@@ -77,6 +77,15 @@ const docker = async (...args: string[]) => {
 };
 const primary = `${label}-primary`;
 const replica = `${label}-replica`;
+const waitRedis = async (name: string) =>
+  until(async () => {
+    try {
+      return (await docker("exec", name, "redis-cli", "PING")) === "PONG";
+    } catch {
+      return false;
+    }
+  });
+let checkpoint = "fixture initialization";
 const owner = createDatabase(base, 2);
 let db: ReturnType<typeof createDatabase> | undefined;
 let created = false;
@@ -256,6 +265,7 @@ try {
   };
   // Deterministic SIGKILL at both transaction/queue acknowledgement boundaries.
   for (const phase of ["BEFORE_COMMIT", "AFTER_COMMIT"]) {
+    checkpoint = phase;
     const namespace = `${label}:${phase}`;
     const marker = new URL(`${phase}.marker`, directory).pathname;
     producer = new UsageProducer({ url: primaryURL, namespace, replicas: 1, timeoutMs: 1000 });
@@ -302,17 +312,22 @@ try {
   // Both copies are killed without a graceful save, then loaded from their own AOF volumes.
   await Promise.all([docker("kill", primary), docker("kill", replica)]);
   // Recover each copy independently: the replica must never be able to refill from the primary.
+  checkpoint = "primary AOF restart";
   await docker("start", primary);
+  await waitRedis(primary);
   producer = new UsageProducer({ url: primaryURL, namespace, replicas: 0, timeoutMs: 1000 });
   assert.equal((await producer.stats()).waiting, 1);
   producer.close();
   producer = undefined;
   checks.push("primary hard restart retains acknowledged evidence from its AOF");
   await docker("kill", primary);
+  checkpoint = "replica AOF promotion";
   await docker("start", replica);
+  await waitRedis(replica);
   await docker("exec", replica, "redis-cli", "REPLICAOF", "NO", "ONE");
   await consume(namespace, replicaURL);
   checks.push("acknowledged replica promotion retains evidence and exact settlement");
+  checkpoint = "unsafe ingress rejection";
   producer = new UsageProducer({ url: replicaURL, namespace, replicas: 1, timeoutMs: 200 });
   await assert.rejects(producer.ready());
   producer.close();
@@ -352,6 +367,8 @@ try {
   );
   checks.push("strict usage payload rejects body; all monetary journals remain singular");
   console.log(JSON.stringify({ durability: "pass", checks, charges: expected, wallet }));
+} catch (error) {
+  throw new Error(`Durability fixture failed at ${checkpoint}`, { cause: error });
 } finally {
   if (child && child.exitCode === null) {
     child.kill("SIGKILL");
