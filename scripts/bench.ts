@@ -36,6 +36,19 @@ if (!token) throw new Error("BENCH_API_KEY or .local/client.env is required");
 const duration = Number(option("--seconds", "15"));
 const concurrency = Number(option("--concurrency", "32"));
 const rate = Number(option("--rate", "0"));
+const warmupConcurrency = Number(
+  option("--warmup-concurrency", String(Math.min(256, concurrency))),
+);
+if (
+  !Number.isSafeInteger(warmupConcurrency) ||
+  warmupConcurrency < 1 ||
+  warmupConcurrency > concurrency
+)
+  throw new Error("Invalid warmup concurrency");
+const hotShare = Number(option("--hot-share", "0"));
+if (!Number.isFinite(hotShare) || hotShare < 0 || hotShare > 1)
+  throw new Error("Invalid hot wallet share");
+const walletCalls = new Uint32Array(tokens.length);
 if (!Number.isSafeInteger(rate) || rate < 0 || rate > 100000)
   throw new Error("Invalid offered RPS");
 if (
@@ -44,7 +57,7 @@ if (
   duration > 3600 ||
   !Number.isSafeInteger(concurrency) ||
   concurrency < 1 ||
-  concurrency > 2000
+  concurrency > 8192
 )
   throw new Error("Invalid benchmark bounds");
 const model = option("--model", "demo");
@@ -116,6 +129,22 @@ const expectedText = option("--expected-text", "") || undefined;
 const windows = new Map<number, { completed: number; succeeded: number; invalid: number }>();
 const statuses = new Map<number, number>();
 const transportErrors = new Map<string, number>();
+const gatewayErrors = new Map<string, number>();
+const knownGatewayErrors = new Set([
+  "usage_queue_unavailable",
+  "usage_commit_failed",
+  "wallet_busy",
+  "overloaded",
+  "memory_limited",
+  "rate_limited",
+  "rate_limit_unavailable",
+  "request_deadline",
+  "result_finalize_failed",
+  "upstream_unavailable",
+  "upstream_capacity",
+  "no_route",
+  "server_error",
+]);
 const collectMetrics = options.includes("--metrics");
 if (collectMetrics && !process.env.ADMIN_KEY)
   throw new Error("--metrics requires this Gateway's ADMIN_KEY");
@@ -178,11 +207,32 @@ const invoke = async () => {
   try {
     const index = sequence++;
     const target = urls[index % urls.length]!;
-    const apiKey = tokens[index % tokens.length]!;
+    const wallet =
+      tokens.length > 1 && hotShare > 0
+        ? (Math.imul(index + 1, 2654435761) >>> 0) / 4294967296 < hotShare
+          ? 0
+          : 1 + (index % (tokens.length - 1))
+        : index % tokens.length;
+    const apiKey = tokens[wallet]!;
+    walletCalls[wallet] = (walletCalls[wallet] ?? 0) + 1;
     const response = await call(target, apiKey);
     status = response.status;
     const body = response.body;
     valid = status === 200 && validChat(body, stream, expectedText);
+    if (measuring && status >= 400) {
+      let code = "other";
+      try {
+        const value: unknown = JSON.parse(body);
+        if (value && typeof value === "object" && "error" in value) {
+          const error = value.error;
+          if (error && typeof error === "object" && "code" in error) {
+            if (typeof error.code === "string" && knownGatewayErrors.has(error.code))
+              code = error.code;
+          }
+        }
+      } catch {}
+      gatewayErrors.set(code, (gatewayErrors.get(code) ?? 0) + 1);
+    }
   } catch (error) {
     const fault = error as { code?: unknown; name?: unknown };
     const raw = String(fault.code ?? fault.name ?? "unclassified_transport");
@@ -212,7 +262,7 @@ const invoke = async () => {
   }
 };
 await Promise.all(
-  Array.from({ length: concurrency }, async () => {
+  Array.from({ length: warmupConcurrency }, async () => {
     while (performance.now() < deadline) await invoke();
   }),
 );
@@ -275,15 +325,19 @@ const report = {
   timestamp: new Date().toISOString(),
   started_at: startedAt,
   warmup_requests: warmupRequests,
+  warmup_concurrency: warmupConcurrency,
   model,
   runtime: Bun.version,
   platform: `${process.platform}/${process.arch}`,
   workload: stream ? "chat-sse" : "chat-json",
   transport: "Bun node:http(s) with bounded persistent agents",
   transport_errors: Object.fromEntries(transportErrors),
+  gateway_errors: Object.fromEntries(gatewayErrors),
   duration_seconds: elapsed,
   concurrency,
   measurement_started_at: measurementStartedAt,
+  hot_wallet_share: hotShare,
+  wallet_calls: Array.from(walletCalls),
   load_model: rate > 0 ? "open-loop" : "closed-loop",
   offered_rps: rate || undefined,
   offered,
@@ -312,6 +366,11 @@ const report = {
           usage_queue_failures:
             (metricsAfter.gateway_usage_queue_failures_total ?? 0) -
             (metricsBefore.gateway_usage_queue_failures_total ?? 0),
+          failure_metrics: Object.fromEntries(
+            Object.keys(metricsAfter)
+              .filter((key) => key.startsWith("gateway_upstream_failure_"))
+              .map((key) => [key, (metricsAfter[key] ?? 0) - (metricsBefore[key] ?? 0)]),
+          ),
         },
       }
     : {}),

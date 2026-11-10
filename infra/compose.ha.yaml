@@ -1,0 +1,53 @@
+# Local three-node durability rehearsal. Use separate fault domains and a fenced failover endpoint in production.
+services:
+  queue-replica-a:
+    extends: { file: compose.yaml, service: queue-redis }
+    command:
+      [
+        redis-server,
+        --appendonly,
+        "yes",
+        --appendfsync,
+        always,
+        --aof-load-truncated,
+        "no",
+        --maxmemory,
+        512mb,
+        --maxmemory-policy,
+        noeviction,
+        --replicaof,
+        queue-redis,
+        "6379",
+        --repl-diskless-sync-delay,
+        "0",
+      ]
+    ports: ["127.0.0.1:56384:6379"]
+    volumes: ["gateway-queue-a:/data"]
+    depends_on: { queue-redis: { condition: service_healthy } }
+  queue-replica-b:
+    extends: { file: compose.yaml, service: queue-redis }
+    command:
+      [
+        redis-server,
+        --appendonly,
+        "yes",
+        --appendfsync,
+        always,
+        --aof-load-truncated,
+        "no",
+        --maxmemory,
+        512mb,
+        --maxmemory-policy,
+        noeviction,
+        --replicaof,
+        queue-redis,
+        "6379",
+        --repl-diskless-sync-delay,
+        "0",
+      ]
+    ports: ["127.0.0.1:56385:6379"]
+    volumes: ["gateway-queue-b:/data"]
+    depends_on: { queue-redis: { condition: service_healthy } }
+volumes:
+  gateway-queue-a:
+  gateway-queue-b:

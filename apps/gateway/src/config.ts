@@ -55,6 +55,7 @@ const envSchema = z.object({
   MAX_EVENT_BYTES: z.coerce.number().int().min(1024).default(1_048_576),
   SHUTDOWN_GRACE_MS: z.coerce.number().int().min(100).default(20000),
   BILLING_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(8),
+  UPSTREAM_POOL_SIZE: z.coerce.number().int().min(1).max(65535).default(1024),
   DB_POOL_SIZE: z.coerce.number().int().min(1).max(200).default(24),
 });
 export type Config = z.infer<typeof envSchema>;

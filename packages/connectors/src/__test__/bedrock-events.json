@@ -1,0 +1,14 @@
+{
+  "stop": {
+    "base64": "AAAAhwAAAEuH6ivzDTptZXNzYWdlLXR5cGUHAAVldmVudAs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29ueyJieXRlcyI6ImV5SjBlWEJsSWpvaWJXVnpjMkZuWlY5emRHOXdJbjA9In1YpN0u",
+    "sse": "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+  },
+  "usage": {
+    "base64": "AAAAuwAAAEvjO350DTptZXNzYWdlLXR5cGUHAAVldmVudAs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29ueyJieXRlcyI6ImV5SjBlWEJsSWpvaWJXVnpjMkZuWlY5emRHRnlkQ0lzSW0xbGMzTmhaMlVpT25zaWRYTmhaMlVpT25zaWFXNXdkWFJmZEc5clpXNXpJam8zZlgxOSJ9JA+4Sw==",
+    "sse": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\n"
+  },
+  "delta": {
+    "base64": "AAAAqwAAAEuD2+n2DTptZXNzYWdlLXR5cGUHAAVldmVudAs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29ueyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbVJsYkhSaElqcDdJblJsZUhRaU9pSjRJbjE5In2bptjM",
+    "sse": "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"x\"}}\n\n"
+  }
+}

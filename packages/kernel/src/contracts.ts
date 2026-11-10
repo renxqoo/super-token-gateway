@@ -1,6 +1,15 @@
 import { z } from "zod";
 
-export const providerKinds = ["openai", "anthropic", "gemini", "deepseek", "ollama"] as const;
+export const providerKinds = [
+  "openai",
+  "anthropic",
+  "gemini",
+  "deepseek",
+  "ollama",
+  "azure",
+  "bedrock",
+  "vertex",
+] as const;
 export type ProviderKind = (typeof providerKinds)[number];
 export const protocols = ["chat", "responses", "messages", "gemini"] as const;
 export type Protocol = (typeof protocols)[number];
@@ -87,7 +96,7 @@ export const providerSchema = z
     name: z.string().min(1).max(100),
     kind: z.enum(providerKinds),
     base_url: z.url().max(1000),
-    api_key: z.string().min(1).max(4096),
+    api_key: z.string().min(1).max(16384),
     concurrency: z.number().int().min(1).max(100_000).default(1000),
     rpm: z.number().int().min(1).max(10_000_000).default(1_000_000),
   })

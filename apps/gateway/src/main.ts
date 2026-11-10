@@ -62,8 +62,9 @@ const shutdown = async () => {
   await server.stop(true);
   await stopped;
   deps.usage.close();
+  deps.transport.close();
   deps.limits.close();
-  await deps.store.db.close({ timeout: 5 });
+  await deps.database.close(5);
 };
 process.on("SIGTERM", () => {
   void shutdown();

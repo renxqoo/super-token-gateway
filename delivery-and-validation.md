@@ -19,8 +19,12 @@ verify 顺序执行原生类型检查、oxlint、原生格式检查、单元测�
 
 参考 Tillgate 的静默降级、重试护栏、深流式、超时规模、异步恢复场景；参考 new-api 的转换 golden、tool loss policy、usage merge、真实慢读取消、DNS 固定和资源归属场景。此仓库按独立 fixture 与行为断言重新实现，未拷贝参考项目的商业层或测试运行器。
 
-测试文件：`tests/unit/kernel.test.ts`（精度/SSE/安全），`conversion.test.ts`（损失策略与转换），`runtime.test.ts`（内存/取消/停机），`architecture.test.ts`（依赖边界）；`tests/integration/gateway.test.ts`（完整 HTTP/PG/Redis 与故障）。最终运行数量与性能见 validation.md。
+测试文件：`tests/unit/kernel.test.ts`（精度/SSE/安全），`packages/connectors/src/__test__/conversion.test.ts`（损失策略与转换），`runtime.test.ts`（内存/取消/停机），`architecture.test.ts`（依赖边界）；`tests/integration/gateway.test.ts`（完整 HTTP/PG/Redis 与故障）。最终运行数量与性能见 validation.md。
 
 没有访问真实付费模型，没有给外部用户发消息，没有部署到未提供的服务器。Linux 配置和 CI 是可重复发布资产，实际公网部署与跨主机/机房故障演练需要目标基础设施。
 
-旧PG usage/outbox、旧版schema和独立旧审计脚本均已删除。完整容量审计统一由bench-system.ts执行。test:durability只破坏自己创建的临时PG库、Redis容器、AOF卷和网络；不操作项目正常依赖的队列。
+旧PG usage/outbox、旧业务运行路径和独立旧审计脚本均已删除；schema06 / schema07只作为隔离升级回归夹具保留，不参与运行时兼容。完整容量审计统一由bench-system.ts执行。test:durability只破坏自己创建的临时PG库、Redis容器、AOF卷和网络；不操作项目正常依赖的队列。
+
+性能审计显式区分 paid/free 客户售价、live/none 外部消费者、live/deferred worker。deferred 在转发阶段保留调用前 PG 预扣及耐久证据确认，停压后才启动 worker；只有全部资金与证据排空核对通过才报告数据有效，不能据此声称后台持续结算吞吐达标。报告记录 PG 耐久参数、两类 Redis 配置、入队合批、并发和产物哈希。
+
+当前 Mac 可运行 `bun run test:durability -- --native`，使用 PATH 中的 redis-server 与独立临时 AOF 目录执行相同强杀、重启及晋升断言；控制命令核对 Redis process_id 与本轮子进程 PID 后才执行。默认入口仍使用固定 Docker 镜像。

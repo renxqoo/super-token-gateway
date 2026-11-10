@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { chmod, mkdir } from "node:fs/promises";
 import { createDatabase, SCHEMA_VERSION } from "@gateway/storage";
 import { UsageProducer } from "@gateway/runtime";
@@ -40,7 +41,21 @@ const path = new URL(`gateway-${Date.now()}.dump`, directory);
 await Bun.write(path, new Uint8Array());
 await chmod(path, 0o600);
 const run = async (args: string[], input?: URL, output?: URL) => {
-  const child = Bun.spawn(["docker", "exec", ...(input ? ["-i"] : []), container, ...args], {
+  const native = process.env.PG_TOOLS_DIRECTORY;
+  const command = native
+    ? [join(native, args[0]!), ...args.slice(1)]
+    : ["docker", "exec", ...(input ? ["-i"] : []), container, ...args];
+  const child = Bun.spawn(command, {
+    ...(native
+      ? {
+          env: {
+            ...process.env,
+            PGHOST: url.hostname,
+            PGPORT: url.port,
+            PGPASSWORD: decodeURIComponent(url.password),
+          },
+        }
+      : {}),
     stdin: input ? Bun.file(input) : "ignore",
     stdout: output ? Bun.file(output) : "pipe",
     stderr: "pipe",

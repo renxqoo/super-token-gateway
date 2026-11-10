@@ -24,7 +24,7 @@ const encryption = "44".repeat(32);
 const pepper = suffix;
 const remote = (value: string) => {
   const result = new URL(value);
-  result.hostname = "host.docker.internal";
+  result.hostname = process.env.CONTAINER_DEPENDENCY_HOST ?? "host.docker.internal";
   return result.toString();
 };
 await mkdir(new URL("../.local/", import.meta.url), { recursive: true });
@@ -42,7 +42,7 @@ await Bun.write(
     DATABASE_URL: remote(url.toString()),
     REDIS_URL: remote(process.env.REDIS_URL),
     QUEUE_REDIS_URL: remote(process.env.QUEUE_REDIS_URL),
-    QUEUE_REQUIRED_REPLICAS: "0",
+    QUEUE_REQUIRED_REPLICAS: process.env.QUEUE_REQUIRED_REPLICAS ?? "0",
     ADMIN_KEY: admin,
     KEY_PEPPER: pepper,
     ENCRYPTION_KEY: encryption,
@@ -246,6 +246,13 @@ try {
       ],
     }),
   );
+} catch (error) {
+  for (const name of names)
+    await Bun.write(
+      new URL(`../.local/${name}.log`, import.meta.url),
+      await run(["logs", name]).catch(() => "Container logs unavailable"),
+    );
+  throw error;
 } finally {
   for (const name of [`${network}-gateway`, `${network}-worker`, mockName])
     await run(["rm", "-f", name]).catch(() => undefined);

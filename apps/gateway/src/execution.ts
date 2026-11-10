@@ -6,16 +6,15 @@ import {
   sha256,
   parseProviderJson,
   stringifyExact,
-  copyExact,
 } from "@gateway/kernel";
 import type { Operation, Protocol, Route, Usage, Finality } from "@gateway/kernel";
 import {
   StreamTranslator,
   MediaStreamMeter,
-  blockedPrompt,
-  decodeResponse,
-  encodeResponse,
-  prepareRequest,
+  measureResponse,
+  validateCompletion,
+  presentResponse,
+  prepareOperation,
 } from "@gateway/connectors";
 import { readBounded } from "@gateway/runtime";
 import type { StreamMeter } from "@gateway/connectors";
@@ -32,6 +31,17 @@ import { rewriteBatchInput } from "./batch-input.ts";
 import { applyOutputBound } from "./input-policy.ts";
 
 const textProtocols = new Set<string>(["chat", "responses", "messages", "gemini"]);
+const transportFailures: Record<string, string> = {
+  EADDRNOTAVAIL: "local_ports",
+  EMFILE: "process_files",
+  ENFILE: "system_files",
+  ECONNRESET: "connection_reset",
+  ECONNREFUSED: "connection_refused",
+  ETIMEDOUT: "timeout",
+  EPIPE: "broken_pipe",
+  ECONNABORTED: "connection_aborted",
+  ConnectionClosed: "connection_closed",
+};
 export interface ExecuteInput {
   auth: Auth;
   request: Request;
@@ -216,71 +226,21 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
       controller.signal.throwIfAborted();
       const route = routes[step % routes.length];
       if (!route) break;
-      let target: Protocol | Operation = input.operation;
-      let outbound: Record<string, unknown> = copyExact(input.body, {
-        ...input.body,
-        model: route.upstream_model,
-      });
-      if (textProtocols.has(input.operation)) {
-        try {
-          const prepared = prepareRequest(
-            input.body,
-            input.operation as Protocol,
-            route.kind,
-            route.upstream_model,
-          );
-          outbound = prepared.body;
-          target = prepared.protocol;
-        } catch (error) {
-          lastError = error;
-          if (routes.length === 1) throw error;
-          continue;
-        }
-      } else if (
-        route.kind !== "openai" &&
-        !(route.kind === "ollama" && input.operation === "embeddings") &&
-        !(input.operation === "videos" && route.kind === "gemini")
-      ) {
-        lastError = new GatewayError(
-          422,
-          "unsupported_capability",
-          "This provider does not support the requested native operation",
+      let target: Operation;
+      let outbound: Record<string, unknown>;
+      try {
+        const prepared = prepareOperation(
+          input.body,
+          input.operation,
+          route.kind,
+          route.upstream_model,
         );
+        outbound = prepared.body;
+        target = prepared.protocol;
+      } catch (error) {
+        lastError = error;
+        if (routes.length === 1) throw error;
         continue;
-      }
-      if (input.operation === "batches" || input.operation === "files") delete outbound.model;
-      if (input.operation === "videos" && route.kind === "gemini") {
-        if (
-          Object.keys(input.body).some(
-            (field) => !["model", "prompt", "seconds", "aspect_ratio", "size"].includes(field),
-          )
-        )
-          throw new GatewayError(
-            422,
-            "conversion_loss",
-            "This video adapter supports prompt, duration and aspect ratio; unsupported fields cannot be converted",
-          );
-        const size = input.body.size;
-        const aspect = size === "1280x720" ? "16:9" : size === "720x1280" ? "9:16" : undefined;
-        if (
-          (size !== undefined && !aspect) ||
-          (aspect && input.body.aspect_ratio && aspect !== input.body.aspect_ratio)
-        )
-          throw new GatewayError(
-            422,
-            "conversion_loss",
-            "Video size cannot be represented by this provider",
-          );
-        outbound = {
-          instances: [{ prompt: input.body.prompt }],
-          parameters: {
-            durationSeconds: Number(input.body.seconds ?? 8),
-            sampleCount: 1,
-            ...(aspect || input.body.aspect_ratio
-              ? { aspectRatio: aspect ?? input.body.aspect_ratio }
-              : {}),
-          },
-        };
       }
       if (input.pinnedUpstreamModel && route.upstream_model !== input.pinnedUpstreamModel) continue;
       const batchFile = input.batchInput
@@ -329,6 +289,7 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
           fingerprint,
           route,
           quote,
+          controller.signal,
         );
         admittedId = admission.record.id;
         if (!admission.created) {
@@ -396,12 +357,14 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
         response = await sendUpstream(
           route,
           deps.config,
+          deps.transport,
           target,
           payload,
           stream,
           attemptController.signal,
           input.request.headers,
           contentType,
+          input.reserveMemory,
         );
         clearTimeout(headersTimer);
         const providerRequestId = response.headers.get("x-request-id") ?? undefined;
@@ -622,66 +585,12 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
         );
         observedUsage = extractUsage(value, route.kind);
         observedFinality = "PARTIAL";
-        if (value.error)
-          throw new GatewayError(502, "provider_failed", "Provider returned an error response");
-        if (
-          (target === "chat" &&
-            (!Array.isArray(value.choices) ||
-              value.choices.length !== Number(outbound.n ?? 1) ||
-              value.choices.some((raw) => {
-                if (!raw || typeof raw !== "object" || Array.isArray(raw)) return true;
-                const choice = raw as Record<string, unknown>;
-                const message = choice.message as Record<string, unknown> | null | undefined;
-                return (
-                  !choice.message ||
-                  typeof choice.message !== "object" ||
-                  Array.isArray(choice.message) ||
-                  !message ||
-                  !["content", "tool_calls", "function_call", "audio", "refusal"].some((field) =>
-                    Object.hasOwn(message, field),
-                  ) ||
-                  (Object.hasOwn(message, "content") &&
-                    message.content !== null &&
-                    typeof message.content !== "string" &&
-                    !Array.isArray(message.content)) ||
-                  typeof choice.finish_reason !== "string" ||
-                  !choice.finish_reason
-                );
-              }))) ||
-          (target === "responses" && !Array.isArray(value.output)) ||
-          (target === "messages" && !Array.isArray(value.content)) ||
-          (target === "gemini" && !Array.isArray(value.candidates) && !blockedPrompt(value))
-        )
-          throw new GatewayError(
-            502,
-            "invalid_upstream",
-            "Provider returned an invalid response shape",
-          );
+        validateCompletion(value, target, Number(outbound.n ?? 1));
         resultReceived = true;
-        let usage = observedUsage;
         observedFinality = "FINAL";
-        if (input.operation === "images" || input.operation === "image_edits") {
-          const data = Array.isArray(value.data) ? value.data : [];
-          const generated = data.filter(
-            (item) =>
-              typeof item === "object" &&
-              item !== null &&
-              (("url" in item && typeof item.url === "string" && !!item.url) ||
-                ("b64_json" in item && typeof item.b64_json === "string" && !!item.b64_json)),
-          );
-          if (generated.length) usage = { ...usage, images: String(generated.length) };
-        }
-        usage = { ...usage, requests: "1" };
+        const usage = measureResponse(value, route.kind, input.operation);
         observedUsage = usage;
-        let output = value;
-        if (textProtocols.has(input.operation) && target !== input.operation)
-          output = encodeResponse(
-            decodeResponse(value, target as Protocol, route.kind),
-            input.operation as Protocol,
-            input.model,
-          );
-        else if (typeof output.model === "string")
-          output = copyExact(output, { ...output, model: input.model });
+        let output = presentResponse(value, target, input.operation, route.kind, input.model);
         finalizationStarted = true;
         if (input.transformResponse)
           output = await input.transformResponse(
@@ -717,18 +626,48 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
         });
       } catch (error) {
         lastError = error;
+        const failureCode = (error as { code?: unknown } | undefined)?.code;
+        const localCapacity =
+          !response && ["EADDRNOTAVAIL", "EMFILE", "ENFILE"].includes(String(failureCode));
+        const notDispatched =
+          localCapacity ||
+          (error instanceof GatewayError && error.code === "upstream_not_dispatched");
+        if (!resultReceived) {
+          const failure = error as { code?: unknown } | undefined;
+          const code = typeof failure?.code === "string" ? failure.code : "";
+          const category = Object.hasOwn(transportFailures, code)
+            ? transportFailures[code]
+            : "unclassified";
+          deps.metrics.increment(`upstream_failure_${category}_total`);
+        }
         if (!recorded && !streaming) {
           await publishEvidence(
             deps,
             attemptId,
-            observedUsage ? (observedFinality === "FINAL" ? "SUCCEEDED" : "PARTIAL") : "UNKNOWN",
+            notDispatched
+              ? "NOT_EXECUTED"
+              : observedUsage
+                ? observedFinality === "FINAL"
+                  ? "SUCCEEDED"
+                  : "PARTIAL"
+                : "UNKNOWN",
             observedUsage ? observedFinality : "UNKNOWN",
             observedUsage,
-            controller.signal.aborted ? "request_cancelled" : "upstream_interrupted",
+            notDispatched
+              ? "upstream_not_dispatched"
+              : controller.signal.aborted
+                ? "request_cancelled"
+                : "upstream_interrupted",
           );
           recorded = true;
         }
         await response?.body?.cancel().catch(() => undefined);
+        if (localCapacity)
+          throw new GatewayError(
+            503,
+            "upstream_capacity",
+            "Local upstream connection capacity exhausted",
+          );
         if (error instanceof GatewayError && ["memory_limited", "overloaded"].includes(error.code))
           throw error;
         if (resultReceived && finalizationStarted)
@@ -763,6 +702,12 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
   } catch (error) {
     if (admittedId && !streaming && !replayed)
       await deps.usage.finish().catch(() => deps.metrics.increment("request_state_failures_total"));
+    if (controller.signal.aborted)
+      throw new GatewayError(
+        504,
+        "request_deadline",
+        "Request deadline reached or client disconnected",
+      );
     throw error;
   } finally {
     if (!streaming) await cleanup();

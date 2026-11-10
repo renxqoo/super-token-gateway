@@ -2,7 +2,7 @@
 
 独立的 LLM Gateway 后端，使用 **Hono + Bun 1.4.4**，原生 `bun check`、`bun fmt` 和 oxlint。业务系统不在此仓库的运行依赖中。
 
-当前处于开发验收阶段，尚未达到10,000+ RPS完整账务吞吐与长期高可用目标。功能、测试和容量证据持续更新于[验收记录](validation.md)。
+当前验收目标为同一台 Mac 上网关转发 6000 RPS。转发吞吐与后台持续结算吞吐分别计量；长期高可用仍需独立基础设施验证。功能、测试和容量证据持续更新于[验收记录](validation.md)。
 
 Gateway 管理技术组织/主体、项目、API Key/IP、模型别名、供应商连接、路由与限流，以及多币种钱包、赠送额度、预扣、精确计费、退款冲正和 BullMQ 结算 worker。独立业务系统负责登录账号、商业组织关系、支付渠道、套餐和营销；通过幂等内部 API 入账，不直接访问 Gateway 数据库。见 [系统边界](architecture.md) 和 [计量契约](funds-and-billing.md)。
 
@@ -75,3 +75,17 @@ bun run bench --model gpt-4o-mini --seconds 30 --concurrency 32 --stream
 [架构](architecture.md) · [数据模型](database.md) · [路由执行](routing-and-execution.md) · [API / OpenAPI](api-contracts.md) · [计量](funds-and-billing.md) · [运行时](bun-runtime.md) · [图示](diagrams.md) · [验证模型](validation-model.md) · [测试说明](delivery-and-validation.md) · [参考对照](references.md)
 
 原有 13 份设计已全部审阅，原文及 SHA-256 清单保存在 `docs/design-2026-11-08/`。当前目录文档已按最终澄清更新；资金归属以 [ADR 0002](docs/decisions/0002-gateway-wallet-worker.md) 为准，计量入口以最新 [ADR 0003](docs/decisions/0003-durable-usage-queue.md) 为准。运行代码只有当前实现，旧数据库明确拒绝启动。
+
+## 云供应商与数据维护
+
+新增三类受明确能力约束的适配：
+
+| kind    | base_url                                                                                          | api_key 内容与能力                                                                                                                                             |
+| ------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| azure   | `https://RESOURCE.openai.azure.com`                                                               | 普通 Key 或 JSON `{"apiKey":"...","apiVersion":"2024-10-21"}`；部署名放 upstream_model；Chat/Embeddings，其他文本协议转换到 Chat                               |
+| bedrock | `https://bedrock-runtime.REGION.amazonaws.com`                                                    | JSON `{"accessKeyId":"...","secretAccessKey":"...","region":"us-east-1","sessionToken":"..."}`，sessionToken 可省略；Claude Messages InvokeModel/事件流，SigV4 |
+| vertex  | `https://REGION-aiplatform.googleapis.com/v1/projects/PROJECT/locations/REGION/publishers/google` | Google service_account JSON；签署 JWT、合并并发刷新、到期前刷新；Gemini GenerateContent/SSE                                                                    |
+
+Vertex 也接受有明确 `expires_at` 的 `{"access_token":"...","expires_at":"...Z"}`，用于已受控轮换的短时令牌；过期不发送推理、不保留预扣。服务账号仅向官方 OAuth 端点换取令牌。JSON 凭证允许多行，继续用 AES-GCM 保存；Azure/Bedrock/Vertex 的其他模型族与端点不被默认宣称支持。真实云账号联调需要对应账号与预算，本地合同测试不替代它。
+
+schema06 / schema07 到当前版本的停机升级、月分区准备、DEFAULT 修复、归档校验和冷存储移动见 [数据库与生命周期](database.md)。运行时仍只接受当前契约，财务幂等身份与未结责任持续保留。

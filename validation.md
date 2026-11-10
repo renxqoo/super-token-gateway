@@ -1,4 +1,96 @@
-# 当前验证与性能进度
+# schema08 优化与当前验收
+
+2026-11-11，当前 schema2026111008。按用户确认，以当前 Mac 同机的实际 LLM HTTP 转发为 6000 RPS 目标；欠费继续记录债务并冻结新调用。**持续 6000 RPS 尚未达标，也未证明全面超过 Tillgate/new-api。**
+
+本轮完成上游有界连接池、钱包锁兼容性、请求与数字证据集合写入、数组暂存、批结果构造和冗余索引优化。连接前仍校验 DNS/IP、Host/SNI 与证书，禁用环境代理与自动重定向；明确的本机建连资源耗尽按 NOT_EXECUTED 释放预扣，不计入供应商熔断。schema06 / schema07 均通过显式离线工具升级到 schema08；运行时不自动迁移。
+
+## 当前验证
+
+- `bun run verify` 通过：check、oxlint、格式、**63 项单元、176 项真实 PG/Redis/HTTP 集成**、build，以及独立产物的8项验证，0失败。覆盖 JSON/SSE、最小权限、金额精度、预扣、超额债务冻结、退款、幂等、取消、强杀及停机。
+- `bun run test --coverage` 通过：单测加载文件 functions **68.37%**、lines **64.52%**；Bun 不提供 statements/branches，当前未配置覆盖率阈值，集成覆盖率未合并，不能称全仓覆盖率达标。
+- `bun run test:durability -- --native` 通过8项故障检查：PG提交前/后未ACK强杀、主副本各自AOF硬恢复、副本在主库停机时晋升、缺少副本及不安全配置拒绝、非法正文证据拒绝。原生装置控制前核对进程PID，清理逐项执行；本轮Docker daemon不可用，因此没有重跑当前修订的Linux/容器验证。
+- 独立只读审查发现的容量舍入边界、原生装置拥有权和失败清理问题已修正并复核；容量使用未舍入的成功数/实际时间。连接突发、外键读锁、本机资源耗尽和容量舍入均有失败与修复证据；新原生重启装置的首次失败也保留。
+
+## 同机容量结果
+
+Apple M4，10逻辑CPU、16GiB、macOS arm64；Bun1.4.4、PG17.9、Redis8.4.0。独立主队列与1个AOF副本，PG fsync/synchronous_commit/full_page_writes始终开启；最终受控轮次使用WAL lz4，准入Redis AOF everysec，证据主副本 AOF always。机器同时运行日常应用，并非专用压测服务器。所有轮次使用独立本机HTTP mock，数字用量为7个输入、3个缓存输入、5个输出，上游成本59 atoms。
+
+| 工作负载            | 测量配置                                           | 成功 HTTP RPS | 结果                                           |
+| ------------------- | -------------------------------------------------- | ------------- | ---------------------------------------------- |
+| 付费转发候选        | 20秒，4实例/1000钱包/4000并发，停压后结算          | 6101.50       | 漏发2306，失败                                 |
+| 付费持续转发        | 60秒，4实例/1000钱包/2000并发，停压后结算，WAL lz4 | 4578.08       | 漏发84476，失败；284050笔含预热精确结清        |
+| 零客户售价转发基线  | 60秒，4实例/1000钱包/2000并发，停压后结算          | 2869.39       | 漏发197515，失败；上游成本仍完整记录           |
+| 付费JSON完整链路    | 10秒，4实例/1000钱包/256并发，闭环                 | 1202.32       | 数据与负载有效；13576笔含预热精确结清及外部ACK |
+| 付费SSE完整链路     | 同上，SSE                                          | 1330.16       | 数据与负载有效；14807笔含预热精确结清及外部ACK |
+| 90%热点钱包完整链路 | 同上，90%请求落同一钱包                            | 516.65        | 数据与负载有效；6170笔含预热精确结清及外部ACK  |
+
+持续转发轮次保留调用前PG预扣和成功终态前的耐久证据确认，但明确延后启动账务worker，且没有外部消费者；它们仍未达到6000 RPS，更不能用来声称后台持续结算6000 RPS。受控轮次的worker与外部消费者均在线，所有请求/attempt/数字用量/账单/预扣/流水/ACK数一致，未结预扣、债务及不平衡流水均为零；10秒只证明所测负载的正确性。
+
+此前1397/1122/900 RPS报告的临时准入Redis误用了AOF always；仓库预期为everysec，不能把纠正配置后的差异算成纯代码收益。用户图1是Linux EPYC上SELECT 100行、100条在途查询的Bun PostgreSQL读基准，不能换算成本项目HTTP或资金事务吞吐。长压中还保留了过载与旧审计8秒超时的失败结果；现在只读审计单独使用有界120秒事务，运行进程仍保留8秒数据库语句限制。
+
+完整参数、各次产物/证据哈希、覆盖率、命令及原始本地证据路径见[本轮验收数据](docs/performance/gateway-optimization-2026-11-11.json)。本轮临时数据库已删除，专用PG/Redis、网关、mock和worker均已停止，日志与报告保留；用户服务未改动。本报告记录验收时的main工作区；后续提交和推送状态以Git记录为准。
+
+---
+
+# schema07 历史验证与性能进度
+
+2026-11-10，schema2026111007。PG 预扣、BullMQ 数字证据与同连接 WAITAOF、worker 原子账务路径保留；支持 schema06 的显式离线升级，运行时只接受当前契约。以下结果覆盖本轮架构修复；后面的 schema06 数字只作历史记录。
+
+## 已验证的修复
+
+- 图片对象、URL/base64 分拆和 metadata-only 条目经过真实 HTTP、PG 与最终收费回归；计量/响应语义移至 connectors，报价纯规则移至 kernel，HTTP 无原始 SQL。
+- 钱包先取得锁才写请求；忙钱包只重试其自身，不阻塞同批冷钱包。调用前取消与云认证失败记 NOT_EXECUTED，释放预扣。worker 跨作业按权重合批，单作业的冲突事实保持同事务，提交后才 ACK。
+- Azure Chat/Embeddings、Bedrock Claude Messages/SigV4/二进制事件流、Vertex Gemini/service-account OAuth 刷新均通过本地合同与完整结算测试。签名由 botocore 独立 golden 值核对；不宣称已做真实云账号联调。
+- schema06 有已结算账单与 UNKNOWN 预扣的旧库升级通过逐行精确核对；其他客户端拒绝、末尾故障回滚、全局幂等、微秒时间、复合 FK、DEFAULT 修复、冷分区/索引移动和归档篡改拒绝均通过。
+- **55 项单元、173 项真实 PG/Redis/HTTP 集成，0 失败。** check、oxlint、fmt、build、独立编译产物及 migration/archive CLI 通过。本轮采集单测覆盖率：已加载文件的 functions 67.47%、lines 63.44%；Bun 此报告不提供 statements/branches，当前未配置覆盖率阈值，不能据此宣称全仓覆盖率达标。
+- Linux 非 root/只读/三进程 JSON 与 SSE、1 个 AOF 副本确认、精确账务与 SIGTERM 通过。
+- 故障演练通过：PG commit 前及 commit 后未 ACK 强杀、AOF 硬重启、副本独立恢复晋升、缺副本拒绝、生产候选数核验及运行中持久化配置漂移拒绝。
+- 专用开发库停机排空备份恢复通过：2 attempts、2 usage、2 charges、5 journals 与钱包一致，账本平衡、不可变保护及最小权限重授有效。没有修改真实业务数据或发布公网服务。
+
+## 本轮规范复核
+
+按根 AGENTS.md 与用户指定的 `/Users/wrr/work/workflow/skills/test/SKILL.md` 核对本轮改动：
+
+- 模块单测 `batcher` 与 `conversion` 迁到各自 `src/__test__/`，更新统一测试入口；共享架构检查和跨模块集成测试保留独立目录，所有原业务断言保留。
+- Bedrock 从直接访问解析器改为通过公开 `bedrockEventStream` 验证 wire、校验和、截断、帧大小、晚到错误、取消和内存释放；CRC 与解析器不再导出。固定二进制样例由 Python 标准库 `binascii.crc32` 独立生成，测试预期不调用被测 CRC。
+- 隔离故障验证：令 CRC 对标准校验字符串之外的输入都返回零，原 2 项测试仍通过，新测试 6 项失败，证明独立样例能识别原先自洽但错误的实现。故障代码只存在于临时副本，验证后移除；结果保留于 `.local/test-standards/*-crc-mutant.log`。
+- 批处理提交用显式 Promise 门闩取代固定 sleep，并直接断言提交前尚未确认；过载和失败用例保留有效工作与结果关联判断。云认证用例按令牌刷新和非法凭据分开，名称对应实际断言。
+- `bun run verify` 与 `bun run test --coverage` 通过；没有增加 skip、弱化有效断言或调整覆盖率门禁。覆盖率仅来自单测加载文件，PG/Redis/HTTP 集成未合并进该统计。
+
+## 当前容量证据
+
+本轮机器为 **10 逻辑 CPU / 16 GiB / macOS arm64**，原生 Bun1.4.4、PG17.9、Redis8.4.0，主队列与1个独立 AOF 副本；fsync/synchronous_commit/full_page_writes 保持开启。该环境与旧报告不同，不能直接比较倍数。
+
+| 工作负载               | 实例/钱包/并发 | 时长 | 成功 HTTP RPS | 验收                                               |
+| ---------------------- | -------------- | ---- | ------------- | -------------------------------------------------- |
+| 单钱包闭环             | 4/1/128        | 10s  | 296.41        | 全部精确结清，108ms排空                            |
+| 90%单热点闭环          | 4/1000/256     | 10s  | 489.63        | 全部精确结清，308ms排空                            |
+| 11000开放到达          | 8/1000/2000    | 15s  | 3231.65       | 49383漏发、65017个503，容量失败                    |
+| 2000开放到达           | 4/1000/1000    | 60s  | 1742.64       | 14003漏发，容量失败                                |
+| 1000开放到达，预算1000 | 4/1000/1000    | 60s  | 997.46        | 72漏发，容量失败                                   |
+| 1000开放到达，预算2000 | 4/1000/2000    | 60s  | 989.58        | 候选构建：无漏发/无错误；64873笔精确一致，11ms排空 |
+| 最终构建1000开放到达   | 4/1000/2000    | 60s  | 999.33        | 无漏发/无错误；64705笔含预热精确一致，115ms排空    |
+
+当前 gateway 和 worker 产物哈希与最后一轮容量构建保持一致；测试规范调整只改变测试、脚本清单与 manifest，原测量记录保留原 manifest 哈希。最后一轮含最后在途请求完成时间，完成吞吐为999.33 RPS。所有轮次的已执行请求均匹配精确 usage、charge、SETTLED hold、SETTLE journal 和外部 ACK，预扣、债务及未平衡账本为零；失败容量轮次保留，不用成功率替代到达率。
+
+**10000+ RPS、生产跨故障域99.99%和真实云账号联调尚未完成。** 当前修复没有证明这些目标，也没有证明长期数据库总量有界。分区/冷存储保留全局身份和权威在线证据，部署仍须提供磁盘/WAL/备份容量与业务留存要求。汇总及原始本地证据路径见 [架构修复验收数据](docs/performance/architecture-hardening-2026-11-10.json)。
+
+## 复验命令
+
+```sh
+bun run verify
+bun run test:durability
+docker build -f infra/Dockerfile -t super-token-gateway:validation .
+QUEUE_REQUIRED_REPLICAS=1 bun run test:container
+PG_TOOLS_DIRECTORY=/path/to/postgresql17/bin bun run test:backup -- --quiesced
+QUEUE_REQUIRED_REPLICAS=1 bun --env-file=.env.local scripts/bench-system.ts --seconds 60 --instances 4 --wallets 1000 --concurrency 2000 --batch 128 --rate 1000
+```
+
+Colima 的宿主 DNS 若被代理改写，容器验证可显式设置 `CONTAINER_DEPENDENCY_HOST` 为其宿主网关地址。不要把故障/集成测试与容量压测并行运行。
+
+---
+
+# schema06 历史验证与性能进度
 
 2026-11-10。当前唯一实现为 **PG 调用前预扣 → BullMQ 数字证据与同连接 WAITAOF → worker 同事务写 PG usage / charge / journal → ACK**。业务系统独立，Gateway 执行多币种钱包与客户结算。旧 usage/outbox 入口和旧 schema 已删除，不支持旧代码/旧库兼容。
 

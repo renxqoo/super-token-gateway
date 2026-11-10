@@ -14,6 +14,7 @@ export interface UsageQueueOptions {
   maxPendingJobs?: number;
   maxInFlight?: number;
   onError?: () => void;
+  requireAllReplicas?: boolean;
 }
 interface Generation {
   raw: RedisClient;
@@ -106,28 +107,7 @@ export class UsageProducer {
     queue.on("error", () => this.options.onError?.());
     g.ready = this.bounded(async () => {
       await queue.waitUntilReady();
-      const settings = (await raw.send("CONFIG", [
-        "GET",
-        "appendonly",
-        "appendfsync",
-        "maxmemory-policy",
-        "no-appendfsync-on-rewrite",
-        "aof-load-truncated",
-      ])) as string[] | Record<string, string>;
-      const config = new Map<string, string>();
-      if (Array.isArray(settings))
-        for (let i = 0; i < settings.length; i += 2) config.set(settings[i]!, settings[i + 1]!);
-      else for (const [key, value] of Object.entries(settings)) config.set(key, value);
-      if (
-        config.get("appendonly") !== "yes" ||
-        config.get("appendfsync") !== "always" ||
-        config.get("maxmemory-policy") !== "noeviction" ||
-        config.get("no-appendfsync-on-rewrite") !== "no" ||
-        config.get("aof-load-truncated") !== "no"
-      )
-        throw failure();
-      const persistence = String(await raw.send("INFO", ["persistence"]));
-      if (!/^aof_last_write_status:ok\r?$/m.test(persistence)) throw failure();
+      await this.checkDurability(g);
       const proof = (await raw.send("WAITAOF", [
         "1",
         String(this.options.replicas),
@@ -142,6 +122,42 @@ export class UsageProducer {
         throw failure();
     }, g);
     return g;
+  }
+  private async checkDurability(g: Generation): Promise<void> {
+    const settings = (await g.raw.send("CONFIG", [
+      "GET",
+      "appendonly",
+      "appendfsync",
+      "maxmemory-policy",
+      "no-appendfsync-on-rewrite",
+      "aof-load-truncated",
+    ])) as string[] | Record<string, string>;
+    const config = new Map<string, string>();
+    if (Array.isArray(settings))
+      for (let i = 0; i < settings.length; i += 2) config.set(settings[i]!, settings[i + 1]!);
+    else for (const [key, value] of Object.entries(settings)) config.set(key, value);
+    if (
+      config.get("appendonly") !== "yes" ||
+      config.get("appendfsync") !== "always" ||
+      config.get("maxmemory-policy") !== "noeviction" ||
+      config.get("no-appendfsync-on-rewrite") !== "no" ||
+      config.get("aof-load-truncated") !== "no"
+    )
+      throw failure();
+    const persistence = String(await g.raw.send("INFO", ["persistence"]));
+    if (!/^aof_last_write_status:ok\r?$/m.test(persistence)) throw failure();
+    if (this.options.requireAllReplicas) {
+      const info = String(await g.raw.send("INFO", ["replication"]));
+      const count = Number(/^connected_slaves:(\d+)\r?$/m.exec(info)?.[1] ?? -1);
+      const online = [...info.matchAll(/^slave\d+:.*state=online(?:,|\r?$)/gm)].length;
+      if (
+        this.options.replicas < 1 ||
+        !/^role:master\r?$/m.test(info) ||
+        count !== this.options.replicas ||
+        online !== count
+      )
+        throw failure();
+    }
   }
   private async connection(): Promise<Generation> {
     if (this.stopping.signal.aborted) throw failure();
@@ -162,6 +178,7 @@ export class UsageProducer {
     ) {
       if (!this.backlogProbe)
         this.backlogProbe = this.bounded(async () => {
+          if (this.options.requireAllReplicas) await this.checkDurability(g);
           const counts = await g.queue.getJobCounts("waiting", "active", "delayed", "failed");
           this.backlog = Object.values(counts).reduce((sum, n) => sum + n, 0);
           this.backlogCheckedAt = Date.now();

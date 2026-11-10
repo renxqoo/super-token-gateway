@@ -1,5 +1,6 @@
 /** Isolated, paid-path benchmark. Creates only its own disposable fixture DB and Redis namespace. */
 import { mkdir } from "node:fs/promises";
+import { passesCapacityTarget } from "./benchmark-lib.ts";
 import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
 import { createKey, verifier, encrypt } from "@gateway/kernel";
 import { RedisClient } from "bun";
@@ -8,12 +9,28 @@ const option = (name: string, fallback: string) => {
   const at = args.indexOf(name);
   return at >= 0 ? (args[at + 1] ?? fallback) : fallback;
 };
+const targetRps = Number(option("--target-rps", "0"));
+if (!Number.isSafeInteger(targetRps) || targetRps < 0 || targetRps > 100000)
+  throw new Error("Invalid target RPS");
 const seconds = Number(option("--seconds", "10"));
 const instances = Number(option("--instances", "1"));
 const wallets = Number(option("--wallets", "1"));
 const concurrency = Number(option("--concurrency", "64"));
 const pool = Number(option("--pool", "16"));
 const stream = args.includes("--stream");
+const billingMode = option("--billing-mode", "paid");
+if (!["paid", "free"].includes(billingMode)) throw new Error("Invalid billing mode");
+const expectedCharge = billingMode === "paid" ? "59" : "0";
+const workerMode = option("--worker-mode", "live");
+if (!["live", "deferred"].includes(workerMode)) throw new Error("Invalid worker mode");
+const drainSeconds = Number(option("--drain-seconds", "60"));
+if (!Number.isSafeInteger(drainSeconds) || drainSeconds < 1 || drainSeconds > 600)
+  throw new Error("Invalid drain budget");
+const consumerMode = option("--consumer-mode", "live");
+if (!["live", "none"].includes(consumerMode)) throw new Error("Invalid consumer mode");
+const hotShare = Number(option("--hot-share", "0"));
+if (!Number.isFinite(hotShare) || hotShare < 0 || hotShare > 1)
+  throw new Error("Invalid hot wallet share");
 if (
   ![seconds, instances, wallets, concurrency, pool].every(
     (v) => Number.isSafeInteger(v) && v > 0,
@@ -21,7 +38,7 @@ if (
   seconds > 3600 ||
   instances > 8 ||
   wallets > 1000 ||
-  concurrency > 2000 ||
+  concurrency > 8192 ||
   instances * pool + 16 > 90
 )
   throw new Error("Invalid capacity bounds");
@@ -56,6 +73,8 @@ const env = {
   DB_POOL_SIZE: String(pool),
   MAX_INFLIGHT: "10000",
   QUEUE_BATCH_SIZE: option("--batch", "64"),
+  QUEUE_BATCH_DELAY_MS: process.env.QUEUE_BATCH_DELAY_MS ?? "1",
+  QUEUE_MAX_PENDING_JOBS: process.env.QUEUE_MAX_PENDING_JOBS ?? "1000",
   BILLING_CONCURRENCY: option("--worker-concurrency", "16"),
   WORKER_PORT: "18099",
   MOCK_CONTROL_TOKEN: `control-${id}`,
@@ -82,6 +101,26 @@ const wait = async (port: number) => {
   throw new Error(`Process ${port} did not become ready`);
 };
 try {
+  const redisSettings: Record<string, unknown> = {};
+  for (const [name, redisURL] of [
+    ["admission", process.env.REDIS_URL],
+    ["evidence", process.env.QUEUE_REDIS_URL],
+  ] as const) {
+    const redis = new RedisClient(redisURL);
+    try {
+      await redis.connect();
+      redisSettings[name] = await redis.send("CONFIG", [
+        "GET",
+        "appendonly",
+        "appendfsync",
+        "no-appendfsync-on-rewrite",
+        "aof-load-truncated",
+        "maxmemory-policy",
+      ]);
+    } finally {
+      redis.close();
+    }
+  }
   await migrate(db);
   const databaseSettings = await db<
     { name: string; setting: string; unit: string | null }[]
@@ -134,9 +173,9 @@ try {
     pricing: {
       currency: "USD",
       rates: {
-        input_tokens: { numerator: "3", denominator: "1" },
-        cached_input_tokens: { numerator: "1", denominator: "1" },
-        output_tokens: { numerator: "7", denominator: "1" },
+        input_tokens: { numerator: billingMode === "paid" ? "3" : "0", denominator: "1" },
+        cached_input_tokens: { numerator: billingMode === "paid" ? "1" : "0", denominator: "1" },
+        output_tokens: { numerator: billingMode === "paid" ? "7" : "0", denominator: "1" },
       },
     },
     ceilings: { input_tokens: "4096", cached_input_tokens: "4096", output_tokens: "4096" },
@@ -184,16 +223,28 @@ try {
     "wallet_lots",
   ])
     await db.unsafe(`ANALYZE ${table}`);
-  const consumer = await store.createConsumer(`bench-${id}`, false);
+  const consumer =
+    consumerMode === "live" ? await store.createConsumer(`bench-${id}`, false) : undefined;
   const mock = spawn("dist/mock-providers/main.js", { MOCK_PORT: "19088" }, "mock");
   await wait(19088);
   const ports = Array.from({ length: instances }, (_, i) => 18081 + i);
   for (const port of ports)
     spawn("dist/gateway/main.js", { PORT: String(port) }, `gateway-${port}`);
   for (const port of ports) await wait(port);
-  spawn("dist/gateway/worker-main.js", { DB_POOL_SIZE: "16" }, "worker");
-  await wait(18099);
-  const timeline: { at: number; queue: Record<string, number>; worker_metrics: string }[] = [];
+  let workerStarted = false;
+  const startWorker = async () => {
+    spawn("dist/gateway/worker-main.js", { DB_POOL_SIZE: "16" }, "worker");
+    await wait(18099);
+    workerStarted = true;
+  };
+  if (workerMode === "live") await startWorker();
+  const timeline: {
+    at: number;
+    queue: Record<string, number>;
+    worker_metrics: string;
+    lock_waiters: number;
+    active_queries: number;
+  }[] = [];
   const samplingStart = Date.now();
   let sampling: Promise<void> | undefined;
   telemetryTimer = setInterval(() => {
@@ -205,10 +256,17 @@ try {
           headers,
           signal: AbortSignal.timeout(2000),
         }),
-        fetch("http://127.0.0.1:18099/metrics", { headers, signal: AbortSignal.timeout(2000) }),
+        workerStarted
+          ? fetch("http://127.0.0.1:18099/metrics", { headers, signal: AbortSignal.timeout(2000) })
+          : Promise.resolve(new Response("")),
       ]);
       if (!queue.ok || !worker.ok) throw new Error("Capacity telemetry unavailable");
+      const activity = (
+        await db`SELECT count(*) FILTER(WHERE wait_event_type='Lock')::int AS locks,count(*) FILTER(WHERE state='active')::int AS active FROM pg_stat_activity WHERE datname=current_database()`
+      )[0];
       timeline.push({
+        lock_waiters: activity.locks,
+        active_queries: activity.active,
         at: Date.now() - samplingStart,
         queue: (await queue.json()) as Record<string, number>,
         worker_metrics: await worker.text(),
@@ -224,7 +282,7 @@ try {
   let consuming = true;
   let delivered = 0;
   const consume = (async () => {
-    while (consuming) {
+    while (consuming && consumer) {
       try {
         const page = await store.claimEvents(consumer, 500);
         if (page.events.length) {
@@ -256,6 +314,8 @@ try {
       "--metrics",
       "--output",
       reportPath,
+      "--hot-share",
+      String(hotShare),
       ...(stream ? ["--stream"] : []),
       ...(args.includes("--rate") ? ["--rate", option("--rate", "0")] : []),
     ],
@@ -272,17 +332,19 @@ try {
       `Load generator exited ${exit} without a report; inspect ${directory}/load.log`,
     );
   const drainStart = Date.now();
+  if (workerMode === "deferred") await startWorker();
   let pending = 1;
-  while (Date.now() - drainStart < 60000) {
+  while (Date.now() - drainStart < drainSeconds * 1000) {
     const rows =
-      await db`SELECT count(*)::int AS n FROM billing_holds WHERE state NOT IN ('SETTLED','RELEASED')`;
-    pending = rows[0].n;
+      await db`SELECT EXISTS(SELECT 1 FROM billing_holds WHERE state NOT IN ('SETTLED','RELEASED')) AS waiting`;
+    pending = rows[0].waiting ? 1 : 0;
     if (!pending) break;
     await Bun.sleep(100);
   }
-  while (Date.now() - drainStart < 60000) {
-    const rows = await db`SELECT count(*)::int AS n FROM event_deliveries WHERE state<>'ACKED'`;
-    if (!rows[0].n) break;
+  while (Date.now() - drainStart < drainSeconds * 1000) {
+    const rows =
+      await db`SELECT EXISTS(SELECT 1 FROM event_deliveries WHERE state<>'ACKED') AS waiting`;
+    if (!rows[0].waiting) break;
     await Bun.sleep(25);
   }
   consuming = false;
@@ -296,26 +358,35 @@ try {
     queueStats = (await response.json()) as Record<string, number>;
     if (Object.values(queueStats).every((n) => n === 0)) break;
     await Bun.sleep(25);
-  } while (Date.now() - drainStart < 60000);
+  } while (Date.now() - drainStart < drainSeconds * 1000);
   const serviceDrainedAt = Date.now();
   clearInterval(telemetryTimer);
-  const accounting =
-    await db`SELECT (SELECT count(*)::int FROM gateway_requests) AS requests,(SELECT count(*)::int FROM attempts) AS attempts,(SELECT count(*)::int FROM usage_events WHERE finality='FINAL' AND usage->>'input_tokens'='7' AND usage->>'cached_input_tokens'='3' AND usage->>'output_tokens'='5' AND cost_atoms=59 AND cost_complete) AS precise_usage,(SELECT count(*)::int FROM billing_charges WHERE amount_atoms=59 AND funded_atoms=59 AND debt_atoms=0 AND refunded_atoms=0) AS precise_charges,(SELECT count(*)::int FROM billing_holds WHERE state='SETTLED') AS settled_holds,(SELECT sum(reserved_atoms)::text FROM wallets) AS reserved,(SELECT sum(spent_atoms)::text FROM wallets) AS spent,(SELECT sum(debt_atoms)::text FROM wallets) AS debt,(SELECT count(*)::int FROM event_deliveries WHERE state='ACKED') AS acknowledged,(SELECT count(*)::int FROM money_journal WHERE kind='SETTLE') AS settlement_journals,(SELECT count(*)::int FROM money_journal j WHERE (SELECT sum((v->>'atoms')::numeric) FROM jsonb_array_elements(j.lines)v)<>0) AS unbalanced_journals`;
+  pending = Number(
+    (
+      await db`SELECT count(*)::int AS n FROM billing_holds WHERE state NOT IN ('SETTLED','RELEASED')`
+    )[0].n,
+  );
+  const accounting = await db.begin(async (audit) => {
+    await audit`SET LOCAL statement_timeout=120000`;
+    return audit`SELECT (SELECT count(*)::int FROM gateway_requests) AS requests,(SELECT count(*)::int FROM attempts) AS attempts,(SELECT count(*)::int FROM usage_events WHERE finality='FINAL' AND usage->>'input_tokens'='7' AND usage->>'cached_input_tokens'='3' AND usage->>'output_tokens'='5' AND cost_atoms=59 AND cost_complete) AS precise_usage,(SELECT count(*)::int FROM billing_charges WHERE amount_atoms=${expectedCharge}::numeric AND funded_atoms=${expectedCharge}::numeric AND debt_atoms=0 AND refunded_atoms=0) AS precise_charges,(SELECT count(*)::int FROM billing_holds WHERE state='SETTLED') AS settled_holds,(SELECT sum(reserved_atoms)::text FROM wallets) AS reserved,(SELECT sum(spent_atoms)::text FROM wallets) AS spent,(SELECT sum(debt_atoms)::text FROM wallets) AS debt,(SELECT count(*)::int FROM event_deliveries WHERE state='ACKED') AS acknowledged,(SELECT count(*)::int FROM money_journal WHERE kind='SETTLE') AS settlement_journals,(SELECT count(*)::int FROM money_journal j WHERE (SELECT sum((v->>'atoms')::numeric) FROM jsonb_array_elements(j.lines)v)<>0) AS unbalanced_journals`;
+  });
   const check = accounting[0];
   let valid =
     exit === 0 &&
     !pending &&
+    check.requests === check.attempts &&
     check.requests === check.precise_usage &&
     check.requests === check.precise_charges &&
     check.requests === check.settled_holds &&
-    check.requests === check.acknowledged &&
-    check.requests === check.settlement_journals &&
+    (consumerMode === "live" ? check.requests : 0) === check.acknowledged &&
+    (billingMode === "paid" ? check.requests : 0) === check.settlement_journals &&
     check.reserved === "0" &&
     check.debt === "0" &&
-    BigInt(check.spent) === BigInt(check.requests) * 59n &&
+    BigInt(check.spent) === BigInt(check.requests) * BigInt(expectedCharge) &&
     !check.unbalanced_journals;
   const http = await Bun.file(reportPath).json();
   valid = valid && http.invalid === 0 && !(http.shed ?? 0) && http.completed === http.succeeded;
+  valid = valid && check.requests === http.succeeded + http.warmup_requests;
   const profile =
     await db`SELECT funcname,calls,total_time,self_time FROM pg_stat_user_functions ORDER BY total_time DESC LIMIT 25`;
   valid = valid && Object.values(queueStats).every((n) => n === 0);
@@ -324,8 +395,11 @@ try {
   valid = valid && telemetryErrors === 0 && timeline.length >= Math.max(1, Math.floor(seconds / 2));
   const result = {
     databaseSettings,
+    redisSettings,
     queue: {
       batchSize: Number(env.QUEUE_BATCH_SIZE),
+      batchDelayMs: Number(env.QUEUE_BATCH_DELAY_MS ?? 1),
+      maxPendingJobs: Number(env.QUEUE_MAX_PENDING_JOBS ?? 1000),
       requiredReplicas: Number(env.QUEUE_REQUIRED_REPLICAS ?? 0),
       workerConcurrency: Number(env.BILLING_CONCURRENCY),
     },
@@ -337,6 +411,8 @@ try {
       await db`SELECT wal_records::text,wal_bytes::text,wal_sync,wal_write,wal_sync_time,wal_write_time FROM pg_stat_wal`
     )[0],
     profile,
+    attemptOutcomes:
+      await db`SELECT state,error_code,count(*)::int AS count FROM attempts GROUP BY state,error_code ORDER BY count(*) DESC`,
     statements: args.includes("--profile")
       ? await db`SELECT query,calls::text,round(total_exec_time::numeric,2)::text AS total_ms,round(mean_exec_time::numeric,3)::text AS mean_ms,rows::text,shared_blks_hit::text,shared_blks_read::text,wal_bytes::text FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) ORDER BY total_exec_time DESC LIMIT 40`
       : undefined,
@@ -344,12 +420,21 @@ try {
       await db`SELECT relname,n_tup_ins::text,n_tup_upd::text,n_tup_hot_upd::text,n_dead_tup::text FROM pg_stat_user_tables ORDER BY n_tup_upd DESC LIMIT 15`,
     id,
     valid,
+    targetRps,
+    capacityPassed: targetRps > 0 ? passesCapacityTarget(valid, http, targetRps) : undefined,
     seconds,
     instances,
     wallets,
+    hotShare,
     pool,
     concurrency,
     stream,
+    billingMode,
+    consumerMode,
+    workerMode,
+    drainSeconds,
+    expectedChargeAtoms: expectedCharge,
+    expectedUpstreamCostAtoms: "59",
     http,
     accounting: check,
     pending,
@@ -367,8 +452,14 @@ try {
   console.log(
     JSON.stringify({
       directory,
+      billingMode,
+      consumerMode,
+      workerMode,
+      drainSeconds,
       valid,
       rps: http.successful_rps,
+      targetRps,
+      capacityPassed: result.capacityPassed,
       financial_completed_rps: result.financial_completed_rps,
       invalid: http.invalid,
       accounting: check,
@@ -376,7 +467,7 @@ try {
       drain_ms: result.drain_ms,
     }),
   );
-  if (!valid) process.exitCode = 1;
+  if (!valid || result.capacityPassed === false) process.exitCode = 1;
   void mock;
 } finally {
   clearInterval(telemetryTimer);

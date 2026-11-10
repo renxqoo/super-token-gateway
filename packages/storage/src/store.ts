@@ -82,6 +82,11 @@ export interface TokenSummary {
   tokens: number;
 }
 
+interface PersistenceResult {
+  status: string;
+  error?: string;
+  billing?: { state: string; replayed?: boolean };
+}
 export class Store {
   private modelCache = new Map<
     string,
@@ -103,19 +108,100 @@ export class Store {
     { credential: Credential; project: Project } | undefined
   >;
   private readonly admissionBatch: Batcher<Record<string, unknown>, Record<string, unknown>>;
+  private readonly persistenceBatch: Batcher<UsageEvidence[], PersistenceResult[]>;
   constructor(readonly db: SQL) {
-    this.authenticationBatch = new Batcher((hashes) => this.authenticateMany(hashes));
+    this.persistenceBatch = new Batcher(
+      async (groups) => {
+        const events = groups.flat();
+        const rows = await this.db<
+          { result: Record<string, PersistenceResult> }[]
+        >`SELECT persist_usage_batch(${events}::jsonb) AS result`;
+        let offset = 0;
+        return groups.map((group) =>
+          group.map(() => {
+            const result = rows[0]?.result[String(offset++)];
+            if (!result) throw new Error("Usage commit result cardinality mismatch");
+            return result;
+          }),
+        );
+      },
+      128,
+      2,
+      4,
+      8192,
+      (events) => events.length,
+    );
+    this.authenticationBatch = new Batcher((hashes) => this.authenticateMany(hashes), 128, 3);
     this.admissionBatch = new Batcher(
       async (inputs) => {
         const rows = await this.db`SELECT admit_gateway_batch(${inputs}::jsonb) AS result`;
         return inputs.map((_, i) => rows[0].result[String(i)]);
       },
-      64,
-      2,
+      128,
+      5,
       1,
     );
   }
 
+  async createOrganization(input: {
+    external_ref: string;
+    name: string;
+    rpm?: number | undefined;
+    tpm?: number | undefined;
+    concurrency?: number | undefined;
+  }): Promise<string> {
+    const id = crypto.randomUUID();
+    await this
+      .db`INSERT INTO organizations(id,external_ref,name,rpm,tpm,concurrency) VALUES(${id},${input.external_ref},${input.name},${input.rpm ?? 100000},${input.tpm ?? 1000000000},${input.concurrency ?? 10000})`;
+    return id;
+  }
+  async updateOrganization(
+    id: string,
+    input: {
+      enabled?: boolean | undefined;
+      rpm?: number | undefined;
+      tpm?: number | undefined;
+      concurrency?: number | undefined;
+    },
+  ): Promise<void> {
+    const rows = await this
+      .db`UPDATE organizations SET enabled=coalesce(${input.enabled ?? null},enabled),rpm=coalesce(${input.rpm ?? null},rpm),tpm=coalesce(${input.tpm ?? null},tpm),concurrency=coalesce(${input.concurrency ?? null},concurrency) WHERE id=${id} RETURNING id`;
+    if (!rows.length) throw new GatewayError(404, "not_found", "Organization not found");
+  }
+  async createPrincipal(
+    organizationId: string,
+    input: {
+      external_ref: string;
+      role: string;
+      rpm?: number | undefined;
+      tpm?: number | undefined;
+      concurrency?: number | undefined;
+    },
+  ): Promise<string> {
+    const id = crypto.randomUUID();
+    await this
+      .db`INSERT INTO principals(id,organization_id,external_ref,role,rpm,tpm,concurrency) VALUES(${id},${organizationId},${input.external_ref},${input.role},${input.rpm ?? 10000},${input.tpm ?? 100000000},${input.concurrency ?? 1000})`;
+    return id;
+  }
+  async updatePrincipal(
+    id: string,
+    input: {
+      enabled?: boolean | undefined;
+      role?: string | undefined;
+      rpm?: number | undefined;
+      tpm?: number | undefined;
+      concurrency?: number | undefined;
+    },
+  ): Promise<void> {
+    const rows = await this
+      .db`UPDATE principals SET enabled=coalesce(${input.enabled ?? null},enabled),role=coalesce(${input.role ?? null},role),rpm=coalesce(${input.rpm ?? null},rpm),tpm=coalesce(${input.tpm ?? null},tpm),concurrency=coalesce(${input.concurrency ?? null},concurrency) WHERE id=${id} RETURNING id`;
+    if (!rows.length) throw new GatewayError(404, "not_found", "Principal not found");
+  }
+  async revokeProjectKey(id: string, projectId: string): Promise<void> {
+    const rows = await this
+      .db`UPDATE api_keys SET enabled=false WHERE id=${id} AND project_id=${projectId} RETURNING id`;
+    if (!rows.length) throw new GatewayError(404, "not_found", "Key not found");
+  }
   async createProject(input: ProjectInput): Promise<string> {
     const id = crypto.randomUUID();
     await this
@@ -239,7 +325,7 @@ export class Store {
     >`SELECT k.verifier,k.id AS key_id,k.project_id,k.models,k.operations,k.principal_id,k.role,k.allowed_cidrs,k.rpm AS key_rpm,k.tpm::float8 AS key_tpm,k.concurrency AS key_concurrency,u.rpm AS principal_rpm,u.tpm::float8 AS principal_tpm,u.concurrency AS principal_concurrency,
     p.id,p.name,p.enabled,p.rpm,p.tpm,p.concurrency,p.billing_currency,p.organization_id,o.rpm AS organization_rpm,o.tpm::float8 AS organization_tpm,o.concurrency AS organization_concurrency
     FROM api_keys k JOIN projects p ON p.id=k.project_id LEFT JOIN organizations o ON o.id=p.organization_id LEFT JOIN principals u ON u.id=k.principal_id
-    WHERE k.verifier=ANY(${hashes}::text[]) AND k.enabled AND p.enabled AND (k.expires_at IS NULL OR k.expires_at>now()) AND (o.id IS NULL OR o.enabled) AND (u.id IS NULL OR u.enabled AND (k.role<>'ADMIN' OR u.role IN ('OWNER','ADMIN')) AND (k.role<>'INVOKER' OR u.role IN ('OWNER','ADMIN','MEMBER')) AND (k.role<>'BILLING' OR u.role IN ('OWNER','ADMIN','BILLING')))`;
+    WHERE k.verifier=ANY(${[...new Set(hashes)]}::text[]) AND k.enabled AND p.enabled AND (k.expires_at IS NULL OR k.expires_at>now()) AND (o.id IS NULL OR o.enabled) AND (u.id IS NULL OR u.enabled AND (k.role<>'ADMIN' OR u.role IN ('OWNER','ADMIN')) AND (k.role<>'INVOKER' OR u.role IN ('OWNER','ADMIN','MEMBER')) AND (k.role<>'BILLING' OR u.role IN ('OWNER','ADMIN','BILLING')))`;
     const byHash = new Map(rows.map((row) => [row.verifier, row]));
     return hashes.map((hash) => {
       const row = byHash.get(hash);
@@ -368,6 +454,7 @@ export class Store {
     fingerprint: string,
     route: Route,
     quote: BillingQuote,
+    signal?: AbortSignal,
   ): Promise<{ record: RequestRecord; created: boolean; attempt_id?: string }> {
     const payload = {
       id,
@@ -382,7 +469,19 @@ export class Store {
       quote,
     };
     try {
-      const result = await this.admissionBatch.add(payload);
+      signal?.throwIfAborted();
+      const deadline = signal ? Infinity : Date.now() + 2000;
+      let backoff = 2;
+      let result = await this.admissionBatch.add(payload);
+      while (result.error === "55P03" && Date.now() < deadline) {
+        signal?.throwIfAborted();
+        await Bun.sleep(backoff + Math.random() * 5);
+        backoff = Math.min(50, backoff * 2);
+        signal?.throwIfAborted();
+        result = await this.admissionBatch.add(payload);
+      }
+      if (result.error === "55P03")
+        throw new GatewayError(503, "wallet_busy", "Wallet admission deadline reached");
       if (result.error) throw { errno: String(result.error) };
       return result as unknown as { record: RequestRecord; created: boolean; attempt_id?: string };
     } catch (error) {
@@ -435,24 +534,34 @@ export class Store {
     return id;
   }
   async persistUsage(events: UsageEvidence[]): Promise<Record<string, number>> {
-    const rows = await this.db<
-      {
-        result: Record<
-          string,
-          { status: string; error?: string; billing?: { state: string; replayed?: boolean } }
-        >;
-      }[]
-    >`SELECT persist_usage_batch(${events}::jsonb) AS result`;
+    if (!events.length || events.length > 128)
+      throw new RangeError("Usage batch requires 1 to 128 events");
     const counts: Record<string, number> = {};
+    let pending = events;
     let failed = false;
-    for (const result of Object.values(rows[0]?.result ?? {})) {
-      if (result.status === "ERROR") failed = true;
-      const state = result.billing?.replayed
-        ? "REPLAYED"
-        : (result.billing?.state ?? result.status);
-      counts[state] = (counts[state] ?? 0) + 1;
-    }
-    if (failed)
+    const deadline = Date.now() + 2000;
+    let backoff = 2;
+    do {
+      const outcomes = await this.persistenceBatch.add(pending);
+      const retry: UsageEvidence[] = [];
+      for (const [index, result] of outcomes.entries()) {
+        if (result.status === "ERROR" && result.error === "55P03") {
+          retry.push(pending[Number(index)]!);
+          continue;
+        }
+        if (result.status === "ERROR") failed = true;
+        const state = result.billing?.replayed
+          ? "REPLAYED"
+          : (result.billing?.state ?? result.status);
+        counts[state] = (counts[state] ?? 0) + 1;
+      }
+      pending = retry;
+      if (pending.length && Date.now() < deadline) {
+        await Bun.sleep(backoff + Math.random() * 5);
+        backoff = Math.min(50, backoff * 2);
+      } else break;
+    } while (pending.length);
+    if (failed || pending.length)
       throw new GatewayError(
         503,
         "usage_commit_failed",

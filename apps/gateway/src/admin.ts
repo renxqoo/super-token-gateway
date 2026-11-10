@@ -22,7 +22,12 @@ import {
   secureEqual,
   verifier,
 } from "@gateway/kernel";
-import { readBounded, validateBaseUrl, validateCidr } from "@gateway/runtime";
+import {
+  readBounded,
+  validateBaseUrl,
+  validateCidr,
+  validateCloudCredentials,
+} from "@gateway/runtime";
 import type { Dependencies, Env } from "./context.ts";
 
 const id = (value: string) => z.uuid().parse(value);
@@ -59,9 +64,7 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
       })
       .strict()
       .parse(await body(c));
-    const key = crypto.randomUUID();
-    await deps.store
-      .db`INSERT INTO organizations(id,external_ref,name,rpm,tpm,concurrency) VALUES(${key},${v.external_ref},${v.name},${v.rpm ?? 100000},${v.tpm ?? 1000000000},${v.concurrency ?? 10000})`;
+    const key = await deps.store.createOrganization(v);
     return c.json({ id: key }, 201);
   });
   app.patch("/organizations/:id", async (c) => {
@@ -69,9 +72,7 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
       .object({ enabled: z.boolean().optional(), ...quotaFields })
       .strict()
       .parse(await body(c));
-    const rows = await deps.store
-      .db`UPDATE organizations SET enabled=coalesce(${v.enabled ?? null},enabled),rpm=coalesce(${v.rpm ?? null},rpm),tpm=coalesce(${v.tpm ?? null},tpm),concurrency=coalesce(${v.concurrency ?? null},concurrency) WHERE id=${id(c.req.param("id"))} RETURNING id`;
-    if (!rows.length) throw new GatewayError(404, "not_found", "Organization not found");
+    await deps.store.updateOrganization(id(c.req.param("id")), v);
     return c.json({ updated: true });
   });
   app.post("/organizations/:id/principals", async (c) => {
@@ -83,9 +84,7 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
       })
       .strict()
       .parse(await body(c));
-    const key = crypto.randomUUID();
-    await deps.store
-      .db`INSERT INTO principals(id,organization_id,external_ref,role,rpm,tpm,concurrency) VALUES(${key},${id(c.req.param("id"))},${v.external_ref},${v.role},${v.rpm ?? 10000},${v.tpm ?? 100000000},${v.concurrency ?? 1000})`;
+    const key = await deps.store.createPrincipal(id(c.req.param("id")), v);
     return c.json({ id: key }, 201);
   });
   app.patch("/principals/:id", async (c) => {
@@ -97,9 +96,7 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
       })
       .strict()
       .parse(await body(c));
-    const rows = await deps.store
-      .db`UPDATE principals SET enabled=coalesce(${v.enabled ?? null},enabled),role=coalesce(${v.role ?? null},role),rpm=coalesce(${v.rpm ?? null},rpm),tpm=coalesce(${v.tpm ?? null},tpm),concurrency=coalesce(${v.concurrency ?? null},concurrency) WHERE id=${id(c.req.param("id"))} RETURNING id`;
-    if (!rows.length) throw new GatewayError(404, "not_found", "Principal not found");
+    await deps.store.updatePrincipal(id(c.req.param("id")), v);
     return c.json({ updated: true });
   });
   app.get("/projects", async (c) => c.json({ data: await deps.store.projects() }));
@@ -150,6 +147,7 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
       deps.config.ALLOW_PRIVATE_UPSTREAM,
       deps.config.PRIVATE_UPSTREAM_CIDRS,
     );
+    validateCloudCredentials(input.kind, input.api_key);
     const providerId = crypto.randomUUID();
     await deps.store.createProvider(
       providerId,
@@ -164,11 +162,13 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
         enabled: z.boolean().optional(),
         rpm: z.number().int().min(1).max(10_000_000).optional(),
         concurrency: z.number().int().min(1).max(100_000).optional(),
-        api_key: z.string().min(1).max(4096).optional(),
+        api_key: z.string().min(1).max(16384).optional(),
       })
       .strict()
       .parse(await body(c));
     const providerId = id(c.req.param("id"));
+    if (input.api_key)
+      validateCloudCredentials((await deps.store.provider(providerId)).kind, input.api_key);
     await deps.store.updateProvider(
       providerId,
       input,

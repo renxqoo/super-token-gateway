@@ -118,7 +118,7 @@ export function createApp(deps: Dependencies): Hono<Env> {
   app.get("/livez", (c) => c.json({ status: "alive" }));
   app.get("/readyz", async (c) => {
     try {
-      await deps.store.db`SELECT 1`;
+      await deps.database.ping();
       await deps.usage.producer.ready();
       await deps.limits.command("PING");
       return c.json({ status: "ready" });
@@ -210,9 +210,7 @@ export function createApp(deps: Dependencies): Hono<Env> {
   });
   publicApi.delete("/project/keys/:id", async (c) => {
     requireRole(c, ["ADMIN"]);
-    const rows = await deps.store
-      .db`UPDATE api_keys SET enabled=false WHERE id=${z.uuid().parse(c.req.param("id"))} AND project_id=${c.get("auth").project.id} RETURNING id`;
-    if (!rows.length) throw new GatewayError(404, "not_found", "Key not found");
+    await deps.store.revokeProjectKey(z.uuid().parse(c.req.param("id")), c.get("auth").project.id);
     return c.json({ revoked: true });
   });
   publicApi.get("/wallets", async (c) => {

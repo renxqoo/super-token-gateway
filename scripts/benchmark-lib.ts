@@ -85,3 +85,20 @@ export function validChat(body: string, stream: boolean, expectedText?: string):
     return false;
   }
 }
+
+export function passesCapacityTarget(
+  dataValid: boolean,
+  result: { succeeded: number; duration_seconds: number },
+  targetRps: number,
+): boolean {
+  return (
+    dataValid &&
+    Number.isSafeInteger(result.succeeded) &&
+    result.succeeded >= 0 &&
+    Number.isFinite(result.duration_seconds) &&
+    result.duration_seconds > 0 &&
+    Number.isFinite(targetRps) &&
+    targetRps > 0 &&
+    result.succeeded / result.duration_seconds >= targetRps
+  );
+}

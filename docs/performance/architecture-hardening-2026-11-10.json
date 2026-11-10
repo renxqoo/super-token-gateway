@@ -1,0 +1,385 @@
+{
+  "date": "2026-11-10",
+  "environment": {
+    "architecture": "darwin/arm64",
+    "logical_cpus": 10,
+    "memory_gib": 16,
+    "bun": "1.4.4",
+    "postgres": "17.9 native Homebrew",
+    "redis": "8.4.0 native",
+    "queue_aof_replicas": 1,
+    "fault_domains": "single host; not production HA"
+  },
+  "delivery_gateway_sha256": "42e585c5d375235fd646daeb68f3fa24c220d06c6764083feaabbc045ba8f730",
+  "delivery_worker_sha256": "a4281efa492bfc2800cd7eb24a35bca39cbe044b845879d818e8d3f449bc65c3",
+  "delivery_manifest_sha256": "d24f8395c7b34a404b6f279b3f9d75ab99fed7c84d5a06784fed40a42fa7e22a",
+  "runs": [
+    {
+      "label": "single_wallet",
+      "audit_path": ".local/phase2/bench-58eba7d6a7874a9aad6adabe8721e554/audit.json",
+      "valid": true,
+      "seconds": 10,
+      "instances": 4,
+      "wallets": 1,
+      "hot_share": 0,
+      "concurrency": 128,
+      "required_aof_replicas": 1,
+      "http_completed_rps": 296.41,
+      "financial_completed_rps": 284.56,
+      "offered": 3554,
+      "shed": 0,
+      "invalid": 0,
+      "statuses": {
+        "200": 3554
+      },
+      "latency_ms": {
+        "p50": 228.96,
+        "p95": 1194.11,
+        "p99": 1933.54
+      },
+      "accounting": {
+        "requests": 4173,
+        "attempts": 4173,
+        "precise_usage": 4173,
+        "precise_charges": 4173,
+        "settled_holds": 4173,
+        "reserved": "0",
+        "spent": "246207",
+        "debt": "0",
+        "acknowledged": 4173,
+        "settlement_journals": 4173,
+        "unbalanced_journals": 0
+      },
+      "queue_after_drain": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms": 108,
+      "telemetry_errors": 0,
+      "gateway_sha256": "a9fc8ea40e2fe9014f0fd8d2e9cf129b4a344282a76ca2f6227576255df6aafe",
+      "source_manifest_sha256": "c0f93365848f560a729a204a6db9e9d0e2fd606b5309c4ef39de903c9d031ba6"
+    },
+    {
+      "label": "ninety_percent_hot_wallet",
+      "audit_path": ".local/phase2/bench-73d295adb41644dbb681724267e249bf/audit.json",
+      "valid": true,
+      "seconds": 10,
+      "instances": 4,
+      "wallets": 1000,
+      "hot_share": 0.9,
+      "concurrency": 256,
+      "required_aof_replicas": 1,
+      "http_completed_rps": 489.63,
+      "financial_completed_rps": 475.57,
+      "offered": 6044,
+      "shed": 0,
+      "invalid": 0,
+      "statuses": {
+        "200": 6044
+      },
+      "latency_ms": {
+        "p50": 295.31,
+        "p95": 1367.22,
+        "p99": 2213.85
+      },
+      "accounting": {
+        "requests": 7017,
+        "attempts": 7017,
+        "precise_usage": 7017,
+        "precise_charges": 7017,
+        "settled_holds": 7017,
+        "reserved": "0",
+        "spent": "414003",
+        "debt": "0",
+        "acknowledged": 7017,
+        "settlement_journals": 7017,
+        "unbalanced_journals": 0
+      },
+      "queue_after_drain": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms": 308,
+      "telemetry_errors": 0,
+      "gateway_sha256": "a9fc8ea40e2fe9014f0fd8d2e9cf129b4a344282a76ca2f6227576255df6aafe",
+      "source_manifest_sha256": "c0f93365848f560a729a204a6db9e9d0e2fd606b5309c4ef39de903c9d031ba6"
+    },
+    {
+      "label": "offered_11000",
+      "audit_path": ".local/phase2/bench-767828697a7b4461a285e4dc1e5963ba/audit.json",
+      "valid": false,
+      "seconds": 15,
+      "instances": 8,
+      "wallets": 1000,
+      "hot_share": 0,
+      "concurrency": 2000,
+      "required_aof_replicas": 1,
+      "http_completed_rps": 3231.65,
+      "financial_completed_rps": 2501.53,
+      "offered": 164979,
+      "shed": 49383,
+      "invalid": 65017,
+      "statuses": {
+        "200": 50579,
+        "503": 65017
+      },
+      "latency_ms": {
+        "p50": 64.14,
+        "p95": 547.5,
+        "p99": 741.46
+      },
+      "accounting": {
+        "requests": 55619,
+        "attempts": 55619,
+        "precise_usage": 55619,
+        "precise_charges": 55619,
+        "settled_holds": 55619,
+        "reserved": "0",
+        "spent": "3281521",
+        "debt": "0",
+        "acknowledged": 55619,
+        "settlement_journals": 55619,
+        "unbalanced_journals": 0
+      },
+      "queue_after_drain": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms": 5119,
+      "telemetry_errors": 0,
+      "gateway_sha256": "a9fc8ea40e2fe9014f0fd8d2e9cf129b4a344282a76ca2f6227576255df6aafe",
+      "source_manifest_sha256": "c0f93365848f560a729a204a6db9e9d0e2fd606b5309c4ef39de903c9d031ba6"
+    },
+    {
+      "label": "offered_2000",
+      "audit_path": ".local/phase2/bench-8e0d5bc9ef504d02b830afe0e9e25178/audit.json",
+      "valid": false,
+      "seconds": 60,
+      "instances": 4,
+      "wallets": 1000,
+      "hot_share": 0,
+      "concurrency": 1000,
+      "required_aof_replicas": 1,
+      "http_completed_rps": 1742.64,
+      "financial_completed_rps": 1723.98,
+      "offered": 119997,
+      "shed": 14003,
+      "invalid": 0,
+      "statuses": {
+        "200": 105994
+      },
+      "latency_ms": {
+        "p50": 113.25,
+        "p95": 867.54,
+        "p99": 1389.62
+      },
+      "accounting": {
+        "requests": 108466,
+        "attempts": 108466,
+        "precise_usage": 108466,
+        "precise_charges": 108466,
+        "settled_holds": 108466,
+        "reserved": "0",
+        "spent": "6399494",
+        "debt": "0",
+        "acknowledged": 108466,
+        "settlement_journals": 108466,
+        "unbalanced_journals": 0
+      },
+      "queue_after_drain": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms": 17,
+      "telemetry_errors": 0,
+      "gateway_sha256": "a9fc8ea40e2fe9014f0fd8d2e9cf129b4a344282a76ca2f6227576255df6aafe",
+      "source_manifest_sha256": "c0f93365848f560a729a204a6db9e9d0e2fd606b5309c4ef39de903c9d031ba6"
+    },
+    {
+      "label": "offered_1000_budget1000",
+      "audit_path": ".local/phase2/bench-ad6258b5ec1f4af4b719e7212775777d/audit.json",
+      "valid": false,
+      "seconds": 60,
+      "instances": 4,
+      "wallets": 1000,
+      "hot_share": 0,
+      "concurrency": 1000,
+      "required_aof_replicas": 1,
+      "http_completed_rps": 997.46,
+      "financial_completed_rps": 1023.15,
+      "offered": 59998,
+      "shed": 72,
+      "invalid": 0,
+      "statuses": {
+        "200": 59926
+      },
+      "latency_ms": {
+        "p50": 171.83,
+        "p95": 795.54,
+        "p99": 951.19
+      },
+      "accounting": {
+        "requests": 63591,
+        "attempts": 63591,
+        "precise_usage": 63591,
+        "precise_charges": 63591,
+        "settled_holds": 63591,
+        "reserved": "0",
+        "spent": "3751869",
+        "debt": "0",
+        "acknowledged": 63591,
+        "settlement_journals": 63591,
+        "unbalanced_journals": 0
+      },
+      "queue_after_drain": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms": 121,
+      "telemetry_errors": 0,
+      "gateway_sha256": "a9fc8ea40e2fe9014f0fd8d2e9cf129b4a344282a76ca2f6227576255df6aafe",
+      "source_manifest_sha256": "8233e5869eaf9a474241cbc00944efdbb9266bcea232ee51cd446931920830ea"
+    },
+    {
+      "label": "offered_1000_budget2000",
+      "audit_path": ".local/phase2/bench-addd47ffa2ac4baab1fe027cb9e11fc6/audit.json",
+      "valid": true,
+      "seconds": 60,
+      "instances": 4,
+      "wallets": 1000,
+      "hot_share": 0,
+      "concurrency": 2000,
+      "required_aof_replicas": 1,
+      "http_completed_rps": 989.58,
+      "financial_completed_rps": 1040.26,
+      "offered": 59998,
+      "shed": 0,
+      "invalid": 0,
+      "statuses": {
+        "200": 59998
+      },
+      "latency_ms": {
+        "p50": 202.14,
+        "p95": 826.27,
+        "p99": 1026.11
+      },
+      "accounting": {
+        "requests": 64873,
+        "attempts": 64873,
+        "precise_usage": 64873,
+        "precise_charges": 64873,
+        "settled_holds": 64873,
+        "reserved": "0",
+        "spent": "3827507",
+        "debt": "0",
+        "acknowledged": 64873,
+        "settlement_journals": 64873,
+        "unbalanced_journals": 0
+      },
+      "queue_after_drain": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms": 11,
+      "telemetry_errors": 0,
+      "gateway_sha256": "a9fc8ea40e2fe9014f0fd8d2e9cf129b4a344282a76ca2f6227576255df6aafe",
+      "source_manifest_sha256": "8233e5869eaf9a474241cbc00944efdbb9266bcea232ee51cd446931920830ea"
+    },
+    {
+      "label": "release_offered_1000_budget2000",
+      "audit_path": ".local/phase2/bench-db3e4a4429614d49836d528790f33a6c/audit.json",
+      "valid": true,
+      "seconds": 60,
+      "instances": 4,
+      "wallets": 1000,
+      "hot_share": 0,
+      "concurrency": 2000,
+      "required_aof_replicas": 1,
+      "http_completed_rps": 999.33,
+      "financial_completed_rps": 1048.6,
+      "offered": 59999,
+      "shed": 0,
+      "invalid": 0,
+      "statuses": {
+        "200": 59999
+      },
+      "latency_ms": {
+        "p50": 208.82,
+        "p95": 804.2,
+        "p99": 1020.57
+      },
+      "accounting": {
+        "requests": 64705,
+        "attempts": 64705,
+        "precise_usage": 64705,
+        "precise_charges": 64705,
+        "settled_holds": 64705,
+        "reserved": "0",
+        "spent": "3817595",
+        "debt": "0",
+        "acknowledged": 64705,
+        "settlement_journals": 64705,
+        "unbalanced_journals": 0
+      },
+      "queue_after_drain": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms": 115,
+      "gateway_sha256": "42e585c5d375235fd646daeb68f3fa24c220d06c6764083feaabbc045ba8f730",
+      "source_manifest_sha256": "8f4385653c8dc20e62c454647e0a7bcb6ac537e9208742d9924117117b521cc1"
+    }
+  ],
+  "conclusions": {
+    "production_10000_rps_proven": false,
+    "production_9999_availability_proven": false,
+    "real_cloud_accounts_tested": false,
+    "coverage_run": true,
+    "unit_tests": 55,
+    "integration_tests": 173,
+    "artifact_tools_and_process_faults": "passed",
+    "redis_aof_crash_and_replica_promotion": "passed",
+    "linux_nonroot_readonly_with_one_aof_replica": "passed",
+    "backup_restore_with_immutable_facts": "passed"
+  },
+  "notes": [
+    "Closed-loop hot-wallet tests prove accounting and bounded failure behavior, not 10000 RPS capacity.",
+    "All submitted requests in the capacity audits have matching precise usage, charges, settlement journals and consumer acknowledgments; no reserved balance or debt remains.",
+    "Open arrival tests fail when the generator sheds requests, even if every sent HTTP request succeeds.",
+    "Historical schema06 benchmarks ran on a different machine and with different replica guarantees; no comparative speedup is claimed.",
+    "The release capacity run matches the delivery gateway and worker bundles. Subsequent test organization and assertion changes alter the source manifest only; each run retains its original manifest hash."
+  ],
+  "unit_coverage": {
+    "command": "bun run test --coverage",
+    "scope": "files loaded by unit tests only; integration coverage not merged",
+    "functions_percent": 67.47,
+    "lines_percent": 63.44,
+    "statements_percent": null,
+    "branches_percent": null,
+    "threshold_configured": false,
+    "log_path": ".local/test-standards/coverage.log"
+  },
+  "test_quality_verification": {
+    "independent_bedrock_fixtures": "Python standard-library binascii.crc32; immutable binary protocol examples",
+    "isolated_zero_crc_mutant": {
+      "original_tests_passed": 2,
+      "rewritten_tests_failed": 6
+    },
+    "temporary_mutation_removed": true,
+    "log_directory": ".local/test-standards"
+  }
+}

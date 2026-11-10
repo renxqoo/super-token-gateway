@@ -21,3 +21,10 @@
 - [Anthropic Messages](https://platform.claude.com/docs/en/api/messages)。
 
 这些契约检查与 mock 验证不替代真实供应商账号的联调。检查日期为 2026-11-10。
+
+## 云传输实现依据
+
+- Azure 部署寻址、API Key 与版本：[Microsoft REST reference](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference)。
+- Bedrock Claude 请求体：[Messages contract](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages-request-response.html)；[InvokeModelWithResponseStream](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_InvokeModelWithResponseStream.html)。
+- SigV4 canonical request：[AWS signing specification](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html)。签名测试另以 botocore 独立生成包含 session token 和编码模型名的 golden 值。
+- Vertex Gemini：[inference reference](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference)；[service account OAuth](https://developers.google.com/identity/protocols/oauth2/service-account)。

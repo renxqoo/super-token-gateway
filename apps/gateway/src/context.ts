@@ -1,6 +1,6 @@
 import type { Credential, Project } from "@gateway/kernel";
 import type { Store, FundsStore } from "@gateway/storage";
-import type { Lifecycle, Limits, Metrics, MemoryBudget } from "@gateway/runtime";
+import type { Lifecycle, Limits, Metrics, MemoryBudget, createTransport } from "@gateway/runtime";
 import type { Metering } from "./usage.ts";
 import type { Config } from "./config.ts";
 export interface Auth {
@@ -14,8 +14,10 @@ export type Env = {
 export interface Dependencies {
   config: Config;
   usage: Metering;
-  store: Store;
-  funds: FundsStore;
+  store: Omit<Store, "db">;
+  funds: Omit<FundsStore, "db">;
+  database: { ping(): Promise<void>; close(timeout?: number): Promise<void> };
+  transport: ReturnType<typeof createTransport>;
   limits: Limits;
   lifecycle: Lifecycle;
   metrics: Metrics;

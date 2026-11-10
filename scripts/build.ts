@@ -4,7 +4,7 @@ await rm(new URL("../dist/", import.meta.url), { recursive: true, force: true })
 for (const [entries, directory] of [
   [["apps/gateway/src/main.ts", "apps/gateway/src/worker-main.ts"], "dist/gateway"],
   [["apps/mock-providers/src/main.ts"], "dist/mock-providers"],
-  [["scripts/migrate.ts"], "dist/tools"],
+  [["scripts/migrate.ts", "scripts/archive.ts"], "dist/tools"],
 ] as const) {
   const result = await Bun.build({
     entrypoints: [...entries],

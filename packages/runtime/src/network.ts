@@ -2,6 +2,23 @@ import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 import { inCidrs } from "./ip.ts";
 import { GatewayError } from "@gateway/kernel";
+import { createHttpPool } from "./http-pool.ts";
+import type { PinnedRequestInit } from "./http-pool.ts";
+
+export function createTransport(maxConnections = 1024) {
+  const pool = createHttpPool(maxConnections);
+  return {
+    fetch(
+      url: URL,
+      init: RequestInit,
+      allowPrivate: boolean,
+      privateCidrs: readonly string[] = [],
+    ) {
+      return safeFetch(url, init, allowPrivate, privateCidrs, pool.send);
+    },
+    close: pool.close,
+  };
+}
 
 const blocked = new BlockList();
 for (const [address, prefix] of [
@@ -78,6 +95,7 @@ export async function safeFetch(
   init: RequestInit,
   allowPrivate: boolean,
   privateCidrs: readonly string[] = [],
+  send: (url: URL, init: PinnedRequestInit) => Promise<Response> = fetch,
 ): Promise<Response> {
   if (url.username || url.password || !["https:", "http:"].includes(url.protocol))
     throw new GatewayError(502, "unsafe_upstream", "Unsafe upstream URL");
@@ -113,7 +131,7 @@ export async function safeFetch(
   headers.set("host", url.host);
   headers.set("accept-encoding", "identity");
   // URL 使用已经校验的 IP；Host、SNI 与证书验证仍绑定原域名，禁用环境代理与重定向。
-  return fetch(pinned, {
+  return send(pinned, {
     ...init,
     headers,
     redirect: "manual",

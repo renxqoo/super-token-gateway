@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, rm } from "node:fs/promises";
-import { createDatabase, migrate } from "@gateway/storage";
+import { createDatabase } from "@gateway/storage";
 import { RedisClient } from "bun";
 
 const base = process.env.DATABASE_URL;
@@ -56,8 +56,8 @@ const env = {
   STREAM_IDLE_MS: "1000",
   DOWNSTREAM_STALL_MS: "1000",
 };
-const start = (path: string) => {
-  const process = Bun.spawn(["bun", new URL(path, root).pathname], {
+const start = (path: string, args: string[] = []) => {
+  const process = Bun.spawn(["bun", new URL(path, root).pathname, ...args], {
     cwd: cwd.pathname,
     env,
     stdout: "pipe",
@@ -93,7 +93,20 @@ const api = async (path: string, body: unknown, token = admin) => {
   return (await response.json()) as Record<string, unknown>;
 };
 try {
-  await migrate(db);
+  assert.equal(
+    await start("dist/tools/migrate.js").exited,
+    0,
+    "Compiled migrator must find both SQL assets from an empty working directory",
+  );
+  const archivePath = new URL("numeric-archive/", cwd).pathname;
+  assert.equal(
+    await start("dist/tools/archive.js", ["--month", "2025-01", "--output", archivePath]).exited,
+    0,
+  );
+  assert.equal(
+    await start("dist/tools/archive.js", ["--verify", archivePath + "/manifest.json"]).exited,
+    0,
+  );
   let server = start("dist/gateway/main.js");
   start("dist/mock-providers/main.js");
   await Promise.all([health(origin, "/readyz"), health(mockOrigin, "/healthz")]);
@@ -276,6 +289,7 @@ try {
       artifact: "pass",
       checks: [
         "standalone bundle with empty working directory",
+        "compiled migration SQL assets and archive CLI",
         "real HTTP readiness and inference",
         "strict queue success while worker stopped, then exact settlement",
         "SIGKILL plus restart and UNKNOWN recovery",

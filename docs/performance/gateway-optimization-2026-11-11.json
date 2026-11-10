@@ -1,0 +1,1204 @@
+{
+  "date": "2026-11-11",
+  "timezone": "Asia/Singapore",
+  "schema": 2026111008,
+  "requested_target": {
+    "rps": 6000,
+    "scope": "actual successful LLM forwarding HTTP requests, not tokens/s or SQL queries/s",
+    "environment": "same-host Mac",
+    "status": "NOT_MET",
+    "acceptance": "unrounded completed success rate >= 6000, zero invalid responses, zero shed arrivals, and exact final accounting"
+  },
+  "host": {
+    "cpu": "Apple M4",
+    "logical_cpus": 10,
+    "memory_gib": 16,
+    "platform": "darwin/arm64",
+    "bun": "1.4.4",
+    "postgresql": "17.9 Homebrew",
+    "redis": "8.4.0",
+    "dedicated_host": false,
+    "mock": "independent localhost HTTP mock; fixed usage 7 input, 3 cached input, 5 output; upstream cost 59 atoms"
+  },
+  "financial_policy": {
+    "atomic_unit": "10^-18 currency unit; integer decimal strings / NUMERIC(38,0)",
+    "available_balance_floor_atoms": "0",
+    "unexpected_underfunding": "record exact unpaid customer charge in debt_atoms, freeze new calls; cash funding repays debt",
+    "paid_charge_atoms": "59",
+    "free_charge_atoms": "0",
+    "free_upstream_cost_atoms": "59"
+  },
+  "changes": [
+    "owned bounded HTTP/HTTPS keep-alive pool with DNS/IP pin, Host/SNI verification, proxy and redirect controls, cancellation and lifecycle cleanup",
+    "local socket/descriptor allocation failure before a response records NOT_EXECUTED, releases hold and returns 503 without provider circuit failure",
+    "wallet NO KEY UPDATE locks permit foreign-key readers while serializing financial writers",
+    "array staging and set-based fresh request/evidence persistence preserve validation, idempotency and journal constraints",
+    "remove redundant indexes; schema06/schema07 explicit offline upgrade to schema08",
+    "explicit paid/free, consumer, worker, offered load and unrounded capacity acceptance in evidence",
+    "native Redis fault fixture with PID ownership and comprehensive cleanup"
+  ],
+  "verification": {
+    "command": "bun run verify",
+    "passed": true,
+    "unit_tests": 63,
+    "integration_tests": 176,
+    "failed_tests": 0,
+    "artifact_checks": 8,
+    "evidence": ".local/optimize-rps-20261110/final-verify-reviewed.log",
+    "evidence_sha256": "eefeafcecb0072a7e938c5f2880a7ea4d5deb96ae33398fc1c4cfb8d057b34af",
+    "coverage": {
+      "command": "bun run test --coverage",
+      "passed": true,
+      "functions_percent": 68.37,
+      "lines_percent": 64.52,
+      "statements_percent": null,
+      "branches_percent": null,
+      "scope": "unit-test loaded files only; integration coverage not merged",
+      "threshold_configured": false,
+      "unsupported_metrics": "Bun report does not provide statements or branches",
+      "evidence": ".local/optimize-rps-20261110/final-coverage.log"
+    },
+    "durability": {
+      "command": "bun run test:durability -- --native",
+      "passed": true,
+      "checks": [
+        "production topology acknowledges every connected candidate and rejects live persistence drift",
+        "SIGKILL BEFORE_COMMIT: recovered exactly once",
+        "SIGKILL AFTER_COMMIT: recovered exactly once",
+        "primary hard restart retains acknowledged evidence from its AOF",
+        "acknowledged replica promotion retains evidence and exact settlement",
+        "promoted node without required durable replica rejects admission",
+        "unsafe persistence configuration rejects admission",
+        "strict usage payload rejects body; all monetary journals remain singular"
+      ],
+      "expected_retained_hold_atoms": "100 for deliberately rejected invalid evidence",
+      "evidence": ".local/optimize-rps-20261110/final-durability-native.log",
+      "evidence_sha256": "95d529471ecc40c68390a8c814dd5e6a012af3fe71e568ee9b3116ec3122f3c5"
+    },
+    "independent_review": "read-only review; identified capacity rounding, native fixture ownership and cleanup issues corrected; latest reviewed native entry rerun passed",
+    "regression_evidence": {
+      "foreign_key_before": ".local/optimize-rps-20261110/keyshare-before.log",
+      "socket_pool_before": ".local/optimize-rps-20261110/pool-before.log",
+      "local_exhaustion_before": ".local/optimize-rps-20261110/local-exhaustion-before.log",
+      "rounding_before": ".local/optimize-rps-20261110/target-rounding-before.log",
+      "rounding_after": ".local/optimize-rps-20261110/target-rounding-after.log",
+      "native_restart_before": ".local/optimize-rps-20261110/durability-native.log",
+      "native_after": ".local/optimize-rps-20261110/final-durability-native.log"
+    },
+    "not_run": [
+      "current-revision Linux/container validation: Docker daemon unavailable",
+      "cross-host/fault-domain HA, one-hour capacity, real paid cloud calls, or same-workload Tillgate/new-api comparison"
+    ]
+  },
+  "runs": [
+    {
+      "label": "paid-short-bulk-20s",
+      "evidence": ".local/phase2/bench-db076672675f4fe89fc11495a6c3de4e",
+      "audit_sha256": "ef0d3f14f1311f4c8562b6a6a62fea8c0c5418d465ee3243f1f134e716f67749",
+      "http_sha256": "3dd7a370d41fb04c7dc5d858bdc9e88205894e45badb383fa338f7c16cee2201",
+      "seconds": 20,
+      "instances": 4,
+      "wallets": 1000,
+      "concurrency": 4000,
+      "billingMode": "paid",
+      "consumerMode": "none",
+      "workerMode": "deferred",
+      "hotShare": 0,
+      "queue": {
+        "batchSize": 128,
+        "batchDelayMs": 5,
+        "maxPendingJobs": 10000,
+        "requiredReplicas": 1,
+        "workerConcurrency": 16
+      },
+      "redisSettings": {
+        "admission": {
+          "appendonly": "yes",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "appendfsync": "everysec",
+          "maxmemory-policy": "noeviction"
+        },
+        "evidence": {
+          "appendonly": "yes",
+          "appendfsync": "always",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "maxmemory-policy": "noeviction"
+        }
+      },
+      "databaseSettings": [
+        {
+          "name": "autovacuum_naptime",
+          "setting": "5",
+          "unit": "s"
+        },
+        {
+          "name": "checkpoint_timeout",
+          "setting": "900",
+          "unit": "s"
+        },
+        {
+          "name": "effective_cache_size",
+          "setting": "786432",
+          "unit": "8kB"
+        },
+        {
+          "name": "fsync",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "full_page_writes",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "max_wal_size",
+          "setting": "4096",
+          "unit": "MB"
+        },
+        {
+          "name": "random_page_cost",
+          "setting": "1.1",
+          "unit": null
+        },
+        {
+          "name": "server_version",
+          "setting": "17.9 (Homebrew)",
+          "unit": null
+        },
+        {
+          "name": "shared_buffers",
+          "setting": "262144",
+          "unit": "8kB"
+        },
+        {
+          "name": "synchronous_commit",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "wal_compression",
+          "setting": "pglz",
+          "unit": null
+        },
+        {
+          "name": "work_mem",
+          "setting": "4096",
+          "unit": "kB"
+        }
+      ],
+      "artifacts": {
+        "gateway_sha256": "fb8f3795a23040f7f4aecab82b8910437f26e1e465866647f4aa9b4ef9465c4c",
+        "manifest_sha256": "11bd2808c4b51129422ca96883ddfc30b70298ade590025b7abbe6645f9074c7"
+      },
+      "http": {
+        "workload": "chat-json",
+        "load_model": "open-loop",
+        "offered_rps": 6300,
+        "offered": 125992,
+        "shed": 2306,
+        "completed": 123686,
+        "succeeded": 123686,
+        "invalid": 0,
+        "successful_rps": 6101.5,
+        "duration_seconds": 20.271423125000002,
+        "warmup_requests": 7710,
+        "warmup_concurrency": null,
+        "latency_ms": {
+          "p50": 338.13,
+          "p95": 676.25,
+          "p99": 915.81
+        },
+        "statuses": {
+          "200": 123686
+        },
+        "transport_errors": {},
+        "gateway_errors": {},
+        "server_metrics": {
+          "sampled_peak_rss_bytes": 612650296,
+          "sampled_peak_buffered_bytes": 944687,
+          "cpu_seconds_including_warmup": 47.61694200000001,
+          "usage_queue_accepted": 131396,
+          "usage_queue_failures": 0,
+          "failure_metrics": {}
+        }
+      },
+      "data_and_load_valid": false,
+      "meets_requested_6000": false,
+      "accounting": {
+        "requests": 131396,
+        "attempts": 131396,
+        "precise_usage": 131396,
+        "precise_charges": 131396,
+        "settled_holds": 131396,
+        "reserved": "0",
+        "spent": "7752364",
+        "debt": "0",
+        "acknowledged": 0,
+        "settlement_journals": 131396,
+        "unbalanced_journals": 0
+      },
+      "pending": 0,
+      "drain_ms": 20437,
+      "financial_completed_rps": 3112.4,
+      "database_bytes": 609318579
+    },
+    {
+      "label": "paid-sustained-60s",
+      "evidence": ".local/phase2/bench-ba1af095312b4d1cac7386c363eafc0f",
+      "audit_sha256": "628c3c91f52f262a08d13e34b157042b4d1155db6566eeed86c6a9b148e5b28f",
+      "http_sha256": "74a649c4240e43a14ea3385282df3cd2fd6eafb9fc16c74e6a4e883d906aa3da",
+      "seconds": 60,
+      "instances": 4,
+      "wallets": 1000,
+      "concurrency": 4000,
+      "billingMode": "paid",
+      "consumerMode": "none",
+      "workerMode": "deferred",
+      "hotShare": 0,
+      "queue": {
+        "batchSize": 128,
+        "batchDelayMs": 5,
+        "maxPendingJobs": 10000,
+        "requiredReplicas": 1,
+        "workerConcurrency": 16
+      },
+      "redisSettings": {
+        "admission": {
+          "appendonly": "yes",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "appendfsync": "everysec",
+          "maxmemory-policy": "noeviction"
+        },
+        "evidence": {
+          "appendonly": "yes",
+          "appendfsync": "always",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "maxmemory-policy": "noeviction"
+        }
+      },
+      "databaseSettings": [
+        {
+          "name": "autovacuum_naptime",
+          "setting": "5",
+          "unit": "s"
+        },
+        {
+          "name": "checkpoint_timeout",
+          "setting": "900",
+          "unit": "s"
+        },
+        {
+          "name": "effective_cache_size",
+          "setting": "786432",
+          "unit": "8kB"
+        },
+        {
+          "name": "fsync",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "full_page_writes",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "max_wal_size",
+          "setting": "4096",
+          "unit": "MB"
+        },
+        {
+          "name": "random_page_cost",
+          "setting": "1.1",
+          "unit": null
+        },
+        {
+          "name": "server_version",
+          "setting": "17.9 (Homebrew)",
+          "unit": null
+        },
+        {
+          "name": "shared_buffers",
+          "setting": "262144",
+          "unit": "8kB"
+        },
+        {
+          "name": "synchronous_commit",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "wal_compression",
+          "setting": "pglz",
+          "unit": null
+        },
+        {
+          "name": "work_mem",
+          "setting": "4096",
+          "unit": "kB"
+        }
+      ],
+      "artifacts": {
+        "gateway_sha256": "fb8f3795a23040f7f4aecab82b8910437f26e1e465866647f4aa9b4ef9465c4c",
+        "manifest_sha256": "d746521f571547b6abb61cf5501e930682a9dba6d95c93638732da93d72e32e3"
+      },
+      "http": {
+        "workload": "chat-json",
+        "load_model": "open-loop",
+        "offered_rps": 6100,
+        "offered": 365997,
+        "shed": 133986,
+        "completed": 232011,
+        "succeeded": 232011,
+        "invalid": 0,
+        "successful_rps": 3820.11,
+        "duration_seconds": 60.734071708,
+        "warmup_requests": 1901,
+        "warmup_concurrency": 256,
+        "latency_ms": {
+          "p50": 930.81,
+          "p95": 1707.11,
+          "p99": 2108.54
+        },
+        "statuses": {
+          "200": 232011
+        },
+        "transport_errors": {},
+        "gateway_errors": {},
+        "server_metrics": {
+          "sampled_peak_rss_bytes": 653430216,
+          "sampled_peak_buffered_bytes": 1083988,
+          "cpu_seconds_including_warmup": 84.62058,
+          "usage_queue_accepted": 233912,
+          "usage_queue_failures": 0,
+          "failure_metrics": {}
+        }
+      },
+      "data_and_load_valid": false,
+      "meets_requested_6000": false,
+      "accounting": {
+        "requests": 233912,
+        "attempts": 233912,
+        "precise_usage": 233912,
+        "precise_charges": 233912,
+        "settled_holds": 233912,
+        "reserved": "0",
+        "spent": "13800808",
+        "debt": "0",
+        "acknowledged": 0,
+        "settlement_journals": 233912,
+        "unbalanced_journals": 0
+      },
+      "pending": 0,
+      "drain_ms": 100240,
+      "financial_completed_rps": 1443.08,
+      "database_bytes": 1066890931
+    },
+    {
+      "label": "paid-sustained-lz4-60s",
+      "evidence": ".local/phase2/bench-3092ff43a0764d5db505127a08da7d1e",
+      "audit_sha256": "79c612a3125bd9b89a59daabf21a55a334a5d29931fa8638bcbc92ff215b9c2d",
+      "http_sha256": "f31f3f8fac5565f93634edbf266b8469b314f1355adb90c3109e2df9076fa982",
+      "seconds": 60,
+      "instances": 4,
+      "wallets": 1000,
+      "concurrency": 2000,
+      "billingMode": "paid",
+      "consumerMode": "none",
+      "workerMode": "deferred",
+      "hotShare": 0,
+      "queue": {
+        "batchSize": 128,
+        "batchDelayMs": 5,
+        "maxPendingJobs": 10000,
+        "requiredReplicas": 1,
+        "workerConcurrency": 16
+      },
+      "redisSettings": {
+        "admission": {
+          "appendonly": "yes",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "appendfsync": "everysec",
+          "maxmemory-policy": "noeviction"
+        },
+        "evidence": {
+          "appendonly": "yes",
+          "appendfsync": "always",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "maxmemory-policy": "noeviction"
+        }
+      },
+      "databaseSettings": [
+        {
+          "name": "autovacuum_naptime",
+          "setting": "5",
+          "unit": "s"
+        },
+        {
+          "name": "checkpoint_timeout",
+          "setting": "900",
+          "unit": "s"
+        },
+        {
+          "name": "effective_cache_size",
+          "setting": "786432",
+          "unit": "8kB"
+        },
+        {
+          "name": "fsync",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "full_page_writes",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "max_wal_size",
+          "setting": "4096",
+          "unit": "MB"
+        },
+        {
+          "name": "random_page_cost",
+          "setting": "1.1",
+          "unit": null
+        },
+        {
+          "name": "server_version",
+          "setting": "17.9 (Homebrew)",
+          "unit": null
+        },
+        {
+          "name": "shared_buffers",
+          "setting": "262144",
+          "unit": "8kB"
+        },
+        {
+          "name": "synchronous_commit",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "wal_compression",
+          "setting": "pglz",
+          "unit": null
+        },
+        {
+          "name": "work_mem",
+          "setting": "4096",
+          "unit": "kB"
+        }
+      ],
+      "artifacts": {
+        "gateway_sha256": "fb8f3795a23040f7f4aecab82b8910437f26e1e465866647f4aa9b4ef9465c4c",
+        "manifest_sha256": "d746521f571547b6abb61cf5501e930682a9dba6d95c93638732da93d72e32e3"
+      },
+      "http": {
+        "workload": "chat-json",
+        "load_model": "open-loop",
+        "offered_rps": 6100,
+        "offered": 365999,
+        "shed": 84476,
+        "completed": 281523,
+        "succeeded": 281523,
+        "invalid": 0,
+        "successful_rps": 4578.08,
+        "duration_seconds": 61.493749292000004,
+        "warmup_requests": 2527,
+        "warmup_concurrency": 256,
+        "latency_ms": {
+          "p50": 316.85,
+          "p95": 799.86,
+          "p99": 1181.25
+        },
+        "statuses": {
+          "200": 281523
+        },
+        "transport_errors": {},
+        "gateway_errors": {},
+        "server_metrics": {
+          "sampled_peak_rss_bytes": 557206600,
+          "sampled_peak_buffered_bytes": 532084,
+          "cpu_seconds_including_warmup": 97.73191999999999,
+          "usage_queue_accepted": 284050,
+          "usage_queue_failures": 0,
+          "failure_metrics": {}
+        }
+      },
+      "data_and_load_valid": false,
+      "meets_requested_6000": false,
+      "accounting": {
+        "requests": 284050,
+        "attempts": 284050,
+        "precise_usage": 284050,
+        "precise_charges": 284050,
+        "settled_holds": 284050,
+        "reserved": "0",
+        "spent": "16758950",
+        "debt": "0",
+        "acknowledged": 0,
+        "settlement_journals": 284050,
+        "unbalanced_journals": 0
+      },
+      "pending": 0,
+      "drain_ms": 99553,
+      "financial_completed_rps": 1750.95,
+      "database_bytes": 1304032947
+    },
+    {
+      "label": "free-sustained-60s",
+      "evidence": ".local/phase2/bench-0a449beffb854d14a90b7094f0f1b2df",
+      "audit_sha256": "6fe8ff797ea1d51a963c07f9b531325fd974216bfecb47ee6505d69567d324da",
+      "http_sha256": "9d52b52da656b4953caf9094fa42c3ce2f03b70a41d234a214de68f8ef2fe138",
+      "seconds": 60,
+      "instances": 4,
+      "wallets": 1000,
+      "concurrency": 2000,
+      "billingMode": "free",
+      "consumerMode": "none",
+      "workerMode": "deferred",
+      "hotShare": 0,
+      "queue": {
+        "batchSize": 128,
+        "batchDelayMs": 5,
+        "maxPendingJobs": 10000,
+        "requiredReplicas": 1,
+        "workerConcurrency": 16
+      },
+      "redisSettings": {
+        "admission": {
+          "appendonly": "yes",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "appendfsync": "everysec",
+          "maxmemory-policy": "noeviction"
+        },
+        "evidence": {
+          "appendonly": "yes",
+          "appendfsync": "always",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "maxmemory-policy": "noeviction"
+        }
+      },
+      "databaseSettings": [
+        {
+          "name": "autovacuum_naptime",
+          "setting": "5",
+          "unit": "s"
+        },
+        {
+          "name": "checkpoint_timeout",
+          "setting": "900",
+          "unit": "s"
+        },
+        {
+          "name": "effective_cache_size",
+          "setting": "786432",
+          "unit": "8kB"
+        },
+        {
+          "name": "fsync",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "full_page_writes",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "max_wal_size",
+          "setting": "4096",
+          "unit": "MB"
+        },
+        {
+          "name": "random_page_cost",
+          "setting": "1.1",
+          "unit": null
+        },
+        {
+          "name": "server_version",
+          "setting": "17.9 (Homebrew)",
+          "unit": null
+        },
+        {
+          "name": "shared_buffers",
+          "setting": "262144",
+          "unit": "8kB"
+        },
+        {
+          "name": "synchronous_commit",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "wal_compression",
+          "setting": "pglz",
+          "unit": null
+        },
+        {
+          "name": "work_mem",
+          "setting": "4096",
+          "unit": "kB"
+        }
+      ],
+      "artifacts": {
+        "gateway_sha256": "fb8f3795a23040f7f4aecab82b8910437f26e1e465866647f4aa9b4ef9465c4c",
+        "manifest_sha256": "d746521f571547b6abb61cf5501e930682a9dba6d95c93638732da93d72e32e3"
+      },
+      "http": {
+        "workload": "chat-json",
+        "load_model": "open-loop",
+        "offered_rps": 6200,
+        "offered": 371999,
+        "shed": 197515,
+        "completed": 174484,
+        "succeeded": 174484,
+        "invalid": 0,
+        "successful_rps": 2869.39,
+        "duration_seconds": 60.808743834,
+        "warmup_requests": 2981,
+        "warmup_concurrency": 256,
+        "latency_ms": {
+          "p50": 587.44,
+          "p95": 1295.15,
+          "p99": 1725.7
+        },
+        "statuses": {
+          "200": 174484
+        },
+        "transport_errors": {},
+        "gateway_errors": {},
+        "server_metrics": {
+          "sampled_peak_rss_bytes": 577522856,
+          "sampled_peak_buffered_bytes": 677495,
+          "cpu_seconds_including_warmup": 69.650671,
+          "usage_queue_accepted": 177465,
+          "usage_queue_failures": 0,
+          "failure_metrics": {}
+        }
+      },
+      "data_and_load_valid": false,
+      "meets_requested_6000": false,
+      "accounting": {
+        "requests": 177465,
+        "attempts": 177465,
+        "precise_usage": 177465,
+        "precise_charges": 177465,
+        "settled_holds": 177465,
+        "reserved": "0",
+        "spent": "0",
+        "debt": "0",
+        "acknowledged": 0,
+        "settlement_journals": 0,
+        "unbalanced_journals": 0
+      },
+      "pending": 0,
+      "drain_ms": 42556,
+      "financial_completed_rps": 1697.5,
+      "database_bytes": 482940595
+    },
+    {
+      "label": "paid-controlled-json",
+      "evidence": ".local/phase2/bench-ea8c1dee6249484a9d78c2d23e2dc46f",
+      "audit_sha256": "6a5efae9a3909657163b1a25af0731b42a85eac498f68beb40333c827d87f8dd",
+      "http_sha256": "391e291014a8b982f4d920be532a8cd0f1ebf285ba498b208d87ef444a2b108b",
+      "seconds": 10,
+      "instances": 4,
+      "wallets": 1000,
+      "concurrency": 256,
+      "billingMode": "paid",
+      "consumerMode": "live",
+      "workerMode": "live",
+      "hotShare": 0,
+      "queue": {
+        "batchSize": 128,
+        "batchDelayMs": 5,
+        "maxPendingJobs": 1000,
+        "requiredReplicas": 1,
+        "workerConcurrency": 16
+      },
+      "redisSettings": {
+        "admission": {
+          "appendonly": "yes",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "appendfsync": "everysec",
+          "maxmemory-policy": "noeviction"
+        },
+        "evidence": {
+          "appendonly": "yes",
+          "appendfsync": "always",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "maxmemory-policy": "noeviction"
+        }
+      },
+      "databaseSettings": [
+        {
+          "name": "autovacuum_naptime",
+          "setting": "5",
+          "unit": "s"
+        },
+        {
+          "name": "checkpoint_timeout",
+          "setting": "900",
+          "unit": "s"
+        },
+        {
+          "name": "effective_cache_size",
+          "setting": "786432",
+          "unit": "8kB"
+        },
+        {
+          "name": "fsync",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "full_page_writes",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "max_wal_size",
+          "setting": "4096",
+          "unit": "MB"
+        },
+        {
+          "name": "random_page_cost",
+          "setting": "1.1",
+          "unit": null
+        },
+        {
+          "name": "server_version",
+          "setting": "17.9 (Homebrew)",
+          "unit": null
+        },
+        {
+          "name": "shared_buffers",
+          "setting": "262144",
+          "unit": "8kB"
+        },
+        {
+          "name": "synchronous_commit",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "wal_compression",
+          "setting": "pglz",
+          "unit": null
+        },
+        {
+          "name": "work_mem",
+          "setting": "4096",
+          "unit": "kB"
+        }
+      ],
+      "artifacts": {
+        "gateway_sha256": "fb8f3795a23040f7f4aecab82b8910437f26e1e465866647f4aa9b4ef9465c4c",
+        "manifest_sha256": "7085c057d86cf1110d5734f643ec91bb3f1d25bc66b7e3af1ad268d1f82b9ddb"
+      },
+      "http": {
+        "workload": "chat-json",
+        "load_model": "closed-loop",
+        "offered_rps": null,
+        "offered": 12206,
+        "shed": 0,
+        "completed": 12206,
+        "succeeded": 12206,
+        "invalid": 0,
+        "successful_rps": 1202.32,
+        "duration_seconds": 10.152005125,
+        "warmup_requests": 1370,
+        "warmup_concurrency": 256,
+        "latency_ms": {
+          "p50": 192.53,
+          "p95": 372.74,
+          "p99": 478.18
+        },
+        "statuses": {
+          "200": 12206
+        },
+        "transport_errors": {},
+        "gateway_errors": {},
+        "server_metrics": {
+          "sampled_peak_rss_bytes": 346213352,
+          "sampled_peak_buffered_bytes": 122624,
+          "cpu_seconds_including_warmup": 9.065560999999999,
+          "usage_queue_accepted": 13576,
+          "usage_queue_failures": 0,
+          "failure_metrics": {}
+        }
+      },
+      "data_and_load_valid": true,
+      "meets_requested_6000": false,
+      "accounting": {
+        "requests": 13576,
+        "attempts": 13576,
+        "precise_usage": 13576,
+        "precise_charges": 13576,
+        "settled_holds": 13576,
+        "reserved": "0",
+        "spent": "800984",
+        "debt": "0",
+        "acknowledged": 13576,
+        "settlement_journals": 13576,
+        "unbalanced_journals": 0
+      },
+      "pending": 0,
+      "drain_ms": 526,
+      "financial_completed_rps": 1138.64,
+      "database_bytes": 79836851
+    },
+    {
+      "label": "paid-controlled-sse",
+      "evidence": ".local/phase2/bench-b1e9095fb9fd4c428acd688dd0f36875",
+      "audit_sha256": "84368f81a2e70010e0fdbe550cba09ecaf4ed179b17a61736e51e9068842feed",
+      "http_sha256": "03848831f627bddd68424bec5d5dc9d4b7acda85cccfbf926f5d41d547ccfbc7",
+      "seconds": 10,
+      "instances": 4,
+      "wallets": 1000,
+      "concurrency": 256,
+      "billingMode": "paid",
+      "consumerMode": "live",
+      "workerMode": "live",
+      "hotShare": 0,
+      "queue": {
+        "batchSize": 128,
+        "batchDelayMs": 5,
+        "maxPendingJobs": 1000,
+        "requiredReplicas": 1,
+        "workerConcurrency": 16
+      },
+      "redisSettings": {
+        "admission": {
+          "appendonly": "yes",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "appendfsync": "everysec",
+          "maxmemory-policy": "noeviction"
+        },
+        "evidence": {
+          "appendonly": "yes",
+          "appendfsync": "always",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "maxmemory-policy": "noeviction"
+        }
+      },
+      "databaseSettings": [
+        {
+          "name": "autovacuum_naptime",
+          "setting": "5",
+          "unit": "s"
+        },
+        {
+          "name": "checkpoint_timeout",
+          "setting": "900",
+          "unit": "s"
+        },
+        {
+          "name": "effective_cache_size",
+          "setting": "786432",
+          "unit": "8kB"
+        },
+        {
+          "name": "fsync",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "full_page_writes",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "max_wal_size",
+          "setting": "4096",
+          "unit": "MB"
+        },
+        {
+          "name": "random_page_cost",
+          "setting": "1.1",
+          "unit": null
+        },
+        {
+          "name": "server_version",
+          "setting": "17.9 (Homebrew)",
+          "unit": null
+        },
+        {
+          "name": "shared_buffers",
+          "setting": "262144",
+          "unit": "8kB"
+        },
+        {
+          "name": "synchronous_commit",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "wal_compression",
+          "setting": "pglz",
+          "unit": null
+        },
+        {
+          "name": "work_mem",
+          "setting": "4096",
+          "unit": "kB"
+        }
+      ],
+      "artifacts": {
+        "gateway_sha256": "fb8f3795a23040f7f4aecab82b8910437f26e1e465866647f4aa9b4ef9465c4c",
+        "manifest_sha256": "7085c057d86cf1110d5734f643ec91bb3f1d25bc66b7e3af1ad268d1f82b9ddb"
+      },
+      "http": {
+        "workload": "chat-sse",
+        "load_model": "closed-loop",
+        "offered_rps": null,
+        "offered": 13422,
+        "shed": 0,
+        "completed": 13422,
+        "succeeded": 13422,
+        "invalid": 0,
+        "successful_rps": 1330.16,
+        "duration_seconds": 10.090523958000002,
+        "warmup_requests": 1385,
+        "warmup_concurrency": 256,
+        "latency_ms": {
+          "p50": 166.34,
+          "p95": 362.79,
+          "p99": 741.46
+        },
+        "statuses": {
+          "200": 13422
+        },
+        "transport_errors": {},
+        "gateway_errors": {},
+        "server_metrics": {
+          "sampled_peak_rss_bytes": 306957288,
+          "sampled_peak_buffered_bytes": 130048,
+          "cpu_seconds_including_warmup": 10.717205,
+          "usage_queue_accepted": 14807,
+          "usage_queue_failures": 0,
+          "failure_metrics": {}
+        }
+      },
+      "data_and_load_valid": true,
+      "meets_requested_6000": false,
+      "accounting": {
+        "requests": 14807,
+        "attempts": 14807,
+        "precise_usage": 14807,
+        "precise_charges": 14807,
+        "settled_holds": 14807,
+        "reserved": "0",
+        "spent": "873613",
+        "debt": "0",
+        "acknowledged": 14807,
+        "settlement_journals": 14807,
+        "unbalanced_journals": 0
+      },
+      "pending": 0,
+      "drain_ms": 120,
+      "financial_completed_rps": 1293.75,
+      "database_bytes": 85595827
+    },
+    {
+      "label": "paid-controlled-hot90",
+      "evidence": ".local/phase2/bench-20dfc4fcc8534bf6ab257f75f332d966",
+      "audit_sha256": "ab06e758a2ca18b2e3be4dc20dcaa91afdbb1ebc848c97799a6803a0d95dfe9d",
+      "http_sha256": "cd7edf24f5cd12eee83aa46f56896191827f3034967bbab9e4d31cd2c84bdf4f",
+      "seconds": 10,
+      "instances": 4,
+      "wallets": 1000,
+      "concurrency": 256,
+      "billingMode": "paid",
+      "consumerMode": "live",
+      "workerMode": "live",
+      "hotShare": 0.9,
+      "queue": {
+        "batchSize": 128,
+        "batchDelayMs": 5,
+        "maxPendingJobs": 1000,
+        "requiredReplicas": 1,
+        "workerConcurrency": 16
+      },
+      "redisSettings": {
+        "admission": {
+          "appendonly": "yes",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "appendfsync": "everysec",
+          "maxmemory-policy": "noeviction"
+        },
+        "evidence": {
+          "appendonly": "yes",
+          "appendfsync": "always",
+          "aof-load-truncated": "no",
+          "no-appendfsync-on-rewrite": "no",
+          "maxmemory-policy": "noeviction"
+        }
+      },
+      "databaseSettings": [
+        {
+          "name": "autovacuum_naptime",
+          "setting": "5",
+          "unit": "s"
+        },
+        {
+          "name": "checkpoint_timeout",
+          "setting": "900",
+          "unit": "s"
+        },
+        {
+          "name": "effective_cache_size",
+          "setting": "786432",
+          "unit": "8kB"
+        },
+        {
+          "name": "fsync",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "full_page_writes",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "max_wal_size",
+          "setting": "4096",
+          "unit": "MB"
+        },
+        {
+          "name": "random_page_cost",
+          "setting": "1.1",
+          "unit": null
+        },
+        {
+          "name": "server_version",
+          "setting": "17.9 (Homebrew)",
+          "unit": null
+        },
+        {
+          "name": "shared_buffers",
+          "setting": "262144",
+          "unit": "8kB"
+        },
+        {
+          "name": "synchronous_commit",
+          "setting": "on",
+          "unit": null
+        },
+        {
+          "name": "wal_compression",
+          "setting": "pglz",
+          "unit": null
+        },
+        {
+          "name": "work_mem",
+          "setting": "4096",
+          "unit": "kB"
+        }
+      ],
+      "artifacts": {
+        "gateway_sha256": "fb8f3795a23040f7f4aecab82b8910437f26e1e465866647f4aa9b4ef9465c4c",
+        "manifest_sha256": "7085c057d86cf1110d5734f643ec91bb3f1d25bc66b7e3af1ad268d1f82b9ddb"
+      },
+      "http": {
+        "workload": "chat-json",
+        "load_model": "closed-loop",
+        "offered_rps": null,
+        "offered": 5435,
+        "shed": 0,
+        "completed": 5435,
+        "succeeded": 5435,
+        "invalid": 0,
+        "successful_rps": 516.65,
+        "duration_seconds": 10.5196985,
+        "warmup_requests": 735,
+        "warmup_concurrency": 256,
+        "latency_ms": {
+          "p50": 305.07,
+          "p95": 1474.91,
+          "p99": 2250.11
+        },
+        "statuses": {
+          "200": 5435
+        },
+        "transport_errors": {},
+        "gateway_errors": {},
+        "server_metrics": {
+          "sampled_peak_rss_bytes": 234818344,
+          "sampled_peak_buffered_bytes": 49175,
+          "cpu_seconds_including_warmup": 5.737827,
+          "usage_queue_accepted": 6170,
+          "usage_queue_failures": 0,
+          "failure_metrics": {}
+        }
+      },
+      "data_and_load_valid": true,
+      "meets_requested_6000": false,
+      "accounting": {
+        "requests": 6170,
+        "attempts": 6170,
+        "precise_usage": 6170,
+        "precise_charges": 6170,
+        "settled_holds": 6170,
+        "reserved": "0",
+        "spent": "364030",
+        "debt": "0",
+        "acknowledged": 6170,
+        "settlement_journals": 6170,
+        "unbalanced_journals": 0
+      },
+      "pending": 0,
+      "drain_ms": 38,
+      "financial_completed_rps": 506.57,
+      "database_bytes": 43431603
+    }
+  ],
+  "interpretation": [
+    "The 6101.50 RPS 20-second candidate shed 2306 arrivals and therefore failed acceptance.",
+    "Paid 60-second lz4 forwarding retained preauthorization and durable evidence but deferred the billing worker; 4578.08 RPS with 84476 shed arrivals fails acceptance.",
+    "Controlled 10-second runs include a live billing worker and external consumer ACK; these establish correctness at their observed loads, not 6000 RPS capacity.",
+    "Earlier 1397/1122/900 RPS reports used temporary admission Redis AOF always; intended admission configuration is everysec. Do not attribute the configuration correction as a code-only speedup.",
+    "The user-provided Bun picture is a SELECT 100-row/100-in-flight PostgreSQL read benchmark on Linux EPYC; it cannot establish this gateway capacity.",
+    "A prior 60-second experiment audit hit the old owner-side 8-second statement limit; it remains a failed experiment. Audit now has a separate bounded 120-second read transaction while runtime retains 8 seconds."
+  ],
+  "current_artifacts": {
+    "dist/gateway/main.js": "fb8f3795a23040f7f4aecab82b8910437f26e1e465866647f4aa9b4ef9465c4c",
+    "dist/gateway/worker-main.js": "171951a5c2c88f78d62685f486298beb2150aded46445b48834baf9b0db194bc",
+    "dist/manifest.json": "7085c057d86cf1110d5734f643ec91bb3f1d25bc66b7e3af1ad268d1f82b9ddb",
+    "packages/storage/src/schema.sql": "167cbbf9520a1289ae28408b96bd183491afae32711b146088dc9d8c28729320",
+    "packages/storage/src/lifecycle.sql": "77f9f04d97504873db7b8d61cf4b2c1686452bab3b0b6557a8dfce77bed5d283"
+  },
+  "cleanup": {
+    "stopped": true,
+    "at": "2026-11-10T17:01:36.869Z",
+    "owned_ports_confirmed_closed": [
+      59442, 59482, 59483, 59484, 18081, 18082, 18083, 18084, 18099, 19088
+    ],
+    "temporary_databases_remaining_before_stop": 0,
+    "native_failure_fixture_removed_after_process_and_port_check": true,
+    "user_services_untouched": true
+  },
+  "git_at_measurement": {
+    "branch": "main",
+    "committed": false,
+    "pushed": false,
+    "preexisting_changes_preserved": true
+  }
+}

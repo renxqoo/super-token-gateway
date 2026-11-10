@@ -75,12 +75,59 @@ const docker = async (...args: string[]) => {
   if (code !== 0) throw new Error(`Fixture Docker command failed: ${args[0]}`);
   return (await output).trim();
 };
+const native = Bun.argv.includes("--native");
+const nodes = new Map<
+  string,
+  { args: string[]; child: ReturnType<typeof Bun.spawn>; starts: number; stopped: boolean }
+>();
 const primary = `${label}-primary`;
 const replica = `${label}-replica`;
+async function redisCommand(name: string, ...args: string[]): Promise<string> {
+  if (!native) return docker("exec", name, "redis-cli", ...args);
+  const node = nodes.get(name);
+  if (!node || node.stopped || node.child.exitCode !== null || node.child.signalCode !== null)
+    throw new Error("Fixture Redis is not running");
+  const client = new RedisClient(name === primary ? primaryURL : replicaURL, {
+    autoReconnect: false,
+    connectionTimeout: 500,
+  });
+  try {
+    await client.connect();
+    const info = String(await client.send("INFO", ["server"]));
+    if (Number(/^process_id:(\d+)\r?$/m.exec(info)?.[1]) !== node.child.pid)
+      throw new Error("Fixture Redis ownership mismatch");
+    return String(await client.send(args[0]!, args.slice(1)));
+  } finally {
+    client.close();
+  }
+}
+async function startNode(name: string): Promise<void> {
+  if (!native) {
+    await docker("start", name);
+    return;
+  }
+  const node = nodes.get(name);
+  if (!node || !node.stopped) throw new Error("Fixture Redis cannot restart");
+  node.starts++;
+  const log = Bun.file(new URL(`${name}-${node.starts}.log`, directory));
+  node.child = Bun.spawn(node.args, { stdout: log, stderr: log });
+  node.stopped = false;
+}
+async function killNode(name: string): Promise<void> {
+  if (!native) {
+    await docker("kill", name);
+    return;
+  }
+  const node = nodes.get(name);
+  if (!node || node.stopped) throw new Error("Fixture Redis cannot be killed");
+  node.child.kill("SIGKILL");
+  await node.child.exited;
+  node.stopped = true;
+}
 const waitRedis = async (name: string) =>
   until(async () => {
     try {
-      return (await docker("exec", name, "redis-cli", "PING")) === "PONG";
+      return (await redisCommand(name, "PING")) === "PONG";
     } catch {
       return false;
     }
@@ -92,16 +139,12 @@ let created = false;
 let consumer: UsageConsumer | undefined;
 let producer: UsageProducer | undefined;
 let child: ReturnType<typeof Bun.spawn> | undefined;
-const clients: RedisClient[] = [];
-const connect = async (url: string) => {
-  const redis = new RedisClient(url, { autoReconnect: false, connectionTimeout: 500 });
-  clients.push(redis);
-  await redis.connect();
-  return redis;
-};
 const checks: string[] = [];
+let failureCause: unknown;
+const cleanupErrors: unknown[] = [];
+let outcome: string | undefined;
 try {
-  await docker("network", "create", label);
+  if (!native) await docker("network", "create", label);
   const common = [
     "redis-server",
     "--save",
@@ -121,31 +164,87 @@ try {
     [primary, primaryPort, []],
     [replica, replicaPort, ["--replicaof", primary, "6379"]],
   ] as const) {
-    await docker(
-      "run",
-      "-d",
-      "--name",
-      name,
-      "--network",
-      label,
-      "-p",
-      `127.0.0.1:${port}:6379`,
-      "-v",
-      `${name}:/data`,
-      image,
-      ...common,
-      ...extra,
-    );
+    if (native) {
+      const data = new URL(`${name}/`, directory);
+      await mkdir(data, { recursive: true });
+      const command = [
+        ...common,
+        "--bind",
+        "127.0.0.1",
+        "--port",
+        String(port),
+        "--dir",
+        data.pathname,
+        ...(name === replica ? ["--replicaof", "127.0.0.1", String(primaryPort)] : []),
+      ];
+      const log = Bun.file(new URL(`${name}-0.log`, directory));
+      nodes.set(name, {
+        args: command,
+        child: Bun.spawn(command, { stdout: log, stderr: log }),
+        starts: 0,
+        stopped: false,
+      });
+    } else {
+      await docker(
+        "run",
+        "-d",
+        "--name",
+        name,
+        "--network",
+        label,
+        "-p",
+        `127.0.0.1:${port}:6379`,
+        "-v",
+        `${name}:/data`,
+        image,
+        ...common,
+        ...extra,
+      );
+    }
   }
+  await waitRedis(primary);
+  await waitRedis(replica);
   await until(async () => {
     try {
-      return (await docker("exec", replica, "redis-cli", "INFO", "replication")).includes(
-        "master_link_status:up",
-      );
+      return (await redisCommand(replica, "INFO", "replication")).includes("master_link_status:up");
     } catch {
       return false;
     }
   });
+  const strictProbe = new UsageProducer({
+    url: primaryURL,
+    namespace: `${label}:topology`,
+    replicas: 1,
+    timeoutMs: 1000,
+    requireAllReplicas: true,
+  });
+  checkpoint = "strict production topology bootstrap";
+  await until(async () => {
+    try {
+      await strictProbe.ready();
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  checkpoint = "live durability configuration drift";
+  await redisCommand(primary, "CONFIG", "SET", "maxmemory-policy", "allkeys-lru");
+  await Bun.sleep(110);
+  await assert.rejects(strictProbe.ready());
+  strictProbe.close();
+  await redisCommand(primary, "CONFIG", "SET", "maxmemory-policy", "noeviction");
+  const unacknowledgedCandidate = new UsageProducer({
+    url: primaryURL,
+    namespace: `${label}:topology`,
+    replicas: 0,
+    timeoutMs: 1000,
+    requireAllReplicas: true,
+  });
+  await assert.rejects(unacknowledgedCandidate.ready());
+  unacknowledgedCandidate.close();
+  checks.push(
+    "production topology acknowledges every connected candidate and rejects live persistence drift",
+  );
   await owner.unsafe(`CREATE DATABASE ${database}`);
   created = true;
   const url = new URL(base);
@@ -310,21 +409,21 @@ try {
   producer.close();
   producer = undefined;
   // Both copies are killed without a graceful save, then loaded from their own AOF volumes.
-  await Promise.all([docker("kill", primary), docker("kill", replica)]);
+  await Promise.all([killNode(primary), killNode(replica)]);
   // Recover each copy independently: the replica must never be able to refill from the primary.
   checkpoint = "primary AOF restart";
-  await docker("start", primary);
+  await startNode(primary);
   await waitRedis(primary);
   producer = new UsageProducer({ url: primaryURL, namespace, replicas: 0, timeoutMs: 1000 });
   assert.equal((await producer.stats()).waiting, 1);
   producer.close();
   producer = undefined;
   checks.push("primary hard restart retains acknowledged evidence from its AOF");
-  await docker("kill", primary);
+  await killNode(primary);
   checkpoint = "replica AOF promotion";
-  await docker("start", replica);
+  await startNode(replica);
   await waitRedis(replica);
-  await docker("exec", replica, "redis-cli", "REPLICAOF", "NO", "ONE");
+  await redisCommand(replica, "REPLICAOF", "NO", "ONE");
   await consume(namespace, replicaURL);
   checks.push("acknowledged replica promotion retains evidence and exact settlement");
   checkpoint = "unsafe ingress rejection";
@@ -333,13 +432,12 @@ try {
   producer.close();
   producer = undefined;
   checks.push("promoted node without required durable replica rejects admission");
-  const redis = await connect(replicaURL);
-  await redis.send("CONFIG", ["SET", "appendfsync", "everysec"]);
+  await redisCommand(replica, "CONFIG", "SET", "appendfsync", "everysec");
   producer = new UsageProducer({ url: replicaURL, namespace, replicas: 0, timeoutMs: 200 });
   await assert.rejects(producer.ready());
   producer.close();
   producer = undefined;
-  await redis.send("CONFIG", ["SET", "appendfsync", "always"]);
+  await redisCommand(replica, "CONFIG", "SET", "appendfsync", "always");
   checks.push("unsafe persistence configuration rejects admission");
   producer = new UsageProducer({ url: replicaURL, namespace, replicas: 0, timeoutMs: 1000 });
   await assert.rejects(
@@ -366,24 +464,59 @@ try {
     expected,
   );
   checks.push("strict usage payload rejects body; all monetary journals remain singular");
-  console.log(JSON.stringify({ durability: "pass", checks, charges: expected, wallet }));
+  outcome = JSON.stringify({
+    durability: "pass",
+    fixture: native ? "native" : "docker",
+    checks,
+    charges: expected,
+    wallet,
+  });
 } catch (error) {
-  throw new Error(`Durability fixture failed at ${checkpoint}`, { cause: error });
+  failureCause = new Error(`Durability fixture failed at ${checkpoint}`, { cause: error });
 } finally {
-  if (child && child.exitCode === null) {
-    child.kill("SIGKILL");
-    await child.exited;
+  async function clean(action: () => unknown | Promise<unknown>) {
+    try {
+      await action();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
   }
-  await consumer?.close();
-  producer?.close();
-  clients.forEach((c) => c.close());
-  await db?.close();
-  if (created) await owner.unsafe(`DROP DATABASE ${database} WITH (FORCE)`);
-  await owner.close();
-  for (const name of [replica, primary]) {
-    await docker("rm", "-f", name).catch(() => undefined);
-    await docker("volume", "rm", name).catch(() => undefined);
+  await clean(async () => {
+    if (child && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  });
+  await clean(() => consumer?.close());
+  await clean(() => producer?.close());
+  await clean(() => db?.close());
+  await clean(async () => {
+    if (created) await owner.unsafe(`DROP DATABASE ${database} WITH (FORCE)`);
+  });
+  await clean(() => owner.close());
+  if (native) {
+    for (const node of nodes.values())
+      await clean(async () => {
+        if (node.child.exitCode === null && node.child.signalCode === null)
+          node.child.kill("SIGKILL");
+        await node.child.exited;
+        node.stopped = true;
+      });
+  } else {
+    for (const name of [replica, primary]) {
+      await docker("rm", "-f", name).catch(() => undefined);
+      await docker("volume", "rm", name).catch(() => undefined);
+    }
+    await docker("network", "rm", label).catch(() => undefined);
   }
-  await docker("network", "rm", label).catch(() => undefined);
-  await rm(directory, { recursive: true, force: true });
+  if (!native || [...nodes.values()].every((node) => node.stopped))
+    await clean(() => rm(directory, { recursive: true, force: true }));
 }
+
+if (failureCause || cleanupErrors.length)
+  throw new AggregateError(
+    failureCause ? [failureCause, ...cleanupErrors] : cleanupErrors,
+    "Durability fixture failed",
+  );
+if (!outcome) throw new Error("Durability fixture completed without evidence");
+console.log(outcome);

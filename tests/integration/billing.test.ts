@@ -70,7 +70,12 @@ async function admit(
     cost_pricing_id: route.pricing_id,
     quote,
   };
-  const rows = await db`SELECT admit_gateway_batch(${[payload]}::jsonb)->'0' AS result`;
+  let rows = await db`SELECT admit_gateway_batch(${[payload]}::jsonb)->'0' AS result`;
+  const deadline = Date.now() + 2000;
+  while (rows[0].result.error === "55P03" && Date.now() < deadline) {
+    await Bun.sleep(5);
+    rows = await db`SELECT admit_gateway_batch(${[payload]}::jsonb)->'0' AS result`;
+  }
   if (rows[0].result.error) throw { errno: rows[0].result.error };
   return { request, attempt: String(rows[0].result.attempt_id) };
 }
@@ -122,6 +127,101 @@ async function invariant(id: string) {
   expect(unpaid).toHaveLength(0);
   return rows[0];
 }
+test("a locked wallet does not block admission or evidence for another wallet", async () => {
+  const hot = await project();
+  const cold = await project();
+  await credit(hot.id, "1000");
+  await credit(cold.id, "1000");
+  const quote = {
+    currency: "USD",
+    amount_atoms: "100",
+    input_characters: "0",
+    prices: { [route.provider_id]: pricingId },
+  };
+  const unlocked = Promise.withResolvers<void>();
+  const locked = Promise.withResolvers<void>();
+  const lock = db.begin(async (tx) => {
+    await tx`SELECT id FROM wallets WHERE project_id=${hot.id} FOR UPDATE`;
+    locked.resolve();
+    await unlocked.promise;
+  });
+  await locked.promise;
+  const hotAdmission = store.admitInitial(
+    crypto.randomUUID(),
+    hot.credential,
+    "chat",
+    "funds-model",
+    null,
+    "hot",
+    route,
+    quote,
+  );
+  const coldAdmission = store.admitInitial(
+    crypto.randomUUID(),
+    cold.credential,
+    "chat",
+    "funds-model",
+    null,
+    "cold",
+    route,
+    quote,
+  );
+  let coldCompleted = false;
+  void coldAdmission.then(
+    () => {
+      coldCompleted = true;
+    },
+    () => {},
+  );
+  try {
+    await Promise.race([coldAdmission, Bun.sleep(300)]);
+    expect(coldCompleted).toBe(true);
+  } finally {
+    unlocked.resolve();
+    await lock;
+    await Promise.allSettled([hotAdmission, coldAdmission]);
+  }
+  expect((await invariant(hot.id)).reserved_atoms).toBe("100");
+  expect((await invariant(cold.id)).reserved_atoms).toBe("100");
+  const admitted = await Promise.all([hotAdmission, coldAdmission]);
+  const unlockedAgain = Promise.withResolvers<void>(),
+    lockedAgain = Promise.withResolvers<void>();
+  const secondLock = db.begin(async (tx) => {
+    await tx`SELECT id FROM wallets WHERE project_id=${hot.id} FOR UPDATE`;
+    lockedAgain.resolve();
+    await unlockedAgain.promise;
+  });
+  await lockedAgain.promise;
+  const ingestion = store.persistUsage(
+    admitted.map((record) => ({
+      attemptId: record.attempt_id!,
+      source: "execution",
+      state: "SUCCEEDED" as const,
+      finality: "FINAL" as const,
+      usage: { input_tokens: "7", output_tokens: "5" },
+      requestState: "SUCCEEDED" as const,
+    })),
+  );
+  try {
+    const end = Date.now() + 1000;
+    let settled = false;
+    while (Date.now() < end) {
+      settled =
+        (await db`SELECT state FROM billing_holds WHERE request_id=${admitted[1]!.record.id}`)[0]
+          ?.state === "SETTLED";
+      if (settled) break;
+      await Bun.sleep(5);
+    }
+    expect(settled).toBe(true);
+  } finally {
+    unlockedAgain.resolve();
+    await secondLock;
+    await ingestion;
+  }
+  expect((await invariant(hot.id)).reserved_atoms).toBe("0");
+  expect((await invariant(cold.id)).reserved_atoms).toBe("0");
+});
+
 beforeAll(async () => {
   const base = process.env.DATABASE_URL;
   if (!base) throw new Error("DATABASE_URL required");
@@ -182,6 +282,20 @@ afterAll(async () => {
     await owner.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
     await owner.close();
   }
+});
+
+test("foreign-key readers do not make a funded wallet appear busy", async () => {
+  const p = await project();
+  await credit(p.id, "100");
+  const result = await db.begin(async (tx) => {
+    await tx`SELECT id FROM wallets WHERE project_id=${p.id} FOR KEY SHARE`;
+    return admit(p.credential, "100");
+  });
+  await complete(result.request, result.attempt);
+  const wallet = await invariant(p.id);
+  expect(wallet.available_atoms).toBe("44");
+  expect(wallet.reserved_atoms).toBe("0");
+  expect(wallet.spent_atoms).toBe("56");
 });
 
 test("credit is concurrent-idempotent and currency isolated", async () => {
@@ -1338,7 +1452,15 @@ test("concurrent intents across different currency wallets still reserve exactly
     },
   }));
   const rows = await Promise.all(
-    inputs.map((input) => db`SELECT admit_gateway_batch(${[input]}::jsonb)->'0' AS result`),
+    inputs.map(async (input) => {
+      const deadline = Date.now() + 2000;
+      let rows = await db`SELECT admit_gateway_batch(${[input]}::jsonb)->'0' AS result`;
+      while (rows[0].result.error === "55P03" && Date.now() < deadline) {
+        await Bun.sleep(5);
+        rows = await db`SELECT admit_gateway_batch(${[input]}::jsonb)->'0' AS result`;
+      }
+      return rows;
+    }),
   );
   const results = rows.map((row) => row[0].result);
   expect(results.filter((result) => result.created)).toHaveLength(1);
@@ -1352,4 +1474,44 @@ test("concurrent intents across different currency wallets still reserve exactly
   const attempts =
     await db`SELECT count(*)::int AS n FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.project_id=${p.id}`;
   expect(attempts[0].n).toBe(1);
+});
+
+test("cross-job batching never splits conflicting facts in one atomic input group", async () => {
+  const p = await project(),
+    disputed = await project();
+  await credit(p.id, "1000");
+  await credit(disputed.id, "1000");
+  const first = await admit(p.credential),
+    second = await admit(disputed.credential);
+  const batching = new Store(db);
+  const filler = {
+    attemptId: first.attempt,
+    source: "execution",
+    state: "SUCCEEDED" as const,
+    finality: "FINAL" as const,
+    usage: { input_tokens: "7", output_tokens: "5" },
+    requestState: "SUCCEEDED" as const,
+  };
+  await Promise.all([
+    batching.persistUsage(Array.from({ length: 127 }, () => ({ ...filler }))),
+    batching.persistUsage([
+      {
+        ...filler,
+        attemptId: second.attempt,
+        source: "first_final",
+        usage: { input_tokens: "1", output_tokens: "1" },
+      },
+      {
+        ...filler,
+        attemptId: second.attempt,
+        source: "conflicting_final",
+        usage: { input_tokens: "2", output_tokens: "1" },
+      },
+    ]),
+  ]);
+  expect((await db`SELECT id FROM billing_charges WHERE request_id=${second.request}`).length).toBe(
+    0,
+  );
+  expect((await invariant(disputed.id)).reserved_atoms).toBe("100");
+  expect((await invariant(disputed.id)).freeze_reason).toBe("EVIDENCE_CONFLICT");
 });

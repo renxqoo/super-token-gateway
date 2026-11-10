@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { LatencyHistogram, validChat } from "../../scripts/benchmark-lib.ts";
+import { LatencyHistogram, validChat, passesCapacityTarget } from "../../scripts/benchmark-lib.ts";
 test("benchmark rejects empty/error/malformed Chat successes and invalid SSE completion", () => {
   expect(validChat('{"choices":[]}', false)).toBe(false);
   expect(validChat("not json", false)).toBe(false);
@@ -21,4 +21,17 @@ test("bounded histogram quantiles retain millisecond accuracy across many observ
   expect(h.quantile(0.5)).toBeLessThan(51);
   expect(h.quantile(0.99)).toBeGreaterThanOrEqual(99);
   expect(h.quantile(0.99)).toBeLessThan(100);
+});
+
+test("rounded 6000 RPS cannot pass when the unrounded completed rate is below target", () => {
+  expect(passesCapacityTarget(true, { succeeded: 5999996, duration_seconds: 1000 }, 6000)).toBe(
+    false,
+  );
+  expect(passesCapacityTarget(true, { succeeded: 6000000, duration_seconds: 1000 }, 6000)).toBe(
+    true,
+  );
+  expect(passesCapacityTarget(false, { succeeded: 7000000, duration_seconds: 1000 }, 6000)).toBe(
+    false,
+  );
+  expect(passesCapacityTarget(true, { succeeded: 0, duration_seconds: 0 }, 6000)).toBe(false);
 });

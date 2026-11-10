@@ -47,6 +47,8 @@ export function extractUsage(
   kind: ProviderKind,
   previous?: Usage,
 ): Usage | undefined {
+  if (kind === "bedrock") kind = "anthropic";
+  if (kind === "vertex") kind = "gemini";
   const value = optionalObject(body);
   const response = optionalObject(value.response);
   const raw = optionalObject(

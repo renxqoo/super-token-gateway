@@ -11,7 +11,7 @@ import {
   sha256,
 } from "@gateway/kernel";
 import type { Operation, Resource, Route } from "@gateway/kernel";
-import { readBounded, safeFetch } from "@gateway/runtime";
+import { readBounded } from "@gateway/runtime";
 import type { Auth, Dependencies } from "./context.ts";
 import { batchUsage } from "./batch-usage.ts";
 import { upstreamHeaders } from "./upstream.ts";
@@ -205,7 +205,7 @@ export async function queryResource(
       `${route.base_url.replace(/\/$/, "")}/${resourcePath(resource, route)}${suffix}`,
     );
     const method = action === "delete" ? "DELETE" : action === "cancel" ? "POST" : "GET";
-    let response = await safeFetch(
+    let response = await deps.transport.fetch(
       url,
       { method, headers: upstreamHeaders(route, deps.config), signal },
       deps.config.ALLOW_PRIVATE_UPSTREAM,
@@ -327,7 +327,7 @@ export async function videoContent(
   reserveMemory ??= lease?.update;
   try {
     const url = new URL(`${route.base_url.replace(/\/$/, "")}/${resourcePath(resource, route)}`);
-    const result = await safeFetch(
+    const result = await deps.transport.fetch(
       url,
       { headers: upstreamHeaders(route, deps.config), signal },
       deps.config.ALLOW_PRIVATE_UPSTREAM,
@@ -355,7 +355,7 @@ export async function videoContent(
       location.origin === new URL(route.base_url).origin
         ? upstreamHeaders(route, deps.config)
         : new Headers();
-    const response = await safeFetch(
+    const response = await deps.transport.fetch(
       location,
       { headers, signal },
       deps.config.ALLOW_PRIVATE_UPSTREAM,

@@ -4,8 +4,17 @@ import {
   decodeRequest,
   encodeRequest,
   encodeResponse,
-} from "@gateway/connectors";
+  imageCount,
+} from "../index.ts";
 import type { Protocol } from "@gateway/kernel";
+
+test("image quantity follows payloads across object, split and metadata shapes", () => {
+  expect(imageCount({ url: "image" })).toBe(1);
+  expect(imageCount([{ url: "image" }, { b64_json: "image" }])).toBe(1);
+  expect(imageCount([{ url: "a", b64_json: "a" }, { url: "b" }])).toBe(2);
+  expect(imageCount([{ revised_prompt: "metadata" }, { b64_json: "image" }])).toBe(1);
+  expect(imageCount([{ url: "", b64_json: "" }, null])).toBe(0);
+});
 
 test("cross-protocol requests preserve zero, ordered tools and results", () => {
   const request = decodeRequest(

@@ -17,7 +17,7 @@
 
 可用 `docker build -f infra/Dockerfile -t <镜像> .` 构建另一种发布成品。运行时建议 `--read-only --tmpfs /tmp:size=64m --cap-drop ALL --security-opt no-new-privileges`、非 root 和内存限制；使用 `bun run test:container` 验证真实依赖、独立 worker、JSON/SSE、精确账单与 SIGTERM。镜像包含 Bun 1.4.4 与独立 bundle，不需要生产安装 node_modules。
 
-只运行当前单一 schema 与队列契约，不保留旧代码或旧库兼容。初始化只接受空库或精确当前版本；旧数据库不修改，需以新的专用库启动。应用修订回退必须使用同一当前契约；不可切回已经删除的 PG usage/outbox 路径，不删除已确认队列、账本或费率证据。
+只运行当前单一 schema 与队列契约，不保留旧代码运行兼容。初始化接受空库或精确当前版本；schema2026111006 / 2026111007 通过显式 `db:migrate -- --upgrade --quiesced` 离线转换到2026111008，其他旧库拒绝修改。执行前停止所有客户端并备份，具体步骤及恢复限制见 database.md。应用修订回退必须使用同一当前契约；不可切回已经删除的 PG usage/outbox 路径，不删除已确认队列、账本或费率证据。
 
 ## 高可用依赖
 
@@ -25,11 +25,13 @@
 
 PG 使用高可用主端点、同步耐久提交、备份与 PITR。准入 Redis 的丢失会重置部分速率窗口；它不保存权威资金。
 
-耐久队列 Redis 保存尚未入 PG 的证据，必须独立部署：Redis ≥7.2、appendonly=yes、appendfsync=always、no-appendfsync-on-rewrite=no、aof-load-truncated=no、maxmemory-policy=noeviction。生产 QUEUE_REQUIRED_REPLICAS 至少 1；应等于所有可晋升副本数，所有候选均须 AOF 落盘确认。成员变动需先停止准入、排空/核对、重新配置确认数，禁止自动降为 0。生产推荐独立主节点与两个 AOF 副本、三个故障域及外部仲裁/隔离。
+耐久队列 Redis 保存尚未入 PG 的证据，必须独立部署：Redis ≥7.2、appendonly=yes、appendfsync=always、no-appendfsync-on-rewrite=no、aof-load-truncated=no、maxmemory-policy=noeviction。生产 QUEUE_REQUIRED_REPLICAS 至少 1，且等于所有可晋升副本数；客户端启动及准入探针检查 Redis 主角色、online/connected 副本数与配置完全一致，并重查持久化配置。所有连接副本都按可晋升候选管理，所有候选均须 AOF 落盘确认。成员变动需先停止准入、排空/核对、重新配置确认数，禁止自动降为 0。生产推荐独立主节点与两个 AOF 副本、三个故障域及外部仲裁/隔离。
 
 同连接 WAITAOF 证明此前写入达到指定落盘副本数量，不提供任意故障下的强一致性。晋升必须隔离旧主，并只选择未丢失已确认偏移的落盘副本；无法证明则停止准入，不能以可用性为由晋升落后的节点。不要从空白主库启动复制覆盖存量副本。当前客户端通过稳定故障转移端点或代理连接，不直接发现 Sentinel。参见 [Redis 官方 WAITAOF 保证](https://redis.io/docs/latest/commands/waitaof/)。
 
-本地 `bun run test:durability` 使用独立临时主副本、各自 AOF 卷和临时 PG：事务未提交/已提交未 ACK 时 SIGKILL、两节点硬重启、在主库保持停机时独立恢复副本并晋升、缺副本/错误持久化配置拒绝准入。它不模拟机房掉电或仲裁失效。
+本地 `bun run test:durability` 默认使用独立临时Docker主副本与AOF卷；当前Mac可加 `-- --native` 使用本轮拥有的redis-server子进程及独立AOF目录，控制前核对进程PID。两者使用相同临时PG及断言：事务未提交/已提交未 ACK 时 SIGKILL、两节点硬重启、在主库保持停机时独立恢复副本并晋升、缺副本/错误持久化配置拒绝准入。它不模拟机房掉电或仲裁失效。
+
+UPSTREAM_POOL_SIZE 默认1024，限制每种协议的上游连接数；共享空闲上限为 min(512, floor(UPSTREAM_POOL_SIZE/2))，30秒无使用则回收，停机时先排空再销毁。连接耗尽指标采用固定错误类别；本机端口或文件描述符不足且尚未取得响应时，记录明确未执行、释放预扣并返回503，不触发供应商熔断。
 
 DB_POOL_SIZE 默认24；多个实例/worker 的连接总数必须低于 PG 预算并留出迁移/运维余量。容量测试单独记录各进程连接总量。增加实例前先确认 PG WAL/磁盘、Redis CPU、上游限制与负载发生器都没有成为瓶颈。
 
@@ -73,3 +75,11 @@ PG 与耐久队列共同构成恢复集。PG 单独备份不包含已经落盘�
 ## 本地容量配置
 
 Compose 为当前约12GiB Docker VM提供2GiB shared_buffers、6GiB effective_cache_size、4GiB max_wal_size 和15分钟checkpoint配置，保留fsync、full_page_writes、synchronous_commit=on。这些是本地测量配置；其他主机应按实际内存、磁盘、连接与WAL保留预算调整，不能直接照搬为通用最优值。参见[PG17内存说明](https://www.postgresql.org/docs/17/runtime-config-resource.html)与[WAL说明](https://www.postgresql.org/docs/17/wal-configuration.html)。
+
+## 本地多副本演练与热点验收
+
+`docker compose --env-file .env.local -p super-token-gateway -f infra/compose.yaml -f infra/compose.ha.yaml up -d --wait` 启动本地两个独立 AOF 副本；以 `QUEUE_REQUIRED_REPLICAS=2` 验证三节点写入。该 overlay 是同机演练模板；生产仍需独立故障域、稳定端点、旧主隔离和明确的晋升控制，不能由本地 Compose 推导99.99% SLO。
+
+完整账务压测支持 `--wallets 1/10/1000` 与 `--hot-share 0.9`，报告每钱包负载、PG 锁等待、活动查询和停压排空。使用 `QUEUE_REQUIRED_REPLICAS=1` 或目标生产副本数实测，不以零副本成绩代替生产容量。修改 schema/队列后重新执行 `verify`、`test:durability`、`test:container`，备份恢复需在停止准入并排空队列后执行。
+
+使用冷 tablespace 的生产恢复需先准备对应 tablespace 或显式用 pg_restore 的 --no-tablespaces 恢复到目标默认存储，再核对数据与权限。原生 PG 工具的本地备份复验可通过 PG_TOOLS_DIRECTORY 指定同主版本工具目录；密码经子进程环境传递，不放入命令行或输出。

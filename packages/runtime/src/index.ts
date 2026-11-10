@@ -5,3 +5,4 @@ export * from "./bounded-relay.ts";
 export * from "./memory.ts";
 export * from "./ip.ts";
 export * from "./usage-queue.ts";
+export * from "./cloud-auth.ts";

@@ -24,7 +24,7 @@ const health = Bun.serve({
       if (stopping || !billing.consumer.healthy())
         return Response.json({ status: "unavailable" }, { status: 503 });
       try {
-        await deps.store.db`SELECT 1`;
+        await deps.database.ping();
         await deps.usage.producer.ready();
         return Response.json({ status: "ready" });
       } catch {
@@ -61,6 +61,7 @@ try {
   await health.stop(true);
   await billing.close();
   deps.usage.close();
+  deps.transport.close();
   deps.limits.close();
-  await deps.store.db.close();
+  await deps.database.close();
 }

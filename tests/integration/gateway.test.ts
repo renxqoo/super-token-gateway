@@ -14,6 +14,7 @@ const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
 const database = `gateway_test_${suffix}`;
 const namespace = `test:${suffix}`;
 let adminDb: SQL;
+let testDb: SQL;
 let deps: Dependencies;
 let billing: BillingWorker;
 let gateway: ReturnType<typeof Bun.serve>;
@@ -38,8 +39,8 @@ const json = async (path: string, body?: unknown, token = adminKey, method = "PO
 };
 async function awaitUsage(requestId: string, count = 1): Promise<void> {
   await waitFor(async () => {
-    const rows = await deps.store
-      .db`SELECT q.state,(SELECT count(*)::int FROM usage_events WHERE request_id=q.id) AS n,(SELECT count(*)::int FROM attempts WHERE request_id=q.id AND evidence_id IS NULL) AS unseen FROM gateway_requests q WHERE id=${requestId}`;
+    const rows =
+      await testDb`SELECT q.state,(SELECT count(*)::int FROM usage_events WHERE request_id=q.id) AS n,(SELECT count(*)::int FROM attempts WHERE request_id=q.id AND evidence_id IS NULL) AS unseen FROM gateway_requests q WHERE id=${requestId}`;
     return (
       rows[0]?.state === "SUCCEEDED" && Number(rows[0]?.n ?? 0) >= count && rows[0]?.unseen === 0
     );
@@ -50,8 +51,7 @@ async function awaitModelUsage(model: string, count = 1): Promise<void> {
     async () =>
       Number(
         (
-          await deps.store
-            .db`SELECT count(*)::int AS n FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model}`
+          await testDb`SELECT count(*)::int AS n FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model}`
         )[0]?.n ?? 0,
       ) >= count,
   );
@@ -60,8 +60,7 @@ async function awaitResourceFinal(id: string): Promise<void> {
   await waitFor(
     async () =>
       (
-        await deps.store
-          .db`SELECT 1 FROM usage_events e JOIN resources r ON r.attempt_id=e.attempt_id WHERE r.id=${id} AND e.source='async_final' AND e.finality='FINAL'`
+        await testDb`SELECT 1 FROM usage_events e JOIN resources r ON r.attempt_id=e.attempt_id WHERE r.id=${id} AND e.source='async_final' AND e.finality='FINAL'`
       ).length > 0,
   );
 }
@@ -69,13 +68,14 @@ async function configureModel(
   kind: ProviderKind,
   scenario: Scenario = {},
   caps: Operation[] = ["chat", "responses", "messages", "gemini"],
+  providerOverride?: string,
 ): Promise<string> {
   const name = `model-${crypto.randomUUID()}`;
   mock.scenarios.set(name, scenario);
   let result = await json("/admin/models", { name, operations: caps, max_output_tokens: 32768 });
   expect(result.response.status).toBe(201);
   result = await json(`/admin/models/${name}/routes`, {
-    provider_id: providers[kind],
+    provider_id: providerOverride ?? providers[kind],
     upstream_model: name,
     operations: caps,
     priority: 10,
@@ -136,7 +136,7 @@ beforeAll(async () => {
   url.pathname = `/${database}`;
   const db = createDatabase(url.toString());
   await migrate(db);
-  await db.close();
+  testDb = db;
   mockServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: mock.app.fetch, idleTimeout: 0 });
   deps = await assemble(
     loadConfig({
@@ -187,12 +187,37 @@ beforeAll(async () => {
   const other = await json("/admin/projects", { name: "foreign" });
   const foreign = await json(`/admin/projects/${other.value.id}/keys`, { name: "foreign" });
   otherKey = String(foreign.value.key);
-  for (const kind of ["openai", "anthropic", "gemini", "deepseek", "ollama"] as const) {
+  for (const kind of [
+    "openai",
+    "anthropic",
+    "gemini",
+    "deepseek",
+    "ollama",
+    "azure",
+    "bedrock",
+    "vertex",
+  ] as const) {
     const result = await json("/admin/providers", {
       name: kind,
       kind,
-      base_url: `http://127.0.0.1:${mockServer.port}/${kind}/${kind === "gemini" ? "v1beta" : "v1"}`,
-      api_key: `fixture-${kind}-secret`,
+      base_url: `http://127.0.0.1:${mockServer.port}/${kind}${kind === "vertex" ? "/v1/projects/test/locations/test/publishers/google" : kind === "azure" || kind === "bedrock" ? "" : kind === "gemini" ? "/v1beta" : "/v1"}`,
+      api_key:
+        kind === "bedrock"
+          ? JSON.stringify(
+              { accessKeyId: "FIXTURE", secretAccessKey: "SECRET", region: "us-east-1" },
+              null,
+              2,
+            )
+          : kind === "vertex"
+            ? JSON.stringify(
+                {
+                  access_token: "fixture-vertex",
+                  expires_at: new Date(Date.now() + 3600000).toISOString(),
+                },
+                null,
+                2,
+              )
+            : `fixture-${kind}-secret`,
     });
     expect(result.response.status).toBe(201);
     providers[kind] = String(result.value.id);
@@ -232,8 +257,10 @@ afterAll(async () => {
     } finally {
       queueRedis.close();
     }
+    deps.transport.close();
     deps.limits.close();
-    await deps.store.db.close();
+    await deps.database.close();
+    await testDb.close();
   }
   if (gateway) await gateway.stop(true);
   if (mockServer) await mockServer.stop(true);
@@ -266,7 +293,7 @@ describe("real HTTP protocol matrix", () => {
           const requestId = response.headers.get("x-gateway-request-id");
           expect(requestId).toBeTruthy();
           await awaitUsage(String(requestId));
-          const events = await deps.store.db<
+          const events = await testDb<
             { usage: Record<string, string>; finality: string; cost: string }[]
           >`SELECT usage,finality,cost_atoms::text AS cost FROM usage_events WHERE request_id=${requestId}`;
           expect(events.length).toBe(1);
@@ -296,9 +323,7 @@ test("100 simultaneous retries execute one physical call and reject payload conf
   expect(responses.filter((r) => r.status === 409).length).toBe(99);
   await Promise.all(responses.map((r) => r.arrayBuffer()));
   expect((await send("changed")).status).toBe(409);
-  expect((await deps.store.db`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(
-    1,
-  );
+  expect((await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(1);
 });
 
 test("availability-first retry preserves unknown attempt and independent usage", async () => {
@@ -306,14 +331,13 @@ test("availability-first retry preserves unknown attempt and independent usage",
   const result = await json("/v1/chat/completions", payload("chat", model, false), key);
   expect(result.response.status).toBe(200);
   await awaitModelUsage(model, 2);
-  const rows = await deps.store.db<
+  const rows = await testDb<
     { state: string }[]
   >`SELECT state FROM attempts WHERE upstream_model=${model} ORDER BY ordinal`;
   expect(rows.map((row) => row.state)).toEqual(["UNKNOWN", "SUCCEEDED"]);
   expect(
     (
-      await deps.store
-        .db`SELECT e.id FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model}`
+      await testDb`SELECT e.id FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model}`
     ).length,
   ).toBe(2);
 });
@@ -329,7 +353,7 @@ test("truncated converted stream retains partial usage and never emits success",
   expect(body).toContain("gateway_stream_error");
   expect(body).not.toContain("[DONE]");
   await awaitModelUsage(model);
-  const rows = await deps.store.db<
+  const rows = await testDb<
     { state: string }[]
   >`SELECT state FROM attempts WHERE upstream_model=${model}`;
   expect(rows.length).toBe(1);
@@ -451,11 +475,10 @@ test("metadata-only events are replayable with fenced leases and immutable evide
   const first = claimed.events[0];
   if (!first) throw new Error("Missing event");
   await expect(
-    deps.store.db`UPDATE usage_events SET cost_atoms=999 WHERE id=${first.id}`,
+    testDb`UPDATE usage_events SET cost_atoms=999 WHERE id=${first.id}`,
   ).rejects.toThrow();
   await expect(
-    deps.store
-      .db`INSERT INTO usage_events(id,project_id,request_id,attempt_id,source,finality,usage,cost_atoms,currency) VALUES(${crypto.randomUUID()},${first.project_id},${first.request_id},${first.attempt_id},'poison','FINAL',${{ content: "forbidden" }},0,'USD')`,
+    testDb`INSERT INTO usage_events(id,project_id,request_id,attempt_id,source,finality,usage,cost_atoms,currency) VALUES(${crypto.randomUUID()},${first.project_id},${first.request_id},${first.attempt_id},'poison','FINAL',${{ content: "forbidden" }},0,'USD')`,
   ).rejects.toThrow();
 });
 
@@ -464,12 +487,12 @@ test("LLM response canary never enters any PostgreSQL table", async () => {
   const model = await configureModel("openai", { output: canary });
   const result = await json("/v1/chat/completions", payload("chat", model, false), key);
   expect(JSON.stringify(result.value)).toContain(canary);
-  const tables = await deps.store.db<
+  const tables = await testDb<
     { tablename: string }[]
   >`SELECT tablename FROM pg_tables WHERE schemaname='public'`;
   for (const table of tables) {
-    if (!/^[a-z_]+$/.test(table.tablename)) throw new Error("Unexpected table identifier");
-    const rows = await deps.store.db.unsafe(
+    if (!/^[a-z_][a-z0-9_]*$/.test(table.tablename)) throw new Error("Unexpected table identifier");
+    const rows = await testDb.unsafe(
       `SELECT row_to_json(t)::text AS body FROM ${table.tablename} t`,
     );
     expect(JSON.stringify(rows)).not.toContain(canary);
@@ -530,6 +553,39 @@ describe("function calls survive real transport conversion", () => {
         });
 });
 
+test("image accounting counts object and split payloads once through final settlement", async () => {
+  for (const operation of ["images", "image_edits"] as const)
+    for (const imageData of [
+      { url: "https://fixture.invalid/image" },
+      [{ url: "https://fixture.invalid/image" }, { b64_json: "aW1hZ2U=" }],
+      [{ revised_prompt: "metadata" }, { b64_json: "aW1hZ2U=" }],
+    ]) {
+      const model = await configureModel("openai", { imageData }, [operation]);
+      await deps.funds.setTariff({
+        model,
+        operation,
+        pricing: { currency: "USD", rates: { images: { numerator: "7", denominator: "1" } } },
+        ceilings: { images: "4" },
+        basis: "PROVIDER_USAGE",
+      });
+      const result = await json(
+        `/v1/images/${operation === "images" ? "generations" : "edits"}`,
+        { model, prompt: "fixture", n: 1 },
+        key,
+      );
+      expect(result.response.status).toBe(200);
+      const requestId = result.response.headers.get("x-gateway-request-id")!;
+      await waitFor(async () => {
+        const rows =
+          await testDb`SELECT amount_atoms::text FROM billing_charges WHERE request_id=${requestId}`;
+        return rows[0]?.amount_atoms === "7";
+      });
+      const rows =
+        await testDb`SELECT usage->>'images' AS images FROM usage_events WHERE request_id=${requestId} AND finality='FINAL'`;
+      expect(rows[0]?.images).toBe("1");
+    }
+});
+
 test("native media SSE records image count and exact transcription duration", async () => {
   const model = await configureModel("openai", { chunkBytes: 1 }, [
     "images",
@@ -574,8 +630,8 @@ test("native media SSE records image count and exact transcription duration", as
           : "transcript.text.done",
     );
     await awaitUsage(String(response.headers.get("x-gateway-request-id")));
-    const rows = await deps.store
-      .db`SELECT usage,finality FROM usage_events WHERE request_id=${response.headers.get("x-gateway-request-id")}`;
+    const rows =
+      await testDb`SELECT usage,finality FROM usage_events WHERE request_id=${response.headers.get("x-gateway-request-id")}`;
     expect(rows.length).toBe(1);
     expect(rows[0]?.finality).toBe("FINAL");
     if (operation === "images") expect(rows[0]?.usage.images).toBe("1");
@@ -657,8 +713,8 @@ test("Responses previous IDs are owned, streaming IDs stable and background usag
   const { recoveryTick } = await import("../../apps/gateway/src/recovery.ts");
   await recoveryTick(deps);
   await awaitResourceFinal(String(background.value.id));
-  const evidence = await deps.store
-    .db`SELECT e.source,e.finality,e.usage,e.cost_complete FROM usage_events e JOIN resources r ON r.attempt_id=e.attempt_id WHERE r.id=${background.value.id} ORDER BY e.seq`;
+  const evidence =
+    await testDb`SELECT e.source,e.finality,e.usage,e.cost_complete FROM usage_events e JOIN resources r ON r.attempt_id=e.attempt_id WHERE r.id=${background.value.id} ORDER BY e.seq`;
   expect(evidence.map((row: { finality: string }) => row.finality)).toEqual(["FINAL", "FINAL"]);
   expect(evidence[0]?.usage).toEqual({ requests: "1" });
   expect(evidence[0]?.cost_complete).toBe(false);
@@ -691,8 +747,8 @@ test("async queue acceptance failure remains pollable and retries idempotently",
   expect(
     (await json(`/v1/responses/${created.value.id}`, undefined, key, "GET")).response.status,
   ).toBe(200);
-  const rows = await deps.store
-    .db`SELECT e.id FROM usage_events e JOIN resources r ON r.attempt_id=e.attempt_id WHERE r.id=${created.value.id} AND e.source='async_final'`;
+  const rows =
+    await testDb`SELECT e.id FROM usage_events e JOIN resources r ON r.attempt_id=e.attempt_id WHERE r.id=${created.value.id} AND e.source='async_final'`;
   expect(rows.length).toBe(1);
 });
 
@@ -711,9 +767,7 @@ test("durable queue acceptance failure withholds stream terminal and does not ex
   expect(body).toContain("gateway_stream_error");
   expect(body).not.toContain("[DONE]");
   expect(body).not.toContain('"finish_reason":"stop"');
-  expect((await deps.store.db`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(
-    1,
-  );
+  expect((await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(1);
 });
 
 test("known usage survives a conversion rejection and output-free failover", async () => {
@@ -736,8 +790,8 @@ test("known usage survives a conversion rejection and output-free failover", asy
   expect(response.status).toBe(200);
   await response.text();
   await awaitUsage(String(response.headers.get("x-gateway-request-id")), 2);
-  const rows = await deps.store
-    .db`SELECT e.finality,e.usage FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model} ORDER BY a.ordinal`;
+  const rows =
+    await testDb`SELECT e.finality,e.usage FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model} ORDER BY a.ordinal`;
   expect(rows.length).toBe(2);
   expect(rows.map((row: { finality: string }) => row.finality)).toEqual(["FINAL", "FINAL"]);
 });
@@ -756,8 +810,8 @@ test("non-JSON transcription output is relayed once without being parsed or pers
   expect(response.status).toBe(200);
   expect(await response.text()).toBe("mock-transcribed-output-content");
   await awaitModelUsage(model);
-  const rows = await deps.store
-    .db`SELECT e.finality FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model}`;
+  const rows =
+    await testDb`SELECT e.finality FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model}`;
   expect(rows.length).toBe(1);
   expect(rows[0]?.finality).toBe("UNKNOWN");
 });
@@ -785,9 +839,7 @@ test("oversized output policies reject before any physical provider call", async
   const response = await sendChat(model, { max_completion_tokens: 32769 });
   expect(response.status).toBe(422);
   await response.text();
-  expect((await deps.store.db`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(
-    0,
-  );
+  expect((await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(0);
 });
 
 test("all provider-backed resource fields enforce ownership, including Gemini native", async () => {
@@ -889,7 +941,7 @@ test("poll-final evidence cannot be downgraded by a later stream cancellation", 
   await reader.cancel().catch(() => undefined);
   await waitFor(() => deps.lifecycle.size === 0);
   const resource = await deps.store.resource(String(resourceId), projectId);
-  const rows = await deps.store.db`SELECT state FROM attempts WHERE id=${resource.attempt_id}`;
+  const rows = await testDb`SELECT state FROM attempts WHERE id=${resource.attempt_id}`;
   expect(rows[0]?.state).toBe("SUCCEEDED");
   const summary = await deps.store.tokenSummary(response.headers.get("x-gateway-request-id") ?? "");
   expect(summary).toEqual({ complete: true, tokens: 15 });
@@ -935,8 +987,8 @@ test("Batch output JSONL is metered after completion and cancellation without sa
     expect(poll.response.status).toBe(200);
     const resource = await deps.store.resource(String(created.value.id), projectId);
     await awaitResourceFinal(String(created.value.id));
-    const rows = await deps.store
-      .db`SELECT finality,usage FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source='async_final'`;
+    const rows =
+      await testDb`SELECT finality,usage FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source='async_final'`;
     expect(rows.length).toBe(1);
     expect(rows[0]?.finality).toBe("FINAL");
     expect(rows[0]?.usage.input_tokens).toBe("10");
@@ -952,8 +1004,7 @@ test("pricing updates preserve dispatched attempt versions and configuration aud
   if (!route) throw new Error("Missing route");
   const pending = sendChat(model);
   await waitFor(
-    async () =>
-      (await deps.store.db`SELECT id FROM attempts WHERE upstream_model=${model}`).length === 1,
+    async () => (await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length === 1,
   );
   expect(
     (
@@ -976,16 +1027,16 @@ test("pricing updates preserve dispatched attempt versions and configuration aud
   const first = await pending;
   await first.text();
   await awaitUsage(String(first.headers.get("x-gateway-request-id")));
-  const firstCost = await deps.store
-    .db`SELECT cost_atoms::text FROM usage_events WHERE request_id=${first.headers.get("x-gateway-request-id")}`;
+  const firstCost =
+    await testDb`SELECT cost_atoms::text FROM usage_events WHERE request_id=${first.headers.get("x-gateway-request-id")}`;
   expect(firstCost[0]?.cost_atoms).toBe("59");
   const second = await sendChat(model);
   await second.text();
   await awaitUsage(String(second.headers.get("x-gateway-request-id")));
-  const nextCost = await deps.store
-    .db`SELECT cost_atoms::text FROM usage_events WHERE request_id=${second.headers.get("x-gateway-request-id")}`;
+  const nextCost =
+    await testDb`SELECT cost_atoms::text FROM usage_events WHERE request_id=${second.headers.get("x-gateway-request-id")}`;
   expect(nextCost[0]?.cost_atoms).toBe("1200");
-  const audit = await deps.store.db`SELECT id FROM audit_events WHERE action='routes.update'`;
+  const audit = await testDb`SELECT id FROM audit_events WHERE action='routes.update'`;
   expect(audit.length).toBeGreaterThan(0);
 });
 
@@ -1113,15 +1164,14 @@ test("independent gateway instances share idempotency and admission without shar
     expect(responses.filter((r) => r.status === 200).length).toBe(1);
     expect(responses.filter((r) => r.status === 409).length).toBe(39);
     await Promise.all(responses.map((r) => r.text()));
-    expect(
-      (await deps.store.db`SELECT id FROM attempts WHERE upstream_model=${model}`).length,
-    ).toBe(1);
+    expect((await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(1);
   } finally {
     await second.stop(true);
     await secondDeps.lifecycle.drain(1000);
     secondDeps.usage.close();
+    secondDeps.transport.close();
     secondDeps.limits.close();
-    await secondDeps.store.db.close();
+    await secondDeps.database.close();
   }
 });
 
@@ -1169,38 +1219,32 @@ test("batch validation rejects mixed models and duplicated item identities befor
     expect(response.status).toBe(400);
     await response.text();
   }
-  expect((await deps.store.db`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(
-    0,
-  );
+  expect((await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(0);
 });
 
 test("crash recovery appends UNKNOWN and later actual evidence supersedes without re-execution", async () => {
   const model = await configureModel("openai", { headerDelayMs: 200 });
   const pending = sendChat(model);
   await waitFor(
-    async () =>
-      (await deps.store.db`SELECT id FROM attempts WHERE upstream_model=${model}`).length === 1,
+    async () => (await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length === 1,
   );
-  await deps.store
-    .db`UPDATE attempts SET started_at=now()-interval '10 minutes' WHERE upstream_model=${model}`;
+  await testDb`UPDATE attempts SET started_at=now()-interval '10 minutes' WHERE upstream_model=${model}`;
   await (await import("../../apps/gateway/src/recovery.ts")).recoverStale(deps);
   const response = await pending;
   expect(response.status).toBe(200);
   await response.text();
   await awaitModelUsage(model, 2);
-  const rows = await deps.store
-    .db`SELECT e.finality FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model} ORDER BY e.seq`;
+  const rows =
+    await testDb`SELECT e.finality FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model} ORDER BY e.seq`;
   expect(rows.map((row: { finality: string }) => row.finality)).toEqual(["UNKNOWN", "FINAL"]);
-  expect((await deps.store.db`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(
-    1,
-  );
+  expect((await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(1);
 });
 
 test("event claims are disjoint, expired leases are fenced and registration cannot miss an in-flight commit", async () => {
   const model = await configureModel("openai");
   const result = await sendChat(model);
   await result.text();
-  const attempt = (await deps.store.db`SELECT id FROM attempts WHERE upstream_model=${model}`)[0]
+  const attempt = (await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`)[0]
     ?.id as string;
   let unlock!: () => void;
   const gate = new Promise<void>((resolve) => {
@@ -1212,11 +1256,10 @@ test("event claims are disjoint, expired leases are fenced and registration cann
   });
   await awaitModelUsage(model);
   const previous = (
-    await deps.store
-      .db`SELECT usage FROM usage_events WHERE attempt_id=${attempt} ORDER BY seq DESC LIMIT 1`
+    await testDb`SELECT usage FROM usage_events WHERE attempt_id=${attempt} ORDER BY seq DESC LIMIT 1`
   )[0]!.usage;
   const event = crypto.randomUUID();
-  const writer = deps.store.db.begin(async (tx) => {
+  const writer = testDb.begin(async (tx) => {
     await tx`SELECT record_usage_evidence(${attempt}::uuid,${event}::uuid,'fixture_late','SUCCEEDED','FINAL',${previous}::jsonb,59,true,NULL,NULL)`;
     staged();
     await gate;
@@ -1235,8 +1278,7 @@ test("event claims are disjoint, expired leases are fenced and registration cann
   await deps.store.backfillConsumer(consumer);
   expect(
     (
-      await deps.store
-        .db`SELECT event_id FROM event_deliveries WHERE consumer_id=${consumer} AND event_id=${event}`
+      await testDb`SELECT event_id FROM event_deliveries WHERE consumer_id=${consumer} AND event_id=${event}`
     ).length,
   ).toBe(1);
   const [a, b] = await Promise.all([
@@ -1247,8 +1289,7 @@ test("event claims are disjoint, expired leases are fenced and registration cann
   const ids = [...a.events, ...b.events].map((value) => value.id);
   expect(new Set(ids).size).toBe(ids.length);
   const active = a.events.length ? a : b;
-  await deps.store
-    .db`UPDATE event_deliveries SET lease_until=now()-interval '1 second' WHERE consumer_id=${consumer}`;
+  await testDb`UPDATE event_deliveries SET lease_until=now()-interval '1 second' WHERE consumer_id=${consumer}`;
   const renewed = await deps.store.claimEvents(consumer, 500);
   expect(renewed.events.length).toBe(ids.length);
   expect(await deps.store.ackEvents(consumer, active.lease_token, ids)).toBe(0);
@@ -1258,7 +1299,7 @@ test("event claims are disjoint, expired leases are fenced and registration cann
 test("restricted production role can serve inference but cannot mutate usage or DDL", async () => {
   const role = `runtime_${suffix}`;
   const password = crypto.randomUUID().replaceAll("-", "");
-  await deps.store.db.unsafe(
+  await testDb.unsafe(
     await Bun.file(new URL("../../infra/runtime-role.sql", import.meta.url)).text(),
   );
   await adminDb.unsafe(`CREATE ROLE ${role} LOGIN PASSWORD '${password}'`);
@@ -1266,6 +1307,7 @@ test("restricted production role can serve inference but cannot mutate usage or 
   const url = new URL(deps.config.DATABASE_URL);
   url.username = role;
   url.password = password;
+  const runtimeDb = createDatabase(url.toString());
   const runtimeDeps = await assemble({ ...deps.config, DATABASE_URL: url.toString() });
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: createApp(runtimeDeps).fetch });
   try {
@@ -1277,13 +1319,14 @@ test("restricted production role can serve inference but cannot mutate usage or 
     });
     expect(response.status).toBe(200);
     await response.text();
-    await expect(runtimeDeps.store.db`UPDATE usage_events SET cost_atoms=0`).rejects.toThrow();
+    await expect(runtimeDb`UPDATE usage_events SET cost_atoms=0`).rejects.toThrow();
+    await expect(runtimeDb`UPDATE wallets SET available_atoms=999999999`).rejects.toThrow();
+    await expect(runtimeDb`TRUNCATE money_journal`).rejects.toThrow();
+    await expect(runtimeDb`SELECT persist_usage_batch('[]'::jsonb)`).rejects.toMatchObject({
+      errno: "42501",
+    });
     await expect(
-      runtimeDeps.store.db`UPDATE wallets SET available_atoms=999999999`,
-    ).rejects.toThrow();
-    await expect(runtimeDeps.store.db`TRUNCATE money_journal`).rejects.toThrow();
-    await expect(
-      runtimeDeps.store.db`SELECT persist_usage_batch('[]'::jsonb)`,
+      runtimeDb`SELECT ingest_initial_usage('[]'::jsonb,'{}'::uuid[])`,
     ).rejects.toMatchObject({ errno: "42501" });
     const tariffResponse = await fetch(`http://127.0.0.1:${server.port}/admin/tariffs`, {
       method: "POST",
@@ -1301,7 +1344,7 @@ test("restricted production role can serve inference but cannot mutate usage or 
     expect(tariffResponse.status).toBe(201);
     await tariffResponse.text();
 
-    await runtimeDeps.store.db.begin(async (tx) => {
+    await runtimeDb.begin(async (tx) => {
       await tx`CREATE TEMP TABLE wallets(LIKE public.wallets INCLUDING ALL) ON COMMIT DROP`;
       await tx.unsafe(
         "CREATE FUNCTION pg_temp.reject_shadow() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'temporary shadow was executed';END $$",
@@ -1313,15 +1356,17 @@ test("restricted production role can serve inference but cannot mutate usage or 
       const rows = await tx`SELECT count(*)::int AS n FROM pg_temp.wallets`;
       expect(rows[0].n).toBe(0);
     });
-    await expect(runtimeDeps.store.db`TRUNCATE usage_events`).rejects.toThrow();
-    await expect(runtimeDeps.store.db`DROP TABLE usage_events`).rejects.toThrow();
+    await expect(runtimeDb`TRUNCATE usage_events`).rejects.toThrow();
+    await expect(runtimeDb`DROP TABLE usage_events`).rejects.toThrow();
   } finally {
     await server.stop(true);
     await runtimeDeps.lifecycle.drain(1000);
     runtimeDeps.usage.close();
+    runtimeDeps.transport.close();
     runtimeDeps.limits.close();
-    await runtimeDeps.store.db.close();
-    await deps.store.db.unsafe(`DROP OWNED BY ${role}`);
+    await runtimeDeps.database.close();
+    await runtimeDb.close();
+    await testDb.unsafe(`DROP OWNED BY ${role}`);
     await adminDb.unsafe(`DROP ROLE ${role}`);
   }
 });
@@ -1335,8 +1380,8 @@ test("completed Responses streams without usage remain recoverable until GET sup
   });
   const body = await response.text();
   expect(body).toContain("response.completed");
-  const rows = await deps.store
-    .db`SELECT id,state FROM resources WHERE attempt_id IN(SELECT id FROM attempts WHERE upstream_model=${model})`;
+  const rows =
+    await testDb`SELECT id,state FROM resources WHERE attempt_id IN(SELECT id FROM attempts WHERE upstream_model=${model})`;
   expect(rows[0]?.state).toBe("PENDING_USAGE");
   const { recoveryTick } = await import("../../apps/gateway/src/recovery.ts");
   await waitFor(async () => {
@@ -1344,8 +1389,8 @@ test("completed Responses streams without usage remain recoverable until GET sup
     return (await deps.store.resource(String(rows[0]?.id), projectId)).state === "COMPLETED";
   });
   await awaitResourceFinal(String(rows[0]?.id));
-  const events = await deps.store
-    .db`SELECT e.finality FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model} ORDER BY e.seq`;
+  const events =
+    await testDb`SELECT e.finality FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model} ORDER BY e.seq`;
   expect(events.map((row: { finality: string }) => row.finality)).toEqual(["UNKNOWN", "FINAL"]);
 });
 
@@ -1401,9 +1446,7 @@ test("HTTP project concurrency and RPM deny excess before dispatch and reconcile
   const limited = await sendChat(model, {}, token);
   expect(limited.status).toBe(429);
   await limited.text();
-  expect((await deps.store.db`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(
-    2,
-  );
+  expect((await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(2);
 });
 
 test("streamed model content is absent from PG, admission Redis and queued payloads", async () => {
@@ -1415,12 +1458,12 @@ test("streamed model content is absent from PG, admission Redis and queued paylo
     expect(await response.text()).toContain(canary);
     await waitFor(() => deps.memory.bufferedBytes === 0);
     expect((await deps.usage.producer.stats()).waiting).toBeGreaterThan(0);
-    const tables = await deps.store.db<
+    const tables = await testDb<
       { tablename: string }[]
     >`SELECT tablename FROM pg_tables WHERE schemaname='public'`;
     for (const table of tables) {
-      expect(table.tablename).toMatch(/^[a-z_]+$/);
-      const rows = await deps.store.db.unsafe(
+      expect(table.tablename).toMatch(/^[a-z_][a-z0-9_]*$/);
+      const rows = await testDb.unsafe(
         `SELECT row_to_json(t)::text AS row FROM ${table.tablename} t`,
       );
       expect(JSON.stringify(rows)).not.toContain(canary);
@@ -1532,9 +1575,7 @@ test("Gemini blocked prompts without candidates preserve native feedback and con
       expect(text).toContain(protocol === "gemini" ? "SAFETY" : "content_filter");
       expect(text).not.toContain("gateway_stream_error");
     }
-  expect((await deps.store.db`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(
-    4,
-  );
+  expect((await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(4);
 });
 
 test("per-key CIDRs check transport IP and ignore spoofed forwarding headers", async () => {
@@ -1653,8 +1694,8 @@ test("native Gemini models, JSON and SSE enforce the same Key CIDRs before dispa
     name: "Gemini IP denied",
     allowed_cidrs: ["203.0.113.7/32"],
   });
-  const before = await deps.store
-    .db`SELECT count(*)::int AS n FROM attempts WHERE upstream_model=${model}`;
+  const before =
+    await testDb`SELECT count(*)::int AS n FROM attempts WHERE upstream_model=${model}`;
   for (const path of [
     "/v1beta/models",
     ...[false, true].map((stream) => pathFor("gemini", model, stream)),
@@ -1673,8 +1714,7 @@ test("native Gemini models, JSON and SSE enforce the same Key CIDRs before dispa
     expect(response.status).toBe(403);
     await response.text();
   }
-  const after = await deps.store
-    .db`SELECT count(*)::int AS n FROM attempts WHERE upstream_model=${model}`;
+  const after = await testDb`SELECT count(*)::int AS n FROM attempts WHERE upstream_model=${model}`;
   expect(after[0].n).toBe(before[0].n);
 });
 
@@ -1742,8 +1782,8 @@ test("queued known rejection releases its complete pre-hold after consumer resum
     const response = await sendChat(model, {}, String(created.value.key));
     expect(response.status).toBe(400);
     await response.text();
-    const holds = await deps.store
-      .db`SELECT h.state,h.amount_atoms::text FROM billing_holds h JOIN gateway_requests q ON q.id=h.request_id WHERE q.project_id=${pid}`;
+    const holds =
+      await testDb`SELECT h.state,h.amount_atoms::text FROM billing_holds h JOIN gateway_requests q ON q.id=h.request_id WHERE q.project_id=${pid}`;
     expect(holds[0]).toMatchObject({ state: "HELD", amount_atoms: "1" });
     expect(
       ((await deps.funds.wallets(pid)) as { available_atoms: string }[])[0]?.available_atoms,
@@ -1754,8 +1794,7 @@ test("queued known rejection releases its complete pre-hold after consumer resum
   await waitFor(
     async () =>
       (
-        await deps.store
-          .db`SELECT 1 FROM billing_holds h JOIN gateway_requests q ON q.id=h.request_id WHERE q.project_id=${pid} AND h.state='RELEASED'`
+        await testDb`SELECT 1 FROM billing_holds h JOIN gateway_requests q ON q.id=h.request_id WHERE q.project_id=${pid} AND h.state='RELEASED'`
       ).length === 1,
   );
   expect(
@@ -1766,7 +1805,7 @@ test("queued known rejection releases its complete pre-hold after consumer resum
 test("production worker role advances async resources and commits queued usage with financial settlement", async () => {
   const role = `worker_${suffix}`;
   const password = crypto.randomUUID().replaceAll("-", "");
-  await deps.store.db.unsafe(
+  await testDb.unsafe(
     await Bun.file(new URL("../../infra/runtime-role.sql", import.meta.url)).text(),
   );
   await adminDb.unsafe(`CREATE ROLE ${role} LOGIN PASSWORD '${password}'`);
@@ -1781,7 +1820,11 @@ test("production worker role advances async resources and commits queued usage w
     DB_POOL_SIZE: 4,
   });
   const consumer = new BillingWorker(workerDeps);
+  const workerDb = createDatabase(url.toString(), 1);
   try {
+    await expect(
+      workerDb`SELECT ingest_initial_usage('[]'::jsonb,'{}'::uuid[])`,
+    ).rejects.toMatchObject({ errno: "42501" });
     await consumer.start();
     const model = await configureModel("openai");
     const background = await json(
@@ -1799,16 +1842,18 @@ test("production worker role advances async resources and commits queued usage w
       usage: { input_tokens: "7", cached_input_tokens: "3", output_tokens: "5", requests: "1" },
     });
     const request = (
-      await deps.store.db`SELECT request_id FROM attempts WHERE id=${resource.attempt_id}`
+      await testDb`SELECT request_id FROM attempts WHERE id=${resource.attempt_id}`
     )[0]!.request_id;
     await waitFor(async () => (await deps.funds.receipt(request, projectId)).charged_atoms === "1");
     expect((await deps.funds.receipt(request, projectId)).billing_outcome).toBe("SUCCESS");
   } finally {
     await consumer.close();
     workerDeps.usage.close();
+    workerDeps.transport.close();
     workerDeps.limits.close();
-    await workerDeps.store.db.close();
-    await deps.store.db.unsafe(`DROP OWNED BY ${role}`);
+    await workerDeps.database.close();
+    await workerDb.close();
+    await testDb.unsafe(`DROP OWNED BY ${role}`);
     await adminDb.unsafe(`DROP ROLE ${role}`);
   }
 });
@@ -1820,12 +1865,12 @@ test("HTTP rejection retains numeric usage as partial evidence without storing i
   await response.text();
   await awaitModelUsage(model);
   await waitFor(async () => {
-    const rows = await deps.store
-      .db`SELECT q.state FROM gateway_requests q JOIN attempts a ON a.request_id=q.id WHERE a.upstream_model=${model}`;
+    const rows =
+      await testDb`SELECT q.state FROM gateway_requests q JOIN attempts a ON a.request_id=q.id WHERE a.upstream_model=${model}`;
     return rows[0]?.state === "FAILED";
   });
-  const rows = await deps.store
-    .db`SELECT a.state,e.finality,e.usage,e.cost_atoms::text,e.cost_complete,q.id AS request_id FROM attempts a JOIN gateway_requests q ON q.id=a.request_id JOIN usage_events e ON e.id=a.evidence_id WHERE a.upstream_model=${model}`;
+  const rows =
+    await testDb`SELECT a.state,e.finality,e.usage,e.cost_atoms::text,e.cost_complete,q.id AS request_id FROM attempts a JOIN gateway_requests q ON q.id=a.request_id JOIN usage_events e ON e.id=a.evidence_id WHERE a.upstream_model=${model}`;
   expect(rows[0]).toMatchObject({
     state: "PARTIAL",
     finality: "PARTIAL",
@@ -1836,8 +1881,8 @@ test("HTTP rejection retains numeric usage as partial evidence without storing i
   const receipt = await deps.funds.receipt(rows[0]!.request_id, projectId);
   expect(receipt.charged_atoms).toBeNull();
   expect(receipt.hold_state).toBe("RECONCILING");
-  const events = await deps.store
-    .db`SELECT row_to_json(e)::text AS value FROM usage_events e WHERE request_id=${rows[0]!.request_id}`;
+  const events =
+    await testDb`SELECT row_to_json(e)::text AS value FROM usage_events e WHERE request_id=${rows[0]!.request_id}`;
   expect(JSON.stringify(events)).not.toContain("mock-secret-error-must-not-persist");
 });
 
@@ -1852,12 +1897,12 @@ test("unreadable oversized HTTP errors remain unknown instead of releasing pre-h
   await response.text();
   await awaitModelUsage(model);
   await waitFor(async () => {
-    const rows = await deps.store
-      .db`SELECT q.state FROM gateway_requests q JOIN attempts a ON a.request_id=q.id WHERE a.upstream_model=${model}`;
+    const rows =
+      await testDb`SELECT q.state FROM gateway_requests q JOIN attempts a ON a.request_id=q.id WHERE a.upstream_model=${model}`;
     return rows[0]?.state === "FAILED";
   });
-  const rows = await deps.store
-    .db`SELECT a.state,a.request_id FROM attempts a WHERE a.upstream_model=${model}`;
+  const rows =
+    await testDb`SELECT a.state,a.request_id FROM attempts a WHERE a.upstream_model=${model}`;
   expect(rows[0]!.state).toBe("UNKNOWN");
   const receipt = await deps.funds.receipt(rows[0]!.request_id, projectId);
   expect(receipt.hold_state).toBe("RECONCILING");
@@ -1876,12 +1921,12 @@ test("local result finalization failure preserves known upstream cost without re
     expect(response.response.status).toBe(502);
     await awaitModelUsage(model);
     await waitFor(async () => {
-      const rows = await deps.store
-        .db`SELECT q.state FROM gateway_requests q JOIN attempts a ON a.request_id=q.id WHERE a.upstream_model=${model}`;
+      const rows =
+        await testDb`SELECT q.state FROM gateway_requests q JOIN attempts a ON a.request_id=q.id WHERE a.upstream_model=${model}`;
       return rows[0]?.state === "FAILED";
     });
-    const rows = await deps.store
-      .db`SELECT a.request_id,a.state,e.finality,e.cost_atoms::text,e.cost_complete FROM attempts a JOIN usage_events e ON e.id=a.evidence_id WHERE a.upstream_model=${model}`;
+    const rows =
+      await testDb`SELECT a.request_id,a.state,e.finality,e.cost_atoms::text,e.cost_complete FROM attempts a JOIN usage_events e ON e.id=a.evidence_id WHERE a.upstream_model=${model}`;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       state: "SUCCEEDED",
@@ -2046,20 +2091,18 @@ test("Batch rows with missing priced dimensions remain partial until every row i
     async () =>
       Number(
         (
-          await deps.store
-            .db`SELECT count(*)::int AS n FROM usage_events WHERE attempt_id=${resource.attempt_id} AND usage?'input_tokens'`
+          await testDb`SELECT count(*)::int AS n FROM usage_events WHERE attempt_id=${resource.attempt_id} AND usage?'input_tokens'`
         )[0].n,
       ) > 0,
   );
-  const evidence = await deps.store.db<
+  const evidence = await testDb<
     { finality: string; cost_complete: boolean }[]
   >`SELECT finality,cost_complete FROM usage_events WHERE attempt_id=${resource.attempt_id} AND usage?'input_tokens'`;
   expect(evidence.every((row) => row.finality === "PARTIAL" && row.cost_complete === false)).toBe(
     true,
   );
-  const request = (
-    await deps.store.db`SELECT request_id FROM attempts WHERE id=${resource.attempt_id}`
-  )[0].request_id;
+  const request = (await testDb`SELECT request_id FROM attempts WHERE id=${resource.attempt_id}`)[0]
+    .request_id;
   expect((await deps.funds.receipt(request, projectId)).charged_atoms).toBeNull();
   expect((await deps.store.resource(String(created.value.id), projectId)).state).toBe(
     "PENDING_USAGE",
@@ -2069,8 +2112,8 @@ test("Batch rows with missing priced dimensions remain partial until every row i
   await waitFor(
     async () => String((await deps.funds.receipt(request, projectId)).charged_atoms) === "130",
   );
-  const final = await deps.store
-    .db`SELECT usage,cost_atoms::text,cost_complete FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source='async_final' AND finality='FINAL'`;
+  const final =
+    await testDb`SELECT usage,cost_atoms::text,cost_complete FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source='async_final' AND finality='FINAL'`;
   expect(final).toHaveLength(1);
   expect(final[0].usage).toMatchObject({
     input_tokens: "20",
@@ -2092,8 +2135,7 @@ test("retry dispatch rechecks route, provider, model and credential after Retry-
       async () =>
         Number(
           (
-            await deps.store
-              .db`SELECT count(*)::int AS n FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.model=${model} AND a.state='UNKNOWN'`
+            await testDb`SELECT count(*)::int AS n FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.model=${model} AND a.state='UNKNOWN'`
           )[0].n,
         ) === 1,
     );
@@ -2112,8 +2154,8 @@ test("retry dispatch rechecks route, provider, model and credential after Retry-
       const result = await response;
       expect(result.status).toBe(403);
       await result.text();
-      const attempts = await deps.store
-        .db`SELECT a.state FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.model=${model}`;
+      const attempts =
+        await testDb`SELECT a.state FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.model=${model}`;
       expect(attempts).toHaveLength(1);
       expect(attempts[0].state).toBe("UNKNOWN");
     } finally {
@@ -2163,8 +2205,8 @@ test("successful JSON without token usage retains exact per-request supplier cos
   const request = response.headers.get("x-gateway-request-id")!;
   await response.text();
   await awaitUsage(request);
-  const rows = await deps.store
-    .db`SELECT usage,cost_atoms::text,cost_complete FROM usage_events WHERE request_id=${request}`;
+  const rows =
+    await testDb`SELECT usage,cost_atoms::text,cost_complete FROM usage_events WHERE request_id=${request}`;
   expect(rows).toHaveLength(1);
   expect(rows[0].usage).toEqual({ requests: "1" });
   expect(rows[0].cost_atoms).toBe("17");
@@ -2188,18 +2230,184 @@ test("empty chat JSON and terminal-only streams cannot create successful request
     await waitFor(
       async () =>
         Number(
-          (
-            await deps.store
-              .db`SELECT count(*)::int AS n FROM gateway_requests WHERE model=${model}`
-          )[0].n,
+          (await testDb`SELECT count(*)::int AS n FROM gateway_requests WHERE model=${model}`)[0].n,
         ) > 0,
     );
-    const rows = await deps.store
-      .db`SELECT q.state,(SELECT count(*)::int FROM billing_charges c WHERE c.request_id=q.id) AS charges FROM gateway_requests q WHERE q.model=${model}`;
+    const rows =
+      await testDb`SELECT q.state,(SELECT count(*)::int FROM billing_charges c WHERE c.request_id=q.id) AS charges FROM gateway_requests q WHERE q.model=${model}`;
     expect(
       rows.every(
         (row: { state: string; charges: number }) => row.state !== "SUCCEEDED" && row.charges === 0,
       ),
     ).toBe(true);
   }
+});
+
+test("cloud adapters preserve JSON and streaming usage through durable accounting", async () => {
+  for (const kind of ["azure", "bedrock", "vertex"] as const) {
+    const model = await configureModel(kind, { output: "cloud-fixture" });
+    for (const stream of [false, true]) {
+      const response = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify(payload("chat", model, stream)),
+      });
+      expect(response.status).toBe(200);
+      const output = await response.text();
+      expect(output).toContain("cloud-fixture");
+      if (stream) expect(output).toContain("[DONE]");
+      const requestId = response.headers.get("x-gateway-request-id")!;
+      await awaitUsage(requestId);
+      const rows =
+        await testDb`SELECT e.finality,e.usage,c.amount_atoms::text AS charge FROM usage_events e JOIN billing_charges c ON c.request_id=e.request_id WHERE e.request_id=${requestId}`;
+      expect(rows[0].finality).toBe("FINAL");
+      expect(rows[0].usage.input_tokens).toBeDefined();
+      expect(rows[0].usage.output_tokens).toBeDefined();
+      expect(rows[0].charge).toBe("1");
+    }
+  }
+});
+
+test("expired cloud credentials release every pre-hold without sending inference", async () => {
+  const model = await configureModel("vertex");
+  const provider = providers.vertex!;
+  const secret = JSON.stringify({ access_token: "expired", expires_at: "2000-01-01T00:00:00Z" });
+  const { encrypt } = await import("@gateway/kernel");
+  await deps.store.updateProvider(
+    provider,
+    {},
+    encrypt(secret, deps.config.ENCRYPTION_KEY, provider),
+  );
+  try {
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify(payload("chat", model, false)),
+    });
+    expect(response.status).toBe(503);
+    await response.text();
+    await waitFor(async () => {
+      const rows =
+        await testDb`SELECT h.state FROM billing_holds h JOIN gateway_requests q ON q.id=h.request_id WHERE q.model=${model}`;
+      return rows.length === 1 && rows[0].state === "RELEASED";
+    });
+    const rows =
+      await testDb`SELECT a.state FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.model=${model}`;
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((row: { state: string }) => row.state === "NOT_EXECUTED")).toBe(true);
+  } finally {
+    await deps.store.updateProvider(
+      provider,
+      {},
+      encrypt(
+        JSON.stringify({
+          access_token: "fixture-vertex",
+          expires_at: new Date(Date.now() + 3600000).toISOString(),
+        }),
+        deps.config.ENCRYPTION_KEY,
+        provider,
+      ),
+    );
+  }
+});
+
+test("cancellation completed during admission releases a never-dispatched cloud attempt", async () => {
+  const configured = await json("/admin/providers", {
+    name: "cancel-fixture",
+    kind: "vertex",
+    base_url: `http://127.0.0.1:${mockServer.port}/vertex/v1/projects/test/locations/test/publishers/google`,
+    api_key: JSON.stringify({
+      access_token: "fixture-vertex",
+      expires_at: new Date(Date.now() + 3600000).toISOString(),
+    }),
+  });
+  const model = await configureModel("vertex", {}, ["chat"], String(configured.value.id));
+  const cancellation = new AbortController();
+  const store = Object.create(deps.store) as typeof deps.store;
+  store.admitInitial = async (...args: Parameters<typeof deps.store.admitInitial>) => {
+    const result = await deps.store.admitInitial(...args);
+    cancellation.abort();
+    return result;
+  };
+  const response = await createApp({ ...deps, store }).fetch(
+    new Request(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify(payload("chat", model, false)),
+      signal: cancellation.signal,
+    }),
+  );
+  expect(response.status).toBe(504);
+  await expect(response.text()).rejects.toThrow();
+  await waitFor(
+    async () =>
+      (
+        await testDb`SELECT h.state FROM billing_holds h JOIN gateway_requests q ON q.id=h.request_id WHERE q.model=${model}`
+      )[0]?.state === "RELEASED",
+  );
+  const attempts = await testDb<
+    { state: string }[]
+  >`SELECT a.state FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.model=${model}`;
+  expect(attempts).toHaveLength(1);
+  expect(attempts[0]?.state).toBe("NOT_EXECUTED");
+});
+
+test("local socket exhaustion releases the hold without opening the provider circuit", async () => {
+  const configured = await json("/admin/providers", {
+    name: "local-resource-fixture",
+    kind: "openai",
+    base_url: `http://127.0.0.1:${mockServer.port}/openai/v1`,
+    api_key: "fixture-openai-secret",
+  });
+  const model = await configureModel("openai", {}, ["chat"], String(configured.value.id));
+  let sends = 0;
+  for (const code of ["EADDRNOTAVAIL", "EMFILE", "ENFILE"]) {
+    const app = createApp({
+      ...deps,
+      transport: {
+        ...deps.transport,
+        async fetch() {
+          sends++;
+          throw Object.assign(new Error("Local socket allocation failed"), { code });
+        },
+      },
+    });
+    const response = await app.fetch(
+      new Request(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify(payload("chat", model, false)),
+      }),
+    );
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      "upstream_capacity",
+    );
+  }
+  expect(sends).toBe(3);
+  await waitFor(
+    async () =>
+      Number(
+        (
+          await testDb`SELECT count(*)::int AS n FROM billing_holds h JOIN gateway_requests q ON q.id=h.request_id WHERE q.model=${model} AND h.state='RELEASED'`
+        )[0]?.n,
+      ) === 3,
+  );
+  const attempts =
+    await testDb`SELECT a.state FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.model=${model}`;
+  expect(attempts).toHaveLength(3);
+  expect(attempts.map((row: { state: string }) => row.state)).toEqual([
+    "NOT_EXECUTED",
+    "NOT_EXECUTED",
+    "NOT_EXECUTED",
+  ]);
+  expect(
+    Number(
+      (
+        await testDb`SELECT coalesce(sum(c.amount_atoms+c.debt_atoms),0)::text AS n FROM billing_charges c JOIN gateway_requests q ON q.id=c.request_id WHERE q.model=${model}`
+      )[0]?.n,
+    ),
+  ).toBe(0);
+  const result = await json("/v1/chat/completions", payload("chat", model, false), key);
+  expect(result.response.status).toBe(200);
 });

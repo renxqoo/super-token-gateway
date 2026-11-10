@@ -1,5 +1,12 @@
 import { createDatabase, Store, FundsStore, SCHEMA_VERSION } from "@gateway/storage";
-import { Lifecycle, Limits, Metrics, MemoryBudget, UsageProducer } from "@gateway/runtime";
+import {
+  Lifecycle,
+  Limits,
+  Metrics,
+  MemoryBudget,
+  UsageProducer,
+  createTransport,
+} from "@gateway/runtime";
 import { Metering } from "./usage.ts";
 import type { Config } from "./config.ts";
 import type { Dependencies } from "./context.ts";
@@ -7,6 +14,7 @@ import type { Dependencies } from "./context.ts";
 export async function assemble(config: Config): Promise<Dependencies> {
   const db = createDatabase(config.DATABASE_URL, config.DB_POOL_SIZE);
   const limits = new Limits(config.REDIS_URL, config.REDIS_NAMESPACE);
+  const transport = createTransport(config.UPSTREAM_POOL_SIZE);
   let producer: UsageProducer | undefined;
   try {
     await limits.redis.connect();
@@ -26,12 +34,22 @@ export async function assemble(config: Config): Promise<Dependencies> {
       batchDelayMs: config.QUEUE_BATCH_DELAY_MS,
       maxPendingJobs: config.QUEUE_MAX_PENDING_JOBS,
       maxInFlight: config.MAX_INFLIGHT,
+      requireAllReplicas: config.NODE_ENV === "production",
     });
     const dependencies: Dependencies = {
       config,
       usage: new Metering(producer),
+      database: {
+        ping: async () => {
+          await db`SELECT 1`;
+        },
+        close: async (timeout = 1) => {
+          await db.close({ timeout });
+        },
+      },
       store: new Store(db),
       funds: new FundsStore(db),
+      transport,
       limits,
       lifecycle: new Lifecycle(config.MAX_INFLIGHT),
       metrics: new Metrics(),
@@ -41,6 +59,7 @@ export async function assemble(config: Config): Promise<Dependencies> {
     return dependencies;
   } catch (error) {
     producer?.close();
+    transport.close();
     limits.close();
     await db.close({ timeout: 1 }).catch(() => undefined);
     throw error;

@@ -182,7 +182,16 @@
           },
           "kind": {
             "type": "string",
-            "enum": ["openai", "anthropic", "gemini", "deepseek", "ollama"]
+            "enum": [
+              "openai",
+              "anthropic",
+              "gemini",
+              "deepseek",
+              "ollama",
+              "azure",
+              "bedrock",
+              "vertex"
+            ]
           },
           "base_url": {
             "type": "string",
@@ -192,7 +201,7 @@
           "api_key": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 4096
+            "maxLength": 16384
           },
           "concurrency": {
             "default": 1000,

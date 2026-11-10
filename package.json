@@ -21,7 +21,7 @@
     "lint": "oxlint --deny-warnings",
     "fmt": "bun fmt --no-script",
     "fmt:check": "bun fmt --no-script --check",
-    "test": "bun test tests/unit",
+    "test": "bun test tests/unit packages/kernel/src/__test__ packages/runtime/src/__test__ packages/connectors/src/__test__",
     "test:integration": "bun --env-file=.env.local test tests/integration --timeout 30000",
     "verify": "bun run check && bun run lint && bun run fmt:check && bun run test && bun run test:integration && bun run build && bun run test:artifact",
     "build": "bun scripts/build.ts",
@@ -32,14 +32,16 @@
     "test:artifact": "bun --env-file=.env.local scripts/verify-artifact.ts",
     "test:container": "bun --env-file=.env.local scripts/verify-container.ts",
     "test:durability": "bun --env-file=.env.local scripts/verify-durability.ts",
-    "test:backup": "bun --env-file=.env.local scripts/verify-backup.ts"
+    "test:backup": "bun --env-file=.env.local scripts/verify-backup.ts",
+    "db:archive": "bun --env-file=.env.local scripts/archive.ts"
   },
   "devDependencies": {
+    "@gateway/connectors": "workspace:*",
+    "@gateway/kernel": "workspace:*",
+    "@gateway/runtime": "workspace:*",
+    "@gateway/storage": "workspace:*",
     "@types/bun": "1.4.4",
     "oxlint": "1.93.0",
-    "@gateway/kernel": "workspace:*",
-    "@gateway/storage": "workspace:*",
-    "@gateway/runtime": "workspace:*",
-    "@gateway/connectors": "workspace:*"
+    "zod": "4.6.7"
   }
 }

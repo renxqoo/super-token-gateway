@@ -2,6 +2,7 @@ import type { SQL } from "bun";
 import {
   GatewayError,
   calculateCost,
+  quoteReservation,
   creditSchema,
   tariffSchema,
   refundSchema,
@@ -122,56 +123,9 @@ export class FundsStore {
       if (this.prices.size > 10000) this.prices.clear();
       this.prices.set(cacheKey, cached);
     }
-    if (!cached.rows.length)
-      throw new GatewayError(
-        503,
-        "tariff_unavailable",
-        "No enabled tariff exists for this model, operation and currency",
-      );
-    const inputCharacters = typeof body.input === "string" ? String([...body.input].length) : "0";
-    const prices: Record<string, string> = {};
-    let amount = 0n;
-    for (const row of cached.rows) {
-      const usage: Usage = { ...row.ceilings };
-      if (row.rates.requests) {
-        if (BigInt(usage.requests ?? "0") < 1n)
-          throw new GatewayError(
-            503,
-            "invalid_tariff",
-            "Request tariff requires a positive reservation ceiling",
-          );
-        usage.requests = "1";
-      }
-      if (row.rates.output_tokens && outputBound > 0) {
-        if (BigInt(outputBound) > BigInt(usage.output_tokens ?? "0")) continue;
-        usage.output_tokens = String(outputBound);
-      }
-      if (row.rates.characters) {
-        if (BigInt(inputCharacters) > BigInt(usage.characters ?? "0")) continue;
-        usage.characters = inputCharacters;
-      }
-      if (row.rates.images) {
-        const n = body.n ?? 1;
-        if (
-          !Number.isSafeInteger(n) ||
-          Number(n) < 1 ||
-          BigInt(Number(n)) > BigInt(usage.images ?? "0")
-        )
-          continue;
-        usage.images = String(n);
-      }
-      const cost = BigInt(calculateCost(usage, { currency: row.currency, rates: row.rates }));
-      if (cost > amount) amount = cost;
-      prices[row.provider_id] = row.id;
-    }
-    if (!Object.keys(prices).length)
-      throw new GatewayError(
-        422,
-        "billing_ceiling",
-        "Request exceeds the configured billing reservation ceilings",
-      );
-    return { currency, amount_atoms: amount.toString(), input_characters: inputCharacters, prices };
+    return quoteReservation(cached.rows, currency, body, outputBound);
   }
+
   async refund(chargeId: string, value: RefundInput): Promise<Record<string, unknown>> {
     const input = refundSchema.parse(value);
     try {
@@ -223,7 +177,7 @@ export class FundsStore {
     const fingerprint = sha256(canonical(input));
     return this.db.begin(async (tx) => {
       const rows =
-        await tx`SELECT w.id,w.currency,q.billing_quote FROM wallets w JOIN billing_holds h ON h.wallet_id=w.id JOIN gateway_requests q ON q.id=h.request_id WHERE q.id=${requestId} FOR UPDATE OF w`;
+        await tx`SELECT w.id,w.currency,q.billing_quote FROM wallets w JOIN billing_holds h ON h.wallet_id=w.id JOIN gateway_requests q ON q.id=h.request_id WHERE q.id=${requestId} FOR NO KEY UPDATE OF w`;
       if (!rows[0]) throw new GatewayError(404, "not_found", "Preauthorization not found");
       const old =
         await tx`SELECT id,fingerprint FROM billing_resolutions WHERE request_id=${requestId} AND external_ref=${input.external_ref}`;

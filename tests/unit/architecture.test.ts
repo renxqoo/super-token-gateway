@@ -21,6 +21,8 @@ test("workspace dependencies stay acyclic and commercial capabilities stay outsi
   expect(Object.keys(mock.dependencies)).toEqual(["hono"]);
   for await (const file of new Bun.Glob("**/*.ts").scan("apps/gateway/src")) {
     const source = await Bun.file(`apps/gateway/src/${file}`).text();
+    if (["app.ts", "admin.ts"].includes(file)) expect(source).not.toMatch(/@gateway\/storage/);
+    expect(source).not.toMatch(/\.db\s*(?:`|<|\.)|\.unsafe\s*\(/);
     expect(source).not.toMatch(
       /(?:Bun\.write|writeFile|appendFile|console\.(?:debug|error|log)\([^\n]*(?:body|content|response))/,
     );

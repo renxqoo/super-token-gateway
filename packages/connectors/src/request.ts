@@ -7,7 +7,7 @@ import {
   parseProviderJson,
   copyExact,
 } from "@gateway/kernel";
-import type { Protocol, ProviderKind } from "@gateway/kernel";
+import type { Protocol, ProviderKind, Operation } from "@gateway/kernel";
 
 export type Part =
   | { type: "text"; text: string }
@@ -650,11 +650,11 @@ export function encodeRequest(
 }
 
 export function providerProtocol(kind: ProviderKind, requested: Protocol): Protocol {
-  return kind === "anthropic"
+  return ["anthropic", "bedrock"].includes(kind)
     ? "messages"
-    : kind === "gemini"
+    : ["gemini", "vertex"].includes(kind)
       ? "gemini"
-      : kind === "deepseek"
+      : ["deepseek", "azure"].includes(kind)
         ? "chat"
         : requested === "responses"
           ? "responses"
@@ -696,4 +696,58 @@ export function prepareRequest(
     delete converted.max_completion_tokens;
   }
   return { body: converted, protocol: target };
+}
+
+export function prepareOperation(
+  body: Record<string, unknown>,
+  operation: Operation,
+  kind: ProviderKind,
+  model: string,
+): { body: Record<string, unknown>; protocol: Operation } {
+  if (["chat", "responses", "messages", "gemini"].includes(operation))
+    return prepareRequest(body, operation as Protocol, kind, model);
+  if (
+    kind !== "openai" &&
+    !(["ollama", "azure"].includes(kind) && operation === "embeddings") &&
+    !(kind === "gemini" && operation === "videos")
+  )
+    throw new GatewayError(
+      422,
+      "unsupported_capability",
+      "This provider does not support the requested native operation",
+    );
+  let outbound: Record<string, unknown> = copyExact(body, { ...body, model });
+  if (operation === "batches" || operation === "files") delete outbound.model;
+  if (kind === "gemini" && operation === "videos") {
+    if (
+      Object.keys(body).some(
+        (field) => !["model", "prompt", "seconds", "aspect_ratio", "size"].includes(field),
+      )
+    )
+      throw new GatewayError(
+        422,
+        "conversion_loss",
+        "This video adapter supports prompt, duration and aspect ratio; unsupported fields cannot be converted",
+      );
+    const size = body.size;
+    const aspect = size === "1280x720" ? "16:9" : size === "720x1280" ? "9:16" : undefined;
+    if (
+      (size !== undefined && !aspect) ||
+      (aspect && body.aspect_ratio && aspect !== body.aspect_ratio)
+    )
+      throw new GatewayError(
+        422,
+        "conversion_loss",
+        "Video size cannot be represented by this provider",
+      );
+    outbound = {
+      instances: [{ prompt: body.prompt }],
+      parameters: {
+        durationSeconds: Number(body.seconds ?? 8),
+        sampleCount: 1,
+        ...(aspect || body.aspect_ratio ? { aspectRatio: aspect ?? body.aspect_ratio } : {}),
+      },
+    };
+  }
+  return { body: outbound, protocol: operation };
 }

@@ -1,6 +1,5 @@
 import { GatewayError, extractUsage, optionalObject, parseProviderJson } from "@gateway/kernel";
 import type { Route, Usage } from "@gateway/kernel";
-import { safeFetch } from "@gateway/runtime";
 import type { Dependencies } from "./context.ts";
 import { upstreamHeaders } from "./upstream.ts";
 
@@ -25,7 +24,7 @@ export async function batchUsage(
     const url = new URL(
       `${route.base_url.replace(/\/$/, "")}/files/${encodeURIComponent(id)}/content`,
     );
-    const response = await safeFetch(
+    const response = await deps.transport.fetch(
       url,
       { headers: upstreamHeaders(route, deps.config), signal },
       deps.config.ALLOW_PRIVATE_UPSTREAM,
