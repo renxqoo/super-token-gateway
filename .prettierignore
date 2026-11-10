@@ -1,0 +1,6 @@
+.local
+node_modules
+dist
+coverage
+reports
+docs/design-2026-11-08

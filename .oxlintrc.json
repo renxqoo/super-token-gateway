@@ -1,0 +1,6 @@
+{
+  "categories": { "correctness": "error" },
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "rules": { "typescript/no-explicit-any": "error", "eqeqeq": "error" },
+  "ignorePatterns": [".local/**", "dist/**", "node_modules/**", "docs/design-2026-11-08/**"]
+}

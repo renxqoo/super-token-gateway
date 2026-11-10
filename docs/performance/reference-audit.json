@@ -1,0 +1,29 @@
+{
+  "date": "2026-11-10",
+  "tillgate": {
+    "version": "58df84769f4d25872b7786643db3468fc1001c57",
+    "requests": 864,
+    "settled": 864,
+    "usage_events": 864,
+    "receipts": 864,
+    "estimated": 0,
+    "settlement_errors": 0,
+    "active_reservations": 0,
+    "wallet_in_flight": "0",
+    "upstream_reserved": "0",
+    "total_cost": "0.0036936",
+    "settlement_after_report_seconds": 5.478
+  },
+  "new_api": {
+    "version": "bd6bb53019fb7e21804b31ab7365c9b2097f4b6c",
+    "consumption_logs": 3707,
+    "unique_request_ids": 3707,
+    "quota_debited": 7414,
+    "used_quota": 7414,
+    "unaccounted_quota": 0,
+    "native_arch": "darwin/arm64",
+    "go": "1.26.10",
+    "official_pgo": true
+  },
+  "notes": "Read-only independent audit. Extra requests include warmup/probes; older reports cannot split them exactly. Tillgate uses native Bun formal entry plus worker, NODE_ENV=development for HTTP mock. New-api uses native Go executable with official PGO."
+}

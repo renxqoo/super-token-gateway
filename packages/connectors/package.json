@@ -1,0 +1,11 @@
+{
+  "name": "@gateway/connectors",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@gateway/kernel": "workspace:*"
+  }
+}

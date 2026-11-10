@@ -1,0 +1,6519 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Independent LLM Gateway",
+    "version": "1.0.0",
+    "description": "Independent technical tenants, routing, metering and prepaid wallet settlement. Commercial identity, payments, subscriptions and marketing remain external. No LLM content persistence."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "projectKey": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "adminKey": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "Project": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "external_ref": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "billing_currency": {
+            "default": "USD",
+            "type": "string",
+            "pattern": "^[A-Z]{3,8}$"
+          },
+          "rpm": {
+            "default": 6000,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000000
+          },
+          "tpm": {
+            "default": 10000000,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000
+          },
+          "concurrency": {
+            "default": 1000,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          }
+        },
+        "required": ["name", "billing_currency", "rpm", "tpm", "concurrency"],
+        "additionalProperties": false
+      },
+      "Credential": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "models": {
+            "default": [],
+            "maxItems": 1000,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 150
+            }
+          },
+          "operations": {
+            "default": [
+              "chat",
+              "responses",
+              "messages",
+              "gemini",
+              "embeddings",
+              "images",
+              "image_edits",
+              "speech",
+              "transcription",
+              "translation",
+              "files",
+              "batches",
+              "videos",
+              "moderations",
+              "completions"
+            ],
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "chat",
+                "responses",
+                "messages",
+                "gemini",
+                "embeddings",
+                "images",
+                "image_edits",
+                "speech",
+                "transcription",
+                "translation",
+                "files",
+                "batches",
+                "videos",
+                "moderations",
+                "completions"
+              ]
+            }
+          },
+          "principal_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "role": {
+            "default": "INVOKER",
+            "type": "string",
+            "enum": ["ADMIN", "INVOKER", "BILLING", "VIEWER"]
+          },
+          "allowed_cidrs": {
+            "default": [],
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 60
+            }
+          },
+          "rpm": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000000
+          },
+          "tpm": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000
+          },
+          "concurrency": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          }
+        },
+        "required": ["name", "models", "operations", "role", "allowed_cidrs"],
+        "additionalProperties": false
+      },
+      "Provider": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["openai", "anthropic", "gemini", "deepseek", "ollama"]
+          },
+          "base_url": {
+            "type": "string",
+            "maxLength": 1000,
+            "format": "uri"
+          },
+          "api_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "concurrency": {
+            "default": 1000,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000
+          },
+          "rpm": {
+            "default": 1000000,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000000
+          }
+        },
+        "required": ["name", "kind", "base_url", "api_key", "concurrency", "rpm"],
+        "additionalProperties": false
+      },
+      "Model": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,149}$"
+          },
+          "operations": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "chat",
+                "responses",
+                "messages",
+                "gemini",
+                "embeddings",
+                "images",
+                "image_edits",
+                "speech",
+                "transcription",
+                "translation",
+                "files",
+                "batches",
+                "videos",
+                "moderations",
+                "completions"
+              ]
+            }
+          },
+          "routing_strategy": {
+            "default": "WEIGHTED",
+            "type": "string",
+            "enum": ["WEIGHTED", "ROUND_ROBIN", "LEAST_LATENCY"]
+          },
+          "max_output_tokens": {
+            "default": 32768,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000000
+          }
+        },
+        "required": ["name", "operations", "routing_strategy", "max_output_tokens"],
+        "additionalProperties": false
+      },
+      "Route": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "provider_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "upstream_model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "operations": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "chat",
+                "responses",
+                "messages",
+                "gemini",
+                "embeddings",
+                "images",
+                "image_edits",
+                "speech",
+                "transcription",
+                "translation",
+                "files",
+                "batches",
+                "videos",
+                "moderations",
+                "completions"
+              ]
+            }
+          },
+          "priority": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "weight": {
+            "default": 1,
+            "type": "number",
+            "minimum": 0.001,
+            "maximum": 1000
+          },
+          "pricing": {
+            "type": "object",
+            "properties": {
+              "currency": {
+                "type": "string",
+                "pattern": "^[A-Z]{3,8}$"
+              },
+              "rates": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "enum": [
+                    "input_tokens",
+                    "output_tokens",
+                    "cached_input_tokens",
+                    "cache_write_tokens",
+                    "requests",
+                    "images",
+                    "audio_ms",
+                    "video_ms",
+                    "audio_seconds",
+                    "video_seconds",
+                    "characters"
+                  ]
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "numerator": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,37})$"
+                    },
+                    "denominator": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]{0,37}$"
+                    }
+                  },
+                  "required": ["numerator", "denominator"],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": ["currency", "rates"],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "provider_id",
+          "upstream_model",
+          "operations",
+          "priority",
+          "weight",
+          "pricing"
+        ],
+        "additionalProperties": false
+      },
+      "Pricing": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3,8}$"
+          },
+          "rates": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "enum": [
+                "input_tokens",
+                "output_tokens",
+                "cached_input_tokens",
+                "cache_write_tokens",
+                "requests",
+                "images",
+                "audio_ms",
+                "video_ms",
+                "audio_seconds",
+                "video_seconds",
+                "characters"
+              ]
+            },
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "numerator": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,37})$"
+                },
+                "denominator": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,37}$"
+                }
+              },
+              "required": ["numerator", "denominator"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["currency", "rates"],
+        "additionalProperties": false
+      },
+      "Credit": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3,8}$"
+          },
+          "external_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "amount_atoms": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,37}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["CASH", "GIFT"]
+          },
+          "priority": {
+            "default": 100,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "models": {
+            "default": [],
+            "maxItems": 1000,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 150
+            }
+          },
+          "operations": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "chat",
+                "responses",
+                "messages",
+                "gemini",
+                "embeddings",
+                "images",
+                "image_edits",
+                "speech",
+                "transcription",
+                "translation",
+                "files",
+                "batches",
+                "videos",
+                "moderations",
+                "completions"
+              ]
+            }
+          }
+        },
+        "required": [
+          "currency",
+          "external_ref",
+          "amount_atoms",
+          "kind",
+          "priority",
+          "models",
+          "operations"
+        ],
+        "additionalProperties": false
+      },
+      "Tariff": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 150
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "chat",
+              "responses",
+              "messages",
+              "gemini",
+              "embeddings",
+              "images",
+              "image_edits",
+              "speech",
+              "transcription",
+              "translation",
+              "files",
+              "batches",
+              "videos",
+              "moderations",
+              "completions"
+            ]
+          },
+          "provider_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "pricing": {
+            "type": "object",
+            "properties": {
+              "currency": {
+                "type": "string",
+                "pattern": "^[A-Z]{3,8}$"
+              },
+              "rates": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "enum": [
+                    "input_tokens",
+                    "output_tokens",
+                    "cached_input_tokens",
+                    "cache_write_tokens",
+                    "requests",
+                    "images",
+                    "audio_ms",
+                    "video_ms",
+                    "audio_seconds",
+                    "video_seconds",
+                    "characters"
+                  ]
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "numerator": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,37})$"
+                    },
+                    "denominator": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]{0,37}$"
+                    }
+                  },
+                  "required": ["numerator", "denominator"],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": ["currency", "rates"],
+            "additionalProperties": false
+          },
+          "ceilings": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "enum": [
+                "input_tokens",
+                "output_tokens",
+                "cached_input_tokens",
+                "cache_write_tokens",
+                "requests",
+                "images",
+                "audio_ms",
+                "video_ms",
+                "audio_seconds",
+                "video_seconds",
+                "characters",
+                "reasoning_tokens"
+              ]
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,37})(\\.[0-9]{1,18})?$"
+            }
+          },
+          "basis": {
+            "default": "PROVIDER_USAGE",
+            "type": "string",
+            "enum": ["PROVIDER_USAGE", "INPUT_CHARACTERS", "REQUEST_COMPLETION"]
+          }
+        },
+        "required": ["model", "operation", "pricing", "ceilings", "basis"],
+        "additionalProperties": false
+      },
+      "Refund": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "external_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "amount_atoms": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,37}$"
+          },
+          "reason": {
+            "default": "CUSTOMER_REFUND",
+            "type": "string",
+            "enum": ["CUSTOMER_REFUND", "ADMIN_CORRECTION", "PROVIDER_RECONCILIATION"]
+          }
+        },
+        "required": ["external_ref", "amount_atoms", "reason"],
+        "additionalProperties": false
+      },
+      "Adjustment": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "external_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "target_atoms": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,37})$"
+          },
+          "reason": {
+            "type": "string",
+            "enum": ["ADMIN_CORRECTION", "PROVIDER_RECONCILIATION"]
+          }
+        },
+        "required": ["external_ref", "target_atoms", "reason"],
+        "additionalProperties": false
+      },
+      "Resolution": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "external_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "action": {
+            "type": "string",
+            "enum": ["RELEASE", "SETTLE"]
+          },
+          "usage": {
+            "default": {},
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "enum": [
+                "input_tokens",
+                "output_tokens",
+                "cached_input_tokens",
+                "cache_write_tokens",
+                "requests",
+                "images",
+                "audio_ms",
+                "video_ms",
+                "audio_seconds",
+                "video_seconds",
+                "characters",
+                "reasoning_tokens"
+              ]
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,37})(\\.[0-9]{1,18})?$"
+            }
+          },
+          "pricing_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "reason": {
+            "type": "string",
+            "enum": ["PROVIDER_INVOICE", "ADMIN_WRITE_OFF", "EVIDENCE_RECONCILIATION"]
+          }
+        },
+        "required": ["external_ref", "action", "usage", "reason"],
+        "additionalProperties": false
+      },
+      "UsageEvent": {
+        "type": "object",
+        "required": [
+          "id",
+          "attempt_id",
+          "source",
+          "semantics",
+          "finality",
+          "usage",
+          "cost_atoms",
+          "currency",
+          "cost_complete"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "attempt_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source": {
+            "type": "string"
+          },
+          "semantics": {
+            "const": "attempt_snapshot"
+          },
+          "finality": {
+            "enum": ["FINAL", "PARTIAL", "UNKNOWN", "ESTIMATED"]
+          },
+          "usage": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "cost_atoms": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Integer atoms, 10^-18 units of the recorded currency. Cumulative per-attempt evidence; never sum revisions."
+          },
+          "currency": {
+            "type": "string"
+          },
+          "cost_complete": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          },
+          "request_id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/v1/chat/completions": {
+      "post": {
+        "operationId": "chat",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Native provider request. Logical model alias replaces the upstream model. Unsupported cross-protocol semantics return 422."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/responses": {
+      "post": {
+        "operationId": "responses",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Native provider request. Logical model alias replaces the upstream model. Unsupported cross-protocol semantics return 422."
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "list_responses",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "operationId": "messages",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Native provider request. Logical model alias replaces the upstream model. Unsupported cross-protocol semantics return 422."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/embeddings": {
+      "post": {
+        "operationId": "embeddings",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Native provider request. Logical model alias replaces the upstream model. Unsupported cross-protocol semantics return 422."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/images/generations": {
+      "post": {
+        "operationId": "images",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Native provider request. Logical model alias replaces the upstream model. Unsupported cross-protocol semantics return 422."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/images/edits": {
+      "post": {
+        "operationId": "image_edits",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "image": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "purpose": {
+                    "type": "string"
+                  },
+                  "stream": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audio/speech": {
+      "post": {
+        "operationId": "speech",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Native provider request. Logical model alias replaces the upstream model. Unsupported cross-protocol semantics return 422."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audio/transcriptions": {
+      "post": {
+        "operationId": "transcription",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "image": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "purpose": {
+                    "type": "string"
+                  },
+                  "stream": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audio/translations": {
+      "post": {
+        "operationId": "translation",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "image": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "purpose": {
+                    "type": "string"
+                  },
+                  "stream": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/files": {
+      "post": {
+        "operationId": "files",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "image": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "purpose": {
+                    "type": "string"
+                  },
+                  "stream": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "list_files",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/batches": {
+      "post": {
+        "operationId": "batches",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Native provider request. Logical model alias replaces the upstream model. Unsupported cross-protocol semantics return 422."
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "list_batches",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/videos": {
+      "post": {
+        "operationId": "videos",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Native provider request. Logical model alias replaces the upstream model. Unsupported cross-protocol semantics return 422."
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "list_videos",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/moderations": {
+      "post": {
+        "operationId": "moderations",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Native provider request. Logical model alias replaces the upstream model. Unsupported cross-protocol semantics return 422."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/completions": {
+      "post": {
+        "operationId": "completions",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Native provider request. Logical model alias replaces the upstream model. Unsupported cross-protocol semantics return 422."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/files/{id}": {
+      "get": {
+        "operationId": "get_files",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_files",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/files/{id}/content": {
+      "get": {
+        "operationId": "content_files",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/batches/{id}": {
+      "get": {
+        "operationId": "get_batches",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/batches/{id}/cancel": {
+      "post": {
+        "operationId": "cancel_batches",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/videos/{id}": {
+      "get": {
+        "operationId": "get_videos",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_videos",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/videos/{id}/content": {
+      "get": {
+        "operationId": "content_videos",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/responses/{id}": {
+      "get": {
+        "operationId": "get_responses",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_responses",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/responses/{id}/cancel": {
+      "post": {
+        "operationId": "cancel_responses",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/responses/{id}/input_items": {
+      "get": {
+        "operationId": "input_items_responses",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "operationId": "models",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "operationId": "project_usage",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/requests/{id}": {
+      "get": {
+        "operationId": "request_evidence",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1/wallets": {
+      "get": {
+        "operationId": "wallets",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "x-gateway-roles": ["ADMIN", "BILLING"]
+      }
+    },
+    "/v1/requests/{id}/billing": {
+      "get": {
+        "operationId": "billing_receipt",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "x-gateway-roles": ["ADMIN", "BILLING"]
+      }
+    },
+    "/v1/project/keys": {
+      "get": {
+        "operationId": "project_keys",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "x-gateway-roles": ["ADMIN"]
+      },
+      "post": {
+        "operationId": "project_create_key",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Credential"
+              }
+            }
+          }
+        },
+        "x-gateway-roles": ["ADMIN"]
+      }
+    },
+    "/v1/project/keys/{id}": {
+      "delete": {
+        "operationId": "project_revoke_key",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "x-gateway-roles": ["ADMIN"]
+      }
+    },
+    "/v1beta/models": {
+      "get": {
+        "operationId": "gemini_models",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/v1beta/models/{model}:generateContent": {
+      "post": {
+        "operationId": "generateContent",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1beta/models/{model}:streamGenerateContent": {
+      "post": {
+        "operationId": "streamGenerateContent",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/projects": {
+      "get": {
+        "operationId": "admin_list_projects",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_create_projects",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Project"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/projects/{id}": {
+      "patch": {
+        "operationId": "admin_update_projects",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "billing_currency": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3,8}$"
+                  },
+                  "rpm": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "tpm": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "concurrency": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/providers": {
+      "get": {
+        "operationId": "admin_list_providers",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_create_providers",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Provider"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/providers/{id}": {
+      "patch": {
+        "operationId": "admin_update_providers",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "api_key": {
+                    "type": "string"
+                  },
+                  "rpm": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "concurrency": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/models": {
+      "get": {
+        "operationId": "admin_list_models",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_create_models",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Model"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/models/{model}": {
+      "patch": {
+        "operationId": "admin_update_models",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "operations": {
+                    "type": "array",
+                    "items": {
+                      "enum": [
+                        "chat",
+                        "responses",
+                        "messages",
+                        "gemini",
+                        "embeddings",
+                        "images",
+                        "image_edits",
+                        "speech",
+                        "transcription",
+                        "translation",
+                        "files",
+                        "batches",
+                        "videos",
+                        "moderations",
+                        "completions"
+                      ]
+                    }
+                  },
+                  "max_output_tokens": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "routing_strategy": {
+                    "enum": ["WEIGHTED", "ROUND_ROBIN", "LEAST_LATENCY"]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/projects/{id}/keys": {
+      "get": {
+        "operationId": "admin_keys",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_create_key",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Credential"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/keys/{id}": {
+      "delete": {
+        "operationId": "admin_revoke_key",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "admin_scope_key",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "models": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "operations": {
+                    "type": "array",
+                    "items": {
+                      "enum": [
+                        "chat",
+                        "responses",
+                        "messages",
+                        "gemini",
+                        "embeddings",
+                        "images",
+                        "image_edits",
+                        "speech",
+                        "transcription",
+                        "translation",
+                        "files",
+                        "batches",
+                        "videos",
+                        "moderations",
+                        "completions"
+                      ]
+                    }
+                  },
+                  "expires_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "role": {
+                    "enum": ["ADMIN", "INVOKER", "BILLING", "VIEWER"]
+                  },
+                  "allowed_cidrs": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "rpm": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "tpm": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "concurrency": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/models/{model}/routes": {
+      "get": {
+        "operationId": "admin_routes",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_create_route",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Route"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/routes/{id}": {
+      "patch": {
+        "operationId": "admin_update_route",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "priority": {
+                    "type": "integer"
+                  },
+                  "weight": {
+                    "type": "number"
+                  },
+                  "pricing": {
+                    "$ref": "#/components/schemas/Pricing"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/usage": {
+      "get": {
+        "operationId": "admin_usage",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/admin/projects/{id}/credits": {
+      "post": {
+        "operationId": "credit_wallet",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Credit"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/projects/{id}/wallets": {
+      "get": {
+        "operationId": "admin_wallets",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/admin/projects/{id}/wallets/{currency}/lots": {
+      "get": {
+        "operationId": "wallet_lots",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "currency",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/admin/projects/{id}/wallets/{currency}/journal": {
+      "get": {
+        "operationId": "wallet_journal",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "currency",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/admin/projects/{id}/wallets/{currency}": {
+      "patch": {
+        "operationId": "configure_wallet",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "currency",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "policy": {
+                    "enum": ["GIFT_FIRST", "CASH_FIRST", "EARLIEST_EXPIRY"]
+                  },
+                  "frozen": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/tariffs": {
+      "get": {
+        "operationId": "tariffs",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "post": {
+        "operationId": "set_tariff",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Tariff"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/charges/{id}/refunds": {
+      "post": {
+        "operationId": "refund_charge",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Refund"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/charges/{id}/adjustments": {
+      "post": {
+        "operationId": "adjust_charge",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Adjustment"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/requests/{id}/resolutions": {
+      "post": {
+        "operationId": "resolve_billing",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Resolution"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/organizations": {
+      "post": {
+        "operationId": "create_organization",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["external_ref", "name"],
+                "properties": {
+                  "external_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "rpm": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000000
+                  },
+                  "tpm": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000000
+                  },
+                  "concurrency": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/organizations/{id}": {
+      "patch": {
+        "operationId": "update_organization",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "rpm": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000000
+                  },
+                  "tpm": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000000
+                  },
+                  "concurrency": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/organizations/{id}/principals": {
+      "post": {
+        "operationId": "create_principal",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["external_ref", "role"],
+                "properties": {
+                  "external_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "role": {
+                    "enum": ["OWNER", "ADMIN", "MEMBER", "BILLING", "VIEWER"]
+                  },
+                  "rpm": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000000
+                  },
+                  "tpm": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000000
+                  },
+                  "concurrency": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/principals/{id}": {
+      "patch": {
+        "operationId": "update_principal",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "role": {
+                    "enum": ["OWNER", "ADMIN", "MEMBER", "BILLING", "VIEWER"]
+                  },
+                  "rpm": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000000
+                  },
+                  "tpm": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000000
+                  },
+                  "concurrency": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/consumers": {
+      "post": {
+        "operationId": "admin_create_consumer",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "replay": {
+                    "type": "boolean",
+                    "default": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/consumers/{id}/claim": {
+      "post": {
+        "operationId": "admin_claim_events",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "default": 100
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/consumers/{id}/ack": {
+      "post": {
+        "operationId": "admin_ack_events",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["lease_token", "event_ids"],
+                "properties": {
+                  "lease_token": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "event_ids": {
+                    "type": "array",
+                    "maxItems": 500,
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/recover": {
+      "post": {
+        "operationId": "admin_recover",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/admin/queue": {
+      "get": {
+        "operationId": "usage_queue_stats",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/admin/queue/jobs/{id}/retry": {
+      "post": {
+        "operationId": "retry_usage_job",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/admin/metrics": {
+      "get": {
+        "operationId": "metrics",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/livez": {
+      "get": {
+        "operationId": "livez",
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "readyz",
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openapi.json",
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    }
+  }
+}

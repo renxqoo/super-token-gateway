@@ -1,0 +1,13 @@
+{
+  "benchmark": "reports/gateway-release-sse-c32.json",
+  "durable_audit": "pass",
+  "includes_warmup": true,
+  "requests": "40581",
+  "attempts": "40581",
+  "events": "40581",
+  "final_events": "40581",
+  "succeeded_requests": "40581",
+  "input_tokens": "284067",
+  "output_tokens": "202905",
+  "cost_atoms": "173483775000000000"
+}

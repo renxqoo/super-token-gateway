@@ -1,0 +1,30 @@
+name: verify
+on: [push, pull_request]
+jobs:
+  gateway:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17@sha256:31ba9c94a03ada9988f2bb493a22a75eef3a185884533e5cdbcd498ea835b08f
+        env: { POSTGRES_USER: gateway, POSTGRES_PASSWORD: ci-only-password, POSTGRES_DB: gateway }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U gateway -d gateway" --health-interval 2s --health-timeout 2s --health-retries 30
+      redis:
+        image: redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
+        ports: ["6379:6379"]
+    env:
+      DATABASE_URL: postgres://gateway:ci-only-password@127.0.0.1:5432/gateway
+      REDIS_URL: redis://127.0.0.1:6379
+      QUEUE_REDIS_URL: redis://127.0.0.1:6380
+      QUEUE_REQUIRED_REPLICAS: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: 1.4.4 }
+      - name: Start strict durable usage Redis
+        run: docker run -d --name gateway-queue --publish 127.0.0.1:6380:6379 redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7 redis-server --appendonly yes --appendfsync always --aof-load-truncated no --maxmemory-policy noeviction
+      - run: bun install --frozen-lockfile
+      - run: bun run verify
+      - run: bun run test:durability
+      - uses: actions/upload-artifact@v4
+        with: { name: gateway-artifacts, path: dist }

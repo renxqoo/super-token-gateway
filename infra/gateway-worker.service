@@ -1,0 +1,24 @@
+[Unit]
+Description=LLM Gateway durable usage and financial settlement worker
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=llm-gateway
+Group=llm-gateway
+WorkingDirectory=/opt/llm-gateway/current
+EnvironmentFile=/etc/llm-gateway/worker.env
+ExecStart=/usr/local/bin/bun dist/gateway/worker-main.js
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=60
+KillSignal=SIGTERM
+LimitNOFILE=131072
+LimitCORE=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+[Install]
+WantedBy=multi-user.target

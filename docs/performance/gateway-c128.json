@@ -1,0 +1,37 @@
+{
+  "label": "gateway-release-c128",
+  "artifacts": {
+    "gateway_sha256": "a16414536057772b234cb30d7f7d0cd31272a987af5862ff8252841107f06d63",
+    "manifest_sha256": "4219954a9a8aa62465a0d244123031d539005486c8f8a34106643fd4004d2dfe"
+  },
+  "timestamp": "2026-11-10T04:27:32.635Z",
+  "started_at": "2026-11-10T04:26:31.559Z",
+  "warmup_requests": 2959,
+  "model": "gpt-4o-mini",
+  "runtime": "1.4.4",
+  "platform": "darwin/arm64",
+  "workload": "chat-json",
+  "duration_seconds": 60.02083,
+  "concurrency": 128,
+  "completed": 200220,
+  "succeeded": 200220,
+  "invalid": 0,
+  "successful_rps": 3335.84,
+  "success_ratio": 1,
+  "latency_ms": {
+    "p50": 33.19,
+    "p95": 50.85,
+    "p99": 233.84
+  },
+  "statuses": {
+    "200": 200220
+  },
+  "load_generator_peak_rss_bytes": 30753464,
+  "server_metrics": {
+    "sampled_peak_rss_bytes": 71992064,
+    "sampled_peak_buffered_bytes": 48428,
+    "cpu_seconds_including_warmup": 58.340829,
+    "metering_commits": 203179,
+    "metering_failures": 0
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "label": "new-api-baseline",
+  "timestamp": "2026-11-10T03:21:56.158Z",
+  "runtime": "1.4.4",
+  "platform": "darwin/arm64",
+  "workload": "chat-json",
+  "duration_seconds": 10.145591417,
+  "concurrency": 32,
+  "completed": 3357,
+  "succeeded": 3357,
+  "invalid": 0,
+  "successful_rps": 330.88,
+  "success_ratio": 1,
+  "latency_ms": {
+    "p50": 76.75,
+    "p95": 233.72,
+    "p99": 329.59
+  },
+  "statuses": {
+    "200": 3357
+  },
+  "load_generator_peak_rss_bytes": 11240144
+}

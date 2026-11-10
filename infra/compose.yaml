@@ -1,0 +1,102 @@
+services:
+  postgres:
+    image: postgres:17@sha256:31ba9c94a03ada9988f2bb493a22a75eef3a185884533e5cdbcd498ea835b08f
+    # Local capacity profile for the available 12 GiB VM; retain synchronous financial durability.
+    command:
+      [
+        "postgres",
+        "-c",
+        "shared_buffers=2GB",
+        "-c",
+        "effective_cache_size=6GB",
+        "-c",
+        "work_mem=8MB",
+        "-c",
+        "maintenance_work_mem=256MB",
+        "-c",
+        "max_wal_size=4GB",
+        "-c",
+        "min_wal_size=1GB",
+        "-c",
+        "checkpoint_timeout=15min",
+        "-c",
+        "checkpoint_completion_target=0.9",
+        "-c",
+        "wal_compression=on",
+        "-c",
+        "random_page_cost=1.1",
+        "-c",
+        "effective_io_concurrency=128",
+        "-c",
+        "autovacuum_naptime=5s",
+        "-c",
+        "shared_preload_libraries=pg_stat_statements",
+        "-c",
+        "fsync=on",
+        "-c",
+        "synchronous_commit=on",
+        "-c",
+        "full_page_writes=on",
+      ]
+    shm_size: 256mb
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: gateway_current
+    ports: ["127.0.0.1:55442:5432"]
+    volumes: ["gateway-pg:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway_current"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--maxmemory",
+        "256mb",
+        "--maxmemory-policy",
+        "noeviction",
+      ]
+    ports: ["127.0.0.1:56382:6379"]
+    volumes: ["gateway-redis:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+  queue-redis:
+    image: redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "always",
+        "--aof-load-truncated",
+        "no",
+        "--maxmemory",
+        "512mb",
+        "--maxmemory-policy",
+        "noeviction",
+      ]
+    ports: ["127.0.0.1:56383:6379"]
+    volumes: ["gateway-queue:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  gateway-pg:
+  gateway-redis:
+  gateway-queue:

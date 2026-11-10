@@ -1,0 +1,12 @@
+{
+  "name": "mock-model-providers",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/main.ts",
+    "check": "bun check --no-script"
+  },
+  "dependencies": {
+    "hono": "4.13.17"
+  }
+}

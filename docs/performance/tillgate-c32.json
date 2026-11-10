@@ -1,0 +1,23 @@
+{
+  "label": "tillgate-baseline",
+  "timestamp": "2026-11-10T03:18:17.307Z",
+  "runtime": "1.4.4",
+  "platform": "darwin/arm64",
+  "workload": "chat-json",
+  "duration_seconds": 10.897684625,
+  "concurrency": 32,
+  "completed": 694,
+  "succeeded": 694,
+  "invalid": 0,
+  "successful_rps": 63.68,
+  "success_ratio": 1,
+  "latency_ms": {
+    "p50": 259.84,
+    "p95": 1896.94,
+    "p99": 2162.84
+  },
+  "statuses": {
+    "200": 694
+  },
+  "load_generator_peak_rss_bytes": 8864416
+}

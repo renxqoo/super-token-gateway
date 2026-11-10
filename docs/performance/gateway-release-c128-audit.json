@@ -1,0 +1,13 @@
+{
+  "benchmark": "reports/gateway-release-c128.json",
+  "durable_audit": "pass",
+  "includes_warmup": true,
+  "requests": "203179",
+  "attempts": "203179",
+  "events": "203179",
+  "final_events": "203179",
+  "succeeded_requests": "203179",
+  "input_tokens": "1422253",
+  "output_tokens": "1015895",
+  "cost_atoms": "868590225000000000"
+}

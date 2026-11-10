@@ -1,0 +1,14 @@
+node_modules/
+.env*
+!.env.example
+dist/
+coverage/
+.local/
+reports/*.json
+*.log
+.DS_Store
+*.dump
+*.pem
+*.key
+.aws/
+.ssh/

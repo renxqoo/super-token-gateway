@@ -1,0 +1,13 @@
+{
+  "name": "@gateway/server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@gateway/kernel": "workspace:*",
+    "@gateway/storage": "workspace:*",
+    "@gateway/connectors": "workspace:*",
+    "@gateway/runtime": "workspace:*",
+    "hono": "4.13.17",
+    "zod": "4.6.7"
+  }
+}

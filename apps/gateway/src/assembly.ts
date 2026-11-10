@@ -1,0 +1,48 @@
+import { createDatabase, Store, FundsStore, SCHEMA_VERSION } from "@gateway/storage";
+import { Lifecycle, Limits, Metrics, MemoryBudget, UsageProducer } from "@gateway/runtime";
+import { Metering } from "./usage.ts";
+import type { Config } from "./config.ts";
+import type { Dependencies } from "./context.ts";
+
+export async function assemble(config: Config): Promise<Dependencies> {
+  const db = createDatabase(config.DATABASE_URL, config.DB_POOL_SIZE);
+  const limits = new Limits(config.REDIS_URL, config.REDIS_NAMESPACE);
+  let producer: UsageProducer | undefined;
+  try {
+    await limits.redis.connect();
+    await limits.redis.ping();
+    await db`SELECT 1`;
+    const schema = await db<{ version: number }[]>`SELECT version FROM schema_migrations`;
+    if (schema.length !== 1 || schema[0]?.version !== SCHEMA_VERSION)
+      throw new Error(
+        "Incompatible database schema; only the current durable-queue contract is supported",
+      );
+    producer = new UsageProducer({
+      url: config.QUEUE_REDIS_URL,
+      namespace: config.REDIS_NAMESPACE,
+      replicas: config.QUEUE_REQUIRED_REPLICAS,
+      timeoutMs: config.QUEUE_ACK_TIMEOUT_MS,
+      batchSize: config.QUEUE_BATCH_SIZE,
+      batchDelayMs: config.QUEUE_BATCH_DELAY_MS,
+      maxPendingJobs: config.QUEUE_MAX_PENDING_JOBS,
+      maxInFlight: config.MAX_INFLIGHT,
+    });
+    const dependencies: Dependencies = {
+      config,
+      usage: new Metering(producer),
+      store: new Store(db),
+      funds: new FundsStore(db),
+      limits,
+      lifecycle: new Lifecycle(config.MAX_INFLIGHT),
+      metrics: new Metrics(),
+      memory: new MemoryBudget(config.MAX_BUFFERED_BYTES),
+    };
+    await dependencies.usage.producer.ready();
+    return dependencies;
+  } catch (error) {
+    producer?.close();
+    limits.close();
+    await db.close({ timeout: 1 }).catch(() => undefined);
+    throw error;
+  }
+}

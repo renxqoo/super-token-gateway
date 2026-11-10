@@ -1,0 +1,8 @@
+{
+  "backup_restore": "pass",
+  "bytes": 88059594,
+  "sha256": "42576ee1a9fcb1f2a1cec9a9d98d811b34b8479ad4cfb8506c2ae67401165655",
+  "attempts": "465651",
+  "usage": "465651",
+  "immutable_trigger": "verified"
+}

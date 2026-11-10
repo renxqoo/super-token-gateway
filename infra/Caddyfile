@@ -1,0 +1,21 @@
+# Replace the hostname and local ports for your deployment. Admin stays private.
+gateway.example.com {
+	encode zstd gzip
+	@public path /v1/* /v1beta/*
+	handle @public {
+		reverse_proxy 127.0.0.1:8088 127.0.0.1:8089 {
+			lb_policy least_conn
+			health_uri /readyz
+			health_interval 5s
+			health_timeout 2s
+			fail_duration 10s
+			flush_interval -1
+			# No transparent proxy replay of POST, including after unknown upstream execution.
+			lb_try_duration 0s
+		}
+	}
+	handle {
+		respond "Not found" 404
+	}
+	# Do not enable request/response body logging, buffering plugins or response caches.
+}

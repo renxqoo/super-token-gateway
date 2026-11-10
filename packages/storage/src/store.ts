@@ -1,0 +1,613 @@
+import { Batcher } from "@gateway/kernel";
+import { fundingError } from "./funds.ts";
+import type { SQL } from "bun";
+import { GatewayError, sha256 } from "@gateway/kernel";
+import type {
+  BillingQuote,
+  Credential,
+  Operation,
+  Project,
+  Resource,
+  Route,
+  UsageEvidence,
+  Pricing,
+  Finality,
+  Usage,
+} from "@gateway/kernel";
+
+type KeyInput = {
+  name: string;
+  models: string[];
+  operations: Operation[];
+  principal_id?: string | undefined;
+  role?: string | undefined;
+  allowed_cidrs?: string[] | undefined;
+  rpm?: number | undefined;
+  tpm?: number | undefined;
+  concurrency?: number | undefined;
+  expires_at?: string | undefined;
+};
+type ProjectInput = {
+  name: string;
+  external_ref?: string | undefined;
+  billing_currency?: string | undefined;
+  organization_id?: string | undefined;
+  rpm: number;
+  tpm: number;
+  concurrency: number;
+};
+type ProviderInput = {
+  name: string;
+  kind: string;
+  base_url: string;
+  concurrency: number;
+  rpm: number;
+};
+type RouteInput = {
+  provider_id: string;
+  upstream_model: string;
+  operations: Operation[];
+  priority: number;
+  weight: number;
+  pricing: Pricing;
+};
+interface ModelMetadata {
+  name: string;
+  operations: Operation[];
+  max_output_tokens: number;
+  routing_strategy: string;
+}
+export interface RequestRecord {
+  id: string;
+  state: string;
+  fingerprint: string;
+}
+export interface UsageRecord {
+  id: string;
+  seq: string;
+  project_id: string;
+  request_id: string;
+  attempt_id: string;
+  source: string;
+  semantics: "attempt_snapshot";
+  finality: Finality;
+  usage: Usage;
+  cost_atoms: string;
+  currency: string;
+  cost_complete: boolean;
+}
+
+export interface TokenSummary {
+  complete: boolean;
+  tokens: number;
+}
+
+export class Store {
+  private modelCache = new Map<
+    string,
+    {
+      until: number;
+      model: {
+        name: string;
+        operations: Operation[];
+        max_output_tokens: number;
+        routing_strategy: string;
+      };
+    }
+  >();
+  private routeCache = new Map<string, { until: number; routes: Route[] }>();
+  private readonly modelLoads = new Map<string, Promise<ModelMetadata>>();
+  private readonly routeLoads = new Map<string, Promise<Route[]>>();
+  private readonly authenticationBatch: Batcher<
+    string,
+    { credential: Credential; project: Project } | undefined
+  >;
+  private readonly admissionBatch: Batcher<Record<string, unknown>, Record<string, unknown>>;
+  constructor(readonly db: SQL) {
+    this.authenticationBatch = new Batcher((hashes) => this.authenticateMany(hashes));
+    this.admissionBatch = new Batcher(
+      async (inputs) => {
+        const rows = await this.db`SELECT admit_gateway_batch(${inputs}::jsonb) AS result`;
+        return inputs.map((_, i) => rows[0].result[String(i)]);
+      },
+      64,
+      2,
+      2,
+    );
+  }
+
+  async createProject(input: ProjectInput): Promise<string> {
+    const id = crypto.randomUUID();
+    await this
+      .db`INSERT INTO projects(id,name,external_ref,rpm,tpm,concurrency,billing_currency,organization_id)
+      VALUES(${id},${input.name},${input.external_ref ?? null},${input.rpm},${input.tpm},${input.concurrency},${input.billing_currency ?? "USD"},${input.organization_id ?? null})`;
+    return id;
+  }
+  async projects(): Promise<Project[]> {
+    return this.db<Project[]>`SELECT * FROM projects ORDER BY created_at DESC LIMIT 200`;
+  }
+  async setProject(id: string, enabled: boolean): Promise<void> {
+    const rows = await this.db`UPDATE projects SET enabled=${enabled} WHERE id=${id} RETURNING id`;
+    if (!rows.length) throw new GatewayError(404, "not_found", "Project not found");
+  }
+  async createCredential(
+    projectId: string,
+    input: KeyInput,
+    hash: string,
+    prefix: string,
+  ): Promise<string> {
+    const id = crypto.randomUUID();
+    await this
+      .db`INSERT INTO api_keys(id,project_id,name,verifier,prefix,models,operations,expires_at,principal_id,role,allowed_cidrs,rpm,tpm,concurrency)
+      VALUES(${id},${projectId},${input.name},${hash},${prefix},${input.models},${input.operations},${input.expires_at ?? null},${input.principal_id ?? null},${input.role ?? "INVOKER"},${input.allowed_cidrs ?? []},${input.rpm ?? null},${input.tpm ?? null},${input.concurrency ?? null})`;
+    return id;
+  }
+  async keys(projectId: string): Promise<unknown[]> {
+    return this
+      .db`SELECT id,project_id,name,prefix,models,operations,enabled,expires_at,created_at,principal_id,role,allowed_cidrs,rpm,tpm,concurrency FROM api_keys WHERE project_id=${projectId} ORDER BY created_at DESC LIMIT 200`;
+  }
+  async revokeKey(id: string): Promise<void> {
+    await this.db`UPDATE api_keys SET enabled=false WHERE id=${id}`;
+  }
+  async authenticate(
+    hash: string,
+  ): Promise<{ credential: Credential; project: Project } | undefined> {
+    return this.authenticationBatch.add(hash);
+  }
+  private async authenticateMany(
+    hashes: string[],
+  ): Promise<({ credential: Credential; project: Project } | undefined)[]> {
+    const rows = await this.db<
+      (Project &
+        Credential & {
+          verifier: string;
+          key_id: string;
+          key_rpm: number | null;
+          key_tpm: number | null;
+          key_concurrency: number | null;
+        })[]
+    >`SELECT k.verifier,k.id AS key_id,k.project_id,k.models,k.operations,k.principal_id,k.role,k.allowed_cidrs,k.rpm AS key_rpm,k.tpm::float8 AS key_tpm,k.concurrency AS key_concurrency,u.rpm AS principal_rpm,u.tpm::float8 AS principal_tpm,u.concurrency AS principal_concurrency,
+    p.id,p.name,p.enabled,p.rpm,p.tpm,p.concurrency,p.billing_currency,p.organization_id,o.rpm AS organization_rpm,o.tpm::float8 AS organization_tpm,o.concurrency AS organization_concurrency
+    FROM api_keys k JOIN projects p ON p.id=k.project_id LEFT JOIN organizations o ON o.id=p.organization_id LEFT JOIN principals u ON u.id=k.principal_id
+    WHERE k.verifier=ANY(${hashes}::text[]) AND k.enabled AND p.enabled AND (k.expires_at IS NULL OR k.expires_at>now()) AND (o.id IS NULL OR o.enabled) AND (u.id IS NULL OR u.enabled AND (k.role<>'ADMIN' OR u.role IN ('OWNER','ADMIN')) AND (k.role<>'INVOKER' OR u.role IN ('OWNER','ADMIN','MEMBER')) AND (k.role<>'BILLING' OR u.role IN ('OWNER','ADMIN','BILLING')))`;
+    const byHash = new Map(rows.map((row) => [row.verifier, row]));
+    return hashes.map((hash) => {
+      const row = byHash.get(hash);
+      return row
+        ? {
+            credential: {
+              id: row.key_id,
+              project_id: row.project_id,
+              models: row.models,
+              operations: row.operations,
+              principal_id: row.principal_id ?? null,
+              role: row.role ?? "INVOKER",
+              allowed_cidrs: row.allowed_cidrs ?? [],
+              rpm: row.key_rpm,
+              tpm: row.key_tpm,
+              concurrency: row.key_concurrency,
+              principal_rpm: row.principal_rpm ?? 0,
+              principal_tpm: row.principal_tpm ?? 0,
+              principal_concurrency: row.principal_concurrency ?? 0,
+            },
+            project: row,
+          }
+        : undefined;
+    });
+  }
+  async createProvider(id: string, input: ProviderInput, secret: string): Promise<void> {
+    await this.db`INSERT INTO providers(id,name,kind,base_url,secret,concurrency,rpm)
+      VALUES(${id},${input.name},${input.kind},${input.base_url},${secret},${input.concurrency},${input.rpm})`;
+  }
+  async providers(): Promise<unknown[]> {
+    return this
+      .db`SELECT id,name,kind,base_url,enabled,concurrency,rpm FROM providers ORDER BY name LIMIT 500`;
+  }
+  async provider(id: string): Promise<Route> {
+    const rows = await this.db<Route[]>`SELECT *,id AS provider_id FROM providers WHERE id=${id}`;
+    if (!rows[0])
+      throw new GatewayError(503, "provider_unavailable", "The original provider is unavailable");
+    return rows[0];
+  }
+  async setProvider(id: string, enabled: boolean): Promise<void> {
+    await this.db`UPDATE providers SET enabled=${enabled} WHERE id=${id}`;
+    this.routeCache.clear();
+    this.routeLoads.clear();
+  }
+  async createModel(input: {
+    name: string;
+    operations: Operation[];
+    max_output_tokens: number;
+    routing_strategy?: string;
+  }): Promise<void> {
+    await this
+      .db`INSERT INTO models(name,operations,max_output_tokens,routing_strategy) VALUES(${input.name},${input.operations},${input.max_output_tokens},${input.routing_strategy ?? "WEIGHTED"})`;
+  }
+  async models(
+    allowed: string[] = [],
+  ): Promise<
+    { name: string; operations: Operation[]; max_output_tokens: number; routing_strategy: string }[]
+  > {
+    return this
+      .db`SELECT name,operations,max_output_tokens,routing_strategy FROM models WHERE enabled AND (${allowed.length === 0} OR name=ANY(${allowed})) ORDER BY name LIMIT 2000`;
+  }
+  async model(name: string): Promise<ModelMetadata> {
+    const cached = this.modelCache.get(name);
+    if (cached && cached.until > Date.now()) return cached.model;
+    const pending = this.modelLoads.get(name);
+    if (pending) return pending;
+    let load!: Promise<ModelMetadata>;
+    load = (async () => {
+      const rows = await this.db<
+        ModelMetadata[]
+      >`SELECT name,operations,max_output_tokens,routing_strategy FROM models WHERE name=${name} AND enabled`;
+      if (!rows[0]) throw new GatewayError(404, "model_not_found", "Model not found");
+      if (this.modelCache.size > 2000) this.modelCache.clear();
+      if (this.modelLoads.get(name) === load)
+        this.modelCache.set(name, { until: Date.now() + 1000, model: rows[0] });
+      return rows[0];
+    })();
+    this.modelLoads.set(name, load);
+    try {
+      return await load;
+    } finally {
+      if (this.modelLoads.get(name) === load) this.modelLoads.delete(name);
+    }
+  }
+  async createRoute(model: string, input: RouteInput): Promise<string> {
+    const id = crypto.randomUUID();
+    const pricingId = crypto.randomUUID();
+    await this.db.begin(async (tx) => {
+      await tx`INSERT INTO cost_versions(id,currency,rates) VALUES(${pricingId},${input.pricing.currency},${input.pricing.rates})`;
+      await tx`INSERT INTO routes(id,model_name,provider_id,upstream_model,operations,priority,weight,pricing_id)
+        VALUES(${id},${model},${input.provider_id},${input.upstream_model},${[...new Set(input.operations)].sort()},${input.priority},${input.weight},${pricingId})`;
+    });
+    this.routeCache.clear();
+    this.routeLoads.clear();
+    return id;
+  }
+  async routes(model: string, operation: Operation): Promise<Route[]> {
+    const key = `${model}:${operation}`;
+    const cached = this.routeCache.get(key);
+    if (cached && cached.until > Date.now()) return cached.routes;
+    const pending = this.routeLoads.get(key);
+    if (pending) return pending;
+    let load!: Promise<Route[]>;
+    load = (async () => {
+      const rows = await this.db<
+        Route[]
+      >`SELECT r.*,p.kind,p.base_url,p.secret,p.concurrency,p.rpm,jsonb_build_object('currency',v.currency,'rates',v.rates) AS pricing FROM routes r JOIN providers p ON p.id=r.provider_id JOIN models m ON m.name=r.model_name JOIN cost_versions v ON v.id=r.pricing_id WHERE r.model_name=${model} AND r.enabled AND p.enabled AND m.enabled AND ${operation}=ANY(r.operations) AND ${operation}=ANY(m.operations) ORDER BY r.priority DESC`;
+      if (this.routeCache.size > 10000) this.routeCache.clear();
+      if (this.routeLoads.get(key) === load)
+        this.routeCache.set(key, { until: Date.now() + 1000, routes: rows });
+      return rows;
+    })();
+    this.routeLoads.set(key, load);
+    try {
+      return await load;
+    } finally {
+      if (this.routeLoads.get(key) === load) this.routeLoads.delete(key);
+    }
+  }
+  async admitInitial(
+    id: string,
+    credential: Credential,
+    operation: Operation,
+    model: string,
+    digest: string | null,
+    fingerprint: string,
+    route: Route,
+    quote: BillingQuote,
+  ): Promise<{ record: RequestRecord; created: boolean; attempt_id?: string }> {
+    const payload = {
+      id,
+      key_id: credential.id,
+      project_id: credential.project_id,
+      operation,
+      model,
+      digest,
+      fingerprint,
+      route_id: route.id,
+      cost_pricing_id: route.pricing_id,
+      quote,
+    };
+    try {
+      const result = await this.admissionBatch.add(payload);
+      if (result.error) throw { errno: String(result.error) };
+      return result as unknown as { record: RequestRecord; created: boolean; attempt_id?: string };
+    } catch (error) {
+      if ((error as { errno?: string }).errno === "P0409")
+        throw new GatewayError(
+          409,
+          "idempotency_conflict",
+          "Idempotency key has a different payload",
+        );
+      fundingError(error);
+    }
+  }
+  async request(
+    id: string,
+    projectId: string,
+    models: string[] = [],
+    operations: Operation[] = [],
+  ): Promise<unknown> {
+    const rows = await this
+      .db`SELECT id,operation,model,state,created_at,updated_at FROM gateway_requests WHERE id=${id} AND project_id=${projectId}
+      AND (${models.length === 0} OR model=ANY(${models})) AND (${operations.length === 0} OR operation=ANY(${operations}))`;
+    if (!rows[0]) throw new GatewayError(404, "not_found", "Request not found");
+    const attempts = await this
+      .db`SELECT id,ordinal,state,error_code,started_at,finished_at FROM attempts WHERE request_id=${id} ORDER BY ordinal`;
+    const usage = await this
+      .db`SELECT attempt_id,source,'attempt_snapshot' AS semantics,finality,usage,cost_atoms::text,currency,cost_complete FROM usage_events WHERE request_id=${id} ORDER BY seq`;
+    return { ...rows[0], attempts, usage };
+  }
+  async startAttempt(requestId: string, ordinal: number, route: Route): Promise<string> {
+    const id = crypto.randomUUID();
+    await this
+      .db`WITH admitted AS (INSERT INTO attempts(id,request_id,ordinal,provider_id,upstream_model,pricing_id,state,billing_pricing_id)
+      SELECT ${id},q.id,${ordinal},${route.provider_id},${route.upstream_model},${route.pricing_id},'DISPATCHING',(q.billing_quote->'prices'->>${route.provider_id})::uuid FROM gateway_requests q WHERE q.id=${requestId} RETURNING request_id)
+      UPDATE gateway_requests q SET state='RUNNING',updated_at=now() FROM admitted a WHERE q.id=a.request_id`;
+    return id;
+  }
+  async persistUsage(events: UsageEvidence[]): Promise<Record<string, number>> {
+    const rows = await this.db<
+      {
+        result: Record<
+          string,
+          { status: string; error?: string; billing?: { state: string; replayed?: boolean } }
+        >;
+      }[]
+    >`SELECT persist_usage_batch(${events}::jsonb) AS result`;
+    const counts: Record<string, number> = {};
+    let failed = false;
+    for (const result of Object.values(rows[0]?.result ?? {})) {
+      if (result.status === "ERROR") failed = true;
+      const state = result.billing?.replayed
+        ? "REPLAYED"
+        : (result.billing?.state ?? result.status);
+      counts[state] = (counts[state] ?? 0) + 1;
+    }
+    if (failed)
+      throw new GatewayError(
+        503,
+        "usage_commit_failed",
+        "One or more usage or financial effects require retry; the durable job must be retained",
+      );
+    return counts;
+  }
+  async tokenSummary(requestId: string): Promise<TokenSummary> {
+    const rows = await this.db<
+      { result: { complete: boolean; tokens: string } }[]
+    >`SELECT gateway_token_summary(${requestId}::uuid) AS result`;
+    const row = rows[0]?.result;
+    const tokens = Number(row?.tokens ?? 0);
+    return { complete: !!row?.complete && Number.isSafeInteger(tokens) && tokens >= 0, tokens };
+  }
+  async usage(
+    projectId: string | null,
+    limit = 100,
+    before?: string,
+    models: string[] = [],
+    operations: Operation[] = [],
+  ): Promise<UsageRecord[]> {
+    if (
+      before !== undefined &&
+      (!/^[1-9][0-9]{0,18}$/.test(before) || BigInt(before) > 9223372036854775807n)
+    )
+      throw new GatewayError(400, "invalid_cursor", "Usage cursor must be a positive bigint");
+    return this.db<
+      UsageRecord[]
+    >`SELECT id,seq::text,project_id,request_id,attempt_id,source,'attempt_snapshot' AS semantics,finality,usage,cost_atoms::text,currency,cost_complete
+      FROM usage_events WHERE
+      EXISTS(SELECT 1 FROM gateway_requests q WHERE q.id=usage_events.request_id AND (${models.length === 0} OR q.model=ANY(${models})) AND (${operations.length === 0} OR q.operation=ANY(${operations}))) AND (${projectId}::uuid IS NULL OR project_id=${projectId})
+      AND (${before ?? null}::bigint IS NULL OR seq<${before ?? null}::bigint) ORDER BY seq DESC LIMIT ${limit}`;
+  }
+  async updateProject(
+    id: string,
+    patch: { [K in keyof ProjectInput]?: ProjectInput[K] | undefined } & {
+      enabled?: boolean | undefined;
+    },
+  ): Promise<void> {
+    const rows = await this
+      .db`UPDATE projects SET name=coalesce(${patch.name ?? null},name),enabled=coalesce(${patch.enabled ?? null},enabled),rpm=coalesce(${patch.rpm ?? null},rpm),tpm=coalesce(${patch.tpm ?? null},tpm),concurrency=coalesce(${patch.concurrency ?? null},concurrency),billing_currency=coalesce(${patch.billing_currency ?? null},billing_currency) WHERE id=${id} RETURNING id`;
+    if (!rows.length) throw new GatewayError(404, "not_found", "Project not found");
+  }
+  async updateProvider(
+    id: string,
+    patch: {
+      enabled?: boolean | undefined;
+      rpm?: number | undefined;
+      concurrency?: number | undefined;
+    },
+    secret?: string,
+  ): Promise<void> {
+    const rows = await this
+      .db`UPDATE providers SET enabled=coalesce(${patch.enabled ?? null},enabled),rpm=coalesce(${patch.rpm ?? null},rpm),concurrency=coalesce(${patch.concurrency ?? null},concurrency),secret=coalesce(${secret ?? null},secret) WHERE id=${id} RETURNING id`;
+    if (!rows.length) throw new GatewayError(404, "not_found", "Provider not found");
+    this.routeCache.clear();
+    this.routeLoads.clear();
+  }
+  async updateModel(
+    name: string,
+    patch: {
+      enabled?: boolean | undefined;
+      operations?: Operation[] | undefined;
+      max_output_tokens?: number | undefined;
+      routing_strategy?: string | undefined;
+    },
+  ): Promise<void> {
+    const rows = await this
+      .db`UPDATE models SET enabled=coalesce(${patch.enabled ?? null},enabled),operations=coalesce(${patch.operations ?? null}::text[],operations),max_output_tokens=coalesce(${patch.max_output_tokens ?? null},max_output_tokens),routing_strategy=coalesce(${patch.routing_strategy ?? null},routing_strategy) WHERE name=${name} RETURNING name`;
+    if (!rows.length) throw new GatewayError(404, "not_found", "Model not found");
+    this.modelCache.delete(name);
+    this.modelLoads.delete(name);
+    this.routeCache.clear();
+    this.routeLoads.clear();
+  }
+  async adminModels(): Promise<unknown[]> {
+    return this
+      .db`SELECT name,enabled,operations,max_output_tokens,routing_strategy FROM models ORDER BY name LIMIT 2000`;
+  }
+  async routeDefinitions(model: string): Promise<unknown[]> {
+    return this
+      .db`SELECT r.*,jsonb_build_object('currency',v.currency,'rates',v.rates) AS pricing FROM routes r JOIN cost_versions v ON v.id=r.pricing_id WHERE model_name=${model} ORDER BY priority DESC,id LIMIT 2000`;
+  }
+  async updateRoute(
+    id: string,
+    patch: {
+      enabled?: boolean | undefined;
+      priority?: number | undefined;
+      weight?: number | undefined;
+      pricing?: Pricing | undefined;
+    },
+  ): Promise<void> {
+    await this.db.begin(async (tx) => {
+      const pricingId = patch.pricing ? crypto.randomUUID() : null;
+      if (pricingId && patch.pricing)
+        await tx`INSERT INTO cost_versions(id,currency,rates) VALUES(${pricingId},${patch.pricing.currency},${patch.pricing.rates})`;
+      const rows =
+        await tx`UPDATE routes SET enabled=coalesce(${patch.enabled ?? null},enabled),priority=coalesce(${patch.priority ?? null},priority),weight=coalesce(${patch.weight ?? null},weight),pricing_id=coalesce(${pricingId}::uuid,pricing_id) WHERE id=${id} RETURNING id`;
+      if (!rows.length) throw new GatewayError(404, "not_found", "Route not found");
+    });
+    this.routeCache.clear();
+    this.routeLoads.clear();
+  }
+  async updateCredential(
+    id: string,
+    patch: {
+      models?: string[] | undefined;
+      operations?: Operation[] | undefined;
+      expires_at?: string | undefined;
+      allowed_cidrs?: string[] | undefined;
+      role?: string | undefined;
+      rpm?: number | undefined;
+      tpm?: number | undefined;
+      concurrency?: number | undefined;
+    },
+  ): Promise<void> {
+    const rows = await this
+      .db`UPDATE api_keys SET models=coalesce(${patch.models ?? null}::text[],models),operations=coalesce(${patch.operations ?? null}::text[],operations),expires_at=coalesce(${patch.expires_at ?? null}::timestamptz,expires_at),allowed_cidrs=coalesce(${patch.allowed_cidrs ?? null}::text[],allowed_cidrs),role=coalesce(${patch.role ?? null},role),rpm=coalesce(${patch.rpm ?? null},rpm),tpm=coalesce(${patch.tpm ?? null},tpm),concurrency=coalesce(${patch.concurrency ?? null},concurrency) WHERE id=${id} AND enabled RETURNING id`;
+    if (!rows.length) throw new GatewayError(404, "not_found", "Active credential not found");
+  }
+  async createConsumer(name: string, replay: boolean): Promise<string> {
+    const id = crypto.randomUUID();
+    await this.db.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(81442592)`;
+      await tx`INSERT INTO event_consumers(id,name,replay_until) VALUES(${id},${name},${replay}::boolean::integer*(SELECT coalesce(max(seq),0) FROM usage_events))`;
+    });
+    return id;
+  }
+  async backfillConsumer(consumerId: string): Promise<void> {
+    await this
+      .db`WITH owned AS (SELECT id,replay_cursor,replay_until FROM event_consumers WHERE id=${consumerId} AND replay_cursor<replay_until FOR UPDATE SKIP LOCKED),
+    page AS (SELECT e.id,e.seq FROM usage_events e,owned o WHERE e.seq>o.replay_cursor AND e.seq<=o.replay_until ORDER BY e.seq LIMIT 1000),
+    inserted AS (INSERT INTO event_deliveries(consumer_id,event_id) SELECT ${consumerId},id FROM page ON CONFLICT DO NOTHING RETURNING event_id)
+    UPDATE event_consumers c SET replay_cursor=coalesce((SELECT max(seq) FROM page),o.replay_until) FROM owned o WHERE c.id=o.id`;
+  }
+  async claimEvents(
+    consumerId: string,
+    limit: number,
+  ): Promise<{ lease_token: string; events: UsageRecord[] }> {
+    await this.backfillConsumer(consumerId);
+    const token = crypto.randomUUID();
+    const events = await this.db.begin(
+      async (tx) => tx<UsageRecord[]>`
+      WITH selected AS (SELECT consumer_id,event_id FROM event_deliveries
+        WHERE consumer_id=${consumerId} AND state<>'ACKED' AND (lease_until IS NULL OR lease_until<now())
+        ORDER BY event_id LIMIT ${limit} FOR UPDATE SKIP LOCKED), claimed AS (
+        UPDATE event_deliveries d SET state='LEASED',lease_token=${token},lease_until=now()+interval '30 seconds',attempts=d.attempts+1
+        FROM selected s WHERE d.consumer_id=s.consumer_id AND d.event_id=s.event_id RETURNING d.event_id)
+      SELECT e.id,e.seq::text,e.project_id,e.request_id,e.attempt_id,e.source,'attempt_snapshot' AS semantics,e.finality,e.usage,e.cost_atoms::text,e.currency,e.cost_complete
+      FROM usage_events e JOIN claimed c ON e.id=c.event_id`,
+    );
+    return { lease_token: token, events };
+  }
+  async ackEvents(consumerId: string, token: string, ids: string[]): Promise<number> {
+    const rows = await this
+      .db`UPDATE event_deliveries SET state='ACKED',lease_until=NULL WHERE consumer_id=${consumerId}
+      AND lease_token=${token} AND event_id=ANY(${ids}) AND state='LEASED' AND lease_until>now() RETURNING event_id`;
+    return rows.length;
+  }
+  async saveResource(
+    projectId: string,
+    providerId: string,
+    remoteId: string,
+    kind: string,
+    model: string | null,
+    attemptId: string | null = null,
+    preferredId?: string,
+    batch?: { endpoint: string; upstreamModel: string },
+  ): Promise<string> {
+    if (
+      !/^[A-Za-z0-9_:/.-]{1,500}$/.test(remoteId) ||
+      remoteId.split("/").some((part) => part === "." || part === "..")
+    )
+      throw new GatewayError(502, "invalid_upstream", "Invalid provider resource identity");
+    const id = preferredId ?? `${kind}_${crypto.randomUUID().replaceAll("-", "")}`;
+    const rows = await this.db<
+      { id: string }[]
+    >`INSERT INTO resources(id,project_id,provider_id,remote_id,kind,model,attempt_id,batch_endpoint,batch_upstream_model)
+      VALUES(${id},${projectId},${providerId},${remoteId},${kind},${model},${attemptId},${batch?.endpoint ?? null},${batch?.upstreamModel ?? null})
+      ON CONFLICT(project_id,provider_id,kind,remote_id) DO UPDATE SET updated_at=resources.updated_at RETURNING id`;
+    const row = rows[0];
+    if (!row) throw new Error("Resource insert failed");
+    return row.id;
+  }
+  async resource(id: string, projectId: string, kind?: string): Promise<Resource> {
+    const rows = await this.db<
+      Resource[]
+    >`SELECT * FROM resources WHERE id=${id} AND project_id=${projectId}
+      AND state<>'DELETED' AND (${kind ?? null}::text IS NULL OR kind=${kind ?? null})`;
+    if (!rows[0]) throw new GatewayError(404, "not_found", "Resource not found");
+    return rows[0];
+  }
+  async resources(
+    projectId: string,
+    kind: string,
+    models: string[] = [],
+    limit = 100,
+    after?: string,
+  ): Promise<Resource[]> {
+    if (after) {
+      const cursor = await this
+        .db`SELECT id FROM resources WHERE id=${after} AND project_id=${projectId} AND kind=${kind} AND (${models.length === 0} OR model=ANY(${models}))`;
+      if (!cursor.length) throw new GatewayError(404, "not_found", "Resource cursor not found");
+    }
+    return this.db<
+      Resource[]
+    >`SELECT * FROM resources r WHERE project_id=${projectId} AND kind=${kind} AND state<>'DELETED'
+      AND (${models.length === 0} OR model=ANY(${models}))
+      AND (${after ?? null}::text IS NULL OR (created_at,id)<(SELECT created_at,id FROM resources WHERE id=${after ?? null}))
+      ORDER BY created_at DESC,id DESC LIMIT ${limit + 1}`;
+  }
+  async updateResource(id: string, state: string, upstreamState?: string): Promise<void> {
+    await this
+      .db`UPDATE resources SET state=${state},upstream_state=coalesce(${upstreamState ?? null},upstream_state),updated_at=now() WHERE id=${id}`;
+  }
+  async audit(action: string, resourceId: string): Promise<void> {
+    await this
+      .db`INSERT INTO audit_events(id,action,resource_id) VALUES(${crypto.randomUUID()},${action},${sha256(resourceId)})`;
+  }
+  async staleAttempts(ageSeconds: number): Promise<{ id: string }[]> {
+    return this.db<
+      { id: string }[]
+    >`SELECT id FROM attempts WHERE state='DISPATCHING' AND started_at<now()-${ageSeconds}*interval '1 second' LIMIT 100`;
+  }
+  async claimResources(limit: number): Promise<{ token: string; resources: Resource[] }> {
+    const token = crypto.randomUUID();
+    const resources = await this.db<
+      Resource[]
+    >`WITH due AS (SELECT id FROM resources WHERE state IN ('ACTIVE','PENDING_USAGE')
+      AND kind IN ('batch','video','response','operation') AND next_poll_at<=now() AND (poll_until IS NULL OR poll_until<now())
+      AND (attempt_id IS NULL OR EXISTS(SELECT 1 FROM attempts a WHERE a.id=resources.attempt_id AND a.state<>'DISPATCHING'))
+      ORDER BY next_poll_at LIMIT ${limit} FOR UPDATE SKIP LOCKED)
+      UPDATE resources r SET poll_token=${token},poll_until=now()+interval '30 seconds'
+      FROM due WHERE r.id=due.id RETURNING r.*`;
+    return { token, resources };
+  }
+  async completePoll(id: string, token: string, failed: boolean): Promise<void> {
+    await this
+      .db`UPDATE resources SET poll_until=NULL,poll_count=poll_count+1,next_poll_at=now()+least(3600,greatest(${failed ? 30 : 5},power(2,least(poll_count,11))::integer))*interval '1 second'
+      WHERE id=${id} AND poll_token=${token}`;
+  }
+}
