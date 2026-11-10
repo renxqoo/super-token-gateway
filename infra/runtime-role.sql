@@ -19,7 +19,7 @@ GRANT EXECUTE ON FUNCTION persist_usage_batch(jsonb),settle_requests(uuid[],uuid
 GRANT UPDATE(reconcile_token,reconcile_until) ON billing_holds TO gateway_worker;
 GRANT INSERT,UPDATE ON resources TO gateway_worker;
 -- Revoke helper entrypoints for every untrusted caller, including the HTTP runtime.
-REVOKE ALL ON FUNCTION record_usage_evidence(uuid,uuid,text,text,text,jsonb,numeric,boolean,text,text),commit_usage_evidence(uuid,uuid,text,text,text,jsonb,numeric,boolean,text,text,text),admit_initial_request(jsonb),collect_wallet_debt(uuid,integer),expire_wallet(uuid) FROM PUBLIC,gateway_runtime,gateway_worker;
+REVOKE ALL ON FUNCTION record_usage_evidence(uuid,uuid,text,text,text,jsonb,numeric,boolean,text,text),commit_usage_evidence(uuid,uuid,text,text,text,jsonb,numeric,boolean,text,text,text),collect_wallet_debt(uuid,integer),expire_wallet(uuid) FROM PUBLIC,gateway_runtime,gateway_worker;
 REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON usage_events,usage_conflicts,wallet_disputes,wallet_lots,money_journal,billing_charges,charge_allocations,hold_allocations,funding_operations,billing_refunds,billing_adjustments FROM gateway_runtime,gateway_worker;
 
 GRANT EXECUTE ON FUNCTION gateway_token_summary(uuid) TO gateway_runtime,gateway_worker;

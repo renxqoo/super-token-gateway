@@ -112,7 +112,7 @@ export class Store {
       },
       64,
       2,
-      2,
+      1,
     );
   }
 
@@ -135,12 +135,82 @@ export class Store {
     input: KeyInput,
     hash: string,
     prefix: string,
+    connection: SQL = this.db,
   ): Promise<string> {
     const id = crypto.randomUUID();
-    await this
-      .db`INSERT INTO api_keys(id,project_id,name,verifier,prefix,models,operations,expires_at,principal_id,role,allowed_cidrs,rpm,tpm,concurrency)
+    await connection`INSERT INTO api_keys(id,project_id,name,verifier,prefix,models,operations,expires_at,principal_id,role,allowed_cidrs,rpm,tpm,concurrency)
       VALUES(${id},${projectId},${input.name},${hash},${prefix},${input.models},${input.operations},${input.expires_at ?? null},${input.principal_id ?? null},${input.role ?? "INVOKER"},${input.allowed_cidrs ?? []},${input.rpm ?? null},${input.tpm ?? null},${input.concurrency ?? null})`;
     return id;
+  }
+
+  /** Project administrators can delegate their current authority, never enlarge it. */
+  async delegateCredential(
+    parentId: string,
+    requested: KeyInput,
+    explicitOperations: boolean,
+    hash: string,
+    prefix: string,
+  ): Promise<{ id: string; input: KeyInput }> {
+    return this.db.begin(async (tx) => {
+      const rows = await tx<
+        (Credential & { expires_at: string | null })[]
+      >`SELECT k.id,k.project_id,k.principal_id,k.models,k.operations,k.allowed_cidrs,k.rpm,k.tpm::float8,k.concurrency,k.expires_at::text
+        FROM api_keys k JOIN projects p ON p.id=k.project_id
+        LEFT JOIN organizations o ON o.id=p.organization_id LEFT JOIN principals u ON u.id=k.principal_id
+        WHERE k.id=${parentId} AND k.enabled AND k.role='ADMIN' AND p.enabled
+        AND (k.expires_at IS NULL OR k.expires_at>clock_timestamp())
+        AND (o.id IS NULL OR o.enabled) AND (u.id IS NULL OR u.enabled AND u.role IN ('OWNER','ADMIN'))
+        FOR SHARE OF k`;
+      const parent = rows[0];
+      const denied = () => {
+        throw new GatewayError(
+          403,
+          "delegation_denied",
+          "Delegated credentials must remain within the issuing credential's authority",
+        );
+      };
+      if (!parent) denied();
+      const authority = parent!;
+      const input = { ...requested, allowed_cidrs: requested.allowed_cidrs ?? [] };
+      if (authority.principal_id) {
+        if (input.principal_id && input.principal_id !== authority.principal_id) denied();
+        input.principal_id = authority.principal_id;
+      }
+      if (authority.models.length) {
+        if (input.models.some((model) => !authority.models.includes(model))) denied();
+        if (!input.models.length) input.models = [...authority.models];
+      }
+      if (!explicitOperations) input.operations = [...authority.operations];
+      if (input.operations.some((operation) => !authority.operations.includes(operation))) denied();
+      if (authority.allowed_cidrs?.length) {
+        if (!input.allowed_cidrs.length) input.allowed_cidrs = [...authority.allowed_cidrs];
+        const ranges = await tx`SELECT NOT EXISTS(
+          SELECT 1 FROM unnest(${input.allowed_cidrs}::text[]) child(cidr) WHERE NOT EXISTS(
+            SELECT 1 FROM unnest(${authority.allowed_cidrs}::text[]) source(cidr) WHERE child.cidr::inet <<= source.cidr::inet
+          )) AS permitted`;
+        if (!ranges[0]?.permitted) denied();
+      }
+      if (authority.expires_at) {
+        const deadline = new Date(authority.expires_at).getTime();
+        if (input.expires_at && new Date(input.expires_at).getTime() > deadline) denied();
+        input.expires_at ??= new Date(deadline).toISOString();
+      }
+      for (const field of ["rpm", "tpm", "concurrency"] as const) {
+        const ceiling = authority[field];
+        if (ceiling !== null && ceiling !== undefined) {
+          if (input[field] !== undefined && input[field]! > ceiling) denied();
+          input[field] ??= ceiling;
+        }
+      }
+      const id = await this.createCredential(
+        authority.project_id,
+        input,
+        hash,
+        prefix,
+        tx as unknown as SQL,
+      );
+      return { id, input };
+    });
   }
   async keys(projectId: string): Promise<unknown[]> {
     return this
@@ -343,10 +413,25 @@ export class Store {
   }
   async startAttempt(requestId: string, ordinal: number, route: Route): Promise<string> {
     const id = crypto.randomUUID();
-    await this
+    const rows = await this
       .db`WITH admitted AS (INSERT INTO attempts(id,request_id,ordinal,provider_id,upstream_model,pricing_id,state,billing_pricing_id)
-      SELECT ${id},q.id,${ordinal},${route.provider_id},${route.upstream_model},${route.pricing_id},'DISPATCHING',(q.billing_quote->'prices'->>${route.provider_id})::uuid FROM gateway_requests q WHERE q.id=${requestId} RETURNING request_id)
-      UPDATE gateway_requests q SET state='RUNNING',updated_at=now() FROM admitted a WHERE q.id=a.request_id`;
+      SELECT ${id},q.id,${ordinal},r.provider_id,r.upstream_model,r.pricing_id,'DISPATCHING',(q.billing_quote->'prices'->>r.provider_id::text)::uuid
+      FROM gateway_requests q JOIN api_keys k ON k.id=q.key_id JOIN projects p ON p.id=q.project_id
+      LEFT JOIN organizations o ON o.id=p.organization_id LEFT JOIN principals u ON u.id=k.principal_id
+      JOIN routes r ON r.id=${route.id} AND r.model_name=q.model JOIN models m ON m.name=q.model JOIN providers pr ON pr.id=r.provider_id
+      WHERE q.id=${requestId} AND k.enabled AND p.enabled AND (k.expires_at IS NULL OR k.expires_at>clock_timestamp())
+      AND k.role IN ('ADMIN','INVOKER') AND q.operation=ANY(k.operations) AND (cardinality(k.models)=0 OR q.model=ANY(k.models))
+      AND (o.id IS NULL OR o.enabled) AND (u.id IS NULL OR u.enabled AND u.role IN ('OWNER','ADMIN','MEMBER'))
+      AND r.enabled AND m.enabled AND pr.enabled AND q.operation=ANY(r.operations) AND q.operation=ANY(m.operations)
+      AND r.provider_id=${route.provider_id} AND r.upstream_model=${route.upstream_model} AND r.pricing_id=${route.pricing_id}
+      AND pr.kind=${route.kind} AND pr.base_url=${route.base_url} AND pr.secret=${route.secret} RETURNING id,request_id)
+      UPDATE gateway_requests q SET state='RUNNING',updated_at=now() FROM admitted a WHERE q.id=a.request_id RETURNING a.id`;
+    if (!rows.length)
+      throw new GatewayError(
+        403,
+        "dispatch_denied",
+        "Credential or upstream configuration changed before retry dispatch",
+      );
     return id;
   }
   async persistUsage(events: UsageEvidence[]): Promise<Record<string, number>> {
@@ -382,6 +467,12 @@ export class Store {
     const row = rows[0]?.result;
     const tokens = Number(row?.tokens ?? 0);
     return { complete: !!row?.complete && Number.isSafeInteger(tokens) && tokens >= 0, tokens };
+  }
+  async usageDimensions(attemptId: string): Promise<(keyof Usage)[]> {
+    const rows = await this.db<{ dimension: keyof Usage }[]>`
+      SELECT jsonb_object_keys(v.rates) AS dimension FROM attempts a JOIN cost_versions v ON v.id=a.pricing_id WHERE a.id=${attemptId}
+      UNION SELECT jsonb_object_keys(p.rates) FROM attempts a JOIN billing_prices p ON p.id=a.billing_pricing_id WHERE a.id=${attemptId} AND p.basis='PROVIDER_USAGE'`;
+    return rows.map((row) => row.dimension).filter((dimension) => dimension !== "requests");
   }
   async usage(
     projectId: string | null,
@@ -498,6 +589,9 @@ export class Store {
     return id;
   }
   async backfillConsumer(consumerId: string): Promise<void> {
+    const cursor = await this.db<{ complete: boolean }[]>`
+      SELECT replay_cursor>=replay_until AS complete FROM event_consumers WHERE id=${consumerId}`;
+    if (!cursor[0] || cursor[0].complete) return;
     await this
       .db`WITH owned AS (SELECT id,replay_cursor,replay_until FROM event_consumers WHERE id=${consumerId} AND replay_cursor<replay_until FOR UPDATE SKIP LOCKED),
     page AS (SELECT e.id,e.seq FROM usage_events e,owned o WHERE e.seq>o.replay_cursor AND e.seq<=o.replay_until ORDER BY e.seq LIMIT 1000),

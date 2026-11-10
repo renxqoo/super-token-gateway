@@ -186,30 +186,27 @@ export function createApp(deps: Dependencies): Hono<Env> {
   });
   publicApi.post("/project/keys", async (c) => {
     requireRole(c, ["ADMIN"]);
-    const input = keySchema.parse(
-      JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(
-          await readBounded(
-            c.req.raw.body,
-            65536,
-            AbortSignal.any([
-              c.req.raw.signal,
-              AbortSignal.timeout(deps.config.HEADERS_TIMEOUT_MS),
-            ]),
-            c.get("reserveMemory"),
-          ),
+    const payload: unknown = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(
+        await readBounded(
+          c.req.raw.body,
+          65536,
+          AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(deps.config.HEADERS_TIMEOUT_MS)]),
+          c.get("reserveMemory"),
         ),
       ),
     );
+    const input = keySchema.parse(payload);
     input.allowed_cidrs = input.allowed_cidrs.map(validateCidr);
     const key = createKey();
-    const keyId = await deps.store.createCredential(
-      c.get("auth").project.id,
+    const delegated = await deps.store.delegateCredential(
+      c.get("auth").credential.id,
       input,
+      Object.hasOwn(payload as object, "operations"),
       verifier(key, deps.config.KEY_PEPPER),
       key.slice(0, 12),
     );
-    return c.json({ id: keyId, key, ...input }, 201);
+    return c.json({ id: delegated.id, key, ...delegated.input }, 201);
   });
   publicApi.delete("/project/keys/:id", async (c) => {
     requireRole(c, ["ADMIN"]);

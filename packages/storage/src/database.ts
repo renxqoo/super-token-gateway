@@ -14,7 +14,7 @@ export function createDatabase(url: string, max = 16): SQL {
   });
 }
 
-export const SCHEMA_VERSION = 2026111005;
+export const SCHEMA_VERSION = 2026111006;
 export async function migrate(db: SQL): Promise<void> {
   const source = await Bun.file(new URL("./schema.sql", import.meta.url)).text();
   await db.begin(async (tx) => {

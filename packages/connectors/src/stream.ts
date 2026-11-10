@@ -54,6 +54,7 @@ export class StreamTranslator {
   private messageOpen: number | undefined;
   private messageClosed = new Set<number>();
   private geminiCompleted = new Set<number>();
+  private chatCompleted = new Set<number>();
   private geminiCalls = new Map<string, { index: number; args: string; name: string }>();
   private readonly id = `gen_${crypto.randomUUID()}`;
   constructor(
@@ -95,6 +96,14 @@ export class StreamTranslator {
     if (event.data === "[DONE]") {
       if (this.source !== "chat")
         throw new GatewayError(502, "invalid_upstream", "Unexpected terminal sentinel");
+      if (this.chatCompleted.size !== this.expectedCandidates) {
+        this.failed = true;
+        throw new GatewayError(
+          502,
+          "stream_truncated",
+          "Provider did not finish every requested choice",
+        );
+      }
       this.terminal = true;
       return {
         chunks: this.source === this.target ? [encodeSSE("[DONE]")] : [],
@@ -173,6 +182,14 @@ export class StreamTranslator {
         );
       for (const raw of choices) {
         const choice = object(raw);
+        const index = Number(choice.index ?? 0);
+        if (!Number.isSafeInteger(index) || index < 0 || index >= this.expectedCandidates)
+          throw new GatewayError(502, "invalid_upstream", "Choice index exceeds requested count");
+        if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
+          if (typeof choice.finish_reason !== "string" || !choice.finish_reason)
+            throw new GatewayError(502, "invalid_upstream", "Invalid choice completion reason");
+          this.chatCompleted.add(index);
+        }
         const delta = optionalObject(choice.delta);
         if (
           this.target !== this.source &&

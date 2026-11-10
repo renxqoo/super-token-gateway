@@ -407,6 +407,7 @@ test("Files, Batch, images, embeddings, video and audio operate through the real
     headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
     body: JSON.stringify({ model, input: "hello", voice: "alloy" }),
   });
+  expect(audio.headers.get("x-gateway-request-id")).toBeTruthy();
   expect(await audio.text()).toBe("mock-generated-audio-content");
   for (const path of ["/v1/audio/transcriptions", "/v1/audio/translations", "/v1/images/edits"]) {
     const data = new FormData();
@@ -657,8 +658,10 @@ test("Responses previous IDs are owned, streaming IDs stable and background usag
   await recoveryTick(deps);
   await awaitResourceFinal(String(background.value.id));
   const evidence = await deps.store
-    .db`SELECT e.source,e.finality,e.usage FROM usage_events e JOIN resources r ON r.attempt_id=e.attempt_id WHERE r.id=${background.value.id} ORDER BY e.seq`;
-  expect(evidence.map((row: { finality: string }) => row.finality)).toEqual(["UNKNOWN", "FINAL"]);
+    .db`SELECT e.source,e.finality,e.usage,e.cost_complete FROM usage_events e JOIN resources r ON r.attempt_id=e.attempt_id WHERE r.id=${background.value.id} ORDER BY e.seq`;
+  expect(evidence.map((row: { finality: string }) => row.finality)).toEqual(["FINAL", "FINAL"]);
+  expect(evidence[0]?.usage).toEqual({ requests: "1" });
+  expect(evidence[0]?.cost_complete).toBe(false);
   expect(evidence[1]?.usage.input_tokens).toBe("7");
 });
 
@@ -1891,5 +1894,312 @@ test("local result finalization failure preserves known upstream cost without re
     expect(receipt.charged_atoms).toBe("0");
   } finally {
     deps.store.saveResource = original;
+  }
+});
+
+test("project key delegation inherits authority and cannot escape its principal or scope", async () => {
+  const org = await json("/admin/organizations", {
+    external_ref: crypto.randomUUID(),
+    name: "delegation",
+  });
+  const principal = await json(`/admin/organizations/${org.value.id}/principals`, {
+    external_ref: crypto.randomUUID(),
+    role: "ADMIN",
+  });
+  const tenant = await json("/admin/projects", {
+    name: "delegation",
+    organization_id: org.value.id,
+  });
+  await deps.funds.credit(String(tenant.value.id), {
+    currency: "USD",
+    external_ref: "funding",
+    amount_atoms: "1000",
+    kind: "CASH",
+    priority: 100,
+    models: [],
+    operations: [],
+  });
+  const model = await configureModel("openai");
+  const other = await configureModel("openai");
+  const expiry = new Date(Date.now() + 600000).toISOString();
+  const parent = await json(`/admin/projects/${tenant.value.id}/keys`, {
+    name: "restricted-admin",
+    principal_id: principal.value.id,
+    role: "ADMIN",
+    models: [model],
+    operations: ["chat"],
+    allowed_cidrs: ["127.0.0.0/8"],
+    expires_at: expiry,
+    rpm: 100,
+    tpm: 1000,
+    concurrency: 10,
+  });
+  expect(parent.response.status).toBe(201);
+  const created = await json("/v1/project/keys", { name: "inherited" }, String(parent.value.key));
+  expect(created.response.status).toBe(201);
+  expect(created.value.principal_id).toBe(principal.value.id);
+  expect(created.value.models).toEqual([model]);
+  expect(created.value.operations).toEqual(["chat"]);
+  expect(created.value.allowed_cidrs).toEqual(["127.0.0.0/8"]);
+  expect(new Date(String(created.value.expires_at)).getTime()).toBe(new Date(expiry).getTime());
+  expect(created.value.rpm).toBe(100);
+  expect(created.value.tpm).toBe(1000);
+  expect(created.value.concurrency).toBe(10);
+  for (const broaden of [
+    { models: [other] },
+    { operations: ["responses"] },
+    { allowed_cidrs: ["0.0.0.0/0"] },
+    { expires_at: new Date(Date.now() + 3600000).toISOString() },
+    { rpm: 101 },
+    { tpm: 1001 },
+    { concurrency: 11 },
+    { principal_id: crypto.randomUUID() },
+  ]) {
+    const denied = await json(
+      "/v1/project/keys",
+      { name: "escape", ...broaden },
+      String(parent.value.key),
+    );
+    expect(denied.response.status).toBe(403);
+  }
+  const narrower = await json(
+    "/v1/project/keys",
+    { name: "narrower", allowed_cidrs: ["127.0.0.1/32"], rpm: 5 },
+    String(parent.value.key),
+  );
+  expect(narrower.response.status).toBe(201);
+  let response = await sendChat(model, {}, String(created.value.key));
+  expect(response.status).toBe(200);
+  await response.text();
+  response = await sendChat(other, {}, String(created.value.key));
+  expect(response.status).toBe(403);
+  await response.text();
+  await json(`/admin/principals/${principal.value.id}`, { enabled: false }, adminKey, "PATCH");
+  for (const delegated of [created, narrower]) {
+    response = await sendChat(model, {}, String(delegated.value.key));
+    expect(response.status).toBe(401);
+    await response.text();
+  }
+});
+
+test("Batch rows with missing priced dimensions remain partial until every row is complete", async () => {
+  const full = {
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    prompt_tokens_details: { cached_tokens: 0 },
+  };
+  const model = await configureModel(
+    "openai",
+    { batchRowUsage: [full, { prompt_tokens: 10, prompt_tokens_details: { cached_tokens: 0 } }] },
+    ["files", "batches", "chat"],
+  );
+  await deps.funds.setTariff({
+    model,
+    operation: "batches",
+    pricing: {
+      currency: "USD",
+      rates: {
+        input_tokens: { numerator: "3", denominator: "1" },
+        output_tokens: { numerator: "7", denominator: "1" },
+        cached_input_tokens: { numerator: "1", denominator: "1" },
+      },
+    },
+    ceilings: { input_tokens: "100", output_tokens: "100", cached_input_tokens: "100" },
+    basis: "PROVIDER_USAGE",
+  });
+  const form = new FormData();
+  form.set("purpose", "batch");
+  form.set(
+    "file",
+    new File(
+      [
+        Array.from({ length: 2 }, (_, i) =>
+          JSON.stringify({
+            custom_id: `item-${i + 1}`,
+            method: "POST",
+            url: "/v1/chat/completions",
+            body: { model, messages: [{ role: "user", content: "x" }] },
+          }),
+        ).join("\n"),
+      ],
+      "batch.jsonl",
+    ),
+  );
+  const uploaded = await fetch(`${origin}/v1/files`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}` },
+    body: form,
+  });
+  expect(uploaded.status).toBe(200);
+  const file = (await uploaded.json()) as { id: string };
+  const created = await json(
+    "/v1/batches",
+    { input_file_id: file.id, endpoint: "/v1/chat/completions", completion_window: "24h" },
+    key,
+  );
+  expect(created.response.status).toBe(200);
+  expect(
+    (await json(`/v1/batches/${created.value.id}`, undefined, key, "GET")).response.status,
+  ).toBe(200);
+  const resource = await deps.store.resource(String(created.value.id), projectId);
+  await waitFor(
+    async () =>
+      Number(
+        (
+          await deps.store
+            .db`SELECT count(*)::int AS n FROM usage_events WHERE attempt_id=${resource.attempt_id} AND usage?'input_tokens'`
+        )[0].n,
+      ) > 0,
+  );
+  const evidence = await deps.store.db<
+    { finality: string; cost_complete: boolean }[]
+  >`SELECT finality,cost_complete FROM usage_events WHERE attempt_id=${resource.attempt_id} AND usage?'input_tokens'`;
+  expect(evidence.every((row) => row.finality === "PARTIAL" && row.cost_complete === false)).toBe(
+    true,
+  );
+  const request = (
+    await deps.store.db`SELECT request_id FROM attempts WHERE id=${resource.attempt_id}`
+  )[0].request_id;
+  expect((await deps.funds.receipt(request, projectId)).charged_atoms).toBeNull();
+  expect((await deps.store.resource(String(created.value.id), projectId)).state).toBe(
+    "PENDING_USAGE",
+  );
+  mock.scenarios.set(model, { batchRowUsage: [full, full] });
+  await json(`/v1/batches/${created.value.id}`, undefined, key, "GET");
+  await waitFor(
+    async () => String((await deps.funds.receipt(request, projectId)).charged_atoms) === "130",
+  );
+  const final = await deps.store
+    .db`SELECT usage,cost_atoms::text,cost_complete FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source='async_final' AND finality='FINAL'`;
+  expect(final).toHaveLength(1);
+  expect(final[0].usage).toMatchObject({
+    input_tokens: "20",
+    output_tokens: "10",
+    cached_input_tokens: "0",
+  });
+  expect(final[0].cost_atoms).toBe("130");
+  expect(final[0].cost_complete).toBe(true);
+});
+
+test("retry dispatch rechecks route, provider, model and credential after Retry-After", async () => {
+  for (const gate of ["route", "provider", "model", "key"] as const) {
+    await deps.limits.observe(providers.openai!, false, 1);
+    const model = await configureModel("openai", { status: 429, failFirst: 1 });
+    const credential = await json(`/admin/projects/${projectId}/keys`, { name: `retry-${gate}` });
+    const route = (await deps.store.routeDefinitions(model))[0] as { id: string };
+    const response = sendChat(model, {}, String(credential.value.key));
+    await waitFor(
+      async () =>
+        Number(
+          (
+            await deps.store
+              .db`SELECT count(*)::int AS n FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.model=${model} AND a.state='UNKNOWN'`
+          )[0].n,
+        ) === 1,
+    );
+    try {
+      if (gate === "route")
+        await json(`/admin/routes/${route.id}`, { enabled: false }, adminKey, "PATCH");
+      if (gate === "provider")
+        await json(`/admin/providers/${providers.openai}`, { enabled: false }, adminKey, "PATCH");
+      if (gate === "model")
+        await json(`/admin/models/${model}`, { enabled: false }, adminKey, "PATCH");
+      if (gate === "key")
+        expect(
+          (await json(`/admin/keys/${credential.value.id}`, undefined, adminKey, "DELETE")).response
+            .status,
+        ).toBe(200);
+      const result = await response;
+      expect(result.status).toBe(403);
+      await result.text();
+      const attempts = await deps.store
+        .db`SELECT a.state FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.model=${model}`;
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0].state).toBe("UNKNOWN");
+    } finally {
+      await deps.limits.observe(providers.openai!, false, 1);
+      if (gate === "provider")
+        await json(`/admin/providers/${providers.openai}`, { enabled: true }, adminKey, "PATCH");
+    }
+  }
+});
+
+test("Gemini video multipart is converted to JSON and unrepresentable reference files are rejected", async () => {
+  const model = await configureModel("gemini", {}, ["videos"]);
+  const form = new FormData();
+  form.set("model", model);
+  form.set("prompt", "video fixture");
+  form.set("seconds", "8");
+  form.set("size", "1280x720");
+  const response = await fetch(`${origin}/v1/videos`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}` },
+    body: form,
+  });
+  expect(response.status).toBe(200);
+  const result = (await response.json()) as { id: string };
+  expect(result.id).toStartWith("video_");
+  form.set("input_reference", new File(["image"], "image.png", { type: "image/png" }));
+  const denied = await fetch(`${origin}/v1/videos`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}` },
+    body: form,
+  });
+  expect(denied.status).toBe(422);
+  await denied.text();
+});
+
+test("successful JSON without token usage retains exact per-request supplier cost", async () => {
+  const model = await configureModel("openai", { omitUsage: true });
+  const route = (await deps.store.routeDefinitions(model))[0] as { id: string };
+  await json(
+    `/admin/routes/${route.id}`,
+    { pricing: { currency: "USD", rates: { requests: { numerator: "17", denominator: "1" } } } },
+    adminKey,
+    "PATCH",
+  );
+  const response = await sendChat(model);
+  expect(response.status).toBe(200);
+  const request = response.headers.get("x-gateway-request-id")!;
+  await response.text();
+  await awaitUsage(request);
+  const rows = await deps.store
+    .db`SELECT usage,cost_atoms::text,cost_complete FROM usage_events WHERE request_id=${request}`;
+  expect(rows).toHaveLength(1);
+  expect(rows[0].usage).toEqual({ requests: "1" });
+  expect(rows[0].cost_atoms).toBe("17");
+  expect(rows[0].cost_complete).toBe(true);
+});
+
+test("empty chat JSON and terminal-only streams cannot create successful request charges", async () => {
+  for (const scenario of [
+    { emptyChoices: true },
+    { terminalOnly: true },
+    { invalidChoice: "missing_message" as const },
+    { invalidChoice: "empty_message" as const },
+    { invalidChoice: "unfinished" as const },
+  ]) {
+    const stream = "terminalOnly" in scenario;
+    await deps.limits.observe(providers.openai!, false, 1);
+    const model = await configureModel("openai", scenario);
+    const response = await sendChat(model, { stream });
+    const body = await response.text();
+    expect(response.status >= 400 || !body.includes("[DONE]")).toBe(true);
+    await waitFor(
+      async () =>
+        Number(
+          (
+            await deps.store
+              .db`SELECT count(*)::int AS n FROM gateway_requests WHERE model=${model}`
+          )[0].n,
+        ) > 0,
+    );
+    const rows = await deps.store
+      .db`SELECT q.state,(SELECT count(*)::int FROM billing_charges c WHERE c.request_id=q.id) AS charges FROM gateway_requests q WHERE q.model=${model}`;
+    expect(
+      rows.every(
+        (row: { state: string; charges: number }) => row.state !== "SUCCEEDED" && row.charges === 0,
+      ),
+    ).toBe(true);
   }
 });

@@ -203,3 +203,29 @@ test("Chat text-block tool results become a Gemini Struct, not a JSON array", ()
   expect(Array.isArray(fn.response)).toBe(false);
   expect(JSON.stringify(fn.response)).toContain("ok");
 });
+
+test("chat success requires every requested choice to finish before the terminal sentinel", () => {
+  for (const frames of [
+    [],
+    [event({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 0 } })],
+    [event({ choices: [{ index: 0, delta: { content: "partial" }, finish_reason: null }] })],
+  ]) {
+    const meter = new StreamTranslator("chat", "chat", "openai", "model");
+    for (const frame of frames) meter.consume(frame);
+    expect(() => meter.consume({ ...event(null), data: "[DONE]" })).toThrow();
+    expect(meter.terminal).toBe(false);
+  }
+  const multi = new StreamTranslator("chat", "chat", "openai", "model", 1024, 2);
+  multi.consume(event({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }));
+  expect(() => multi.consume({ ...event(null), data: "[DONE]" })).toThrow();
+  const valid = new StreamTranslator("chat", "chat", "openai", "model", 1024, 2);
+  valid.consume(
+    event({
+      choices: [
+        { index: 0, delta: {}, finish_reason: "stop" },
+        { index: 1, delta: {}, finish_reason: "length" },
+      ],
+    }),
+  );
+  expect(valid.consume({ ...event(null), data: "[DONE]" }).terminal).toBe(true);
+});

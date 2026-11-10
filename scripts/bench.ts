@@ -1,5 +1,7 @@
 import { LatencyHistogram, validChat } from "./benchmark-lib.ts";
 import { mkdir } from "node:fs/promises";
+import { Agent as HttpAgent, request as httpRequest } from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 
 const options = Bun.argv.slice(2);
 const option = (name: string, fallback: string) => {
@@ -53,10 +55,67 @@ const payload = JSON.stringify({
   max_completion_tokens: 32,
   stream,
 });
+// A bounded, explicit persistent pool avoids ephemeral-port churn on the load machine.
+const poolOptions = {
+  keepAlive: true,
+  maxSockets: concurrency,
+  maxTotalSockets: concurrency,
+  maxFreeSockets: concurrency,
+};
+const httpAgent = new HttpAgent(poolOptions);
+const httpsAgent = new HttpsAgent(poolOptions);
+const call = (target: string, apiKey: string): Promise<{ status: number; body: string }> =>
+  new Promise((resolve, reject) => {
+    const secure = new URL(target).protocol === "https:";
+    const request = (secure ? httpsRequest : httpRequest)(
+      `${target.replace(/\/$/, "")}/v1/chat/completions`,
+      {
+        method: "POST",
+        agent: secure ? httpsAgent : httpAgent,
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+        },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        response.on("data", (chunk: Buffer) => {
+          size += chunk.byteLength;
+          if (size > 1048576)
+            request.destroy(
+              Object.assign(new Error("Benchmark response budget exceeded"), {
+                code: "RESPONSE_BUDGET",
+              }),
+            );
+          else chunks.push(chunk);
+        });
+        response.once("error", reject);
+        response.once("end", () =>
+          resolve({
+            status: response.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      },
+    );
+    const deadline = setTimeout(
+      () =>
+        request.destroy(
+          Object.assign(new Error("Benchmark request deadline"), { code: "REQUEST_DEADLINE" }),
+        ),
+      30000,
+    );
+    request.once("error", reject);
+    request.once("close", () => clearTimeout(deadline));
+    request.end(payload);
+  });
 const latencies = new LatencyHistogram();
 const expectedText = option("--expected-text", "") || undefined;
 const windows = new Map<number, { completed: number; succeeded: number; invalid: number }>();
 const statuses = new Map<number, number>();
+const transportErrors = new Map<string, number>();
 const collectMetrics = options.includes("--metrics");
 if (collectMetrics && !process.env.ADMIN_KEY)
   throw new Error("--metrics requires this Gateway's ADMIN_KEY");
@@ -120,16 +179,16 @@ const invoke = async () => {
     const index = sequence++;
     const target = urls[index % urls.length]!;
     const apiKey = tokens[index % tokens.length]!;
-    const response = await fetch(`${target.replace(/\/$/, "")}/v1/chat/completions`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-      body: payload,
-      signal: AbortSignal.timeout(30000),
-    });
+    const response = await call(target, apiKey);
     status = response.status;
-    const body = await response.text();
+    const body = response.body;
     valid = status === 200 && validChat(body, stream, expectedText);
-  } catch {
+  } catch (error) {
+    const fault = error as { code?: unknown; name?: unknown };
+    const raw = String(fault.code ?? fault.name ?? "unclassified_transport");
+    const code = /^[A-Za-z0-9_]{1,64}$/.test(raw) ? raw : "unclassified_transport";
+    const bucket = transportErrors.has(code) || transportErrors.size < 16 ? code : "other";
+    transportErrors.set(bucket, (transportErrors.get(bucket) ?? 0) + 1);
   } finally {
     if (!measuring) {
       warmupRequests++;
@@ -194,6 +253,8 @@ if (rate > 0) {
   );
 }
 clearInterval(sampler);
+httpAgent.destroy();
+httpsAgent.destroy();
 const elapsed = (performance.now() - started) / 1000;
 await collecting;
 const metricsAfter = collectMetrics ? await metrics() : undefined;
@@ -218,6 +279,8 @@ const report = {
   runtime: Bun.version,
   platform: `${process.platform}/${process.arch}`,
   workload: stream ? "chat-sse" : "chat-json",
+  transport: "Bun node:http(s) with bounded persistent agents",
+  transport_errors: Object.fromEntries(transportErrors),
   duration_seconds: elapsed,
   concurrency,
   measurement_started_at: measurementStartedAt,

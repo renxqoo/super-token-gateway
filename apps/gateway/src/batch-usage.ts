@@ -9,6 +9,7 @@ export async function batchUsage(
   deps: Dependencies,
   route: Route,
   body: Record<string, unknown>,
+  dimensions: readonly (keyof Usage)[],
   signal: AbortSignal,
   reserveMemory?: (bytes: number) => void,
 ): Promise<{ usage: Usage; complete: boolean } | undefined> {
@@ -50,6 +51,7 @@ export async function batchUsage(
         return;
       }
       metered++;
+      if (dimensions.some((dimension) => usage[dimension] === undefined)) complete = false;
       for (const [dimension, value] of Object.entries(usage)) {
         if (!/^(0|[1-9][0-9]{0,37})$/.test(value)) {
           complete = false;

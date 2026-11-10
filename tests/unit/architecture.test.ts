@@ -32,7 +32,7 @@ test("the sole current implementation has no PG usage outbox or compatibility sc
   expect(schemas).toEqual(["schema.sql"]);
   const schema = await Bun.file("packages/storage/src/schema.sql").text();
   expect(schema).not.toMatch(
-    /billing_work|record_gateway_usage|LEGACY|meter_gateway_batch|settle_request\(|reconcile_known_holds|reserve_wallet\(/,
+    /admit_initial_request|billing_work|record_gateway_usage|LEGACY|meter_gateway_batch|settle_request\(|reconcile_known_holds|reserve_wallet\(/,
   );
   expect(await Bun.file("packages/runtime/src/billing-queue.ts").exists()).toBe(false);
 });

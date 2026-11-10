@@ -21,6 +21,7 @@ if (
   seconds > 3600 ||
   instances > 8 ||
   wallets > 1000 ||
+  concurrency > 2000 ||
   instances * pool + 16 > 90
 )
   throw new Error("Invalid capacity bounds");
@@ -266,6 +267,10 @@ try {
   );
   processes.push(load);
   const exit = await load.exited;
+  if (!(await Bun.file(reportPath).exists()))
+    throw new Error(
+      `Load generator exited ${exit} without a report; inspect ${directory}/load.log`,
+    );
   const drainStart = Date.now();
   let pending = 1;
   while (Date.now() - drainStart < 60000) {

@@ -242,7 +242,10 @@ export async function queryResource(
       ["completed", "succeeded", "cancelled", "canceled", "failed", "expired"].includes(status) &&
       !metered
     ) {
-      const evidence = await batchUsage(deps, route, data, signal, reserveMemory);
+      const dimensions = resource.attempt_id
+        ? await deps.store.usageDimensions(resource.attempt_id)
+        : [];
+      const evidence = await batchUsage(deps, route, data, dimensions, signal, reserveMemory);
       metered = evidence?.usage;
       complete = evidence?.complete ?? false;
     }

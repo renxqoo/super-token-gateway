@@ -250,12 +250,35 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
       }
       if (input.operation === "batches" || input.operation === "files") delete outbound.model;
       if (input.operation === "videos" && route.kind === "gemini") {
+        if (
+          Object.keys(input.body).some(
+            (field) => !["model", "prompt", "seconds", "aspect_ratio", "size"].includes(field),
+          )
+        )
+          throw new GatewayError(
+            422,
+            "conversion_loss",
+            "This video adapter supports prompt, duration and aspect ratio; unsupported fields cannot be converted",
+          );
+        const size = input.body.size;
+        const aspect = size === "1280x720" ? "16:9" : size === "720x1280" ? "9:16" : undefined;
+        if (
+          (size !== undefined && !aspect) ||
+          (aspect && input.body.aspect_ratio && aspect !== input.body.aspect_ratio)
+        )
+          throw new GatewayError(
+            422,
+            "conversion_loss",
+            "Video size cannot be represented by this provider",
+          );
         outbound = {
           instances: [{ prompt: input.body.prompt }],
           parameters: {
             durationSeconds: Number(input.body.seconds ?? 8),
             sampleCount: 1,
-            ...(input.body.aspect_ratio ? { aspectRatio: input.body.aspect_ratio } : {}),
+            ...(aspect || input.body.aspect_ratio
+              ? { aspectRatio: aspect ?? input.body.aspect_ratio }
+              : {}),
           },
         };
       }
@@ -353,7 +376,7 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
         const stream = input.body.stream === true || input.body.stream_format === "sse";
         let payload: BodyInit = stringifyExact(outbound);
         let contentType: string | undefined;
-        if (input.form) {
+        if (input.form && !(input.operation === "videos" && route.kind === "gemini")) {
           const form = new FormData();
           for (const [name, value] of input.form.entries())
             if (name !== "model")
@@ -468,7 +491,9 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
                       (input.body.generationConfig as Record<string, unknown> | undefined)
                         ?.candidateCount ?? 1,
                     )
-                  : 1,
+                  : target === "chat"
+                    ? Number(input.body.n ?? 1)
+                    : 1,
               )
             : new MediaStreamMeter(input.operation);
           const publicResponseId = `response_${input.requestId.replaceAll("-", "")}`;
@@ -582,6 +607,7 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
             headers: {
               "content-type": response.headers.get("content-type") ?? "application/octet-stream",
               "x-request-id": input.requestId,
+              "x-gateway-request-id": admission.record.id,
             },
           });
         }
@@ -599,7 +625,29 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
         if (value.error)
           throw new GatewayError(502, "provider_failed", "Provider returned an error response");
         if (
-          (target === "chat" && !Array.isArray(value.choices)) ||
+          (target === "chat" &&
+            (!Array.isArray(value.choices) ||
+              value.choices.length !== Number(outbound.n ?? 1) ||
+              value.choices.some((raw) => {
+                if (!raw || typeof raw !== "object" || Array.isArray(raw)) return true;
+                const choice = raw as Record<string, unknown>;
+                const message = choice.message as Record<string, unknown> | null | undefined;
+                return (
+                  !choice.message ||
+                  typeof choice.message !== "object" ||
+                  Array.isArray(choice.message) ||
+                  !message ||
+                  !["content", "tool_calls", "function_call", "audio", "refusal"].some((field) =>
+                    Object.hasOwn(message, field),
+                  ) ||
+                  (Object.hasOwn(message, "content") &&
+                    message.content !== null &&
+                    typeof message.content !== "string" &&
+                    !Array.isArray(message.content)) ||
+                  typeof choice.finish_reason !== "string" ||
+                  !choice.finish_reason
+                );
+              }))) ||
           (target === "responses" && !Array.isArray(value.output)) ||
           (target === "messages" && !Array.isArray(value.content)) ||
           (target === "gemini" && !Array.isArray(value.candidates) && !blockedPrompt(value))
@@ -623,7 +671,7 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
           );
           if (generated.length) usage = { ...usage, images: String(generated.length) };
         }
-        if (usage) usage.requests = "1";
+        usage = { ...usage, requests: "1" };
         observedUsage = usage;
         let output = value;
         if (textProtocols.has(input.operation) && target !== input.operation)

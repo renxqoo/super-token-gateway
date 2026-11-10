@@ -35,11 +35,15 @@
 
 ## 数据面与资源
 
+项目侧 `POST /v1/project/keys` 只允许 ADMIN Key 签发。派生 Key 在事务内重新验证签发者，继承其主体、模型/操作、CIDR、有效期及 Key 级限额；显式请求只能进一步收窄。省略操作权限时继承，受限模型或 CIDR 的空数组也继承。独立管理面可以签发无主体或更宽范围的服务 Key。各 Key 独立撤销，主体禁用对其所有 Key 生效。
+
 推理端点见 README。`GET /v1/models` 按 Key 的模型范围过滤；`GET /v1/usage`、`GET /v1/requests/:id` 只能查看本项目且符合操作/模型范围的证据。
 
 Files 支持上传/列表/查询/删除/content；Batch 支持创建/列表/查询/cancel；Video 支持创建/列表/查询/删除/content；Responses 支持创建、后台、列表、查询、删除、cancel、input_items 和 previous_response_id。资源列表支持 limit=1..100、after=<last_id>，返回 has_more/first_id/last_id；授权过滤先于分页，游标必须属于当前项目和模型范围。列表只返回本地必要元数据，不缓存供应商正文。原供应商不支持的资源动作返回明确上游错误。
 
-普通 Files 可省略 model，由有权限且支持 files 的配置选择；Batch 文件必须包含合法 POST JSONL、唯一 custom_id、统一逻辑模型和端点，支持不超过 50,000 项（仍受上传字节限制）。Gateway 重写为该供应商实际模型；创建 Batch 不向上游发送无效的顶层 model 字段。
+普通 Files 可省略 model，由有权限且支持 files 的配置选择；Batch 文件必须包含合法 POST JSONL、唯一 custom_id、统一逻辑模型和端点，支持不超过 50,000 项（仍受上传字节限制）。输出按每行检查捕获的供应商价格与客户价格所需维度；任一行缺证据则保留 PARTIAL 与待对账预扣，聚合后字段齐全也不能提前结算。Gateway 重写为该供应商实际模型；创建 Batch 不向上游发送无效的顶层 model 字段。
+
+Gemini 视频将 JSON 或 multipart 的 prompt、seconds、size/aspect_ratio 转为任务 JSON；参考文件及无法表达的字段返回 422。OpenAI 兼容视频入口按上游能力透传。
 
 文件引用、file_ids 数组、previous_response_id 都经过项目/模型授权并改写为自有 upstream ID。未经管理的 Gemini fileData/cachedContent、容器 ID、向量库/会话/assistant 资源引用返回 422，不能利用共享上游密钥越过项目边界。
 

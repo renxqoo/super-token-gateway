@@ -19,6 +19,10 @@ export interface Scenario {
   repeat?: number;
   omitUsage?: boolean;
   pollUsage?: boolean;
+  batchRowUsage?: Record<string, unknown>[];
+  emptyChoices?: boolean;
+  invalidChoice?: "missing_message" | "empty_message" | "unfinished";
+  terminalOnly?: boolean;
   whitespace?: boolean;
   thoughtSignature?: boolean;
   binaryBytes?: number;
@@ -249,6 +253,24 @@ export function createMockApp(controlToken: string): {
     }
     const streaming =
       body.stream === true || new URL(request.url).pathname.endsWith(":streamGenerateContent");
+    if (scenario.emptyChoices) value = { ...value, choices: [] };
+    if (scenario.invalidChoice)
+      value = {
+        ...value,
+        choices: [
+          scenario.invalidChoice === "missing_message"
+            ? {}
+            : scenario.invalidChoice === "empty_message"
+              ? { index: 0, message: {}, finish_reason: "stop" }
+              : {
+                  index: 0,
+                  message: { role: "assistant", content: "unfinished" },
+                  finish_reason: null,
+                },
+        ],
+      };
+    if (streaming && scenario.terminalOnly)
+      return new Response(sse("[DONE]"), { headers: { "content-type": "text/event-stream" } });
     if (scenario.thoughtSignature && dialect === "gemini")
       value = {
         ...value,
@@ -537,7 +559,16 @@ export function createMockApp(controlToken: string): {
     const colon = action.lastIndexOf(":");
     const model = action.slice(0, colon);
     if (action.endsWith(":predictLongRunning")) {
-      await c.req.json();
+      if (!c.req.header("content-type")?.includes("application/json"))
+        return c.json({ error: "JSON required" }, 400);
+      const payload = obj(await c.req.json());
+      const instance = Array.isArray(payload.instances) ? obj(payload.instances[0]) : {};
+      if (
+        typeof instance.prompt !== "string" ||
+        !instance.prompt ||
+        typeof obj(payload.parameters).durationSeconds !== "number"
+      )
+        return c.json({ error: "Invalid video payload" }, 400);
       const remote = `operations/${crypto.randomUUID()}`;
       resources.set(remote, {
         id: remote,
@@ -745,11 +776,20 @@ export function createMockApp(controlToken: string): {
     const kind = type === "files" ? "file" : type === "batches" ? "batch" : "video";
     app.post(`/openai/v1/${type}`, async (c) => {
       if (resources.size >= 10000) return c.json({ error: "mock capacity" }, 503);
-      if (c.req.header("content-type")?.includes("multipart")) await c.req.formData();
-      else {
+      let model: string | undefined;
+      if (c.req.header("content-type")?.includes("multipart")) {
+        const form = await c.req.formData();
+        const file = form.get("file");
+        if (file instanceof File && form.get("purpose") === "batch") {
+          try {
+            model = String(obj(obj(JSON.parse((await file.text()).split("\n")[0]!)).body).model);
+          } catch {}
+        }
+      } else {
         const body = obj(await c.req.json());
         if (kind === "batch" && body.model !== undefined)
           return c.json({ error: "Batch has no top-level model parameter" }, 400);
+        if (kind === "batch") model = resources.get(String(body.input_file_id))?.model;
       }
       const id = `${kind}-${crypto.randomUUID()}`;
       resources.set(id, {
@@ -758,6 +798,7 @@ export function createMockApp(controlToken: string): {
         polls: 0,
         output: `mock-${kind}-output-content`,
         cancelled: false,
+        ...(model ? { model } : {}),
       });
       return c.json({
         id,
@@ -771,22 +812,29 @@ export function createMockApp(controlToken: string): {
       if (!resource) return c.json({ error: "missing" }, 404);
       resource.polls++;
       if (kind === "batch") {
+        const usages = scenarios.get(resource.model ?? "")?.batchRowUsage ?? [
+          { prompt_tokens: 10, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 0 } },
+        ];
         const file = `file-result-${resource.id}`;
         resources.set(file, {
           id: file,
           kind: "file",
           polls: 0,
           output:
-            JSON.stringify({
-              custom_id: "item-1",
-              response: {
-                status_code: 200,
-                body: {
-                  choices: [{ message: { content: resource.output } }],
-                  usage: { prompt_tokens: 10, completion_tokens: 5 },
-                },
-              },
-            }) + "\n",
+            usages
+              .map((usage, index) =>
+                JSON.stringify({
+                  custom_id: `item-${index + 1}`,
+                  response: {
+                    status_code: 200,
+                    body: {
+                      choices: [{ message: { content: resource.output } }],
+                      usage,
+                    },
+                  },
+                }),
+              )
+              .join("\n") + "\n",
           cancelled: false,
         });
         return c.json({
@@ -794,7 +842,7 @@ export function createMockApp(controlToken: string): {
           object: kind,
           status: resource.cancelled ? "cancelled" : "completed",
           output_file_id: file,
-          request_counts: { total: 1, completed: 1, failed: 0 },
+          request_counts: { total: usages.length, completed: usages.length, failed: 0 },
         });
       }
       return c.json({

@@ -70,7 +70,8 @@ async function admit(
     cost_pricing_id: route.pricing_id,
     quote,
   };
-  const rows = await db`SELECT admit_initial_request(${payload}::jsonb) AS result`;
+  const rows = await db`SELECT admit_gateway_batch(${[payload]}::jsonb)->'0' AS result`;
+  if (rows[0].result.error) throw { errno: rows[0].result.error };
   return { request, attempt: String(rows[0].result.attempt_id) };
 }
 async function complete(
@@ -656,7 +657,7 @@ test("incompatible old database is rejected without modifying its records", asyn
     await old`INSERT INTO retained_record VALUES('keep')`;
     const { assemble } = await import("../../apps/gateway/src/assembly.ts");
     const { loadConfig } = await import("../../apps/gateway/src/config.ts");
-    for (const version of [8, 2026111004]) {
+    for (const version of [8, 2026111005]) {
       await old`UPDATE schema_migrations SET version=${version}`;
       await expect(migrate(old)).rejects.toThrow("Incompatible database schema");
       await expect(
@@ -1179,4 +1180,176 @@ test("fully spent refundable buckets retain their slot and refunds do not exceed
   const wallet = await invariant(p.id);
   expect(wallet.available_atoms).toBe("6");
   expect(wallet.spent_atoms).toBe("765");
+});
+
+test("completed replay cursors skip historical scans without missing later live evidence", async () => {
+  const p = await project();
+  await credit(p.id, "100");
+  const q = await admit(p.credential);
+  const live = await store.createConsumer(`live-${crypto.randomUUID()}`, false);
+  expect((await store.claimEvents(live, 500)).events).toHaveLength(0);
+  const event = (source: string) => ({
+    attemptId: q.attempt,
+    source,
+    state: "SUCCEEDED" as const,
+    finality: "FINAL" as const,
+    usage: { input_tokens: "7", output_tokens: "5" },
+    requestState: "SUCCEEDED" as const,
+  });
+  for (let offset = 0; offset < 1001; offset += 128)
+    await store.persistUsage(
+      Array.from({ length: Math.min(128, 1001 - offset) }, (_, i) =>
+        event(`history_${offset + i}`),
+      ),
+    );
+  const drain = async (consumer: string, expected: number) => {
+    const seen = new Set<string>();
+    for (;;) {
+      const page = await store.claimEvents(consumer, 500);
+      if (!page.events.length) break;
+      for (const value of page.events) {
+        expect(seen.has(value.id)).toBe(false);
+        seen.add(value.id);
+      }
+      expect(
+        await store.ackEvents(
+          consumer,
+          page.lease_token,
+          page.events.map((e) => e.id),
+        ),
+      ).toBe(page.events.length);
+    }
+    expect(seen.size).toBe(expected);
+  };
+  await drain(live, 1001);
+  const history = await db`SELECT count(*)::int AS n FROM usage_events`;
+  const replay = await store.createConsumer(`replay-${crypto.randomUUID()}`, true);
+  await drain(replay, Number(history[0].n));
+  await store.persistUsage([event("after_replay")]);
+  await drain(live, 1);
+  await drain(replay, 1);
+  const wallet = await invariant(p.id);
+  expect(wallet.spent_atoms).toBe("56");
+});
+
+test("batch admission isolates rejected allocations, authorizes each item and arbitrates repeated intents", async () => {
+  const p = await project();
+  await credit(p.id, "100");
+  const denied = await store.createCredential(
+    p.id,
+    { name: "billing-only", models: [], operations: ["chat"], role: "BILLING" },
+    crypto.randomUUID(),
+    "test",
+  );
+  const input = (amount: string) => ({
+    id: crypto.randomUUID(),
+    key_id: p.credential.id,
+    project_id: p.id,
+    operation: "chat",
+    model: "funds-model",
+    digest: null as string | null,
+    fingerprint: "batch",
+    route_id: route.id,
+    cost_pricing_id: route.pricing_id,
+    quote: { currency: "USD", amount_atoms: amount, prices: { [route.provider_id]: pricingId } },
+  });
+  const accepted = { ...input("60"), digest: "unique-intent" };
+  const items = [
+    input("200"),
+    { ...input("1"), cost_pricing_id: crypto.randomUUID() },
+    { ...input("1"), key_id: denied },
+    accepted,
+    { ...accepted, id: crypto.randomUUID() },
+    { ...accepted, id: crypto.randomUUID(), fingerprint: "conflict" },
+    { ...input("1"), id: accepted.id },
+    input("40"),
+    input("1"),
+  ];
+  const rows = await db`SELECT admit_gateway_batch(${items}::jsonb) AS result`;
+  const result = rows[0].result;
+  expect(result["0"].error).toBe("P0402");
+  expect(result["1"].error).toBe("P0422");
+  expect(result["2"].error).toBe("P0403");
+  expect(result["3"].created).toBe(true);
+  expect(result["4"].created).toBe(false);
+  expect(result["4"].record.id).toBe(accepted.id);
+  expect(result["5"].error).toBe("P0409");
+  expect(result["6"].error).toBe("23505");
+  expect(result["7"].created).toBe(true);
+  expect(result["8"].error).toBe("P0402");
+  expect((await invariant(p.id)).reserved_atoms).toBe("100");
+  const counts =
+    await db`SELECT (SELECT count(*)::int FROM gateway_requests WHERE project_id=${p.id}) AS requests,(SELECT count(*)::int FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.project_id=${p.id}) AS attempts`;
+  expect(counts[0].requests).toBe(2);
+  expect(counts[0].attempts).toBe(2);
+});
+
+test("expiry overflow on one wallet does not roll back a valid peer admission", async () => {
+  const p = await project();
+  const max = "9".repeat(38);
+  await credit(p.id, max, "GIFT", { expires_at: new Date(Date.now() + 100).toISOString() });
+  await Bun.sleep(150);
+  await admit(p.credential, "0");
+  expect((await invariant(p.id)).expired_atoms).toBe(max);
+  await credit(p.id, "1", "GIFT", { expires_at: new Date(Date.now() + 100).toISOString() });
+  await Bun.sleep(150);
+  const peer = await project();
+  await credit(peer.id, "100");
+  const input = (credential: Credential, amount: string) => ({
+    id: crypto.randomUUID(),
+    key_id: credential.id,
+    project_id: credential.project_id,
+    operation: "chat",
+    model: "funds-model",
+    digest: null,
+    fingerprint: "expiry",
+    route_id: route.id,
+    cost_pricing_id: route.pricing_id,
+    quote: { currency: "USD", amount_atoms: amount, prices: { [route.provider_id]: pricingId } },
+  });
+  const items = [input(p.credential, "0"), input(peer.credential, "100")];
+  const rows = await db`SELECT admit_gateway_batch(${items}::jsonb) AS result`;
+  expect(rows[0].result["0"].error).toBe("22003");
+  expect(rows[0].result["1"].created).toBe(true);
+  expect((await invariant(peer.id)).reserved_atoms).toBe("100");
+  expect((await invariant(p.id)).available_atoms).toBe("1");
+});
+
+test("concurrent intents across different currency wallets still reserve exactly once", async () => {
+  const p = await project();
+  await credit(p.id, "100");
+  await credit(p.id, "100", "CASH", { currency: "CNY" });
+  const cny = crypto.randomUUID();
+  await db`INSERT INTO billing_prices(id,currency,rates,ceilings,basis) SELECT ${cny},'CNY',rates,ceilings,basis FROM billing_prices WHERE id=${pricingId}`;
+  const inputs = Array.from({ length: 20 }, (_, i) => ({
+    id: crypto.randomUUID(),
+    key_id: p.credential.id,
+    project_id: p.id,
+    operation: "chat",
+    model: "funds-model",
+    digest: "cross-currency-intent",
+    fingerprint: "same-intent",
+    route_id: route.id,
+    cost_pricing_id: route.pricing_id,
+    quote: {
+      currency: i % 2 ? "USD" : "CNY",
+      amount_atoms: "100",
+      prices: { [route.provider_id]: i % 2 ? pricingId : cny },
+    },
+  }));
+  const rows = await Promise.all(
+    inputs.map((input) => db`SELECT admit_gateway_batch(${[input]}::jsonb)->'0' AS result`),
+  );
+  const results = rows.map((row) => row[0].result);
+  expect(results.filter((result) => result.created)).toHaveLength(1);
+  expect(results.filter((result) => result.created === false)).toHaveLength(19);
+  expect(new Set(results.map((result) => result.record.id)).size).toBe(1);
+  await invariant(p.id);
+  const summary =
+    await db`SELECT sum(available_atoms)::text AS available,sum(reserved_atoms)::text AS reserved FROM wallets WHERE project_id=${p.id}`;
+  expect(summary[0].available).toBe("100");
+  expect(summary[0].reserved).toBe("100");
+  const attempts =
+    await db`SELECT count(*)::int AS n FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.project_id=${p.id}`;
+  expect(attempts[0].n).toBe(1);
 });
