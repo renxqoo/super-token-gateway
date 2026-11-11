@@ -1389,6 +1389,26 @@ test("restricted production role can serve inference but cannot mutate usage or 
     await response.text();
     await expect(runtimeDb`UPDATE usage_events SET cost_atoms=0`).rejects.toThrow();
     await expect(runtimeDb`UPDATE wallets SET available_atoms=999999999`).rejects.toThrow();
+    await expect(runtimeDb`UPDATE wallets SET credit_limit_atoms=999999999`).rejects.toThrow();
+    await expect(runtimeDb`UPDATE wallets SET credit_reserved_atoms=0`).rejects.toThrow();
+    const creditPolicy = await fetch(
+      `http://127.0.0.1:${server.port}/admin/projects/${projectId}/wallets/USD/credit-policy`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${adminKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          external_ref: "runtime-credit",
+          expected_version: "0",
+          credit_limit_atoms: "100",
+        }),
+      },
+    );
+    expect(creditPolicy.status).toBe(200);
+    expect(await creditPolicy.json()).toMatchObject({
+      credit_policy_version: "1",
+      credit_limit_atoms: "100",
+    });
+    await expect(runtimeDb`DELETE FROM wallet_credit_policies`).rejects.toThrow();
     await expect(runtimeDb`TRUNCATE money_journal`).rejects.toThrow();
     await expect(runtimeDb`SELECT persist_usage_batch('[]'::jsonb)`).rejects.toMatchObject({
       errno: "42501",

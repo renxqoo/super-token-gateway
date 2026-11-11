@@ -122,11 +122,353 @@ async function invariant(id: string) {
   const unpaid = await db`SELECT w.id FROM wallets w WHERE w.project_id=${id} AND (
     w.debt_atoms<>coalesce((SELECT sum(c.debt_atoms) FROM billing_charges c JOIN billing_holds h ON h.id=c.hold_id WHERE h.wallet_id=w.id),0) OR
     w.spent_atoms<>coalesce((SELECT sum(c.funded_atoms-c.refunded_atoms+c.debt_refunded_atoms) FROM billing_charges c JOIN billing_holds h ON h.id=c.hold_id WHERE h.wallet_id=w.id),0) OR
-    w.reserved_atoms<>coalesce((SELECT sum(h.amount_atoms) FROM billing_holds h WHERE h.wallet_id=w.id AND h.state IN ('HELD','RECONCILING')),0)
+    w.reserved_atoms<>coalesce((SELECT sum(h.amount_atoms-h.credit_atoms) FROM billing_holds h WHERE h.wallet_id=w.id AND h.state IN ('HELD','RECONCILING')),0) OR
+    w.credit_reserved_atoms<>coalesce((SELECT sum(h.credit_atoms) FROM billing_holds h WHERE h.wallet_id=w.id AND h.state IN ('HELD','RECONCILING')),0)
   )`;
   expect(unpaid).toHaveLength(0);
   return rows[0];
 }
+test("concurrent requests reserve existing debt and in-flight credit before admitting more work", async () => {
+  const p = await project();
+  await credit(p.id, "100");
+  await funds.configureCredit(p.id, "USD", {
+    external_ref: "limit",
+    expected_version: "0",
+    credit_limit_atoms: "50",
+  });
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: 3 }, () => admit(p.credential, "60")),
+  );
+  const accepted = outcomes.filter((r) => r.status === "fulfilled").map((r) => r.value);
+  expect(accepted).toHaveLength(2);
+  expect(outcomes.filter((r) => r.status === "rejected")).toHaveLength(1);
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    available_atoms: "0",
+    reserved_atoms: "100",
+    credit_reserved_atoms: "20",
+    available_credit_atoms: "30",
+  });
+  for (const q of accepted) await complete(q.request, q.attempt);
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    credit_reserved_atoms: "0",
+    debt_atoms: "12",
+    available_credit_atoms: "38",
+    freeze_reason: null,
+  });
+  await invariant(p.id);
+});
+
+test("unknown credit holds remain committed until an explicit release and duplicate release is harmless", async () => {
+  const p = await project();
+  await credit(p.id, "1", "GIFT", { models: ["other"] });
+  await funds.configureCredit(p.id, "USD", {
+    external_ref: "limit",
+    expected_version: "0",
+    credit_limit_atoms: "60",
+  });
+  const q = await admit(p.credential, "60");
+  await store.persistUsage([
+    { attemptId: q.attempt, source: "execution", state: "UNKNOWN", finality: "UNKNOWN", usage: {} },
+  ]);
+  await expect(admit(p.credential, "1")).rejects.toBeDefined();
+  expect((await funds.wallets(p.id))[0]).toMatchObject({ credit_reserved_atoms: "60" });
+  const resolution = {
+    external_ref: "release",
+    action: "RELEASE" as const,
+    usage: {},
+    reason: "ADMIN_WRITE_OFF" as const,
+  };
+  await funds.resolve(q.request, resolution);
+  await db`SELECT settle_requests(ARRAY[${q.request}::uuid])`;
+  await funds.resolve(q.request, resolution);
+  await db`SELECT settle_requests(ARRAY[${q.request}::uuid])`;
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    reserved_atoms: "0",
+    credit_reserved_atoms: "0",
+    debt_atoms: "0",
+    available_credit_atoms: "60",
+  });
+  await invariant(p.id);
+});
+
+test("credit settlement and refunds debit once, gifts do not repay old debt, and cash restores credit", async () => {
+  const p = await project();
+  await credit(p.id, "1", "GIFT", { models: ["other"] });
+  await funds.configureCredit(p.id, "USD", {
+    external_ref: "limit",
+    expected_version: "0",
+    credit_limit_atoms: "100",
+  });
+  const q = await admit(p.credential, "60");
+  const settled = await complete(q.request, q.attempt);
+  await complete(q.request, q.attempt);
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    debt_atoms: "56",
+    credit_reserved_atoms: "0",
+  });
+  await credit(p.id, "100", "GIFT");
+  await db`SELECT settle_requests(ARRAY[${q.request}::uuid])`;
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    debt_atoms: "56",
+    available_credit_atoms: "44",
+  });
+  const refund = { external_ref: "refund", amount_atoms: "16", reason: "CUSTOMER_REFUND" as const };
+  await funds.refund(String(settled[0].result.charge_id), refund);
+  await funds.refund(String(settled[0].result.charge_id), refund);
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    debt_atoms: "40",
+    available_credit_atoms: "60",
+  });
+  await credit(p.id, "50");
+  await db`SELECT settle_requests(ARRAY[${q.request}::uuid])`;
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    debt_atoms: "0",
+    available_atoms: "111",
+    available_credit_atoms: "100",
+  });
+  await invariant(p.id);
+});
+
+test("actual overrun keeps the full receivable and freezes new promises beyond the credit limit", async () => {
+  const p = await project();
+  await credit(p.id, "1");
+  await funds.configureCredit(p.id, "USD", {
+    external_ref: "limit",
+    expected_version: "0",
+    credit_limit_atoms: "50",
+  });
+  const q = await admit(p.credential, "50");
+  await complete(q.request, q.attempt, { input_tokens: "50", output_tokens: "50" });
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    available_atoms: "0",
+    credit_reserved_atoms: "0",
+    debt_atoms: "499",
+    credit_excess_atoms: "449",
+    available_credit_atoms: "0",
+    freeze_reason: "DEBT",
+  });
+  await expect(admit(p.credential, "0")).rejects.toBeDefined();
+  await credit(p.id, "449");
+  await db`SELECT settle_requests(ARRAY[${q.request}::uuid])`;
+  expect((await funds.wallets(p.id))[0]).toMatchObject({ debt_atoms: "50", freeze_reason: null });
+  await admit(p.credential, "0");
+  await invariant(p.id);
+});
+
+test("credit policy retries preserve their original result without overwriting a newer policy", async () => {
+  const p = await project();
+  await credit(p.id, "1");
+  const input = { external_ref: "first", expected_version: "0", credit_limit_atoms: "100" };
+  const results = await Promise.all(
+    Array.from({ length: 5 }, () => funds.configureCredit(p.id, "USD", input)),
+  );
+  expect(new Set(results.map((r) => r.id)).size).toBe(1);
+  await funds.configureCredit(p.id, "USD", {
+    ...input,
+    external_ref: "second",
+    expected_version: "1",
+    credit_limit_atoms: "200",
+  });
+  expect(await funds.configureCredit(p.id, "USD", input)).toMatchObject({
+    credit_policy_version: "1",
+    replayed: true,
+  });
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    credit_limit_atoms: "200",
+    credit_policy_version: "2",
+  });
+  await expect(
+    funds.configureCredit(p.id, "USD", { ...input, credit_limit_atoms: "101" }),
+  ).rejects.toMatchObject({ status: 409 });
+  await expect(
+    funds.configureCredit(p.id, "USD", { ...input, external_ref: "stale" }),
+  ).rejects.toMatchObject({ status: 409 });
+  const q = await admit(p.credential, "60");
+  await expect(
+    funds.configureCredit(p.id, "USD", {
+      external_ref: "lower",
+      expected_version: "2",
+      credit_limit_atoms: "58",
+    }),
+  ).rejects.toMatchObject({ status: 409 });
+  await funds.configure(p.id, "USD", { frozen: true });
+  await expect(admit(p.credential, "0")).rejects.toBeDefined();
+  await complete(q.request, q.attempt);
+  expect((await funds.wallets(p.id))[0]).toMatchObject({ freeze_reason: "MANUAL" });
+  await invariant(p.id);
+});
+
+test("Responses completion racing initial evidence cannot leave final usage and credit held forever", async () => {
+  const p = await project();
+  await credit(p.id, "1", "GIFT", { models: ["other"] });
+  await funds.configureCredit(p.id, "USD", {
+    external_ref: "credit",
+    expected_version: "0",
+    credit_limit_atoms: "100",
+  });
+  const q = await admit(p.credential, "100");
+  const resource = await store.saveResource(
+    p.id,
+    route.provider_id,
+    `response_${crypto.randomUUID()}`,
+    "response",
+    "funds-model",
+    q.attempt,
+  );
+  await store.updateResource(resource, "PENDING_USAGE", "in_progress");
+  let initial: Promise<unknown> | undefined;
+  try {
+    await db.begin(async (tx) => {
+      await tx`SELECT id FROM gateway_requests WHERE id=${q.request} FOR NO KEY UPDATE`;
+      initial = store.persistUsage([
+        {
+          attemptId: q.attempt,
+          source: "execution",
+          state: "SUCCEEDED",
+          finality: "FINAL",
+          usage: { requests: "1" },
+          requestState: "SUCCEEDED",
+        },
+      ]);
+      const end = Date.now() + 1500;
+      let blocked = false;
+      while (Date.now() < end) {
+        blocked =
+          (
+            await db`SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%persist_usage_batch%'`
+          ).length > 0;
+        if (blocked) break;
+        await Bun.sleep(5);
+      }
+      expect(blocked).toBe(true);
+      await store.updateResource(resource, "COMPLETED", "completed");
+    });
+  } finally {
+    await initial;
+  }
+  await store.persistUsage([
+    {
+      attemptId: q.attempt,
+      source: "async_final",
+      state: "SUCCEEDED",
+      finality: "FINAL",
+      usage: { requests: "1", input_tokens: "7", output_tokens: "5" },
+    },
+  ]);
+  expect(await funds.receipt(q.request, p.id)).toMatchObject({
+    hold_state: "SETTLED",
+    charged_atoms: "56",
+    debt_atoms: "56",
+  });
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    credit_reserved_atoms: "0",
+    debt_atoms: "56",
+  });
+  await invariant(p.id);
+});
+
+test("credit atoms above IEEE754 remain exact and cannot fund another currency", async () => {
+  const p = await project();
+  await credit(p.id, "1", "GIFT", { models: ["other"] });
+  await funds.credit(p.id, {
+    currency: "EUR",
+    external_ref: "eur",
+    amount_atoms: "1",
+    kind: "CASH",
+    priority: 100,
+    models: [],
+    operations: [],
+  });
+  await funds.configureCredit(p.id, "USD", {
+    external_ref: "exact",
+    expected_version: "0",
+    credit_limit_atoms: "9007199254740993",
+  });
+  const q = await admit(p.credential, "9007199254740993");
+  await expect(admit(p.credential, "1")).rejects.toBeDefined();
+  expect(
+    (await funds.wallets(p.id)).find((w) => (w as { currency: string }).currency === "USD"),
+  ).toMatchObject({ credit_reserved_atoms: "9007199254740993", available_credit_atoms: "0" });
+  await complete(q.request, q.attempt);
+  expect(
+    (await funds.wallets(p.id)).find((w) => (w as { currency: string }).currency === "USD"),
+  ).toMatchObject({
+    credit_reserved_atoms: "0",
+    debt_atoms: "56",
+    available_credit_atoms: "9007199254740937",
+  });
+  expect(
+    (await funds.wallets(p.id)).find((w) => (w as { currency: string }).currency === "EUR"),
+  ).toMatchObject({ available_atoms: "1", credit_limit_atoms: "0", debt_atoms: "0" });
+  await invariant(p.id);
+});
+
+test("concurrent credit reduction and admission cannot commit promises beyond the resulting limit", async () => {
+  const p = await project();
+  await credit(p.id, "1", "GIFT", { models: ["other"] });
+  await funds.configureCredit(p.id, "USD", {
+    external_ref: "open",
+    expected_version: "0",
+    credit_limit_atoms: "1000",
+  });
+  const reducing = funds.configureCredit(p.id, "USD", {
+    external_ref: "reduce",
+    expected_version: "1",
+    credit_limit_atoms: "100",
+  });
+  const [reduced, admitted] = await Promise.all([
+    reducing.then(
+      () => true,
+      () => false,
+    ),
+    Promise.allSettled(Array.from({ length: 10 }, () => admit(p.credential, "100"))),
+  ]);
+  const accepted = admitted.filter((result) => result.status === "fulfilled").length;
+  expect(accepted).toBeGreaterThanOrEqual(1);
+  if (reduced) expect(accepted).toBe(1);
+  else expect(accepted).toBeGreaterThan(1);
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    credit_limit_atoms: reduced ? "100" : "1000",
+    credit_reserved_atoms: String(accepted * 100),
+    available_credit_atoms: String((reduced ? 100 : 1000) - accepted * 100),
+  });
+  await invariant(p.id);
+});
+
+test("charge adjustments freeze and reopen the same credit boundary without turning credit into cash", async () => {
+  const p = await project();
+  await credit(p.id, "1", "GIFT", { models: ["other"] });
+  await funds.configureCredit(p.id, "USD", {
+    external_ref: "limit",
+    expected_version: "0",
+    credit_limit_atoms: "100",
+  });
+  const q = await admit(p.credential, "60");
+  const result = await complete(q.request, q.attempt);
+  const charge = String(result[0].result.charge_id);
+  await funds.adjust(charge, {
+    external_ref: "up",
+    target_atoms: "150",
+    reason: "ADMIN_CORRECTION",
+  });
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    debt_atoms: "150",
+    freeze_reason: "DEBT",
+    credit_excess_atoms: "50",
+  });
+  await funds.adjust(charge, {
+    external_ref: "down",
+    target_atoms: "50",
+    reason: "ADMIN_CORRECTION",
+  });
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    available_atoms: "1",
+    debt_atoms: "50",
+    freeze_reason: null,
+    available_credit_atoms: "50",
+  });
+  await invariant(p.id);
+});
 test("admission and settlement avoid randomly scattered new index keys for an existing request UUID", async () => {
   const tenant = await project();
   await credit(tenant.id, "1000");

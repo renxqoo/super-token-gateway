@@ -3,6 +3,14 @@ import { operations, pricingSchema, usageSchema } from "./contracts.ts";
 export const currencySchema = z.string().regex(/^[A-Z]{3,8}$/);
 export const atomsSchema = z.string().regex(/^(0|[1-9][0-9]{0,37})$/);
 export const positiveAtomsSchema = z.string().regex(/^[1-9][0-9]{0,37}$/);
+export const creditPolicySchema = z
+  .object({
+    external_ref: z.string().min(1).max(200),
+    expected_version: atomsSchema,
+    credit_limit_atoms: atomsSchema,
+  })
+  .strict();
+export type CreditPolicyInput = z.infer<typeof creditPolicySchema>;
 export const creditSchema = z
   .object({
     currency: currencySchema,

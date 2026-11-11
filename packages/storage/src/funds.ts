@@ -4,6 +4,7 @@ import {
   calculateCost,
   quoteReservation,
   creditSchema,
+  creditPolicySchema,
   tariffSchema,
   refundSchema,
   adjustmentSchema,
@@ -14,6 +15,7 @@ import {
 import type {
   BillingQuote,
   CreditInput,
+  CreditPolicyInput,
   TariffInput,
   RefundInput,
   AdjustmentInput,
@@ -70,7 +72,21 @@ export class FundsStore {
   }
   async wallets(projectId: string): Promise<unknown[]> {
     return this
-      .db`SELECT w.id,w.project_id,w.currency,w.policy,w.available_atoms::text,w.reserved_atoms::text,w.spent_atoms::text,w.expired_atoms::text,w.debt_atoms::text,CASE WHEN dispute.active THEN 'EVIDENCE_CONFLICT' ELSE w.freeze_reason END AS freeze_reason,w.manual_frozen,w.evidence_disputed OR dispute.active AS evidence_disputed FROM wallets w CROSS JOIN LATERAL(SELECT EXISTS(SELECT 1 FROM wallet_disputes d WHERE d.wallet_id=w.id AND NOT EXISTS(SELECT 1 FROM billing_resolutions r WHERE r.request_id=d.request_id)) AS active) dispute WHERE w.project_id=${projectId} ORDER BY currency`;
+      .db`SELECT w.id,w.project_id,w.currency,w.policy,w.available_atoms::text,w.reserved_atoms::text,w.spent_atoms::text,w.expired_atoms::text,w.debt_atoms::text,w.credit_limit_atoms::text,w.credit_reserved_atoms::text,w.credit_policy_version::text,greatest(0,w.credit_limit_atoms-w.debt_atoms-w.credit_reserved_atoms)::text AS available_credit_atoms,greatest(0,w.debt_atoms+w.credit_reserved_atoms-w.credit_limit_atoms)::text AS credit_excess_atoms,CASE WHEN dispute.active THEN 'EVIDENCE_CONFLICT' ELSE w.freeze_reason END AS freeze_reason,w.manual_frozen,w.evidence_disputed OR dispute.active AS evidence_disputed FROM wallets w CROSS JOIN LATERAL(SELECT EXISTS(SELECT 1 FROM wallet_disputes d WHERE d.wallet_id=w.id AND NOT EXISTS(SELECT 1 FROM billing_resolutions r WHERE r.request_id=d.request_id)) AS active) dispute WHERE w.project_id=${projectId} ORDER BY currency`;
+  }
+  async configureCredit(
+    projectId: string,
+    currency: string,
+    value: CreditPolicyInput,
+  ): Promise<Record<string, unknown>> {
+    const input = creditPolicySchema.parse(value);
+    try {
+      const rows = await this
+        .db`SELECT configure_wallet_credit(${projectId}::uuid,${currency},${input.external_ref},${input.expected_version}::numeric,${input.credit_limit_atoms}::numeric) AS result`;
+      return rows[0]?.result;
+    } catch (error) {
+      fundingError(error);
+    }
   }
   async lots(projectId: string, currency: string): Promise<unknown[]> {
     return this
@@ -86,7 +102,7 @@ export class FundsStore {
     patch: { policy?: string | undefined; frozen?: boolean | undefined },
   ): Promise<void> {
     const rows = await this
-      .db`UPDATE wallets SET policy=coalesce(${patch.policy ?? null},policy),manual_frozen=coalesce(${patch.frozen ?? null},manual_frozen),freeze_reason=CASE WHEN evidence_disputed THEN 'EVIDENCE_CONFLICT' WHEN coalesce(${patch.frozen ?? null},manual_frozen) THEN 'MANUAL' WHEN debt_atoms>0 THEN 'DEBT' ELSE NULL END WHERE project_id=${projectId} AND currency=${currency} RETURNING id`;
+      .db`UPDATE wallets SET policy=coalesce(${patch.policy ?? null},policy),manual_frozen=coalesce(${patch.frozen ?? null},manual_frozen),freeze_reason=CASE WHEN evidence_disputed THEN 'EVIDENCE_CONFLICT' WHEN coalesce(${patch.frozen ?? null},manual_frozen) THEN 'MANUAL' WHEN debt_atoms+credit_reserved_atoms>credit_limit_atoms THEN 'DEBT' ELSE NULL END WHERE project_id=${projectId} AND currency=${currency} RETURNING id`;
     if (!rows.length) throw new GatewayError(404, "not_found", "Wallet not found");
   }
   async setTariff(value: TariffInput): Promise<{ id: string; pricing_id: string }> {
@@ -165,7 +181,7 @@ export class FundsStore {
   }
   async receipt(requestId: string, projectId: string): Promise<Record<string, unknown>> {
     const rows = await this
-      .db`SELECT q.id,q.billing_currency,q.billing_outcome,h.state AS hold_state,h.amount_atoms::text AS reserved_atoms,c.id AS charge_id,c.amount_atoms::text AS charged_atoms,c.funded_atoms::text,c.debt_atoms::text,c.refunded_atoms::text,c.pricing_id,c.evidence_id FROM gateway_requests q LEFT JOIN billing_holds h ON h.request_id=q.id LEFT JOIN billing_charges c ON c.request_id=q.id WHERE q.id=${requestId} AND q.project_id=${projectId}`;
+      .db`SELECT q.id,q.billing_currency,q.billing_outcome,h.state AS hold_state,h.amount_atoms::text AS reserved_atoms,h.credit_atoms::text AS credit_reserved_atoms,c.id AS charge_id,c.amount_atoms::text AS charged_atoms,c.funded_atoms::text,c.debt_atoms::text,c.refunded_atoms::text,c.pricing_id,c.evidence_id FROM gateway_requests q LEFT JOIN billing_holds h ON h.request_id=q.id LEFT JOIN billing_charges c ON c.request_id=q.id WHERE q.id=${requestId} AND q.project_id=${projectId}`;
     if (!rows[0]) throw new GatewayError(404, "not_found", "Billing request not found");
     return rows[0];
   }
@@ -235,7 +251,7 @@ export class FundsStore {
         await tx`SELECT adjust_billing_charge(${charges[0].id}::uuid,${target}::numeric,${`resolution:${id}`},'PROVIDER_RECONCILIATION')`;
       }
       await tx`UPDATE wallets w SET evidence_disputed=EXISTS(SELECT 1 FROM billing_holds h JOIN attempts a ON a.request_id=h.request_id WHERE h.wallet_id=w.id AND a.metering_conflict AND NOT EXISTS(SELECT 1 FROM billing_resolutions r WHERE r.request_id=h.request_id)) WHERE w.id=${rows[0].id}`;
-      await tx`UPDATE wallets SET freeze_reason=CASE WHEN evidence_disputed THEN 'EVIDENCE_CONFLICT' WHEN manual_frozen THEN 'MANUAL' WHEN debt_atoms>0 THEN 'DEBT' ELSE NULL END WHERE id=${rows[0].id}`;
+      await tx`UPDATE wallets SET freeze_reason=CASE WHEN evidence_disputed THEN 'EVIDENCE_CONFLICT' WHEN manual_frozen THEN 'MANUAL' WHEN debt_atoms+credit_reserved_atoms>credit_limit_atoms THEN 'DEBT' ELSE NULL END WHERE id=${rows[0].id}`;
       await tx`UPDATE billing_holds SET next_reconcile_at=now(),reconcile_until=NULL WHERE request_id=${requestId}`;
       return { id, replayed: false };
     });

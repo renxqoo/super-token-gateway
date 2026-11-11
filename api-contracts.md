@@ -52,3 +52,19 @@ Multipart 推理请求的 `prompt` 和 `input` 各只接受一个字段。重复
 文件引用、file_ids 数组、previous_response_id 都经过项目/模型授权并改写为自有 upstream ID。未经管理的 Gemini fileData/cachedContent、容器 ID、向量库/会话/assistant 资源引用返回 422，不能利用共享上游密钥越过项目边界。
 
 没有“跨供应商查询同一个资源”和“本地下载归档”功能。原供应商删除或停止保存内容后，Gateway 只能保留计量与元数据。
+
+## 授信策略
+
+`POST /admin/projects/:id/wallets/:currency/credit-policy` 仅允许管理凭证，钱包须已经存在。严格输入示例：
+
+```json
+{
+  "external_ref": "credit-policy-001",
+  "expected_version": "0",
+  "credit_limit_atoms": "100000000000000000000"
+}
+```
+
+成功200返回id、credit_policy_version、credit_limit_atoms及replayed。相同命令重试返回原id与版本，不重新应用；不同载荷、旧版本、新额度低于欠费加在途信用返回409/billing_conflict，钱包不存在404/not_found，HTTP输入格式错误400。数据库入口的非法金额映射422/billing_rejected。
+
+钱包查询新增credit_limit_atoms、credit_reserved_atoms、available_credit_atoms、credit_excess_atoms、credit_policy_version，均为整数串；available_credit_atoms不包含模型受限赠额。`GET /v1/requests/:id/billing` 新增该请求credit_reserved_atoms，描述原预扣中的信用部分，终态后的实际欠费看debt_atoms。现金/赠额available最低0；异常应收超过授信时保留全额债务并冻结。

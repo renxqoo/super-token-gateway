@@ -1,3 +1,9 @@
+# 2026-11-11 资金边界与当前容量状态
+
+正常授信及严格容量验收装置已实施；最终门禁通过77单元、260真实集成、8项产物与8项原生耐久检查。当前原生环境多轮6000 RPS及较低负载两分钟复验均未通过，60分钟因磁盘预算不足未运行。完整结果、限制、旧版本对照与原始证据见[本轮报告](docs/performance/funds-capacity-2026-11-11.md)。后续历史记录不是当前版本达标证明。
+
+---
+
 # 智能路由故障与资金验证
 
 2026-11-11，本轮使用三个独立端口的 OpenAI 兼容 mock 渠道、两个独立装配的 Gateway 与 Redis 客户端，以及隔离的真实 PostgreSQL 数据库和耐久证据 Redis。所有场景通过真实 HTTP 派发，正常消费数字证据、结算并核对外部 ACK。50 项新增回归位于 `tests/integration/routing.test.ts`，执行入口为 `bun --env-file=.env.local test tests/integration/routing.test.ts --timeout 30000`。

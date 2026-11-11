@@ -1,11 +1,12 @@
 import { LatencyHistogram, validChat } from "./benchmark-lib.ts";
 import { mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+import { createIdentityWriter } from "./capacity-evidence.ts";
 import { Agent as HttpAgent, request as httpRequest } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 
 const options = Bun.argv.slice(2);
 const recordIds = options.includes("--record-request-ids");
-const completedIds: string[] = [];
 const option = (name: string, fallback: string) => {
   const index = options.indexOf(name);
   return index >= 0 ? (options[index + 1] ?? fallback) : fallback;
@@ -36,8 +37,6 @@ const urls = url.split(",");
 let sequence = 0;
 if (!token) throw new Error("BENCH_API_KEY or .local/client.env is required");
 const duration = Number(option("--seconds", "15"));
-if (recordIds && duration > 60)
-  throw new Error("Request identity evidence requires a window of at most 60 seconds");
 const concurrency = Number(option("--concurrency", "32"));
 const rate = Number(option("--rate", "0"));
 const warmupConcurrency = Number(
@@ -64,6 +63,10 @@ if (
   concurrency > 8192
 )
   throw new Error("Invalid benchmark bounds");
+const output = option("--output", `reports/gateway-${Date.now()}.json`);
+await mkdir(dirname(output), { recursive: true });
+const identityPath = `${output}.identities.tsv`;
+const identityWriter = recordIds ? await createIdentityWriter(identityPath) : undefined;
 const model = option("--model", "demo");
 const stream = options.includes("--stream");
 const payload = JSON.stringify({
@@ -140,7 +143,11 @@ const call = (
   });
 const latencies = new LatencyHistogram();
 const expectedText = option("--expected-text", "") || undefined;
-const windows = new Map<number, { completed: number; succeeded: number; invalid: number }>();
+const windows = new Map<
+  number,
+  { completed: number; succeeded: number; invalid: number; latency: LatencyHistogram }
+>();
+const latencyWindows = new Map<number, LatencyHistogram>();
 const statuses = new Map<number, number>();
 const firstByteLatency = new LatencyHistogram();
 const schedulingGaps = new LatencyHistogram();
@@ -221,8 +228,9 @@ let deadline = performance.now() + 1000;
 let warmupFailures = 0;
 let offered = 0;
 let shed = 0;
-const invoke = async () => {
+const invoke = async (arrivalWindow?: number) => {
   const started = performance.now();
+  const issuedWindow = arrivalWindow ?? Math.floor((started - measuredStart) / 60000);
   let status = 0;
   let valid = false;
   let requestId: string | undefined;
@@ -269,22 +277,32 @@ const invoke = async () => {
       warmupRequests++;
       if (!valid) warmupFailures++;
     } else {
+      const completedAt = Date.now();
+      const latencyMs = performance.now() - started;
       completed++;
-      if (recordIds && valid && requestId && performance.now() <= deadline)
-        completedIds.push(requestId);
       if (valid) succeeded++;
       else invalid++;
       statuses.set(status, (statuses.get(status) ?? 0) + 1);
       const window = Math.floor((performance.now() - measuredStart) / 60000);
       let sample = windows.get(window);
       if (!sample) {
-        sample = { completed: 0, succeeded: 0, invalid: 0 };
+        sample = { completed: 0, succeeded: 0, invalid: 0, latency: new LatencyHistogram() };
         windows.set(window, sample);
       }
       sample.completed++;
       if (valid) sample.succeeded++;
       else sample.invalid++;
-      latencies.add(performance.now() - started);
+      latencies.add(latencyMs);
+      sample.latency.add(latencyMs);
+      let issuedLatency = latencyWindows.get(issuedWindow);
+      if (!issuedLatency) {
+        issuedLatency = new LatencyHistogram();
+        latencyWindows.set(issuedWindow, issuedLatency);
+      }
+      issuedLatency.add(latencyMs);
+      if (identityWriter && valid) {
+        await identityWriter.write([requestId ?? ""], completedAt);
+      }
     }
   }
 };
@@ -318,7 +336,7 @@ if (rate > 0) {
     const admitted = Math.min(due, concurrency - pending.size);
     inflightShed += due - admitted;
     for (let i = 0; i < admitted; i++) {
-      const task = invoke();
+      const task = invoke(Math.floor((offered - due + i) / (rate * 60)));
       pending.add(task);
       void task.finally(() => pending.delete(task));
     }
@@ -344,6 +362,7 @@ httpsAgent.destroy();
 const elapsed = (performance.now() - started) / 1000;
 const cpu = process.cpuUsage(cpuStart);
 await collecting;
+await identityWriter?.close();
 const metricsAfter = collectMetrics ? await metrics() : undefined;
 const quantile = (value: number) => latencies.quantile(value);
 const artifacts = collectMetrics
@@ -390,15 +409,47 @@ const report = {
     p95: firstByteLatency.quantile(0.95),
     p99: firstByteLatency.quantile(0.99),
   },
-  ...(recordIds ? { completed_ids_in_window: completedIds } : {}),
+  ...(recordIds ? { identity_log: identityPath } : {}),
   completed,
   succeeded,
   invalid,
   successful_rps: Math.round((succeeded / elapsed) * 100) / 100,
   success_ratio: succeeded / Math.max(1, completed + shed),
-  latency_ms: { p50: quantile(0.5), p95: quantile(0.95), p99: quantile(0.99) },
+  latency_ms: {
+    p50: quantile(0.5),
+    p95: quantile(0.95),
+    p99: quantile(0.99),
+    p999: quantile(0.999),
+  },
   statuses: Object.fromEntries(statuses),
-  minute_windows: Object.fromEntries(windows),
+  minute_windows: Object.fromEntries(
+    [...windows].map(([index, sample]) => [
+      index,
+      {
+        completed: sample.completed,
+        succeeded: sample.succeeded,
+        invalid: sample.invalid,
+        latency_ms: {
+          p50: sample.latency.quantile(0.5),
+          p95: sample.latency.quantile(0.95),
+          p99: sample.latency.quantile(0.99),
+          p999: sample.latency.quantile(0.999),
+        },
+      },
+    ]),
+  ),
+  latency_windows: Object.fromEntries(
+    [...latencyWindows].map(([index, latency]) => [
+      index,
+      {
+        samples: latency.count,
+        p50: latency.quantile(0.5),
+        p95: latency.quantile(0.95),
+        p99: latency.quantile(0.99),
+        p999: latency.quantile(0.999),
+      },
+    ]),
+  ),
   histogram_samples: latencies.count,
   load_generator_peak_rss_bytes: peakRSS,
   ...(metricsBefore && metricsAfter
@@ -426,10 +477,6 @@ const report = {
     : {}),
 };
 await mkdir(new URL("../reports/", import.meta.url), { recursive: true });
-const output = option(
-  "--output",
-  `reports/${report.label}-${stream ? "sse" : "json"}-${Date.now()}.json`,
-);
 await Bun.write(output, `${JSON.stringify(report, null, 2)}\n`);
 console.log(JSON.stringify(report, null, 2));
 if (report.success_ratio < 0.999) process.exitCode = 1;

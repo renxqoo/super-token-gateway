@@ -14,13 +14,14 @@ export function createDatabase(url: string, max = 16): SQL {
   });
 }
 
-export const SCHEMA_VERSION = 2026111010;
+export const SCHEMA_VERSION = 2026111101;
 export async function migrate(
   db: SQL,
   options: { upgrade?: boolean; quiesced?: boolean } = {},
 ): Promise<void> {
   const source = await Bun.file(new URL("./schema.sql", import.meta.url)).text();
   const lifecycle = await Bun.file(new URL("./lifecycle.sql", import.meta.url)).text();
+  const credit = await Bun.file(new URL("./credit.sql", import.meta.url)).text();
   await db.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(81442591)`;
     const existing = await tx`SELECT to_regclass('public.schema_migrations') AS relation`;
@@ -30,7 +31,9 @@ export async function migrate(
       if (versions.length === 1 && versions[0]?.version === SCHEMA_VERSION) return;
       if (
         versions.length !== 1 ||
-        ![2026111006, 2026111007, 2026111008, 2026111009].includes(versions[0]?.version ?? 0) ||
+        ![2026111006, 2026111007, 2026111008, 2026111009, 2026111010].includes(
+          versions[0]?.version ?? 0,
+        ) ||
         !options.upgrade ||
         !options.quiesced
       )
@@ -46,7 +49,7 @@ export async function migrate(
         await tx`SELECT (SELECT count(*)::text FROM usage_events) AS usage,(SELECT count(*)::text FROM money_journal) AS journals,(SELECT count(*)::text FROM gateway_requests) AS requests,(SELECT sum(available_atoms+reserved_atoms+spent_atoms+expired_atoms+debt_atoms)::text FROM wallets) AS balances`
       )[0];
       if (versions[0]?.version === 2026111006) await tx.unsafe(lifecycle);
-      if (versions[0]?.version !== 2026111009) {
+      if ((versions[0]?.version ?? 0) < 2026111009) {
         await tx`ALTER TABLE public.resources ADD COLUMN IF NOT EXISTS batch_manifest jsonb`;
         await tx`UPDATE public.gateway_requests q SET billing_outcome='PENDING'
         FROM public.billing_holds h, public.resources r WHERE h.request_id=q.id AND r.attempt_id=q.selected_attempt_id
@@ -56,6 +59,7 @@ export async function migrate(
         WHERE r.attempt_id=a.id AND r.kind='batch' AND r.state IN ('COMPLETED','CANCELLED','FAILED')
         AND h.state IN ('HELD','RECONCILING')`;
       }
+      await tx.unsafe(credit);
       const functions = `${source}\n${lifecycle}`.match(
         /CREATE FUNCTION [\s\S]*?\bAS (\$[A-Za-z_]*\$)[\s\S]*?\1;/g,
       );
@@ -80,6 +84,8 @@ export async function migrate(
         if ((await tx`SELECT 1 FROM pg_roles WHERE rolname=${role}`).length)
           await tx.unsafe(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${role}`);
       }
+      if ((await tx`SELECT 1 FROM pg_roles WHERE rolname='gateway_runtime'`).length)
+        await tx`GRANT EXECUTE ON FUNCTION public.configure_wallet_credit(uuid,text,text,numeric,numeric) TO gateway_runtime`;
       await tx`UPDATE schema_migrations SET version=${SCHEMA_VERSION},applied_at=now()`;
       return;
     }
@@ -88,6 +94,7 @@ export async function migrate(
     if (objects.length) throw new Error("Refusing to initialize a nonempty database");
     await tx.unsafe(source);
     await tx.unsafe(lifecycle);
+    await tx.unsafe(credit);
     await tx`INSERT INTO schema_migrations(version) VALUES(${SCHEMA_VERSION})`;
   });
 }

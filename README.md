@@ -2,9 +2,9 @@
 
 独立的 LLM Gateway 后端，使用 **Hono + Bun 1.4.4**，原生 `bun check`、`bun fmt` 和 oxlint。业务系统不在此仓库的运行依赖中。
 
-当前验收目标为同一台 Mac 上网关转发 6000 RPS。转发吞吐与后台持续结算吞吐分别计量；长期高可用仍需独立基础设施验证。功能、测试和容量证据持续更新于[验收记录](validation.md)。
+当前验收目标为同一台 Mac 上网关转发 6000 RPS。正式验收要求窗口内有效响应、精确结算与外部ACK共同完成，见[6000 RPS契约](docs/performance/capacity-contract.md)；长期高可用仍需独立基础设施验证。功能、测试和容量证据持续更新于[验收记录](validation.md)。
 
-Gateway 管理技术组织/主体、项目、API Key/IP、模型别名、供应商连接、路由与限流，以及多币种钱包、赠送额度、预扣、精确计费、退款冲正和 BullMQ 结算 worker。独立业务系统负责登录账号、商业组织关系、支付渠道、套餐和营销；通过幂等内部 API 入账，不直接访问 Gateway 数据库。见 [系统边界](architecture.md) 和 [计量契约](funds-and-billing.md)。
+Gateway 管理技术组织/主体、项目、API Key/IP、模型别名、供应商连接、路由与限流，以及多币种钱包、赠送额度、预扣、有界正常授信、精确计费、退款冲正和 BullMQ 结算 worker。独立业务系统负责登录账号、商业组织关系、支付渠道、套餐和营销；通过幂等内部 API 入账，不直接访问 Gateway 数据库。见 [系统边界](architecture.md) 和 [计量契约](funds-and-billing.md)。
 
 **不持久化模型输出**：文本、工具参数、向量、图片、音频、视频、完整响应和 Batch 结果不进入 Gateway 数据库、文件、日志、Redis 或 usage 事件。文件、状态查询与下载依赖原供应商；没有本地正文重放缓存。
 

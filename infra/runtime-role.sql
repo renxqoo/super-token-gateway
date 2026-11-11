@@ -14,6 +14,7 @@ GRANT UPDATE ON gateway_requests TO gateway_runtime;
 GRANT UPDATE(policy,manual_frozen,freeze_reason,evidence_disputed) ON wallets TO gateway_runtime;
 GRANT UPDATE(next_reconcile_at,reconcile_until) ON billing_holds TO gateway_runtime;
 GRANT EXECUTE ON FUNCTION credit_wallet(uuid,text,text,numeric,text,integer,timestamptz,text[],text[]),admit_gateway_batch(jsonb),refund_billing_charge(uuid,numeric,text,text),adjust_billing_charge(uuid,numeric,text,text) TO gateway_runtime;
+GRANT EXECUTE ON FUNCTION configure_wallet_credit(uuid,text,text,numeric,numeric) TO gateway_runtime;
 -- Only a worker can persist queued usage and execute automatic financial settlement.
 GRANT EXECUTE ON FUNCTION persist_usage_batch(jsonb),settle_requests(uuid[],uuid) TO gateway_worker;
 GRANT UPDATE(reconcile_token,reconcile_until) ON billing_holds TO gateway_worker;

@@ -1,8 +1,8 @@
 # PostgreSQL 模型与事务
 
-当前契约为 schema2026111010，定义由 `packages/storage/src/schema.sql` 与 `lifecycle.sql` 组成。运行进程只校验当前版本，不执行 DDL。初始化在事务与 advisory lock 下完成；非空未知库拒绝修改。
+当前契约为 schema2026111101，定义由 `packages/storage/src/schema.sql`、`lifecycle.sql` 与 `credit.sql` 组成。运行进程只校验当前版本，不执行 DDL。初始化在事务与 advisory lock 下完成；非空未知库拒绝修改。
 
-schema10 为新建请求、初始尝试、预扣流水和结算记录生成按毫秒排序的 UUID，减少热表持续插入时分散的索引页写入。已持久化 UUID 继续按原值关联，证据投递继续按既有 ID 顺序认领。schema06、07、08、09 均使用显式离线入口升级到 schema10。schema09 升级刷新函数、权限和版本并校验资金快照，已有 Batch 状态保留。首次最终证据在同一条集合写入语句中共享解析结果，原事务仍同时提交数字证据、可投递事件和资金效果。worker 最多将 256 个证据并入一次 SQL 提交，队列作业的单项上限仍为 128，单个作业的事实一起进入同一事务。批内保留按钱包冲突退避，数字、资金来源和流水仍逐笔校验。
+schema10 为新建请求、初始尝试、预扣流水和结算记录生成按毫秒排序的 UUID，减少热表持续插入时分散的索引页写入。已持久化 UUID 继续按原值关联，证据投递继续按既有 ID 顺序认领。schema06、07、08、09、10 均使用显式离线入口升级到当前版本。schema09 升级刷新函数、权限和版本并校验资金快照，已有 Batch 状态保留。首次最终证据在同一条集合写入语句中共享解析结果，原事务仍同时提交数字证据、可投递事件和资金效果。worker 最多将 256 个证据并入一次 SQL 提交，队列作业的单项上限仍为 128，单个作业的事实一起进入同一事务。批内保留按钱包冲突退避，数字、资金来源和流水仍逐笔校验。
 
 请求恢复只读取 `attempts_stale`；移除没有调用方的 `requests_stale`，让请求终态更新不再因该部分索引而强制重写其他索引。usage 的 `(attempt_id,source)` 唯一索引同时支持按 attempt 查询，移除重复的单列 `usage_attempt`。请求表的新页面按 70% 填充保留更新空间；索引变化不改变唯一性、外键、历史查询和恢复契约，离线升级统一应用。
 
@@ -59,3 +59,9 @@ FINAL 证据不会被后到 PARTIAL/UNKNOWN 降级。选定证据由 attempts.ev
 `bun run db:archive -- --month YYYY-MM --output /absolute/archive-directory` 对已过去月份导出有界 gzip NDJSON，写入 schema、MVCC snapshot、条数、压缩/原文 SHA-256 清单并自动复验。`--verify /absolute/archive-directory/manifest.json` 可独立复验；时间比较保留 PG 微秒精度。它是某一 MVCC 快照，晚到事实会进入后续快照，不能宣称自然月永久封闭。
 
 指定 `--tablespace <已存在名称> --quiesced` 可把已验证月份的 payload 分区及全部索引移到冷存储。证据与账本在线查询仍然有效，归档工具不删除权威事实。全局元数据与金融记录仍会增长；按目标负载实测磁盘/WAL/备份预算，不能把分区说成数据库总量有界，也不能擅自给未结责任设置删除期限。
+
+## 授信迁移与状态
+
+schema2026111101在钱包增加非负credit_limit_atoms、credit_reserved_atoms、credit_policy_version，在预扣增加credit_atoms；存量均初始化0。wallet_credit_policies保留每钱包唯一external_ref、指纹、策略版本和额度，不可修改/删除。授信承诺不写现金来源流水；欠费继续使用现有账单及receivable流水。纯现金快速结算明确要求credit_atoms=0。
+
+停止准入与worker、排空队列并备份、断开其他客户端后，使用既有 `bun run db:migrate -- --upgrade --quiesced`。工具在同一事务内增加字段、刷新函数、授权既有gateway_runtime的新调额入口并核对旧资金快照。新角色仍按infra/runtime-role.sql配置，运行角色无直接修改信用字段或策略记录的权限。运行时仅接受当前版本；有新授信业务写入后不能部署旧版本处理。

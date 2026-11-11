@@ -28,3 +28,7 @@
 - Bedrock Claude 请求体：[Messages contract](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages-request-response.html)；[InvokeModelWithResponseStream](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_InvokeModelWithResponseStream.html)。
 - SigV4 canonical request：[AWS signing specification](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html)。签名测试另以 botocore 独立生成包含 session token 和编码模型名的 golden 值。
 - Vertex Gemini：[inference reference](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference)；[service account OAuth](https://developers.google.com/identity/protocols/oauth2/service-account)。
+
+## 当前持续对标
+
+本轮使用 /Users/wrr/work/Tillgate 与 /Users/wrr/work/new-api，版本及差距见[当前参考矩阵](docs/performance/reference-comparison.md)。通过 `bun run references:snapshot` 重新记录HEAD、工作区状态与关键源码哈希；当前性能与失败证据见[资金及容量复验](docs/performance/funds-capacity-2026-11-11.md)。历史参考版本与倍数不用于当前资金链路排名。

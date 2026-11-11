@@ -102,3 +102,46 @@ export function passesCapacityTarget(
     result.succeeded / result.duration_seconds >= targetRps
   );
 }
+
+export function passesOnlineCapacity(
+  valid: boolean,
+  http: {
+    succeeded: number;
+    duration_seconds: number;
+    latency_ms: { p99: number };
+    latency_windows: Record<string, { p99: number }>;
+  },
+  targetRps: number,
+  seconds: number,
+  minuteCompletions: number[],
+  maxP99Ms: number,
+  drainAfterWindowMs: number,
+): boolean {
+  return (
+    passesCapacityTarget(valid, http, targetRps) &&
+    Number.isFinite(drainAfterWindowMs) &&
+    drainAfterWindowMs >= 0 &&
+    drainAfterWindowMs <= 120000 &&
+    Number.isSafeInteger(seconds) &&
+    seconds >= 60 &&
+    seconds <= 3600 &&
+    seconds % 60 === 0 &&
+    Number.isFinite(maxP99Ms) &&
+    maxP99Ms > 0 &&
+    Number.isFinite(http.latency_ms.p99) &&
+    http.latency_ms.p99 >= 0 &&
+    http.latency_ms.p99 <= maxP99Ms &&
+    minuteCompletions.length === seconds / 60 &&
+    minuteCompletions.every((count, index) => {
+      const p99 = http.latency_windows[String(index)]?.p99;
+      return (
+        Number.isSafeInteger(count) &&
+        count >= targetRps * 60 &&
+        p99 !== undefined &&
+        Number.isFinite(p99) &&
+        p99 >= 0 &&
+        p99 <= maxP99Ms
+      );
+    })
+  );
+}

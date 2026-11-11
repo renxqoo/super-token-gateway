@@ -1,0 +1,229 @@
+{
+  "date": "2026-11-11",
+  "gateway_head": "45b7673d1397dc7e75c103b64b9cffc8b5ad500e",
+  "gateway_sha256": "9d403a62c42bce6c4e6519176494ffd64418fd2135bc050d822a547246e67c63",
+  "schema": 2026111101,
+  "verify_exit_code": 0,
+  "unit_tests": 77,
+  "integration_tests": 260,
+  "artifact_checks": 8,
+  "durability_checks": 8,
+  "unit_loaded_functions_coverage": 71.47,
+  "unit_loaded_lines_coverage": 68.88,
+  "statements_coverage": null,
+  "branches_coverage": null,
+  "coverage_threshold_configured": false,
+  "evidence_archive": ".local/credit-capacity-20261111/evidence.tar.gz",
+  "evidence_sha256": "d510717973e7f26cdc2dab5947cc0b6472615a82588ed13e66e819a716f0270e",
+  "capacity_passed": false,
+  "long_capacity": "not_run_insufficient_disk",
+  "references_performance": "not_run",
+  "cases": [
+    {
+      "name": "native-initial",
+      "seconds": 60,
+      "rate": 6150,
+      "target_rps": 6000,
+      "valid": false,
+      "capacity_passed": false,
+      "http_successful_rps": 3005.18,
+      "window_complete_rps": 2429.633333333333,
+      "minute_completions": [145778],
+      "p99_ms": 4828.44,
+      "shed": 121783,
+      "invalid": 60033,
+      "gateway_errors": {
+        "usage_queue_unavailable": 60033
+      },
+      "requests": 187813,
+      "unbalanced_journals": 0,
+      "debt_atoms": "0",
+      "reserved_atoms": "0",
+      "queue": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms_after_http": 4337,
+      "database_bytes": 950908595,
+      "artifacts": {
+        "gateway_sha256": "9d403a62c42bce6c4e6519176494ffd64418fd2135bc050d822a547246e67c63",
+        "manifest_sha256": "11bf46e85755c184f9bc4ba66926eff519a2381133d3028158d40c40a2b874d0"
+      },
+      "source_directory": "/Users/wrr/work/super-token-gateway/.local/phase2/bench-de9683a803024cfea5ea7bb8daa1c57e",
+      "audit_archive": "native-initial.audit.json.gz"
+    },
+    {
+      "name": "native-profile",
+      "seconds": 60,
+      "rate": 6150,
+      "target_rps": 6000,
+      "valid": false,
+      "capacity_passed": false,
+      "http_successful_rps": 3332.37,
+      "window_complete_rps": 3326.5833333333335,
+      "minute_completions": [199595],
+      "p99_ms": 1821.73,
+      "shed": 162422,
+      "invalid": 0,
+      "gateway_errors": {},
+      "requests": 207058,
+      "unbalanced_journals": 0,
+      "debt_atoms": "0",
+      "reserved_atoms": "0",
+      "queue": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms_after_http": 121,
+      "database_bytes": 979998387,
+      "artifacts": {
+        "gateway_sha256": "9d403a62c42bce6c4e6519176494ffd64418fd2135bc050d822a547246e67c63",
+        "manifest_sha256": "e58ad84918ec23cccfc0950a875509dc84860f43f8e1ee291cf5488c38ab50f5"
+      },
+      "source_directory": "/Users/wrr/work/super-token-gateway/.local/phase2/bench-ccbba784eba74e7695c667d4a5a259d0",
+      "audit_archive": "native-profile.audit.json.gz"
+    },
+    {
+      "name": "baseline-45b7673",
+      "seconds": 60,
+      "rate": 6150,
+      "target_rps": 6000,
+      "valid": false,
+      "capacity_passed": false,
+      "http_successful_rps": 3889.69,
+      "window_complete_rps": 3950.7166666666667,
+      "minute_completions": null,
+      "p99_ms": 5680.16,
+      "shed": 119238,
+      "invalid": 0,
+      "gateway_errors": {},
+      "requests": 250383,
+      "unbalanced_journals": 0,
+      "debt_atoms": "0",
+      "reserved_atoms": "0",
+      "queue": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms_after_http": 35,
+      "database_bytes": 1181636275,
+      "artifacts": {
+        "gateway_sha256": "2b275642fc8a76c5ec35c94f3d136884aa8f54228009fab34f7de18e3f4c5832",
+        "manifest_sha256": "59f39532812983d55322f3a785cd8548823c49b76f473fd8167060fbb9edd17f"
+      },
+      "source_directory": "/Users/wrr/work/super-token-gateway/.local/credit-capacity-20261111/baseline/.local/phase2/bench-0077b7f77d4e464ebb2b96cd72523f05",
+      "audit_archive": "baseline-45b7673.audit.json.gz"
+    },
+    {
+      "name": "redis84-crash-120s",
+      "seconds": 120,
+      "rate": 2600,
+      "target_rps": 2500,
+      "valid": false,
+      "capacity_passed": false,
+      "http_successful_rps": 62,
+      "window_complete_rps": 62.175,
+      "minute_completions": [7461, 0],
+      "p99_ms": 391.36,
+      "shed": 0,
+      "invalid": 304539,
+      "gateway_errors": {
+        "rate_limit_unavailable": 304539
+      },
+      "requests": 8165,
+      "unbalanced_journals": 0,
+      "debt_atoms": "0",
+      "reserved_atoms": "0",
+      "queue": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms_after_http": 15,
+      "database_bytes": 57882291,
+      "artifacts": {
+        "gateway_sha256": "9d403a62c42bce6c4e6519176494ffd64418fd2135bc050d822a547246e67c63",
+        "manifest_sha256": "e58ad84918ec23cccfc0950a875509dc84860f43f8e1ee291cf5488c38ab50f5"
+      },
+      "source_directory": "/Users/wrr/work/super-token-gateway/.local/phase2/bench-59fdd007d8d040a3a7fb5d5dce380fd1",
+      "audit_archive": "redis84-crash-120s.audit.json.gz"
+    },
+    {
+      "name": "redis74-6000",
+      "seconds": 60,
+      "rate": 6150,
+      "target_rps": 6000,
+      "valid": false,
+      "capacity_passed": false,
+      "http_successful_rps": 3209.59,
+      "window_complete_rps": 3154.016666666667,
+      "minute_completions": [189241],
+      "p99_ms": 1841.57,
+      "shed": 171501,
+      "invalid": 0,
+      "gateway_errors": {},
+      "requests": 198042,
+      "unbalanced_journals": 0,
+      "debt_atoms": "0",
+      "reserved_atoms": "0",
+      "queue": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms_after_http": 24,
+      "database_bytes": 936294067,
+      "artifacts": {
+        "gateway_sha256": "9d403a62c42bce6c4e6519176494ffd64418fd2135bc050d822a547246e67c63",
+        "manifest_sha256": "e58ad84918ec23cccfc0950a875509dc84860f43f8e1ee291cf5488c38ab50f5"
+      },
+      "source_directory": "/Users/wrr/work/super-token-gateway/.local/phase2/bench-ed6c6d15cbab4859bd2d2cd6923e3219",
+      "audit_archive": "redis74-6000.audit.json.gz"
+    },
+    {
+      "name": "redis74-120s",
+      "seconds": 120,
+      "rate": 2600,
+      "target_rps": 2500,
+      "valid": false,
+      "capacity_passed": false,
+      "http_successful_rps": 2034.1,
+      "window_complete_rps": 2000.0333333333333,
+      "minute_completions": [124504, 115500],
+      "p99_ms": 2019.15,
+      "shed": 64164,
+      "invalid": 63,
+      "gateway_errors": {
+        "rate_limit_unavailable": 61
+      },
+      "requests": 248181,
+      "unbalanced_journals": 0,
+      "debt_atoms": "0",
+      "reserved_atoms": "0",
+      "queue": {
+        "waiting": 0,
+        "active": 0,
+        "delayed": 0,
+        "failed": 0
+      },
+      "drain_ms_after_http": 98,
+      "database_bytes": 1169069747,
+      "artifacts": {
+        "gateway_sha256": "9d403a62c42bce6c4e6519176494ffd64418fd2135bc050d822a547246e67c63",
+        "manifest_sha256": "e58ad84918ec23cccfc0950a875509dc84860f43f8e1ee291cf5488c38ab50f5"
+      },
+      "source_directory": "/Users/wrr/work/super-token-gateway/.local/phase2/bench-bdee354f019145c5b52e8301984e3421",
+      "audit_archive": "redis74-120s.audit.json.gz"
+    }
+  ],
+  "fixture_cleanup": "owned_processes_stopped_and_disposable_data_removed",
+  "user_environment": "Mac only; retain local evidence"
+}

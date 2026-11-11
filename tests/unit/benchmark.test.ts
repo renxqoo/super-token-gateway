@@ -78,11 +78,19 @@ test("the open-loop driver does not drop the planned arrival at the window bound
     );
     const stderr = await new Response(child.stderr).text();
     expect(await child.exited, stderr).toBe(0);
-    expect(await Bun.file(output).json()).toMatchObject({
+    const report = await Bun.file(output).json();
+    const identities = (await Bun.file(report.identity_log).text()).trim().split("\n");
+    expect(identities).toHaveLength(2);
+    expect(
+      identities.filter(
+        (line) => Number(line.split("\t")[1]) < Date.parse(report.measurement_started_at) + 1000,
+      ),
+    ).toHaveLength(1);
+    expect(report).toMatchObject({
       offered: 2,
       shed: 0,
       succeeded: 2,
-      completed_ids_in_window: ["fixture-request"],
+      identity_log: `${output}.identities.tsv`,
     });
   } finally {
     await server.stop(true);

@@ -1,6 +1,12 @@
 /** Isolated, paid-path benchmark. Creates only its own disposable fixture DB and Redis namespace. */
 import { mkdir } from "node:fs/promises";
-import { passesCapacityTarget } from "./benchmark-lib.ts";
+import { cleanupCapacityNamespaces } from "./capacity-cleanup.ts";
+import {
+  auditCapacityIdentities,
+  createIdentityWriter,
+  capacityStorageBudget,
+} from "./capacity-evidence.ts";
+import { passesCapacityTarget, passesOnlineCapacity } from "./benchmark-lib.ts";
 import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
 import { createKey, verifier, encrypt } from "@gateway/kernel";
 import { RedisClient } from "bun";
@@ -20,8 +26,10 @@ const pool = Number(option("--pool", "16"));
 const stream = args.includes("--stream");
 const observe = args.includes("--observe");
 const requireOnlineCapacity = args.includes("--online-capacity");
-if (requireOnlineCapacity && seconds !== 60)
-  throw new Error("Online capacity acceptance requires a 60-second window");
+if (requireOnlineCapacity && (seconds < 60 || seconds % 60 !== 0))
+  throw new Error("Online capacity acceptance requires complete 60-second windows");
+const maxP99Ms = Number(option("--max-p99-ms", "1500"));
+if (!Number.isFinite(maxP99Ms) || maxP99Ms <= 0) throw new Error("Invalid P99 budget");
 const lz4 = args.includes("--wal-lz4");
 const providerKind = option("--provider", "openai");
 if (providerKind !== "openai" && providerKind !== "anthropic")
@@ -76,6 +84,14 @@ if (!base || !process.env.REDIS_URL || !process.env.QUEUE_REDIS_URL)
   throw new Error("Local PG, admission Redis and durable queue Redis URLs are required");
 if (requireOnlineCapacity && Number(process.env.QUEUE_REQUIRED_REPLICAS ?? "0") < 1)
   throw new Error("Online capacity requires an acknowledged AOF replica");
+const storageBudget = await capacityStorageBudget(
+  process.cwd(),
+  seconds * Number(option("--rate", String(targetRps || 6000))),
+);
+if (requireOnlineCapacity && !storageBudget.sufficient)
+  throw new Error(
+    `Capacity storage budget insufficient: ${storageBudget.available} bytes available, ${storageBudget.estimated + storageBudget.reserve} required; no fixture created`,
+  );
 const id = crypto.randomUUID().replaceAll("-", "");
 const database = `gateway_bench_${id}`;
 const namespace = `bench:${id}`;
@@ -89,6 +105,12 @@ url.pathname = `/${database}`;
 const db = createDatabase(url.toString(), 4);
 const processes: ReturnType<typeof Bun.spawn>[] = [];
 let telemetryTimer: ReturnType<typeof setInterval> | undefined;
+let sampling: Promise<void> | undefined;
+let consuming = false;
+let consume: Promise<void> | undefined;
+let ackWriter: Awaited<ReturnType<typeof createIdentityWriter>> | undefined;
+let loadProcess: ReturnType<typeof Bun.spawn> | undefined;
+let lastStorageCheck = 0;
 let telemetryErrors = 0;
 const env = {
   ...process.env,
@@ -314,13 +336,29 @@ try {
   const samplingStart = Date.now();
   let delivered = 0;
   let receiptConfirmedAcks = 0;
-  const confirmedRequests = new Map<string, number>();
+  const ackPath = `${directory}/ack.identities.tsv`;
+  ackWriter = requireOnlineCapacity ? await createIdentityWriter(ackPath) : undefined;
   let unconfirmedReceipts = 0;
-  let sampling: Promise<void> | undefined;
   telemetryTimer = setInterval(
     () => {
       if (sampling) return;
       sampling = (async () => {
+        if (requireOnlineCapacity && Date.now() - lastStorageCheck >= 1000) {
+          lastStorageCheck = Date.now();
+          const storage = await capacityStorageBudget(process.cwd(), 0);
+          if (storage.available < storage.reserve) {
+            await Bun.write(
+              `${directory}/abort.json`,
+              JSON.stringify({
+                reason: "storage_reserve_exhausted",
+                storage,
+                at: new Date().toISOString(),
+              }),
+            );
+            loadProcess?.kill("SIGTERM");
+            throw new Error("Capacity disk reserve exhausted");
+          }
+        }
         const headers = { authorization: `Bearer ${env.ADMIN_KEY}` };
         const [queue, worker, upstream] = await Promise.all([
           fetch(`http://127.0.0.1:${ports[0]}/admin/queue`, {
@@ -371,8 +409,8 @@ try {
     },
     requireOnlineCapacity ? 250 : 1000,
   );
-  let consuming = true;
-  const consume = (async () => {
+  consuming = true;
+  consume = (async () => {
     while (consuming && consumer) {
       try {
         const page = await store.claimEvents(consumer, 500);
@@ -407,10 +445,10 @@ try {
           if (requireOnlineCapacity && receipts === page.events.length && numericEvidence) {
             receiptConfirmedAcks += acknowledged;
             if (acknowledged === page.events.length) {
-              const committedAt = Date.now();
-              for (const event of page.events)
-                if (!confirmedRequests.has(event.request_id))
-                  confirmedRequests.set(event.request_id, committedAt);
+              await ackWriter!.write(
+                page.events.map((event) => event.request_id),
+                Date.now(),
+              );
             }
           } else if (requireOnlineCapacity) unconfirmedReceipts += acknowledged;
         } else await Bun.sleep(10);
@@ -449,6 +487,7 @@ try {
       stderr: Bun.file(`${directory}/load.log`),
     },
   );
+  loadProcess = load;
   processes.push(load);
   const exit = await load.exited;
   if (!(await Bun.file(reportPath).exists()))
@@ -473,6 +512,7 @@ try {
   }
   consuming = false;
   await consume;
+  await ackWriter?.close();
   let queueStats: Record<string, number> = {};
   do {
     const response = await fetch(`http://127.0.0.1:${ports[0]}/admin/queue`, {
@@ -539,11 +579,15 @@ try {
   valid = valid && telemetryErrors === 0 && timeline.length >= Math.max(1, Math.floor(seconds / 2));
   const windowStart = Date.parse(http.measurement_started_at);
   const windowEnd = windowStart + seconds * 1000;
-  const completedIds = new Set<string>(http.completed_ids_in_window ?? []);
-  const fullyCompletedByWindow = [...completedIds].filter((id) => {
-    const confirmed = confirmedRequests.get(id);
-    return confirmed !== undefined && confirmed >= windowStart && confirmed <= windowEnd;
-  }).length;
+  const identityAudit = requireOnlineCapacity
+    ? await auditCapacityIdentities(http.identity_log, ackPath, windowStart, seconds)
+    : undefined;
+  valid =
+    valid &&
+    (!identityAudit ||
+      (identityAudit.matchedRequests === http.succeeded &&
+        identityAudit.httpOnly === 0 &&
+        identityAudit.ackOnly === http.warmup_requests));
   const withinWindow = timeline
     .filter((sample) => (sample.completed_at ?? Infinity) <= windowEnd)
     .at(-1);
@@ -560,7 +604,9 @@ try {
         receiptConfirmedAcks === (consumerMode === "live" ? check.requests : 0)));
   const onlineCapacity = requireOnlineCapacity
     ? {
-        fullyCompletedByWindow,
+        ...identityAudit!,
+        maxP99Ms,
+        drainAfterWindowMs: Math.max(0, serviceDrainedAt - windowEnd),
         receiptAcksByWindow,
         settledByWindow,
         ackedByWindow,
@@ -569,6 +615,7 @@ try {
       }
     : undefined;
   const result = {
+    storageBudget,
     ownershipMismatches: ownership,
     walletMismatches,
     receiptConfirmedAcks,
@@ -608,7 +655,16 @@ try {
     capacityPassed:
       targetRps > 0
         ? passesCapacityTarget(valid, http, targetRps) &&
-          (!onlineCapacity || onlineCapacity.fullyCompletedByWindow >= seconds * targetRps)
+          (!onlineCapacity ||
+            passesOnlineCapacity(
+              valid,
+              http,
+              targetRps,
+              seconds,
+              onlineCapacity.minuteCompletions,
+              maxP99Ms,
+              onlineCapacity.drainAfterWindowMs,
+            ))
         : undefined,
     seconds,
     instances,
@@ -669,38 +725,33 @@ try {
   if (!valid || result.capacityPassed === false) process.exitCode = 1;
   void mock;
 } finally {
+  consuming = false;
   clearInterval(telemetryTimer);
   for (const child of processes) {
     if (child.exitCode === null) child.kill("SIGTERM");
   }
   await Promise.allSettled(processes.map((p) => p.exited));
+  await Promise.allSettled([consume, sampling]);
+  await ackWriter?.close().catch(() => undefined);
   await db.close();
   await owner.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
   await owner.close();
-  for (const redisURL of [
-    process.env.REDIS_URL,
-    ...(process.env.REDIS_EXTRA_URLS ?? "")
-      .split(",")
-      .map((url) => url.trim())
-      .filter(Boolean),
-    process.env.QUEUE_REDIS_URL,
-  ]) {
-    const redis = new RedisClient(redisURL);
-    try {
-      let cursor = "0";
-      do {
-        const result = (await redis.send("SCAN", [
-          cursor,
-          "MATCH",
-          `*${namespace}*`,
-          "COUNT",
-          "1000",
-        ])) as [string, string[]];
-        cursor = result[0];
-        if (result[1].length) await redis.send("UNLINK", result[1]);
-      } while (cursor !== "0");
-    } finally {
-      redis.close();
-    }
+  const cleanup = await cleanupCapacityNamespaces(
+    [
+      process.env.REDIS_URL!,
+      ...(process.env.REDIS_EXTRA_URLS ?? "")
+        .split(",")
+        .map((url) => url.trim())
+        .filter(Boolean),
+      process.env.QUEUE_REDIS_URL!,
+    ],
+    namespace,
+  );
+  await Bun.write(`${directory}/cleanup.json`, JSON.stringify(cleanup) + "\n");
+  if (cleanup.failed) {
+    process.exitCode = 1;
+    console.error(
+      `Capacity fixture cleanup could not reach ${cleanup.failed} endpoint(s); other endpoints were still cleaned`,
+    );
   }
 }

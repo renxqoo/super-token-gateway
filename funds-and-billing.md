@@ -1,12 +1,12 @@
 # Gateway 钱包、预扣与结算
 
-资金边界见 [ADR 0002](docs/decisions/0002-gateway-wallet-worker.md)，当前唯一计量入口见 [ADR 0003](docs/decisions/0003-durable-usage-queue.md)。Gateway 执行技术钱包记账；业务系统处理支付、商业账号、商品订阅、营销和真实退款渠道。业务系统通过幂等内部管理 API 入账与冲正，不写 Gateway 的数据库。
+资金边界见 [ADR 0002](docs/decisions/0002-gateway-wallet-worker.md)，正常授信与资金承诺边界见 [ADR 0005](docs/decisions/0005-credit-boundaries-and-capacity.md)，当前唯一计量入口见 [ADR 0003](docs/decisions/0003-durable-usage-queue.md)。Gateway 执行技术钱包记账；业务系统处理支付、商业账号、商品订阅、营销和真实退款渠道。业务系统通过幂等内部管理 API 入账与冲正，不写 Gateway 的数据库。
 
 ## 请求链路
 
 1. 验证项目、Key、技术组织/主体、角色、模型/操作、来源 IP 和 RPM/TPM/并发。
 2. 按请求币种获取不可变客户费率版本与预扣上界。币种默认项目的 billing_currency，可用 `x-gateway-currency` 指定；不换汇，不跨币种补足。
-3. PG 同事务复核授权、创建幂等请求、从合资格的现金/赠额分配预扣、登记首次物理 attempt。余额不足或冻结返回 402，上游尚未调用。
+3. PG 同事务复核授权、创建幂等请求、从合资格的现金/赠额及剩余信用分配预扣、登记首次物理 attempt。合资格资金与信用不足或冻结返回 402，上游尚未调用。
 4. 转发模型内容，同时旁路提取白名单数字；每个 attempt 独立保存 usage 和上游成本。正常 JSON/SSE 终态交付前，BullMQ 数字证据必须取得同连接 WAITAOF 落盘确认。
 5. 独立 BullMQ worker 结算最终交付 attempt，释放多余预扣；重试的其他成本由 Gateway 承担。取消但有可信最终 usage 时结算实际用量。
 6. 缺少最终证据时保留预扣并进入对账。不会因等待 15 分钟自动免收、释放或重发模型请求。明确未执行可释放；人工对账指令可显式结算或核销。
@@ -17,7 +17,7 @@
 
 费率是 `{numerator,denominator}`，金额为 **10^-18 币种单位**的原子整数字符串，最大 NUMERIC(38,0)。全部维度用精确有理数汇总，仅在最终原子金额上向上取整。供应商成本 `cost_versions` 与客户售价 `billing_prices` 独立，不能互相代替。模型/操作/币种默认费率可由供应商专属费率覆盖；请求保存原始报价与各候选供应商的价格版本。
 
-预扣上界由显式 ceilings、请求最大输出和收费依据决定。`PROVIDER_USAGE` 要求全部已定价维度的 FINAL 证据；`INPUT_CHARACTERS` 用明确输入字符量并要求请求成功；`REQUEST_COMPLETION` 按成功请求收费。禁止把缺失维度当零。预扣上界不足造成超额时补扣可用资金；仍不足则登记债务、冻结新调用。现金入账可偿债，赠额不能偿还现金债务。可用余额扣减地板为0；欠费金额为实际客户应收中未被资金覆盖的部分，单独记录为 `debt_atoms`，新调用保持冻结并返回402。管理接口 `GET /admin/projects/:id/wallets` 返回按币种区分的可用、预扣、已花费、欠费原子整数字符串和冻结原因。
+预扣上界由显式 ceilings、请求最大输出和收费依据决定。`PROVIDER_USAGE` 要求全部已定价维度的 FINAL 证据；`INPUT_CHARACTERS` 用明确输入字符量并要求请求成功；`REQUEST_COMPLETION` 按成功请求收费。禁止把缺失维度当零。预扣上界不足造成超额时补扣可用资金；仍不足则完整登记债务；已有欠费与在途信用预扣合计超出授信时冻结新调用。现金入账可偿债，赠额不能偿还现金债务。可用余额扣减地板为0；欠费金额为实际客户应收中未被资金覆盖的部分，单独记录为 `debt_atoms`，默认授信为0时债务会冻结新调用并返回402；显式授信允许额度内继续使用。管理接口 `GET /admin/projects/:id/wallets` 返回按币种区分的可用、预扣、已花费、欠费原子整数字符串和冻结原因，以及credit_limit_atoms、credit_reserved_atoms、available_credit_atoms、credit_excess_atoms、credit_policy_version。
 
 字符费率按入口协议中的直接文本计算 Unicode 码点。Completions、图片和视频读取 `prompt`，Speech、Embeddings 和 Moderations 读取 `input`，对话协议读取消息、系统提示和指令的文本内容。文本数组按项相加。媒体载荷、工具元数据和仅引用的历史内容不计入字符量。无法确定字符量时，该候选费率不能用于预扣，其他可用候选仍可参与路由。
 
@@ -55,3 +55,13 @@ worker 的唯一入口 `persist_usage_batch → settle_requests` 在 PG 中原�
 Gateway 不保存提示词、模型输出、工具参数、向量、媒体、完整响应或 Batch 结果；内容恢复依赖上游，资金恢复只使用数字证据和资源标识。
 
 每钱包最多256组仍可成为可用余额的资金条款；已消费但仍可退款的未过期来源继续占用名额。同条款入账复用原批次，退款不受新增条款名额影响。现金退款与预扣释放会唤醒既有债务回收；赠额不能偿还现金债务，争议未解决的债务不会自动回收。
+
+## 正常授信与扣除地板
+
+`available_atoms` 和 `reserved_atoms` 只统计真实现金/赠额，最低为0；`credit_reserved_atoms` 是独立的信用承诺。`billing_holds.amount_atoms` 仍为总预扣，其中 `credit_atoms` 是信用部分；资金来源分配合计为两者之差。正常准入在钱包锁内保证欠费加在途信用加新信用不超过授信，不用赠额偿还旧债。信用不产生资金批次或充值流水。
+
+私网 `POST /admin/projects/:id/wallets/:currency/credit-policy` 接受 external_ref、expected_version、credit_limit_atoms，后两项为非负原子整数字符串。新钱包默认额度和版本均为0。命令按钱包持久幂等；旧命令重放返回原结果，不覆盖新策略。同身份不同载荷、过期版本或调低后不能覆盖已有敞口均返回409。人工冻结继续由原PATCH执行。信用不足使用原402/insufficient_funds。
+
+UNKNOWN保留信用承诺；明确释放或终态结算恰好释放一次，未被真实资金覆盖的实际费用记债务。授信约束正常承诺，异常实际应收可能突破额度，完整记录并冻结，不提供客户费用硬封顶或额外结算宽限。退款、收债、调账、人工对账和冻结统一复核债务加信用承诺；现金清偿或信用释放后重新计算可用额度。
+
+最终补证与资源完成、创建证据可能交错；选中尝试的可信async_final成功证据重新推进账务，不能将已有最终数字和信用承诺永久留在PENDING。其他尝试的迟到事实仍不能替换选中尝试。

@@ -4,6 +4,7 @@ import type { Context } from "hono";
 import { z } from "zod";
 import {
   creditSchema,
+  creditPolicySchema,
   tariffSchema,
   refundSchema,
   adjustmentSchema,
@@ -281,6 +282,15 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
   );
   app.get("/projects/:id/wallets", async (c) =>
     c.json({ data: await deps.funds.wallets(id(c.req.param("id"))) }),
+  );
+  app.post("/projects/:id/wallets/:currency/credit-policy", async (c) =>
+    c.json(
+      await deps.funds.configureCredit(
+        id(c.req.param("id")),
+        currencySchema.parse(c.req.param("currency")),
+        creditPolicySchema.parse(await body(c)),
+      ),
+    ),
   );
   app.get("/projects/:id/wallets/:currency/lots", async (c) =>
     c.json({

@@ -314,6 +314,22 @@ export function openapi(): Record<string, unknown> {
     true,
   );
   add("/admin/projects/{id}/wallets", "get", "admin_wallets", undefined, true);
+  add(
+    "/admin/projects/{id}/wallets/{currency}/credit-policy",
+    "post",
+    "configure_wallet_credit",
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["external_ref", "expected_version", "credit_limit_atoms"],
+      properties: {
+        external_ref: { type: "string", minLength: 1, maxLength: 200 },
+        expected_version: { type: "string", pattern: "^(0|[1-9][0-9]{0,37})$" },
+        credit_limit_atoms: { type: "string", pattern: "^(0|[1-9][0-9]{0,37})$" },
+      },
+    },
+    true,
+  );
   add("/admin/projects/{id}/wallets/{currency}/lots", "get", "wallet_lots", undefined, true);
   add("/admin/projects/{id}/wallets/{currency}/journal", "get", "wallet_journal", undefined, true);
   add(

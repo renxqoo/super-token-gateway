@@ -17,7 +17,7 @@
 
 可用 `docker build -f infra/Dockerfile -t <镜像> .` 构建另一种发布成品。运行时建议 `--read-only --tmpfs /tmp:size=64m --cap-drop ALL --security-opt no-new-privileges`、非 root 和内存限制；使用 `bun run test:container` 验证真实依赖、独立 worker、JSON/SSE、精确账单与 SIGTERM。镜像包含 Bun 1.4.4 与独立 bundle，不需要生产安装 node_modules。
 
-只运行当前单一 schema 与队列契约。初始化接受空库或精确当前版本；schema2026111006 / 2026111007 / 2026111008 / 2026111009 通过显式 `db:migrate -- --upgrade --quiesced` 离线转换到 2026111010。执行前停止所有客户端、排空旧证据作业并备份，具体步骤及恢复限制见 database.md。应用修订回退必须使用同一数据库契约并保留已确认队列、账本及费率证据。
+只运行当前单一 schema 与队列契约。初始化接受空库或精确当前版本；schema2026111006 / 2026111007 / 2026111008 / 2026111009 / 2026111010 通过显式 `db:migrate -- --upgrade --quiesced` 离线转换到 2026111101。执行前停止所有客户端、排空旧证据作业并备份，具体步骤及恢复限制见 database.md。应用修订回退必须使用同一数据库契约并保留已确认队列、账本及费率证据。
 
 ## 高可用依赖
 
@@ -84,7 +84,7 @@ HTTP 408、409、429、500、502、503、504、529 允许重试或切换，401�
 
 `scripts/bench-system.ts --online-capacity --seconds 60 --upstream precomputed --rate 6150 --target-rps 6000` 使用预序列化无延迟 Chat 上游，保留在线 worker、资金预扣和外部消费。需提供测试 owner 的 DATABASE_URL、准入 Redis、独立的 AOF always 证据主节点及落盘副本，设置 QUEUE_REQUIRED_REPLICAS=1。该入口创建并清理独立测试数据库和命名空间；REDIS_EXTRA_URLS 的所有端点参与清理。完整命令与本机配置、结果见 validation.md。
 
-严格窗口验收按 request ID 求有效 HTTP 完成与已确认收据 ACK 的交集。每页 ACK 前逐对核对 request_id、evidence_id、数字用量及金额，最后再核对全量预扣、扣款、流水与队列。`--record-request-ids` 为此保留最多 60 秒的技术身份记录；普通吞吐测试使用固定大小直方图。
+严格窗口验收按 request ID 求有效 HTTP 完成与已确认收据 ACK 的交集。每页 ACK 前逐对核对 request_id、evidence_id、数字用量及金额，最后再核对全量预扣、扣款、流水与队列。`--record-request-ids` 将技术身份和完成时刻写入有背压的TSV文件；外部ACK单独记录，运行后用64MiB排序预算逐行合并核对。严格在线验收支持60秒的整数倍、最长3600秒，每分钟完成交集和对应发出窗口的全部响应延迟均须达标，尾批包含在延迟预算内；普通吞吐测试使用固定大小直方图。
 
 不得在网关、代理、APM 或错误采集中记录请求/响应正文或认证头；不要启用响应缓存、body dump、磁盘请求缓冲或 swap/core dump 内容采集。技术ID和数字计量可保留。S3并非本 Gateway 的输出存储依赖。
 
@@ -98,7 +98,7 @@ PG 与耐久队列共同构成恢复集。PG 单独备份不包含已经落盘�
 
 供应商 API Key 通过管理 PATCH 轮换；master ENCRYPTION_KEY 不可直接覆盖，需先受控迁移全部密文并保留恢复窗口。KEY_PEPPER 改变后旧 Key verifier 无法使用，需要先发放新凭证并完成迁移。
 
-当前没有提供目标服务器，因此未执行公网发布、跨主机故障转移或10,000 RPS持续60分钟集群验收。当前吞吐仍未达到目标，验收进度见 validation.md；不得将单机短测称为完整生产验收。
+当前没有提供目标服务器，因此未执行公网发布、跨主机故障转移或10,000 RPS持续60分钟集群验收。当前版本的6000 RPS及持续验收状态见 validation.md；不得将单机短测称为完整生产验收。
 
 ## 本地容量配置
 
@@ -111,3 +111,7 @@ Compose 为当前约12GiB Docker VM提供2GiB shared_buffers、6GiB effective_ca
 完整账务压测支持 `--wallets 1/10/1000` 与 `--hot-share 0.9`，报告每钱包负载、PG 锁等待、活动查询和停压排空。使用 `QUEUE_REQUIRED_REPLICAS=1` 或目标生产副本数实测，不以零副本成绩代替生产容量。修改 schema/队列后重新执行 `verify`、`test:durability`、`test:container`，备份恢复需在停止准入并排空队列后执行。
 
 使用冷 tablespace 的生产恢复需先准备对应 tablespace 或显式用 pg_restore 的 --no-tablespaces 恢复到目标默认存储，再核对数据与权限。原生 PG 工具的本地备份复验可通过 PG_TOOLS_DIRECTORY 指定同主版本工具目录；密码经子进程环境传递，不放入命令行或输出。
+
+## 当前容量验收入口
+
+完整口径见 [容量契约](docs/performance/capacity-contract.md)。`scripts/bench-system.ts --online-capacity` 支持60秒整数倍窗口，`--max-p99-ms`默认1500；全量和每个发出分钟的尾批P99均进入门槛。默认按5000字节/计划请求另加4GiB实验空间、4GiB系统保留量做磁盘预检，长测空间不足时在创建数据库前拒绝。该估计来自历史数量级，不是磁盘占用上限；测试期间继续检查剩余空间，不足时中止并判失败。不要通过关闭耐久性或删除权威身份降低空间预算。
