@@ -304,7 +304,14 @@ try {
 } finally {
   for (const child of children) if (child.exitCode === null) child.kill("SIGKILL");
   await Promise.allSettled([...children].map((child) => child.exited));
-  for (const endpoint of [redisURL, queueURL]) {
+  for (const endpoint of [
+    redisURL,
+    ...(process.env.REDIS_EXTRA_URLS ?? "")
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean),
+    queueURL,
+  ]) {
     const redis = new RedisClient(endpoint);
     try {
       await redis.connect();

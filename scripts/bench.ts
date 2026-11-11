@@ -4,6 +4,8 @@ import { Agent as HttpAgent, request as httpRequest } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 
 const options = Bun.argv.slice(2);
+const recordIds = options.includes("--record-request-ids");
+const completedIds: string[] = [];
 const option = (name: string, fallback: string) => {
   const index = options.indexOf(name);
   return index >= 0 ? (options[index + 1] ?? fallback) : fallback;
@@ -34,6 +36,8 @@ const urls = url.split(",");
 let sequence = 0;
 if (!token) throw new Error("BENCH_API_KEY or .local/client.env is required");
 const duration = Number(option("--seconds", "15"));
+if (recordIds && duration > 60)
+  throw new Error("Request identity evidence requires a window of at most 60 seconds");
 const concurrency = Number(option("--concurrency", "32"));
 const rate = Number(option("--rate", "0"));
 const warmupConcurrency = Number(
@@ -77,8 +81,12 @@ const poolOptions = {
 };
 const httpAgent = new HttpAgent(poolOptions);
 const httpsAgent = new HttpsAgent(poolOptions);
-const call = (target: string, apiKey: string): Promise<{ status: number; body: string }> =>
+const call = (
+  target: string,
+  apiKey: string,
+): Promise<{ status: number; body: string; requestId?: string; firstByteMs?: number }> =>
   new Promise((resolve, reject) => {
+    const began = performance.now();
     const secure = new URL(target).protocol === "https:";
     const request = (secure ? httpsRequest : httpRequest)(
       `${target.replace(/\/$/, "")}/v1/chat/completions`,
@@ -94,7 +102,9 @@ const call = (target: string, apiKey: string): Promise<{ status: number; body: s
       (response) => {
         const chunks: Buffer[] = [];
         let size = 0;
+        let firstByteMs: number | undefined;
         response.on("data", (chunk: Buffer) => {
+          firstByteMs ??= performance.now() - began;
           size += chunk.byteLength;
           if (size > 1048576)
             request.destroy(
@@ -109,6 +119,10 @@ const call = (target: string, apiKey: string): Promise<{ status: number; body: s
           resolve({
             status: response.statusCode ?? 0,
             body: Buffer.concat(chunks).toString("utf8"),
+            ...(typeof response.headers["x-request-id"] === "string"
+              ? { requestId: response.headers["x-request-id"] }
+              : {}),
+            ...(firstByteMs === undefined ? {} : { firstByteMs }),
           }),
         );
       },
@@ -128,6 +142,12 @@ const latencies = new LatencyHistogram();
 const expectedText = option("--expected-text", "") || undefined;
 const windows = new Map<number, { completed: number; succeeded: number; invalid: number }>();
 const statuses = new Map<number, number>();
+const firstByteLatency = new LatencyHistogram();
+const schedulingGaps = new LatencyHistogram();
+let peakDriverInflight = 0;
+let peakServerInflight = 0;
+let inflightShed = 0;
+let lastDispatchOverrunMs = 0;
 const transportErrors = new Map<string, number>();
 const gatewayErrors = new Map<string, number>();
 const knownGatewayErrors = new Set([
@@ -182,6 +202,7 @@ const sampleServer = () => {
       .then((value) => {
         serverPeakRSS = Math.max(serverPeakRSS, value.gateway_rss_bytes ?? 0);
         peakBufferedBytes = Math.max(peakBufferedBytes, value.gateway_buffered_bytes ?? 0);
+        peakServerInflight = Math.max(peakServerInflight, value.gateway_inflight ?? 0);
       })
       .catch(() => undefined)
       .finally(() => {
@@ -204,6 +225,7 @@ const invoke = async () => {
   const started = performance.now();
   let status = 0;
   let valid = false;
+  let requestId: string | undefined;
   try {
     const index = sequence++;
     const target = urls[index % urls.length]!;
@@ -217,8 +239,11 @@ const invoke = async () => {
     walletCalls[wallet] = (walletCalls[wallet] ?? 0) + 1;
     const response = await call(target, apiKey);
     status = response.status;
+    requestId = response.requestId;
     const body = response.body;
     valid = status === 200 && validChat(body, stream, expectedText);
+    if (measuring && valid && response.firstByteMs !== undefined)
+      firstByteLatency.add(response.firstByteMs);
     if (measuring && status >= 400) {
       let code = "other";
       try {
@@ -245,6 +270,8 @@ const invoke = async () => {
       if (!valid) warmupFailures++;
     } else {
       completed++;
+      if (recordIds && valid && requestId && performance.now() <= deadline)
+        completedIds.push(requestId);
       if (valid) succeeded++;
       else invalid++;
       statuses.set(status, (statuses.get(status) ?? 0) + 1);
@@ -270,6 +297,7 @@ if (warmupFailures) throw new Error(`Warmup produced ${warmupFailures} invalid r
 measuring = true;
 const measurementStartedAt = new Date().toISOString();
 const started = performance.now();
+const cpuStart = process.cpuUsage();
 measuredStart = started;
 deadline = started + duration * 1000;
 const sampler = setInterval(() => {
@@ -279,18 +307,26 @@ const sampler = setInterval(() => {
 if (rate > 0) {
   // Fixed offered arrivals do not slow down when the target slows down. Bound in-flight memory explicitly.
   const pending = new Set<Promise<void>>();
-  while (performance.now() < deadline) {
-    const due = Math.floor(((performance.now() - started) * rate) / 1000) - offered;
+  const planned = duration * rate;
+  let previousTick = started;
+  while (offered < planned) {
+    const now = performance.now();
+    schedulingGaps.add(now - previousTick);
+    previousTick = now;
+    const due = Math.min(planned, Math.floor(((now - started) * rate) / 1000)) - offered;
     offered += due;
     const admitted = Math.min(due, concurrency - pending.size);
-    shed += due - admitted;
+    inflightShed += due - admitted;
     for (let i = 0; i < admitted; i++) {
       const task = invoke();
       pending.add(task);
       void task.finally(() => pending.delete(task));
     }
-    await Bun.sleep(2);
+    peakDriverInflight = Math.max(peakDriverInflight, pending.size);
+    if (offered < planned) await Bun.sleep(Math.min(2, Math.max(0, deadline - performance.now())));
+    else lastDispatchOverrunMs = Math.max(0, now - deadline);
   }
+  shed = inflightShed;
   await Promise.all(pending);
 } else {
   await Promise.all(
@@ -306,6 +342,7 @@ clearInterval(sampler);
 httpAgent.destroy();
 httpsAgent.destroy();
 const elapsed = (performance.now() - started) / 1000;
+const cpu = process.cpuUsage(cpuStart);
 await collecting;
 const metricsAfter = collectMetrics ? await metrics() : undefined;
 const quantile = (value: number) => latencies.quantile(value);
@@ -342,6 +379,18 @@ const report = {
   offered_rps: rate || undefined,
   offered,
   shed,
+  inflight_shed: inflightShed,
+  last_dispatch_overrun_ms: rate > 0 ? lastDispatchOverrunMs : undefined,
+  load_generator_peak_inflight: rate > 0 ? peakDriverInflight : undefined,
+  scheduler_gap_ms:
+    rate > 0 ? { p99: schedulingGaps.quantile(0.99), max: schedulingGaps.quantile(1) } : undefined,
+  load_generator_cpu_seconds: (cpu.user + cpu.system) / 1e6,
+  first_body_byte_ms: {
+    p50: firstByteLatency.quantile(0.5),
+    p95: firstByteLatency.quantile(0.95),
+    p99: firstByteLatency.quantile(0.99),
+  },
+  ...(recordIds ? { completed_ids_in_window: completedIds } : {}),
   completed,
   succeeded,
   invalid,
@@ -357,6 +406,7 @@ const report = {
         server_metrics: {
           sampled_peak_rss_bytes: serverPeakRSS,
           sampled_peak_buffered_bytes: peakBufferedBytes,
+          sampled_peak_inflight: peakServerInflight,
           cpu_seconds_including_warmup:
             (metricsAfter.gateway_cpu_seconds_total ?? 0) -
             (metricsBefore.gateway_cpu_seconds_total ?? 0),

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
 import type { SQL } from "bun";
-import type { Route, Credential, Usage } from "@gateway/kernel";
+import type { Route, Credential, Usage, UsageEvidence } from "@gateway/kernel";
 const database = `gateway_test_funds_${crypto.randomUUID().replaceAll("-", "")}`;
 let owner: SQL;
 let db: SQL;
@@ -127,6 +127,170 @@ async function invariant(id: string) {
   expect(unpaid).toHaveLength(0);
   return rows[0];
 }
+test("admission and settlement avoid randomly scattered new index keys for an existing request UUID", async () => {
+  const tenant = await project();
+  await credit(tenant.id, "1000");
+  const { request, attempt } = await admit(tenant.credential);
+  await complete(request, attempt);
+  const ids = await db<
+    { charge_id: string; hold_id: string; journal_id: string; kind: string }[]
+  >`SELECT c.id AS charge_id,h.id AS hold_id,j.id AS journal_id,j.kind
+    FROM billing_charges c JOIN billing_holds h ON h.id=c.hold_id
+    JOIN money_journal j ON j.wallet_id=h.wallet_id AND j.reference IN ('hold:'||h.request_id,'settle:'||h.request_id)
+    WHERE c.request_id=${request} ORDER BY j.kind`;
+  expect(ids.map((row) => row.kind)).toEqual(["HOLD", "SETTLE"]);
+  const timeOrdered = /^[a-f0-9]{8}-[a-f0-9]{4}-7[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+  expect(attempt).toMatch(timeOrdered);
+  for (const row of ids) {
+    expect(row.hold_id).toBe(request);
+    expect(row.charge_id).toMatch(timeOrdered);
+    expect(row.journal_id).toMatch(timeOrdered);
+  }
+  expect(await invariant(tenant.id)).toMatchObject({ reserved_atoms: "0" });
+});
+
+test("a concurrent quote burst must not starve independent funding behind a locked tariff catalog", async () => {
+  const tenant = await project();
+  await credit(tenant.id, "1000");
+  const url = new URL(process.env.DATABASE_URL!);
+  url.pathname = `/${database}`;
+  const constrained = createDatabase(url.href, 2);
+  const isolated = new FundsStore(constrained);
+  const acquired = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const lock = db.begin(async (tx) => {
+    await tx`LOCK TABLE billing_tariffs IN ACCESS EXCLUSIVE MODE`;
+    acquired.resolve();
+    await release.promise;
+  });
+  await acquired.promise;
+  const quotes = Array.from({ length: 32 }, () =>
+    isolated.quote(
+      "funds-model",
+      "chat",
+      "USD",
+      [route.provider_id],
+      { messages: [{ role: "user", content: "x" }] },
+      1,
+    ),
+  );
+  let creditFinished = false;
+  let credited: Promise<unknown> | undefined;
+  try {
+    const deadline = Date.now() + 1000;
+    let waiting = false;
+    while (!waiting && Date.now() < deadline) {
+      waiting = (
+        await db`SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%DISTINCT ON(provider.id)%') AS waiting`
+      )[0].waiting;
+      if (!waiting) await Bun.sleep(5);
+    }
+    expect(waiting).toBe(true);
+    credited = isolated
+      .credit(tenant.id, {
+        currency: "USD",
+        external_ref: "during-quote-load",
+        amount_atoms: "1",
+        kind: "CASH",
+        priority: 100,
+        models: [],
+        operations: [],
+      })
+      .then(() => {
+        creditFinished = true;
+      });
+    await Promise.race([credited, Bun.sleep(300)]);
+    expect(creditFinished).toBe(true);
+  } finally {
+    release.resolve();
+    await lock;
+    await Promise.allSettled([...quotes, ...(credited ? [credited] : [])]);
+    await constrained.close();
+  }
+  const captured = await Promise.all(quotes);
+  expect(captured).toHaveLength(32);
+  expect(captured.every((quote) => quote.prices[route.provider_id] === pricingId)).toBe(true);
+  expect(await invariant(tenant.id)).toMatchObject({
+    available_atoms: "1001",
+    reserved_atoms: "0",
+  });
+});
+
+test("covered settlement and an over-hold peer on the same wallet preserve exact independent charges", async () => {
+  const mixed = await project();
+  const peer = await project();
+  await credit(mixed.id, "1000");
+  await credit(peer.id, "1000");
+  const covered = await admit(mixed.credential);
+  const over = await admit(mixed.credential);
+  const independent = await admit(peer.credential);
+  const events: UsageEvidence[] = [covered, over, independent].map((record, index) => ({
+    attemptId: record.attempt,
+    source: "execution",
+    state: "SUCCEEDED",
+    finality: "FINAL",
+    requestState: "SUCCEEDED",
+    usage:
+      index === 1
+        ? { input_tokens: "14", output_tokens: "10" }
+        : { input_tokens: "7", output_tokens: "5" },
+  }));
+  expect(await store.persistUsage(events)).toEqual({ SETTLED: 3 });
+  expect((await funds.receipt(covered.request, mixed.id)).charged_atoms).toBe("56");
+  expect((await funds.receipt(over.request, mixed.id)).charged_atoms).toBe("112");
+  expect((await funds.receipt(independent.request, peer.id)).charged_atoms).toBe("56");
+  expect(await store.persistUsage(events)).toEqual({ REPLAYED: 3 });
+  expect(await invariant(mixed.id)).toMatchObject({
+    spent_atoms: "168",
+    available_atoms: "832",
+    reserved_atoms: "0",
+  });
+  expect(await invariant(peer.id)).toMatchObject({
+    spent_atoms: "56",
+    available_atoms: "944",
+    reserved_atoms: "0",
+  });
+});
+
+test("a 256-event transaction preserves every receipt and repeated atomic job at the batch boundary", async () => {
+  const tenant = await project();
+  await credit(tenant.id, "30000");
+  const events: UsageEvidence[] = [];
+  for (let index = 0; index < 256; index++) {
+    const record = await admit(tenant.credential);
+    events.push({
+      attemptId: record.attempt,
+      source: "execution",
+      state: "SUCCEEDED",
+      finality: "FINAL",
+      requestState: "SUCCEEDED",
+      usage: { input_tokens: "7", output_tokens: "5" },
+    });
+  }
+  const rows = await db<
+    {
+      result: Record<string, { status: string; billing: { state: string; charged_atoms: string } }>;
+    }[]
+  >`SELECT persist_usage_batch(${events}::jsonb) AS result`;
+  expect(Object.keys(rows[0]!.result)).toHaveLength(256);
+  for (const result of Object.values(rows[0]!.result))
+    expect(result).toMatchObject({
+      status: "APPLIED",
+      billing: { state: "SETTLED", charged_atoms: "56" },
+    });
+  expect(
+    await Promise.all([
+      store.persistUsage(events.slice(0, 128)),
+      store.persistUsage(events.slice(128)),
+    ]),
+  ).toEqual([{ REPLAYED: 128 }, { REPLAYED: 128 }]);
+  expect(await invariant(tenant.id)).toMatchObject({
+    available_atoms: "15664",
+    spent_atoms: "14336",
+    reserved_atoms: "0",
+  });
+});
+
 test("a locked wallet does not block admission or evidence for another wallet", async () => {
   const hot = await project();
   const cold = await project();
@@ -389,6 +553,54 @@ test("missing final usage stays held until explicit reconciliation", async () =>
     await db`SELECT (settle_requests(ARRAY[${q.request}::uuid])->${q.request}::text) AS result`;
   expect(resolved[0].result.charged_atoms).toBe("56");
   await invariant(p.id);
+});
+
+test("Batch cancellation settles once even when final rows precede the creation evidence", async () => {
+  const p = await project();
+  await credit(p.id, "100");
+  const perRequest = await funds.setTariff({
+    model: "funds-model",
+    operation: "chat",
+    provider_id: route.provider_id,
+    pricing: { currency: "USD", rates: { requests: { numerator: "7", denominator: "1" } } },
+    ceilings: { requests: "1" },
+    basis: "REQUEST_COMPLETION",
+  });
+  for (const finalFirst of [false, true]) {
+    const { request, attempt } = await admit(p.credential, "7", "USD", perRequest.pricing_id);
+    const resource = await store.saveResource(
+      p.id,
+      route.provider_id,
+      `batch-${request}`,
+      "batch",
+      "funds-model",
+      attempt,
+    );
+    const creation: UsageEvidence = {
+      source: "execution",
+      attemptId: attempt,
+      state: "SUCCEEDED",
+      finality: "FINAL",
+      usage: { requests: "1" },
+      requestState: "SUCCEEDED",
+    };
+    const final: UsageEvidence = {
+      source: "batch_cancelled",
+      attemptId: attempt,
+      state: "FAILED",
+      finality: "FINAL",
+      usage: { requests: "1", input_tokens: "7", output_tokens: "5" },
+    };
+    await store.updateResource(resource, "PENDING_USAGE", "cancelled");
+    for (const evidence of finalFirst ? [final, creation] : [creation, final])
+      await store.persistUsage([evidence]);
+    expect(await funds.receipt(request, p.id)).toMatchObject({
+      billing_outcome: "CANCELLED",
+      hold_state: "RELEASED",
+      charged_atoms: "0",
+    });
+    expect((await invariant(p.id)).available_atoms).toBe("100");
+  }
 });
 test("expired reserved gift is consumed but its unused hold and refund cannot revive", async () => {
   const p = await project();

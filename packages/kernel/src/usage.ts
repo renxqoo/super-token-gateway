@@ -12,7 +12,11 @@ function seconds(source: Record<string, unknown>, key: string): string | undefin
       "invalid_upstream_usage",
       "Duration must be an exact nonnegative quantity",
     );
-  const value = normalizedNumber(numberLiteral(source, key) ?? String(raw));
+  return decimalDuration(numberLiteral(source, key) ?? String(raw));
+}
+
+function decimalDuration(literal: string): string {
+  const value = normalizedNumber(literal);
   if (value.negative || value.exponent < -18 || value.digits.length + value.exponent > 38)
     throw new GatewayError(502, "invalid_upstream_usage", "Duration exceeds precision budget");
   if (value.exponent >= 0) return value.digits + "0".repeat(value.exponent);
@@ -42,6 +46,36 @@ function aliases(source: Record<string, unknown>, keys: string[]): string | unde
   }
   return selected;
 }
+
+function measureDuration(
+  usage: Usage,
+  source: Record<string, unknown>,
+  media: "audio" | "video",
+): boolean {
+  const secondsKey = `${media}_seconds` as const;
+  const millisecondsKey = `${media}_ms` as const;
+  const reported = seconds(source, secondsKey);
+  const alias =
+    media === "audio" && source.type === "duration" ? seconds(source, "seconds") : undefined;
+  const milliseconds = quantity(source, millisecondsKey);
+  const fromMilliseconds =
+    milliseconds === undefined ? undefined : decimalDuration(`${milliseconds}e-3`);
+  const duration = reported ?? alias ?? fromMilliseconds;
+  if (duration === undefined) return false;
+  if (
+    (alias !== undefined && alias !== duration) ||
+    (fromMilliseconds !== undefined && fromMilliseconds !== duration)
+  )
+    throw new GatewayError(502, "usage_alias_conflict", "Provider duration usage aliases disagree");
+
+  usage[secondsKey] = duration;
+  const scaled = normalizedNumber(`${duration}e3`);
+  if (scaled.exponent >= 0 && scaled.digits.length + scaled.exponent <= 38)
+    usage[millisecondsKey] = scaled.digits + "0".repeat(scaled.exponent);
+  else delete usage[millisecondsKey];
+  return true;
+}
+
 export function extractUsage(
   body: unknown,
   kind: ProviderKind,
@@ -82,21 +116,19 @@ export function extractUsage(
   const write = quantity(raw, "cache_creation_input_tokens");
   const observedReasoning =
     quantity(outputDetails, "reasoning_tokens") ?? quantity(raw, "thoughtsTokenCount");
-  const audioSeconds =
-    seconds(raw, "audio_seconds") ??
-    (raw.type === "duration" ? seconds(raw, "seconds") : undefined);
-  const videoSeconds = seconds(raw, "video_seconds");
+  const usage: Usage = { ...previous };
+  const audioDuration = measureDuration(usage, raw, "audio");
+  const videoDuration = measureDuration(usage, raw, "video");
   if (
     input === undefined &&
     output === undefined &&
-    audioSeconds === undefined &&
-    videoSeconds === undefined &&
+    !audioDuration &&
+    !videoDuration &&
     observedCached === undefined &&
     write === undefined &&
     observedReasoning === undefined
   )
     return undefined;
-  const usage: Usage = { ...previous };
   const cached = observedCached ?? previous?.cached_input_tokens;
   const reasoning = observedReasoning ?? previous?.reasoning_tokens;
   const totalInput =
@@ -109,8 +141,6 @@ export function extractUsage(
     (kind === "gemini" && previous?.output_tokens !== undefined
       ? (BigInt(previous.output_tokens) - BigInt(previous.reasoning_tokens ?? "0")).toString()
       : undefined);
-  if (audioSeconds !== undefined) usage.audio_seconds = audioSeconds;
-  if (videoSeconds !== undefined) usage.video_seconds = videoSeconds;
   if (totalInput !== undefined || input !== undefined) {
     const uncached =
       BigInt(totalInput ?? input ?? "0") - (kind === "anthropic" ? 0n : BigInt(cached ?? "0"));
@@ -137,10 +167,4 @@ export function extractUsage(
   if (write !== undefined) usage.cache_write_tokens = write;
   if (reasoning !== undefined) usage.reasoning_tokens = reasoning;
   return usage;
-}
-export function mergeUsage(
-  previous: Usage | undefined,
-  next: Usage | undefined,
-): Usage | undefined {
-  return next ? { ...previous, ...next } : previous;
 }

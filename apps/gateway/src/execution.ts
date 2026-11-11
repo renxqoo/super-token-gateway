@@ -7,7 +7,15 @@ import {
   parseProviderJson,
   stringifyExact,
 } from "@gateway/kernel";
-import type { Operation, Protocol, Route, Usage, Finality } from "@gateway/kernel";
+import type {
+  BatchResourceMetadata,
+  Resource,
+  Operation,
+  Protocol,
+  Route,
+  Usage,
+  Finality,
+} from "@gateway/kernel";
 import {
   StreamTranslator,
   MediaStreamMeter,
@@ -16,7 +24,7 @@ import {
   presentResponse,
   prepareOperation,
 } from "@gateway/connectors";
-import { readBounded } from "@gateway/runtime";
+import { readBounded, UpstreamPreDispatchError } from "@gateway/runtime";
 import type { StreamMeter } from "@gateway/connectors";
 import type { RequestRecord } from "@gateway/storage";
 import type { RatePermit } from "@gateway/runtime";
@@ -27,7 +35,7 @@ import { publishEvidence } from "./metering.ts";
 import { prepareStream, relayStream } from "./relay-stream.ts";
 import { relayBinary } from "./relay-binary.ts";
 import type { BatchInput } from "./batch-input.ts";
-import { rewriteBatchInput } from "./batch-input.ts";
+import { readBatchManifest, rewriteBatchInput } from "./batch-input.ts";
 import { applyOutputBound } from "./input-policy.ts";
 
 const textProtocols = new Set<string>(["chat", "responses", "messages", "gemini"]);
@@ -41,6 +49,12 @@ const transportFailures: Record<string, string> = {
   EPIPE: "broken_pipe",
   ECONNABORTED: "connection_aborted",
   ConnectionClosed: "connection_closed",
+  upstream_dns: "dns",
+  upstream_tls: "tls_handshake",
+  upstream_connect: "connect",
+  upstream_capacity: "connection_pool_full",
+  upstream_not_dispatched: "not_dispatched",
+  unsafe_upstream: "address_blocked",
 };
 export interface ExecuteInput {
   auth: Auth;
@@ -53,12 +67,13 @@ export interface ExecuteInput {
   pinnedProviderId?: string;
   pinnedUpstreamModel?: string;
   batchInput?: BatchInput;
+  batchSource?: Resource;
   reserveMemory?: (bytes: number) => void;
   transformResponse?: (
     body: Record<string, unknown>,
     route: Route,
     attemptId: string,
-    batch?: { endpoint: string; upstreamModel: string },
+    batch?: BatchResourceMetadata,
   ) => Promise<Record<string, unknown>>;
 }
 
@@ -203,13 +218,55 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
         "invalid_currency",
         "Billing currency requires an uppercase currency code",
       );
+    let batchMetadata: BatchResourceMetadata | undefined;
+    if (input.batchSource) {
+      const source = input.batchSource;
+      const route = routes.find(
+        (candidate) =>
+          candidate.provider_id === source.provider_id &&
+          candidate.upstream_model === source.batch_upstream_model,
+      );
+      if (!route || !source.batch_endpoint)
+        throw new GatewayError(
+          422,
+          "resource_provider_mismatch",
+          "No route matches the original batch input",
+        );
+      let manifest = source.batch_manifest;
+      if (!manifest) {
+        const release = await deps.limits.enter(
+          `provider:${route.provider_id}`,
+          `${input.requestId}:batch_input`,
+          route.rpm,
+          route.concurrency,
+          deps.config.TOTAL_TIMEOUT_MS + 10000,
+        );
+        try {
+          manifest = await readBatchManifest(deps, source, controller.signal, input.reserveMemory);
+        } finally {
+          await release();
+        }
+      }
+      batchMetadata = {
+        endpoint: source.batch_endpoint,
+        upstreamModel: route.upstream_model,
+        manifest,
+      };
+    }
+    const quoteBody =
+      input.form &&
+      (input.operation === "images" || input.operation === "image_edits") &&
+      typeof input.body.n === "string"
+        ? { ...input.body, n: Number(input.body.n) }
+        : input.body;
     const quote = await deps.funds.quote(
       input.model,
       input.operation,
       currency,
       [...new Set(routes.map((route) => route.provider_id))],
-      input.body,
+      quoteBody,
       outputBound,
+      batchMetadata?.manifest?.images,
     );
     routes = routes.filter((route) => Object.hasOwn(quote.prices, route.provider_id));
     let admission: { record: RequestRecord; created: boolean; attempt_id?: string } | undefined;
@@ -258,11 +315,23 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
         lastError = error;
         continue;
       }
-      if (!(await deps.limits.probe(route.provider_id, deps.config.TOTAL_TIMEOUT_MS + 10000))) {
+      const releaseProbe = await deps.limits.probe(
+        route.provider_id,
+        deps.config.TOTAL_TIMEOUT_MS + 10000,
+        `${input.requestId}:${step}`,
+      );
+      if (!releaseProbe) {
         await providerRelease?.();
         providerRelease = undefined;
         continue;
       }
+      const releaseProvider = providerRelease;
+      providerRelease = async () => {
+        await releaseProbe().catch(() =>
+          deps.metrics.increment("health_probe_release_failures_total"),
+        );
+        await releaseProvider?.();
+      };
       const delay = (retryAt.get(route.provider_id) ?? 0) - Date.now();
       if (delay > 0)
         await new Promise<void>((resolve, reject) => {
@@ -539,13 +608,12 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
         ) {
           const raw = response.body;
           if (!raw) throw new GatewayError(502, "invalid_upstream", "Provider returned no audio");
-          // 二进制输出不收集；只能记录已知输入字符量，不能把它宣称为精确音频时长。
-          const usage: Usage = {
-            characters: String(
-              typeof input.body.input === "string" ? [...input.body.input].length : 0,
-            ),
-            requests: "1",
-          };
+          let usage: Usage | undefined;
+          if (input.operation === "speech" && typeof input.body.input === "string") {
+            let characters = 0;
+            for (const _ of input.body.input) characters++;
+            usage = { characters: String(characters) };
+          }
           const body = relayBinary(
             deps,
             raw,
@@ -563,7 +631,7 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
                 .catch(() => deps.metrics.increment("health_observation_failures_total"));
               await cleanup();
             },
-            input.operation === "speech" ? usage : undefined,
+            usage,
           );
           streaming = true;
           return new Response(body, {
@@ -583,12 +651,15 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
         const value = object(
           parseProviderJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
         );
-        observedUsage = extractUsage(value, route.kind);
+        observedUsage = input.operation === "batches" ? undefined : extractUsage(value, route.kind);
         observedFinality = "PARTIAL";
         validateCompletion(value, target, Number(outbound.n ?? 1));
         resultReceived = true;
         observedFinality = "FINAL";
-        const usage = measureResponse(value, route.kind, input.operation);
+        const usage =
+          input.operation === "batches"
+            ? { requests: "1" }
+            : measureResponse(value, route.kind, input.operation);
         observedUsage = usage;
         let output = presentResponse(value, target, input.operation, route.kind, input.model);
         finalizationStarted = true;
@@ -598,8 +669,12 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
             route,
             attemptId,
             input.batchInput && batchFile
-              ? { endpoint: input.batchInput.endpoint, upstreamModel: batchFile.upstreamModel }
-              : undefined,
+              ? {
+                  endpoint: input.batchInput.endpoint,
+                  upstreamModel: batchFile.upstreamModel,
+                  manifest: input.batchInput.manifest,
+                }
+              : batchMetadata,
           );
         await publishEvidence(
           deps,
@@ -628,9 +703,11 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
         lastError = error;
         const failureCode = (error as { code?: unknown } | undefined)?.code;
         const localCapacity =
-          !response && ["EADDRNOTAVAIL", "EMFILE", "ENFILE"].includes(String(failureCode));
+          !response &&
+          ["EADDRNOTAVAIL", "EMFILE", "ENFILE", "upstream_capacity"].includes(String(failureCode));
         const notDispatched =
           localCapacity ||
+          error instanceof UpstreamPreDispatchError ||
           (error instanceof GatewayError && error.code === "upstream_not_dispatched");
         if (!resultReceived) {
           const failure = error as { code?: unknown } | undefined;
@@ -683,6 +760,8 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
             "request_deadline",
             "Request deadline reached or client disconnected",
           );
+        if (error instanceof UpstreamPreDispatchError && error.code === "upstream_not_dispatched")
+          continue;
         await deps.limits
           .observe(route.provider_id, true, performance.now() - started)
           .catch(() => deps.metrics.increment("health_observation_failures_total"));

@@ -54,6 +54,7 @@ export function fundingError(error: unknown): never {
 }
 export class FundsStore {
   private prices = new Map<string, { until: number; rows: PriceRow[] }>();
+  private readonly priceLoads = new Map<string, Promise<PriceRow[]>>();
   constructor(readonly db: SQL) {}
   async credit(projectId: string, value: CreditInput): Promise<Record<string, unknown>> {
     const input = creditSchema.parse(value);
@@ -99,6 +100,7 @@ export class FundsStore {
       return { id: String(rows[0]?.id), pricing_id: pricing };
     });
     this.prices.clear();
+    this.priceLoads.clear();
     return result;
   }
   async tariffs(model?: string): Promise<unknown[]> {
@@ -112,18 +114,33 @@ export class FundsStore {
     providers: string[],
     body: Record<string, unknown>,
     outputBound: number,
+    batchImages?: number,
   ): Promise<BillingQuote> {
     const cacheKey = `${model}:${operation}:${currency}:${[...providers].sort().join(",")}`;
-    let cached = this.prices.get(cacheKey);
-    if (!cached || cached.until < Date.now()) {
-      const rows = await this.db<
-        PriceRow[]
-      >`SELECT DISTINCT ON(provider.id) provider.id AS provider_id,p.id,p.currency,p.rates,p.ceilings,p.basis FROM unnest(${providers}::uuid[]) provider(id) JOIN billing_tariffs t ON t.model=${model} AND t.operation=${operation} AND t.currency=${currency} AND t.enabled AND (t.provider_id IS NULL OR t.provider_id=provider.id) JOIN billing_prices p ON p.id=t.pricing_id ORDER BY provider.id,(t.provider_id IS NOT NULL) DESC`;
-      cached = { until: Date.now() + 1000, rows };
-      if (this.prices.size > 10000) this.prices.clear();
-      this.prices.set(cacheKey, cached);
+    const cached = this.prices.get(cacheKey);
+    let rows = cached && cached.until >= Date.now() ? cached.rows : undefined;
+    if (!rows) {
+      let pending = this.priceLoads.get(cacheKey);
+      if (!pending) {
+        let loading!: Promise<PriceRow[]>;
+        loading = (async () => {
+          const loaded = await this.db<
+            PriceRow[]
+          >`SELECT DISTINCT ON(provider.id) provider.id AS provider_id,p.id,p.currency,p.rates,p.ceilings,p.basis FROM unnest(${providers}::uuid[]) provider(id) JOIN billing_tariffs t ON t.model=${model} AND t.operation=${operation} AND t.currency=${currency} AND t.enabled AND (t.provider_id IS NULL OR t.provider_id=provider.id) JOIN billing_prices p ON p.id=t.pricing_id ORDER BY provider.id,(t.provider_id IS NOT NULL) DESC`;
+          if (this.priceLoads.get(cacheKey) === loading) {
+            if (this.prices.size > 10000) this.prices.clear();
+            this.prices.set(cacheKey, { until: Date.now() + 1000, rows: loaded });
+          }
+          return loaded;
+        })().finally(() => {
+          if (this.priceLoads.get(cacheKey) === loading) this.priceLoads.delete(cacheKey);
+        });
+        this.priceLoads.set(cacheKey, loading);
+        pending = loading;
+      }
+      rows = await pending;
     }
-    return quoteReservation(cached.rows, currency, body, outputBound);
+    return quoteReservation(rows, currency, operation, body, outputBound, batchImages);
   }
 
   async refund(chargeId: string, value: RefundInput): Promise<Record<string, unknown>> {

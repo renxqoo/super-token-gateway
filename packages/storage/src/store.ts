@@ -4,6 +4,7 @@ import type { SQL } from "bun";
 import { GatewayError, sha256 } from "@gateway/kernel";
 import type {
   BillingQuote,
+  BatchResourceMetadata,
   Credential,
   Operation,
   Project,
@@ -125,8 +126,8 @@ export class Store {
           }),
         );
       },
-      128,
-      2,
+      256,
+      5,
       4,
       8192,
       (events) => events.length,
@@ -713,16 +714,14 @@ export class Store {
   ): Promise<{ lease_token: string; events: UsageRecord[] }> {
     await this.backfillConsumer(consumerId);
     const token = crypto.randomUUID();
-    const events = await this.db.begin(
-      async (tx) => tx<UsageRecord[]>`
+    const events = await this.db<UsageRecord[]>`
       WITH selected AS (SELECT consumer_id,event_id FROM event_deliveries
         WHERE consumer_id=${consumerId} AND state<>'ACKED' AND (lease_until IS NULL OR lease_until<now())
         ORDER BY event_id LIMIT ${limit} FOR UPDATE SKIP LOCKED), claimed AS (
         UPDATE event_deliveries d SET state='LEASED',lease_token=${token},lease_until=now()+interval '30 seconds',attempts=d.attempts+1
         FROM selected s WHERE d.consumer_id=s.consumer_id AND d.event_id=s.event_id RETURNING d.event_id)
       SELECT e.id,e.seq::text,e.project_id,e.request_id,e.attempt_id,e.source,'attempt_snapshot' AS semantics,e.finality,e.usage,e.cost_atoms::text,e.currency,e.cost_complete
-      FROM usage_events e JOIN claimed c ON e.id=c.event_id`,
-    );
+      FROM usage_events e JOIN claimed c ON e.id=c.event_id`;
     return { lease_token: token, events };
   }
   async ackEvents(consumerId: string, token: string, ids: string[]): Promise<number> {
@@ -739,7 +738,7 @@ export class Store {
     model: string | null,
     attemptId: string | null = null,
     preferredId?: string,
-    batch?: { endpoint: string; upstreamModel: string },
+    batch?: BatchResourceMetadata,
   ): Promise<string> {
     if (
       !/^[A-Za-z0-9_:/.-]{1,500}$/.test(remoteId) ||
@@ -749,8 +748,8 @@ export class Store {
     const id = preferredId ?? `${kind}_${crypto.randomUUID().replaceAll("-", "")}`;
     const rows = await this.db<
       { id: string }[]
-    >`INSERT INTO resources(id,project_id,provider_id,remote_id,kind,model,attempt_id,batch_endpoint,batch_upstream_model)
-      VALUES(${id},${projectId},${providerId},${remoteId},${kind},${model},${attemptId},${batch?.endpoint ?? null},${batch?.upstreamModel ?? null})
+    >`INSERT INTO resources(id,project_id,provider_id,remote_id,kind,model,attempt_id,batch_endpoint,batch_upstream_model,batch_manifest)
+      VALUES(${id},${projectId},${providerId},${remoteId},${kind},${model},${attemptId},${batch?.endpoint ?? null},${batch?.upstreamModel ?? null},${batch?.manifest ?? null}::jsonb)
       ON CONFLICT(project_id,provider_id,kind,remote_id) DO UPDATE SET updated_at=resources.updated_at RETURNING id`;
     const row = rows[0];
     if (!row) throw new Error("Resource insert failed");
@@ -785,7 +784,8 @@ export class Store {
   }
   async updateResource(id: string, state: string, upstreamState?: string): Promise<void> {
     await this
-      .db`UPDATE resources SET state=${state},upstream_state=coalesce(${upstreamState ?? null},upstream_state),updated_at=now() WHERE id=${id}`;
+      .db`UPDATE resources SET state=${state},upstream_state=coalesce(${upstreamState ?? null},upstream_state),updated_at=now()
+      WHERE id=${id} AND state<>'DELETED' AND (kind<>'batch' OR state NOT IN ('COMPLETED','CANCELLED','FAILED') OR ${state}='DELETED')`;
   }
   async audit(action: string, resourceId: string): Promise<void> {
     await this

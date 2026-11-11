@@ -13,12 +13,11 @@ import type { Dependencies } from "./context.ts";
 
 export async function assemble(config: Config): Promise<Dependencies> {
   const db = createDatabase(config.DATABASE_URL, config.DB_POOL_SIZE);
-  const limits = new Limits(config.REDIS_URL, config.REDIS_NAMESPACE);
+  const limits = new Limits([config.REDIS_URL, ...config.REDIS_EXTRA_URLS], config.REDIS_NAMESPACE);
   const transport = createTransport(config.UPSTREAM_POOL_SIZE);
   let producer: UsageProducer | undefined;
   try {
-    await limits.redis.connect();
-    await limits.redis.ping();
+    await limits.ping();
     await db`SELECT 1`;
     const schema = await db<{ version: number }[]>`SELECT version FROM schema_migrations`;
     if (schema.length !== 1 || schema[0]?.version !== SCHEMA_VERSION)

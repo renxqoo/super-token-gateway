@@ -139,6 +139,53 @@ test("closing a saturated pool rejects queued requests and abort frees capacity"
   }
 });
 
+test("a queued upstream abort returns before the active socket frees and proves no dispatch", async () => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const seen: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      seen.push(path);
+      if (path === "/first") {
+        entered.resolve();
+        await release.promise;
+      }
+      return new Response("completed");
+    },
+  });
+  const transport = createTransport(1);
+  const url = (path: string) => new URL(`http://127.0.0.1:${server.port}${path}`);
+  const first = transport.fetch(url("/first"), {}, true).then((response) => response.text());
+  const abort = new AbortController();
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await entered.promise;
+    const queued = transport.fetch(url("/queued"), { method: "POST", signal: abort.signal }, true);
+    await Bun.sleep(5);
+    abort.abort(new Error("Upstream response header deadline"));
+    const result = await Promise.race([
+      queued.catch((error) => error),
+      new Promise<string>((resolve) => {
+        watchdog = setTimeout(() => resolve("still waiting for the active socket"), 250);
+      }),
+    ]);
+    expect(result).toMatchObject({ code: "upstream_not_dispatched" });
+    release.resolve();
+    await expect(first).resolves.toBe("completed");
+    expect(await (await transport.fetch(url("/after"), {}, true)).text()).toBe("completed");
+    expect(seen).toEqual(["/first", "/after"]);
+  } finally {
+    clearTimeout(watchdog);
+    release.resolve();
+    await first.catch(() => undefined);
+    transport.close();
+    await server.stop(true);
+  }
+});
+
 test("aborting an upstream body stops the socket and allows the next request", async () => {
   let cancelled = false;
   const server = Bun.serve({
@@ -183,7 +230,7 @@ test("aborting an upstream body stops the socket and allows the next request", a
   }
 });
 
-test("TLS keeps the original SNI and rejects an untrusted upstream certificate", async () => {
+test("TLS preserves SNI and classifies rejected handshakes as undispatched", async () => {
   const { createServer } = await import("node:https");
   const { createServer: createTcpServer } = await import("node:net");
   const key = await Bun.file(new URL("./fixtures/upstream-key.fixture", import.meta.url)).text();
@@ -196,21 +243,33 @@ test("TLS keeps the original SNI and rejects an untrusted upstream certificate",
     }),
   );
   await new Promise<void>((resolve) => wire.listen(0, "127.0.0.1", resolve));
-  const server = createServer({ key, cert }, (_request, response) => response.end("unsafe"));
+  let accepted = 0;
+  const server = createServer({ key, cert }, (_request, response) => {
+    accepted++;
+    response.end("unsafe");
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("TLS fixture did not bind");
   const transport = createTransport(8);
   try {
     await expect(
-      transport.fetch(new URL(`https://localhost:${address.port}/`), {}, true),
-    ).rejects.toMatchObject({ code: "DEPTH_ZERO_SELF_SIGNED_CERT" });
+      transport.fetch(
+        new URL(`https://localhost:${address.port}/`),
+        { method: "POST", body: "fixture" },
+        true,
+      ),
+    ).rejects.toMatchObject({
+      code: "upstream_tls",
+      cause: { code: "DEPTH_ZERO_SELF_SIGNED_CERT" },
+    });
+    expect(accepted).toBe(0);
     const wireAddress = wire.address();
     if (!wireAddress || typeof wireAddress === "string")
       throw new Error("TLS wire fixture did not bind");
     await expect(
       transport.fetch(new URL(`https://localhost:${wireAddress.port}/`), {}, true),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ code: "upstream_tls" });
     expect(Buffer.from(clientHello).includes(Buffer.from("localhost"))).toBe(true);
   } finally {
     transport.close();

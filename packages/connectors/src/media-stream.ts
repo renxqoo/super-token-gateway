@@ -2,7 +2,6 @@ import {
   GatewayError,
   encodeSSE,
   extractUsage,
-  mergeUsage,
   providerObject as object,
   parseProviderJson,
   text,
@@ -33,7 +32,7 @@ export class MediaStreamMeter implements StreamMeter {
         "Media stream continued after completion",
       );
     const body = object(parseProviderJson(event.data));
-    this.usage = mergeUsage(this.usage, extractUsage(body, "openai", this.usage));
+    this.usage = extractUsage(body, "openai", this.usage) ?? this.usage;
     if (body.error || body.type === "error") {
       this.failed = true;
       throw new GatewayError(502, "provider_stream_error", "Provider media stream failed");

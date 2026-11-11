@@ -1,15 +1,21 @@
 SET LOCAL check_function_bodies=false;
 CREATE FUNCTION public.validate_money_lines(p_wallet uuid,p_currency text,p_lines jsonb) RETURNS void
  LANGUAGE plpgsql SET search_path TO 'pg_catalog','public','pg_temp' AS $validation$
-DECLARE item jsonb; total numeric=0;
+DECLARE item jsonb; total numeric=0; count integer; i integer; account text; atoms text; lot_id uuid; prior_lot uuid; lot_ids uuid[]='{}';
 BEGIN
- IF jsonb_array_length(p_lines)<2 OR jsonb_array_length(p_lines)>2048 THEN RAISE EXCEPTION 'invalid money entry'; END IF;
- FOR item IN SELECT value FROM jsonb_array_elements(p_lines) LOOP
-  IF jsonb_typeof(item)<>'object' OR item-ARRAY['account','atoms']<>'{}'::jsonb OR NOT(item?&ARRAY['account','atoms']) OR jsonb_typeof(item->'account')<>'string' OR item->>'account' !~ '^(lot:[a-f0-9-]{36}:(available|reserved|spent|expired)|system:(funding|revenue|receivable))$' OR jsonb_typeof(item->'atoms')<>'string' OR item->>'atoms' !~ '^-?(0|[1-9][0-9]{0,37})$' THEN RAISE EXCEPTION 'invalid money leg'; END IF;
-  total=total+(item->>'atoms')::numeric;
+ count=jsonb_array_length(p_lines);
+ IF count NOT BETWEEN 2 AND 2048 THEN RAISE EXCEPTION 'invalid money entry'; END IF;
+ FOR i IN 0..count-1 LOOP
+  item=p_lines->i;account=item->>'account';atoms=item->>'atoms';
+  IF jsonb_typeof(item)<>'object' OR item-ARRAY['account','atoms']<>'{}'::jsonb OR NOT(item?&ARRAY['account','atoms']) OR jsonb_typeof(item->'account')<>'string' OR account !~ '^(lot:[a-f0-9-]{36}:(available|reserved|spent|expired)|system:(funding|revenue|receivable))$' OR jsonb_typeof(item->'atoms')<>'string' OR atoms !~ '^-?(0|[1-9][0-9]{0,37})$' THEN RAISE EXCEPTION 'invalid money leg'; END IF;
+  total=total+atoms::numeric;
+  IF left(account,4)='lot:' THEN
+   lot_id=substr(account,5,36)::uuid;
+   IF lot_id IS DISTINCT FROM prior_lot THEN lot_ids=array_append(lot_ids,lot_id);prior_lot=lot_id;END IF;
+  END IF;
  END LOOP;
  IF total<>0 THEN RAISE EXCEPTION 'unbalanced money entry'; END IF;
- IF EXISTS(SELECT 1 FROM (SELECT DISTINCT split_part(v->>'account',':',2)::uuid AS id FROM jsonb_array_elements(p_lines) v WHERE v->>'account' LIKE 'lot:%') sources WHERE NOT EXISTS(SELECT 1 FROM wallet_lots l WHERE l.id=sources.id AND l.wallet_id=p_wallet)) THEN RAISE EXCEPTION 'foreign money source';END IF;
+ IF EXISTS(SELECT 1 FROM unnest(lot_ids) AS sources(id) WHERE NOT EXISTS(SELECT 1 FROM wallet_lots l WHERE l.id=sources.id AND l.wallet_id=p_wallet)) THEN RAISE EXCEPTION 'foreign money source';END IF;
  IF NOT EXISTS(SELECT 1 FROM wallets WHERE id=p_wallet AND currency=p_currency) THEN RAISE EXCEPTION 'wallet currency mismatch'; END IF;
  RETURN;
 END $validation$;
@@ -101,14 +107,16 @@ CLUSTER public.money_entries USING money_journal_pkey;
 
 CREATE FUNCTION public.post_money_journals(p_items jsonb) RETURNS void LANGUAGE plpgsql
  SET search_path TO 'pg_catalog','public','pg_temp' AS $$ BEGIN
- IF jsonb_typeof(p_items)<>'array' OR jsonb_array_length(p_items)>65536 THEN RAISE EXCEPTION 'invalid posting batch';END IF;
+ IF jsonb_typeof(p_items)<>'array' OR jsonb_array_length(p_items)>65792 THEN RAISE EXCEPTION 'invalid posting batch';END IF;
  IF jsonb_array_length(p_items)=0 THEN RETURN;END IF;
- WITH entries AS (
+ WITH journals AS MATERIALIZED (
+  SELECT * FROM jsonb_to_recordset(p_items) j(id uuid,wallet_id uuid,reference text,kind text,currency text,lines jsonb)
+ ), entries AS (
   INSERT INTO money_entries(id,wallet_id,reference,kind,currency)
-  SELECT j.id,j.wallet_id,j.reference,j.kind,j.currency FROM jsonb_to_recordset(p_items) j(id uuid,wallet_id uuid,reference text,kind text,currency text)
+  SELECT j.id,j.wallet_id,j.reference,j.kind,j.currency FROM journals j
   RETURNING id,created_at
  )
  INSERT INTO journal_payloads(id,created_at,lines)
- SELECT j.id,e.created_at,j.lines FROM jsonb_to_recordset(p_items) j(id uuid,lines jsonb) JOIN entries e ON e.id=j.id;
+ SELECT j.id,e.created_at,j.lines FROM journals j JOIN entries e ON e.id=j.id;
 END $$;
 REVOKE ALL ON FUNCTION public.post_money_journals(jsonb) FROM PUBLIC;

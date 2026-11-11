@@ -4,11 +4,34 @@ import type { StreamMeter } from "@gateway/connectors";
 import type { Dependencies } from "./context.ts";
 import { publishEvidence } from "./metering.ts";
 
+const encoder = new TextEncoder();
+
 export interface PreparedStream {
   reader: ReadableStreamDefaultReader<Uint8Array>;
   parser: SSEParser;
-  events: SSEEvent[];
+  events: (SSEEvent & { bytes: number })[];
   reservedBytes: number;
+}
+
+function parseChunk(
+  prepared: PreparedStream,
+  chunk: Uint8Array,
+  prelude: boolean,
+  reserveMemory?: (bytes: number) => void,
+  flush = false,
+): void {
+  reserveMemory?.(chunk.byteLength);
+  prepared.reservedBytes += chunk.byteLength;
+  const frames = prepared.parser.feed(chunk, flush);
+  let retained = prepared.parser.bufferedBytes;
+  for (const frame of frames) {
+    if (prelude && (!frame.data || frame.event === "ping")) continue;
+    const bytes = encoder.encode(frame.wire).byteLength;
+    retained += bytes;
+    prepared.events.push({ ...frame, bytes });
+  }
+  reserveMemory?.(retained - prepared.reservedBytes);
+  prepared.reservedBytes = retained;
 }
 
 export async function prepareStream(
@@ -20,24 +43,29 @@ export async function prepareStream(
   if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream"))
     throw new GatewayError(502, "invalid_upstream", "Expected an SSE response");
   const reader = response.body.getReader();
-  const parser = new SSEParser(deps.config.MAX_EVENT_BYTES);
-  let reservedBytes = 0;
+  const prepared: PreparedStream = {
+    reader,
+    parser: new SSEParser(deps.config.MAX_EVENT_BYTES),
+    events: [],
+    reservedBytes: 0,
+  };
+  const cancelRead = () => void reader.cancel().catch(() => undefined);
+  controller.signal.addEventListener("abort", cancelRead, { once: true });
   const timeout = setTimeout(
     () => controller.abort(new Error("First upstream event deadline")),
     deps.config.STREAM_IDLE_MS,
   );
   try {
+    controller.signal.throwIfAborted();
     while (true) {
       const chunk = await reader.read();
+      controller.signal.throwIfAborted();
       if (chunk.done)
         throw new GatewayError(502, "stream_truncated", "Provider closed before the first event");
-      reserveMemory?.(chunk.value.byteLength);
-      reservedBytes += chunk.value.byteLength;
-      const events = parser
-        .feed(chunk.value)
-        .filter((event) => event.data && event.event !== "ping");
-      if (!events.length) continue;
-      return { reader, parser, events, reservedBytes };
+      if (chunk.value.byteLength > deps.config.MAX_EVENT_BYTES * 2)
+        throw new GatewayError(502, "stream_chunk_limit", "Upstream chunk exceeds limit");
+      parseChunk(prepared, chunk.value, true, reserveMemory);
+      if (prepared.events.length) return prepared;
     }
   } catch (error) {
     await reader.cancel().catch(() => undefined);
@@ -45,6 +73,7 @@ export async function prepareStream(
     throw error;
   } finally {
     clearTimeout(timeout);
+    controller.signal.removeEventListener("abort", cancelRead);
   }
 }
 
@@ -60,12 +89,12 @@ export async function relayStream(
   reserveMemory?: (bytes: number) => void,
   afterCommit?: () => Promise<void>,
 ): Promise<ReadableStream<Uint8Array>> {
-  const { reader, parser } = prepared;
-  const events = [...prepared.events];
+  const { reader, parser, events } = prepared;
   const output: Uint8Array[] = [];
   const terminal: Uint8Array[] = [];
   let terminalBytes = 0;
   let ended = false;
+  let eof = false;
   let terminalStarted = false;
   let settlement: Promise<void> | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -76,25 +105,24 @@ export async function relayStream(
       clearTimeout(idleTimer);
       clearTimeout(stallTimer);
       try {
+        const usage =
+          success || translator.usage ? { ...translator.usage, requests: "1" } : undefined;
+        const completed =
+          translator.terminal &&
+          !translator.failed &&
+          !parser.incomplete &&
+          (success || (code === "client_disconnected" && translator.source !== "gemini"));
         await publishEvidence(
           deps,
           attemptId,
-          translator.terminal && !translator.failed
-            ? "SUCCEEDED"
-            : translator.usage
-              ? "PARTIAL"
-              : "UNKNOWN",
-          translator.terminal && !translator.failed && translator.usage
-            ? "FINAL"
-            : translator.usage
-              ? "PARTIAL"
-              : "UNKNOWN",
-          translator.usage ? { ...translator.usage, requests: "1" } : undefined,
+          completed ? "SUCCEEDED" : usage ? "PARTIAL" : "UNKNOWN",
+          completed && usage ? "FINAL" : usage ? "PARTIAL" : "UNKNOWN",
+          usage,
           code,
           undefined,
           success ? "SUCCEEDED" : "UNKNOWN",
         );
-        await afterCommit?.();
+        if (success) await afterCommit?.();
       } finally {
         await reader.cancel().catch(() => undefined);
         reader.releaseLock();
@@ -103,13 +131,9 @@ export async function relayStream(
     })();
     return settlement;
   };
-  const consume = async (event: SSEEvent) => {
-    const released = Math.min(
-      prepared.reservedBytes,
-      new TextEncoder().encode(event.wire).byteLength,
-    );
-    reserveMemory?.(-released);
-    prepared.reservedBytes -= released;
+  const consume = async (event: SSEEvent & { bytes: number }) => {
+    reserveMemory?.(-event.bytes);
+    prepared.reservedBytes -= event.bytes;
     const result = translator.consume(event);
     for (const chunk of result.chunks) reserveMemory?.(chunk.byteLength);
     await beforeOutput?.();
@@ -164,14 +188,7 @@ export async function relayStream(
               await consume(event);
               continue;
             }
-            idleTimer = setTimeout(
-              () => controller.abort(new Error("Upstream stream idle")),
-              deps.config.STREAM_IDLE_MS,
-            );
-            const chunk = await reader.read();
-            clearTimeout(idleTimer);
-            if (chunk.done) {
-              parser.feed(new Uint8Array(), true);
+            if (eof) {
               if (!translator.terminal || translator.failed || parser.incomplete)
                 throw new GatewayError(
                   502,
@@ -192,12 +209,21 @@ export async function relayStream(
               await done(true);
               ended = true;
               output.push(...terminal);
+              continue;
+            }
+            idleTimer = setTimeout(
+              () => controller.abort(new Error("Upstream stream idle")),
+              deps.config.STREAM_IDLE_MS,
+            );
+            const chunk = await reader.read();
+            clearTimeout(idleTimer);
+            if (chunk.done) {
+              eof = true;
+              parseChunk(prepared, new Uint8Array(), false, reserveMemory, true);
             } else {
               if (chunk.value.byteLength > deps.config.MAX_EVENT_BYTES * 2)
                 throw new GatewayError(502, "stream_chunk_limit", "Upstream chunk exceeds limit");
-              reserveMemory?.(chunk.value.byteLength);
-              prepared.reservedBytes += chunk.value.byteLength;
-              events.push(...parser.feed(chunk.value));
+              parseChunk(prepared, chunk.value, false, reserveMemory);
             }
           }
           const next = output.shift();

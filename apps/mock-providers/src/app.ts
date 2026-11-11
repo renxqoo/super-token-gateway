@@ -20,6 +20,9 @@ export interface Scenario {
   omitUsage?: boolean;
   pollUsage?: boolean;
   batchRowUsage?: Record<string, unknown>[];
+  batchUsage?: Record<string, unknown>;
+  batchRowIds?: string[];
+  batchReportedTotal?: number;
   emptyChoices?: boolean;
   invalidChoice?: "missing_message" | "empty_message" | "unfinished";
   terminalOnly?: boolean;
@@ -38,6 +41,7 @@ interface FixtureResource {
   cancelled: boolean;
   payload?: Record<string, unknown>;
   model?: string;
+  batchIds?: string[];
 }
 const obj = (value: unknown): Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -877,28 +881,41 @@ export function createMockApp(controlToken: string): {
     app.post(`/openai/v1/${type}`, async (c) => {
       if (resources.size >= 10000) return c.json({ error: "mock capacity" }, 503);
       let model: string | undefined;
+      let batchIds: string[] | undefined;
+      let batchContent: string | undefined;
       if (c.req.header("content-type")?.includes("multipart")) {
         const form = await c.req.formData();
         const file = form.get("file");
         if (file instanceof File && form.get("purpose") === "batch") {
           try {
-            model = String(obj(obj(JSON.parse((await file.text()).split("\n")[0]!)).body).model);
+            batchContent = await file.text();
+            const items = batchContent
+              .split("\n")
+              .filter((line) => line.trim())
+              .map((line) => obj(JSON.parse(line)));
+            model = String(obj(items[0]?.body).model);
+            batchIds = items.map((item) => String(item.custom_id));
           } catch {}
         }
       } else {
         const body = obj(await c.req.json());
         if (kind === "batch" && body.model !== undefined)
           return c.json({ error: "Batch has no top-level model parameter" }, 400);
-        if (kind === "batch") model = resources.get(String(body.input_file_id))?.model;
+        if (kind === "batch") {
+          const input = resources.get(String(body.input_file_id));
+          model = input?.model;
+          batchIds = input?.batchIds;
+        }
       }
       const id = `${kind}-${crypto.randomUUID()}`;
       resources.set(id, {
         id,
         kind,
         polls: 0,
-        output: `mock-${kind}-output-content`,
+        output: batchContent ?? `mock-${kind}-output-content`,
         cancelled: false,
         ...(model ? { model } : {}),
+        ...(batchIds ? { batchIds } : {}),
       });
       return c.json({
         id,
@@ -912,9 +929,14 @@ export function createMockApp(controlToken: string): {
       if (!resource) return c.json({ error: "missing" }, 404);
       resource.polls++;
       if (kind === "batch") {
-        const usages = scenarios.get(resource.model ?? "")?.batchRowUsage ?? [
-          { prompt_tokens: 10, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 0 } },
-        ];
+        const scenario = scenarios.get(resource.model ?? "");
+        const usages =
+          scenario?.batchRowUsage ??
+          Array.from({ length: resource.batchIds?.length ?? 1 }, () => ({
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            prompt_tokens_details: { cached_tokens: 0 },
+          }));
         const file = `file-result-${resource.id}`;
         resources.set(file, {
           id: file,
@@ -924,11 +946,16 @@ export function createMockApp(controlToken: string): {
             usages
               .map((usage, index) =>
                 JSON.stringify({
-                  custom_id: `item-${index + 1}`,
+                  custom_id:
+                    scenario?.batchRowIds?.[index] ??
+                    resource.batchIds?.[index] ??
+                    `item-${index + 1}`,
                   response: {
                     status_code: 200,
                     body: {
-                      choices: [{ message: { content: resource.output } }],
+                      ...(scenario?.imageData === undefined
+                        ? { choices: [{ message: { content: resource.output } }] }
+                        : { data: scenario.imageData }),
                       usage,
                     },
                   },
@@ -942,7 +969,12 @@ export function createMockApp(controlToken: string): {
           object: kind,
           status: resource.cancelled ? "cancelled" : "completed",
           output_file_id: file,
-          request_counts: { total: usages.length, completed: usages.length, failed: 0 },
+          ...(scenario?.batchUsage ? { usage: scenario.batchUsage } : {}),
+          request_counts: {
+            total: scenario?.batchReportedTotal ?? resource.batchIds?.length ?? usages.length,
+            completed: usages.length,
+            failed: 0,
+          },
         });
       }
       return c.json({

@@ -56,11 +56,11 @@ async function awaitModelUsage(model: string, count = 1): Promise<void> {
       ) >= count,
   );
 }
-async function awaitResourceFinal(id: string): Promise<void> {
+async function awaitResourceFinal(id: string, source = "async_final"): Promise<void> {
   await waitFor(
     async () =>
       (
-        await testDb`SELECT 1 FROM usage_events e JOIN resources r ON r.attempt_id=e.attempt_id WHERE r.id=${id} AND e.source='async_final' AND e.finality='FINAL'`
+        await testDb`SELECT 1 FROM usage_events e JOIN resources r ON r.attempt_id=e.attempt_id WHERE r.id=${id} AND e.source=${source} AND e.finality='FINAL'`
       ).length > 0,
   );
 }
@@ -147,6 +147,7 @@ beforeAll(async () => {
       ENCRYPTION_KEY: "11".repeat(32),
       KEY_PEPPER: "p".repeat(40),
       REDIS_NAMESPACE: namespace,
+      REDIS_EXTRA_URLS: "",
       ALLOW_PRIVATE_UPSTREAM: "true",
       TOTAL_TIMEOUT_MS: "5000",
       HEADERS_TIMEOUT_MS: "1000",
@@ -586,6 +587,40 @@ test("image accounting counts object and split payloads once through final settl
     }
 });
 
+test("multipart image edit n=2 does not reject a funded per-image request", async () => {
+  const model = await configureModel(
+    "openai",
+    {
+      imageData: [
+        { url: "https://fixture.invalid/image-1" },
+        { url: "https://fixture.invalid/image-2" },
+      ],
+    },
+    ["image_edits"],
+  );
+  await deps.funds.setTariff({
+    model,
+    operation: "image_edits",
+    pricing: { currency: "USD", rates: { images: { numerator: "7", denominator: "1" } } },
+    ceilings: { images: "4" },
+    basis: "PROVIDER_USAGE",
+  });
+  const form = new FormData();
+  form.set("model", model);
+  form.set("prompt", "fixture");
+  form.set("n", "2");
+  form.set("image", new File(["fixture"], "image.png", { type: "image/png" }));
+  const response = await fetch(`${origin}/v1/images/edits`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}` },
+    body: form,
+  });
+  expect(response.status).toBe(200);
+  expect((await response.json()).data).toHaveLength(2);
+  const request = response.headers.get("x-gateway-request-id")!;
+  await waitFor(async () => (await deps.funds.receipt(request, projectId)).charged_atoms === "14");
+});
+
 test("native media SSE records image count and exact transcription duration", async () => {
   const model = await configureModel("openai", { chunkBytes: 1 }, [
     "images",
@@ -747,6 +782,7 @@ test("async queue acceptance failure remains pollable and retries idempotently",
   expect(
     (await json(`/v1/responses/${created.value.id}`, undefined, key, "GET")).response.status,
   ).toBe(200);
+  await awaitResourceFinal(String(created.value.id));
   const rows =
     await testDb`SELECT e.id FROM usage_events e JOIN resources r ON r.attempt_id=e.attempt_id WHERE r.id=${created.value.id} AND e.source='async_final'`;
   expect(rows.length).toBe(1);
@@ -796,8 +832,24 @@ test("known usage survives a conversion rejection and output-free failover", asy
   expect(rows.map((row: { finality: string }) => row.finality)).toEqual(["FINAL", "FINAL"]);
 });
 
-test("non-JSON transcription output is relayed once without being parsed or persisted", async () => {
+test("non-JSON transcription completion retains its exact request fee without storing output", async () => {
   const model = await configureModel("openai", {}, ["transcription"]);
+  const route = (await deps.store.routeDefinitions(model))[0] as { id: string };
+  await json(
+    `/admin/routes/${route.id}`,
+    {
+      pricing: { currency: "USD", rates: { requests: { numerator: "11", denominator: "1" } } },
+    },
+    adminKey,
+    "PATCH",
+  );
+  await deps.funds.setTariff({
+    model,
+    operation: "transcription",
+    pricing: { currency: "USD", rates: { requests: { numerator: "7", denominator: "1" } } },
+    ceilings: { requests: "1" },
+    basis: "PROVIDER_USAGE",
+  });
   const form = new FormData();
   form.set("model", model);
   form.set("response_format", "srt");
@@ -809,11 +861,19 @@ test("non-JSON transcription output is relayed once without being parsed or pers
   });
   expect(response.status).toBe(200);
   expect(await response.text()).toBe("mock-transcribed-output-content");
+  const request = response.headers.get("x-gateway-request-id")!;
   await awaitModelUsage(model);
   const rows =
-    await testDb`SELECT e.finality FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model}`;
+    await testDb`SELECT finality,usage,cost_atoms::text,cost_complete FROM usage_events WHERE request_id=${request}`;
   expect(rows.length).toBe(1);
-  expect(rows[0]?.finality).toBe("UNKNOWN");
+  expect(rows[0]).toMatchObject({
+    finality: "FINAL",
+    usage: { requests: "1" },
+    cost_atoms: "11",
+    cost_complete: true,
+  });
+  expect(JSON.stringify(rows)).not.toContain("mock-transcribed-output-content");
+  expect((await deps.funds.receipt(request, projectId)).charged_atoms).toBe("7");
 });
 
 test("client cancellation releases project/provider concurrency and bounds upstream activity", async () => {
@@ -986,9 +1046,10 @@ test("Batch output JSONL is metered after completion and cancellation without sa
     expect(poll.value.usage).toBeUndefined();
     expect(poll.response.status).toBe(200);
     const resource = await deps.store.resource(String(created.value.id), projectId);
-    await awaitResourceFinal(String(created.value.id));
+    const source = cancel ? "batch_cancelled" : "batch_completed";
+    await awaitResourceFinal(String(created.value.id), source);
     const rows =
-      await testDb`SELECT finality,usage FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source='async_final'`;
+      await testDb`SELECT finality,usage FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source=${source}`;
     expect(rows.length).toBe(1);
     expect(rows[0]?.finality).toBe("FINAL");
     expect(rows[0]?.usage.input_tokens).toBe("10");
@@ -1070,11 +1131,18 @@ test("distributed permits and half-open probes coordinate across two instances",
     expect((await second.health(provider)).open).toBe(true);
     await Bun.sleep(40);
     const probes = await Promise.all([
-      deps.limits.probe(provider, 1000),
-      second.probe(provider, 1000),
+      deps.limits.probe(provider, 1000, "first"),
+      second.probe(provider, 1000, "second"),
     ]);
     expect(probes.filter(Boolean).length).toBe(1);
+    const release = probes.find((probe) => probe !== undefined)!;
+    await release();
+    const replacement = await second.probe(provider, 1000, "replacement");
+    expect(replacement).toBeDefined();
+    await release();
+    expect(await deps.limits.probe(provider, 1000, "stale-release")).toBeUndefined();
     await second.observe(provider, false, 10);
+    await replacement?.();
     expect((await deps.limits.health(provider)).open).toBe(false);
   } finally {
     second.close();
@@ -1373,6 +1441,20 @@ test("restricted production role can serve inference but cannot mutate usage or 
 
 test("completed Responses streams without usage remain recoverable until GET supplies evidence", async () => {
   const model = await configureModel("openai", { omitUsage: true, pollUsage: true });
+  await deps.funds.setTariff({
+    model,
+    operation: "responses",
+    pricing: {
+      currency: "USD",
+      rates: {
+        input_tokens: { numerator: "3", denominator: "1" },
+        cached_input_tokens: { numerator: "1", denominator: "1" },
+        output_tokens: { numerator: "7", denominator: "1" },
+      },
+    },
+    ceilings: { input_tokens: "100", cached_input_tokens: "100", output_tokens: "100" },
+    basis: "PROVIDER_USAGE",
+  });
   const response = await fetch(`${origin}/v1/responses`, {
     method: "POST",
     headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
@@ -1380,6 +1462,12 @@ test("completed Responses streams without usage remain recoverable until GET sup
   });
   const body = await response.text();
   expect(body).toContain("response.completed");
+  const requestId = response.headers.get("x-gateway-request-id")!;
+  await awaitUsage(requestId);
+  expect(await deps.funds.receipt(requestId, projectId)).toMatchObject({
+    hold_state: "RECONCILING",
+    charged_atoms: null,
+  });
   const rows =
     await testDb`SELECT id,state FROM resources WHERE attempt_id IN(SELECT id FROM attempts WHERE upstream_model=${model})`;
   expect(rows[0]?.state).toBe("PENDING_USAGE");
@@ -1389,9 +1477,208 @@ test("completed Responses streams without usage remain recoverable until GET sup
     return (await deps.store.resource(String(rows[0]?.id), projectId)).state === "COMPLETED";
   });
   await awaitResourceFinal(String(rows[0]?.id));
+  expect(await deps.funds.receipt(requestId, projectId)).toMatchObject({
+    hold_state: "SETTLED",
+    charged_atoms: "59",
+  });
   const events =
-    await testDb`SELECT e.finality FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model} ORDER BY e.seq`;
-  expect(events.map((row: { finality: string }) => row.finality)).toEqual(["UNKNOWN", "FINAL"]);
+    await testDb`SELECT e.finality,e.usage FROM usage_events e JOIN attempts a ON a.id=e.attempt_id WHERE a.upstream_model=${model} ORDER BY e.seq`;
+  expect(events).toEqual([
+    { finality: "FINAL", usage: { requests: "1" } },
+    {
+      finality: "FINAL",
+      usage: { requests: "1", input_tokens: "7", cached_input_tokens: "3", output_tokens: "5" },
+    },
+  ]);
+});
+
+test("cached admission scripts reduce request bytes and survive an unexecuted NOSCRIPT response", async () => {
+  const { Limits } = await import("@gateway/runtime");
+  const scope = `script-cache:${suffix}`;
+  const limits = new Limits(process.env.REDIS_URL ?? "", namespace);
+  const send = limits.redis.send.bind(limits.redis);
+  let bytes = 0;
+  let missing = true;
+  limits.redis.send = async (command, args) => {
+    bytes +=
+      Buffer.byteLength(command) +
+      (args ?? []).reduce((total, value) => total + Buffer.byteLength(String(value)), 0);
+    if (command === "EVALSHA" && missing) {
+      missing = false;
+      throw new Error("NOSCRIPT No matching script. Please use EVAL.");
+    }
+    return send(command, args);
+  };
+  try {
+    const first = await limits.enter(scope, "first", 10, 1, 1000);
+    await first();
+    bytes = 0;
+    const second = await limits.enter(scope, "second", 10, 1, 1000);
+    expect(bytes).toBeLessThan(512);
+    await expect(limits.enter(scope, "denied", 10, 1, 1000)).rejects.toMatchObject({ status: 429 });
+    await second();
+    missing = true;
+    const third = await limits.enter(scope, "third", 10, 1, 1000);
+    await third();
+    expect(Number(await limits.command("ZCARD", [`${namespace}:{${scope}}:rpm`]))).toBe(3);
+  } finally {
+    limits.close();
+  }
+});
+
+test("zero-token reservations still reconcile and share the original TPM bucket", async () => {
+  const clock = (await deps.limits.command("TIME")) as string[];
+  const remaining =
+    60000 - ((Number(clock[0]) * 1000 + Math.floor(Number(clock[1]) / 1000)) % 60000);
+  if (remaining < 1000) await Bun.sleep(remaining + 5);
+  const scope = `zero-token:${suffix}`;
+  const first = await deps.limits.enter(scope, "first", 100, 10, 1000, 0, 20);
+  await first.adjustTokens(7);
+  await first();
+  await expect(deps.limits.enter(scope, "excess", 100, 10, 1000, 14, 20)).rejects.toMatchObject({
+    status: 429,
+  });
+  const second = await deps.limits.enter(scope, "second", 100, 10, 1000, 13, 20);
+  await second.adjustTokens(13);
+  await second();
+  const zero = await deps.limits.enter(scope, "zero", 100, 10, 1000, 0, 20);
+  await zero();
+  await expect(
+    deps.limits.enter(scope, "one-too-many", 100, 10, 1000, 1, 20),
+  ).rejects.toMatchObject({ status: 429 });
+});
+
+test("short admissions cannot expire an existing longer concurrent lease", async () => {
+  const scope = `mixed-lease:${suffix}`;
+  const active = `${namespace}:{${scope}}:active`;
+  const long = await deps.limits.enter(scope, "long", 100, 2, 240000);
+  let short: (() => Promise<void>) | undefined;
+  try {
+    short = await deps.limits.enter(scope, "short", 100, 2, 1000);
+    expect(Number(await deps.limits.command("PTTL", [active]))).toBeGreaterThanOrEqual(240000);
+    await expect(deps.limits.enter(scope, "excess", 100, 2, 1000)).rejects.toMatchObject({
+      status: 429,
+    });
+    await short();
+    short = await deps.limits.enter(scope, "replacement", 100, 2, 1000);
+    expect(Number(await deps.limits.command("PTTL", [active]))).toBeGreaterThanOrEqual(240000);
+    await expect(deps.limits.enter(scope, "still-excess", 100, 2, 1000)).rejects.toMatchObject({
+      status: 429,
+    });
+  } finally {
+    await short?.();
+    await long();
+  }
+});
+
+test("sharded admission preserves cross-instance quotas and colocates provider circuit state", async () => {
+  const { Limits } = await import("@gateway/runtime");
+  const urls = [14, 15].map((database) => {
+    const url = new URL(process.env.REDIS_URL!);
+    url.pathname = `/${database}`;
+    return url.href;
+  });
+  const isolated = `shards:${suffix}`;
+  const first = new Limits(urls, isolated);
+  const second = new Limits(urls, isolated);
+  const clients = urls.map((url) => new Bun.RedisClient(url));
+  try {
+    await first.ping();
+    await second.ping();
+    const clock = (await first.command("TIME")) as string[];
+    const remaining =
+      60000 - ((Number(clock[0]) * 1000 + Math.floor(Number(clock[1]) / 1000)) % 60000);
+    if (remaining < 1000) await Bun.sleep(remaining + 5);
+    const permit = await first.enter("project:shared", "first", 100, 1, 1000, 10, 20);
+    await expect(
+      second.enter("project:shared", "blocked", 100, 1, 1000, 10, 20),
+    ).rejects.toMatchObject({ status: 429 });
+    await permit.adjustTokens(7);
+    await permit();
+    await expect(
+      second.enter("project:shared", "excess", 100, 1, 1000, 14, 20),
+    ).rejects.toMatchObject({ status: 429 });
+    const next = await second.enter("project:shared", "next", 100, 1, 1000, 13, 20);
+    await next();
+    const owners = new Set<number>();
+    for (let index = 0; index < 16; index++) {
+      const scope = `project:spread-${index}`;
+      await (
+        await first.enter(scope, "request", 100, 1, 1000)
+      )();
+      const present = await Promise.all(
+        clients.map((client) => client.send("EXISTS", [`${isolated}:{${scope}}:rpm`])),
+      );
+      expect(present.map(Number).reduce((sum, value) => sum + value, 0)).toBe(1);
+      owners.add(present.findIndex((value) => Number(value) === 1));
+    }
+    expect(owners.size).toBe(2);
+    const provider = "capacity-provider";
+    await (
+      await first.enter(`provider:${provider}`, "request", 100, 1, 1000)
+    )();
+    for (let index = 0; index < 3; index++) await second.observe(provider, true, 10);
+    expect((await first.health(provider)).open).toBe(true);
+    const quotaOwners = await Promise.all(
+      clients.map((client) => client.send("EXISTS", [`${isolated}:{provider:${provider}}:rpm`])),
+    );
+    const circuitOwners = await Promise.all(
+      clients.map((client) => client.send("EXISTS", [`${isolated}:health:${provider}`])),
+    );
+    expect(circuitOwners).toEqual(quotaOwners);
+  } finally {
+    first.close();
+    second.close();
+    for (const client of clients) {
+      try {
+        let cursor = "0";
+        do {
+          const page = (await client.send("SCAN", [
+            cursor,
+            "MATCH",
+            `${isolated}:*`,
+            "COUNT",
+            "100",
+          ])) as [string, string[]];
+          cursor = String(page[0]);
+          if (page[1].length) await client.send("UNLINK", page[1]);
+        } while (cursor !== "0");
+      } finally {
+        client.close();
+      }
+    }
+  }
+});
+
+test("admission readiness checks a failed secondary shard and closes all owned connections", async () => {
+  const { Limits } = await import("@gateway/runtime");
+  const sockets = new Set<{ terminate(): void }>();
+  const blackhole = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      open(socket) {
+        sockets.add(socket);
+      },
+      data() {},
+      close(socket) {
+        sockets.delete(socket);
+      },
+    },
+  });
+  const limits = new Limits(
+    [process.env.REDIS_URL!, `redis://127.0.0.1:${blackhole.port}`],
+    `shard-failure:${suffix}`,
+    100,
+  );
+  try {
+    await expect(limits.ping()).rejects.toMatchObject({ status: 503 });
+  } finally {
+    limits.close();
+    for (const socket of sockets) socket.terminate();
+    blackhole.stop(true);
+  }
+  await expect(limits.ping()).rejects.toMatchObject({ status: 503 });
 });
 
 test("Redis admission reconnects after transport closure instead of staying permanently unavailable", async () => {
@@ -2027,31 +2314,11 @@ test("project key delegation inherits authority and cannot escape its principal 
   }
 });
 
-test("Batch rows with missing priced dimensions remain partial until every row is complete", async () => {
-  const full = {
-    prompt_tokens: 10,
-    completion_tokens: 5,
-    prompt_tokens_details: { cached_tokens: 0 },
-  };
-  const model = await configureModel(
-    "openai",
-    { batchRowUsage: [full, { prompt_tokens: 10, prompt_tokens_details: { cached_tokens: 0 } }] },
-    ["files", "batches", "chat"],
-  );
-  await deps.funds.setTariff({
-    model,
-    operation: "batches",
-    pricing: {
-      currency: "USD",
-      rates: {
-        input_tokens: { numerator: "3", denominator: "1" },
-        output_tokens: { numerator: "7", denominator: "1" },
-        cached_input_tokens: { numerator: "1", denominator: "1" },
-      },
-    },
-    ceilings: { input_tokens: "100", output_tokens: "100", cached_input_tokens: "100" },
-    basis: "PROVIDER_USAGE",
-  });
+async function uploadTwoItemBatch(
+  model: string,
+  endpoint = "/v1/chat/completions",
+  input: Record<string, unknown> = { messages: [{ role: "user", content: "x" }] },
+): Promise<string> {
   const form = new FormData();
   form.set("purpose", "batch");
   form.set(
@@ -2062,8 +2329,8 @@ test("Batch rows with missing priced dimensions remain partial until every row i
           JSON.stringify({
             custom_id: `item-${i + 1}`,
             method: "POST",
-            url: "/v1/chat/completions",
-            body: { model, messages: [{ role: "user", content: "x" }] },
+            url: endpoint,
+            body: { model, ...input },
           }),
         ).join("\n"),
       ],
@@ -2076,17 +2343,67 @@ test("Batch rows with missing priced dimensions remain partial until every row i
     body: form,
   });
   expect(uploaded.status).toBe(200);
-  const file = (await uploaded.json()) as { id: string };
+  return ((await uploaded.json()) as { id: string }).id;
+}
+
+async function submitTwoItemBatch(model: string): Promise<string> {
+  const endpoint = "/v1/chat/completions";
+  const file = await uploadTwoItemBatch(model);
   const created = await json(
     "/v1/batches",
-    { input_file_id: file.id, endpoint: "/v1/chat/completions", completion_window: "24h" },
+    { input_file_id: file, endpoint, completion_window: "24h" },
     key,
   );
   expect(created.response.status).toBe(200);
-  expect(
-    (await json(`/v1/batches/${created.value.id}`, undefined, key, "GET")).response.status,
-  ).toBe(200);
-  const resource = await deps.store.resource(String(created.value.id), projectId);
+  return String(created.value.id);
+}
+
+test("Batch summary cannot hide incomplete rows before exact millisecond settlement", async () => {
+  const full = {
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    prompt_tokens_details: { cached_tokens: 0 },
+    audio_ms: 125,
+  };
+  const model = await configureModel(
+    "openai",
+    {
+      batchUsage: {
+        prompt_tokens: 20,
+        completion_tokens: 10,
+        prompt_tokens_details: { cached_tokens: 0 },
+        audio_ms: 250,
+      },
+      batchRowUsage: [
+        full,
+        { prompt_tokens: 10, prompt_tokens_details: { cached_tokens: 0 }, audio_seconds: "0.1251" },
+      ],
+    },
+    ["files", "batches", "chat"],
+  );
+  await deps.funds.setTariff({
+    model,
+    operation: "batches",
+    pricing: {
+      currency: "USD",
+      rates: {
+        input_tokens: { numerator: "3", denominator: "1" },
+        output_tokens: { numerator: "7", denominator: "1" },
+        cached_input_tokens: { numerator: "1", denominator: "1" },
+        audio_ms: { numerator: "2", denominator: "1" },
+      },
+    },
+    ceilings: {
+      input_tokens: "100",
+      output_tokens: "100",
+      cached_input_tokens: "100",
+      audio_ms: "500",
+    },
+    basis: "PROVIDER_USAGE",
+  });
+  const batchId = await submitTwoItemBatch(model);
+  expect((await json(`/v1/batches/${batchId}`, undefined, key, "GET")).response.status).toBe(200);
+  const resource = await deps.store.resource(batchId, projectId);
   await waitFor(
     async () =>
       Number(
@@ -2096,32 +2413,176 @@ test("Batch rows with missing priced dimensions remain partial until every row i
       ) > 0,
   );
   const evidence = await testDb<
-    { finality: string; cost_complete: boolean }[]
-  >`SELECT finality,cost_complete FROM usage_events WHERE attempt_id=${resource.attempt_id} AND usage?'input_tokens'`;
+    { finality: string; cost_complete: boolean; usage: Record<string, string> }[]
+  >`SELECT finality,cost_complete,usage FROM usage_events WHERE attempt_id=${resource.attempt_id} AND usage?'input_tokens'`;
   expect(evidence.every((row) => row.finality === "PARTIAL" && row.cost_complete === false)).toBe(
     true,
   );
+  expect(evidence[0]?.usage.audio_seconds).toBe("0.2501");
+  expect(evidence[0]?.usage).not.toHaveProperty("audio_ms");
   const request = (await testDb`SELECT request_id FROM attempts WHERE id=${resource.attempt_id}`)[0]
     .request_id;
   expect((await deps.funds.receipt(request, projectId)).charged_atoms).toBeNull();
-  expect((await deps.store.resource(String(created.value.id), projectId)).state).toBe(
-    "PENDING_USAGE",
-  );
+  expect((await deps.store.resource(batchId, projectId)).state).toBe("PENDING_USAGE");
   mock.scenarios.set(model, { batchRowUsage: [full, full] });
-  await json(`/v1/batches/${created.value.id}`, undefined, key, "GET");
+  await json(`/v1/batches/${batchId}`, undefined, key, "GET");
   await waitFor(
-    async () => String((await deps.funds.receipt(request, projectId)).charged_atoms) === "130",
+    async () => String((await deps.funds.receipt(request, projectId)).charged_atoms) === "630",
   );
   const final =
-    await testDb`SELECT usage,cost_atoms::text,cost_complete FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source='async_final' AND finality='FINAL'`;
+    await testDb`SELECT usage,cost_atoms::text,cost_complete FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source='batch_completed' AND finality='FINAL'`;
   expect(final).toHaveLength(1);
   expect(final[0].usage).toMatchObject({
     input_tokens: "20",
     output_tokens: "10",
     cached_input_tokens: "0",
+    audio_ms: "250",
+    audio_seconds: "0.25",
   });
   expect(final[0].cost_atoms).toBe("130");
   expect(final[0].cost_complete).toBe(true);
+});
+
+test("Batch image payloads retain per-image usage for settlement", async () => {
+  const usage = {
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    prompt_tokens_details: { cached_tokens: 0 },
+  };
+  const model = await configureModel(
+    "openai",
+    {
+      batchRowUsage: [usage, usage],
+      imageData: [{ url: "https://fixture.invalid/1" }, { url: "https://fixture.invalid/2" }],
+    },
+    ["images", "files", "batches"],
+  );
+  await deps.funds.setTariff({
+    model,
+    operation: "batches",
+    pricing: { currency: "USD", rates: { images: { numerator: "7", denominator: "1" } } },
+    ceilings: { images: "10" },
+    basis: "PROVIDER_USAGE",
+  });
+  const endpoint = "/v1/images/generations";
+  const file = await uploadTwoItemBatch(model, endpoint, { prompt: "x", n: 2 });
+  const created = await json(
+    "/v1/batches",
+    { input_file_id: file, endpoint, completion_window: "24h" },
+    key,
+  );
+  expect(created.response.status).toBe(200);
+  const id = String(created.value.id);
+  const resource = await deps.store.resource(id, projectId);
+  const [hold] =
+    await testDb`SELECT h.amount_atoms::text FROM billing_holds h JOIN attempts a ON a.request_id=h.request_id WHERE a.id=${resource.attempt_id}`;
+  expect(hold.amount_atoms).toBe("28");
+  await json(`/v1/batches/${id}`, undefined, key, "GET");
+  await waitFor(
+    async () =>
+      (
+        await testDb`SELECT 1 FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source='batch_completed'`
+      ).length > 0,
+  );
+  const [metering] =
+    await testDb`SELECT e.usage,e.finality,c.amount_atoms::text AS charge FROM usage_events e LEFT JOIN billing_charges c ON c.request_id=e.request_id WHERE e.attempt_id=${resource.attempt_id} AND e.source='batch_completed'`;
+  expect(metering).toMatchObject({ usage: { images: "4" }, finality: "FINAL", charge: "28" });
+});
+
+test("an image Batch exceeding its aggregate tariff ceiling is rejected before dispatch even for older files", async () => {
+  const endpoint = "/v1/images/generations";
+  const model = await configureModel("openai", {}, ["images", "files", "batches"]);
+  await deps.funds.setTariff({
+    model,
+    operation: "batches",
+    basis: "PROVIDER_USAGE",
+    pricing: { currency: "USD", rates: { images: { numerator: "7", denominator: "1" } } },
+    ceilings: { images: "3" },
+  });
+  const file = await uploadTwoItemBatch(model, endpoint, { prompt: "x", n: 2 });
+  for (const previousSchema of [false, true]) {
+    if (previousSchema) await testDb`UPDATE resources SET batch_manifest=NULL WHERE id=${file}`;
+    const response = await json(
+      "/v1/batches",
+      { input_file_id: file, endpoint, completion_window: "24h" },
+      key,
+    );
+    expect(response.response.status).toBe(422);
+    expect(response.value.error).toMatchObject({ code: "billing_ceiling" });
+  }
+  expect(
+    await testDb`SELECT 1 FROM gateway_requests WHERE model=${model} AND operation='batches'`,
+  ).toHaveLength(0);
+});
+
+for (const malformed of ["duplicate", "missing"] as const)
+  test(`${malformed} Batch result identities cannot be settled at the per-request price`, async () => {
+    const usage = {
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      prompt_tokens_details: { cached_tokens: 0 },
+    };
+    const model = await configureModel(
+      "openai",
+      malformed === "duplicate"
+        ? { batchRowUsage: [usage, usage], batchRowIds: ["item-1", "item-1"] }
+        : { batchRowUsage: [usage], batchReportedTotal: 1 },
+      ["chat", "files", "batches"],
+    );
+    const id = await submitTwoItemBatch(model);
+    expect((await json(`/v1/batches/${id}`, undefined, key, "GET")).response.status).toBe(200);
+    const resource = await deps.store.resource(id, projectId);
+    await waitFor(
+      async () =>
+        (
+          await testDb`SELECT 1 FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source LIKE 'async_%'`
+        ).length > 0,
+    );
+    const [row] = await testDb`SELECT q.billing_outcome,c.amount_atoms::text AS charge,e.finality
+    FROM attempts a JOIN gateway_requests q ON q.id=a.request_id
+    JOIN usage_events e ON e.attempt_id=a.id LEFT JOIN billing_charges c ON c.request_id=q.id
+    WHERE a.id=${resource.attempt_id} AND e.source LIKE 'async_%'`;
+    expect(row).toMatchObject({ billing_outcome: "PENDING", charge: null, finality: "PARTIAL" });
+    expect(resource.state).toBe("PENDING_USAGE");
+  });
+
+test("Batch seconds settle when the derived millisecond sum exceeds its integer budget", async () => {
+  const duration = "50000000000000000000000000000000000";
+  const total = "100000000000000000000000000000000000";
+  const usage = {
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    prompt_tokens_details: { cached_tokens: 0 },
+    audio_seconds: duration,
+  };
+  const model = await configureModel("openai", { batchRowUsage: [usage, usage] }, [
+    "files",
+    "batches",
+    "chat",
+  ]);
+  await deps.funds.setTariff({
+    model,
+    operation: "batches",
+    pricing: {
+      currency: "USD",
+      rates: { audio_seconds: { numerator: "1", denominator: total } },
+    },
+    ceilings: { audio_seconds: total },
+    basis: "PROVIDER_USAGE",
+  });
+  const batchId = await submitTwoItemBatch(model);
+  const polled = await json(`/v1/batches/${batchId}`, undefined, key, "GET");
+  expect(polled.response.status).toBe(200);
+  await awaitResourceFinal(batchId, "batch_completed");
+  const row = (
+    await testDb`SELECT a.request_id,e.usage FROM attempts a JOIN usage_events e ON e.id=a.evidence_id JOIN resources r ON r.attempt_id=a.id WHERE r.id=${batchId}`
+  )[0];
+  expect(row?.usage.audio_seconds).toBe(total);
+  expect(row?.usage).not.toHaveProperty("audio_ms");
+  expect(await deps.funds.receipt(row?.request_id, projectId)).toMatchObject({
+    hold_state: "SETTLED",
+    charged_atoms: "1",
+  });
 });
 
 test("retry dispatch rechecks route, provider, model and credential after Retry-After", async () => {
@@ -2191,27 +2652,29 @@ test("Gemini video multipart is converted to JSON and unrepresentable reference 
   await denied.text();
 });
 
-test("successful JSON without token usage retains exact per-request supplier cost", async () => {
-  const model = await configureModel("openai", { omitUsage: true });
-  const route = (await deps.store.routeDefinitions(model))[0] as { id: string };
-  await json(
-    `/admin/routes/${route.id}`,
-    { pricing: { currency: "USD", rates: { requests: { numerator: "17", denominator: "1" } } } },
-    adminKey,
-    "PATCH",
-  );
-  const response = await sendChat(model);
-  expect(response.status).toBe(200);
-  const request = response.headers.get("x-gateway-request-id")!;
-  await response.text();
-  await awaitUsage(request);
-  const rows =
-    await testDb`SELECT usage,cost_atoms::text,cost_complete FROM usage_events WHERE request_id=${request}`;
-  expect(rows).toHaveLength(1);
-  expect(rows[0].usage).toEqual({ requests: "1" });
-  expect(rows[0].cost_atoms).toBe("17");
-  expect(rows[0].cost_complete).toBe(true);
-});
+for (const stream of [false, true])
+  test(`successful ${stream ? "SSE" : "JSON"} without token usage retains exact per-request supplier cost`, async () => {
+    const model = await configureModel("openai", { omitUsage: true });
+    const route = (await deps.store.routeDefinitions(model))[0] as { id: string };
+    await json(
+      `/admin/routes/${route.id}`,
+      { pricing: { currency: "USD", rates: { requests: { numerator: "17", denominator: "1" } } } },
+      adminKey,
+      "PATCH",
+    );
+    const response = await sendChat(model, { stream });
+    expect(response.status).toBe(200);
+    const request = response.headers.get("x-gateway-request-id")!;
+    const output = await response.text();
+    if (stream) expect(output).toContain("[DONE]");
+    await awaitUsage(request);
+    const rows =
+      await testDb`SELECT usage,cost_atoms::text,cost_complete FROM usage_events WHERE request_id=${request}`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].usage).toEqual({ requests: "1" });
+    expect(rows[0].cost_atoms).toBe("17");
+    expect(rows[0].cost_complete).toBe(true);
+  });
 
 test("empty chat JSON and terminal-only streams cannot create successful request charges", async () => {
   for (const scenario of [
@@ -2410,4 +2873,157 @@ test("local socket exhaustion releases the hold without opening the provider cir
   ).toBe(0);
   const result = await json("/v1/chat/completions", payload("chat", model, false), key);
   expect(result.response.status).toBe(200);
+});
+
+test("character billing charges a legacy completion prompt instead of settling at zero", async () => {
+  const mockCompletion = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (request) => {
+      const input = await request.json();
+      expect(input.prompt).toBe("hello");
+      return Response.json({
+        choices: [{ text: "hi", finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    },
+  });
+  try {
+    const provider = await json("/admin/providers", {
+      name: "audit-completion",
+      kind: "openai",
+      base_url: `http://127.0.0.1:${mockCompletion.port}/v1`,
+      api_key: "audit-fixture",
+    });
+    expect(provider.response.status).toBe(201);
+    const model = await configureModel("openai", {}, ["completions"], String(provider.value.id));
+    const tariff = await json("/admin/tariffs", {
+      model,
+      operation: "completions",
+      pricing: { currency: "USD", rates: { characters: { numerator: "7", denominator: "1" } } },
+      ceilings: { characters: "100" },
+      basis: "INPUT_CHARACTERS",
+    });
+    expect(tariff.response.status).toBe(201);
+    const reply = await json("/v1/completions", { model, prompt: "hello", max_tokens: 16 }, key);
+    expect(reply.response.status).toBe(200);
+    const id = reply.response.headers.get("x-gateway-request-id")!;
+    const receipt = await deps.funds.receipt(id, projectId);
+    expect(receipt).toMatchObject({
+      hold_state: "SETTLED",
+      reserved_atoms: "35",
+      charged_atoms: "35",
+    });
+  } finally {
+    mockCompletion.stop(true);
+  }
+});
+
+test("millisecond audio tariffs settle a completed 125ms transcription", async () => {
+  const provider = await json("/admin/providers", {
+    name: "millisecond-transcription",
+    kind: "openai",
+    base_url: `http://127.0.0.1:${mockServer.port}/openai/v1`,
+    api_key: "fixture-millisecond-transcription",
+  });
+  expect(provider.response.status).toBe(201);
+  const model = await configureModel("openai", {}, ["transcription"], String(provider.value.id));
+  const tariff = await json("/admin/tariffs", {
+    model,
+    operation: "transcription",
+    pricing: { currency: "USD", rates: { audio_ms: { numerator: "1", denominator: "1" } } },
+    ceilings: { audio_ms: "500" },
+    basis: "PROVIDER_USAGE",
+  });
+  expect(tariff.response.status).toBe(201);
+  const form = new FormData();
+  form.set("model", model);
+  form.set("stream", "true");
+  form.set("file", new File(["test"], "test.wav", { type: "audio/wav" }));
+  const reply = await fetch(`${origin}/v1/audio/transcriptions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}` },
+    body: form,
+  });
+  expect(reply.status).toBe(200);
+  expect(await reply.text()).toContain("transcript.text.done");
+  const id = reply.headers.get("x-gateway-request-id")!;
+  await awaitUsage(id);
+  const receipt = await deps.funds.receipt(id, projectId);
+  const evidence = (await testDb`SELECT usage FROM usage_events WHERE request_id=${id}`)[0]?.usage;
+  expect(evidence).toMatchObject({ audio_seconds: "0.125" });
+  expect(evidence).toHaveProperty("audio_ms", "125");
+  expect(receipt).toMatchObject({
+    hold_state: "SETTLED",
+    reserved_atoms: "500",
+    charged_atoms: "125",
+  });
+});
+
+test("upstream address blocked before dispatch releases the hold", async () => {
+  const provider = await json("/admin/providers", {
+    name: "blocked-before-dispatch",
+    kind: "openai",
+    base_url: `http://127.0.0.1:${mockServer.port}/openai/v1`,
+    api_key: "fixture-blocked-before-dispatch",
+  });
+  expect(provider.response.status).toBe(201);
+  const model = await configureModel("openai", {}, ["chat"], String(provider.value.id));
+  const previous = deps.config.ALLOW_PRIVATE_UPSTREAM;
+  deps.config.ALLOW_PRIVATE_UPSTREAM = false;
+  try {
+    const reply = await json("/v1/chat/completions", payload("chat", model, false), key);
+    expect(reply.response.status).toBe(502);
+    const id = (
+      await testDb`SELECT id FROM gateway_requests WHERE project_id=${projectId} AND model=${model}`
+    )[0]?.id;
+    expect(typeof id).toBe("string");
+    await waitFor(
+      async () => (await deps.funds.receipt(id, projectId)).billing_outcome === "FAILED",
+    );
+    const receipt = await deps.funds.receipt(id, projectId);
+    const attempt = (await testDb`SELECT state FROM attempts WHERE request_id=${id}`)[0];
+    expect(attempt?.state).toBe("NOT_EXECUTED");
+    expect(receipt).toMatchObject({
+      hold_state: "RELEASED",
+      reserved_atoms: "1",
+      charged_atoms: "0",
+    });
+  } finally {
+    deps.config.ALLOW_PRIVATE_UPSTREAM = previous;
+  }
+});
+
+test("duplicate multipart prompts cannot underquote a character-priced request", async () => {
+  const provider = await json("/admin/providers", {
+    name: "duplicate-multipart-prompt",
+    kind: "openai",
+    base_url: `http://127.0.0.1:${mockServer.port}/openai/v1`,
+    api_key: "fixture-duplicate-multipart-prompt",
+  });
+  expect(provider.response.status).toBe(201);
+  const model = await configureModel("openai", {}, ["transcription"], String(provider.value.id));
+  const tariff = await json("/admin/tariffs", {
+    model,
+    operation: "transcription",
+    pricing: { currency: "USD", rates: { characters: { numerator: "7", denominator: "1" } } },
+    ceilings: { characters: "100" },
+    basis: "INPUT_CHARACTERS",
+  });
+  expect(tariff.response.status).toBe(201);
+
+  const form = new FormData();
+  form.set("model", model);
+  form.set("file", new File(["test"], "test.wav", { type: "audio/wav" }));
+  form.append("prompt", "x");
+  form.append("prompt", "longer prompt");
+  const response = await fetch(`${origin}/v1/audio/transcriptions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}` },
+    body: form,
+  });
+  await response.text();
+  expect(response.status).toBe(400);
+  const requests = await testDb`SELECT 1 FROM gateway_requests WHERE model=${model}`;
+  expect(requests).toHaveLength(0);
 });

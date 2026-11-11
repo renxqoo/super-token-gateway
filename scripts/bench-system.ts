@@ -18,6 +18,33 @@ const wallets = Number(option("--wallets", "1"));
 const concurrency = Number(option("--concurrency", "64"));
 const pool = Number(option("--pool", "16"));
 const stream = args.includes("--stream");
+const observe = args.includes("--observe");
+const requireOnlineCapacity = args.includes("--online-capacity");
+if (requireOnlineCapacity && seconds !== 60)
+  throw new Error("Online capacity acceptance requires a 60-second window");
+const lz4 = args.includes("--wal-lz4");
+const providerKind = option("--provider", "openai");
+if (providerKind !== "openai" && providerKind !== "anthropic")
+  throw new Error("Unsupported fixture provider");
+const scenario = JSON.parse(option("--scenario", "{}"));
+const upstreamMode = option("--upstream", "standard");
+if (!["standard", "precomputed"].includes(upstreamMode))
+  throw new Error("Invalid benchmark upstream");
+if (
+  upstreamMode === "precomputed" &&
+  (stream || providerKind !== "openai" || Object.keys(scenario).length)
+)
+  throw new Error("Precomputed upstream requires plain OpenAI JSON");
+const upstreamStats = async (action = "stats") => {
+  const response = await fetch(`http://127.0.0.1:19088/__control/${action}`, {
+    method: action === "stats" ? "GET" : "POST",
+    headers: { authorization: `Bearer control-${id}`, "content-type": "application/json" },
+    ...(action === "scenarios" ? { body: JSON.stringify({ model: "demo", scenario }) } : {}),
+    signal: AbortSignal.timeout(2000),
+  });
+  if (!response.ok) throw new Error("Mock telemetry unavailable");
+  return response.json();
+};
 const billingMode = option("--billing-mode", "paid");
 if (!["paid", "free"].includes(billingMode)) throw new Error("Invalid billing mode");
 const expectedCharge = billingMode === "paid" ? "59" : "0";
@@ -28,6 +55,8 @@ if (!Number.isSafeInteger(drainSeconds) || drainSeconds < 1 || drainSeconds > 60
   throw new Error("Invalid drain budget");
 const consumerMode = option("--consumer-mode", "live");
 if (!["live", "none"].includes(consumerMode)) throw new Error("Invalid consumer mode");
+if (requireOnlineCapacity && (workerMode !== "live" || consumerMode !== "live"))
+  throw new Error("Online capacity requires live settlement and consumer ACK");
 const hotShare = Number(option("--hot-share", "0"));
 if (!Number.isFinite(hotShare) || hotShare < 0 || hotShare > 1)
   throw new Error("Invalid hot wallet share");
@@ -45,6 +74,8 @@ if (
 const base = process.env.DATABASE_URL;
 if (!base || !process.env.REDIS_URL || !process.env.QUEUE_REDIS_URL)
   throw new Error("Local PG, admission Redis and durable queue Redis URLs are required");
+if (requireOnlineCapacity && Number(process.env.QUEUE_REQUIRED_REPLICAS ?? "0") < 1)
+  throw new Error("Online capacity requires an acknowledged AOF replica");
 const id = crypto.randomUUID().replaceAll("-", "");
 const database = `gateway_bench_${id}`;
 const namespace = `bench:${id}`;
@@ -52,6 +83,7 @@ const directory = `.local/phase2/bench-${id}`;
 await mkdir(directory, { recursive: true });
 const owner = createDatabase(base, 2);
 await owner.unsafe(`CREATE DATABASE ${database}`);
+if (lz4) await owner.unsafe(`ALTER DATABASE ${database} SET wal_compression=lz4`);
 const url = new URL(base);
 url.pathname = `/${database}`;
 const db = createDatabase(url.toString(), 4);
@@ -63,6 +95,8 @@ const env = {
   NODE_ENV: "test",
   QUEUE_REQUIRED_REPLICAS: process.env.QUEUE_REQUIRED_REPLICAS ?? "0",
   DATABASE_URL: url.toString(),
+  REDIS_URL: process.env.REDIS_URL!,
+  REDIS_EXTRA_URLS: process.env.REDIS_EXTRA_URLS ?? "",
   REDIS_NAMESPACE: namespace,
   ADMIN_KEY: `bench-${id}`,
   ENCRYPTION_KEY: "22".repeat(32),
@@ -104,6 +138,11 @@ try {
   const redisSettings: Record<string, unknown> = {};
   for (const [name, redisURL] of [
     ["admission", process.env.REDIS_URL],
+    ...(process.env.REDIS_EXTRA_URLS ?? "")
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean)
+      .map((url, index) => [`admission-${index + 2}`, url] as const),
     ["evidence", process.env.QUEUE_REDIS_URL],
   ] as const) {
     const redis = new RedisClient(redisURL);
@@ -116,6 +155,7 @@ try {
         "no-appendfsync-on-rewrite",
         "aof-load-truncated",
         "maxmemory-policy",
+        "auto-aof-rewrite-min-size",
       ]);
     } finally {
       redis.close();
@@ -124,19 +164,34 @@ try {
   await migrate(db);
   const databaseSettings = await db<
     { name: string; setting: string; unit: string | null }[]
-  >`SELECT name,setting,unit FROM pg_settings WHERE name IN ('server_version','shared_buffers','effective_cache_size','work_mem','max_wal_size','checkpoint_timeout','wal_compression','fsync','full_page_writes','synchronous_commit','random_page_cost','autovacuum_naptime') ORDER BY name`;
+  >`SELECT name,setting,unit FROM pg_settings WHERE name IN ('server_version','shared_buffers','effective_cache_size','work_mem','max_wal_size','checkpoint_timeout','wal_compression','fsync','full_page_writes','synchronous_commit','random_page_cost','autovacuum_naptime','track_functions','track_wal_io_timing','jit') ORDER BY name`;
   for (const name of ["fsync", "full_page_writes", "synchronous_commit"])
     if (!databaseSettings.some((row) => row.name === name && row.setting === "on"))
       throw new Error(`Financial capacity measurement requires ${name}=on`);
   if (args.includes("--profile")) {
     await db`CREATE EXTENSION pg_stat_statements`;
     await db.unsafe(`ALTER DATABASE ${database} SET pg_stat_statements.track='all'`);
+    await db.unsafe(`ALTER DATABASE ${database} SET track_functions='all'`);
+    await db.unsafe(`ALTER DATABASE ${database} SET track_wal_io_timing=on`);
   }
-  await db.unsafe(`ALTER DATABASE ${database} SET track_functions='all'`);
-  await db.unsafe(`ALTER DATABASE ${database} SET track_wal_io_timing=on`);
   const walBefore = (
-    await db`SELECT wal_records::text,wal_bytes::text,wal_sync,wal_write,wal_sync_time,wal_write_time FROM pg_stat_wal`
+    await db`SELECT wal_records::text,wal_fpi::text,wal_bytes::text,wal_sync,wal_write,wal_sync_time,wal_write_time FROM pg_stat_wal`
   )[0];
+  const checkpoint = async () =>
+    (
+      await db`SELECT num_timed,num_requested,restartpoints_timed,write_time,sync_time,buffers_written FROM pg_stat_checkpointer`
+    )[0];
+  const checkpointBefore = await checkpoint();
+  const admissionInfo = async () => {
+    const redis = new RedisClient(env.REDIS_URL);
+    try {
+      await redis.connect();
+      return String(await redis.send("INFO", ["persistence"]));
+    } finally {
+      redis.close();
+    }
+  };
+  const admissionBefore = await admissionInfo();
   const store = new Store(db);
   const funds = new FundsStore(db);
   const provider = crypto.randomUUID();
@@ -144,8 +199,8 @@ try {
     provider,
     {
       name: "benchmark",
-      kind: "openai",
-      base_url: "http://127.0.0.1:19088/openai/v1",
+      kind: providerKind,
+      base_url: `http://127.0.0.1:19088/${providerKind}/v1`,
       concurrency: 100000,
       rpm: 10000000,
     },
@@ -225,8 +280,13 @@ try {
     await db.unsafe(`ANALYZE ${table}`);
   const consumer =
     consumerMode === "live" ? await store.createConsumer(`bench-${id}`, false) : undefined;
-  const mock = spawn("dist/mock-providers/main.js", { MOCK_PORT: "19088" }, "mock");
+  const mock = spawn(
+    upstreamMode === "precomputed" ? "scripts/bench-upstream.ts" : "dist/mock-providers/main.js",
+    { MOCK_PORT: "19088" },
+    "mock",
+  );
   await wait(19088);
+  if (Object.keys(scenario).length) await upstreamStats("scenarios");
   const ports = Array.from({ length: instances }, (_, i) => 18081 + i);
   for (const port of ports)
     spawn("dist/gateway/main.js", { PORT: String(port) }, `gateway-${port}`);
@@ -244,54 +304,115 @@ try {
     worker_metrics: string;
     lock_waiters: number;
     active_queries: number;
+    upstream_active: number;
+    completed_at?: number;
+    external_acked?: number;
+    receipt_confirmed_acks?: number;
+    waits: { wait_event_type: string; wait_event: string; count: number }[] | undefined;
+    checkpoint?: unknown;
   }[] = [];
   const samplingStart = Date.now();
-  let sampling: Promise<void> | undefined;
-  telemetryTimer = setInterval(() => {
-    if (sampling) return;
-    sampling = (async () => {
-      const headers = { authorization: `Bearer ${env.ADMIN_KEY}` };
-      const [queue, worker] = await Promise.all([
-        fetch(`http://127.0.0.1:${ports[0]}/admin/queue`, {
-          headers,
-          signal: AbortSignal.timeout(2000),
-        }),
-        workerStarted
-          ? fetch("http://127.0.0.1:18099/metrics", { headers, signal: AbortSignal.timeout(2000) })
-          : Promise.resolve(new Response("")),
-      ]);
-      if (!queue.ok || !worker.ok) throw new Error("Capacity telemetry unavailable");
-      const activity = (
-        await db`SELECT count(*) FILTER(WHERE wait_event_type='Lock')::int AS locks,count(*) FILTER(WHERE state='active')::int AS active FROM pg_stat_activity WHERE datname=current_database()`
-      )[0];
-      timeline.push({
-        lock_waiters: activity.locks,
-        active_queries: activity.active,
-        at: Date.now() - samplingStart,
-        queue: (await queue.json()) as Record<string, number>,
-        worker_metrics: await worker.text(),
-      });
-    })()
-      .catch(() => {
-        telemetryErrors++;
-      })
-      .finally(() => {
-        sampling = undefined;
-      });
-  }, 1000);
-  let consuming = true;
   let delivered = 0;
+  let receiptConfirmedAcks = 0;
+  const confirmedRequests = new Map<string, number>();
+  let unconfirmedReceipts = 0;
+  let sampling: Promise<void> | undefined;
+  telemetryTimer = setInterval(
+    () => {
+      if (sampling) return;
+      sampling = (async () => {
+        const headers = { authorization: `Bearer ${env.ADMIN_KEY}` };
+        const [queue, worker, upstream] = await Promise.all([
+          fetch(`http://127.0.0.1:${ports[0]}/admin/queue`, {
+            headers,
+            signal: AbortSignal.timeout(2000),
+          }),
+          workerStarted
+            ? fetch("http://127.0.0.1:18099/metrics", {
+                headers,
+                signal: AbortSignal.timeout(2000),
+              })
+            : Promise.resolve(new Response("")),
+          upstreamStats(),
+        ]);
+        if (!queue.ok || !worker.ok) throw new Error("Capacity telemetry unavailable");
+        const activity = (
+          await db`SELECT count(*) FILTER(WHERE wait_event_type='Lock')::int AS locks,count(*) FILTER(WHERE state='active')::int AS active FROM pg_stat_activity WHERE datname=current_database()`
+        )[0];
+        const waits = observe
+          ? await db<
+              { wait_event_type: string; wait_event: string; count: number }[]
+            >`SELECT coalesce(wait_event_type,'CPU') AS wait_event_type,coalesce(wait_event,'CPU') AS wait_event,count(*)::int FROM pg_stat_activity WHERE datname=current_database() AND state='active' AND pid<>pg_backend_pid() GROUP BY 1,2 ORDER BY 3 DESC`
+          : undefined;
+        const workerMetrics = await worker.text();
+        const sampleTime = Date.now();
+        const externalAcked = delivered;
+        const receiptSnapshot = receiptConfirmedAcks;
+        timeline.push({
+          waits,
+          checkpoint: observe ? await checkpoint() : undefined,
+          completed_at: sampleTime,
+          external_acked: externalAcked,
+          receipt_confirmed_acks: receiptSnapshot,
+          lock_waiters: activity.locks,
+          active_queries: activity.active,
+          upstream_active: upstream.active,
+          at: Date.now() - samplingStart,
+          queue: (await queue.json()) as Record<string, number>,
+          worker_metrics: workerMetrics,
+        });
+      })()
+        .catch(() => {
+          telemetryErrors++;
+        })
+        .finally(() => {
+          sampling = undefined;
+        });
+    },
+    requireOnlineCapacity ? 250 : 1000,
+  );
+  let consuming = true;
   const consume = (async () => {
     while (consuming && consumer) {
       try {
         const page = await store.claimEvents(consumer, 500);
         if (page.events.length) {
-          await store.ackEvents(
+          const receipts = requireOnlineCapacity
+            ? (
+                await db<{ n: number }[]>`SELECT count(*)::int AS n
+            FROM unnest(${page.events.map((event) => event.request_id)}::uuid[],${page.events.map((event) => event.id)}::uuid[]) expected(request_id,evidence_id)
+            JOIN billing_charges c ON c.request_id=expected.request_id AND c.evidence_id=expected.evidence_id
+            WHERE c.amount_atoms=${expectedCharge}::numeric AND c.funded_atoms=${expectedCharge}::numeric
+            AND c.currency='USD' AND c.debt_atoms=0 AND c.refunded_atoms=0`
+              )[0]!.n
+            : page.events.length;
+          const numericEvidence =
+            !requireOnlineCapacity ||
+            page.events.every(
+              (event) =>
+                event.finality === "FINAL" &&
+                event.currency === "USD" &&
+                event.cost_complete &&
+                event.cost_atoms === "59" &&
+                event.usage.input_tokens === "7" &&
+                event.usage.cached_input_tokens === "3" &&
+                event.usage.output_tokens === "5",
+            );
+          const acknowledged = await store.ackEvents(
             consumer,
             page.lease_token,
-            page.events.map((e) => e.id),
+            page.events.map((event) => event.id),
           );
-          delivered += page.events.length;
+          delivered += acknowledged;
+          if (requireOnlineCapacity && receipts === page.events.length && numericEvidence) {
+            receiptConfirmedAcks += acknowledged;
+            if (acknowledged === page.events.length) {
+              const committedAt = Date.now();
+              for (const event of page.events)
+                if (!confirmedRequests.has(event.request_id))
+                  confirmedRequests.set(event.request_id, committedAt);
+            }
+          } else if (requireOnlineCapacity) unconfirmedReceipts += acknowledged;
         } else await Bun.sleep(10);
       } catch {
         await Bun.sleep(50);
@@ -311,7 +432,10 @@ try {
       String(seconds),
       "--concurrency",
       String(concurrency),
+      "--warmup-concurrency",
+      option("--warmup-concurrency", String(Math.min(256, concurrency))),
       "--metrics",
+      ...(requireOnlineCapacity ? ["--record-request-ids"] : []),
       "--output",
       reportPath,
       "--hot-share",
@@ -385,7 +509,27 @@ try {
     BigInt(check.spent) === BigInt(check.requests) * BigInt(expectedCharge) &&
     !check.unbalanced_journals;
   const http = await Bun.file(reportPath).json();
+  const ownership = (
+    await db`SELECT count(*)::int AS mismatches FROM billing_charges c
+    JOIN billing_holds h ON h.id=c.hold_id JOIN wallets w ON w.id=h.wallet_id
+    JOIN gateway_requests q ON q.id=c.request_id LEFT JOIN usage_event_index e ON e.id=c.evidence_id
+    WHERE h.request_id<>q.id OR w.project_id<>q.project_id OR c.currency<>w.currency
+    OR (e.id IS NOT NULL AND e.request_id<>q.id)`
+  )[0]!.mismatches;
+  const walletMismatches = (
+    await db`SELECT count(*)::int AS mismatches
+    FROM unnest(${projects}::uuid[],${http.wallet_calls}::bigint[]) expected(project_id,calls)
+    LEFT JOIN wallets w ON w.project_id=expected.project_id AND w.currency='USD'
+    WHERE w.id IS NULL OR w.reserved_atoms<>0 OR w.debt_atoms<>0
+    OR w.spent_atoms<>expected.calls*${expectedCharge}::numeric
+    OR w.available_atoms<>1000000000000000000::numeric-expected.calls*${expectedCharge}::numeric`
+  )[0]!.mismatches;
+  valid = valid && ownership === 0 && walletMismatches === 0;
   valid = valid && http.invalid === 0 && !(http.shed ?? 0) && http.completed === http.succeeded;
+  if (args.includes("--rate")) {
+    const planned = seconds * Number(option("--rate", "0"));
+    valid = valid && http.offered === planned && http.completed + http.shed === planned;
+  }
   valid = valid && check.requests === http.succeeded + http.warmup_requests;
   const profile =
     await db`SELECT funcname,calls,total_time,self_time FROM pg_stat_user_functions ORDER BY total_time DESC LIMIT 25`;
@@ -393,7 +537,43 @@ try {
   clearInterval(telemetryTimer);
   await sampling;
   valid = valid && telemetryErrors === 0 && timeline.length >= Math.max(1, Math.floor(seconds / 2));
+  const windowStart = Date.parse(http.measurement_started_at);
+  const windowEnd = windowStart + seconds * 1000;
+  const completedIds = new Set<string>(http.completed_ids_in_window ?? []);
+  const fullyCompletedByWindow = [...completedIds].filter((id) => {
+    const confirmed = confirmedRequests.get(id);
+    return confirmed !== undefined && confirmed >= windowStart && confirmed <= windowEnd;
+  }).length;
+  const withinWindow = timeline
+    .filter((sample) => (sample.completed_at ?? Infinity) <= windowEnd)
+    .at(-1);
+  const settledByWindow =
+    Number(
+      /^gateway_billing_settled_total (\d+)$/m.exec(withinWindow?.worker_metrics ?? "")?.[1] ?? 0,
+    ) - http.warmup_requests;
+  const ackedByWindow = (withinWindow?.external_acked ?? 0) - http.warmup_requests;
+  const receiptAcksByWindow = (withinWindow?.receipt_confirmed_acks ?? 0) - http.warmup_requests;
+  valid =
+    valid &&
+    (!requireOnlineCapacity ||
+      (unconfirmedReceipts === 0 &&
+        receiptConfirmedAcks === (consumerMode === "live" ? check.requests : 0)));
+  const onlineCapacity = requireOnlineCapacity
+    ? {
+        fullyCompletedByWindow,
+        receiptAcksByWindow,
+        settledByWindow,
+        ackedByWindow,
+        sampledBeforeWindowEndMs: windowEnd - (withinWindow?.completed_at ?? 0),
+        httpByWindow: http.minute_windows?.["0"]?.succeeded ?? 0,
+      }
+    : undefined;
   const result = {
+    ownershipMismatches: ownership,
+    walletMismatches,
+    receiptConfirmedAcks,
+    unconfirmedReceipts,
+    onlineCapacity,
     databaseSettings,
     redisSettings,
     queue: {
@@ -406,9 +586,13 @@ try {
     telemetryErrors,
     timeline,
     queueStats,
+    admissionBefore,
+    admissionAfter: await admissionInfo(),
+    checkpointBefore,
+    checkpointAfter: await checkpoint(),
     walBefore,
     walAfter: (
-      await db`SELECT wal_records::text,wal_bytes::text,wal_sync,wal_write,wal_sync_time,wal_write_time FROM pg_stat_wal`
+      await db`SELECT wal_records::text,wal_fpi::text,wal_bytes::text,wal_sync,wal_write,wal_sync_time,wal_write_time FROM pg_stat_wal`
     )[0],
     profile,
     attemptOutcomes:
@@ -421,7 +605,11 @@ try {
     id,
     valid,
     targetRps,
-    capacityPassed: targetRps > 0 ? passesCapacityTarget(valid, http, targetRps) : undefined,
+    capacityPassed:
+      targetRps > 0
+        ? passesCapacityTarget(valid, http, targetRps) &&
+          (!onlineCapacity || onlineCapacity.fullyCompletedByWindow >= seconds * targetRps)
+        : undefined,
     seconds,
     instances,
     wallets,
@@ -430,6 +618,17 @@ try {
     concurrency,
     stream,
     billingMode,
+    providerKind,
+    upstreamMode,
+    admissionEndpoints: [
+      env.REDIS_URL,
+      ...(env.REDIS_EXTRA_URLS ?? "")
+        .split(",")
+        .map((url) => url.trim())
+        .filter(Boolean),
+    ].length,
+    scenario,
+    upstream: await upstreamStats(),
     consumerMode,
     workerMode,
     drainSeconds,
@@ -478,7 +677,14 @@ try {
   await db.close();
   await owner.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
   await owner.close();
-  for (const redisURL of [process.env.REDIS_URL, process.env.QUEUE_REDIS_URL]) {
+  for (const redisURL of [
+    process.env.REDIS_URL,
+    ...(process.env.REDIS_EXTRA_URLS ?? "")
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean),
+    process.env.QUEUE_REDIS_URL,
+  ]) {
     const redis = new RedisClient(redisURL);
     try {
       let cursor = "0";

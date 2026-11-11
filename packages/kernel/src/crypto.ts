@@ -12,6 +12,10 @@ import { normalizedNumber, numberLiteral } from "./json.ts";
 export const sha256 = (value: string | Uint8Array): string =>
   createHash("sha256").update(value).digest("hex");
 
+export function batchIdentityDigest(identities: Iterable<string>): string {
+  return sha256(JSON.stringify([...identities].sort()));
+}
+
 export function verifier(value: string, pepper: string): string {
   return createHmac("sha256", pepper).update(value).digest("hex");
 }

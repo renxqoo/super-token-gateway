@@ -26,6 +26,7 @@ const health = Bun.serve({
       try {
         await deps.database.ping();
         await deps.usage.producer.ready();
+        await deps.limits.ping();
         return Response.json({ status: "ready" });
       } catch {
         return Response.json({ status: "unavailable" }, { status: 503 });

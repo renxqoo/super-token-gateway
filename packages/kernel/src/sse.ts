@@ -1,3 +1,5 @@
+const encoder = new TextEncoder();
+
 export interface SSEEvent {
   event: string;
   data: string;
@@ -10,6 +12,7 @@ export class SSEParser {
   private buffer = "";
   private eventLines: string[] = [];
   private eventSize = 0;
+  private trailingBytes = 0;
   constructor(private readonly maxBytes = 1_048_576) {}
 
   feed(chunk: Uint8Array, flush = false): SSEEvent[] {
@@ -23,7 +26,7 @@ export class SSEParser {
       const line = this.buffer.slice(start, i);
       if (ch === "\r" && this.buffer[i + 1] === "\n") i++;
       start = i + 1;
-      this.eventSize += new TextEncoder().encode(line).byteLength + 1;
+      this.eventSize += encoder.encode(line).byteLength + 1;
       if (this.eventSize > this.maxBytes) throw new Error("SSE event exceeds limit");
       if (line !== "") {
         this.eventLines.push(line);
@@ -49,11 +52,15 @@ export class SSEParser {
       } else this.eventSize = 0;
     }
     this.buffer = this.buffer.slice(start);
-    if (new TextEncoder().encode(this.buffer).byteLength + this.eventSize > this.maxBytes) {
+    this.trailingBytes = encoder.encode(this.buffer).byteLength;
+    if (this.bufferedBytes > this.maxBytes) {
       throw new Error("SSE event exceeds limit");
     }
     // EOF 不合成空行或成功终态；未完整事件保持为截断。
     return events;
+  }
+  get bufferedBytes(): number {
+    return this.trailingBytes + this.eventSize;
   }
   get incomplete(): boolean {
     return this.buffer.length > 0 || this.eventLines.length > 0;

@@ -1,5 +1,12 @@
 -- Sole current schema: durable BullMQ usage ingestion. No previous schema contract is supported.
 SET LOCAL check_function_bodies=false;
+CREATE FUNCTION public.ledger_uuid() RETURNS uuid
+ LANGUAGE sql VOLATILE PARALLEL SAFE AS $$
+ SELECT (pg_catalog.lpad(pg_catalog.to_hex(pg_catalog.floor(extract(epoch FROM pg_catalog.clock_timestamp())*1000)::bigint),12,'0')||'7'||pg_catalog.substr(pg_catalog.replace(pg_catalog.gen_random_uuid()::text,'-',''),14))::uuid
+$$;
+REVOKE ALL ON FUNCTION public.ledger_uuid() FROM PUBLIC;
+
+
 --
 -- PostgreSQL database dump
 --
@@ -55,10 +62,11 @@ END $$;
 
 CREATE FUNCTION public.admit_gateway_batch(p_inputs jsonb) RETURNS jsonb
  LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public','pg_temp' AS $$
-DECLARE item record;p jsonb;quote jsonb;credential record;route record;old gateway_requests%ROWTYPE;
+DECLARE item record;p jsonb;quote jsonb;credential api_keys%ROWTYPE;route routes%ROWTYPE;old gateway_requests%ROWTYPE;
  wallet wallets%ROWTYPE;lot wallet_lots%ROWTYPE;wallet_rows wallets[];lot_rows wallet_lots[];local_lots wallet_lots[];
  wallet_index jsonb;lot_ranges jsonb;wallet_dirty boolean[];lot_dirty boolean[];
- staged_requests jsonb[]='{}';staged_holds jsonb[]='{}';staged_allocations jsonb[]='{}';staged_journals jsonb[]='{}';staged_attempts jsonb[]='{}';local_allocations jsonb;
+ staged_requests gateway_requests[]='{}';staged_holds billing_holds[]='{}';staged_allocations jsonb[]='{}';staged_journals jsonb[]='{}';staged_attempts attempts[]='{}';local_allocations jsonb;
+ pending_request gateway_requests%ROWTYPE;pending_hold billing_holds%ROWTYPE;pending_attempt attempts%ROWTYPE;
  result jsonb;results jsonb='{}';outcomes jsonb[]='{}';expiry_errors jsonb='{}';legs jsonb;failure text;new_id uuid;attempt_id uuid;pricing uuid;
  wi integer;first_lot integer;last_lot integer;li integer;i integer;sequence integer;
  atoms numeric;remaining numeric;take numeric;asof timestamptz;locked_wallets uuid[];
@@ -88,11 +96,21 @@ BEGIN
   SELECT (lot_rows[n]).wallet_id AS wallet_id,min(n) AS first_index,max(n) AS last_index FROM generate_subscripts(lot_rows,1) input(n) GROUP BY (lot_rows[n]).wallet_id
  ) ranges;
  wallet_dirty=array_fill(false,ARRAY[cardinality(wallet_rows)]);lot_dirty=array_fill(false,ARRAY[cardinality(lot_rows)]);
- FOR item IN SELECT value,ordinality FROM jsonb_array_elements(p_inputs) WITH ORDINALITY LOOP
+ FOR item IN SELECT input.value,input.ordinality,k AS credential,project.enabled AS project_enabled,r AS route,
+  m.enabled AS model_enabled,pr.enabled AS provider_enabled,m.operations AS model_operations,
+  price.id AS billing_price,cost.id AS cost_price
+  FROM jsonb_array_elements(p_inputs) WITH ORDINALITY input
+  LEFT JOIN api_keys k ON k.id=(input.value->>'key_id')::uuid
+  LEFT JOIN projects project ON project.id=k.project_id
+  LEFT JOIN routes r ON r.id=(input.value->>'route_id')::uuid
+  LEFT JOIN models m ON m.name=r.model_name LEFT JOIN providers pr ON pr.id=r.provider_id
+  LEFT JOIN billing_prices price ON price.id=(input.value->'quote'->'prices'->>r.provider_id::text)::uuid AND price.currency=input.value->'quote'->>'currency'
+  LEFT JOIN cost_versions cost ON cost.id=(input.value->>'cost_pricing_id')::uuid
+  ORDER BY input.ordinality LOOP
   p=item.value;quote=p->'quote';
-   new_id=(p->>'id')::uuid;attempt_id=gen_random_uuid();
-   SELECT k.*,project.enabled AS project_enabled INTO credential FROM api_keys k JOIN projects project ON project.id=k.project_id WHERE k.id=(p->>'key_id')::uuid;
-   IF NOT FOUND OR NOT credential.enabled OR NOT credential.project_enabled OR credential.expires_at<=clock_timestamp() THEN RAISE EXCEPTION 'credential unavailable' USING ERRCODE='P0401';END IF;
+   new_id=(p->>'id')::uuid;attempt_id=ledger_uuid();
+   credential=item.credential;route=item.route;
+   IF credential.id IS NULL OR NOT credential.enabled OR NOT coalesce(item.project_enabled,false) OR credential.expires_at<=clock_timestamp() THEN RAISE EXCEPTION 'credential unavailable' USING ERRCODE='P0401';END IF;
    IF credential.project_id<>(p->>'project_id')::uuid OR NOT p->>'operation'=ANY(credential.operations) OR (cardinality(credential.models)>0 AND NOT p->>'model'=ANY(credential.models)) THEN RAISE EXCEPTION 'credential scope denied' USING ERRCODE='P0403';END IF;
    IF p->>'digest' IS NOT NULL THEN
     SELECT * INTO old FROM gateway_requests WHERE project_id=credential.project_id AND key_id=credential.id AND operation=p->>'operation' AND intent_digest=p->>'digest';
@@ -101,10 +119,9 @@ BEGIN
      outcomes[item.ordinality]=jsonb_build_object('created',false,'record',jsonb_build_object('id',old.id,'state',old.state,'fingerprint',old.fingerprint));CONTINUE;
     END IF;
    END IF;
-   SELECT r.*,m.enabled AS model_enabled,pr.enabled AS provider_enabled,m.operations AS model_operations INTO route FROM routes r JOIN models m ON m.name=r.model_name JOIN providers pr ON pr.id=r.provider_id WHERE r.id=(p->>'route_id')::uuid;
-   IF NOT FOUND OR NOT route.enabled OR NOT route.model_enabled OR NOT route.provider_enabled OR route.model_name<>p->>'model' OR NOT p->>'operation'=ANY(route.operations) OR NOT p->>'operation'=ANY(route.model_operations) THEN RAISE EXCEPTION 'route unavailable' USING ERRCODE='P0422';END IF;
+   IF route.id IS NULL OR NOT route.enabled OR NOT coalesce(item.model_enabled,false) OR NOT coalesce(item.provider_enabled,false) OR route.model_name<>p->>'model' OR NOT p->>'operation'=ANY(route.operations) OR NOT p->>'operation'=ANY(item.model_operations) THEN RAISE EXCEPTION 'route unavailable' USING ERRCODE='P0422';END IF;
    pricing=(quote->'prices'->>route.provider_id::text)::uuid;
-   IF quote IS NULL OR NOT EXISTS(SELECT 1 FROM billing_prices WHERE id=pricing AND currency=quote->>'currency') OR NOT EXISTS(SELECT 1 FROM cost_versions WHERE id=(p->>'cost_pricing_id')::uuid) THEN RAISE EXCEPTION 'billing quote unavailable' USING ERRCODE='P0422';END IF;
+   IF quote IS NULL OR item.billing_price IS NULL OR item.cost_price IS NULL THEN RAISE EXCEPTION 'billing quote unavailable' USING ERRCODE='P0422';END IF;
    wi=(wallet_index->>(credential.project_id::text||':'||(quote->>'currency')))::integer;
    IF wi IS NULL THEN
     result=jsonb_build_object('error',CASE WHEN EXISTS(SELECT 1 FROM wallets WHERE project_id=credential.project_id AND currency=quote->>'currency') THEN '55P03' ELSE 'P0402' END);
@@ -118,7 +135,10 @@ BEGIN
     IF old.fingerprint<>p->>'fingerprint' THEN RAISE EXCEPTION 'idempotency conflict' USING ERRCODE='P0409';END IF;
     outcomes[item.ordinality]=jsonb_build_object('created',false,'record',jsonb_build_object('id',old.id,'state',old.state,'fingerprint',old.fingerprint));CONTINUE;
    END IF;
-   ELSE staged_requests=array_append(staged_requests,p);
+   ELSE
+    pending_request.id=new_id;pending_request.project_id=credential.project_id;pending_request.key_id=credential.id;
+    pending_request.operation=p->>'operation';pending_request.model=p->>'model';pending_request.intent_digest=p->>'digest';pending_request.fingerprint=p->>'fingerprint';pending_request.billing_quote=quote;
+    staged_requests=array_append(staged_requests,pending_request);
    END IF;
    atoms=(quote->>'amount_atoms')::numeric;
    IF atoms IS NULL OR atoms<0 OR atoms<>trunc(atoms) OR atoms>max_atoms THEN RAISE EXCEPTION 'invalid hold' USING ERRCODE='P0422';END IF;
@@ -145,25 +165,28 @@ BEGIN
    FOR i IN 1..cardinality(local_lots) LOOP
     li=first_lot+i-1;IF lot_rows[li] IS DISTINCT FROM local_lots[i] THEN lot_rows[li]=local_lots[i];lot_dirty[li]=true;END IF;
    END LOOP;
-   staged_holds=array_append(staged_holds,jsonb_build_object('id',new_id,'wallet_id',wallet.id,'amount_atoms',atoms::text));
-   staged_allocations=array_cat(staged_allocations,ARRAY(SELECT value FROM jsonb_array_elements(local_allocations)));
-   IF atoms>0 THEN staged_journals=array_append(staged_journals,jsonb_build_object('id',gen_random_uuid(),'wallet_id',wallet.id,'reference','hold:'||new_id,'kind','HOLD','currency',wallet.currency,'lines',legs));END IF;
-   staged_attempts=array_append(staged_attempts,jsonb_build_object('id',attempt_id,'request_id',new_id,'provider_id',route.provider_id,'upstream_model',route.upstream_model,'pricing_id',p->>'cost_pricing_id','billing_pricing_id',pricing));
+   pending_hold.id=new_id;pending_hold.wallet_id=wallet.id;pending_hold.amount_atoms=atoms;
+   staged_holds=array_append(staged_holds,pending_hold);
+   staged_allocations=array_append(staged_allocations,local_allocations);
+   IF atoms>0 THEN staged_journals=array_append(staged_journals,jsonb_build_object('id',ledger_uuid(),'wallet_id',wallet.id,'reference','hold:'||new_id,'kind','HOLD','currency',wallet.currency,'lines',legs));END IF;
+   pending_attempt.id=attempt_id;pending_attempt.request_id=new_id;pending_attempt.provider_id=route.provider_id;pending_attempt.upstream_model=route.upstream_model;pending_attempt.pricing_id=(p->>'cost_pricing_id')::uuid;pending_attempt.billing_pricing_id=pricing;
+   staged_attempts=array_append(staged_attempts,pending_attempt);
    result=jsonb_build_object('created',true,'record',jsonb_build_object('id',new_id,'state','RUNNING','fingerprint',p->>'fingerprint'),'attempt_id',attempt_id);
   outcomes[item.ordinality]=result;
  END LOOP;
  INSERT INTO gateway_requests(id,project_id,key_id,operation,model,intent_digest,fingerprint,state,billing_currency,billing_quote,billing_outcome)
- SELECT q.id,q.project_id,q.key_id,q.operation,q.model,q.digest,q.fingerprint,'RUNNING',q.quote->>'currency',q.quote,'PENDING'
- FROM jsonb_to_recordset(to_jsonb(staged_requests)) q(id uuid,project_id uuid,key_id uuid,operation text,model text,digest text,fingerprint text,quote jsonb);
- INSERT INTO billing_holds(id,request_id,wallet_id,amount_atoms) SELECT h.id,h.id,h.wallet_id,h.amount_atoms FROM jsonb_to_recordset(to_jsonb(staged_holds)) h(id uuid,wallet_id uuid,amount_atoms numeric);
- INSERT INTO hold_allocations(hold_id,lot_id,ordinal,amount_atoms) SELECT a.hold_id,a.lot_id,a.ordinal,a.amount_atoms FROM jsonb_to_recordset(to_jsonb(staged_allocations)) a(hold_id uuid,lot_id uuid,ordinal integer,amount_atoms numeric);
+ SELECT q.id,q.project_id,q.key_id,q.operation,q.model,q.intent_digest,q.fingerprint,'RUNNING',q.billing_quote->>'currency',q.billing_quote,'PENDING'
+ FROM unnest(staged_requests) q;
+ INSERT INTO billing_holds(id,request_id,wallet_id,amount_atoms,next_reconcile_at) SELECT h.id,h.id,h.wallet_id,h.amount_atoms,now()+interval '30 seconds' FROM unnest(staged_holds) h;
+ INSERT INTO hold_allocations(hold_id,lot_id,ordinal,amount_atoms) SELECT a.hold_id,a.lot_id,a.ordinal,a.amount_atoms
+ FROM unnest(staged_allocations) batch(items) CROSS JOIN LATERAL jsonb_to_recordset(batch.items) a(hold_id uuid,lot_id uuid,ordinal integer,amount_atoms numeric);
  UPDATE wallet_lots target SET available_atoms=state.available_atoms,reserved_atoms=state.reserved_atoms
  FROM(SELECT (lot_rows[n]).* FROM generate_subscripts(lot_rows,1) input(n) WHERE lot_dirty[n]) state WHERE target.id=state.id;
  UPDATE wallets target SET available_atoms=state.available_atoms,reserved_atoms=state.reserved_atoms
  FROM(SELECT (wallet_rows[n]).* FROM generate_subscripts(wallet_rows,1) input(n) WHERE wallet_dirty[n]) state WHERE target.id=state.id;
  PERFORM post_money_journals(to_jsonb(staged_journals));
  INSERT INTO attempts(id,request_id,ordinal,provider_id,upstream_model,pricing_id,billing_pricing_id,state)
- SELECT a.id,a.request_id,1,a.provider_id,a.upstream_model,a.pricing_id,a.billing_pricing_id,'DISPATCHING' FROM jsonb_to_recordset(to_jsonb(staged_attempts)) a(id uuid,request_id uuid,provider_id uuid,upstream_model text,pricing_id uuid,billing_pricing_id uuid);
+ SELECT a.id,a.request_id,1,a.provider_id,a.upstream_model,a.pricing_id,a.billing_pricing_id,'DISPATCHING' FROM unnest(staged_attempts) a;
  SELECT jsonb_object_agg((n-1)::text,outcomes[n]) INTO results FROM generate_subscripts(outcomes,1) input(n);
  RETURN results;
  EXCEPTION WHEN OTHERS THEN GET STACKED DIAGNOSTICS failure=RETURNED_SQLSTATE;
@@ -251,18 +274,26 @@ END $$;
 
 CREATE FUNCTION public.commit_usage_evidence(p_attempt uuid, p_event uuid, p_source text, p_state text, p_finality text, p_usage jsonb, p_cost numeric, p_complete boolean, p_error text, p_provider_request text, p_request_state text) RETURNS jsonb
  LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public','pg_temp' AS $$
-DECLARE result jsonb;req uuid;pending boolean;all_known boolean;
+DECLARE result jsonb;req uuid;pending boolean;all_known boolean;batch boolean;
 BEGIN
  result=record_usage_evidence(p_attempt,p_event,p_source,p_state,p_finality,p_usage,p_cost,p_complete,p_error,p_provider_request);
  IF result->>'status' IN ('MERGE_REQUIRED','CONFLICT') THEN RETURN result;END IF;
  SELECT request_id INTO req FROM attempts WHERE id=p_attempt;
  IF p_request_state='SUCCEEDED' THEN
-  SELECT EXISTS(SELECT 1 FROM resources WHERE attempt_id=p_attempt AND kind IN ('batch','video','response','operation') AND state IN ('ACTIVE','PENDING_USAGE') AND coalesce(upstream_state,'queued') NOT IN ('completed','succeeded')) INTO pending;
-  UPDATE gateway_requests SET state='SUCCEEDED',selected_attempt_id=p_attempt,billing_outcome=CASE WHEN pending THEN 'PENDING' ELSE 'SUCCESS' END,updated_at=now() WHERE id=req;
+  SELECT coalesce(bool_or(kind='batch'),false),coalesce(bool_or(kind IN ('video','response','operation') AND state IN ('ACTIVE','PENDING_USAGE') AND coalesce(upstream_state,'queued') NOT IN ('completed','succeeded')),false)
+  INTO batch,pending FROM resources WHERE attempt_id=p_attempt;
+  UPDATE gateway_requests SET state='SUCCEEDED',selected_attempt_id=p_attempt,
+   billing_outcome=CASE WHEN batch AND selected_attempt_id=p_attempt THEN billing_outcome WHEN batch OR pending THEN 'PENDING' ELSE 'SUCCESS' END,updated_at=now() WHERE id=req;
  ELSIF p_error IN ('client_disconnected','request_cancelled','stream_cancelled','binary_interrupted') AND p_request_state IS NOT NULL THEN
   UPDATE gateway_requests SET state='CANCELLED',selected_attempt_id=p_attempt,billing_outcome='CANCELLED',updated_at=now() WHERE id=req AND billing_outcome<>'SUCCESS';
  ELSIF p_request_state IS NOT NULL THEN
   UPDATE gateway_requests SET state=CASE WHEN state='SUCCEEDED' OR state IN ('FAILED','CANCELLED') AND p_request_state IN ('UNKNOWN','RUNNING') THEN state ELSE p_request_state END,updated_at=now() WHERE id=req;
+ END IF;
+ IF batch OR (p_source IN ('batch_completed','batch_cancelled','batch_failed') AND p_finality='FINAL') THEN
+  UPDATE gateway_requests q SET billing_outcome=CASE fact.source WHEN 'batch_completed' THEN 'SUCCESS' WHEN 'batch_cancelled' THEN 'CANCELLED' ELSE 'UNKNOWN' END,updated_at=now()
+  FROM (SELECT source FROM usage_event_index WHERE attempt_id=p_attempt AND source IN ('batch_completed','batch_cancelled','batch_failed') AND finality='FINAL' ORDER BY seq DESC LIMIT 1) fact
+  WHERE q.id=req AND q.selected_attempt_id=p_attempt AND q.billing_outcome IN ('PENDING','UNKNOWN')
+  AND EXISTS(SELECT 1 FROM resources r WHERE r.attempt_id=p_attempt AND r.kind='batch');
  END IF;
  -- A terminal outcome can arrive before earlier physical attempts. Re-evaluate after every late fact.
  IF p_request_state IS DISTINCT FROM 'SUCCEEDED' AND EXISTS(SELECT 1 FROM gateway_requests WHERE id=req AND state='FAILED' AND billing_outcome NOT IN ('SUCCESS','CANCELLED')) THEN
@@ -320,6 +351,7 @@ BEGIN
   IF quantity !~ '^(0|[1-9][0-9]{0,37})(\.[0-9]{1,18})?$' OR part.value->>'numerator' !~ '^(0|[1-9][0-9]{0,37})$' OR part.value->>'denominator' !~ '^[1-9][0-9]{0,37}$' THEN RAISE EXCEPTION 'invalid price input'; END IF;
   fraction=CASE WHEN position('.' IN quantity)>0 THEN length(split_part(quantity,'.',2)) ELSE 0 END;
   q=replace(quantity,'.','')::numeric;d=(part.value->>'denominator')::numeric*power(10::numeric,fraction);
+  IF d=1 THEN n=n+q*(part.value->>'numerator')::numeric*denominator;CONTINUE;END IF;
   n=n*d+q*(part.value->>'numerator')::numeric*denominator;denominator=denominator*d;
   a=n;b=denominator;WHILE b<>0 LOOP remainder=mod(a,b);a=b;b=remainder;END LOOP;
   IF a<>0 THEN n=div(n,a);denominator=div(denominator,a);END IF;
@@ -398,12 +430,12 @@ CREATE FUNCTION public.money_leg(p_account text, p_atoms numeric) RETURNS jsonb
 
 CREATE FUNCTION public.ingest_initial_usage(p_events jsonb,p_wallets uuid[]) RETURNS jsonb
  LANGUAGE plpgsql SET search_path TO 'pg_catalog','public','pg_temp' AS $$
-DECLARE item record;event jsonb;event_id uuid;cost numeric;complete boolean;staged jsonb[]='{}';requests uuid[]='{}';results jsonb='{}';processed integer=0;
+DECLARE item record;event jsonb;event_id uuid;cost numeric;complete boolean;staged jsonb[]='{}';requests uuid[]='{}';outcomes jsonb[]='{}';processed integer=0;
 BEGIN
  FOR item IN SELECT input.ordinality FROM jsonb_array_elements(p_events) WITH ORDINALITY input
   JOIN attempts a ON a.id=(input.value->>'attemptId')::uuid JOIN billing_holds h ON h.request_id=a.request_id
   WHERE NOT h.wallet_id=ANY(p_wallets) LOOP
-  results=jsonb_set(results,ARRAY[(item.ordinality-1)::text],'{"status":"ERROR","error":"55P03"}');processed=processed+1;
+  outcomes[item.ordinality]='{"status":"ERROR","error":"55P03"}';processed=processed+1;
  END LOOP;
  FOR item IN SELECT input.value,input.ordinality,a.id AS attempt_id,a.request_id,a.evidence_id,a.state AS attempt_state,q.project_id,q.state AS request_state,q.billing_outcome,q.selected_attempt_id,q.operation,v.currency,v.rates,
   EXISTS(SELECT 1 FROM usage_event_index e WHERE e.attempt_id=a.id) AS prior,
@@ -422,37 +454,42 @@ BEGIN
   complete=NOT EXISTS(SELECT 1 FROM jsonb_object_keys(item.rates) dimension WHERE NOT event->'usage'?dimension);
   event_id=gen_random_uuid();requests=array_append(requests,item.request_id);
   staged=array_append(staged,jsonb_build_object('id',event_id,'attempt_id',item.attempt_id,'request_id',item.request_id,'project_id',item.project_id,'usage',event->'usage','cost',cost::text,'currency',item.currency,'complete',complete,'provider_request_id',event->>'providerRequestId'));
-  results=jsonb_set(results,ARRAY[(item.ordinality-1)::text],jsonb_build_object('status','APPLIED','evidence_id',event_id,'request_id',item.request_id));
+  outcomes[item.ordinality]=jsonb_build_object('status','APPLIED','evidence_id',event_id,'request_id',item.request_id);
   processed=processed+1;
  END LOOP;
  IF processed<>jsonb_array_length(p_events) THEN RETURN NULL;END IF;
- IF cardinality(staged)=0 THEN RETURN results;END IF;
+ IF cardinality(staged)=0 THEN RETURN (SELECT jsonb_object_agg((n-1)::text,outcomes[n]) FROM generate_subscripts(outcomes,1) input(n));END IF;
  PERFORM pg_advisory_xact_lock_shared(81442592);
- WITH inserted AS (
+ WITH evidence AS MATERIALIZED (
+  SELECT * FROM jsonb_to_recordset(to_jsonb(staged)) e(id uuid,project_id uuid,request_id uuid,attempt_id uuid,usage jsonb,cost numeric,currency text,complete boolean,provider_request_id text)
+ ), inserted AS (
   INSERT INTO usage_event_index(id,project_id,request_id,attempt_id,source,finality,cost_atoms,currency,cost_complete)
   SELECT e.id,e.project_id,e.request_id,e.attempt_id,'execution','FINAL',e.cost,e.currency,e.complete
-  FROM jsonb_to_recordset(to_jsonb(staged)) e(id uuid,project_id uuid,request_id uuid,attempt_id uuid,cost numeric,currency text,complete boolean)
+  FROM evidence e
   RETURNING id,created_at
+ ), payloads AS (
+  INSERT INTO usage_payloads(id,created_at,usage)
+  SELECT e.id,i.created_at,e.usage FROM evidence e JOIN inserted i ON i.id=e.id
+ ), deliveries AS (
+  INSERT INTO event_deliveries(consumer_id,event_id)
+  SELECT c.id,i.id FROM event_consumers c CROSS JOIN inserted i
+ ), completed AS (
+  UPDATE attempts a SET evidence_id=e.id,state='SUCCEEDED',finished_at=now(),error_code=NULL,provider_request_id=coalesce(e.provider_request_id,a.provider_request_id)
+  FROM evidence e JOIN inserted i ON i.id=e.id WHERE a.id=e.attempt_id
  )
- INSERT INTO usage_payloads(id,created_at,usage)
- SELECT e.id,i.created_at,e.usage FROM jsonb_to_recordset(to_jsonb(staged)) e(id uuid,usage jsonb) JOIN inserted i ON i.id=e.id;
- INSERT INTO event_deliveries(consumer_id,event_id)
- SELECT c.id,e.id FROM event_consumers c CROSS JOIN jsonb_to_recordset(to_jsonb(staged)) e(id uuid);
- UPDATE attempts a SET evidence_id=e.id,state='SUCCEEDED',finished_at=now(),error_code=NULL,provider_request_id=coalesce(e.provider_request_id,a.provider_request_id)
- FROM jsonb_to_recordset(to_jsonb(staged)) e(id uuid,attempt_id uuid,provider_request_id text) WHERE a.id=e.attempt_id;
  UPDATE gateway_requests q SET state='SUCCEEDED',selected_attempt_id=e.attempt_id,billing_outcome='SUCCESS',updated_at=now()
- FROM jsonb_to_recordset(to_jsonb(staged)) e(request_id uuid,attempt_id uuid) WHERE q.id=e.request_id;
- RETURN results;
+ FROM evidence e WHERE q.id=e.request_id;
+ RETURN (SELECT jsonb_object_agg((n-1)::text,outcomes[n]) FROM generate_subscripts(outcomes,1) input(n));
 EXCEPTION WHEN OTHERS THEN RETURN NULL;
 END $$;
 REVOKE ALL ON FUNCTION public.ingest_initial_usage(jsonb,uuid[]) FROM PUBLIC;
 
 CREATE FUNCTION public.persist_usage_batch(p_events jsonb) RETURNS jsonb
  LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public','pg_temp' AS $$
-DECLARE item record;p jsonb;usage jsonb;price cost_versions%ROWTYPE;result jsonb;cost numeric;complete boolean;failure text;results jsonb='{}';retry integer;
- requests uuid[]='{}';identities jsonb='{}';financial jsonb;outcome jsonb;seen uuid[]='{}';financial_request uuid;locked_wallets uuid[];initial jsonb;
+DECLARE item record;p jsonb;usage jsonb;price cost_versions%ROWTYPE;result jsonb;cost numeric;complete boolean;failure text;outcomes jsonb[]='{}';retry integer;position integer;
+ requests uuid[]='{}';identities uuid[]='{}';financial jsonb;outcome jsonb;seen uuid[]='{}';financial_request uuid;locked_wallets uuid[];initial jsonb;
 BEGIN
- IF p_events IS NULL OR jsonb_typeof(p_events)<>'array' OR jsonb_array_length(p_events) NOT BETWEEN 1 AND 128 THEN RAISE EXCEPTION 'invalid durable usage batch';END IF;
+ IF p_events IS NULL OR jsonb_typeof(p_events)<>'array' OR jsonb_array_length(p_events) NOT BETWEEN 1 AND 256 THEN RAISE EXCEPTION 'invalid durable usage batch';END IF;
  SELECT coalesce(array_agg(id),'{}'::uuid[]) INTO locked_wallets FROM (SELECT w.id FROM wallets w JOIN (
   SELECT DISTINCT h.wallet_id FROM jsonb_array_elements(p_events) event
   JOIN LATERAL(SELECT request_id FROM attempts WHERE id=(event->>'attemptId')::uuid OFFSET 0) a ON true
@@ -475,28 +512,95 @@ BEGIN
     EXIT WHEN result->>'status'<>'MERGE_REQUIRED';usage=result->'usage';
    END LOOP;
    IF result->>'status'='MERGE_REQUIRED' THEN RAISE EXCEPTION 'usage enrichment retry exhausted';END IF;
-   requests=array_append(requests,item.request_id);identities=jsonb_set(identities,ARRAY[(item.ordinality-1)::text],to_jsonb(item.request_id::text));
+   requests=array_append(requests,item.request_id);identities[item.ordinality]=item.request_id;
   EXCEPTION WHEN OTHERS THEN GET STACKED DIAGNOSTICS failure=RETURNED_SQLSTATE;result=jsonb_build_object('status','ERROR','error',failure);END;
-  results=jsonb_set(results,ARRAY[(item.ordinality-1)::text],result);
+  outcomes[item.ordinality]=result;
  END LOOP;
  ELSE
   FOR item IN SELECT key,value FROM jsonb_each(initial) ORDER BY key::integer LOOP
-   IF item.value?'request_id' THEN requests=array_append(requests,(item.value->>'request_id')::uuid);identities=jsonb_set(identities,ARRAY[item.key],item.value->'request_id');END IF;
-   results=jsonb_set(results,ARRAY[item.key],item.value-'request_id');
+   position=item.key::integer+1;
+   IF item.value?'request_id' THEN
+    financial_request=(item.value->>'request_id')::uuid;
+    requests=array_append(requests,financial_request);identities[position]=financial_request;
+   END IF;
+   outcomes[position]=item.value-'request_id';
   END LOOP;
  END IF;
  IF cardinality(requests)>0 THEN
   financial=settle_requests(requests);
-  FOR item IN SELECT key,value FROM jsonb_each(identities) ORDER BY key::integer LOOP
-   financial_request=(item.value#>>'{}')::uuid;outcome=financial->financial_request::text;result=results->item.key;
+  FOR position IN SELECT n FROM generate_subscripts(identities,1) input(n) WHERE identities[n] IS NOT NULL ORDER BY n LOOP
+   financial_request=identities[position];outcome=financial->financial_request::text;result=outcomes[position];
    IF outcome->>'state'='ERROR' THEN result=result||jsonb_build_object('status','ERROR','error',outcome->>'error');
    ELSIF financial_request=ANY(seen) AND outcome->>'replayed'='false' THEN outcome=outcome||'{"replayed":true}'::jsonb;
    END IF;
-   seen=array_append(seen,financial_request);results=jsonb_set(results,ARRAY[item.key],result||jsonb_build_object('billing',outcome));
+   seen=array_append(seen,financial_request);outcomes[position]=result||jsonb_build_object('billing',outcome);
   END LOOP;
- END IF;RETURN results;
+ END IF;
+ RETURN (SELECT jsonb_object_agg((n-1)::text,outcomes[n]) FROM generate_subscripts(outcomes,1) input(n));
 END $$;
 
+CREATE FUNCTION public.settle_covered_requests(p_requests uuid[]) RETURNS jsonb
+ LANGUAGE plpgsql SET search_path TO 'pg_catalog','public','pg_temp' AS $$
+DECLARE receipts jsonb;journals jsonb;
+BEGIN
+ WITH targets AS MATERIALIZED (
+  SELECT h.* FROM billing_holds h WHERE h.request_id=ANY(p_requests)
+ ), candidates AS MATERIALIZED (
+  SELECT h.id AS hold_id,h.request_id,h.wallet_id,h.amount_atoms AS held,w.currency,
+   l.id AS lot_id,p.id AS pricing_id,e.id AS evidence_id,exact_billing_price(e.usage,p.rates) AS actual
+  FROM targets h JOIN wallets w ON w.id=h.wallet_id
+  JOIN LATERAL(SELECT * FROM gateway_requests WHERE id=h.request_id OFFSET 0) q ON true
+  JOIN LATERAL(SELECT * FROM attempts WHERE id=q.selected_attempt_id OFFSET 0) a ON true
+  JOIN LATERAL(SELECT * FROM usage_events WHERE id=a.evidence_id OFFSET 0) e ON true
+  JOIN billing_prices p ON p.id=a.billing_pricing_id
+  JOIN LATERAL(SELECT * FROM hold_allocations WHERE hold_id=h.id AND ordinal=1 AND amount_atoms=h.amount_atoms OFFSET 0) s ON true
+  JOIN wallet_lots l ON l.id=s.lot_id AND l.wallet_id=w.id AND l.expires_at IS NULL
+  WHERE h.state IN ('HELD','RECONCILING') AND w.debt_atoms=0 AND w.freeze_reason IS NULL AND NOT w.evidence_disputed
+   AND q.operation IN ('chat','messages','gemini','embeddings','completions') AND q.billing_outcome='SUCCESS'
+   AND a.state='SUCCEEDED' AND e.source='execution' AND e.finality='FINAL' AND p.basis='PROVIDER_USAGE' AND p.currency=w.currency
+   AND NOT EXISTS(SELECT 1 FROM jsonb_object_keys(p.rates) dimension WHERE NOT e.usage?dimension)
+   AND NOT EXISTS(SELECT 1 FROM hold_allocations extra WHERE extra.hold_id=h.id AND extra.ordinal<>1)
+   AND NOT EXISTS(SELECT 1 FROM attempts x WHERE x.request_id=q.id AND x.metering_conflict)
+   AND NOT EXISTS(SELECT 1 FROM billing_resolutions x WHERE x.request_id=q.id)
+   AND NOT EXISTS(SELECT 1 FROM billing_charges x WHERE x.request_id=q.id)
+ ), wallet_counts AS (
+  SELECT wallet_id,count(*) AS requests FROM targets GROUP BY wallet_id
+ ), covered AS (
+  SELECT c.wallet_id FROM candidates c JOIN wallet_counts t ON t.wallet_id=c.wallet_id
+  WHERE c.actual>0 AND c.actual<=c.held GROUP BY c.wallet_id,t.requests HAVING count(*)=t.requests
+ ), entries AS MATERIALIZED (
+  SELECT c.*,ledger_uuid() AS charge_id,ledger_uuid() AS journal_id FROM candidates c JOIN covered w ON w.wallet_id=c.wallet_id
+ ), charges AS (
+  INSERT INTO billing_charges(id,request_id,hold_id,pricing_id,evidence_id,currency,amount_atoms,funded_atoms,debt_atoms)
+  SELECT charge_id,request_id,hold_id,pricing_id,evidence_id,currency,actual,actual,0 FROM entries RETURNING id
+ ), allocations AS (
+  INSERT INTO charge_allocations(charge_id,lot_id,ordinal,amount_atoms)
+  SELECT c.id,e.lot_id,1,e.actual FROM entries e JOIN charges c ON c.id=e.charge_id
+ ), lot_totals AS (
+  SELECT lot_id,sum(held) AS held,sum(actual) AS actual FROM entries GROUP BY lot_id
+ ), lots AS (
+  UPDATE wallet_lots l SET reserved_atoms=l.reserved_atoms-t.held,available_atoms=l.available_atoms+t.held-t.actual,spent_atoms=l.spent_atoms+t.actual
+  FROM lot_totals t WHERE l.id=t.lot_id
+ ), wallet_totals AS (
+  SELECT wallet_id,sum(held) AS held,sum(actual) AS actual FROM entries GROUP BY wallet_id
+ ), balances AS (
+  UPDATE wallets w SET reserved_atoms=w.reserved_atoms-t.held,available_atoms=w.available_atoms+t.held-t.actual,spent_atoms=w.spent_atoms+t.actual
+  FROM wallet_totals t WHERE w.id=t.wallet_id
+ ), holds AS (
+  UPDATE billing_holds h SET state='SETTLED',closed_at=now(),next_reconcile_at=now()+interval '1 hour',reconcile_until=NULL,reconcile_reason=NULL
+  FROM entries e WHERE h.id=e.hold_id
+ )
+ SELECT coalesce(jsonb_object_agg(e.request_id,jsonb_build_object('state','SETTLED','charge_id',e.charge_id,'charged_atoms',e.actual::text,'funded_atoms',e.actual::text,'debt_atoms','0','replayed',false)),'{}'::jsonb),
+  coalesce(jsonb_agg(jsonb_build_object('id',e.journal_id,'wallet_id',e.wallet_id,'reference','settle:'||e.request_id,'kind','SETTLE','currency',e.currency,'lines',
+   jsonb_build_array(money_leg('lot:'||e.lot_id||':reserved',-e.held))||
+   CASE WHEN e.held>e.actual THEN jsonb_build_array(money_leg('lot:'||e.lot_id||':available',e.held-e.actual)) ELSE '[]'::jsonb END||
+   jsonb_build_array(money_leg('system:revenue',e.actual)))),'[]'::jsonb)
+ INTO receipts,journals FROM entries e;
+ PERFORM post_money_journals(journals);
+ RETURN receipts;
+EXCEPTION WHEN numeric_value_out_of_range OR check_violation OR raise_exception OR invalid_parameter_value THEN RETURN '{}'::jsonb;
+END $$;
+REVOKE ALL ON FUNCTION public.settle_covered_requests(uuid[]) FROM PUBLIC;
 
 -- Sole batch settlement engine. Ingestion and leased recovery both use this contract.
 CREATE FUNCTION public.settle_requests(p_requests uuid[], p_token uuid DEFAULT NULL) RETURNS jsonb
@@ -507,18 +611,25 @@ DECLARE snapshot record;source record;req gateway_requests%ROWTYPE;hold billing_
  wallet_rows wallets[];lot_rows wallet_lots[];local_lots wallet_lots[];
  wallet_index jsonb;lot_index jsonb;lot_ranges jsonb;wallet_dirty boolean[];lot_dirty boolean[];
  staged_charges jsonb[]='{}';staged_allocations jsonb[]='{}';staged_journals jsonb[]='{}';staged_holds jsonb[]='{}';wake_wallets uuid[]='{}';
- local_allocations jsonb;local_journals jsonb;legs jsonb;result jsonb;results jsonb='{}';
+ local_allocations jsonb;local_journals jsonb;legs jsonb;result jsonb;outcomes jsonb[]='{}';outcome_ids uuid[]='{}';
  wi integer;first_lot integer;last_lot integer;li integer;i integer;sequence integer;failure text;
  actual numeric;remaining numeric;take numeric;returned numeric;expired numeric;released numeric;funded numeric;extra numeric;expired_available numeric;
- max_atoms constant numeric=99999999999999999999999999999999999999;precollect_errors jsonb='{}';
+ max_atoms constant numeric=99999999999999999999999999999999999999;precollect_errors jsonb='{}';covered jsonb='{}';
  charge uuid;pricing_id uuid;evidence_id uuid;release_hold boolean;asof timestamptz;new_charge boolean;dirty_wallet boolean;
 BEGIN
- IF p_requests IS NULL OR cardinality(p_requests) NOT BETWEEN 1 AND 128 OR array_position(p_requests,NULL) IS NOT NULL THEN RAISE EXCEPTION 'invalid settlement batch' USING ERRCODE='P0422';END IF;
+ IF p_requests IS NULL OR cardinality(p_requests) NOT BETWEEN 1 AND 256 OR array_position(p_requests,NULL) IS NOT NULL THEN RAISE EXCEPTION 'invalid settlement batch' USING ERRCODE='P0422';END IF;
  p_requests=ARRAY(SELECT DISTINCT id FROM unnest(p_requests) input(id) ORDER BY id);
  IF (SELECT count(*) FROM billing_holds WHERE request_id=ANY(p_requests))<>cardinality(p_requests) THEN RAISE EXCEPTION 'preauthorization missing' USING ERRCODE='P0404';END IF;
  PERFORM w.id FROM wallets w WHERE id IN(SELECT wallet_id FROM billing_holds WHERE request_id=ANY(p_requests)) ORDER BY id FOR NO KEY UPDATE;
  PERFORM id FROM gateway_requests WHERE id=ANY(p_requests) ORDER BY id FOR UPDATE;
  PERFORM id FROM billing_holds WHERE request_id=ANY(p_requests) ORDER BY id FOR UPDATE;
+ IF p_token IS NULL THEN
+  covered=settle_covered_requests(p_requests);
+  IF covered<>'{}'::jsonb THEN
+   p_requests=ARRAY(SELECT id FROM unnest(p_requests) input(id) WHERE NOT covered?id::text);
+   IF cardinality(p_requests)=0 THEN RETURN covered;END IF;
+  END IF;
+ END IF;
  -- Debt collection can affect other charges on a wallet. Complete it before loading any staged state.
  FOR source IN SELECT DISTINCT h.wallet_id FROM billing_charges c JOIN billing_holds h ON h.id=c.hold_id
   WHERE c.request_id=ANY(p_requests) AND c.debt_atoms>0 AND (p_token IS NULL OR h.reconcile_token=p_token AND h.reconcile_until>clock_timestamp())
@@ -549,7 +660,7 @@ BEGIN
   LEFT JOIN billing_charges c ON c.request_id=q.id WHERE q.id=ANY(p_requests) ORDER BY h.wallet_id,q.id LOOP
   req=snapshot.req;hold=snapshot.hold;attempt=snapshot.attempt;evidence=snapshot.evidence;price=snapshot.price;resolution=snapshot.resolution;existing=snapshot.charge;
   IF p_token IS NOT NULL AND (hold.reconcile_token IS DISTINCT FROM p_token OR hold.reconcile_until IS NULL OR hold.reconcile_until<=clock_timestamp()) THEN
-   results=jsonb_set(results,ARRAY[req.id::text],'{"state":"STALE_LEASE"}');CONTINUE;
+   outcome_ids=array_append(outcome_ids,req.id);outcomes=array_append(outcomes,'{"state":"STALE_LEASE"}'::jsonb);CONTINUE;
   END IF;
   wi=(wallet_index->>hold.wallet_id::text)::integer;wallet=wallet_rows[wi];
   first_lot=(lot_ranges->hold.wallet_id::text->>0)::integer;last_lot=(lot_ranges->hold.wallet_id::text->>1)::integer;
@@ -583,13 +694,17 @@ BEGIN
       IF evidence.finality<>'FINAL' OR EXISTS(SELECT 1 FROM jsonb_object_keys(price.rates) dimension WHERE NOT evidence.usage?dimension) THEN result='{"state":"WAITING"}';EXIT decision;END IF;
       actual=exact_billing_price(evidence.usage,price.rates);
      ELSE
-      IF req.billing_outcome<>'SUCCESS' THEN result='{"state":"WAITING"}';EXIT decision;END IF;
-      actual=exact_billing_price(CASE WHEN price.basis='INPUT_CHARACTERS' THEN jsonb_build_object('characters',req.billing_quote->>'input_characters','requests','1') ELSE '{"requests":"1"}'::jsonb END,price.rates);
+      IF req.billing_outcome='CANCELLED' THEN
+       IF NOT EXISTS(SELECT 1 FROM usage_event_index e WHERE e.attempt_id=attempt.id AND e.source='batch_cancelled' AND e.finality='FINAL') THEN result='{"state":"WAITING"}';EXIT decision;END IF;
+       release_hold=true;actual=0;
+      ELSE
+       actual=exact_billing_price(CASE WHEN price.basis='INPUT_CHARACTERS' THEN jsonb_build_object('characters',req.billing_quote->>'input_characters','requests','1') ELSE '{"requests":"1"}'::jsonb END,price.rates);
+      END IF;
      END IF;
     END IF;
     IF pricing_id IS NOT NULL AND price.currency<>wallet.currency THEN RAISE EXCEPTION 'settlement currency mismatch' USING ERRCODE='P0422';END IF;
     IF actual IS NULL OR actual<0 OR actual<>trunc(actual) OR actual>max_atoms THEN RAISE EXCEPTION 'invalid settlement amount' USING ERRCODE='P0422';END IF;
-    charge=gen_random_uuid();remaining=actual;
+    charge=ledger_uuid();remaining=actual;
     FOR source IN SELECT * FROM hold_allocations WHERE hold_id=hold.id ORDER BY ordinal LOOP
      li=(lot_index->>source.lot_id::text)::integer-first_lot+1;lot=local_lots[li];
      IF lot.id IS NULL OR lot.wallet_id<>wallet.id THEN RAISE EXCEPTION 'reservation source unavailable';END IF;
@@ -632,11 +747,11 @@ BEGIN
      lot=local_lots[i];
      IF lot.available_atoms NOT BETWEEN 0 AND max_atoms OR lot.reserved_atoms NOT BETWEEN 0 AND max_atoms OR lot.spent_atoms NOT BETWEEN 0 AND max_atoms OR lot.expired_atoms NOT BETWEEN 0 AND max_atoms OR lot.issued_atoms<>lot.available_atoms+lot.reserved_atoms+lot.spent_atoms+lot.expired_atoms THEN RAISE EXCEPTION 'staged source amount exceeds bounds' USING ERRCODE='22003';END IF;
     END LOOP;
-    IF jsonb_array_length(legs)>0 THEN local_journals=local_journals||jsonb_build_array(jsonb_build_object('id',gen_random_uuid(),'wallet_id',wallet.id,'reference','settle:'||req.id,'kind',CASE WHEN release_hold THEN 'RELEASE' ELSE 'SETTLE' END,'currency',wallet.currency,'lines',legs));END IF;
+    IF jsonb_array_length(legs)>0 THEN local_journals=local_journals||jsonb_build_array(jsonb_build_object('id',ledger_uuid(),'wallet_id',wallet.id,'reference','settle:'||req.id,'kind',CASE WHEN release_hold THEN 'RELEASE' ELSE 'SETTLE' END,'currency',wallet.currency,'lines',legs));END IF;
     IF jsonb_array_length(legs)>2048 OR jsonb_array_length(legs)=1 THEN RAISE EXCEPTION 'settlement journal exceeds posting bounds' USING ERRCODE='P0422';END IF;
     -- No expected validation or calculation may occur after this merge boundary.
     staged_charges=array_append(staged_charges,jsonb_build_object('id',charge,'request_id',req.id,'hold_id',hold.id,'pricing_id',pricing_id,'evidence_id',evidence_id,'currency',wallet.currency,'amount_atoms',actual::text,'funded_atoms',funded::text,'debt_atoms',remaining::text));
-    staged_allocations=array_cat(staged_allocations,ARRAY(SELECT value FROM jsonb_array_elements(local_allocations)));staged_journals=array_cat(staged_journals,ARRAY(SELECT value FROM jsonb_array_elements(local_journals)));
+    staged_allocations=array_append(staged_allocations,local_allocations);staged_journals=array_append(staged_journals,local_journals);
     FOR i IN 1..cardinality(local_lots) LOOP
      li=first_lot+i-1;
      IF local_lots[i] IS DISTINCT FROM lot_rows[li] THEN lot_rows[li]=local_lots[i];lot_dirty[li]=true;END IF;
@@ -656,22 +771,23 @@ BEGIN
    'closed_at',CASE WHEN new_charge THEN now() ELSE hold.closed_at END,
    'next_reconcile_at',now()+CASE WHEN result->>'state' IN ('WAITING','CONFLICT','ERROR') THEN interval '30 seconds' ELSE interval '1 hour' END,
    'reconcile_reason',CASE WHEN result->>'state' IN ('WAITING','CONFLICT','DEBT','ERROR') THEN result->>'state' ELSE NULL END));
-  results=jsonb_set(results,ARRAY[req.id::text],result);
+  outcome_ids=array_append(outcome_ids,req.id);outcomes=array_append(outcomes,result);
  END LOOP;
  -- Grouped writes below either commit together with the facts or roll back as one unexpected failure.
  INSERT INTO billing_charges(id,request_id,hold_id,pricing_id,evidence_id,currency,amount_atoms,funded_atoms,debt_atoms)
  SELECT c.id,c.request_id,c.hold_id,c.pricing_id,c.evidence_id,c.currency,c.amount_atoms,c.funded_atoms,c.debt_atoms FROM jsonb_to_recordset(to_jsonb(staged_charges)) c(id uuid,request_id uuid,hold_id uuid,pricing_id uuid,evidence_id uuid,currency text,amount_atoms numeric,funded_atoms numeric,debt_atoms numeric);
  INSERT INTO charge_allocations(charge_id,lot_id,ordinal,amount_atoms)
- SELECT a.charge_id,a.lot_id,min(a.ordinal),sum(a.amount_atoms) FROM jsonb_to_recordset(to_jsonb(staged_allocations)) a(charge_id uuid,lot_id uuid,ordinal integer,amount_atoms numeric) GROUP BY a.charge_id,a.lot_id;
+ SELECT a.charge_id,a.lot_id,min(a.ordinal),sum(a.amount_atoms)
+ FROM unnest(staged_allocations) batch(items) CROSS JOIN LATERAL jsonb_to_recordset(batch.items) a(charge_id uuid,lot_id uuid,ordinal integer,amount_atoms numeric) GROUP BY a.charge_id,a.lot_id;
  UPDATE wallet_lots target SET available_atoms=state.available_atoms,reserved_atoms=state.reserved_atoms,spent_atoms=state.spent_atoms,expired_atoms=state.expired_atoms
  FROM(SELECT (lot_rows[n]).* FROM generate_subscripts(lot_rows,1) input(n) WHERE lot_dirty[n]) state WHERE target.id=state.id;
  UPDATE wallets target SET available_atoms=state.available_atoms,reserved_atoms=state.reserved_atoms,spent_atoms=state.spent_atoms,expired_atoms=state.expired_atoms,debt_atoms=state.debt_atoms,evidence_disputed=state.evidence_disputed,freeze_reason=state.freeze_reason
  FROM(SELECT (wallet_rows[n]).* FROM generate_subscripts(wallet_rows,1) input(n) WHERE wallet_dirty[n]) state WHERE target.id=state.id;
- PERFORM post_money_journals(to_jsonb(staged_journals));
+ PERFORM post_money_journals(coalesce((SELECT jsonb_agg(j.item) FROM unnest(staged_journals) batch(items) CROSS JOIN LATERAL jsonb_array_elements(batch.items) j(item)),'[]'::jsonb));
  UPDATE billing_holds target SET state=state.state,closed_at=state.closed_at,next_reconcile_at=state.next_reconcile_at,reconcile_until=NULL,reconcile_reason=state.reconcile_reason
  FROM jsonb_to_recordset(to_jsonb(staged_holds)) state(id uuid,state text,closed_at timestamptz,next_reconcile_at timestamptz,reconcile_reason text) WHERE target.id=state.id;
  FOR source IN SELECT DISTINCT id FROM unnest(wake_wallets) w(id) LOOP PERFORM wake_wallet_debt(source.id);END LOOP;
- RETURN results;
+ RETURN covered||(SELECT jsonb_object_agg(id,value) FROM unnest(outcome_ids,outcomes) result_rows(id,value));
 END $$;
 
 
@@ -783,7 +899,7 @@ CREATE FUNCTION public.resource_billing_state() RETURNS trigger
     AS $$
 DECLARE req uuid;
 BEGIN
- IF NEW.kind NOT IN ('batch','video','response','operation') OR NEW.attempt_id IS NULL THEN RETURN NEW;END IF;
+ IF NEW.kind NOT IN ('video','response','operation') OR NEW.attempt_id IS NULL THEN RETURN NEW;END IF;
  SELECT request_id INTO req FROM attempts WHERE id=NEW.attempt_id;
  IF NEW.upstream_state IN ('completed','succeeded') THEN
   UPDATE gateway_requests SET billing_outcome='SUCCESS',selected_attempt_id=NEW.attempt_id WHERE id=req AND billing_outcome IN ('PENDING','UNKNOWN','CANCELLED') AND selected_attempt_id=NEW.attempt_id;
@@ -1393,6 +1509,7 @@ CREATE TABLE public.resources (
     poll_until timestamp with time zone,
     batch_endpoint text,
     batch_upstream_model text,
+    batch_manifest jsonb,
     poll_count integer DEFAULT 0 NOT NULL,
     upstream_state text,
     CONSTRAINT resources_kind_check CHECK ((kind = ANY (ARRAY['file'::text, 'batch'::text, 'video'::text, 'response'::text, 'operation'::text]))),

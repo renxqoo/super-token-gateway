@@ -199,7 +199,7 @@ test("decimal durations price exactly without binary float drift or duplicate un
     parseProviderJson('{"usage":{"type":"duration","seconds":0.125}}'),
     "openai",
   );
-  expect(usage).toEqual({ audio_seconds: "0.125" });
+  expect(usage).toEqual({ audio_seconds: "0.125", audio_ms: "125" });
   expect(
     calculateCost(usage ?? {}, {
       currency: "USD",

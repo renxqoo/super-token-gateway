@@ -14,7 +14,7 @@ export function createDatabase(url: string, max = 16): SQL {
   });
 }
 
-export const SCHEMA_VERSION = 2026111008;
+export const SCHEMA_VERSION = 2026111010;
 export async function migrate(
   db: SQL,
   options: { upgrade?: boolean; quiesced?: boolean } = {},
@@ -30,7 +30,7 @@ export async function migrate(
       if (versions.length === 1 && versions[0]?.version === SCHEMA_VERSION) return;
       if (
         versions.length !== 1 ||
-        ![2026111006, 2026111007].includes(versions[0]?.version ?? 0) ||
+        ![2026111006, 2026111007, 2026111008, 2026111009].includes(versions[0]?.version ?? 0) ||
         !options.upgrade ||
         !options.quiesced
       )
@@ -46,6 +46,16 @@ export async function migrate(
         await tx`SELECT (SELECT count(*)::text FROM usage_events) AS usage,(SELECT count(*)::text FROM money_journal) AS journals,(SELECT count(*)::text FROM gateway_requests) AS requests,(SELECT sum(available_atoms+reserved_atoms+spent_atoms+expired_atoms+debt_atoms)::text FROM wallets) AS balances`
       )[0];
       if (versions[0]?.version === 2026111006) await tx.unsafe(lifecycle);
+      if (versions[0]?.version !== 2026111009) {
+        await tx`ALTER TABLE public.resources ADD COLUMN IF NOT EXISTS batch_manifest jsonb`;
+        await tx`UPDATE public.gateway_requests q SET billing_outcome='PENDING'
+        FROM public.billing_holds h, public.resources r WHERE h.request_id=q.id AND r.attempt_id=q.selected_attempt_id
+        AND r.kind='batch' AND h.state IN ('HELD','RECONCILING') AND q.billing_outcome IN ('SUCCESS','CANCELLED')`;
+        await tx`UPDATE public.resources r SET state='PENDING_USAGE',next_poll_at=now(),poll_until=NULL,poll_token=NULL
+        FROM public.attempts a JOIN public.billing_holds h ON h.request_id=a.request_id
+        WHERE r.attempt_id=a.id AND r.kind='batch' AND r.state IN ('COMPLETED','CANCELLED','FAILED')
+        AND h.state IN ('HELD','RECONCILING')`;
+      }
       const functions = `${source}\n${lifecycle}`.match(
         /CREATE FUNCTION [\s\S]*?\bAS (\$[A-Za-z_]*\$)[\s\S]*?\1;/g,
       );
@@ -53,6 +63,8 @@ export async function migrate(
       for (const definition of functions)
         await tx.unsafe(definition.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION"));
       await tx`REVOKE ALL ON FUNCTION public.ingest_initial_usage(jsonb,uuid[]) FROM PUBLIC`;
+      await tx`REVOKE ALL ON FUNCTION public.ledger_uuid() FROM PUBLIC`;
+      await tx`REVOKE ALL ON FUNCTION public.settle_covered_requests(uuid[]) FROM PUBLIC`;
       await tx`DROP INDEX IF EXISTS public.requests_stale`;
       await tx`DROP INDEX IF EXISTS public.usage_attempt`;
       await tx`ALTER TABLE public.gateway_requests SET (fillfactor=70)`;

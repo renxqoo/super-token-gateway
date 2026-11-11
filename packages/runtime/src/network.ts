@@ -2,8 +2,10 @@ import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 import { inCidrs } from "./ip.ts";
 import { GatewayError } from "@gateway/kernel";
-import { createHttpPool } from "./http-pool.ts";
+import { createHttpPool, UpstreamPreDispatchError } from "./http-pool.ts";
 import type { PinnedRequestInit } from "./http-pool.ts";
+
+export { UpstreamPreDispatchError };
 
 export function createTransport(maxConnections = 1024) {
   const pool = createHttpPool(maxConnections);
@@ -98,33 +100,40 @@ export async function safeFetch(
   send: (url: URL, init: PinnedRequestInit) => Promise<Response> = fetch,
 ): Promise<Response> {
   if (url.username || url.password || !["https:", "http:"].includes(url.protocol))
-    throw new GatewayError(502, "unsafe_upstream", "Unsafe upstream URL");
-  init.signal?.throwIfAborted();
+    throw new UpstreamPreDispatchError("unsafe_upstream", "Unsafe upstream URL");
+  const signal = init.signal;
+  const cancelled = () =>
+    new UpstreamPreDispatchError(
+      "upstream_not_dispatched",
+      "Upstream request cancelled before dispatch",
+    );
+  if (signal?.aborted) throw cancelled();
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   const addresses = isIP(hostname)
     ? [{ address: hostname, family: isIP(hostname) }]
     : await new Promise<{ address: string; family: number }[]>((resolve, reject) => {
-        const abort = () => reject(init.signal?.reason ?? new Error("DNS deadline reached"));
-        init.signal?.addEventListener("abort", abort, { once: true });
+        const abort = () => reject(cancelled());
+        signal?.addEventListener("abort", abort, { once: true });
         lookup(hostname, { all: true })
-          .then(resolve, reject)
-          .finally(() => init.signal?.removeEventListener("abort", abort));
-        if (init.signal?.aborted) abort();
+          .then(resolve, () =>
+            reject(new UpstreamPreDispatchError("upstream_dns", "Upstream address lookup failed")),
+          )
+          .finally(() => signal?.removeEventListener("abort", abort));
+        if (signal?.aborted) abort();
       });
-  if (
-    !addresses.length ||
-    (!allowPrivate &&
-      (addresses.some(
-        (entry) => !isPublicAddress(entry.address) && !inCidrs(entry.address, privateCidrs),
-      ) ||
-        (url.protocol !== "https:" &&
-          addresses.some((entry) => !inCidrs(entry.address, privateCidrs)))))
-  ) {
-    throw new GatewayError(502, "unsafe_upstream", "Upstream address is not permitted");
-  }
-  init.signal?.throwIfAborted();
+  if (signal?.aborted) throw cancelled();
   const chosen = addresses.find((entry) => entry.family === 4) ?? addresses[0];
-  if (!chosen) throw new GatewayError(502, "upstream_dns", "Upstream address lookup failed");
+  if (!chosen) throw new UpstreamPreDispatchError("upstream_dns", "Upstream address lookup failed");
+  if (
+    !allowPrivate &&
+    (addresses.some(
+      (entry) => !isPublicAddress(entry.address) && !inCidrs(entry.address, privateCidrs),
+    ) ||
+      (url.protocol !== "https:" &&
+        addresses.some((entry) => !inCidrs(entry.address, privateCidrs))))
+  ) {
+    throw new UpstreamPreDispatchError("unsafe_upstream", "Upstream address is not permitted");
+  }
   const pinned = new URL(url);
   pinned.hostname = chosen.family === 6 ? `[${chosen.address}]` : chosen.address;
   const headers = new Headers(init.headers);

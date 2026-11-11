@@ -26,7 +26,7 @@ export function numberLiteral(parent: object, key: string): string | undefined {
   return numericLiterals.get(parent)?.get(key);
 }
 
-export function parseProviderJson(source: string): unknown {
+function parseExactJson(source: string, preserveMeteringIntegers: boolean): unknown {
   let depth = 0;
   let string = false;
   let escaped = false;
@@ -56,17 +56,20 @@ export function parseProviderJson(source: string): unknown {
   ) => unknown;
   try {
     return parse(source, function (key, value, context) {
-      if (typeof value !== "number" || !context?.source || String(value) === context.source)
-        return value;
-      const exact = normalizedNumber(context.source);
-      const rounded = Number.isFinite(value) ? normalizedNumber(String(value)) : undefined;
-      if (
-        rounded &&
-        exact.digits === rounded.digits &&
-        exact.exponent === rounded.exponent &&
-        exact.negative === rounded.negative
-      )
-        return value;
+      if (typeof value !== "number" || !context?.source) return value;
+      if (!preserveMeteringIntegers || !Number.isInteger(value) || Number.isSafeInteger(value)) {
+        const serialized = String(value);
+        if (serialized === context.source) return value;
+        const exact = normalizedNumber(context.source);
+        const rounded = Number.isFinite(value) ? normalizedNumber(serialized) : undefined;
+        if (
+          rounded &&
+          exact.digits === rounded.digits &&
+          exact.exponent === rounded.exponent &&
+          exact.negative === rounded.negative
+        )
+          return value;
+      }
       if (++tracked > 10000)
         throw new GatewayError(502, "numeric_limit", "Too many extended precision numeric fields");
       let fields = numericLiterals.get(this);
@@ -81,6 +84,10 @@ export function parseProviderJson(source: string): unknown {
     if (error instanceof GatewayError) throw error;
     throw new GatewayError(502, "invalid_upstream_json", "Provider returned malformed JSON");
   }
+}
+
+export function parseProviderJson(source: string): unknown {
+  return parseExactJson(source, true);
 }
 
 export function stringifyExact(value: unknown): string {
@@ -119,7 +126,7 @@ export function copyExact<T extends object>(source: object, target: T): T {
 
 export function parseClientJson(source: string): unknown {
   try {
-    return parseProviderJson(source);
+    return parseExactJson(source, false);
   } catch {
     throw new GatewayError(
       400,

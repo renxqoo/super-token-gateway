@@ -174,6 +174,18 @@ export interface Route {
   concurrency: number;
   rpm: number;
 }
+export interface BatchManifest {
+  items: number;
+  idsSha256: string;
+  images?: number;
+}
+
+export interface BatchResourceMetadata {
+  endpoint: string;
+  upstreamModel: string;
+  manifest?: BatchManifest;
+}
+
 export interface Resource {
   id: string;
   project_id: string;
@@ -186,6 +198,7 @@ export interface Resource {
   attempt_id: string | null;
   batch_endpoint: string | null;
   batch_upstream_model: string | null;
+  batch_manifest: BatchManifest | null;
 }
 export interface MeteredUsage {
   usage: Usage;

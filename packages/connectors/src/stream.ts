@@ -2,7 +2,6 @@ import {
   GatewayError,
   encodeSSE,
   extractUsage,
-  mergeUsage,
   providerObject as object,
   optionalObject,
   text,
@@ -84,7 +83,7 @@ export class StreamTranslator {
           "Provider sent data after terminal completion",
         );
       }
-      this.usage = mergeUsage(this.usage, extractUsage(late, this.kind, this.usage));
+      this.usage = extractUsage(late, this.kind, this.usage) ?? this.usage;
       return { chunks: this.source === this.target ? [encodeSSE(late)] : [], terminal: true };
     }
     const chunks: Uint8Array[] = [];
@@ -134,10 +133,8 @@ export class StreamTranslator {
     )
       this.holdTerminal = true;
     const nested = optionalObject(body.message);
-    this.usage = mergeUsage(
-      this.usage,
-      extractUsage(Object.keys(nested).length ? nested : body, this.kind, this.usage),
-    );
+    this.usage =
+      extractUsage(Object.keys(nested).length ? nested : body, this.kind, this.usage) ?? this.usage;
     if (
       body.error ||
       event.event === "error" ||

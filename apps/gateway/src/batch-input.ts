@@ -5,11 +5,13 @@ import {
   GatewayError,
   object,
   text,
+  batchIdentityDigest,
 } from "@gateway/kernel";
-import type { Operation, Route } from "@gateway/kernel";
+import type { BatchManifest, Operation, Resource, Route } from "@gateway/kernel";
+import { readBounded } from "@gateway/runtime";
 import type { Auth, Dependencies } from "./context.ts";
 import { applyOutputBound } from "./input-policy.ts";
-import { resolveFileReferences } from "./resources.ts";
+import { queryResource, resolveFileReferences } from "./resources.ts";
 
 const endpoints: Record<string, Operation> = {
   "/v1/chat/completions": "chat",
@@ -25,10 +27,11 @@ export interface BatchInput {
   endpoint: string;
   operation: Operation;
   requests: Record<string, unknown>[];
+  manifest: BatchManifest;
 }
 
-export async function parseBatchInput(file: File, auth: Auth): Promise<BatchInput> {
-  const source = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+function parseBatchFile(bytes: Uint8Array): BatchInput {
+  const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   const lines = source.split(/\r?\n/).filter((line) => line.trim());
   if (!lines.length || lines.length > 50000)
     throw new GatewayError(400, "invalid_batch", "Batch must contain 1 to 50000 requests");
@@ -36,6 +39,7 @@ export async function parseBatchInput(file: File, auth: Auth): Promise<BatchInpu
   let model = "";
   let endpoint = "";
   let embeddingInputs = 0;
+  let images = 0;
   const requests = lines.map((line) => {
     const request = object(parseClientJson(line));
     const body = object(request.body);
@@ -66,11 +70,7 @@ export async function parseBatchInput(file: File, auth: Auth): Promise<BatchInpu
       );
     model = text(body.model);
     endpoint = text(request.url);
-    if (
-      !model ||
-      (auth.credential.models.length && !auth.credential.models.includes(model)) ||
-      !auth.credential.operations.includes(endpoints[endpoint] as Operation)
-    )
+    if (!model)
       throw new GatewayError(
         403,
         "scope_denied",
@@ -79,11 +79,69 @@ export async function parseBatchInput(file: File, auth: Auth): Promise<BatchInpu
     if (endpoint === "/v1/embeddings")
       embeddingInputs +=
         Array.isArray(body.input) && typeof body.input[0] !== "number" ? body.input.length : 1;
+    if (endpoints[endpoint] === "images" || endpoints[endpoint] === "image_edits") {
+      const count = body.n ?? 1;
+      if (
+        typeof count !== "number" ||
+        !Number.isSafeInteger(count) ||
+        count < 1 ||
+        !Number.isSafeInteger(images + count)
+      )
+        throw new GatewayError(
+          400,
+          "invalid_batch",
+          "Batch image counts must be positive integers within the batch budget",
+        );
+      images += count;
+    }
     return copyExact(request, { ...request, body });
   });
   if (embeddingInputs > 50000)
     throw new GatewayError(400, "invalid_batch", "Embedding batch input limit exceeded");
-  return { model, endpoint, operation: endpoints[endpoint] as Operation, requests };
+  return {
+    model,
+    endpoint,
+    operation: endpoints[endpoint] as Operation,
+    requests,
+    manifest: {
+      items: requests.length,
+      idsSha256: batchIdentityDigest(ids),
+      ...(images ? { images } : {}),
+    },
+  };
+}
+
+export async function parseBatchInput(file: File, auth: Auth): Promise<BatchInput> {
+  const batch = parseBatchFile(new Uint8Array(await file.arrayBuffer()));
+  if (
+    (auth.credential.models.length && !auth.credential.models.includes(batch.model)) ||
+    !auth.credential.operations.includes(batch.operation)
+  )
+    throw new GatewayError(
+      403,
+      "scope_denied",
+      "Batch contains an unauthorized model or operation",
+    );
+  return batch;
+}
+
+export async function readBatchManifest(
+  deps: Dependencies,
+  file: Resource,
+  signal: AbortSignal,
+  reserveMemory?: (bytes: number) => void,
+): Promise<BatchManifest> {
+  if (file.batch_manifest) return file.batch_manifest;
+  const response = await queryResource(deps, file, "content", signal, reserveMemory);
+  const bytes = await readBounded(response.body, deps.config.MAX_BODY_BYTES, signal, reserveMemory);
+  const batch = parseBatchFile(bytes);
+  if (batch.endpoint !== file.batch_endpoint || batch.model !== file.batch_upstream_model)
+    throw new GatewayError(
+      422,
+      "invalid_batch",
+      "Stored batch content does not match its registered endpoint and model",
+    );
+  return batch.manifest;
 }
 
 export async function rewriteBatchInput(

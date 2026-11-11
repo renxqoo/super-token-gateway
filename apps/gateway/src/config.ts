@@ -4,7 +4,29 @@ import { z } from "zod";
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DATABASE_URL: z.string().startsWith("postgres"),
-  REDIS_URL: z.string().startsWith("redis"),
+  REDIS_URL: z
+    .string()
+    .url()
+    .regex(/^rediss?:\/\//),
+  REDIS_EXTRA_URLS: z
+    .string()
+    .default("")
+    .transform((value) =>
+      value
+        .split(",")
+        .map((url) => url.trim())
+        .filter(Boolean),
+    )
+    .pipe(
+      z
+        .array(
+          z
+            .string()
+            .url()
+            .regex(/^rediss?:\/\//),
+        )
+        .max(7),
+    ),
   QUEUE_REDIS_URL: z.string().startsWith("redis"),
   QUEUE_REQUIRED_REPLICAS: z.coerce.number().int().min(0).max(5).default(0),
   QUEUE_ACK_TIMEOUT_MS: z.coerce.number().int().min(100).max(10000).default(2000),
@@ -71,7 +93,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     validateCidr(cidr);
   if (result.data.NODE_ENV === "production" && result.data.QUEUE_REQUIRED_REPLICAS < 1)
     throw new Error("Production requires an acknowledged AOF replica for the usage queue");
-  if (result.data.REDIS_URL === result.data.QUEUE_REDIS_URL)
+  const admissionUrls = [result.data.REDIS_URL, ...result.data.REDIS_EXTRA_URLS];
+  if (new Set(admissionUrls).size !== admissionUrls.length)
+    throw new Error("Admission Redis endpoints must be distinct");
+  if (admissionUrls.includes(result.data.QUEUE_REDIS_URL))
     throw new Error("Queue Redis and admission Redis must be separate");
   return result.data;
 }

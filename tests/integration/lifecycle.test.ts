@@ -11,6 +11,185 @@ import {
 import { exportEvidenceArchive, verifyEvidenceArchive } from "../../scripts/evidence-archive.ts";
 import { mkdir, rm, appendFile } from "node:fs/promises";
 
+test("schema09 upgrade preserves settled receipts, ACKs and an open hold before completing it once", async () => {
+  const base = process.env.DATABASE_URL;
+  if (!base) throw new Error("DATABASE_URL required");
+  const name = `gateway_test_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
+  const owner = createDatabase(base, 1);
+  await owner.unsafe(`CREATE DATABASE ${name}`);
+  const url = new URL(base);
+  url.pathname = `/${name}`;
+  const db = createDatabase(url.toString(), 1);
+  try {
+    await db.begin(async (tx) => {
+      const source = Bun.gunzipSync(
+        new Uint8Array(
+          await Bun.file(
+            new URL("../fixtures/schema-2026111009.sql.gz", import.meta.url),
+          ).arrayBuffer(),
+        ),
+      );
+      await tx.unsafe(new TextDecoder().decode(source));
+      await tx`INSERT INTO schema_migrations(version) VALUES(2026111009)`;
+    });
+    const store = new Store(db);
+    const funds = new FundsStore(db);
+    const tenant = await store.createProject({
+      name: "schema09-upgrade",
+      rpm: 1000,
+      tpm: 10000,
+      concurrency: 100,
+    });
+    const key = await store.createCredential(
+      tenant,
+      { name: "fixture", models: [], operations: ["chat"] },
+      crypto.randomUUID(),
+      "fixture",
+    );
+    const provider = crypto.randomUUID();
+    await store.createProvider(
+      provider,
+      {
+        name: "fixture",
+        kind: "openai",
+        base_url: "http://fixture.invalid/v1",
+        concurrency: 100,
+        rpm: 1000,
+      },
+      "encrypted-fixture",
+    );
+    await store.createModel({ name: "fixture", operations: ["chat"], max_output_tokens: 100 });
+    await store.createRoute("fixture", {
+      provider_id: provider,
+      upstream_model: "fixture",
+      operations: ["chat"],
+      priority: 1,
+      weight: 1,
+      pricing: { currency: "USD", rates: { requests: { numerator: "1", denominator: "1" } } },
+    });
+    const route = (await store.routes("fixture", "chat"))[0]!;
+    const tariff = await funds.setTariff({
+      model: "fixture",
+      operation: "chat",
+      pricing: { currency: "USD", rates: { requests: { numerator: "3", denominator: "1" } } },
+      ceilings: { requests: "1" },
+      basis: "PROVIDER_USAGE",
+    });
+    await funds.credit(tenant, {
+      currency: "USD",
+      external_ref: "opening",
+      amount_atoms: "1000",
+      kind: "CASH",
+      priority: 100,
+      models: [],
+      operations: [],
+    });
+    const credential = {
+      id: key,
+      project_id: tenant,
+      models: [],
+      operations: ["chat"] as ["chat"],
+    };
+    const quote = {
+      currency: "USD",
+      amount_atoms: "10",
+      input_characters: "0",
+      prices: { [provider]: tariff.pricing_id },
+    };
+    const first = await store.admitInitial(
+      crypto.randomUUID(),
+      credential,
+      "chat",
+      "fixture",
+      "settled",
+      "fixture",
+      route,
+      quote,
+    );
+    const pending = await store.admitInitial(
+      crypto.randomUUID(),
+      credential,
+      "chat",
+      "fixture",
+      "pending",
+      "fixture",
+      route,
+      quote,
+    );
+    const consumer = await store.createConsumer("fixture", false);
+    const fact = {
+      attemptId: first.attempt_id!,
+      source: "execution",
+      state: "SUCCEEDED" as const,
+      finality: "FINAL" as const,
+      requestState: "SUCCEEDED" as const,
+      usage: { requests: "1" },
+    };
+    await store.persistUsage([fact]);
+    const page = await store.claimEvents(consumer, 10);
+    expect(
+      await store.ackEvents(
+        consumer,
+        page.lease_token,
+        page.events.map((event) => event.id),
+      ),
+    ).toBe(1);
+    const tables = [
+      "wallets",
+      "wallet_lots",
+      "gateway_requests",
+      "attempts",
+      "billing_holds",
+      "billing_charges",
+      "charge_allocations",
+      "hold_allocations",
+      "usage_events",
+      "money_journal",
+      "event_deliveries",
+      "event_consumers",
+    ];
+    const snapshot = async () => {
+      const values: unknown[] = [];
+      for (const table of tables)
+        values.push(
+          (
+            await db.unsafe(
+              `SELECT jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text) AS rows FROM ${table} t`,
+            )
+          )[0].rows,
+        );
+      return values;
+    };
+    const before = await snapshot();
+    await expect(migrate(db)).rejects.toThrow("--upgrade --quiesced");
+    await migrate(db, { upgrade: true, quiesced: true });
+    expect(await snapshot()).toEqual(before);
+    expect(await store.persistUsage([fact])).toEqual({ REPLAYED: 1 });
+    expect(await store.persistUsage([{ ...fact, attemptId: pending.attempt_id! }])).toEqual({
+      SETTLED: 1,
+    });
+    expect((await funds.wallets(tenant))[0]).toMatchObject({
+      available_atoms: "994",
+      reserved_atoms: "0",
+      spent_atoms: "6",
+    });
+    const next = await store.claimEvents(consumer, 10);
+    expect(next.events).toHaveLength(1);
+    expect(next.events[0]!.request_id).toBe(pending.record.id);
+    expect(
+      await store.ackEvents(
+        consumer,
+        next.lease_token,
+        next.events.map((event) => event.id),
+      ),
+    ).toBe(1);
+  } finally {
+    await db.close();
+    await owner.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+    await owner.close();
+  }
+});
+
 test("schema07 function upgrade preserves funded wallets and permits concurrent foreign-key readers", async () => {
   const base = process.env.DATABASE_URL;
   if (!base) throw new Error("DATABASE_URL required");

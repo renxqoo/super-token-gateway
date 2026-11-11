@@ -41,6 +41,12 @@ await Bun.write(
   Object.entries({
     DATABASE_URL: remote(url.toString()),
     REDIS_URL: remote(process.env.REDIS_URL),
+    REDIS_EXTRA_URLS: (process.env.REDIS_EXTRA_URLS ?? "")
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean)
+      .map(remote)
+      .join(","),
     QUEUE_REDIS_URL: remote(process.env.QUEUE_REDIS_URL),
     QUEUE_REQUIRED_REPLICAS: process.env.QUEUE_REQUIRED_REPLICAS ?? "0",
     ADMIN_KEY: admin,
@@ -257,7 +263,14 @@ try {
   for (const name of [`${network}-gateway`, `${network}-worker`, mockName])
     await run(["rm", "-f", name]).catch(() => undefined);
   await run(["network", "rm", network]).catch(() => undefined);
-  for (const endpoint of [process.env.REDIS_URL, process.env.QUEUE_REDIS_URL]) {
+  for (const endpoint of [
+    process.env.REDIS_URL,
+    ...(process.env.REDIS_EXTRA_URLS ?? "")
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean),
+    process.env.QUEUE_REDIS_URL,
+  ]) {
     const redis = new RedisClient(endpoint);
     try {
       let cursor = "0";

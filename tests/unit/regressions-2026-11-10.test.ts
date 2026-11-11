@@ -7,9 +7,10 @@ import {
   publicUsage,
 } from "@gateway/connectors";
 import { parseProviderJson, stringifyExact } from "@gateway/kernel";
-import type { SSEEvent } from "@gateway/kernel";
+import type { SSEEvent, UsageEvidence } from "@gateway/kernel";
+import { MemoryBudget } from "@gateway/runtime";
 import { applyOutputBound } from "../../apps/gateway/src/input-policy.ts";
-import { prepareStream } from "../../apps/gateway/src/relay-stream.ts";
+import { prepareStream, relayStream } from "../../apps/gateway/src/relay-stream.ts";
 import { resolveFileReferences } from "../../apps/gateway/src/resources.ts";
 import type { Dependencies } from "../../apps/gateway/src/context.ts";
 const event = (value: unknown, type = "message"): SSEEvent => ({
@@ -90,6 +91,81 @@ test("first error SSE reaches the usage meter rather than being discarded by tra
   await prepared.reader.cancel();
   prepared.reader.releaseLock();
 });
+test("discarded prelude SSE heartbeats do not exhaust the buffered-byte budget", async () => {
+  const encoder = new TextEncoder();
+  const heartbeat = encoder.encode(`: ${"p".repeat(200)}\r\n\r\n`);
+  const content = encoder.encode('data: {"ok":true}\r\n\r\n');
+  const budget = new MemoryBudget(512);
+  const lease = budget.lease();
+  let chunks = 0;
+  const source = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (chunks++ < 20) controller.enqueue(heartbeat);
+      else {
+        controller.enqueue(content);
+        controller.close();
+      }
+    },
+  });
+  try {
+    const prepared = await prepareStream(
+      new Response(source, { headers: { "content-type": "text/event-stream" } }),
+      { config: { MAX_EVENT_BYTES: 512, STREAM_IDLE_MS: 100 } } as Dependencies,
+      new AbortController(),
+      lease.update,
+    );
+    expect(prepared.events.map((frame) => frame.data)).toEqual(['{"ok":true}']);
+    expect(budget.bufferedBytes).toBe(19);
+    await prepared.reader.cancel();
+    prepared.reader.releaseLock();
+  } finally {
+    lease.close();
+  }
+});
+
+for (const trailingError of [false, true])
+  test(`SSE ${trailingError ? "malformed trailing data cannot certify final usage" : "preserves a CR-delimited terminal frame at EOF"}`, async () => {
+    const frame = {
+      choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 3, completion_tokens: 1 },
+    };
+    const wire = trailingError
+      ? `data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\ndata: {\n\n`
+      : `data: ${JSON.stringify(frame)}\r\rdata: [DONE]\r\r`;
+    const evidence: UsageEvidence[] = [];
+    const deps = {
+      config: { MAX_EVENT_BYTES: 1024, STREAM_IDLE_MS: 100, DOWNSTREAM_STALL_MS: 1000 },
+      usage: {
+        async publish(value: UsageEvidence) {
+          evidence.push(value);
+        },
+      },
+      metrics: { increment() {} },
+    } as unknown as Dependencies;
+    const controller = new AbortController();
+    const prepared = await prepareStream(
+      new Response(wire, { headers: { "content-type": "text/event-stream" } }),
+      deps,
+      controller,
+    );
+    const stream = await relayStream(
+      deps,
+      prepared,
+      new StreamTranslator("chat", "chat", "openai", "model"),
+      "attempt",
+      "request",
+      controller,
+      async () => {},
+    );
+    const output = await new Response(stream).text();
+    expect(output.includes("[DONE]")).toBe(!trailingError);
+    expect(output.includes("gateway_stream_error")).toBe(trailingError);
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]).toMatchObject({
+      finality: trailingError ? "PARTIAL" : "FINAL",
+      usage: { input_tokens: "3", output_tokens: "1", requests: "1" },
+    });
+  });
 test("public usage includes cache creation and preserves aggregate integers beyond IEEE754", () => {
   const usage = {
     input_tokens: "7",

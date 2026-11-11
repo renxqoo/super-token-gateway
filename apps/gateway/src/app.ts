@@ -13,7 +13,7 @@ import {
   parseClientJson,
   copyExact,
 } from "@gateway/kernel";
-import type { Operation } from "@gateway/kernel";
+import type { Operation, Resource } from "@gateway/kernel";
 import { boundedRelay, readBounded, clientAddress, validateCidr, inCidrs } from "@gateway/runtime";
 import type { Dependencies, Env } from "./context.ts";
 import { openapi, resourceActions, inferencePaths } from "./openapi.ts";
@@ -35,7 +35,7 @@ export function createApp(deps: Dependencies): Hono<Env> {
   const app = new Hono<Env>();
   let httpInFlight = 0;
   app.use("*", async (c, next) => {
-    c.set("requestId", crypto.randomUUID());
+    c.set("requestId", Bun.randomUUIDv7());
     c.header("x-request-id", c.get("requestId"));
     c.header("x-content-type-options", "nosniff");
     c.header("cache-control", "no-store");
@@ -120,7 +120,7 @@ export function createApp(deps: Dependencies): Hono<Env> {
     try {
       await deps.database.ping();
       await deps.usage.producer.ready();
-      await deps.limits.command("PING");
+      await deps.limits.ping();
       return c.json({ status: "ready" });
     } catch {
       throw new GatewayError(503, "not_ready", "Gateway dependencies are unavailable");
@@ -401,7 +401,25 @@ export function createApp(deps: Dependencies): Hono<Env> {
         }).formData();
         body = {};
         for (const key of new Set(form.keys())) {
+          const imageCount = key === "n" && (operation === "images" || operation === "image_edits");
+          if ((key === "prompt" || key === "input" || imageCount) && form.getAll(key).length > 1)
+            throw new GatewayError(400, "invalid_request", `Multipart ${key} must appear once`);
           const value = form.get(key);
+          if (imageCount) {
+            if (
+              typeof value !== "string" ||
+              !/^[0-9]+$/.test(value) ||
+              !Number.isSafeInteger(Number(value)) ||
+              Number(value) < 1
+            )
+              throw new GatewayError(
+                400,
+                "invalid_request",
+                "Multipart n must be a positive integer",
+              );
+            body.n = value;
+            continue;
+          }
           body[key] =
             typeof value === "string"
               ? value
@@ -421,6 +439,7 @@ export function createApp(deps: Dependencies): Hono<Env> {
       let model = text(body.model);
       let batchInput: BatchInput | undefined;
       let pinnedUpstreamModel: string | undefined;
+      let batchSource: Resource | undefined;
       if (operation === "files" && form?.get("purpose") === "batch") {
         const file = form.get("file");
         if (!file || typeof file === "string")
@@ -432,7 +451,12 @@ export function createApp(deps: Dependencies): Hono<Env> {
       }
       if (operation === "batches") {
         const file = await deps.store.resource(text(body.input_file_id), auth.project.id, "file");
-        if (!file.batch_endpoint || body.endpoint !== file.batch_endpoint || !file.model)
+        if (
+          !file.batch_endpoint ||
+          !file.batch_upstream_model ||
+          body.endpoint !== file.batch_endpoint ||
+          !file.model
+        )
           throw new GatewayError(
             400,
             "invalid_batch",
@@ -441,7 +465,8 @@ export function createApp(deps: Dependencies): Hono<Env> {
         if (model && model !== file.model)
           throw new GatewayError(400, "invalid_batch", "Batch model differs from input file");
         model = file.model;
-        pinnedUpstreamModel = file.batch_upstream_model ?? undefined;
+        pinnedUpstreamModel = file.batch_upstream_model;
+        batchSource = file;
       }
       if (operation === "responses" && !model && typeof body.previous_response_id === "string")
         model =
@@ -490,6 +515,7 @@ export function createApp(deps: Dependencies): Hono<Env> {
         reserveMemory: c.get("reserveMemory"),
         ...(form ? { form } : {}),
         ...(batchInput ? { batchInput } : {}),
+        ...(batchSource ? { batchSource } : {}),
         ...(pinnedUpstreamModel ? { pinnedUpstreamModel } : {}),
         ...(resolved.providerId ? { pinnedProviderId: resolved.providerId } : {}),
         ...(kind

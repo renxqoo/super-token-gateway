@@ -17,7 +17,7 @@
 
 可用 `docker build -f infra/Dockerfile -t <镜像> .` 构建另一种发布成品。运行时建议 `--read-only --tmpfs /tmp:size=64m --cap-drop ALL --security-opt no-new-privileges`、非 root 和内存限制；使用 `bun run test:container` 验证真实依赖、独立 worker、JSON/SSE、精确账单与 SIGTERM。镜像包含 Bun 1.4.4 与独立 bundle，不需要生产安装 node_modules。
 
-只运行当前单一 schema 与队列契约，不保留旧代码运行兼容。初始化接受空库或精确当前版本；schema2026111006 / 2026111007 通过显式 `db:migrate -- --upgrade --quiesced` 离线转换到2026111008，其他旧库拒绝修改。执行前停止所有客户端并备份，具体步骤及恢复限制见 database.md。应用修订回退必须使用同一当前契约；不可切回已经删除的 PG usage/outbox 路径，不删除已确认队列、账本或费率证据。
+只运行当前单一 schema 与队列契约。初始化接受空库或精确当前版本；schema2026111006 / 2026111007 / 2026111008 / 2026111009 通过显式 `db:migrate -- --upgrade --quiesced` 离线转换到 2026111010。执行前停止所有客户端、排空旧证据作业并备份，具体步骤及恢复限制见 database.md。应用修订回退必须使用同一数据库契约并保留已确认队列、账本及费率证据。
 
 ## 高可用依赖
 
@@ -31,9 +31,17 @@ PG 使用高可用主端点、同步耐久提交、备份与 PITR。准入 Redis
 
 本地 `bun run test:durability` 默认使用独立临时Docker主副本与AOF卷；当前Mac可加 `-- --native` 使用本轮拥有的redis-server子进程及独立AOF目录，控制前核对进程PID。两者使用相同临时PG及断言：事务未提交/已提交未 ACK 时 SIGKILL、两节点硬重启、在主库保持停机时独立恢复副本并晋升、缺副本/错误持久化配置拒绝准入。它不模拟机房掉电或仲裁失效。
 
-UPSTREAM_POOL_SIZE 默认1024，限制每种协议的上游连接数；共享空闲上限为 min(512, floor(UPSTREAM_POOL_SIZE/2))，30秒无使用则回收，停机时先排空再销毁。连接耗尽指标采用固定错误类别；本机端口或文件描述符不足且尚未取得响应时，记录明确未执行、释放预扣并返回503，不触发供应商熔断。
+UPSTREAM_POOL_SIZE 默认1024，限制每种协议同时持有连接的请求数；共享空闲连接另有 min(512, floor(UPSTREAM_POOL_SIZE/2)) 的上限，30秒无使用则回收。等待连接的请求可被取消，取消发生在获得连接前时记录明确未执行。停机时拒绝等待请求并销毁连接。连接耗尽指标采用固定错误类别；本机端口或文件描述符不足且尚未取得响应时，记录明确未执行、释放预扣并返回503，不触发供应商熔断。
 
 DB_POOL_SIZE 默认24；多个实例/worker 的连接总数必须低于 PG 预算并留出迁移/运维余量。容量测试单独记录各进程连接总量。增加实例前先确认 PG WAL/磁盘、Redis CPU、上游限制与负载发生器都没有成为瓶颈。
+
+准入与熔断脚本优先使用 EVALSHA，减少每个请求重复发送 Lua 正文。只有 Redis 明确返回 NOSCRIPT 时才在同一命令期限内发送脚本；超时、断连和执行结果未知继续关闭本次准入。脚本缓存被清理后按同一规则恢复。
+
+TPM 桶在首次创建时设置固定窗口到期时间，已有桶的零 token 预留只读取现有计数。后续预留仍累加精确计数，最终调整仍作用于原桶，减少重复的零值写入及相同到期时间写入。
+
+RPM 和 active 集合按剩余 TTL 合并过期时间写入，保留至少完整滚动窗口及租约预算，空闲键最多额外保留 30 秒。短租约准入保留已有长租约的集合寿命。实际准入仍按 Redis TIME 和成员 score 清理过期项。成功健康观察在一次 HSET 中更新失败数、延迟和熔断时间。
+
+QUEUE_BATCH_DELAY_MS 允许 0 至 10 毫秒，缺省 1 毫秒。容量测试记录实际窗口、作业大小、worker 并发和数据库合批上限。
 
 TPM 是按输入字节/输出上限保守估算的准入，完成后用最终 token 事实修正；多模态、远端文件与异步任务不能依靠它获得精确财务上限，应配合供应商配额和项目并发。财务硬约束由 PG 预扣与钱包承担，不能由技术窗口代替。
 
@@ -57,6 +65,12 @@ TPM 是按输入字节/输出上限保守估算的准入，完成后用最终 to
 ## 监控与告警
 
 私网 `GET /admin/metrics` 提供固定基数计数器、请求时长直方图、在途量、原始缓冲量、进程 RSS 与 CPU。至少告警：readiness失败、usage_queue_failures_total、usage_consumer_errors_total、failed/waiting/active 队列数量、用量入库延迟、持续UNKNOWN/PENDING_USAGE、恢复/事件积压、429/503、RSS/缓冲预算、PG连接/锁/WAL/磁盘、Redis内存与延迟。
+
+`billing_settled_total` 等消费回调计数描述完成作业的返回结果。作业内部分提交、忙项重试和已提交作业重投可能使回调时间晚于实际 PG 提交，窗口内账务验收使用已提交收据及实际 ACK。
+
+`scripts/bench-system.ts --online-capacity --seconds 60 --upstream precomputed --rate 6150 --target-rps 6000` 使用预序列化无延迟 Chat 上游，保留在线 worker、资金预扣和外部消费。需提供测试 owner 的 DATABASE_URL、准入 Redis、独立的 AOF always 证据主节点及落盘副本，设置 QUEUE_REQUIRED_REPLICAS=1。该入口创建并清理独立测试数据库和命名空间；REDIS_EXTRA_URLS 的所有端点参与清理。完整命令与本机配置、结果见 validation.md。
+
+严格窗口验收按 request ID 求有效 HTTP 完成与已确认收据 ACK 的交集。每页 ACK 前逐对核对 request_id、evidence_id、数字用量及金额，最后再核对全量预扣、扣款、流水与队列。`--record-request-ids` 为此保留最多 60 秒的技术身份记录；普通吞吐测试使用固定大小直方图。
 
 不得在网关、代理、APM 或错误采集中记录请求/响应正文或认证头；不要启用响应缓存、body dump、磁盘请求缓冲或 swap/core dump 内容采集。技术ID和数字计量可保留。S3并非本 Gateway 的输出存储依赖。
 

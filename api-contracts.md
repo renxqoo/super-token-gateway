@@ -43,7 +43,11 @@ Files 支持上传/列表/查询/删除/content；Batch 支持创建/列表/查�
 
 普通 Files 可省略 model，由有权限且支持 files 的配置选择；Batch 文件必须包含合法 POST JSONL、唯一 custom_id、统一逻辑模型和端点，支持不超过 50,000 项（仍受上传字节限制）。输出按每行检查捕获的供应商价格与客户价格所需维度；任一行缺证据则保留 PARTIAL 与待对账预扣，聚合后字段齐全也不能提前结算。Gateway 重写为该供应商实际模型；创建 Batch 不向上游发送无效的顶层 model 字段。
 
+图片 Batch 的张数来自每行图片结果。图片编辑的 multipart `n` 接受单个正整数文本，并按其数值预扣。完整读取非 JSON 音频响应后记录精确请求次数，音频时长仍需要上游证据。
+
 Gemini 视频将 JSON 或 multipart 的 prompt、seconds、size/aspect_ratio 转为任务 JSON；参考文件及无法表达的字段返回 422。OpenAI 兼容视频入口按上游能力透传。
+
+Multipart 推理请求的 `prompt` 和 `input` 各只接受一个字段。重复字段返回 400，避免报价与上游读取不同的文本。
 
 文件引用、file_ids 数组、previous_response_id 都经过项目/模型授权并改写为自有 upstream ID。未经管理的 Gemini fileData/cachedContent、容器 ID、向量库/会话/assistant 资源引用返回 422，不能利用共享上游密钥越过项目边界。
 

@@ -10,7 +10,7 @@ import {
   copyExact,
   sha256,
 } from "@gateway/kernel";
-import type { Operation, Resource, Route } from "@gateway/kernel";
+import type { BatchResourceMetadata, Operation, Resource, Route } from "@gateway/kernel";
 import { readBounded } from "@gateway/runtime";
 import type { Auth, Dependencies } from "./context.ts";
 import { batchUsage } from "./batch-usage.ts";
@@ -53,7 +53,7 @@ export async function rememberResource(
   body: Record<string, unknown>,
   route: Route,
   attemptId: string,
-  batch?: { endpoint: string; upstreamModel: string },
+  batch?: BatchResourceMetadata,
 ): Promise<Record<string, unknown>> {
   const remote = text(body.id ?? body.name);
   if (!remote)
@@ -68,7 +68,9 @@ export async function rememberResource(
     undefined,
     batch,
   );
-  if (finalStates.has(text(body.status)))
+  if (kind === "batch" && finalStates.has(text(body.status)))
+    await deps.store.updateResource(id, "PENDING_USAGE", text(body.status).toLowerCase());
+  else if (finalStates.has(text(body.status)))
     await deps.store.updateResource(
       id,
       kind === "file" || extractUsage(body, route.kind) ? "COMPLETED" : "PENDING_USAGE",
@@ -235,19 +237,37 @@ export async function queryResource(
       ),
     );
     const status = text(data.status).toLowerCase();
-    let metered = extractUsage(data, route.kind);
+    let metered = resource.kind === "batch" ? undefined : extractUsage(data, route.kind);
     let complete = true;
+    const batchVerified =
+      resource.kind === "batch" && ["COMPLETED", "CANCELLED", "FAILED"].includes(resource.state);
     if (
       resource.kind === "batch" &&
-      ["completed", "succeeded", "cancelled", "canceled", "failed", "expired"].includes(status) &&
-      !metered
+      !batchVerified &&
+      ["completed", "succeeded", "cancelled", "canceled", "failed", "expired"].includes(status)
     ) {
-      const dimensions = resource.attempt_id
-        ? await deps.store.usageDimensions(resource.attempt_id)
-        : [];
-      const evidence = await batchUsage(deps, route, data, dimensions, signal, reserveMemory);
-      metered = evidence?.usage;
-      complete = evidence?.complete ?? false;
+      try {
+        const dimensions = resource.attempt_id
+          ? await deps.store.usageDimensions(resource.attempt_id)
+          : [];
+        const evidence = await batchUsage(
+          deps,
+          route,
+          data,
+          dimensions,
+          resource.batch_endpoint ?? text(data.endpoint),
+          resource.batch_manifest,
+          signal,
+          reserveMemory,
+        );
+        metered = evidence?.usage;
+        complete = evidence?.complete ?? false;
+      } catch (error) {
+        signal.throwIfAborted();
+        if (!(error instanceof GatewayError) || ![502, 503].includes(error.status)) throw error;
+        deps.metrics.increment("batch_usage_unavailable_total");
+        complete = false;
+      }
     }
     if (
       metered &&
@@ -259,7 +279,13 @@ export async function queryResource(
       await deps.usage.publish({
         attemptId: resource.attempt_id,
         source: complete
-          ? "async_final"
+          ? resource.kind !== "batch"
+            ? "async_final"
+            : finalStates.has(status)
+              ? "batch_completed"
+              : ["cancelled", "canceled"].includes(status)
+                ? "batch_cancelled"
+                : "batch_failed"
           : `async_partial_${sha256(stringifyExact(metered)).slice(0, 24)}`,
         state:
           finalStates.has(status) || (data.done === true && !data.error) ? "SUCCEEDED" : "FAILED",
@@ -267,7 +293,7 @@ export async function queryResource(
         usage: { ...metered, requests: "1" },
       });
     }
-    if (states.has(status))
+    if (states.has(status) && !batchVerified)
       await deps.store.updateResource(
         resource.id,
         finalStates.has(status)
