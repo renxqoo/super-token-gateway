@@ -21,7 +21,7 @@
     "lint": "oxlint --deny-warnings",
     "fmt": "bun fmt --no-script",
     "fmt:check": "bun fmt --no-script --check",
-    "test": "bun test tests/unit scripts/__test__ packages/kernel/src/__test__ packages/runtime/src/__test__ packages/connectors/src/__test__",
+    "test": "bun test tests/unit scripts/__test__ apps/gateway/src/__test__ packages/kernel/src/__test__ packages/runtime/src/__test__ packages/connectors/src/__test__",
     "test:integration": "bun --env-file=.env.local test tests/integration --timeout 30000",
     "verify": "bun run check && bun run lint && bun run fmt:check && bun run test && bun run test:integration && bun run build && bun run test:artifact",
     "build": "bun scripts/build.ts",

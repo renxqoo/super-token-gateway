@@ -416,7 +416,6 @@ export class StreamTranslator {
       this.tools.set(delta.index, tool);
       this.finish = "tool_calls";
     }
-    // Responses 的完成事件需要完整 output；只在该目标下累积，且总量有硬上限。
     if (this.target === "responses" || delta.type === "tool") {
       this.accumulatedBytes += new TextEncoder().encode(delta.text).byteLength;
       if (this.accumulatedBytes > this.maxAggregate)

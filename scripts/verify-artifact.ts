@@ -246,7 +246,6 @@ try {
   await until(
     async () => (await db`SELECT id FROM attempts WHERE state='DISPATCHING'`).length === 0,
   );
-  // A non-streaming body remains a live request until it is fully read and durably accepted.
   server = start("dist/gateway/main.js");
   await health(origin, "/readyz");
   await scenario({ jsonChunkDelayMs: 20, jsonChunkBytes: 64 });

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LatencyHistogram, validChat, passesCapacityTarget } from "../../scripts/benchmark-lib.ts";
+import { LatencyHistogram, validChat, passesCapacityTarget } from "../benchmark-lib.ts";
 test("benchmark rejects empty/error/malformed Chat successes and invalid SSE completion", () => {
   expect(validChat('{"choices":[]}', false)).toBe(false);
   expect(validChat("not json", false)).toBe(false);

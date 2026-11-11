@@ -56,7 +56,6 @@ export class SSEParser {
     if (this.bufferedBytes > this.maxBytes) {
       throw new Error("SSE event exceeds limit");
     }
-    // EOF 不合成空行或成功终态；未完整事件保持为截断。
     return events;
   }
   get bufferedBytes(): number {

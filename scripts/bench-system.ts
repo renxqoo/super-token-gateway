@@ -1,4 +1,3 @@
-/** Isolated, paid-path benchmark. Creates only its own disposable fixture DB and Redis namespace. */
 import { mkdir } from "node:fs/promises";
 import { cleanupCapacityNamespaces } from "./capacity-cleanup.ts";
 import {
@@ -6,7 +5,11 @@ import {
   createIdentityWriter,
   capacityStorageBudget,
 } from "./capacity-evidence.ts";
-import { passesCapacityTarget, passesOnlineCapacity } from "./benchmark-lib.ts";
+import {
+  CONTRACT_MAX_P99_MS,
+  passesCapacityTarget,
+  passesOnlineCapacity,
+} from "./benchmark-lib.ts";
 import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
 import { createKey, verifier, encrypt } from "@gateway/kernel";
 import { RedisClient } from "bun";
@@ -28,8 +31,9 @@ const observe = args.includes("--observe");
 const requireOnlineCapacity = args.includes("--online-capacity");
 if (requireOnlineCapacity && (seconds < 60 || seconds % 60 !== 0))
   throw new Error("Online capacity acceptance requires complete 60-second windows");
-const maxP99Ms = Number(option("--max-p99-ms", "1500"));
-if (!Number.isFinite(maxP99Ms) || maxP99Ms <= 0) throw new Error("Invalid P99 budget");
+const maxP99Ms = Number(option("--max-p99-ms", String(CONTRACT_MAX_P99_MS)));
+if (!Number.isFinite(maxP99Ms) || maxP99Ms <= 0 || maxP99Ms > CONTRACT_MAX_P99_MS)
+  throw new Error(`P99 budget must be within the ${CONTRACT_MAX_P99_MS} ms capacity contract`);
 const lz4 = args.includes("--wal-lz4");
 const providerKind = option("--provider", "openai");
 if (providerKind !== "openai" && providerKind !== "anthropic")
@@ -286,7 +290,6 @@ try {
       key.slice(0, 12),
     );
   }
-  // Do not ANALYZE empty hot tables: caching zero-row FK plans would distort their initial growth.
   for (const table of [
     "projects",
     "api_keys",

@@ -6,7 +6,6 @@ interface Scope {
   attempts: Map<string, UsageEvidence | undefined>;
   finished?: boolean;
 }
-/** Per-request quota facts stay local; durable financial evidence is accepted only by the queue. */
 export class Metering {
   constructor(
     readonly producer: UsageProducer,

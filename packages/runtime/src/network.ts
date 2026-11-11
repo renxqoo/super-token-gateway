@@ -139,7 +139,6 @@ export async function safeFetch(
   const headers = new Headers(init.headers);
   headers.set("host", url.host);
   headers.set("accept-encoding", "identity");
-  // URL 使用已经校验的 IP；Host、SNI 与证书验证仍绑定原域名，禁用环境代理与重定向。
   return send(pinned, {
     ...init,
     headers,

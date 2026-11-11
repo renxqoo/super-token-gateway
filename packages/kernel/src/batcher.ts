@@ -1,5 +1,4 @@
 import { GatewayError } from "./errors.ts";
-/** A bounded microbatch is acknowledged only after the shared database transaction commits. */
 export class Batcher<Input, Output> {
   private pending: {
     input: Input;

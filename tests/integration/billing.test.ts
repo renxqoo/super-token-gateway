@@ -128,6 +128,131 @@ async function invariant(id: string) {
   expect(unpaid).toHaveLength(0);
   return rows[0];
 }
+test("expected admission rejections become item outcomes without re-evaluating the whole batch", async () => {
+  const funded = await project();
+  await credit(funded.id, "1000");
+  const broke = await project();
+  await credit(broke.id, "1");
+  const frozen = await project();
+  await credit(frozen.id, "1000");
+  await funds.configure(frozen.id, "USD", { frozen: true });
+  const input = (
+    p: Awaited<ReturnType<typeof project>>,
+    amount: string,
+    digest: string | null,
+  ) => ({
+    id: crypto.randomUUID(),
+    key_id: p.credential.id,
+    project_id: p.id,
+    operation: "chat",
+    model: "funds-model",
+    digest,
+    fingerprint: "fixture",
+    route_id: route.id,
+    cost_pricing_id: route.pricing_id,
+    quote: {
+      currency: "USD",
+      amount_atoms: amount,
+      input_characters: "0",
+      prices: { [route.provider_id]: pricingId },
+    },
+  });
+  const brokeDigest = crypto.randomUUID();
+  const inputs = [
+    input(funded, "10", null),
+    input(broke, "100", brokeDigest),
+    input(frozen, "10", null),
+    { ...input(funded, "10", null), key_id: crypto.randomUUID() },
+    input(funded, "10", crypto.randomUUID()),
+  ];
+  const { result, calls } = await db.begin(async (tx) => {
+    await tx`SET LOCAL track_functions='pl'`;
+    const rows = await tx`SELECT admit_gateway_batch(${inputs}::jsonb) AS result`;
+    const stats =
+      await tx`SELECT calls FROM pg_stat_xact_user_functions WHERE funcname='admit_gateway_batch'`;
+    return { result: rows[0].result, calls: Number(stats[0].calls) };
+  });
+  expect(result["0"]).toMatchObject({ created: true });
+  expect(result["1"]).toEqual({ error: "P0402" });
+  expect(result["2"]).toEqual({ error: "P0402" });
+  expect(result["3"]).toEqual({ error: "P0401" });
+  expect(result["4"]).toMatchObject({ created: true });
+  expect(calls).toBe(1);
+  expect((await db`SELECT 1 FROM gateway_requests WHERE intent_digest=${brokeDigest}`).length).toBe(
+    0,
+  );
+  expect((await funds.wallets(funded.id))[0]).toMatchObject({
+    available_atoms: "980",
+    reserved_atoms: "20",
+  });
+  expect((await funds.wallets(broke.id))[0]).toMatchObject({
+    available_atoms: "1",
+    reserved_atoms: "0",
+  });
+});
+
+test("holds that cannot progress without new evidence back off and do not delay debt collection", async () => {
+  const waiting = await project();
+  await credit(waiting.id, "1000");
+  for (let i = 0; i < 40; i++) {
+    const q = await admit(waiting.credential, "1");
+    await store.persistUsage([
+      {
+        attemptId: q.attempt,
+        source: "execution",
+        state: "UNKNOWN",
+        finality: "UNKNOWN",
+        usage: {},
+      },
+    ]);
+  }
+  const [{ id: wallet }] = await db`SELECT id FROM wallets WHERE project_id=${waiting.id}`;
+  await db`UPDATE billing_holds SET created_at=now()-interval '2 hours',next_reconcile_at=now()-interval '1 minute' WHERE wallet_id=${wallet}`;
+  const indebted = await project();
+  await credit(indebted.id, "1");
+  const q = await admit(indebted.credential, "1");
+  await complete(q.request, q.attempt);
+  expect((await funds.wallets(indebted.id))[0]).toMatchObject({
+    debt_atoms: "55",
+    freeze_reason: "DEBT",
+  });
+  await credit(indebted.id, "100");
+  await funds.reconcileKnownHolds(32);
+  expect((await funds.wallets(indebted.id))[0]).toMatchObject({
+    debt_atoms: "0",
+    freeze_reason: null,
+  });
+  while ((await funds.reconcileKnownHolds(32)) > 0);
+  const [due] =
+    await db`SELECT count(*)::int AS n FROM billing_holds WHERE wallet_id=${wallet} AND next_reconcile_at<now()+interval '59 minutes'`;
+  expect(due.n).toBe(0);
+  await invariant(indebted.id);
+});
+
+test("a gift-funded release does not re-wake cash debt that it cannot collect", async () => {
+  const p = await project();
+  await credit(p.id, "1", "GIFT", { models: ["other"] });
+  await funds.configureCredit(p.id, "USD", {
+    external_ref: "limit",
+    expected_version: "0",
+    credit_limit_atoms: "1000",
+  });
+  const indebted = await admit(p.credential, "60");
+  await complete(indebted.request, indebted.attempt);
+  expect((await funds.wallets(p.id))[0]).toMatchObject({ debt_atoms: "56", freeze_reason: null });
+  await credit(p.id, "100", "GIFT");
+  const gifted = await admit(p.credential, "60");
+  await complete(gifted.request, gifted.attempt);
+  const [hold] =
+    await db`SELECT next_reconcile_at>now()+interval '59 minutes' AS deferred FROM billing_holds WHERE request_id=${indebted.request}`;
+  expect(hold.deferred).toBe(true);
+  expect((await funds.wallets(p.id))[0]).toMatchObject({ debt_atoms: "56" });
+  await credit(p.id, "100");
+  while ((await funds.reconcileKnownHolds(32)) > 0);
+  expect((await funds.wallets(p.id))[0]).toMatchObject({ debt_atoms: "0" });
+  await invariant(p.id);
+});
+
 test("concurrent requests reserve existing debt and in-flight credit before admitting more work", async () => {
   const p = await project();
   await credit(p.id, "100");
@@ -141,7 +266,9 @@ test("concurrent requests reserve existing debt and in-flight credit before admi
   );
   const accepted = outcomes.filter((r) => r.status === "fulfilled").map((r) => r.value);
   expect(accepted).toHaveLength(2);
-  expect(outcomes.filter((r) => r.status === "rejected")).toHaveLength(1);
+  expect(
+    outcomes.flatMap((r) => (r.status === "rejected" ? [r.reason as { errno: string }] : [])),
+  ).toEqual([{ errno: "P0402" }]);
   expect((await funds.wallets(p.id))[0]).toMatchObject({
     available_atoms: "0",
     reserved_atoms: "100",
@@ -170,7 +297,7 @@ test("unknown credit holds remain committed until an explicit release and duplic
   await store.persistUsage([
     { attemptId: q.attempt, source: "execution", state: "UNKNOWN", finality: "UNKNOWN", usage: {} },
   ]);
-  await expect(admit(p.credential, "1")).rejects.toBeDefined();
+  await expect(admit(p.credential, "1")).rejects.toMatchObject({ errno: "P0402" });
   expect((await funds.wallets(p.id))[0]).toMatchObject({ credit_reserved_atoms: "60" });
   const resolution = {
     external_ref: "release",
@@ -247,7 +374,7 @@ test("actual overrun keeps the full receivable and freezes new promises beyond t
     available_credit_atoms: "0",
     freeze_reason: "DEBT",
   });
-  await expect(admit(p.credential, "0")).rejects.toBeDefined();
+  await expect(admit(p.credential, "0")).rejects.toMatchObject({ errno: "P0402" });
   await credit(p.id, "449");
   await db`SELECT settle_requests(ARRAY[${q.request}::uuid])`;
   expect((await funds.wallets(p.id))[0]).toMatchObject({ debt_atoms: "50", freeze_reason: null });
@@ -292,7 +419,7 @@ test("credit policy retries preserve their original result without overwriting a
     }),
   ).rejects.toMatchObject({ status: 409 });
   await funds.configure(p.id, "USD", { frozen: true });
-  await expect(admit(p.credential, "0")).rejects.toBeDefined();
+  await expect(admit(p.credential, "0")).rejects.toMatchObject({ errno: "P0402" });
   await complete(q.request, q.attempt);
   expect((await funds.wallets(p.id))[0]).toMatchObject({ freeze_reason: "MANUAL" });
   await invariant(p.id);
@@ -367,6 +494,47 @@ test("Responses completion racing initial evidence cannot leave final usage and 
   await invariant(p.id);
 });
 
+test("an async resource completing after backed-off evidence wakes its hold without waiting an hour", async () => {
+  const p = await project();
+  await credit(p.id, "100");
+  const q = await admit(p.credential, "100");
+  const resource = await store.saveResource(
+    p.id,
+    route.provider_id,
+    `response_${crypto.randomUUID()}`,
+    "response",
+    "funds-model",
+    q.attempt,
+  );
+  await store.updateResource(resource, "PENDING_USAGE", "in_progress");
+  await db`UPDATE billing_holds SET created_at=now()-interval '2 hours' WHERE request_id=${q.request}`;
+  await store.persistUsage([
+    {
+      attemptId: q.attempt,
+      source: "execution",
+      state: "SUCCEEDED",
+      finality: "FINAL",
+      usage: { requests: "1", input_tokens: "7", output_tokens: "5" },
+      requestState: "SUCCEEDED",
+    },
+  ]);
+  const [waiting] =
+    await db`SELECT h.state,q.billing_outcome,h.next_reconcile_at>now()+interval '59 minutes' AS deferred FROM billing_holds h JOIN gateway_requests q ON q.id=h.request_id WHERE h.request_id=${q.request}`;
+  expect(waiting).toMatchObject({
+    state: "RECONCILING",
+    billing_outcome: "PENDING",
+    deferred: true,
+  });
+  await store.updateResource(resource, "COMPLETED", "completed");
+  while ((await funds.reconcileKnownHolds(32)) > 0);
+  expect(await funds.receipt(q.request, p.id)).toMatchObject({
+    billing_outcome: "SUCCESS",
+    hold_state: "SETTLED",
+    charged_atoms: "56",
+  });
+  await invariant(p.id);
+});
+
 test("credit atoms above IEEE754 remain exact and cannot fund another currency", async () => {
   const p = await project();
   await credit(p.id, "1", "GIFT", { models: ["other"] });
@@ -385,7 +553,7 @@ test("credit atoms above IEEE754 remain exact and cannot fund another currency",
     credit_limit_atoms: "9007199254740993",
   });
   const q = await admit(p.credential, "9007199254740993");
-  await expect(admit(p.credential, "1")).rejects.toBeDefined();
+  await expect(admit(p.credential, "1")).rejects.toMatchObject({ errno: "P0402" });
   expect(
     (await funds.wallets(p.id)).find((w) => (w as { currency: string }).currency === "USD"),
   ).toMatchObject({ credit_reserved_atoms: "9007199254740993", available_credit_atoms: "0" });
@@ -973,7 +1141,7 @@ test("over-hold usage records debt, freezes admission, then cash topup pays debt
   let w = await invariant(p.id);
   expect(w.debt_atoms).toBe("400");
   expect(w.freeze_reason).toBe("DEBT");
-  await expect(admit(p.credential, "0")).rejects.toBeDefined();
+  await expect(admit(p.credential, "0")).rejects.toMatchObject({ errno: "P0402" });
   await credit(p.id, "450");
   await db`SELECT (settle_requests(ARRAY[${q.request}::uuid])->${q.request}::text)`;
   w = await invariant(p.id);
@@ -1005,7 +1173,7 @@ test("refund and adjustment are idempotent and preserve lot sums", async () => {
 test("gift scopes and configured cash-first priority govern reservation", async () => {
   const p = await project();
   await credit(p.id, "100", "GIFT", { models: ["another-model"] });
-  await expect(admit(p.credential, "1")).rejects.toBeDefined();
+  await expect(admit(p.credential, "1")).rejects.toMatchObject({ errno: "P0402" });
   await credit(p.id, "100");
   await credit(p.id, "100", "GIFT");
   await funds.configure(p.id, "USD", { policy: "CASH_FIRST" });
@@ -1117,7 +1285,7 @@ test("conflicting FINAL evidence freezes funds even after settlement until expli
   expect(((await funds.wallets(p.id)) as { freeze_reason: string }[])[0]?.freeze_reason).toBe(
     "EVIDENCE_CONFLICT",
   );
-  await expect(admit(p.credential, "1")).rejects.toBeDefined();
+  await expect(admit(p.credential, "1")).rejects.toMatchObject({ errno: "P0402" });
   await funds.resolve(q.request, {
     external_ref: "reviewed-invoice",
     action: "SETTLE",
@@ -1367,6 +1535,45 @@ test("explicit RELEASE with a captured pricing reference releases the original h
   const w = await invariant(p.id);
   expect(w.available_atoms).toBe("200");
   expect(w.reserved_atoms).toBe("0");
+});
+
+test("a retained failed usage job is alerted on but does not close admission until failed jobs reach their own bound", async () => {
+  const { UsageProducer } = await import("@gateway/runtime");
+  const namespace = `queue-failed:${crypto.randomUUID()}`;
+  const options = {
+    url: process.env.QUEUE_REDIS_URL!,
+    namespace,
+    replicas: 0,
+    timeoutMs: 1000,
+    maxPendingJobs: 2,
+  };
+  const producer = new UsageProducer(options);
+  const redis = new Bun.RedisClient(options.url);
+  try {
+    await producer.ready();
+    await redis.send("ZADD", [
+      `{${namespace}:usage}:usage-v1:failed`,
+      String(Date.now()),
+      "retained",
+    ]);
+    expect((await producer.stats()).failed).toBe(1);
+    await Bun.sleep(150);
+    await producer.ready();
+    await redis.send("ZADD", [
+      `{${namespace}:usage}:usage-v1:failed`,
+      String(Date.now()),
+      "retained-2",
+    ]);
+    await Bun.sleep(150);
+    await expect(producer.ready()).rejects.toMatchObject({
+      status: 503,
+      code: "usage_queue_unavailable",
+    });
+  } finally {
+    producer.close();
+    await redis.send("UNLINK", [`{${namespace}:usage}:usage-v1:failed`]);
+    redis.close();
+  }
 });
 
 test("queue backlog blocks new admission while accepting facts for already-admitted calls", async () => {

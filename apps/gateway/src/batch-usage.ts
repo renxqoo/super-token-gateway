@@ -22,7 +22,6 @@ function addDuration(left: string, right: string): string {
   return fraction ? `${seconds}.${fraction}` : seconds;
 }
 
-// Scan upstream result streams in bounded memory. Only numeric counters escape this function.
 export async function batchUsage(
   deps: Dependencies,
   route: Route,

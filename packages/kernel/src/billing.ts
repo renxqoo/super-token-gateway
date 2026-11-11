@@ -119,7 +119,6 @@ export interface BillingQuote {
   prices: Record<string, string>;
 }
 
-/** Only numeric usage and bounded operational identifiers may enter the durable queue. */
 export const usageEvidenceSchema = z
   .object({
     attemptId: z.uuid(),

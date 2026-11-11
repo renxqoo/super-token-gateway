@@ -57,7 +57,7 @@ export function fundingError(error: unknown): never {
 export class FundsStore {
   private prices = new Map<string, { until: number; rows: PriceRow[] }>();
   private readonly priceLoads = new Map<string, Promise<PriceRow[]>>();
-  constructor(readonly db: SQL) {}
+  constructor(private readonly db: SQL) {}
   async credit(projectId: string, value: CreditInput): Promise<Record<string, unknown>> {
     const input = creditSchema.parse(value);
     const models = [...new Set(input.models)].sort();
@@ -102,7 +102,7 @@ export class FundsStore {
     patch: { policy?: string | undefined; frozen?: boolean | undefined },
   ): Promise<void> {
     const rows = await this
-      .db`UPDATE wallets SET policy=coalesce(${patch.policy ?? null},policy),manual_frozen=coalesce(${patch.frozen ?? null},manual_frozen),freeze_reason=CASE WHEN evidence_disputed THEN 'EVIDENCE_CONFLICT' WHEN coalesce(${patch.frozen ?? null},manual_frozen) THEN 'MANUAL' WHEN debt_atoms+credit_reserved_atoms>credit_limit_atoms THEN 'DEBT' ELSE NULL END WHERE project_id=${projectId} AND currency=${currency} RETURNING id`;
+      .db`UPDATE wallets SET policy=coalesce(${patch.policy ?? null},policy),manual_frozen=coalesce(${patch.frozen ?? null},manual_frozen),freeze_reason=wallet_freeze_reason(evidence_disputed,coalesce(${patch.frozen ?? null},manual_frozen),debt_atoms,credit_reserved_atoms,credit_limit_atoms) WHERE project_id=${projectId} AND currency=${currency} RETURNING id`;
     if (!rows.length) throw new GatewayError(404, "not_found", "Wallet not found");
   }
   async setTariff(value: TariffInput): Promise<{ id: string; pricing_id: string }> {
@@ -188,15 +188,15 @@ export class FundsStore {
   async reconcileKnownHolds(limit = 32): Promise<number> {
     const token = crypto.randomUUID();
     const rows = await this.db<{ request_id: string }[]>`WITH candidates AS (
-      SELECT h.id,h.next_reconcile_at FROM billing_holds h
+      SELECT h.id,h.next_reconcile_at,1 AS priority FROM billing_holds h
       WHERE h.state IN ('HELD','RECONCILING') AND h.next_reconcile_at<=now() AND (h.reconcile_until IS NULL OR h.reconcile_until<now())
       AND (EXISTS(SELECT 1 FROM attempts a WHERE a.request_id=h.request_id AND a.evidence_id IS NOT NULL) OR EXISTS(SELECT 1 FROM billing_resolutions r WHERE r.request_id=h.request_id))
       UNION ALL
-      SELECT h.id,h.next_reconcile_at FROM billing_charges c JOIN billing_holds h ON h.id=c.hold_id
+      SELECT h.id,h.next_reconcile_at,0 AS priority FROM billing_charges c JOIN billing_holds h ON h.id=c.hold_id
       WHERE c.debt_atoms>0 AND h.state NOT IN ('HELD','RECONCILING') AND h.next_reconcile_at<=now() AND (h.reconcile_until IS NULL OR h.reconcile_until<now())
     ),due AS (
       SELECT h.id FROM candidates c JOIN billing_holds h ON h.id=c.id WHERE h.reconcile_until IS NULL OR h.reconcile_until<now()
-      ORDER BY c.next_reconcile_at,h.id LIMIT ${limit} FOR UPDATE OF h SKIP LOCKED
+      ORDER BY c.priority,c.next_reconcile_at,h.id LIMIT ${limit} FOR UPDATE OF h SKIP LOCKED
     ) UPDATE billing_holds h SET reconcile_token=${token},reconcile_until=now()+interval '30 seconds' FROM due WHERE h.id=due.id RETURNING h.request_id`;
     if (!rows.length) return 0;
     const result = await this
@@ -251,7 +251,7 @@ export class FundsStore {
         await tx`SELECT adjust_billing_charge(${charges[0].id}::uuid,${target}::numeric,${`resolution:${id}`},'PROVIDER_RECONCILIATION')`;
       }
       await tx`UPDATE wallets w SET evidence_disputed=EXISTS(SELECT 1 FROM billing_holds h JOIN attempts a ON a.request_id=h.request_id WHERE h.wallet_id=w.id AND a.metering_conflict AND NOT EXISTS(SELECT 1 FROM billing_resolutions r WHERE r.request_id=h.request_id)) WHERE w.id=${rows[0].id}`;
-      await tx`UPDATE wallets SET freeze_reason=CASE WHEN evidence_disputed THEN 'EVIDENCE_CONFLICT' WHEN manual_frozen THEN 'MANUAL' WHEN debt_atoms+credit_reserved_atoms>credit_limit_atoms THEN 'DEBT' ELSE NULL END WHERE id=${rows[0].id}`;
+      await tx`UPDATE wallets SET freeze_reason=wallet_freeze_reason(evidence_disputed,manual_frozen,debt_atoms,credit_reserved_atoms,credit_limit_atoms) WHERE id=${rows[0].id}`;
       await tx`UPDATE billing_holds SET next_reconcile_at=now(),reconcile_until=NULL WHERE request_id=${requestId}`;
       return { id, replayed: false };
     });

@@ -143,3 +143,22 @@ test("character quotes count direct Unicode text from each protocol without bill
     quoteReservation([tariff, fallback], "USD", "embeddings", { input: [101, 102] }, 0),
   ).toMatchObject({ amount_atoms: "9", prices: { "per-request": "request-price" } });
 });
+
+test("Gemini tool-use prompt tokens are billed as input instead of being dropped", () => {
+  expect(
+    extractUsage(
+      {
+        usageMetadata: {
+          promptTokenCount: 10,
+          toolUsePromptTokenCount: 5,
+          candidatesTokenCount: 3,
+          cachedContentTokenCount: 4,
+        },
+      },
+      "gemini",
+    ),
+  ).toMatchObject({ input_tokens: "11", cached_input_tokens: "4", output_tokens: "3" });
+  expect(
+    extractUsage({ usageMetadata: { toolUsePromptTokenCount: 6 } }, "vertex")?.input_tokens,
+  ).toBe("6");
+});

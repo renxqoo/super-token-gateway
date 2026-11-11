@@ -75,7 +75,6 @@ const payload = JSON.stringify({
   max_completion_tokens: 32,
   stream,
 });
-// A bounded, explicit persistent pool avoids ephemeral-port churn on the load machine.
 const poolOptions = {
   keepAlive: true,
   maxSockets: concurrency,
@@ -323,7 +322,6 @@ const sampler = setInterval(() => {
   sampleServer();
 }, 100);
 if (rate > 0) {
-  // Fixed offered arrivals do not slow down when the target slows down. Bound in-flight memory explicitly.
   const pending = new Set<Promise<void>>();
   const planned = duration * rate;
   let previousTick = started;

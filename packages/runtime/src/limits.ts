@@ -150,7 +150,6 @@ export class Limits {
     this.redis.close();
     for (const shard of this.shards?.slice(1) ?? []) shard.close();
   }
-  // Only one instance may probe an expired circuit. Normal closed circuits incur no lease.
   async probe(
     providerId: string,
     leaseMs: number,
@@ -242,9 +241,7 @@ return {2,epoch}`,
       released = true;
       try {
         await this.command("ZREM", [`${prefix}:active`, id]);
-      } catch {
-        /* 有界租约兜底，不放开新请求。 */
-      }
+      } catch {}
     };
     let reconciled = false;
     return Object.assign(release, {

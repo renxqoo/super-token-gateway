@@ -34,7 +34,7 @@ BEGIN
  IF p_version>=99999999999999999999999999999999999999 THEN RAISE EXCEPTION 'credit policy version exhausted' USING ERRCODE='P0409';END IF;
  command=gen_random_uuid();next_version=p_version+1;
  UPDATE wallets SET credit_limit_atoms=p_limit,credit_policy_version=next_version,
-  freeze_reason=CASE WHEN evidence_disputed THEN 'EVIDENCE_CONFLICT' WHEN manual_frozen THEN 'MANUAL' WHEN debt_atoms+credit_reserved_atoms>p_limit THEN 'DEBT' ELSE NULL END WHERE id=wallet.id;
+  freeze_reason=wallet_freeze_reason(evidence_disputed,manual_frozen,debt_atoms,credit_reserved_atoms,p_limit) WHERE id=wallet.id;
  INSERT INTO wallet_credit_policies(id,wallet_id,external_ref,fingerprint,credit_limit_atoms,version) VALUES(command,wallet.id,p_ref,digest,p_limit,next_version);
  RETURN jsonb_build_object('id',command,'credit_policy_version',next_version::text,'credit_limit_atoms',p_limit::text,'replayed',false);
 END $$;

@@ -1,4 +1,3 @@
-/** Destructive faults target only disposable containers, volumes, databases and namespaces owned by this run. */
 import assert from "node:assert/strict";
 import { mkdir, rm } from "node:fs/promises";
 import { RedisClient } from "bun";
@@ -362,7 +361,6 @@ try {
     await consumer.close();
     consumer = undefined;
   };
-  // Deterministic SIGKILL at both transaction/queue acknowledgement boundaries.
   for (const phase of ["BEFORE_COMMIT", "AFTER_COMMIT"]) {
     checkpoint = phase;
     const namespace = `${label}:${phase}`;
@@ -408,9 +406,7 @@ try {
   assert.equal((await producer.stats()).waiting, 1);
   producer.close();
   producer = undefined;
-  // Both copies are killed without a graceful save, then loaded from their own AOF volumes.
   await Promise.all([killNode(primary), killNode(replica)]);
-  // Recover each copy independently: the replica must never be able to refill from the primary.
   checkpoint = "primary AOF restart";
   await startNode(primary);
   await waitRedis(primary);

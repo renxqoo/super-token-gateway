@@ -267,6 +267,12 @@ Apple M4，10逻辑CPU、16GiB、macOS arm64；Bun1.4.4、PG17.9、Redis8.4.0。
 
 **10000+ RPS、生产跨故障域99.99%和真实云账号联调尚未完成。** 当前修复没有证明这些目标，也没有证明长期数据库总量有界。分区/冷存储保留全局身份和权威在线证据，部署仍须提供磁盘/WAL/备份容量与业务留存要求。汇总及原始本地证据路径见 [架构修复验收数据](docs/performance/architecture-hardening-2026-11-10.json)。
 
+## 整仓审查整改（2026-11-11）
+
+按 [ADR 0006](docs/decisions/0006-review-remediation.md) 修复整仓审查发现，schema 升至 2026111102。每个缺陷先取得修复前失败证据：非本协议输出上界在 DeepSeek 原生路由返回200（修复后400）；Gemini `toolUsePromptTokenCount` 未计入输入；5项批量准入含3个预期拒绝时函数被调用9次（修复后1次）；40个过期等待证据的预扣使现金入账后首轮对账未收债；单个 failed 作业使 `maxPendingJobs=1` 的准入返回503；运行角色可直接改写 `billing_outcome`；撤销 PUBLIC 后运行角色人工冻结返回500；`--max-p99-ms 2000` 可使 P99 1800ms 判定通过；OpenAPI 文档与生成结果漂移。独立复审又发现并修复：显式 `null` 输出上界被判为422（修复前单测失败）；客户端执行工具（Chat `custom`、Responses `computer_use_preview`/`local_shell`/`shell`/`apply_patch`、Messages `memory_*`、Gemini `function_declarations`/`computerUse`）及 `tools: null` 被拒；升级后冻结函数仍对 PUBLIC 可执行（5个升级用例断言失败）；赠额释放把无法回收的现金债务重新唤醒（`deferred` 为 false）；异步资源完成后退避中的预扣不被唤醒（预扣停留 RECONCILING）；failed 作业无上限（第2个 failed 作业在 `maxPendingJobs=2` 下仍放行）。`organizations`/`principals` 停用与 Key 角色仍由插入触发器复核并二分，已在文档注明。
+
+本机 macOS/arm64、Bun 1.4.4、原生 PG17、Redis 7.4.12：`check`、`lint` 零告警，86 单元（1510断言）、269 集成（6821断言）、`build`、`test:artifact` 8项、`test:durability -- --native` 8项均通过。`bun run test --coverage` 单测加载文件 functions 72.20%、lines 70.48%，仓库无覆盖率门禁。`fmt:check` 仅因被全局 gitignore 的本机 `.claude/settings.local.json` 失败。Docker 不可用，`test:container`、`test:backup`（需 PG 容器）及容量压测本轮未运行。
+
 ## 复验命令
 
 ```sh

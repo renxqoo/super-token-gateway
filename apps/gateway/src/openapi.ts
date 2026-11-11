@@ -8,6 +8,7 @@ import {
   providerSchema,
   routeSchema,
   creditSchema,
+  creditPolicySchema,
   tariffSchema,
   refundSchema,
   adjustmentSchema,
@@ -46,6 +47,7 @@ export function openapi(): Record<string, unknown> {
     Route: z.toJSONSchema(routeSchema),
     Pricing: z.toJSONSchema(pricingSchema),
     Credit: z.toJSONSchema(creditSchema),
+    CreditPolicy: z.toJSONSchema(creditPolicySchema),
     Tariff: z.toJSONSchema(tariffSchema),
     Refund: z.toJSONSchema(refundSchema),
     Adjustment: z.toJSONSchema(adjustmentSchema),
@@ -318,16 +320,7 @@ export function openapi(): Record<string, unknown> {
     "/admin/projects/{id}/wallets/{currency}/credit-policy",
     "post",
     "configure_wallet_credit",
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["external_ref", "expected_version", "credit_limit_atoms"],
-      properties: {
-        external_ref: { type: "string", minLength: 1, maxLength: 200 },
-        expected_version: { type: "string", pattern: "^(0|[1-9][0-9]{0,37})$" },
-        credit_limit_atoms: { type: "string", pattern: "^(0|[1-9][0-9]{0,37})$" },
-      },
-    },
+    { $ref: "#/components/schemas/CreditPolicy" },
     true,
   );
   add("/admin/projects/{id}/wallets/{currency}/lots", "get", "wallet_lots", undefined, true);

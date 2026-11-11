@@ -2,6 +2,11 @@
 
 ## 项目目录结构
 
+- `apps/gateway`：HTTP 网关、管理面与结算 worker 入口；`apps/mock-providers`：测试用上游替身。
+- `packages/kernel`：契约、计量与金额计算；`packages/connectors`：协议转换与流解析；`packages/runtime`：网络、限流、队列与进程生命周期；`packages/storage`：PostgreSQL schema、迁移与资金存储。
+- `scripts`：迁移、构建、基准与验收脚本；`tests/integration`：真实 PG/Redis/HTTP 集成测试；`tests/unit`：只放跨模块架构约束；`tests/fixtures`：历史 schema 升级夹具。
+- `infra`：部署配置与最小权限角色；`docs`：ADR、OpenAPI 与性能证据。
+
 ## 事实来源
 
 - 当前代码、测试、`package.json` 和工具配置用于核实当前行为；现有测试可能存在缺口或错误，不能自动作为目标行为的依据。
@@ -30,7 +35,7 @@
 
 ## 测试规范
 
-- 模块单测放在同目录 `__test__/`；共享测试辅助代码使用明确的公共测试目录，禁止跨模块引用其他模块的 `__test__` 私有文件。
+- 模块单测放在同目录 `__test__/`；`tests/unit` 只放跨模块架构约束，`tests/integration` 放需要真实 PG/Redis/HTTP 的测试；共享测试辅助代码使用明确的公共测试目录，禁止跨模块引用其他模块的 `__test__` 私有文件。
 - 测试通过公开接口验证业务规则、可观察行为、边界条件和异常路径；期望值来自独立需求、人工算例或明确契约，不能复用被测逻辑计算。
 - 不写仅复述实现的无效测试，例如只断言常量等于其声明值、照抄静态对象或配置作为期望值，或断言测试自己构造的数据；常量和配置承载的真实业务约束、公共契约及跨数据一致性仍应验证。
 - 行为错误时测试应失败；仅改变内部实现、保持行为不变时，测试应继续通过，不绑定私有函数调用顺序或内部协作方式。
@@ -39,20 +44,23 @@
 
 ## 验证
 
-代码变更提交前必须通过以下四项检查，具体执行内容以 `package.json` 和工具配置为准：
+代码变更提交前必须通过以下检查，具体执行内容以 `package.json` 和工具配置为准；CI 执行 `bun run verify` 与 `bun run test:durability`：
 
-| 命令                | 验证内容                                                        |
-| ------------------- | --------------------------------------------------------------- |
-| `bun run lint`      | 架构检查、类型感知 oxlint 和 oxfmt 格式检查，错误与警告均为零。 |
-| `bun run typecheck` | TypeScript 类型检查。                                           |
-| `bun run build`     | Next.js 生产构建。                                              |
-| `bun run test`      | Vitest 单元测试与覆盖率，以及开发和生产模式的浏览器冒烟。       |
+| 命令                       | 验证内容                                                                         |
+| -------------------------- | -------------------------------------------------------------------------------- |
+| `bun run check`            | Bun TypeScript 类型检查。                                                        |
+| `bun run lint`             | oxlint，错误与警告均为零。                                                       |
+| `bun run fmt:check`        | 格式检查。                                                                       |
+| `bun run test`             | 模块 `__test__/` 单元测试与 `tests/unit` 架构约束。                              |
+| `bun run test:integration` | 真实 PG/Redis/HTTP 集成测试，资金、授信、权限与升级回归均在此；需 `.env.local`。 |
+| `bun run build`            | Bun 打包网关、worker 与 mock 产物。                                              |
+| `bun run test:artifact`    | 对构建产物做独立启动与端到端检查。                                               |
 
-- 修改过程中先运行与当前改动直接相关的检查；代码里程碑完成时运行四项检查。
-- 纯文档修改和只读审阅按实际影响核对内容、引用和格式；未影响运行时代码、测试或配置时无需运行四项检查，须说明未执行项。
-- 覆盖率门禁以 `vitest.config.ts` 的匹配范围和指标为准；分别报告实际覆盖率与配置内门禁结果，不以局部门禁通过声称全仓覆盖率达标。
-- 汇报已执行检查的真实结果，包括用例数及适用的 statements、branches、functions、lines 覆盖率数字；未运行测试或覆盖率时明确说明，不编造数字。
-- E2E 通过 `bun run test:e2e` 入口按受影响功能选择用例文件或 Playwright 筛选参数，例如 `bun run test:e2e e2e/docs.spec.ts`；避免每次全量执行。
+- 修改过程中先运行与当前改动直接相关的检查，例如 `bun --env-file=.env.local test tests/integration/billing.test.ts -t <名称>`；代码里程碑完成时运行上表全部检查。
+- 纯文档修改和只读审阅按实际影响核对内容、引用和格式；未影响运行时代码、测试或配置时无需运行上述检查，须说明未执行项。
+- 仓库没有配置覆盖率门禁；需要覆盖率时运行 `bun run test --coverage` 并如实报告 functions、lines 数字及统计范围（仅单测加载的文件），不以此声称全仓覆盖率达标。
+- 汇报已执行检查的真实结果，包括用例数；未运行的检查明确说明，不编造数字。
+- 容器、耐久与备份检查分别通过 `test:container`、`test:durability`、`test:backup` 执行；依赖 Docker 或停机条件不满足时说明未执行。
 
 ## 提交与交付规范
 

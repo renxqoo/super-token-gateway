@@ -32,12 +32,12 @@ const failure = () =>
     "Durable usage acceptance is unavailable; query the original request before retrying",
   );
 
-/** The publisher never reconnects a connection inside an add/WAITAOF pair. */
 export class UsageProducer {
   private generation: Generation | undefined;
   private readonly stopping = new AbortController();
   private readonly batch: Batcher<UsageEvidence, void>;
   private backlog = 0;
+  private failed = 0;
   private backlogCheckedAt = 0;
   private backlogProbe: Promise<void> | undefined;
   constructor(readonly options: UsageQueueOptions) {
@@ -46,7 +46,6 @@ export class UsageProducer {
       options.batchSize ?? 64,
       options.batchDelayMs ?? 1,
       2,
-      // One awaited fact per admitted HTTP operation, plus bounded recovery/poll work.
       (options.maxInFlight ?? 10000) + 128,
     );
   }
@@ -101,7 +100,6 @@ export class UsageProducer {
       },
     });
     const g: Generation = { raw, adapter, queue, broken: false, ready: Promise.resolve() };
-    // Stop adapter-level reconnection as well as native automatic reconnection.
     adapter.on("close", () => this.invalidate(g));
     adapter.on("error", () => this.options.onError?.());
     queue.on("error", () => this.options.onError?.());
@@ -172,22 +170,30 @@ export class UsageProducer {
   }
   async ready(): Promise<void> {
     const g = await this.connection();
+    const limit = this.options.maxPendingJobs ?? 1000;
     if (
-      this.backlog >= (this.options.maxPendingJobs ?? 1000) ||
+      this.backlog >= limit ||
+      this.failed >= limit ||
       Date.now() - this.backlogCheckedAt >= 100
     ) {
       if (!this.backlogProbe)
         this.backlogProbe = this.bounded(async () => {
           if (this.options.requireAllReplicas) await this.checkDurability(g);
-          const counts = await g.queue.getJobCounts("waiting", "active", "delayed", "failed");
-          this.backlog = Object.values(counts).reduce((sum, n) => sum + n, 0);
+          const { failed = 0, ...pending } = await g.queue.getJobCounts(
+            "waiting",
+            "active",
+            "delayed",
+            "failed",
+          );
+          this.backlog = Object.values(pending).reduce((sum, n) => sum + n, 0);
+          this.failed = failed;
           this.backlogCheckedAt = Date.now();
         }, g).finally(() => {
           this.backlogProbe = undefined;
         });
       await this.backlogProbe;
     }
-    if (g.broken || this.backlog >= (this.options.maxPendingJobs ?? 1000)) throw failure();
+    if (g.broken || this.backlog >= limit || this.failed >= limit) throw failure();
   }
   async stats(): Promise<Record<string, number>> {
     const g = await this.connection();
@@ -231,10 +237,8 @@ export class UsageProducer {
   private async publishBatch(events: UsageEvidence[]): Promise<void[]> {
     const jobId = crypto.randomUUID();
     const payload: Payload = { version: 1, events };
-    // An unknown confirmation may be retried with the same identity. PG also deduplicates after job removal.
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        // Backlog gates new upstream admission. Already-executed calls must still record their facts.
         const g = await this.connection();
         await this.bounded(async () => {
           await g.queue.add("evidence", payload, { jobId });
@@ -333,7 +337,6 @@ export class UsageConsumer {
     }
   }
   async close(): Promise<void> {
-    // Wait for financial transactions, then force-close Redis ACK/receive operations if the network is a blackhole.
     await this.worker.pause(true);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

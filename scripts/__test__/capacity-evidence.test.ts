@@ -95,3 +95,17 @@ test("drain beyond 120 seconds after arrivals stop cannot pass despite correct f
   };
   expect(passesOnlineCapacity(true, http, 6000, 60, [370000], 1500, 120001)).toBe(false);
 });
+
+test("a looser --max-p99-ms cannot turn a contract latency breach into a capacity pass", () => {
+  const http = {
+    succeeded: 750000,
+    duration_seconds: 120,
+    latency_ms: { p99: 1800 },
+    latency_windows: { "0": { p99: 1800 }, "1": { p99: 1800 } },
+  };
+  expect(passesOnlineCapacity(true, http, 6000, 120, [370000, 360000], 2000, 500)).toBe(false);
+  http.latency_ms.p99 = 900;
+  http.latency_windows["0"].p99 = 900;
+  http.latency_windows["1"].p99 = 900;
+  expect(passesOnlineCapacity(true, http, 6000, 120, [370000, 360000], 1000, 500)).toBe(true);
+});

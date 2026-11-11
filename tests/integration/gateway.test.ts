@@ -902,6 +902,40 @@ test("oversized output policies reject before any physical provider call", async
   expect((await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length).toBe(0);
 });
 
+test("native requests cannot shrink the hold with a foreign output bound or use unmetered hosted tools", async () => {
+  const model = await configureModel("deepseek");
+  const geminiModel = await configureModel("gemini");
+  const rejected = [
+    {
+      response: await sendChat(model, {
+        max_completion_tokens: undefined,
+        max_tokens: 32768,
+        max_output_tokens: 1,
+      }),
+      status: 400,
+    },
+    { response: await sendChat(model, { tools: [{ type: "web_search" }] }), status: 422 },
+    {
+      response: await fetch(`${origin}/v1beta/models/${geminiModel}:generateContent`, {
+        method: "POST",
+        headers: { "x-goog-api-key": key, "content-type": "application/json" },
+        body: JSON.stringify({
+          ...payload("gemini", geminiModel, false),
+          tools: [{ googleSearch: {} }],
+        }),
+      }),
+      status: 422,
+    },
+  ];
+  for (const { response, status } of rejected) {
+    expect(response.status).toBe(status);
+    await response.text();
+  }
+  expect(
+    (await testDb`SELECT id FROM gateway_requests WHERE model IN (${model},${geminiModel})`).length,
+  ).toBe(0);
+});
+
 test("all provider-backed resource fields enforce ownership, including Gemini native", async () => {
   const model = await configureModel("openai");
   const denied = await json(
@@ -1364,9 +1398,56 @@ test("event claims are disjoint, expired leases are fenced and registration cann
   expect(await deps.store.ackEvents(consumer, renewed.lease_token, ids)).toBe(ids.length);
 });
 
+test("exhausted credit returns 402 insufficient_funds and the credit policy contract rejects unknown wallets and malformed input", async () => {
+  const project = await json("/admin/projects", { name: "credit-exhaustion" });
+  const tenant = String(project.value.id);
+  const tenantKey = String(
+    (await json(`/admin/projects/${tenant}/keys`, { name: "credit" })).value.key,
+  );
+  const missing = await json(`/admin/projects/${tenant}/wallets/USD/credit-policy`, {
+    external_ref: "missing",
+    expected_version: "0",
+    credit_limit_atoms: "1",
+  });
+  expect(missing.response.status).toBe(404);
+  expect(missing.value).toMatchObject({ error: { code: "not_found" } });
+  await deps.funds.credit(tenant, {
+    currency: "USD",
+    external_ref: "credit-exhaustion",
+    amount_atoms: "1",
+    kind: "CASH",
+    priority: 100,
+    models: [],
+    operations: [],
+  });
+  for (const body of [
+    { external_ref: "bad", expected_version: "0", credit_limit_atoms: "-1" },
+    { external_ref: "bad", expected_version: "0", credit_limit_atoms: 1 },
+    { external_ref: "bad", expected_version: "0" },
+  ]) {
+    const malformed = await json(`/admin/projects/${tenant}/wallets/USD/credit-policy`, body);
+    expect(malformed.response.status).toBe(400);
+    expect(malformed.value).toMatchObject({ error: { code: "invalid_request" } });
+  }
+  const configured = await json(`/admin/projects/${tenant}/wallets/USD/credit-policy`, {
+    external_ref: "limit",
+    expected_version: "0",
+    credit_limit_atoms: "1",
+  });
+  expect(configured.response.status).toBe(200);
+  const model = await configureModel("openai");
+  for (const status of [200, 200, 402]) {
+    const response = await sendChat(model, {}, tenantKey);
+    expect(response.status).toBe(status);
+    const body = (await response.json()) as Record<string, unknown>;
+    if (status === 402) expect(body).toMatchObject({ error: { code: "insufficient_funds" } });
+  }
+});
+
 test("restricted production role can serve inference but cannot mutate usage or DDL", async () => {
   const role = `runtime_${suffix}`;
   const password = crypto.randomUUID().replaceAll("-", "");
+  await testDb`REVOKE ALL ON FUNCTION wallet_freeze_reason(boolean,boolean,numeric,numeric,numeric) FROM PUBLIC`;
   await testDb.unsafe(
     await Bun.file(new URL("../../infra/runtime-role.sql", import.meta.url)).text(),
   );
@@ -1391,6 +1472,9 @@ test("restricted production role can serve inference but cannot mutate usage or 
     await expect(runtimeDb`UPDATE wallets SET available_atoms=999999999`).rejects.toThrow();
     await expect(runtimeDb`UPDATE wallets SET credit_limit_atoms=999999999`).rejects.toThrow();
     await expect(runtimeDb`UPDATE wallets SET credit_reserved_atoms=0`).rejects.toThrow();
+    await expect(
+      runtimeDb`UPDATE gateway_requests SET billing_outcome='FAILED',billing_quote='{}'::jsonb`,
+    ).rejects.toMatchObject({ errno: "42501" });
     const creditPolicy = await fetch(
       `http://127.0.0.1:${server.port}/admin/projects/${projectId}/wallets/USD/credit-policy`,
       {
@@ -1408,6 +1492,18 @@ test("restricted production role can serve inference but cannot mutate usage or 
       credit_policy_version: "1",
       credit_limit_atoms: "100",
     });
+    for (const frozen of [true, false]) {
+      const freeze = await fetch(
+        `http://127.0.0.1:${server.port}/admin/projects/${projectId}/wallets/USD`,
+        {
+          method: "PATCH",
+          headers: { authorization: `Bearer ${adminKey}`, "content-type": "application/json" },
+          body: JSON.stringify({ frozen }),
+        },
+      );
+      expect(freeze.status).toBe(200);
+      await freeze.text();
+    }
     await expect(runtimeDb`DELETE FROM wallet_credit_policies`).rejects.toThrow();
     await expect(runtimeDb`TRUNCATE money_journal`).rejects.toThrow();
     await expect(runtimeDb`SELECT persist_usage_batch('[]'::jsonb)`).rejects.toMatchObject({

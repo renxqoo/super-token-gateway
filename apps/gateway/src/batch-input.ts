@@ -10,7 +10,7 @@ import {
 import type { BatchManifest, Operation, Resource, Route } from "@gateway/kernel";
 import { readBounded } from "@gateway/runtime";
 import type { Auth, Dependencies } from "./context.ts";
-import { applyOutputBound } from "./input-policy.ts";
+import { applyOutputBound, rejectUnmeteredTools } from "./input-policy.ts";
 import { queryResource, resolveFileReferences } from "./resources.ts";
 
 const endpoints: Record<string, Operation> = {
@@ -165,6 +165,7 @@ export async function rewriteBatchInput(
   for (const request of input.requests) {
     const original = object(request.body);
     const body = copyExact(original, { ...original });
+    rejectUnmeteredTools(body, input.operation);
     applyOutputBound(body, input.operation, policy.max_output_tokens);
     const references = await resolveFileReferences(
       deps,

@@ -92,7 +92,10 @@ export function extractUsage(
     raw.prompt_tokens_details ?? raw.input_tokens_details ?? raw.input_token_details,
   );
   const outputDetails = optionalObject(raw.completion_tokens_details ?? raw.output_tokens_details);
-  const input = aliases(raw, ["prompt_tokens", "input_tokens", "promptTokenCount"]);
+  const prompt = aliases(raw, ["prompt_tokens", "input_tokens", "promptTokenCount"]);
+  const toolUse = kind === "gemini" ? quantity(raw, "toolUsePromptTokenCount") : undefined;
+  const input =
+    toolUse === undefined ? prompt : (BigInt(prompt ?? "0") + BigInt(toolUse)).toString();
   const output = aliases(raw, ["completion_tokens", "output_tokens", "candidatesTokenCount"]);
   const cachedAliases = [
     aliases(details, ["cached_tokens"]),

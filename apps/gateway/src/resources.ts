@@ -318,7 +318,6 @@ export async function queryResource(
         data.error ? "failed" : "completed",
       );
     if (action === "delete") await deps.store.updateResource(resource.id, "DELETED");
-    // Batch 输出文件只登记上游引用，内容始终由上游提供。
     for (const field of ["output_file_id", "error_file_id"])
       if (typeof data[field] === "string") {
         data[field] = await deps.store.saveResource(

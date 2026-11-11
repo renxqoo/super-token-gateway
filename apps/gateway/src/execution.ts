@@ -36,7 +36,7 @@ import { prepareStream, relayStream } from "./relay-stream.ts";
 import { relayBinary } from "./relay-binary.ts";
 import type { BatchInput } from "./batch-input.ts";
 import { readBatchManifest, rewriteBatchInput } from "./batch-input.ts";
-import { applyOutputBound } from "./input-policy.ts";
+import { applyOutputBound, rejectUnmeteredTools } from "./input-policy.ts";
 
 const textProtocols = new Set<string>(["chat", "responses", "messages", "gemini"]);
 const transportFailures: Record<string, string> = {
@@ -143,6 +143,7 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
   try {
     controller.signal.throwIfAborted();
     const fingerprint = sha256(canonical(input.body));
+    rejectUnmeteredTools(input.body, input.operation);
     const modelPolicy = await deps.store.model(input.model);
     const outputBound = applyOutputBound(
       input.body,
@@ -273,7 +274,6 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
     let lastError: unknown = new GatewayError(503, "no_route", "No eligible upstream");
     let physicalAttempts = 0;
     const retryAt = new Map<string, number>();
-    // 候选数量与同渠道重试共享一次总尝试预算。
     for (
       let step = 0;
       physicalAttempts < deps.config.MAX_ATTEMPTS &&

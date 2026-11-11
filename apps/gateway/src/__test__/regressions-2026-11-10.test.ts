@@ -9,10 +9,10 @@ import {
 import { parseProviderJson, stringifyExact } from "@gateway/kernel";
 import type { SSEEvent, UsageEvidence } from "@gateway/kernel";
 import { MemoryBudget } from "@gateway/runtime";
-import { applyOutputBound } from "../../apps/gateway/src/input-policy.ts";
-import { prepareStream, relayStream } from "../../apps/gateway/src/relay-stream.ts";
-import { resolveFileReferences } from "../../apps/gateway/src/resources.ts";
-import type { Dependencies } from "../../apps/gateway/src/context.ts";
+import { applyOutputBound } from "../input-policy.ts";
+import { prepareStream, relayStream } from "../relay-stream.ts";
+import { resolveFileReferences } from "../resources.ts";
+import type { Dependencies } from "../context.ts";
 const event = (value: unknown, type = "message"): SSEEvent => ({
   data: JSON.stringify(value),
   event: type,

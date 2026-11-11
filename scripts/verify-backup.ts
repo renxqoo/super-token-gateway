@@ -87,7 +87,9 @@ try {
     (SELECT count(*)::text FROM billing_holds) AS holds,
     (SELECT count(*)::text FROM billing_charges) AS charges,
     (SELECT count(*)::text FROM wallet_lots) AS lots,
-    (SELECT jsonb_agg(v ORDER BY currency) FROM(SELECT currency,sum(available_atoms)::text AS available,sum(reserved_atoms)::text AS reserved,sum(spent_atoms)::text AS spent,sum(expired_atoms)::text AS expired,sum(debt_atoms)::text AS debt FROM wallets GROUP BY currency)v) AS balances,
+    (SELECT count(*)::text FROM wallet_credit_policies) AS credit_policies,
+    (SELECT jsonb_agg(v ORDER BY currency) FROM(SELECT currency,sum(available_atoms)::text AS available,sum(reserved_atoms)::text AS reserved,sum(spent_atoms)::text AS spent,sum(expired_atoms)::text AS expired,sum(debt_atoms)::text AS debt,sum(credit_limit_atoms)::text AS credit_limit,sum(credit_reserved_atoms)::text AS credit_reserved,sum(credit_policy_version)::text AS credit_versions FROM wallets GROUP BY currency)v) AS balances,
+    (SELECT count(*)::int FROM wallets w WHERE w.credit_reserved_atoms<>(SELECT coalesce(sum(h.credit_atoms),0) FROM billing_holds h WHERE h.wallet_id=w.id AND h.state IN ('HELD','RECONCILING'))) AS inconsistent_credit,
     (SELECT count(*)::int FROM money_journal j WHERE (SELECT sum((v->>'atoms')::numeric) FROM jsonb_array_elements(j.lines)v)<>0) AS unbalanced,
     (SELECT count(*)::int FROM wallets w WHERE (w.available_atoms,w.reserved_atoms,w.spent_atoms,w.expired_atoms) IS DISTINCT FROM (SELECT ROW(coalesce(sum(l.available_atoms),0),coalesce(sum(l.reserved_atoms),0),coalesce(sum(l.spent_atoms),0),coalesce(sum(l.expired_atoms),0)) FROM wallet_lots l WHERE l.wallet_id=w.id)) AS inconsistent_wallets
   `
@@ -96,7 +98,6 @@ try {
   await owner.begin(async (tx) => {
     await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
     const snapshot = String((await tx`SELECT pg_export_snapshot() AS id`)[0].id);
-    // Use the same exported MVCC snapshot for counters and pg_dump.
     before = await counters(tx as unknown as typeof owner);
     await run(
       [
@@ -133,7 +134,6 @@ try {
   const restored = new URL(url);
   restored.pathname = `/${restore}`;
   destination = createDatabase(restored.toString());
-  // --no-acl restores functions with default PUBLIC execute. Remove it before granting the two roles.
   await destination`REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC`;
   await destination.unsafe(
     await Bun.file(new URL("../infra/runtime-role.sql", import.meta.url)).text(),
@@ -142,6 +142,7 @@ try {
   assert.deepEqual(after, before);
   assert.equal(after.unbalanced, 0);
   assert.equal(after.inconsistent_wallets, 0);
+  assert.equal(after.inconsistent_credit, 0);
   assert.equal(
     (await destination`SELECT version FROM schema_migrations`)[0].version,
     SCHEMA_VERSION,

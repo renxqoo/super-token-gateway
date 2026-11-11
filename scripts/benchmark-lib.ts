@@ -1,6 +1,5 @@
 import { SSEParser, optionalObject, parseProviderJson } from "@gateway/kernel";
 
-/** Fixed 32 KiB logarithmic histogram, independent of run duration or request count. */
 export class LatencyHistogram {
   private readonly bins = new Float64Array(4096);
   count = 0;
@@ -103,6 +102,8 @@ export function passesCapacityTarget(
   );
 }
 
+export const CONTRACT_MAX_P99_MS = 1500;
+
 export function passesOnlineCapacity(
   valid: boolean,
   http: {
@@ -128,6 +129,7 @@ export function passesOnlineCapacity(
     seconds % 60 === 0 &&
     Number.isFinite(maxP99Ms) &&
     maxP99Ms > 0 &&
+    maxP99Ms <= CONTRACT_MAX_P99_MS &&
     Number.isFinite(http.latency_ms.p99) &&
     http.latency_ms.p99 >= 0 &&
     http.latency_ms.p99 <= maxP99Ms &&

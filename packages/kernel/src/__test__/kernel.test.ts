@@ -9,8 +9,7 @@ import {
   secureEqual,
   parseProviderJson,
   stringifyExact,
-} from "@gateway/kernel";
-import { isPublicAddress, validateBaseUrl } from "@gateway/runtime";
+} from "../index.ts";
 
 describe("precise cost and usage evidence", () => {
   test("uses original numeric literals rather than rounded JSON.parse quantities", () => {
@@ -159,34 +158,6 @@ describe("secret and outbound boundaries", () => {
     expect(() => decrypt(value, key, "provider-2")).toThrow();
     expect(secureEqual("abc", "abc")).toBe(true);
     expect(secureEqual("abc", "ab")).toBe(false);
-  });
-  test("rejects private, mapped, metadata, reserved and ambiguous destinations", () => {
-    for (const address of [
-      "127.0.0.1",
-      "10.0.0.1",
-      "169.254.169.254",
-      "100.64.0.1",
-      "192.168.1.1",
-      "::1",
-      "::ffff:127.0.0.1",
-      "::ffff:7f00:1",
-      "fc00::1",
-      "fe80::1",
-      "2001:db8::1",
-      "0.0.0.0",
-      "224.0.0.1",
-    ])
-      expect(isPublicAddress(address)).toBe(false);
-    expect(isPublicAddress("1.1.1.1")).toBe(true);
-    expect(isPublicAddress("2606:4700:4700::1111")).toBe(true);
-    for (const url of [
-      "http://example.com",
-      "https://user:pass@example.com",
-      "https://example.com?secret=x",
-      "https://127.0.0.1",
-      "https://[::1]",
-    ])
-      expect(() => validateBaseUrl(url, false)).toThrow();
   });
   test("canonical fingerprints preserve array order and explicit zero/false", () => {
     expect(canonical({ b: false, a: [0, 1] })).toBe(canonical({ a: [0, 1], b: false }));

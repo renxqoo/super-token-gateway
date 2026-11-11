@@ -17,7 +17,7 @@
 
 可用 `docker build -f infra/Dockerfile -t <镜像> .` 构建另一种发布成品。运行时建议 `--read-only --tmpfs /tmp:size=64m --cap-drop ALL --security-opt no-new-privileges`、非 root 和内存限制；使用 `bun run test:container` 验证真实依赖、独立 worker、JSON/SSE、精确账单与 SIGTERM。镜像包含 Bun 1.4.4 与独立 bundle，不需要生产安装 node_modules。
 
-只运行当前单一 schema 与队列契约。初始化接受空库或精确当前版本；schema2026111006 / 2026111007 / 2026111008 / 2026111009 / 2026111010 通过显式 `db:migrate -- --upgrade --quiesced` 离线转换到 2026111101。执行前停止所有客户端、排空旧证据作业并备份，具体步骤及恢复限制见 database.md。应用修订回退必须使用同一数据库契约并保留已确认队列、账本及费率证据。
+只运行当前单一 schema 与队列契约。初始化接受空库或精确当前版本；schema2026111006 / 2026111007 / 2026111008 / 2026111009 / 2026111010 / 2026111101 通过显式 `db:migrate -- --upgrade --quiesced` 离线转换到 2026111102。执行前停止所有客户端、排空旧证据作业并备份，具体步骤及恢复限制见 database.md。应用修订回退必须使用同一数据库契约并保留已确认队列、账本及费率证据。
 
 ## 高可用依赖
 
@@ -78,7 +78,7 @@ HTTP 408、409、429、500、502、503、504、529 允许重试或切换，401�
 
 ## 监控与告警
 
-私网 `GET /admin/metrics` 提供固定基数计数器、请求时长直方图、在途量、原始缓冲量、进程 RSS 与 CPU。至少告警：readiness失败、usage_queue_failures_total、usage_consumer_errors_total、failed/waiting/active 队列数量、用量入库延迟、持续UNKNOWN/PENDING_USAGE、恢复/事件积压、429/503、RSS/缓冲预算、PG连接/锁/WAL/磁盘、Redis内存与延迟。
+私网 `GET /admin/metrics` 提供固定基数计数器、请求时长直方图、在途量、原始缓冲量、进程 RSS 与 CPU。至少告警：readiness失败、usage_queue_failures_total、usage_consumer_errors_total、`GET /admin/queue` 的 failed/waiting/active 队列数量（准入门控 QUEUE_MAX_PENDING_JOBS 统计 waiting/active/delayed；failed 作业保留待人工重试，单独按同一上限计数，未达上限不关闭全部租户准入）、用量入库延迟、持续UNKNOWN/PENDING_USAGE、恢复/事件积压、429/503、RSS/缓冲预算、PG连接/锁/WAL/磁盘、Redis内存与延迟。
 
 `billing_settled_total` 等消费回调计数描述完成作业的返回结果。作业内部分提交、忙项重试和已提交作业重投可能使回调时间晚于实际 PG 提交，窗口内账务验收使用已提交收据及实际 ACK。
 
@@ -114,4 +114,4 @@ Compose 为当前约12GiB Docker VM提供2GiB shared_buffers、6GiB effective_ca
 
 ## 当前容量验收入口
 
-完整口径见 [容量契约](docs/performance/capacity-contract.md)。`scripts/bench-system.ts --online-capacity` 支持60秒整数倍窗口，`--max-p99-ms`默认1500；全量和每个发出分钟的尾批P99均进入门槛。默认按5000字节/计划请求另加4GiB实验空间、4GiB系统保留量做磁盘预检，长测空间不足时在创建数据库前拒绝。该估计来自历史数量级，不是磁盘占用上限；测试期间继续检查剩余空间，不足时中止并判失败。不要通过关闭耐久性或删除权威身份降低空间预算。
+完整口径见 [容量契约](docs/performance/capacity-contract.md)。`scripts/bench-system.ts --online-capacity` 支持60秒整数倍窗口，`--max-p99-ms`默认1500，只能收紧，超过1500的参数直接拒绝且验收判定不通过；全量和每个发出分钟的尾批P99均进入门槛。默认按5000字节/计划请求另加4GiB实验空间、4GiB系统保留量做磁盘预检，长测空间不足时在创建数据库前拒绝。该估计来自历史数量级，不是磁盘占用上限；测试期间继续检查剩余空间，不足时中止并判失败。不要通过关闭耐久性或删除权威身份降低空间预算。

@@ -1,6 +1,5 @@
 import { UsageConsumer } from "@gateway/runtime";
 import type { Dependencies } from "./context.ts";
-/** Usage is durably queued first; PG evidence and financial effects commit before the BullMQ ACK. */
 export class BillingWorker {
   readonly consumer: UsageConsumer;
   constructor(readonly deps: Dependencies) {

@@ -14,7 +14,7 @@ export function createDatabase(url: string, max = 16): SQL {
   });
 }
 
-export const SCHEMA_VERSION = 2026111101;
+export const SCHEMA_VERSION = 2026111102;
 export async function migrate(
   db: SQL,
   options: { upgrade?: boolean; quiesced?: boolean } = {},
@@ -31,7 +31,7 @@ export async function migrate(
       if (versions.length === 1 && versions[0]?.version === SCHEMA_VERSION) return;
       if (
         versions.length !== 1 ||
-        ![2026111006, 2026111007, 2026111008, 2026111009, 2026111010].includes(
+        ![2026111006, 2026111007, 2026111008, 2026111009, 2026111010, 2026111101].includes(
           versions[0]?.version ?? 0,
         ) ||
         !options.upgrade ||
@@ -59,8 +59,8 @@ export async function migrate(
         WHERE r.attempt_id=a.id AND r.kind='batch' AND r.state IN ('COMPLETED','CANCELLED','FAILED')
         AND h.state IN ('HELD','RECONCILING')`;
       }
-      await tx.unsafe(credit);
-      const functions = `${source}\n${lifecycle}`.match(
+      if ((versions[0]?.version ?? 0) < 2026111101) await tx.unsafe(credit);
+      const functions = `${source}\n${lifecycle}\n${credit}`.match(
         /CREATE FUNCTION [\s\S]*?\bAS (\$[A-Za-z_]*\$)[\s\S]*?\1;/g,
       );
       if (!functions?.length) throw new Error("Current schema function manifest is empty");
@@ -69,6 +69,7 @@ export async function migrate(
       await tx`REVOKE ALL ON FUNCTION public.ingest_initial_usage(jsonb,uuid[]) FROM PUBLIC`;
       await tx`REVOKE ALL ON FUNCTION public.ledger_uuid() FROM PUBLIC`;
       await tx`REVOKE ALL ON FUNCTION public.settle_covered_requests(uuid[]) FROM PUBLIC`;
+      await tx`REVOKE ALL ON FUNCTION public.wallet_freeze_reason(boolean,boolean,numeric,numeric,numeric) FROM PUBLIC`;
       await tx`DROP INDEX IF EXISTS public.requests_stale`;
       await tx`DROP INDEX IF EXISTS public.usage_attempt`;
       await tx`ALTER TABLE public.gateway_requests SET (fillfactor=70)`;
@@ -84,8 +85,12 @@ export async function migrate(
         if ((await tx`SELECT 1 FROM pg_roles WHERE rolname=${role}`).length)
           await tx.unsafe(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${role}`);
       }
-      if ((await tx`SELECT 1 FROM pg_roles WHERE rolname='gateway_runtime'`).length)
+      if ((await tx`SELECT 1 FROM pg_roles WHERE rolname='gateway_runtime'`).length) {
         await tx`GRANT EXECUTE ON FUNCTION public.configure_wallet_credit(uuid,text,text,numeric,numeric) TO gateway_runtime`;
+        await tx`GRANT EXECUTE ON FUNCTION public.wallet_freeze_reason(boolean,boolean,numeric,numeric,numeric) TO gateway_runtime`;
+        await tx`REVOKE UPDATE ON public.gateway_requests FROM gateway_runtime`;
+        await tx`GRANT UPDATE(state,updated_at) ON public.gateway_requests TO gateway_runtime`;
+      }
       await tx`UPDATE schema_migrations SET version=${SCHEMA_VERSION},applied_at=now()`;
       return;
     }

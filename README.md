@@ -53,7 +53,7 @@ curl "$GATEWAY_URL/v1/chat/completions" \
 | Video / 异步生成                                                           | Gemini Veo 长任务及 OpenAI 兼容供应商的视频任务；状态、取消能力按上游、下载与后台补证 |
 | Responses 状态                                                             | 所有权校验、previous_response_id、后台任务、查询、取消、删除、input_items             |
 
-供应商不能表达的跨协议语义返回 `422`，例如托管工具、签名思维链、多候选或无法保真的工具结果；原生接口保留该供应商能接受的字段。不同供应商的模型不被假设为支持所有端点。OpenAI 官方 Videos API 已于 2026-09-24 停用，视频适配器用于 Gemini 和仍提供相应契约的兼容供应商，见 [官方参考](references.md)。
+供应商不能表达的跨协议语义返回 `422`，例如托管工具、签名思维链、多候选或无法保真的工具结果；原生接口保留该供应商能接受的字段，但输出上界只接受本协议原生字段，没有计量维度的服务端托管工具返回 `422 unmetered_tool`（[ADR 0006](docs/decisions/0006-review-remediation.md)）。不同供应商的模型不被假设为支持所有端点。OpenAI 官方 Videos API 已于 2026-09-24 停用，视频适配器用于 Gemini 和仍提供相应契约的兼容供应商，见 [官方参考](references.md)。
 
 Key 支持 IPv4/IPv6 CIDR、模型/操作权限及角色。转发头只接受 `TRUSTED_PROXY_CIDRS` 内的实际对端；生产内网 Ollama 通过明确的 `PRIVATE_UPSTREAM_CIDRS` 授权，禁止全局私网绕过。DeepSeek 与 Ollama 使用其官方 OpenAI 兼容接口；Ollama 基地址填写 `/v1`。
 

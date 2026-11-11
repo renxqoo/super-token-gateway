@@ -1,4 +1,3 @@
-/** Runs the same compiled gateway, worker and mock in separate least-privilege Linux containers. */
 import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
 import { createKey, encrypt, verifier } from "@gateway/kernel";
 import { mkdir, unlink, chmod } from "node:fs/promises";

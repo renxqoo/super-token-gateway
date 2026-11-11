@@ -11,7 +11,7 @@ import {
 import { exportEvidenceArchive, verifyEvidenceArchive } from "../../scripts/evidence-archive.ts";
 import { mkdir, rm, appendFile } from "node:fs/promises";
 
-for (const previousVersion of [2026111009, 2026111010])
+for (const previousVersion of [2026111008, 2026111009, 2026111010, 2026111101])
   test(`schema${previousVersion} upgrade preserves settled receipts, ACKs and an open hold before completing it once`, async () => {
     const base = process.env.DATABASE_URL;
     if (!base) throw new Error("DATABASE_URL required");
@@ -164,9 +164,27 @@ for (const previousVersion of [2026111009, 2026111010])
       const before = await snapshot();
       await db`DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gateway_runtime') THEN CREATE ROLE gateway_runtime NOLOGIN;END IF;END $$`;
       await db`GRANT USAGE ON SCHEMA public TO gateway_runtime`;
+      await db`GRANT UPDATE ON gateway_requests TO gateway_runtime`;
       await expect(migrate(db)).rejects.toThrow("--upgrade --quiesced");
       await migrate(db, { upgrade: true, quiesced: true });
       expect(await snapshot()).toEqual(before);
+      await expect(
+        db.begin(async (tx) => {
+          await tx`SET LOCAL ROLE gateway_runtime`;
+          await tx`UPDATE gateway_requests SET billing_outcome='FAILED' WHERE id=${pending.record.id}`;
+        }),
+      ).rejects.toMatchObject({ errno: "42501" });
+      await db.begin(async (tx) => {
+        await tx`SET LOCAL ROLE gateway_runtime`;
+        await tx`UPDATE gateway_requests SET updated_at=updated_at WHERE id=${pending.record.id}`;
+      });
+      expect(
+        (
+          await db`SELECT has_function_privilege('public','public.wallet_freeze_reason(boolean,boolean,numeric,numeric,numeric)','EXECUTE') AS public_execute,
+          has_function_privilege('gateway_runtime','public.wallet_freeze_reason(boolean,boolean,numeric,numeric,numeric)','EXECUTE') AS runtime_execute,
+          (SELECT proacl IS NOT NULL FROM pg_proc WHERE proname='wallet_freeze_reason') AS explicit_acl`
+        )[0],
+      ).toEqual({ public_execute: false, runtime_execute: true, explicit_acl: true });
       expect((await funds.wallets(tenant))[0]).toMatchObject({
         credit_limit_atoms: "0",
         credit_reserved_atoms: "0",

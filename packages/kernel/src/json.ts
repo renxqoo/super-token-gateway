@@ -112,7 +112,6 @@ export function exactInteger(parent: Record<string, unknown>, key: string): stri
   return value.digits + "0".repeat(value.exponent);
 }
 
-// Object spread loses the sidecar used for JSON numbers beyond IEEE-754 precision.
 export function copyExact<T extends object>(source: object, target: T): T {
   const fields = numericLiterals.get(source);
   if (fields) {

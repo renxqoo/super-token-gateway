@@ -1,5 +1,34 @@
 import { expect, test } from "bun:test";
-import { createTransport } from "../network.ts";
+import { createTransport, isPublicAddress, validateBaseUrl } from "../network.ts";
+
+test("rejects private, mapped, metadata, reserved and ambiguous destinations", () => {
+  for (const address of [
+    "127.0.0.1",
+    "10.0.0.1",
+    "169.254.169.254",
+    "100.64.0.1",
+    "192.168.1.1",
+    "::1",
+    "::ffff:127.0.0.1",
+    "::ffff:7f00:1",
+    "fc00::1",
+    "fe80::1",
+    "2001:db8::1",
+    "0.0.0.0",
+    "224.0.0.1",
+  ])
+    expect(isPublicAddress(address)).toBe(false);
+  expect(isPublicAddress("1.1.1.1")).toBe(true);
+  expect(isPublicAddress("2606:4700:4700::1111")).toBe(true);
+  for (const url of [
+    "http://example.com",
+    "https://user:pass@example.com",
+    "https://example.com?secret=x",
+    "https://127.0.0.1",
+    "https://[::1]",
+  ])
+    expect(() => validateBaseUrl(url, false)).toThrow();
+});
 
 test("repeated upstream bursts reuse sockets instead of exhausting local ports", async () => {
   const ports = new Set<number>();

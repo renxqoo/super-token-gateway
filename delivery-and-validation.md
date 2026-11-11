@@ -19,7 +19,7 @@ verify 顺序执行原生类型检查、oxlint、原生格式检查、单元测�
 
 参考 Tillgate 的静默降级、重试护栏、深流式、超时规模、异步恢复场景；参考 new-api 的转换 golden、tool loss policy、usage merge、真实慢读取消、DNS 固定和资源归属场景。此仓库按独立 fixture 与行为断言重新实现，未拷贝参考项目的商业层或测试运行器。
 
-测试文件：`tests/unit/kernel.test.ts`（精度/SSE/安全），`packages/connectors/src/__test__/conversion.test.ts`（损失策略与转换），`runtime.test.ts`（内存/取消/停机），`architecture.test.ts`（依赖边界）；`tests/integration/gateway.test.ts`（完整 HTTP/PG/Redis 与故障）。最终运行数量与性能见 validation.md。
+测试文件：模块单测位于各模块 `__test__/`，如 `packages/kernel/src/__test__/kernel.test.ts`（精度/SSE/加密），`packages/connectors/src/__test__/conversion.test.ts`（损失策略与转换），`packages/runtime/src/__test__/bounded-io.test.ts`（内存/取消）与 `network.test.ts`（出站地址），`apps/gateway/src/__test__/`（准入输入、停机与回归）；跨模块的 `tests/unit/architecture.test.ts`（依赖边界）；`tests/integration/gateway.test.ts`（完整 HTTP/PG/Redis 与故障）。最终运行数量与性能见 validation.md。
 
 没有访问真实付费模型，没有给外部用户发消息，没有部署到未提供的服务器。Linux 配置和 CI 是可重复发布资产，实际公网部署与跨主机/机房故障演练需要目标基础设施。
 

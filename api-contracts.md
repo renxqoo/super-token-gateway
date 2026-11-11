@@ -8,7 +8,9 @@
 
 每次 HTTP 请求生成 `x-request-id`，推理另返回持久化的 `x-gateway-request-id`。`Idempotency-Key` 最长 200 个可打印 ASCII 字符；重复请求返回 409 和已有请求状态，不保存/重放响应体。所有错误正文均为清洗过的 error.code/message，不回显原供应商错误正文或 SQL。
 
-400 输入无效；401 未认证；403 操作/模型越权；404 自有资源不存在；409 意图/配置冲突；413 字节超限；422 能力不可表达；429 准入超限；502 上游/转换/完成提交失败；503 依赖/容量不可用；504 超时。
+400 输入无效；401 未认证；402 合资格资金或授信不足、钱包冻结（insufficient_funds）；403 操作/模型越权；404 自有资源不存在；409 意图/配置冲突；413 字节超限；422 能力不可表达；429 准入超限；502 上游/转换/完成提交失败；503 依赖/容量不可用；504 超时。
+
+输出上界只接受入口协议的原生字段（Chat `max_completion_tokens`/`max_tokens` 二选一，Responses `max_output_tokens`，Messages/Completions `max_tokens`，Gemini `generationConfig.maxOutputTokens`），显式 `null` 视为未提供；多个或非本协议的上界字段返回 400/invalid_request。没有计量维度的服务端托管工具（如 web search、code interpreter、file search、Gemini Google Search/URL Context/Code Execution）在准入前返回 422/unmetered_tool；按白名单放行函数工具及只按 token 计费的客户端执行工具（列表见 ADR 0006），`tools: null` 视为未提供，未列入白名单的新工具类型默认拒绝。见 [ADR 0006](docs/decisions/0006-review-remediation.md)。
 
 ## 管理面
 

@@ -110,7 +110,7 @@ export class Store {
   >;
   private readonly admissionBatch: Batcher<Record<string, unknown>, Record<string, unknown>>;
   private readonly persistenceBatch: Batcher<UsageEvidence[], PersistenceResult[]>;
-  constructor(readonly db: SQL) {
+  constructor(private readonly db: SQL) {
     this.persistenceBatch = new Batcher(
       async (groups) => {
         const events = groups.flat();
@@ -230,7 +230,6 @@ export class Store {
     return id;
   }
 
-  /** Project administrators can delegate their current authority, never enlarge it. */
   async delegateCredential(
     parentId: string,
     requested: KeyInput,

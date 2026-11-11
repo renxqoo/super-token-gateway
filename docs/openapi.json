@@ -496,6 +496,27 @@
         ],
         "additionalProperties": false
       },
+      "CreditPolicy": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "external_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "expected_version": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,37})$"
+          },
+          "credit_limit_atoms": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,37})$"
+          }
+        },
+        "required": ["external_ref", "expected_version", "credit_limit_atoms"],
+        "additionalProperties": false
+      },
       "Tariff": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -5071,24 +5092,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["external_ref", "expected_version", "credit_limit_atoms"],
-                "properties": {
-                  "external_ref": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 200
-                  },
-                  "expected_version": {
-                    "type": "string",
-                    "pattern": "^(0|[1-9][0-9]{0,37})$"
-                  },
-                  "credit_limit_atoms": {
-                    "type": "string",
-                    "pattern": "^(0|[1-9][0-9]{0,37})$"
-                  }
-                }
+                "$ref": "#/components/schemas/CreditPolicy"
               }
             }
           }
