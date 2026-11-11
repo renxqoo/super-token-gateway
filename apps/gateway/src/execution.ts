@@ -473,9 +473,8 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
             providerRequestId,
           );
           recorded = true;
-          await deps.limits
+          await releaseProbe
             .observe(
-              route.provider_id,
               retryable || response.status === 401 || response.status === 403,
               performance.now() - started,
             )
@@ -534,12 +533,8 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
           let responseRegistered = false;
           const streamCleanup = async () => {
             controller.signal.removeEventListener("abort", abortAttempt);
-            await deps.limits
-              .observe(
-                route.provider_id,
-                !translator.terminal || translator.failed,
-                performance.now() - started,
-              )
+            await releaseProbe
+              .observe(!translator.terminal || translator.failed, performance.now() - started)
               .catch(() => deps.metrics.increment("health_observation_failures_total"));
             await cleanup();
           };
@@ -622,12 +617,8 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
             attemptController,
             async () => {
               controller.signal.removeEventListener("abort", abortAttempt);
-              await deps.limits
-                .observe(
-                  route.provider_id,
-                  attemptController.signal.aborted,
-                  performance.now() - started,
-                )
+              await releaseProbe
+                .observe(attemptController.signal.aborted, performance.now() - started)
                 .catch(() => deps.metrics.increment("health_observation_failures_total"));
               await cleanup();
             },
@@ -687,8 +678,8 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
           "SUCCEEDED",
         );
         recorded = true;
-        await deps.limits
-          .observe(route.provider_id, false, performance.now() - started)
+        await releaseProbe
+          .observe(false, performance.now() - started)
           .catch(() => deps.metrics.increment("health_observation_failures_total"));
         deps.metrics.increment("requests_succeeded_total");
         return new Response(stringifyExact(output), {
@@ -762,8 +753,8 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
           );
         if (error instanceof UpstreamPreDispatchError && error.code === "upstream_not_dispatched")
           continue;
-        await deps.limits
-          .observe(route.provider_id, true, performance.now() - started)
+        await releaseProbe
+          .observe(true, performance.now() - started)
           .catch(() => deps.metrics.increment("health_observation_failures_total"));
       } finally {
         clearTimeout(headersTimer);
