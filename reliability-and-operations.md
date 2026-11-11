@@ -17,7 +17,7 @@
 
 可用 `docker build -f infra/Dockerfile -t <镜像> .` 构建另一种发布成品。运行时建议 `--read-only --tmpfs /tmp:size=64m --cap-drop ALL --security-opt no-new-privileges`、非 root 和内存限制；使用 `bun run test:container` 验证真实依赖、独立 worker、JSON/SSE、精确账单与 SIGTERM。镜像包含 Bun 1.4.4 与独立 bundle，不需要生产安装 node_modules。
 
-只运行当前单一 schema 与队列契约。初始化接受空库或精确当前版本；schema2026111006 / 2026111007 / 2026111008 / 2026111009 / 2026111010 / 2026111101 通过显式 `db:migrate -- --upgrade --quiesced` 离线转换到 2026111102。执行前停止所有客户端、排空旧证据作业并备份，具体步骤及恢复限制见 database.md。应用修订回退必须使用同一数据库契约并保留已确认队列、账本及费率证据。
+只运行当前单一 schema 与队列契约。初始化接受空库或精确当前版本；schema2026111006 / 2026111007 / 2026111008 / 2026111009 / 2026111010 / 2026111101 / 2026111102 通过显式 `db:migrate -- --upgrade --quiesced` 离线转换到 2026111201。执行前停止所有客户端、排空旧证据作业并备份，具体步骤及恢复限制见 database.md。应用修订回退必须使用同一数据库契约并保留已确认队列、账本及费率证据。
 
 ## 高可用依赖
 

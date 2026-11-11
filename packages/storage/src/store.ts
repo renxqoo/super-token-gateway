@@ -14,6 +14,7 @@ import type {
   Pricing,
   Finality,
   Usage,
+  RequestPolicy,
 } from "@gateway/kernel";
 
 type KeyInput = {
@@ -51,6 +52,7 @@ type RouteInput = {
   priority: number;
   weight: number;
   pricing: Pricing;
+  request_policy?: RequestPolicy | undefined;
 };
 interface ModelMetadata {
   name: string;
@@ -417,6 +419,8 @@ export class Store {
       await tx`INSERT INTO cost_versions(id,currency,rates) VALUES(${pricingId},${input.pricing.currency},${input.pricing.rates})`;
       await tx`INSERT INTO routes(id,model_name,provider_id,upstream_model,operations,priority,weight,pricing_id)
         VALUES(${id},${model},${input.provider_id},${input.upstream_model},${[...new Set(input.operations)].sort()},${input.priority},${input.weight},${pricingId})`;
+      if (input.request_policy)
+        await tx`UPDATE routes SET request_policy=${input.request_policy} WHERE id=${id}`;
     });
     this.routeCache.clear();
     this.routeLoads.clear();
@@ -659,6 +663,7 @@ export class Store {
       priority?: number | undefined;
       weight?: number | undefined;
       pricing?: Pricing | undefined;
+      request_policy?: RequestPolicy | undefined;
     },
   ): Promise<void> {
     await this.db.begin(async (tx) => {
@@ -666,7 +671,7 @@ export class Store {
       if (pricingId && patch.pricing)
         await tx`INSERT INTO cost_versions(id,currency,rates) VALUES(${pricingId},${patch.pricing.currency},${patch.pricing.rates})`;
       const rows =
-        await tx`UPDATE routes SET enabled=coalesce(${patch.enabled ?? null},enabled),priority=coalesce(${patch.priority ?? null},priority),weight=coalesce(${patch.weight ?? null},weight),pricing_id=coalesce(${pricingId}::uuid,pricing_id) WHERE id=${id} RETURNING id`;
+        await tx`UPDATE routes SET enabled=coalesce(${patch.enabled ?? null},enabled),priority=coalesce(${patch.priority ?? null},priority),weight=coalesce(${patch.weight ?? null},weight),pricing_id=coalesce(${pricingId}::uuid,pricing_id),request_policy=coalesce(${patch.request_policy ?? null}::jsonb,request_policy) WHERE id=${id} RETURNING id`;
       if (!rows.length) throw new GatewayError(404, "not_found", "Route not found");
     });
     this.routeCache.clear();

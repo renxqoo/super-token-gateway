@@ -5,8 +5,91 @@ import {
   parseClientJson,
   parseProviderJson,
   quoteReservation,
+  calculateCost,
 } from "../index.ts";
 import type { Operation, ReservationPrice } from "../index.ts";
+
+test("mixed cache TTLs retain separately priced quantities instead of collapsing their costs", () => {
+  const usage = extractUsage(
+    {
+      usage: {
+        cache_creation_input_tokens: 200,
+        cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 100 },
+      },
+    },
+    "anthropic",
+  );
+  expect(usage).toEqual({
+    cache_write_tokens: "200",
+    cache_write_5m_tokens: "100",
+    cache_write_1h_tokens: "100",
+  });
+  expect(
+    calculateCost(usage!, {
+      currency: "USD",
+      rates: {
+        cache_write_5m_tokens: { numerator: "5", denominator: "4" },
+        cache_write_1h_tokens: { numerator: "2", denominator: "1" },
+      },
+    }),
+  ).toBe("325");
+});
+
+test("new aggregate cache snapshots cannot reuse stale TTL quantities or invent missing quantities", () => {
+  const previous = extractUsage(
+    {
+      usage: {
+        cache_creation_input_tokens: 200,
+        cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 100 },
+      },
+    },
+    "anthropic",
+  );
+  expect(
+    extractUsage({ usage: { cache_creation_input_tokens: 300 } }, "anthropic", previous),
+  ).toEqual({ cache_write_tokens: "300" });
+  expect(
+    extractUsage(
+      { usage: { cache_creation: { ephemeral_5m_input_tokens: 12 } } },
+      "anthropic",
+      previous,
+    ),
+  ).toEqual({ cache_write_5m_tokens: "12" });
+  expect(
+    extractUsage(
+      {
+        usage: { cache_creation: { ephemeral_5m_input_tokens: 12, ephemeral_1h_input_tokens: 3 } },
+      },
+      "bedrock",
+    ),
+  ).toEqual({ cache_write_tokens: "15", cache_write_5m_tokens: "12", cache_write_1h_tokens: "3" });
+});
+
+test("inconsistent cache partitions and duplicate aggregate pricing cannot produce a charge", () => {
+  expect(() =>
+    extractUsage(
+      {
+        usage: {
+          cache_creation_input_tokens: 201,
+          cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 100 },
+        },
+      },
+      "anthropic",
+    ),
+  ).toThrow("cache write");
+  expect(() =>
+    calculateCost(
+      { cache_write_tokens: "2", cache_write_5m_tokens: "1", cache_write_1h_tokens: "1" },
+      {
+        currency: "USD",
+        rates: {
+          cache_write_tokens: { numerator: "1", denominator: "1" },
+          cache_write_5m_tokens: { numerator: "1", denominator: "1" },
+        },
+      },
+    ),
+  ).toThrow("cache write");
+});
 
 test("JSON usage retains exact integers at and above the safe integer boundary", () => {
   for (const [literal, expected] of [

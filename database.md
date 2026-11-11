@@ -1,6 +1,6 @@
 # PostgreSQL 模型与事务
 
-当前契约为 schema2026111102，定义由 `packages/storage/src/schema.sql`、`lifecycle.sql` 与 `credit.sql` 组成。运行进程只校验当前版本，不执行 DDL。初始化在事务与 advisory lock 下完成；非空未知库拒绝修改。
+当前契约为 schema2026111201，定义由 `packages/storage/src/schema.sql`、`lifecycle.sql` 与 `credit.sql` 组成。运行进程只校验当前版本，不执行 DDL。初始化在事务与 advisory lock 下完成；非空未知库拒绝修改。
 
 schema10 为新建请求、初始尝试、预扣流水和结算记录生成按毫秒排序的 UUID，减少热表持续插入时分散的索引页写入。已持久化 UUID 继续按原值关联，证据投递继续按既有 ID 顺序认领。schema06、07、08、09、10 均使用显式离线入口升级到当前版本。schema09 升级刷新函数、权限和版本并校验资金快照，已有 Batch 状态保留。首次最终证据在同一条集合写入语句中共享解析结果，原事务仍同时提交数字证据、可投递事件和资金效果。worker 最多将 256 个证据并入一次 SQL 提交，队列作业的单项上限仍为 128，单个作业的事实一起进入同一事务。批内保留按钱包冲突退避，数字、资金来源和流水仍逐笔校验。
 
@@ -67,3 +67,5 @@ schema2026111101在钱包增加非负credit_limit_atoms、credit_reserved_atoms�
 停止准入与worker、排空队列并备份、断开其他客户端后，使用既有 `bun run db:migrate -- --upgrade --quiesced`。工具在同一事务内增加字段、刷新函数、授权既有gateway_runtime的新调额入口并核对旧资金快照。新角色仍按infra/runtime-role.sql配置，运行角色无直接修改信用字段或策略记录的权限。运行时仅接受当前版本；有新授信业务写入后不能部署旧版本处理。
 
 schema2026111102 不改表结构：新增 `wallet_freeze_reason` 并替换资金函数，等待证据的预扣按预扣时长退避对账（30 秒至 1 小时），运行角色对 `gateway_requests` 只保留 `state`、`updated_at` 列更新权。schema2026111101 升级只替换函数与权限，不重复授信 DDL；schema06–10 升级同时执行授信 DDL。见 [ADR 0006](docs/decisions/0006-review-remediation.md)。
+
+schema2026111201 在 routes 增加非空 JSON request_policy（默认 `{}`），并更新 TTL 缓存写入维度、合计一致性及重复定价校验。schema06–10、2026111101、2026111102 均使用既有离线升级入口，升级保持历史数字证据、价格、余额、预扣和已结账单不变。具体发布顺序与旧消费者回退限制见 [ADR 0007](docs/decisions/0007-money-and-model-compatibility.md)。

@@ -116,7 +116,20 @@ export function extractUsage(
       "usage_alias_conflict",
       "Provider cache partition does not equal prompt usage",
     );
-  const write = quantity(raw, "cache_creation_input_tokens");
+  const creation = optionalObject(raw.cache_creation);
+  const write5m = quantity(creation, "ephemeral_5m_input_tokens");
+  const write1h = quantity(creation, "ephemeral_1h_input_tokens");
+  let write = quantity(raw, "cache_creation_input_tokens");
+  if (write5m !== undefined && write1h !== undefined) {
+    const total = (BigInt(write5m) + BigInt(write1h)).toString();
+    if ((write !== undefined && write !== total) || total.length > 38)
+      throw new GatewayError(
+        502,
+        "usage_alias_conflict",
+        "Provider cache write partitions disagree",
+      );
+    write = total;
+  }
   const observedReasoning =
     quantity(outputDetails, "reasoning_tokens") ?? quantity(raw, "thoughtsTokenCount");
   const usage: Usage = { ...previous };
@@ -129,6 +142,8 @@ export function extractUsage(
     !videoDuration &&
     observedCached === undefined &&
     write === undefined &&
+    write5m === undefined &&
+    write1h === undefined &&
     observedReasoning === undefined
   )
     return undefined;
@@ -167,7 +182,14 @@ export function extractUsage(
   )
     throw new GatewayError(502, "invalid_upstream_usage", "Reasoning usage exceeds total output");
   if (cached !== undefined) usage.cached_input_tokens = cached;
-  if (write !== undefined) usage.cache_write_tokens = write;
+  if (write !== undefined || write5m !== undefined || write1h !== undefined) {
+    delete usage.cache_write_tokens;
+    delete usage.cache_write_5m_tokens;
+    delete usage.cache_write_1h_tokens;
+    if (write !== undefined) usage.cache_write_tokens = write;
+    if (write5m !== undefined) usage.cache_write_5m_tokens = write5m;
+    if (write1h !== undefined) usage.cache_write_1h_tokens = write1h;
+  }
   if (reasoning !== undefined) usage.reasoning_tokens = reasoning;
   return usage;
 }

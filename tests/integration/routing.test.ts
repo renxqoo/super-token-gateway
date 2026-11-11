@@ -76,7 +76,8 @@ beforeAll(async () => {
         idleTimeout: 0,
         fetch: async (request) => {
           const model =
-            request.method === "POST"
+            request.method === "POST" &&
+            request.headers.get("content-type")?.includes("application/json")
               ? String(((await request.clone().json()) as { model?: string }).model ?? "")
               : "";
           const response = await mock.app.fetch(request);
@@ -412,6 +413,107 @@ async function audit(
     }[]
   >`SELECT a.id,a.provider_id,a.ordinal,a.state,e.finality,e.cost_atoms::text AS cost,e.cost_complete,e.usage FROM attempts a JOIN gateway_requests q ON q.id=a.request_id LEFT JOIN usage_events e ON e.id=a.evidence_id WHERE q.project_id=${f.project} ORDER BY q.created_at,q.id,a.ordinal`;
 }
+
+test("incompatible route policies are excluded from dispatch and the captured customer quote", async () => {
+  const f = await fixture();
+  await manage(
+    `/routes/${f.routes[0]}`,
+    { request_policy: { blocked_parameters: ["temperature"] } },
+    "PATCH",
+  );
+  const response = await f.send({ temperature: 0 });
+  expect(response.status).toBe(200);
+  await response.json();
+  const attempts = await audit(f, "18");
+  expect(await f.counts()).toEqual([0, 1, 0]);
+  expect(attempts.map((a) => a.provider_id)).toEqual([f.providers[1]!]);
+  const [request] =
+    await db`SELECT billing_quote FROM gateway_requests WHERE project_id=${f.project}`;
+  expect(Object.keys(request!.billing_quote.prices).sort()).toEqual(
+    [f.providers[1]!, f.providers[2]!].sort(),
+  );
+});
+
+test("all model policies rejecting a request leaves no hold and policy replacement restores dispatch", async () => {
+  const f = await fixture();
+  for (const id of f.routes)
+    await manage(
+      `/routes/${id}`,
+      { request_policy: { parameter_ranges: { max_completion_tokens: { maximum: 4 } } } },
+      "PATCH",
+    );
+  const denied = await f.send();
+  expect(denied.status).toBe(422);
+  expect(await denied.json()).toMatchObject({ error: { code: "unsupported_capability" } });
+  expect(await f.counts()).toEqual([0, 0, 0]);
+  expect((await db`SELECT id FROM gateway_requests WHERE project_id=${f.project}`).length).toBe(0);
+  await audit(f, "0");
+  await manage(`/routes/${f.routes[0]}`, { request_policy: {} }, "PATCH");
+  const accepted = await f.send();
+  expect(accepted.status).toBe(200);
+  await accepted.json();
+  expect(await f.counts()).toEqual([1, 0, 0]);
+  await audit(f, "32");
+});
+
+test("Batch row incompatibility skips its provider before quoting and uploads through a compatible provider", async () => {
+  const f = await fixture();
+  await manage(`/models/${f.model}`, { operations: ["chat", "files", "batches"] }, "PATCH");
+  for (let i = 0; i < f.providers.length; i++)
+    await manage(`/models/${f.model}/routes`, {
+      provider_id: f.providers[i],
+      upstream_model: f.model,
+      operations: ["files"],
+      priority: 30 - i * 10,
+      weight: 1,
+      pricing: { currency: "USD", rates: { requests: { numerator: "1", denominator: "1" } } },
+    });
+  await manage("/tariffs", {
+    model: f.model,
+    operation: "files",
+    pricing: { currency: "USD", rates: { requests: { numerator: "1", denominator: "1" } } },
+    ceilings: { requests: "1" },
+    basis: "REQUEST_COMPLETION",
+  });
+  await manage(
+    `/routes/${f.routes[0]}`,
+    { request_policy: { blocked_parameters: ["temperature"] } },
+    "PATCH",
+  );
+  const form = new FormData();
+  form.set("purpose", "batch");
+  form.set(
+    "file",
+    new File(
+      [
+        JSON.stringify({
+          custom_id: "policy",
+          method: "POST",
+          url: "/v1/chat/completions",
+          body: { model: f.model, messages: [{ role: "user", content: "x" }], temperature: 0 },
+        }),
+      ],
+      "policy.jsonl",
+    ),
+  );
+  const response = await fetch(`${origin}/v1/files`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${f.key}` },
+    body: form,
+  });
+  expect(response.status).toBe(200);
+  const resource = await instances[0]!.store.resource(
+    String(((await response.json()) as { id: string }).id),
+    f.project,
+  );
+  expect(resource.provider_id).toBe(f.providers[1]!);
+  await audit(f, "1");
+  const [request] =
+    await db`SELECT billing_quote FROM gateway_requests WHERE project_id=${f.project}`;
+  expect(Object.keys(request!.billing_quote.prices).sort()).toEqual(
+    [f.providers[1]!, f.providers[2]!].sort(),
+  );
+});
 
 for (const status of [408, 409, 429, 500, 502, 503, 504, 529])
   test(`HTTP ${status} switches to a healthy provider and charges its fractional tariff exactly once`, async () => {

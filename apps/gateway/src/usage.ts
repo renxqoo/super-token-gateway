@@ -55,6 +55,11 @@ export class Metering {
           (this.state.operation !== "embeddings" && usage.output_tokens === undefined))
       )
         complete = false;
+      if (
+        (usage.cache_write_5m_tokens !== undefined || usage.cache_write_1h_tokens !== undefined) &&
+        usage.cache_write_tokens === undefined
+      )
+        complete = false;
       total +=
         BigInt(usage.input_tokens ?? "0") +
         BigInt(usage.cached_input_tokens ?? "0") +

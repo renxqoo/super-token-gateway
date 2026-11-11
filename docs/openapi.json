@@ -332,6 +332,8 @@
                     "output_tokens",
                     "cached_input_tokens",
                     "cache_write_tokens",
+                    "cache_write_5m_tokens",
+                    "cache_write_1h_tokens",
                     "requests",
                     "images",
                     "audio_ms",
@@ -359,6 +361,50 @@
               }
             },
             "required": ["currency", "rates"],
+            "additionalProperties": false
+          },
+          "request_policy": {
+            "type": "object",
+            "properties": {
+              "allowed_parameters": {
+                "maxItems": 100,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 100,
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                }
+              },
+              "blocked_parameters": {
+                "maxItems": 100,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|\\*))*$"
+                }
+              },
+              "parameter_ranges": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|\\*))*$"
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "minimum": {
+                      "type": "number"
+                    },
+                    "maximum": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
             "additionalProperties": false
           }
         },
@@ -389,6 +435,8 @@
                 "output_tokens",
                 "cached_input_tokens",
                 "cache_write_tokens",
+                "cache_write_5m_tokens",
+                "cache_write_1h_tokens",
                 "requests",
                 "images",
                 "audio_ms",
@@ -567,6 +615,8 @@
                     "output_tokens",
                     "cached_input_tokens",
                     "cache_write_tokens",
+                    "cache_write_5m_tokens",
+                    "cache_write_1h_tokens",
                     "requests",
                     "images",
                     "audio_ms",
@@ -605,6 +655,8 @@
                 "output_tokens",
                 "cached_input_tokens",
                 "cache_write_tokens",
+                "cache_write_5m_tokens",
+                "cache_write_1h_tokens",
                 "requests",
                 "images",
                 "audio_ms",
@@ -695,6 +747,8 @@
                 "output_tokens",
                 "cached_input_tokens",
                 "cache_write_tokens",
+                "cache_write_5m_tokens",
+                "cache_write_1h_tokens",
                 "requests",
                 "images",
                 "audio_ms",
@@ -4828,6 +4882,51 @@
                   },
                   "pricing": {
                     "$ref": "#/components/schemas/Pricing"
+                  },
+                  "request_policy": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "properties": {
+                      "allowed_parameters": {
+                        "maxItems": 100,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 100,
+                          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                        }
+                      },
+                      "blocked_parameters": {
+                        "maxItems": 100,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 200,
+                          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|\\*))*$"
+                        }
+                      },
+                      "parameter_ranges": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string",
+                          "maxLength": 200,
+                          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|\\*))*$"
+                        },
+                        "additionalProperties": {
+                          "type": "object",
+                          "properties": {
+                            "minimum": {
+                              "type": "number"
+                            },
+                            "maximum": {
+                              "type": "number"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "additionalProperties": false
                   }
                 }
               }

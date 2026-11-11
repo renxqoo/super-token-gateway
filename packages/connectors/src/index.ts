@@ -5,3 +5,5 @@ export * from "./media-stream.ts";
 export * from "./finish.ts";
 export * from "./measurement.ts";
 export * from "./bedrock-stream.ts";
+export * from "./adapters.ts";
+export * from "./policy.ts";

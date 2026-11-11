@@ -11,6 +11,7 @@ import type { BatchManifest, Operation, Resource, Route } from "@gateway/kernel"
 import { readBounded } from "@gateway/runtime";
 import type { Auth, Dependencies } from "./context.ts";
 import { applyOutputBound, rejectUnmeteredTools } from "./input-policy.ts";
+import { prepareOperation } from "@gateway/connectors";
 import { queryResource, resolveFileReferences } from "./resources.ts";
 
 const endpoints: Record<string, Operation> = {
@@ -144,29 +145,24 @@ export async function readBatchManifest(
   return batch.manifest;
 }
 
-export async function rewriteBatchInput(
+export interface BatchPreparation {
+  route: Route;
+  maxOutputTokens: number;
+}
+
+async function prepareBatchRequests(
   deps: Dependencies,
   auth: Auth,
   input: BatchInput,
-  selected: Route,
-): Promise<{ file: File; upstreamModel: string }> {
-  const candidates = await deps.store.routes(input.model, input.operation);
-  const route = candidates.find(
-    (route) => route.provider_id === selected.provider_id && route.kind === "openai",
-  );
-  if (!route)
-    throw new GatewayError(
-      422,
-      "resource_provider_mismatch",
-      "Batch model has no compatible route on the upload provider",
-    );
-  const policy = await deps.store.model(input.model);
-  const rewritten: string[] = [];
+  preparation: BatchPreparation,
+  accept?: (request: Record<string, unknown>) => void,
+): Promise<void> {
+  const { route, maxOutputTokens } = preparation;
   for (const request of input.requests) {
     const original = object(request.body);
     const body = copyExact(original, { ...original });
     rejectUnmeteredTools(body, input.operation);
-    applyOutputBound(body, input.operation, policy.max_output_tokens);
+    applyOutputBound(body, input.operation, maxOutputTokens);
     const references = await resolveFileReferences(
       deps,
       auth.project.id,
@@ -179,19 +175,59 @@ export async function rewriteBatchInput(
         "resource_provider_mismatch",
         "Batch file references a different provider",
       );
-    rewritten.push(
-      stringifyExact(
-        copyExact(request, {
-          ...request,
-          body: copyExact(references.body, { ...references.body, model: route.upstream_model }),
-        }),
-      ),
+    const prepared = prepareOperation(
+      references.body,
+      input.operation,
+      route.kind,
+      route.upstream_model,
+      route.request_policy,
     );
+    accept?.(copyExact(request, { ...request, body: prepared.body }));
   }
+}
+
+export async function prepareBatchInput(
+  deps: Dependencies,
+  auth: Auth,
+  input: BatchInput,
+  selected: Route,
+): Promise<BatchPreparation> {
+  const candidates = (await deps.store.routes(input.model, input.operation)).filter(
+    (route) => route.provider_id === selected.provider_id && route.kind === "openai",
+  );
+  const policy = await deps.store.model(input.model);
+  let failure: unknown = new GatewayError(
+    422,
+    "resource_provider_mismatch",
+    "Batch model has no compatible route on the upload provider",
+  );
+  for (const route of candidates) {
+    const preparation = { route, maxOutputTokens: policy.max_output_tokens };
+    try {
+      await prepareBatchRequests(deps, auth, input, preparation);
+      return preparation;
+    } catch (error) {
+      if (!(error instanceof GatewayError)) throw error;
+      failure = error;
+    }
+  }
+  throw failure;
+}
+
+export async function rewriteBatchInput(
+  deps: Dependencies,
+  auth: Auth,
+  input: BatchInput,
+  preparation: BatchPreparation,
+): Promise<{ file: File; upstreamModel: string }> {
+  const rewritten: string[] = [];
+  await prepareBatchRequests(deps, auth, input, preparation, (request) => {
+    rewritten.push(stringifyExact(request));
+  });
   return {
     file: new File([rewritten.join("\n") + "\n"], "batch-input.jsonl", {
       type: "application/jsonl",
     }),
-    upstreamModel: route.upstream_model,
+    upstreamModel: preparation.route.upstream_model,
   };
 }

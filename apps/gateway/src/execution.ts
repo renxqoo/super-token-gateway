@@ -34,8 +34,8 @@ import { sendUpstream } from "./upstream.ts";
 import { publishEvidence } from "./metering.ts";
 import { prepareStream, relayStream } from "./relay-stream.ts";
 import { relayBinary } from "./relay-binary.ts";
-import type { BatchInput } from "./batch-input.ts";
-import { readBatchManifest, rewriteBatchInput } from "./batch-input.ts";
+import type { BatchInput, BatchPreparation } from "./batch-input.ts";
+import { readBatchManifest, rewriteBatchInput, prepareBatchInput } from "./batch-input.ts";
 import { applyOutputBound, rejectUnmeteredTools } from "./input-policy.ts";
 
 const textProtocols = new Set<string>(["chat", "responses", "messages", "gemini"]);
@@ -212,6 +212,40 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
         "resource_provider_mismatch",
         "No route matches the original resource provider",
       );
+    let preparationError: unknown;
+    const compatibleRoutes: Route[] = [];
+    const preparedBatches = new Map<string, BatchPreparation>();
+    for (const route of routes) {
+      if (input.pinnedUpstreamModel && route.upstream_model !== input.pinnedUpstreamModel) continue;
+      try {
+        prepareOperation(
+          input.body,
+          input.operation,
+          route.kind,
+          route.upstream_model,
+          route.request_policy,
+        );
+        if (input.batchInput)
+          preparedBatches.set(
+            route.id,
+            await prepareBatchInput(deps, input.auth, input.batchInput, route),
+          );
+        compatibleRoutes.push(route);
+      } catch (error) {
+        if (!(error instanceof GatewayError)) throw error;
+        preparationError = error;
+      }
+    }
+    routes = compatibleRoutes;
+    if (!routes.length)
+      throw (
+        preparationError ??
+        new GatewayError(
+          422,
+          "unsupported_capability",
+          "No compatible route model accepts this request",
+        )
+      );
     const currency = input.request.headers.get("x-gateway-currency") ?? project.billing_currency;
     if (!/^[A-Z]{3,8}$/.test(currency))
       throw new GatewayError(
@@ -283,25 +317,22 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
       controller.signal.throwIfAborted();
       const route = routes[step % routes.length];
       if (!route) break;
-      let target: Operation;
-      let outbound: Record<string, unknown>;
-      try {
-        const prepared = prepareOperation(
-          input.body,
-          input.operation,
-          route.kind,
-          route.upstream_model,
-        );
-        outbound = prepared.body;
-        target = prepared.protocol;
-      } catch (error) {
-        lastError = error;
-        if (routes.length === 1) throw error;
-        continue;
-      }
-      if (input.pinnedUpstreamModel && route.upstream_model !== input.pinnedUpstreamModel) continue;
+      const prepared = prepareOperation(
+        input.body,
+        input.operation,
+        route.kind,
+        route.upstream_model,
+        route.request_policy,
+      );
+      const outbound = prepared.body;
+      const target = prepared.protocol;
       const batchFile = input.batchInput
-        ? await rewriteBatchInput(deps, input.auth, input.batchInput, route)
+        ? await rewriteBatchInput(
+            deps,
+            input.auth,
+            input.batchInput,
+            preparedBatches.get(route.id)!,
+          )
         : undefined;
       try {
         providerRelease = await deps.limits.enter(

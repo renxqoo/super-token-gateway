@@ -1192,6 +1192,77 @@ test("SQL price rounds the exact sum once including sub-atom fractions", async (
   expect(rows[0].atoms).toBe("1");
 });
 
+test("mixed cache TTL charges remain exact and missing TTL evidence retains the hold until enrichment", async () => {
+  const p = await project();
+  await credit(p.id, "1000");
+  const rates = {
+    cache_write_5m_tokens: { numerator: "5", denominator: "4" },
+    cache_write_1h_tokens: { numerator: "2", denominator: "1" },
+  };
+  const tariff = await funds.setTariff({
+    model: "funds-model",
+    operation: "chat",
+    pricing: { currency: "USD", rates },
+    ceilings: { cache_write_5m_tokens: "100", cache_write_1h_tokens: "100" },
+    basis: "PROVIDER_USAGE",
+  });
+  const q = await admit(p.credential, "325", "USD", tariff.pricing_id);
+  await complete(q.request, q.attempt, { cache_write_tokens: "200" });
+  expect((await funds.receipt(q.request, p.id)).charged_atoms).toBeNull();
+  expect((await invariant(p.id)).reserved_atoms).toBe("325");
+  await store.persistUsage([
+    {
+      attemptId: q.attempt,
+      source: "provider_invoice",
+      state: "SUCCEEDED",
+      finality: "FINAL",
+      usage: {
+        cache_write_tokens: "200",
+        cache_write_5m_tokens: "100",
+        cache_write_1h_tokens: "100",
+      },
+    },
+  ]);
+  expect((await funds.receipt(q.request, p.id)).charged_atoms).toBe("325");
+  expect((await invariant(p.id)).spent_atoms).toBe("325");
+  expect(await store.tokenSummary(q.request)).toEqual({ complete: false, tokens: 200 });
+  const [cost] =
+    await db`SELECT exact_billing_price(${{ cache_write_5m_tokens: "100", cache_write_1h_tokens: "100" }}::jsonb,${rates}::jsonb)::text AS atoms`;
+  expect(cost.atoms).toBe("325");
+  const replay = {
+    attemptId: q.attempt,
+    source: "provider_invoice",
+    state: "SUCCEEDED",
+    finality: "FINAL",
+    usage: {
+      cache_write_tokens: "200",
+      cache_write_5m_tokens: "100",
+      cache_write_1h_tokens: "100",
+    },
+  } as const;
+  await store.persistUsage([replay]);
+  expect((await invariant(p.id)).spent_atoms).toBe("325");
+});
+
+test("SQL rejects aggregate plus TTL rates and inconsistent cache write partitions", async () => {
+  const rates = {
+    cache_write_tokens: { numerator: "1", denominator: "1" },
+    cache_write_1h_tokens: { numerator: "2", denominator: "1" },
+  };
+  await expect(
+    db`SELECT exact_billing_price('{"cache_write_tokens":"10","cache_write_1h_tokens":"10"}',${rates}::jsonb)`,
+  ).rejects.toThrow("duplicate cache write rate");
+  await expect(
+    db`INSERT INTO billing_prices(id,currency,rates,ceilings,basis) VALUES(${crypto.randomUUID()},'USD',${rates}::jsonb,'{"cache_write_tokens":"10","cache_write_1h_tokens":"10"}','PROVIDER_USAGE')`,
+  ).rejects.toThrow("cache write");
+  const p = await project();
+  await credit(p.id, "100");
+  const q = await admit(p.credential);
+  await expect(
+    db`SELECT record_usage_evidence(${q.attempt}::uuid,${crypto.randomUUID()}::uuid,'execution','SUCCEEDED','FINAL','{"cache_write_tokens":"3","cache_write_5m_tokens":"1","cache_write_1h_tokens":"1"}',0,true,NULL,NULL)`,
+  ).rejects.toThrow("cache write partitions");
+});
+
 test("refund waiting across gift expiry cannot resurrect credit or block later funding", async () => {
   const p = await project();
   const expires = Date.now() + 900;

@@ -5,8 +5,79 @@ import {
   encodeRequest,
   encodeResponse,
   imageCount,
+  prepareRequest,
 } from "../index.ts";
 import type { Protocol } from "@gateway/kernel";
+
+test("cross-protocol conversion rejects effort instead of silently dropping it", () => {
+  const body = { messages: [{ role: "user", content: "solve" }], output_config: { effort: "low" } };
+  expect(() => prepareRequest(body, "messages", "gemini", "target")).toThrow(
+    "output_config.effort",
+  );
+  expect(prepareRequest(body, "messages", "anthropic", "target").body.output_config).toEqual({
+    effort: "low",
+  });
+});
+
+test("cross-protocol conversion rejects audio and video instead of sending them as images", () => {
+  for (const mimeType of ["audio/wav", "video/mp4"]) {
+    for (const part of [
+      { inlineData: { mimeType, data: "AAAA" } },
+      { fileData: { mimeType, fileUri: "gs://media" } },
+    ]) {
+      const body = { contents: [{ role: "user", parts: [part] }] };
+      expect(() => prepareRequest(body, "gemini", "anthropic", "target")).toThrow(
+        "image media type",
+      );
+      expect(prepareRequest(body, "gemini", "gemini", "target").body.contents).toEqual(
+        body.contents,
+      );
+    }
+  }
+});
+
+test("cross-protocol conversion rejects strict output and nested tool controls instead of losing them", () => {
+  expect(() =>
+    prepareRequest(
+      {
+        messages: [],
+        response_format: {
+          type: "json_schema",
+          json_schema: { name: "result", strict: true, schema: { type: "object" } },
+        },
+      },
+      "chat",
+      "anthropic",
+      "target",
+    ),
+  ).toThrow("strict");
+  expect(() =>
+    prepareRequest(
+      {
+        messages: [],
+        tools: [
+          {
+            name: "lookup",
+            input_schema: { type: "object" },
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+      "messages",
+      "gemini",
+      "target",
+    ),
+  ).toThrow("cache_control");
+});
+
+test("cross-protocol conversion rejects versioned Anthropic tools instead of weakening their contracts", () => {
+  const body = {
+    messages: [{ role: "user", content: "run" }],
+    tools: [{ type: "bash_20250124", name: "bash" }],
+  };
+  expect(() => prepareRequest(body, "messages", "openai", "target")).toThrow("versioned tool");
+  expect(prepareRequest(body, "messages", "anthropic", "target").body.tools).toEqual(body.tools);
+});
 
 test("image quantity follows payloads across object, split and metadata shapes", () => {
   expect(imageCount({ url: "image" })).toBe(1);

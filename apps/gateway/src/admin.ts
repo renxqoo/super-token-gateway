@@ -20,6 +20,7 @@ import {
   operations,
   providerSchema,
   routeSchema,
+  requestPolicySchema,
   secureEqual,
   verifier,
 } from "@gateway/kernel";
@@ -211,6 +212,7 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
         priority: z.number().int().min(0).max(1000).optional(),
         weight: z.number().min(0.001).max(1000).optional(),
         pricing: pricingSchema.optional(),
+        request_policy: requestPolicySchema.optional(),
       })
       .strict()
       .parse(await body(c));

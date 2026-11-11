@@ -16,3 +16,9 @@
 请求指纹保留对象键无关性、数组顺序、显式 false/0 和 IEEE-754 之外的数字原文。模型别名在发送时替换，Files/Batch 资源固定到原供应商，不能切换到不拥有该资源的账号。
 
 跨协议只转换已能保真的语义：文本、常用图片、工具调用/结果、输出上限、采样、停止词、工具选择及 JSON schema。未支持的签名、思维块、托管工具、多候选、严格模式等返回 conversion_loss。原生接口透传可支持字段，不用通用中间格式裁掉新字段；输出上界只接受本协议原生字段，没有计量维度的服务端托管工具在准入前返回 unmetered_tool（[ADR 0006](docs/decisions/0006-review-remediation.md)）。
+
+模型兼容策略与扩展边界见 [ADR 0007](docs/decisions/0007-money-and-model-compatibility.md)。适配器使用编译期注册表；同协议模型复用实现，Bedrock 当前适配 Anthropic Messages，Vertex 当前适配 Gemini，其他模型家族须新增完整适配与验收后开放。不会自动承诺厂商所有模型。
+
+每条路由可配置 `request_policy`，对转换后的目标原生请求执行 `allowed_parameters` 顶层白名单、`blocked_parameters` 点分路径拒绝和 `parameter_ranges` 数值范围检查。路径中的 `*` 只展开一层数组或对象；例如 `tools.*.function.strict` 和 `generationConfig.temperature`。白名单需包含网关注入的 `model`、输出上界、流式 `stream_options` 等目标字段；Gemini 的 model/stream 不在 JSON body 中。空策略保留原生扩展字段透传。策略限制目标模型，不从名称猜测能力。
+
+例如 DeepSeek 路由可设置 `{"parameter_ranges":{"max_tokens":{"maximum":8192},"temperature":{"minimum":0,"maximum":2}},"blocked_parameters":["response_format.json_schema"]}`。该例演示配置格式，具体约束必须按部署模型版本验收。未兼容候选在报价和预扣前移除；全部拒绝返回 422/unsupported_capability 或 conversion_loss，不调用上游、不产生预扣。更新路由策略替换整个策略对象，`{}` 清空限制，配置缓存沿用最多一秒的跨实例失效边界。

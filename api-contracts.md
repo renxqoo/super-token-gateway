@@ -70,3 +70,5 @@ Multipart 推理请求的 `prompt` 和 `input` 各只接受一个字段。重复
 成功200返回id、credit_policy_version、credit_limit_atoms及replayed。相同命令重试返回原id与版本，不重新应用；不同载荷、旧版本、新额度低于欠费加在途信用返回409/billing_conflict，钱包不存在404/not_found，HTTP输入格式错误400。数据库入口的非法金额映射422/billing_rejected。
 
 钱包查询新增credit_limit_atoms、credit_reserved_atoms、available_credit_atoms、credit_excess_atoms、credit_policy_version，均为整数串；available_credit_atoms不包含模型受限赠额。`GET /v1/requests/:id/billing` 新增该请求credit_reserved_atoms，描述原预扣中的信用部分，终态后的实际欠费看debt_atoms。现金/赠额available最低0；异常应收超过授信时保留全额债务并冻结。
+
+路由创建与 PATCH 支持可选 `request_policy`，策略整体替换，`{}` 清空。格式、目标原生字段及扩展约束见 [路由设计](routing-and-execution.md) 与 [ADR 0007](docs/decisions/0007-money-and-model-compatibility.md)。新增缓存写入维度 `cache_write_5m_tokens`、`cache_write_1h_tokens` 均为精确非负整数字符串；原合计维度继续用于已捕获的历史费率，同一费率禁止同时定价合计与明细。金额单位、舍入、旧账单和外部队列版本不变；启用新维度前须先升级所有消费者。

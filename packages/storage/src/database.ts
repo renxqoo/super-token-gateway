@@ -14,7 +14,7 @@ export function createDatabase(url: string, max = 16): SQL {
   });
 }
 
-export const SCHEMA_VERSION = 2026111102;
+export const SCHEMA_VERSION = 2026111201;
 export async function migrate(
   db: SQL,
   options: { upgrade?: boolean; quiesced?: boolean } = {},
@@ -31,9 +31,9 @@ export async function migrate(
       if (versions.length === 1 && versions[0]?.version === SCHEMA_VERSION) return;
       if (
         versions.length !== 1 ||
-        ![2026111006, 2026111007, 2026111008, 2026111009, 2026111010, 2026111101].includes(
-          versions[0]?.version ?? 0,
-        ) ||
+        ![
+          2026111006, 2026111007, 2026111008, 2026111009, 2026111010, 2026111101, 2026111102,
+        ].includes(versions[0]?.version ?? 0) ||
         !options.upgrade ||
         !options.quiesced
       )
@@ -60,6 +60,7 @@ export async function migrate(
         AND h.state IN ('HELD','RECONCILING')`;
       }
       if ((versions[0]?.version ?? 0) < 2026111101) await tx.unsafe(credit);
+      await tx`ALTER TABLE public.routes ADD COLUMN request_policy jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(request_policy)='object')`;
       const functions = `${source}\n${lifecycle}\n${credit}`.match(
         /CREATE FUNCTION [\s\S]*?\bAS (\$[A-Za-z_]*\$)[\s\S]*?\1;/g,
       );

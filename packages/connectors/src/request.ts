@@ -7,7 +7,9 @@ import {
   parseProviderJson,
   copyExact,
 } from "@gateway/kernel";
-import type { Protocol, ProviderKind, Operation } from "@gateway/kernel";
+import type { Protocol, ProviderKind, Operation, RequestPolicy } from "@gateway/kernel";
+import { providerAdapter, providerProtocol } from "./adapters.ts";
+import { validateRequestPolicy } from "./policy.ts";
 
 export type Part =
   | { type: "text"; text: string }
@@ -49,9 +51,19 @@ const list = (value: unknown): unknown[] => {
 const jsonArguments = (value: unknown): string =>
   typeof value === "string" ? value : stringifyExact(value ?? {});
 
+function onlyKeys(value: Record<string, unknown>, allowed: readonly string[], path: string): void {
+  for (const key of Object.keys(value)) if (!allowed.includes(key)) unsupported(`${path}.${key}`);
+}
+
+function imageMime(mime: unknown): string {
+  if (typeof mime !== "string" || !/^image\/(?:png|jpeg|gif|webp)$/.test(mime))
+    return unsupported("image media type");
+  return mime;
+}
+
 function imageFromData(data: unknown, mime: unknown): Part {
   if (typeof data !== "string" || typeof mime !== "string") return unsupported("image source");
-  return { type: "image", url: `data:${mime};base64,${data}`, mime };
+  return { type: "image", url: `data:${imageMime(mime)};base64,${data}`, mime };
 }
 
 function openaiParts(content: unknown): Part[] {
@@ -59,10 +71,12 @@ function openaiParts(content: unknown): Part[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
   return list(content).map((entry): Part => {
     const part = object(entry);
+    onlyKeys(part, ["type", "text", "image_url", "detail"], "content");
     if (["text", "input_text", "output_text"].includes(text(part.type)))
       return { type: "text", text: text(part.text) };
     if (["image_url", "input_image"].includes(text(part.type))) {
       const image = optionalObject(part.image_url);
+      onlyKeys(image, ["url", "detail"], "image_url");
       const url = text(image.url ?? part.image_url);
       if (
         !url ||
@@ -81,11 +95,19 @@ function anthropicParts(content: unknown): Part[] {
   return list(content).map((entry): Part => {
     const part = object(entry);
     if (part.cache_control) return unsupported("cache_control");
+    const fields: Record<string, string[]> = {
+      text: ["type", "text"],
+      image: ["type", "source"],
+      tool_use: ["type", "id", "name", "input"],
+      tool_result: ["type", "tool_use_id", "is_error", "content"],
+    };
+    onlyKeys(part, fields[text(part.type)] ?? ["type"], "content");
     switch (part.type) {
       case "text":
         return { type: "text", text: text(part.text) };
       case "image": {
         const source = object(part.source);
+        onlyKeys(source, ["type", "data", "media_type", "url"], "image.source");
         if (source.type === "base64") return imageFromData(source.data, source.media_type);
         if (source.type === "url")
           return { type: "image", url: text(source.url), mime: "image/jpeg" };
@@ -162,6 +184,10 @@ export function decodeRequest(body: Record<string, unknown>, source: Protocol): 
     ]),
   };
   for (const key of Object.keys(body)) if (!allowed[source].has(key)) unsupported(key);
+  if (body.output_config) onlyKeys(object(body.output_config), ["format"], "output_config");
+  if (body.text) onlyKeys(object(body.text), ["format"], "text");
+  if (body.stream_options)
+    onlyKeys(object(body.stream_options), ["include_usage"], "stream_options");
   if (body.n !== undefined && body.n !== 1) unsupported("n > 1");
   if (body.store === true) unsupported("stored response continuation");
   const result: NormalRequest = { messages: [], tools: [], stream: body.stream === true };
@@ -202,6 +228,8 @@ export function decodeRequest(body: Record<string, unknown>, source: Protocol): 
         for (const raw of list(message.tool_calls)) {
           const call = object(raw);
           const fn = object(call.function);
+          onlyKeys(call, ["id", "type", "function"], "tool_call");
+          onlyKeys(fn, ["name", "arguments"], "tool_call.function");
           if (call.type !== "function") unsupported("non-function tool");
           parts.push({
             type: "call",
@@ -218,6 +246,15 @@ export function decodeRequest(body: Record<string, unknown>, source: Protocol): 
     else
       for (const raw of list(body.input)) {
         const item = object(raw);
+        onlyKeys(
+          item,
+          item.type === "function_call"
+            ? ["type", "call_id", "name", "arguments"]
+            : item.type === "function_call_output"
+              ? ["type", "call_id", "output"]
+              : ["type", "role", "content"],
+          "input",
+        );
         if (item.type === "function_call")
           add("assistant", [
             {
@@ -243,31 +280,47 @@ export function decodeRequest(body: Record<string, unknown>, source: Protocol): 
     if (body.system) add("system", anthropicParts(body.system));
     for (const raw of list(body.messages)) {
       const message = object(raw);
+      onlyKeys(message, ["role", "content"], "message");
       add(message.role, anthropicParts(message.content));
     }
   } else {
     const system = optionalObject(body.systemInstruction);
+    onlyKeys(system, ["parts", "role"], "systemInstruction");
     if (system.parts)
       add(
         "system",
-        list(system.parts).map((raw) => ({ type: "text", text: text(object(raw).text) })),
+        list(system.parts).map((raw) => {
+          const part = object(raw);
+          onlyKeys(part, ["text"], "systemInstruction.parts");
+          return { type: "text", text: text(part.text) };
+        }),
       );
     for (const raw of list(body.contents)) {
       const message = object(raw);
+      onlyKeys(message, ["role", "parts"], "content");
       const parts = list(message.parts).map((value): Part => {
         const part = object(value);
         if (part.thought || part.thoughtSignature) unsupported("Gemini thought/signature");
+        onlyKeys(
+          part,
+          ["text", "inlineData", "fileData", "functionCall", "functionResponse"],
+          "part",
+        );
+        if (Object.keys(part).length !== 1) unsupported("combined Gemini part fields");
         if (typeof part.text === "string") return { type: "text", text: part.text };
         if (part.inlineData) {
           const data = object(part.inlineData);
+          onlyKeys(data, ["mimeType", "data"], "inlineData");
           return imageFromData(data.data, data.mimeType);
         }
         if (part.fileData) {
           const data = object(part.fileData);
-          return { type: "image", url: text(data.fileUri), mime: text(data.mimeType) };
+          onlyKeys(data, ["mimeType", "fileUri"], "fileData");
+          return { type: "image", url: text(data.fileUri), mime: imageMime(data.mimeType) };
         }
         if (part.functionCall) {
           const call = object(part.functionCall);
+          onlyKeys(call, ["id", "name", "args"], "functionCall");
           return {
             type: "call",
             id: text(call.id, `call_${result.messages.length}`),
@@ -277,6 +330,7 @@ export function decodeRequest(body: Record<string, unknown>, source: Protocol): 
         }
         if (part.functionResponse) {
           const response = object(part.functionResponse);
+          onlyKeys(response, ["id", "name", "response"], "functionResponse");
           return {
             type: "result",
             id: text(response.id),
@@ -338,9 +392,15 @@ export function decodeRequest(body: Record<string, unknown>, source: Protocol): 
     for (const value of list(body.tools)) {
       const tool = object(value);
       if (source === "gemini") {
+        onlyKeys(tool, ["functionDeclarations"], "tool");
         if (!tool.functionDeclarations) unsupported("hosted tools");
         for (const raw of list(tool.functionDeclarations)) {
           const fn = object(raw);
+          onlyKeys(
+            fn,
+            ["name", "description", "parameters", "parametersJsonSchema"],
+            "tool.functionDeclarations",
+          );
           result.tools.push({
             name: text(fn.name),
             description: text(fn.description),
@@ -349,8 +409,16 @@ export function decodeRequest(body: Record<string, unknown>, source: Protocol): 
         }
       } else {
         const fn = source === "chat" ? object(tool.function) : tool;
+        if (source === "chat") onlyKeys(tool, ["type", "function"], "tool");
+        onlyKeys(
+          fn,
+          ["type", "name", "description", "parameters", "input_schema", "strict"],
+          "tool",
+        );
         if ((source === "chat" || source === "responses") && tool.type !== "function")
           unsupported("hosted tools");
+        if (source === "messages" && tool.type !== undefined && tool.type !== "custom")
+          unsupported("versioned tool");
         if (fn.strict === true) unsupported("strict tool validation");
         result.tools.push({
           name: text(fn.name),
@@ -364,11 +432,19 @@ export function decodeRequest(body: Record<string, unknown>, source: Protocol): 
     source === "gemini"
       ? optionalObject(optionalObject(body.toolConfig).functionCallingConfig)
       : body.tool_choice;
+  if (source === "gemini" && body.toolConfig)
+    onlyKeys(object(body.toolConfig), ["functionCallingConfig"], "toolConfig");
   if (typeof choice === "string") {
     if (!["auto", "none", "required"].includes(choice)) unsupported("tool_choice");
     result.toolChoice = choice as "auto" | "none" | "required";
   } else if (choice && Object.keys(optionalObject(choice)).length) {
     const c = object(choice);
+    onlyKeys(
+      c,
+      ["type", "mode", "name", "function", "allowedFunctionNames", "disable_parallel_tool_use"],
+      "tool_choice",
+    );
+    if (c.function) onlyKeys(object(c.function), ["name"], "tool_choice.function");
     if (c.disable_parallel_tool_use !== undefined) unsupported("disable_parallel_tool_use");
     const name = text(c.name ?? optionalObject(c.function).name);
     if (name) result.toolChoice = { name };
@@ -396,6 +472,11 @@ export function decodeRequest(body: Record<string, unknown>, source: Protocol): 
       : source === "messages"
         ? optionalObject(optionalObject(body.output_config).format)
         : optionalObject(body.response_format);
+  onlyKeys(format, ["type", "json_schema", "name", "schema", "strict"], "format");
+  const schemaFormat = optionalObject(format.json_schema);
+  onlyKeys(schemaFormat, ["name", "description", "schema", "strict"], "format.json_schema");
+  if (format.strict === true || schemaFormat.strict === true)
+    unsupported("strict output validation");
   if (format.type === "json_object" || config.responseMimeType === "application/json")
     result.jsonSchema = { type: "object" };
   if (format.type === "json_schema")
@@ -649,18 +730,6 @@ export function encodeRequest(
   return body;
 }
 
-export function providerProtocol(kind: ProviderKind, requested: Protocol): Protocol {
-  return ["anthropic", "bedrock"].includes(kind)
-    ? "messages"
-    : ["gemini", "vertex"].includes(kind)
-      ? "gemini"
-      : ["deepseek", "azure"].includes(kind)
-        ? "chat"
-        : requested === "responses"
-          ? "responses"
-          : "chat";
-}
-
 export function prepareRequest(
   body: Record<string, unknown>,
   source: Protocol,
@@ -668,34 +737,11 @@ export function prepareRequest(
   model: string,
 ): { body: Record<string, unknown>; protocol: Protocol } {
   const target = providerProtocol(kind, source);
-  if (target === source) {
-    const native: Record<string, unknown> = copyExact(body, { ...body, model });
-    if (source === "chat" && native.stream === true)
-      native.stream_options = { ...optionalObject(native.stream_options), include_usage: true };
-    if (source === "gemini") {
-      delete native.model;
-      delete native.stream;
-    }
-    if (
-      ["deepseek", "ollama"].includes(kind) &&
-      source === "chat" &&
-      native.max_completion_tokens !== undefined
-    ) {
-      native.max_tokens = native.max_completion_tokens;
-      delete native.max_completion_tokens;
-    }
-    return { body: native, protocol: target };
-  }
-  const converted = encodeRequest(decodeRequest(body, source), target, model);
-  if (
-    ["deepseek", "ollama"].includes(kind) &&
-    target === "chat" &&
-    converted.max_completion_tokens !== undefined
-  ) {
-    converted.max_tokens = converted.max_completion_tokens;
-    delete converted.max_completion_tokens;
-  }
-  return { body: converted, protocol: target };
+  const outbound =
+    target === source
+      ? copyExact(body, { ...body, model })
+      : encodeRequest(decodeRequest(body, source), target, model);
+  return { body: providerAdapter(kind).prepare(outbound, target), protocol: target };
 }
 
 export function prepareOperation(
@@ -703,14 +749,14 @@ export function prepareOperation(
   operation: Operation,
   kind: ProviderKind,
   model: string,
+  policy?: RequestPolicy,
 ): { body: Record<string, unknown>; protocol: Operation } {
-  if (["chat", "responses", "messages", "gemini"].includes(operation))
-    return prepareRequest(body, operation as Protocol, kind, model);
-  if (
-    kind !== "openai" &&
-    !(["ollama", "azure"].includes(kind) && operation === "embeddings") &&
-    !(kind === "gemini" && operation === "videos")
-  )
+  if (["chat", "responses", "messages", "gemini"].includes(operation)) {
+    const prepared = prepareRequest(body, operation as Protocol, kind, model);
+    validateRequestPolicy(prepared.body, policy);
+    return prepared;
+  }
+  if (!providerAdapter(kind).operations.includes(operation))
     throw new GatewayError(
       422,
       "unsupported_capability",
@@ -749,5 +795,6 @@ export function prepareOperation(
       },
     };
   }
+  validateRequestPolicy(outbound, policy);
   return { body: outbound, protocol: operation };
 }

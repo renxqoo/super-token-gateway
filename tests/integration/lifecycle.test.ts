@@ -11,7 +11,7 @@ import {
 import { exportEvidenceArchive, verifyEvidenceArchive } from "../../scripts/evidence-archive.ts";
 import { mkdir, rm, appendFile } from "node:fs/promises";
 
-for (const previousVersion of [2026111008, 2026111009, 2026111010, 2026111101])
+for (const previousVersion of [2026111008, 2026111009, 2026111010, 2026111101, 2026111102])
   test(`schema${previousVersion} upgrade preserves settled receipts, ACKs and an open hold before completing it once`, async () => {
     const base = process.env.DATABASE_URL;
     if (!base) throw new Error("DATABASE_URL required");

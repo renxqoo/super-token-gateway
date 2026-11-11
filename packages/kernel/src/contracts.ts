@@ -33,6 +33,8 @@ export const dimensions = [
   "output_tokens",
   "cached_input_tokens",
   "cache_write_tokens",
+  "cache_write_5m_tokens",
+  "cache_write_1h_tokens",
   "requests",
   "images",
   "audio_ms",
@@ -54,12 +56,52 @@ export const pricingSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (
+      value.rates.cache_write_tokens &&
+      (value.rates.cache_write_5m_tokens || value.rates.cache_write_1h_tokens)
+    )
+      context.addIssue({
+        code: "custom",
+        message: "Choose aggregate or TTL-specific cache write rates",
+      });
     for (const prefix of ["audio", "video"] as const) {
       if (value.rates[`${prefix}_ms`] && value.rates[`${prefix}_seconds`])
         context.addIssue({ code: "custom", message: "Choose one duration unit per media type" });
     }
   });
 export type Pricing = z.infer<typeof pricingSchema>;
+const parameterPath = z
+  .string()
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|\*))*$/)
+  .max(200);
+const parameterRange = z
+  .object({ minimum: z.number().finite().optional(), maximum: z.number().finite().optional() })
+  .strict()
+  .refine(
+    (v) =>
+      (v.minimum !== undefined || v.maximum !== undefined) &&
+      !(v.minimum !== undefined && v.maximum !== undefined && v.minimum > v.maximum),
+    "A parameter range requires ordered bounds",
+  );
+export const requestPolicySchema = z
+  .object({
+    allowed_parameters: z
+      .array(
+        z
+          .string()
+          .regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
+          .max(100),
+      )
+      .max(100)
+      .optional(),
+    blocked_parameters: z.array(parameterPath).max(100).optional(),
+    parameter_ranges: z
+      .record(parameterPath, parameterRange)
+      .refine((v) => Object.keys(v).length <= 100, "Too many parameter ranges")
+      .optional(),
+  })
+  .strict();
+export type RequestPolicy = z.infer<typeof requestPolicySchema>;
 export const projectSchema = z
   .object({
     name: z.string().min(1).max(100),
@@ -117,6 +159,7 @@ export const routeSchema = z
     priority: z.number().int().min(0).max(1000).default(0),
     weight: z.number().min(0.001).max(1000).default(1),
     pricing: pricingSchema,
+    request_policy: requestPolicySchema.optional(),
   })
   .strict();
 export const usageSchema = z
@@ -128,6 +171,17 @@ export const usageSchema = z
     for (const [key, quantity] of Object.entries(value))
       if (quantity.includes(".") && key !== "audio_seconds" && key !== "video_seconds")
         context.addIssue({ code: "custom", message: "Counters must be integers", path: [key] });
+    if (
+      value.cache_write_tokens !== undefined &&
+      value.cache_write_5m_tokens !== undefined &&
+      value.cache_write_1h_tokens !== undefined &&
+      [value.cache_write_tokens, value.cache_write_5m_tokens, value.cache_write_1h_tokens].every(
+        (q) => /^(0|[1-9][0-9]{0,37})$/.test(q),
+      ) &&
+      BigInt(value.cache_write_tokens) !==
+        BigInt(value.cache_write_5m_tokens) + BigInt(value.cache_write_1h_tokens)
+    )
+      context.addIssue({ code: "custom", message: "Provider cache write partitions disagree" });
   });
 
 export interface Project {
@@ -171,6 +225,7 @@ export interface Route {
   weight: number;
   pricing_id: string;
   pricing: Pricing;
+  request_policy?: RequestPolicy;
   concurrency: number;
   rpm: number;
 }

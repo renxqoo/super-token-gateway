@@ -347,6 +347,7 @@ CREATE FUNCTION public.exact_billing_price(p_usage jsonb, p_rates jsonb) RETURNS
     AS $_$
 DECLARE part record; quantity text; fraction integer; q numeric; d numeric; n numeric=0; denominator numeric=1; a numeric; b numeric; remainder numeric; result numeric;
 BEGIN
+ IF p_rates?'cache_write_tokens' AND (p_rates?'cache_write_5m_tokens' OR p_rates?'cache_write_1h_tokens') THEN RAISE EXCEPTION 'duplicate cache write rate';END IF;
  FOR part IN SELECT key,value FROM jsonb_each(p_rates) LOOP
   quantity=coalesce(p_usage->>part.key,'0');
   IF quantity !~ '^(0|[1-9][0-9]{0,37})(\.[0-9]{1,18})?$' OR part.value->>'numerator' !~ '^(0|[1-9][0-9]{0,37})$' OR part.value->>'denominator' !~ '^[1-9][0-9]{0,37}$' THEN RAISE EXCEPTION 'invalid price input'; END IF;
@@ -400,6 +401,7 @@ BEGIN
   IF attempt.evidence_id IS NOT NULL THEN SELECT e.finality,e.usage INTO evidence FROM usage_events e WHERE e.id=attempt.evidence_id;
   ELSE SELECT NULL::text AS finality,'{}'::jsonb AS usage INTO evidence;END IF;
   IF attempt.metering_conflict OR NOT(attempt.state='NOT_EXECUTED' OR coalesce(evidence.finality='FINAL' AND evidence.usage?'input_tokens' AND (operation='embeddings' OR evidence.usage?'output_tokens'),false)) THEN complete=false;END IF;
+  IF (evidence.usage?'cache_write_5m_tokens' OR evidence.usage?'cache_write_1h_tokens') AND NOT evidence.usage?'cache_write_tokens' THEN complete=false;END IF;
   tokens=tokens+coalesce((evidence.usage->>'input_tokens')::numeric,0)+coalesce((evidence.usage->>'cached_input_tokens')::numeric,0)+coalesce((evidence.usage->>'cache_write_tokens')::numeric,0)+coalesce((evidence.usage->>'output_tokens')::numeric,0);
  END LOOP;RETURN jsonb_build_object('complete',seen AND complete,'tokens',tokens::text);
 END $$;
@@ -796,9 +798,10 @@ CREATE FUNCTION public.record_usage_evidence(p_attempt uuid, p_event uuid, p_sou
     AS $_$
 DECLARE a record; prior usage_events%ROWTYPE; original usage_events%ROWTYPE; conflicting boolean; chosen boolean;
 BEGIN
- IF jsonb_typeof(p_usage)<>'object' OR EXISTS(SELECT 1 FROM jsonb_each(p_usage) j WHERE jsonb_typeof(j.value)<>'string' OR j.key NOT IN ('input_tokens','output_tokens','cached_input_tokens','cache_write_tokens','reasoning_tokens','requests','images','audio_ms','video_ms','audio_seconds','video_seconds','characters') OR
+ IF jsonb_typeof(p_usage)<>'object' OR EXISTS(SELECT 1 FROM jsonb_each(p_usage) j WHERE jsonb_typeof(j.value)<>'string' OR j.key NOT IN ('input_tokens','output_tokens','cached_input_tokens','cache_write_tokens','cache_write_5m_tokens','cache_write_1h_tokens','reasoning_tokens','requests','images','audio_ms','video_ms','audio_seconds','video_seconds','characters') OR
  (j.key IN ('audio_seconds','video_seconds') AND j.value#>>'{}' !~ '^(0|[1-9][0-9]{0,37})(\.[0-9]{1,18})?$') OR
  (j.key NOT IN ('audio_seconds','video_seconds') AND j.value#>>'{}' !~ '^(0|[1-9][0-9]{0,37})$')) THEN RAISE EXCEPTION 'invalid usage evidence'; END IF;
+ IF p_usage?&ARRAY['cache_write_tokens','cache_write_5m_tokens','cache_write_1h_tokens'] AND (p_usage->>'cache_write_tokens')::numeric<>(p_usage->>'cache_write_5m_tokens')::numeric+(p_usage->>'cache_write_1h_tokens')::numeric THEN RAISE EXCEPTION 'cache write partitions disagree';END IF;
  SELECT attempts.*,q.project_id,v.currency INTO a FROM attempts JOIN gateway_requests q ON q.id=attempts.request_id JOIN cost_versions v ON v.id=attempts.pricing_id WHERE attempts.id=p_attempt FOR NO KEY UPDATE OF attempts;
  IF NOT FOUND THEN RAISE EXCEPTION 'unknown attempt'; END IF;
  IF a.evidence_id IS NOT NULL THEN SELECT * INTO prior FROM usage_events WHERE id=a.evidence_id;ELSE prior=NULL;END IF;
@@ -916,10 +919,11 @@ DECLARE part record;
 BEGIN
  IF jsonb_typeof(NEW.rates)<>'object' OR NEW.rates='{}' THEN RAISE EXCEPTION 'invalid tariff rates';END IF;
  FOR part IN SELECT key,value FROM jsonb_each(NEW.rates) LOOP
-  IF part.key NOT IN ('input_tokens','output_tokens','cached_input_tokens','cache_write_tokens','requests','images','audio_ms','video_ms','audio_seconds','video_seconds','characters') OR jsonb_typeof(part.value)<>'object' OR NOT(part.value?&ARRAY['numerator','denominator']) OR jsonb_typeof(part.value->'numerator')<>'string' OR jsonb_typeof(part.value->'denominator')<>'string' OR part.value->>'numerator' !~ '^(0|[1-9][0-9]{0,37})$' OR part.value->>'denominator' !~ '^[1-9][0-9]{0,37}$' OR NOT NEW.ceilings?part.key OR jsonb_typeof(NEW.ceilings->part.key)<>'string' OR NEW.ceilings->>part.key !~ '^(0|[1-9][0-9]{0,37})(\.[0-9]{1,18})?$' THEN RAISE EXCEPTION 'invalid tariff dimension';END IF;
+  IF part.key NOT IN ('input_tokens','output_tokens','cached_input_tokens','cache_write_tokens','cache_write_5m_tokens','cache_write_1h_tokens','requests','images','audio_ms','video_ms','audio_seconds','video_seconds','characters') OR jsonb_typeof(part.value)<>'object' OR NOT(part.value?&ARRAY['numerator','denominator']) OR jsonb_typeof(part.value->'numerator')<>'string' OR jsonb_typeof(part.value->'denominator')<>'string' OR part.value->>'numerator' !~ '^(0|[1-9][0-9]{0,37})$' OR part.value->>'denominator' !~ '^[1-9][0-9]{0,37}$' OR NOT NEW.ceilings?part.key OR jsonb_typeof(NEW.ceilings->part.key)<>'string' OR NEW.ceilings->>part.key !~ '^(0|[1-9][0-9]{0,37})(\.[0-9]{1,18})?$' THEN RAISE EXCEPTION 'invalid tariff dimension';END IF;
   IF part.key NOT IN ('audio_seconds','video_seconds') AND NEW.ceilings->>part.key LIKE '%.%' THEN RAISE EXCEPTION 'counter ceiling is fractional';END IF;
   IF NEW.basis='REQUEST_COMPLETION' AND part.key<>'requests' OR NEW.basis='INPUT_CHARACTERS' AND part.key NOT IN ('characters','requests') THEN RAISE EXCEPTION 'billing basis dimension mismatch';END IF;
  END LOOP;
+ IF NEW.rates?'cache_write_tokens' AND (NEW.rates?'cache_write_5m_tokens' OR NEW.rates?'cache_write_1h_tokens') THEN RAISE EXCEPTION 'duplicate cache write rate';END IF;
  IF NEW.rates?'audio_ms' AND NEW.rates?'audio_seconds' OR NEW.rates?'video_ms' AND NEW.rates?'video_seconds' THEN RAISE EXCEPTION 'duplicate duration unit';END IF;
  IF NEW.rates?'requests' AND (NEW.ceilings->>'requests')::numeric<1 THEN RAISE EXCEPTION 'request ceiling is zero';END IF;
  PERFORM exact_billing_price(NEW.ceilings,NEW.rates);RETURN NEW;
@@ -978,10 +982,11 @@ CREATE FUNCTION public.validate_usage() RETURNS trigger
  FOR k,v IN SELECT key,value #>> '{}' FROM jsonb_each(NEW.usage) LOOP
   IF jsonb_typeof(NEW.usage->k)<>'string' OR
    (k IN ('audio_seconds','video_seconds') AND v !~ '^(0|[1-9][0-9]{0,37})(\.[0-9]{1,18})?$') OR
-   (k NOT IN ('audio_seconds','video_seconds') AND (k NOT IN ('input_tokens','output_tokens','cached_input_tokens','cache_write_tokens','reasoning_tokens','requests','images','audio_ms','video_ms','characters') OR v !~ '^(0|[1-9][0-9]{0,37})$')) THEN
+   (k NOT IN ('audio_seconds','video_seconds') AND (k NOT IN ('input_tokens','output_tokens','cached_input_tokens','cache_write_tokens','cache_write_5m_tokens','cache_write_1h_tokens','reasoning_tokens','requests','images','audio_ms','video_ms','characters') OR v !~ '^(0|[1-9][0-9]{0,37})$')) THEN
    RAISE EXCEPTION 'invalid usage dimension';
   END IF;
  END LOOP;
+ IF NEW.usage?&ARRAY['cache_write_tokens','cache_write_5m_tokens','cache_write_1h_tokens'] AND (NEW.usage->>'cache_write_tokens')::numeric<>(NEW.usage->>'cache_write_5m_tokens')::numeric+(NEW.usage->>'cache_write_1h_tokens')::numeric THEN RAISE EXCEPTION 'cache write partitions disagree';END IF;
  RETURN NEW;
 END $_$;
 
@@ -1521,6 +1526,7 @@ CREATE TABLE public.resources (
 
 CREATE TABLE public.routes (
     id uuid NOT NULL,
+    request_policy jsonb DEFAULT '{}'::jsonb NOT NULL CHECK (jsonb_typeof(request_policy)='object'),
     model_name text NOT NULL,
     provider_id uuid NOT NULL,
     upstream_model text NOT NULL,

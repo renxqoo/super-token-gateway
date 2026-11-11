@@ -2474,6 +2474,54 @@ async function submitTwoItemBatch(model: string): Promise<string> {
   return String(created.value.id);
 }
 
+test("Batch upload cannot bypass a model parameter policy through its JSONL rows", async () => {
+  const model = await configureModel("openai", {}, ["chat", "files", "batches"]);
+  const [route] = await deps.store.routes(model, "chat");
+  const updated = await json(
+    `/admin/routes/${route!.id}`,
+    { request_policy: { blocked_parameters: ["temperature"] } },
+    adminKey,
+    "PATCH",
+  );
+  expect(updated.response.status).toBe(200);
+  const form = new FormData();
+  form.set("purpose", "batch");
+  form.set(
+    "file",
+    new File(
+      [
+        JSON.stringify({
+          custom_id: "policy",
+          method: "POST",
+          url: "/v1/chat/completions",
+          body: { model, messages: [{ role: "user", content: "x" }], temperature: 0 },
+        }),
+      ],
+      "policy.jsonl",
+    ),
+  );
+  const response = await fetch(`${origin}/v1/files`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}` },
+    body: form,
+  });
+  expect(response.status).toBe(422);
+  expect(await response.json()).toMatchObject({ error: { code: "unsupported_capability" } });
+  expect(await testDb`SELECT id FROM gateway_requests WHERE model=${model}`).toHaveLength(0);
+  const cleared = await json(
+    `/admin/routes/${route!.id}`,
+    { request_policy: {} },
+    adminKey,
+    "PATCH",
+  );
+  expect(cleared.response.status).toBe(200);
+  const file = await uploadTwoItemBatch(model, "/v1/chat/completions", {
+    messages: [{ role: "user", content: "x" }],
+    temperature: 0,
+  });
+  expect((await deps.store.resource(file, projectId)).model).toBe(model);
+});
+
 test("Batch summary cannot hide incomplete rows before exact millisecond settlement", async () => {
   const full = {
     prompt_tokens: 10,
