@@ -1,21 +1,10 @@
-import {
-  GatewayError,
-  canonical,
-  extractUsage,
-  providerObject as object,
-  sha256,
-  parseProviderJson,
-  stringifyExact,
-} from "@gateway/kernel";
-import type {
-  BatchResourceMetadata,
-  Resource,
-  Operation,
-  Protocol,
-  Route,
-  Usage,
-  Finality,
-} from "@gateway/kernel";
+import { canonicalExact } from "@gateway/connectors";
+import { GatewayError, providerObject as object } from "@gateway/contracts";
+
+import { extractUsage, parseProviderJson, stringifyExact } from "@gateway/connectors";
+import { sha256 } from "@gateway/runtime";
+import type { BatchResourceMetadata, Resource, Route } from "@gateway/contracts";
+import type { Operation, Protocol, Usage, Finality } from "@gateway/kernel";
 import {
   StreamTranslator,
   MediaStreamMeter,
@@ -23,6 +12,7 @@ import {
   validateCompletion,
   presentResponse,
   prepareOperation,
+  requestCharacters,
 } from "@gateway/connectors";
 import { readBounded, UpstreamPreDispatchError } from "@gateway/runtime";
 import type { StreamMeter } from "@gateway/connectors";
@@ -142,7 +132,7 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
   let replayed = false;
   try {
     controller.signal.throwIfAborted();
-    const fingerprint = sha256(canonical(input.body));
+    const fingerprint = sha256(canonicalExact(input.body));
     rejectUnmeteredTools(input.body, input.operation);
     const modelPolicy = await deps.store.model(input.model);
     const outputBound = applyOutputBound(
@@ -299,9 +289,14 @@ export async function execute(deps: Dependencies, input: ExecuteInput): Promise<
       input.operation,
       currency,
       [...new Set(routes.map((route) => route.provider_id))],
-      quoteBody,
+      {
+        inputCharacters: requestCharacters(input.operation, quoteBody)?.toString(),
+        images:
+          input.operation === "images" || input.operation === "image_edits"
+            ? (quoteBody.n ?? 1)
+            : batchMetadata?.manifest?.images,
+      },
       outputBound,
-      batchMetadata?.manifest?.images,
     );
     routes = routes.filter((route) => Object.hasOwn(quote.prices, route.provider_id));
     let admission: { record: RequestRecord; created: boolean; attempt_id?: string } | undefined;

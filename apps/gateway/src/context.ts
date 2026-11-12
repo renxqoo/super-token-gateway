@@ -1,4 +1,5 @@
-import type { Credential, Project } from "@gateway/kernel";
+import type { CatalogApplication } from "@gateway/core-api/catalog";
+import type { Credential, Project } from "@gateway/contracts";
 import type { Store, FundsStore } from "@gateway/storage";
 import type { Lifecycle, Limits, Metrics, MemoryBudget, createTransport } from "@gateway/runtime";
 import type { Metering } from "./usage.ts";
@@ -13,6 +14,7 @@ export type Env = {
 };
 export interface Dependencies {
   config: Config;
+  catalog?: CatalogApplication;
   usage: Metering;
   store: Omit<Store, "db">;
   funds: Omit<FundsStore, "db">;

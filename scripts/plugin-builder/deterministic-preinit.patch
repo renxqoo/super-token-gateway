@@ -1,0 +1,68 @@
+--- a/crates/cli/src/opt.rs
++++ b/crates/cli/src/opt.rs
+@@ -3,6 +3,8 @@
+     path::Path,
+     process::{Command, Stdio},
+ };
++use std::rc::Rc;
++use wasmtime::Caller;
+ use wizer::Wizer;
+ 
+ pub(crate) struct Optimizer<'a> {
+@@ -32,7 +34,35 @@
+     pub fn write_optimized_wasm(self, dest: impl AsRef<Path>) -> Result<(), Error> {
+         if self.wizen {
+             let wasm = Wizer::new()
+-                .allow_wasi(true)?
++                .make_linker(Some(Rc::new(|engine| {
++                    let mut linker = wizer::Linker::new(engine);
++                    wasmtime_wasi::add_to_linker(&mut linker, |ctx: &mut Option<wasmtime_wasi::WasiCtx>| {
++                        ctx.get_or_insert_with(|| {
++                            let mut builder = wasmtime_wasi::sync::WasiCtxBuilder::new();
++                            builder.inherit_stdio();
++                            builder.build()
++                        })
++                    })?;
++                    linker.allow_shadowing(true);
++                    linker.func_wrap("wasi_snapshot_preview1", "random_get", |mut caller: Caller<'_, Option<wasmtime_wasi::WasiCtx>>, ptr: i32, len: i32| -> Result<i32> {
++                        let memory = caller.get_export("memory").and_then(|item| item.into_memory()).ok_or_else(|| anyhow::anyhow!("missing memory"))?;
++                        let start = usize::try_from(ptr)?;
++                        let end = start.checked_add(usize::try_from(len)?).ok_or_else(|| anyhow::anyhow!("random range"))?;
++                        memory.data_mut(&mut caller).get_mut(start..end).ok_or_else(|| anyhow::anyhow!("random bounds"))?.fill(0x5a);
++                        Ok(0)
++                    })?;
++                    linker.func_wrap("wasi_snapshot_preview1", "clock_time_get", |mut caller: Caller<'_, Option<wasmtime_wasi::WasiCtx>>, _id: i32, _precision: i64, ptr: i32| -> Result<i32> {
++                        let memory = caller.get_export("memory").and_then(|item| item.into_memory()).ok_or_else(|| anyhow::anyhow!("missing memory"))?;
++                        memory.write(&mut caller, usize::try_from(ptr)?, &0u64.to_le_bytes())?;
++                        Ok(0)
++                    })?;
++                    linker.func_wrap("wasi_snapshot_preview1", "clock_res_get", |mut caller: Caller<'_, Option<wasmtime_wasi::WasiCtx>>, _id: i32, ptr: i32| -> Result<i32> {
++                        let memory = caller.get_export("memory").and_then(|item| item.into_memory()).ok_or_else(|| anyhow::anyhow!("missing memory"))?;
++                        memory.write(&mut caller, usize::try_from(ptr)?, &1u64.to_le_bytes())?;
++                        Ok(0)
++                    })?;
++                    Ok(linker)
++                })))?
+                 .inherit_stdio(true)
+                 .wasm_bulk_memory(true)
+                 .run(self.wasm)?;
+--- a/crates/cli/Cargo.toml
++++ b/crates/cli/Cargo.toml
+@@ -23,3 +23,6 @@
+ log = "0.4"
+ tempfile = "3"
+ env_logger = "0.11"
++
++wasmtime = "=16.0.0"
++wasmtime-wasi = "=16.0.0"
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1395,6 +1395,8 @@
+  "tempfile",
+  "wagen",
+  "wizer",
++ "wasmtime",
++ "wasmtime-wasi",
+ ]
+ 
+ [[package]]

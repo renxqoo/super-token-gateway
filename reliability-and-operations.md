@@ -9,7 +9,7 @@
 ## 生产发布
 
 1. 使用 Bun 1.4.4 和锁文件执行 `bun install --frozen-lockfile`、`bun run verify`，生成 dist 与 manifest；保留上一个可回滚版本。
-2. 准备专用 PG、准入 Redis、耐久队列 Redis、数据库迁移 owner 和两个独立运行登录账号。用迁移账号运行 `bun dist/tools/migrate.js`，再执行 `infra/runtime-role.sql` 把 `gateway_runtime` 授予 HTTP 账号、`gateway_worker` 授予独立 worker 账号。`MIGRATION_DATABASE_URL` 可独立于 `DATABASE_URL`。
+2. 准备专用 PG、准入 Redis、耐久队列 Redis、数据库迁移 owner 和两个独立运行登录账号。用迁移账号运行 `bun dist/tools/migrate.js --database <确切新库名>`，再执行 `infra/runtime-role.sql` 把 `gateway_runtime` 授予 HTTP 账号、`gateway_worker` 授予独立 worker 账号。`MIGRATION_DATABASE_URL` 可独立于 `DATABASE_URL`。
 3. 发布 dist 到 `/opt/llm-gateway/releases/<版本>/`，将 current 指向该目录。进程必须只读，密钥由 `/etc/llm-gateway/<实例>.env` 或外部 secret manager 注入，文件权限 0600，禁止打入镜像。
 4. 安装 `infra/gateway@.service` 和必需的 `gateway-worker.service`，使用独立低权限用户、Bun 的绝对路径。实例 1/2 分别监听 127.0.0.1:8088/8089，共享同一 Gateway DB、Redis namespace、KEY_PEPPER 与 ENCRYPTION_KEY。
 5. 配置 `NODE_ENV=production`、`ALLOW_PRIVATE_UPSTREAM=false`、已验证的 PG/Redis TLS 连接及公网 HTTPS 供应商地址。配置业务系统与 Gateway 的独立访问凭证。
@@ -17,7 +17,7 @@
 
 可用 `docker build -f infra/Dockerfile -t <镜像> .` 构建另一种发布成品。运行时建议 `--read-only --tmpfs /tmp:size=64m --cap-drop ALL --security-opt no-new-privileges`、非 root 和内存限制；使用 `bun run test:container` 验证真实依赖、独立 worker、JSON/SSE、精确账单与 SIGTERM。镜像包含 Bun 1.4.4 与独立 bundle，不需要生产安装 node_modules。
 
-只运行当前单一 schema 与队列契约。初始化接受空库或精确当前版本；schema2026111006 / 2026111007 / 2026111008 / 2026111009 / 2026111010 / 2026111101 / 2026111102 通过显式 `db:migrate -- --upgrade --quiesced` 离线转换到 2026111201。执行前停止所有客户端、排空旧证据作业并备份，具体步骤及恢复限制见 database.md。应用修订回退必须使用同一数据库契约并保留已确认队列、账本及费率证据。
+运行进程只接受当前 v2 schema2026111202。迁移工具要求 `--database <确切名称>` 匹配连接 URL，首次只接受空库；已知 v2 版本按 checksummed manifest 顺序应用。旧开发 schema06–2026111201 不升级、不修改，必须为 v2 建独立新库。应用回退须使用相同数据库契约并保留已确认队列、账本及费率证据。详见 [数据库契约](database.md)。
 
 ## 高可用依赖
 
@@ -29,7 +29,7 @@ PG 使用高可用主端点、同步耐久提交、备份与 PITR。准入 Redis
 
 同连接 WAITAOF 证明此前写入达到指定落盘副本数量，不提供任意故障下的强一致性。晋升必须隔离旧主，并只选择未丢失已确认偏移的落盘副本；无法证明则停止准入，不能以可用性为由晋升落后的节点。不要从空白主库启动复制覆盖存量副本。当前客户端通过稳定故障转移端点或代理连接，不直接发现 Sentinel。参见 [Redis 官方 WAITAOF 保证](https://redis.io/docs/latest/commands/waitaof/)。
 
-本地 `bun run test:durability` 默认使用独立临时Docker主副本与AOF卷；当前Mac可加 `-- --native` 使用本轮拥有的redis-server子进程及独立AOF目录，控制前核对进程PID。两者使用相同临时PG及断言：事务未提交/已提交未 ACK 时 SIGKILL、两节点硬重启、在主库保持停机时独立恢复副本并晋升、缺副本/错误持久化配置拒绝准入。它不模拟机房掉电或仲裁失效。
+本地 `bun run test:durability` 仅使用本轮新建的原生 PostgreSQL 17 cluster 与 Redis 7.4 AOF 主副本；必须显式设置 `PG_TOOLS_DIRECTORY`（PG 工具绝对目录）和 `DURABILITY_REDIS_SERVER`（Redis server 绝对路径），不接受参数。脚本不会使用 `DATABASE_URL` 或现有 Redis 端点作为源，也不会安装工具或操作已有服务。八项断言保留旧单账本路径的提交前/提交后未 ACK 强杀、完整 AOF 重启、副本独立晋升、缺副本/配置漂移拒绝准入、非法正文拒收与 UNKNOWN 预扣保留；三笔结算各 12 atoms。临时目录 0700、配置和数据 0600，子进程使用最小环境和 `--no-env-file`；正常、失败、超时、SIGINT/SIGTERM 均执行有界独立清理，输出实际 owned resources。该单元不代表未来 Core 双账本/真实三服务耐久验收，也不模拟驱动进程 SIGKILL 后自动恢复、机房掉电或仲裁失效。工具配置、预算与边界见 [原生耐久实施记录](docs/migrations/enterprise-v2-native-durability.md)。
 
 UPSTREAM_POOL_SIZE 默认1024，限制每种协议同时持有连接的请求数；共享空闲连接另有 min(512, floor(UPSTREAM_POOL_SIZE/2)) 的上限，30秒无使用则回收。等待连接的请求可被取消，取消发生在获得连接前时记录明确未执行。停机时拒绝等待请求并销毁连接。连接耗尽指标采用固定错误类别；本机端口或文件描述符不足且尚未取得响应时，记录明确未执行、释放预扣并返回503，不触发供应商熔断。
 

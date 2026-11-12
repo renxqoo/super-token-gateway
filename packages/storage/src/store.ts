@@ -1,21 +1,23 @@
-import { Batcher } from "@gateway/kernel";
+import { Batcher } from "@gateway/runtime/batcher";
 import { fundingError } from "./funds.ts";
 import type { SQL } from "bun";
-import { GatewayError, sha256 } from "@gateway/kernel";
+import {
+  upstreamCostConfigurationSchema,
+  opaqueResourceIdSchema,
+  batchResourceMetadataSchema,
+  GatewayError,
+} from "@gateway/contracts";
+import { sha256 } from "@gateway/runtime/crypto";
+import type { BillingQuote, Operation, Pricing, Finality, Usage } from "@gateway/kernel";
 import type {
-  BillingQuote,
   BatchResourceMetadata,
   Credential,
-  Operation,
   Project,
   Resource,
   Route,
   UsageEvidence,
-  Pricing,
-  Finality,
-  Usage,
   RequestPolicy,
-} from "@gateway/kernel";
+} from "@gateway/contracts";
 
 type KeyInput = {
   name: string;
@@ -52,6 +54,7 @@ type RouteInput = {
   priority: number;
   weight: number;
   pricing: Pricing;
+  ceilings: Usage;
   request_policy?: RequestPolicy | undefined;
 };
 interface ModelMetadata {
@@ -353,22 +356,21 @@ export class Store {
         : undefined;
     });
   }
-  async createProvider(id: string, input: ProviderInput, secret: string): Promise<void> {
-    await this.db`INSERT INTO providers(id,name,kind,base_url,secret,concurrency,rpm)
-      VALUES(${id},${input.name},${input.kind},${input.base_url},${secret},${input.concurrency},${input.rpm})`;
+  async createProvider(id: string, input: ProviderInput, secret: string) {
+    return this.db.begin((tx) => recordProvider(tx, id, input, secret));
   }
   async providers(): Promise<unknown[]> {
     return this
-      .db`SELECT id,name,kind,base_url,enabled,concurrency,rpm FROM providers ORDER BY name LIMIT 500`;
+      .db`SELECT id,name,kind,base_url,enabled,concurrency,rpm,brand_id,account_id,binding_id,config_revision::text FROM channels ORDER BY name LIMIT 500`;
   }
   async provider(id: string): Promise<Route> {
-    const rows = await this.db<Route[]>`SELECT *,id AS provider_id FROM providers WHERE id=${id}`;
+    const rows = await this.db<Route[]>`SELECT *,id AS provider_id FROM channels WHERE id=${id}`;
     if (!rows[0])
       throw new GatewayError(503, "provider_unavailable", "The original provider is unavailable");
     return rows[0];
   }
   async setProvider(id: string, enabled: boolean): Promise<void> {
-    await this.db`UPDATE providers SET enabled=${enabled} WHERE id=${id}`;
+    await this.db`UPDATE channels SET enabled=${enabled} WHERE id=${id}`;
     this.routeCache.clear();
     this.routeLoads.clear();
   }
@@ -413,15 +415,7 @@ export class Store {
     }
   }
   async createRoute(model: string, input: RouteInput): Promise<string> {
-    const id = crypto.randomUUID();
-    const pricingId = crypto.randomUUID();
-    await this.db.begin(async (tx) => {
-      await tx`INSERT INTO cost_versions(id,currency,rates) VALUES(${pricingId},${input.pricing.currency},${input.pricing.rates})`;
-      await tx`INSERT INTO routes(id,model_name,provider_id,upstream_model,operations,priority,weight,pricing_id)
-        VALUES(${id},${model},${input.provider_id},${input.upstream_model},${[...new Set(input.operations)].sort()},${input.priority},${input.weight},${pricingId})`;
-      if (input.request_policy)
-        await tx`UPDATE routes SET request_policy=${input.request_policy} WHERE id=${id}`;
-    });
+    const id = await this.db.begin((tx) => recordRoute(tx, model, input));
     this.routeCache.clear();
     this.routeLoads.clear();
     return id;
@@ -436,7 +430,7 @@ export class Store {
     load = (async () => {
       const rows = await this.db<
         Route[]
-      >`SELECT r.*,p.kind,p.base_url,p.secret,p.concurrency,p.rpm,jsonb_build_object('currency',v.currency,'rates',v.rates) AS pricing FROM routes r JOIN providers p ON p.id=r.provider_id JOIN models m ON m.name=r.model_name JOIN cost_versions v ON v.id=r.pricing_id WHERE r.model_name=${model} AND r.enabled AND p.enabled AND m.enabled AND ${operation}=ANY(r.operations) AND ${operation}=ANY(m.operations) ORDER BY r.priority DESC`;
+      >`SELECT r.*,p.kind,p.base_url,p.secret,p.concurrency,p.rpm,jsonb_build_object('currency',v.currency,'rates',v.rates) AS pricing,v.ceilings FROM routes r JOIN channels p ON p.id=r.provider_id JOIN models m ON m.name=r.model_name JOIN cost_versions v ON v.id=r.pricing_id WHERE r.model_name=${model} AND r.enabled AND p.enabled AND m.enabled AND ${operation}=ANY(r.operations) AND ${operation}=ANY(m.operations) ORDER BY r.priority DESC`;
       if (this.routeCache.size > 10000) this.routeCache.clear();
       if (this.routeLoads.get(key) === load)
         this.routeCache.set(key, { until: Date.now() + 1000, routes: rows });
@@ -521,7 +515,7 @@ export class Store {
       SELECT ${id},q.id,${ordinal},r.provider_id,r.upstream_model,r.pricing_id,'DISPATCHING',(q.billing_quote->'prices'->>r.provider_id::text)::uuid
       FROM gateway_requests q JOIN api_keys k ON k.id=q.key_id JOIN projects p ON p.id=q.project_id
       LEFT JOIN organizations o ON o.id=p.organization_id LEFT JOIN principals u ON u.id=k.principal_id
-      JOIN routes r ON r.id=${route.id} AND r.model_name=q.model JOIN models m ON m.name=q.model JOIN providers pr ON pr.id=r.provider_id
+      JOIN routes r ON r.id=${route.id} AND r.model_name=q.model JOIN models m ON m.name=q.model JOIN channels pr ON pr.id=r.provider_id
       WHERE q.id=${requestId} AND k.enabled AND p.enabled AND (k.expires_at IS NULL OR k.expires_at>clock_timestamp())
       AND k.role IN ('ADMIN','INVOKER') AND q.operation=ANY(k.operations) AND (cardinality(k.models)=0 OR q.model=ANY(k.models))
       AND (o.id IS NULL OR o.enabled) AND (u.id IS NULL OR u.enabled AND u.role IN ('OWNER','ADMIN','MEMBER'))
@@ -626,7 +620,7 @@ export class Store {
     secret?: string,
   ): Promise<void> {
     const rows = await this
-      .db`UPDATE providers SET enabled=coalesce(${patch.enabled ?? null},enabled),rpm=coalesce(${patch.rpm ?? null},rpm),concurrency=coalesce(${patch.concurrency ?? null},concurrency),secret=coalesce(${secret ?? null},secret) WHERE id=${id} RETURNING id`;
+      .db`UPDATE channels SET enabled=coalesce(${patch.enabled ?? null},enabled),rpm=coalesce(${patch.rpm ?? null},rpm),concurrency=coalesce(${patch.concurrency ?? null},concurrency),secret=coalesce(${secret ?? null},secret) WHERE id=${id} RETURNING id`;
     if (!rows.length) throw new GatewayError(404, "not_found", "Provider not found");
     this.routeCache.clear();
     this.routeLoads.clear();
@@ -654,7 +648,7 @@ export class Store {
   }
   async routeDefinitions(model: string): Promise<unknown[]> {
     return this
-      .db`SELECT r.*,jsonb_build_object('currency',v.currency,'rates',v.rates) AS pricing FROM routes r JOIN cost_versions v ON v.id=r.pricing_id WHERE model_name=${model} ORDER BY priority DESC,id LIMIT 2000`;
+      .db`SELECT r.*,jsonb_build_object('currency',v.currency,'rates',v.rates) AS pricing,v.ceilings FROM routes r JOIN cost_versions v ON v.id=r.pricing_id WHERE model_name=${model} ORDER BY priority DESC,id LIMIT 2000`;
   }
   async updateRoute(
     id: string,
@@ -663,17 +657,11 @@ export class Store {
       priority?: number | undefined;
       weight?: number | undefined;
       pricing?: Pricing | undefined;
+      ceilings?: Usage | undefined;
       request_policy?: RequestPolicy | undefined;
     },
   ): Promise<void> {
-    await this.db.begin(async (tx) => {
-      const pricingId = patch.pricing ? crypto.randomUUID() : null;
-      if (pricingId && patch.pricing)
-        await tx`INSERT INTO cost_versions(id,currency,rates) VALUES(${pricingId},${patch.pricing.currency},${patch.pricing.rates})`;
-      const rows =
-        await tx`UPDATE routes SET enabled=coalesce(${patch.enabled ?? null},enabled),priority=coalesce(${patch.priority ?? null},priority),weight=coalesce(${patch.weight ?? null},weight),pricing_id=coalesce(${pricingId}::uuid,pricing_id),request_policy=coalesce(${patch.request_policy ?? null}::jsonb,request_policy) WHERE id=${id} RETURNING id`;
-      if (!rows.length) throw new GatewayError(404, "not_found", "Route not found");
-    });
+    await this.db.begin((tx) => recordRouteUpdate(tx, id, patch));
     this.routeCache.clear();
     this.routeLoads.clear();
   }
@@ -745,10 +733,14 @@ export class Store {
     batch?: BatchResourceMetadata,
   ): Promise<string> {
     if (
-      !/^[A-Za-z0-9_:/.-]{1,500}$/.test(remoteId) ||
-      remoteId.split("/").some((part) => part === "." || part === "..")
+      !opaqueResourceIdSchema.safeParse(remoteId).success ||
+      (batch !== undefined && !batchResourceMetadataSchema.safeParse(batch).success)
     )
-      throw new GatewayError(502, "invalid_upstream", "Invalid provider resource identity");
+      throw new GatewayError(
+        502,
+        "invalid_upstream",
+        "Invalid provider resource identity or metadata",
+      );
     const id = preferredId ?? `${kind}_${crypto.randomUUID().replaceAll("-", "")}`;
     const rows = await this.db<
       { id: string }[]
@@ -817,4 +809,83 @@ export class Store {
       .db`UPDATE resources SET poll_until=NULL,poll_count=poll_count+1,next_poll_at=now()+least(3600,greatest(${failed ? 30 : 5},power(2,least(poll_count,11))::integer))*interval '1 second'
       WHERE id=${id} AND poll_token=${token}`;
   }
+}
+
+export async function recordProvider(
+  tx: SQL,
+  id: string,
+  input: ProviderInput,
+  secret: string,
+  existing?: { account_id: string; brand_id: string },
+) {
+  if (existing) {
+    const brand = (
+      await tx`SELECT id,name,enabled FROM supplier_brands WHERE id=${existing.brand_id} FOR SHARE`
+    )[0];
+    const account = (
+      await tx`SELECT id,brand_id,mode FROM upstream_accounts WHERE id=${existing.account_id} FOR SHARE`
+    )[0];
+    if (
+      !brand ||
+      !account ||
+      !brand.enabled ||
+      brand.name !== input.kind ||
+      account.brand_id !== brand.id ||
+      account.mode !== "PREPAID"
+    )
+      throw new GatewayError(403, "provider_account_mismatch", "Provider account binding denied");
+    await tx`INSERT INTO channels(id,name,kind,base_url,secret,concurrency,rpm,brand_id,account_id) VALUES(${id},${input.name},${input.kind},${input.base_url},${secret},${input.concurrency},${input.rpm},${brand.id},${account.id})`;
+    return {
+      id,
+      brand_id: brand.id as string,
+      account_id: account.id as string,
+      config_revision: "0",
+      binding_id: null,
+      funded: false,
+    };
+  }
+  const brandId = crypto.randomUUID();
+  const accountId = crypto.randomUUID();
+  const brands =
+    await tx`INSERT INTO supplier_brands(id,name) VALUES(${brandId},${input.kind}) ON CONFLICT(name) DO UPDATE SET name=excluded.name RETURNING id`;
+  await tx`INSERT INTO upstream_accounts(id,brand_id,name) VALUES(${accountId},${brands[0].id},${input.name})`;
+  await tx`INSERT INTO channels(id,name,kind,base_url,secret,concurrency,rpm,brand_id,account_id)
+        VALUES(${id},${input.name},${input.kind},${input.base_url},${secret},${input.concurrency},${input.rpm},${brands[0].id},${accountId})`;
+  return {
+    id,
+    brand_id: brands[0].id as string,
+    account_id: accountId,
+    config_revision: "0",
+    binding_id: null,
+    funded: false,
+  };
+}
+
+export async function recordRoute(tx: SQL, model: string, input: RouteInput) {
+  upstreamCostConfigurationSchema.parse({ pricing: input.pricing, ceilings: input.ceilings });
+  const id = crypto.randomUUID(),
+    pricingId = crypto.randomUUID();
+  await tx`INSERT INTO cost_versions(id,currency,rates,ceilings) VALUES(${pricingId},${input.pricing.currency},${input.pricing.rates},${input.ceilings})`;
+  await tx`INSERT INTO routes(id,model_name,provider_id,upstream_model,operations,priority,weight,pricing_id)
+        VALUES(${id},${model},${input.provider_id},${input.upstream_model},${[...new Set(input.operations)].sort()},${input.priority},${input.weight},${pricingId})`;
+  if (input.request_policy)
+    await tx`UPDATE routes SET request_policy=${input.request_policy} WHERE id=${id}`;
+
+  return id;
+}
+
+export async function recordRouteUpdate(
+  tx: SQL,
+  id: string,
+  patch: Parameters<Store["updateRoute"]>[1],
+): Promise<void> {
+  if (patch.pricing !== undefined || patch.ceilings !== undefined)
+    upstreamCostConfigurationSchema.parse({ pricing: patch.pricing, ceilings: patch.ceilings });
+
+  const pricingId = patch.pricing ? crypto.randomUUID() : null;
+  if (pricingId && patch.pricing)
+    await tx`INSERT INTO cost_versions(id,currency,rates,ceilings) VALUES(${pricingId},${patch.pricing.currency},${patch.pricing.rates},${patch.ceilings})`;
+  const rows =
+    await tx`UPDATE routes SET enabled=coalesce(${patch.enabled ?? null},enabled),priority=coalesce(${patch.priority ?? null},priority),weight=coalesce(${patch.weight ?? null},weight),pricing_id=coalesce(${pricingId}::uuid,pricing_id),request_policy=coalesce(${patch.request_policy ?? null}::jsonb,request_policy) WHERE id=${id} RETURNING id`;
+  if (!rows.length) throw new GatewayError(404, "not_found", "Route not found");
 }

@@ -23,7 +23,7 @@ export async function prepareEvidenceMonth(
   await db.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(81442591)`;
     await tx`LOCK TABLE schema_migrations IN ACCESS EXCLUSIVE MODE`;
-    const version = await tx`SELECT version FROM schema_migrations`;
+    const version = await tx`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`;
     if (version.length !== 1 || version[0].version !== SCHEMA_VERSION)
       throw new Error("Maintenance schema mismatch");
     await tx`SET LOCAL statement_timeout=0`;
@@ -79,7 +79,7 @@ export async function moveEvidenceMonth(db: SQL, month: string, tablespace: stri
   await db.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(81442591)`;
     await tx`LOCK TABLE schema_migrations IN ACCESS EXCLUSIVE MODE`;
-    const version = await tx`SELECT version FROM schema_migrations`;
+    const version = await tx`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`;
     if (version.length !== 1 || version[0].version !== SCHEMA_VERSION)
       throw new Error("Maintenance schema mismatch");
     await assertOffline(tx as unknown as SQL);

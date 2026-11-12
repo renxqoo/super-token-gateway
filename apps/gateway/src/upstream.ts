@@ -1,11 +1,8 @@
-import {
-  decrypt,
-  providerObject,
-  parseProviderJson,
-  stringifyExact,
-  GatewayError,
-} from "@gateway/kernel";
-import type { Operation, Protocol, Route } from "@gateway/kernel";
+import { decrypt } from "@gateway/runtime";
+import { providerObject, GatewayError } from "@gateway/contracts";
+import { parseProviderJson, stringifyExact } from "@gateway/connectors";
+import type { Operation, Protocol } from "@gateway/kernel";
+import type { Route } from "@gateway/contracts";
 import { awsCredentials, azureCredentials, signBedrock, VertexTokens } from "@gateway/runtime";
 import { bedrockEventStream } from "@gateway/connectors";
 import type { Dependencies } from "./context.ts";

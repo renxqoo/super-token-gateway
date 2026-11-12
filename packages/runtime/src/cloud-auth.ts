@@ -1,5 +1,6 @@
 import { createHmac, createPrivateKey, sign } from "node:crypto";
-import { GatewayError, sha256, providerObject, text } from "@gateway/kernel";
+import { GatewayError, providerObject, text } from "@gateway/contracts";
+import { sha256 } from "./crypto.ts";
 import type { ProviderKind } from "@gateway/kernel";
 import { readBounded, safeFetch } from "./network.ts";
 

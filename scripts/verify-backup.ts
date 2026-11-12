@@ -72,7 +72,10 @@ const owner = createDatabase(connection);
 let destination: ReturnType<typeof createDatabase> | undefined;
 try {
   await assertDrained();
-  assert.equal((await owner`SELECT version FROM schema_migrations`)[0].version, SCHEMA_VERSION);
+  assert.equal(
+    (await owner`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`)[0].version,
+    SCHEMA_VERSION,
+  );
   assert.equal(
     (await owner`SELECT count(*)::int AS n FROM attempts WHERE state='DISPATCHING'`)[0].n,
     0,
@@ -144,7 +147,8 @@ try {
   assert.equal(after.inconsistent_wallets, 0);
   assert.equal(after.inconsistent_credit, 0);
   assert.equal(
-    (await destination`SELECT version FROM schema_migrations`)[0].version,
+    (await destination`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`)[0]
+      .version,
     SCHEMA_VERSION,
   );
   assert.equal((await destination`SELECT to_regclass('public.billing_work') AS old`)[0].old, null);

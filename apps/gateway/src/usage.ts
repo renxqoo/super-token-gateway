@@ -1,5 +1,6 @@
 import { UsageProducer } from "@gateway/runtime";
-import type { Operation, UsageEvidence } from "@gateway/kernel";
+import type { Operation } from "@gateway/kernel";
+import type { UsageEvidence } from "@gateway/contracts";
 import type { TokenSummary } from "@gateway/storage";
 interface Scope {
   operation: Operation;

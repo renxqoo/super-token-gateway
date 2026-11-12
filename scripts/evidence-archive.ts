@@ -67,7 +67,7 @@ export async function exportEvidenceArchive(
     await tx`SET LOCAL TIME ZONE 'UTC'`;
     await tx`SET LOCAL statement_timeout=0`;
     manifest.snapshot = String((await tx`SELECT pg_export_snapshot() AS id`)[0].id);
-    const versions = await tx`SELECT version FROM schema_migrations`;
+    const versions = await tx`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`;
     if (versions.length !== 1 || versions[0].version !== SCHEMA_VERSION)
       throw new Error("Archive schema mismatch");
     for (const [kind, table] of [

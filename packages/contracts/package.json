@@ -1,0 +1,12 @@
+{
+  "name": "@gateway/contracts",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@gateway/kernel": "workspace:*",
+    "zod": "4.6.7"
+  }
+}

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Route, RequestPolicy } from "@gateway/kernel";
+import type { Route, RequestPolicy } from "@gateway/contracts";
 import type { Auth, Dependencies } from "../context.ts";
 import type { BatchInput } from "../batch-input.ts";
 import { prepareBatchInput, rewriteBatchInput } from "../batch-input.ts";
@@ -17,7 +17,8 @@ function candidate(model: string, request_policy: RequestPolicy = {}): Route {
     priority: 1,
     weight: 1,
     pricing_id: "price",
-    pricing: { currency: "USD", rates: {} },
+    pricing: { currency: "USD", rates: { requests: { numerator: "0", denominator: "1" } } },
+    ceilings: {},
     concurrency: 1,
     rpm: 1,
     request_policy,

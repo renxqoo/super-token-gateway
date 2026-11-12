@@ -1,4 +1,4 @@
-import { GatewayError, optionalObject } from "@gateway/kernel";
+import { GatewayError, optionalObject } from "@gateway/contracts";
 import type { Protocol } from "@gateway/kernel";
 export type Finish = "stop" | "length" | "tool_calls" | "content_filter";
 export function finishReason(protocol: Protocol, reason: unknown): Finish | undefined {

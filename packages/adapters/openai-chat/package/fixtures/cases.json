@@ -1,0 +1,449 @@
+{
+  "format": 1,
+  "config": {
+    "model_map": {
+      "logical": "upstream"
+    },
+    "max_output_tokens": 100,
+    "max_input_tokens": 10000,
+    "auth": "bearer"
+  },
+  "cases": [
+    {
+      "name": "same protocol exact prepare",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "chat",
+            "operation": "chat",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJtZXNzYWdlcyI6W3sicm9sZSI6InVzZXIiLCJjb250ZW50Ijoic3ludGhldGljIn1dLCJ0ZW1wZXJhdHVyZSI6MC4xMDAwMDAwMDAwMDAwMDAwMSwib3BhcXVlIjo5MDA3MTk5MjU0NzQwOTkzfQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "auth": {
+                "type": "bearer"
+              },
+              "manifest": {
+                "operation": "chat",
+                "model": "logical",
+                "upstream_model": "upstream",
+                "stream": false,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "output_tokens": "100",
+                  "requests": "1"
+                },
+                "input_bytes": 130
+              }
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6InVwc3RyZWFtIiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6InN5bnRoZXRpYyJ9XSwidGVtcGVyYXR1cmUiOjAuMTAwMDAwMDAwMDAwMDAwMDEsIm9wYXF1ZSI6OTAwNzE5OTI1NDc0MDk5MywibWF4X2NvbXBsZXRpb25fdG9rZW5zIjoxMDB9"
+        }
+      ]
+    },
+    {
+      "name": "exact JSON response and terminal candidate",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6InVwc3RyZWFtIiwiY2hvaWNlcyI6W3sibWVzc2FnZSI6eyJjb250ZW50Ijoi5ZCI5oiQ8J+MjyJ9LCJmaW5pc2hfcmVhc29uIjoic3RvcCJ9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6OTAwNzE5OTI1NDc0MDk5MywiY29tcGxldGlvbl90b2tlbnMiOjJ9LCJkZWNpbWFsIjowLjEwMDAwMDAwMDAwMDAwMDAxfQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "chunks": [],
+            "usage": {
+              "input_tokens": "9007199254740993",
+              "output_tokens": "2"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJjaG9pY2VzIjpbeyJtZXNzYWdlIjp7ImNvbnRlbnQiOiLlkIjmiJDwn4yPIn0sImZpbmlzaF9yZWFzb24iOiJzdG9wIn1dLCJ1c2FnZSI6eyJwcm9tcHRfdG9rZW5zIjo5MDA3MTk5MjU0NzQwOTkzLCJjb21wbGV0aW9uX3Rva2VucyI6Mn0sImRlY2ltYWwiOjAuMTAwMDAwMDAwMDAwMDAwMDF9"
+        }
+      ]
+    },
+    {
+      "name": "missing usage stays unknown",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6InVwc3RyZWFtIiwiY2hvaWNlcyI6W3sibWVzc2FnZSI6eyJjb250ZW50IjoibGltaXRlZCJ9LCJmaW5pc2hfcmVhc29uIjoibGVuZ3RoIn1dfQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "finality": "UNKNOWN",
+            "terminal": {
+              "kind": "incomplete",
+              "bytes": ""
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJjaG9pY2VzIjpbeyJtZXNzYWdlIjp7ImNvbnRlbnQiOiJsaW1pdGVkIn0sImZpbmlzaF9yZWFzb24iOiJsZW5ndGgifV19"
+        }
+      ]
+    },
+    {
+      "name": "negative usage cannot be final",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6InVwc3RyZWFtIiwiY2hvaWNlcyI6W3sibWVzc2FnZSI6eyJjb250ZW50Ijoi5ZCI5oiQ8J+MjyJ9LCJmaW5pc2hfcmVhc29uIjoic3RvcCJ9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6LTEsImNvbXBsZXRpb25fdG9rZW5zIjoyfSwiZGVjaW1hbCI6MC4xMDAwMDAwMDAwMDAwMDAwMX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "invalid_upstream_usage"
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid numeric exponent is 502",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6InVwc3RyZWFtIiwiY2hvaWNlcyI6W3sibWVzc2FnZSI6eyJjb250ZW50Ijoi5ZCI5oiQ8J+MjyJ9LCJmaW5pc2hfcmVhc29uIjoic3RvcCJ9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MWU5OTk5OTksImNvbXBsZXRpb25fdG9rZW5zIjoyfSwiZGVjaW1hbCI6MC4xMDAwMDAwMDAwMDAwMDAwMX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "invalid_upstream_usage"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed JSON is 502",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "model": "logical"
+          },
+          "body": "ew==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "invalid_json"
+          }
+        }
+      ]
+    },
+    {
+      "name": "provider error cannot become success",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "model": "logical"
+          },
+          "body": "eyJlcnJvciI6eyJtZXNzYWdlIjoic3ludGhldGljIn19",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "upstream_error"
+          }
+        }
+      ]
+    },
+    {
+      "name": "normal SSE only offers a withheld terminal",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZGF0YTogeyJjaG9pY2VzIjpbeyJkZWx0YSI6eyJjb250ZW50Ijoi5L2g5aW98J+MjyJ9LCJmaW5pc2hfcmVhc29uIjpudWxsfV19CgpkYXRhOiB7ImNob2ljZXMiOlt7ImRlbHRhIjp7fSwiZmluaXNoX3JlYXNvbiI6InN0b3AifV19CgpkYXRhOiB7ImNob2ljZXMiOltdLCJ1c2FnZSI6eyJwcm9tcHRfdG9rZW5zIjo5MDA3MTk5MjU0NzQwOTkzLCJjb21wbGV0aW9uX3Rva2VucyI6Mn19CgpkYXRhOiBbRE9ORV0KCg==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 235,
+            "chunks": [
+              "ZGF0YTogeyJjaG9pY2VzIjpbeyJkZWx0YSI6eyJjb250ZW50Ijoi5L2g5aW98J+MjyJ9LCJmaW5pc2hfcmVhc29uIjpudWxsfV19Cgo="
+            ],
+            "finality": "FINAL",
+            "needs_input": false,
+            "usage": {
+              "input_tokens": "9007199254740993",
+              "output_tokens": "2"
+            },
+            "terminal": {
+              "kind": "complete",
+              "bytes": "ZGF0YTogeyJjaG9pY2VzIjpbeyJkZWx0YSI6e30sImZpbmlzaF9yZWFzb24iOiJzdG9wIn1dfQoKZGF0YTogeyJjaG9pY2VzIjpbXSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6OTAwNzE5OTI1NDc0MDk5MywiY29tcGxldGlvbl90b2tlbnMiOjJ9fQoKZGF0YTogW0RPTkVdCgo="
+            }
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_finish",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "FINAL",
+            "needs_input": false,
+            "usage": {
+              "input_tokens": "9007199254740993",
+              "output_tokens": "2"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "SSE EOF cannot fabricate terminal",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZGF0YTogeyJjaG9pY2VzIjpbeyJkZWx0YSI6eyJjb250ZW50Ijoi5L2g5aW98J+MjyJ9LCJmaW5pc2hfcmVhc29uIjpudWxsfV19Cgo=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 77,
+            "chunks": [
+              "ZGF0YTogeyJjaG9pY2VzIjpbeyJkZWx0YSI6eyJjb250ZW50Ijoi5L2g5aW98J+MjyJ9LCJmaW5pc2hfcmVhc29uIjpudWxsfV19Cgo="
+            ],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_finish",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "stream_truncated"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed SSE is a failure",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZGF0YTogYnJva2VuCgo=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "invalid_json"
+          }
+        }
+      ]
+    },
+    {
+      "name": "empty SSE terminal cannot be successful",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZGF0YTogW0RPTkVdCgo=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "premature_terminal"
+          }
+        }
+      ]
+    },
+    {
+      "name": "UTF8 fragment retained explicitly",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZGF0YTogeyJjaG9pY2VzIjpbeyJkZWx0YSI6eyJjb250ZW50Ijoi5L2g5aW98A==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 46,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "n4yPIn0sImZpbmlzaF9yZWFzb24iOm51bGx9XX0KCmRhdGE6IHsiY2hvaWNlcyI6W3siZGVsdGEiOnt9LCJmaW5pc2hfcmVhc29uIjoic3RvcCJ9XX0KCmRhdGE6IHsiY2hvaWNlcyI6W10sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjkwMDcxOTkyNTQ3NDA5OTMsImNvbXBsZXRpb25fdG9rZW5zIjoyfX0KCmRhdGE6IFtET05FXQoK",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 189,
+            "chunks": [
+              "ZGF0YTogeyJjaG9pY2VzIjpbeyJkZWx0YSI6eyJjb250ZW50Ijoi5L2g5aW98J+MjyJ9LCJmaW5pc2hfcmVhc29uIjpudWxsfV19Cgo="
+            ],
+            "finality": "FINAL",
+            "needs_input": false,
+            "usage": {
+              "input_tokens": "9007199254740993",
+              "output_tokens": "2"
+            },
+            "terminal": {
+              "kind": "complete",
+              "bytes": "ZGF0YTogeyJjaG9pY2VzIjpbeyJkZWx0YSI6e30sImZpbmlzaF9yZWFzb24iOiJzdG9wIn1dfQoKZGF0YTogeyJjaG9pY2VzIjpbXSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6OTAwNzE5OTI1NDc0MDk5MywiY29tcGxldGlvbl90b2tlbnMiOjJ9fQoKZGF0YTogW0RPTkVdCgo="
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "cancellation invalidates context",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "cancel",
+          "hook": "stream_feed",
+          "input": "ZGF0YTogeyJjaG9pY2VzIjpbeyJkZWx0YSI6eyJjb250ZW50Ijoi5L2g5aW98J+MjyJ9LCJmaW5pc2hfcmVhc29uIjpudWxsfV19Cgo=",
+          "expected_error": "CALL_CANCELLED"
+        }
+      ]
+    },
+    {
+      "name": "balance explicitly unsupported",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "balance_prepare",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_capability"
+          }
+        }
+      ]
+    },
+    {
+      "name": "resources explicitly unsupported",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_capability"
+          }
+        }
+      ]
+    }
+  ]
+}

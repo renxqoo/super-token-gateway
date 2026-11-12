@@ -1,4 +1,4 @@
-import { secureEqual } from "@gateway/kernel";
+import { secureEqual } from "@gateway/runtime";
 import { loadConfig } from "./config.ts";
 import { assemble } from "./assembly.ts";
 import { recoveryTick } from "./recovery.ts";

@@ -1,0 +1,20 @@
+{
+  "frames": [
+    "data: {\"choices\":[{\"delta\":{\"content\":\"你🙂\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\"}}]},\"finish_reason\":null}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"北京\\\",\\\"n\\\":9007199254740993}\"}}]},\"finish_reason\":null}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9007199254740993,\"completion_tokens\":17},\"opaque\":0.10000000000000001}\n\n",
+    "data: [DONE]\n\n"
+  ],
+  "expected": {
+    "text": "你🙂",
+    "args": "{\"city\":\"北京\",\"n\":9007199254740993}",
+    "usage": {
+      "input_tokens": "9007199254740993",
+      "output_tokens": "17"
+    },
+    "exact": "0.10000000000000001",
+    "frames": 6
+  }
+}

@@ -12,11 +12,13 @@ Gateway 管理技术组织/主体、项目、API Key/IP、模型别名、供应�
 
 需要 Bun **1.4.4**、已有 Docker，或者已有 PostgreSQL 17 / Redis 7。脚本不安装 Docker。独立 mock 是另一个应用，仅使用 Hono，不依赖 Gateway 解析器或业务模块。
 
+`DATABASE_URL` 必须显式指向已创建的空开发库 `gateway_v2_dev`；已有旧 schema 的数据库会被拒绝并保留。
+
 ```sh
 bun install --frozen-lockfile
 bun run setup:local
 bun run infra:up
-bun run db:migrate
+bun run db:migrate -- --database gateway_v2_dev
 bun run seed
 ```
 
@@ -69,6 +71,20 @@ bun run bench --model gpt-4o-mini --seconds 30 --concurrency 32 --stream
 测试使用真实 PostgreSQL、Redis 和真实 HTTP mock，自动创建并删除独立测试数据库。测试数据库账号需要 `CREATEDB`，生产运行账号不需要。验证内容和实测数据见 [验收报告](validation.md)；不会把短时本机测试描述为 10,000 RPS 持续一小时或完整机房高可用验证。
 
 `bun run build` 输出无需 `node_modules` 的 Gateway、计费与恢复 worker、迁移工具与独立 mock。生产入口为 `bun dist/gateway/main.js`，独立 worker 为 `bun dist/gateway/worker-main.js`。Linux、双实例、最小权限、发布/回滚与恢复步骤见 [运维手册](reliability-and-operations.md)。
+
+T04.a 增加独立插件组件：`@gateway/plugin-host` 提供有界 Bun 监督、已验证包与 attempt API，`@gateway/plugin-sdk` 定义 ABI v1，`@gateway/adapters` 提供 OpenAI Chat WASM 包及锁定来源的构建入口。当前 Gateway 装配和资金路径仍由 T04.b/c 迁移。原生构建需要 Go 1.27.4；`PLUGIN_GO` 可指定该 Go 的绝对路径，Go 缓存保存在 `.local`。`bun run verify` 包含显式 native gofmt/vet/`go test ./__test__`；完整 race 入口为 `bun run test:native:race`。CI 和部署环境须安装同版本 Go。
+
+```sh
+bun run test:plugins
+bun run build
+bun run test:plugin-artifact
+bun run setup:plugin-tools --fetch-tools --fetch-dependencies --rust-bin /absolute/rust/1.95.0/bin
+bun run build:plugins
+```
+
+前三项使用已提交 WASM，不下载插件工具、不访问数据库或供应商。`setup:plugin-tools` 在 macOS arm64 上显式获取并校验官方源码、冻结锁、最小 Wizer/Linker 补丁和未改 engine，使用指定 Rust 1.95.0 在 `.local` 以两 jobs 有界构建确定性 CLI；也可用 `--import-tool /absolute/extism-js` 导入 hash 已批准的本地 CLI。后续 `build:plugins` 从 `.local/plugin-tools` 离线重建，并强制执行同目录两次、异目录一次的真实 Chat/isolation WASM hash 一致门禁。内置包没有默认可信签名；生产加载必须提供发布信任锚，上传/发布生命周期留 T08。构建增加 `dist/native/plugin-host`、`dist/plugin-host/index.js`、`dist/adapters/index.js` 和 `dist/openai-chat/package/`；独立产物检查使用临时合成签名，在隔离目录执行真实包 fixtures 并回收 helper。公开 API、JSON 16MiB 边界、预算与终态责任见 [插件 SDK 迁移记录](docs/migrations/enterprise-v2-plugin-sdk.md)。
+
+官方 CLI 原始快照的非确定性失败样本已保留；正式构建使用已批准的确定性预初始化路径，运行时和产物字节没有重写。未重建官方 engine 源码、未测 CLI 二进制自身复现及跨平台矩阵；T04.a 仍待协调集成和独立审查。生产签名和内容 digest 始终严格不可替换。
 
 ## 文档
 

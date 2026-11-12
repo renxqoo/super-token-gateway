@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
 import type { SQL } from "bun";
-import type { Route, Credential, Usage, UsageEvidence } from "@gateway/kernel";
+import type { Route, Credential, UsageEvidence } from "@gateway/contracts";
+import type { Usage } from "@gateway/kernel";
+import { createUsageQueueCleanup } from "../support/usage-queue-cleanup.ts";
 const database = `gateway_test_funds_${crypto.randomUUID().replaceAll("-", "")}`;
 let owner: SQL;
 let db: SQL;
@@ -675,14 +677,7 @@ test("a concurrent quote burst must not starve independent funding behind a lock
   });
   await acquired.promise;
   const quotes = Array.from({ length: 32 }, () =>
-    isolated.quote(
-      "funds-model",
-      "chat",
-      "USD",
-      [route.provider_id],
-      { messages: [{ role: "user", content: "x" }] },
-      1,
-    ),
+    isolated.quote("funds-model", "chat", "USD", [route.provider_id], { inputCharacters: "1" }, 1),
   );
   let creditFinished = false;
   let credited: Promise<unknown> | undefined;
@@ -933,6 +928,7 @@ beforeAll(async () => {
         output_tokens: { numerator: "1", denominator: "1" },
       },
     },
+    ceilings: { input_tokens: "16777216", output_tokens: "1000000" },
   });
   route = (await store.routes("funds-model", "chat"))[0]!;
   const tariff = await funds.setTariff({
@@ -1608,9 +1604,15 @@ test("explicit RELEASE with a captured pricing reference releases the original h
   expect(w.reserved_atoms).toBe("0");
 });
 
-test("a retained failed usage job is alerted on but does not close admission until failed jobs reach their own bound", async () => {
+test("a retained failed usage job is alerted on but does not close admission until failed jobs reach their own bound; teardown leaves no queue metadata", async () => {
   const { UsageProducer } = await import("@gateway/runtime");
-  const namespace = `queue-failed:${crypto.randomUUID()}`;
+  const id = crypto.randomUUID();
+  const namespace = `test-usage:failed:${id}`;
+  const neighborNamespace = `test-usage:failed-neighbor:${id}`;
+  const cleanup = createUsageQueueCleanup(namespace);
+  const neighborCleanup = createUsageQueueCleanup(neighborNamespace);
+  for (const unowned of ["", "*", "test-usage:*", `${namespace}:*`, `queue-failed:${id}`])
+    expect(() => createUsageQueueCleanup(unowned)).toThrow("owned test namespace");
   const options = {
     url: process.env.QUEUE_REDIS_URL!,
     namespace,
@@ -1620,30 +1622,56 @@ test("a retained failed usage job is alerted on but does not close admission unt
   };
   const producer = new UsageProducer(options);
   const redis = new Bun.RedisClient(options.url);
+  const neighbor = new UsageProducer({ ...options, namespace: neighborNamespace });
+  let neighborKeys: string[] = [];
   try {
-    await producer.ready();
-    await redis.send("ZADD", [
-      `{${namespace}:usage}:usage-v1:failed`,
-      String(Date.now()),
-      "retained",
-    ]);
-    expect((await producer.stats()).failed).toBe(1);
-    await Bun.sleep(150);
-    await producer.ready();
-    await redis.send("ZADD", [
-      `{${namespace}:usage}:usage-v1:failed`,
-      String(Date.now()),
-      "retained-2",
-    ]);
-    await Bun.sleep(150);
-    await expect(producer.ready()).rejects.toMatchObject({
-      status: 503,
-      code: "usage_queue_unavailable",
-    });
+    try {
+      await neighbor.ready();
+      await neighbor.publish({
+        attemptId: crypto.randomUUID(),
+        source: "execution",
+        state: "SUCCEEDED",
+        finality: "FINAL",
+        usage: { input_tokens: "1" },
+      });
+      neighborKeys = await neighborCleanup.keys(options.url);
+      expect(neighborKeys.length).toBeGreaterThan(0);
+      await producer.ready();
+      await redis.send("ZADD", [
+        `{${namespace}:usage}:usage-v1:failed`,
+        String(Date.now()),
+        "retained",
+      ]);
+      expect((await producer.stats()).failed).toBe(1);
+      await Bun.sleep(150);
+      await producer.ready();
+      await redis.send("ZADD", [
+        `{${namespace}:usage}:usage-v1:failed`,
+        String(Date.now()),
+        "retained-2",
+      ]);
+      await Bun.sleep(150);
+      await expect(producer.ready()).rejects.toMatchObject({
+        status: 503,
+        code: "usage_queue_unavailable",
+      });
+    } finally {
+      producer.close();
+      neighbor.close();
+      redis.close();
+      await cleanup.remove(options.url);
+    }
+    expect(await cleanup.keys(options.url)).toHaveLength(0);
+    expect(await neighborCleanup.keys(options.url)).toEqual(neighborKeys);
+    const reader = new UsageProducer({ ...options, namespace: neighborNamespace });
+    try {
+      await reader.ready();
+      expect((await reader.stats()).waiting).toBe(1);
+    } finally {
+      reader.close();
+    }
   } finally {
-    producer.close();
-    await redis.send("UNLINK", [`{${namespace}:usage}:usage-v1:failed`]);
-    redis.close();
+    await neighborCleanup.remove(options.url);
   }
 });
 

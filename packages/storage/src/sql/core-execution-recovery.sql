@@ -1,0 +1,70 @@
+CREATE FUNCTION public.core_abort_recovery_v1(p jsonb,e jsonb,d jsonb) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE permit public.execution_permits%ROWTYPE;cmd public.execution_commands%ROWTYPE;q public.gateway_requests%ROWTYPE;h public.upstream_holds%ROWTYPE;ctx public.execution_contexts%ROWTYPE;
+ k public.api_keys%ROWTYPE;pr public.projects%ROWTYPE;o public.organizations%ROWTYPE;u public.principals%ROWTYPE;original_key public.api_keys%ROWTYPE;original_project public.projects%ROWTYPE;
+ owner_instance public.internal_service_instances%ROWTYPE;owner_certificate public.internal_service_certificates%ROWTYPE;owner_session public.internal_startup_sessions%ROWTYPE;channel public.channels%ROWTYPE;
+ caller text=p->>'service'||':'||(p->>'instance_id');response jsonb;settled jsonb;rejection text;eligible boolean;BEGIN
+ IF NOT pg_try_advisory_xact_lock(hashtextextended('stg.execution.v1:command:'||caller||':execution_abort_recovery_v1:'||(e->>'command_id'),0)) THEN RAISE EXCEPTION 'core_busy' USING ERRCODE='P0503';END IF;
+ IF jsonb_typeof(d) IS DISTINCT FROM 'object' OR d-ARRAY['attempt_id']<>'{}'::jsonb OR jsonb_typeof(d->'attempt_id') IS DISTINCT FROM 'string' OR e->>'command_id' IS DISTINCT FROM p->>'command_id' OR e->>'deadline_at' IS DISTINCT FROM p->>'deadline_at' OR e->>'caller_incarnation' IS DISTINCT FROM p->>'incarnation_id' OR public.core_digest_v1(jsonb_build_object('kind','execution_abort_recovery_v1','contract_version',1,'owner',jsonb_build_object('service',p->>'service','instance_id',p->>'instance_id','session_id',p->>'session_id','incarnation_id',p->>'incarnation_id'),'deadline_at',p->>'deadline_at','data',d)) IS DISTINCT FROM e->>'body_digest' THEN RAISE EXCEPTION 'internal_request_invalid' USING ERRCODE='P0400';END IF;
+ SELECT * INTO permit FROM public.execution_permits WHERE attempt_id=(d->>'attempt_id')::uuid;
+ IF permit.context_id IS NULL THEN RAISE EXCEPTION 'context_invalid' USING ERRCODE='P0403';END IF;
+ PERFORM service FROM public.internal_service_instances WHERE (service,instance_id) IN ((p->>'service',p->>'instance_id'),(permit.owner_service,permit.gateway_instance_id)) ORDER BY service COLLATE "C",instance_id COLLATE "C" FOR SHARE NOWAIT;
+ PERFORM certificate_sha256 FROM public.internal_service_certificates WHERE certificate_sha256=ANY(ARRAY[p->>'certificate_sha256',permit.certificate_sha256]) ORDER BY certificate_sha256 COLLATE "C" FOR SHARE NOWAIT;
+ PERFORM session_id FROM public.internal_startup_sessions WHERE session_id=ANY(ARRAY[(p->>'session_id')::uuid,permit.owner_session_id]) ORDER BY session_id FOR SHARE NOWAIT;
+ PERFORM public.core_caller_v1(p);
+ IF p->>'command_type' IS DISTINCT FROM 'execution_abort_recovery_v1' OR p->>'service' NOT IN ('core-api','core-worker') THEN RAISE EXCEPTION 'internal_peer_forbidden' USING ERRCODE='P0403';END IF;
+ SELECT * INTO cmd FROM public.execution_commands WHERE caller_identity=caller AND kind='execution_abort_recovery_v1' AND command_id=(e->>'command_id')::uuid;
+ IF FOUND THEN
+  IF cmd.body_digest IS DISTINCT FROM e->>'body_digest' OR cmd.owner_session_id IS DISTINCT FROM (p->>'session_id')::uuid THEN RAISE EXCEPTION 'command_conflict' USING ERRCODE='P0409';END IF;RETURN cmd.receipt;
+ END IF;
+ SELECT * INTO ctx FROM public.execution_contexts WHERE id=permit.context_id;
+ SELECT * INTO original_key FROM public.api_keys WHERE id=ctx.key_id;
+ SELECT * INTO original_project FROM public.projects WHERE id=ctx.project_id;
+ IF original_project.organization_id IS NOT NULL THEN SELECT * INTO o FROM public.organizations WHERE id=original_project.organization_id FOR SHARE NOWAIT;END IF;
+ IF original_key.principal_id IS NOT NULL THEN SELECT * INTO u FROM public.principals WHERE id=original_key.principal_id FOR SHARE NOWAIT;END IF;
+ SELECT * INTO pr FROM public.projects WHERE id=ctx.project_id FOR SHARE NOWAIT;
+ SELECT * INTO k FROM public.api_keys WHERE id=ctx.key_id FOR SHARE NOWAIT;
+ IF (k.project_id,k.principal_id,pr.organization_id) IS DISTINCT FROM (original_key.project_id,original_key.principal_id,original_project.organization_id) THEN RAISE EXCEPTION 'core_busy' USING ERRCODE='P0503';END IF;
+ SELECT * INTO h FROM public.upstream_holds WHERE attempt_id=permit.attempt_id;
+ PERFORM id FROM public.supplier_brands WHERE id=(SELECT brand_id FROM public.channels WHERE id=h.channel_id) FOR SHARE NOWAIT;
+ SELECT * INTO channel FROM public.channels WHERE id=h.channel_id FOR SHARE NOWAIT;
+ PERFORM id FROM public.plugin_versions WHERE id=(SELECT plugin_version_id FROM public.channel_plugin_bindings WHERE id=permit.binding_id) FOR SHARE NOWAIT;
+ PERFORM id FROM public.upstream_accounts WHERE id=h.account_id FOR SHARE NOWAIT;
+ SELECT * INTO owner_instance FROM public.internal_service_instances WHERE service=permit.owner_service AND instance_id=permit.gateway_instance_id;
+ SELECT * INTO owner_certificate FROM public.internal_service_certificates WHERE certificate_sha256=permit.certificate_sha256;
+ SELECT * INTO owner_session FROM public.internal_startup_sessions WHERE session_id=permit.owner_session_id;
+ BEGIN
+  PERFORM id FROM public.wallets WHERE id=(SELECT wallet_id FROM public.billing_holds WHERE request_id=(SELECT request_id FROM public.attempts WHERE id=permit.attempt_id)) FOR NO KEY UPDATE NOWAIT;
+  PERFORM account_id FROM public.upstream_account_balances WHERE account_id=h.account_id AND currency=h.currency FOR NO KEY UPDATE NOWAIT;
+  SELECT * INTO q FROM public.gateway_requests WHERE id=(SELECT request_id FROM public.attempts WHERE id=permit.attempt_id) FOR UPDATE NOWAIT;
+  PERFORM id FROM public.billing_holds WHERE request_id=q.id FOR UPDATE NOWAIT;
+  PERFORM id FROM public.attempts WHERE request_id=q.id ORDER BY ordinal,id FOR NO KEY UPDATE NOWAIT;
+  PERFORM ep.attempt_id FROM public.execution_permits ep JOIN public.attempts at ON at.id=ep.attempt_id WHERE at.request_id=q.id ORDER BY ep.attempt_id FOR NO KEY UPDATE OF ep NOWAIT;
+  SELECT * INTO permit FROM public.execution_permits WHERE attempt_id=(d->>'attempt_id')::uuid;
+  PERFORM attempt_id FROM public.upstream_holds WHERE attempt_id=permit.attempt_id FOR NO KEY UPDATE NOWAIT;
+  IF permit.state<>'RESERVED' OR permit.granted_at IS NOT NULL THEN RAISE EXCEPTION 'recovery_not_reserved' USING ERRCODE='P0409';END IF;
+  eligible=permit.expires_at<=clock_timestamp() OR owner_instance.security_revoked_at IS NOT NULL OR NOT owner_instance.enabled OR owner_certificate.security_revoked_at IS NOT NULL OR owner_certificate.retired_at IS NOT NULL OR owner_certificate.not_after<=clock_timestamp() OR owner_session.disabled_at IS NOT NULL OR owner_session.security_revoked_at IS NOT NULL OR owner_session.expires_at<=clock_timestamp() OR NOT k.enabled OR k.expires_at<=clock_timestamp() OR NOT pr.enabled OR (o.id IS NOT NULL AND NOT o.enabled) OR (u.id IS NOT NULL AND (NOT u.enabled OR u.role NOT IN ('OWNER','ADMIN','MEMBER'))) OR k.role NOT IN ('ADMIN','INVOKER') OR (ctx.operation=ANY(k.operations)) IS NOT TRUE OR (cardinality(k.models)>0 AND NOT ctx.model=ANY(k.models)) OR NOT channel.enabled;
+  IF eligible IS NOT TRUE THEN RAISE EXCEPTION 'recovery_not_eligible' USING ERRCODE='P0409';END IF;
+  UPDATE public.execution_permits SET state='ABORTED' WHERE attempt_id=permit.attempt_id AND state='RESERVED' AND granted_at IS NULL;
+  IF NOT FOUND THEN RAISE EXCEPTION 'core_busy' USING ERRCODE='P0503';END IF;
+  UPDATE public.attempts SET state='NOT_EXECUTED',finished_at=clock_timestamp() WHERE id=permit.attempt_id;
+  UPDATE public.upstream_holds SET state='RELEASED',final_cost_atoms=0 WHERE attempt_id=permit.attempt_id;
+  UPDATE public.upstream_account_balances SET reserved_atoms=reserved_atoms-h.estimated_atoms,revision=revision+1 WHERE account_id=h.account_id AND currency=h.currency;
+  PERFORM public.core_upstream_journal_v1(h.account_id,h.currency,h.channel_id,permit.attempt_id,'RELEASE',h.estimated_atoms);
+  UPDATE public.execution_quota_leases SET state='RELEASE_PENDING' WHERE attempt_id=permit.attempt_id AND scope_kind='channel' AND state IN ('ADOPTION_PENDING','ACTIVE');
+  IF NOT EXISTS(SELECT 1 FROM public.execution_permits ep JOIN public.attempts at ON at.id=ep.attempt_id WHERE at.request_id=q.id AND (ep.state<>'ABORTED' OR ep.granted_at IS NOT NULL)) THEN
+   UPDATE public.gateway_requests SET execution_closed_at=coalesce(execution_closed_at,clock_timestamp()),state='FAILED',billing_outcome='FAILED' WHERE id=q.id;
+   settled=public.settle_requests(ARRAY[q.id]);
+   IF settled->q.id::text->>'state' IS DISTINCT FROM 'RELEASED' THEN RAISE EXCEPTION 'settlement_failed';END IF;
+   UPDATE public.execution_quota_leases SET state='RELEASE_PENDING' WHERE request_id=q.id AND state IN ('ADOPTION_PENDING','ACTIVE');
+  END IF;
+  response=jsonb_build_object('command_state','COMMITTED','request_id',q.id,'attempt_id',permit.attempt_id,'state','ABORTED','permit_epoch',permit.permit_epoch::text);
+  INSERT INTO public.audit_events(id,action,resource_id,actor,details) VALUES(gen_random_uuid(),'execution_abort_recovery_v1',permit.attempt_id::text,caller,jsonb_build_object('command_id',e->>'command_id','request_id',q.id,'attempt_id',permit.attempt_id,'state','ABORTED'));
+ EXCEPTION WHEN SQLSTATE 'P0409' THEN
+  GET STACKED DIAGNOSTICS rejection=MESSAGE_TEXT;
+  IF rejection NOT IN ('recovery_not_reserved','recovery_not_eligible') THEN RAISE;END IF;
+  response=jsonb_build_object('command_state','REJECTED','code',rejection);
+ END;
+ INSERT INTO public.execution_commands(id,command_id,kind,caller_identity,owner_session_id,caller_incarnation,body_digest,deadline_at,trace_id,contract_version,state,request_id,attempt_id,context_id,rejection_code,receipt) VALUES(gen_random_uuid(),(e->>'command_id')::uuid,'execution_abort_recovery_v1',caller,(p->>'session_id')::uuid,(p->>'incarnation_id')::uuid,e->>'body_digest',(e->>'deadline_at')::timestamptz,e->>'trace_id',1,response->>'command_state',q.id,permit.attempt_id,ctx.id,rejection,response);
+ RETURN response;
+END $$;
+REVOKE ALL ON FUNCTION public.core_abort_recovery_v1(jsonb,jsonb,jsonb) FROM PUBLIC;

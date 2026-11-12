@@ -1,29 +1,24 @@
 import type { SQL } from "bun";
 import {
   GatewayError,
-  calculateCost,
-  quoteReservation,
   creditSchema,
   creditPolicySchema,
   tariffSchema,
   refundSchema,
   adjustmentSchema,
   resolutionSchema,
-  canonical,
-  sha256,
-} from "@gateway/kernel";
+} from "@gateway/contracts";
+import { calculateCost, quoteReservation, canonical, DomainError } from "@gateway/kernel";
+import { sha256 } from "@gateway/runtime/crypto";
+import type { BillingQuote, Operation, Pricing, Usage } from "@gateway/kernel";
 import type {
-  BillingQuote,
   CreditInput,
   CreditPolicyInput,
   TariffInput,
   RefundInput,
   AdjustmentInput,
   ResolutionInput,
-  Operation,
-  Pricing,
-  Usage,
-} from "@gateway/kernel";
+} from "@gateway/contracts";
 
 export function fundingError(error: unknown): never {
   const failure = error as { code?: string; errno?: string; message?: string };
@@ -107,14 +102,7 @@ export class FundsStore {
   }
   async setTariff(value: TariffInput): Promise<{ id: string; pricing_id: string }> {
     const input = tariffSchema.parse(value);
-    const pricing = crypto.randomUUID();
-    const tariff = crypto.randomUUID();
-    const result = await this.db.begin(async (tx) => {
-      await tx`INSERT INTO billing_prices(id,currency,rates,ceilings,basis) VALUES(${pricing},${input.pricing.currency},${input.pricing.rates},${input.ceilings},${input.basis})`;
-      const rows =
-        await tx`INSERT INTO billing_tariffs(id,model,operation,provider_id,currency,pricing_id) VALUES(${tariff},${input.model},${input.operation},${input.provider_id ?? null},${input.pricing.currency},${pricing}) ON CONFLICT(model,operation,provider_id,currency) DO UPDATE SET pricing_id=excluded.pricing_id,enabled=true RETURNING id`;
-      return { id: String(rows[0]?.id), pricing_id: pricing };
-    });
+    const result = await this.db.begin((tx) => recordBillingTariff(tx, input));
     this.prices.clear();
     this.priceLoads.clear();
     return result;
@@ -128,9 +116,8 @@ export class FundsStore {
     operation: Operation,
     currency: string,
     providers: string[],
-    body: Record<string, unknown>,
+    measurement: { inputCharacters?: string | undefined; images?: unknown },
     outputBound: number,
-    batchImages?: number,
   ): Promise<BillingQuote> {
     const cacheKey = `${model}:${operation}:${currency}:${[...providers].sort().join(",")}`;
     const cached = this.prices.get(cacheKey);
@@ -156,7 +143,17 @@ export class FundsStore {
       }
       rows = await pending;
     }
-    return quoteReservation(rows, currency, operation, body, outputBound, batchImages);
+    try {
+      return quoteReservation(rows, currency, measurement, outputBound);
+    } catch (error) {
+      if (error instanceof DomainError)
+        throw new GatewayError(
+          ["tariff_unavailable", "invalid_tariff"].includes(error.code) ? 503 : 422,
+          error.code,
+          error.message,
+        );
+      throw error;
+    }
   }
 
   async refund(chargeId: string, value: RefundInput): Promise<Record<string, unknown>> {
@@ -264,4 +261,14 @@ interface PriceRow {
   rates: Pricing["rates"];
   ceilings: Usage;
   basis: "PROVIDER_USAGE" | "INPUT_CHARACTERS" | "REQUEST_COMPLETION";
+}
+
+export async function recordBillingTariff(tx: SQL, value: TariffInput) {
+  const input = tariffSchema.parse(value),
+    pricing = crypto.randomUUID(),
+    tariff = crypto.randomUUID();
+  await tx`INSERT INTO billing_prices(id,currency,rates,ceilings,basis) VALUES(${pricing},${input.pricing.currency},${input.pricing.rates},${input.ceilings},${input.basis})`;
+  const rows =
+    await tx`INSERT INTO billing_tariffs(id,model,operation,provider_id,currency,pricing_id) VALUES(${tariff},${input.model},${input.operation},${input.provider_id ?? null},${input.pricing.currency},${pricing}) ON CONFLICT(model,operation,provider_id,currency) DO UPDATE SET pricing_id=excluded.pricing_id,enabled=true RETURNING id`;
+  return { id: String(rows[0]?.id), pricing_id: pricing };
 }

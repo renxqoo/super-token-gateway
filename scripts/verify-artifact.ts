@@ -93,10 +93,89 @@ const api = async (path: string, body: unknown, token = admin) => {
   return (await response.json()) as Record<string, unknown>;
 };
 try {
+  const benchmark = Bun.spawn(
+    [
+      process.execPath,
+      "scripts/bench-system.ts",
+      "--seconds",
+      "1",
+      "--rate",
+      "1",
+      "--concurrency",
+      "1",
+      "--warmup-concurrency",
+      "1",
+      "--instances",
+      "1",
+      "--wallets",
+      "1",
+      "--pool",
+      "1",
+      "--worker-concurrency",
+      "1",
+      "--drain-seconds",
+      "10",
+      "--scenario",
+      JSON.stringify({ headerDelayMs: 50 }),
+    ],
+    { cwd: root.pathname, env, stdout: "pipe", stderr: "pipe" },
+  );
+  children.add(benchmark);
+  const [benchmarkOutput, benchmarkErrors, benchmarkExit] = await Promise.all([
+    new Response(benchmark.stdout).text(),
+    new Response(benchmark.stderr).text(),
+    benchmark.exited,
+  ]);
   assert.equal(
-    await start("dist/tools/migrate.js").exited,
+    benchmarkExit,
     0,
-    "Compiled migrator must find both SQL assets from an empty working directory",
+    `Fresh-schema benchmark must initialize, settle and clean up: ${benchmarkOutput}${benchmarkErrors}`,
+  );
+  const benchmarkResult = JSON.parse(benchmarkOutput.trim()) as {
+    directory: string;
+    valid: boolean;
+  };
+  assert.equal(benchmarkResult.valid, true);
+  const benchmarkDirectory = new URL(benchmarkResult.directory + "/", root);
+  const audit = await Bun.file(new URL("audit.json", benchmarkDirectory)).json();
+  assert.equal(audit.http.offered, 1);
+  assert.equal(audit.http.succeeded, 1);
+  assert.equal(audit.http.invalid, 0);
+  assert(audit.accounting.requests > 1);
+  assert.equal(audit.accounting.precise_charges, audit.accounting.requests);
+  assert.equal(audit.accounting.acknowledged, audit.accounting.requests);
+  assert.equal(audit.pending, 0);
+  assert.equal((await Bun.file(new URL("cleanup.json", benchmarkDirectory)).json()).failed, 0);
+  assert.equal(
+    (
+      await owner`SELECT count(*)::int AS n FROM pg_database WHERE datname=${`gateway_bench_${audit.id}`}`
+    )[0].n,
+    0,
+  );
+  for (const endpoint of [redisURL, queueURL]) {
+    const redis = new RedisClient(endpoint);
+    try {
+      await redis.connect();
+      let cursor = "0";
+      do {
+        const page = (await redis.send("SCAN", [
+          cursor,
+          "MATCH",
+          `*bench:${audit.id}*`,
+          "COUNT",
+          "1000",
+        ])) as [string, string[]];
+        cursor = page[0];
+        assert.equal(page[1].length, 0, "Benchmark must remove its own Redis namespace");
+      } while (cursor !== "0");
+    } finally {
+      redis.close();
+    }
+  }
+  assert.equal(
+    await start("dist/tools/migrate.js", ["--database", name]).exited,
+    0,
+    "Compiled migrator must find versioned SQL assets from an empty working directory",
   );
   const archivePath = new URL("numeric-archive/", cwd).pathname;
   assert.equal(
@@ -129,6 +208,7 @@ try {
     provider_id: provider.id,
     upstream_model: model,
     operations: ["chat"],
+    ceilings: { input_tokens: "100", output_tokens: "100" },
     pricing: {
       currency: "USD",
       rates: {
@@ -287,6 +367,7 @@ try {
     JSON.stringify({
       artifact: "pass",
       checks: [
+        "fresh-schema benchmark initialization, exact settlement, ACK and cleanup",
         "standalone bundle with empty working directory",
         "compiled migration SQL assets and archive CLI",
         "real HTTP readiness and inference",

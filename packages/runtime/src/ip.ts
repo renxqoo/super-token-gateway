@@ -1,5 +1,5 @@
 import { BlockList, isIP } from "node:net";
-import { GatewayError } from "@gateway/kernel";
+import { GatewayError } from "@gateway/contracts";
 export function normalizeAddress(address: string): string {
   return address.startsWith("::ffff:") && isIP(address.slice(7)) === 4 ? address.slice(7) : address;
 }

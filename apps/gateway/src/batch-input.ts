@@ -1,13 +1,8 @@
-import {
-  copyExact,
-  parseClientJson,
-  stringifyExact,
-  GatewayError,
-  object,
-  text,
-  batchIdentityDigest,
-} from "@gateway/kernel";
-import type { BatchManifest, Operation, Resource, Route } from "@gateway/kernel";
+import { copyExact, parseClientJson, stringifyExact } from "@gateway/connectors";
+import { GatewayError, object, text } from "@gateway/contracts";
+import { batchIdentityDigest } from "@gateway/runtime";
+import type { BatchManifest, Resource, Route } from "@gateway/contracts";
+import type { Operation } from "@gateway/kernel";
 import { readBounded } from "@gateway/runtime";
 import type { Auth, Dependencies } from "./context.ts";
 import { applyOutputBound, rejectUnmeteredTools } from "./input-policy.ts";

@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { SQL } from "bun";
+import { UsageProducer } from "@gateway/runtime";
+import { createUsageQueueCleanup } from "../support/usage-queue-cleanup.ts";
 import { createDatabase, migrate } from "@gateway/storage";
 import type { Operation, Protocol, ProviderKind } from "@gateway/kernel";
 import { loadConfig } from "../../apps/gateway/src/config.ts";
@@ -87,6 +89,11 @@ async function configureModel(
         output_tokens: { numerator: "7", denominator: "1" },
         cached_input_tokens: { numerator: "1", denominator: "1" },
       },
+    },
+    ceilings: {
+      input_tokens: "16777216",
+      output_tokens: "1000000",
+      cached_input_tokens: "16777216",
     },
   });
   expect(result.response.status).toBe(201);
@@ -821,6 +828,7 @@ test("known usage survives a conversion rejection and output-free failover", asy
         output_tokens: { numerator: "7", denominator: "1" },
       },
     },
+    ceilings: { input_tokens: "16777216", output_tokens: "1000000" },
   });
   const response = await sendChat(model);
   expect(response.status).toBe(200);
@@ -839,6 +847,7 @@ test("non-JSON transcription completion retains its exact request fee without st
     `/admin/routes/${route.id}`,
     {
       pricing: { currency: "USD", rates: { requests: { numerator: "11", denominator: "1" } } },
+      ceilings: { requests: "1" },
     },
     adminKey,
     "PATCH",
@@ -970,7 +979,8 @@ test("all provider-backed resource fields enforce ownership, including Gemini na
 
 test("precise numeric literals survive resource rewriting, forwarding and idempotency", async () => {
   const { resolveFileReferences } = await import("../../apps/gateway/src/resources.ts");
-  const { canonical, parseProviderJson, stringifyExact } = await import("@gateway/kernel");
+  const { canonicalExact } = await import("@gateway/connectors");
+  const { parseProviderJson, stringifyExact } = await import("@gateway/connectors");
   const a = (
     await resolveFileReferences(
       deps,
@@ -990,7 +1000,7 @@ test("precise numeric literals survive resource rewriting, forwarding and idempo
     )
   ).body;
   expect(stringifyExact(a)).toContain("9007199254740993");
-  expect(canonical(a)).not.toBe(canonical(b));
+  expect(canonicalExact(a)).not.toBe(canonicalExact(b));
   const model = await configureModel("openai");
   const intent = crypto.randomUUID();
   const send = (n: string) =>
@@ -1034,6 +1044,7 @@ test("poll-final evidence cannot be downgraded by a later stream cancellation", 
   controller.abort();
   await reader.cancel().catch(() => undefined);
   await waitFor(() => deps.lifecycle.size === 0);
+  await awaitModelUsage(model, 2);
   const resource = await deps.store.resource(String(resourceId), projectId);
   const rows = await testDb`SELECT state FROM attempts WHERE id=${resource.attempt_id}`;
   expect(rows[0]?.state).toBe("SUCCEEDED");
@@ -1113,6 +1124,7 @@ test("pricing updates preserve dispatched attempt versions and configuration aud
               output_tokens: { numerator: "100", denominator: "1" },
             },
           },
+          ceilings: { input_tokens: "16777216", output_tokens: "1000000" },
         },
         adminKey,
         "PATCH",
@@ -2070,7 +2082,8 @@ test("round-robin rotates equal priorities and least-latency selects shared meas
     operations: ["chat"],
     priority: 10,
     weight: 1,
-    pricing: { currency: "USD", rates: {} },
+    pricing: { currency: "USD", rates: { requests: { numerator: "0", denominator: "1" } } },
+    ceilings: { requests: "1" },
   });
   await json(`/admin/models/${model}`, { routing_strategy: "ROUND_ROBIN" }, adminKey, "PATCH");
   const chosen: string[] = [];
@@ -2205,7 +2218,12 @@ test("queued known rejection releases its complete pre-hold after consumer resum
   ).toMatchObject({ available_atoms: "100", reserved_atoms: "0" });
 });
 
-test("production worker role advances async resources and commits queued usage with financial settlement", async () => {
+test("production worker role advances async resources and commits queued usage with financial settlement; teardown leaves no queue metadata", async () => {
+  const id = crypto.randomUUID();
+  const workerNamespace = `test-usage:worker:${id}`;
+  const neighborNamespace = `test-usage:worker-neighbor:${id}`;
+  const cleanup = createUsageQueueCleanup(workerNamespace);
+  const neighborCleanup = createUsageQueueCleanup(neighborNamespace);
   const role = `worker_${suffix}`;
   const password = crypto.randomUUID().replaceAll("-", "");
   await testDb.unsafe(
@@ -2219,45 +2237,80 @@ test("production worker role advances async resources and commits queued usage w
   const workerDeps = await assemble({
     ...deps.config,
     DATABASE_URL: url.toString(),
-    REDIS_NAMESPACE: `worker-role:${suffix}`,
+    REDIS_NAMESPACE: workerNamespace,
     DB_POOL_SIZE: 4,
   });
   const consumer = new BillingWorker(workerDeps);
   const workerDb = createDatabase(url.toString(), 1);
+  const neighborOptions = {
+    url: workerDeps.config.QUEUE_REDIS_URL,
+    namespace: neighborNamespace,
+    replicas: 0,
+    timeoutMs: 1000,
+  };
+  const neighbor = new UsageProducer(neighborOptions);
+  let neighborKeys: string[] = [];
   try {
-    await expect(
-      workerDb`SELECT ingest_initial_usage('[]'::jsonb,'{}'::uuid[])`,
-    ).rejects.toMatchObject({ errno: "42501" });
-    await consumer.start();
-    const model = await configureModel("openai");
-    const background = await json(
-      "/v1/responses",
-      { ...payload("responses", model, false), background: true },
-      key,
-    );
-    const resource = await deps.store.resource(String(background.value.id), projectId);
-    await workerDeps.store.updateResource(resource.id, "PENDING_USAGE", "completed");
-    await workerDeps.usage.publish({
-      attemptId: resource.attempt_id!,
-      source: "async_final",
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage: { input_tokens: "7", cached_input_tokens: "3", output_tokens: "5", requests: "1" },
-    });
-    const request = (
-      await testDb`SELECT request_id FROM attempts WHERE id=${resource.attempt_id}`
-    )[0]!.request_id;
-    await waitFor(async () => (await deps.funds.receipt(request, projectId)).charged_atoms === "1");
-    expect((await deps.funds.receipt(request, projectId)).billing_outcome).toBe("SUCCESS");
+    try {
+      await neighbor.ready();
+      await neighbor.publish({
+        attemptId: crypto.randomUUID(),
+        source: "execution",
+        state: "SUCCEEDED",
+        finality: "FINAL",
+        usage: { input_tokens: "1" },
+      });
+      neighborKeys = await neighborCleanup.keys(neighborOptions.url);
+      expect(neighborKeys.length).toBeGreaterThan(0);
+      await expect(
+        workerDb`SELECT ingest_initial_usage('[]'::jsonb,'{}'::uuid[])`,
+      ).rejects.toMatchObject({ errno: "42501" });
+      await consumer.start();
+      const model = await configureModel("openai");
+      const background = await json(
+        "/v1/responses",
+        { ...payload("responses", model, false), background: true },
+        key,
+      );
+      const resource = await deps.store.resource(String(background.value.id), projectId);
+      await workerDeps.store.updateResource(resource.id, "PENDING_USAGE", "completed");
+      await workerDeps.usage.publish({
+        attemptId: resource.attempt_id!,
+        source: "async_final",
+        state: "SUCCEEDED",
+        finality: "FINAL",
+        usage: { input_tokens: "7", cached_input_tokens: "3", output_tokens: "5", requests: "1" },
+      });
+      const request = (
+        await testDb`SELECT request_id FROM attempts WHERE id=${resource.attempt_id}`
+      )[0]!.request_id;
+      await waitFor(
+        async () => (await deps.funds.receipt(request, projectId)).charged_atoms === "1",
+      );
+      expect((await deps.funds.receipt(request, projectId)).billing_outcome).toBe("SUCCESS");
+    } finally {
+      await consumer.close();
+      neighbor.close();
+      workerDeps.usage.close();
+      workerDeps.transport.close();
+      workerDeps.limits.close();
+      await workerDeps.database.close();
+      await workerDb.close();
+      await testDb.unsafe(`DROP OWNED BY ${role}`);
+      await adminDb.unsafe(`DROP ROLE ${role}`);
+      await cleanup.remove(neighborOptions.url);
+    }
+    expect(await cleanup.keys(neighborOptions.url)).toHaveLength(0);
+    expect(await neighborCleanup.keys(neighborOptions.url)).toEqual(neighborKeys);
+    const reader = new UsageProducer(neighborOptions);
+    try {
+      await reader.ready();
+      expect((await reader.stats()).waiting).toBe(1);
+    } finally {
+      reader.close();
+    }
   } finally {
-    await consumer.close();
-    workerDeps.usage.close();
-    workerDeps.transport.close();
-    workerDeps.limits.close();
-    await workerDeps.database.close();
-    await workerDb.close();
-    await testDb.unsafe(`DROP OWNED BY ${role}`);
-    await adminDb.unsafe(`DROP ROLE ${role}`);
+    await neighborCleanup.remove(neighborOptions.url);
   }
 });
 
@@ -2822,7 +2875,10 @@ for (const stream of [false, true])
     const route = (await deps.store.routeDefinitions(model))[0] as { id: string };
     await json(
       `/admin/routes/${route.id}`,
-      { pricing: { currency: "USD", rates: { requests: { numerator: "17", denominator: "1" } } } },
+      {
+        pricing: { currency: "USD", rates: { requests: { numerator: "17", denominator: "1" } } },
+        ceilings: { requests: "1" },
+      },
       adminKey,
       "PATCH",
     );
@@ -2899,7 +2955,7 @@ test("expired cloud credentials release every pre-hold without sending inference
   const model = await configureModel("vertex");
   const provider = providers.vertex!;
   const secret = JSON.stringify({ access_token: "expired", expires_at: "2000-01-01T00:00:00Z" });
-  const { encrypt } = await import("@gateway/kernel");
+  const { encrypt } = await import("@gateway/runtime");
   await deps.store.updateProvider(
     provider,
     {},
@@ -3190,4 +3246,57 @@ test("duplicate multipart prompts cannot underquote a character-priced request",
   expect(response.status).toBe(400);
   const requests = await testDb`SELECT 1 FROM gateway_requests WHERE model=${model}`;
   expect(requests).toHaveLength(0);
+});
+
+test("supplier route replacement without full ceilings is rejected and old cost versions stay immutable", async () => {
+  const model = await configureModel("openai");
+  const original = (await deps.store.routeDefinitions(model))[0] as {
+    id: string;
+    pricing_id: string;
+    ceilings: Record<string, string>;
+  };
+  const old = (
+    await testDb`SELECT currency,rates,ceilings FROM cost_versions WHERE id=${original.pricing_id}`
+  )[0];
+  const pricing = { currency: "USD", rates: { requests: { numerator: "0", denominator: "1" } } };
+  const missing = await json(`/admin/models/${model}/routes`, {
+    provider_id: providers.openai,
+    upstream_model: model,
+    operations: ["chat"],
+    pricing,
+  });
+  expect(missing.response.status).toBe(400);
+  const absent = await json(`/admin/routes/${original.id}`, { pricing }, adminKey, "PATCH");
+  expect(absent.response.status).toBe(400);
+  const mismatch = await json(
+    `/admin/routes/${original.id}`,
+    { pricing, ceilings: { input_tokens: "100" } },
+    adminKey,
+    "PATCH",
+  );
+  expect(mismatch.response.status).toBe(400);
+  const changed = await json(
+    `/admin/routes/${original.id}`,
+    { pricing, ceilings: { requests: "0" } },
+    adminKey,
+    "PATCH",
+  );
+  expect(changed.response.status).toBe(200);
+  const latest = (await deps.store.routeDefinitions(model))[0] as {
+    pricing_id: string;
+    pricing: unknown;
+    ceilings: unknown;
+  };
+  expect(latest.pricing_id).not.toBe(original.pricing_id);
+  expect(latest.pricing).toEqual(pricing);
+  expect(latest.ceilings).toEqual({ requests: "0" });
+  expect(
+    (
+      await testDb`SELECT currency,rates,ceilings FROM cost_versions WHERE id=${original.pricing_id}`
+    )[0],
+  ).toEqual(old);
+  expect((await deps.store.routes(model, "chat"))[0]!.ceilings).toEqual({ requests: "0" });
+  await expect(
+    testDb`UPDATE cost_versions SET ceilings='{}' WHERE id=${latest.pricing_id}`,
+  ).rejects.toMatchObject({ errno: "P0001" });
 });

@@ -6,3 +6,7 @@ export * from "./memory.ts";
 export * from "./ip.ts";
 export * from "./usage-queue.ts";
 export * from "./cloud-auth.ts";
+export * from "./crypto.ts";
+export * from "./batcher.ts";
+export * from "./quota-leases.ts";
+export * from "./route-policy.ts";

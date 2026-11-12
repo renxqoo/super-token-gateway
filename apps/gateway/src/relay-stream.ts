@@ -1,5 +1,6 @@
-import { GatewayError, SSEParser, encodeSSE } from "@gateway/kernel";
-import type { SSEEvent } from "@gateway/kernel";
+import { GatewayError } from "@gateway/contracts";
+import { SSEParser, encodeSSE } from "@gateway/connectors";
+import type { SSEEvent } from "@gateway/connectors";
 import type { StreamMeter } from "@gateway/connectors";
 import type { Dependencies } from "./context.ts";
 import { publishEvidence } from "./metering.ts";

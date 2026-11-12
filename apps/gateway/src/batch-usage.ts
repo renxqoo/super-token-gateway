@@ -1,11 +1,8 @@
-import {
-  GatewayError,
-  batchIdentityDigest,
-  extractUsage,
-  optionalObject,
-  parseProviderJson,
-} from "@gateway/kernel";
-import type { BatchManifest, Route, Usage } from "@gateway/kernel";
+import { GatewayError, optionalObject } from "@gateway/contracts";
+import { batchIdentityDigest } from "@gateway/runtime";
+import { extractUsage, parseProviderJson } from "@gateway/connectors";
+import type { BatchManifest, Route } from "@gateway/contracts";
+import type { Usage } from "@gateway/kernel";
 import { imageCount } from "@gateway/connectors";
 import type { Dependencies } from "./context.ts";
 import { upstreamHeaders } from "./upstream.ts";

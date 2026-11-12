@@ -1,4 +1,5 @@
-import { copyExact, optionalObject } from "@gateway/kernel";
+import { copyExact } from "./json.ts";
+import { optionalObject } from "@gateway/contracts";
 import type { Operation, Protocol, ProviderKind } from "@gateway/kernel";
 
 interface ProviderAdapter {

@@ -276,6 +276,22 @@ async function fixture(
             priority: options.priorities?.[i] ?? 30 - i * 10,
             weight: options.weights?.[i] ?? 1,
             pricing: { currency: "USD", rates: costRates[i] },
+            ceilings: {
+              input_tokens: "16777216",
+              output_tokens: "1000000",
+              cached_input_tokens: "16777216",
+              cache_write_tokens: "2000000",
+              cache_write_5m_tokens: "1000000",
+              cache_write_1h_tokens: "1000000",
+              requests: "1",
+              images: "1000",
+              audio_ms: "3600000",
+              music_ms: "3600000",
+              video_ms: "3600000",
+              audio_seconds: "3600",
+              video_seconds: "3600",
+              characters: "16777216",
+            },
           })
         ).id,
       ),
@@ -467,6 +483,7 @@ test("Batch row incompatibility skips its provider before quoting and uploads th
       priority: 30 - i * 10,
       weight: 1,
       pricing: { currency: "USD", rates: { requests: { numerator: "1", denominator: "1" } } },
+      ceilings: { requests: "1" },
     });
   await manage("/tariffs", {
     model: f.model,

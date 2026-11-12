@@ -1,4 +1,5 @@
-import type { UsageEvidence, Usage } from "@gateway/kernel";
+import type { UsageEvidence } from "@gateway/contracts";
+import type { Usage } from "@gateway/kernel";
 import type { TokenSummary } from "@gateway/storage";
 import type { Dependencies } from "./context.ts";
 export async function publishEvidence(

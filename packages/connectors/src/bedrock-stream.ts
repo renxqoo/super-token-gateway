@@ -1,4 +1,6 @@
-import { GatewayError, encodeSSE, providerObject, parseProviderJson, text } from "@gateway/kernel";
+import { GatewayError, providerObject, text } from "@gateway/contracts";
+import { encodeSSE } from "./sse.ts";
+import { parseProviderJson } from "./json.ts";
 
 const crcTable = Uint32Array.from({ length: 256 }, (_, index) => {
   let value = index;

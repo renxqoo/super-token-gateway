@@ -1,0 +1,15 @@
+{
+  "name": "@gateway/plugin-sdk",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./guest": "./src/guest.ts"
+  },
+  "dependencies": {
+    "@gateway/contracts": "workspace:*",
+    "@gateway/kernel": "workspace:*",
+    "lossless-json": "4.3.3",
+    "zod": "4.6.7"
+  }
+}

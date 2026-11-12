@@ -1,0 +1,12 @@
+{
+  "name": "@gateway/plugin-host",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@gateway/plugin-sdk": "workspace:*",
+    "@gateway/kernel": "workspace:*"
+  }
+}

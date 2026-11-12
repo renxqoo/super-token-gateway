@@ -1,0 +1,54 @@
+{
+  "packages/adapters/openai-chat/plugin.ts": {
+    "bytes": 24210,
+    "sha256": "e0037c0ef98562ec986dd09bf2f83d4f16f76efab95bca324018d685a6b2fc94"
+  },
+  "packages/adapters/openai-chat/plugin.d.ts": {
+    "bytes": 59,
+    "sha256": "96eb7fa2ca46fc25371ed0f1da56c267ee542f348ffa73346370a43296e34648"
+  },
+  "packages/plugin-sdk/src/guest.ts": {
+    "bytes": 6942,
+    "sha256": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2"
+  },
+  "packages/adapters/openai-chat/package/module.wasm": {
+    "bytes": 2508689,
+    "sha256": "37f3c0f21326aa747204781a77e5dba87cf2d22098bca95c6dda673941abe70f"
+  },
+  "packages/adapters/openai-chat/package/manifest.json": {
+    "bytes": 750,
+    "sha256": "dbb68c12682b718891b242978ca3be83e5e5a1ea20f6be9c77f1d29106f16492"
+  },
+  "packages/adapters/openai-chat/package/config.schema.json": {
+    "bytes": 646,
+    "sha256": "dab73682f6a54db8d5ff618bc4ad2eb5193431dd22db69d8e170f4c2c331434e"
+  },
+  "packages/adapters/openai-chat/package/fixtures/cases.json": {
+    "bytes": 13971,
+    "sha256": "62b38c154f77f258eba0dbf11a13bc8b250e74f3318b2da3f7cbc9a7ccffae1c"
+  },
+  "scripts/plugin-tools.json": {
+    "bytes": 1830,
+    "sha256": "86173fe40e6802e7b38b40b663b04df2190b16afa1fb13a527e853afb6e6738d"
+  },
+  "scripts/build-plugins.ts": {
+    "bytes": 11095,
+    "sha256": "12c248d90eaa3d872ee5a5fa5c2f9fc10834b689c5ddc61bea24a16d73703346"
+  },
+  "scripts/setup-plugin-tools.py": {
+    "bytes": 8332,
+    "sha256": "90c25685e25c4c357062d064dae474ffcfec53a9e749cf9167c3fb0ec56a6191"
+  },
+  "scripts/plugin-builder/deterministic-preinit.patch": {
+    "bytes": 3172,
+    "sha256": "28dbd8480b2705040bbb1c6fec79c6773ea55bd3dc67a52b588adf5c41d9c805"
+  },
+  "scripts/plugin-builder/upstream-Cargo.lock": {
+    "bytes": 97632,
+    "sha256": "8c11a1e5117be6a0e2e1696d54d81d730c52c8329c5486429f3fc776896f0f7e"
+  },
+  "scripts/plugin-builder/Cargo.lock": {
+    "bytes": 97663,
+    "sha256": "59e4e9ce11a53ed1a05afc9f688f962bf6ab471cf71fdf9371b844f0841f7cac"
+  }
+}

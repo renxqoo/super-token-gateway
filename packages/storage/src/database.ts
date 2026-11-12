@@ -1,7 +1,13 @@
 import { SQL } from "bun";
+import { drizzle } from "drizzle-orm/bun-sql";
+import * as schema from "./schema/index.ts";
+import manifest from "./migrations/manifest.json";
 
+const databases = new WeakMap<SQL, string>();
 export function createDatabase(url: string, max = 16): SQL {
-  return new SQL(url, {
+  const name = decodeURIComponent(new URL(url).pathname.slice(1));
+  if (!name) throw new Error("An explicit PostgreSQL database name is required");
+  const db = new SQL(url, {
     max,
     connectionTimeout: 5,
     idleTimeout: 30,
@@ -12,95 +18,72 @@ export function createDatabase(url: string, max = 16): SQL {
       application_name: "super-token-gateway",
     },
   });
+  databases.set(db, name);
+  return db;
 }
-
-export const SCHEMA_VERSION = 2026111201;
-export async function migrate(
-  db: SQL,
-  options: { upgrade?: boolean; quiesced?: boolean } = {},
-): Promise<void> {
-  const source = await Bun.file(new URL("./schema.sql", import.meta.url)).text();
-  const lifecycle = await Bun.file(new URL("./lifecycle.sql", import.meta.url)).text();
-  const credit = await Bun.file(new URL("./credit.sql", import.meta.url)).text();
+export function createRepositories(db: SQL) {
+  return drizzle({ client: db, schema });
+}
+export const SCHEMA_VERSION = manifest.migrations.at(-1)!.version;
+export async function migrate(db: SQL): Promise<void> {
+  const plan = await Promise.all(
+    manifest.migrations.map(async (migration) => ({
+      migration,
+      checksum: new Bun.CryptoHasher("sha256").update(JSON.stringify(migration)).digest("hex"),
+      files: await Promise.all(
+        migration.files.map(async (entry) => {
+          const source = await Bun.file(new URL(entry.path, import.meta.url)).text();
+          const checksum = new Bun.CryptoHasher("sha256").update(source).digest("hex");
+          if (checksum !== entry.checksum)
+            throw new Error(`Migration checksum mismatch: ${entry.path}`);
+          return { ...entry, source };
+        }),
+      ),
+    })),
+  );
   await db.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(81442591)`;
+    const identity = (await tx`SELECT current_database() AS name`)[0]?.name;
+    if (!databases.get(db) || identity !== databases.get(db))
+      throw new Error("Migration target database identity mismatch");
     const existing = await tx`SELECT to_regclass('public.schema_migrations') AS relation`;
+    let applied = 0;
     if (existing[0]?.relation) {
       await tx`LOCK TABLE schema_migrations IN ACCESS EXCLUSIVE MODE`;
-      const versions = await tx<{ version: number }[]>`SELECT version FROM schema_migrations`;
-      if (versions.length === 1 && versions[0]?.version === SCHEMA_VERSION) return;
-      if (
-        versions.length !== 1 ||
-        ![
-          2026111006, 2026111007, 2026111008, 2026111009, 2026111010, 2026111101, 2026111102,
-        ].includes(versions[0]?.version ?? 0) ||
-        !options.upgrade ||
-        !options.quiesced
-      )
-        throw new Error(
-          "Incompatible database schema; supported upgrades require --upgrade --quiesced",
-        );
-      const active =
-        await tx`SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND backend_type='client backend'`;
-      if (active.length)
-        throw new Error("Offline upgrade requires all other database clients to disconnect");
-      await tx`SET LOCAL statement_timeout=0`;
-      const before = (
-        await tx`SELECT (SELECT count(*)::text FROM usage_events) AS usage,(SELECT count(*)::text FROM money_journal) AS journals,(SELECT count(*)::text FROM gateway_requests) AS requests,(SELECT sum(available_atoms+reserved_atoms+spent_atoms+expired_atoms+debt_atoms)::text FROM wallets) AS balances`
-      )[0];
-      if (versions[0]?.version === 2026111006) await tx.unsafe(lifecycle);
-      if ((versions[0]?.version ?? 0) < 2026111009) {
-        await tx`ALTER TABLE public.resources ADD COLUMN IF NOT EXISTS batch_manifest jsonb`;
-        await tx`UPDATE public.gateway_requests q SET billing_outcome='PENDING'
-        FROM public.billing_holds h, public.resources r WHERE h.request_id=q.id AND r.attempt_id=q.selected_attempt_id
-        AND r.kind='batch' AND h.state IN ('HELD','RECONCILING') AND q.billing_outcome IN ('SUCCESS','CANCELLED')`;
-        await tx`UPDATE public.resources r SET state='PENDING_USAGE',next_poll_at=now(),poll_until=NULL,poll_token=NULL
-        FROM public.attempts a JOIN public.billing_holds h ON h.request_id=a.request_id
-        WHERE r.attempt_id=a.id AND r.kind='batch' AND r.state IN ('COMPLETED','CANCELLED','FAILED')
-        AND h.state IN ('HELD','RECONCILING')`;
+      const columns =
+        await tx`SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='schema_migrations'`;
+      if (!columns.some((row: { column_name: string }) => row.column_name === "checksum"))
+        throw new Error("Incompatible database schema; initialize a new empty v2 database");
+      const versions =
+        await tx`SELECT version,checksum,manifest FROM schema_migrations ORDER BY version`;
+      if (!versions.length || versions.length > plan.length)
+        throw new Error("Incompatible database schema; initialize a new empty v2 database");
+      for (const [index, row] of versions.entries()) {
+        const expected = plan[index];
+        if (!expected || row.version !== expected.migration.version)
+          throw new Error("Incompatible database schema; initialize a new empty v2 database");
+        const stored = row.manifest;
+        if (
+          row.checksum !== expected.checksum ||
+          stored?.version !== expected.migration.version ||
+          !Array.isArray(stored?.files) ||
+          stored.files.length !== expected.files.length ||
+          expected.files.some(
+            (entry, i) =>
+              stored.files[i]?.path !== entry.path || stored.files[i]?.checksum !== entry.checksum,
+          )
+        )
+          throw new Error("Applied migration manifest checksum mismatch");
       }
-      if ((versions[0]?.version ?? 0) < 2026111101) await tx.unsafe(credit);
-      await tx`ALTER TABLE public.routes ADD COLUMN request_policy jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(request_policy)='object')`;
-      const functions = `${source}\n${lifecycle}\n${credit}`.match(
-        /CREATE FUNCTION [\s\S]*?\bAS (\$[A-Za-z_]*\$)[\s\S]*?\1;/g,
-      );
-      if (!functions?.length) throw new Error("Current schema function manifest is empty");
-      for (const definition of functions)
-        await tx.unsafe(definition.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION"));
-      await tx`REVOKE ALL ON FUNCTION public.ingest_initial_usage(jsonb,uuid[]) FROM PUBLIC`;
-      await tx`REVOKE ALL ON FUNCTION public.ledger_uuid() FROM PUBLIC`;
-      await tx`REVOKE ALL ON FUNCTION public.settle_covered_requests(uuid[]) FROM PUBLIC`;
-      await tx`REVOKE ALL ON FUNCTION public.wallet_freeze_reason(boolean,boolean,numeric,numeric,numeric) FROM PUBLIC`;
-      await tx`DROP INDEX IF EXISTS public.requests_stale`;
-      await tx`DROP INDEX IF EXISTS public.usage_attempt`;
-      await tx`ALTER TABLE public.gateway_requests SET (fillfactor=70)`;
-      const after = (
-        await tx`SELECT (SELECT count(*)::text FROM usage_events) AS usage,(SELECT count(*)::text FROM money_journal) AS journals,(SELECT count(*)::text FROM gateway_requests) AS requests,(SELECT sum(available_atoms+reserved_atoms+spent_atoms+expired_atoms+debt_atoms)::text FROM wallets) AS balances`
-      )[0];
-      if (JSON.stringify(before) !== JSON.stringify(after))
-        throw new Error("Upgrade accounting snapshot mismatch");
-      const invalid =
-        await tx`SELECT 1 FROM pg_constraint WHERE connamespace='public'::regnamespace AND NOT convalidated LIMIT 1`;
-      if (invalid.length) throw new Error("Upgrade left unvalidated constraints");
-      for (const role of ["gateway_runtime", "gateway_worker"]) {
-        if ((await tx`SELECT 1 FROM pg_roles WHERE rolname=${role}`).length)
-          await tx.unsafe(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${role}`);
-      }
-      if ((await tx`SELECT 1 FROM pg_roles WHERE rolname='gateway_runtime'`).length) {
-        await tx`GRANT EXECUTE ON FUNCTION public.configure_wallet_credit(uuid,text,text,numeric,numeric) TO gateway_runtime`;
-        await tx`GRANT EXECUTE ON FUNCTION public.wallet_freeze_reason(boolean,boolean,numeric,numeric,numeric) TO gateway_runtime`;
-        await tx`REVOKE UPDATE ON public.gateway_requests FROM gateway_runtime`;
-        await tx`GRANT UPDATE(state,updated_at) ON public.gateway_requests TO gateway_runtime`;
-      }
-      await tx`UPDATE schema_migrations SET version=${SCHEMA_VERSION},applied_at=now()`;
-      return;
+      applied = versions.length;
+    } else {
+      const objects =
+        await tx`SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f') UNION ALL SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' UNION ALL SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public' UNION ALL SELECT 1 FROM pg_extension WHERE extname<>'plpgsql' UNION ALL SELECT 1 FROM pg_namespace WHERE nspname NOT IN ('public','information_schema') AND nspname !~ '^pg_' LIMIT 1`;
+      if (objects.length) throw new Error("Refusing to initialize a nonempty database");
     }
-    const objects =
-      await tx`SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S') LIMIT 1`;
-    if (objects.length) throw new Error("Refusing to initialize a nonempty database");
-    await tx.unsafe(source);
-    await tx.unsafe(lifecycle);
-    await tx.unsafe(credit);
-    await tx`INSERT INTO schema_migrations(version) VALUES(${SCHEMA_VERSION})`;
+    for (const entry of plan.slice(applied)) {
+      for (const file of entry.files) await tx.unsafe(file.source);
+      await tx`INSERT INTO schema_migrations(version,checksum,manifest) VALUES(${entry.migration.version},${entry.checksum},${entry.migration}::jsonb)`;
+    }
   });
 }

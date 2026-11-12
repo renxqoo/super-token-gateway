@@ -1,7 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 import { inCidrs } from "./ip.ts";
-import { GatewayError } from "@gateway/kernel";
+import { GatewayError } from "@gateway/contracts";
 import { createHttpPool, UpstreamPreDispatchError } from "./http-pool.ts";
 import type { PinnedRequestInit } from "./http-pool.ts";
 

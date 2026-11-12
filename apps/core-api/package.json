@@ -1,0 +1,22 @@
+{
+  "name": "@gateway/core-api",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./catalog": "./src/plugins/application.ts",
+    "./catalog-http": "./src/plugins/http.ts",
+    "./management": "./src/platform/management.ts"
+  },
+  "dependencies": {
+    "@gateway/storage": "workspace:*",
+    "@gateway/contracts": "workspace:*",
+    "@gateway/kernel": "workspace:*",
+    "@gateway/plugin-sdk": "workspace:*",
+    "@gateway/plugin-host": "workspace:*",
+    "@gateway/adapters": "workspace:*",
+    "@gateway/runtime": "workspace:*",
+    "hono": "4.13.17",
+    "zod": "4.6.7",
+    "@gateway/core-client": "workspace:*"
+  }
+}

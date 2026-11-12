@@ -2,19 +2,25 @@ import { z } from "zod";
 import {
   keySchema,
   modelSchema,
-  operations,
   pricingSchema,
   projectSchema,
   providerSchema,
   routeSchema,
-  requestPolicySchema,
+  routePatchSchema,
   creditSchema,
   creditPolicySchema,
   tariffSchema,
   refundSchema,
   adjustmentSchema,
   resolutionSchema,
-} from "@gateway/kernel";
+} from "@gateway/contracts";
+import {
+  installBundledReleaseSchema,
+  bindPluginSchema,
+  versionCommandSchema,
+  recoveryCommandSchema,
+} from "@gateway/core-api/catalog";
+import { operations } from "@gateway/kernel";
 
 export const inferencePaths: Record<string, string> = {
   "/v1/chat/completions": "chat",
@@ -45,7 +51,11 @@ export function openapi(): Record<string, unknown> {
     Credential: z.toJSONSchema(keySchema),
     Provider: z.toJSONSchema(providerSchema),
     Model: z.toJSONSchema(modelSchema),
-    Route: z.toJSONSchema(routeSchema),
+    Route: {
+      ...z.toJSONSchema(routeSchema),
+      description:
+        "Supplier pricing requires at least one rate and an explicit ceiling for every rated dimension, including zero rates.",
+    },
     Pricing: z.toJSONSchema(pricingSchema),
     Credit: z.toJSONSchema(creditSchema),
     CreditPolicy: z.toJSONSchema(creditPolicySchema),
@@ -298,17 +308,50 @@ export function openapi(): Record<string, unknown> {
     "patch",
     "admin_update_route",
     {
-      type: "object",
-      properties: {
-        enabled: { type: "boolean" },
-        priority: { type: "integer" },
-        weight: { type: "number" },
-        pricing: { $ref: "#/components/schemas/Pricing" },
-        request_policy: z.toJSONSchema(requestPolicySchema),
-      },
+      ...z.toJSONSchema(routePatchSchema),
+      dependentRequired: { pricing: ["ceilings"], ceilings: ["pricing"] },
+      description:
+        "Replacing supplier pricing requires complete ceilings for every rated dimension, including zero rates. A replacement creates an immutable new cost version.",
     },
     true,
   );
+  add(
+    "/admin/plugins/install-bundled-release",
+    "post",
+    "install_bundled_release",
+    z.toJSONSchema(installBundledReleaseSchema),
+    true,
+  );
+  add("/admin/plugins/{id}", "get", "plugin_catalog_truth", undefined, true);
+  add(
+    "/admin/plugins/{id}/recover",
+    "post",
+    "recover_plugin_validation",
+    z.toJSONSchema(recoveryCommandSchema),
+    true,
+  );
+  add(
+    "/admin/plugins/{id}/validate",
+    "post",
+    "validate_plugin",
+    z.toJSONSchema(versionCommandSchema),
+    true,
+  );
+  add(
+    "/admin/plugins/{id}/publish",
+    "post",
+    "publish_plugin",
+    z.toJSONSchema(versionCommandSchema),
+    true,
+  );
+  add(
+    "/admin/providers/{id}/plugin-binding",
+    "put",
+    "bind_plugin",
+    z.toJSONSchema(bindPluginSchema),
+    true,
+  );
+  add("/admin/providers/{id}/plugin-binding", "get", "plugin_binding_truth", undefined, true);
   add("/admin/usage", "get", "admin_usage", undefined, true);
   add(
     "/admin/projects/{id}/credits",

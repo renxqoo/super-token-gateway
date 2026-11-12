@@ -3,9 +3,16 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./schema": "./src/schema/index.ts",
+    "./internal-identity": "./src/internal-identity/store.ts",
+    "./execution": "./src/execution/index.ts"
   },
   "dependencies": {
-    "@gateway/kernel": "workspace:*"
+    "@gateway/kernel": "workspace:*",
+    "drizzle-orm": "0.45.4",
+    "@gateway/contracts": "workspace:*",
+    "@gateway/runtime": "workspace:*",
+    "zod": "4.6.7"
   }
 }

@@ -11,7 +11,7 @@ import {
   passesOnlineCapacity,
 } from "./benchmark-lib.ts";
 import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
-import { createKey, verifier, encrypt } from "@gateway/kernel";
+import { createKey, verifier, encrypt } from "@gateway/runtime";
 import { RedisClient } from "bun";
 const args = Bun.argv.slice(2);
 const option = (name: string, fallback: string) => {
@@ -247,6 +247,11 @@ try {
         output_tokens: { numerator: "7", denominator: "1" },
       },
     },
+    ceilings: {
+      input_tokens: "16777216",
+      output_tokens: "1000000",
+      cached_input_tokens: "16777216",
+    },
   });
   await funds.setTariff({
     model: "bench",
@@ -293,7 +298,7 @@ try {
   for (const table of [
     "projects",
     "api_keys",
-    "providers",
+    "channels",
     "models",
     "routes",
     "cost_versions",

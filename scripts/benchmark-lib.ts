@@ -1,4 +1,5 @@
-import { SSEParser, optionalObject, parseProviderJson } from "@gateway/kernel";
+import { SSEParser, parseProviderJson } from "@gateway/connectors";
+import { optionalObject } from "@gateway/contracts";
 
 export class LatencyHistogram {
   private readonly bins = new Float64Array(4096);

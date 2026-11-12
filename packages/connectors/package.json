@@ -6,6 +6,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@gateway/kernel": "workspace:*"
+    "@gateway/kernel": "workspace:*",
+    "@gateway/contracts": "workspace:*"
   }
 }

@@ -1,5 +1,7 @@
-import { GatewayError, normalizedNumber, numberLiteral } from "@gateway/kernel";
-import type { RequestPolicy } from "@gateway/kernel";
+import { numberLiteral } from "./json.ts";
+import { GatewayError } from "@gateway/contracts";
+import { normalizedNumber } from "@gateway/kernel";
+import type { RequestPolicy } from "@gateway/contracts";
 
 function* valuesAt(
   value: unknown,

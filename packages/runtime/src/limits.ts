@@ -1,5 +1,6 @@
 import { RedisClient } from "bun";
-import { GatewayError, sha256 } from "@gateway/kernel";
+import { GatewayError } from "@gateway/contracts";
+import { sha256 } from "./crypto.ts";
 
 const enterScript = `
 local now_parts=redis.call('TIME')

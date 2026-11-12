@@ -1,6 +1,7 @@
 import { mkdir, chmod } from "node:fs/promises";
 import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
-import { createKey, encrypt, operations, verifier } from "@gateway/kernel";
+import { createKey, encrypt, verifier } from "@gateway/runtime";
+import { operations } from "@gateway/kernel";
 import { loadConfig } from "../apps/gateway/src/config.ts";
 
 const config = loadConfig();
@@ -46,7 +47,7 @@ try {
       const name = kind === "openai" ? "demo" : `demo-${kind}`;
       const caps =
         kind === "openai"
-          ? [...operations]
+          ? operations.filter((operation) => operation !== "music")
           : kind === "gemini"
             ? (["chat", "responses", "messages", "gemini", "videos"] as const)
             : (["chat", "responses", "messages", "gemini"] as const);
@@ -65,6 +66,11 @@ try {
             cached_input_tokens: { numerator: "75000000000", denominator: "1" },
           },
         },
+        ceilings: {
+          input_tokens: "16777216",
+          output_tokens: "1000000",
+          cached_input_tokens: "16777216",
+        },
       });
     }
     await mkdir(new URL("../.local/", import.meta.url), { recursive: true });
@@ -80,7 +86,7 @@ try {
   }
   const alias = await db`SELECT name FROM models WHERE name='gpt-4o-mini'`;
   if (!alias.length) {
-    const provider = await db`SELECT id FROM providers WHERE name='local-openai'`;
+    const provider = await db`SELECT id FROM channels WHERE name='local-openai'`;
     if (provider[0]) {
       await store.createModel({
         name: "gpt-4o-mini",
@@ -100,6 +106,11 @@ try {
             output_tokens: { numerator: "600000000000", denominator: "1" },
             cached_input_tokens: { numerator: "75000000000", denominator: "1" },
           },
+        },
+        ceilings: {
+          input_tokens: "16777216",
+          output_tokens: "1000000",
+          cached_input_tokens: "16777216",
         },
       });
     }

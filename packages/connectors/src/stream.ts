@@ -1,15 +1,9 @@
-import {
-  GatewayError,
-  encodeSSE,
-  extractUsage,
-  providerObject as object,
-  optionalObject,
-  text,
-  parseProviderJson,
-  copyExact,
-  stringifyExact,
-} from "@gateway/kernel";
-import type { Protocol, ProviderKind, SSEEvent, Usage } from "@gateway/kernel";
+import { GatewayError, providerObject as object, optionalObject, text } from "@gateway/contracts";
+import { encodeSSE } from "./sse.ts";
+import { extractUsage } from "./usage.ts";
+import { parseProviderJson, copyExact, stringifyExact } from "./json.ts";
+import type { Protocol, ProviderKind, Usage } from "@gateway/kernel";
+import type { SSEEvent } from "./sse.ts";
 import { finishReason, blockedPrompt } from "./finish.ts";
 import { encodeResponse, publicUsage } from "./response.ts";
 import type { Completion } from "./response.ts";

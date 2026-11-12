@@ -1,13 +1,7 @@
-import {
-  GatewayError,
-  object,
-  optionalObject,
-  text,
-  stringifyExact,
-  parseProviderJson,
-  copyExact,
-} from "@gateway/kernel";
-import type { Protocol, ProviderKind, Operation, RequestPolicy } from "@gateway/kernel";
+import { GatewayError, object, optionalObject, text } from "@gateway/contracts";
+import { stringifyExact, parseProviderJson, copyExact } from "./json.ts";
+import type { Protocol, ProviderKind, Operation } from "@gateway/kernel";
+import type { RequestPolicy } from "@gateway/contracts";
 import { providerAdapter, providerProtocol } from "./adapters.ts";
 import { validateRequestPolicy } from "./policy.ts";
 

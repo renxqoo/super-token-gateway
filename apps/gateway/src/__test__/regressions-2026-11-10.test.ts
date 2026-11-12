@@ -6,8 +6,9 @@ import {
   encodeRequest,
   publicUsage,
 } from "@gateway/connectors";
-import { parseProviderJson, stringifyExact } from "@gateway/kernel";
-import type { SSEEvent, UsageEvidence } from "@gateway/kernel";
+import { parseProviderJson, stringifyExact } from "@gateway/connectors";
+import type { SSEEvent } from "@gateway/connectors";
+import type { UsageEvidence } from "@gateway/contracts";
 import { MemoryBudget } from "@gateway/runtime";
 import { applyOutputBound } from "../input-policy.ts";
 import { prepareStream, relayStream } from "../relay-stream.ts";

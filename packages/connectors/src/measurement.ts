@@ -1,4 +1,6 @@
-import { extractUsage, optionalObject, GatewayError, copyExact } from "@gateway/kernel";
+import { extractUsage } from "./usage.ts";
+import { copyExact } from "./json.ts";
+import { optionalObject, GatewayError } from "@gateway/contracts";
 import type { Operation, Protocol, ProviderKind, Usage } from "@gateway/kernel";
 import { blockedPrompt } from "./finish.ts";
 import { decodeResponse, encodeResponse } from "./response.ts";

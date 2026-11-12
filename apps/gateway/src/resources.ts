@@ -1,16 +1,8 @@
-import {
-  GatewayError,
-  extractUsage,
-  providerObject,
-  object,
-  optionalObject,
-  text,
-  parseProviderJson,
-  stringifyExact,
-  copyExact,
-  sha256,
-} from "@gateway/kernel";
-import type { BatchResourceMetadata, Operation, Resource, Route } from "@gateway/kernel";
+import { GatewayError, providerObject, object, optionalObject, text } from "@gateway/contracts";
+import { extractUsage, parseProviderJson, stringifyExact, copyExact } from "@gateway/connectors";
+import { sha256 } from "@gateway/runtime";
+import type { BatchResourceMetadata, Resource, Route } from "@gateway/contracts";
+import type { Operation } from "@gateway/kernel";
 import { readBounded } from "@gateway/runtime";
 import type { Auth, Dependencies } from "./context.ts";
 import { batchUsage } from "./batch-usage.ts";

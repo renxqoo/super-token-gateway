@@ -2,6 +2,9 @@ import { validateCidr } from "@gateway/runtime";
 import { z } from "zod";
 
 const envSchema = z.object({
+  PLUGIN_RELEASE_POLICY: z.string().min(1).optional(),
+  PLUGIN_RELEASE_DIRECTORY: z.string().min(1).optional(),
+  PLUGIN_HELPER_EXECUTABLE: z.string().min(1).optional(),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DATABASE_URL: z.string().startsWith("postgres"),
   REDIS_URL: z

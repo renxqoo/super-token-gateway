@@ -1,0 +1,40 @@
+{
+  "purpose": "Synthetic incremental protocol/isolation fixture; never a production adapter",
+  "source": "plugin.cts",
+  "exports": ["invoke", "loop", "exhaustMemory"],
+  "files": {
+    "plugin.cts": {
+      "sha256": "6a5c3f54c26529fdccac02965f93efac47b8d2cfc19be4a50315de22e40bd4f9",
+      "bytes": 6177
+    },
+    "plugin.d.ts": {
+      "sha256": "29109dd713a645c8f1639b78c4546b4e71d5bace5e133368d9cb5eb26f1dbee1",
+      "bytes": 130
+    },
+    "plugin.wasm": {
+      "sha256": "532fcc3c661187a52ecbb7315b284f4636794b990772cdd8668299a077469a1b",
+      "bytes": 2497660
+    },
+    "vectors.json": {
+      "sha256": "e2fd2f8f8026f69e149ddf9c5a6880790673e2800a8def4cf6f7c3bbb7522f79",
+      "bytes": 970
+    }
+  },
+  "tools": {
+    "bun": "1.4.4",
+    "esbuild": "0.28.2",
+    "lossless-json": "4.3.3",
+    "extism-js-release": "v1.7.0",
+    "extism-js-self-reported": "1.6.1",
+    "extism-js-archive-url": "https://github.com/extism/js-pdk/releases/download/v1.7.0/extism-js-aarch64-macos-v1.7.0.gz",
+    "extism-js-archive-sha256": "12c01c2bb2240a6a05a4f8babe680c793c397d84e6a1497a7ca1312e78a475c3",
+    "binaryen-release": "version_133",
+    "binaryen-archive-url": "https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-arm64-macos.tar.gz",
+    "binaryen-archive-sha256": "ad66da82ac13f163e424b1643f16c6dfcccc98b5966296b43e52d3cab04f84a8"
+  },
+  "memory": {
+    "initialPages": 38,
+    "declaredMaximum": null,
+    "enforcement": "wazero RuntimeConfig.WithMemoryLimitPages; binary is not rewritten"
+  }
+}

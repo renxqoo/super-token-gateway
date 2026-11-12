@@ -1,0 +1,67 @@
+{
+  "purpose": "Synthetic SDK isolation fixture; no production trust anchor",
+  "source": "isolation.ts",
+  "sdk": {
+    "path": "packages/plugin-sdk/src/guest.ts",
+    "bytes": 6942,
+    "sha256": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2"
+  },
+  "tools": {
+    "esbuild": "0.28.2",
+    "lossless-json": "4.3.3",
+    "platform": "darwin-arm64",
+    "extism-js": {
+      "release": "v1.7.0",
+      "reported": "1.6.1",
+      "url": "https://github.com/extism/js-pdk/releases/download/v1.7.0/extism-js-aarch64-macos-v1.7.0.gz",
+      "sha256": "12c01c2bb2240a6a05a4f8babe680c793c397d84e6a1497a7ca1312e78a475c3"
+    },
+    "binaryen": {
+      "release": "version_133",
+      "url": "https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-arm64-macos.tar.gz",
+      "sha256": "ad66da82ac13f163e424b1643f16c6dfcccc98b5966296b43e52d3cab04f84a8"
+    },
+    "builder": {
+      "version": "deterministic-preinit-v1",
+      "source": {
+        "url": "https://codeload.github.com/extism/js-pdk/tar.gz/refs/tags/v1.7.0",
+        "commit": "beacc9ad9e6bac6250143980b669d2e6c68aaa18",
+        "sha256": "54cccf479ceb5a934b208d79d1171652f97bd13d6cd0e946885754bde8f7de25"
+      },
+      "patchSha256": "28dbd8480b2705040bbb1c6fec79c6773ea55bd3dc67a52b588adf5c41d9c805",
+      "upstreamLockSha256": "8c11a1e5117be6a0e2e1696d54d81d730c52c8329c5486429f3fc776896f0f7e",
+      "lockSha256": "59e4e9ce11a53ed1a05afc9f688f962bf6ab471cf71fdf9371b844f0841f7cac",
+      "referenceBinarySha256": "b47d157c424296e083ec0ffc0e23e0271195de10622d3a12229e8a004ae80e39",
+      "officialBinarySha256": "e113a396c950a68b81f5acb2f3c42d7bc389996197bd58a16da6f9e1ca5731c3",
+      "engine": {
+        "offset": 9881564,
+        "bytes": 1395757,
+        "sha256": "739a7cb0d6379e4896bab6a8740088b8c61f2b9bd3b55fed583c993441d4dc8c",
+        "sourceBuilt": false
+      },
+      "rustVersion": "1.95.0",
+      "cargoJobs": 2,
+      "releaseOptLevel": 0,
+      "releaseDebug": 0,
+      "preinitRandomByte": 90,
+      "preinitEpochNs": 0,
+      "preinitResolutionNs": 1,
+      "compilerBinaryReproducibility": "not verified",
+      "platformsVerified": ["darwin-arm64"]
+    }
+  },
+  "files": {
+    "isolation.ts": {
+      "bytes": 6558,
+      "sha256": "1158014420b127f269a7d346c86ed951a064558af95174c31f9c35fdb472b591"
+    },
+    "isolation.d.ts": {
+      "bytes": 121,
+      "sha256": "281328c011deada0c4f0d6943c47d7d9f23ff1f3de910dd29af8c065a813b6d4"
+    },
+    "isolation.wasm": {
+      "bytes": 2500323,
+      "sha256": "272a5b997bc0a8a3133fd86a1ce00c882c14ebd22cfa3b75285f2a09e66c539b"
+    }
+  }
+}

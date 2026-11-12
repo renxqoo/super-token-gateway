@@ -1,22 +1,16 @@
 import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import { z, ZodError } from "zod";
-import {
-  GatewayError,
-  errorResponse,
-  object,
-  sha256,
-  text,
-  verifier,
-  createKey,
-  keySchema,
-  parseClientJson,
-  copyExact,
-} from "@gateway/kernel";
-import type { Operation, Resource } from "@gateway/kernel";
+import { GatewayError, object, text, keySchema } from "@gateway/contracts";
+import { errorResponse } from "./http-errors.ts";
+import { sha256, verifier, createKey } from "@gateway/runtime";
+import { parseClientJson, copyExact } from "@gateway/connectors";
+import type { Operation } from "@gateway/kernel";
+import type { Resource } from "@gateway/contracts";
 import { boundedRelay, readBounded, clientAddress, validateCidr, inCidrs } from "@gateway/runtime";
 import type { Dependencies, Env } from "./context.ts";
 import { openapi, resourceActions, inferencePaths } from "./openapi.ts";
+import { catalogRoutes } from "@gateway/core-api/catalog-http";
 import { adminRoutes } from "./admin.ts";
 import { execute } from "./execution.ts";
 import { parseBatchInput } from "./batch-input.ts";
@@ -126,6 +120,7 @@ export function createApp(deps: Dependencies): Hono<Env> {
       throw new GatewayError(503, "not_ready", "Gateway dependencies are unavailable");
     }
   });
+  if (deps.catalog) app.route("/admin", catalogRoutes(deps.catalog));
   app.route("/admin", adminRoutes(deps));
   app.get("/openapi.json", (c) => c.json(openapi()));
 

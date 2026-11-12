@@ -1,0 +1,4 @@
+ALTER TABLE "financial_vouchers" ADD CONSTRAINT "financial_vouchers_id_digest_key" UNIQUE("id","digest");--> statement-breakpoint
+ALTER TABLE "upstream_funding_operations" ADD CONSTRAINT "funding_voucher_digest_fk" FOREIGN KEY ("voucher_id","voucher_digest") REFERENCES "public"."financial_vouchers"("id","digest") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "upstream_funding_voucher_idx" ON "upstream_funding_operations" USING btree ("voucher_id");--> statement-breakpoint
+ALTER TABLE "financial_vouchers" ADD CONSTRAINT "voucher_content_digest" CHECK (digest=encode(sha256(content),'hex'));

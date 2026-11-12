@@ -1,5 +1,6 @@
-import { dimensions, pricingSchema, usageSchema } from "./contracts.ts";
-import type { Pricing, Usage } from "./contracts.ts";
+import { dimensions } from "./values.ts";
+import { validatePricing, validateUsage } from "./validation.ts";
+import type { Pricing, Usage } from "./values.ts";
 
 const maxAtoms = 10n ** 38n - 1n;
 function gcd(a: bigint, b: bigint): bigint {
@@ -12,8 +13,8 @@ function gcd(a: bigint, b: bigint): bigint {
 }
 
 export function calculateCost(usage: Usage, pricing: Pricing): string {
-  usageSchema.parse(usage);
-  pricingSchema.parse(pricing);
+  validateUsage(usage);
+  validatePricing(pricing);
   let numerator = 0n;
   let denominator = 1n;
   for (const dimension of dimensions) {

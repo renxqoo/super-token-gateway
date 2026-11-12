@@ -1,0 +1,77 @@
+{
+  "migrations": [
+    {
+      "version": 2026111202,
+      "files": [
+        {
+          "path": "./migrations/0000_enterprise.sql",
+          "checksum": "842977536c4ed9e66266849cc9a29f2cd2112231673d80c9c2c91dbb95ea9535"
+        },
+        {
+          "path": "./sql/functions.sql",
+          "checksum": "7ec94e0cc080ce556760208486066dfa8d492bb67b3b1f51a9ddb4b068c9f43a"
+        },
+        {
+          "path": "./sql/invariants.sql",
+          "checksum": "6821317fe93e306f2f023ad957803bb53d18f2d0108b17a246e1e57d6308f74d"
+        },
+        {
+          "path": "./sql/enterprise-invariants.sql",
+          "checksum": "a4eba879a08fbedd04ce31b517c884ff8d04620af67eee5e1a434e0772b160d2"
+        }
+      ]
+    },
+    {
+      "version": 2026111203,
+      "files": [
+        {
+          "path": "./migrations/0001_upstream_funding.sql",
+          "checksum": "3523a7f77dc57549f1508bf2d4eb8120dc6613c96fc6dff5c226f733248c1bcb"
+        }
+      ]
+    },
+    {
+      "version": 2026111204,
+      "files": [
+        {
+          "path": "./migrations/0002_plugin_catalog.sql",
+          "checksum": "fe4473ed158b331e2c6beb38e4ff5033f4847b6cba275cfcef331e22d5dd925a"
+        },
+        {
+          "path": "./sql/plugin-catalog.sql",
+          "checksum": "dbdf0abf601dfbb0edc9b838f72d4215653053e0c3f3a7c627d9bab07f006d2e"
+        }
+      ]
+    },
+    {
+      "version": 2026111205,
+      "files": [
+        {
+          "path": "./migrations/0003_internal_identity.sql",
+          "checksum": "0ac1d05fd314d1f23c64d5800608af1cdec79e7a8ad327b3c03c42da390981d5"
+        },
+        {
+          "path": "./sql/internal-identity.sql",
+          "checksum": "bd13b47aeeaae876028a8b2e22b5462a2c8b86bb9f2faca76b0fa7b1ac03ae64"
+        }
+      ]
+    },
+    {
+      "version": 2026111206,
+      "files": [
+        {
+          "path": "./migrations/0004_financial_admission.sql",
+          "checksum": "f3908793700b0b4651cc0cf9ad6678db7d5bbc4749cf1f6313e031d53f59d48a"
+        },
+        {
+          "path": "./sql/core-execution.sql",
+          "checksum": "66fb8dd92baa583820ddf73b7da7a7ffaa274be262781e2da8524b93c9a59880"
+        },
+        {
+          "path": "./sql/core-execution-recovery.sql",
+          "checksum": "ab4082958847fc37b5ac1e1a8c8741d3a23de1d0a80d1340d3c359c0ae1d69d1"
+        }
+      ]
+    }
+  ]
+}

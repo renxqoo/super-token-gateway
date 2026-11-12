@@ -1,4 +1,4 @@
-import { GatewayError } from "@gateway/kernel";
+import { GatewayError } from "@gateway/contracts";
 export class MemoryBudget {
   private used = 0;
   constructor(readonly limit: number) {}

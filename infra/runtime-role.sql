@@ -5,7 +5,7 @@ END $$;
 GRANT USAGE ON SCHEMA public TO gateway_runtime,gateway_worker;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO gateway_runtime,gateway_worker;
 GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO gateway_runtime,gateway_worker;
-GRANT INSERT,UPDATE ON projects,api_keys,providers,models,routes,organizations,principals,event_consumers,event_deliveries,resources TO gateway_runtime;
+GRANT INSERT,UPDATE ON supplier_brands,upstream_accounts,projects,api_keys,channels,models,routes,organizations,principals,event_consumers,event_deliveries,resources TO gateway_runtime;
 GRANT INSERT ON cost_versions,billing_prices,billing_tariffs,billing_resolutions,audit_events TO gateway_runtime;
 GRANT UPDATE ON billing_tariffs TO gateway_runtime;
 GRANT INSERT ON attempts TO gateway_runtime;
@@ -27,3 +27,12 @@ GRANT EXECUTE ON FUNCTION gateway_token_summary(uuid) TO gateway_runtime,gateway
 GRANT EXECUTE ON FUNCTION exact_billing_price(jsonb,jsonb) TO gateway_runtime;
 
 GRANT EXECUTE ON FUNCTION wallet_freeze_reason(boolean,boolean,numeric,numeric,numeric) TO gateway_runtime;
+
+REVOKE ALL ON plugin_packages,financial_vouchers,administrator_credentials FROM gateway_runtime,gateway_worker;
+
+REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON plugin_versions,plugin_validation_runs,plugin_publication_receipts,plugin_catalog_receipts,channel_plugin_bindings FROM gateway_runtime,gateway_worker;
+REVOKE UPDATE ON channels FROM gateway_runtime;
+GRANT UPDATE(enabled,concurrency,rpm,secret) ON channels TO gateway_runtime;
+REVOKE ALL ON FUNCTION public.verify_platform_credential_v1(text),public.plugin_catalog_command_v1(text,text,uuid,jsonb,uuid,timestamptz,uuid,uuid,text,boolean),public.plugin_catalog_receipt_v1(text,text,uuid,jsonb) FROM gateway_runtime,gateway_worker;
+
+REVOKE ALL ON internal_service_instances,internal_service_certificates,internal_startup_registrations,internal_startup_sessions FROM gateway_runtime,gateway_worker;

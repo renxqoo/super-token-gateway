@@ -1,4 +1,4 @@
-import { GatewayError, object, optionalObject } from "@gateway/kernel";
+import { GatewayError, object, optionalObject } from "@gateway/contracts";
 import type { Operation } from "@gateway/kernel";
 
 const nativeOutputBounds: Partial<Record<Operation, readonly string[]>> = {

@@ -1,0 +1,36 @@
+{
+  "format": 1,
+  "id": "gateway.openai-chat",
+  "version": "1.0.0",
+  "abi_version": 1,
+  "sdk_version": "1.0.0",
+  "module": "module.wasm",
+  "entrypoint": "invoke",
+  "config_schema": "config.schema.json",
+  "capabilities": {
+    "operations": ["chat"],
+    "dimensions": [
+      "input_tokens",
+      "output_tokens",
+      "cached_input_tokens",
+      "reasoning_tokens",
+      "requests"
+    ],
+    "protocols": ["chat"],
+    "hooks": [
+      "describe",
+      "prepare",
+      "response",
+      "error",
+      "stream_open",
+      "stream_feed",
+      "stream_drain",
+      "stream_finish",
+      "stream_dispose"
+    ],
+    "auth": ["none", "bearer", "api-key"],
+    "resources": false,
+    "balance": false,
+    "stream_codec": "sse"
+  }
+}

@@ -11,19 +11,15 @@ import {
   resolutionSchema,
   currencySchema,
   GatewayError,
-  createKey,
-  encrypt,
   keySchema,
   modelSchema,
   projectSchema,
-  pricingSchema,
-  operations,
+  routePatchSchema,
   providerSchema,
   routeSchema,
-  requestPolicySchema,
-  secureEqual,
-  verifier,
-} from "@gateway/kernel";
+} from "@gateway/contracts";
+import { createKey, encrypt, secureEqual, verifier } from "@gateway/runtime";
+import { operations } from "@gateway/kernel";
 import {
   readBounded,
   validateBaseUrl,
@@ -151,12 +147,12 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
     );
     validateCloudCredentials(input.kind, input.api_key);
     const providerId = crypto.randomUUID();
-    await deps.store.createProvider(
+    const provider = await deps.store.createProvider(
       providerId,
       input,
       encrypt(input.api_key, deps.config.ENCRYPTION_KEY, providerId),
     );
-    return c.json({ id: providerId }, 201);
+    return c.json(provider, 201);
   });
   app.patch("/providers/:id", async (c) => {
     const input = z
@@ -206,16 +202,7 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
     c.json({ data: await deps.store.routeDefinitions(c.req.param("model")) }),
   );
   app.patch("/routes/:id", async (c) => {
-    const input = z
-      .object({
-        enabled: z.boolean().optional(),
-        priority: z.number().int().min(0).max(1000).optional(),
-        weight: z.number().min(0.001).max(1000).optional(),
-        pricing: pricingSchema.optional(),
-        request_policy: requestPolicySchema.optional(),
-      })
-      .strict()
-      .parse(await body(c));
+    const input = routePatchSchema.parse(await body(c));
     await deps.store.updateRoute(id(c.req.param("id")), input);
     return c.json({ updated: true });
   });

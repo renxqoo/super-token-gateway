@@ -1,12 +1,9 @@
-import {
-  GatewayError,
-  encodeSSE,
-  extractUsage,
-  providerObject as object,
-  parseProviderJson,
-  text,
-} from "@gateway/kernel";
-import type { Operation, SSEEvent, Usage } from "@gateway/kernel";
+import { GatewayError, providerObject as object, text } from "@gateway/contracts";
+import { encodeSSE } from "./sse.ts";
+import { extractUsage } from "./usage.ts";
+import { parseProviderJson } from "./json.ts";
+import type { Operation, Usage } from "@gateway/kernel";
+import type { SSEEvent } from "./sse.ts";
 import type { StreamMeter } from "./stream.ts";
 
 export class MediaStreamMeter implements StreamMeter {

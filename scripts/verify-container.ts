@@ -1,5 +1,5 @@
 import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
-import { createKey, encrypt, verifier } from "@gateway/kernel";
+import { createKey, encrypt, verifier } from "@gateway/runtime";
 import { mkdir, unlink, chmod } from "node:fs/promises";
 import { RedisClient } from "bun";
 import assert from "node:assert/strict";
@@ -132,6 +132,7 @@ try {
     priority: 1,
     weight: 1,
     pricing: { currency: "USD", rates },
+    ceilings: { input_tokens: "100", output_tokens: "100" },
   });
   await funds.setTariff({
     model: suffix,

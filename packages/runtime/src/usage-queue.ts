@@ -1,7 +1,8 @@
 import { RedisClient } from "bun";
 import { Queue, Worker, createBunRedisClient } from "bullmq";
-import { Batcher, GatewayError, usageEvidenceSchema, usageBatchSchema } from "@gateway/kernel";
-import type { UsageEvidence } from "@gateway/kernel";
+import { Batcher } from "./batcher.ts";
+import { GatewayError, usageEvidenceSchema, usageBatchSchema } from "@gateway/contracts";
+import type { UsageEvidence } from "@gateway/contracts";
 
 type Payload = { version: 1; events: UsageEvidence[] };
 export interface UsageQueueOptions {

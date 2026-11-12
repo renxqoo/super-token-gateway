@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { requestPolicySchema, parseClientJson, object } from "@gateway/kernel";
+import { requestPolicySchema, object } from "@gateway/contracts";
+import { parseClientJson } from "../index.ts";
 import { prepareOperation } from "../index.ts";
 
 test("route policy rejects incompatible native parameters while retaining unconfigured extensions", () => {

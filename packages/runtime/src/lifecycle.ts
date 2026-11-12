@@ -1,4 +1,4 @@
-import { GatewayError } from "@gateway/kernel";
+import { GatewayError } from "@gateway/contracts";
 
 export class Lifecycle {
   private active = new Set<Promise<unknown>>();

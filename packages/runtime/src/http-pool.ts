@@ -10,7 +10,7 @@ import {
   createBrotliDecompress,
   createZstdDecompress,
 } from "node:zlib";
-import { GatewayError } from "@gateway/kernel";
+import { GatewayError } from "@gateway/contracts";
 
 export interface PinnedRequestInit extends RequestInit {
   tls?: { serverName: string; rejectUnauthorized: true };
