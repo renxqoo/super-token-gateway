@@ -6,7 +6,7 @@ import type { SQL } from "bun";
 import { createDatabase, migrate, Store } from "@gateway/storage";
 import { createCatalogApplication } from "../../apps/core-api/src/plugins/application.ts";
 import { catalogRoutes } from "../../apps/core-api/src/plugins/http.ts";
-import { bundledReleaseId, type ReleasePolicy } from "../../apps/core-api/src/plugins/releases.ts";
+import { bundledReleaseId, type ReleasePolicy } from "@gateway/plugin-sdk";
 import { withDatabase } from "./database.ts";
 const registry = ".local/T04b1-resources.jsonl";
 export const syntheticAdminKey = "synthetic-platform-admin-key-0123456789";

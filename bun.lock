@@ -44,6 +44,19 @@
         "zod": "4.6.7",
       },
     },
+    "apps/gateway": {
+      "name": "@gateway/gateway",
+      "dependencies": {
+        "@gateway/contracts": "workspace:*",
+        "@gateway/core-client": "workspace:*",
+        "@gateway/kernel": "workspace:*",
+        "@gateway/plugin-host": "workspace:*",
+        "@gateway/plugin-sdk": "workspace:*",
+        "@gateway/runtime": "workspace:*",
+        "hono": "4.13.17",
+        "zod": "4.6.7",
+      },
+    },
     "apps/legacy-gateway": {
       "name": "@gateway/legacy-gateway",
       "dependencies": {
@@ -199,6 +212,8 @@
     "@gateway/core-client": ["@gateway/core-client@workspace:packages/core-client"],
 
     "@gateway/core-worker": ["@gateway/core-worker@workspace:apps/core-worker"],
+
+    "@gateway/gateway": ["@gateway/gateway@workspace:apps/gateway"],
 
     "@gateway/kernel": ["@gateway/kernel@workspace:packages/kernel"],
 

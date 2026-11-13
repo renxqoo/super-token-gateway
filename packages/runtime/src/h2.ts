@@ -81,11 +81,16 @@ export const boundedH2Defaults: Readonly<H2Limits> = Object.freeze({
   lifetimeMs: 300000,
   drainMs: 1000,
 });
-function safeReply(stream: ServerHttp2Stream, status: number, value: Uint8Array) {
+function safeReply(
+  stream: ServerHttp2Stream,
+  status: number,
+  value: Uint8Array,
+  contentType = "application/json",
+) {
   if (stream.destroyed || stream.closed || stream.headersSent) return;
   stream.respond({
     ":status": status,
-    "content-type": "application/json",
+    "content-type": contentType,
     "content-length": value.byteLength,
   });
   stream.end(value, () => {
@@ -101,6 +106,10 @@ export function h2JsonReply(
   const bytes = Buffer.from(JSON.stringify(value));
   if (bytes.length > maxBytes) throw new Error("Response budget exceeded");
   safeReply(stream, status, bytes);
+}
+export function h2BytesReply(stream: ServerHttp2Stream, bytes: Uint8Array, maxBytes: number) {
+  if (bytes.byteLength > maxBytes) throw new Error("Response budget exceeded");
+  safeReply(stream, 200, bytes, "application/octet-stream");
 }
 export async function readBoundedData(
   stream: ServerHttp2Stream,
@@ -465,11 +474,20 @@ export async function createBoundedH2Client(options: {
       headers: OutgoingHttpHeaders,
       body: Uint8Array,
       signal?: AbortSignal,
+      binary?: { maxBytes: number; timeoutMs: number },
     ): Promise<{ status: number; body: Buffer }> {
       if (closed || session.closed || session.destroyed || active >= 32)
         throw new Error("Internal transport unavailable");
       active++;
-      const task = sendH2(session, headers, body, options.responseBytes ?? 8192, timeout, signal);
+      const task = sendH2(
+        session,
+        headers,
+        body,
+        binary?.maxBytes ?? options.responseBytes ?? 8192,
+        binary?.timeoutMs ?? timeout,
+        signal,
+        binary !== undefined,
+      );
       pending.add(task);
       try {
         return await task;
@@ -497,6 +515,7 @@ function sendH2(
   max: number,
   timeout: number,
   signal?: AbortSignal,
+  binary = false,
 ): Promise<{ status: number; body: Buffer }> {
   return new Promise((resolve, reject) => {
     let status = 0,
@@ -525,14 +544,23 @@ function sendH2(
     function abort() {
       finish(new Error("Internal request cancelled"));
     }
+    let limit = max;
     stream.on("response", (h) => {
-      if (typeof h[":status"] !== "number" || h["content-type"] !== "application/json")
+      const code = h[":status"];
+      const json = h["content-type"] === "application/json";
+      if (
+        typeof code !== "number" ||
+        (binary ? (code === 200 ? h["content-type"] !== "application/octet-stream" : !json) : !json)
+      )
         finish(new Error("Invalid internal response"));
-      else status = h[":status"];
+      else {
+        status = code;
+        if (json && binary) limit = 8192;
+      }
     });
     stream.on("data", (chunk) => {
       size += chunk.length;
-      if (size > max) finish(new Error("Internal response budget exceeded"));
+      if (size > limit) finish(new Error("Internal response budget exceeded"));
       else chunks.push(Buffer.from(chunk));
     });
     stream.once("end", () => {

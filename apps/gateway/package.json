@@ -1,0 +1,15 @@
+{
+  "name": "@gateway/gateway",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@gateway/contracts": "workspace:*",
+    "@gateway/core-client": "workspace:*",
+    "@gateway/kernel": "workspace:*",
+    "@gateway/plugin-host": "workspace:*",
+    "@gateway/plugin-sdk": "workspace:*",
+    "@gateway/runtime": "workspace:*",
+    "hono": "4.13.17",
+    "zod": "4.6.7"
+  }
+}

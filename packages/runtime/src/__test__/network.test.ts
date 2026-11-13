@@ -307,6 +307,31 @@ test("TLS preserves SNI and classifies rejected handshakes as undispatched", asy
   }
 });
 
+test("an IP-literal HTTPS upstream handshakes without SNI instead of failing before connecting", async () => {
+  const { createServer: createTcpServer } = await import("node:net");
+  let clientHello: Uint8Array = Buffer.alloc(0);
+  const wire = createTcpServer((socket) =>
+    socket.once("data", (bytes) => {
+      clientHello = typeof bytes === "string" ? Buffer.from(bytes) : bytes;
+      socket.destroy();
+    }),
+  );
+  await new Promise<void>((resolve) => wire.listen(0, "127.0.0.1", resolve));
+  const address = wire.address();
+  if (!address || typeof address === "string") throw new Error("TLS wire fixture did not bind");
+  const transport = createTransport(8);
+  try {
+    await expect(
+      transport.fetch(new URL(`https://127.0.0.1:${address.port}/`), {}, true),
+    ).rejects.toMatchObject({ code: "upstream_tls" });
+    expect(clientHello.length).toBeGreaterThan(0);
+    expect(Buffer.from(clientHello).includes(Buffer.from("127.0.0.1"))).toBe(false);
+  } finally {
+    transport.close();
+    await new Promise<void>((resolve) => wire.close(() => resolve()));
+  }
+});
+
 test("configured environment proxies cannot intercept pinned upstream requests", async () => {
   let intercepted = 0;
   const proxy = Bun.serve({

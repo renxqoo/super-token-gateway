@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { RedisClient } from "bun";
 import { withCatalog, syntheticAdminKey, syntheticPepper } from "../tests/support/catalog.ts";
 import { prepareIdentity } from "../tests/support/internal-identity.ts";
-import { bundledReleaseId } from "../apps/core-api/src/plugins/releases.ts";
+import { bundledReleaseId } from "@gateway/plugin-sdk";
 const registry = ".local/T04b1-resources.jsonl";
 const record = (event: string, details: Record<string, unknown>) =>
   appendFile(registry, JSON.stringify({ event, ...details }) + "\n", { mode: 0o600 });

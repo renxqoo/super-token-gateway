@@ -3,13 +3,9 @@ import { parseArgs } from "node:util";
 import { mkdir, writeFile, stat, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { openAIChatPackageFiles } from "@gateway/adapters";
-import { packageDigest, sha256 } from "@gateway/plugin-sdk";
+import { bundledReleaseId, packageDigest, sha256 } from "@gateway/plugin-sdk";
 import { canonical } from "@gateway/kernel";
-import {
-  bundledReleaseId,
-  describeRelease,
-  signedReleaseSchema,
-} from "../apps/core-api/src/plugins/releases.ts";
+import { describeRelease, signedReleaseSchema } from "../apps/core-api/src/plugins/releases.ts";
 const { values } = parseArgs({
   options: {
     "private-key-file": { type: "string" },

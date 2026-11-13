@@ -157,6 +157,9 @@ export function createExecutionHandler(
       quota.close();
       routingLimits.close();
     },
+    async pluginPackage(context: object, digest: string) {
+      return store.pluginPackage(requireCaller(context), digest);
+    },
     async handle(context: object, kind: ExecutionKind, input: unknown) {
       const p = requireCaller(context);
       if (p.command_type !== kind) throw new Error("internal_proof_invalid");

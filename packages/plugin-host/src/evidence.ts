@@ -3,7 +3,7 @@ import type { AbiResult, Hook } from "@gateway/plugin-sdk";
 import type { createPluginAttempts } from "./attempts.ts";
 
 type PluginAttempt = ReturnType<ReturnType<typeof createPluginAttempts>["create"]>;
-type Finality = "FINAL" | "PARTIAL" | "UNKNOWN" | "ESTIMATED";
+type Finality = "FINAL" | "PARTIAL" | "UNKNOWN" | "ESTIMATED" | "NOT_EXECUTED";
 export type ObservedEvidence = {
   event_id: string;
   attempt_id: string;
@@ -13,15 +13,15 @@ export type ObservedEvidence = {
   finality: Finality;
   usage: Record<string, string>;
   final_dimensions: string[];
-  attempt_state?: "SUCCEEDED" | "FAILED" | "UNKNOWN" | "PARTIAL";
+  attempt_state?: "SUCCEEDED" | "FAILED" | "UNKNOWN" | "PARTIAL" | "NOT_EXECUTED";
   request_state?: "SUCCEEDED" | "FAILED" | "CANCELLED" | "UNKNOWN";
   error_code?: string;
   provider_request_id?: string;
 };
 export type AttemptOutcome = Pick<
   ObservedEvidence,
-  "attempt_state" | "request_state" | "error_code" | "provider_request_id"
->;
+  "request_state" | "error_code" | "provider_request_id"
+> & { attempt_state?: "SUCCEEDED" | "FAILED" | "UNKNOWN" | "PARTIAL" };
 
 function pricedDimensions(usage: Record<string, string>): string[] {
   return Object.keys(usage)
@@ -42,7 +42,12 @@ export function observeAttempt(
     finality: Finality = "UNKNOWN",
     last = "",
     finished = false;
-  async function emit(outcome: AttemptOutcome = {}) {
+  async function emit(
+    outcome: Pick<
+      ObservedEvidence,
+      "attempt_state" | "request_state" | "error_code" | "provider_request_id"
+    > = {},
+  ) {
     revision++;
     await binding.record({
       event_id: crypto.randomUUID(),
@@ -91,6 +96,13 @@ export function observeAttempt(
       if (finished) throw new Error("Attempt evidence already finished");
       finished = true;
       await emit(outcome);
+    },
+    async notExecuted(outcome: Pick<ObservedEvidence, "request_state" | "error_code">) {
+      if (finished) throw new Error("Attempt evidence already finished");
+      if (revision !== 0n) throw new Error("Attempt evidence already observed");
+      finished = true;
+      finality = "NOT_EXECUTED";
+      await emit({ ...outcome, attempt_state: "NOT_EXECUTED" });
     },
     dispose: () => attempt.dispose(),
   };

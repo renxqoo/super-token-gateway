@@ -145,7 +145,11 @@ export async function safeFetch(
     redirect: "manual",
     proxy: false,
     ...(url.protocol === "https:"
-      ? { tls: { serverName: hostname, rejectUnauthorized: true } }
+      ? {
+          tls: isIP(hostname)
+            ? { rejectUnauthorized: true }
+            : { serverName: hostname, rejectUnauthorized: true },
+        }
       : {}),
   });
 }

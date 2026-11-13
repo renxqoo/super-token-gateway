@@ -7,7 +7,8 @@ import { canonical } from "@gateway/kernel";
 import { GatewayError } from "@gateway/contracts";
 import { sha256, validateConfig } from "@gateway/plugin-sdk";
 import { createPlatformAuthenticator, type PlatformActor } from "../platform/authentication.ts";
-import { verifyRelease, bundledReleaseId, releasePolicySchema } from "./releases.ts";
+import { bundledReleaseId, releasePolicySchema } from "@gateway/plugin-sdk";
+import { verifyRelease } from "./releases.ts";
 import { validateCatalogPackage } from "./validator.ts";
 export const installBundledReleaseSchema = z
   .object({

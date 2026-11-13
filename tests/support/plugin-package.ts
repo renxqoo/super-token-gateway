@@ -1,9 +1,11 @@
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { openAIChatPackageFiles } from "@gateway/adapters";
 import { packageDigest, verifyPackage, type PackageFile } from "@gateway/plugin-sdk";
 
-export function syntheticSignedPackage(files: PackageFile[]) {
-  const key = generateKeyPairSync("ed25519");
+export function syntheticSignedPackage(
+  files: PackageFile[],
+  key: { privateKey: KeyObject; publicKey: KeyObject } = generateKeyPairSync("ed25519"),
+) {
   const envelope = {
     format: 1,
     files: files.map((file) => ({
@@ -22,8 +24,8 @@ export function syntheticSignedPackage(files: PackageFile[]) {
   const bytes = new TextEncoder().encode(JSON.stringify(envelope));
   return { bytes, trust, envelope, pkg: verifyPackage(bytes, trust) };
 }
-export async function syntheticChatPackage() {
-  return syntheticSignedPackage(await openAIChatPackageFiles());
+export async function syntheticChatPackage(key?: { privateKey: KeyObject; publicKey: KeyObject }) {
+  return syntheticSignedPackage(await openAIChatPackageFiles(), key);
 }
 export async function syntheticAdversarialPackage() {
   const files = await openAIChatPackageFiles(),

@@ -3,8 +3,14 @@ import { z } from "zod";
 import { canonical } from "@gateway/kernel";
 import { GatewayError } from "@gateway/contracts";
 import { openAIChatPackageFiles } from "@gateway/adapters";
-import { packageDigest, verifyPackage, sha256, type PackageFile } from "@gateway/plugin-sdk";
-export const bundledReleaseId = "gateway.openai-chat-1.0.0" as const;
+import {
+  bundledReleaseId,
+  packageDigest,
+  releasePolicySchema,
+  verifyPackage,
+  sha256,
+  type PackageFile,
+} from "@gateway/plugin-sdk";
 export const validationPolicy = Object.freeze({
   id: "gateway-fixtures-v1",
   abi_version: 1,
@@ -60,48 +66,6 @@ export const signedReleaseSchema = z
       .strict(),
   })
   .strict();
-export const releasePolicySchema = z
-  .object({
-    format: z.literal(1),
-    expires_at: z.iso.datetime(),
-    revoked: z.boolean(),
-    keys: z
-      .array(
-        z
-          .object({
-            id: keyId,
-            public_key: z.string().min(1).max(4096),
-            not_before: z.iso.datetime(),
-            expires_at: z.iso.datetime(),
-            revoked: z.boolean(),
-            purposes: z.array(z.enum(["package", "release"])).min(1),
-            release_ids: z.array(z.literal(bundledReleaseId)).min(1),
-          })
-          .strict(),
-      )
-      .min(1)
-      .max(100),
-    releases: z
-      .array(
-        z
-          .object({
-            release_id: z.literal(bundledReleaseId),
-            descriptor_digest: digest,
-            package_digest: digest,
-            abi_version: z.literal(1),
-            config_schema_digest: digest,
-            fixture_digest: digest,
-            validation_policy_digest: digest,
-            runtime_digest: digest,
-            revoked: z.boolean(),
-          })
-          .strict(),
-      )
-      .min(1)
-      .max(100),
-  })
-  .strict();
-export type ReleasePolicy = z.infer<typeof releasePolicySchema>;
 export type SignedRelease = z.infer<typeof signedReleaseSchema>;
 export function describeRelease(
   files: readonly PackageFile[],

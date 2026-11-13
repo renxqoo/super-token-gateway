@@ -9,6 +9,7 @@ for (const [entries, directory] of [
   [["apps/mock-providers/src/main.ts"], "dist/mock-providers"],
   [["apps/core-api/src/main.ts", "apps/core-api/src/platform/management.ts"], "dist/core-api"],
   [["apps/core-worker/src/main.ts"], "dist/core-worker"],
+  [["apps/gateway/src/main.ts"], "dist/gateway"],
   [
     [
       "scripts/migrate.ts",
@@ -83,5 +84,5 @@ await Bun.write(
   ) + "\n",
 );
 console.log(
-  "Built legacy gateway, Core API, Core worker, migration, mock and isolated plugin artifacts",
+  "Built v2 Gateway, legacy gateway, Core API, Core worker, migration, mock and isolated plugin artifacts",
 );

@@ -258,3 +258,37 @@ test("an observation whose record failed is recorded again when the same usage i
   await bridge.invoke("stream_feed");
   expect(recorded.map((e) => [e.usage, e.finality])).toEqual([[{ input_tokens: "7" }, "FINAL"]]);
 });
+
+test("a send that never left the host is recorded once as NOT_EXECUTED without quantities", async () => {
+  const { bridge, recorded, attemptId } = observed();
+  await bridge.notExecuted({ request_state: "FAILED", error_code: "upstream_not_dispatched" });
+  expect(recorded.map((e) => ({ ...e, event_id: "id" }))).toEqual([
+    {
+      event_id: "id",
+      attempt_id: attemptId,
+      permit_epoch: "1",
+      source: "execution",
+      source_revision: "1",
+      finality: "NOT_EXECUTED",
+      usage: {},
+      final_dimensions: [],
+      attempt_state: "NOT_EXECUTED",
+      request_state: "FAILED",
+      error_code: "upstream_not_dispatched",
+    },
+  ]);
+  await expect(bridge.finish({ request_state: "FAILED" })).rejects.toThrow("already finished");
+  bridge.dispose();
+});
+
+test("an attempt with observed usage can no longer claim it was never executed", async () => {
+  const recorded: ObservedEvidence[] = [];
+  const bridge = observeAttempt(scripted([output({ input_tokens: "3" })]), {
+    attemptId: crypto.randomUUID(),
+    permitEpoch: "1",
+    record: async (e) => void recorded.push(e),
+  });
+  await bridge.invoke("stream_feed");
+  await expect(bridge.notExecuted({ request_state: "FAILED" })).rejects.toThrow("already observed");
+  expect(recorded.map((e) => e.finality)).toEqual(["FINAL"]);
+});

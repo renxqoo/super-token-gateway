@@ -66,6 +66,7 @@ export const internalProofSchema = z.strictObject({
     "execution_quota_v1",
     "execution_quota_recovery_v1",
     "execution_abort_recovery_v1",
+    "plugin_package_v1",
   ]),
   command_id: internalUuidSchema,
   deadline_at: internalInstantSchema,
@@ -172,6 +173,7 @@ export const internalErrorSchema = z.strictObject({
       "cost_unbounded",
       "customer_forbidden",
       "context_invalid",
+      "plugin_package_unavailable",
     ]),
   ]),
   category: z.enum(["AUTHENTICATION", "VALIDATION", "DEPENDENCY"]),
@@ -253,7 +255,8 @@ export type CoreVerifiedCallerProjection = Omit<CoreVerifiedPeerProjection, "end
     | "execution_query_v1"
     | "execution_quota_v1"
     | "execution_quota_recovery_v1"
-    | "execution_abort_recovery_v1";
+    | "execution_abort_recovery_v1"
+    | "plugin_package_v1";
   command_id: string;
   method: "POST";
   normalized_path: string;

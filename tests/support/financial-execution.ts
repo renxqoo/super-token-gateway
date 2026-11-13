@@ -14,7 +14,7 @@ import { sha256 } from "@gateway/runtime/crypto";
 import { withIdentity, identityAudience } from "./internal-identity.ts";
 import { prepareCatalog, syntheticAdminKey, syntheticPepper } from "./catalog.ts";
 import { createCoreManagementApplication } from "../../apps/core-api/src/platform/management.ts";
-import { bundledReleaseId } from "../../apps/core-api/src/plugins/releases.ts";
+import { bundledReleaseId } from "@gateway/plugin-sdk";
 export const financialKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 export async function withFinancial(
   run: (fixture: Awaited<ReturnType<typeof prepareFinancial>>, db: SQL) => Promise<void>,
@@ -129,13 +129,14 @@ async function prepareFinancial(
         },
         ceilings: { input_tokens: "100", output_tokens: "50" },
       },
+      upstream: { baseUrl?: string; maxInputTokens?: number } = {},
     ) {
       const uuid = crypto.randomUUID(),
         model = `financial-${uuid}`;
       const providerResponse = await request("/providers", {
         name: model,
         kind: "openai",
-        base_url: "https://synthetic.provider.test/v1",
+        base_url: upstream.baseUrl ?? "https://synthetic.provider.test/v1",
         api_key: "synthetic-upstream-secret",
         concurrency: 10,
         rpm: 100,
@@ -197,7 +198,7 @@ async function prepareFinancial(
         config: {
           model_map: { [model]: "synthetic" },
           max_output_tokens: 100,
-          max_input_tokens: 10000,
+          max_input_tokens: upstream.maxInputTokens ?? 10000,
           auth: "bearer",
         },
       });
@@ -268,6 +269,68 @@ async function prepareFinancial(
         recharge: recharge.value as unknown as UpstreamRechargeReceipt,
         rechargeInput,
       };
+    },
+    async addChannel(
+      setup: {
+        model: string;
+        provider: { account_id: string; brand_id: string };
+        publication: { version_id: string };
+      },
+      channel: {
+        baseUrl: string;
+        apiKey: string;
+        maxInputTokens: number;
+        ceilings: Record<string, string>;
+      },
+    ) {
+      const created = await request("/providers", {
+        name: `channel-${crypto.randomUUID()}`,
+        kind: "openai",
+        base_url: channel.baseUrl,
+        api_key: channel.apiKey,
+        concurrency: 10,
+        rpm: 100,
+        account_id: setup.provider.account_id,
+        brand_id: setup.provider.brand_id,
+      });
+      if (created.status !== 201) throw new Error(`Provider creation: ${JSON.stringify(created)}`);
+      const provider = financialProviderSchema.parse(created.value);
+      const route = await request(`/models/${setup.model}/routes`, {
+        provider_id: provider.id,
+        upstream_model: "synthetic",
+        operations: ["chat"],
+        pricing: {
+          currency: "USD",
+          rates: {
+            input_tokens: { numerator: "1", denominator: "3" },
+            output_tokens: { numerator: "1", denominator: "3" },
+          },
+        },
+        ceilings: channel.ceilings,
+      });
+      if (route.status !== 201) throw new Error(`Route creation: ${JSON.stringify(route)}`);
+      const tariff = await request("/billing/tariffs", {
+        model: setup.model,
+        operation: "chat",
+        provider_id: provider.id,
+        pricing: { currency: "USD", rates: { requests: { numerator: "100", denominator: "1" } } },
+        ceilings: { requests: "1" },
+        basis: "REQUEST_COMPLETION",
+      });
+      if (tariff.status !== 201) throw new Error(`Tariff creation: ${JSON.stringify(tariff)}`);
+      await catalog.application.bind(await catalog.actor(), provider.id, {
+        ...catalog.binding(setup.publication.version_id),
+        account_id: setup.provider.account_id,
+        brand_id: setup.provider.brand_id,
+        secret_reference: `channel:${provider.id}`,
+        config: {
+          model_map: { [setup.model]: "synthetic" },
+          max_output_tokens: 100,
+          max_input_tokens: channel.maxInputTokens,
+          auth: "bearer",
+        },
+      });
+      return provider;
     },
     async close() {
       for (const c of clients) await c.close();

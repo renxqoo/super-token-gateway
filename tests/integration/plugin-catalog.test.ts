@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { createPluginCatalogStore, Store } from "@gateway/storage";
 import { verifier } from "@gateway/runtime/crypto";
 import { withCatalog, syntheticAdminKey, syntheticPepper } from "../support/catalog.ts";
-import { bundledReleaseId } from "../../apps/core-api/src/plugins/releases.ts";
+import { bundledReleaseId } from "@gateway/plugin-sdk";
 import { catalogStageCommand } from "../../apps/core-api/src/plugins/application.ts";
 const install = () => ({
   command_id: crypto.randomUUID(),

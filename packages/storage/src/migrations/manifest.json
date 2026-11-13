@@ -107,6 +107,15 @@
           "checksum": "4c40c9f6c16375122fdf0f502b90167b7e8e65762e4779be968c221064a5dda9"
         }
       ]
+    },
+    {
+      "version": 2026111210,
+      "files": [
+        {
+          "path": "./sql/core-plugin-distribution.sql",
+          "checksum": "9d79b838fed5b13d3aa90a6f26289ddcadd7aa1c0cc6cc9f26471207b016b176"
+        }
+      ]
     }
   ]
 }

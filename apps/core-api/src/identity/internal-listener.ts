@@ -12,6 +12,8 @@ import {
   executionRejectionStatus,
   internalErrorSchema,
   executionDataSchemas,
+  pluginPackageDataSchema,
+  pluginPackageMaxBytes,
   type ExecutionKind,
   registrationProofFields,
   commandProofFields,
@@ -32,6 +34,7 @@ import {
   readBoundedData,
   readH2Peer,
   h2JsonReply,
+  h2BytesReply,
   type H2Limits,
 } from "@gateway/runtime/h2";
 import { createCoreRpcClient } from "@gateway/core-client";
@@ -92,7 +95,7 @@ export async function startCoreInternalListener(options: Options) {
         session: Session;
         proof: ReturnType<typeof internalProofSchema.parse>;
         rawDigest: string;
-        endpoint: "current-session" | ExecutionKind;
+        endpoint: "current-session" | "plugin_package_v1" | ExecutionKind;
       };
   const contexts = new WeakMap<object, Snapshot>();
   let activeContexts = 0;
@@ -139,7 +142,9 @@ export async function startCoreInternalListener(options: Options) {
       normalized_path:
         s.endpoint === "current-session"
           ? "/_internal/core/v1/identity/current-session"
-          : executionPaths[s.endpoint],
+          : s.endpoint === "plugin_package_v1"
+            ? "/_internal/core/v1/plugin-package"
+            : executionPaths[s.endpoint],
       raw_body_sha256: s.rawDigest,
       deadline_at: s.proof.deadline_at,
       trace_id: s.proof.trace_id,
@@ -197,12 +202,15 @@ export async function startCoreInternalListener(options: Options) {
     try {
       const routes: Record<
         string,
-        "challenges" | "registrations" | "current-session" | ExecutionKind
+        "challenges" | "registrations" | "current-session" | "plugin_package_v1" | ExecutionKind
       > = {
         ...(execution
-          ? Object.fromEntries(
-              Object.entries(executionPaths).map(([kind, path]) => [path, kind as ExecutionKind]),
-            )
+          ? {
+              ...Object.fromEntries(
+                Object.entries(executionPaths).map(([kind, path]) => [path, kind as ExecutionKind]),
+              ),
+              "/_internal/core/v1/plugin-package": "plugin_package_v1" as const,
+            }
           : {}),
         "/_internal/core/v1/identity/challenges": "challenges",
         "/_internal/core/v1/identity/registrations": "registrations",
@@ -365,7 +373,10 @@ export async function startCoreInternalListener(options: Options) {
             ? internalCurrentRequestSchema
             : (await import("zod")).z.strictObject({
                 envelope: executionEnvelopeSchema,
-                data: executionDataSchemas[endpoint],
+                data:
+                  endpoint === "plugin_package_v1"
+                    ? pluginPackageDataSchema
+                    : executionDataSchemas[endpoint],
               })
         ).safeParse(parsed);
         if (!request.success) return reject("internal_request_invalid");
@@ -397,6 +408,14 @@ export async function startCoreInternalListener(options: Options) {
         if (endpoint !== "current-session") {
           await reserved.release();
           reserved = undefined;
+        }
+        if (endpoint === "plugin_package_v1") {
+          const bytes = await execution!.pluginPackage(
+            context,
+            pluginPackageDataSchema.parse(request.data.data).digest,
+          );
+          if (!signal.aborted) h2BytesReply(stream, bytes, pluginPackageMaxBytes);
+          return;
         }
         const result =
           endpoint === "current-session"
@@ -458,6 +477,7 @@ export async function startCoreInternalListener(options: Options) {
         cost_unbounded: 422,
         customer_forbidden: 403,
         context_invalid: 403,
+        plugin_package_unavailable: 404,
       };
       const sqlcode = (error as { errno?: string })?.errno;
       const code = Object.hasOwn(codes, message)

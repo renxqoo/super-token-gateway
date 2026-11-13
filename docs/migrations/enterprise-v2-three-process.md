@@ -42,7 +42,7 @@ A 下 Chat 在过渡期存在两条实现：legacy Chat 继续作为 T05/T09 迁
 ## 3. 目标结构与依赖
 
 ```text
-apps/gateway/src/        v2：main/assembly/config、http（Chat、健康）、execution（许可执行、重试、流、取消）
+apps/gateway/src/        v2：main（装配与排空）、config、app（Chat 与健康路由）、chat（许可执行、重试、JSON/SSE 中继）、packages（插件包信任与缓存）
 apps/core-api/src/       main/assembly/config；既有 identity/execution/plugins/platform
 apps/core-worker/src/    main/assembly/config、settlement
 apps/legacy-gateway/src/ 现单体原样移入，过渡期唯一 PG 直连 Gateway
@@ -104,3 +104,33 @@ legacy 测试原样保留，作为未迁能力的回归，删除随各自迁移�
 - 产物：execution 检查 14 项（编译后 worker 结算 1 组：客户 100，上游余额 985/预留 0/已花 15，SIGTERM `committed:1` 退出 0、无 stderr）；catalog 检查通过 7 项。
 
 c1 全量门禁：check 238 文件无类型错误；lint 0；fmt 344 文件；test:native 通过；test 297 通过 / 4177 断言 / 43 文件（较 ⑦ 的 291 增 6：两份配置用例 5 条、架构 1 条）；test:integration 501 通过 / 0 失败 / 10755 断言 / 34 文件（与迁移前用例数一致，legacy 行为未变）；build 成功；test:plugin-artifact 15/24；test:artifact 四项全部通过（legacy、catalog、identity 7、admission+worker 14）；test:durability 通过。test:backup 未通过的原因同 T04.b.2b；test:container 已退役，未运行。
+
+## 8. c2 Gateway 执行核心记录
+
+| 项           | 实施                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 插件包分发   | 追加迁移 v2026111210 `core_plugin_package_v1`（SECURITY DEFINER，仅 `gateway` 服务的 `plugin_package_v1` 命令、复核当前 session，只返回 PUBLISHED 且未隔离版本引用的包），`core_execution_api` 获 EXECUTE。内部 RPC 新增 `/_internal/core/v1/plugin-package`，以 `application/octet-stream` 回包（上限 44 MiB），错误仍为 JSON；`plugin_package_unavailable` 映射 404。core-client 新增 `pluginPackage(digest)` |
+| 包信任       | 发行策略 schema 与 `bundledReleaseId` 从 Core 私有模块移到 `@gateway/plugin-sdk`（Core、脚本、测试改为从此导入，不留转发）。新增 `packageTrust(policy)`：按摘要只给出未撤销发行所绑定、在有效期内且用途含 `package` 的 Ed25519 key；Gateway 用自己的部署策略校验 Core 下发的包，摘要不在策略内时不下载，下载结果摘要不符即拒绝                                                                                  |
+| Gateway 进程 | `apps/gateway`：`GATEWAY_CONFIG_FILE` JSON 配置（Core mTLS pin、证据队列、helper、信任策略、私网放行仅限非 production），production 禁止私网放行且要求证据至少一个已确认副本。无 PG、无 `DATABASE_URL`/`KEY_PEPPER`。启动建立 Core session 与证据 producer；`/readyz` 复核 session 与队列；SIGTERM 停止接收、有界排空在途请求、撤销未消费发送许可后退出 0                                                       |
+| Chat 路径    | context→插件 prepare→admit→begin→受控发送（注入 Core 下发的上游凭证）→observe→签名证据 publish→关闭请求。JSON 在证据持久化后才返回；SSE 在终止帧前持有，证据持久化后才放出终止帧。失败前的中间 attempt 只发不带 `request_state` 的证据，不关闭请求                                                                                                                                                              |
+| 重试         | 沿用 legacy 的可重试状态（408/409/429/500/502/503/504/529 及 401/403/404 换渠道）与传输失败换渠道；每次重试取新 context 并选未尝试过的渠道，经 `execution_next_v1` 续接同一请求，序号与次数由 Core 约束。客户端取消、请求截止或不可重试状态立即结束。整个请求只由最后一个 attempt 发一次 CLOSE（或 begin 前的 abort 带 `close_request`）                                                                        |
+| 运行时缺陷   | `createTransport` 对 IP 字面量 HTTPS 上游把地址作为 TLS ServerName 传给 node，被拒为 `ERR_INVALID_ARG_VALUE`，配置为 IP 地址的 HTTPS 供应商无法连接（legacy 同受影响）。修复为 IP 字面量不发 SNI、证书按 IP 校验；回归用例先红后绿                                                                                                                                                                              |
+| 产物         | `scripts/build.ts` 产出 `dist/gateway/main.js`；新增 `scripts/verify-gateway-artifact.ts` 并入 `test:artifact`：编译后的 Core API、worker、Gateway（空 cwd）真实三进程完成 JSON 与 SSE 各一次并核对手算金额                                                                                                                                                                                                     |
+
+有意差异与说明：
+
+- 证据桥新增 `notExecuted`：只能在尚未观察到任何用量时以 `NOT_EXECUTED` 终结，用于发送前即失败（未拿到发送许可、连接前失败）；`AttemptOutcome` 不再接受 `NOT_EXECUTED`，避免带用量的 attempt 声称未执行。
+- 失败请求按 REQUEST_COMPLETION 计费基础结算为 0 原子的客户 charge 行、`billing_outcome` 为 FAILED，而非没有 charge 行。
+- 上游非 2xx 的证据：400/401/403/404/422 记 `FAILED`，其余记 `UNKNOWN`（保守保留供应商敞口），错误码 `upstream_http_<status>`；公开错误码沿用 legacy 的 `upstream_rejected`。
+- 公开错误响应的 `x-request-id` 与 Core 记录的请求 ID 一致。
+
+新增验证：
+
+- `tests/integration/gateway-chat.test.ts`（真实 Core API、worker、Gateway 三进程与 TLS 上游）：JSON 与 SSE 各一次发送，客户 100、上游余额 985/预留 0/已花 15、最新 CANONICAL 快照为 FINAL usage 30/15 成本 15（SSE 每个证据修订追加一个快照，结算只取最新），上游收到 Core 下发凭证、模型映射与输出上限；503 后换到第二渠道同一请求成功、仅收费一次；400 不重试、请求 FAILED 关闭且客户 charge 为 0。
+- `tests/integration/core-plugin-package.test.ts`：Gateway session 下载的包经部署策略 `packageTrust` 校验等于候选摘要；未知摘要 404、worker 身份 403、隔离后 404。
+- `packages/plugin-sdk/src/__test__/release-policy.test.ts`、`apps/gateway/src/__test__/packages.test.ts`、`apps/gateway/src/__test__/config.test.ts`、`packages/plugin-host/src/__test__/evidence.test.ts`（`notExecuted` 两条）、`packages/runtime/src/__test__/network.test.ts`（IP 字面量 SNI 回归）。
+- `tests/unit/architecture.test.ts`：Gateway 的工作区依赖闭包不含 storage/Core/legacy/数据库驱动，源码只读取 `GATEWAY_CONFIG_FILE` 环境变量；植入违规 import 或 `DATABASE_URL` 读取时用例失败，移除后通过。
+
+未在 c2 验证（属 c3/c4）：取消与排空中的请求、grant 丢失、worker 暂停、helper 强杀、双 Gateway、截断流、私网拒绝的真实进程用例；集成测试的证据队列为 0 副本，production 的副本确认要求只由配置校验覆盖。
+
+c2 全量门禁：check 251 文件无类型错误；lint 0；fmt 358 文件；test:native 通过；test 312 通过 / 4261 断言 / 46 文件（较 c1 增 15：发行策略 3、Gateway 包缓存 5 与配置 3、证据桥 2、传输 1、架构 1）；test:integration 507 通过 / 0 失败 / 10805 断言 / 36 文件（增 6：Gateway Chat 4、插件包分发 2）；build 成功；test:plugin-artifact 15/24；test:artifact 五项全部通过（legacy、catalog、identity 7、admission+worker 14、Gateway 三进程 10）；test:durability 通过。test:backup 未运行，原因同 c1；test:container 已退役。首轮全量门禁中 SSE 用例断言“每请求仅一行 usage_events”失败，核实为结算按证据修订追加 CANONICAL 快照的既定设计，断言改为核对最新快照后该文件与整套集成重跑通过。

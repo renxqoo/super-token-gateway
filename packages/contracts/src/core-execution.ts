@@ -121,6 +121,8 @@ export const executionDataSchemas = {
     reason: z.enum(["COMPLETED", "FAILED", "CANCELLED", "DRAINED"]).optional(),
   }),
 } as const;
+export const pluginPackageDataSchema = z.strictObject({ digest: digestSchema });
+export const pluginPackageMaxBytes = 46137344;
 export const hostAuthorizationPlanV1Schema = z.strictObject({
   version: z.literal(1),
   owner: z.strictObject({

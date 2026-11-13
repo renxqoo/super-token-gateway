@@ -41,6 +41,8 @@ test("Core processes never reach into the transitional Gateway or each other's p
     "core-worker":
       /legacy-gateway|core-api|@gateway\/(?:legacy-gateway|core-api|core-client|plugin-host)/,
     "mock-providers": /legacy-gateway|core-api|core-worker/,
+    gateway:
+      /legacy-gateway|core-api|core-worker|@gateway\/(?:storage|legacy-gateway|core-api|core-worker|connectors)|drizzle|^postgres/,
   };
   for (const [app, pattern] of Object.entries(forbidden))
     for await (const file of new Bun.Glob("**/*.ts").scan(`apps/${app}/src`)) {
@@ -48,6 +50,39 @@ test("Core processes never reach into the transitional Gateway or each other's p
       for (const match of source.matchAll(/(?:from\s+|import\s*\(?\s*)["']([^"']+)["']/g))
         expect(match[1] ?? "").not.toMatch(pattern);
     }
+});
+
+test("the v2 Gateway has no database path and reads only its config file from the environment", async () => {
+  const closure = new Set<string>();
+  const pending = ["apps/gateway"];
+  while (pending.length) {
+    const directory = pending.pop()!;
+    const manifest = (await Bun.file(`${directory}/package.json`).json()) as {
+      dependencies?: Record<string, string>;
+    };
+    for (const name of Object.keys(manifest.dependencies ?? {})) {
+      if (closure.has(name)) continue;
+      closure.add(name);
+      if (name.startsWith("@gateway/")) pending.push(`packages/${name.slice(9)}`);
+    }
+  }
+  for (const name of [
+    "@gateway/storage",
+    "@gateway/core-api",
+    "@gateway/legacy-gateway",
+    "drizzle-orm",
+    "postgres",
+  ])
+    expect(closure.has(name)).toBe(false);
+  const reads = new Set<string>();
+  for await (const file of new Bun.Glob("**/*.ts").scan("apps/gateway/src")) {
+    if (file.includes("__test__")) continue;
+    const source = await Bun.file(`apps/gateway/src/${file}`).text();
+    expect(source).not.toMatch(/DATABASE_URL|KEY_PEPPER|Bun\.env|new SQL\b/);
+    for (const match of source.matchAll(/process\.env(?:\.([A-Z_]+)|\[)/g))
+      reads.add(match[1] ?? "[dynamic]");
+  }
+  expect([...reads]).toEqual(["GATEWAY_CONFIG_FILE"]);
 });
 
 test("every schema artifact has one checksummed migration owner and no compatibility outbox", async () => {

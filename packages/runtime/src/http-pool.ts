@@ -13,7 +13,7 @@ import {
 import { GatewayError } from "@gateway/contracts";
 
 export interface PinnedRequestInit extends RequestInit {
-  tls?: { serverName: string; rejectUnauthorized: true };
+  tls?: { serverName?: string; rejectUnauthorized: true };
   proxy?: false;
 }
 
@@ -158,7 +158,8 @@ export function createHttpPool(maxConnections: number) {
               method: serialized.method,
               headers: Object.fromEntries(headers),
               agent: secureRequest ? secure : plain,
-              ...(secureRequest ? { servername: serverName, rejectUnauthorized: true } : {}),
+              ...(secureRequest ? { rejectUnauthorized: true as const } : {}),
+              ...(secureRequest && serverName ? { servername: serverName } : {}),
             },
             (response) => {
               markConnected();

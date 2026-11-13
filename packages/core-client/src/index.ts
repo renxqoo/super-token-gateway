@@ -2,6 +2,8 @@ import { generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto"
 import {
   executionDataSchemas,
   executionContextResponseSchema,
+  pluginPackageDataSchema,
+  pluginPackageMaxBytes,
   executionReceiptSchema,
   transientSendSchema,
   type ExecutionKind,
@@ -82,9 +84,14 @@ export function createCoreRpcClient(
     }
     return connecting;
   }
-  async function request(path: string, body: Buffer, proof?: string) {
+  async function send(
+    path: string,
+    body: Buffer,
+    proof?: string,
+    binary?: { maxBytes: number; timeoutMs: number },
+  ) {
     const c = await connection();
-    const response = await c.request(
+    return c.request(
       {
         ":authority": new URL(options.origin).port
           ? `${options.servername}:${new URL(options.origin).port}`
@@ -96,7 +103,11 @@ export function createCoreRpcClient(
         ...(proof ? { "x-stg-proof": proof } : {}),
       },
       body,
+      undefined,
+      binary,
     );
+  }
+  function parseReply(response: { status: number; body: Buffer }) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(response.body));
@@ -111,6 +122,65 @@ export function createCoreRpcClient(
       throw new Error("Internal transport rejected request");
     }
     return parsed;
+  }
+  async function request(path: string, body: Buffer, proof?: string) {
+    return parseReply(await send(path, body, proof));
+  }
+  function signed(
+    kind: ExecutionKind | "plugin_package_v1",
+    normalizedPath: string,
+    data: unknown,
+    requestOptions: { commandId?: string; deadlineAt?: string; traceId?: string },
+  ) {
+    const owner = receipt;
+    if (!owner) throw new Error("Startup required");
+    const commandId = requestOptions.commandId ?? randomUUID(),
+      deadline = requestOptions.deadlineAt ?? new Date(Date.now() + 30000).toISOString(),
+      trace = requestOptions.traceId ?? randomUUID();
+    const envelope = {
+      command_id: commandId,
+      body_digest: sha256(
+        canonical({
+          kind,
+          contract_version: 1,
+          owner: {
+            service: owner.service,
+            instance_id: owner.instance_id,
+            session_id: owner.session_id,
+            incarnation_id: owner.incarnation_id,
+          },
+          deadline_at: deadline,
+          data,
+        }),
+      ),
+      caller_incarnation: owner.incarnation_id,
+      deadline_at: deadline,
+      trace_id: trace,
+      contract_version: 1,
+    };
+    const body = Buffer.from(JSON.stringify({ envelope, data }));
+    const proof = {
+      session_id: owner.session_id,
+      incarnation_id: owner.incarnation_id,
+      command_type: kind,
+      command_id: commandId,
+      deadline_at: deadline,
+      trace_id: trace,
+      contract_version: 1 as const,
+      raw_body_sha256: sha256(body),
+    };
+    const signature = sign(
+      null,
+      Buffer.from(
+        JSON.stringify(commandProofFields(options.audience, owner, proof, "POST", normalizedPath)),
+      ),
+      key.privateKey,
+    ).toString("base64url");
+    return {
+      owner,
+      body,
+      proof: Buffer.from(JSON.stringify({ ...proof, signature })).toString("base64url"),
+    };
   }
   async function register() {
     if (receipt) return receipt;
@@ -259,8 +329,7 @@ export function createCoreRpcClient(
     ) {
       if (requestOptions.commandId && !requestOptions.deadlineAt)
         throw new Error("Stable command deadline required");
-      const owner = receipt;
-      if (!owner) throw new Error("Startup required");
+      if (!receipt) throw new Error("Startup required");
       const parsedData = executionDataSchemas[kind].parse(data);
       const path = (
         {
@@ -276,56 +345,9 @@ export function createCoreRpcClient(
         } as const
       )[kind];
       const normalizedPath = `/_internal/core/v1/${path}`;
-      const commandId = requestOptions.commandId ?? randomUUID(),
-        deadline = requestOptions.deadlineAt ?? new Date(Date.now() + 30000).toISOString(),
-        trace = requestOptions.traceId ?? randomUUID();
-      const envelope = {
-        command_id: commandId,
-        body_digest: sha256(
-          canonical({
-            kind,
-            contract_version: 1,
-            owner: {
-              service: owner.service,
-              instance_id: owner.instance_id,
-              session_id: owner.session_id,
-              incarnation_id: owner.incarnation_id,
-            },
-            deadline_at: deadline,
-            data: parsedData,
-          }),
-        ),
-        caller_incarnation: owner.incarnation_id,
-        deadline_at: deadline,
-        trace_id: trace,
-        contract_version: 1,
-      };
-      const body = Buffer.from(JSON.stringify({ envelope, data: parsedData }));
-      const proof = {
-        session_id: owner.session_id,
-        incarnation_id: owner.incarnation_id,
-        command_type: kind,
-        command_id: commandId,
-        deadline_at: deadline,
-        trace_id: trace,
-        contract_version: 1 as const,
-        raw_body_sha256: sha256(body),
-      };
-      const signature = sign(
-        null,
-        Buffer.from(
-          JSON.stringify(
-            commandProofFields(options.audience, owner, proof, "POST", normalizedPath),
-          ),
-        ),
-        key.privateKey,
-      ).toString("base64url");
+      const { owner, body, proof } = signed(kind, normalizedPath, parsedData, requestOptions);
       try {
-        const value = (await request(
-          normalizedPath,
-          body,
-          Buffer.from(JSON.stringify({ ...proof, signature })).toString("base64url"),
-        )) as Record<string, unknown>;
+        const value = (await request(normalizedPath, body, proof)) as Record<string, unknown>;
         if (kind === "execution_context_v1") return executionContextResponseSchema.parse(value);
         if (kind === "execution_quota_v1" || kind === "execution_quota_recovery_v1") return value;
         const safe = executionReceiptSchema.parse(value.receipt);
@@ -352,6 +374,21 @@ export function createCoreRpcClient(
             message: "Internal request outcome unknown",
           });
         throw error;
+      } finally {
+        body.fill(0);
+      }
+    },
+    async pluginPackage(digest: string, requestOptions: { deadlineAt?: string } = {}) {
+      const data = pluginPackageDataSchema.parse({ digest });
+      const path = "/_internal/core/v1/plugin-package";
+      const { body, proof } = signed("plugin_package_v1", path, data, requestOptions);
+      try {
+        const response = await send(path, body, proof, {
+          maxBytes: pluginPackageMaxBytes,
+          timeoutMs: 30000,
+        });
+        if (response.status !== 200) parseReply(response);
+        return new Uint8Array(response.body);
       } finally {
         body.fill(0);
       }

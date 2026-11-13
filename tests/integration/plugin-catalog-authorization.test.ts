@@ -3,7 +3,7 @@ import type { SQL } from "bun";
 import { verifier } from "@gateway/runtime/crypto";
 import { createPluginCatalogStore } from "@gateway/storage";
 import { withCatalog, syntheticAdminKey, syntheticPepper } from "../support/catalog.ts";
-import { bundledReleaseId } from "../../apps/core-api/src/plugins/releases.ts";
+import { bundledReleaseId } from "@gateway/plugin-sdk";
 import { createPlatformAuthenticator } from "../../apps/core-api/src/platform/authentication.ts";
 const permissions = [
   "plugins:read",
