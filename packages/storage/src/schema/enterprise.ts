@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  customType,
   pgTable,
   uuid,
   text,
@@ -34,6 +35,7 @@ import {
 } from "./catalog.ts";
 
 import { internalStartupSessions } from "./internal-identity.ts";
+const signatureBytes = customType<{ data: Buffer }>({ dataType: () => "bytea" });
 
 const atoms = (name: string) => numeric(name, { precision: 38, scale: 0 });
 const instant = (name: string) => timestamp(name, { withTimezone: true, mode: "string" });
@@ -246,6 +248,12 @@ export const coreEvidenceReceipts = pgTable(
     conflictId: uuid("conflict_id"),
     riskDimensions: text("risk_dimensions").array().notNull(),
     numericFault: text("numeric_fault"),
+    authenticationDisposition: text("authentication_disposition").notNull(),
+    authenticationReason: text("authentication_reason").notNull(),
+    producerKeySha256: text("producer_key_sha256").notNull(),
+    signatureVersion: integer("signature_version").notNull(),
+    signature: signatureBytes().notNull(),
+    signaturePayloadDigest: text("signature_payload_digest").notNull(),
     createdAt: instant("created_at").defaultNow().notNull(),
   },
   (t) => [
@@ -278,7 +286,7 @@ export const coreEvidenceReceipts = pgTable(
     ),
     check(
       "core_receipt_outcome",
-      sql`outcome IN ('ACCEPTED','STALE','ESTIMATED','REVISION_REPLAY','CONFLICT','OVERFLOW') AND finality IN ('FINAL','PARTIAL','UNKNOWN','ESTIMATED','NOT_EXECUTED')
+      sql`outcome IN ('ACCEPTED','STALE','ESTIMATED','REVISION_REPLAY','CONFLICT','OVERFLOW','QUARANTINED') AND finality IN ('FINAL','PARTIAL','UNKNOWN','ESTIMATED','NOT_EXECUTED')
         AND (outcome<>'CONFLICT' OR (conflict_id IS NOT NULL AND disputed_evidence_id IS NOT NULL AND NOT revision_claim))
         AND (outcome<>'OVERFLOW' OR (numeric_fault='COST_OVERFLOW' AND disputed_evidence_id IS NOT NULL))
         AND (outcome NOT IN ('ACCEPTED','REVISION_REPLAY') OR (canonical_evidence_id IS NOT NULL AND disputed_evidence_id IS NULL AND conflict_id IS NULL))
@@ -288,6 +296,14 @@ export const coreEvidenceReceipts = pgTable(
         AND (error_code IS NULL OR error_code ~ '^[a-z][a-z0-9_]{0,79}$')
         AND (provider_request_id IS NULL OR provider_request_id ~ '^[A-Za-z0-9._:/-]{1,256}$')
         AND cardinality(risk_dimensions)<=16`,
+    ),
+    check(
+      "core_receipt_authentication",
+      sql`authentication_disposition IN ('VERIFIED','QUARANTINED') AND authentication_reason IN ('NORMAL','SECURITY_REVOKED','UNGRANTED')
+        AND (authentication_disposition='VERIFIED')=(authentication_reason='NORMAL')
+        AND (authentication_disposition='QUARANTINED')=(outcome='QUARANTINED')
+        AND (outcome<>'QUARANTINED' OR (canonical_evidence_id IS NULL AND disputed_evidence_id IS NULL AND conflict_id IS NULL AND NOT revision_claim AND cardinality(risk_dimensions)=0))
+        AND producer_key_sha256 ~ '^[a-f0-9]{64}$' AND signature_version=1 AND octet_length(signature)=64 AND signature_payload_digest ~ '^[a-f0-9]{64}$'`,
     ),
   ],
 );

@@ -114,7 +114,12 @@ async function prepareFinancial(
     catalog,
     client,
     request,
-    async bootstrap(currency = "USD", creditedAtoms = "1000", modelOutput = 100) {
+    async bootstrap(
+      currency = "USD",
+      creditedAtoms = "1000",
+      modelOutput = 100,
+      customerBasis: "REQUEST_COMPLETION" | "PROVIDER_USAGE" = "REQUEST_COMPLETION",
+    ) {
       const uuid = crypto.randomUUID(),
         model = `financial-${uuid}`;
       const providerResponse = await request("/providers", {
@@ -154,9 +159,25 @@ async function prepareFinancial(
         model,
         operation: "chat",
         provider_id: provider.value.id,
-        pricing: { currency: "USD", rates: { requests: { numerator: "100", denominator: "1" } } },
-        ceilings: { requests: "1" },
-        basis: "REQUEST_COMPLETION",
+        ...(customerBasis === "PROVIDER_USAGE"
+          ? {
+              pricing: {
+                currency: "USD",
+                rates: {
+                  input_tokens: { numerator: "1", denominator: "1" },
+                  output_tokens: { numerator: "2", denominator: "1" },
+                },
+              },
+              ceilings: { input_tokens: "100", output_tokens: "50" },
+            }
+          : {
+              pricing: {
+                currency: "USD",
+                rates: { requests: { numerator: "100", denominator: "1" } },
+              },
+              ceilings: { requests: "1" },
+            }),
+        basis: customerBasis,
       });
       if (tariff.status !== 201) throw new Error(`Tariff creation: ${JSON.stringify(tariff)}`);
       const publication = await catalog.application.installBundled(await catalog.actor(), {

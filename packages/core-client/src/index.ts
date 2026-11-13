@@ -11,6 +11,11 @@ import {
   internalErrorSchema,
   registrationProofFields,
   commandProofFields,
+  coreEvidenceEventV1Schema,
+  evidenceProofFields,
+  signedCoreEvidenceEventV1Schema,
+  type CoreEvidenceEventV1,
+  type SignedCoreEvidenceEventV1,
   type StartupReceipt,
 } from "@gateway/contracts";
 import { canonical } from "@gateway/kernel";
@@ -350,6 +355,28 @@ export function createCoreRpcClient(
       } finally {
         body.fill(0);
       }
+    },
+    signEvidence(
+      body: Omit<
+        CoreEvidenceEventV1,
+        "origin_identity" | "origin_incarnation" | "origin_session_id"
+      >,
+    ): SignedCoreEvidenceEventV1 {
+      const owner = receipt;
+      if (!owner) throw new Error("Startup required");
+      if (owner.service !== "gateway") throw new Error("Only gateway produces evidence");
+      const event = coreEvidenceEventV1Schema.parse({
+        ...body,
+        origin_identity: `${owner.service}:${owner.instance_id}`,
+        origin_incarnation: owner.incarnation_id,
+        origin_session_id: owner.session_id,
+      });
+      const signature = sign(
+        null,
+        Buffer.from(JSON.stringify(evidenceProofFields(event, sha256(canonical(event))))),
+        key.privateKey,
+      ).toString("base64url");
+      return signedCoreEvidenceEventV1Schema.parse({ ...event, signature });
     },
     async reconnect(target: CoreTarget) {
       requireTarget(target);

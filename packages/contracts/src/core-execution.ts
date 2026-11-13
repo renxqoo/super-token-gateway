@@ -263,50 +263,75 @@ export const evidenceSources = [
   "provider_invoice",
 ] as const;
 const evidenceRevisionSchema = z.string().regex(/^[1-9][0-9]{0,37}$/);
+const evidenceEventFields = {
+  event_id: internalUuidSchema,
+  attempt_id: internalUuidSchema,
+  origin_identity: z.string().regex(/^gateway:[A-Za-z0-9_-]{1,100}$/),
+  origin_incarnation: internalUuidSchema,
+  origin_session_id: internalUuidSchema,
+  permit_epoch: evidenceRevisionSchema,
+  source: z.enum(evidenceSources),
+  source_revision: evidenceRevisionSchema,
+  finality: z.enum(["FINAL", "PARTIAL", "UNKNOWN", "ESTIMATED", "NOT_EXECUTED"]),
+  usage: usageSchema,
+  final_dimensions: z.array(z.string()).max(15),
+  attempt_state: z.enum(["SUCCEEDED", "FAILED", "UNKNOWN", "PARTIAL", "NOT_EXECUTED"]).optional(),
+  request_state: z.enum(["SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]).optional(),
+  error_code: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{0,79}$/)
+    .optional(),
+  provider_request_id: z
+    .string()
+    .regex(/^[A-Za-z0-9._:/-]{1,256}$/)
+    .optional(),
+};
+function refineEvidenceEvent(
+  value: z.infer<z.ZodObject<typeof evidenceEventFields>>,
+  context: z.RefinementCtx,
+) {
+  const finals = new Set(value.final_dimensions);
+  if (finals.size !== value.final_dimensions.length)
+    context.addIssue({ code: "custom", message: "Duplicate final dimension" });
+  for (const dimension of finals)
+    if (!(dimension in value.usage))
+      context.addIssue({ code: "custom", message: "Final dimension lacks a quantity" });
+  if ((value.finality === "UNKNOWN" || value.finality === "ESTIMATED") && finals.size > 0)
+    context.addIssue({ code: "custom", message: "Non-factual evidence cannot be final" });
+  if (
+    value.finality === "NOT_EXECUTED" &&
+    (Object.keys(value.usage).length > 0 ||
+      finals.size > 0 ||
+      (value.attempt_state ?? "NOT_EXECUTED") !== "NOT_EXECUTED")
+  )
+    context.addIssue({ code: "custom", message: "NOT_EXECUTED carries no quantities" });
+}
 export const coreEvidenceEventV1Schema = z
-  .strictObject({
-    event_id: internalUuidSchema,
-    attempt_id: internalUuidSchema,
-    origin_identity: z.string().regex(/^gateway:[A-Za-z0-9_-]{1,100}$/),
-    origin_incarnation: internalUuidSchema,
-    origin_session_id: internalUuidSchema,
-    permit_epoch: evidenceRevisionSchema,
-    source: z.enum(evidenceSources),
-    source_revision: evidenceRevisionSchema,
-    finality: z.enum(["FINAL", "PARTIAL", "UNKNOWN", "ESTIMATED", "NOT_EXECUTED"]),
-    usage: usageSchema,
-    final_dimensions: z.array(z.string()).max(15),
-    attempt_state: z.enum(["SUCCEEDED", "FAILED", "UNKNOWN", "PARTIAL", "NOT_EXECUTED"]).optional(),
-    request_state: z.enum(["SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]).optional(),
-    error_code: z
-      .string()
-      .regex(/^[a-z][a-z0-9_]{0,79}$/)
-      .optional(),
-    provider_request_id: z
-      .string()
-      .regex(/^[A-Za-z0-9._:/-]{1,256}$/)
-      .optional(),
-  })
-  .superRefine((value, context) => {
-    const finals = new Set(value.final_dimensions);
-    if (finals.size !== value.final_dimensions.length)
-      context.addIssue({ code: "custom", message: "Duplicate final dimension" });
-    for (const dimension of finals)
-      if (!(dimension in value.usage))
-        context.addIssue({ code: "custom", message: "Final dimension lacks a quantity" });
-    if ((value.finality === "UNKNOWN" || value.finality === "ESTIMATED") && finals.size > 0)
-      context.addIssue({ code: "custom", message: "Non-factual evidence cannot be final" });
-    if (
-      value.finality === "NOT_EXECUTED" &&
-      (Object.keys(value.usage).length > 0 ||
-        finals.size > 0 ||
-        (value.attempt_state ?? "NOT_EXECUTED") !== "NOT_EXECUTED")
-    )
-      context.addIssue({ code: "custom", message: "NOT_EXECUTED carries no quantities" });
-  });
+  .strictObject(evidenceEventFields)
+  .superRefine(refineEvidenceEvent);
+export const signedCoreEvidenceEventV1Schema = z
+  .strictObject({ ...evidenceEventFields, signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) })
+  .superRefine(refineEvidenceEvent);
 export const coreEvidenceGroupV1Schema = z.strictObject({
-  events: z.array(coreEvidenceEventV1Schema).min(1).max(64),
+  events: z.array(signedCoreEvidenceEventV1Schema).min(1).max(64),
 });
+export const coreEvidenceBatchV1Schema = z.strictObject({
+  version: z.literal(1),
+  groups: z.array(coreEvidenceGroupV1Schema).min(1).max(128),
+});
+export function evidenceProofFields(
+  event: Pick<CoreEvidenceEventV1, "origin_identity" | "origin_session_id" | "origin_incarnation">,
+  bodySha256: string,
+): string[] {
+  return [
+    "stg.internal.evidence",
+    "1",
+    event.origin_identity,
+    event.origin_session_id,
+    event.origin_incarnation,
+    bodySha256,
+  ];
+}
 export const coreEvidenceGroupResultSchema = z.discriminatedUnion("status", [
   z.strictObject({
     status: z.literal("COMMITTED"),
@@ -321,6 +346,7 @@ export const coreEvidenceGroupResultSchema = z.discriminatedUnion("status", [
           "REVISION_REPLAY",
           "CONFLICT",
           "OVERFLOW",
+          "QUARANTINED",
         ]),
         duplicate: z.boolean(),
       }),
@@ -332,4 +358,6 @@ export const coreEvidenceGroupResultSchema = z.discriminatedUnion("status", [
 ]);
 export type CoreEvidenceEventV1 = z.infer<typeof coreEvidenceEventV1Schema>;
 export type CoreEvidenceGroupV1 = z.infer<typeof coreEvidenceGroupV1Schema>;
+export type SignedCoreEvidenceEventV1 = z.infer<typeof signedCoreEvidenceEventV1Schema>;
+export type CoreEvidenceBatchV1 = z.infer<typeof coreEvidenceBatchV1Schema>;
 export type CoreEvidenceGroupResult = z.infer<typeof coreEvidenceGroupResultSchema>;

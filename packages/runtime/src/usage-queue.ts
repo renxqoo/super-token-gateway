@@ -1,10 +1,36 @@
 import { RedisClient } from "bun";
 import { Queue, Worker, createBunRedisClient } from "bullmq";
 import { Batcher } from "./batcher.ts";
-import { GatewayError, usageEvidenceSchema, usageBatchSchema } from "@gateway/contracts";
-import type { UsageEvidence } from "@gateway/contracts";
+import {
+  GatewayError,
+  coreEvidenceBatchV1Schema,
+  coreEvidenceGroupV1Schema,
+  usageEvidenceSchema,
+  usageBatchSchema,
+} from "@gateway/contracts";
+import type { CoreEvidenceGroupV1, UsageEvidence } from "@gateway/contracts";
 
-type Payload = { version: 1; events: UsageEvidence[] };
+export interface QueueChannel<T> {
+  name: string;
+  scope: string;
+  parse(item: unknown): T | undefined;
+  encode(items: T[]): unknown;
+  decode(payload: unknown): T[];
+}
+export const usageChannel: QueueChannel<UsageEvidence> = {
+  name: "usage-v1",
+  scope: "usage",
+  parse: (item) => usageEvidenceSchema.safeParse(item).data,
+  encode: (events) => ({ version: 1, events }),
+  decode: (payload) => usageBatchSchema.parse(payload).events,
+};
+export const evidenceChannel: QueueChannel<CoreEvidenceGroupV1> = {
+  name: "core-evidence-v1",
+  scope: "core-evidence",
+  parse: (item) => coreEvidenceGroupV1Schema.safeParse(item).data,
+  encode: (groups) => ({ version: 1, groups }),
+  decode: (payload) => coreEvidenceBatchV1Schema.parse(payload).groups,
+};
 export interface UsageQueueOptions {
   url: string;
   namespace: string;
@@ -20,12 +46,12 @@ export interface UsageQueueOptions {
 interface Generation {
   raw: RedisClient;
   adapter: ReturnType<typeof createBunRedisClient>;
-  queue: Queue<Payload>;
+  queue: Queue;
   broken: boolean;
   ready: Promise<void>;
 }
-const queueName = "usage-v1";
-const queuePrefix = (namespace: string) => `{${namespace}:usage}`;
+const queuePrefix = (namespace: string, channel: QueueChannel<unknown>) =>
+  `{${namespace}:${channel.scope}}`;
 const failure = () =>
   new GatewayError(
     503,
@@ -33,15 +59,17 @@ const failure = () =>
     "Durable usage acceptance is unavailable; query the original request before retrying",
   );
 
-export class UsageProducer {
+export class UsageProducer<T = UsageEvidence> {
   private generation: Generation | undefined;
   private readonly stopping = new AbortController();
-  private readonly batch: Batcher<UsageEvidence, void>;
+  private readonly batch: Batcher<T, void>;
+  private readonly channel: QueueChannel<T>;
   private backlog = 0;
   private failed = 0;
   private backlogCheckedAt = 0;
   private backlogProbe: Promise<void> | undefined;
-  constructor(readonly options: UsageQueueOptions) {
+  constructor(readonly options: UsageQueueOptions & { channel?: QueueChannel<T> }) {
+    this.channel = options.channel ?? (usageChannel as unknown as QueueChannel<T>);
     this.batch = new Batcher(
       (events) => this.publishBatch(events),
       options.batchSize ?? 64,
@@ -90,9 +118,9 @@ export class UsageProducer {
       enableOfflineQueue: false,
     });
     const adapter = createBunRedisClient(raw, { lazyConnect: true });
-    const queue = new Queue<Payload>(queueName, {
+    const queue = new Queue(this.channel.name, {
       connection: adapter,
-      prefix: queuePrefix(this.options.namespace),
+      prefix: queuePrefix(this.options.namespace, this.channel as QueueChannel<unknown>),
       defaultJobOptions: {
         attempts: 10,
         backoff: { type: "exponential", delay: 250 },
@@ -219,15 +247,14 @@ export class UsageProducer {
         throw failure();
     }, g);
   }
-  async publish(value: UsageEvidence): Promise<void> {
-    const parsed = usageEvidenceSchema.safeParse(value);
-    if (!parsed.success)
+  async publish(value: T): Promise<void> {
+    const input = this.channel.parse(value);
+    if (input === undefined)
       throw new GatewayError(
         502,
         "invalid_usage_evidence",
         "Metering produced invalid numeric evidence or identifiers",
       );
-    const input = parsed.data;
     if (this.stopping.signal.aborted) throw failure();
     try {
       await this.batch.add(input);
@@ -235,9 +262,9 @@ export class UsageProducer {
       throw failure();
     }
   }
-  private async publishBatch(events: UsageEvidence[]): Promise<void[]> {
+  private async publishBatch(events: T[]): Promise<void[]> {
     const jobId = crypto.randomUUID();
-    const payload: Payload = { version: 1, events };
+    const payload = this.channel.encode(events);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const g = await this.connection();
@@ -271,19 +298,21 @@ export class UsageProducer {
   }
 }
 
-export interface UsageConsumerOptions extends UsageQueueOptions {
+export interface UsageConsumerOptions<T = UsageEvidence> extends UsageQueueOptions {
+  channel?: QueueChannel<T>;
   concurrency?: number;
-  process: (events: UsageEvidence[]) => Promise<unknown>;
+  process: (events: T[]) => Promise<unknown>;
   lockDurationMs?: number;
   stalledIntervalMs?: number;
   onCommitted?: (events: number, lagSeconds: number) => void;
 }
-export class UsageConsumer {
-  readonly worker: Worker<Payload>;
+export class UsageConsumer<T = UsageEvidence> {
+  readonly worker: Worker;
   private readonly adapter: ReturnType<typeof createBunRedisClient>;
   private readonly raw: RedisClient;
   private readonly pending = new Set<Promise<unknown>>();
-  constructor(readonly options: UsageConsumerOptions) {
+  constructor(readonly options: UsageConsumerOptions<T>) {
+    const channel = options.channel ?? (usageChannel as unknown as QueueChannel<T>);
     const raw = new RedisClient(options.url, {
       connectionTimeout: 1000,
       idleTimeout: 0,
@@ -292,18 +321,15 @@ export class UsageConsumer {
     });
     this.raw = raw;
     this.adapter = createBunRedisClient(raw);
-    this.worker = new Worker<Payload>(
-      queueName,
+    this.worker = new Worker(
+      channel.name,
       async (job) => {
-        const input = usageBatchSchema.parse(job.data);
-        const processing = options.process(input.events);
+        const events = channel.decode(job.data);
+        const processing = options.process(events);
         this.pending.add(processing);
         try {
           const result = await processing;
-          options.onCommitted?.(
-            input.events.length,
-            Math.max(0, Date.now() - job.timestamp) / 1000,
-          );
+          options.onCommitted?.(events.length, Math.max(0, Date.now() - job.timestamp) / 1000);
           return result;
         } finally {
           this.pending.delete(processing);
@@ -311,7 +337,7 @@ export class UsageConsumer {
       },
       {
         connection: this.adapter,
-        prefix: queuePrefix(options.namespace),
+        prefix: queuePrefix(options.namespace, channel as QueueChannel<unknown>),
         concurrency: options.concurrency ?? 8,
         lockDuration: options.lockDurationMs ?? 30000,
         stalledInterval: options.stalledIntervalMs ?? 5000,

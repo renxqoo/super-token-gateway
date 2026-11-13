@@ -24,37 +24,35 @@ async function granted(
   await client.execution("execution_begin_v1", prepared.beginData(admission.receipt), {
     deadlineAt: prepared.deadline,
   });
-  const owner = (
-    await db`SELECT owner_service||':'||gateway_instance_id AS identity,incarnation_id::text,owner_session_id::text,permit_epoch::text,state FROM execution_permits WHERE attempt_id=${prepared.attemptId}`
+  const permit = (
+    await db`SELECT permit_epoch::text,state FROM execution_permits WHERE attempt_id=${prepared.attemptId}`
   )[0];
-  expect(owner.state).toBe("SEND_GRANTED");
-  return { prepared, owner };
+  expect(permit.state).toBe("SEND_GRANTED");
+  return { prepared, owner: { client, permit_epoch: String(permit.permit_epoch) } };
 }
 
-function event(
-  owner: {
-    identity: string;
-    incarnation_id: string;
-    owner_session_id: string;
-    permit_epoch: string;
-  },
-  attempt: string,
-  body: Partial<CoreEvidenceEventV1>,
-): CoreEvidenceEventV1 {
+type Signer = { client: Client; permit_epoch: string };
+type EventBody = Omit<
+  CoreEvidenceEventV1,
+  "origin_identity" | "origin_incarnation" | "origin_session_id"
+>;
+
+function body(owner: Signer, attempt: string, fields: Partial<EventBody>): EventBody {
   return {
     event_id: crypto.randomUUID(),
     attempt_id: attempt,
-    origin_identity: owner.identity,
-    origin_incarnation: owner.incarnation_id,
-    origin_session_id: owner.owner_session_id,
     permit_epoch: owner.permit_epoch,
     source: "execution",
     source_revision: "1",
     finality: "PARTIAL",
     usage: {},
     final_dimensions: [],
-    ...body,
+    ...fields,
   };
+}
+
+function event(owner: Signer, attempt: string, fields: Partial<EventBody>) {
+  return owner.client.signEvidence(body(owner, attempt, fields));
 }
 
 async function supplier(db: SQL, account: string) {
@@ -114,7 +112,7 @@ test("partial then final supplier evidence posts one combined ceiling and settle
       )[0],
     ).toEqual({ state: expect.any(String), billing_outcome: "PENDING" });
 
-    const final = event(owner, attempt, {
+    const finalBody = body(owner, attempt, {
       source_revision: "3",
       finality: "FINAL",
       usage: { input_tokens: "31", output_tokens: "2" },
@@ -122,6 +120,7 @@ test("partial then final supplier evidence posts one combined ceiling and settle
       attempt_state: "SUCCEEDED",
       request_state: "SUCCEEDED",
     });
+    const final = client.signEvidence(finalBody);
     const [second] = await store.persist([{ events: [final] }]);
     expect(committed(second).receipts.map((r) => r.outcome)).toEqual(["ACCEPTED"]);
     expect(await supplier(db, account)).toEqual({
@@ -150,12 +149,7 @@ test("partial then final supplier evidence posts one combined ceiling and settle
       usage: { input_tokens: "31", output_tokens: "40" },
       final_dimensions: ["input_tokens"],
     });
-    const changedEvent = {
-      ...final,
-      usage: { input_tokens: "31", output_tokens: "2" },
-      source_revision: "3",
-      event_id: crypto.randomUUID(),
-    };
+    const changedEvent = client.signEvidence({ ...finalBody, event_id: crypto.randomUUID() });
     const [replays] = await store.persist([{ events: [partial, late, changedEvent] }]);
     expect(
       Object.fromEntries(
@@ -413,9 +407,7 @@ test("a retry delivery is billed once while the earlier unknown attempt keeps an
     await client.execution("execution_begin_v1", retry.beginData(next.receipt), {
       deadlineAt: retry.deadline,
     });
-    const owner = (
-      await db`SELECT owner_service||':'||gateway_instance_id AS identity,incarnation_id::text,owner_session_id::text,permit_epoch::text FROM execution_permits WHERE attempt_id=${retry.attemptId}`
-    )[0];
+    const owner = { client, permit_epoch: "1" };
     expect(await supplier(db, account)).toEqual({
       balance: "1000",
       reserved: "60",
@@ -478,7 +470,9 @@ test("evidence from another owner session is rejected without touching a peer gr
       client = f.client();
     await client.startup();
     const { prepared, owner } = await granted(db, setup, client);
-    const forged = event({ ...owner, owner_session_id: crypto.randomUUID() }, prepared.attemptId, {
+    const successor = f.client();
+    await successor.startup();
+    const forged = event({ ...owner, client: successor }, prepared.attemptId, {
       finality: "FINAL",
       usage: { input_tokens: "3" },
       final_dimensions: ["input_tokens"],
@@ -508,4 +502,95 @@ test("evidence from another owner session is rejected without touching a peer gr
         await db`SELECT count(*)::integer n FROM core_evidence_receipts WHERE event_id=${forged.event_id}`
       )[0].n,
     ).toBe(0);
+  }));
+
+test("final evidence with an unfinished supplier dimension is a FINAL customer snapshot under request completion pricing", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap(),
+      client = f.client();
+    await client.startup();
+    const { prepared, owner } = await granted(db, setup, client);
+    const [result] = await createSettlementStore(db).persist([
+      {
+        events: [
+          event(owner, prepared.attemptId, {
+            finality: "FINAL",
+            usage: { input_tokens: "30", output_tokens: "15" },
+            final_dimensions: ["input_tokens"],
+            attempt_state: "SUCCEEDED",
+            request_state: "SUCCEEDED",
+          }),
+        ],
+      },
+    ]);
+    committed(result);
+    expect(
+      (await new Store(db).usage(setup.project.id)).map((row) => [row.finality, row.cost_atoms]),
+    ).toEqual([["FINAL", "10"]]);
+    expect(await supplier(db, setup.provider.account_id)).toEqual({
+      balance: "990",
+      reserved: "10",
+      spent: "10",
+      state: "ACTIVE",
+    });
+    expect(
+      await db`SELECT amount_atoms::text FROM billing_charges WHERE request_id=${prepared.requestId}`,
+    ).toEqual([{ amount_atoms: "100" }]);
+  }));
+
+test("provider usage pricing keeps the snapshot PARTIAL and the charge waiting until every priced dimension is final", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap("USD", "1000", 100, "PROVIDER_USAGE"),
+      client = f.client();
+    await client.startup();
+    const { prepared, owner } = await granted(db, setup, client);
+    const store = createSettlementStore(db);
+    const [first] = await store.persist([
+      {
+        events: [
+          event(owner, prepared.attemptId, {
+            finality: "FINAL",
+            usage: { input_tokens: "30", output_tokens: "15" },
+            final_dimensions: ["input_tokens"],
+            attempt_state: "SUCCEEDED",
+            request_state: "SUCCEEDED",
+          }),
+        ],
+      },
+    ]);
+    committed(first);
+    expect((await new Store(db).usage(setup.project.id)).map((row) => row.finality)).toEqual([
+      "PARTIAL",
+    ]);
+    expect(
+      await db`SELECT count(*)::integer n FROM billing_charges WHERE request_id=${prepared.requestId}`,
+    ).toEqual([{ n: 0 }]);
+    const [second] = await store.persist([
+      {
+        events: [
+          event(owner, prepared.attemptId, {
+            source_revision: "2",
+            finality: "FINAL",
+            usage: { input_tokens: "30", output_tokens: "15" },
+            final_dimensions: ["input_tokens", "output_tokens"],
+            attempt_state: "SUCCEEDED",
+            request_state: "SUCCEEDED",
+          }),
+        ],
+      },
+    ]);
+    committed(second);
+    expect((await new Store(db).usage(setup.project.id)).map((row) => row.finality)).toEqual([
+      "FINAL",
+      "PARTIAL",
+    ]);
+    expect(
+      await db`SELECT amount_atoms::text FROM billing_charges WHERE request_id=${prepared.requestId}`,
+    ).toEqual([{ amount_atoms: "60" }]);
+    expect(await supplier(db, setup.provider.account_id)).toEqual({
+      balance: "985",
+      reserved: "0",
+      spent: "15",
+      state: "ACTIVE",
+    });
   }));

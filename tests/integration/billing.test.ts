@@ -1688,7 +1688,7 @@ test("queue backlog blocks new admission while accepting facts for already-admit
     maxPendingJobs: 1,
   };
   const producer = new UsageProducer(options);
-  let consumer: InstanceType<typeof UsageConsumer> | undefined;
+  let consumer: import("@gateway/runtime").UsageConsumer | undefined;
   const event = (attemptId: string) => ({
     attemptId,
     source: "execution",

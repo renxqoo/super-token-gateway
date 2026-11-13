@@ -78,11 +78,11 @@
       "files": [
         {
           "path": "./migrations/0005_signed_settlement.sql",
-          "checksum": "2642e994360f5a8654ffb22b63a2f6900ff3d09d1e4c98675c5cfa51e1c3e453"
+          "checksum": "109746193ca2978ba1cf1dc9bb0bc452c552ef5505685586d6223170e64c0c21"
         },
         {
           "path": "./sql/core-settlement.sql",
-          "checksum": "b8438de46fef3bef7784710d5f34221abfa68ff51e133c41d3c208baaa13ac3c"
+          "checksum": "bde570990b8f3c74aa1c6139fcafa0ace4122dec80104214a117b40ef6d50435"
         }
       ]
     }

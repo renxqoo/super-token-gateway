@@ -9,7 +9,7 @@
 | ①      | v2026111207 schema：证据角色与 snapshot 谱系、`core_evidence_receipts`、供应成本证据外键、旧路径隔离 | 已实现 |
 | ②      | 供应累计成本 C 与派生 R、供应平衡 journal，§7.4 人工算例 A/B/C/D                                     | 已实现 |
 | ③      | `persist_core_evidence_groups_v1`：归一、争议、风险冻结、客户 selected 结算、事件交付及对外 DTO      | 已实现 |
-| ④      | Core client 数字证据签名、producer 撤销屏障、worker 提交后 ACK                                       | 待执行 |
+| ④      | Core client 数字证据签名、producer 撤销屏障、worker 提交后 ACK                                       | 已实现 |
 
 ## ① schema 落点
 
@@ -83,7 +83,7 @@
 3. 主体校验：permit 必须处于 SEND_GRANTED/UNKNOWN/TERMINAL，`owner_service:gateway_instance_id`、owner session、incarnation 与 permit epoch 与事件 origin 全等，否则整组 `evidence_subject_invalid`。③ 不改 permit 状态。
 4. NOT_EXECUTED 归一为 FINAL 且全部计费维度为 0 的快照。
 5. 先全组预扫描再记账：同 body 重投为 DUPLICATE（返回原 receipt，不写新行）；同 event 异 body、同 revision 异 body 为 CONFLICT；同 revision 同 body 新 event 为 REVISION_REPLAY；与当前 CANONICAL 或组内其它事件对同一 final 维度给出不同量时，双方都标为争议。未争议事件先处理，争议事件后处理，保证组内先到事实不会先收费再发现矛盾。
-6. 每个非重复事件写一个 RAW；ACCEPTED 再写 CANONICAL（合并已 final 维度，旧 final 不被覆盖），争议写 DISPUTED 与 `usage_conflicts`、置 `attempts.metering_conflict`（既有 `register_wallet_dispute` 冻结客户钱包）；数值溢出写无成本 DISPUTED 与 `numeric_fault='COST_OVERFLOW'`；ESTIMATED 与 STALE（同 origin/source 已接受更高 revision）只留 RAW 与 receipt。CANONICAL 的 finality 仅在输入 FINAL 且供应成本 complete 时为 FINAL。
+6. 每个非重复事件写一个 RAW；ACCEPTED 再写 CANONICAL（合并已 final 维度，旧 final 不被覆盖），争议写 DISPUTED 与 `usage_conflicts`、置 `attempts.metering_conflict`（既有 `register_wallet_dispute` 冻结客户钱包）；数值溢出写无成本 DISPUTED 与 `numeric_fault='COST_OVERFLOW'`；ESTIMATED 与 STALE（同 origin/source 已接受更高 revision）只留 RAW 与 receipt。CANONICAL 的 finality 按 §345 由客户口径决定：输入 FINAL，且客户价格为 `PROVIDER_USAGE` 时其全部计价维度均已 final，才为 FINAL，否则为 PARTIAL（无数量时 UNKNOWN）；非 `PROVIDER_USAGE` 价格不等待用量维度。供应 `complete` 独立判定，可能在客户快照 FINAL 时仍为 false。
 7. 只为 CANONICAL/DISPUTED 写 `event_deliveries`；RAW 与重复投递不外发。
 8. 每个产生资金影响的 attempt 调一次 `core_supplier_settle_v1`；请求终态只在 `selected_attempt_id` 为空且 billing_outcome 为 PENDING/UNKNOWN 时 CAS 一次，随后对已终态且无 charge 的请求调 `settle_requests`，任一 ERROR 回滚整组。客户结算读 `attempts.evidence_id`，它只指向 accepted CANONICAL，因此 Core attempt 不会按 RAW/DISPUTED 收费，修订 3 的过滤由此落地。
 
@@ -119,3 +119,47 @@
 | test:artifact            | Gateway 9、catalog 7、identity 7、financial 9 项通过                                      |
 
 首轮全量集成中 `business dependency load failure closes the preflight fixture before any service starts`（native-durability）失败一次，单独重跑与第二轮全量均通过，该用例不涉及本单元改动的表或函数，记为负载下的时序波动。`test:durability`、`test:backup`、`test:container` 未运行。
+
+## ④ 签名证据、producer 撤销屏障与提交后 ACK
+
+### 签名
+
+`signedCoreEvidenceEventV1Schema` 为事件加 `signature`（Ed25519，base64url 64 字节）。签名域为 `JSON.stringify(evidenceProofFields(event, sha256(canonical(event))))`，字段为 `stg.internal.evidence`、`1`、origin identity、origin session、origin incarnation 与事件规范化摘要；与命令证明分属不同域，不能互相重放。`createCoreRpcClient().signEvidence(body)` 只在 startup 后、且服务为 `gateway` 时可用，origin 三字段由当前启动回执填入，调用方不能自报。
+
+`createSettlementStore(db).persist` 在事务外按 `origin_session_id` 读取不可变的 `public_key_spki` 验签（ID-R2 第 1 步）。组内任一事件验签失败或 session 不存在时，该组整体为 `REJECTED evidence_signature_invalid`，不进 SQL、不写 RAW/receipt、不认领 event/revision；同批其它组照常处理。验签通过后向 SQL 传入签名 hex、签名域摘要与 session 公钥摘要；SQL 再核对公钥摘要等于 session 与 permit 记录、session 的 instance/incarnation/certificate 与 permit 一致。新 session（含同证书重启）替原 owner 签名的事实以 `evidence_subject_invalid` 拒绝。
+
+### 撤销屏障
+
+`core_evidence_group_v1` 在 advisory 锁之后、任何资金锁之前，按 instance（service,instance_id）→ certificate → session 的全局序对组内全部 producer 身份行 `FOR SHARE NOWAIT`，锁持至外层事务结束。撤销函数 `internal_identity_change_v1` 以 `FOR UPDATE` 取同序，因此：撤销未提交时收证得到 `55P03`，组回滚为 `ERROR`、worker 不 ACK；撤销提交后重试读到新值。
+
+处置：精确重投（同 event、同 body、同签名域摘要与公钥）先于身份处置判定，返回原 receipt，不因后续撤销而改判。未锚事实若 instance/certificate/session 任一 `security_revoked_at` 非空，记为 `QUARANTINED / SECURITY_REVOKED`；permit 仍为 RESERVED/ABORTED 且从未 grant 时记为 `QUARANTINED / UNGRANTED`。隔离事实只写 RAW 与 receipt，不认领 revision，不进入 canonical、成本 head、任一侧流水、请求终态或敞口释放。session 自然过期、普通 disable/drain、证书 RETIRE 不是隔离谓词。
+
+`core_evidence_receipts` 增加 `authentication_disposition`、`authentication_reason`、`producer_key_sha256`、`signature_version`（=1）、`signature`（64 字节）、`signature_payload_digest`，均 NOT NULL 且不可变；`core_receipt_authentication` CHECK 固定 VERIFIED⇔NORMAL、QUARANTINED⇔outcome QUARANTINED 及隔离行不得指向 canonical/disputed/conflict。
+
+### worker
+
+`packages/runtime/src/usage-queue.ts` 的耐久 producer/consumer 增加 `QueueChannel` 参数：`usageChannel` 保持原队列名 `usage-v1` 与前缀 `{ns:usage}`，在途任务不受影响；`evidenceChannel` 使用 `core-evidence-v1`、`{ns:core-evidence}`，载荷为 `{version:1,groups}`。生产侧沿用同一 WAITAOF 耐久确认。
+
+`apps/core-api/src/settlement/worker.ts` 的 `createSettlementWorker` 消费 evidenceChannel：processor 等 `persist` 的外层 PG 事务提交后才 resolve，BullMQ 随后 ACK。任一组 `ERROR`（锁忙、PG 不可用）则抛错，整个 job 不 ACK 并按既有有界退避重试，已提交的组在重投时按 receipt 收敛为 DUPLICATE；`REJECTED` 组 ACK 并经 `onRejected` 告警，不无限重投。
+
+### 对设计的修订（④）
+
+5. 认证字段并入 v2026111207，不另开版本：主规格规定本单元只独占追加 v07。该版本在 `30218b0` 已推送但未接纳；本次修改使 v07 校验和变化，任何已应用 `30218b0` 版 v07 的数据库须重建，不提供原地升级。
+6. 设计稿拟加的 `producer_session_id` 不单独建列，复用已有、带外键的 `origin_session_id`；producer 证书与 instance 由该 session 不可变派生。
+7. 签名在 storage 入口以 Node Ed25519 验证，PG 无原生 Ed25519；SQL 只接受该入口传入的已验证签名域摘要，并独立复核身份绑定。该入口仅供受信 Core 进程调用，函数对 PUBLIC 撤权。
+8. worker 模块暂置于 `apps/core-api/src/settlement/`；独立 core-worker 进程入口、角色与部署随 T04.c 三进程切分落地。
+9. ③ 中组内重复投递若排在被判争议的首份之前处理，会读不到首份 receipt 而返回空 receipt_id；④ 改为重复投递在全组其余事件之后处理，并以回归用例覆盖。
+10. ③ 推送版本把 CANONICAL 的 FINAL 判定绑在供应 complete 上，与 §345 不符：请求完成计价下，供应维度尚未 final 的 FINAL 证据被记成 PARTIAL。④ 改按客户口径判定，并以两条回归用例覆盖（请求完成计价一条修复前失败、修复后通过；按量计价一条覆盖 PARTIAL 等待与随后 FINAL 收费 30×1+15×2=60）。测试 fixture `bootstrap` 新增 `customerBasis` 参数以构造按量计价的客户价格。
+
+### ④ 验证
+
+| 检查                                                             | 结果                                                                                                                                                                                                                                                                                                            |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/integration/core-evidence-authentication.test.ts`（新增） | 5 通过：篡改签名整组拒绝且不占 event，原签名随后照常结算（989/10/11）；session 撤销后已锚事实精确重投返回原 ACCEPTED、新事实 QUARANTINED 且双方资金与请求不变；证书撤销未提交时收证 `55P03` 且无 receipt，提交后重试 QUARANTINED；未 grant permit 的用量 QUARANTINED/UNGRANTED 且占用 30 保持；组内重复投递回归 |
+| `tests/integration/core-settlement-worker.test.ts`（新增）       | 1 通过：身份锁被占时 job 进入退避、无 receipt、余额 1000/30/0；释放后 ACK 且结算 985/0/15；同组换 job 重投 receipt 仍 1 条、charge 仍一条 100；篡改组 ACK 并告警 1 次                                                                                                                                           |
+| 组内重复投递回归                                                 | 恢复旧处理顺序时该用例因 receipt_id 为空被 schema 拒绝而失败；修复后通过                                                                                                                                                                                                                                        |
+| 受影响集成（9 个文件）                                           | 38 通过 / 0 失败 / 358 断言                                                                                                                                                                                                                                                                                     |
+
+既有 `tests/integration/core-settlement.test.ts` 改为由真实 core-client 签名，伪造用例改为同证书新 session 替原 owner 签名。`tests/integration/billing.test.ts` 中一处 `InstanceType<typeof UsageConsumer>` 类型标注因 consumer 变为泛型改为直接引用默认实例类型，断言未变。
+
+未覆盖：ingester 先取得 SHARE、撤销者等待的顺序（需在 SQL 函数内暂停的故障注入点）；instance 级撤销单独用例（session 与 certificate 已覆盖，三者走同一谓词与锁序）；多 owner 交叉组的锁序。
