@@ -47,12 +47,13 @@ function requireTarget(target: CoreTarget) {
   if (url.protocol !== "https:" || url.origin !== target.origin)
     throw new Error("Invalid Core target");
 }
+export const coreAudiencePattern = /^[A-Za-z0-9_.-]{1,100}\/core-api$/;
+
 export function createCoreRpcClient(
   options: Parameters<typeof createBoundedH2Client>[0] & CoreTarget & { audience: string },
 ) {
   requireTarget(options);
-  if (!/^[A-Za-z0-9_.-]{1,100}\/core-api$/.test(options.audience))
-    throw new Error("Invalid Core audience");
+  if (!coreAudiencePattern.test(options.audience)) throw new Error("Invalid Core audience");
   const key = generateKeyPairSync("ed25519"),
     registrationId = randomUUID(),
     bootNonce = randomBytes(32).toString("base64url"),

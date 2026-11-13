@@ -112,14 +112,37 @@ function owned(child: Bun.Subprocess<"ignore", "pipe", "pipe">, label: string) {
   };
 }
 
-export async function startCoreWorker(db: SQL, namespace: string, entry?: string, cwd?: string) {
-  const url = new URL(process.env.DATABASE_URL!);
-  url.pathname = `/${(await db`SELECT current_database() AS name`)[0].name}`;
-  const child = Bun.spawn(["bun", resolve(entry ?? "apps/core-worker/src/main.ts")], {
-    ...(cwd ? { cwd } : {}),
+export async function withSettlementRole<T>(db: SQL, run: (databaseUrl: string) => Promise<T>) {
+  const role = `core_settlement_${crypto.randomUUID().replaceAll("-", "")}`,
+    password = crypto.randomUUID();
+  await db.unsafe(`CREATE ROLE ${role} LOGIN PASSWORD '${password}'`);
+  try {
+    await db.unsafe(
+      (await Bun.file(resolve("infra/core-settlement-role.sql")).text()).replaceAll(
+        "core_settlement_worker",
+        role,
+      ),
+    );
+    const url = new URL(process.env.DATABASE_URL!);
+    url.pathname = `/${(await db`SELECT current_database() AS name`)[0].name}`;
+    url.username = role;
+    url.password = password;
+    return await run(url.toString());
+  } finally {
+    await db.unsafe(`DROP OWNED BY ${role}`);
+    await db.unsafe(`DROP ROLE ${role}`);
+  }
+}
+
+export async function startCoreWorker(
+  namespace: string,
+  options: { databaseUrl: string; entry?: string; cwd?: string },
+) {
+  const child = Bun.spawn(["bun", resolve(options.entry ?? "apps/core-worker/src/main.ts")], {
+    ...(options.cwd ? { cwd: options.cwd } : {}),
     env: {
       PATH: process.env.PATH,
-      DATABASE_URL: url.toString(),
+      DATABASE_URL: options.databaseUrl,
       QUEUE_REDIS_URL: process.env.QUEUE_REDIS_URL,
       REDIS_NAMESPACE: namespace,
       WORKER_PORT: "0",
@@ -259,6 +282,7 @@ export function withGatewayStack(
     received: UpstreamCall[];
     gateway: Process;
     worker: Awaited<ReturnType<typeof startCoreWorker>>;
+    workerDatabaseUrl: string;
     startGateway: (
       overrides?: Record<string, unknown>,
       instance?: "gateway" | "gatewayB",
@@ -274,93 +298,95 @@ export function withGatewayStack(
   }) => Promise<void>,
 ) {
   return withFinancial(
-    async (f, db) => {
-      const received: UpstreamCall[] = [];
-      const upstream = await startTlsUpstream(async (request) => {
-        const call = {
-          index: received.length,
-          authorization: request.headers.get("authorization"),
-          body: (await request.json()) as Record<string, unknown>,
-          signal: request.signal,
-        };
-        received.push(call);
-        return options.reply(call);
-      });
-      const namespace = `gateway-stack_${crypto.randomUUID().replaceAll("-", "")}`;
-      const processes: { alive(): boolean; kill(): void; stop(): Promise<unknown> }[] = [];
-      try {
-        const setup = await f.bootstrap(
-          undefined,
-          options.supplierCredit,
-          undefined,
-          undefined,
-          boundedSupplier,
-          {
-            baseUrl: upstream.baseUrl,
-            maxInputTokens: 1000,
-          },
-        );
-        for (let channel = 2; channel <= (options.channels ?? 1); channel++)
-          await f.addChannel(setup, {
-            baseUrl: upstream.baseUrl,
-            apiKey: `synthetic-upstream-secret-${channel}`,
-            maxInputTokens: 1000,
-            ceilings: boundedSupplier.ceilings,
-          });
-        const startWorker = async () => {
-          const worker = await startCoreWorker(db, namespace);
-          processes.push(worker);
-          return worker;
-        };
-        const launch = async (
-          overrides: Record<string, unknown> = {},
-          instance: "gateway" | "gatewayB" = "gateway",
-        ) => {
-          const gateway = await startGateway(f, {
-            namespace,
-            upstreamCertificate: upstream.certificate,
-            instance,
-            overrides: { ...options.gateway, ...overrides },
-          });
-          processes.push(gateway);
-          return gateway;
-        };
-        const worker = await startWorker();
-        const gateway = await launch();
-        await run({
-          f,
-          db,
-          namespace,
-          setup,
-          received,
-          gateway,
-          worker,
-          startGateway: launch,
-          startWorker,
-          send: (input = {}) =>
-            fetch(`${(input.via ?? gateway).origin}/v1/chat/completions`, {
-              method: "POST",
-              headers: {
-                authorization: `Bearer ${setup.key.key}`,
-                "content-type": "application/json",
-                ...input.headers,
-              },
-              body: JSON.stringify({
-                model: setup.model,
-                messages: [{ role: "user", content: input.content ?? "合成" }],
-                max_completion_tokens: 30,
-                ...(input.stream ? { stream: true } : {}),
-              }),
-              ...(input.signal ? { signal: input.signal } : {}),
-            }),
+    (f, db) =>
+      withSettlementRole(db, async (workerDatabaseUrl) => {
+        const received: UpstreamCall[] = [];
+        const upstream = await startTlsUpstream(async (request) => {
+          const call = {
+            index: received.length,
+            authorization: request.headers.get("authorization"),
+            body: (await request.json()) as Record<string, unknown>,
+            signal: request.signal,
+          };
+          received.push(call);
+          return options.reply(call);
         });
-        for (const process_ of processes.reverse()) if (process_.alive()) await process_.stop();
-      } finally {
-        for (const process_ of processes) process_.kill();
-        await upstream.stop();
-        await clearQueueNamespace(namespace);
-      }
-    },
+        const namespace = `gateway-stack_${crypto.randomUUID().replaceAll("-", "")}`;
+        const processes: { alive(): boolean; kill(): void; stop(): Promise<unknown> }[] = [];
+        try {
+          const setup = await f.bootstrap(
+            undefined,
+            options.supplierCredit,
+            undefined,
+            undefined,
+            boundedSupplier,
+            {
+              baseUrl: upstream.baseUrl,
+              maxInputTokens: 1000,
+            },
+          );
+          for (let channel = 2; channel <= (options.channels ?? 1); channel++)
+            await f.addChannel(setup, {
+              baseUrl: upstream.baseUrl,
+              apiKey: `synthetic-upstream-secret-${channel}`,
+              maxInputTokens: 1000,
+              ceilings: boundedSupplier.ceilings,
+            });
+          const startWorker = async () => {
+            const worker = await startCoreWorker(namespace, { databaseUrl: workerDatabaseUrl });
+            processes.push(worker);
+            return worker;
+          };
+          const launch = async (
+            overrides: Record<string, unknown> = {},
+            instance: "gateway" | "gatewayB" = "gateway",
+          ) => {
+            const gateway = await startGateway(f, {
+              namespace,
+              upstreamCertificate: upstream.certificate,
+              instance,
+              overrides: { ...options.gateway, ...overrides },
+            });
+            processes.push(gateway);
+            return gateway;
+          };
+          const worker = await startWorker();
+          const gateway = await launch();
+          await run({
+            f,
+            db,
+            namespace,
+            setup,
+            received,
+            gateway,
+            worker,
+            workerDatabaseUrl,
+            startGateway: launch,
+            startWorker,
+            send: (input = {}) =>
+              fetch(`${(input.via ?? gateway).origin}/v1/chat/completions`, {
+                method: "POST",
+                headers: {
+                  authorization: `Bearer ${setup.key.key}`,
+                  "content-type": "application/json",
+                  ...input.headers,
+                },
+                body: JSON.stringify({
+                  model: setup.model,
+                  messages: [{ role: "user", content: input.content ?? "合成" }],
+                  max_completion_tokens: 30,
+                  ...(input.stream ? { stream: true } : {}),
+                }),
+                ...(input.signal ? { signal: input.signal } : {}),
+              }),
+          });
+          for (const process_ of processes.reverse()) if (process_.alive()) await process_.stop();
+        } finally {
+          for (const process_ of processes) process_.kill();
+          await upstream.stop();
+          await clearQueueNamespace(namespace);
+        }
+      }),
     options.databasePort ? { databasePort: options.databasePort } : {},
   );
 }

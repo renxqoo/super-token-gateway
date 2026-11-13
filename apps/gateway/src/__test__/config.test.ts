@@ -10,7 +10,7 @@ const base = {
   core: {
     origin: "https://127.0.0.1:9443",
     servername: "core.internal",
-    audience: "core-api",
+    audience: "core.internal/core-api",
     peer_sha256: "a".repeat(64),
     subject_altname: "URI:spiffe://synthetic/core-api/a",
     key_file: "/run/gateway/key.pem",
@@ -55,8 +55,29 @@ test("production refuses private upstream bypass and evidence without an acknowl
   ).rejects.toThrow("replica");
 });
 
+test("an audience the Core client would refuse at startup is rejected while loading", async () => {
+  await expect(load({ ...base, core: { ...base.core, audience: "core-api" } })).rejects.toThrow();
+  await expect(
+    load({ ...base, core: { ...base.core, audience: "a/b/core-api" } }),
+  ).rejects.toThrow();
+});
+
 test("database settings, unknown keys and malformed CIDRs are rejected", async () => {
   await expect(load({ ...base, database_url: "postgres://x" })).rejects.toThrow();
   await expect(load({ ...base, trusted_proxy_cidrs: ["10.0.0.0/33"] })).rejects.toThrow();
   await expect(loadGatewayConfig(undefined)).rejects.toThrow("GATEWAY_CONFIG_FILE");
+});
+
+test("the shipped production example loads and keeps the production safeguards", async () => {
+  const config = await loadGatewayConfig(
+    resolve(import.meta.dir, "../../../../infra/gateway.example.json"),
+  );
+  expect(config).toMatchObject({
+    production: true,
+    allow_private_upstream: false,
+    private_upstream_cidrs: [],
+  });
+  expect(config.queue.required_replicas).toBeGreaterThanOrEqual(1);
+  expect(config.queue.url.startsWith("rediss://")).toBe(true);
+  expect(config.core.origin.startsWith("https://")).toBe(true);
 });

@@ -281,6 +281,7 @@ async function reserve(
   previous: { permit: Permit; ordinal: number } | undefined,
 ): Promise<Admitted> {
   let reply: ExecutionReply;
+  const commandId = crypto.randomUUID();
   try {
     reply = (await (previous
       ? deps.core.execution(
@@ -292,7 +293,7 @@ async function reserve(
             expected_ordinal: previous.ordinal + 1,
             visible_output: false,
           },
-          { commandId: crypto.randomUUID(), deadlineAt: facts.deadlineAt },
+          { commandId, deadlineAt: facts.deadlineAt },
         )
       : deps.core.execution(
           "execution_admit_v1",
@@ -306,10 +307,26 @@ async function reserve(
             fingerprint: facts.fingerprint,
             customer_currency: context.customer_currency,
           },
-          { commandId: crypto.randomUUID(), deadlineAt: facts.deadlineAt },
+          { commandId, deadlineAt: facts.deadlineAt },
         ))) as ExecutionReply;
   } catch (error) {
     planned.attempt.dispose();
+    if (
+      !(error instanceof CoreRpcError) ||
+      (error.detail.command_state === "UNKNOWN" && error.detail.retryability !== "NONE")
+    ) {
+      const receipt = await queryCommand(
+        deps,
+        previous ? "execution_next_v1" : "execution_admit_v1",
+        commandId,
+      );
+      if (receipt?.command_state === "COMMITTED" && receipt.state === "RESERVED")
+        await abortBeforeSend(
+          deps,
+          { attemptId: planned.attemptId, permitEpoch: receipt.permit_epoch ?? "1" },
+          "PREPARE_DISPOSED",
+        );
+    }
     throw coreFailure(error);
   }
   if (reply.receipt.state !== "RESERVED" || !reply.receipt.authorization_plan_digest) {
@@ -409,21 +426,37 @@ function halt(request: ChatRequest) {
   };
 }
 
-async function resolveUnknownBegin(deps: ChatDependencies, commandId: string) {
+async function queryCommand(
+  deps: ChatDependencies,
+  kind: "execution_admit_v1" | "execution_next_v1" | "execution_begin_v1",
+  commandId: string,
+) {
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      const reply = (await deps.core.execution(
-        "execution_query_v1",
-        { kind: "execution_begin_v1", command_id: commandId },
-        shortDeadline(),
-      )) as ExecutionReply;
-      if (reply.receipt.command_state === "NOT_FOUND") return "absent" as const;
-      if (reply.receipt.state === "SEND_GRANTED") return "granted" as const;
-      return "unknown" as const;
+      return (
+        (await deps.core.execution(
+          "execution_query_v1",
+          { kind, command_id: commandId },
+          shortDeadline(),
+        )) as ExecutionReply
+      ).receipt;
     } catch {
       await Bun.sleep(200 * (attempt + 1));
     }
   }
+  return undefined;
+}
+
+async function resolveUnknownBegin(deps: ChatDependencies, commandId: string) {
+  const receipt = await queryCommand(deps, "execution_begin_v1", commandId);
+  if (!receipt) return "unknown" as const;
+  if (receipt.state === "SEND_GRANTED") return "granted" as const;
+  if (
+    receipt.command_state === "NOT_FOUND" ||
+    receipt.command_state === "REJECTED" ||
+    receipt.state === "RESERVED"
+  )
+    return "absent" as const;
   return "unknown" as const;
 }
 
@@ -652,7 +685,9 @@ async function relayJSON(
   try {
     const bytes = await readBounded(response.body, deps.config.max_response_bytes, signal);
     transformed = await bridge.transformJSON("response", { model: facts.model }, bytes, signal);
-  } catch {
+  } catch (error) {
+    if (error instanceof GatewayError && error.code === "usage_queue_unavailable")
+      return finalFailure({ attempt_state: "UNKNOWN", error_code: "evidence_unavailable" }, error);
     return finalFailure({ attempt_state: "UNKNOWN", error_code: "upstream_read_failed" }, invalid);
   }
   const result = transformed.result;
@@ -667,7 +702,8 @@ async function relayJSON(
       outcome: { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
       reason: "COMPLETED",
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof GatewayError) throw error;
     throw new GatewayError(503, "evidence_unavailable", "Usage evidence could not be recorded");
   }
   return new Response(transformed.body.slice(), {

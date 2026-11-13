@@ -1,0 +1,39 @@
+[Unit]
+Description=LLM Gateway Core settlement worker
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=llm-core-worker
+Group=llm-core-worker
+WorkingDirectory=/opt/llm-gateway/current
+EnvironmentFile=/etc/llm-gateway/core-worker.env
+ExecStart=/usr/local/bin/bun dist/core-worker/main.js
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=60
+KillSignal=SIGTERM
+KillMode=control-group
+LimitNOFILE=131072
+LimitCORE=0
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+[Install]
+WantedBy=multi-user.target

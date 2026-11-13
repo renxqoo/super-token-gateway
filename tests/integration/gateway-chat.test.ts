@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { SQL } from "bun";
+import { SQL } from "bun";
 import {
   chatReplies,
   eventually,
@@ -144,3 +144,26 @@ test("a non-retryable upstream 400 fails the request after one send and settles 
       ]);
     },
   ));
+
+test("the settlement worker's least-privilege role settles a chat but cannot read customer data, startup secrets or call execution functions", () =>
+  withGatewayStack({ reply: () => chatReplies.json() }, async ({ db, workerDatabaseUrl, send }) => {
+    const response = await send();
+    await expectStatus(response, 200);
+    expect((await settledCharge(db, response.headers.get("x-request-id")!)).amount).toBe("100");
+    const worker = new SQL(workerDatabaseUrl, { max: 1 });
+    try {
+      for (const statement of [
+        "SELECT * FROM wallets LIMIT 1",
+        "SELECT * FROM gateway_requests LIMIT 1",
+        "SELECT * FROM api_keys LIMIT 1",
+        "SELECT * FROM channels LIMIT 1",
+        "SELECT boot_nonce FROM internal_startup_sessions LIMIT 1",
+        "UPDATE upstream_account_balances SET reserved_atoms=0",
+        "SELECT core_execution_batch_v1('[]'::jsonb)",
+        "SELECT core_quota_close_v1('{}'::jsonb,'{}'::jsonb,'{}'::jsonb)",
+      ])
+        await expect(worker.unsafe(statement)).rejects.toThrow("permission denied");
+    } finally {
+      await worker.close();
+    }
+  }));

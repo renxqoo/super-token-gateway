@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { coreAudiencePattern } from "@gateway/core-client";
 import { validateCidr } from "@gateway/runtime";
 
 const cidrs = z.array(z.string().max(64)).max(64).default([]);
@@ -28,7 +29,7 @@ const configSchema = z.strictObject({
   core: z.strictObject({
     origin: z.string().url(),
     servername: z.string().min(1),
-    audience: z.string().min(1),
+    audience: z.string().regex(coreAudiencePattern),
     peer_sha256: z.string().regex(/^[a-f0-9]{64}$/),
     subject_altname: z.string().min(1).max(2000),
     key_file: z.string().min(1),

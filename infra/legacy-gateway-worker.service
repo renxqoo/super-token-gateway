@@ -1,13 +1,13 @@
 [Unit]
-Description=LLM Gateway durable usage and financial settlement worker
+Description=Legacy LLM Gateway usage and settlement worker
 After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-User=llm-gateway
-Group=llm-gateway
+User=llm-legacy-worker
+Group=llm-legacy-worker
 WorkingDirectory=/opt/llm-gateway/current
-EnvironmentFile=/etc/llm-gateway/worker.env
+EnvironmentFile=/etc/llm-gateway/legacy-worker.env
 ExecStart=/usr/local/bin/bun dist/legacy-gateway/worker-main.js
 Restart=on-failure
 RestartSec=2

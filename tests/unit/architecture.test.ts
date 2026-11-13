@@ -119,3 +119,50 @@ test("Drizzle declarations and the versioned ordinary schema snapshot cannot dri
   ).json();
   expect(await generateMigration(snapshot, generateDrizzleJson(schema, snapshot.id))).toEqual([]);
 });
+
+test("deployment units start built entries, keep v2 processes under separate users and route Chat to the v2 Gateway", async () => {
+  const build = await Bun.file("scripts/build.ts").text();
+  const units: Record<string, Record<string, string[]>> = {};
+  for await (const file of new Bun.Glob("*.service").scan("infra")) {
+    const fields: Record<string, string[]> = {};
+    for (const line of (await Bun.file(`infra/${file}`).text()).split("\n")) {
+      const match = /^([A-Za-z]+)=(.*)$/.exec(line);
+      if (match) (fields[match[1]!] ??= []).push(match[2]!);
+    }
+    units[file] = fields;
+    const entry = /^\/usr\/local\/bin\/bun (dist\/([a-z-]+)\/([a-z-]+)\.js)$/.exec(
+      fields.ExecStart?.[0] ?? "",
+    );
+    expect(entry).not.toBeNull();
+    const source = `apps/${entry![2]}/src/${entry![3]}.ts`;
+    expect(await Bun.file(source).exists()).toBe(true);
+    expect(build).toContain(`"${source}"`);
+    expect(build).toContain(`"dist/${entry![2]}"`);
+    expect(fields.User?.[0]).not.toBe("root");
+    expect(fields.NoNewPrivileges).toEqual(["true"]);
+    expect(fields.ProtectSystem).toEqual(["strict"]);
+  }
+  expect(Object.keys(units).sort()).toEqual([
+    "core-api.service",
+    "core-worker.service",
+    "gateway@.service",
+    "legacy-gateway-worker.service",
+    "legacy-gateway@.service",
+  ]);
+  const gateway = units["gateway@.service"]!;
+  expect(gateway.ExecStart).toEqual(["/usr/local/bin/bun dist/gateway/main.js"]);
+  expect(gateway.EnvironmentFile).toBeUndefined();
+  expect(gateway.Environment).toEqual(["GATEWAY_CONFIG_FILE=/etc/llm-gateway/gateway-%i.json"]);
+  const users = Object.values(units).map((unit) => unit.User![0]);
+  expect(new Set(users).size).toBe(users.length);
+  const example = (await Bun.file("infra/gateway.example.json").json()) as { port: number };
+  const caddy = await Bun.file("infra/Caddyfile").text();
+  const chat = caddy.indexOf("handle @chat"),
+    legacy = caddy.indexOf("handle @legacy");
+  expect(caddy).toContain("@chat path /v1/chat/completions\n");
+  expect(chat).toBeGreaterThan(-1);
+  expect(legacy).toBeGreaterThan(chat);
+  expect(caddy.slice(chat, legacy)).toContain(`127.0.0.1:${example.port}`);
+  expect(caddy.slice(legacy)).not.toContain(`127.0.0.1:${example.port}`);
+  expect(caddy).not.toMatch(/\/admin|\/_internal/);
+});

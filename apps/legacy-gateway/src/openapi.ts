@@ -123,7 +123,10 @@ export function openapi(): Record<string, unknown> {
     },
   };
   const responses = {
-    "200": { description: "Success; output content is never retained by Gateway" },
+    "200": {
+      description:
+        "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal",
+    },
     "400": { description: "Invalid request" },
     "401": { description: "Invalid credential" },
     "402": { description: "Insufficient eligible funds or frozen wallet" },

@@ -83,10 +83,10 @@ test(
 );
 
 test(
-  "a Gateway refuses to start without durable evidence, and evidence lost after start withholds the terminal without re-sending",
+  "a Gateway refuses to start without durable evidence, and evidence lost after start withholds the terminal, tells JSON clients to query the request instead of claiming it was not recorded, and never re-sends",
   () =>
     withGatewayStack(
-      { reply: () => chatReplies.sse() },
+      { reply: (call) => (call.body.stream ? chatReplies.sse() : chatReplies.json()) },
       async ({ received, namespace, send, startGateway }) => {
         const queue = { url: process.env.QUEUE_REDIS_URL!, namespace, ack_timeout_ms: 300 };
         await expect(
@@ -105,9 +105,16 @@ test(
           expect(text).toContain("gateway_stream_error");
           expect(text).not.toContain("[DONE]");
           expect(received).toHaveLength(1);
+          const json = await send({ via: gateway });
+          expect(json.status).toBe(503);
+          expect((await json.json()).error).toMatchObject({
+            code: "usage_queue_unavailable",
+            message:
+              "Durable usage acceptance is unavailable; query the original request before retrying",
+          });
           expect((await fetch(`${gateway.origin}/readyz`)).status).toBe(503);
           await Bun.sleep(500);
-          expect(received).toHaveLength(1);
+          expect(received).toHaveLength(2);
         } finally {
           await proxy.close();
         }
@@ -409,6 +416,47 @@ test(
           expect(
             (
               await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+            )[0].reserved_atoms,
+          ).toBe("0");
+        },
+      );
+    } finally {
+      await proxy.close();
+    }
+  },
+  timeout,
+);
+
+test(
+  "a lost admission acknowledgement is resolved by status query: the committed reservation is aborted and both parties' funds are released instead of staying reserved",
+  async () => {
+    const proxy = await createCommitAckProxy();
+    try {
+      await withGatewayStack(
+        { reply: () => chatReplies.json(), databasePort: proxy.port },
+        async ({ db, setup, received, send }) => {
+          const observed = proxy.arm(["core_execution_batch_v1", "execution_admit_v1"], 30000);
+          const response = await send();
+          await observed;
+          expect(response.status).toBe(503);
+          await response.text();
+          expect(received).toHaveLength(0);
+          const requestId = response.headers.get("x-request-id")!;
+          expect(await requestOutcome(db, requestId)).toMatchObject({
+            state: "FAILED",
+            charged: "0",
+          });
+          expect(
+            await db`SELECT p.state AS permit FROM attempts a JOIN execution_permits p ON p.attempt_id=a.id WHERE a.request_id=${requestId}`,
+          ).toEqual([{ permit: "ABORTED" }]);
+          expect(
+            (
+              await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+            )[0].reserved_atoms,
+          ).toBe("0");
+          expect(
+            (
+              await db`SELECT reserved_atoms::text FROM wallets WHERE project_id=${setup.project.id}`
             )[0].reserved_atoms,
           ).toBe("0");
         },
