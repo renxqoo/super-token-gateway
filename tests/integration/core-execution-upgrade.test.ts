@@ -4,8 +4,8 @@ import { migrate, Store, FundsStore, createDatabase } from "@gateway/storage";
 import manifest from "../../packages/storage/src/migrations/manifest.json";
 import { withDatabase } from "../support/database.ts";
 import { withFinancial } from "../support/financial-execution.ts";
-async function installV5(db: SQL) {
-  for (const m of manifest.migrations.slice(0, 4)) {
+async function install(db: SQL, versions: number) {
+  for (const m of manifest.migrations.slice(0, versions)) {
     for (const f of m.files)
       await db.unsafe(
         await Bun.file(new URL(`../../packages/storage/src/${f.path}`, import.meta.url)).text(),
@@ -81,7 +81,7 @@ async function historical(db: SQL) {
 test("v5 to financial append preserves historical wallets requests and null catalog owners without fabricated captures", () =>
   withDatabase(
     async (db) => {
-      await installV5(db);
+      await install(db, 4);
       await historical(db);
       const command = crypto.randomUUID();
       await db`INSERT INTO execution_commands(id,command_id,kind,caller_identity,caller_incarnation,body_digest,deadline_at,trace_id,contract_version,state) VALUES(${crypto.randomUUID()},${command},'plugin_register_v1','historical:catalog',${crypto.randomUUID()},repeat('a',64),clock_timestamp()+interval '1 hour','historical',1,'COMMITTED')`;
@@ -118,7 +118,7 @@ test("v5 to financial append preserves historical wallets requests and null cata
         ),
       ).toEqual(before.commands);
       expect((await db`SELECT count(*)::integer n FROM upstream_holds`)[0].n).toBe(0);
-      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(5);
+      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(6);
     },
     { max: 4, registry: ".local/T04b2a-resources.jsonl" },
   ));
@@ -126,7 +126,7 @@ test("v5 to financial append preserves historical wallets requests and null cata
 test("append refuses unmappable active supplier holds and rolls all new schema back", () =>
   withDatabase(
     async (db) => {
-      await installV5(db);
+      await install(db, 4);
       const old = await historical(db);
       await db`INSERT INTO upstream_account_balances(account_id,currency) VALUES(${old.provider.account_id},'USD')`;
       await db`INSERT INTO upstream_holds(attempt_id,account_id,channel_id,currency,estimated_atoms,cost_version_id,state) SELECT ${old.attempt},${old.provider.account_id},${old.provider.id},'USD',1,pricing_id,'UNKNOWN' FROM attempts WHERE id=${old.attempt}`;
@@ -144,7 +144,7 @@ test("append refuses unmappable active supplier holds and rolls all new schema b
 test("append rejects cross-key duplicate project intents instead of selecting a historical winner", () =>
   withDatabase(
     async (db) => {
-      await installV5(db);
+      await install(db, 4);
       const old = await historical(db),
         key = await old.store.createCredential(
           old.project,
@@ -184,3 +184,65 @@ test(
     }),
   30000,
 );
+
+test("signed settlement append keeps gateway usage visible and its per-source uniqueness", () =>
+  withDatabase(
+    async (db) => {
+      await install(db, 5);
+      const old = await historical(db);
+      const persisted = (
+        await db`SELECT persist_usage_batch(${[{ attemptId: old.attempt, source: "execution", state: "SUCCEEDED", finality: "FINAL", requestState: "SUCCEEDED", usage: { requests: "1" } }]}::jsonb) result`
+      )[0].result["0"];
+      expect(persisted.status).toBe("APPLIED");
+      const before =
+        await db`SELECT id,seq::text,source,finality,usage,cost_atoms::text FROM usage_events`;
+      expect(before).toHaveLength(1);
+      await migrate(db);
+      expect(
+        await db`SELECT id,seq::text,source,finality,usage,cost_atoms::text FROM usage_events`,
+      ).toEqual(before);
+      expect(
+        await db`SELECT record_kind,snapshot_revision,final_dimensions FROM usage_event_index`,
+      ).toEqual([{ record_kind: "GATEWAY", snapshot_revision: null, final_dimensions: null }]);
+      expect(await new Store(db).usage(null)).toEqual([
+        expect.objectContaining({
+          id: before[0].id,
+          semantics: "attempt_snapshot",
+          snapshot_revision: null,
+          cost_revision: null,
+          cost_atoms: before[0].cost_atoms,
+        }),
+      ]);
+      const duplicate = await db
+        .begin(
+          (tx) =>
+            tx`INSERT INTO usage_events(id,project_id,request_id,attempt_id,source,finality,usage,cost_atoms,currency) SELECT ${crypto.randomUUID()},project_id,request_id,attempt_id,'execution','FINAL','{"requests":"1"}',1,currency FROM usage_events`,
+        )
+        .catch((error) => error);
+      expect(duplicate).toMatchObject({ errno: "23505" });
+      const replay = (
+        await db`SELECT persist_usage_batch(${[{ attemptId: old.attempt, source: "execution", state: "SUCCEEDED", finality: "FINAL", requestState: "SUCCEEDED", usage: { requests: "1" } }]}::jsonb) result`
+      )[0].result["0"];
+      expect(replay.status).toBe("REPLAY");
+      expect((await db`SELECT count(*)::integer n FROM usage_event_index`)[0].n).toBe(1);
+      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(6);
+    },
+    { max: 4, registry: ".local/T04b2b-resources.jsonl" },
+  ));
+
+test("signed settlement append refuses historical supplier costs without evidence links", () =>
+  withDatabase(
+    async (db) => {
+      await install(db, 5);
+      const old = await historical(db);
+      await db`INSERT INTO upstream_costs(attempt_id,revision,currency,cost_atoms,complete,evidence_digest) VALUES(${old.attempt},0,'USD',1,true,repeat('a',64))`;
+      const failure = await migrate(db).catch((error) => error as Error);
+      expect((failure as Error).message).toContain("upstream_costs_history_unmapped");
+      expect((await db`SELECT count(*)::integer n FROM upstream_costs`)[0].n).toBe(1);
+      expect(
+        (await db`SELECT to_regclass('core_evidence_receipts') relation`)[0].relation,
+      ).toBeNull();
+      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(5);
+    },
+    { max: 4, registry: ".local/T04b2b-resources.jsonl" },
+  ));

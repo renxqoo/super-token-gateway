@@ -75,10 +75,12 @@ export interface UsageRecord {
   request_id: string;
   attempt_id: string;
   source: string;
-  semantics: "attempt_snapshot";
+  semantics: "attempt_snapshot" | "disputed_snapshot";
+  snapshot_revision: string | null;
+  cost_revision: string | null;
   finality: Finality;
   usage: Usage;
-  cost_atoms: string;
+  cost_atoms: string | null;
   currency: string;
   cost_complete: boolean;
 }
@@ -505,7 +507,7 @@ export class Store {
     const attempts = await this
       .db`SELECT id,ordinal,state,error_code,started_at,finished_at FROM attempts WHERE request_id=${id} ORDER BY ordinal`;
     const usage = await this
-      .db`SELECT attempt_id,source,'attempt_snapshot' AS semantics,finality,usage,cost_atoms::text,currency,cost_complete FROM usage_events WHERE request_id=${id} ORDER BY seq`;
+      .db`SELECT attempt_id,source,CASE record_kind WHEN 'DISPUTED' THEN 'disputed_snapshot' ELSE 'attempt_snapshot' END AS semantics,snapshot_revision::text,(SELECT c.revision::text FROM upstream_costs c WHERE c.evidence_id=usage_events.id) AS cost_revision,finality,usage,cost_atoms::text,currency,cost_complete FROM usage_events WHERE request_id=${id} ORDER BY seq`;
     return { ...rows[0], attempts, usage };
   }
   async startAttempt(requestId: string, ordinal: number, route: Route): Promise<string> {
@@ -595,7 +597,7 @@ export class Store {
       throw new GatewayError(400, "invalid_cursor", "Usage cursor must be a positive bigint");
     return this.db<
       UsageRecord[]
-    >`SELECT id,seq::text,project_id,request_id,attempt_id,source,'attempt_snapshot' AS semantics,finality,usage,cost_atoms::text,currency,cost_complete
+    >`SELECT id,seq::text,project_id,request_id,attempt_id,source,CASE record_kind WHEN 'DISPUTED' THEN 'disputed_snapshot' ELSE 'attempt_snapshot' END AS semantics,snapshot_revision::text,(SELECT c.revision::text FROM upstream_costs c WHERE c.evidence_id=usage_events.id) AS cost_revision,finality,usage,cost_atoms::text,currency,cost_complete
       FROM usage_events WHERE
       EXISTS(SELECT 1 FROM gateway_requests q WHERE q.id=usage_events.request_id AND (${models.length === 0} OR q.model=ANY(${models})) AND (${operations.length === 0} OR q.operation=ANY(${operations}))) AND (${projectId}::uuid IS NULL OR project_id=${projectId})
       AND (${before ?? null}::bigint IS NULL OR seq<${before ?? null}::bigint) ORDER BY seq DESC LIMIT ${limit}`;
@@ -712,7 +714,7 @@ export class Store {
         ORDER BY event_id LIMIT ${limit} FOR UPDATE SKIP LOCKED), claimed AS (
         UPDATE event_deliveries d SET state='LEASED',lease_token=${token},lease_until=now()+interval '30 seconds',attempts=d.attempts+1
         FROM selected s WHERE d.consumer_id=s.consumer_id AND d.event_id=s.event_id RETURNING d.event_id)
-      SELECT e.id,e.seq::text,e.project_id,e.request_id,e.attempt_id,e.source,'attempt_snapshot' AS semantics,e.finality,e.usage,e.cost_atoms::text,e.currency,e.cost_complete
+      SELECT e.id,e.seq::text,e.project_id,e.request_id,e.attempt_id,e.source,CASE e.record_kind WHEN 'DISPUTED' THEN 'disputed_snapshot' ELSE 'attempt_snapshot' END AS semantics,e.snapshot_revision::text,(SELECT c.revision::text FROM upstream_costs c WHERE c.evidence_id=e.id) AS cost_revision,e.finality,e.usage,e.cost_atoms::text,e.currency,e.cost_complete
       FROM usage_events e JOIN claimed c ON e.id=c.event_id`;
     return { lease_token: token, events };
   }

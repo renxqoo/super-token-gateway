@@ -127,12 +127,15 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
       usage: { requests: "1" },
     };
     await store.persistUsage([fact]);
-    const page = await store.claimEvents(consumer, 10);
+    const leaseToken = crypto.randomUUID();
+    const leased =
+      await db`UPDATE event_deliveries SET state='LEASED',lease_token=${leaseToken},lease_until=now()+interval '30 seconds',attempts=attempts+1 WHERE consumer_id=${consumer} AND state<>'ACKED' RETURNING event_id`;
+    expect(leased).toHaveLength(1);
     expect(
       await store.ackEvents(
         consumer,
-        page.lease_token,
-        page.events.map((event) => event.id),
+        leaseToken,
+        leased.map((row: { event_id: string }) => row.event_id),
       ),
     ).toBe(1);
     const packageBytes = Buffer.from("synthetic-upgrade-package-fact");
@@ -209,7 +212,9 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
             ? "to_jsonb(t)-ARRAY['release_descriptor','release_signature','release_key_id']"
             : table === "gateway_requests"
               ? "to_jsonb(t)-ARRAY['execution_budget','execution_closed_at']"
-              : "to_jsonb(t)";
+              : table === "usage_events"
+                ? "to_jsonb(t)-ARRAY['record_kind','snapshot_revision','final_dimensions']"
+                : "to_jsonb(t)";
         values.push(
           (
             await db.unsafe(
@@ -251,6 +256,7 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
       { version: 2026111203 },
       { version: 2026111204 },
       { version: 2026111205 },
+      { version: 2026111206 },
       { version: SCHEMA_VERSION },
     ]);
     expect(
@@ -266,6 +272,14 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
         await db`SELECT count(*)::integer n FROM gateway_requests WHERE execution_budget IS NOT NULL OR execution_closed_at IS NOT NULL`
       )[0].n,
     ).toBe(0);
+    expect(
+      await db`SELECT record_kind,count(*)::integer n FROM usage_event_index WHERE snapshot_revision IS NULL AND final_dimensions IS NULL GROUP BY record_kind`,
+    ).toEqual([
+      {
+        record_kind: "GATEWAY",
+        n: (await db`SELECT count(*)::integer n FROM usage_event_index`)[0].n,
+      },
+    ]);
     expect(await snapshot()).toEqual(before);
     await migrate(db);
     expect(await snapshot()).toEqual(before);

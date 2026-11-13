@@ -6,7 +6,8 @@
     ".": "./src/index.ts",
     "./schema": "./src/schema/index.ts",
     "./internal-identity": "./src/internal-identity/store.ts",
-    "./execution": "./src/execution/index.ts"
+    "./execution": "./src/execution/index.ts",
+    "./settlement": "./src/settlement/index.ts"
   },
   "dependencies": {
     "@gateway/kernel": "workspace:*",

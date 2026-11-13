@@ -16,7 +16,15 @@ import {
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { jsonb } from "./jsonb.ts";
-import { attempts, costVersions, gatewayRequests, apiKeys, projects, routes } from "./existing.ts";
+import {
+  attempts,
+  costVersions,
+  gatewayRequests,
+  apiKeys,
+  projects,
+  routes,
+  usageEventIndex,
+} from "./existing.ts";
 import {
   channels,
   upstreamAccounts,
@@ -189,12 +197,97 @@ export const upstreamCosts = pgTable(
     disputed: boolean().default(false).notNull(),
     evidenceDigest: text("evidence_digest").notNull(),
     createdAt: instant("created_at").defaultNow().notNull(),
+    evidenceId: uuid("evidence_id").notNull(),
+    costVersionId: uuid("cost_version_id")
+      .notNull()
+      .references(() => costVersions.id),
   },
   (t) => [
     primaryKey({ columns: [t.attemptId, t.revision] }),
+    unique("upstream_cost_evidence").on(t.evidenceId),
+    foreignKey({
+      columns: [t.evidenceId, t.attemptId],
+      foreignColumns: [usageEventIndex.id, usageEventIndex.attemptId],
+      name: "upstream_cost_evidence_attempt",
+    }),
     check(
       "upstream_cost_exact",
-      sql`revision>=0 AND cost_atoms>=0 AND evidence_digest ~ '^[a-f0-9]{64}$'`,
+      sql`revision>=1 AND cost_atoms>=0 AND evidence_digest ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+export const coreEvidenceReceipts = pgTable(
+  "core_evidence_receipts",
+  {
+    id: uuid().primaryKey(),
+    originIdentity: text("origin_identity").notNull(),
+    originIncarnation: uuid("origin_incarnation").notNull(),
+    originSessionId: uuid("origin_session_id")
+      .notNull()
+      .references(() => internalStartupSessions.sessionId),
+    eventId: uuid("event_id").notNull(),
+    attemptId: uuid("attempt_id")
+      .notNull()
+      .references(() => attempts.id),
+    source: text().notNull(),
+    sourceRevision: atoms("source_revision").notNull(),
+    bodyDigest: text("body_digest").notNull(),
+    eventClaim: boolean("event_claim").notNull(),
+    revisionClaim: boolean("revision_claim").notNull(),
+    outcome: text().notNull(),
+    finality: text().notNull(),
+    attemptState: text("attempt_state"),
+    requestState: text("request_state"),
+    errorCode: text("error_code"),
+    providerRequestId: text("provider_request_id"),
+    rawEvidenceId: uuid("raw_evidence_id").notNull(),
+    canonicalEvidenceId: uuid("canonical_evidence_id"),
+    disputedEvidenceId: uuid("disputed_evidence_id"),
+    conflictId: uuid("conflict_id"),
+    riskDimensions: text("risk_dimensions").array().notNull(),
+    numericFault: text("numeric_fault"),
+    createdAt: instant("created_at").defaultNow().notNull(),
+  },
+  (t) => [
+    unique("core_receipt_delivery").on(t.originIdentity, t.eventId, t.bodyDigest),
+    uniqueIndex("core_receipt_event_claim")
+      .on(t.originIdentity, t.eventId)
+      .where(sql`event_claim`),
+    uniqueIndex("core_receipt_revision_claim")
+      .on(t.attemptId, t.originIdentity, t.source, t.sourceRevision)
+      .where(sql`revision_claim`),
+    index("core_receipt_attempt_source").on(t.attemptId, t.source, t.sourceRevision),
+    foreignKey({
+      columns: [t.rawEvidenceId, t.attemptId],
+      foreignColumns: [usageEventIndex.id, usageEventIndex.attemptId],
+      name: "core_receipt_raw",
+    }),
+    foreignKey({
+      columns: [t.canonicalEvidenceId, t.attemptId],
+      foreignColumns: [usageEventIndex.id, usageEventIndex.attemptId],
+      name: "core_receipt_canonical",
+    }),
+    foreignKey({
+      columns: [t.disputedEvidenceId, t.attemptId],
+      foreignColumns: [usageEventIndex.id, usageEventIndex.attemptId],
+      name: "core_receipt_disputed",
+    }),
+    check(
+      "core_receipt_source",
+      sql`source IN ('execution','execution_outcome','recovery_interruption','async_partial','async_final','batch_completed','batch_cancelled','batch_failed','provider_invoice') AND source_revision>=1 AND body_digest ~ '^[a-f0-9]{64}$' AND origin_identity ~ '^gateway:[A-Za-z0-9_-]{1,100}$'`,
+    ),
+    check(
+      "core_receipt_outcome",
+      sql`outcome IN ('ACCEPTED','STALE','ESTIMATED','REVISION_REPLAY','CONFLICT','OVERFLOW') AND finality IN ('FINAL','PARTIAL','UNKNOWN','ESTIMATED','NOT_EXECUTED')
+        AND (outcome<>'CONFLICT' OR (conflict_id IS NOT NULL AND disputed_evidence_id IS NOT NULL AND NOT revision_claim))
+        AND (outcome<>'OVERFLOW' OR (numeric_fault='COST_OVERFLOW' AND disputed_evidence_id IS NOT NULL))
+        AND (outcome NOT IN ('ACCEPTED','REVISION_REPLAY') OR (canonical_evidence_id IS NOT NULL AND disputed_evidence_id IS NULL AND conflict_id IS NULL))
+        AND (numeric_fault IS NULL OR numeric_fault='COST_OVERFLOW')
+        AND (attempt_state IS NULL OR attempt_state IN ('SUCCEEDED','FAILED','UNKNOWN','PARTIAL','NOT_EXECUTED'))
+        AND (request_state IS NULL OR request_state IN ('SUCCEEDED','FAILED','CANCELLED','UNKNOWN'))
+        AND (error_code IS NULL OR error_code ~ '^[a-z][a-z0-9_]{0,79}$')
+        AND (provider_request_id IS NULL OR provider_request_id ~ '^[A-Za-z0-9._:/-]{1,256}$')
+        AND cardinality(risk_dimensions)<=16`,
     ),
   ],
 );

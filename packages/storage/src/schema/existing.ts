@@ -16,6 +16,7 @@ import {
   type PgTableExtraConfigValue,
   primaryKey,
   pgView,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { jsonb } from "./jsonb.ts";
@@ -467,8 +468,25 @@ export const usageConflicts = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
+    incomingEvidenceId: uuid("incoming_evidence_id"),
+    disputedEvidenceId: uuid("disputed_evidence_id"),
+    incomingReceiptId: uuid("incoming_receipt_id"),
   },
   (table): PgTableExtraConfigValue[] => [
+    foreignKey({
+      columns: [table.incomingEvidenceId, table.attemptId],
+      foreignColumns: [usageEventIndex.id, usageEventIndex.attemptId],
+      name: "usage_conflict_incoming",
+    }),
+    foreignKey({
+      columns: [table.disputedEvidenceId, table.attemptId],
+      foreignColumns: [usageEventIndex.id, usageEventIndex.attemptId],
+      name: "usage_conflict_disputed",
+    }),
+    check(
+      "usage_conflict_core_links",
+      sql`(incoming_evidence_id IS NULL AND disputed_evidence_id IS NULL AND incoming_receipt_id IS NULL) OR (incoming_evidence_id IS NOT NULL AND disputed_evidence_id IS NOT NULL AND incoming_receipt_id IS NOT NULL)`,
+    ),
     index("usage_conflicts_attempt").using("btree", table.attemptId.asc().nullsLast()),
     foreignKey({
       columns: [table.attemptId],
@@ -850,12 +868,18 @@ export const usageEventIndex = pgTable(
     attemptId: uuid("attempt_id").notNull(),
     source: text().notNull(),
     finality: text().notNull(),
-    costAtoms: numeric("cost_atoms", { precision: 38, scale: 0 }).notNull(),
+    costAtoms: numeric("cost_atoms", { precision: 38, scale: 0 }),
     currency: text().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
     costComplete: boolean("cost_complete").default(false).notNull(),
+    recordKind: text("record_kind").default("GATEWAY").notNull(),
+    snapshotRevision: numeric("snapshot_revision", { precision: 38, scale: 0 }),
+    snapshotDigest: text("snapshot_digest"),
+    finalDimensions: text("final_dimensions").array(),
+    parentEvidenceId: uuid("parent_evidence_id"),
+    inputFactId: uuid("input_fact_id"),
   },
   (table): PgTableExtraConfigValue[] => [
     index("usage_archive_range").using(
@@ -891,8 +915,33 @@ export const usageEventIndex = pgTable(
     }),
     unique("usage_index_time").on(table.id, table.createdAt),
     unique("usage_events_seq_key").on(table.seq),
-    unique("usage_events_attempt_id_source_key").on(table.attemptId, table.source),
+    unique("usage_index_attempt_identity").on(table.id, table.attemptId),
+    uniqueIndex("usage_gateway_source_unique")
+      .on(table.attemptId, table.source)
+      .where(sql`record_kind='GATEWAY'`),
+    uniqueIndex("usage_snapshot_revision_unique")
+      .on(table.attemptId, table.snapshotRevision)
+      .where(sql`snapshot_revision IS NOT NULL`),
+    index("usage_attempt_source").on(table.attemptId, table.source, table.seq),
+    foreignKey({
+      columns: [table.parentEvidenceId, table.attemptId],
+      foreignColumns: [table.id, table.attemptId],
+      name: "usage_parent_evidence",
+    }),
+    foreignKey({
+      columns: [table.inputFactId, table.attemptId],
+      foreignColumns: [table.id, table.attemptId],
+      name: "usage_input_fact",
+    }),
     check("usage_events_cost_atoms_check", sql`cost_atoms >= (0)::numeric`),
+    check(
+      "usage_record_kind",
+      sql`record_kind IN ('GATEWAY','RAW','CANONICAL','DISPUTED') AND CASE record_kind
+        WHEN 'GATEWAY' THEN cost_atoms IS NOT NULL AND snapshot_revision IS NULL AND snapshot_digest IS NULL AND final_dimensions IS NULL AND parent_evidence_id IS NULL AND input_fact_id IS NULL
+        WHEN 'RAW' THEN cost_atoms IS NULL AND NOT cost_complete AND snapshot_revision>=1 AND snapshot_digest ~ '^[a-f0-9]{64}$' AND final_dimensions IS NOT NULL AND parent_evidence_id IS NULL AND input_fact_id IS NULL
+        WHEN 'CANONICAL' THEN cost_atoms IS NOT NULL AND snapshot_revision>=1 AND snapshot_digest ~ '^[a-f0-9]{64}$' AND final_dimensions IS NOT NULL AND input_fact_id IS NOT NULL
+        ELSE snapshot_revision>=1 AND snapshot_digest ~ '^[a-f0-9]{64}$' AND final_dimensions IS NOT NULL AND input_fact_id IS NOT NULL AND (cost_atoms IS NOT NULL OR NOT cost_complete) END`,
+    ),
     check(
       "usage_events_finality_check",
       sql`finality = ANY (ARRAY['FINAL'::text, 'PARTIAL'::text, 'UNKNOWN'::text, 'ESTIMATED'::text])`,
@@ -1206,8 +1255,11 @@ export const usageEvents = pgView("usage_events", {
   currency: text(),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow(),
   costComplete: boolean("cost_complete").default(false),
+  recordKind: text("record_kind"),
+  snapshotRevision: numeric("snapshot_revision", { precision: 38, scale: 0 }),
+  finalDimensions: text("final_dimensions").array(),
 }).as(
-  sql`SELECT i.id, i.seq, i.project_id, i.request_id, i.attempt_id, i.source, i.finality, p.usage, i.cost_atoms, i.currency, i.created_at, i.cost_complete FROM usage_event_index i JOIN usage_payloads p ON p.id = i.id AND p.created_at = i.created_at`,
+  sql`SELECT i.id, i.seq, i.project_id, i.request_id, i.attempt_id, i.source, i.finality, p.usage, i.cost_atoms, i.currency, i.created_at, i.cost_complete, i.record_kind, i.snapshot_revision, i.final_dimensions FROM usage_event_index i JOIN usage_payloads p ON p.id = i.id AND p.created_at = i.created_at WHERE i.record_kind <> 'RAW'`,
 );
 
 export const moneyJournal = pgView("money_journal", {

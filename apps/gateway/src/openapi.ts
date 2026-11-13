@@ -70,6 +70,8 @@ export function openapi(): Record<string, unknown> {
         "attempt_id",
         "source",
         "semantics",
+        "snapshot_revision",
+        "cost_revision",
         "finality",
         "usage",
         "cost_atoms",
@@ -80,14 +82,30 @@ export function openapi(): Record<string, unknown> {
         id: { type: "string", format: "uuid" },
         attempt_id: { type: "string", format: "uuid" },
         source: { type: "string" },
-        semantics: { const: "attempt_snapshot" },
+        semantics: {
+          enum: ["attempt_snapshot", "disputed_snapshot"],
+          description:
+            "attempt_snapshot is the accepted cumulative snapshot of one attempt; disputed_snapshot records contradicting evidence that froze settlement and is never posted.",
+        },
+        snapshot_revision: {
+          type: ["string", "null"],
+          pattern: "^[1-9][0-9]*$",
+          description:
+            "Per-attempt signed snapshot revision; null for usage recorded before signed settlement.",
+        },
+        cost_revision: {
+          type: ["string", "null"],
+          pattern: "^[1-9][0-9]*$",
+          description:
+            "Supplier cost revision posted from this snapshot; null when the snapshot was not posted.",
+        },
         finality: { enum: ["FINAL", "PARTIAL", "UNKNOWN", "ESTIMATED"] },
         usage: { type: "object", additionalProperties: { type: "string" } },
         cost_atoms: {
-          type: "string",
+          type: ["string", "null"],
           pattern: "^[0-9]+$",
           description:
-            "Integer atoms, 10^-18 units of the recorded currency. Cumulative per-attempt evidence; never sum revisions.",
+            "Integer atoms, 10^-18 units of the recorded currency. Cumulative per-attempt evidence; never sum revisions. Null only for a disputed_snapshot whose cost overflowed.",
         },
         currency: { type: "string" },
         cost_complete: { type: "boolean" },

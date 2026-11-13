@@ -72,6 +72,19 @@
           "checksum": "ab4082958847fc37b5ac1e1a8c8741d3a23de1d0a80d1340d3c359c0ae1d69d1"
         }
       ]
+    },
+    {
+      "version": 2026111207,
+      "files": [
+        {
+          "path": "./migrations/0005_signed_settlement.sql",
+          "checksum": "2642e994360f5a8654ffb22b63a2f6900ff3d09d1e4c98675c5cfa51e1c3e453"
+        },
+        {
+          "path": "./sql/core-settlement.sql",
+          "checksum": "b8438de46fef3bef7784710d5f34221abfa68ff51e133c41d3c208baaa13ac3c"
+        }
+      ]
     }
   ]
 }
