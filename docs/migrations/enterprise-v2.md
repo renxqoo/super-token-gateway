@@ -543,14 +543,14 @@ music生成直接受控返回供应商真实响应/流；hex、音频字节及si
 
 T04 按以下有界交付顺序实施；各子项通过不等于 T04 全链验收通过，下游 T05/T06 仍依赖完整 T04：
 
-| 子任务         | 依赖                      | 交付与独立验收                                                                                                                                                  | 当前状态                |
-| -------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| T04.a          | 已核验并集成的 T02.a、T03 | Bun 插件宿主监督、ABI/SDK、可复现内置 OpenAI Chat 包；真实 helper 验证 JSON/SSE 精确数值、UTF-8、显式状态隔离、终态候选与取消/重启/预算，不能接触资金或网络凭证 | 已集成 / 首次+修复2     |
-| T04.b          | T04.a                     | Core 准入与双方资金事务、一次发送命令/许可、数字结算；真实 PG/Redis 验证重试/响应丢失、共享账户硬闸、UNKNOWN 与结算幂等，定义服务端消费的稳定 RPC               | b.2a已接纳 / b.2b实施   |
-| T04.b.identity | b.1接纳及内部身份设计     | 真实h2/mTLS startup注册、共享PG challenge/session/撤销、core-client与Core私有认证投影；两个独立Core进程验证伪造/丢包/唯一身份/权限，资金和历史收证在b.2实际消费 | 已接纳 / 主树verify通过 |
-| T04.b.2a       | 已接纳 b.1、b.identity    | 真实context/命令/准入/重试/一次begin/abort与安全回执，客户和供应预留及quota清理权；追加迁移、最小权限与真实PG/Redis/HTTP验收                                    | 已接纳 / 主树verify通过 |
-| T04.b.2b       | 已接纳 b.2a               | RAW/CANONICAL/DISPUTED数字事实与历史producer验证，双方结算/流水/事件同事务和提交后ACK；追加迁移、独立审查                                                       | 重做候选 / 双路审查中   |
-| T04.c          | T04.b                     | 三进程装配、Gateway Core client、宿主受控传输及 OpenAI Chat 产品路径；完整执行 T04 表列出的独立进程、双 Gateway、耐久终态、双方账本/事件/ACK、取消与排空验收    | 待执行 / 0              |
+| 子任务         | 依赖                      | 交付与独立验收                                                                                                                                                  | 当前状态                      |
+| -------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| T04.a          | 已核验并集成的 T02.a、T03 | Bun 插件宿主监督、ABI/SDK、可复现内置 OpenAI Chat 包；真实 helper 验证 JSON/SSE 精确数值、UTF-8、显式状态隔离、终态候选与取消/重启/预算，不能接触资金或网络凭证 | 已集成 / 首次+修复2           |
+| T04.b          | T04.a                     | Core 准入与双方资金事务、一次发送命令/许可、数字结算；真实 PG/Redis 验证重试/响应丢失、共享账户硬闸、UNKNOWN 与结算幂等，定义服务端消费的稳定 RPC               | b.2a已接纳 / b.2b实施         |
+| T04.b.identity | b.1接纳及内部身份设计     | 真实h2/mTLS startup注册、共享PG challenge/session/撤销、core-client与Core私有认证投影；两个独立Core进程验证伪造/丢包/唯一身份/权限，资金和历史收证在b.2实际消费 | 已接纳 / 主树verify通过       |
+| T04.b.2a       | 已接纳 b.1、b.identity    | 真实context/命令/准入/重试/一次begin/abort与安全回执，客户和供应预留及quota清理权；追加迁移、最小权限与真实PG/Redis/HTTP验收                                    | 已接纳 / 主树verify通过       |
+| T04.b.2b       | 已接纳 b.2a               | RAW/CANONICAL/DISPUTED数字事实与历史producer验证，双方结算/流水/事件同事务和提交后ACK；追加迁移、独立审查                                                       | main重做①–⑤已实现，待独立审查 |
+| T04.c          | T04.b                     | 三进程装配、Gateway Core client、宿主受控传输及 OpenAI Chat 产品路径；完整执行 T04 表列出的独立进程、双 Gateway、耐久终态、双方账本/事件/ACK、取消与排空验收    | 待执行 / 0                    |
 
 子任务的实现者、独立审查者和修复者均使用全新上下文。产品工作树只在协调者核验后集成；不得让后续子任务读取仍在写入的前序工作树作为已验收依赖。
 
@@ -784,3 +784,5 @@ T04.b.2b在途边界澄清：Core client只负责内部RPC、startup私钥的有
 编排策略按用户最新指示修订：不把所有子agent任务一律放入全新上下文。同一模块的实现、调试和后续修复保留原agent上下文，已冻结交付后的修复由root核实新输入/保护产物再唤醒原实现者；独立模块使用精简版本与契约brief单独分配；首次独立审查使用与实现隔离的新上下文，后续复查可保留该审查者自己的上下文并核对确切新版本。先前已执行的fork_turns=none记录仍为历史事实；此用户指示覆盖task-orchestrator的逐次新建默认。物理worktree隔离、root唯一集成、一次一个schema writer、共享PGRedis/native测试排队、有限修复预算及不得重跑至绿的规则保持。当前结算agent继续持有本模块上下文，后续只在依赖与资源可隔离时并行，不为占满槽位提前实施不稳定契约的下游功能。
 
 2026-11-13恢复登记：11-12全部隔离worktree目录被外部删除（git记录已prune），T04.b.2b在途中间态（PG494/2）及Go1.27.4/模块缓存随之丢失，无交付证据留存。root以main未提交树（备份`.local/enterprise-v2/backup/main-20261113.tgz`）重建基线：unit284/4057、integration450/13（13项均为root漏传native工具env），带env重跑native-durability17/0，等价于已接纳463；Go1.27.4与模块重新下载至`.local/go-mod`并`mod verify`通过。T04.b.2b在`super-token-gateway-signed-settlement-20261113`重做，候选patch SHA-256 `219b025609c1a3b88045ecea83ed67e2aa0afb088eee8fa0d98cd2aaefcbfd5e`（39文件，仅追加v2026111207）；作者门禁check232、lint0、fmt336、unit294/4102/42、integration477/10546/29、build、plugin15/24、artifact9+7+7+9+settlement7，未跑durability/backup。作者提出6项待裁决（LEGACY引号、LEGACY部分唯一索引延至T11/T16、FAILED/UNKNOWN释放归T04.c、gateway_runtime读权限至T04.c、Store按to_jsonb读record_kind、worker namespace正则），由双路独立审查评估后裁决。期间main索引被外部整体staged（内容与备份逐字节一致），root未提交。
+
+2026-11-13 main 重做登记：T04.b.2b 在本机 main 按里程碑重做，未使用上段隔离候选。`30218b0`（①–③，已推送）与后续本地提交实现签名数字证据、producer 撤销屏障、RAW/CANONICAL/DISPUTED、供应累计成本与 selected 客户结算、提交后 ACK 及 plugin-host 观察桥首链，仍只占 v2026111207（④ 将认证列并入该版本，`30218b0` 版 v07 的校验和随之变化）。实施记录、设计修订与门禁结果见 [Core 签名数字证据与双方结算实现单元](enterprise-v2-signed-settlement.md)。独立审查、test:durability/backup/container 尚未执行，本登记不是验收。

@@ -1,6 +1,6 @@
 # Core 签名数字证据与双方结算实现单元
 
-本记录对应 T04.b.2b、追加版本 `2026111207`，在本机 main 工作区按四个里程碑推进，未提交。设计依据为 [Core 准入、单次发送许可与双方资金事务](enterprise-v2-core-execution.md) §4.1a、§7、§8；本文只记录实现中对该设计的具体落点和修订，不是整个企业迁移的完成声明。
+本记录对应 T04.b.2b、追加版本 `2026111207`，在本机 main 工作区按里程碑推进（⑤ 依主规格 T04.b.2b 边界澄清追加），未提交。设计依据为 [Core 准入、单次发送许可与双方资金事务](enterprise-v2-core-execution.md) §4.1a、§7、§8；本文只记录实现中对该设计的具体落点和修订，不是整个企业迁移的完成声明。
 
 ## 里程碑
 
@@ -10,6 +10,7 @@
 | ②      | 供应累计成本 C 与派生 R、供应平衡 journal，§7.4 人工算例 A/B/C/D                                     | 已实现 |
 | ③      | `persist_core_evidence_groups_v1`：归一、争议、风险冻结、客户 selected 结算、事件交付及对外 DTO      | 已实现 |
 | ④      | Core client 数字证据签名、producer 撤销屏障、worker 提交后 ACK                                       | 已实现 |
+| ⑤      | Bun plugin-host 观察桥；真实 HTTP→插件/宿主→数字观察→签名→worker 首链                                | 已实现 |
 
 ## ① schema 落点
 
@@ -163,3 +164,24 @@
 既有 `tests/integration/core-settlement.test.ts` 改为由真实 core-client 签名，伪造用例改为同证书新 session 替原 owner 签名。`tests/integration/billing.test.ts` 中一处 `InstanceType<typeof UsageConsumer>` 类型标注因 consumer 变为泛型改为直接引用默认实例类型，断言未变。
 
 未覆盖：ingester 先取得 SHARE、撤销者等待的顺序（需在 SQL 函数内暂停的故障注入点）；instance 级撤销单独用例（session 与 certificate 已覆盖，三者走同一谓词与锁序）；多 owner 交叉组的锁序。
+
+## ⑤ plugin-host 观察桥与首链
+
+主规格 T04.b.2b 边界澄清要求：签名对象是宿主验证后的归一化数字观察，不在 core-client 另写协议解析；真实 HTTP→插件/宿主→观察→签名→worker 首链在本单元可测。
+
+`packages/plugin-host/src/evidence.ts` 的 `observeAttempt(attempt, { attemptId, permitEpoch, record })` 包装宿主 attempt 的 `invoke`/`transformJSON`：只观察宿主已按 ABI 与 capabilities 校验过的 `output`/`failure` 结果，不接受外部 JSON。累计 usage 快照或 finality 变化时生成一条 `source=execution`、revision 单调递增的观察；FINAL 时 `final_dimensions` 为本次报告的全部维度，否则为空；failure 携带的 usage 记为 UNKNOWN。`finish(outcome)` 以最后快照附 attempt/request 终态追加一条，只能调用一次。`record` 由调用方注入（签名与入队），观察在宿主结果返回调用方之前写入，写入失败即向调用方抛错，不先放出输出。plugin-host 不依赖 core-client，Go/WASM/SDK ABI 未变。
+
+首链测试只在测试装配中组合：Core admit→begin 取得 transient send，真实 WASM openai-chat 插件 prepare，经本地 HTTP 上游发送（校验收到的 bearer 为 begin 下发的供应凭证、模型映射与输出上限），response 经宿主转换为 FINAL 观察，`client.signEvidence` 签名后经 evidenceChannel 入队，settlement worker 提交后 ACK。Gateway 进程内的实际装配随 T04.c 三进程切换。
+
+### ⑤ 验证
+
+| 检查                                                         | 结果                                                                                                                                                                                                                            |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/plugin-host/src/__test__/evidence.test.ts`（新增） | 4 通过：JSON FINAL 观察与终态追加（revision 1/2、event 不同）；SSE 只在累计快照变化时记录且末帧前不为 FINAL；无用量终态为 UNKNOWN 且拒绝二次 finish；record 失败时宿主结果不返回                                                |
+| `tests/integration/core-first-chain.test.ts`（新增）         | 1 通过 / 9 断言：上游恰收 1 次、凭证 `Bearer synthetic-upstream-secret`；两条 receipt 均 ACCEPTED/VERIFIED；供应 985/0/15、charge 一条 100、请求 SUCCEEDED/SUCCESS 且 selected 为该 attempt；公开 usage 为 FINAL 30/15、成本 15 |
+
+首链测试的 worker 并发设为 1：两条观察分属两个 job，并发处理时若 revision 2 先提交，revision 1 按设计记为 STALE（已由 `core-settlement` 的 STALE 用例覆盖），资金结果相同；为使该用例期望确定而固定并发，不代表生产并发配置。
+
+未覆盖：SSE 流的端到端首链（桥的 SSE 行为已由单测覆盖）、settlement 独立产物检查（无独立 core-worker 进程入口，随 T04.c）。
+
+④⑤ 合计全量门禁（⑤ 完成后一次运行）：check 231 文件无类型错误；lint 0；fmt 334 文件；test:native 通过；test 288 通过 / 4073 断言 / 41 文件；test:integration 469 通过 / 13 失败 / 10534 断言 / 33 文件，失败集合与基线逐项一致（native-durability 环境缺口）；build 成功；test:plugin-artifact 15/24、pending 0；test:artifact Gateway 9、catalog 7、identity 7、financial 9。`test:durability`、`test:backup`、`test:container` 未运行。
