@@ -23,12 +23,9 @@ export type AttemptOutcome = Pick<
   "attempt_state" | "request_state" | "error_code" | "provider_request_id"
 >;
 
-function completeDimensions(usage: Record<string, string>): string[] {
-  const partitioned =
-    usage.cache_write_5m_tokens !== undefined && usage.cache_write_1h_tokens !== undefined;
+function pricedDimensions(usage: Record<string, string>): string[] {
   return Object.keys(usage)
     .filter((key) => (dimensions as readonly string[]).includes(key))
-    .filter((key) => key !== "cache_write_tokens" || partitioned)
     .sort();
 }
 
@@ -55,7 +52,7 @@ export function observeAttempt(
       source_revision: revision.toString(),
       finality,
       usage,
-      final_dimensions: finality === "FINAL" ? completeDimensions(usage) : [],
+      final_dimensions: finality === "FINAL" ? pricedDimensions(usage) : [],
       ...outcome,
     });
   }

@@ -98,6 +98,15 @@
           "checksum": "dc54bcd8c002d53f17c5598f85cf76cd3296f0682c53b5e958847496ccbb2662"
         }
       ]
+    },
+    {
+      "version": 2026111209,
+      "files": [
+        {
+          "path": "./sql/core-evidence-replay.sql",
+          "checksum": "4c40c9f6c16375122fdf0f502b90167b7e8e65762e4779be968c221064a5dda9"
+        }
+      ]
     }
   ]
 }

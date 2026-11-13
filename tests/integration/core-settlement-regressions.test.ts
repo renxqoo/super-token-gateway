@@ -657,3 +657,90 @@ test("a supplier cost beyond 38 digits is an OVERFLOW dispute that freezes the a
       state: "RECONCILE_REQUIRED",
     });
   }));
+
+const sortedId = (lead: "0" | "f") => lead + crypto.randomUUID().slice(1);
+
+test("a new copy grouped after a duplicate of an unanchored conflict is a conflict instead of a retried busy group", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap(),
+      client = f.client();
+    await client.startup();
+    const { prepared, owner } = await granted(db, setup, client);
+    const store = createSettlementStore(db);
+    committed(
+      (
+        await store.persist([
+          {
+            events: [
+              event(owner, prepared.attemptId, {
+                finality: "FINAL",
+                usage: { input_tokens: "30" },
+                final_dimensions: ["input_tokens"],
+              }),
+            ],
+          },
+        ])
+      )[0],
+    );
+    const contradiction = {
+      source_revision: "2",
+      finality: "FINAL" as const,
+      usage: { input_tokens: "31" },
+      final_dimensions: ["input_tokens"],
+    };
+    const stored = event(owner, prepared.attemptId, { ...contradiction, event_id: sortedId("0") });
+    expect(
+      committed((await store.persist([{ events: [stored] }]))[0]).receipts.map((r) => r.outcome),
+    ).toEqual(["CONFLICT"]);
+    const copy = event(owner, prepared.attemptId, { ...contradiction, event_id: sortedId("f") });
+    const [group] = await store.persist([{ events: [stored, copy] }]);
+    expect(
+      Object.fromEntries(
+        committed(group).receipts.map((r) => [r.event_id, [r.outcome, r.duplicate]]),
+      ),
+    ).toEqual({
+      [stored.event_id]: ["CONFLICT", true],
+      [copy.event_id]: ["CONFLICT", false],
+    });
+  }));
+
+test("a revision is accepted from its new event regardless of order when a grouped copy reuses a claimed event id", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap(),
+      client = f.client();
+    await client.startup();
+    const { prepared, owner } = await granted(db, setup, client);
+    const store = createSettlementStore(db);
+    const reused = sortedId("0");
+    committed(
+      (
+        await store.persist([
+          {
+            events: [
+              event(owner, prepared.attemptId, {
+                event_id: reused,
+                usage: { input_tokens: "10" },
+              }),
+            ],
+          },
+        ])
+      )[0],
+    );
+    const revision = {
+      source_revision: "2",
+      finality: "FINAL" as const,
+      usage: { input_tokens: "30", output_tokens: "15" },
+      final_dimensions: ["input_tokens", "output_tokens"],
+    };
+    const replayedId = event(owner, prepared.attemptId, { ...revision, event_id: reused });
+    const fresh = event(owner, prepared.attemptId, { ...revision, event_id: sortedId("f") });
+    const [group] = await store.persist([{ events: [replayedId, fresh] }]);
+    expect(
+      Object.fromEntries(committed(group).receipts.map((r) => [r.event_id, r.outcome])),
+    ).toEqual({ [reused]: "CONFLICT", [fresh.event_id]: "ACCEPTED" });
+    expect(
+      (
+        await db`SELECT event_id::text FROM core_evidence_receipts WHERE attempt_id=${prepared.attemptId} AND source_revision=2 AND revision_claim`
+      ).map((r: { event_id: string }) => r.event_id),
+    ).toEqual([fresh.event_id]);
+  }));

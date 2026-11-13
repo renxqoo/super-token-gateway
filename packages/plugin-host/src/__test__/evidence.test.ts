@@ -223,18 +223,10 @@ test("FINAL reasoning tokens are recorded but never become a final pricing dimen
   ]);
 });
 
-test("an aggregate cache write is final only when both TTL partitions are reported", async () => {
+test("a reported aggregate cache write is final while unreported TTL partitions stay unknown", async () => {
   const recorded: ObservedEvidence[] = [];
   const bridge = observeAttempt(
-    scripted([
-      output({ input_tokens: "4", cache_write_tokens: "9" }),
-      output({
-        input_tokens: "4",
-        cache_write_tokens: "9",
-        cache_write_5m_tokens: "6",
-        cache_write_1h_tokens: "3",
-      }),
-    ]),
+    scripted([output({ input_tokens: "4", cache_write_tokens: "9" })]),
     {
       attemptId: crypto.randomUUID(),
       permitEpoch: "1",
@@ -242,11 +234,7 @@ test("an aggregate cache write is final only when both TTL partitions are report
     },
   );
   await bridge.invoke("stream_feed");
-  await bridge.invoke("stream_feed");
-  expect(recorded.map((e) => e.final_dimensions)).toEqual([
-    ["input_tokens"],
-    ["cache_write_1h_tokens", "cache_write_5m_tokens", "cache_write_tokens", "input_tokens"],
-  ]);
+  expect(recorded.map((e) => e.final_dimensions)).toEqual([["cache_write_tokens", "input_tokens"]]);
 });
 
 test("an observation whose record failed is recorded again when the same usage is observed next", async () => {
