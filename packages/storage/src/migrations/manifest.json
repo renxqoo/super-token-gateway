@@ -78,11 +78,24 @@
       "files": [
         {
           "path": "./migrations/0005_signed_settlement.sql",
-          "checksum": "109746193ca2978ba1cf1dc9bb0bc452c552ef5505685586d6223170e64c0c21"
+          "checksum": "2642e994360f5a8654ffb22b63a2f6900ff3d09d1e4c98675c5cfa51e1c3e453"
         },
         {
           "path": "./sql/core-settlement.sql",
-          "checksum": "bde570990b8f3c74aa1c6139fcafa0ace4122dec80104214a117b40ef6d50435"
+          "checksum": "b8438de46fef3bef7784710d5f34221abfa68ff51e133c41d3c208baaa13ac3c"
+        }
+      ]
+    },
+    {
+      "version": 2026111208,
+      "files": [
+        {
+          "path": "./migrations/0006_settlement_authentication.sql",
+          "checksum": "39a3adc6b017788f0f1809b1898e092b4065fd3ec9aa240924f930da542669af"
+        },
+        {
+          "path": "./sql/core-settlement-authentication.sql",
+          "checksum": "dc54bcd8c002d53f17c5598f85cf76cd3296f0682c53b5e958847496ccbb2662"
         }
       ]
     }

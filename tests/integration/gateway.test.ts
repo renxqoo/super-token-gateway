@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { SQL } from "bun";
-import { UsageProducer } from "@gateway/runtime";
+import { UsageProducer, usageChannel } from "@gateway/runtime";
 import { createUsageQueueCleanup } from "../support/usage-queue-cleanup.ts";
 import { createDatabase, migrate } from "@gateway/storage";
 import type { Operation, Protocol, ProviderKind } from "@gateway/kernel";
@@ -2248,7 +2248,7 @@ test("production worker role advances async resources and commits queued usage w
     replicas: 0,
     timeoutMs: 1000,
   };
-  const neighbor = new UsageProducer(neighborOptions);
+  const neighbor = new UsageProducer({ ...neighborOptions, channel: usageChannel });
   let neighborKeys: string[] = [];
   try {
     try {
@@ -2302,7 +2302,7 @@ test("production worker role advances async resources and commits queued usage w
     }
     expect(await cleanup.keys(neighborOptions.url)).toHaveLength(0);
     expect(await neighborCleanup.keys(neighborOptions.url)).toEqual(neighborKeys);
-    const reader = new UsageProducer(neighborOptions);
+    const reader = new UsageProducer({ ...neighborOptions, channel: usageChannel });
     try {
       await reader.ready();
       expect((await reader.stats()).waiting).toBe(1);

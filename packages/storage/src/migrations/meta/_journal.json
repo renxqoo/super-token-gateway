@@ -43,6 +43,13 @@
       "when": 1794549371450,
       "tag": "0005_signed_settlement",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794555964904,
+      "tag": "0006_settlement_authentication",
+      "breakpoints": true
     }
   ]
 }

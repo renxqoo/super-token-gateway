@@ -1,9 +1,10 @@
-import { UsageConsumer } from "@gateway/runtime";
+import { UsageConsumer, usageChannel } from "@gateway/runtime";
 import type { Dependencies } from "./context.ts";
 export class BillingWorker {
   readonly consumer: UsageConsumer;
   constructor(readonly deps: Dependencies) {
     this.consumer = new UsageConsumer({
+      channel: usageChannel,
       url: deps.config.QUEUE_REDIS_URL,
       namespace: deps.config.REDIS_NAMESPACE,
       replicas: deps.config.QUEUE_REQUIRED_REPLICAS,

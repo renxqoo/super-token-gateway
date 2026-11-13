@@ -22,13 +22,14 @@ async function worker() {
   )
     throw new Error("Incomplete durability worker configuration");
   setTimeout(() => process.exit(2), 60000);
-  const [{ UsageConsumer }, { createDatabase, Store }] = await Promise.all([
+  const [{ UsageConsumer, usageChannel }, { createDatabase, Store }] = await Promise.all([
     import("@gateway/runtime"),
     import("@gateway/storage"),
   ]);
   const db = createDatabase(process.env.DATABASE_URL!, 2);
   const store = new Store(db);
   const consumer = new UsageConsumer({
+    channel: usageChannel,
     url: process.env.QUEUE_REDIS_URL!,
     namespace: process.env.REDIS_NAMESPACE!,
     replicas: 1,
@@ -112,11 +113,13 @@ async function verify() {
   console.log(JSON.stringify({ durabilityFixture: "started", directory: fixture.directory }));
   try {
     checkpoint = "business dependency loading";
-    const [{ UsageProducer, UsageConsumer }, { createDatabase, migrate, Store, FundsStore }] =
-      await Promise.race([
-        Promise.all([import("@gateway/runtime"), import("@gateway/storage")]),
-        interrupted.promise,
-      ]);
+    const [
+      { UsageProducer, UsageConsumer, usageChannel },
+      { createDatabase, migrate, Store, FundsStore },
+    ] = await Promise.race([
+      Promise.all([import("@gateway/runtime"), import("@gateway/storage")]),
+      interrupted.promise,
+    ]);
     const primary = await fixture.startRedis("primary");
     const replica = await fixture.startRedis("replica", primary);
     const primaryURL = primary.url;
@@ -125,6 +128,7 @@ async function verify() {
       (await replica.command("INFO", "replication")).includes("master_link_status:up"),
     );
     producer = new UsageProducer({
+      channel: usageChannel,
       url: primaryURL,
       namespace: `${label}:topology`,
       replicas: 1,
@@ -148,6 +152,7 @@ async function verify() {
     producer = undefined;
     await primary.command("CONFIG", "SET", "maxmemory-policy", "noeviction");
     producer = new UsageProducer({
+      channel: usageChannel,
       url: primaryURL,
       namespace: `${label}:topology`,
       replicas: 0,
@@ -252,6 +257,7 @@ async function verify() {
     let expected = 0;
     const consume = async (namespace: string, endpoint: string) => {
       consumer = new UsageConsumer({
+        channel: usageChannel,
         url: endpoint,
         namespace,
         replicas: 0,
@@ -271,6 +277,7 @@ async function verify() {
           ) === expected,
       );
       const inspector = new UsageProducer({
+        channel: usageChannel,
         url: endpoint,
         namespace,
         replicas: 0,
@@ -291,7 +298,13 @@ async function verify() {
       checkpoint = phase;
       const namespace = `${label}:${phase}`;
       const marker = await fixture.write(`${phase}.marker`, "");
-      producer = new UsageProducer({ url: primaryURL, namespace, replicas: 1, timeoutMs: 1000 });
+      producer = new UsageProducer({
+        channel: usageChannel,
+        url: primaryURL,
+        namespace,
+        replicas: 1,
+        timeoutMs: 1000,
+      });
       child = await fixture.startBun(
         `worker-${phase}`,
         import.meta.path,
@@ -324,7 +337,13 @@ async function verify() {
       checks.push(`SIGKILL ${phase}: recovered exactly once`);
     }
     const namespace = `${label}:AOF`;
-    producer = new UsageProducer({ url: primaryURL, namespace, replicas: 1, timeoutMs: 1000 });
+    producer = new UsageProducer({
+      channel: usageChannel,
+      url: primaryURL,
+      namespace,
+      replicas: 1,
+      timeoutMs: 1000,
+    });
     await producer.publish(await evidence());
     expected++;
     assert.equal((await producer.stats()).waiting, 1);
@@ -333,7 +352,13 @@ async function verify() {
     await Promise.all([primary.stop("SIGKILL"), replica.stop("SIGKILL")]);
     checkpoint = "primary AOF restart";
     await primary.restart();
-    producer = new UsageProducer({ url: primaryURL, namespace, replicas: 0, timeoutMs: 1000 });
+    producer = new UsageProducer({
+      channel: usageChannel,
+      url: primaryURL,
+      namespace,
+      replicas: 0,
+      timeoutMs: 1000,
+    });
     assert.equal((await producer.stats()).waiting, 1);
     producer.close();
     producer = undefined;
@@ -345,19 +370,37 @@ async function verify() {
     await consume(namespace, replicaURL);
     checks.push("acknowledged replica promotion retains evidence and exact settlement");
     checkpoint = "unsafe ingress rejection";
-    producer = new UsageProducer({ url: replicaURL, namespace, replicas: 1, timeoutMs: 200 });
+    producer = new UsageProducer({
+      channel: usageChannel,
+      url: replicaURL,
+      namespace,
+      replicas: 1,
+      timeoutMs: 200,
+    });
     await assert.rejects(producer.ready());
     producer.close();
     producer = undefined;
     checks.push("promoted node without required durable replica rejects admission");
     await replica.command("CONFIG", "SET", "appendfsync", "everysec");
-    producer = new UsageProducer({ url: replicaURL, namespace, replicas: 0, timeoutMs: 200 });
+    producer = new UsageProducer({
+      channel: usageChannel,
+      url: replicaURL,
+      namespace,
+      replicas: 0,
+      timeoutMs: 200,
+    });
     await assert.rejects(producer.ready());
     producer.close();
     producer = undefined;
     await replica.command("CONFIG", "SET", "appendfsync", "always");
     checks.push("unsafe persistence configuration rejects admission");
-    producer = new UsageProducer({ url: replicaURL, namespace, replicas: 0, timeoutMs: 1000 });
+    producer = new UsageProducer({
+      channel: usageChannel,
+      url: replicaURL,
+      namespace,
+      replicas: 0,
+      timeoutMs: 1000,
+    });
     await assert.rejects(
       producer.publish({
         ...(await evidence()),

@@ -1,6 +1,6 @@
 # Core 签名数字证据与双方结算实现单元
 
-本记录对应 T04.b.2b、追加版本 `2026111207`，在本机 main 工作区按里程碑推进（⑤ 依主规格 T04.b.2b 边界澄清追加），未提交。设计依据为 [Core 准入、单次发送许可与双方资金事务](enterprise-v2-core-execution.md) §4.1a、§7、§8；本文只记录实现中对该设计的具体落点和修订，不是整个企业迁移的完成声明。
+本记录对应 T04.b.2b，占用追加版本 `2026111207`（①–③，`30218b0` 已推送）与 `2026111208`（④ 认证列及⑥审查修复），在本机 main 工作区按里程碑推进（⑤ 依主规格 T04.b.2b 边界澄清追加）。设计依据为 [Core 准入、单次发送许可与双方资金事务](enterprise-v2-core-execution.md) §4.1a、§7、§8；本文只记录实现中对该设计的具体落点和修订，不是整个企业迁移的完成声明。
 
 ## 里程碑
 
@@ -11,6 +11,7 @@
 | ③      | `persist_core_evidence_groups_v1`：归一、争议、风险冻结、客户 selected 结算、事件交付及对外 DTO      | 已实现 |
 | ④      | Core client 数字证据签名、producer 撤销屏障、worker 提交后 ACK                                       | 已实现 |
 | ⑤      | Bun plugin-host 观察桥；真实 HTTP→插件/宿主→数字观察→签名→worker 首链                                | 已实现 |
+| ⑥      | 独立审查发现修复：v07 复原、v08 追加、最终性/重放/争议结清/NOWAIT/拒绝审计/告警/观察桥维度           | 已实现 |
 
 ## ① schema 落点
 
@@ -103,7 +104,7 @@
 | 重试与迟到旧 attempt               | 两 attempt 各占 30；新 attempt final 15 → 985/30/15 并 selected；旧 attempt 迟到 60+30：C=30 → 955/0/45；selected 不变，charge 仍一条 100                                                                      |
 | 伪造 owner session                 | 该组 REJECTED 且无 receipt；同批 NOT_EXECUTED 组 ACCEPTED，供应占用全额释放、客户 hold RELEASED                                                                                                                |
 
-未覆盖：`OVERFLOW` 路径需要单价使成本越过 38 位 atoms，而当前 fixture 路由费率固定为 1/3，本里程碑未构造该场景。
+未覆盖（③ 当时）：`OVERFLOW` 路径。⑥ 已用 38 位费率用例覆盖。
 
 `tests/integration/lifecycle.test.ts` 在 v2 基线上原用当前 `Store.claimEvents` 制造“升级前已 ACK”的历史状态；该查询现读取 `record_kind`，而生产 Gateway 启动时要求 schema 恰为 `SCHEMA_VERSION`，不会以新代码读旧 schema。因此升级前的 lease 改为只用 v2 表的 SQL，`ackEvents` 返回 1 及升级后 replay/claim 的断言保持不变。
 
@@ -145,7 +146,7 @@
 
 ### 对设计的修订（④）
 
-5. 认证字段并入 v2026111207，不另开版本：主规格规定本单元只独占追加 v07。该版本在 `30218b0` 已推送但未接纳；本次修改使 v07 校验和变化，任何已应用 `30218b0` 版 v07 的数据库须重建，不提供原地升级。
+5. ~~认证字段并入 v2026111207~~（已被⑥修订 11 取代）：④ 曾把认证列并入已推送的 v07 并改变其校验和；独立审查判定违反迁移不可变规则，⑥ 已把 v07 复原为 `30218b0` 内容，认证列改由 v2026111208 追加。
 6. 设计稿拟加的 `producer_session_id` 不单独建列，复用已有、带外键的 `origin_session_id`；producer 证书与 instance 由该 session 不可变派生。
 7. 签名在 storage 入口以 Node Ed25519 验证，PG 无原生 Ed25519；SQL 只接受该入口传入的已验证签名域摘要，并独立复核身份绑定。该入口仅供受信 Core 进程调用，函数对 PUBLIC 撤权。
 8. worker 模块暂置于 `apps/core-api/src/settlement/`；独立 core-worker 进程入口、角色与部署随 T04.c 三进程切分落地。
@@ -163,13 +164,13 @@
 
 既有 `tests/integration/core-settlement.test.ts` 改为由真实 core-client 签名，伪造用例改为同证书新 session 替原 owner 签名。`tests/integration/billing.test.ts` 中一处 `InstanceType<typeof UsageConsumer>` 类型标注因 consumer 变为泛型改为直接引用默认实例类型，断言未变。
 
-未覆盖：ingester 先取得 SHARE、撤销者等待的顺序（需在 SQL 函数内暂停的故障注入点）；instance 级撤销单独用例（session 与 certificate 已覆盖，三者走同一谓词与锁序）；多 owner 交叉组的锁序。
+未覆盖（④ 当时）：ingester 先取得 SHARE、撤销者等待的顺序；instance 级撤销；多 owner 交叉组的锁序。⑥ 已全部补齐：在测试控制的事务中调用 SQL 入口持锁。
 
 ## ⑤ plugin-host 观察桥与首链
 
 主规格 T04.b.2b 边界澄清要求：签名对象是宿主验证后的归一化数字观察，不在 core-client 另写协议解析；真实 HTTP→插件/宿主→观察→签名→worker 首链在本单元可测。
 
-`packages/plugin-host/src/evidence.ts` 的 `observeAttempt(attempt, { attemptId, permitEpoch, record })` 包装宿主 attempt 的 `invoke`/`transformJSON`：只观察宿主已按 ABI 与 capabilities 校验过的 `output`/`failure` 结果，不接受外部 JSON。累计 usage 快照或 finality 变化时生成一条 `source=execution`、revision 单调递增的观察；FINAL 时 `final_dimensions` 为本次报告的全部维度，否则为空；failure 携带的 usage 记为 UNKNOWN。`finish(outcome)` 以最后快照附 attempt/request 终态追加一条，只能调用一次。`record` 由调用方注入（签名与入队），观察在宿主结果返回调用方之前写入，写入失败即向调用方抛错，不先放出输出。plugin-host 不依赖 core-client，Go/WASM/SDK ABI 未变。
+`packages/plugin-host/src/evidence.ts` 的 `observeAttempt(attempt, { attemptId, permitEpoch, record })` 包装宿主 attempt 的 `invoke`/`transformJSON`：只观察宿主已按 ABI 与 capabilities 校验过的 `output`/`failure` 结果，不接受外部 JSON。累计 usage 快照或 finality 变化时生成一条 `source=execution`、revision 单调递增的观察；FINAL 时 `final_dimensions` 取本次报告中可完整定价的 kernel 定价维度（不含 `reasoning_tokens`；`cache_write_tokens` 聚合须两个 TTL 分区都报告），否则为空（⑥ 修订 13）；failure 携带的 usage 记为 UNKNOWN。`finish(outcome)` 以最后快照附 attempt/request 终态追加一条，只能调用一次。`record` 由调用方注入（签名与入队），观察在宿主结果返回调用方之前写入，写入失败即向调用方抛错，不先放出输出。plugin-host 不依赖 core-client，Go/WASM/SDK ABI 未变。
 
 首链测试只在测试装配中组合：Core admit→begin 取得 transient send，真实 WASM openai-chat 插件 prepare，经本地 HTTP 上游发送（校验收到的 bearer 为 begin 下发的供应凭证、模型映射与输出上限），response 经宿主转换为 FINAL 观察，`client.signEvidence` 签名后经 evidenceChannel 入队，settlement worker 提交后 ACK。Gateway 进程内的实际装配随 T04.c 三进程切换。
 
@@ -182,6 +183,50 @@
 
 首链测试的 worker 并发设为 1：两条观察分属两个 job，并发处理时若 revision 2 先提交，revision 1 按设计记为 STALE（已由 `core-settlement` 的 STALE 用例覆盖），资金结果相同；为使该用例期望确定而固定并发，不代表生产并发配置。
 
-未覆盖：SSE 流的端到端首链（桥的 SSE 行为已由单测覆盖）、settlement 独立产物检查（无独立 core-worker 进程入口，随 T04.c）。
+未覆盖：settlement 独立产物检查（无独立 core-worker 进程入口，随 T04.c）。SSE 端到端首链已于 ⑥ 补齐。
 
 ④⑤ 合计全量门禁（⑤ 完成后一次运行）：check 231 文件无类型错误；lint 0；fmt 334 文件；test:native 通过；test 288 通过 / 4073 断言 / 41 文件；test:integration 469 通过 / 13 失败 / 10534 断言 / 33 文件，失败集合与基线逐项一致（native-durability 环境缺口）；build 成功；test:plugin-artifact 15/24、pending 0；test:artifact Gateway 9、catalog 7、identity 7、financial 9。`test:durability`、`test:backup`、`test:container` 未运行。
+
+## ⑥ 独立审查与修复
+
+全新上下文审查者只读审查 `f05f703..3f2e1e0`，发现经实现者逐条对照代码核实。每条缺陷先写回归用例，再把修复前的函数体与约束临时换回验证其失败，最后恢复修复版确认通过。这次替换只在本地进行，复原后的校验和与 manifest 一致。
+
+| #   | 发现                                                                                                           | 处置                                                                                                                                                                                                           | 回归证据                                                                                                                 |
+| --- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 1   | FINAL 之后的 UNKNOWN/PARTIAL 输入把 CANONICAL 降为 PARTIAL，按量计价客户永不收费（违反 §7.1）                  | 快照最终性改由“本输入为 FINAL 或该 attempt 已有 ACCEPTED 的 FINAL/NOT_EXECUTED 收据”判定，再叠加 §345 客户口径                                                                                                 | `core-settlement-regressions`：修复前快照为 PARTIAL、无扣费；修复后 FINAL/FINAL、扣 60、客户 hold SETTLED、供应 985/0/15 |
+| 2A  | 原收据为 ESTIMATED/OVERFLOW/无头 STALE 时，同版本同内容重放违反 `core_receipt_outcome` 约束（23514），job 毒化 | v08 约束只要求 ACCEPTED 有 canonical；REVISION_REPLAY 精确指向原 RAW 与原 canonical（可空，§4.1a/字段定义允许），不再回落到当前头                                                                              | 修复前 23514；修复后 ESTIMATED→REVISION_REPLAY，原 RAW、canonical 空、无新快照                                           |
+| 2B  | 组内同版本两份副本、首份被判争议时，第二份按重放处理却读不到认领（23502）                                      | 预扫描后把组内副本的争议与隔离状态继承自首份，并按新事实处理；数据库中仍无锚时以可重试 BUSY 报错，不写半成品                                                                                                   | 修复前 23502；修复后两份均 CONFLICT、账户 RECONCILE_REQUIRED                                                             |
+| 3   | 证据组资金锁阻塞等待，违反 §5“只 try 不等待”                                                                   | 账户、钱包、余额、请求、客户 hold、attempt、permit、供应 hold 全部 NOWAIT，并按 §5 第 5 级把 billing_holds 移到 attempts 之前；身份锁排序加 `COLLATE "C"`                                                      | 修复前约 2016ms 后才超时；修复后立即返回 55P03，未写收据，释放后重投正常结算                                             |
+| 4   | 观察桥按字段出现加全局 FINAL 推断 `final_dimensions`（违反 §7.1）                                              | 只取 kernel 定价维度：`reasoning_tokens` 不计入；`cache_write_tokens` 聚合仅在两个 TTL 分区都报告时计入                                                                                                        | `evidence.test.ts` 新增 2 条，修复前失败                                                                                 |
+| 4b  | 记录失败后去重标记已更新，同一观察再也不会被记录                                                               | 记录成功后才更新去重标记                                                                                                                                                                                       | 新增 1 条，修复前失败                                                                                                    |
+| 5   | 已推送 v07 的校验和被改                                                                                        | v07 复原为 `30218b0` 内容；v2026111208 追加认证列、拒绝审计表与全部函数修复。升级前若已有 `core_evidence_receipts` 行（只可能来自未签名的旧 v07）则以 `core_evidence_receipts_unsigned_history` 拒绝并整体回滚 | `core-execution-upgrade` 新增 2 条：空表升级保留前 6 版校验和；有旧收据时拒绝且回滚                                      |
+| 6   | 争议未决时供应 hold 仍被标为 SETTLED 并写 final_cost（违反 §7.2）                                              | SETTLED 与 final_cost 追加“无争议、无溢出”条件                                                                                                                                                                 | 修复前保持 SETTLED/15；修复后 PARTIAL、final_cost 空、RECONCILE_REQUIRED                                                 |
+| 7   | 组内“30、31、30”三方主张中，第三份被接受为 canonical                                                           | 组内争议维度标记为 contested，之后的同维度主张一律判争议                                                                                                                                                       | 修复前出现 CANONICAL；修复后三份 CONFLICT、无 CANONICAL                                                                  |
+| 8   | 签名无效/主体不符没有技术审计；UNGRANTED 隔离无告警；身份锁未按 ASCII 序                                       | 新表 `core_evidence_rejections`（仅标识字段，单批 ≤8192 行，不可变，对 PUBLIC 撤权），由 SQL 入口在同一事务内写入；worker 新增 `onQuarantined`；排序 `COLLATE "C"`                                             | 审计 1 条（修复前失败）；隔离告警由 worker 用例覆盖                                                                      |
+| 9   | 任务重试时 REJECTED 组重复告警；队列不传 channel 时静默落到 usage-v1（隐式兼容层）                             | 拒绝告警只在本次确认（ACK）时发出；隔离告警只计非重复收据；`channel` 改为必填，24 处旧调用显式传 `usageChannel`                                                                                                | worker 新增 1 条：同一 job 重试两次，拒绝告警只发一次（修复前失败）                                                      |
+| 10  | 供应敞口任何异常都被记为数值溢出                                                                               | 只捕获 `numeric_value_out_of_range` 与 `exact_billing_price` 的溢出信号（`price exceeds amount range`），其他异常让整组报错重试；另检查 C+R 不超过 38 位                                                       | 38 位费率用例：OVERFLOW、`COST_OVERFLOW`、RAW+DISPUTED、账户冻结。非溢出异常经公开入口不可达，只经代码审阅               |
+
+### 对设计的修订（⑥）
+
+11. 本单元占用 v2026111207 与 v2026111208，偏离主规格“只追加 v07”的表述。原因：v07 已推送，不可再改；v08 的升级保护只接受空收据表。
+12. 规格 §4.1a 的“必须同时替换”（修订 2：旧 `(attempt_id,source)` 部分唯一索引、旧 ON CONFLICT 仲裁和旧 producer 保留到 T11/T16）按审查建议提交用户裁决；用户于 2026-11-13 指示按推荐方案处理，接纳推迟，并登记于主规格。
+13. 插件 ABI 只有整份结果级的 finality，没有逐维度最终性。观察桥按“定价维度 + 完整分区”规则推导，是在不改 ABI 前提下能满足 §7.1 的最小实现。逐维度 final 事实需要 ABI 扩展，移交 T08/T09 的 SDK 演进，不在本单元修改 Go/WASM/SDK ABI。
+14. 拒绝审计在重试时可能为同一拒绝组写多行（每次尝试一行，最多 10 次），仍然有界；不为去重另建状态。
+15. ② 记录曾称 §7.4 算例经 ③ 的 `persist` 验证，实际只验证到私有暴露函数；⑥ 补齐 A、B、C 三例，按原文常数从签名收证一路验证到余额与 journal。C 例因 chat 准入要求输入上界，加入显式零费率 `input_tokens`（§7.3 允许），E 不变。fixture `bootstrap` 新增可选 `supplier` 参数，用于指定供应价格与上界。
+
+### ⑥ 验证（新增与改动用例）
+
+| 用例                                                            | 结果                                                                                                                                                                                                                                                                      |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/integration/core-settlement-regressions.test.ts`（新增） | 11 通过：发现 1、2A、2B、3、6、7、8 各 1 条（共 7 条，修复前全部失败）；§7.4 A（1000/32/0→998/30/2→987/0/13）、B（50/40/0→20/20/30 冻结→-5/0/55→充值后 95 仍冻结）、C（500/100→500/180→480/160/20→450/100/50→420/0/80，selected 为重试 attempt、客户只扣一次）；38 位溢出 |
+| `tests/integration/core-evidence-authentication.test.ts`        | 7 通过（新增 2）：ingester 先持身份 SHARE 时 instance 撤销等待其提交，之后的精确重投返回原 ACCEPTED、新事实 SECURITY_REVOKED 隔离（989/10/11）；两个 producer 同组，任一证书行忙则整组 55P03 回滚无收据（1000/60/0），重试后两条均 ACCEPTED（970/0/30）                   |
+| `tests/integration/core-settlement-worker.test.ts`              | 2 通过（新增 1，修复前失败）                                                                                                                                                                                                                                              |
+| `tests/integration/core-first-chain.test.ts`                    | 2 通过：JSON 与真实 SSE（分 97 字节切片喂入，上游收到 `stream:true` 与 `include_usage`），两路结算均为 985/0/15、扣 100                                                                                                                                                   |
+| `tests/integration/core-execution-upgrade.test.ts`              | 10 通过（新增 2；两处“已应用版本数”由 6 改为 7，原因是追加了 v08）                                                                                                                                                                                                        |
+| `packages/plugin-host/src/__test__/evidence.test.ts`            | 7 通过（新增 3，修复前失败）                                                                                                                                                                                                                                              |
+
+共享测试辅助（`granted`、`event`、`supplier` 等）从 `core-settlement.test.ts` 移至公共的 `tests/support/core-settlement.ts`。
+
+仍未覆盖：单批 128 组在 `statement_timeout=8000` 下的整体超时（NOWAIT 后不再因锁等待放大，未单独压测，留 T17）；非溢出的供应敞口异常（经公开入口不可达）。
+
+⑥ 全量门禁：check 233 文件无类型错误；lint 0；fmt 337 文件；test:native 通过；test 291 通过 / 4083 断言 / 41 文件；build 成功；test:plugin-artifact 15/24、pending 0；test:artifact Gateway、catalog、identity 7、financial 9 全部通过；test:durability 通过（本机原生 PostgreSQL 17.11 / Redis 7.4.12，位于 `.local/toolchain`）。test:integration 第一次运行 498 通过 / 1 失败：`plugin-catalog-upgrade` 中重复迁移后的版本数仍断言为 6，追加 v08 后应为 7。修正后整套重跑：499 通过 / 0 失败 / 10754 断言 / 34 文件，原 13 项 native-durability 环境失败已随原生工具就位而通过。`test:backup` 未通过：开发库 `DATABASE_URL` 仍停在 2026111006，脚本第一步版本核对即失败，且脚本读取的是旧单账本表，需在 T12/T14 迁移，本单元未改动开发库。`test:container` 未运行。

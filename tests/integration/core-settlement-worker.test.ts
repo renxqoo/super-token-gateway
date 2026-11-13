@@ -125,3 +125,91 @@ test("the settlement worker acknowledges a job only after its group commits and 
       producer.close();
     }
   }));
+
+test("rejections in a retried job are alerted once on acknowledgement and an ungranted fact raises a quarantine alert once", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap(),
+      client = f.client();
+    await client.startup();
+    const delivered = await prepareFinancialAdmission(setup, client);
+    const admission = (await delivered.admit()) as ExecutionReply;
+    await client.execution("execution_begin_v1", delivered.beginData(admission.receipt), {
+      deadlineAt: delivered.deadline,
+    });
+    const ungranted = await prepareFinancialAdmission(setup, client);
+    await ungranted.admit();
+    const instance = String(
+      (
+        await db`SELECT gateway_instance_id FROM execution_permits WHERE attempt_id=${delivered.attemptId}`
+      )[0].gateway_instance_id,
+    );
+    const sign = (attempt: string) =>
+      client.signEvidence({
+        event_id: crypto.randomUUID(),
+        attempt_id: attempt,
+        permit_epoch: "1",
+        source: "execution",
+        source_revision: "1",
+        finality: "FINAL",
+        usage: { input_tokens: "30", output_tokens: "15" },
+        final_dimensions: ["input_tokens", "output_tokens"],
+      });
+    const fact = sign(delivered.attemptId);
+    const tampered = { ...sign(delivered.attemptId), source_revision: "2" };
+    const options = {
+      url: process.env.QUEUE_REDIS_URL!,
+      namespace: `core-evidence:${crypto.randomUUID()}`,
+      replicas: 0,
+      timeoutMs: 1000,
+    };
+    const producer = new UsageProducer({ ...options, channel: evidenceChannel });
+    const alerts = { rejected: [] as number[], quarantined: [] as number[] };
+    const worker = createSettlementWorker({
+      ...options,
+      db,
+      onRejected: (count) => alerts.rejected.push(count),
+      onQuarantined: (count) => alerts.quarantined.push(count),
+    });
+    const drained = async () =>
+      Object.values(await producer.stats()).reduce((sum, count) => sum + count, 0) === 0;
+    try {
+      await producer.ready();
+      await worker.ready();
+      const held = new Error("release identity lock");
+      await db
+        .begin(async (tx) => {
+          await tx`SELECT 1 FROM internal_service_instances WHERE service='gateway' AND instance_id=${instance} FOR UPDATE`;
+          await Promise.all([
+            producer.publish({ events: [tampered] }),
+            producer.publish({ events: [fact] }),
+          ]);
+          await eventually(async () => (await producer.stats()).delayed === 1, "first retry");
+          await eventually(
+            async () =>
+              (
+                await db`SELECT count(*)::integer n FROM core_evidence_rejections WHERE event_id=${tampered.event_id}`
+              )[0].n >= 2,
+            "second attempt",
+          );
+          expect(alerts.rejected).toEqual([]);
+          throw held;
+        })
+        .catch((error) => {
+          if (error !== held) throw error;
+        });
+      await eventually(drained, "acknowledgement");
+      expect(alerts.rejected).toEqual([1]);
+
+      await producer.publish({ events: [sign(ungranted.attemptId)] });
+      await eventually(drained, "quarantine acknowledgement");
+      expect(alerts.quarantined).toEqual([1]);
+      expect(
+        (
+          await db`SELECT outcome,authentication_reason FROM core_evidence_receipts WHERE attempt_id=${ungranted.attemptId}`
+        )[0],
+      ).toEqual({ outcome: "QUARANTINED", authentication_reason: "UNGRANTED" });
+    } finally {
+      await worker.close();
+      producer.close();
+    }
+  }));

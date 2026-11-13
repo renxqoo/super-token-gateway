@@ -118,7 +118,7 @@ test("v5 to financial append preserves historical wallets requests and null cata
         ),
       ).toEqual(before.commands);
       expect((await db`SELECT count(*)::integer n FROM upstream_holds`)[0].n).toBe(0);
-      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(6);
+      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(7);
     },
     { max: 4, registry: ".local/T04b2a-resources.jsonl" },
   ));
@@ -225,7 +225,7 @@ test("signed settlement append keeps gateway usage visible and its per-source un
       )[0].result["0"];
       expect(replay.status).toBe("REPLAY");
       expect((await db`SELECT count(*)::integer n FROM usage_event_index`)[0].n).toBe(1);
-      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(6);
+      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(7);
     },
     { max: 4, registry: ".local/T04b2b-resources.jsonl" },
   ));
@@ -243,6 +243,45 @@ test("signed settlement append refuses historical supplier costs without evidenc
         (await db`SELECT to_regclass('core_evidence_receipts') relation`)[0].relation,
       ).toBeNull();
       expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(5);
+    },
+    { max: 4, registry: ".local/T04b2b-resources.jsonl" },
+  ));
+
+test("authentication append upgrades an empty signed settlement schema without rewriting its version", () =>
+  withDatabase(
+    async (db) => {
+      await install(db, 6);
+      const before = await db`SELECT version,checksum FROM schema_migrations ORDER BY version`;
+      await migrate(db);
+      expect(
+        (await db`SELECT version,checksum FROM schema_migrations ORDER BY version`).slice(0, 6),
+      ).toEqual(before);
+      expect((await db`SELECT max(version) v FROM schema_migrations`)[0].v).toBe(2026111208);
+      expect(
+        (
+          await db`SELECT array_agg(column_name::text ORDER BY column_name) c FROM information_schema.columns WHERE table_name='core_evidence_receipts' AND column_name IN ('authentication_disposition','signature','signature_payload_digest')`
+        )[0].c,
+      ).toEqual(["authentication_disposition", "signature", "signature_payload_digest"]);
+      expect((await db`SELECT to_regclass('core_evidence_rejections')::text r`)[0].r).toBe(
+        "core_evidence_rejections",
+      );
+    },
+    { max: 4, registry: ".local/T04b2b-resources.jsonl" },
+  ));
+
+test("authentication append refuses unsigned receipts from the earlier signed settlement version", () =>
+  withDatabase(
+    async (db) => {
+      await install(db, 6);
+      await db.begin(async (tx) => {
+        await tx`SET LOCAL session_replication_role=replica`;
+        await tx`INSERT INTO core_evidence_receipts(id,origin_identity,origin_incarnation,origin_session_id,event_id,attempt_id,source,source_revision,body_digest,event_claim,revision_claim,outcome,finality,raw_evidence_id,risk_dimensions) VALUES(${crypto.randomUUID()},'gateway:old',${crypto.randomUUID()},${crypto.randomUUID()},${crypto.randomUUID()},${crypto.randomUUID()},'execution',1,repeat('a',64),true,true,'ESTIMATED','ESTIMATED',${crypto.randomUUID()},'{}')`;
+      });
+      const failure = await migrate(db).catch((error) => error as Error);
+      expect((failure as Error).message).toContain("core_evidence_receipts_unsigned_history");
+      expect((await db`SELECT count(*)::integer n FROM core_evidence_receipts`)[0].n).toBe(1);
+      expect((await db`SELECT to_regclass('core_evidence_rejections') r`)[0].r).toBeNull();
+      expect((await db`SELECT max(version) v FROM schema_migrations`)[0].v).toBe(2026111207);
     },
     { max: 4, registry: ".local/T04b2b-resources.jsonl" },
   ));

@@ -15,7 +15,27 @@ async function eventually(check: () => Promise<boolean>, label: string) {
   }
 }
 
-test("real upstream HTTP through the plugin host is signed, queued and settled for both parties exactly once", () =>
+const jsonReply =
+  '{"id":"chain","model":"synthetic","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":30,"completion_tokens":15}}';
+const sseReply = [
+  { id: "chain", model: "synthetic", choices: [{ index: 0, delta: { content: "o" } }] },
+  {
+    id: "chain",
+    model: "synthetic",
+    choices: [{ index: 0, delta: { content: "k" }, finish_reason: "stop" }],
+  },
+  {
+    id: "chain",
+    model: "synthetic",
+    choices: [],
+    usage: { prompt_tokens: 30, completion_tokens: 15 },
+  },
+]
+  .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`)
+  .concat("data: [DONE]\n\n")
+  .join("");
+
+const chain = (stream: boolean) =>
   withFinancial(async (f, db) => {
     const setup = await f.bootstrap(),
       client = f.client();
@@ -39,10 +59,9 @@ test("real upstream HTTP through the plugin host is signed, queued and settled f
           authorization: request.headers.get("authorization"),
           body: await request.json(),
         });
-        return new Response(
-          '{"id":"chain","model":"synthetic","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":30,"completion_tokens":15}}',
-          { headers: { "content-type": "application/json" } },
-        );
+        return new Response(stream ? sseReply : jsonReply, {
+          headers: { "content-type": stream ? "text/event-stream" : "application/json" },
+        });
       },
     });
     const host = createPluginAttempts(
@@ -85,7 +104,11 @@ test("real upstream HTTP through the plugin host is signed, queued and settled f
           "prepare",
           { protocol: "chat", operation: "chat", model: setup.model },
           new TextEncoder().encode(
-            JSON.stringify({ model: setup.model, messages: [{ role: "user", content: "合成" }] }),
+            JSON.stringify({
+              model: setup.model,
+              messages: [{ role: "user", content: "合成" }],
+              ...(stream ? { stream: true } : {}),
+            }),
           ),
         );
         if (outbound.result.kind !== "prepared" || !outbound.body)
@@ -99,12 +122,24 @@ test("real upstream HTTP through the plugin host is signed, queued and settled f
           },
           body: outbound.body.slice(),
         });
-        const inbound = await bridge.transformJSON(
-          "response",
-          { model: setup.model },
-          new Uint8Array(await response.arrayBuffer()),
-        );
-        expect(inbound.result.kind).toBe("output");
+        if (stream) {
+          await bridge.invoke(
+            "stream_open",
+            new TextEncoder().encode(JSON.stringify({ model: setup.model })),
+          );
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          for (let offset = 0; offset < bytes.length; offset += 97)
+            expect(
+              (await bridge.invoke("stream_feed", bytes.slice(offset, offset + 97))).kind,
+            ).toBe("output");
+        } else {
+          const inbound = await bridge.transformJSON(
+            "response",
+            { model: setup.model },
+            new Uint8Array(await response.arrayBuffer()),
+          );
+          expect(inbound.result.kind).toBe("output");
+        }
         await bridge.finish({ attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" });
       } finally {
         bridge.dispose();
@@ -126,7 +161,11 @@ test("real upstream HTTP through the plugin host is signed, queued and settled f
 
     expect(received).toHaveLength(1);
     expect(received[0]!.authorization).toBe("Bearer synthetic-upstream-secret");
-    expect(received[0]!.body).toMatchObject({ model: "synthetic", max_completion_tokens: 30 });
+    expect(received[0]!.body).toMatchObject({
+      model: "synthetic",
+      max_completion_tokens: 30,
+      ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
+    });
     expect(
       await db`SELECT outcome,authentication_disposition,source_revision::text FROM core_evidence_receipts WHERE attempt_id=${prepared.attemptId} ORDER BY source_revision`,
     ).toEqual([
@@ -157,4 +196,10 @@ test("real upstream HTTP through the plugin host is signed, queued and settled f
         row.cost_atoms,
       ])[0],
     ).toEqual(["FINAL", { input_tokens: "30", output_tokens: "15" }, "15"]);
-  }));
+  });
+
+test("real upstream HTTP JSON through the plugin host is signed, queued and settled for both parties exactly once", () =>
+  chain(false));
+
+test("a real upstream SSE stream through the plugin host settles from its final usage frame exactly once", () =>
+  chain(true));

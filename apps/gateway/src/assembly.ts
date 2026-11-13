@@ -7,6 +7,7 @@ import {
   MemoryBudget,
   UsageProducer,
   createTransport,
+  usageChannel,
 } from "@gateway/runtime";
 import { Metering } from "./usage.ts";
 import type { Config } from "./config.ts";
@@ -28,6 +29,7 @@ export async function assemble(config: Config): Promise<Dependencies> {
         "Incompatible database schema; only the current durable-queue contract is supported",
       );
     producer = new UsageProducer({
+      channel: usageChannel,
       url: config.QUEUE_REDIS_URL,
       namespace: config.REDIS_NAMESPACE,
       replicas: config.QUEUE_REQUIRED_REPLICAS,

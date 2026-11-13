@@ -1,4 +1,4 @@
-import { canonical } from "@gateway/kernel";
+import { canonical, dimensions } from "@gateway/kernel";
 import type { AbiResult, Hook } from "@gateway/plugin-sdk";
 import type { createPluginAttempts } from "./attempts.ts";
 
@@ -23,6 +23,15 @@ export type AttemptOutcome = Pick<
   "attempt_state" | "request_state" | "error_code" | "provider_request_id"
 >;
 
+function completeDimensions(usage: Record<string, string>): string[] {
+  const partitioned =
+    usage.cache_write_5m_tokens !== undefined && usage.cache_write_1h_tokens !== undefined;
+  return Object.keys(usage)
+    .filter((key) => (dimensions as readonly string[]).includes(key))
+    .filter((key) => key !== "cache_write_tokens" || partitioned)
+    .sort();
+}
+
 export function observeAttempt(
   attempt: PluginAttempt,
   binding: {
@@ -46,7 +55,7 @@ export function observeAttempt(
       source_revision: revision.toString(),
       finality,
       usage,
-      final_dimensions: finality === "FINAL" ? Object.keys(usage).sort() : [],
+      final_dimensions: finality === "FINAL" ? completeDimensions(usage) : [],
       ...outcome,
     });
   }
@@ -60,10 +69,10 @@ export function observeAttempt(
     };
     const key = canonical(next);
     if (key === last) return;
-    last = key;
     usage = next.usage;
     finality = next.finality;
     await emit();
+    last = key;
   }
   return {
     async invoke(hook: Hook, payload?: Uint8Array, signal?: AbortSignal) {

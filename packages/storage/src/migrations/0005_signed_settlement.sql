@@ -23,16 +23,10 @@ CREATE TABLE "core_evidence_receipts" (
 	"conflict_id" uuid,
 	"risk_dimensions" text[] NOT NULL,
 	"numeric_fault" text,
-	"authentication_disposition" text NOT NULL,
-	"authentication_reason" text NOT NULL,
-	"producer_key_sha256" text NOT NULL,
-	"signature_version" integer NOT NULL,
-	"signature" "bytea" NOT NULL,
-	"signature_payload_digest" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "core_receipt_delivery" UNIQUE("origin_identity","event_id","body_digest"),
 	CONSTRAINT "core_receipt_source" CHECK (source IN ('execution','execution_outcome','recovery_interruption','async_partial','async_final','batch_completed','batch_cancelled','batch_failed','provider_invoice') AND source_revision>=1 AND body_digest ~ '^[a-f0-9]{64}$' AND origin_identity ~ '^gateway:[A-Za-z0-9_-]{1,100}$'),
-	CONSTRAINT "core_receipt_outcome" CHECK (outcome IN ('ACCEPTED','STALE','ESTIMATED','REVISION_REPLAY','CONFLICT','OVERFLOW','QUARANTINED') AND finality IN ('FINAL','PARTIAL','UNKNOWN','ESTIMATED','NOT_EXECUTED')
+	CONSTRAINT "core_receipt_outcome" CHECK (outcome IN ('ACCEPTED','STALE','ESTIMATED','REVISION_REPLAY','CONFLICT','OVERFLOW') AND finality IN ('FINAL','PARTIAL','UNKNOWN','ESTIMATED','NOT_EXECUTED')
         AND (outcome<>'CONFLICT' OR (conflict_id IS NOT NULL AND disputed_evidence_id IS NOT NULL AND NOT revision_claim))
         AND (outcome<>'OVERFLOW' OR (numeric_fault='COST_OVERFLOW' AND disputed_evidence_id IS NOT NULL))
         AND (outcome NOT IN ('ACCEPTED','REVISION_REPLAY') OR (canonical_evidence_id IS NOT NULL AND disputed_evidence_id IS NULL AND conflict_id IS NULL))
@@ -41,12 +35,7 @@ CREATE TABLE "core_evidence_receipts" (
         AND (request_state IS NULL OR request_state IN ('SUCCEEDED','FAILED','CANCELLED','UNKNOWN'))
         AND (error_code IS NULL OR error_code ~ '^[a-z][a-z0-9_]{0,79}$')
         AND (provider_request_id IS NULL OR provider_request_id ~ '^[A-Za-z0-9._:/-]{1,256}$')
-        AND cardinality(risk_dimensions)<=16),
-	CONSTRAINT "core_receipt_authentication" CHECK (authentication_disposition IN ('VERIFIED','QUARANTINED') AND authentication_reason IN ('NORMAL','SECURITY_REVOKED','UNGRANTED')
-        AND (authentication_disposition='VERIFIED')=(authentication_reason='NORMAL')
-        AND (authentication_disposition='QUARANTINED')=(outcome='QUARANTINED')
-        AND (outcome<>'QUARANTINED' OR (canonical_evidence_id IS NULL AND disputed_evidence_id IS NULL AND conflict_id IS NULL AND NOT revision_claim AND cardinality(risk_dimensions)=0))
-        AND producer_key_sha256 ~ '^[a-f0-9]{64}$' AND signature_version=1 AND octet_length(signature)=64 AND signature_payload_digest ~ '^[a-f0-9]{64}$')
+        AND cardinality(risk_dimensions)<=16)
 );
 --> statement-breakpoint
 ALTER TABLE "usage_event_index" DROP CONSTRAINT "usage_events_attempt_id_source_key";--> statement-breakpoint

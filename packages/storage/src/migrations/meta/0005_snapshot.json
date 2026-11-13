@@ -5092,42 +5092,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "authentication_disposition": {
-          "name": "authentication_disposition",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "authentication_reason": {
-          "name": "authentication_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "producer_key_sha256": {
-          "name": "producer_key_sha256",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "signature_version": {
-          "name": "signature_version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "signature": {
-          "name": "signature",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "signature_payload_digest": {
-          "name": "signature_payload_digest",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -5284,11 +5248,7 @@
         },
         "core_receipt_outcome": {
           "name": "core_receipt_outcome",
-          "value": "outcome IN ('ACCEPTED','STALE','ESTIMATED','REVISION_REPLAY','CONFLICT','OVERFLOW','QUARANTINED') AND finality IN ('FINAL','PARTIAL','UNKNOWN','ESTIMATED','NOT_EXECUTED')\n        AND (outcome<>'CONFLICT' OR (conflict_id IS NOT NULL AND disputed_evidence_id IS NOT NULL AND NOT revision_claim))\n        AND (outcome<>'OVERFLOW' OR (numeric_fault='COST_OVERFLOW' AND disputed_evidence_id IS NOT NULL))\n        AND (outcome NOT IN ('ACCEPTED','REVISION_REPLAY') OR (canonical_evidence_id IS NOT NULL AND disputed_evidence_id IS NULL AND conflict_id IS NULL))\n        AND (numeric_fault IS NULL OR numeric_fault='COST_OVERFLOW')\n        AND (attempt_state IS NULL OR attempt_state IN ('SUCCEEDED','FAILED','UNKNOWN','PARTIAL','NOT_EXECUTED'))\n        AND (request_state IS NULL OR request_state IN ('SUCCEEDED','FAILED','CANCELLED','UNKNOWN'))\n        AND (error_code IS NULL OR error_code ~ '^[a-z][a-z0-9_]{0,79}$')\n        AND (provider_request_id IS NULL OR provider_request_id ~ '^[A-Za-z0-9._:/-]{1,256}$')\n        AND cardinality(risk_dimensions)<=16"
-        },
-        "core_receipt_authentication": {
-          "name": "core_receipt_authentication",
-          "value": "authentication_disposition IN ('VERIFIED','QUARANTINED') AND authentication_reason IN ('NORMAL','SECURITY_REVOKED','UNGRANTED')\n        AND (authentication_disposition='VERIFIED')=(authentication_reason='NORMAL')\n        AND (authentication_disposition='QUARANTINED')=(outcome='QUARANTINED')\n        AND (outcome<>'QUARANTINED' OR (canonical_evidence_id IS NULL AND disputed_evidence_id IS NULL AND conflict_id IS NULL AND NOT revision_claim AND cardinality(risk_dimensions)=0))\n        AND producer_key_sha256 ~ '^[a-f0-9]{64}$' AND signature_version=1 AND octet_length(signature)=64 AND signature_payload_digest ~ '^[a-f0-9]{64}$'"
+          "value": "outcome IN ('ACCEPTED','STALE','ESTIMATED','REVISION_REPLAY','CONFLICT','OVERFLOW') AND finality IN ('FINAL','PARTIAL','UNKNOWN','ESTIMATED','NOT_EXECUTED')\n        AND (outcome<>'CONFLICT' OR (conflict_id IS NOT NULL AND disputed_evidence_id IS NOT NULL AND NOT revision_claim))\n        AND (outcome<>'OVERFLOW' OR (numeric_fault='COST_OVERFLOW' AND disputed_evidence_id IS NOT NULL))\n        AND (outcome NOT IN ('ACCEPTED','REVISION_REPLAY') OR (canonical_evidence_id IS NOT NULL AND disputed_evidence_id IS NULL AND conflict_id IS NULL))\n        AND (numeric_fault IS NULL OR numeric_fault='COST_OVERFLOW')\n        AND (attempt_state IS NULL OR attempt_state IN ('SUCCEEDED','FAILED','UNKNOWN','PARTIAL','NOT_EXECUTED'))\n        AND (request_state IS NULL OR request_state IN ('SUCCEEDED','FAILED','CANCELLED','UNKNOWN'))\n        AND (error_code IS NULL OR error_code ~ '^[a-z][a-z0-9_]{0,79}$')\n        AND (provider_request_id IS NULL OR provider_request_id ~ '^[A-Za-z0-9._:/-]{1,256}$')\n        AND cardinality(risk_dimensions)<=16"
         }
       },
       "isRLSEnabled": false

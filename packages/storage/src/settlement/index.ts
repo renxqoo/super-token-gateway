@@ -13,7 +13,6 @@ import { sha256 } from "@gateway/runtime/crypto";
 import { z } from "zod";
 
 const resultsSchema = z.array(coreEvidenceGroupResultSchema);
-const rejected = { status: "REJECTED", error: "evidence_signature_invalid" } as const;
 
 function authenticate(event: SignedCoreEvidenceEventV1, key: KeyObject | undefined) {
   if (!key) return undefined;
@@ -53,22 +52,26 @@ export function createSettlementStore(db: SQL) {
           const body = authenticate(event, session?.key);
           return body && session ? { ...body, producer_key_sha256: session.digest } : undefined;
         });
-        return events.every((event) => event !== undefined) ? { events } : undefined;
+        return events.every((event) => event !== undefined)
+          ? { events }
+          : {
+              rejected: "evidence_signature_invalid",
+              events: group.events.map((event) => ({
+                origin_identity: event.origin_identity,
+                origin_session_id: event.origin_session_id,
+                event_id: event.event_id,
+                attempt_id: event.attempt_id,
+              })),
+            };
       });
-      const accepted = verified.filter((group) => group !== undefined);
-      const persisted =
-        accepted.length === 0
-          ? []
-          : resultsSchema.parse(
-              await db.begin(
-                async (tx) =>
-                  (await tx`SELECT persist_core_evidence_groups_v1(${accepted}::jsonb) value`)[0]
-                    .value,
-              ),
-            );
-      if (persisted.length !== accepted.length) throw new Error("evidence_batch_result_mismatch");
-      let next = 0;
-      return verified.map((group) => (group ? persisted[next++]! : rejected));
+      const persisted = resultsSchema.parse(
+        await db.begin(
+          async (tx) =>
+            (await tx`SELECT persist_core_evidence_groups_v1(${verified}::jsonb) value`)[0].value,
+        ),
+      );
+      if (persisted.length !== verified.length) throw new Error("evidence_batch_result_mismatch");
+      return persisted;
     },
   };
 }

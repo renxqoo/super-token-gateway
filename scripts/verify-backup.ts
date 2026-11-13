@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { chmod, mkdir } from "node:fs/promises";
 import { createDatabase, SCHEMA_VERSION } from "@gateway/storage";
-import { UsageProducer } from "@gateway/runtime";
+import { UsageProducer, usageChannel } from "@gateway/runtime";
 import { loadConfig } from "../apps/gateway/src/config.ts";
 if (!Bun.argv.includes("--quiesced"))
   throw new Error(
@@ -10,6 +10,7 @@ if (!Bun.argv.includes("--quiesced"))
   );
 const config = loadConfig();
 const queue = new UsageProducer({
+  channel: usageChannel,
   url: config.QUEUE_REDIS_URL,
   namespace: config.REDIS_NAMESPACE,
   replicas: config.QUEUE_REQUIRED_REPLICAS,

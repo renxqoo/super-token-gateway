@@ -1366,7 +1366,7 @@ test("conflicting FINAL evidence freezes funds even after settlement until expli
   expect(w.spent_atoms).toBe("59");
 });
 test("strict BullMQ evidence retries PG failure and duplicate deliveries debit once", async () => {
-  const { UsageProducer, UsageConsumer } = await import("@gateway/runtime");
+  const { UsageProducer, UsageConsumer, usageChannel } = await import("@gateway/runtime");
   const p = await project();
   await credit(p.id, "1000");
   const q = await admit(p.credential);
@@ -1378,8 +1378,9 @@ test("strict BullMQ evidence retries PG failure and duplicate deliveries debit o
   };
   let failing = true;
   let deliveries = 0;
-  const producer = new UsageProducer(options);
+  const producer = new UsageProducer({ ...options, channel: usageChannel });
   const consumer = new UsageConsumer({
+    channel: usageChannel,
     ...options,
     process: async (events) => {
       deliveries++;
@@ -1605,7 +1606,7 @@ test("explicit RELEASE with a captured pricing reference releases the original h
 });
 
 test("a retained failed usage job is alerted on but does not close admission until failed jobs reach their own bound; teardown leaves no queue metadata", async () => {
-  const { UsageProducer } = await import("@gateway/runtime");
+  const { UsageProducer, usageChannel } = await import("@gateway/runtime");
   const id = crypto.randomUUID();
   const namespace = `test-usage:failed:${id}`;
   const neighborNamespace = `test-usage:failed-neighbor:${id}`;
@@ -1620,9 +1621,13 @@ test("a retained failed usage job is alerted on but does not close admission unt
     timeoutMs: 1000,
     maxPendingJobs: 2,
   };
-  const producer = new UsageProducer(options);
+  const producer = new UsageProducer({ ...options, channel: usageChannel });
   const redis = new Bun.RedisClient(options.url);
-  const neighbor = new UsageProducer({ ...options, namespace: neighborNamespace });
+  const neighbor = new UsageProducer({
+    channel: usageChannel,
+    ...options,
+    namespace: neighborNamespace,
+  });
   let neighborKeys: string[] = [];
   try {
     try {
@@ -1663,7 +1668,11 @@ test("a retained failed usage job is alerted on but does not close admission unt
     }
     expect(await cleanup.keys(options.url)).toHaveLength(0);
     expect(await neighborCleanup.keys(options.url)).toEqual(neighborKeys);
-    const reader = new UsageProducer({ ...options, namespace: neighborNamespace });
+    const reader = new UsageProducer({
+      channel: usageChannel,
+      ...options,
+      namespace: neighborNamespace,
+    });
     try {
       await reader.ready();
       expect((await reader.stats()).waiting).toBe(1);
@@ -1676,7 +1685,7 @@ test("a retained failed usage job is alerted on but does not close admission unt
 });
 
 test("queue backlog blocks new admission while accepting facts for already-admitted calls", async () => {
-  const { UsageProducer, UsageConsumer } = await import("@gateway/runtime");
+  const { UsageProducer, UsageConsumer, usageChannel } = await import("@gateway/runtime");
   const p = await project();
   await credit(p.id, "1000");
   const requests = await Promise.all([admit(p.credential), admit(p.credential)]);
@@ -1687,7 +1696,7 @@ test("queue backlog blocks new admission while accepting facts for already-admit
     timeoutMs: 1000,
     maxPendingJobs: 1,
   };
-  const producer = new UsageProducer(options);
+  const producer = new UsageProducer({ ...options, channel: usageChannel });
   let consumer: import("@gateway/runtime").UsageConsumer | undefined;
   const event = (attemptId: string) => ({
     attemptId,
@@ -1703,7 +1712,11 @@ test("queue backlog blocks new admission while accepting facts for already-admit
     await expect(producer.ready()).rejects.toMatchObject({ status: 503 });
     await producer.publish(event(requests[1]!.attempt));
     expect((await producer.stats()).waiting).toBe(2);
-    consumer = new UsageConsumer({ ...options, process: (events) => store.persistUsage(events) });
+    consumer = new UsageConsumer({
+      channel: usageChannel,
+      ...options,
+      process: (events) => store.persistUsage(events),
+    });
     await consumer.ready();
     const end = Date.now() + 5000;
     while ((await invariant(p.id)).spent_atoms !== "112" && Date.now() < end) await Bun.sleep(10);
@@ -1733,7 +1746,7 @@ test("queue backlog blocks new admission while accepting facts for already-admit
 });
 
 test("every permitted in-flight operation can finish a simultaneous durable evidence burst", async () => {
-  const { UsageProducer } = await import("@gateway/runtime");
+  const { UsageProducer, usageChannel } = await import("@gateway/runtime");
   const options = {
     url: process.env.QUEUE_REDIS_URL!,
     namespace: `queue-burst:${crypto.randomUUID()}`,
@@ -1741,7 +1754,7 @@ test("every permitted in-flight operation can finish a simultaneous durable evid
     timeoutMs: 2000,
     maxInFlight: 10000,
   };
-  const producer = new UsageProducer(options);
+  const producer = new UsageProducer({ ...options, channel: usageChannel });
   try {
     await producer.ready();
     const outcomes = await Promise.allSettled(

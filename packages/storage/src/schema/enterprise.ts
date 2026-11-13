@@ -289,7 +289,8 @@ export const coreEvidenceReceipts = pgTable(
       sql`outcome IN ('ACCEPTED','STALE','ESTIMATED','REVISION_REPLAY','CONFLICT','OVERFLOW','QUARANTINED') AND finality IN ('FINAL','PARTIAL','UNKNOWN','ESTIMATED','NOT_EXECUTED')
         AND (outcome<>'CONFLICT' OR (conflict_id IS NOT NULL AND disputed_evidence_id IS NOT NULL AND NOT revision_claim))
         AND (outcome<>'OVERFLOW' OR (numeric_fault='COST_OVERFLOW' AND disputed_evidence_id IS NOT NULL))
-        AND (outcome NOT IN ('ACCEPTED','REVISION_REPLAY') OR (canonical_evidence_id IS NOT NULL AND disputed_evidence_id IS NULL AND conflict_id IS NULL))
+        AND (outcome<>'ACCEPTED' OR canonical_evidence_id IS NOT NULL)
+        AND (outcome NOT IN ('ACCEPTED','REVISION_REPLAY') OR (disputed_evidence_id IS NULL AND conflict_id IS NULL AND numeric_fault IS NULL))
         AND (numeric_fault IS NULL OR numeric_fault='COST_OVERFLOW')
         AND (attempt_state IS NULL OR attempt_state IN ('SUCCEEDED','FAILED','UNKNOWN','PARTIAL','NOT_EXECUTED'))
         AND (request_state IS NULL OR request_state IN ('SUCCEEDED','FAILED','CANCELLED','UNKNOWN'))
@@ -304,6 +305,28 @@ export const coreEvidenceReceipts = pgTable(
         AND (authentication_disposition='QUARANTINED')=(outcome='QUARANTINED')
         AND (outcome<>'QUARANTINED' OR (canonical_evidence_id IS NULL AND disputed_evidence_id IS NULL AND conflict_id IS NULL AND NOT revision_claim AND cardinality(risk_dimensions)=0))
         AND producer_key_sha256 ~ '^[a-f0-9]{64}$' AND signature_version=1 AND octet_length(signature)=64 AND signature_payload_digest ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+export const coreEvidenceRejections = pgTable(
+  "core_evidence_rejections",
+  {
+    id: uuid().primaryKey(),
+    batchId: uuid("batch_id").notNull(),
+    ordinal: integer().notNull(),
+    reason: text().notNull(),
+    originIdentity: text("origin_identity").notNull(),
+    originSessionId: uuid("origin_session_id").notNull(),
+    eventId: uuid("event_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    createdAt: instant("created_at").defaultNow().notNull(),
+  },
+  (t) => [
+    unique("core_rejection_position").on(t.batchId, t.ordinal),
+    index("core_rejection_origin").on(t.originIdentity, t.createdAt),
+    check(
+      "core_rejection_shape",
+      sql`reason ~ '^[a-z][a-z0-9_]{0,79}$' AND origin_identity ~ '^gateway:[A-Za-z0-9_-]{1,100}$' AND ordinal BETWEEN 0 AND 8191`,
     ),
   ],
 );

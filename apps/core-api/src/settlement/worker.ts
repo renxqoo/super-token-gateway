@@ -7,6 +7,7 @@ export function createSettlementWorker(
     db: SQL;
     concurrency?: number;
     onRejected?: (count: number) => void;
+    onQuarantined?: (count: number) => void;
     onCommitted?: (groups: number, lagSeconds: number) => void;
   },
 ) {
@@ -16,10 +17,14 @@ export function createSettlementWorker(
     channel: evidenceChannel,
     process: async (groups) => {
       const results = await store.persist(groups);
-      const rejected = results.filter((result) => result.status === "REJECTED").length;
-      if (rejected > 0) options.onRejected?.(rejected);
+      const quarantined = results
+        .flatMap((result) => (result.status === "COMMITTED" ? result.receipts : []))
+        .filter((receipt) => receipt.outcome === "QUARANTINED" && !receipt.duplicate).length;
+      if (quarantined > 0) options.onQuarantined?.(quarantined);
       if (results.some((result) => result.status === "ERROR"))
         throw new Error("evidence_group_retry");
+      const rejected = results.filter((result) => result.status === "REJECTED").length;
+      if (rejected > 0) options.onRejected?.(rejected);
       return results;
     },
   });

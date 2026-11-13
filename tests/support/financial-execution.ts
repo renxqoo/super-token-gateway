@@ -119,6 +119,16 @@ async function prepareFinancial(
       creditedAtoms = "1000",
       modelOutput = 100,
       customerBasis: "REQUEST_COMPLETION" | "PROVIDER_USAGE" = "REQUEST_COMPLETION",
+      supplier: {
+        rates: Record<string, { numerator: string; denominator: string }>;
+        ceilings: Record<string, string>;
+      } = {
+        rates: {
+          input_tokens: { numerator: "1", denominator: "3" },
+          output_tokens: { numerator: "1", denominator: "3" },
+        },
+        ceilings: { input_tokens: "100", output_tokens: "50" },
+      },
     ) {
       const uuid = crypto.randomUUID(),
         model = `financial-${uuid}`;
@@ -145,14 +155,8 @@ async function prepareFinancial(
         provider_id: provider.value.id,
         upstream_model: "synthetic",
         operations: ["chat"],
-        pricing: {
-          currency,
-          rates: {
-            input_tokens: { numerator: "1", denominator: "3" },
-            output_tokens: { numerator: "1", denominator: "3" },
-          },
-        },
-        ceilings: { input_tokens: "100", output_tokens: "50" },
+        pricing: { currency, rates: supplier.rates },
+        ceilings: supplier.ceilings,
       });
       if (route.status !== 201) throw new Error(`Route creation: ${JSON.stringify(route)}`);
       const tariff = await request("/billing/tariffs", {

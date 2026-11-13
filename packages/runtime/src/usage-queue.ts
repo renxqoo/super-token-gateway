@@ -68,8 +68,8 @@ export class UsageProducer<T = UsageEvidence> {
   private failed = 0;
   private backlogCheckedAt = 0;
   private backlogProbe: Promise<void> | undefined;
-  constructor(readonly options: UsageQueueOptions & { channel?: QueueChannel<T> }) {
-    this.channel = options.channel ?? (usageChannel as unknown as QueueChannel<T>);
+  constructor(readonly options: UsageQueueOptions & { channel: QueueChannel<T> }) {
+    this.channel = options.channel;
     this.batch = new Batcher(
       (events) => this.publishBatch(events),
       options.batchSize ?? 64,
@@ -299,7 +299,7 @@ export class UsageProducer<T = UsageEvidence> {
 }
 
 export interface UsageConsumerOptions<T = UsageEvidence> extends UsageQueueOptions {
-  channel?: QueueChannel<T>;
+  channel: QueueChannel<T>;
   concurrency?: number;
   process: (events: T[]) => Promise<unknown>;
   lockDurationMs?: number;
@@ -312,7 +312,7 @@ export class UsageConsumer<T = UsageEvidence> {
   private readonly raw: RedisClient;
   private readonly pending = new Set<Promise<unknown>>();
   constructor(readonly options: UsageConsumerOptions<T>) {
-    const channel = options.channel ?? (usageChannel as unknown as QueueChannel<T>);
+    const channel = options.channel;
     const raw = new RedisClient(options.url, {
       connectionTimeout: 1000,
       idleTimeout: 0,
