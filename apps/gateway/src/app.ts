@@ -103,7 +103,8 @@ export function createGatewayApp(
           token,
           ip,
           idempotencyKey: c.req.header("idempotency-key"),
-          signal,
+          signal: c.req.raw.signal,
+          drain: entered.controller.signal,
         }),
       );
       const settled = release;

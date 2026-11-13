@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
+import { connect, createServer, type Socket } from "node:net";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { SQL } from "bun";
 import { RedisClient } from "bun";
 import { sha256 } from "@gateway/runtime/crypto";
-import type { withFinancial } from "./financial-execution.ts";
+import { withFinancial } from "./financial-execution.ts";
 import { identityAudience } from "./internal-identity.ts";
 
 type Fixture = Parameters<Parameters<typeof withFinancial>[0]>[0];
@@ -93,8 +94,9 @@ function owned(child: Bun.Subprocess<"ignore", "pipe", "pipe">, label: string) {
   const stderr = new Response(child.stderr).text();
   return {
     pid: child.pid,
+    alive: () => child.exitCode === null && child.signalCode === null,
     kill(signal: NodeJS.Signals = "SIGKILL") {
-      if (child.exitCode === null) child.kill(signal);
+      if (child.exitCode === null && child.signalCode === null) child.kill(signal);
     },
     async stop(lines: { remaining(): Promise<string> }) {
       if (child.exitCode === null) child.kill("SIGTERM");
@@ -129,7 +131,12 @@ export async function startCoreWorker(db: SQL, namespace: string, entry?: string
   });
   const process_ = owned(child, "core worker");
   const lines = await readyLine(child, "core worker", process_.stderr());
-  return { ...process_, port: lines.port, stop: () => process_.stop(lines) };
+  return {
+    ...process_,
+    port: lines.port,
+    stop: () => process_.stop(lines),
+    output: async () => (await lines.remaining()) + (await process_.stderr()),
+  };
 }
 
 export async function startGateway(
@@ -199,6 +206,7 @@ export async function startGateway(
     ...process_,
     origin: `http://127.0.0.1:${lines.port}`,
     stop: () => process_.stop(lines),
+    output: async () => (await lines.remaining()) + (await process_.stderr()),
   };
 }
 
@@ -218,4 +226,264 @@ export async function eventually(check: () => Promise<boolean>, label: string, m
     if (Date.now() > end) throw new Error(`Timed out waiting for ${label}`);
     await Bun.sleep(25);
   }
+}
+
+export type UpstreamCall = {
+  index: number;
+  authorization: string | null;
+  body: Record<string, unknown>;
+  signal: AbortSignal;
+};
+type Process = Awaited<ReturnType<typeof startGateway>>;
+const boundedSupplier = {
+  rates: {
+    input_tokens: { numerator: "1", denominator: "3" },
+    output_tokens: { numerator: "1", denominator: "3" },
+  },
+  ceilings: { input_tokens: "1000", output_tokens: "50" },
+};
+
+export function withGatewayStack(
+  options: {
+    reply: (call: UpstreamCall) => Response | Promise<Response>;
+    channels?: number;
+    gateway?: Record<string, unknown>;
+    databasePort?: number;
+    supplierCredit?: string;
+  },
+  run: (stack: {
+    f: Fixture;
+    db: SQL;
+    namespace: string;
+    setup: Awaited<ReturnType<Fixture["bootstrap"]>>;
+    received: UpstreamCall[];
+    gateway: Process;
+    worker: Awaited<ReturnType<typeof startCoreWorker>>;
+    startGateway: (
+      overrides?: Record<string, unknown>,
+      instance?: "gateway" | "gatewayB",
+    ) => Promise<Process>;
+    startWorker: () => Promise<Awaited<ReturnType<typeof startCoreWorker>>>;
+    send: (input?: {
+      stream?: boolean;
+      via?: Process;
+      headers?: Record<string, string>;
+      signal?: AbortSignal;
+      content?: string;
+    }) => Promise<Response>;
+  }) => Promise<void>,
+) {
+  return withFinancial(
+    async (f, db) => {
+      const received: UpstreamCall[] = [];
+      const upstream = await startTlsUpstream(async (request) => {
+        const call = {
+          index: received.length,
+          authorization: request.headers.get("authorization"),
+          body: (await request.json()) as Record<string, unknown>,
+          signal: request.signal,
+        };
+        received.push(call);
+        return options.reply(call);
+      });
+      const namespace = `gateway-stack_${crypto.randomUUID().replaceAll("-", "")}`;
+      const processes: { alive(): boolean; kill(): void; stop(): Promise<unknown> }[] = [];
+      try {
+        const setup = await f.bootstrap(
+          undefined,
+          options.supplierCredit,
+          undefined,
+          undefined,
+          boundedSupplier,
+          {
+            baseUrl: upstream.baseUrl,
+            maxInputTokens: 1000,
+          },
+        );
+        for (let channel = 2; channel <= (options.channels ?? 1); channel++)
+          await f.addChannel(setup, {
+            baseUrl: upstream.baseUrl,
+            apiKey: `synthetic-upstream-secret-${channel}`,
+            maxInputTokens: 1000,
+            ceilings: boundedSupplier.ceilings,
+          });
+        const startWorker = async () => {
+          const worker = await startCoreWorker(db, namespace);
+          processes.push(worker);
+          return worker;
+        };
+        const launch = async (
+          overrides: Record<string, unknown> = {},
+          instance: "gateway" | "gatewayB" = "gateway",
+        ) => {
+          const gateway = await startGateway(f, {
+            namespace,
+            upstreamCertificate: upstream.certificate,
+            instance,
+            overrides: { ...options.gateway, ...overrides },
+          });
+          processes.push(gateway);
+          return gateway;
+        };
+        const worker = await startWorker();
+        const gateway = await launch();
+        await run({
+          f,
+          db,
+          namespace,
+          setup,
+          received,
+          gateway,
+          worker,
+          startGateway: launch,
+          startWorker,
+          send: (input = {}) =>
+            fetch(`${(input.via ?? gateway).origin}/v1/chat/completions`, {
+              method: "POST",
+              headers: {
+                authorization: `Bearer ${setup.key.key}`,
+                "content-type": "application/json",
+                ...input.headers,
+              },
+              body: JSON.stringify({
+                model: setup.model,
+                messages: [{ role: "user", content: input.content ?? "合成" }],
+                max_completion_tokens: 30,
+                ...(input.stream ? { stream: true } : {}),
+              }),
+              ...(input.signal ? { signal: input.signal } : {}),
+            }),
+        });
+        for (const process_ of processes.reverse()) if (process_.alive()) await process_.stop();
+      } finally {
+        for (const process_ of processes) process_.kill();
+        await upstream.stop();
+        await clearQueueNamespace(namespace);
+      }
+    },
+    options.databasePort ? { databasePort: options.databasePort } : {},
+  );
+}
+
+export const chatReplies = {
+  json: (content = "ok") =>
+    Response.json({
+      id: "chain",
+      model: "synthetic",
+      choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 30, completion_tokens: 15 },
+    }),
+  sse: (frames: unknown[] = chatFrames(), done = true) =>
+    new Response(
+      frames
+        .map((frame) => `data: ${JSON.stringify(frame)}\n\n`)
+        .concat(done ? ["data: [DONE]\n\n"] : [])
+        .join(""),
+      { headers: { "content-type": "text/event-stream" } },
+    ),
+};
+
+export function chatFrames() {
+  return [
+    { id: "chain", model: "synthetic", choices: [{ index: 0, delta: { content: "o" } }] },
+    {
+      id: "chain",
+      model: "synthetic",
+      choices: [{ index: 0, delta: { content: "k" }, finish_reason: "stop" }],
+    },
+    {
+      id: "chain",
+      model: "synthetic",
+      choices: [],
+      usage: { prompt_tokens: 30, completion_tokens: 15 },
+    },
+  ];
+}
+
+export async function settledCharge(db: SQL, requestId: string) {
+  await eventually(
+    async () =>
+      (await db`SELECT count(*)::integer n FROM billing_charges WHERE request_id=${requestId}`)[0]
+        .n === 1,
+    "customer charge",
+  );
+  return (
+    await db`SELECT c.amount_atoms::text AS amount,r.state,r.billing_outcome FROM billing_charges c JOIN gateway_requests r ON r.id=c.request_id WHERE c.request_id=${requestId}`
+  )[0] as { amount: string; state: string; billing_outcome: string };
+}
+
+export function stall() {
+  let release: () => void = () => undefined;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  return { released, release };
+}
+
+export function slowStream(frames: unknown[], delayMs: number, onCancel: () => void) {
+  let index = 0;
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await Bun.sleep(delayMs);
+        controller.enqueue(
+          new TextEncoder().encode(`data: ${JSON.stringify(frames[index % frames.length])}\n\n`),
+        );
+        index++;
+      },
+      cancel() {
+        onCancel();
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+export async function requestOutcome(db: SQL, requestId: string) {
+  await eventually(
+    async () =>
+      (
+        await db`SELECT count(*)::integer n FROM gateway_requests WHERE id=${requestId} AND billing_outcome<>'PENDING' AND execution_closed_at IS NOT NULL`
+      )[0].n === 1,
+    "request outcome",
+  );
+  return (
+    await db`SELECT r.state,r.billing_outcome,coalesce((SELECT sum(c.amount_atoms) FROM billing_charges c WHERE c.request_id=r.id),0)::text AS charged FROM gateway_requests r WHERE r.id=${requestId}`
+  )[0] as { state: string; billing_outcome: string; charged: string };
+}
+
+export async function tcpProxy(target: URL) {
+  const sockets = new Set<Socket>();
+  let open = true;
+  const server = createServer((client) => {
+    if (!open) return client.destroy();
+    const upstream = connect({ host: target.hostname, port: Number(target.port) });
+    for (const socket of [client, upstream]) {
+      sockets.add(socket);
+      socket.on("error", () => undefined);
+      socket.on("close", () => {
+        sockets.delete(socket);
+        client.destroy();
+        upstream.destroy();
+      });
+    }
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Proxy did not bind");
+  const url = new URL(target);
+  url.hostname = "127.0.0.1";
+  url.port = String(address.port);
+  return {
+    url: url.toString(),
+    cut() {
+      open = false;
+      for (const socket of sockets) socket.destroy();
+    },
+    async close() {
+      open = false;
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }

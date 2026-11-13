@@ -43,6 +43,7 @@ export type ChatRequest = {
   ip: string;
   idempotencyKey: string | undefined;
   signal: AbortSignal;
+  drain: AbortSignal;
 };
 
 type Attempt = ReturnType<ReturnType<typeof createPluginAttempts>["create"]>;
@@ -66,7 +67,7 @@ type Plan = {
 };
 type Permit = { attemptId: string; permitEpoch: string };
 type Admitted = Plan & Permit & { begin: Record<string, string> };
-type CloseReason = "COMPLETED" | "FAILED" | "CANCELLED";
+type CloseReason = "COMPLETED" | "FAILED" | "CANCELLED" | "DRAINED";
 type Ending =
   | { kind: "final"; outcome: AttemptOutcome; reason: CloseReason }
   | { kind: "retry"; outcome: Omit<AttemptOutcome, "request_state"> };
@@ -334,33 +335,44 @@ function shortDeadline() {
   return { deadlineAt: new Date(Date.now() + 5000).toISOString() };
 }
 
+async function finalCommand(
+  deps: ChatDependencies,
+  kind: "execution_abort_v1" | "execution_quota_v1",
+  data: Record<string, unknown>,
+) {
+  const options = { commandId: crypto.randomUUID(), ...shortDeadline() },
+    end = Date.parse(options.deadlineAt) - 250;
+  for (let delay = 25; ; delay = Math.min(delay * 2, 400)) {
+    try {
+      return await deps.core.execution(kind, data, options);
+    } catch (error) {
+      if (error instanceof CoreRpcError && error.detail.retryability === "NONE") return;
+      if (Date.now() + delay >= end) return;
+      await Bun.sleep(delay);
+    }
+  }
+}
+
 async function abortBeforeSend(
   deps: ChatDependencies,
   permit: Permit,
   reason: "CANCELLED" | "DEADLINE" | "PREPARE_DISPOSED",
 ) {
-  await deps.core
-    .execution(
-      "execution_abort_v1",
-      {
-        attempt_id: permit.attemptId,
-        permit_epoch: permit.permitEpoch,
-        reason,
-        close_request: true,
-      },
-      shortDeadline(),
-    )
-    .catch(() => undefined);
+  await finalCommand(deps, "execution_abort_v1", {
+    attempt_id: permit.attemptId,
+    permit_epoch: permit.permitEpoch,
+    reason,
+    close_request: true,
+  });
 }
 
 async function closeRequest(deps: ChatDependencies, permit: Permit, reason: CloseReason) {
-  await deps.core
-    .execution(
-      "execution_quota_v1",
-      { attempt_id: permit.attemptId, permit_epoch: permit.permitEpoch, action: "CLOSE", reason },
-      shortDeadline(),
-    )
-    .catch(() => undefined);
+  await finalCommand(deps, "execution_quota_v1", {
+    attempt_id: permit.attemptId,
+    permit_epoch: permit.permitEpoch,
+    action: "CLOSE",
+    reason,
+  });
 }
 
 function authorize(headers: Record<string, string>, reply: ExecutionReply) {
@@ -378,6 +390,56 @@ function upstreamRejection(status: number) {
   );
 }
 
+function halt(request: ChatRequest) {
+  const drained = request.drain.aborted,
+    cancelled = !drained && request.signal.aborted;
+  return {
+    halted: drained || cancelled,
+    requestState: cancelled ? ("CANCELLED" as const) : ("FAILED" as const),
+    reason: drained
+      ? ("DRAINED" as const)
+      : cancelled
+        ? ("CANCELLED" as const)
+        : ("FAILED" as const),
+    error(fallback: GatewayError) {
+      if (drained) return new GatewayError(503, "draining", "Gateway is draining");
+      if (cancelled) return new GatewayError(499, "cancelled", "Request cancelled");
+      return fallback;
+    },
+  };
+}
+
+async function resolveUnknownBegin(deps: ChatDependencies, commandId: string) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const reply = (await deps.core.execution(
+        "execution_query_v1",
+        { kind: "execution_begin_v1", command_id: commandId },
+        shortDeadline(),
+      )) as ExecutionReply;
+      if (reply.receipt.command_state === "NOT_FOUND") return "absent" as const;
+      if (reply.receipt.state === "SEND_GRANTED") return "granted" as const;
+      return "unknown" as const;
+    } catch {
+      await Bun.sleep(200 * (attempt + 1));
+    }
+  }
+  return "unknown" as const;
+}
+
+function renewQuota(deps: ChatDependencies, permit: Permit) {
+  const timer = setInterval(() => {
+    void deps.core
+      .execution(
+        "execution_quota_v1",
+        { attempt_id: permit.attemptId, permit_epoch: permit.permitEpoch, action: "RENEW" },
+        shortDeadline(),
+      )
+      .catch(() => clearInterval(timer));
+  }, deps.config.quota_renew_ms);
+  return () => clearInterval(timer);
+}
+
 async function dispatch(
   deps: ChatDependencies,
   request: ChatRequest,
@@ -387,6 +449,7 @@ async function dispatch(
   const local = new AbortController();
   const signal = AbortSignal.any([
     request.signal,
+    request.drain,
     local.signal,
     AbortSignal.timeout(Math.max(1, Date.parse(facts.deadlineAt) - Date.now())),
   ]);
@@ -397,22 +460,49 @@ async function dispatch(
     await abortBeforeSend(deps, admitted, "PREPARE_DISPOSED");
     throw error;
   }
+  const unavailable = new GatewayError(
+    503,
+    "core_unavailable",
+    "Execution authority is unavailable",
+  );
+  const bridge = observeAttempt(admitted.attempt, {
+    attemptId: admitted.attemptId,
+    permitEpoch: admitted.permitEpoch,
+    record: (evidence) => deps.publish([deps.core.signEvidence(evidence)]),
+  });
+  const neverSent = async (outcome: Parameters<Bridge["notExecuted"]>[0]) => {
+    deps.grants.release(admitted.attemptId);
+    await bridge.notExecuted(outcome).catch(() => undefined);
+    bridge.dispose();
+  };
+  const beginCommand = crypto.randomUUID();
   let reply: ExecutionReply;
   try {
-    if (signal.aborted) throw new GatewayError(499, "cancelled", "Request cancelled");
+    if (signal.aborted) throw halt(request).error(unavailable);
     reply = (await deps.core.execution("execution_begin_v1", admitted.begin, {
-      commandId: crypto.randomUUID(),
+      commandId: beginCommand,
       deadlineAt: facts.deadlineAt,
     })) as ExecutionReply;
   } catch (error) {
+    if (error instanceof CoreRpcError && error.detail.command_state === "UNKNOWN") {
+      const resolved = await resolveUnknownBegin(deps, beginCommand);
+      if (resolved === "granted") {
+        await neverSent({ request_state: "FAILED", error_code: "begin_outcome_unknown" });
+        await closeRequest(deps, admitted, "FAILED");
+      } else {
+        deps.grants.release(admitted.attemptId);
+        bridge.dispose();
+        if (resolved === "absent") await abortBeforeSend(deps, admitted, "PREPARE_DISPOSED");
+      }
+      throw unavailable;
+    }
     deps.grants.release(admitted.attemptId);
-    admitted.attempt.dispose();
-    if (error instanceof CoreRpcError && error.detail.command_state === "UNKNOWN")
-      throw new GatewayError(503, "core_unavailable", "Execution authority is unavailable");
+    bridge.dispose();
+    const stop = halt(request);
     await abortBeforeSend(
       deps,
       admitted,
-      request.signal.aborted
+      stop.requestState === "CANCELLED"
         ? "CANCELLED"
         : Date.now() >= Date.parse(facts.deadlineAt)
           ? "DEADLINE"
@@ -420,12 +510,14 @@ async function dispatch(
     );
     throw error instanceof GatewayError ? error : coreFailure(error);
   }
-  const bridge = observeAttempt(admitted.attempt, {
-    attemptId: admitted.attemptId,
-    permitEpoch: admitted.permitEpoch,
-    record: (evidence) => deps.publish([deps.core.signEvidence(evidence)]),
-  });
+  if (!reply.transient_send || !deps.grants.consume(admitted.attemptId)) {
+    await neverSent({ request_state: "FAILED", error_code: "send_not_authorized" });
+    await closeRequest(deps, admitted, halt(request).reason);
+    throw halt(request).error(unavailable);
+  }
+  const stopRenewal = renewQuota(deps, admitted);
   const end = async (ending: Ending) => {
+    stopRenewal();
     deps.grants.release(admitted.attemptId);
     try {
       await bridge.finish(ending.outcome);
@@ -434,27 +526,18 @@ async function dispatch(
       if (ending.kind === "final") await closeRequest(deps, admitted, ending.reason);
     }
   };
-  const cancelled = () => request.signal.aborted;
   const finalFailure = async (
     outcome: Omit<AttemptOutcome, "request_state">,
     error: GatewayError,
-  ) => {
+  ): Promise<never> => {
+    const stop = halt(request);
     await end({
       kind: "final",
-      outcome: { ...outcome, request_state: cancelled() ? "CANCELLED" : "FAILED" },
-      reason: cancelled() ? "CANCELLED" : "FAILED",
+      outcome: { ...outcome, request_state: stop.requestState },
+      reason: stop.reason,
     }).catch(() => undefined);
-    throw cancelled() ? new GatewayError(499, "cancelled", "Request cancelled") : error;
+    throw stop.error(error);
   };
-  if (!reply.transient_send || !deps.grants.consume(admitted.attemptId)) {
-    deps.grants.release(admitted.attemptId);
-    await bridge
-      .notExecuted({ request_state: "FAILED", error_code: "send_not_authorized" })
-      .catch(() => undefined);
-    bridge.dispose();
-    await closeRequest(deps, admitted, "FAILED");
-    throw new GatewayError(503, "core_unavailable", "Execution authority is unavailable");
-  }
   let response: Response;
   try {
     response = await deps.transport.fetch(
@@ -469,29 +552,32 @@ async function dispatch(
       deps.config.private_upstream_cidrs,
     );
   } catch (error) {
-    const unavailable = new GatewayError(
+    const unreachable = new GatewayError(
       502,
       "upstream_unavailable",
       "The upstream could not be reached",
     );
     if (error instanceof UpstreamPreDispatchError) {
-      deps.grants.release(admitted.attemptId);
-      const final = cancelled() || signal.aborted;
-      await bridge
-        .notExecuted({
-          ...(final ? { request_state: cancelled() ? "CANCELLED" : "FAILED" } : {}),
-          error_code: "upstream_not_dispatched",
-        })
-        .catch(() => undefined);
-      bridge.dispose();
-      if (!final) return { retry: unavailable };
-      await closeRequest(deps, admitted, cancelled() ? "CANCELLED" : "FAILED");
-      throw cancelled() ? new GatewayError(499, "cancelled", "Request cancelled") : unavailable;
+      stopRenewal();
+      const stop = halt(request),
+        final = stop.halted || signal.aborted || error.code === "unsafe_upstream";
+      await neverSent({
+        ...(final ? { request_state: stop.requestState } : {}),
+        error_code:
+          error.code === "unsafe_upstream" ? "unsafe_upstream" : "upstream_not_dispatched",
+      });
+      if (!final) return { retry: unreachable };
+      await closeRequest(deps, admitted, stop.reason);
+      throw stop.error(
+        error.code === "unsafe_upstream"
+          ? new GatewayError(502, "unsafe_upstream", "The upstream address is not permitted")
+          : unreachable,
+      );
     }
     const interrupted = { attempt_state: "UNKNOWN" as const, error_code: "upstream_interrupted" };
-    if (signal.aborted) return finalFailure(interrupted, unavailable);
+    if (signal.aborted) return finalFailure(interrupted, unreachable);
     await end({ kind: "retry", outcome: interrupted }).catch(() => undefined);
-    return { retry: unavailable };
+    return { retry: unreachable };
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
@@ -508,29 +594,32 @@ async function dispatch(
   }
   return {
     response: facts.stream
-      ? relaySSE(facts, admitted, bridge, response, signal, cancelled, end)
-      : await relayJSON(deps, facts, admitted, bridge, response, signal, finalFailure, end),
+      ? relaySSE(facts, admitted, bridge, response, signal, request, end)
+      : await relayJSON(deps, facts, bridge, response, signal, finalFailure, end),
   };
 }
 
 export async function executeChat(deps: ChatDependencies, request: ChatRequest) {
   const facts = requestFacts(request, deps.config.total_timeout_ms);
+  const external = { ...request, signal: AbortSignal.any([request.signal, request.drain]) };
   const tried = new Set<string>();
   let previous: { permit: Permit; ordinal: number } | undefined;
   let lastError: GatewayError | undefined;
   for (let ordinal = 1; ordinal <= maxOrdinal; ordinal++) {
     let admitted: Admitted;
     try {
+      if (external.signal.aborted)
+        throw halt(request).error(new GatewayError(499, "cancelled", "Request cancelled"));
       const context = await openContext(deps, request, facts);
       const candidate = context.candidates.find((c) => !tried.has(c.ref.channel_id));
       if (!candidate) break;
       tried.add(candidate.ref.channel_id);
-      const planned = await plan(deps, request, facts, context, candidate);
+      const planned = await plan(deps, external, facts, context, candidate);
       admitted = await reserve(deps, request, facts, context, planned, previous);
     } catch (error) {
       if (!previous) throw error;
-      await closeRequest(deps, previous.permit, request.signal.aborted ? "CANCELLED" : "FAILED");
-      throw lastError ?? error;
+      await closeRequest(deps, previous.permit, halt(request).reason);
+      throw halt(request).error(lastError ?? coreFailure(error));
     }
     const outcome = await dispatch(deps, request, facts, admitted);
     if ("response" in outcome) return outcome.response;
@@ -545,7 +634,6 @@ export async function executeChat(deps: ChatDependencies, request: ChatRequest) 
 async function relayJSON(
   deps: ChatDependencies,
   facts: Facts,
-  admitted: Admitted,
   bridge: Bridge,
   response: Response,
   signal: AbortSignal,
@@ -594,30 +682,35 @@ function relaySSE(
   bridge: Bridge,
   response: Response,
   signal: AbortSignal,
-  cancelled: () => boolean,
+  request: ChatRequest,
   end: (ending: Ending) => Promise<void>,
 ) {
-  const decode = (chunks: string[]) => chunks.map((c) => Buffer.from(c, "base64"));
+  const encoder = new TextEncoder();
   async function* frames(): AsyncGenerator<Uint8Array> {
     let terminal: { bytes: string } | undefined;
-    let ended = false;
+    let ended = false,
+      delivered = false,
+      failed = false;
     const reader = response.body!.getReader();
     const cancel = () => void reader.cancel().catch(() => undefined);
     signal.addEventListener("abort", cancel, { once: true });
+    const settle = function* (result: AbiResult) {
+      if (result.kind === "failure") throw new Error(result.code);
+      if (result.kind !== "output") throw new Error("plugin_output");
+      for (const chunk of result.chunks) {
+        const bytes = Buffer.from(chunk, "base64");
+        if (bytes.length) {
+          delivered = true;
+          yield bytes;
+        }
+      }
+      const id = (result as { output_id?: string }).output_id;
+      if (id) admitted.attempt.releaseOutput(id);
+      if (result.terminal) terminal = result.terminal;
+      return result.needs_input || Boolean(result.terminal);
+    };
     try {
-      await bridge.invoke(
-        "stream_open",
-        new TextEncoder().encode(JSON.stringify({ model: facts.model })),
-      );
-      const settle = function* (result: AbiResult) {
-        if (result.kind === "failure") throw new Error(result.code);
-        if (result.kind !== "output") throw new Error("plugin_output");
-        yield* decode(result.chunks);
-        const id = (result as { output_id?: string }).output_id;
-        if (id) admitted.attempt.releaseOutput(id);
-        if (result.terminal) terminal = result.terminal;
-        return result.needs_input || Boolean(result.terminal);
-      };
+      await bridge.invoke("stream_open", encoder.encode(JSON.stringify({ model: facts.model })));
       for (;;) {
         const next = await reader.read();
         if (next.done) break;
@@ -638,20 +731,39 @@ function relaySSE(
       });
       const held = Buffer.from(terminal.bytes, "base64");
       if (held.length) yield held;
+    } catch {
+      failed = true;
     } finally {
       signal.removeEventListener("abort", cancel);
       cancel();
-      if (!ended)
+      if (!ended) {
+        const stop = halt(request);
         await end({
           kind: "final",
           outcome: {
-            attempt_state: "UNKNOWN",
-            request_state: cancelled() ? "CANCELLED" : "FAILED",
-            error_code: cancelled() ? "client_cancelled" : "stream_truncated",
+            attempt_state: delivered ? "PARTIAL" : "UNKNOWN",
+            request_state: stop.requestState,
+            error_code:
+              stop.reason === "CANCELLED"
+                ? "client_cancelled"
+                : stop.reason === "DRAINED"
+                  ? "gateway_draining"
+                  : "stream_interrupted",
           },
-          reason: cancelled() ? "CANCELLED" : "FAILED",
+          reason: stop.reason,
         }).catch(() => undefined);
+      }
     }
+    if (failed && halt(request).requestState !== "CANCELLED")
+      yield encoder.encode(
+        `data: ${JSON.stringify({
+          error: {
+            type: "gateway_stream_error",
+            message: "Stream interrupted; usage may be partial",
+            request_id: facts.requestId,
+          },
+        })}\n\n`,
+      );
   }
   const iterator = frames();
   return new Response(

@@ -66,18 +66,18 @@ packages/core-client     增 plugin_package 调用，不做全量 Store 代理
 
 legacy 测试原样保留，作为未迁能力的回归，删除随各自迁移任务。下列旧 Chat 断言的语义在 v2 路径以新用例重新验证（期望来自规格与手算，不复用 legacy 实现）：
 
-| 旧用例（`tests/integration/gateway.test.ts`）                  | v2 对应验收                                                                   |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| 337 availability-first retry preserves unknown attempt         | next 重试：A 保持 UNKNOWN 与供应 hold，B 交付并单独结算                       |
-| 353 truncated converted stream never emits success             | SSE 中断：无正常终态，PARTIAL 证据，客户不按成功收费                          |
-| 798 durable queue acceptance failure withholds stream terminal | WAITAOF 失败扣住 terminal，且不重发                                           |
-| 888 client cancellation releases concurrency                   | 取消：本地 grant 作废、传输等待结束、CLOSE 释放并发，不释放 SEND_GRANTED 资金 |
-| 1258 independent gateway instances share idempotency           | 两个 v2 Gateway 进程同意图：只有一次 begin 胜出                               |
-| 1339 crash recovery appends UNKNOWN without re-execution       | Gateway 在 begin 后被强杀：attempt UNKNOWN，重启不重发                        |
-| 1867 streamed content absent from PG/Redis/queue               | 双 canary：正文不进 Core、PG、Redis、队列与日志                               |
-| 2805 retry rechecks route/credential                           | next 在 Core 重新复核目录与授权                                               |
-| 2899 empty chat JSON / terminal-only stream                    | 不产生成功客户收费                                                            |
-| 3183 upstream address blocked before dispatch                  | 受控传输拒绝私网地址，RESERVED abort，资金释放                                |
+| 旧用例（`tests/integration/gateway.test.ts`）                  | v2 对应验收                                                                                          |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 337 availability-first retry preserves unknown attempt         | next 重试：A 保持 UNKNOWN 与供应 hold，B 交付并单独结算                                              |
+| 353 truncated converted stream never emits success             | SSE 中断：无正常终态，PARTIAL 证据，客户不按成功收费                                                 |
+| 798 durable queue acceptance failure withholds stream terminal | WAITAOF 失败扣住 terminal，且不重发                                                                  |
+| 888 client cancellation releases concurrency                   | 取消：本地 grant 作废、传输等待结束、CLOSE 释放并发，不释放 SEND_GRANTED 资金                        |
+| 1258 independent gateway instances share idempotency           | 两个 v2 Gateway 进程同意图：只有一次 begin 胜出                                                      |
+| 1339 crash recovery appends UNKNOWN without re-execution       | Gateway 在 begin 后被强杀：attempt UNKNOWN，重启不重发                                               |
+| 1867 streamed content absent from PG/Redis/queue               | 双 canary：正文不进 Core、PG、Redis、队列与日志                                                      |
+| 2805 retry rechecks route/credential                           | next 在 Core 重新复核目录与授权                                                                      |
+| 2899 empty chat JSON / terminal-only stream                    | 不产生成功客户收费                                                                                   |
+| 3183 upstream address blocked before dispatch                  | 私网字面量地址在准入前拒绝、不预留资金；解析到私网的主机名在 begin 后由受控传输拒绝并记 NOT_EXECUTED |
 
 ## 6. 风险与未验证项
 
@@ -131,6 +131,53 @@ c1 全量门禁：check 238 文件无类型错误；lint 0；fmt 344 文件；te
 - `packages/plugin-sdk/src/__test__/release-policy.test.ts`、`apps/gateway/src/__test__/packages.test.ts`、`apps/gateway/src/__test__/config.test.ts`、`packages/plugin-host/src/__test__/evidence.test.ts`（`notExecuted` 两条）、`packages/runtime/src/__test__/network.test.ts`（IP 字面量 SNI 回归）。
 - `tests/unit/architecture.test.ts`：Gateway 的工作区依赖闭包不含 storage/Core/legacy/数据库驱动，源码只读取 `GATEWAY_CONFIG_FILE` 环境变量；植入违规 import 或 `DATABASE_URL` 读取时用例失败，移除后通过。
 
-未在 c2 验证（属 c3/c4）：取消与排空中的请求、grant 丢失、worker 暂停、helper 强杀、双 Gateway、截断流、私网拒绝的真实进程用例；集成测试的证据队列为 0 副本，production 的副本确认要求只由配置校验覆盖。
+未在 c2 验证（已由 c3 补齐，见 §9）：取消与排空中的请求、grant 丢失、worker 暂停、helper 强杀、双 Gateway、截断流、私网拒绝的真实进程用例；集成测试的证据队列为 0 副本，production 的副本确认要求只由配置校验覆盖。
 
 c2 全量门禁：check 251 文件无类型错误；lint 0；fmt 358 文件；test:native 通过；test 312 通过 / 4261 断言 / 46 文件（较 c1 增 15：发行策略 3、Gateway 包缓存 5 与配置 3、证据桥 2、传输 1、架构 1）；test:integration 507 通过 / 0 失败 / 10805 断言 / 36 文件（增 6：Gateway Chat 4、插件包分发 2）；build 成功；test:plugin-artifact 15/24；test:artifact 五项全部通过（legacy、catalog、identity 7、admission+worker 14、Gateway 三进程 10）；test:durability 通过。test:backup 未运行，原因同 c1；test:container 已退役。首轮全量门禁中 SSE 用例断言“每请求仅一行 usage_events”失败，核实为结算按证据修订追加 CANONICAL 快照的既定设计，断言改为核对最新快照后该文件与整套集成重跑通过。
+
+## 9. c3 故障与生命周期记录
+
+| 项             | 实施                                                                                                                                                                                                                                                                                                                            |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 取消与排空     | 请求信号合并客户端断开、Gateway 排空、请求截止与本地放弃。begin 前取消以 `execution_abort_v1`（`close_request`）结束；发送后取消或排空记 attempt `PARTIAL`（已向客户端交付字节）或 `UNKNOWN`，保留供应商敞口。超出宽限期仍在途的请求回 503 `draining`，CLOSE 原因 `DRAINED`、请求 FAILED；客户端取消的 CLOSE 原因为 `CANCELLED` |
+| CLOSE 与 abort | 两者使用稳定 command_id，在 5 秒截止内对可重试错误（含 `identity_busy` 与传输失败）以同一命令重试，`retryability` 为 `NONE` 时停止。Core 对重复 CLOSE 返回原回执并再次完成租约释放                                                                                                                                              |
+| 配额续租       | 发送许可消费后按 `quota_renew_ms`（默认 10000，范围 100–20000）对本 attempt 发 RENEW，失败即停、请求结束时停止，避免 30 秒租约在长请求中过期                                                                                                                                                                                    |
+| begin 结果未知 | begin 回执丢失时按同一 command_id 以 `execution_query_v1` 查询（最多 5 次）：命令不存在则 abort `PREPARE_DISPOSED`；已授予发送则不使用该许可，发布 `NOT_EXECUTED` 证据（`begin_outcome_unknown`）并 CLOSE FAILED；仍未知则保持原状。三种情况均回 503 `core_unavailable`，不向上游发送                                           |
+| 流式失败       | SSE 在上游截断、证据无法持久化或 helper 失效时不放出 `[DONE]`，改为发送与 legacy 相同的 `gateway_stream_error` 事件后结束；客户端自行断开时不再写入。最终证据为 `PARTIAL`（已交付）或 `UNKNOWN`，错误码 `stream_interrupted`、`client_cancelled` 或 `gateway_draining`                                                          |
+| 私网地址       | 渠道 base_url 为私网字面量时在准入前由 `validateBaseUrl` 拒绝，回 502 `unsafe_upstream`，不创建请求、不预留资金；主机名在发送时解析到私网时由受控传输拒绝，attempt 记 `NOT_EXECUTED`、错误码 `unsafe_upstream`，不重试                                                                                                          |
+
+有意差异与说明：
+
+- 被重试替代的 attempt 以及发送后被取消的 attempt，供应商 hold 为 `PARTIAL` 而非 `UNKNOWN`，预留按 ceiling 保留（手算 ceil(1000/3 + 30/3) = 344）；客户只按成功 attempt 收费一次。
+- 矩阵 3183 原写“RESERVED abort”；实现对私网字面量地址在准入前拒绝，比 RESERVED 后 abort 更早且无资金变动，只有主机名解析路径在 begin 后拒绝。
+- Gateway 在 begin 后被强杀时，permit 保持 `SEND_GRANTED`、供应商 hold 为 `HELD`、请求未关闭，重启的 Gateway 不重发。目前没有回收此类遗留请求的流程（Redis 并发槽按 30 秒租约自然过期），回收归后续任务。
+- 启动时证据队列无法确认所需副本，Gateway 拒绝启动（`usage_queue_unavailable`）；运行中队列断开时 `/readyz` 转为 503。
+
+缺陷修复（先红后绿）：
+
+- CLOSE 遇到 Core `identity_busy`（与结算 worker 争用行锁时的 `NOWAIT` 冲突）时，c2 吞掉错误且不重试：Core 已提交关闭，但租约停在 `RELEASE_PENDING`。客户端断开用例在单次 CLOSE 下稳定失败（等待 “released quota leases” 超时），改为同命令重试后通过。
+- c2 缺少配额续租、把排空记为 CANCELLED、SSE 失败时直接断连、begin 结果未知时资金滞留，均按上表实施，并由下列用例覆盖。
+
+新增验证 `tests/integration/gateway-lifecycle.test.ts`（真实 Core API、worker、Gateway 与 TLS 上游，共 14 条）：
+
+- 截断流：发出错误事件、无 `[DONE]`、attempt 为 PARTIAL、客户收费 0。
+- 空 choices、缺 message、空 content、未结束的 choice、仅含终止的流，共 5 种均不按成功收费。
+- 无副本时拒绝启动；运行中 Redis 断开时扣住终态，且不重发。
+- 私网字面量地址在准入前被拒绝。
+- worker 停止期间证据留在队列，重启后结算一次。
+- 客户端断开：上游被取消，租约为 RELEASED，hold 为 PARTIAL，预留 344。
+- SIGTERM 宽限期内完成在途请求，并拒绝新请求。
+- 超出宽限期的请求回 503 `draining`，租约被释放。
+- 两个 Gateway 收到相同 Idempotency-Key 时只发送一次、只收费一次。
+- Gateway 被强杀后重启，不重发。
+- begin 回执丢失（COMMIT 应答被代理丢弃）：查询后不发送，记 NOT_EXECUTED，供应商预留归零。
+- helper 被强杀：流失败且不重发，下一个请求由新 helper 完成。
+- prompt 与输出 canary 不进入 PG、Redis、队列和进程日志。
+- 长请求续租：租约修订递增，请求关闭后释放。
+
+其他测试变更：
+
+- `gateway-chat.test.ts` 的重试用例补充 permit/hold 状态，以及供应商余额 985、预留 344、已花 15。
+- 测试辅助：`tests/support/commit-ack-proxy.ts` 支持按 SQL 文本触发；`tests/support/gateway-process.ts` 新增三进程栈 `withGatewayStack`、TCP 断开代理和进程日志读取。
+
+c3 全量门禁：check 252 文件无类型错误；lint 0；fmt 359 文件；test:native 通过；test 312 通过 / 4261 断言 / 46 文件（c3 无新增单测，生命周期行为全部以真实进程验证）；test:integration 521 通过 / 0 失败 / 11043 断言 / 37 文件（较 c2 增 14，均为 `gateway-lifecycle.test.ts`）；build 成功；test:plugin-artifact 15/24；test:artifact 五项全部通过（Gateway 三进程 10）；test:durability 通过。test:backup 未运行，原因同 c1；test:container 已退役。

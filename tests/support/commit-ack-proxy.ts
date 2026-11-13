@@ -4,6 +4,7 @@ export async function createCommitAckProxy() {
   const target = new URL(process.env.DATABASE_URL!),
     sockets = new Set<Socket>();
   let armed = false,
+    triggers: string[] = [],
     finished: ((error?: Error) => void) | undefined,
     timer: ReturnType<typeof setTimeout> | undefined;
   const server = createServer((client) => {
@@ -11,6 +12,7 @@ export async function createCommitAckProxy() {
     sockets.add(client);
     sockets.add(upstream);
     let drop = false,
+      primed = false,
       tail = Buffer.alloc(0);
     const close = () => {
       tail.fill(0);
@@ -31,7 +33,10 @@ export async function createCommitAckProxy() {
     client.on("data", (chunk) => {
       const part = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
       const bytes = Buffer.concat([tail, part]);
-      if (armed && /COMMIT(?:\s+TRANSACTION)?\0/.test(bytes.toString("latin1"))) {
+      const text = bytes.toString("latin1");
+      if (armed && triggers.length && triggers.every((trigger) => text.includes(trigger)))
+        primed = true;
+      if (armed && (!triggers.length || primed) && /COMMIT(?:\s+TRANSACTION)?\0/.test(text)) {
         drop = true;
         armed = false;
       }
@@ -70,9 +75,10 @@ export async function createCommitAckProxy() {
   );
   return {
     port: address.port,
-    arm() {
+    arm(trigger: string[] = [], timeoutMs = 3000) {
       if (armed || finished) throw new Error("Proxy already armed");
       armed = true;
+      triggers = trigger;
       return new Promise<void>((resolve, reject) => {
         finished = (error) => (error ? reject(error) : resolve());
         timer = setTimeout(() => {
@@ -80,7 +86,7 @@ export async function createCommitAckProxy() {
           finished = undefined;
           timer = undefined;
           reject(new Error("COMMIT acknowledgement was not observed"));
-        }, 3000);
+        }, timeoutMs);
       });
     },
     async close() {
