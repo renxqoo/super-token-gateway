@@ -2,7 +2,7 @@ import { mkdir, chmod } from "node:fs/promises";
 import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
 import { createKey, encrypt, verifier } from "@gateway/runtime";
 import { operations } from "@gateway/kernel";
-import { loadConfig } from "../apps/gateway/src/config.ts";
+import { loadConfig } from "../apps/legacy-gateway/src/config.ts";
 
 const config = loadConfig();
 if (config.NODE_ENV === "production")

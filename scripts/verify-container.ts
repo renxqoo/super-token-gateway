@@ -171,8 +171,8 @@ try {
       kind === "mock"
         ? "dist/mock-providers/main.js"
         : kind === "worker"
-          ? "dist/gateway/worker-main.js"
-          : "dist/gateway/main.js",
+          ? "dist/legacy-gateway/worker-main.js"
+          : "dist/legacy-gateway/main.js",
     ]);
     names.push(name);
   }

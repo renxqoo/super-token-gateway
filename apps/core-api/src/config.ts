@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { startCoreInternalListener } from "./identity/internal-listener.ts";
 const configSchema = z.strictObject({
   database_url: z.string().url(),
   execution: z
@@ -47,37 +46,33 @@ const configSchema = z.strictObject({
       Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)),
     )
     .optional(),
+  admin: z
+    .strictObject({
+      database_url: z.string().url(),
+      hostname: z.string(),
+      port: z.number().int().min(0).max(65535),
+      admin_key: z.string().min(32),
+      max_body_bytes: z.number().int().positive().max(16777216).optional(),
+      shutdown_grace_ms: z.number().int().min(100).max(120000).optional(),
+      plugins: z
+        .strictObject({
+          release_policy: z.string().min(1),
+          release_directory: z.string().min(1),
+          helper_executable: z.string().min(1),
+        })
+        .optional(),
+    })
+    .optional(),
 });
-const path = process.env.INTERNAL_IDENTITY_CONFIG_FILE;
-if (!path) throw new Error("INTERNAL_IDENTITY_CONFIG_FILE required");
-const c = configSchema.parse(await Bun.file(path).json());
-const listener = await startCoreInternalListener({
-  databaseUrl: c.database_url,
-  ...(c.execution ? { execution: c.execution } : {}),
-  audience: c.audience,
-  hostname: c.hostname,
-  servername: c.servername,
-  port: c.port,
-  key: await Bun.file(c.key_file).text(),
-  cert: await Bun.file(c.cert_file).text(),
-  ca: await Bun.file(c.ca_file).text(),
-  clientKey: await Bun.file(c.client_key_file).text(),
-  clientCert: await Bun.file(c.client_cert_file).text(),
-  ...(c.limits ? { limits: c.limits } : {}),
-  ...(c.challenge_ttl_seconds ? { challengeTtlSeconds: c.challenge_ttl_seconds } : {}),
-  ...(c.session_ttl_seconds ? { sessionTtlSeconds: c.session_ttl_seconds } : {}),
-});
-let stopping = false;
-async function stop() {
-  if (stopping) return;
-  stopping = true;
-  await listener.stop();
-  console.log(JSON.stringify({ event: "stopped", resources: listener.stats() }));
+
+export type CoreApiConfig = z.infer<typeof configSchema>;
+
+export async function loadCoreApiConfig(
+  path = process.env.CORE_API_CONFIG_FILE,
+): Promise<CoreApiConfig> {
+  if (!path) throw new Error("CORE_API_CONFIG_FILE required");
+  const config = configSchema.parse(await Bun.file(path).json());
+  if (config.admin && !config.execution)
+    throw new Error("Core API admin listener requires the execution configuration");
+  return config;
 }
-process.on("SIGTERM", () => {
-  void stop();
-});
-process.on("SIGINT", () => {
-  void stop();
-});
-console.log(JSON.stringify({ event: "ready", port: listener.port, session: listener.session }));

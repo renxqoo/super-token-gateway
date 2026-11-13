@@ -186,7 +186,7 @@ try {
     await start("dist/tools/archive.js", ["--verify", archivePath + "/manifest.json"]).exited,
     0,
   );
-  let server = start("dist/gateway/main.js");
+  let server = start("dist/legacy-gateway/main.js");
   start("dist/mock-providers/main.js");
   await Promise.all([health(origin, "/readyz"), health(mockOrigin, "/healthz")]);
   const project = await api("/admin/projects", {
@@ -248,7 +248,7 @@ try {
     "HTTP completion must not depend on the PG worker",
   );
   assert.equal((await db`SELECT state FROM billing_holds`)[0].state, "HELD");
-  start("dist/gateway/worker-main.js");
+  start("dist/legacy-gateway/worker-main.js");
   await health(`http://127.0.0.1:${workerPort}`, "/readyz");
   await until(
     async () =>
@@ -284,7 +284,7 @@ try {
   await pending;
   await db`UPDATE attempts SET started_at=now()-interval '10 minutes' WHERE state='DISPATCHING'`;
   await db`UPDATE gateway_requests SET updated_at=now()-interval '10 minutes' WHERE state='RUNNING'`;
-  server = start("dist/gateway/main.js");
+  server = start("dist/legacy-gateway/main.js");
   await health(origin, "/readyz");
   await api("/admin/recover", {});
   await until(
@@ -326,7 +326,7 @@ try {
   await until(
     async () => (await db`SELECT id FROM attempts WHERE state='DISPATCHING'`).length === 0,
   );
-  server = start("dist/gateway/main.js");
+  server = start("dist/legacy-gateway/main.js");
   await health(origin, "/readyz");
   await scenario({ jsonChunkDelayMs: 20, jsonChunkBytes: 64 });
   const slow = fetch(origin + "/v1/chat/completions", {

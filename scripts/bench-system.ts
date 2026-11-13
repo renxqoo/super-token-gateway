@@ -319,11 +319,11 @@ try {
   if (Object.keys(scenario).length) await upstreamStats("scenarios");
   const ports = Array.from({ length: instances }, (_, i) => 18081 + i);
   for (const port of ports)
-    spawn("dist/gateway/main.js", { PORT: String(port) }, `gateway-${port}`);
+    spawn("dist/legacy-gateway/main.js", { PORT: String(port) }, `gateway-${port}`);
   for (const port of ports) await wait(port);
   let workerStarted = false;
   const startWorker = async () => {
-    spawn("dist/gateway/worker-main.js", { DB_POOL_SIZE: "16" }, "worker");
+    spawn("dist/legacy-gateway/worker-main.js", { DB_POOL_SIZE: "16" }, "worker");
     await wait(18099);
     workerStarted = true;
   };

@@ -70,7 +70,7 @@ bun run bench --model gpt-4o-mini --seconds 30 --concurrency 32 --stream
 
 测试使用真实 PostgreSQL、Redis 和真实 HTTP mock，自动创建并删除独立测试数据库。测试数据库账号需要 `CREATEDB`，生产运行账号不需要。验证内容和实测数据见 [验收报告](validation.md)；不会把短时本机测试描述为 10,000 RPS 持续一小时或完整机房高可用验证。
 
-`bun run build` 输出无需 `node_modules` 的 Gateway、计费与恢复 worker、迁移工具与独立 mock。生产入口为 `bun dist/gateway/main.js`，独立 worker 为 `bun dist/gateway/worker-main.js`。Linux、双实例、最小权限、发布/回滚与恢复步骤见 [运维手册](reliability-and-operations.md)。
+`bun run build` 输出无需 `node_modules` 的过渡 legacy Gateway 及其 worker、Core API、Core 结算 worker、迁移工具与独立 mock。legacy 入口为 `bun dist/legacy-gateway/main.js` 与 `bun dist/legacy-gateway/worker-main.js`，承载尚未迁到 v2 的公开能力；Core API 为 `CORE_API_CONFIG_FILE=<json> bun dist/core-api/main.js`（内部 mTLS 监听，配置 `admin` 段时另起 `/admin` 管理与插件目录监听），Core 结算 worker 为 `bun dist/core-worker/main.js`（`DATABASE_URL`、`QUEUE_REDIS_URL`、`REDIS_NAMESPACE`、`WORKER_PORT` 等环境变量）。三进程拆分进度见 [T04.c 记录](docs/migrations/enterprise-v2-three-process.md)。Linux、双实例、最小权限、发布/回滚与恢复步骤见 [运维手册](reliability-and-operations.md)。
 
 T04.a 增加独立插件组件：`@gateway/plugin-host` 提供有界 Bun 监督、已验证包与 attempt API，`@gateway/plugin-sdk` 定义 ABI v1，`@gateway/adapters` 提供 OpenAI Chat WASM 包及锁定来源的构建入口。当前 Gateway 装配和资金路径仍由 T04.b/c 迁移。原生构建需要 Go 1.27.4；`PLUGIN_GO` 可指定该 Go 的绝对路径，Go 缓存保存在 `.local`。`bun run verify` 包含显式 native gofmt/vet/`go test ./__test__`；完整 race 入口为 `bun run test:native:race`。CI 和部署环境须安装同版本 Go。
 

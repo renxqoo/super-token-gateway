@@ -3,7 +3,7 @@ import type { ExecutionReply } from "@gateway/contracts";
 import { createPluginAttempts, createPluginSupervisor, observeAttempt } from "@gateway/plugin-host";
 import { UsageProducer, evidenceChannel } from "@gateway/runtime";
 import { Store } from "@gateway/storage";
-import { createSettlementWorker } from "../../apps/core-api/src/settlement/worker.ts";
+import { createSettlementWorker } from "../../apps/core-worker/src/settlement/worker.ts";
 import { prepareFinancialAdmission, withFinancial } from "../support/financial-execution.ts";
 import { syntheticChatPackage } from "../support/plugin-package.ts";
 

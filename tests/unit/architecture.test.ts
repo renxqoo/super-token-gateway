@@ -25,14 +25,29 @@ test("workspace dependencies stay acyclic and commercial capabilities stay outsi
     dependencies: Record<string, string>;
   };
   expect(Object.keys(mock.dependencies)).toEqual(["hono"]);
-  for await (const file of new Bun.Glob("**/*.ts").scan("apps/gateway/src")) {
-    const source = await Bun.file(`apps/gateway/src/${file}`).text();
+  for await (const file of new Bun.Glob("**/*.ts").scan("apps/legacy-gateway/src")) {
+    const source = await Bun.file(`apps/legacy-gateway/src/${file}`).text();
     if (["app.ts", "admin.ts"].includes(file)) expect(source).not.toMatch(/@gateway\/storage/);
     expect(source).not.toMatch(/\.db\s*(?:`|<|\.)|\.unsafe\s*\(/);
     expect(source).not.toMatch(
       /(?:Bun\.write|writeFile|appendFile|console\.(?:debug|error|log)\([^\n]*(?:body|content|response))/,
     );
   }
+});
+
+test("Core processes never reach into the transitional Gateway or each other's private modules", async () => {
+  const forbidden: Record<string, RegExp> = {
+    "core-api": /legacy-gateway|core-worker|@gateway\/(?:legacy-gateway|connectors)/,
+    "core-worker":
+      /legacy-gateway|core-api|@gateway\/(?:legacy-gateway|core-api|core-client|plugin-host)/,
+    "mock-providers": /legacy-gateway|core-api|core-worker/,
+  };
+  for (const [app, pattern] of Object.entries(forbidden))
+    for await (const file of new Bun.Glob("**/*.ts").scan(`apps/${app}/src`)) {
+      const source = await Bun.file(`apps/${app}/src/${file}`).text();
+      for (const match of source.matchAll(/(?:from\s+|import\s*\(?\s*)["']([^"']+)["']/g))
+        expect(match[1] ?? "").not.toMatch(pattern);
+    }
 });
 
 test("every schema artifact has one checksummed migration owner and no compatibility outbox", async () => {

@@ -10,7 +10,6 @@ import type { Resource } from "@gateway/contracts";
 import { boundedRelay, readBounded, clientAddress, validateCidr, inCidrs } from "@gateway/runtime";
 import type { Dependencies, Env } from "./context.ts";
 import { openapi, resourceActions, inferencePaths } from "./openapi.ts";
-import { catalogRoutes } from "@gateway/core-api/catalog-http";
 import { adminRoutes } from "./admin.ts";
 import { execute } from "./execution.ts";
 import { parseBatchInput } from "./batch-input.ts";
@@ -120,7 +119,6 @@ export function createApp(deps: Dependencies): Hono<Env> {
       throw new GatewayError(503, "not_ready", "Gateway dependencies are unavailable");
     }
   });
-  if (deps.catalog) app.route("/admin", catalogRoutes(deps.catalog));
   app.route("/admin", adminRoutes(deps));
   app.get("/openapi.json", (c) => c.json(openapi()));
 

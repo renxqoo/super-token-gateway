@@ -176,6 +176,7 @@ export async function prepareCatalog(db: SQL) {
       release,
       keys,
       appDb,
+      appUrl: url.toString(),
       get application() {
         return application;
       },

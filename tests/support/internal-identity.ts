@@ -57,11 +57,12 @@ export async function withIdentity(
     { max: 8, registry: identityRegistry },
   );
 }
-async function prepareIdentity(
+export async function prepareIdentity(
   db: SQL,
   options: {
     databasePort?: number;
     execution?: import("../../apps/core-api/src/execution/handler.ts").ExecutionOptions;
+    admin?: NonNullable<import("../../apps/core-api/src/config.ts").CoreApiConfig["admin"]>;
     entry?: string;
     challengeTtl?: number;
     sessionTtl?: number;
@@ -193,6 +194,7 @@ async function prepareIdentity(
         JSON.stringify({
           database_url: roleUrl(api),
           ...(options.execution ? { execution: options.execution } : {}),
+          ...(options.admin ? { admin: options.admin } : {}),
           audience: identityAudience,
           hostname: "127.0.0.1",
           servername: "localhost",
@@ -208,8 +210,8 @@ async function prepareIdentity(
         }),
         { mode: 0o600 },
       );
-      const child = Bun.spawn(["bun", options.entry ?? "apps/core-api/src/identity-main.ts"], {
-        env: { ...process.env, MINIMAX_API_KEY: "", INTERNAL_IDENTITY_CONFIG_FILE: config },
+      const child = Bun.spawn(["bun", options.entry ?? "apps/core-api/src/main.ts"], {
+        env: { ...process.env, MINIMAX_API_KEY: "", CORE_API_CONFIG_FILE: config },
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -229,7 +231,7 @@ async function prepareIdentity(
         return JSON.parse(output.split("\n").find((line) => line.includes('"event":"ready"'))!);
       };
       const timeout = setTimeout(() => child.kill("SIGKILL"), 10000);
-      let ready: { port: number; session: StartupReceipt };
+      let ready: { port: number; session: StartupReceipt; admin_port?: number };
       try {
         ready = await read();
       } finally {

@@ -1,11 +1,11 @@
 import { afterAll, afterEach, beforeAll, expect, spyOn, test } from "bun:test";
 import { createDatabase, migrate } from "@gateway/storage";
 import type { SQL } from "bun";
-import { assemble } from "../../apps/gateway/src/assembly.ts";
-import { createApp } from "../../apps/gateway/src/app.ts";
-import { loadConfig } from "../../apps/gateway/src/config.ts";
-import { BillingWorker } from "../../apps/gateway/src/billing-worker.ts";
-import type { Dependencies } from "../../apps/gateway/src/context.ts";
+import { assemble } from "../../apps/legacy-gateway/src/assembly.ts";
+import { createApp } from "../../apps/legacy-gateway/src/app.ts";
+import { loadConfig } from "../../apps/legacy-gateway/src/config.ts";
+import { BillingWorker } from "../../apps/legacy-gateway/src/billing-worker.ts";
+import type { Dependencies } from "../../apps/legacy-gateway/src/context.ts";
 import { createMockApp } from "../../apps/mock-providers/src/app.ts";
 import type { Scenario } from "../../apps/mock-providers/src/app.ts";
 

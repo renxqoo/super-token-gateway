@@ -366,7 +366,9 @@ const quantile = (value: number) => latencies.quantile(value);
 const artifacts = collectMetrics
   ? {
       gateway_sha256: new Bun.CryptoHasher("sha256")
-        .update(await Bun.file(new URL("../dist/gateway/main.js", import.meta.url)).arrayBuffer())
+        .update(
+          await Bun.file(new URL("../dist/legacy-gateway/main.js", import.meta.url)).arrayBuffer(),
+        )
         .digest("hex"),
       manifest_sha256: new Bun.CryptoHasher("sha256")
         .update(await Bun.file(new URL("../dist/manifest.json", import.meta.url)).arrayBuffer())

@@ -2,7 +2,7 @@
 
 ## 项目目录结构
 
-- `apps/gateway`：HTTP 网关、管理面与结算 worker 入口；`apps/mock-providers`：测试用上游替身。
+- `apps/legacy-gateway`：过渡单体网关（直连 PG，承载未迁能力）及其 worker；`apps/core-api`：Core 内部 RPC 与 `/admin` 管理、插件目录；`apps/core-worker`：签名证据结算 worker；`apps/mock-providers`：测试用上游替身。
 - `packages/kernel`：契约、计量与金额计算；`packages/connectors`：协议转换与流解析；`packages/runtime`：网络、限流、队列与进程生命周期；`packages/storage`：PostgreSQL schema、迁移与资金存储。
 - `scripts`：迁移、构建、基准与验收脚本；`tests/integration`：真实 PG/Redis/HTTP 集成测试；`tests/unit`：只放跨模块架构约束；`tests/fixtures`：历史 schema 升级夹具。
 - `infra`：部署配置与最小权限角色；`docs`：ADR、OpenAPI 与性能证据。

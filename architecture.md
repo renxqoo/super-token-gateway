@@ -17,7 +17,9 @@
 
 ## 模块
 
-- `apps/gateway`：Hono 入口、认证授权、请求编排、资源代理、计量提交、恢复与生命周期。
+- `apps/legacy-gateway`：过渡单体 Gateway，直连 PG，承载尚未迁到 v2 的公开能力；各迁移任务逐项删除其路由，T16 整体删除。
+- `apps/core-api`：Core 内部 mTLS RPC（身份、准入、执行许可）与 `/admin` 管理、插件目录监听。
+- `apps/core-worker`：消费签名数字证据，在一个 PG 事务内完成双方结算后 ACK。
 - `packages/kernel`：纯契约、精确数字、成本、加密、SSE；不依赖存储、HTTP 服务或业务系统。
 - `packages/connectors`：协议编码、转换损失策略、流事件及 usage 旁路提取；只依赖 kernel。
 - `packages/storage`：PG 查询、迁移、不可变证据、幂等、资源归属与事件投递；只依赖 kernel。

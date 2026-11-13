@@ -30,6 +30,7 @@ export function createSettlementWorker(
   });
   return {
     ready: () => consumer.ready(),
+    healthy: () => consumer.healthy(),
     close: () => consumer.close(),
   };
 }

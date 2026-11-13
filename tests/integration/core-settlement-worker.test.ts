@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { SQL } from "bun";
 import type { CoreEvidenceGroupV1, ExecutionReply } from "@gateway/contracts";
-import { createSettlementWorker } from "../../apps/core-api/src/settlement/worker.ts";
+import { createSettlementWorker } from "../../apps/core-worker/src/settlement/worker.ts";
 import { UsageProducer, evidenceChannel } from "@gateway/runtime";
 import { prepareFinancialAdmission, withFinancial } from "../support/financial-execution.ts";
 

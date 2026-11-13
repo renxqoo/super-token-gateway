@@ -1,5 +1,5 @@
 {
-  "name": "@gateway/server",
+  "name": "@gateway/legacy-gateway",
   "private": true,
   "type": "module",
   "dependencies": {

@@ -12,4 +12,4 @@ USER bun
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=8088
 EXPOSE 8088
 STOPSIGNAL SIGTERM
-CMD ["bun","dist/gateway/main.js"]
+CMD ["bun","dist/legacy-gateway/main.js"]

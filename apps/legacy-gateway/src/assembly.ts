@@ -1,4 +1,3 @@
-import { createCatalogApplication } from "@gateway/core-api/catalog";
 import { createDatabase, Store, FundsStore, SCHEMA_VERSION } from "@gateway/storage";
 import {
   Lifecycle,
@@ -40,28 +39,7 @@ export async function assemble(config: Config): Promise<Dependencies> {
       maxInFlight: config.MAX_INFLIGHT,
       requireAllReplicas: config.NODE_ENV === "production",
     });
-    const pluginSettings = [
-      config.PLUGIN_RELEASE_POLICY,
-      config.PLUGIN_RELEASE_DIRECTORY,
-      config.PLUGIN_HELPER_EXECUTABLE,
-    ];
-    if (pluginSettings.some(Boolean) && !pluginSettings.every(Boolean))
-      throw new Error("All plugin catalog trust settings are required");
     const dependencies: Dependencies = {
-      ...(config.PLUGIN_RELEASE_POLICY &&
-      config.PLUGIN_RELEASE_DIRECTORY &&
-      config.PLUGIN_HELPER_EXECUTABLE
-        ? {
-            catalog: createCatalogApplication({
-              db,
-              adminKey: config.ADMIN_KEY,
-              pepper: config.KEY_PEPPER,
-              policyFile: config.PLUGIN_RELEASE_POLICY,
-              releaseDirectory: config.PLUGIN_RELEASE_DIRECTORY,
-              helperExecutable: config.PLUGIN_HELPER_EXECUTABLE,
-            }),
-          }
-        : {}),
       config,
       usage: new Metering(producer),
       database: {
@@ -69,7 +47,6 @@ export async function assemble(config: Config): Promise<Dependencies> {
           await db`SELECT 1`;
         },
         close: async (timeout = 1) => {
-          await dependencies.catalog?.close();
           await db.close({ timeout });
         },
       },

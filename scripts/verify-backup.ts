@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { chmod, mkdir } from "node:fs/promises";
 import { createDatabase, SCHEMA_VERSION } from "@gateway/storage";
 import { UsageProducer, usageChannel } from "@gateway/runtime";
-import { loadConfig } from "../apps/gateway/src/config.ts";
+import { loadConfig } from "../apps/legacy-gateway/src/config.ts";
 if (!Bun.argv.includes("--quiesced"))
   throw new Error(
     "Stop all admission/producer processes and drain the queue, then pass --quiesced. A PG-only snapshot of an active queue is incomplete.",

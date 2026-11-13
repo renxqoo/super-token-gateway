@@ -1,0 +1,10 @@
+{
+  "name": "@gateway/core-worker",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@gateway/runtime": "workspace:*",
+    "@gateway/storage": "workspace:*",
+    "zod": "4.6.7"
+  }
+}

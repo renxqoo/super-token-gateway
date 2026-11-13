@@ -12,7 +12,7 @@ bun run build
 
 `--no-script` 明确调用 Bun 原生命令，避免 package.json 的同名脚本转发。所有 TypeScript 启用 strict、noUncheckedIndexedAccess 和 exactOptionalPropertyTypes。
 
-配置在 `apps/gateway/src/config.ts` 中验证。关键默认值：总时限 180s、头/首事件/流空闲与下游停滞 30s、请求 16MiB、JSON 响应 32MiB、SSE 单事件 1MiB、累计原始缓冲预算 128MiB、HTTP/执行准入 10,000、PG 池 24、最多物理尝试 3。
+配置在 `apps/legacy-gateway/src/config.ts` 中验证。关键默认值：总时限 180s、头/首事件/流空闲与下游停滞 30s、请求 16MiB、JSON 响应 32MiB、SSE 单事件 1MiB、累计原始缓冲预算 128MiB、HTTP/执行准入 10,000、PG 池 24、最多物理尝试 3。
 
 128MiB 是受控原始缓冲量预算，不是操作系统 RSS 上限。JSON/字符串/转换对象和运行时也占内存；生产需配合容器/systemd 内存上限与压测调整。流队列按字节背压，输出不写临时文件。
 

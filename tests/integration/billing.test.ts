@@ -1559,8 +1559,8 @@ test("incompatible old database is rejected without modifying its records", asyn
     await old`INSERT INTO schema_migrations VALUES(8)`;
     await old`CREATE TABLE retained_record(value text)`;
     await old`INSERT INTO retained_record VALUES('keep')`;
-    const { assemble } = await import("../../apps/gateway/src/assembly.ts");
-    const { loadConfig } = await import("../../apps/gateway/src/config.ts");
+    const { assemble } = await import("../../apps/legacy-gateway/src/assembly.ts");
+    const { loadConfig } = await import("../../apps/legacy-gateway/src/config.ts");
     for (const version of [8, 2026111005]) {
       await old`UPDATE schema_migrations SET version=${version}`;
       await expect(migrate(old)).rejects.toThrow("Incompatible database schema");

@@ -53,6 +53,6 @@ await withIdentity(
     );
     checks++;
   },
-  { entry: "dist/core-api/identity-main.js" },
+  { entry: "dist/core-api/main.js" },
 );
 console.log(`Compiled Core identity artifact passed ${checks} checks`);

@@ -4,11 +4,11 @@ import { UsageProducer, usageChannel } from "@gateway/runtime";
 import { createUsageQueueCleanup } from "../support/usage-queue-cleanup.ts";
 import { createDatabase, migrate } from "@gateway/storage";
 import type { Operation, Protocol, ProviderKind } from "@gateway/kernel";
-import { loadConfig } from "../../apps/gateway/src/config.ts";
-import { assemble } from "../../apps/gateway/src/assembly.ts";
-import { createApp } from "../../apps/gateway/src/app.ts";
-import type { Dependencies } from "../../apps/gateway/src/context.ts";
-import { BillingWorker } from "../../apps/gateway/src/billing-worker.ts";
+import { loadConfig } from "../../apps/legacy-gateway/src/config.ts";
+import { assemble } from "../../apps/legacy-gateway/src/assembly.ts";
+import { createApp } from "../../apps/legacy-gateway/src/app.ts";
+import type { Dependencies } from "../../apps/legacy-gateway/src/context.ts";
+import { BillingWorker } from "../../apps/legacy-gateway/src/billing-worker.ts";
 import { createMockApp } from "../../apps/mock-providers/src/app.ts";
 import type { Scenario } from "../../apps/mock-providers/src/app.ts";
 
@@ -752,7 +752,7 @@ test("Responses previous IDs are owned, streaming IDs stable and background usag
     key,
   );
   expect(background.value.status).toBe("queued");
-  const { recoveryTick } = await import("../../apps/gateway/src/recovery.ts");
+  const { recoveryTick } = await import("../../apps/legacy-gateway/src/recovery.ts");
   await recoveryTick(deps);
   await awaitResourceFinal(String(background.value.id));
   const evidence =
@@ -978,7 +978,7 @@ test("all provider-backed resource fields enforce ownership, including Gemini na
 });
 
 test("precise numeric literals survive resource rewriting, forwarding and idempotency", async () => {
-  const { resolveFileReferences } = await import("../../apps/gateway/src/resources.ts");
+  const { resolveFileReferences } = await import("../../apps/legacy-gateway/src/resources.ts");
   const { canonicalExact } = await import("@gateway/connectors");
   const { parseProviderJson, stringifyExact } = await import("@gateway/connectors");
   const a = (
@@ -1343,7 +1343,7 @@ test("crash recovery appends UNKNOWN and later actual evidence supersedes withou
     async () => (await testDb`SELECT id FROM attempts WHERE upstream_model=${model}`).length === 1,
   );
   await testDb`UPDATE attempts SET started_at=now()-interval '10 minutes' WHERE upstream_model=${model}`;
-  await (await import("../../apps/gateway/src/recovery.ts")).recoverStale(deps);
+  await (await import("../../apps/legacy-gateway/src/recovery.ts")).recoverStale(deps);
   const response = await pending;
   expect(response.status).toBe(200);
   await response.text();
@@ -1535,7 +1535,7 @@ test("restricted production role can serve inference but cannot mutate usage or 
         basis: "REQUEST_COMPLETION",
       }),
     });
-    const { recoveryTick } = await import("../../apps/gateway/src/recovery.ts");
+    const { recoveryTick } = await import("../../apps/legacy-gateway/src/recovery.ts");
     await recoveryTick(runtimeDeps);
     expect(tariffResponse.status).toBe(201);
     await tariffResponse.text();
@@ -1599,7 +1599,7 @@ test("completed Responses streams without usage remain recoverable until GET sup
   const rows =
     await testDb`SELECT id,state FROM resources WHERE attempt_id IN(SELECT id FROM attempts WHERE upstream_model=${model})`;
   expect(rows[0]?.state).toBe("PENDING_USAGE");
-  const { recoveryTick } = await import("../../apps/gateway/src/recovery.ts");
+  const { recoveryTick } = await import("../../apps/legacy-gateway/src/recovery.ts");
   await waitFor(async () => {
     await recoveryTick(deps);
     return (await deps.store.resource(String(rows[0]?.id), projectId)).state === "COMPLETED";
@@ -2074,7 +2074,7 @@ test("technical organization/principal RBAC rejects cross-tenant keys and disabl
   expect(listed.response.status).toBe(403);
 });
 test("round-robin rotates equal priorities and least-latency selects shared measurements", async () => {
-  const { chooseRoutes } = await import("../../apps/gateway/src/routing.ts");
+  const { chooseRoutes } = await import("../../apps/legacy-gateway/src/routing.ts");
   const model = await configureModel("openai");
   await json(`/admin/models/${model}/routes`, {
     provider_id: providers.anthropic,

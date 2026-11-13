@@ -36,8 +36,16 @@
         "zod": "4.6.7",
       },
     },
-    "apps/gateway": {
-      "name": "@gateway/server",
+    "apps/core-worker": {
+      "name": "@gateway/core-worker",
+      "dependencies": {
+        "@gateway/runtime": "workspace:*",
+        "@gateway/storage": "workspace:*",
+        "zod": "4.6.7",
+      },
+    },
+    "apps/legacy-gateway": {
+      "name": "@gateway/legacy-gateway",
       "dependencies": {
         "@gateway/connectors": "workspace:*",
         "@gateway/contracts": "workspace:*",
@@ -190,15 +198,17 @@
 
     "@gateway/core-client": ["@gateway/core-client@workspace:packages/core-client"],
 
+    "@gateway/core-worker": ["@gateway/core-worker@workspace:apps/core-worker"],
+
     "@gateway/kernel": ["@gateway/kernel@workspace:packages/kernel"],
+
+    "@gateway/legacy-gateway": ["@gateway/legacy-gateway@workspace:apps/legacy-gateway"],
 
     "@gateway/plugin-host": ["@gateway/plugin-host@workspace:packages/plugin-host"],
 
     "@gateway/plugin-sdk": ["@gateway/plugin-sdk@workspace:packages/plugin-sdk"],
 
     "@gateway/runtime": ["@gateway/runtime@workspace:packages/runtime"],
-
-    "@gateway/server": ["@gateway/server@workspace:apps/gateway"],
 
     "@gateway/storage": ["@gateway/storage@workspace:packages/storage"],
 
