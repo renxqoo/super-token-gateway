@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
+import {
+  createDatabase,
+  migrate,
+  Store,
+  FundsStore,
+  createCustomerFundsStore,
+} from "@gateway/storage";
 import type { SQL } from "bun";
 import type { Route, Credential, UsageEvidence } from "@gateway/contracts";
 import type { Usage } from "@gateway/kernel";
@@ -8,7 +14,7 @@ const database = `gateway_test_funds_${crypto.randomUUID().replaceAll("-", "")}`
 let owner: SQL;
 let db: SQL;
 let store: Store;
-let funds: FundsStore;
+let funds: ReturnType<typeof createCustomerFundsStore>;
 let route: Route;
 let pricingId: string;
 async function project(currency = "USD") {
@@ -667,7 +673,8 @@ test("a concurrent quote burst must not starve independent funding behind a lock
   const url = new URL(process.env.DATABASE_URL!);
   url.pathname = `/${database}`;
   const constrained = createDatabase(url.href, 2);
-  const isolated = new FundsStore(constrained);
+  const isolated = createCustomerFundsStore(constrained);
+  const quoting = new FundsStore(constrained);
   const acquired = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const lock = db.begin(async (tx) => {
@@ -677,7 +684,7 @@ test("a concurrent quote burst must not starve independent funding behind a lock
   });
   await acquired.promise;
   const quotes = Array.from({ length: 32 }, () =>
-    isolated.quote("funds-model", "chat", "USD", [route.provider_id], { inputCharacters: "1" }, 1),
+    quoting.quote("funds-model", "chat", "USD", [route.provider_id], { inputCharacters: "1" }, 1),
   );
   let creditFinished = false;
   let credited: Promise<unknown> | undefined;
@@ -901,7 +908,7 @@ beforeAll(async () => {
   db = createDatabase(url.toString());
   await migrate(db);
   store = new Store(db);
-  funds = new FundsStore(db);
+  funds = createCustomerFundsStore(db);
   const provider = crypto.randomUUID();
   await store.createProvider(
     provider,

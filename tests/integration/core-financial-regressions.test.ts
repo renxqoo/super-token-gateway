@@ -97,7 +97,7 @@ test(
       const owner = f.client();
       await owner.startup();
       const setup = await f.bootstrap();
-      await f.request("/billing/tariffs", {
+      await f.request("/tariffs", {
         model: setup.model,
         operation: "chat",
         provider_id: setup.provider.id,

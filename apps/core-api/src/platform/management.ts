@@ -9,17 +9,13 @@ import {
   keySchema,
   routeSchema,
   routePatchSchema,
-  tariffSchema,
-  creditSchema,
   upstreamRechargeSchema,
 } from "@gateway/contracts";
 import {
   Store,
-  FundsStore,
   recordProvider,
   recordRoute,
   recordRouteUpdate,
-  recordBillingTariff,
   createPluginCatalogStore,
   recordFinancialVoucher,
   recordUpstreamRecharge,
@@ -28,6 +24,7 @@ import {
 import { createKey, encrypt, verifier } from "@gateway/runtime/crypto";
 import { readBounded, validateCidr } from "@gateway/runtime";
 import { createPlatformAuthenticator, type PlatformPermission } from "./authentication.ts";
+import { registerCustomerFunds } from "./customer-funds.ts";
 export function createCoreManagementApplication(options: {
   db: SQL;
   adminKey: string;
@@ -204,29 +201,7 @@ export function createCoreManagementApplication(options: {
       201,
     );
   });
-  app.post("/projects/:id/credits", async (c) => {
-    const project = id(c.req.param("id")),
-      input = creditSchema.parse(await body(c.req.raw));
-    return c.json(
-      await run(c.req.header("authorization"), "customer:fund", async (tx, actor) => {
-        const receipt = await new FundsStore(tx).credit(project, input);
-        await audit(tx, actor, "customer.credit", project);
-        return receipt;
-      }),
-      201,
-    );
-  });
-  app.post("/billing/tariffs", async (c) => {
-    const input = tariffSchema.parse(await body(c.req.raw));
-    return c.json(
-      await run(c.req.header("authorization"), "catalog:manage", async (tx, actor) => {
-        const receipt = await recordBillingTariff(tx, input);
-        await audit(tx, actor, "tariff.set", receipt.id);
-        return receipt;
-      }),
-      201,
-    );
-  });
+  registerCustomerFunds(app, { run, audit, body });
   app.post("/models/:model/routes", async (c) => {
     const model = c.req.param("model"),
       input = routeSchema.parse(await body(c.req.raw));

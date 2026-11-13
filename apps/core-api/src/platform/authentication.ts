@@ -6,6 +6,8 @@ const permissionNames = [
   "funding:read",
   "funding:recharge",
   "customer:fund",
+  "customer:read",
+  "customer:adjust",
   "plugins:read",
   "plugins:install-bundled",
   "plugins:validate",

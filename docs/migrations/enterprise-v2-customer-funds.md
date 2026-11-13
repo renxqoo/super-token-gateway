@@ -1,0 +1,69 @@
+# Enterprise v2 客户资金迁移（T05）实施方案
+
+状态：用户已确认 D1–D3 按推荐执行。日期：2026-11-14。起点：`main` `cdf19a1`（T04.c 完成，未推送）。
+
+本记录对应 [enterprise-v2.md](enterprise-v2.md) 任务图 T05：客户钱包、授信、价格、退款完整迁移到 Core，覆盖能力 C13、C18–C20 及 §5.1 客户资金不变量。客户账本的 SQL 规则（`credit_wallet`、`configure_wallet_credit`、`refund_billing_charge`、`adjust_billing_charge`、`settle_requests`、`expire_wallet`、`collect_wallet_debt`）由 legacy 与 v2 结算共用，本单元不改其语义，只迁移调用方、权限与驱动进程，并以 v2 三进程真实用例验证。
+
+## 1. 当前行为（实测与代码核对）
+
+| 范围           | 现状                                                                                                                                                                                                                  | 依据                                          |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| C18–C20 管理   | 仅 legacy：`/admin/projects/{id}/credits`、`/wallets`、`/wallets/{currency}/lots`、`/journal`、PATCH 钱包、`/credit-policy`、`/admin/tariffs`、退款、调账、resolution；`FundsStore` 直连 PG，ADMIN_KEY 鉴权，不写审计 | `apps/legacy-gateway/src/admin.ts:269–335`    |
+| C13 公开查询   | 仅 legacy：`GET /v1/wallets`、`GET /v1/requests/{id}/billing`，project key 角色须为 ADMIN/BILLING                                                                                                                     | `apps/legacy-gateway/src/app.ts:209–224`      |
+| Core 管理面    | 已有 `POST /admin/projects/{id}/credits` 与 `POST /admin/billing/tariffs`（T04.b 测试装置引入；后者不是原路径）                                                                                                       | `apps/core-api/src/platform/management.ts`    |
+| 平台权限       | `catalog:manage`、`funding:read`、`funding:recharge`、`customer:fund`，由 `core_platform_authorize_v1` 枚举                                                                                                           | `packages/storage/src/sql/core-execution.sql` |
+| 争议后重新结算 | `reconcileKnownHolds` 只由 legacy worker 驱动，v2 请求的争议裁决依赖 T16 要删除的进程                                                                                                                                 | `apps/legacy-gateway/src/worker-main.ts:54`   |
+| 测试           | `billing.test.ts` 直接调用 `FundsStore`/`Store`/SQL；legacy HTTP 用例约 8 处（`gateway.test.ts`）、`routing.test.ts` 2 处、`scripts/verify-artifact.ts` 2 处                                                          | `tests/integration`                           |
+
+## 2. 关键决策（用户已确认）
+
+- **D1 C13 由 Core API 公开监听提供**：Core API 新增独立 `public` 监听，只承载两个只读账务端点；project key 校验复用执行路径的 pepper verifier 与 `core_auth_v1`（撤销、IP、组织/成员状态），并要求 ADMIN/BILLING 角色。Caddy 把 `/v1/wallets`、`/v1/requests/*/billing` 路由到该监听；管理监听仍不公开。T07 扩展 C11–C12 时复用同一实现。
+- **D2 新增平台权限**：追加迁移新增 `customer:read`（钱包、lots、流水、费率读取）与 `customer:adjust`（退款、调账、人工 resolution）；充值、授信、钱包冻结/策略用 `customer:fund`；写费率用 `catalog:manage`。所有写操作与审计同事务。
+- **D3 争议后重新结算移到 core-worker**：`apps/core-worker/src/reconciliation/` 定时调用同一 SQL（SKIP LOCKED + 租约 token），从 legacy worker 删除，core-worker 为唯一执行者；结算角色追加最小授权并实测。
+
+其余工程选择：
+
+1. 管理与查询能力移到 `packages/storage/src/customer-funds/`，按函数暴露；legacy `FundsStore` 只保留 legacy 准入的 `quote`，T16 随 legacy 删除。
+2. legacy 删除 C13、C18–C20 路由；Core `/admin/billing/tariffs` 改为原路径 `/admin/tariffs`（GET/POST），调用方同步迁移，不留别名。路径与请求体不变，`openapi.ts` 按 T04.c 惯例继续描述整体契约，不删除这些条目，T14 统一 OpenAPI 时迁走。
+3. `core_management_api` 补齐所需函数与列级授权；公开监听使用独立只读角色；每个角色以“允许的成功、其余被拒”实测。
+4. 数据库异常只在 storage 边界转换。资金业务错误码保持 legacy 原值（`insufficient_funds`、`billing_conflict`、`not_found`、`invalid_resolution`、`currency_mismatch`、`incomplete_evidence`）；输入校验与鉴权使用 Core 管理面统一信封（`invalid_management_input` 400、`unauthenticated` 401、`platform_scope_denied` 403），这是有意差异。
+5. ADR 0005 中授信策略“独立 ADMIN_KEY 授权”由 `customer:fund` 平台权限取代；ADMIN_KEY 仍作为 bootstrap 凭证拥有全部权限。ADR 作为历史决定不改写。
+
+## 3. 里程碑
+
+| 里程碑           | 交付                                                                                                                     | 完成证据                                                                                                                               |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| e1 管理 API      | customer-funds 存储模块；Core 管理面 C18–C20 全部原路径；权限迁移与审计；管理角色授权；legacy 路由删除与测试迁移         | 真实 Core API HTTP 覆盖每个端点：幂等回执、同 key 异 payload 冲突、401/403、审计同事务；`billing.test.ts` 改用新模块全部通过；全量门禁 |
+| e2 公开查询      | Core 公开监听与 project key 鉴权；C13 两端点；配置、systemd、Caddy、OpenAPI                                              | ADMIN/BILLING 允许、INVOKER 拒绝、撤销即时生效、IP 限制、跨项目 404、币种隔离、精确字符串金额                                          |
+| e3 v2 资金端到端 | v2 charge 退款/调账；争议→冻结→resolution→core-worker 重新结算；超额应收完整入账并冻结；授信并发；热点钱包不阻塞无关钱包 | 三进程真实用例，期望值手算；reconcile 迁移先红后绿；结算角色实测                                                                       |
+| e4 审查与验收    | 只读独立审查、逐条处置、文档、全量门禁                                                                                   | 同 T04.c c4                                                                                                                            |
+
+每个里程碑结束运行全部门禁并本地提交，推送需另行指示。
+
+## 4. 测试迁移矩阵
+
+| 旧测试                                                                 | 处理                                                                                                                |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `billing.test.ts` 账本规则（来源、过期、债务、版本、并发、争议、批次） | 断言保留，改为调用 customer-funds 模块；依赖 legacy 准入（`admit_gateway_batch`）的用例保留为 legacy 回归，T16 删除 |
+| legacy HTTP 中这些路由的用例                                           | 改为调用 Core 管理面或公开监听的同一路径，断言不弱化                                                                |
+| Core 测试装置的 `/admin/billing/tariffs`                               | 改为 `/admin/tariffs`                                                                                               |
+| 新增                                                                   | e1–e3 列出的真实 HTTP 与三进程用例                                                                                  |
+
+## 5. 风险
+
+- C13 的 key 鉴权先于 T07 在 Core 落地，T07 必须复用，不写第二套。
+- 争议与超额应收在 v2 路径上目前只有 SQL 级证据，e3 首次端到端验证，可能暴露 T04.b 结算缺陷；如暴露，按先红后绿在本单元修复并记录。
+
+## 6. e1 实施记录
+
+| 项           | 结果                                                                                                                                                                                                                                                                               |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 存储         | `packages/storage/src/customer-funds/` 提供 `createCustomerFundsStore(db \| tx)`（入参为事务时不再开新事务）、`recordBillingTariff`、`fundingError`；`FundsStore` 只保留 legacy 准入的 `quote`                                                                                     |
+| Core 管理面  | `apps/core-api/src/platform/customer-funds.ts` 在 `/admin` 下提供 C18–C20 全部原路径；每个写操作与 `audit_events` 同事务，授权在动作前后各校验一次                                                                                                                                 |
+| 权限         | 迁移 `2026111211`（`sql/core-customer-funds.sql`）替换 `core_platform_authorize_v1` 的权限枚举，加入 `customer:read`、`customer:adjust`                                                                                                                                            |
+| 角色         | `core_management_api` 追加资金函数与列级授权；`gateway_runtime` 收回 `credit_wallet`、`configure_wallet_credit`、`refund_billing_charge`、`adjust_billing_charge` 执行权及费率、resolution、钱包策略列写权（legacy 不再承载这些路由）                                              |
+| legacy       | 删除 C13、C18–C20 路由；争议后重新结算暂以 `reconcileHolds` 依赖保留在 legacy worker，e3 迁到 core-worker                                                                                                                                                                          |
+| 测试迁移     | `billing.test.ts`、`lifecycle.test.ts`、`routing.test.ts`、`gateway.test.ts` 改调存储模块；legacy HTTP 授信策略用例的 404/400/409 断言迁到 Core HTTP 用例；legacy runtime 角色用例改为断言上述资金函数与表写入被拒（42501）；Core 装置与数值用例改用 `/admin/tariffs`              |
+| 新增         | `tests/integration/core-customer-funds.test.ts`：v2 charge 退款/调账幂等与冲突、钱包/lots/流水分页、授信与授信策略、冻结、费率读取、resolution 重放/冲突/未捕获价格/调度重新结算、401/403 拒绝时资金与审计不变、失败写操作不留审计                                                 |
+| 红绿证据     | 去掉 `core-management-role.sql` 新增授权或去掉 `2026111211` 迁移，新增 4 个用例全部失败；恢复后全部通过                                                                                                                                                                            |
+| 迁移版本断言 | `core-execution-upgrade`、`plugin-catalog-upgrade`、`lifecycle` 中“升级到当前清单”的版本数、版本列表与最高版本随追加迁移更新；`lifecycle` 升级用例原断言升级后 `gateway_runtime` 可设置授信策略，现改为断言该角色被拒（42501），并经 customer-funds 模块验证升级后授信策略仍可设置 |

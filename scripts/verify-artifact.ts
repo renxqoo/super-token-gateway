@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, rm } from "node:fs/promises";
-import { createDatabase } from "@gateway/storage";
+import { createCustomerFundsStore, createDatabase } from "@gateway/storage";
 import { RedisClient } from "bun";
 
 const base = process.env.DATABASE_URL;
@@ -217,13 +217,16 @@ try {
       },
     },
   });
-  await api(`/admin/projects/${project.id}/credits`, {
+  await createCustomerFundsStore(db).credit(String(project.id), {
     currency: "USD",
     external_ref: "artifact-credit",
     amount_atoms: "1000000",
     kind: "CASH",
+    priority: 100,
+    models: [],
+    operations: [],
   });
-  await api("/admin/tariffs", {
+  await createCustomerFundsStore(db).setTariff({
     model,
     operation: "chat",
     basis: "PROVIDER_USAGE",

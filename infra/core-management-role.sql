@@ -11,3 +11,8 @@ GRANT UPDATE(id) ON financial_vouchers TO core_management_api;
 GRANT UPDATE(id) ON upstream_accounts TO core_management_api;
 GRANT SELECT ON upstream_journals,upstream_entries TO core_management_api;
 GRANT UPDATE(id) ON supplier_brands TO core_management_api;
+GRANT EXECUTE ON FUNCTION public.configure_wallet_credit(uuid,text,text,numeric,numeric),public.refund_billing_charge(uuid,numeric,text,text),public.adjust_billing_charge(uuid,numeric,text,text),public.wallet_freeze_reason(boolean,boolean,numeric,numeric,numeric) TO core_management_api;
+GRANT SELECT ON wallets,wallet_lots,money_journal,wallet_disputes,billing_resolutions,billing_holds,billing_charges,gateway_requests,attempts TO core_management_api;
+GRANT UPDATE(policy,manual_frozen,freeze_reason,evidence_disputed) ON wallets TO core_management_api;
+GRANT UPDATE(next_reconcile_at,reconcile_until) ON billing_holds TO core_management_api;
+GRANT INSERT ON billing_resolutions TO core_management_api;

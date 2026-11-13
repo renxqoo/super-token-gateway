@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, expect, spyOn, test } from "bun:test";
-import { createDatabase, migrate } from "@gateway/storage";
+import { createCustomerFundsStore, createDatabase, migrate } from "@gateway/storage";
 import type { SQL } from "bun";
 import { assemble } from "../../apps/legacy-gateway/src/assembly.ts";
 import { createApp } from "../../apps/legacy-gateway/src/app.ts";
@@ -228,7 +228,7 @@ async function fixture(
   const project = String(
     (await manage("/projects", { name: model, rpm: 100000, tpm: 100000000, concurrency: 1000 })).id,
   );
-  await instances[0]!.funds.credit(project, {
+  await createCustomerFundsStore(db).credit(project, {
     currency: "USD",
     external_ref: model,
     amount_atoms: "100000",
@@ -296,11 +296,11 @@ async function fixture(
         ).id,
       ),
     );
-    await manage("/tariffs", {
+    await createCustomerFundsStore(db).setTariff({
       model,
       operation: "chat",
       provider_id: provider,
-      pricing: { currency: "USD", rates: customerRates[i] },
+      pricing: { currency: "USD", rates: customerRates[i]! },
       ceilings: { input_tokens: "7", cached_input_tokens: "3", output_tokens: "8", requests: "1" },
       basis: "PROVIDER_USAGE",
     });
@@ -485,7 +485,7 @@ test("Batch row incompatibility skips its provider before quoting and uploads th
       pricing: { currency: "USD", rates: { requests: { numerator: "1", denominator: "1" } } },
       ceilings: { requests: "1" },
     });
-  await manage("/tariffs", {
+  await createCustomerFundsStore(db).setTariff({
     model: f.model,
     operation: "files",
     pricing: { currency: "USD", rates: { requests: { numerator: "1", denominator: "1" } } },
@@ -547,7 +547,7 @@ for (const status of [408, 409, 429, 500, 502, 503, 504, 529])
       [f.providers[1]!, "SUCCEEDED", "FINAL", true],
     ]);
     expect(rows[1]!.cost).toBe("83");
-    const receipt = await instances[0]!.funds.receipt(
+    const receipt = await createCustomerFundsStore(db).receipt(
       response.headers.get("x-gateway-request-id")!,
       f.project,
     );
@@ -665,7 +665,7 @@ test("an unusable successful payload retains reported cost while falling back", 
 
 test("a failed-over charge consumes the selected price from gift funding and releases cash", async () => {
   const f = await fixture([{ status: 503 }, {}, {}]);
-  await instances[0]!.funds.credit(f.project, {
+  await createCustomerFundsStore(db).credit(f.project, {
     currency: "USD",
     external_ref: `${f.model}-gift`,
     amount_atoms: "40",
@@ -674,7 +674,7 @@ test("a failed-over charge consumes the selected price from gift funding and rel
     models: [f.model],
     operations: ["chat"],
   });
-  await manage(`/projects/${f.project}/wallets/USD`, { policy: "GIFT_FIRST" }, "PATCH");
+  await createCustomerFundsStore(db).configure(f.project, "USD", { policy: "GIFT_FIRST" });
   const response = await f.send();
   expect(response.status).toBe(200);
   await response.text();
@@ -967,7 +967,7 @@ test("client cancellation after a retryable rejection releases permits and preve
 
 test("a frozen wallet rejects routing before any provider executes", async () => {
   const f = await fixture();
-  await manage(`/projects/${f.project}/wallets/USD`, { frozen: true }, "PATCH");
+  await createCustomerFundsStore(db).configure(f.project, "USD", { frozen: true });
   const response = await f.send();
   expect(response.status).toBe(402);
   await response.text();
@@ -1020,13 +1020,19 @@ test("operator reconciliation releases an all-unknown hold once without replayin
   await response.text();
   await audit(f, "0", "41");
   const request = (await db`SELECT id FROM gateway_requests WHERE project_id=${f.project}`)[0]!.id;
-  const resolution = { external_ref: f.model, action: "RELEASE", reason: "ADMIN_WRITE_OFF" };
-  await manage(`/requests/${request}/resolutions`, resolution);
-  await manage(`/requests/${request}/resolutions`, resolution);
-  await instances[0]!.funds.reconcileKnownHolds(256);
+  const resolution = {
+    external_ref: f.model,
+    action: "RELEASE",
+    usage: {},
+    reason: "ADMIN_WRITE_OFF",
+  } as const;
+  await createCustomerFundsStore(db).resolve(String(request), resolution);
+  await createCustomerFundsStore(db).resolve(String(request), resolution);
+  await createCustomerFundsStore(db).reconcileKnownHolds(256);
   await waitFor(
     async () =>
-      (await instances[0]!.funds.receipt(String(request), f.project)).hold_state === "RELEASED",
+      (await createCustomerFundsStore(db).receipt(String(request), f.project)).hold_state ===
+      "RELEASED",
   );
   await audit(f, "0");
   expect(await db`SELECT id FROM billing_charges WHERE request_id=${request}`).toHaveLength(1);

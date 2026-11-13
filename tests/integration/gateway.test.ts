@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { SQL } from "bun";
 import { UsageProducer, usageChannel } from "@gateway/runtime";
 import { createUsageQueueCleanup } from "../support/usage-queue-cleanup.ts";
-import { createDatabase, migrate } from "@gateway/storage";
+import { createCustomerFundsStore, createDatabase, migrate } from "@gateway/storage";
 import type { Operation, Protocol, ProviderKind } from "@gateway/kernel";
 import { loadConfig } from "../../apps/legacy-gateway/src/config.ts";
 import { assemble } from "../../apps/legacy-gateway/src/assembly.ts";
@@ -17,6 +17,7 @@ const database = `gateway_test_${suffix}`;
 const namespace = `test:${suffix}`;
 let adminDb: SQL;
 let testDb: SQL;
+let customerFunds: ReturnType<typeof createCustomerFundsStore>;
 let deps: Dependencies;
 let billing: BillingWorker;
 let gateway: ReturnType<typeof Bun.serve>;
@@ -98,7 +99,7 @@ async function configureModel(
   });
   expect(result.response.status).toBe(201);
   for (const operation of caps)
-    await deps.funds.setTariff({
+    await customerFunds.setTariff({
       model: name,
       operation,
       pricing: { currency: "USD", rates: { requests: { numerator: "1", denominator: "1" } } },
@@ -144,6 +145,7 @@ beforeAll(async () => {
   const db = createDatabase(url.toString());
   await migrate(db);
   testDb = db;
+  customerFunds = createCustomerFundsStore(db);
   mockServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: mock.app.fetch, idleTimeout: 0 });
   deps = await assemble(
     loadConfig({
@@ -179,7 +181,7 @@ beforeAll(async () => {
   });
   expect(project.response.status).toBe(201);
   projectId = String(project.value.id);
-  await deps.funds.credit(projectId, {
+  await customerFunds.credit(projectId, {
     currency: "USD",
     external_ref: "test-funding",
     amount_atoms: "100000000",
@@ -569,7 +571,7 @@ test("image accounting counts object and split payloads once through final settl
       [{ revised_prompt: "metadata" }, { b64_json: "aW1hZ2U=" }],
     ]) {
       const model = await configureModel("openai", { imageData }, [operation]);
-      await deps.funds.setTariff({
+      await customerFunds.setTariff({
         model,
         operation,
         pricing: { currency: "USD", rates: { images: { numerator: "7", denominator: "1" } } },
@@ -605,7 +607,7 @@ test("multipart image edit n=2 does not reject a funded per-image request", asyn
     },
     ["image_edits"],
   );
-  await deps.funds.setTariff({
+  await customerFunds.setTariff({
     model,
     operation: "image_edits",
     pricing: { currency: "USD", rates: { images: { numerator: "7", denominator: "1" } } },
@@ -625,7 +627,9 @@ test("multipart image edit n=2 does not reject a funded per-image request", asyn
   expect(response.status).toBe(200);
   expect((await response.json()).data).toHaveLength(2);
   const request = response.headers.get("x-gateway-request-id")!;
-  await waitFor(async () => (await deps.funds.receipt(request, projectId)).charged_atoms === "14");
+  await waitFor(
+    async () => (await customerFunds.receipt(request, projectId)).charged_atoms === "14",
+  );
 });
 
 test("native media SSE records image count and exact transcription duration", async () => {
@@ -852,7 +856,7 @@ test("non-JSON transcription completion retains its exact request fee without st
     adminKey,
     "PATCH",
   );
-  await deps.funds.setTariff({
+  await customerFunds.setTariff({
     model,
     operation: "transcription",
     pricing: { currency: "USD", rates: { requests: { numerator: "7", denominator: "1" } } },
@@ -882,7 +886,7 @@ test("non-JSON transcription completion retains its exact request fee without st
     cost_complete: true,
   });
   expect(JSON.stringify(rows)).not.toContain("mock-transcribed-output-content");
-  expect((await deps.funds.receipt(request, projectId)).charged_atoms).toBe("7");
+  expect((await customerFunds.receipt(request, projectId)).charged_atoms).toBe("7");
 });
 
 test("client cancellation releases project/provider concurrency and bounds upstream activity", async () => {
@@ -1410,20 +1414,13 @@ test("event claims are disjoint, expired leases are fenced and registration cann
   expect(await deps.store.ackEvents(consumer, renewed.lease_token, ids)).toBe(ids.length);
 });
 
-test("exhausted credit returns 402 insufficient_funds and the credit policy contract rejects unknown wallets and malformed input", async () => {
+test("exhausted credit returns 402 insufficient_funds", async () => {
   const project = await json("/admin/projects", { name: "credit-exhaustion" });
   const tenant = String(project.value.id);
   const tenantKey = String(
     (await json(`/admin/projects/${tenant}/keys`, { name: "credit" })).value.key,
   );
-  const missing = await json(`/admin/projects/${tenant}/wallets/USD/credit-policy`, {
-    external_ref: "missing",
-    expected_version: "0",
-    credit_limit_atoms: "1",
-  });
-  expect(missing.response.status).toBe(404);
-  expect(missing.value).toMatchObject({ error: { code: "not_found" } });
-  await deps.funds.credit(tenant, {
+  await customerFunds.credit(tenant, {
     currency: "USD",
     external_ref: "credit-exhaustion",
     amount_atoms: "1",
@@ -1432,21 +1429,13 @@ test("exhausted credit returns 402 insufficient_funds and the credit policy cont
     models: [],
     operations: [],
   });
-  for (const body of [
-    { external_ref: "bad", expected_version: "0", credit_limit_atoms: "-1" },
-    { external_ref: "bad", expected_version: "0", credit_limit_atoms: 1 },
-    { external_ref: "bad", expected_version: "0" },
-  ]) {
-    const malformed = await json(`/admin/projects/${tenant}/wallets/USD/credit-policy`, body);
-    expect(malformed.response.status).toBe(400);
-    expect(malformed.value).toMatchObject({ error: { code: "invalid_request" } });
-  }
-  const configured = await json(`/admin/projects/${tenant}/wallets/USD/credit-policy`, {
-    external_ref: "limit",
-    expected_version: "0",
-    credit_limit_atoms: "1",
-  });
-  expect(configured.response.status).toBe(200);
+  expect(
+    await customerFunds.configureCredit(tenant, "USD", {
+      external_ref: "limit",
+      expected_version: "0",
+      credit_limit_atoms: "1",
+    }),
+  ).toMatchObject({ credit_policy_version: "1", credit_limit_atoms: "1" });
   const model = await configureModel("openai");
   for (const status of [200, 200, 402]) {
     const response = await sendChat(model, {}, tenantKey);
@@ -1487,35 +1476,6 @@ test("restricted production role can serve inference but cannot mutate usage or 
     await expect(
       runtimeDb`UPDATE gateway_requests SET billing_outcome='FAILED',billing_quote='{}'::jsonb`,
     ).rejects.toMatchObject({ errno: "42501" });
-    const creditPolicy = await fetch(
-      `http://127.0.0.1:${server.port}/admin/projects/${projectId}/wallets/USD/credit-policy`,
-      {
-        method: "POST",
-        headers: { authorization: `Bearer ${adminKey}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          external_ref: "runtime-credit",
-          expected_version: "0",
-          credit_limit_atoms: "100",
-        }),
-      },
-    );
-    expect(creditPolicy.status).toBe(200);
-    expect(await creditPolicy.json()).toMatchObject({
-      credit_policy_version: "1",
-      credit_limit_atoms: "100",
-    });
-    for (const frozen of [true, false]) {
-      const freeze = await fetch(
-        `http://127.0.0.1:${server.port}/admin/projects/${projectId}/wallets/USD`,
-        {
-          method: "PATCH",
-          headers: { authorization: `Bearer ${adminKey}`, "content-type": "application/json" },
-          body: JSON.stringify({ frozen }),
-        },
-      );
-      expect(freeze.status).toBe(200);
-      await freeze.text();
-    }
     await expect(runtimeDb`DELETE FROM wallet_credit_policies`).rejects.toThrow();
     await expect(runtimeDb`TRUNCATE money_journal`).rejects.toThrow();
     await expect(runtimeDb`SELECT persist_usage_batch('[]'::jsonb)`).rejects.toMatchObject({
@@ -1524,34 +1484,18 @@ test("restricted production role can serve inference but cannot mutate usage or 
     await expect(
       runtimeDb`SELECT ingest_initial_usage('[]'::jsonb,'{}'::uuid[])`,
     ).rejects.toMatchObject({ errno: "42501" });
-    const tariffResponse = await fetch(`http://127.0.0.1:${server.port}/admin/tariffs`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${adminKey}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        model,
-        operation: "chat",
-        pricing: { currency: "USD", rates: { requests: { numerator: "2", denominator: "1" } } },
-        ceilings: { requests: "1" },
-        basis: "REQUEST_COMPLETION",
-      }),
-    });
     const { recoveryTick } = await import("../../apps/legacy-gateway/src/recovery.ts");
     await recoveryTick(runtimeDeps);
-    expect(tariffResponse.status).toBe(201);
-    await tariffResponse.text();
+    for (const statement of [
+      `SELECT credit_wallet(${"'" + projectId + "'"}::uuid,'USD','runtime',1,'CASH',100,NULL,'{}','{}')`,
+      `SELECT configure_wallet_credit(${"'" + projectId + "'"}::uuid,'USD','runtime',0,100)`,
+      "SELECT refund_billing_charge(gen_random_uuid(),1,'runtime','CUSTOMER_REQUEST')",
+      "SELECT adjust_billing_charge(gen_random_uuid(),1,'runtime','PROVIDER_RECONCILIATION')",
+      "UPDATE wallets SET manual_frozen=true",
+      "INSERT INTO billing_tariffs(id) VALUES(gen_random_uuid())",
+    ])
+      await expect(runtimeDb.unsafe(statement)).rejects.toMatchObject({ errno: "42501" });
 
-    await runtimeDb.begin(async (tx) => {
-      await tx`CREATE TEMP TABLE wallets(LIKE public.wallets INCLUDING ALL) ON COMMIT DROP`;
-      await tx.unsafe(
-        "CREATE FUNCTION pg_temp.reject_shadow() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'temporary shadow was executed';END $$",
-      );
-      await tx`CREATE TRIGGER reject_shadow BEFORE INSERT ON pg_temp.wallets FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_shadow()`;
-      const result =
-        await tx`SELECT public.credit_wallet(${projectId}::uuid,'USD',${`shadow-${suffix}`},1,'CASH',100,NULL,'{}','{}') AS result`;
-      expect(result[0].result.wallet_id).toBeTruthy();
-      const rows = await tx`SELECT count(*)::int AS n FROM pg_temp.wallets`;
-      expect(rows[0].n).toBe(0);
-    });
     await expect(runtimeDb`TRUNCATE usage_events`).rejects.toThrow();
     await expect(runtimeDb`DROP TABLE usage_events`).rejects.toThrow();
   } finally {
@@ -1569,7 +1513,7 @@ test("restricted production role can serve inference but cannot mutate usage or 
 
 test("completed Responses streams without usage remain recoverable until GET supplies evidence", async () => {
   const model = await configureModel("openai", { omitUsage: true, pollUsage: true });
-  await deps.funds.setTariff({
+  await customerFunds.setTariff({
     model,
     operation: "responses",
     pricing: {
@@ -1592,7 +1536,7 @@ test("completed Responses streams without usage remain recoverable until GET sup
   expect(body).toContain("response.completed");
   const requestId = response.headers.get("x-gateway-request-id")!;
   await awaitUsage(requestId);
-  expect(await deps.funds.receipt(requestId, projectId)).toMatchObject({
+  expect(await customerFunds.receipt(requestId, projectId)).toMatchObject({
     hold_state: "RECONCILING",
     charged_atoms: null,
   });
@@ -1605,7 +1549,7 @@ test("completed Responses streams without usage remain recoverable until GET sup
     return (await deps.store.resource(String(rows[0]?.id), projectId)).state === "COMPLETED";
   });
   await awaitResourceFinal(String(rows[0]?.id));
-  expect(await deps.funds.receipt(requestId, projectId)).toMatchObject({
+  expect(await customerFunds.receipt(requestId, projectId)).toMatchObject({
     hold_state: "SETTLED",
     charged_atoms: "59",
   });
@@ -1838,7 +1782,7 @@ test("HTTP project concurrency and RPM deny excess before dispatch and reconcile
     tpm: 2000,
     concurrency: 1,
   });
-  await deps.funds.credit(String(project.value.id), {
+  await customerFunds.credit(String(project.value.id), {
     currency: "USD",
     external_ref: "test-funding",
     amount_atoms: "1000000",
@@ -2030,7 +1974,7 @@ test("technical organization/principal RBAC rejects cross-tenant keys and disabl
     role: "MEMBER",
   });
   const tenant = await json("/admin/projects", { name: "tenant", organization_id: org.value.id });
-  await deps.funds.credit(String(tenant.value.id), {
+  await customerFunds.credit(String(tenant.value.id), {
     currency: "USD",
     external_ref: "funding",
     amount_atoms: "1000",
@@ -2183,7 +2127,7 @@ test("queued known rejection releases its complete pre-hold after consumer resum
   const model = await configureModel("openai", { status: 400 });
   const p = await json("/admin/projects", { name: "rejected-wallet" });
   const pid = String(p.value.id);
-  await deps.funds.credit(pid, {
+  await customerFunds.credit(pid, {
     currency: "USD",
     external_ref: "fund",
     amount_atoms: "100",
@@ -2202,7 +2146,7 @@ test("queued known rejection releases its complete pre-hold after consumer resum
       await testDb`SELECT h.state,h.amount_atoms::text FROM billing_holds h JOIN gateway_requests q ON q.id=h.request_id WHERE q.project_id=${pid}`;
     expect(holds[0]).toMatchObject({ state: "HELD", amount_atoms: "1" });
     expect(
-      ((await deps.funds.wallets(pid)) as { available_atoms: string }[])[0]?.available_atoms,
+      ((await customerFunds.wallets(pid)) as { available_atoms: string }[])[0]?.available_atoms,
     ).toBe("99");
   } finally {
     billing.consumer.worker.resume();
@@ -2214,7 +2158,9 @@ test("queued known rejection releases its complete pre-hold after consumer resum
       ).length === 1,
   );
   expect(
-    ((await deps.funds.wallets(pid)) as { available_atoms: string; reserved_atoms: string }[])[0],
+    (
+      (await customerFunds.wallets(pid)) as { available_atoms: string; reserved_atoms: string }[]
+    )[0],
   ).toMatchObject({ available_atoms: "100", reserved_atoms: "0" });
 });
 
@@ -2285,9 +2231,9 @@ test("production worker role advances async resources and commits queued usage w
         await testDb`SELECT request_id FROM attempts WHERE id=${resource.attempt_id}`
       )[0]!.request_id;
       await waitFor(
-        async () => (await deps.funds.receipt(request, projectId)).charged_atoms === "1",
+        async () => (await customerFunds.receipt(request, projectId)).charged_atoms === "1",
       );
-      expect((await deps.funds.receipt(request, projectId)).billing_outcome).toBe("SUCCESS");
+      expect((await customerFunds.receipt(request, projectId)).billing_outcome).toBe("SUCCESS");
     } finally {
       await consumer.close();
       neighbor.close();
@@ -2334,7 +2280,7 @@ test("HTTP rejection retains numeric usage as partial evidence without storing i
     cost_atoms: "59",
     cost_complete: false,
   });
-  const receipt = await deps.funds.receipt(rows[0]!.request_id, projectId);
+  const receipt = await customerFunds.receipt(rows[0]!.request_id, projectId);
   expect(receipt.charged_atoms).toBeNull();
   expect(receipt.hold_state).toBe("RECONCILING");
   const events =
@@ -2360,7 +2306,7 @@ test("unreadable oversized HTTP errors remain unknown instead of releasing pre-h
   const rows =
     await testDb`SELECT a.state,a.request_id FROM attempts a WHERE a.upstream_model=${model}`;
   expect(rows[0]!.state).toBe("UNKNOWN");
-  const receipt = await deps.funds.receipt(rows[0]!.request_id, projectId);
+  const receipt = await customerFunds.receipt(rows[0]!.request_id, projectId);
   expect(receipt.hold_state).toBe("RECONCILING");
   expect(receipt.charged_atoms).toBeNull();
   expect(BigInt(String(receipt.reserved_atoms))).toBeGreaterThan(0n);
@@ -2390,7 +2336,7 @@ test("local result finalization failure preserves known upstream cost without re
       cost_atoms: "59",
       cost_complete: true,
     });
-    const receipt = await deps.funds.receipt(rows[0]!.request_id, projectId);
+    const receipt = await customerFunds.receipt(rows[0]!.request_id, projectId);
     expect(receipt.hold_state).toBe("RELEASED");
     expect(receipt.charged_atoms).toBe("0");
   } finally {
@@ -2411,7 +2357,7 @@ test("project key delegation inherits authority and cannot escape its principal 
     name: "delegation",
     organization_id: org.value.id,
   });
-  await deps.funds.credit(String(tenant.value.id), {
+  await customerFunds.credit(String(tenant.value.id), {
     currency: "USD",
     external_ref: "funding",
     amount_atoms: "1000",
@@ -2598,7 +2544,7 @@ test("Batch summary cannot hide incomplete rows before exact millisecond settlem
     },
     ["files", "batches", "chat"],
   );
-  await deps.funds.setTariff({
+  await customerFunds.setTariff({
     model,
     operation: "batches",
     pricing: {
@@ -2639,12 +2585,12 @@ test("Batch summary cannot hide incomplete rows before exact millisecond settlem
   expect(evidence[0]?.usage).not.toHaveProperty("audio_ms");
   const request = (await testDb`SELECT request_id FROM attempts WHERE id=${resource.attempt_id}`)[0]
     .request_id;
-  expect((await deps.funds.receipt(request, projectId)).charged_atoms).toBeNull();
+  expect((await customerFunds.receipt(request, projectId)).charged_atoms).toBeNull();
   expect((await deps.store.resource(batchId, projectId)).state).toBe("PENDING_USAGE");
   mock.scenarios.set(model, { batchRowUsage: [full, full] });
   await json(`/v1/batches/${batchId}`, undefined, key, "GET");
   await waitFor(
-    async () => String((await deps.funds.receipt(request, projectId)).charged_atoms) === "630",
+    async () => String((await customerFunds.receipt(request, projectId)).charged_atoms) === "630",
   );
   const final =
     await testDb`SELECT usage,cost_atoms::text,cost_complete FROM usage_events WHERE attempt_id=${resource.attempt_id} AND source='batch_completed' AND finality='FINAL'`;
@@ -2674,7 +2620,7 @@ test("Batch image payloads retain per-image usage for settlement", async () => {
     },
     ["images", "files", "batches"],
   );
-  await deps.funds.setTariff({
+  await customerFunds.setTariff({
     model,
     operation: "batches",
     pricing: { currency: "USD", rates: { images: { numerator: "7", denominator: "1" } } },
@@ -2709,7 +2655,7 @@ test("Batch image payloads retain per-image usage for settlement", async () => {
 test("an image Batch exceeding its aggregate tariff ceiling is rejected before dispatch even for older files", async () => {
   const endpoint = "/v1/images/generations";
   const model = await configureModel("openai", {}, ["images", "files", "batches"]);
-  await deps.funds.setTariff({
+  await customerFunds.setTariff({
     model,
     operation: "batches",
     basis: "PROVIDER_USAGE",
@@ -2777,7 +2723,7 @@ test("Batch seconds settle when the derived millisecond sum exceeds its integer 
     "batches",
     "chat",
   ]);
-  await deps.funds.setTariff({
+  await customerFunds.setTariff({
     model,
     operation: "batches",
     pricing: {
@@ -2796,7 +2742,7 @@ test("Batch seconds settle when the derived millisecond sum exceeds its integer 
   )[0];
   expect(row?.usage.audio_seconds).toBe(total);
   expect(row?.usage).not.toHaveProperty("audio_ms");
-  expect(await deps.funds.receipt(row?.request_id, projectId)).toMatchObject({
+  expect(await customerFunds.receipt(row?.request_id, projectId)).toMatchObject({
     hold_state: "SETTLED",
     charged_atoms: "1",
   });
@@ -3117,18 +3063,17 @@ test("character billing charges a legacy completion prompt instead of settling a
     });
     expect(provider.response.status).toBe(201);
     const model = await configureModel("openai", {}, ["completions"], String(provider.value.id));
-    const tariff = await json("/admin/tariffs", {
+    await customerFunds.setTariff({
       model,
       operation: "completions",
       pricing: { currency: "USD", rates: { characters: { numerator: "7", denominator: "1" } } },
       ceilings: { characters: "100" },
       basis: "INPUT_CHARACTERS",
     });
-    expect(tariff.response.status).toBe(201);
     const reply = await json("/v1/completions", { model, prompt: "hello", max_tokens: 16 }, key);
     expect(reply.response.status).toBe(200);
     const id = reply.response.headers.get("x-gateway-request-id")!;
-    const receipt = await deps.funds.receipt(id, projectId);
+    const receipt = await customerFunds.receipt(id, projectId);
     expect(receipt).toMatchObject({
       hold_state: "SETTLED",
       reserved_atoms: "35",
@@ -3148,14 +3093,13 @@ test("millisecond audio tariffs settle a completed 125ms transcription", async (
   });
   expect(provider.response.status).toBe(201);
   const model = await configureModel("openai", {}, ["transcription"], String(provider.value.id));
-  const tariff = await json("/admin/tariffs", {
+  await customerFunds.setTariff({
     model,
     operation: "transcription",
     pricing: { currency: "USD", rates: { audio_ms: { numerator: "1", denominator: "1" } } },
     ceilings: { audio_ms: "500" },
     basis: "PROVIDER_USAGE",
   });
-  expect(tariff.response.status).toBe(201);
   const form = new FormData();
   form.set("model", model);
   form.set("stream", "true");
@@ -3169,7 +3113,7 @@ test("millisecond audio tariffs settle a completed 125ms transcription", async (
   expect(await reply.text()).toContain("transcript.text.done");
   const id = reply.headers.get("x-gateway-request-id")!;
   await awaitUsage(id);
-  const receipt = await deps.funds.receipt(id, projectId);
+  const receipt = await customerFunds.receipt(id, projectId);
   const evidence = (await testDb`SELECT usage FROM usage_events WHERE request_id=${id}`)[0]?.usage;
   expect(evidence).toMatchObject({ audio_seconds: "0.125" });
   expect(evidence).toHaveProperty("audio_ms", "125");
@@ -3199,9 +3143,9 @@ test("upstream address blocked before dispatch releases the hold", async () => {
     )[0]?.id;
     expect(typeof id).toBe("string");
     await waitFor(
-      async () => (await deps.funds.receipt(id, projectId)).billing_outcome === "FAILED",
+      async () => (await customerFunds.receipt(id, projectId)).billing_outcome === "FAILED",
     );
-    const receipt = await deps.funds.receipt(id, projectId);
+    const receipt = await customerFunds.receipt(id, projectId);
     const attempt = (await testDb`SELECT state FROM attempts WHERE request_id=${id}`)[0];
     expect(attempt?.state).toBe("NOT_EXECUTED");
     expect(receipt).toMatchObject({
@@ -3223,14 +3167,13 @@ test("duplicate multipart prompts cannot underquote a character-priced request",
   });
   expect(provider.response.status).toBe(201);
   const model = await configureModel("openai", {}, ["transcription"], String(provider.value.id));
-  const tariff = await json("/admin/tariffs", {
+  await customerFunds.setTariff({
     model,
     operation: "transcription",
     pricing: { currency: "USD", rates: { characters: { numerator: "7", denominator: "1" } } },
     ceilings: { characters: "100" },
     basis: "INPUT_CHARACTERS",
   });
-  expect(tariff.response.status).toBe(201);
 
   const form = new FormData();
   form.set("model", model);

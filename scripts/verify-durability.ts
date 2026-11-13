@@ -115,7 +115,7 @@ async function verify() {
     checkpoint = "business dependency loading";
     const [
       { UsageProducer, UsageConsumer, usageChannel },
-      { createDatabase, migrate, Store, FundsStore },
+      { createDatabase, migrate, Store, createCustomerFundsStore },
     ] = await Promise.race([
       Promise.all([import("@gateway/runtime"), import("@gateway/storage")]),
       interrupted.promise,
@@ -173,7 +173,7 @@ async function verify() {
       JSON.stringify({ durabilityFixture: "ready", ownedResources: await fixture.resources() }),
     );
     const store = new Store(db);
-    const funds = new FundsStore(db);
+    const funds = createCustomerFundsStore(db);
     const project = await store.createProject({
       name: id,
       rpm: 1000,

@@ -51,7 +51,7 @@ const health = Bun.serve({
 try {
   while (!stopping) {
     try {
-      await deps.funds.reconcileKnownHolds();
+      await deps.reconcileHolds();
       await recoveryTick(deps);
     } catch {
       deps.metrics.increment("worker_failures_total");

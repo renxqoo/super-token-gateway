@@ -1,5 +1,5 @@
 import { mkdir, chmod } from "node:fs/promises";
-import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
+import { createDatabase, migrate, Store, createCustomerFundsStore } from "@gateway/storage";
 import { createKey, encrypt, verifier } from "@gateway/runtime";
 import { operations } from "@gateway/kernel";
 import { loadConfig } from "../apps/legacy-gateway/src/config.ts";
@@ -115,7 +115,7 @@ try {
       });
     }
   }
-  const funds = new FundsStore(db);
+  const funds = createCustomerFundsStore(db);
   const development = await db`SELECT id FROM projects WHERE external_ref='local-development'`;
   if (development[0])
     await funds.credit(development[0].id, {

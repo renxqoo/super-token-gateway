@@ -10,7 +10,7 @@ import {
   passesCapacityTarget,
   passesOnlineCapacity,
 } from "./benchmark-lib.ts";
-import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
+import { createDatabase, migrate, Store, createCustomerFundsStore } from "@gateway/storage";
 import { createKey, verifier, encrypt } from "@gateway/runtime";
 import { RedisClient } from "bun";
 const args = Bun.argv.slice(2);
@@ -219,7 +219,7 @@ try {
   };
   const admissionBefore = await admissionInfo();
   const store = new Store(db);
-  const funds = new FundsStore(db);
+  const funds = createCustomerFundsStore(db);
   const provider = crypto.randomUUID();
   await store.createProvider(
     provider,

@@ -160,7 +160,7 @@ async function prepareFinancial(
         ceilings: supplier.ceilings,
       });
       if (route.status !== 201) throw new Error(`Route creation: ${JSON.stringify(route)}`);
-      const tariff = await request("/billing/tariffs", {
+      const tariff = await request("/tariffs", {
         model,
         operation: "chat",
         provider_id: provider.value.id,
@@ -309,7 +309,7 @@ async function prepareFinancial(
         ceilings: channel.ceilings,
       });
       if (route.status !== 201) throw new Error(`Route creation: ${JSON.stringify(route)}`);
-      const tariff = await request("/billing/tariffs", {
+      const tariff = await request("/tariffs", {
         model: setup.model,
         operation: "chat",
         provider_id: provider.id,

@@ -207,7 +207,7 @@ test(
         ceilings: { input_tokens: "100", output_tokens: "50" },
       });
       expect(route.status).toBe(201);
-      await f.request("/billing/tariffs", {
+      await f.request("/tariffs", {
         model: setup.model,
         operation: "chat",
         provider_id: secondProvider.id,

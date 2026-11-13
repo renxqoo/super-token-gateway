@@ -4,7 +4,7 @@ import {
   createRepositories,
   migrate,
   Store,
-  FundsStore,
+  createCustomerFundsStore,
   createUpstreamFundingStore,
   prepareEvidenceMonth,
   SCHEMA_VERSION,
@@ -27,7 +27,7 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
   try {
     await installV2Baseline(db);
     const store = new Store(db);
-    const funds = new FundsStore(db);
+    const funds = createCustomerFundsStore(db);
     const tenant = await store.createProject({
       name: "schema09-upgrade",
       rpm: 1000,
@@ -260,6 +260,7 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
       { version: 2026111207 },
       { version: 2026111208 },
       { version: 2026111209 },
+      { version: 2026111210 },
       { version: SCHEMA_VERSION },
     ]);
     expect(
@@ -312,15 +313,19 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
       credit_reserved_atoms: "0",
       credit_policy_version: "0",
     });
-    await db.begin(async (tx) => {
-      await tx`SET LOCAL ROLE gateway_runtime`;
-      const configured =
-        await tx`SELECT configure_wallet_credit(${tenant}::uuid,'USD','upgraded-runtime',0,1) AS result`;
-      expect(configured[0].result).toMatchObject({
+    await expect(
+      db.begin(async (tx) => {
+        await tx`SET LOCAL ROLE gateway_runtime`;
+        await tx`SELECT configure_wallet_credit(${tenant}::uuid,'USD','upgraded-runtime',0,1)`;
+      }),
+    ).rejects.toMatchObject({ errno: "42501" });
+    expect(
+      await funds.configureCredit(tenant, "USD", {
+        external_ref: "upgraded-management",
+        expected_version: "0",
         credit_limit_atoms: "1",
-        credit_policy_version: "1",
-      });
-    });
+      }),
+    ).toMatchObject({ credit_limit_atoms: "1", credit_policy_version: "1" });
     await expect(
       db.begin(async (tx) => {
         await tx`SET LOCAL ROLE gateway_runtime`;
@@ -365,7 +370,7 @@ test("baseline replay preserves funded wallets and permits concurrent foreign-ke
   try {
     await migrate(db);
     const store = new Store(db);
-    let funds = new FundsStore(db);
+    let funds = createCustomerFundsStore(db);
     const project = await store.createProject({
       name: "function-upgrade",
       rpm: 1000,
@@ -392,7 +397,7 @@ test("baseline replay preserves funded wallets and permits concurrent foreign-ke
     expect(await snapshot()).toEqual(before);
     await db.close();
     db = createDatabase(url.toString(), 2);
-    funds = new FundsStore(db);
+    funds = createCustomerFundsStore(db);
     await db.begin(async (tx) => {
       await tx`SELECT id FROM wallets WHERE project_id=${project} FOR KEY SHARE`;
       await funds.credit(project, { ...input, external_ref: "after-upgrade", amount_atoms: "1" });
@@ -423,7 +428,7 @@ test("baseline preserves exact evidence and funds and archives verified monthly 
   try {
     await migrate(db);
     const store = new Store(db),
-      funds = new FundsStore(db);
+      funds = createCustomerFundsStore(db);
     const project = await store.createProject({
       name: "upgrade",
       rpm: 1000,

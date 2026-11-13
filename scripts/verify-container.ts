@@ -1,4 +1,4 @@
-import { createDatabase, migrate, Store, FundsStore } from "@gateway/storage";
+import { createDatabase, migrate, Store, createCustomerFundsStore } from "@gateway/storage";
 import { createKey, encrypt, verifier } from "@gateway/runtime";
 import { mkdir, unlink, chmod } from "node:fs/promises";
 import { RedisClient } from "bun";
@@ -85,7 +85,7 @@ async function until(predicate: () => Promise<boolean>) {
 try {
   await migrate(db);
   const store = new Store(db);
-  const funds = new FundsStore(db);
+  const funds = createCustomerFundsStore(db);
   const project = await store.createProject({
     name: suffix,
     rpm: 1000,

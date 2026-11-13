@@ -1,5 +1,5 @@
 import { Batcher } from "@gateway/runtime/batcher";
-import { fundingError } from "./funds.ts";
+import { fundingError } from "./customer-funds/index.ts";
 import type { SQL } from "bun";
 import {
   upstreamCostConfigurationSchema,

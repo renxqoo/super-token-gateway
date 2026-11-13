@@ -88,7 +88,7 @@ test(
     withFinancial(async (f, db) => {
       const setup = await f.bootstrap(),
         client = f.client();
-      const tariff = await f.request("/billing/tariffs", {
+      const tariff = await f.request("/tariffs", {
         model: setup.model,
         operation: "chat",
         provider_id: setup.provider.id,

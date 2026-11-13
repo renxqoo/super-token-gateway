@@ -206,22 +206,6 @@ export function createApp(deps: Dependencies): Hono<Env> {
     await deps.store.revokeProjectKey(z.uuid().parse(c.req.param("id")), c.get("auth").project.id);
     return c.json({ revoked: true });
   });
-  publicApi.get("/wallets", async (c) => {
-    requireRole(c, ["ADMIN", "BILLING"]);
-    return c.json({ data: await deps.funds.wallets(c.get("auth").project.id) });
-  });
-  publicApi.get("/requests/:id/billing", async (c) => {
-    requireRole(c, ["ADMIN", "BILLING"]);
-    const auth = c.get("auth");
-    const requestId = z.uuid().parse(c.req.param("id"));
-    await deps.store.request(
-      requestId,
-      auth.project.id,
-      auth.credential.models,
-      auth.credential.operations,
-    );
-    return c.json(await deps.funds.receipt(requestId, auth.project.id));
-  });
   publicApi.get("/models", async (c) =>
     c.json({
       object: "list",

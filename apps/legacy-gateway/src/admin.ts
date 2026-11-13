@@ -3,12 +3,6 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
 import {
-  creditSchema,
-  creditPolicySchema,
-  tariffSchema,
-  refundSchema,
-  adjustmentSchema,
-  resolutionSchema,
   currencySchema,
   GatewayError,
   keySchema,
@@ -265,74 +259,6 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
     c.json({
       recovered: await recoverStale(deps),
     }),
-  );
-  app.post("/projects/:id/credits", async (c) =>
-    c.json(await deps.funds.credit(id(c.req.param("id")), creditSchema.parse(await body(c))), 201),
-  );
-  app.get("/projects/:id/wallets", async (c) =>
-    c.json({ data: await deps.funds.wallets(id(c.req.param("id"))) }),
-  );
-  app.post("/projects/:id/wallets/:currency/credit-policy", async (c) =>
-    c.json(
-      await deps.funds.configureCredit(
-        id(c.req.param("id")),
-        currencySchema.parse(c.req.param("currency")),
-        creditPolicySchema.parse(await body(c)),
-      ),
-    ),
-  );
-  app.get("/projects/:id/wallets/:currency/lots", async (c) =>
-    c.json({
-      data: await deps.funds.lots(
-        id(c.req.param("id")),
-        currencySchema.parse(c.req.param("currency")),
-      ),
-    }),
-  );
-  app.get("/projects/:id/wallets/:currency/journal", async (c) =>
-    c.json({
-      data: await deps.funds.journal(
-        id(c.req.param("id")),
-        currencySchema.parse(c.req.param("currency")),
-        c.req.query("before") ? id(c.req.query("before")!) : undefined,
-      ),
-    }),
-  );
-  app.patch("/projects/:id/wallets/:currency", async (c) => {
-    const input = z
-      .object({
-        policy: z.enum(["GIFT_FIRST", "CASH_FIRST", "EARLIEST_EXPIRY"]).optional(),
-        frozen: z.boolean().optional(),
-      })
-      .strict()
-      .parse(await body(c));
-    await deps.funds.configure(
-      id(c.req.param("id")),
-      currencySchema.parse(c.req.param("currency")),
-      input,
-    );
-    return c.json({ updated: true });
-  });
-  app.get("/tariffs", async (c) =>
-    c.json({ data: await deps.funds.tariffs(c.req.query("model")) }),
-  );
-  app.post("/tariffs", async (c) =>
-    c.json(await deps.funds.setTariff(tariffSchema.parse(await body(c))), 201),
-  );
-  app.post("/charges/:id/refunds", async (c) =>
-    c.json(await deps.funds.refund(id(c.req.param("id")), refundSchema.parse(await body(c))), 201),
-  );
-  app.post("/charges/:id/adjustments", async (c) =>
-    c.json(
-      await deps.funds.adjust(id(c.req.param("id")), adjustmentSchema.parse(await body(c))),
-      201,
-    ),
-  );
-  app.post("/requests/:id/resolutions", async (c) =>
-    c.json(
-      await deps.funds.resolve(id(c.req.param("id")), resolutionSchema.parse(await body(c))),
-      201,
-    ),
   );
   app.get("/queue", async (c) => c.json(await deps.usage.producer.stats()));
   app.post("/queue/jobs/:id/retry", async (c) => {

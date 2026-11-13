@@ -1,4 +1,10 @@
-import { createDatabase, Store, FundsStore, SCHEMA_VERSION } from "@gateway/storage";
+import {
+  createCustomerFundsStore,
+  createDatabase,
+  Store,
+  FundsStore,
+  SCHEMA_VERSION,
+} from "@gateway/storage";
 import {
   Lifecycle,
   Limits,
@@ -52,6 +58,7 @@ export async function assemble(config: Config): Promise<Dependencies> {
       },
       store: new Store(db),
       funds: new FundsStore(db),
+      reconcileHolds: () => createCustomerFundsStore(db).reconcileKnownHolds(),
       transport,
       limits,
       lifecycle: new Lifecycle(config.MAX_INFLIGHT),
