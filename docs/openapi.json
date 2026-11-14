@@ -5141,7 +5141,8 @@
                       "gateway.openai-chat-1.4.0",
                       "gateway.anthropic-messages-1.2.0",
                       "gateway.gemini-generate-1.2.0",
-                      "gateway.bedrock-anthropic-1.1.0"
+                      "gateway.bedrock-anthropic-1.1.0",
+                      "gateway.minimax-music-1.0.0"
                     ]
                   },
                   "reason": {

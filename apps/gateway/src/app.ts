@@ -143,6 +143,7 @@ export function createGatewayApp(
   app.post("/v1/audio/speech", (c) => serve(c, "speech"));
   app.post("/v1/audio/transcriptions", (c) => serve(c, "transcription"));
   app.post("/v1/audio/translations", (c) => serve(c, "translation"));
+  app.post("/v1/music/generations", (c) => serve(c, "music"));
   app.post("/v1beta/models/:action", (c) => {
     const match = /^([A-Za-z0-9._-]{1,200}):(generateContent|streamGenerateContent)$/.exec(
       c.req.param("action"),

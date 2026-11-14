@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "id": "gateway.minimax-music",
+  "version": "1.0.0",
+  "abi_version": 1,
+  "sdk_version": "1.0.0",
+  "module": "module.wasm",
+  "entrypoint": "invoke",
+  "config_schema": "config.schema.json",
+  "capabilities": {
+    "operations": ["music"],
+    "dimensions": ["music_ms", "requests"],
+    "protocols": [],
+    "hooks": ["describe", "prepare", "response", "error"],
+    "auth": ["bearer"],
+    "resources": false,
+    "balance": false,
+    "stream_codec": "none"
+  }
+}

@@ -10,6 +10,7 @@ import {
   anthropicMessagesReleaseId,
   bedrockAnthropicReleaseId,
   geminiGenerateReleaseId,
+  minimaxMusicReleaseId,
   openAIChatReleaseId,
   type BundledReleaseId,
   type ReleasePolicy,
@@ -96,6 +97,7 @@ export async function prepareCatalog(db: SQL) {
       anthropic = await signRelease(anthropicMessagesReleaseId),
       gemini = await signRelease(geminiGenerateReleaseId),
       bedrock = await signRelease(bedrockAnthropicReleaseId),
+      music = await signRelease(minimaxMusicReleaseId),
       release = openAI.signed;
     const policy: ReleasePolicy = {
       format: 1,
@@ -114,10 +116,11 @@ export async function prepareCatalog(db: SQL) {
             anthropicMessagesReleaseId,
             geminiGenerateReleaseId,
             bedrockAnthropicReleaseId,
+            minimaxMusicReleaseId,
           ],
         },
       ],
-      releases: [openAI.entry, anthropic.entry, gemini.entry, bedrock.entry],
+      releases: [openAI.entry, anthropic.entry, gemini.entry, bedrock.entry, music.entry],
       publishers: [
         {
           id: "synthetic-publisher",

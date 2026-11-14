@@ -36,8 +36,8 @@
     "sha256": "86173fe40e6802e7b38b40b663b04df2190b16afa1fb13a527e853afb6e6738d"
   },
   "scripts/build-plugins.ts": {
-    "bytes": 12000,
-    "sha256": "bfcdbbfc3c85cf9acf079bb331e59ea891d3b92beaecb3814639f706a95cd2f1"
+    "bytes": 12030,
+    "sha256": "3c91e5ef18a02587fe3d93af74821aed115682d0074005529039d2985cf64407"
   },
   "scripts/setup-plugin-tools.py": {
     "bytes": 8332,

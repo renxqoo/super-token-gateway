@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { minimaxMusicReleaseId } from "@gateway/plugin-sdk";
+import { syntheticAdminKey } from "../support/catalog.ts";
 import {
   allowOperation,
   eventually,
@@ -236,5 +238,75 @@ test(
         await stack.db`SELECT state,error_code FROM attempts WHERE request_id=${cutId}`,
       ).toEqual([{ state: "UNKNOWN", error_code: "binary_interrupted" }]);
     }),
+  120000,
+);
+
+const musicBody =
+  '{"data":{"audio":"4944330400","status":2},"trace_id":"synthetic","extra_info":{"music_duration":25364,"music_sample_rate":44100,"music_channel":2,"bitrate":256000,"music_size":813651},"analysis_info":null,"base_resp":{"status_code":0,"status_msg":"success"}}';
+
+test(
+  "MiniMax music is generated through gateway.minimax-music with only the model rewritten and settled by music milliseconds; streaming is refused before the upstream",
+  () =>
+    withGatewayStack(
+      {
+        reply: () => new Response(musicBody, { headers: { "content-type": "application/json" } }),
+        supplierCredit: "1000000",
+      },
+      async (stack) => {
+        const { f, setup } = stack;
+        await allowOperation(stack, "music", {
+          pricing: { currency: "USD", rates: { music_ms: { numerator: "1", denominator: "100" } } },
+          ceilings: { music_ms: "60000" },
+          basis: "PROVIDER_USAGE",
+        });
+        const installed = await f.catalog.application.installBundled(await f.catalog.actor(), {
+          command_id: crypto.randomUUID(),
+          release_id: minimaxMusicReleaseId,
+          reason: "Synthetic MiniMax music installation",
+        });
+        const bound = await f.catalog.request(
+          `/providers/${setup.provider.id}/plugin-binding`,
+          {
+            ...f.catalog.binding(installed.version_id),
+            expected_revision: "1",
+            account_id: setup.provider.account_id,
+            brand_id: setup.provider.brand_id,
+            secret_reference: `channel:${setup.provider.id}`,
+            config: {
+              model_map: { [setup.model]: "synthetic" },
+              max_input_tokens: 10000,
+              auth: "bearer",
+            },
+          },
+          syntheticAdminKey,
+          "PUT",
+        );
+        expect(bound.status).toBe(201);
+        const send = (body: Record<string, unknown>) =>
+          fetch(`${stack.gateway.origin}/v1/music/generations`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${setup.key.key}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ model: setup.model, ...body }),
+          });
+        const request = { prompt: "轻快的钢琴", lyrics: "[Verse]\n你好", output_format: "hex" };
+        const generated = await send(request);
+        expect(generated.status).toBe(200);
+        expect(await generated.text()).toBe(musicBody);
+        expect(stack.received.at(-1)).toMatchObject({
+          path: "/v1/music_generation",
+          body: { ...request, model: "synthetic" },
+        });
+        expect(stack.received.at(-1)!.authorization).toStartWith("Bearer ");
+        expect(await settledCharge(stack.db, generated.headers.get("x-request-id")!)).toMatchObject(
+          { amount: "254", state: "SUCCEEDED" },
+        );
+        const calls = stack.received.length;
+        expect((await send({ prompt: "x", stream: true })).status).toBe(422);
+        expect(stack.received).toHaveLength(calls);
+      },
+    ),
   120000,
 );

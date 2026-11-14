@@ -128,10 +128,7 @@ export const capabilitiesSchema = z
   .object({
     operations: z.array(z.enum(operations)).min(1).max(32),
     dimensions: z.array(z.enum([...dimensions, "reasoning_tokens"])).max(32),
-    protocols: z
-      .array(z.enum(["chat", "responses", "messages", "gemini"]))
-      .min(1)
-      .max(4),
+    protocols: z.array(z.enum(["chat", "responses", "messages", "gemini"])).max(4),
     hooks: z.array(z.enum(hooks)).min(1).max(32),
     auth: z
       .array(z.enum(["none", "bearer", "api-key", "google-oauth", "aws-sigv4"]))

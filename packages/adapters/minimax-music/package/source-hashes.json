@@ -1,0 +1,54 @@
+{
+  "packages/adapters/minimax-music/package/manifest.json": {
+    "bytes": 488,
+    "sha256": "6fa40d3e45fba9d13fc9f722e5e6b7639331b63e2d6f4fbbea518071d1a9b97c"
+  },
+  "packages/adapters/minimax-music/plugin.ts": {
+    "bytes": 6017,
+    "sha256": "46f7016e717b914222a9a5abad3815631491b3ae3415f9ef200c02a357dd888f"
+  },
+  "packages/plugin-sdk/src/guest.ts": {
+    "bytes": 6942,
+    "sha256": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2"
+  },
+  "packages/adapters/minimax-music/plugin.d.ts": {
+    "bytes": 59,
+    "sha256": "96eb7fa2ca46fc25371ed0f1da56c267ee542f348ffa73346370a43296e34648"
+  },
+  "packages/adapters/minimax-music/package/module.wasm": {
+    "bytes": 2498100,
+    "sha256": "5aae9438d25fd770957f6912284cc5ac17ed2e56cc51219274fcd7c4c45da945"
+  },
+  "packages/adapters/minimax-music/package/config.schema.json": {
+    "bytes": 502,
+    "sha256": "1c8c31280c5f09fa50a653f69920a09c4dbb92b90d0790790a7211cbb0ad2cdc"
+  },
+  "packages/adapters/minimax-music/package/fixtures/cases.json": {
+    "bytes": 8182,
+    "sha256": "102df968d525195a525a24a409d1e7059c511b3a16992d6757a9a6f42eda2396"
+  },
+  "scripts/plugin-tools.json": {
+    "bytes": 1830,
+    "sha256": "86173fe40e6802e7b38b40b663b04df2190b16afa1fb13a527e853afb6e6738d"
+  },
+  "scripts/build-plugins.ts": {
+    "bytes": 12030,
+    "sha256": "3c91e5ef18a02587fe3d93af74821aed115682d0074005529039d2985cf64407"
+  },
+  "scripts/setup-plugin-tools.py": {
+    "bytes": 8332,
+    "sha256": "90c25685e25c4c357062d064dae474ffcfec53a9e749cf9167c3fb0ec56a6191"
+  },
+  "scripts/plugin-builder/deterministic-preinit.patch": {
+    "bytes": 3172,
+    "sha256": "28dbd8480b2705040bbb1c6fec79c6773ea55bd3dc67a52b588adf5c41d9c805"
+  },
+  "scripts/plugin-builder/upstream-Cargo.lock": {
+    "bytes": 97632,
+    "sha256": "8c11a1e5117be6a0e2e1696d54d81d730c52c8329c5486429f3fc776896f0f7e"
+  },
+  "scripts/plugin-builder/Cargo.lock": {
+    "bytes": 97663,
+    "sha256": "59e4e9ce11a53ed1a05afc9f688f962bf6ab471cf71fdf9371b844f0841f7cac"
+  }
+}

@@ -2,6 +2,7 @@ import {
   anthropicMessagesReleaseId,
   bedrockAnthropicReleaseId,
   geminiGenerateReleaseId,
+  minimaxMusicReleaseId,
   openAIChatReleaseId,
   type BundledReleaseId,
   type PackageFile,
@@ -26,11 +27,15 @@ export function bedrockAnthropicPackageFiles(): Promise<PackageFile[]> {
 export function geminiGeneratePackageFiles(): Promise<PackageFile[]> {
   return packageFiles("gemini-generate");
 }
+export function minimaxMusicPackageFiles(): Promise<PackageFile[]> {
+  return packageFiles("minimax-music");
+}
 const bundledPackages: Record<BundledReleaseId, () => Promise<PackageFile[]>> = {
   [openAIChatReleaseId]: openAIChatPackageFiles,
   [anthropicMessagesReleaseId]: anthropicMessagesPackageFiles,
   [geminiGenerateReleaseId]: geminiGeneratePackageFiles,
   [bedrockAnthropicReleaseId]: bedrockAnthropicPackageFiles,
+  [minimaxMusicReleaseId]: minimaxMusicPackageFiles,
 };
 export function bundledPackageFiles(releaseId: BundledReleaseId): Promise<PackageFile[]> {
   return bundledPackages[releaseId]();

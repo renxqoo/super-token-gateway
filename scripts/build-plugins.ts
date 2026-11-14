@@ -134,7 +134,13 @@ async function reproducible(name: string) {
     await rm(relocated, { recursive: true, force: true });
   }
 }
-const adapters = ["openai-chat", "anthropic-messages", "gemini-generate", "bedrock-anthropic"];
+const adapters = [
+  "openai-chat",
+  "anthropic-messages",
+  "gemini-generate",
+  "bedrock-anthropic",
+  "minimax-music",
+];
 const selected = process.argv.includes("--adapter")
   ? process.argv.slice(process.argv.indexOf("--adapter") + 1).filter((arg) => !arg.startsWith("--"))
   : adapters;

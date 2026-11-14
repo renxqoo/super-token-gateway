@@ -5,11 +5,13 @@ export const openAIChatReleaseId = "gateway.openai-chat-1.4.0" as const;
 export const anthropicMessagesReleaseId = "gateway.anthropic-messages-1.2.0" as const;
 export const bedrockAnthropicReleaseId = "gateway.bedrock-anthropic-1.1.0" as const;
 export const geminiGenerateReleaseId = "gateway.gemini-generate-1.2.0" as const;
+export const minimaxMusicReleaseId = "gateway.minimax-music-1.0.0" as const;
 export const bundledReleaseIds = [
   openAIChatReleaseId,
   anthropicMessagesReleaseId,
   geminiGenerateReleaseId,
   bedrockAnthropicReleaseId,
+  minimaxMusicReleaseId,
 ] as const;
 export type BundledReleaseId = (typeof bundledReleaseIds)[number];
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
