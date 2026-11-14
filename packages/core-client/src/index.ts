@@ -2,6 +2,9 @@ import { generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto"
 import {
   executionDataSchemas,
   executionContextResponseSchema,
+  resourceCommitResponseSchema,
+  resourceListResponseSchema,
+  resourcePermitResponseSchema,
   pluginPackageDataSchema,
   pluginPackageMaxBytes,
   executionReceiptSchema,
@@ -343,6 +346,9 @@ export function createCoreRpcClient(
           execution_quota_v1: "quota",
           execution_quota_recovery_v1: "quota-recovery",
           execution_abort_recovery_v1: "abort-recovery",
+          execution_resource_commit_v1: "resources/commit",
+          execution_resource_v1: "resource-permits",
+          execution_resource_list_v1: "resources/list",
         } as const
       )[kind];
       const normalizedPath = `/_internal/core/v1/${path}`;
@@ -350,6 +356,15 @@ export function createCoreRpcClient(
       try {
         const value = (await request(normalizedPath, body, proof)) as Record<string, unknown>;
         if (kind === "execution_context_v1") return executionContextResponseSchema.parse(value);
+        if (kind === "execution_resource_commit_v1")
+          return resourceCommitResponseSchema.parse(value);
+        if (kind === "execution_resource_v1") {
+          const permit = resourcePermitResponseSchema.parse(value);
+          if ((permit.state === "GRANTED") !== (permit.auth_material !== undefined))
+            throw new Error("Unexpected send authority");
+          return permit;
+        }
+        if (kind === "execution_resource_list_v1") return resourceListResponseSchema.parse(value);
         if (kind === "execution_quota_v1" || kind === "execution_quota_recovery_v1") return value;
         const safe = executionReceiptSchema.parse(value.receipt);
         if (value.transient_send !== undefined) {

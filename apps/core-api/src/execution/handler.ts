@@ -137,6 +137,15 @@ export function createExecutionHandler(
       namespace: options.quotaNamespace,
       generation: options.quotaGeneration,
     });
+  async function limitResource(scope: string, rpm: number) {
+    await routingLimits
+      .enter(`resource:${scope}`, crypto.randomUUID(), rpm, Number.MAX_SAFE_INTEGER, 1000)
+      .catch((error: unknown) => {
+        if (error instanceof GatewayError && error.code === "rate_limited")
+          throw new Error("resource_rate_limited");
+        throw error;
+      });
+  }
   async function synchronize(
     p: CoreVerifiedCallerProjection,
     attempt: string,
@@ -240,6 +249,57 @@ export function createExecutionHandler(
         }
         return store.recoverQuota(p, completed);
       }
+      if (kind === "execution_resource_commit_v1")
+        return store.resource(p, "core_resource_commit_v1", d as Record<string, unknown>);
+      if (kind === "execution_resource_list_v1") {
+        const { customer_token, ...data } =
+          executionDataSchemas.execution_resource_list_v1.parse(d);
+        const result = await store.resource(p, "core_resource_list_v1", {
+          ...data,
+          verifier: verifier(customer_token, options.pepper),
+        });
+        await limitResource(`key:${String(result.key_id)}`, Number(result.rpm));
+        return { data: result.data };
+      }
+      if (kind === "execution_resource_v1") {
+        const { customer_token, ...data } = executionDataSchemas.execution_resource_v1.parse(d);
+        const result = await store.resource(p, "core_resource_permit_v1", {
+          ...data,
+          verifier: verifier(customer_token, options.pepper),
+        });
+        const limits = result.rpm as { key: number; channel: number },
+          resolution = result.resolution as Record<string, unknown>;
+        if (result.state === "RESOLVED") {
+          await limitResource(`key:${String(result.key_id)}`, limits.key);
+          await limitResource(`channel:${String(result.channel_id)}`, limits.channel);
+        }
+        if (result.state !== "GRANTED" || !data.auth) return { resolution, state: result.state };
+        const secret =
+          data.auth.type === "none"
+            ? Buffer.alloc(0)
+            : Buffer.from(
+                decrypt(
+                  String(result.credential_ciphertext),
+                  options.encryptionKey,
+                  String(result.channel_id),
+                ),
+              );
+        try {
+          if (secret.length > 4096 || [...secret].some((byte) => byte < 33 || byte > 126))
+            throw new Error("no_route");
+          const authMaterial = await material(
+            data.auth,
+            secret,
+            AbortSignal.timeout(
+              Math.max(1, Date.parse(String(resolution.deadline_at)) - Date.now()),
+            ),
+          );
+          if (!authMaterial) throw new Error("no_route");
+          return { resolution, state: result.state, auth_material: authMaterial };
+        } finally {
+          secret.fill(0);
+        }
+      }
       if (kind === "execution_context_v1") {
         const data = executionDataSchemas.execution_context_v1.parse(d);
         const snapshot = await store.context(p, crypto.randomUUID(), {
@@ -249,6 +309,7 @@ export function createExecutionHandler(
           model: data.model,
           fingerprint: data.fingerprint,
           max_attempts: options.maxAttempts ?? 3,
+          ...(data.resource_ids ? { resource_ids: data.resource_ids } : {}),
         });
         const parsed = contextSchema.parse(snapshot);
         const ordered = await orderRouteCandidates(

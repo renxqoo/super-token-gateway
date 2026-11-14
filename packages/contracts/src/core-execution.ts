@@ -2,11 +2,12 @@ import { z } from "zod";
 import { operations } from "@gateway/kernel";
 import { atomsSchema, currencySchema } from "./billing.ts";
 import { usageSchema } from "./public.ts";
-import { digestSchema } from "./enterprise.ts";
+import { digestSchema, opaqueResourceIdSchema } from "./enterprise.ts";
 import {
   internalInstantSchema,
   internalUuidSchema,
   dispatchProjectionV1Schema,
+  dispatchAuthSchema,
   candidateRefV1Schema,
 } from "./internal-identity.ts";
 export const executionKinds = [
@@ -19,7 +20,22 @@ export const executionKinds = [
   "execution_quota_v1",
   "execution_quota_recovery_v1",
   "execution_abort_recovery_v1",
+  "execution_resource_commit_v1",
+  "execution_resource_v1",
+  "execution_resource_list_v1",
 ] as const;
+export const resourceKinds = ["response", "file", "batch", "video"] as const;
+export const resourceActions = ["get", "delete", "cancel", "content", "input_items"] as const;
+export const publicResourceIdSchema = z
+  .string()
+  .regex(/^(response|file|batch|video)_[0-9a-f]{32}$/);
+const customerCredential = {
+  customer_token: z.string().min(1).max(16384),
+  ip: z
+    .string()
+    .max(64)
+    .regex(/^[0-9a-fA-F:.]{2,64}$/),
+};
 export const executionKindSchema = z.enum(executionKinds);
 export const executionEnvelopeSchema = z.strictObject({
   command_id: internalUuidSchema,
@@ -66,14 +82,15 @@ export const executionDataSchemas = {
   execution_abort_recovery_v1: z.strictObject({ attempt_id: internalUuidSchema }),
   execution_quota_recovery_v1: z.strictObject({ limit: z.number().int().min(1).max(100) }),
   execution_context_v1: z.strictObject({
-    customer_token: z.string().min(1).max(16384),
-    ip: z
-      .string()
-      .max(64)
-      .regex(/^[0-9a-fA-F:.]{2,64}$/),
+    ...customerCredential,
     operation: z.enum(operations),
     model: z.string().min(1).max(150),
     fingerprint: digestSchema,
+    resource_ids: z
+      .array(z.string().regex(/^(response|file)_[0-9a-f]{32}$/))
+      .min(1)
+      .max(16)
+      .optional(),
   }),
   execution_admit_v1: z.strictObject({
     ...dispatch,
@@ -129,6 +146,26 @@ export const executionDataSchemas = {
         .optional(),
     })
     .refine((value) => (value.action === "OBSERVE") === (value.observation !== undefined)),
+  execution_resource_commit_v1: z.strictObject({
+    attempt_id: internalUuidSchema,
+    permit_epoch: atomsSchema,
+    kind: z.enum(resourceKinds),
+    remote_id: opaqueResourceIdSchema,
+    state: z.enum(["ACTIVE", "COMPLETED", "FAILED", "CANCELLED"]),
+  }),
+  execution_resource_v1: z.strictObject({
+    ...customerCredential,
+    resource_id: publicResourceIdSchema,
+    action: z.enum(resourceActions),
+    auth: dispatchAuthSchema.optional(),
+    granted_command_id: internalUuidSchema.optional(),
+  }),
+  execution_resource_list_v1: z.strictObject({
+    ...customerCredential,
+    kind: z.enum(resourceKinds),
+    limit: z.number().int().min(1).max(100),
+    after: publicResourceIdSchema.optional(),
+  }),
 } as const;
 export const pluginPackageDataSchema = z.strictObject({ digest: digestSchema });
 export const pluginPackageMaxBytes = 46137344;
@@ -242,12 +279,19 @@ export const executionContextResponseSchema = z.strictObject({
     }),
   ),
   candidates: z.array(candidateMetadataSchema).max(128),
+  resources: z
+    .array(
+      z.strictObject({ resource_id: publicResourceIdSchema, remote_id: opaqueResourceIdSchema }),
+    )
+    .max(16)
+    .optional(),
 });
 export const executionReplySchema = z.strictObject({
   receipt: executionReceiptSchema,
   transient_send: transientSendSchema.optional(),
 });
 export type ExecutionReply = z.infer<typeof executionReplySchema>;
+export type TransientSend = z.infer<typeof transientSendSchema>;
 export type ExecutionContextResponse = z.infer<typeof executionContextResponseSchema>;
 export function prepBindingV1(input: {
   owner: z.infer<typeof hostAuthorizationPlanV1Schema>["owner"];
@@ -384,3 +428,32 @@ export type CoreEvidenceGroupV1 = z.infer<typeof coreEvidenceGroupV1Schema>;
 export type SignedCoreEvidenceEventV1 = z.infer<typeof signedCoreEvidenceEventV1Schema>;
 export type CoreEvidenceBatchV1 = z.infer<typeof coreEvidenceBatchV1Schema>;
 export type CoreEvidenceGroupResult = z.infer<typeof coreEvidenceGroupResultSchema>;
+export const resourceCommitResponseSchema = z.strictObject({ resource_id: publicResourceIdSchema });
+export const resourceResolutionSchema = z.strictObject({
+  resource_id: publicResourceIdSchema,
+  kind: z.enum(resourceKinds),
+  remote_id: opaqueResourceIdSchema,
+  model: z.string().min(1).max(150).nullable(),
+  state: z.string().max(40),
+  channel_id: internalUuidSchema,
+  package_digest: digestSchema,
+  config: z.record(z.string(), z.unknown()),
+  origin: z.string().max(250),
+  deadline_at: internalInstantSchema,
+});
+export const resourcePermitResponseSchema = z.strictObject({
+  resolution: resourceResolutionSchema,
+  state: z.enum(["RESOLVED", "GRANTED", "REPLAYED", "DELETED"]),
+  auth_material: transientSendSchema.shape.auth_material.optional(),
+});
+export const resourceListResponseSchema = z.strictObject({
+  data: z
+    .array(
+      z.strictObject({
+        id: publicResourceIdSchema,
+        state: z.string().max(40),
+        created_at: z.number().int().min(0),
+      }),
+    )
+    .max(101),
+});

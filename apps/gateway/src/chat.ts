@@ -5,6 +5,7 @@ import {
   prepBindingV1,
   type ExecutionContextResponse,
   type ExecutionReply,
+  type TransientSend,
   type SignedCoreEvidenceEventV1,
 } from "@gateway/contracts";
 import { CoreRpcError, type createCoreRpcClient } from "@gateway/core-client";
@@ -12,6 +13,7 @@ import { requestCharacters } from "@gateway/adapters/protocol";
 import { canonical, protocols, type Operation, type Protocol } from "@gateway/kernel";
 import {
   observeAttempt,
+  rewriteJSON,
   type AbiResult,
   type AttemptOutcome,
   type createPluginAttempts,
@@ -27,6 +29,7 @@ import {
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
 import type { createPackageCache } from "./packages.ts";
+import { collectReferences, type Reference } from "./references.ts";
 import { encodeForm, readForm, type FormFiles } from "./form.ts";
 import { requestAsChat, responseFromChat, streamFromChat } from "./protocols.ts";
 
@@ -66,6 +69,7 @@ type Facts = {
   fingerprint: string;
   deadlineAt: string;
   requestId: string;
+  references: Reference[];
 };
 type Candidate = ExecutionContextResponse["candidates"][number];
 type Plan = {
@@ -117,10 +121,20 @@ export function createSendRegistry() {
   };
 }
 
-function coreFailure(error: unknown): GatewayError {
+export function coreFailure(error: unknown): GatewayError {
   if (error instanceof GatewayError) return error;
   if (error instanceof CoreRpcError) {
     const code = error.detail.code;
+    if (code === "resource_not_found")
+      return new GatewayError(404, "not_found", "Resource not found");
+    if (code === "resource_provider_mismatch")
+      return new GatewayError(
+        422,
+        "resource_provider_mismatch",
+        "Resources belong to different providers",
+      );
+    if (code === "resource_rate_limited")
+      return new GatewayError(429, "rate_limited", "Resource request rate limit reached");
     if (code === "customer_forbidden" || code === "context_invalid")
       return new GatewayError(403, "permission_denied", "The API key may not use this model");
     if (error.detail.command_state === "REJECTED")
@@ -175,6 +189,7 @@ async function requestFacts(request: ChatRequest, totalTimeoutMs: number): Promi
       throw new GatewayError(400, "invalid_request", "Request body must be a JSON object");
     value = parsed;
   }
+  const references = collectReferences(value, request.operation === "responses" && !files);
   const model = request.path ? request.path.model : value.model;
   if (typeof model !== "string" || !model)
     throw new GatewayError(400, "invalid_request", "A model is required");
@@ -192,6 +207,7 @@ async function requestFacts(request: ChatRequest, totalTimeoutMs: number): Promi
     fingerprint: sha256(body),
     deadlineAt: new Date(Date.now() + totalTimeoutMs).toISOString(),
     requestId: request.requestId,
+    references,
   };
 }
 
@@ -223,6 +239,9 @@ async function openContext(deps: ChatDependencies, request: ChatRequest, facts: 
           operation: facts.operation,
           model: facts.model,
           fingerprint: facts.fingerprint,
+          ...(facts.references.length
+            ? { resource_ids: [...new Set(facts.references.map((r) => r.resourceId))] }
+            : {}),
         },
         { deadlineAt: facts.deadlineAt },
       ),
@@ -254,6 +273,12 @@ async function plan(
     const source = facts.protocol;
     const converted =
       source !== undefined && !pkg.manifest.capabilities.operations.includes(facts.operation);
+    if (converted && facts.references.length)
+      throw new GatewayError(
+        422,
+        "unsupported_semantics",
+        "Stored responses cannot be continued through this route",
+      );
     const transformed = await attempt.transformJSON(
       "prepare",
       converted
@@ -268,7 +293,9 @@ async function plan(
               ? {}
               : { input_characters: String(facts.inputCharacters) }),
           },
-      converted ? requestAsChat(request.body, source, facts.model, request.path) : facts.document,
+      converted
+        ? requestAsChat(request.body, source, facts.model, request.path)
+        : resolvedDocument(facts, context),
       request.signal,
     );
     const rejected = failure(transformed.result);
@@ -472,6 +499,66 @@ async function reserve(
   };
 }
 
+function resolvedDocument(facts: Facts, context: ExecutionContextResponse) {
+  if (!facts.references.length) return facts.document;
+  const remote = new Map((context.resources ?? []).map((r) => [r.resource_id, r.remote_id]));
+  const edits = facts.references.map((reference) => {
+    const value = remote.get(reference.resourceId);
+    if (!value) throw new GatewayError(503, "core_unavailable", "Resource resolution failed");
+    return { op: "set" as const, pointer: reference.pointer, value: JSON.stringify(value) };
+  });
+  return rewriteJSON(facts.document, edits);
+}
+
+export function publicResourceId(kind: string, requestId: string) {
+  return `${kind}_${requestId.replaceAll("-", "")}`;
+}
+
+function createdResource(facts: Facts, admitted: Admitted) {
+  return facts.operation === "responses" && !admitted.converted
+    ? publicResourceId("response", facts.requestId)
+    : undefined;
+}
+
+async function commitResource(
+  deps: ChatDependencies,
+  admitted: Admitted,
+  expected: string | undefined,
+  declared: { kind: string; remote_id: string } | undefined,
+) {
+  if (!expected && !declared) return;
+  if (!expected || !declared || !expected.startsWith(`${declared.kind}_`))
+    throw new GatewayError(502, "plugin_invalid", "The route's plugin misreported a resource");
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const committed = (await deps.core.execution(
+        "execution_resource_commit_v1",
+        {
+          attempt_id: admitted.attemptId,
+          permit_epoch: admitted.permitEpoch,
+          kind: declared.kind,
+          remote_id: declared.remote_id,
+          state: "COMPLETED",
+        },
+        shortDeadline(),
+      )) as { resource_id: string };
+      if (committed.resource_id !== expected)
+        throw new GatewayError(
+          502,
+          "upstream_invalid_response",
+          "The upstream reused a resource identity",
+        );
+      return;
+    } catch (error) {
+      if (error instanceof GatewayError || attempt >= 2)
+        throw error instanceof GatewayError
+          ? error
+          : new GatewayError(503, "resource_unavailable", "The resource could not be recorded");
+      await Bun.sleep(100 * (attempt + 1));
+    }
+  }
+}
+
 function shortDeadline() {
   return { deadlineAt: new Date(Date.now() + 5000).toISOString() };
 }
@@ -552,13 +639,12 @@ async function closeRequest(deps: ChatDependencies, permit: Permit, reason: Clos
   });
 }
 
-function authorize(
+export function authorize(
   headers: Record<string, string>,
-  reply: ExecutionReply,
+  material: TransientSend["auth_material"],
   url: URL,
   body: Uint8Array,
 ): Record<string, string> {
-  const material = reply.transient_send!.auth_material;
   if (material.type === "bearer") return { ...headers, authorization: `Bearer ${material.value}` };
   if (material.type === "api-key") return { ...headers, [material.header]: material.value };
   if (material.type === "aws-sigv4") {
@@ -765,7 +851,12 @@ async function dispatch(
       admitted.url,
       {
         method: admitted.prepared.method,
-        headers: authorize(admitted.headers, reply, admitted.url, admitted.outbound),
+        headers: authorize(
+          admitted.headers,
+          reply.transient_send!.auth_material,
+          admitted.url,
+          admitted.outbound,
+        ),
         body: admitted.outbound.slice(),
         signal,
       },
@@ -819,7 +910,7 @@ async function dispatch(
       admitted.prepared.binary && !/json|^text\/event-stream/i.test(type)
         ? relayBinary(facts, admitted, bridge, response, type, signal, request, end)
         : admitted.prepared.manifest.stream
-          ? relaySSE(facts, admitted, bridge, response, signal, request, end)
+          ? relaySSE(deps, facts, admitted, bridge, response, signal, request, end)
           : await relayJSON(deps, facts, admitted, bridge, response, signal, finalFailure, end),
   };
 }
@@ -882,7 +973,13 @@ async function relayJSON(
       admitted.converted
         ? { protocol: "chat", model: facts.model }
         : facts.protocol
-          ? { protocol: facts.protocol, model: facts.model }
+          ? {
+              protocol: facts.protocol,
+              model: facts.model,
+              ...(createdResource(facts, admitted)
+                ? { resource_id: createdResource(facts, admitted) }
+                : {}),
+            }
           : { operation: facts.operation, model: facts.model },
       bytes,
       signal,
@@ -898,6 +995,14 @@ async function relayJSON(
       { attempt_state: "UNKNOWN", error_code: "upstream_invalid" },
       failure(result) ?? invalid,
     );
+  try {
+    await commitResource(deps, admitted, createdResource(facts, admitted), result.resource);
+  } catch (error) {
+    return finalFailure(
+      { attempt_state: "UNKNOWN", error_code: "resource_unrecorded" },
+      error instanceof GatewayError ? error : invalid,
+    );
+  }
   try {
     await end({
       kind: "final",
@@ -918,6 +1023,7 @@ async function relayJSON(
 }
 
 function relaySSE(
+  deps: ChatDependencies,
   facts: Facts,
   admitted: Admitted,
   bridge: Bridge,
@@ -938,13 +1044,24 @@ function relaySSE(
     let terminal: { bytes: string } | undefined;
     let ended = false,
       delivered = false,
-      failed = false;
+      failed = false,
+      recorded = false;
+    const expected = createdResource(facts, admitted);
     const reader = response.body!.getReader();
     const cancel = () => void reader.cancel().catch(() => undefined);
     signal.addEventListener("abort", cancel, { once: true });
+    const record = async (result: AbiResult) => {
+      if (result.kind !== "output" || !result.resource) return result;
+      if (recorded) throw new Error("resource_redeclared");
+      await commitResource(deps, admitted, expected, result.resource);
+      recorded = true;
+      return result;
+    };
     const settle = function* (result: AbiResult) {
       if (result.kind === "failure") throw new Error(result.code);
       if (result.kind !== "output") throw new Error("plugin_output");
+      if (expected && !recorded && (result.chunks.length || result.terminal))
+        throw new Error("resource_unrecorded");
       for (const chunk of result.chunks) {
         const bytes = Buffer.from(chunk, "base64");
         if (bytes.length) {
@@ -963,7 +1080,11 @@ function relaySSE(
         encoder.encode(
           JSON.stringify(
             admitted.converted || facts.protocol
-              ? { model: facts.model, protocol: admitted.converted ? "chat" : facts.protocol }
+              ? {
+                  model: facts.model,
+                  protocol: admitted.converted ? "chat" : facts.protocol,
+                  ...(expected ? { resource_id: expected } : {}),
+                }
               : { model: facts.model, operation: facts.operation },
           ),
         ),
@@ -974,9 +1095,12 @@ function relaySSE(
         if (next.done) break;
         for (let offset = 0; offset < next.value.length; offset += 64 << 10) {
           let waiting = yield* settle(
-            await bridge.invoke("stream_feed", next.value.subarray(offset, offset + (64 << 10))),
+            await record(
+              await bridge.invoke("stream_feed", next.value.subarray(offset, offset + (64 << 10))),
+            ),
           );
-          while (!waiting) waiting = yield* settle(await bridge.invoke("stream_drain"));
+          while (!waiting)
+            waiting = yield* settle(await record(await bridge.invoke("stream_drain")));
         }
       }
       await bridge.invoke("stream_finish");

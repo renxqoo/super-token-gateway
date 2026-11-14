@@ -85,7 +85,7 @@ export function observeAttempt(
       return result;
     },
     async transformJSON(
-      hook: "prepare" | "response" | "error",
+      hook: "prepare" | "response" | "error" | "resource_response",
       metadata: Record<string, unknown>,
       body: Uint8Array,
       signal?: AbortSignal,

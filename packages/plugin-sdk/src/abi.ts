@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { dimensions, operations, protocols } from "@gateway/kernel";
-import { digestSchema, usageSchema } from "@gateway/contracts";
+import { digestSchema, opaqueResourceIdSchema, usageSchema } from "@gateway/contracts";
 
 export const hooks = [
   "describe",
@@ -115,15 +115,21 @@ export const jsonMetadataSchema = z
   .object({
     protocol: z.enum(protocols).optional(),
     operation: z.enum(operations).optional(),
-    model: identity,
+    model: identity.optional(),
     stream: z.boolean().optional(),
     content: z.literal("multipart").optional(),
+    action: z.enum(["get", "delete", "cancel", "input_items"]).optional(),
     input_characters: z
       .string()
       .regex(/^(0|[1-9][0-9]{0,37})$/)
       .optional(),
+    resource_id: z
+      .string()
+      .regex(/^(response|file|batch|video)_[0-9a-f]{32}$/)
+      .optional(),
   })
-  .strict();
+  .strict()
+  .refine((value) => value.model !== undefined || value.action !== undefined);
 export const capabilitiesSchema = z
   .object({
     operations: z.array(z.enum(operations)).min(1).max(32),
@@ -268,6 +274,9 @@ export const preparedSchema = z
   })
   .strict();
 export type PreparedRequest = z.infer<typeof preparedSchema>;
+export const resourceRequestSchema = preparedSchema
+  .pick({ method: true, path: true, headers: true, auth: true })
+  .strict();
 export const terminalSchema = z
   .object({ kind: z.enum(["complete", "incomplete"]), bytes: base64Schema })
   .strict();
@@ -311,6 +320,13 @@ export const resultSchema = z.discriminatedUnion("kind", [
   z
     .object({
       abi_version: z.literal(1),
+      kind: z.literal("resource_request"),
+      request: resourceRequestSchema,
+    })
+    .strict(),
+  z
+    .object({
+      abi_version: z.literal(1),
       kind: z.literal("output"),
       consumed: z
         .number()
@@ -324,6 +340,13 @@ export const resultSchema = z.discriminatedUnion("kind", [
       finality: z.enum(["FINAL", "PARTIAL", "UNKNOWN", "ESTIMATED"]),
       terminal: terminalSchema.optional(),
       needs_input: z.boolean(),
+      resource: z
+        .object({
+          kind: z.enum(["response", "file", "batch", "video"]),
+          remote_id: opaqueResourceIdSchema,
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
   z.object({ abi_version: z.literal(1), kind: z.literal("disposed") }).strict(),

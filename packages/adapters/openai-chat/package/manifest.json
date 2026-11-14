@@ -1,7 +1,7 @@
 {
   "format": 1,
   "id": "gateway.openai-chat",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "abi_version": 1,
   "sdk_version": "1.0.0",
   "module": "module.wasm",
@@ -41,10 +41,12 @@
       "stream_feed",
       "stream_drain",
       "stream_finish",
-      "stream_dispose"
+      "stream_dispose",
+      "resource_prepare",
+      "resource_response"
     ],
     "auth": ["none", "bearer", "api-key"],
-    "resources": false,
+    "resources": true,
     "balance": false,
     "stream_codec": "sse"
   }

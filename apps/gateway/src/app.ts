@@ -3,6 +3,7 @@ import type { Operation } from "@gateway/kernel";
 import { GatewayError } from "@gateway/contracts";
 import { clientAddress, readBounded, type Lifecycle } from "@gateway/runtime";
 import { executeChat, type ChatDependencies } from "./chat.ts";
+import { executeResource, listResources, type ResourceRequest } from "./resources.ts";
 
 export type GatewayEnv = { Bindings: { peerAddress?: string } };
 
@@ -74,11 +75,22 @@ export function createGatewayApp(
       return c.json({ status: "unavailable" }, 503);
     }
   });
-  async function serve(
+  type Inbound = ResourceRequest & {
+    body: Uint8Array;
+    contentType: string | undefined;
+    idempotencyKey: string | undefined;
+    drain: AbortSignal;
+  };
+  function serve(
     c: Context<GatewayEnv>,
     operation: Operation,
     path?: { model: string; stream: boolean },
   ) {
+    return handle(c, (inbound) =>
+      executeChat(deps, { ...inbound, operation, ...(path ? { path } : {}) }),
+    );
+  }
+  async function handle(c: Context<GatewayEnv>, run: (inbound: Inbound) => Promise<Response>) {
     const requestId = crypto.randomUUID();
     let release: (() => void) | undefined;
     try {
@@ -102,10 +114,8 @@ export function createGatewayApp(
       const signal = AbortSignal.any([c.req.raw.signal, entered.controller.signal]);
       const body = await readBounded(c.req.raw.body, deps.config.max_body_bytes, signal);
       const response = await deps.lifecycle.track(
-        executeChat(deps, {
+        run({
           requestId,
-          operation,
-          ...(path ? { path } : {}),
           body,
           contentType: c.req.header("content-type"),
           token,
@@ -135,6 +145,26 @@ export function createGatewayApp(
   app.post("/v1/chat/completions", (c) => serve(c, "chat"));
   app.post("/v1/messages", (c) => serve(c, "messages"));
   app.post("/v1/responses", (c) => serve(c, "responses"));
+  app.get("/v1/responses", (c) =>
+    handle(c, (inbound) =>
+      listResources(deps, inbound, "response", {
+        limit: c.req.query("limit"),
+        after: c.req.query("after"),
+      }),
+    ),
+  );
+  app.get("/v1/responses/:id", (c) =>
+    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "get")),
+  );
+  app.delete("/v1/responses/:id", (c) =>
+    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "delete")),
+  );
+  app.post("/v1/responses/:id/cancel", (c) =>
+    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "cancel")),
+  );
+  app.get("/v1/responses/:id/input_items", (c) =>
+    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "input_items")),
+  );
   app.post("/v1/embeddings", (c) => serve(c, "embeddings"));
   app.post("/v1/moderations", (c) => serve(c, "moderations"));
   app.post("/v1/completions", (c) => serve(c, "completions"));

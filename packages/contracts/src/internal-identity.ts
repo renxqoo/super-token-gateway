@@ -66,6 +66,9 @@ export const internalProofSchema = z.strictObject({
     "execution_quota_v1",
     "execution_quota_recovery_v1",
     "execution_abort_recovery_v1",
+    "execution_resource_commit_v1",
+    "execution_resource_v1",
+    "execution_resource_list_v1",
     "plugin_package_v1",
   ]),
   command_id: internalUuidSchema,
@@ -175,6 +178,9 @@ export const internalErrorSchema = z.strictObject({
       "context_invalid",
       "plugin_package_unavailable",
       "no_route",
+      "resource_not_found",
+      "resource_rate_limited",
+      "resource_provider_mismatch",
     ]),
   ]),
   category: z.enum(["AUTHENTICATION", "VALIDATION", "DEPENDENCY"]),
@@ -262,6 +268,9 @@ export type CoreVerifiedCallerProjection = Omit<CoreVerifiedPeerProjection, "end
     | "execution_quota_v1"
     | "execution_quota_recovery_v1"
     | "execution_abort_recovery_v1"
+    | "execution_resource_commit_v1"
+    | "execution_resource_v1"
+    | "execution_resource_list_v1"
     | "plugin_package_v1";
   command_id: string;
   method: "POST";

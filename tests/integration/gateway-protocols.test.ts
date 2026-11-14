@@ -386,18 +386,24 @@ const responsesEvents: Record<string, unknown>[] = [
 ];
 
 function responsesReply(call: UpstreamCall) {
+  const id = `resp_synthetic_${call.index}`;
   if (call.body.stream)
     return new Response(
       responsesEvents
+        .map((data) =>
+          "response" in data
+            ? { ...data, response: { ...(data.response as Record<string, unknown>), id } }
+            : data,
+        )
         .map((data) => `event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`)
         .join(""),
       { headers: { "content-type": "text/event-stream" } },
     );
-  return Response.json(responsesBody);
+  return Response.json({ ...responsesBody, id });
 }
 
 test(
-  "an OpenAI Responses client is served through /v1/responses with only the model rewritten, JSON and SSE, and exact settlement; previous_response_id is refused before reaching the upstream",
+  "an OpenAI Responses client is served through /v1/responses with the model and response identity rewritten, JSON and SSE, and exact settlement; an upstream previous_response_id is refused before reaching the upstream",
   () =>
     withGatewayStack({ reply: responsesReply }, async (stack) => {
       await allowOperation(stack, "responses");
@@ -413,7 +419,13 @@ test(
       const request = { input: "你好", instructions: "简短", max_output_tokens: 30 };
       const json = await send(request);
       expect(json.status).toBe(200);
-      expect(await json.json()).toEqual({ ...responsesBody, model: stack.setup.model });
+      const publicId = (response: Response) =>
+        `response_${response.headers.get("x-request-id")!.replaceAll("-", "")}`;
+      expect(await json.json()).toEqual({
+        ...responsesBody,
+        id: publicId(json),
+        model: stack.setup.model,
+      });
       const call = stack.received.at(-1)!;
       expect(call.path).toBe("/v1/responses");
       expect(call.authorization).toStartWith("Bearer ");
@@ -432,15 +444,13 @@ test(
           return [event!.replace(/^event: /, ""), JSON.parse(data!.replace(/^data: /, ""))];
         });
       const created = responsesEvents[0] as { response: Record<string, unknown> };
+      const identity = { id: publicId(streamed), model: stack.setup.model };
       expect(frames).toEqual([
-        [
-          "response.created",
-          { ...created, response: { ...created.response, model: stack.setup.model } },
-        ],
+        ["response.created", { ...created, response: { ...created.response, ...identity } }],
         ["response.output_text.delta", responsesEvents[1]],
         [
           "response.completed",
-          { ...responsesEvents[2], response: { ...responsesBody, model: stack.setup.model } },
+          { ...responsesEvents[2], response: { ...responsesBody, ...identity } },
         ],
       ]);
       expect(await settledCharge(stack.db, streamed.headers.get("x-request-id")!)).toMatchObject({

@@ -179,6 +179,15 @@
           "checksum": "117720fa26b0f77d41e8bbf71998e9be2661bf2cbd9d5594c478095501262f68"
         }
       ]
+    },
+    {
+      "version": 2026111218,
+      "files": [
+        {
+          "path": "./sql/core-resources.sql",
+          "checksum": "453379ce967716347e44107bc5cc226ad5d58ddbebed446a372e28e0d2f49c50"
+        }
+      ]
     }
   ]
 }

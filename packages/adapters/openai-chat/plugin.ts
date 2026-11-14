@@ -13,6 +13,8 @@ import manifest from "./package/manifest.json";
 declare const Host: { inputString(): string; outputString(value: string): void };
 type Usage = Record<string, string>;
 type State = {
+  resourceId?: string;
+  remoteId?: string;
   session: string;
   sequence: number;
   model: string;
@@ -126,6 +128,8 @@ type DocumentInput = {
   model?: string;
   content?: string;
   input_characters?: string;
+  resource_id?: string;
+  action?: string;
 };
 const preparePointers = [
   "",
@@ -188,14 +192,7 @@ function authOf(input: GuestInput) {
       : { type: "bearer" };
 }
 function prepareResponses(input: GuestInput, value: DocumentInput) {
-  const query = inspect(value, [
-    "",
-    "/model",
-    "/stream",
-    "/max_output_tokens",
-    "/previous_response_id",
-    "/background",
-  ]);
+  const query = inspect(value, ["", "/model", "/stream", "/max_output_tokens", "/background"]);
   if (query) return query;
   if (fact(value, "").kind !== "object") throw new AdapterFailure(400, "invalid_request");
   const map = object(input.config.model_map, 400),
@@ -203,10 +200,7 @@ function prepareResponses(input: GuestInput, value: DocumentInput) {
   if (typeof upstream !== "string" || !upstream || scalar(value, "/model", 400) !== value.model)
     throw new AdapterFailure(422, "model_unavailable");
   if (input.config.path_style === "azure") throw new AdapterFailure(422, "unsupported_capability");
-  if (
-    !["missing", "null"].includes(fact(value, "/previous_response_id").kind) ||
-    scalar(value, "/background", 400) === true
-  )
+  if (scalar(value, "/background", 400) === true)
     throw new AdapterFailure(422, "unsupported_semantics");
   const stream = scalar(value, "/stream", 400);
   if (stream !== undefined && typeof stream !== "boolean")
@@ -284,9 +278,23 @@ function modelEdit(value: DocumentInput, pointer: string, model: string) {
     ? []
     : [{ op: "set", pointer, value: JSON.stringify(model) }];
 }
+function remoteIdentity(value: DocumentInput, pointer: string) {
+  const id = scalar(value, pointer);
+  if (typeof id !== "string" || !/^[A-Za-z0-9_.:-]{1,200}$/.test(id)) fail("invalid_object");
+  return id;
+}
+function identityEdits(value: DocumentInput, pointer: string, resourceId: string | undefined) {
+  if (!resourceId) return { edits: [] as { op: string; pointer: string; value: string }[] };
+  const remote = remoteIdentity(value, pointer);
+  return {
+    edits: [{ op: "set", pointer, value: JSON.stringify(resourceId) }],
+    resource: { kind: "response", remote_id: remote },
+  };
+}
 function responsesResponse(value: DocumentInput) {
   const query = inspect(value, [
     "",
+    "/id",
     "/error",
     "/object",
     "/status",
@@ -298,17 +306,83 @@ function responsesResponse(value: DocumentInput) {
   if (!["missing", "null"].includes(fact(value, "/error").kind)) fail("upstream_error");
   if (scalar(value, "/object") !== "response") fail("invalid_object");
   const kind = responseStatus(scalar(value, "/status")),
-    measured = responsesUsage(value, "/usage", null);
+    measured = responsesUsage(value, "/usage", null),
+    identity = identityEdits(value, "/id", value.resource_id);
   return {
     abi_version: 1,
     kind: "output",
     consumed: 0,
     chunks: [],
-    body: { document: value.document.handle, edits: modelEdit(value, "/model", value.model!) },
+    body: {
+      document: value.document.handle,
+      edits: [...modelEdit(value, "/model", value.model!), ...identity.edits],
+    },
     usage: measured,
     finality: finality(measured),
     terminal: { kind, bytes: "" },
     needs_input: false,
+    ...(identity.resource ? { resource: identity.resource } : {}),
+  };
+}
+function responsesResource(value: DocumentInput) {
+  const objects: Record<string, string> = {
+    get: "response",
+    cancel: "response",
+    delete: "response",
+    input_items: "list",
+  };
+  const query = inspect(value, ["", "/id", "/object", "/model", "/error"]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object") fail("invalid_object");
+  if (!["missing", "null"].includes(fact(value, "/error").kind)) fail("upstream_error");
+  if (!value.action || !value.resource_id || scalar(value, "/object") !== objects[value.action])
+    fail("invalid_object");
+  const edits =
+    value.action === "input_items"
+      ? []
+      : [
+          ...(value.model ? modelEdit(value, "/model", value.model) : []),
+          ...identityEdits(value, "/id", value.resource_id).edits,
+        ];
+  return {
+    abi_version: 1,
+    kind: "output",
+    consumed: 0,
+    chunks: [],
+    body: { document: value.document.handle, edits },
+    finality: "UNKNOWN",
+    terminal: { kind: "complete", bytes: "" },
+    needs_input: false,
+  };
+}
+function resourceRequest(input: GuestInput, payload: Record<string, unknown>) {
+  const remote = payload.remote_id,
+    action = payload.action;
+  if (
+    payload.kind !== "response" ||
+    typeof remote !== "string" ||
+    !/^[A-Za-z0-9_.:-]{1,200}$/.test(remote) ||
+    typeof action !== "string"
+  )
+    throw new AdapterFailure(422, "unsupported_capability");
+  if (input.config.path_style === "azure") throw new AdapterFailure(422, "unsupported_capability");
+  const suffix: Record<string, [string, string]> = {
+    get: ["GET", ""],
+    delete: ["DELETE", ""],
+    cancel: ["POST", "/cancel"],
+    input_items: ["GET", "/input_items"],
+  };
+  const route = suffix[action];
+  if (!route) throw new AdapterFailure(422, "unsupported_capability");
+  return {
+    abi_version: 1,
+    kind: "resource_request",
+    request: {
+      method: route[0],
+      path: `/v1/responses/${remote}${route[1]}`,
+      headers: { accept: "application/json" },
+      auth: authOf(input),
+    },
   };
 }
 function responsesFrame(state: State, value: FrameInput) {
@@ -322,6 +396,7 @@ function responsesFrame(state: State, value: FrameInput) {
   const query = inspect(value, [
     "",
     "/type",
+    "/response/id",
     "/response/model",
     "/response/status",
     ...responseUsagePaths("/response/usage"),
@@ -331,21 +406,39 @@ function responsesFrame(state: State, value: FrameInput) {
   if (typeof type !== "string" || (frame.event.value !== "" && frame.event.value !== type))
     fail("invalid_stream");
   state.lastFrame = frame.ordinal;
-  const edits = modelEdit(value, "/response/model", state.model),
-    body = edits.length ? { body: { document: value.document.handle, edits } } : {};
+  const edits: { op: string; pointer: string; value?: string }[] = modelEdit(
+    value,
+    "/response/model",
+    state.model,
+  );
+  let declared: { kind: string; remote_id: string } | undefined;
+  if (state.resourceId && fact(value, "/response/id").kind !== "missing") {
+    const remote = remoteIdentity(value, "/response/id");
+    if (state.remoteId && state.remoteId !== remote) fail("invalid_stream");
+    if (!state.remoteId) declared = { kind: "response", remote_id: remote };
+    state.remoteId = remote;
+    edits.push({ op: "set", pointer: "/response/id", value: JSON.stringify(state.resourceId) });
+  }
+  const body = edits.length ? { body: { document: value.document.handle, edits } } : {};
   if (type === "error" || type === "response.failed") fail("upstream_error");
   if (type === "response.completed" || type === "response.incomplete") {
     const kind = responseStatus(scalar(value, "/response/status"));
     state.usage = responsesUsage(value, "/response/usage", state.usage);
     state.done = true;
-    return streamOutput(
-      state,
-      { handle: frame.handle, disposition: "hold", ...body },
-      { kind, bytes: "" },
-    );
+    return {
+      ...streamOutput(
+        state,
+        { handle: frame.handle, disposition: "hold", ...body },
+        { kind, bytes: "" },
+      ),
+      ...(declared ? { resource: declared } : {}),
+    };
   }
   if (!type.startsWith("response.")) fail("invalid_stream");
-  return streamOutput(state, { handle: frame.handle, disposition: "emit", ...body });
+  return {
+    ...streamOutput(state, { handle: frame.handle, disposition: "emit", ...body }),
+    ...(declared ? { resource: declared } : {}),
+  };
 }
 const mediaStreams: Record<string, [string, string]> = {
   images: ["image_generation.", "image_generation.completed"],
@@ -1224,18 +1317,32 @@ export function invoke() {
         result:
           value.protocol === "responses"
             ? responsesResponse(value)
-            : value.protocol === undefined && nativeOperations.includes(value.operation ?? "")
-              ? nativeResponse(value)
-              : value.protocol === undefined && imageOperations.includes(value.operation ?? "")
-                ? imagesResponse(value)
-                : value.operation === "transcription" || value.operation === "translation"
-                  ? transcriptResponse(value)
-                  : value.operation === "speech"
-                    ? fail("invalid_object")
-                    : response(input, value),
+            : value.action !== undefined
+              ? fail("invalid_object")
+              : value.protocol === undefined && nativeOperations.includes(value.operation ?? "")
+                ? nativeResponse(value)
+                : value.protocol === undefined && imageOperations.includes(value.operation ?? "")
+                  ? imagesResponse(value)
+                  : value.operation === "transcription" || value.operation === "translation"
+                    ? transcriptResponse(value)
+                    : value.operation === "speech"
+                      ? fail("invalid_object")
+                      : response(input, value),
         state: null,
       };
     }
+    if (input.hook === "resource_prepare")
+      return {
+        result: resourceRequest(input, object(exactParse(new TextDecoder().decode(bytes), 400))),
+        state: null,
+      };
+    if (input.hook === "resource_response")
+      return {
+        result: responsesResource(
+          object(JSON.parse(new TextDecoder().decode(bytes))) as DocumentInput,
+        ),
+        state: null,
+      };
     if (input.hook === "error")
       return {
         result: { abi_version: 1, kind: "failure", status: 502, code: "upstream_error" },
@@ -1256,7 +1363,15 @@ export function invoke() {
             !Object.hasOwn(mediaStreams, String(payload.operation))))
       )
         throw new AdapterFailure(422, "unsupported_semantics");
+      if (
+        payload.resource_id !== undefined &&
+        (payload.protocol !== "responses" ||
+          typeof payload.resource_id !== "string" ||
+          !/^response_[0-9a-f]{32}$/.test(payload.resource_id))
+      )
+        throw new AdapterFailure(400, "invalid_request");
       const state: State = {
+        ...(payload.resource_id === undefined ? {} : { resourceId: payload.resource_id as string }),
         native: payload.protocol === "responses",
         ...(payload.operation === undefined ? {} : { media: String(payload.operation) }),
         session: input.session.id,

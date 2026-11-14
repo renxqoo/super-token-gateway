@@ -26,7 +26,7 @@ export const fixtureSuiteSchema = z
                   z
                     .object({
                       action: z.literal("json"),
-                      hook: z.enum(["prepare", "response", "error"]),
+                      hook: z.enum(["prepare", "response", "error", "resource_response"]),
                       metadata: z.record(z.string(), z.unknown()),
                       body: base64Schema,
                       expected,

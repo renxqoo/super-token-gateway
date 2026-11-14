@@ -160,6 +160,9 @@ export async function startCoreInternalListener(options: Options) {
     execution_quota_v1: "/_internal/core/v1/quota",
     execution_quota_recovery_v1: "/_internal/core/v1/quota-recovery",
     execution_abort_recovery_v1: "/_internal/core/v1/abort-recovery",
+    execution_resource_commit_v1: "/_internal/core/v1/resources/commit",
+    execution_resource_v1: "/_internal/core/v1/resource-permits",
+    execution_resource_list_v1: "/_internal/core/v1/resources/list",
   };
   const execution = options.execution
     ? createExecutionHandler(db, options.execution, requireCaller)
@@ -479,6 +482,9 @@ export async function startCoreInternalListener(options: Options) {
         context_invalid: 403,
         plugin_package_unavailable: 404,
         no_route: 503,
+        resource_not_found: 404,
+        resource_rate_limited: 429,
+        resource_provider_mismatch: 422,
       };
       const sqlcode = (error as { errno?: string })?.errno;
       const code = Object.hasOwn(codes, message)

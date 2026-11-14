@@ -151,7 +151,13 @@ export function createPluginAttempts(
           throw new PluginHostError("ATTEMPT_CLOSED");
         }
         if (busy || (jsonBusy && !document)) throw new PluginHostError("BATCH_CONCURRENT");
-        if (!document && (hook === "prepare" || hook === "response" || hook === "error"))
+        if (
+          !document &&
+          (hook === "prepare" ||
+            hook === "response" ||
+            hook === "error" ||
+            hook === "resource_response")
+        )
           throw new PluginHostError("JSON_DOCUMENT_REQUIRED");
         if (finished && hook !== "stream_dispose" && hook !== "stream_finish")
           throw new PluginHostError("STREAM_FINISHED");
@@ -223,11 +229,13 @@ export function createPluginAttempts(
           const expected =
             hook === "describe"
               ? "description"
-              : hook === "prepare" || hook === "resource_prepare" || hook === "balance_prepare"
-                ? "prepared"
-                : hook === "stream_dispose"
-                  ? "disposed"
-                  : "output";
+              : hook === "resource_prepare"
+                ? "resource_request"
+                : hook === "prepare" || hook === "balance_prepare"
+                  ? "prepared"
+                  : hook === "stream_dispose"
+                    ? "disposed"
+                    : "output";
           if (result.kind === "inspect" && (!document || result.document !== document.handle))
             throw new PluginHostError("JSON_HANDLE");
           if (
@@ -241,6 +249,11 @@ export function createPluginAttempts(
             canonical(result.capabilities) !== canonical(capabilities)
           )
             throw new PluginHostError("CAPABILITIES_MISMATCH");
+          if (
+            result.kind === "resource_request" &&
+            (!capabilities.resources || !capabilities.auth.includes(result.request.auth.type))
+          )
+            throw new PluginHostError("PREPARE_INVALID");
           if (result.kind === "prepared") {
             if (
               !capabilities.operations.includes(result.request.manifest.operation) ||
@@ -275,6 +288,7 @@ export function createPluginAttempts(
               result.consumed > payload.length ||
               (hook !== "stream_feed" && result.consumed !== 0) ||
               bytes > input.output_budget ||
+              (result.resource !== undefined && !capabilities.resources) ||
               outputBytes + bytes > maxOutput ||
               (result.finality === "FINAL" &&
                 (!result.usage || !Object.keys(result.usage).length)) ||
@@ -337,7 +351,7 @@ export function createPluginAttempts(
         },
         releaseOutput: (id: string) => sse?.release(id) ?? false,
         async transformJSON(
-          hook: "prepare" | "response" | "error",
+          hook: "prepare" | "response" | "error" | "resource_response",
           metadata: Record<string, unknown>,
           body: Uint8Array,
           signal?: AbortSignal,

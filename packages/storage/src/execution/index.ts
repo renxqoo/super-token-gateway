@@ -42,6 +42,18 @@ export function createExecutionStore(db: SQL) {
         await db`SELECT core_preflight_v1(${projection(p)}::jsonb,${contextId ?? null}::uuid,${attemptId ?? null}::uuid) value`
       )[0].value;
     },
+    async resource(
+      p: CoreVerifiedCallerProjection,
+      fn: "core_resource_commit_v1" | "core_resource_permit_v1" | "core_resource_list_v1",
+      data: Record<string, unknown>,
+    ): Promise<Record<string, unknown>> {
+      return db.begin(
+        async (tx) =>
+          (
+            await tx`SELECT ${tx.unsafe(`public.${fn}`)}(${projection(p)}::jsonb,${data}::jsonb) value`
+          )[0].value,
+      );
+    },
     async pluginPackage(p: CoreVerifiedCallerProjection, digest: string): Promise<Buffer> {
       return (await db`SELECT core_plugin_package_v1(${projection(p)}::jsonb,${digest}) value`)[0]
         .value;

@@ -254,6 +254,7 @@ export async function eventually(check: () => Promise<boolean>, label: string, m
 
 export type UpstreamCall = {
   index: number;
+  method: string;
   url: string;
   headers: Record<string, string>;
   raw: string;
@@ -316,6 +317,7 @@ export function withGatewayStack(
             raw = new TextDecoder().decode(bytes);
           const call = {
             index: received.length,
+            method: request.method,
             url: request.url,
             headers: Object.fromEntries(request.headers),
             raw,
@@ -325,7 +327,7 @@ export function withGatewayStack(
             azureKey: request.headers.get("api-key"),
             googKey: request.headers.get("x-goog-api-key"),
             authorization: request.headers.get("authorization"),
-            body: (request.headers.get("content-type")?.startsWith("multipart/")
+            body: (request.headers.get("content-type")?.startsWith("multipart/") || raw === ""
               ? {}
               : JSON.parse(raw)) as Record<string, unknown>,
             signal: request.signal,

@@ -497,3 +497,15 @@ export function createJSONDocuments(maxBytes = 256 << 20) {
     }),
   };
 }
+export function rewriteJSON(body: Uint8Array, edits: JSONEdit[]): Uint8Array {
+  const documents = createJSONDocuments(),
+    owner = crypto.randomUUID();
+  try {
+    const document = documents.register(owner, body);
+    const output = documents.materialize(owner, { document: document.handle, edits });
+    output.release();
+    return output.bytes;
+  } finally {
+    documents.dispose(owner);
+  }
+}

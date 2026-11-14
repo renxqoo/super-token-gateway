@@ -74,11 +74,11 @@ async function responseResult(source: string) {
 }
 const complete =
   '{"id":"synthetic","model":"upstream","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9007199254740993,"completion_tokens":2},"decimal":0.10000000000000001}';
-test("the real WASM describes supported Chat and explicitly refuses resource and balance hooks", async () => {
+test("the real WASM describes supported Chat and explicitly refuses balance hooks", async () => {
   const a = attempt();
   expect((await a.invoke("describe")).kind).toBe("description");
   a.dispose();
-  for (const hook of ["balance_prepare", "resource_prepare"] as const)
+  for (const hook of ["balance_prepare"] as const)
     expect(await attempt().invoke(hook)).toEqual({
       abi_version: 1,
       kind: "failure",
@@ -469,8 +469,8 @@ test("package synthetic fixtures execute through the production WASM ABI", async
   const observers = supervisor.snapshot().observers;
   const result = await runPluginFixtures(supervisor, signed.pkg);
   expect(supervisor.snapshot().observers).toBe(observers);
-  expect(result.cases).toBe(50);
-  expect(result.steps).toBe(68);
+  expect(result.cases).toBe(60);
+  expect(result.steps).toBe(83);
   expect(result.state.attempts).toBe(0);
   expect(result.state.json.bytes).toBe(0);
   const rejected = syntheticSignedPackage(

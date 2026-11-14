@@ -160,13 +160,18 @@ test("deployment units start built entries, keep v2 processes under separate use
   const chat = caddy.indexOf("handle @chat"),
     legacy = caddy.indexOf("handle @legacy");
   expect(caddy).toContain(
-    "@chat {\n\t\tmethod POST\n\t\tpath /v1/chat/completions /v1/messages /v1/embeddings /v1/moderations /v1/completions /v1/images/generations /v1/images/edits /v1/audio/speech /v1/audio/transcriptions /v1/audio/translations /v1/music/generations /v1beta/models/*\n\t}\n",
+    "@chat {\n\t\tmethod POST\n\t\tpath /v1/chat/completions /v1/messages /v1/responses /v1/embeddings /v1/moderations /v1/completions /v1/images/generations /v1/images/edits /v1/audio/speech /v1/audio/transcriptions /v1/audio/translations /v1/music/generations /v1beta/models/*\n\t}\n",
   );
   expect(chat).toBeGreaterThan(-1);
   expect(legacy).toBeGreaterThan(chat);
   expect(caddy.slice(chat, legacy)).toContain(`127.0.0.1:${example.port}`);
   expect(caddy.slice(legacy)).not.toContain(`127.0.0.1:${example.port}`);
   expect(caddy).not.toMatch(/\/admin|\/_internal/);
+  const resources = caddy.indexOf("handle @resources");
+  expect(caddy).toContain("@resources path /v1/responses /v1/responses/*\n");
+  expect(resources).toBeGreaterThan(chat);
+  expect(resources).toBeLessThan(legacy);
+  expect(caddy.slice(resources, legacy)).toContain(`127.0.0.1:${example.port}`);
   const account = caddy.indexOf("handle @account"),
     request = caddy.indexOf("handle @request");
   expect(caddy).toContain(

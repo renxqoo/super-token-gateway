@@ -39,6 +39,7 @@ export function createSSEStream(options: {
     inspection: Record<string, unknown> = {},
     operation: unknown,
     latest: OutputResult | undefined,
+    declaredResource: OutputResult["resource"],
     held: Uint8Array[] = [],
     heldCharge = 0,
     heldBytes = 0,
@@ -231,7 +232,8 @@ export function createSSEStream(options: {
       running = false;
       throw new PluginHostError("STREAM_ALREADY_OPEN");
     }
-    let chunks: string[] = [],
+    let declared: OutputResult["resource"],
+      chunks: string[] = [],
       candidate: OutputResult["terminal"],
       consumed = 0;
     try {
@@ -352,6 +354,11 @@ export function createSSEStream(options: {
           throw new PluginHostError("SSE_FRAME");
         if (result.terminal && result.frame.disposition !== "hold")
           throw new PluginHostError("ABI_OUTPUT");
+        if (result.resource) {
+          if (declaredResource || result.frame.disposition === "drop")
+            throw new PluginHostError("SSE_FRAME");
+          declaredResource = declared = result.resource;
+        }
         if (
           result.terminal &&
           (result.terminal.bytes || framer.snapshot().ready > 1 || framer.snapshot().incomplete)
@@ -437,6 +444,7 @@ export function createSSEStream(options: {
         ...output(),
         consumed,
         chunks,
+        ...(declared ? { resource: declared } : {}),
         ...(candidate ? { terminal: candidate } : {}),
         needs_input: !candidate && !current && framer.snapshot().ready === 0 && !ended,
       };
