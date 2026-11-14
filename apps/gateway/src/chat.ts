@@ -26,6 +26,7 @@ import {
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
 import type { createPackageCache } from "./packages.ts";
+import { requestAsChat, responseFromChat, streamFromChat } from "./protocols.ts";
 
 export type ChatDependencies = {
   config: GatewayConfig;
@@ -61,6 +62,7 @@ type Facts = {
 };
 type Candidate = ExecutionContextResponse["candidates"][number];
 type Plan = {
+  converted: boolean;
   attempt: Attempt;
   attemptId: string;
   channelId: string;
@@ -219,20 +221,29 @@ async function plan(
     deadlineAt: Date.parse(facts.deadlineAt),
   });
   try {
+    const converted = !pkg.manifest.capabilities.operations.includes(facts.protocol);
     const transformed = await attempt.transformJSON(
       "prepare",
-      {
-        protocol: facts.protocol,
-        operation: facts.protocol,
-        model: facts.model,
-        ...(request.path ? { stream: request.path.stream } : {}),
-      },
-      request.body,
+      converted
+        ? { protocol: "chat", operation: "chat", model: facts.model }
+        : {
+            protocol: facts.protocol,
+            operation: facts.protocol,
+            model: facts.model,
+            ...(request.path ? { stream: request.path.stream } : {}),
+          },
+      converted
+        ? requestAsChat(request.body, facts.protocol, facts.model, request.path)
+        : request.body,
       request.signal,
     );
     const rejected = failure(transformed.result);
     if (rejected) throw rejected;
-    if (transformed.result.kind !== "prepared" || !transformed.body)
+    if (
+      transformed.result.kind !== "prepared" ||
+      !transformed.body ||
+      transformed.result.request.manifest.operation !== (converted ? "chat" : facts.protocol)
+    )
       throw new GatewayError(502, "plugin_invalid", "The route's plugin did not prepare a request");
     const prepared = transformed.result.request,
       outbound = transformed.body;
@@ -251,7 +262,7 @@ async function plan(
     const headers = { ...prepared.headers, "content-type": "application/json" };
     const manifest = {
       version: 1,
-      operation: prepared.manifest.operation,
+      operation: facts.protocol,
       model: prepared.manifest.model,
       upstream_model: prepared.manifest.upstream_model,
       stream: prepared.manifest.stream,
@@ -266,7 +277,7 @@ async function plan(
       proposed_attempt_id: attemptId,
       origin: candidate.origin,
       method: prepared.method,
-      operation: prepared.manifest.operation,
+      operation: facts.protocol,
       request_target_sha256: sha256(url.pathname + url.search),
       final_headers_digest: sha256(canonical(headers)),
       final_body_sha256: sha256(outbound),
@@ -280,6 +291,7 @@ async function plan(
     });
     const prepSessionId = crypto.randomUUID();
     return {
+      converted,
       attempt,
       attemptId,
       channelId: candidate.ref.channel_id,
@@ -749,7 +761,7 @@ async function dispatch(
   return {
     response: facts.stream
       ? relaySSE(facts, admitted, bridge, response, signal, request, end)
-      : await relayJSON(deps, facts, bridge, response, signal, finalFailure, end),
+      : await relayJSON(deps, facts, admitted, bridge, response, signal, finalFailure, end),
   };
 }
 
@@ -788,6 +800,7 @@ export async function executeChat(deps: ChatDependencies, request: ChatRequest) 
 async function relayJSON(
   deps: ChatDependencies,
   facts: Facts,
+  admitted: Admitted,
   bridge: Bridge,
   response: Response,
   signal: AbortSignal,
@@ -807,7 +820,7 @@ async function relayJSON(
     const bytes = await readBounded(response.body, deps.config.max_response_bytes, signal);
     transformed = await bridge.transformJSON(
       "response",
-      { protocol: facts.protocol, model: facts.model },
+      { protocol: admitted.converted ? "chat" : facts.protocol, model: facts.model },
       bytes,
       signal,
     );
@@ -832,7 +845,10 @@ async function relayJSON(
     if (error instanceof GatewayError) throw error;
     throw new GatewayError(503, "evidence_unavailable", "Usage evidence could not be recorded");
   }
-  return new Response(transformed.body.slice(), {
+  const body = admitted.converted
+    ? responseFromChat(transformed.body, facts.protocol, facts.model)
+    : transformed.body;
+  return new Response(body.slice(), {
     status: 200,
     headers: { "content-type": "application/json", "x-request-id": facts.requestId },
   });
@@ -848,6 +864,11 @@ function relaySSE(
   end: (ending: Ending) => Promise<void>,
 ) {
   const encoder = new TextEncoder();
+  const translated = admitted.converted ? streamFromChat(facts.protocol, facts.model) : undefined;
+  const emit = function* (bytes: Uint8Array) {
+    if (translated) yield* translated.feed(bytes);
+    else yield bytes;
+  };
   async function* frames(): AsyncGenerator<Uint8Array> {
     let terminal: { bytes: string } | undefined;
     let ended = false,
@@ -863,7 +884,7 @@ function relaySSE(
         const bytes = Buffer.from(chunk, "base64");
         if (bytes.length) {
           delivered = true;
-          yield bytes;
+          yield* emit(bytes);
         }
       }
       const id = (result as { output_id?: string }).output_id;
@@ -872,10 +893,16 @@ function relaySSE(
       return result.needs_input || Boolean(result.terminal);
     };
     try {
-      await bridge.invoke(
+      const opened = await bridge.invoke(
         "stream_open",
-        encoder.encode(JSON.stringify({ model: facts.model, protocol: facts.protocol })),
+        encoder.encode(
+          JSON.stringify({
+            model: facts.model,
+            protocol: admitted.converted ? "chat" : facts.protocol,
+          }),
+        ),
       );
+      if (opened.kind !== "output") throw new Error("stream_open");
       for (;;) {
         const next = await reader.read();
         if (next.done) break;
@@ -895,7 +922,8 @@ function relaySSE(
         reason: "COMPLETED",
       });
       const held = Buffer.from(terminal.bytes, "base64");
-      if (held.length) yield held;
+      if (held.length) yield* emit(held);
+      if (translated) yield* translated.finish();
     } catch {
       failed = true;
     } finally {

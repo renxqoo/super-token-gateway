@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import { anthropicMessagesReleaseId, geminiGenerateReleaseId } from "@gateway/plugin-sdk";
 import { syntheticAdminKey } from "../support/catalog.ts";
-import { settledCharge, withGatewayStack, type UpstreamCall } from "../support/gateway-process.ts";
+import {
+  chatReplies,
+  settledCharge,
+  withGatewayStack,
+  type UpstreamCall,
+} from "../support/gateway-process.ts";
 
 type Stack = Parameters<Parameters<typeof withGatewayStack>[1]>[0];
 
@@ -152,17 +157,121 @@ test(
 );
 
 test(
-  "a /v1/messages request for a model whose only channel runs a plugin without the messages operation is no_route and never reaches the upstream",
+  "a Messages client reaching a channel whose plugin only speaks chat is converted to chat upstream and back to Messages JSON and SSE, billed as messages",
   () =>
-    withGatewayStack({ reply }, async (stack) => {
-      await allowOperation(stack, "messages");
-      const response = await sendMessages(stack, {
-        max_tokens: 30,
-        messages: [{ role: "user", content: "你好" }],
+    withGatewayStack(
+      { reply: (call) => (call.body.stream ? chatReplies.sse() : chatReplies.json()) },
+      async (stack) => {
+        await allowOperation(stack, "messages");
+        const request = { max_tokens: 30, messages: [{ role: "user", content: "你好" }] };
+        const json = await sendMessages(stack, request);
+        expect(json.status).toBe(200);
+        expect(await json.json()).toMatchObject({
+          type: "message",
+          role: "assistant",
+          model: stack.setup.model,
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 30, output_tokens: 15 },
+        });
+        const call = stack.received.at(-1)!;
+        expect(call.path).toBe("/v1/chat/completions");
+        expect(call.body).toEqual({
+          model: "synthetic",
+          stream: false,
+          messages: [{ role: "user", content: [{ type: "text", text: "你好" }] }],
+          max_completion_tokens: 30,
+        });
+        const id = json.headers.get("x-request-id")!;
+        expect(await settledCharge(stack.db, id)).toMatchObject({ state: "SUCCEEDED" });
+        expect(
+          (await stack.db`SELECT operation FROM gateway_requests WHERE id=${id}`)[0].operation,
+        ).toBe("messages");
+
+        const streamed = await sendMessages(stack, { ...request, stream: true });
+        expect(streamed.status).toBe(200);
+        const frames = (await streamed.text())
+          .split("\n\n")
+          .filter(Boolean)
+          .map((frame) => {
+            const lines = frame.split("\n");
+            return {
+              event: lines.find((l) => l.startsWith("event: "))?.slice(7),
+              data: JSON.parse(lines.find((l) => l.startsWith("data: "))!.slice(6)),
+            };
+          });
+        expect(frames.map((f) => f.event).filter((e) => e !== "ping")).toEqual([
+          "message_start",
+          "content_block_start",
+          "content_block_delta",
+          "content_block_delta",
+          "content_block_stop",
+          "message_delta",
+          "message_stop",
+        ]);
+        expect(frames.every((f) => f.data.type === f.event)).toBe(true);
+        expect(frames[0]!.data.message.model).toBe(stack.setup.model);
+        expect(
+          frames
+            .filter((f) => f.event === "content_block_delta")
+            .map((f) => f.data.delta.text)
+            .join(""),
+        ).toBe("ok");
+        expect(frames.find((f) => f.event === "message_delta")!.data).toMatchObject({
+          delta: { stop_reason: "end_turn" },
+          usage: { output_tokens: 15 },
+        });
+        expect(stack.received.at(-1)!.body.stream).toBe(true);
+        expect(await settledCharge(stack.db, streamed.headers.get("x-request-id")!)).toMatchObject({
+          state: "SUCCEEDED",
+        });
+
+        const lossy = await sendMessages(stack, {
+          max_tokens: 30,
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "你好", cache_control: { type: "ephemeral" } }],
+            },
+          ],
+        });
+        expect(lossy.status).toBe(422);
+        expect(((await lossy.json()) as { error: { code: string } }).error.code).toBe(
+          "conversion_loss",
+        );
+        expect(stack.received).toHaveLength(2);
+      },
+    ),
+  120000,
+);
+
+test(
+  "a Gemini client reaching a channel whose plugin only speaks chat is converted with the model and stream from the URL and answered in Gemini format",
+  () =>
+    withGatewayStack({ reply: () => chatReplies.json() }, async (stack) => {
+      await allowOperation(stack, "gemini");
+      const response = await fetch(
+        `${stack.gateway.origin}/v1beta/models/${stack.setup.model}:generateContent`,
+        {
+          method: "POST",
+          headers: { "x-goog-api-key": stack.setup.key.key, "content-type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: "你好" }] }],
+            generationConfig: { maxOutputTokens: 30 },
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 15 },
       });
-      expect(response.status).toBe(503);
-      expect(((await response.json()) as { error: { code: string } }).error.code).toBe("no_route");
-      expect(stack.received).toHaveLength(0);
+      expect(stack.received.at(-1)!.body).toEqual({
+        model: "synthetic",
+        stream: false,
+        messages: [{ role: "user", content: [{ type: "text", text: "你好" }] }],
+        max_completion_tokens: 30,
+      });
     }),
   120000,
 );

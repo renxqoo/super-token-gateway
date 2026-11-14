@@ -47,6 +47,7 @@
     "apps/gateway": {
       "name": "@gateway/gateway",
       "dependencies": {
+        "@gateway/adapters": "workspace:*",
         "@gateway/contracts": "workspace:*",
         "@gateway/core-client": "workspace:*",
         "@gateway/kernel": "workspace:*",

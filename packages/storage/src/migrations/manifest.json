@@ -170,6 +170,15 @@
           "checksum": "ae20e79968a940b8da477f19bd8cdf88a915c90e3506a775d5568e0e43faf8bb"
         }
       ]
+    },
+    {
+      "version": 2026111217,
+      "files": [
+        {
+          "path": "./sql/core-protocol-candidates.sql",
+          "checksum": "117720fa26b0f77d41e8bbf71998e9be2661bf2cbd9d5594c478095501262f68"
+        }
+      ]
     }
   ]
 }
