@@ -52,16 +52,16 @@
   },
   "files": {
     "isolation.ts": {
-      "bytes": 6558,
-      "sha256": "1158014420b127f269a7d346c86ed951a064558af95174c31f9c35fdb472b591"
+      "bytes": 6837,
+      "sha256": "398db55b4dd19cefc1f195af08709077b3da8dd055b9b91fdfbdcf07d3358ac4"
     },
     "isolation.d.ts": {
       "bytes": 121,
       "sha256": "281328c011deada0c4f0d6943c47d7d9f23ff1f3de910dd29af8c065a813b6d4"
     },
     "isolation.wasm": {
-      "bytes": 2500323,
-      "sha256": "272a5b997bc0a8a3133fd86a1ce00c882c14ebd22cfa3b75285f2a09e66c539b"
+      "bytes": 2501032,
+      "sha256": "83ad07317300c3692b473b6df00a2e4cdef1fdefdcc1b7a064088285a2771715"
     }
   }
 }

@@ -65,10 +65,12 @@ export function observeAttempt(
     if (finished) throw new Error("Attempt evidence already finished");
     if (result.kind !== "output" && result.kind !== "failure") return;
     if (!result.usage) return;
-    const next = {
+    await update({
       usage: { ...result.usage } as Record<string, string>,
-      finality: result.kind === "output" ? result.finality : ("UNKNOWN" as const),
-    };
+      finality: result.kind === "output" ? result.finality : "UNKNOWN",
+    });
+  }
+  async function update(next: { usage: Record<string, string>; finality: Finality }) {
     const key = canonical(next);
     if (key === last) return;
     usage = next.usage;
@@ -91,6 +93,10 @@ export function observeAttempt(
       const transformed = await attempt.transformJSON(hook, metadata, body, signal);
       await observe(transformed.result);
       return transformed;
+    },
+    async declare(declared: Record<string, string>) {
+      if (finished) throw new Error("Attempt evidence already finished");
+      await update({ usage: { ...declared }, finality: "FINAL" });
     },
     async finish(outcome: AttemptOutcome) {
       if (finished) throw new Error("Attempt evidence already finished");

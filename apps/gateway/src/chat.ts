@@ -27,6 +27,7 @@ import {
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
 import type { createPackageCache } from "./packages.ts";
+import { encodeForm, readForm, type FormFiles } from "./form.ts";
 import { requestAsChat, responseFromChat, streamFromChat } from "./protocols.ts";
 
 export type ChatDependencies = {
@@ -44,6 +45,7 @@ export type ChatRequest = {
   operation: Operation;
   path?: { model: string; stream: boolean };
   body: Uint8Array;
+  contentType: string | undefined;
   token: string;
   ip: string;
   idempotencyKey: string | undefined;
@@ -57,6 +59,8 @@ type Facts = {
   operation: Operation;
   protocol: Protocol | undefined;
   inputCharacters: number | undefined;
+  document: Uint8Array;
+  files: FormFiles | undefined;
   model: string;
   stream: boolean;
   fingerprint: string;
@@ -144,17 +148,33 @@ function failure(result: AbiResult): GatewayError | undefined {
     : new GatewayError(result.status, result.code, "The request cannot be represented upstream");
 }
 
-function requestFacts(request: ChatRequest, totalTimeoutMs: number): Facts {
+async function requestFacts(request: ChatRequest, totalTimeoutMs: number): Promise<Facts> {
   const body = request.body;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
-  } catch {
-    throw new GatewayError(400, "invalid_json", "Request body must be JSON");
+  let value: { model?: unknown; stream?: unknown },
+    document = body,
+    files: FormFiles | undefined;
+  if (/^multipart\/form-data\s*;/i.test(request.contentType ?? "")) {
+    const form = await readForm(body, request.contentType!);
+    if (
+      form.view.stream !== undefined &&
+      form.view.stream !== "true" &&
+      form.view.stream !== "false"
+    )
+      throw new GatewayError(400, "invalid_request", "stream must be boolean");
+    value = { ...form.view, stream: form.view.stream === "true" };
+    document = new TextEncoder().encode(JSON.stringify(form.view));
+    files = form.files;
+  } else {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+    } catch {
+      throw new GatewayError(400, "invalid_json", "Request body must be JSON");
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      throw new GatewayError(400, "invalid_request", "Request body must be a JSON object");
+    value = parsed;
   }
-  const value = parsed as { model?: unknown; stream?: unknown };
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    throw new GatewayError(400, "invalid_request", "Request body must be a JSON object");
   const model = request.path ? request.path.model : value.model;
   if (typeof model !== "string" || !model)
     throw new GatewayError(400, "invalid_request", "A model is required");
@@ -165,6 +185,8 @@ function requestFacts(request: ChatRequest, totalTimeoutMs: number): Facts {
     operation: request.operation,
     protocol,
     inputCharacters: requestCharacters(request.operation, value as Record<string, unknown>),
+    document,
+    files,
     model,
     stream: request.path ? request.path.stream : value.stream === true,
     fingerprint: sha256(body),
@@ -241,8 +263,12 @@ async function plan(
             operation: facts.operation,
             model: facts.model,
             ...(request.path ? { stream: request.path.stream } : {}),
+            ...(facts.files ? { content: "multipart" } : {}),
+            ...(facts.inputCharacters === undefined
+              ? {}
+              : { input_characters: String(facts.inputCharacters) }),
           },
-      converted ? requestAsChat(request.body, source, facts.model, request.path) : request.body,
+      converted ? requestAsChat(request.body, source, facts.model, request.path) : facts.document,
       request.signal,
     );
     const rejected = failure(transformed.result);
@@ -250,11 +276,23 @@ async function plan(
     if (
       transformed.result.kind !== "prepared" ||
       !transformed.body ||
-      transformed.result.request.manifest.operation !== (converted ? "chat" : facts.operation)
+      transformed.result.request.manifest.operation !== (converted ? "chat" : facts.operation) ||
+      (transformed.result.request.body_format === "multipart") !== Boolean(facts.files)
     )
       throw new GatewayError(502, "plugin_invalid", "The route's plugin did not prepare a request");
     const prepared = transformed.result.request,
-      outbound = transformed.body;
+      boundary = `stg-${attemptId.replaceAll("-", "")}`;
+    let outbound = transformed.body;
+    if (facts.files)
+      try {
+        outbound = encodeForm(
+          JSON.parse(new TextDecoder().decode(transformed.body)),
+          facts.files,
+          boundary,
+        );
+      } catch {
+        throw new GatewayError(502, "plugin_invalid", "The route's plugin rewrote form files");
+      }
     let url: URL;
     try {
       const origin = validateBaseUrl(
@@ -267,7 +305,12 @@ async function plan(
     } catch {
       throw new GatewayError(502, "unsafe_upstream", "The upstream address is not permitted");
     }
-    const headers = { ...prepared.headers, "content-type": "application/json" };
+    const headers = {
+      ...prepared.headers,
+      "content-type": facts.files
+        ? `multipart/form-data; boundary=${boundary}`
+        : "application/json",
+    };
     const manifest = {
       version: 1,
       operation: facts.operation,
@@ -275,9 +318,10 @@ async function plan(
       upstream_model: prepared.manifest.upstream_model,
       stream: prepared.manifest.stream,
       input_bytes: prepared.manifest.input_bytes,
-      quantities: {},
+      quantities: prepared.manifest.quantities ?? {},
       resource_ids: [],
       ceilings: prepared.manifest.ceilings,
+      ...(prepared.manifest.images === undefined ? {} : { images: prepared.manifest.images }),
       ...(facts.inputCharacters === undefined
         ? {}
         : { input_characters: String(facts.inputCharacters) }),
@@ -769,15 +813,19 @@ async function dispatch(
     await end({ kind: "retry", outcome: rejected }).catch(() => undefined);
     return { retry: upstreamRejection(response.status) };
   }
+  const type = response.headers.get("content-type") ?? "";
   return {
-    response: facts.stream
-      ? relaySSE(facts, admitted, bridge, response, signal, request, end)
-      : await relayJSON(deps, facts, admitted, bridge, response, signal, finalFailure, end),
+    response:
+      admitted.prepared.binary && !/json|^text\/event-stream/i.test(type)
+        ? relayBinary(facts, admitted, bridge, response, type, signal, request, end)
+        : admitted.prepared.manifest.stream
+          ? relaySSE(facts, admitted, bridge, response, signal, request, end)
+          : await relayJSON(deps, facts, admitted, bridge, response, signal, finalFailure, end),
   };
 }
 
 export async function executeChat(deps: ChatDependencies, request: ChatRequest) {
-  const facts = requestFacts(request, deps.config.total_timeout_ms);
+  const facts = await requestFacts(request, deps.config.total_timeout_ms);
   const external = { ...request, signal: AbortSignal.any([request.signal, request.drain]) };
   const tried = new Set<string>();
   let previous: { permit: Permit; ordinal: number } | undefined;
@@ -913,10 +961,11 @@ function relaySSE(
       const opened = await bridge.invoke(
         "stream_open",
         encoder.encode(
-          JSON.stringify({
-            model: facts.model,
-            protocol: admitted.converted ? "chat" : facts.protocol,
-          }),
+          JSON.stringify(
+            admitted.converted || facts.protocol
+              ? { model: facts.model, protocol: admitted.converted ? "chat" : facts.protocol }
+              : { model: facts.model, operation: facts.operation },
+          ),
         ),
       );
       if (opened.kind !== "output") throw new Error("stream_open");
@@ -992,6 +1041,83 @@ function relaySSE(
       headers: {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
+        "x-request-id": facts.requestId,
+      },
+    },
+  );
+}
+
+const binaryTypes =
+  /^(?:audio\/[A-Za-z0-9.+-]{1,64}|text\/plain|text\/vtt|application\/x-subrip|application\/octet-stream)(?:\s*;.*)?$/i;
+
+function relayBinary(
+  facts: Facts,
+  admitted: Admitted,
+  bridge: Bridge,
+  response: Response,
+  type: string,
+  signal: AbortSignal,
+  request: ChatRequest,
+  end: (ending: Ending) => Promise<void>,
+) {
+  async function* chunks(): AsyncGenerator<Uint8Array> {
+    let ended = false,
+      failed = false;
+    const reader = response.body!.getReader();
+    const cancel = () => void reader.cancel().catch(() => undefined);
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      let held: Uint8Array | undefined;
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        if (held) yield held;
+        held = next.value;
+      }
+      await bridge.declare({ ...admitted.prepared.binary!.usage, requests: "1" });
+      ended = true;
+      await end({
+        kind: "final",
+        outcome: { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
+        reason: "COMPLETED",
+      });
+      if (held) yield held;
+    } catch {
+      failed = true;
+    } finally {
+      signal.removeEventListener("abort", cancel);
+      cancel();
+      if (!ended) {
+        const stop = halt(request);
+        await end({
+          kind: "final",
+          outcome: {
+            attempt_state: "UNKNOWN",
+            request_state: stop.requestState,
+            error_code: stop.reason === "CANCELLED" ? "client_cancelled" : "binary_interrupted",
+          },
+          reason: stop.reason,
+        }).catch(() => undefined);
+      }
+    }
+    if (failed) throw new GatewayError(502, "upstream_interrupted", "Binary response interrupted");
+  }
+  const iterator = chunks();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const next = await iterator.next();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      },
+      async cancel() {
+        await iterator.return(undefined);
+      },
+    }),
+    {
+      status: 200,
+      headers: {
+        "content-type": binaryTypes.test(type) ? type : "application/octet-stream",
         "x-request-id": facts.requestId,
       },
     },

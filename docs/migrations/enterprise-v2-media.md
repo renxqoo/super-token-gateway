@@ -1,0 +1,35 @@
+# T10 媒体、音乐与二进制流迁移
+
+## 1. 当前行为（代码核对）
+
+- 媒体公开面只在 legacy：`POST /v1/images/generations`、`/v1/images/edits`、`/v1/audio/speech`、`/v1/audio/transcriptions`、`/v1/audio/translations`、`/v1/videos`。v2 Gateway 只处理 JSON 文本操作，插件 ABI 只有 JSON 文档与 SSE/aws-eventstream 帧。
+- legacy multipart（`apps/legacy-gateway/src/app.ts`）：解析为表单，`prompt`/`input`/`n` 重复出现 400；图片 `n` 须正整数字符串；文件部件以 `{digest,size,type}` 参与策略与计量，发送时原部件原样转发，只把 `model` 换成上游模型。
+- legacy 允许流式的操作：chat/responses/messages/gemini 与 images、image_edits、transcription、speech（speech 另以 `stream_format: "sse"` 判定）；其余 `stream: true` 422 `unsupported_stream`。
+- legacy 计量：图片 JSON 以 `data` 项数计 `images`；媒体 SSE（`MediaStreamMeter`）在 `image_generation.completed`/`image_edit.completed`/`transcript.text.done`/`speech.audio.done` 处收尾，带 `b64_json` 的图片终态记 `images: 1`，token 用量取事件 `usage`；speech/transcription/translation 非 JSON 响应走二进制转发，完整 EOF 后为 FINAL：speech 记输入字符数，均加 `requests: 1`；中断为 UNKNOWN。音频时长 `audio_seconds`/`audio_ms` 由 `extractUsage` 精确换算。
+- Core 已支持：billable manifest 的 `images`（预扣图片数）、`input_characters`（字符计费）与 `quantities`（供应侧精确估算）；SQL 维度含 `music_ms`；kernel operation 含 `music`。插件 prepared manifest 目前不能声明 `images`/`quantities`，Gateway 恒写 `quantities: {}`。
+
+## 2. 决策
+
+- **M1 multipart 表单文档**：Gateway 对 `multipart/form-data` 请求按 `max_body_bytes` 有界解析，向插件 prepare 提交 JSON 表单视图：文本字段为字符串，文件部件为 `{"file":{"name","type","bytes","sha256"}}`，同名字段多次出现时为数组（`prompt`/`input`/`model`/`n`/`stream` 重复 400，与 legacy 一致）；元数据增加 `content: "multipart"`。插件按现有编辑计划修改文本字段（通常只换 `model`），prepared 增加 `body_format: "multipart"`。Gateway 用编辑后的视图重建请求：值只能是字符串、文件描述或其数组；文件描述必须与原部件逐字段相同，且每个原文件部件恰好使用一次（不能复制、伪造或丢弃）；按视图键序编码，boundary 固定为 `stg-` + attempt id（去连字符），`content-type` 由 Gateway 设定。dispatch 投影的 body 摘要即最终 multipart 字节。
+- **M2 预知计量**：prepared manifest 增加可选 `images`（十进制字符串）与 `quantities`（usage 对象）；Gateway 原样写入 billable manifest，Core 据此报价（每图价格预扣）与供应侧估算。
+- **M3 二进制响应**：prepared 增加可选 `binary: {usage?}`。上游 2xx 且 content-type 既非 JSON 也非 `text/event-stream` 时：未声明 `binary` 为 `upstream_invalid_response`；已声明则 Gateway 按块转发（背压、下游停滞与总时限沿用 Chat SSE），content-type 仅透传 `audio/*`、`text/plain`、`text/vtt`、`application/x-subrip`、`application/octet-stream`，其余按 `application/octet-stream`。完整 EOF 后以 `{...usage, requests: "1"}` 记 FINAL；中断或取消记 UNKNOWN（`binary_interrupted`）。JSON 与 SSE 响应仍走 response/stream 钩子。
+- **M4 字符元数据**：prepare 元数据增加可选 `input_characters`（Gateway 以共享 `requestCharacters` 计算的十进制字符串），供插件声明 speech 的字符用量。
+- **M5 图片（k1）**：`gateway.openai-chat` 声明 `images`、`image_edits`。`n` 缺省 1，须为 1–8 的整数（JSON 数字或 multipart 字符串），prepared `images` 与 ceilings `images` 均为 n；请求只改写 `model`。JSON 响应要求 `data` 为数组且项数 1..n，用量 `images` 为项数并合并 `usage` 中的 token；SSE（`stream: true`）帧原样透传（无 model 字段），`image_generation.completed`/`image_edit.completed` 作为终态保留，终态带非空 `b64_json` 记 `images: 1` 并合并其 token 用量，终态前 EOF 截断失败。
+- **M6 音频（k2）**：speech 为 JSON 请求，二进制或 SSE（`stream_format: "sse"` 或 `stream: true`）响应，用量为输入字符数；transcription/translation 为 multipart，`response_format` 为 json/verbose_json 时 JSON 计量 token 与精确时长，text/srt/vtt 走 M3（只有 `requests: 1`），transcription `stream: true` 为 SSE（`transcript.text.done` 终态）；translation 不支持流式。
+- **M7 视频**：创建后用量只在任务完成时出现，依赖 T11 资源回查与补证；整体在 T11 实现，T10 不开放 v2 `/v1/videos`，Caddy 继续指向 legacy。
+- **M8 音乐（k3）**：新增公共 `POST /v1/music/generations`（operation `music`，维度 `music_ms`），MiniMax 插件在核对官方契约后实现；不新增持久化资源或假异步任务。
+
+## 3. 里程碑
+
+| 里程碑            | 内容                                                            | 验收                                                                                              |
+| ----------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| k1 图片与宿主管道 | M1–M5：ABI 扩展、Gateway multipart/二进制管道、openai-chat 图片 | n=2 每图预扣与按项数结算、multipart edits 原文件逐字节转发、伪造/复制文件部件拒绝、SSE 终态与截断 |
+| k2 音频           | M6                                                              | speech 二进制字符计费、SSE；转写 JSON 时长精度、文本格式、SSE                                     |
+| k3 音乐           | M8                                                              | 官方契约核对、JSON/流式、`music_ms` 计量与预扣、证据                                              |
+| k4 验收           | 自审、全量门禁、Caddy 切换                                      | 同 T09 j7                                                                                         |
+
+## 4. 实施记录
+
+- **k1 图片与宿主管道**：ABI（`packages/plugin-sdk/src/abi.ts`）增加 prepare 元数据 `content`/`input_characters`、prepared `body_format`/`binary` 与 manifest `images`/`quantities`；宿主校验 `quantities`/`binary.usage` 维度属于插件声明、`images` 等于 ceilings 中的 `images`。`apps/gateway/src/form.ts` 实现 M1 表单视图与重建；`chat.ts` 写入 `images`/`quantities`、按 prepared `manifest.stream` 选择 SSE、按 M3 二进制转发（保留最后一块直到 EOF 后证据落定，中断时向客户端报错而不是正常结束）；evidence 桥增加 `declare` 记 FINAL 声明用量。`gateway.openai-chat` 1.4.0 声明 images/image_edits（M5）。
+- **k2 音频**：`gateway.openai-chat` 1.4.0 同时声明 speech/transcription/translation 与 `characters`/`audio_ms`/`audio_seconds` 维度（M6）。时长由 guest 从数字字面量精确换算：`seconds` 须为普通小数（不接受指数形式，legacy 接受），超过 3 位小数时只记 `audio_seconds`。speech 只以 `stream_format: "sse"` 流式，`stream` 字段 422（legacy 曾把 `stream: true` 当作 SSE，但上游返回二进制会失败）；translation 不支持流式；文本格式转写走二进制转发，只记 `requests: 1`。
+- **测试**：`apps/gateway/src/__test__/form.test.ts` 5 例（表单视图、原文件逐字节重建、伪造/复制/丢弃文件与非字符串文本拒绝、单值字段重复 400、畸形 400）；openai-chat fixture 增至 50 cases/68 steps；`tests/integration/gateway-media.test.ts` 2 例：图片 n=2 预扣 100、交付 1 张只收 50、n=9 422、multipart 编辑原文件逐字节到上游、图片 SSE 终态保留；speech 二进制逐字节与 4 字符×3=12 结算、转写 0.125 秒=125ms 结算、文本翻译转发与按次结算、流式翻译 422、上游中途断开时客户端连接报错且请求 FAILED/0 收费、attempt `UNKNOWN`/`binary_interrupted`。`tests/support/gateway-process.ts` 记录上游原始字节并共享 `allowOperation`。

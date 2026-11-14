@@ -117,6 +117,11 @@ export const jsonMetadataSchema = z
     operation: z.enum(operations).optional(),
     model: identity,
     stream: z.boolean().optional(),
+    content: z.literal("multipart").optional(),
+    input_characters: z
+      .string()
+      .regex(/^(0|[1-9][0-9]{0,37})$/)
+      .optional(),
   })
   .strict();
 export const capabilitiesSchema = z
@@ -230,6 +235,8 @@ export const preparedSchema = z
       ),
     headers: headerSchema,
     body: jsonPlanSchema,
+    body_format: z.enum(["json", "multipart"]).optional(),
+    binary: z.object({ usage: usageSchema.optional() }).strict().optional(),
     auth: z.discriminatedUnion("type", [
       z.object({ type: z.literal("none") }).strict(),
       z.object({ type: z.literal("bearer") }).strict(),
@@ -249,6 +256,11 @@ export const preparedSchema = z
         upstream_model: identity,
         stream: z.boolean(),
         ceilings: usageSchema,
+        images: z
+          .string()
+          .regex(/^[1-9][0-9]{0,15}$/)
+          .optional(),
+        quantities: usageSchema.optional(),
         input_bytes: z
           .number()
           .int()

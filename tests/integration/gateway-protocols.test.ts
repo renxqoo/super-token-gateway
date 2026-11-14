@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { anthropicMessagesReleaseId, geminiGenerateReleaseId } from "@gateway/plugin-sdk";
 import { syntheticAdminKey } from "../support/catalog.ts";
 import {
+  allowOperation,
   chatReplies,
   settledCharge,
   withGatewayStack,
@@ -56,30 +57,6 @@ function reply(call: UpstreamCall) {
       { headers: { "content-type": "text/event-stream" } },
     );
   return Response.json(message);
-}
-
-const requestTariff = {
-  pricing: { currency: "USD", rates: { requests: { numerator: "100", denominator: "1" } } },
-  ceilings: { requests: "1" },
-  basis: "REQUEST_COMPLETION",
-};
-
-async function allowOperation(
-  stack: Stack,
-  operation: string,
-  pricing: { pricing: unknown; ceilings: Record<string, string>; basis: string } = requestTariff,
-) {
-  const { db, setup } = stack;
-  await db`UPDATE models SET operations=array_append(operations,${operation}) WHERE name=${setup.model}`;
-  await db`UPDATE routes SET operations=array_append(operations,${operation}) WHERE model_name=${setup.model}`;
-  await db`UPDATE api_keys SET operations=array_append(operations,${operation}) WHERE id=${setup.key.id}`;
-  const tariff = await stack.f.request("/tariffs", {
-    model: setup.model,
-    operation,
-    provider_id: setup.provider.id,
-    ...pricing,
-  });
-  expect(tariff.status).toBe(201);
 }
 
 async function bind(stack: Stack, releaseId: string, maxOutputTokens = 100) {

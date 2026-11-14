@@ -30,6 +30,7 @@ type State = {
   finished: boolean;
   finishKind: string;
   native: boolean;
+  media?: string;
   content: boolean;
   usage: Usage | null;
   tools: Record<string, { id: string; name: string; args?: string }>;
@@ -94,7 +95,8 @@ function usage(value: Record<string, unknown>, previous: Usage | null): Usage | 
   return Object.keys(next).length ? next : null;
 }
 function finality(value: Usage | null) {
-  return value?.input_tokens !== undefined && value.output_tokens !== undefined
+  return value?.images !== undefined ||
+    (value?.input_tokens !== undefined && value.output_tokens !== undefined)
     ? "FINAL"
     : value
       ? "PARTIAL"
@@ -122,6 +124,8 @@ type DocumentInput = {
   protocol?: string;
   operation?: string;
   model?: string;
+  content?: string;
+  input_characters?: string;
 };
 const preparePointers = [
   "",
@@ -343,6 +347,296 @@ function responsesFrame(state: State, value: FrameInput) {
   if (!type.startsWith("response.")) fail("invalid_stream");
   return streamOutput(state, { handle: frame.handle, disposition: "emit", ...body });
 }
+const mediaStreams: Record<string, [string, string]> = {
+  images: ["image_generation.", "image_generation.completed"],
+  image_edits: ["image_edit.", "image_edit.completed"],
+  speech: ["speech.audio.", "speech.audio.done"],
+  transcription: ["transcript.text.", "transcript.text.done"],
+};
+function mediaFrame(state: State, value: FrameInput) {
+  const frame = value.frame;
+  if (frame.ordinal !== smallInteger(state.lastFrame, Number.MAX_SAFE_INTEGER) + 1)
+    fail("stream_state");
+  if (!frame.data.bytes) {
+    state.lastFrame = frame.ordinal;
+    return streamOutput(state, { handle: frame.handle, disposition: "drop" });
+  }
+  const query = inspect(value, [
+    "",
+    "/type",
+    "/error",
+    "/b64_json",
+    "/usage",
+    "/usage/input_tokens",
+    "/usage/output_tokens",
+  ]);
+  if (query) return query;
+  state.lastFrame = frame.ordinal;
+  const type = scalar(value, "/type");
+  if (typeof type !== "string" || (frame.event.value !== "" && frame.event.value !== type))
+    fail("invalid_stream");
+  if (type === "error" || !["missing", "null"].includes(fact(value, "/error").kind))
+    fail("upstream_error");
+  const [prefix, terminal] = mediaStreams[state.media!]!;
+  if (!type.startsWith(prefix)) fail("invalid_stream");
+  if (type !== terminal) return streamOutput(state, { handle: frame.handle, disposition: "emit" });
+  if (!["object", "missing", "null"].includes(fact(value, "/usage").kind)) fail("invalid_object");
+  const raw: Record<string, unknown> = {};
+  for (const name of ["input_tokens", "output_tokens"]) {
+    const current = scalar(value, `/usage/${name}`);
+    if (current !== undefined) raw[name] = current;
+  }
+  const image = fact(value, "/b64_json");
+  state.usage = {
+    ...usage({ usage: raw }, state.usage),
+    ...(imageOperations.includes(state.media!) && image.kind === "string" && !image.empty
+      ? { images: "1" }
+      : {}),
+  };
+  state.done = true;
+  return streamOutput(
+    state,
+    { handle: frame.handle, disposition: "hold" },
+    { kind: "complete", bytes: "" },
+  );
+}
+const imageOperations = ["images", "image_edits"];
+function prepareImages(input: GuestInput, value: DocumentInput) {
+  const operation = value.operation!,
+    form = value.content === "multipart";
+  const query = inspect(value, ["", "/model", "/n", "/stream"]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object") throw new AdapterFailure(400, "invalid_request");
+  const map = object(input.config.model_map, 400),
+    upstream = map[value.model!];
+  if (typeof upstream !== "string" || !upstream || scalar(value, "/model", 400) !== value.model)
+    throw new AdapterFailure(422, "model_unavailable");
+  let n = scalar(value, "/n", 400),
+    stream = scalar(value, "/stream", 400);
+  if (form) {
+    if (n !== undefined && (typeof n !== "string" || !/^[0-9]{1,6}$/.test(n)))
+      throw new AdapterFailure(400, "invalid_request");
+    n = n === undefined ? undefined : Number(n);
+    if (stream !== undefined && stream !== "true" && stream !== "false")
+      throw new AdapterFailure(400, "invalid_stream");
+    stream = stream === undefined ? undefined : stream === "true";
+  }
+  if (stream !== undefined && typeof stream !== "boolean")
+    throw new AdapterFailure(400, "invalid_stream");
+  const count = n === undefined ? 1 : smallInteger(n, 1000000, 400);
+  if (count < 1 || count > 8) throw new AdapterFailure(422, "unsupported_choice_count");
+  const inputTokens = smallInteger(input.config.max_input_tokens, 16 << 20, 422);
+  if (value.document.bytes > inputTokens) throw new AdapterFailure(413, "input_ceiling");
+  const route = operation === "images" ? "images/generations" : "images/edits";
+  let path = `/v1/${route}`;
+  if (input.config.path_style === "azure") {
+    const version = input.config.api_version;
+    if (typeof version !== "string" || !/^\d{4}-\d{2}-\d{2}(?:-preview)?$/.test(version))
+      throw new AdapterFailure(422, "unsupported_capability");
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(upstream))
+      throw new AdapterFailure(422, "model_unavailable");
+    path = `/openai/deployments/${upstream}/${route}?api-version=${version}`;
+  }
+  return {
+    abi_version: 1,
+    kind: "prepared",
+    request: {
+      method: "POST",
+      path,
+      headers: {
+        "content-type": "application/json",
+        accept: stream ? "text/event-stream" : "application/json",
+      },
+      body: {
+        document: value.document.handle,
+        edits: [{ op: "set", pointer: "/model", value: JSON.stringify(upstream) }],
+      },
+      ...(form ? { body_format: "multipart" } : {}),
+      auth: authOf(input),
+      manifest: {
+        operation,
+        model: value.model,
+        upstream_model: upstream,
+        stream: stream === true,
+        ceilings: { input_tokens: String(inputTokens), images: String(count), requests: "1" },
+        images: String(count),
+        input_bytes: value.document.bytes,
+      },
+    },
+  };
+}
+function imagesResponse(value: DocumentInput) {
+  const query = inspect(value, ["", "/error", "/data"]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object") fail("invalid_object");
+  if (!["missing", "null"].includes(fact(value, "/error").kind)) fail("upstream_error");
+  const data = fact(value, "/data");
+  if (data.kind !== "array" || !data.count) fail("invalid_object");
+  const tokens = inspect(value, ["/usage", "/usage/input_tokens", "/usage/output_tokens"]);
+  if (tokens) return tokens;
+  if (!["object", "missing", "null"].includes(fact(value, "/usage").kind)) fail("invalid_object");
+  const raw: Record<string, unknown> = {};
+  for (const name of ["input_tokens", "output_tokens"]) {
+    const current = scalar(value, `/usage/${name}`);
+    if (current !== undefined) raw[name] = current;
+  }
+  return {
+    abi_version: 1,
+    kind: "output",
+    consumed: 0,
+    chunks: [],
+    body: { document: value.document.handle, edits: [] },
+    usage: { ...usage({ usage: raw }, null), images: String(data.count) },
+    finality: "FINAL",
+    terminal: { kind: "complete", bytes: "" },
+    needs_input: false,
+  };
+}
+const audioOperations = ["speech", "transcription", "translation"];
+const transcriptFormats = ["json", "verbose_json", "text", "srt", "vtt"];
+function prepareAudio(input: GuestInput, value: DocumentInput) {
+  const operation = value.operation!,
+    form = value.content === "multipart";
+  if (form !== (operation !== "speech")) throw new AdapterFailure(400, "invalid_request");
+  const query = inspect(value, [
+    "",
+    "/model",
+    "/input",
+    "/file",
+    "/stream",
+    "/stream_format",
+    "/response_format",
+  ]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object") throw new AdapterFailure(400, "invalid_request");
+  const map = object(input.config.model_map, 400),
+    upstream = map[value.model!];
+  if (typeof upstream !== "string" || !upstream || scalar(value, "/model", 400) !== value.model)
+    throw new AdapterFailure(422, "model_unavailable");
+  const inputTokens = smallInteger(input.config.max_input_tokens, 16 << 20, 422);
+  const ceilings: Usage = { input_tokens: String(inputTokens), requests: "1" };
+  let stream = false,
+    binary: { usage?: Usage } | undefined,
+    quantities: Usage | undefined,
+    route: string;
+  if (operation === "speech") {
+    route = "audio/speech";
+    if (fact(value, "/input").kind !== "string" || !value.input_characters)
+      throw new AdapterFailure(400, "invalid_request");
+    if (scalar(value, "/stream", 400) !== undefined)
+      throw new AdapterFailure(422, "unsupported_semantics");
+    const format = scalar(value, "/stream_format", 400);
+    if (format !== undefined && format !== "sse" && format !== "audio")
+      throw new AdapterFailure(400, "invalid_stream");
+    stream = format === "sse";
+    ceilings.characters = value.input_characters;
+    quantities = { characters: value.input_characters };
+    if (!stream) binary = { usage: { characters: value.input_characters } };
+  } else {
+    route = operation === "transcription" ? "audio/transcriptions" : "audio/translations";
+    if (fact(value, "/file").kind !== "object") throw new AdapterFailure(400, "invalid_request");
+    const requested = scalar(value, "/stream", 400);
+    if (requested !== undefined && requested !== "true" && requested !== "false")
+      throw new AdapterFailure(400, "invalid_stream");
+    stream = requested === "true";
+    if (stream && operation === "translation")
+      throw new AdapterFailure(422, "unsupported_semantics");
+    const format = scalar(value, "/response_format", 400) ?? "json";
+    if (typeof format !== "string" || !transcriptFormats.includes(format))
+      throw new AdapterFailure(422, "unsupported_semantics");
+    if (stream && format !== "json" && format !== "text")
+      throw new AdapterFailure(422, "unsupported_semantics");
+    if (!stream && !format.endsWith("json")) binary = {};
+  }
+  if (value.document.bytes > inputTokens && !form) throw new AdapterFailure(413, "input_ceiling");
+  let path = `/v1/${route}`;
+  if (input.config.path_style === "azure") {
+    const version = input.config.api_version;
+    if (typeof version !== "string" || !/^\d{4}-\d{2}-\d{2}(?:-preview)?$/.test(version))
+      throw new AdapterFailure(422, "unsupported_capability");
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(upstream))
+      throw new AdapterFailure(422, "model_unavailable");
+    path = `/openai/deployments/${upstream}/${route}?api-version=${version}`;
+  }
+  return {
+    abi_version: 1,
+    kind: "prepared",
+    request: {
+      method: "POST",
+      path,
+      headers: {
+        "content-type": "application/json",
+        accept: stream ? "text/event-stream" : "*/*",
+      },
+      body: {
+        document: value.document.handle,
+        edits: [{ op: "set", pointer: "/model", value: JSON.stringify(upstream) }],
+      },
+      ...(form ? { body_format: "multipart" } : {}),
+      ...(binary ? { binary } : {}),
+      auth: authOf(input),
+      manifest: {
+        operation,
+        model: value.model,
+        upstream_model: upstream,
+        stream,
+        ceilings,
+        ...(quantities ? { quantities } : {}),
+        input_bytes: value.document.bytes,
+      },
+    },
+  };
+}
+function decimalSeconds(literal: string | undefined) {
+  if (literal === undefined || !/^(0|[1-9][0-9]{0,15})(\.[0-9]{1,18})?$/.test(literal))
+    fail("invalid_upstream_usage");
+  const [whole, fraction = ""] = literal.split("."),
+    trimmed = fraction.replace(/0+$/, ""),
+    seconds = trimmed ? `${whole}.${trimmed}` : whole!;
+  if (trimmed.length > 3) return { audio_seconds: seconds };
+  const ms = BigInt(whole!) * 1000n + BigInt((trimmed + "000").slice(0, 3));
+  return { audio_seconds: seconds, audio_ms: ms.toString() };
+}
+function transcriptResponse(value: DocumentInput) {
+  const query = inspect(value, [
+    "",
+    "/error",
+    "/text",
+    "/usage",
+    "/usage/type",
+    "/usage/seconds",
+    "/usage/input_tokens",
+    "/usage/output_tokens",
+  ]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object") fail("invalid_object");
+  if (!["missing", "null"].includes(fact(value, "/error").kind)) fail("upstream_error");
+  if (fact(value, "/text").kind !== "string") fail("invalid_object");
+  const usageFact = fact(value, "/usage");
+  if (!["object", "missing", "null"].includes(usageFact.kind)) fail("invalid_object");
+  let measured: Usage = { requests: "1" };
+  if (scalar(value, "/usage/type") === "duration")
+    measured = { ...measured, ...decimalSeconds(fact(value, "/usage/seconds").literal) };
+  else {
+    const raw: Record<string, unknown> = {};
+    for (const name of ["input_tokens", "output_tokens"]) {
+      const current = scalar(value, `/usage/${name}`);
+      if (current !== undefined) raw[name] = current;
+    }
+    measured = { ...measured, ...usage({ usage: raw }, null) };
+  }
+  return {
+    abi_version: 1,
+    kind: "output",
+    consumed: 0,
+    chunks: [],
+    body: { document: value.document.handle, edits: [] },
+    usage: measured,
+    finality: "FINAL",
+    terminal: { kind: "complete", bytes: "" },
+    needs_input: false,
+  };
+}
 const nativeOperations = ["embeddings", "moderations", "completions"];
 function prepareNative(input: GuestInput, value: DocumentInput) {
   const operation = value.operation!;
@@ -495,10 +789,20 @@ function nativeResponse(value: DocumentInput) {
 function prepare(input: GuestInput, value: DocumentInput) {
   if (!value.document || !value.inspection || typeof value.model !== "string" || !value.model)
     throw new AdapterFailure(400, "invalid_request");
+  if (
+    value.content === "multipart" &&
+    !imageOperations.includes(value.operation ?? "") &&
+    !audioOperations.includes(value.operation ?? "")
+  )
+    throw new AdapterFailure(422, "unsupported_semantics");
   if (value.protocol === "responses" && value.operation === "responses")
     return prepareResponses(input, value);
   if (value.protocol === undefined && nativeOperations.includes(value.operation ?? ""))
     return prepareNative(input, value);
+  if (value.protocol === undefined && imageOperations.includes(value.operation ?? ""))
+    return prepareImages(input, value);
+  if (value.protocol === undefined && audioOperations.includes(value.operation ?? ""))
+    return prepareAudio(input, value);
   if (value.protocol !== "chat" || value.operation !== "chat")
     throw new AdapterFailure(422, "unsupported_semantics");
   const query = inspect(value, preparePointers);
@@ -711,6 +1015,7 @@ function streamFrame(state: State, value: FrameInput) {
   const frame = value.frame;
   if (!frame || frame.data.handle !== value.document.handle) fail("stream_state");
   if (state.native) return responsesFrame(state, value);
+  if (state.media) return mediaFrame(state, value);
   if (!state.active) {
     if (frame.ordinal !== smallInteger(state.lastFrame, Number.MAX_SAFE_INTEGER) + 1)
       fail("stream_state");
@@ -921,7 +1226,13 @@ export function invoke() {
             ? responsesResponse(value)
             : value.protocol === undefined && nativeOperations.includes(value.operation ?? "")
               ? nativeResponse(value)
-              : response(input, value),
+              : value.protocol === undefined && imageOperations.includes(value.operation ?? "")
+                ? imagesResponse(value)
+                : value.operation === "transcription" || value.operation === "translation"
+                  ? transcriptResponse(value)
+                  : value.operation === "speech"
+                    ? fail("invalid_object")
+                    : response(input, value),
         state: null,
       };
     }
@@ -937,13 +1248,17 @@ export function invoke() {
       if (typeof payload.model !== "string" || !payload.model)
         throw new AdapterFailure(400, "invalid_model");
       if (
-        payload.protocol !== undefined &&
-        payload.protocol !== "chat" &&
-        payload.protocol !== "responses"
+        (payload.protocol !== undefined &&
+          payload.protocol !== "chat" &&
+          payload.protocol !== "responses") ||
+        (payload.operation !== undefined &&
+          (payload.protocol !== undefined ||
+            !Object.hasOwn(mediaStreams, String(payload.operation))))
       )
         throw new AdapterFailure(422, "unsupported_semantics");
       const state: State = {
         native: payload.protocol === "responses",
+        ...(payload.operation === undefined ? {} : { media: String(payload.operation) }),
         session: input.session.id,
         sequence: input.session.sequence,
         model: payload.model,

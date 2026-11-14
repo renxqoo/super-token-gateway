@@ -107,6 +107,7 @@ export function createGatewayApp(
           operation,
           ...(path ? { path } : {}),
           body,
+          contentType: c.req.header("content-type"),
           token,
           ip,
           idempotencyKey: c.req.header("idempotency-key"),
@@ -137,6 +138,11 @@ export function createGatewayApp(
   app.post("/v1/embeddings", (c) => serve(c, "embeddings"));
   app.post("/v1/moderations", (c) => serve(c, "moderations"));
   app.post("/v1/completions", (c) => serve(c, "completions"));
+  app.post("/v1/images/generations", (c) => serve(c, "images"));
+  app.post("/v1/images/edits", (c) => serve(c, "image_edits"));
+  app.post("/v1/audio/speech", (c) => serve(c, "speech"));
+  app.post("/v1/audio/transcriptions", (c) => serve(c, "transcription"));
+  app.post("/v1/audio/translations", (c) => serve(c, "translation"));
   app.post("/v1beta/models/:action", (c) => {
     const match = /^([A-Za-z0-9._-]{1,200}):(generateContent|streamGenerateContent)$/.exec(
       c.req.param("action"),

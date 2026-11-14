@@ -245,7 +245,13 @@ export function createPluginAttempts(
             if (
               !capabilities.operations.includes(result.request.manifest.operation) ||
               !capabilities.auth.includes(result.request.auth.type) ||
-              result.request.manifest.input_bytes !== (document?.bytes ?? payload.length)
+              result.request.manifest.input_bytes !== (document?.bytes ?? payload.length) ||
+              [
+                ...Object.keys(result.request.manifest.quantities ?? {}),
+                ...Object.keys(result.request.binary?.usage ?? {}),
+              ].some((key) => !capabilities.dimensions.includes(key as never)) ||
+              (result.request.manifest.images !== undefined &&
+                result.request.manifest.ceilings.images !== result.request.manifest.images)
             )
               throw new PluginHostError("PREPARE_INVALID");
             if (

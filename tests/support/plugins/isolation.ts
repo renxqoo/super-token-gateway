@@ -147,7 +147,12 @@ export function invoke() {
               model: "logical",
               upstream_model: "synthetic",
               stream: false,
-              ceilings: { output_tokens: "1" },
+              ceilings:
+                mode === "image_mismatch"
+                  ? { output_tokens: "1", images: "1" }
+                  : { output_tokens: "1" },
+              ...(mode === "image_mismatch" ? { images: "2" } : {}),
+              ...(mode === "undeclared_quantity" ? { quantities: { music_ms: "1" } } : {}),
               input_bytes: Number(doc.bytes),
             },
           },

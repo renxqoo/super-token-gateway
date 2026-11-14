@@ -257,6 +257,7 @@ export type UpstreamCall = {
   url: string;
   headers: Record<string, string>;
   raw: string;
+  bytes: Uint8Array;
   path: string;
   apiKey: string | null;
   azureKey: string | null;
@@ -266,6 +267,7 @@ export type UpstreamCall = {
   signal: AbortSignal;
 };
 type Process = Awaited<ReturnType<typeof startGateway>>;
+type GatewayStack = Parameters<Parameters<typeof withGatewayStack>[1]>[0];
 const boundedSupplier = {
   rates: {
     input_tokens: { numerator: "1", denominator: "3" },
@@ -310,18 +312,22 @@ export function withGatewayStack(
       withSettlementRole(db, async (workerDatabaseUrl) => {
         const received: UpstreamCall[] = [];
         const upstream = await startTlsUpstream(async (request) => {
-          const raw = await request.text();
+          const bytes = new Uint8Array(await request.arrayBuffer()),
+            raw = new TextDecoder().decode(bytes);
           const call = {
             index: received.length,
             url: request.url,
             headers: Object.fromEntries(request.headers),
             raw,
+            bytes,
             path: new URL(request.url).pathname + new URL(request.url).search,
             apiKey: request.headers.get("x-api-key"),
             azureKey: request.headers.get("api-key"),
             googKey: request.headers.get("x-goog-api-key"),
             authorization: request.headers.get("authorization"),
-            body: JSON.parse(raw) as Record<string, unknown>,
+            body: (request.headers.get("content-type")?.startsWith("multipart/")
+              ? {}
+              : JSON.parse(raw)) as Record<string, unknown>,
             signal: request.signal,
           };
           received.push(call);
@@ -440,6 +446,30 @@ export function chatFrames() {
       usage: { prompt_tokens: 30, completion_tokens: 15 },
     },
   ];
+}
+
+const requestTariff = {
+  pricing: { currency: "USD", rates: { requests: { numerator: "100", denominator: "1" } } },
+  ceilings: { requests: "1" },
+  basis: "REQUEST_COMPLETION",
+};
+
+export async function allowOperation(
+  stack: GatewayStack,
+  operation: string,
+  pricing: { pricing: unknown; ceilings: Record<string, string>; basis: string } = requestTariff,
+) {
+  const { db, setup } = stack;
+  await db`UPDATE models SET operations=array_append(operations,${operation}) WHERE name=${setup.model}`;
+  await db`UPDATE routes SET operations=array_append(operations,${operation}) WHERE model_name=${setup.model}`;
+  await db`UPDATE api_keys SET operations=array_append(operations,${operation}) WHERE id=${setup.key.id}`;
+  const tariff = await stack.f.request("/tariffs", {
+    model: setup.model,
+    operation,
+    provider_id: setup.provider.id,
+    ...pricing,
+  });
+  if (tariff.status !== 201) throw new Error(`tariff ${tariff.status}`);
 }
 
 export async function settledCharge(db: SQL, requestId: string) {

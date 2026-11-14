@@ -1010,6 +1010,489 @@
           }
         }
       ]
+    },
+    {
+      "name": "image generation reserves n images and changes only the model",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "images",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm9tcHQiOiLnjKsiLCJuIjoyLCJzaXplIjoiMTAyNHgxMDI0In0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1/images/generations",
+              "manifest": {
+                "operation": "images",
+                "stream": false,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "images": "2",
+                  "requests": "1"
+                },
+                "images": "2"
+              }
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6InVwc3RyZWFtIiwicHJvbXB0Ijoi54yrIiwibiI6Miwic2l6ZSI6IjEwMjR4MTAyNCJ9"
+        }
+      ]
+    },
+    {
+      "name": "multipart image edit keeps file parts and reads n from text",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "image_edits",
+            "model": "logical",
+            "content": "multipart"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm9tcHQiOiLliqDluL3lrZAiLCJpbWFnZSI6eyJmaWxlIjp7Im5hbWUiOiJhLnBuZyIsInR5cGUiOiJpbWFnZS9wbmciLCJieXRlcyI6Mywic2hhMjU2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCJ9fSwibiI6IjIifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "path": "/v1/images/edits",
+              "body_format": "multipart",
+              "manifest": {
+                "operation": "image_edits",
+                "images": "2"
+              }
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6InVwc3RyZWFtIiwicHJvbXB0Ijoi5Yqg5bi95a2QIiwiaW1hZ2UiOnsiZmlsZSI6eyJuYW1lIjoiYS5wbmciLCJ0eXBlIjoiaW1hZ2UvcG5nIiwiYnl0ZXMiOjMsInNoYTI1NiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAifX0sIm4iOiIyIn0="
+        }
+      ]
+    },
+    {
+      "name": "more than eight images are refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "images",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm9tcHQiOiJ4IiwibiI6OX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_choice_count"
+          }
+        }
+      ]
+    },
+    {
+      "name": "multipart bodies are refused for operations without form support",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "embeddings",
+            "model": "logical",
+            "content": "multipart"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IngifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_semantics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "image response is metered by delivered images and tokens",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "images",
+            "model": "logical"
+          },
+          "body": "eyJjcmVhdGVkIjoxLCJkYXRhIjpbeyJiNjRfanNvbiI6IlFVSkQifSx7ImI2NF9qc29uIjoiUkVWRyJ9XSwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjo5LCJvdXRwdXRfdG9rZW5zIjo0fX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "chunks": [],
+            "usage": {
+              "input_tokens": "9",
+              "output_tokens": "4",
+              "images": "2"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "image response without data is invalid",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "images",
+            "model": "logical"
+          },
+          "body": "eyJjcmVhdGVkIjoxLCJkYXRhIjpbXX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "invalid_object"
+          }
+        }
+      ]
+    },
+    {
+      "name": "image SSE emits partial images and holds the completed event with one image",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJvcGVyYXRpb24iOiJpbWFnZXMifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZXZlbnQ6IGltYWdlX2dlbmVyYXRpb24ucGFydGlhbF9pbWFnZQpkYXRhOiB7InR5cGUiOiJpbWFnZV9nZW5lcmF0aW9uLnBhcnRpYWxfaW1hZ2UiLCJiNjRfanNvbiI6IkFBQSIsInBhcnRpYWxfaW1hZ2VfaW5kZXgiOjB9CgpldmVudDogaW1hZ2VfZ2VuZXJhdGlvbi5jb21wbGV0ZWQKZGF0YTogeyJ0eXBlIjoiaW1hZ2VfZ2VuZXJhdGlvbi5jb21wbGV0ZWQiLCJiNjRfanNvbiI6IlFVSkQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjUsIm91dHB1dF90b2tlbnMiOjd9fQoK",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "chunks": [
+              "ZXZlbnQ6IGltYWdlX2dlbmVyYXRpb24ucGFydGlhbF9pbWFnZQpkYXRhOiB7InR5cGUiOiJpbWFnZV9nZW5lcmF0aW9uLnBhcnRpYWxfaW1hZ2UiLCJiNjRfanNvbiI6IkFBQSIsInBhcnRpYWxfaW1hZ2VfaW5kZXgiOjB9Cgo="
+            ],
+            "usage": {
+              "input_tokens": "5",
+              "output_tokens": "7",
+              "images": "1"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "complete",
+              "bytes": "ZXZlbnQ6IGltYWdlX2dlbmVyYXRpb24uY29tcGxldGVkCmRhdGE6IHsidHlwZSI6ImltYWdlX2dlbmVyYXRpb24uY29tcGxldGVkIiwiYjY0X2pzb24iOiJRVUpEIiwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjo1LCJvdXRwdXRfdG9rZW5zIjo3fX0KCg=="
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "image SSE EOF before completion is truncated",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJvcGVyYXRpb24iOiJpbWFnZXMifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZXZlbnQ6IGltYWdlX2dlbmVyYXRpb24ucGFydGlhbF9pbWFnZQpkYXRhOiB7InR5cGUiOiJpbWFnZV9nZW5lcmF0aW9uLnBhcnRpYWxfaW1hZ2UiLCJiNjRfanNvbiI6IkFBQSIsInBhcnRpYWxfaW1hZ2VfaW5kZXgiOjB9Cgo=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "chunks": [
+              "ZXZlbnQ6IGltYWdlX2dlbmVyYXRpb24ucGFydGlhbF9pbWFnZQpkYXRhOiB7InR5cGUiOiJpbWFnZV9nZW5lcmF0aW9uLnBhcnRpYWxfaW1hZ2UiLCJiNjRfanNvbiI6IkFBQSIsInBhcnRpYWxfaW1hZ2VfaW5kZXgiOjB9Cgo="
+            ],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_finish",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "stream_truncated"
+          }
+        }
+      ]
+    },
+    {
+      "name": "speech is relayed as binary and billed by input characters",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "speech",
+            "model": "logical",
+            "input_characters": "4"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IuS9oOWlveS4lueVjCIsInZvaWNlIjoiYWxsb3kifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "path": "/v1/audio/speech",
+              "binary": {
+                "usage": {
+                  "characters": "4"
+                }
+              },
+              "manifest": {
+                "operation": "speech",
+                "stream": false,
+                "ceilings": {
+                  "characters": "4",
+                  "requests": "1"
+                },
+                "quantities": {
+                  "characters": "4"
+                }
+              }
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6InVwc3RyZWFtIiwiaW5wdXQiOiLkvaDlpb3kuJbnlYwiLCJ2b2ljZSI6ImFsbG95In0="
+        }
+      ]
+    },
+    {
+      "name": "speech SSE uses stream_format and is not binary",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "speech",
+            "model": "logical",
+            "input_characters": "1"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IngiLCJzdHJlYW1fZm9ybWF0Ijoic3NlIn0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "path": "/v1/audio/speech",
+              "manifest": {
+                "operation": "speech",
+                "stream": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "speech stream flag is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "speech",
+            "model": "logical",
+            "input_characters": "1"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IngiLCJzdHJlYW0iOnRydWV9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_semantics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "text transcription is multipart and binary",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "transcription",
+            "model": "logical",
+            "content": "multipart"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJmaWxlIjp7ImZpbGUiOnsibmFtZSI6ImEud2F2IiwidHlwZSI6ImF1ZGlvL3dhdiIsImJ5dGVzIjozLCJzaGEyNTYiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIn19LCJyZXNwb25zZV9mb3JtYXQiOiJ0ZXh0In0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "path": "/v1/audio/transcriptions",
+              "body_format": "multipart",
+              "binary": {},
+              "manifest": {
+                "operation": "transcription",
+                "stream": false
+              }
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6InVwc3RyZWFtIiwiZmlsZSI6eyJmaWxlIjp7Im5hbWUiOiJhLndhdiIsInR5cGUiOiJhdWRpby93YXYiLCJieXRlcyI6Mywic2hhMjU2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCJ9fSwicmVzcG9uc2VfZm9ybWF0IjoidGV4dCJ9"
+        }
+      ]
+    },
+    {
+      "name": "streaming translation is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "translation",
+            "model": "logical",
+            "content": "multipart"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJmaWxlIjp7ImZpbGUiOnsibmFtZSI6ImEud2F2IiwidHlwZSI6ImF1ZGlvL3dhdiIsImJ5dGVzIjozLCJzaGEyNTYiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIn19LCJzdHJlYW0iOiJ0cnVlIn0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_semantics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "duration usage keeps exact seconds and milliseconds",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "transcription",
+            "model": "logical"
+          },
+          "body": "eyJ0ZXh0Ijoi5L2g5aW9IiwidXNhZ2UiOnsidHlwZSI6ImR1cmF0aW9uIiwic2Vjb25kcyI6OC40NzB9fQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "usage": {
+              "requests": "1",
+              "audio_seconds": "8.47",
+              "audio_ms": "8470"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "sub-millisecond durations keep seconds only",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "translation",
+            "model": "logical"
+          },
+          "body": "eyJ0ZXh0IjoiaGkiLCJ1c2FnZSI6eyJ0eXBlIjoiZHVyYXRpb24iLCJzZWNvbmRzIjowLjEyNTV9fQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "usage": {
+              "requests": "1",
+              "audio_seconds": "0.1255"
+            },
+            "finality": "FINAL"
+          }
+        }
+      ]
+    },
+    {
+      "name": "token usage transcription is metered from tokens",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "transcription",
+            "model": "logical"
+          },
+          "body": "eyJ0ZXh0IjoiaGkiLCJ1c2FnZSI6eyJ0eXBlIjoidG9rZW5zIiwiaW5wdXRfdG9rZW5zIjoxNCwib3V0cHV0X3Rva2VucyI6MywidG90YWxfdG9rZW5zIjoxN319",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "usage": {
+              "requests": "1",
+              "input_tokens": "14",
+              "output_tokens": "3"
+            },
+            "finality": "FINAL"
+          }
+        }
+      ]
+    },
+    {
+      "name": "speech SSE holds speech.audio.done with token usage",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJvcGVyYXRpb24iOiJzcGVlY2gifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZXZlbnQ6IHNwZWVjaC5hdWRpby5kZWx0YQpkYXRhOiB7InR5cGUiOiJzcGVlY2guYXVkaW8uZGVsdGEiLCJhdWRpbyI6IkFBQSJ9CgpldmVudDogc3BlZWNoLmF1ZGlvLmRvbmUKZGF0YTogeyJ0eXBlIjoic3BlZWNoLmF1ZGlvLmRvbmUiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjQsIm91dHB1dF90b2tlbnMiOjksInRvdGFsX3Rva2VucyI6MTN9fQoK",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "chunks": [
+              "ZXZlbnQ6IHNwZWVjaC5hdWRpby5kZWx0YQpkYXRhOiB7InR5cGUiOiJzcGVlY2guYXVkaW8uZGVsdGEiLCJhdWRpbyI6IkFBQSJ9Cgo="
+            ],
+            "usage": {
+              "input_tokens": "4",
+              "output_tokens": "9"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "complete",
+              "bytes": "ZXZlbnQ6IHNwZWVjaC5hdWRpby5kb25lCmRhdGE6IHsidHlwZSI6InNwZWVjaC5hdWRpby5kb25lIiwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjo0LCJvdXRwdXRfdG9rZW5zIjo5LCJ0b3RhbF90b2tlbnMiOjEzfX0KCg=="
+            }
+          }
+        }
+      ]
     }
   ]
 }

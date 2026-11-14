@@ -54,6 +54,16 @@ test("a real guest cannot repeat inspections, overlap edits or exceed literal bu
     expect(host.snapshot().reservedStateBytes).toBe(0);
   }
 });
+test("a guest cannot declare quantities outside its dimensions or reserve a different image count than its ceiling", async () => {
+  for (const mode of ["undeclared_quantity", "image_mismatch"]) {
+    const a = create(mode);
+    await expect(a.transformJSON("prepare", metadata, body)).rejects.toMatchObject({
+      code: "PREPARE_INVALID",
+    });
+    expect(a.snapshot().disposed).toBe(true);
+    expect(host.snapshot().json.bytes).toBe(0);
+  }
+});
 test("a consumed document cannot be replayed by the same guest into its next JSON epoch", async () => {
   const a = create("replay");
   expect((await a.transformJSON("prepare", metadata, body)).result.kind).toBe("prepared");
