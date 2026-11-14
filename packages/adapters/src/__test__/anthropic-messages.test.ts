@@ -50,8 +50,8 @@ async function prepare(body: unknown) {
 
 test("package synthetic fixtures execute through the production WASM ABI", async () => {
   const result = await runPluginFixtures(supervisor, signed.pkg);
-  expect(result.cases).toBe(14);
-  expect(result.steps).toBe(20);
+  expect(result.cases).toBe(22);
+  expect(result.steps).toBe(33);
 });
 
 test("a long conversation is converted in one inspection pass with every message in order", async () => {

@@ -1,4 +1,5 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import type { Protocol } from "@gateway/kernel";
 import { GatewayError } from "@gateway/contracts";
 import { clientAddress, readBounded, type Lifecycle } from "@gateway/runtime";
 import { executeChat, type ChatDependencies } from "./chat.ts";
@@ -73,14 +74,18 @@ export function createGatewayApp(
       return c.json({ status: "unavailable" }, 503);
     }
   });
-  app.post("/v1/chat/completions", async (c) => {
+  async function serve(
+    c: Context<GatewayEnv>,
+    protocol: Protocol,
+    path?: { model: string; stream: boolean },
+  ) {
     const requestId = crypto.randomUUID();
     let release: (() => void) | undefined;
     try {
       const authorization = c.req.header("authorization");
       const token = authorization?.startsWith("Bearer ")
         ? authorization.slice(7)
-        : (c.req.header("x-api-key") ?? "");
+        : (c.req.header("x-api-key") ?? c.req.header("x-goog-api-key") ?? "");
       if (!/^gw_[A-Za-z0-9_-]{43}$/.test(token))
         throw new GatewayError(401, "unauthenticated", "A valid project API key is required");
       const declared = Number(c.req.header("content-length") ?? 0);
@@ -99,6 +104,8 @@ export function createGatewayApp(
       const response = await deps.lifecycle.track(
         executeChat(deps, {
           requestId,
+          protocol,
+          ...(path ? { path } : {}),
           body,
           token,
           ip,
@@ -123,6 +130,23 @@ export function createGatewayApp(
         requestId,
       );
     }
+  }
+  app.post("/v1/chat/completions", (c) => serve(c, "chat"));
+  app.post("/v1/messages", (c) => serve(c, "messages"));
+  app.post("/v1/responses", (c) => serve(c, "responses"));
+  app.post("/v1beta/models/:action", (c) => {
+    const match = /^([A-Za-z0-9._-]{1,200}):(generateContent|streamGenerateContent)$/.exec(
+      c.req.param("action"),
+    );
+    if (!match)
+      return errorResponse(
+        new GatewayError(404, "not_found", "Unknown Gemini operation"),
+        crypto.randomUUID(),
+      );
+    return serve(c, "gemini", {
+      model: match[1]!,
+      stream: match[2] === "streamGenerateContent",
+    });
   });
   app.notFound(() =>
     errorResponse(new GatewayError(404, "not_found", "Unknown endpoint"), crypto.randomUUID()),

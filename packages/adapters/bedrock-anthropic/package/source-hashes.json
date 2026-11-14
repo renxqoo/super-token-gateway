@@ -1,11 +1,11 @@
 {
   "packages/adapters/anthropic-messages/messages.ts": {
-    "bytes": 28822,
-    "sha256": "c29c58d1502d64fb6c67d5b9feeaa7f85b1a25364f46e2dbde857c7abd6993c8"
+    "bytes": 34616,
+    "sha256": "b52e69a33ede9a11d1f6d09154b5477be46600d23e5cf9a3822ba6eb9f7485b4"
   },
   "packages/adapters/bedrock-anthropic/package/manifest.json": {
-    "bytes": 754,
-    "sha256": "2d3127a39d65deb15da3a95fa328c5550c3afd03b9c67c01ed2367a0e74feb09"
+    "bytes": 778,
+    "sha256": "cfe827c5414a359f02c633b7b65fcc2537bf2c55bccc718c03a6eb158be94c21"
   },
   "packages/adapters/bedrock-anthropic/plugin.ts": {
     "bytes": 179,
@@ -20,16 +20,16 @@
     "sha256": "96eb7fa2ca46fc25371ed0f1da56c267ee542f348ffa73346370a43296e34648"
   },
   "packages/adapters/bedrock-anthropic/package/module.wasm": {
-    "bytes": 2508476,
-    "sha256": "75e0214672fa25b1d416f31debe9fb8edb016c042ad58335cde102b051b066a7"
+    "bytes": 2511860,
+    "sha256": "1764e437d8a7c3e8bb6908b58f392e595392ed41e140dd3fca0f043bdc1071d5"
   },
   "packages/adapters/bedrock-anthropic/package/config.schema.json": {
     "bytes": 630,
     "sha256": "bad3c8b83f6361bdb77c67fa0224db0de9f7ef8283781389fd369225a635b9a3"
   },
   "packages/adapters/bedrock-anthropic/package/fixtures/cases.json": {
-    "bytes": 13476,
-    "sha256": "7545b67c69dde2c71f1e0d0f693c101797f933bcf2ba4f17a09b048b1e77de39"
+    "bytes": 27425,
+    "sha256": "cac0cc3dcf3bd7458802a73595af0d440d392ef742e031b5bad5f8739d1022bb"
   },
   "scripts/plugin-tools.json": {
     "bytes": 1830,

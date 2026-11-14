@@ -18,6 +18,6 @@ test("package synthetic fixtures execute through the production WASM ABI with th
     generateKeyPairSync("ed25519"),
   );
   const result = await runPluginFixtures(supervisor, signed.pkg);
-  expect(result.cases).toBe(9);
-  expect(result.steps).toBe(16);
+  expect(result.cases).toBe(17);
+  expect(result.steps).toBe(29);
 });

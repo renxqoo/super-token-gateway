@@ -46,6 +46,7 @@ type State = {
   finish: string;
   usage: Usage | null;
   done: boolean;
+  native: boolean;
 };
 class Slot {
   constructor(readonly spec: Record<string, unknown>) {}
@@ -306,7 +307,97 @@ function convertChoice(value: DocumentInput) {
     fail("unsupported_semantics", 422);
   return { type: "tool", name: copy("/tool_choice/function/name"), ...disable };
 }
+function prepareNative(input: GuestInput, value: DocumentInput, target: Target) {
+  if (!Object.hasOwn(value.inspection, "/max_tokens"))
+    return inspect(value, ["/*", "/model", "/max_tokens", "/stream", "/anthropic_version"]);
+  const map = object(input.config.model_map, 400),
+    upstream = map[value.model!],
+    model = scalar(value, "/model", 400),
+    stream = scalar(value, "/stream", 400);
+  if (typeof upstream !== "string" || !upstream || model !== value.model)
+    fail("model_unavailable", 422);
+  if (stream !== undefined && typeof stream !== "boolean") fail("invalid_stream", 400);
+  const max = smallInteger(input.config.max_output_tokens, 1000000, 422),
+    inputTokens = smallInteger(input.config.max_input_tokens, 16 << 20, 422);
+  if (value.document.bytes > inputTokens) fail("input_ceiling", 413);
+  const requested = scalar(value, "/max_tokens", 400);
+  if (requested === undefined) fail("invalid_request", 400);
+  const output = smallInteger(requested, max, 422);
+  if (output < 1) fail("invalid_output_ceiling", 422);
+  if (fact(value, "/anthropic_version").kind !== "missing") fail("unsupported_semantics", 422);
+  const edits: { op: string; pointer: string; value?: string }[] = [];
+  if (target === "bedrock") {
+    if (!/^[A-Za-z0-9._:-]{1,200}$/.test(upstream)) fail("model_unavailable", 422);
+    edits.push({ op: "remove", pointer: "/model" });
+    if (stream !== undefined) edits.push({ op: "remove", pointer: "/stream" });
+    edits.push({ op: "set", pointer: "/anthropic_version", value: '"bedrock-2023-05-31"' });
+  } else edits.push({ op: "set", pointer: "/model", value: JSON.stringify(upstream) });
+  return prepared(input, value, target, upstream, stream === true, output, inputTokens, {
+    document: value.document.handle,
+    edits,
+  });
+}
+function prepared(
+  input: GuestInput,
+  value: DocumentInput,
+  target: Target,
+  upstream: string,
+  stream: boolean,
+  output: number,
+  inputTokens: number,
+  body: unknown,
+) {
+  const auth =
+    target === "bedrock"
+      ? { type: "aws-sigv4", service: "bedrock" }
+      : input.config.auth === "api-key"
+        ? { type: "api-key", header: "x-api-key" }
+        : input.config.auth === "none"
+          ? { type: "none" }
+          : { type: "bearer" };
+  const path =
+    target === "bedrock"
+      ? `/model/${encodeURIComponent(upstream)}/${stream ? "invoke-with-response-stream" : "invoke"}`
+      : "/v1/messages";
+  const headers: Record<string, string> =
+    target === "bedrock"
+      ? {
+          "content-type": "application/json",
+          accept: "application/json",
+          ...(stream ? { "x-amzn-bedrock-accept": "application/json" } : {}),
+        }
+      : {
+          "content-type": "application/json",
+          accept: stream ? "text/event-stream" : "application/json",
+          "anthropic-version": "2023-06-01",
+        };
+  return {
+    abi_version: 1,
+    kind: "prepared",
+    request: {
+      method: "POST",
+      path,
+      headers,
+      body,
+      auth,
+      manifest: {
+        operation: value.operation,
+        model: value.model,
+        upstream_model: upstream,
+        stream,
+        ceilings: {
+          input_tokens: String(inputTokens),
+          output_tokens: String(output),
+          requests: "1",
+        },
+        input_bytes: value.document.bytes,
+      },
+    },
+  };
+}
 function prepare(input: GuestInput, value: DocumentInput, target: Target) {
+  if (value.protocol === "messages" && value.operation === "messages" && value.model)
+    return prepareNative(input, value, target);
   if (value.protocol !== "chat" || value.operation !== "chat") fail("unsupported_semantics", 422);
   if (!value.document || !value.inspection || typeof value.model !== "string")
     fail("invalid_request", 400);
@@ -362,53 +453,16 @@ function prepare(input: GuestInput, value: DocumentInput, target: Target) {
   if (stream === true && target === "anthropic") body.stream = true;
   if (target === "bedrock" && !/^[A-Za-z0-9._:-]{1,200}$/.test(upstream))
     fail("model_unavailable", 422);
-  const auth =
-    target === "bedrock"
-      ? { type: "aws-sigv4", service: "bedrock" }
-      : input.config.auth === "api-key"
-        ? { type: "api-key", header: "x-api-key" }
-        : input.config.auth === "none"
-          ? { type: "none" }
-          : { type: "bearer" };
-  const path =
-    target === "bedrock"
-      ? `/model/${encodeURIComponent(upstream)}/${stream === true ? "invoke-with-response-stream" : "invoke"}`
-      : "/v1/messages";
-  const headers: Record<string, string> =
-    target === "bedrock"
-      ? {
-          "content-type": "application/json",
-          accept: "application/json",
-          ...(stream === true ? { "x-amzn-bedrock-accept": "application/json" } : {}),
-        }
-      : {
-          "content-type": "application/json",
-          accept: stream ? "text/event-stream" : "application/json",
-          "anthropic-version": "2023-06-01",
-        };
-  return {
-    abi_version: 1,
-    kind: "prepared",
-    request: {
-      method: "POST",
-      path,
-      headers,
-      body: compose(value.document.handle, body),
-      auth,
-      manifest: {
-        operation: "chat",
-        model: value.model,
-        upstream_model: upstream,
-        stream: stream === true,
-        ceilings: {
-          input_tokens: String(inputTokens),
-          output_tokens: String(output),
-          requests: "1",
-        },
-        input_bytes: value.document.bytes,
-      },
-    },
-  };
+  return prepared(
+    input,
+    value,
+    target,
+    upstream,
+    stream === true,
+    output,
+    inputTokens,
+    compose(value.document.handle, body),
+  );
 }
 function measure(value: DocumentInput, base: string, previous: Usage | null): Usage | null {
   const next: Usage = { ...previous };
@@ -469,6 +523,86 @@ const responsePointers = [
   "/usage/cache_read_input_tokens",
   "/usage/cache_creation_input_tokens",
 ];
+function responseNative(value: DocumentInput) {
+  if (!Object.hasOwn(value.inspection, "/type")) return inspect(value, responsePointers);
+  if (scalar(value, "/type") === "error" || fact(value, "/error").kind !== "missing")
+    fail("upstream_error");
+  if (scalar(value, "/type") !== "message" || fact(value, "/id").kind !== "string")
+    fail("invalid_object");
+  if (fact(value, "/content").kind !== "array") fail("invalid_object");
+  const finish = finishReason(scalar(value, "/stop_reason"));
+  const usage = measure(value, "/usage", null);
+  if (usage?.input_tokens === undefined || usage.output_tokens === undefined)
+    fail("invalid_upstream_usage");
+  return {
+    abi_version: 1,
+    kind: "output",
+    consumed: 0,
+    chunks: [],
+    body: {
+      document: value.document.handle,
+      edits: [{ op: "set", pointer: "/model", value: JSON.stringify(value.model) }],
+    },
+    usage,
+    finality: finality(usage),
+    terminal: {
+      kind: ["length", "content_filter"].includes(finish) ? "incomplete" : "complete",
+      bytes: "",
+    },
+    needs_input: false,
+  };
+}
+function nativeFrame(state: State, value: FrameInput) {
+  const frame = value.frame;
+  if (!frame.data.bytes) {
+    state.lastFrame = frame.ordinal;
+    return output(state, { handle: frame.handle, disposition: "drop" });
+  }
+  if (!Object.hasOwn(value.inspection, "/type")) return inspect(value, framePointers);
+  const type = scalar(value, "/type");
+  if (frame.event.value !== "" && frame.event.value !== type) fail("invalid_stream");
+  state.lastFrame = frame.ordinal;
+  const pass = (disposition = "emit", body?: unknown) =>
+    output(state, { handle: frame.handle, disposition, ...(body ? { body } : {}) });
+  if (type === "error") fail("upstream_error");
+  if (type === "ping") return pass();
+  if (state.finish && type !== "message_stop") fail("data_after_finish");
+  if (type === "message_start") {
+    if (state.id) fail("stream_state");
+    const id = scalar(value, "/message/id");
+    if (typeof id !== "string" || !id) fail("invalid_object");
+    state.id = id;
+    state.usage = measure(value, "/message/usage", null);
+    return pass("emit", {
+      document: value.document.handle,
+      edits: [{ op: "set", pointer: "/message/model", value: JSON.stringify(state.model) }],
+    });
+  }
+  if (!state.id) fail("stream_state");
+  if (["content_block_start", "content_block_delta", "content_block_stop"].includes(String(type)))
+    return pass();
+  if (type === "message_delta") {
+    if (state.finish) fail("duplicate_finish");
+    state.finish = finishReason(scalar(value, "/delta/stop_reason"));
+    state.usage = measure(value, "/usage", state.usage);
+    return pass("hold");
+  }
+  if (type === "message_stop") {
+    if (!state.finish) fail("premature_terminal");
+    if (state.usage?.input_tokens === undefined || state.usage.output_tokens === undefined)
+      fail("usage_required");
+    state.done = true;
+    return output(
+      state,
+      { handle: frame.handle, disposition: "hold" },
+      {
+        kind: ["length", "content_filter"].includes(state.finish) ? "incomplete" : "complete",
+        bytes: "",
+      },
+    );
+  }
+  fail("invalid_stream");
+}
 function response(_input: GuestInput, value: DocumentInput) {
   if (!value.document || !value.inspection || typeof value.model !== "string" || !value.model)
     fail("invalid_request");
@@ -566,6 +700,7 @@ function streamFrame(state: State, value: FrameInput) {
   const frame = value.frame;
   if (!frame || frame.data.handle !== value.document.handle) fail("stream_state");
   if (frame.ordinal !== Number(state.lastFrame) + 1) fail("stream_state");
+  if (state.native) return nativeFrame(state, value);
   if (!frame.data.bytes) {
     state.lastFrame = frame.ordinal;
     return output(state, { handle: frame.handle, disposition: "drop" });
@@ -716,8 +851,13 @@ export function runMessages(manifest: { capabilities: unknown }, target: Target)
       };
     if (input.hook === "prepare")
       return { result: prepare(input, document() as DocumentInput, target), state: null };
-    if (input.hook === "response")
-      return { result: response(input, document() as DocumentInput), state: null };
+    if (input.hook === "response") {
+      const value = document() as DocumentInput;
+      return {
+        result: value.protocol === "messages" ? responseNative(value) : response(input, value),
+        state: null,
+      };
+    }
     if (input.hook === "error")
       return {
         result: { abi_version: 1, kind: "failure", status: 502, code: "upstream_error" },
@@ -728,7 +868,14 @@ export function runMessages(manifest: { capabilities: unknown }, target: Target)
     if (input.hook === "stream_open") {
       const payload = object(exactParse(new TextDecoder().decode(bytes), 400));
       if (typeof payload.model !== "string" || !payload.model) fail("invalid_model", 400);
+      if (
+        payload.protocol !== undefined &&
+        payload.protocol !== "chat" &&
+        payload.protocol !== "messages"
+      )
+        fail("unsupported_semantics", 422);
       const state: State = {
+        native: payload.protocol === "messages",
         session: input.session.id,
         sequence: input.session.sequence,
         model: payload.model,

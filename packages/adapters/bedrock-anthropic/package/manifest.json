@@ -1,14 +1,14 @@
 {
   "format": 1,
   "id": "gateway.bedrock-anthropic",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "abi_version": 1,
   "sdk_version": "1.0.0",
   "module": "module.wasm",
   "entrypoint": "invoke",
   "config_schema": "config.schema.json",
   "capabilities": {
-    "operations": ["chat"],
+    "operations": ["chat", "messages"],
     "dimensions": [
       "input_tokens",
       "output_tokens",
@@ -16,7 +16,7 @@
       "cache_write_tokens",
       "requests"
     ],
-    "protocols": ["chat"],
+    "protocols": ["chat", "messages"],
     "hooks": [
       "describe",
       "prepare",

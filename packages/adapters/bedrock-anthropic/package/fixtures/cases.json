@@ -298,6 +298,286 @@
           }
         }
       ]
+    },
+    {
+      "name": "native messages request passes through with only the upstream model and target envelope changed",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "messages",
+            "operation": "messages",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJtYXhfdG9rZW5zIjo1MCwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6IuS9oOWlvSJ9XSwic3RyZWFtIjp0cnVlLCJtZXRhZGF0YSI6eyJ1c2VyX2lkIjoidTEifX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/model/anthropic.claude-upstream%3A0/invoke-with-response-stream",
+              "headers": {
+                "accept": "application/json",
+                "x-amzn-bedrock-accept": "application/json"
+              },
+              "auth": {
+                "type": "aws-sigv4",
+                "service": "bedrock"
+              },
+              "manifest": {
+                "operation": "messages",
+                "model": "logical",
+                "upstream_model": "anthropic.claude-upstream:0",
+                "stream": true,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "output_tokens": "50",
+                  "requests": "1"
+                },
+                "input_bytes": 125
+              }
+            }
+          },
+          "expected_body": "eyJtYXhfdG9rZW5zIjo1MCwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6IuS9oOWlvSJ9XSwibWV0YWRhdGEiOnsidXNlcl9pZCI6InUxIn0sImFudGhyb3BpY192ZXJzaW9uIjoiYmVkcm9jay0yMDIzLTA1LTMxIn0="
+        }
+      ]
+    },
+    {
+      "name": "native messages request without max_tokens is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "messages",
+            "operation": "messages",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJtZXNzYWdlcyI6W119",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 400,
+            "code": "invalid_request"
+          }
+        }
+      ]
+    },
+    {
+      "name": "native messages request above the configured output ceiling is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "messages",
+            "operation": "messages",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJtYXhfdG9rZW5zIjoxMDEsIm1lc3NhZ2VzIjpbXX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "integer_limit"
+          }
+        }
+      ]
+    },
+    {
+      "name": "native messages request with a client anthropic_version is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "messages",
+            "operation": "messages",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJtYXhfdG9rZW5zIjo1LCJtZXNzYWdlcyI6W10sImFudGhyb3BpY192ZXJzaW9uIjoieCJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_semantics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "native message response keeps its shape and reports the logical model with exact usage",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "protocol": "messages",
+            "operation": "messages",
+            "model": "logical"
+          },
+          "body": "eyJpZCI6Im1zZ18xIiwidHlwZSI6Im1lc3NhZ2UiLCJyb2xlIjoiYXNzaXN0YW50IiwiY29udGVudCI6W3sidHlwZSI6InRleHQiLCJ0ZXh0Ijoi5aW9In1dLCJtb2RlbCI6ImNsYXVkZS11cHN0cmVhbSIsInN0b3BfcmVhc29uIjoiZW5kX3R1cm4iLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjcsIm91dHB1dF90b2tlbnMiOjIsImNhY2hlX3JlYWRfaW5wdXRfdG9rZW5zIjozfX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "usage": {
+              "input_tokens": "7",
+              "output_tokens": "2",
+              "cached_input_tokens": "3"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            },
+            "needs_input": false
+          },
+          "expected_body": "eyJpZCI6Im1zZ18xIiwidHlwZSI6Im1lc3NhZ2UiLCJyb2xlIjoiYXNzaXN0YW50IiwiY29udGVudCI6W3sidHlwZSI6InRleHQiLCJ0ZXh0Ijoi5aW9In1dLCJtb2RlbCI6ImxvZ2ljYWwiLCJzdG9wX3JlYXNvbiI6ImVuZF90dXJuIiwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjo3LCJvdXRwdXRfdG9rZW5zIjoyLCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6M319"
+        }
+      ]
+    },
+    {
+      "name": "native message SSE passes frames through with the logical model and withholds message_delta and message_stop as the terminal",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm90b2NvbCI6Im1lc3NhZ2VzIn0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "AAABTAAAAEvScyGcCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2liV1Z6YzJGblpWOXpkR0Z5ZENJc0ltMWxjM05oWjJVaU9uc2lhV1FpT2lKdGMyZGZNU0lzSW5SNWNHVWlPaUp0WlhOellXZGxJaXdpY205c1pTSTZJbUZ6YzJsemRHRnVkQ0lzSW1OdmJuUmxiblFpT2x0ZExDSnRiMlJsYkNJNkltTnNZWFZrWlMxMWNITjBjbVZoYlNJc0luVnpZV2RsSWpwN0ltbHVjSFYwWDNSdmEyVnVjeUk2Tnl3aWIzVjBjSFYwWDNSdmEyVnVjeUk2TVgxOWZRPT0ifaMfQMQAAAB8AAAAS7gOSr8LOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjogImV5SjBlWEJsSWpvaWNHbHVaeUo5In0QwPr0AAAA2AAAAEs9qXPpCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5emRHRnlkQ0lzSW1sdVpHVjRJam93TENKamIyNTBaVzUwWDJKc2IyTnJJanA3SW5SNWNHVWlPaUowWlhoMElpd2lkR1Y0ZENJNklpSjlmUT09In070kLXAAAA2AAAAEs9qXPpCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5a1pXeDBZU0lzSW1sdVpHVjRJam93TENKa1pXeDBZU0k2ZXlKMGVYQmxJam9pZEdWNGRGOWtaV3gwWVNJc0luUmxlSFFpT2lMbHBiMGlmWDA9In21DNYuAAAAnAAAAEuQ2o1gCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5emRHOXdJaXdpYVc1a1pYZ2lPakI5In24oTKuAAAA+AAAAEv8aFztCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2liV1Z6YzJGblpWOWtaV3gwWVNJc0ltUmxiSFJoSWpwN0luTjBiM0JmY21WaGMyOXVJam9pWlc1a1gzUjFjbTRpTENKemRHOXdYM05sY1hWbGJtTmxJanB1ZFd4c2ZTd2lkWE5oWjJVaU9uc2liM1YwY0hWMFgzUnZhMlZ1Y3lJNk1uMTkifW6+hx8AAACIAAAASwW6vCILOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjogImV5SjBlWEJsSWpvaWJXVnpjMkZuWlY5emRHOXdJbjA9In23ayrx",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 1428,
+            "chunks": [
+              "ZXZlbnQ6IG1lc3NhZ2Vfc3RhcnQKZGF0YTogeyJ0eXBlIjoibWVzc2FnZV9zdGFydCIsIm1lc3NhZ2UiOnsiaWQiOiJtc2dfMSIsInR5cGUiOiJtZXNzYWdlIiwicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOltdLCJtb2RlbCI6ImxvZ2ljYWwiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjcsIm91dHB1dF90b2tlbnMiOjF9fX0KCg==",
+              "ZXZlbnQ6IHBpbmcKZGF0YTogeyJ0eXBlIjoicGluZyJ9Cgo=",
+              "ZXZlbnQ6IGNvbnRlbnRfYmxvY2tfc3RhcnQKZGF0YTogeyJ0eXBlIjoiY29udGVudF9ibG9ja19zdGFydCIsImluZGV4IjowLCJjb250ZW50X2Jsb2NrIjp7InR5cGUiOiJ0ZXh0IiwidGV4dCI6IiJ9fQoK",
+              "ZXZlbnQ6IGNvbnRlbnRfYmxvY2tfZGVsdGEKZGF0YTogeyJ0eXBlIjoiY29udGVudF9ibG9ja19kZWx0YSIsImluZGV4IjowLCJkZWx0YSI6eyJ0eXBlIjoidGV4dF9kZWx0YSIsInRleHQiOiLlpb0ifX0KCg==",
+              "ZXZlbnQ6IGNvbnRlbnRfYmxvY2tfc3RvcApkYXRhOiB7InR5cGUiOiJjb250ZW50X2Jsb2NrX3N0b3AiLCJpbmRleCI6MH0KCg=="
+            ],
+            "finality": "FINAL",
+            "needs_input": false,
+            "usage": {
+              "input_tokens": "7",
+              "output_tokens": "2"
+            },
+            "terminal": {
+              "kind": "complete",
+              "bytes": "ZXZlbnQ6IG1lc3NhZ2VfZGVsdGEKZGF0YTogeyJ0eXBlIjoibWVzc2FnZV9kZWx0YSIsImRlbHRhIjp7InN0b3BfcmVhc29uIjoiZW5kX3R1cm4iLCJzdG9wX3NlcXVlbmNlIjpudWxsfSwidXNhZ2UiOnsib3V0cHV0X3Rva2VucyI6Mn19CgpldmVudDogbWVzc2FnZV9zdG9wCmRhdGE6IHsidHlwZSI6Im1lc3NhZ2Vfc3RvcCJ9Cgo="
+            }
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_finish",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "FINAL",
+            "needs_input": false,
+            "usage": {
+              "input_tokens": "7",
+              "output_tokens": "2"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "native message SSE EOF before message_stop cannot fabricate a terminal",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm90b2NvbCI6Im1lc3NhZ2VzIn0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "AAABTAAAAEvScyGcCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2liV1Z6YzJGblpWOXpkR0Z5ZENJc0ltMWxjM05oWjJVaU9uc2lhV1FpT2lKdGMyZGZNU0lzSW5SNWNHVWlPaUp0WlhOellXZGxJaXdpY205c1pTSTZJbUZ6YzJsemRHRnVkQ0lzSW1OdmJuUmxiblFpT2x0ZExDSnRiMlJsYkNJNkltTnNZWFZrWlMxMWNITjBjbVZoYlNJc0luVnpZV2RsSWpwN0ltbHVjSFYwWDNSdmEyVnVjeUk2Tnl3aWIzVjBjSFYwWDNSdmEyVnVjeUk2TVgxOWZRPT0ifaMfQMQAAAB8AAAAS7gOSr8LOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjogImV5SjBlWEJsSWpvaWNHbHVaeUo5In0QwPr0AAAA2AAAAEs9qXPpCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5emRHRnlkQ0lzSW1sdVpHVjRJam93TENKamIyNTBaVzUwWDJKc2IyTnJJanA3SW5SNWNHVWlPaUowWlhoMElpd2lkR1Y0ZENJNklpSjlmUT09In070kLXAAAA2AAAAEs9qXPpCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5a1pXeDBZU0lzSW1sdVpHVjRJam93TENKa1pXeDBZU0k2ZXlKMGVYQmxJam9pZEdWNGRGOWtaV3gwWVNJc0luUmxlSFFpT2lMbHBiMGlmWDA9In21DNYu",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 888,
+            "chunks": [
+              "ZXZlbnQ6IG1lc3NhZ2Vfc3RhcnQKZGF0YTogeyJ0eXBlIjoibWVzc2FnZV9zdGFydCIsIm1lc3NhZ2UiOnsiaWQiOiJtc2dfMSIsInR5cGUiOiJtZXNzYWdlIiwicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOltdLCJtb2RlbCI6ImxvZ2ljYWwiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjcsIm91dHB1dF90b2tlbnMiOjF9fX0KCg==",
+              "ZXZlbnQ6IHBpbmcKZGF0YTogeyJ0eXBlIjoicGluZyJ9Cgo=",
+              "ZXZlbnQ6IGNvbnRlbnRfYmxvY2tfc3RhcnQKZGF0YTogeyJ0eXBlIjoiY29udGVudF9ibG9ja19zdGFydCIsImluZGV4IjowLCJjb250ZW50X2Jsb2NrIjp7InR5cGUiOiJ0ZXh0IiwidGV4dCI6IiJ9fQoK",
+              "ZXZlbnQ6IGNvbnRlbnRfYmxvY2tfZGVsdGEKZGF0YTogeyJ0eXBlIjoiY29udGVudF9ibG9ja19kZWx0YSIsImluZGV4IjowLCJkZWx0YSI6eyJ0eXBlIjoidGV4dF9kZWx0YSIsInRleHQiOiLlpb0ifX0KCg=="
+            ],
+            "usage": {
+              "input_tokens": "7",
+              "output_tokens": "1"
+            },
+            "finality": "PARTIAL",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_finish",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "stream_truncated"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an error event in a native message stream is an upstream failure",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm90b2NvbCI6Im1lc3NhZ2VzIn0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "AAABTAAAAEvScyGcCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2liV1Z6YzJGblpWOXpkR0Z5ZENJc0ltMWxjM05oWjJVaU9uc2lhV1FpT2lKdGMyZGZNU0lzSW5SNWNHVWlPaUp0WlhOellXZGxJaXdpY205c1pTSTZJbUZ6YzJsemRHRnVkQ0lzSW1OdmJuUmxiblFpT2x0ZExDSnRiMlJsYkNJNkltTnNZWFZrWlMxMWNITjBjbVZoYlNJc0luVnpZV2RsSWpwN0ltbHVjSFYwWDNSdmEyVnVjeUk2Tnl3aWIzVjBjSFYwWDNSdmEyVnVjeUk2TVgxOWZRPT0ifaMfQMQAAADEAAAAS5i5CWoLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjogImV5SjBlWEJsSWpvaVpYSnliM0lpTENKbGNuSnZjaUk2ZXlKMGVYQmxJam9pYjNabGNteHZZV1JsWkY5bGNuSnZjaUlzSW0xbGMzTmhaMlVpT2lKaWRYTjVJbjE5In1IyGQd",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "upstream_error"
+          }
+        }
+      ]
     }
   ]
 }

@@ -1,11 +1,11 @@
 {
   "packages/adapters/anthropic-messages/messages.ts": {
-    "bytes": 28822,
-    "sha256": "c29c58d1502d64fb6c67d5b9feeaa7f85b1a25364f46e2dbde857c7abd6993c8"
+    "bytes": 34616,
+    "sha256": "b52e69a33ede9a11d1f6d09154b5477be46600d23e5cf9a3822ba6eb9f7485b4"
   },
   "packages/adapters/anthropic-messages/package/manifest.json": {
-    "bytes": 759,
-    "sha256": "9db6d73815d8a398a56ad43ae599aff58886ca6a21653c39d15d6941e7762c06"
+    "bytes": 783,
+    "sha256": "d0ce575775b596222cca84f0c7a2e995b0a36815f24dd9cc6401b01a58c8b8f2"
   },
   "packages/adapters/anthropic-messages/plugin.ts": {
     "bytes": 161,
@@ -20,16 +20,16 @@
     "sha256": "96eb7fa2ca46fc25371ed0f1da56c267ee542f348ffa73346370a43296e34648"
   },
   "packages/adapters/anthropic-messages/package/module.wasm": {
-    "bytes": 2508497,
-    "sha256": "79411f771f7a0f06d5fa96104aaeb1071bfaab244b66fc29c3ca6443b764f978"
+    "bytes": 2511800,
+    "sha256": "9152646c9b6281620cfa0c0e38b0d06d0fe76fa6dafadbf21eafa6e78d904a09"
   },
   "packages/adapters/anthropic-messages/package/config.schema.json": {
     "bytes": 646,
     "sha256": "dab73682f6a54db8d5ff618bc4ad2eb5193431dd22db69d8e170f4c2c331434e"
   },
   "packages/adapters/anthropic-messages/package/fixtures/cases.json": {
-    "bytes": 17117,
-    "sha256": "9b0836caf009407fb3f61fe1a6dc59da972f0992d08577ecb5311a25bcf8a4c2"
+    "bytes": 29179,
+    "sha256": "f967ba16a96994d9ba6dc4c10d6a8041e3a0bef14861dfe9e7fe48caf5beb557"
   },
   "scripts/plugin-tools.json": {
     "bytes": 1830,

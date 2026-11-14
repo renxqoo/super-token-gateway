@@ -8,7 +8,7 @@ import {
   type SignedCoreEvidenceEventV1,
 } from "@gateway/contracts";
 import { CoreRpcError, type createCoreRpcClient } from "@gateway/core-client";
-import { canonical } from "@gateway/kernel";
+import { canonical, type Protocol } from "@gateway/kernel";
 import {
   observeAttempt,
   type AbiResult,
@@ -39,6 +39,8 @@ export type ChatDependencies = {
 
 export type ChatRequest = {
   requestId: string;
+  protocol: Protocol;
+  path?: { model: string; stream: boolean };
   body: Uint8Array;
   token: string;
   ip: string;
@@ -50,6 +52,7 @@ export type ChatRequest = {
 type Attempt = ReturnType<ReturnType<typeof createPluginAttempts>["create"]>;
 type Bridge = ReturnType<typeof observeAttempt>;
 type Facts = {
+  protocol: Protocol;
   model: string;
   stream: boolean;
   fingerprint: string;
@@ -145,11 +148,15 @@ function requestFacts(request: ChatRequest, totalTimeoutMs: number): Facts {
     throw new GatewayError(400, "invalid_json", "Request body must be JSON");
   }
   const value = parsed as { model?: unknown; stream?: unknown };
-  if (typeof value !== "object" || value === null || typeof value.model !== "string")
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new GatewayError(400, "invalid_request", "Request body must be a JSON object");
+  const model = request.path ? request.path.model : value.model;
+  if (typeof model !== "string" || !model)
     throw new GatewayError(400, "invalid_request", "A model is required");
   return {
-    model: value.model,
-    stream: value.stream === true,
+    protocol: request.protocol,
+    model,
+    stream: request.path ? request.path.stream : value.stream === true,
     fingerprint: sha256(body),
     deadlineAt: new Date(Date.now() + totalTimeoutMs).toISOString(),
     requestId: request.requestId,
@@ -164,7 +171,7 @@ async function openContext(deps: ChatDependencies, request: ChatRequest, facts: 
         {
           customer_token: request.token,
           ip: request.ip,
-          operation: "chat",
+          operation: facts.protocol,
           model: facts.model,
           fingerprint: facts.fingerprint,
         },
@@ -204,7 +211,7 @@ async function plan(
   try {
     const transformed = await attempt.transformJSON(
       "prepare",
-      { protocol: "chat", operation: "chat", model: facts.model },
+      { protocol: facts.protocol, operation: facts.protocol, model: facts.model },
       request.body,
       request.signal,
     );
@@ -781,7 +788,12 @@ async function relayJSON(
   let transformed: Awaited<ReturnType<Bridge["transformJSON"]>>;
   try {
     const bytes = await readBounded(response.body, deps.config.max_response_bytes, signal);
-    transformed = await bridge.transformJSON("response", { model: facts.model }, bytes, signal);
+    transformed = await bridge.transformJSON(
+      "response",
+      { protocol: facts.protocol, model: facts.model },
+      bytes,
+      signal,
+    );
   } catch (error) {
     if (error instanceof GatewayError && error.code === "usage_queue_unavailable")
       return finalFailure({ attempt_state: "UNKNOWN", error_code: "evidence_unavailable" }, error);
@@ -843,7 +855,10 @@ function relaySSE(
       return result.needs_input || Boolean(result.terminal);
     };
     try {
-      await bridge.invoke("stream_open", encoder.encode(JSON.stringify({ model: facts.model })));
+      await bridge.invoke(
+        "stream_open",
+        encoder.encode(JSON.stringify({ model: facts.model, protocol: facts.protocol })),
+      );
       for (;;) {
         const next = await reader.read();
         if (next.done) break;
