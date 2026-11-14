@@ -116,6 +116,22 @@ test("a retryable upstream 503 moves the same request to the other channel and c
     },
   ));
 
+test("a customer wallet briefly locked by another transaction (identity_busy at admission) retries the admission instead of failing the request with 503", () =>
+  withGatewayStack({ reply: () => chatReplies.json() }, async ({ db, setup, received, send }) => {
+    let locked: () => void = () => undefined;
+    const ready = new Promise<void>((resolve) => (locked = resolve));
+    const holder = db.begin(async (tx) => {
+      await tx`SELECT w.id FROM wallets w JOIN api_keys k ON k.project_id=w.project_id WHERE k.id=${setup.key.id} FOR UPDATE OF w`;
+      locked();
+      await Bun.sleep(1500);
+    });
+    await ready;
+    const response = await send();
+    await holder;
+    expect(JSON.parse(await expectStatus(response, 200)).choices[0].message.content).toBe("ok");
+    expect(received).toHaveLength(1);
+  }));
+
 test("a catalog row briefly locked by another transaction (identity_busy) delays the context instead of failing the request with 503", () =>
   withGatewayStack({ reply: () => chatReplies.json() }, async ({ db, setup, received, send }) => {
     let locked: () => void = () => undefined;

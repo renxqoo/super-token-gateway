@@ -163,10 +163,27 @@ function requestFacts(request: ChatRequest, totalTimeoutMs: number): Facts {
   };
 }
 
-async function openContext(deps: ChatDependencies, request: ChatRequest, facts: Facts) {
+async function whileBusy<T>(request: ChatRequest, facts: Facts, run: () => Promise<T>) {
   for (let delay = 25; ; delay = Math.min(delay * 2, 200)) {
     try {
-      return (await deps.core.execution(
+      return await run();
+    } catch (error) {
+      if (
+        !(error instanceof CoreRpcError) ||
+        error.detail.code !== "identity_busy" ||
+        request.signal.aborted ||
+        Date.now() + delay >= Date.parse(facts.deadlineAt)
+      )
+        throw error;
+      await Bun.sleep(delay);
+    }
+  }
+}
+
+async function openContext(deps: ChatDependencies, request: ChatRequest, facts: Facts) {
+  try {
+    return (await whileBusy(request, facts, () =>
+      deps.core.execution(
         "execution_context_v1",
         {
           customer_token: request.token,
@@ -176,17 +193,10 @@ async function openContext(deps: ChatDependencies, request: ChatRequest, facts: 
           fingerprint: facts.fingerprint,
         },
         { deadlineAt: facts.deadlineAt },
-      )) as ExecutionContextResponse;
-    } catch (error) {
-      if (
-        !(error instanceof CoreRpcError) ||
-        error.detail.retryability !== "SAME_COMMAND" ||
-        request.signal.aborted ||
-        Date.now() + delay >= Date.parse(facts.deadlineAt)
-      )
-        throw coreFailure(error);
-      await Bun.sleep(delay);
-    }
+      ),
+    )) as ExecutionContextResponse;
+  } catch (error) {
+    throw coreFailure(error);
   }
 }
 
@@ -315,32 +325,34 @@ async function reserve(
   let reply: ExecutionReply;
   const commandId = crypto.randomUUID();
   try {
-    reply = (await (previous
-      ? deps.core.execution(
-          "execution_next_v1",
-          {
-            ...planned.dispatch,
-            request_id: facts.requestId,
-            previous_attempt_id: previous.permit.attemptId,
-            expected_ordinal: previous.ordinal + 1,
-            visible_output: false,
-          },
-          { commandId, deadlineAt: facts.deadlineAt },
-        )
-      : deps.core.execution(
-          "execution_admit_v1",
-          {
-            ...planned.dispatch,
-            project_id: context.project_id,
-            key_id: context.key_id,
-            intent_digest: request.idempotencyKey
-              ? sha256(canonical(["stg.public.intent", "1", request.idempotencyKey]))
-              : null,
-            fingerprint: facts.fingerprint,
-            customer_currency: context.customer_currency,
-          },
-          { commandId, deadlineAt: facts.deadlineAt },
-        ))) as ExecutionReply;
+    reply = (await whileBusy(request, facts, () =>
+      previous
+        ? deps.core.execution(
+            "execution_next_v1",
+            {
+              ...planned.dispatch,
+              request_id: facts.requestId,
+              previous_attempt_id: previous.permit.attemptId,
+              expected_ordinal: previous.ordinal + 1,
+              visible_output: false,
+            },
+            { commandId, deadlineAt: facts.deadlineAt },
+          )
+        : deps.core.execution(
+            "execution_admit_v1",
+            {
+              ...planned.dispatch,
+              project_id: context.project_id,
+              key_id: context.key_id,
+              intent_digest: request.idempotencyKey
+                ? sha256(canonical(["stg.public.intent", "1", request.idempotencyKey]))
+                : null,
+              fingerprint: facts.fingerprint,
+              customer_currency: context.customer_currency,
+            },
+            { commandId, deadlineAt: facts.deadlineAt },
+          ),
+    )) as ExecutionReply;
   } catch (error) {
     planned.attempt.dispose();
     const abandoned = {
