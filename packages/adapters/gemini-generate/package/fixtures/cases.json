@@ -269,6 +269,340 @@
           }
         }
       ]
+    },
+    {
+      "name": "native generateContent request passes through unchanged when it states its own output ceiling",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "gemini",
+            "operation": "gemini",
+            "model": "logical",
+            "stream": false
+          },
+          "body": "eyJjb250ZW50cyI6W3sicm9sZSI6InVzZXIiLCJwYXJ0cyI6W3sidGV4dCI6IuS9oOWlvSJ9XX1dLCJnZW5lcmF0aW9uQ29uZmlnIjp7InRlbXBlcmF0dXJlIjowLjUsIm1heE91dHB1dFRva2VucyI6NDB9LCJzYWZldHlTZXR0aW5ncyI6W119",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1beta/models/gemini-upstream:generateContent",
+              "headers": {
+                "accept": "application/json"
+              },
+              "auth": {
+                "type": "api-key",
+                "header": "x-goog-api-key"
+              },
+              "manifest": {
+                "operation": "gemini",
+                "model": "logical",
+                "upstream_model": "gemini-upstream",
+                "stream": false,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "output_tokens": "40",
+                  "requests": "1"
+                },
+                "input_bytes": 138
+              }
+            }
+          },
+          "expected_body": "eyJjb250ZW50cyI6W3sicm9sZSI6InVzZXIiLCJwYXJ0cyI6W3sidGV4dCI6IuS9oOWlvSJ9XX1dLCJnZW5lcmF0aW9uQ29uZmlnIjp7InRlbXBlcmF0dXJlIjowLjUsIm1heE91dHB1dFRva2VucyI6NDB9LCJzYWZldHlTZXR0aW5ncyI6W119"
+        }
+      ]
+    },
+    {
+      "name": "native streamGenerateContent request without generationConfig gains the configured output ceiling",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "gemini",
+            "operation": "gemini",
+            "model": "logical",
+            "stream": true
+          },
+          "body": "eyJjb250ZW50cyI6W3sicm9sZSI6InVzZXIiLCJwYXJ0cyI6W3sidGV4dCI6IuS9oOWlvSJ9XX1dfQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1beta/models/gemini-upstream:streamGenerateContent?alt=sse",
+              "headers": {
+                "accept": "text/event-stream"
+              },
+              "auth": {
+                "type": "api-key",
+                "header": "x-goog-api-key"
+              },
+              "manifest": {
+                "operation": "gemini",
+                "model": "logical",
+                "upstream_model": "gemini-upstream",
+                "stream": true,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "output_tokens": "100",
+                  "requests": "1"
+                },
+                "input_bytes": 58
+              }
+            }
+          },
+          "expected_body": "eyJjb250ZW50cyI6W3sicm9sZSI6InVzZXIiLCJwYXJ0cyI6W3sidGV4dCI6IuS9oOWlvSJ9XX1dLCJnZW5lcmF0aW9uQ29uZmlnIjp7Im1heE91dHB1dFRva2VucyI6MTAwfX0="
+        }
+      ]
+    },
+    {
+      "name": "native request with a generationConfig but no ceiling gains the configured output ceiling inside it",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "gemini",
+            "operation": "gemini",
+            "model": "logical",
+            "stream": false
+          },
+          "body": "eyJjb250ZW50cyI6W10sImdlbmVyYXRpb25Db25maWciOnsidG9wSyI6M319",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1beta/models/gemini-upstream:generateContent",
+              "headers": {
+                "accept": "application/json"
+              },
+              "auth": {
+                "type": "api-key",
+                "header": "x-goog-api-key"
+              },
+              "manifest": {
+                "operation": "gemini",
+                "model": "logical",
+                "upstream_model": "gemini-upstream",
+                "stream": false,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "output_tokens": "100",
+                  "requests": "1"
+                },
+                "input_bytes": 45
+              }
+            }
+          },
+          "expected_body": "eyJjb250ZW50cyI6W10sImdlbmVyYXRpb25Db25maWciOnsidG9wSyI6MywibWF4T3V0cHV0VG9rZW5zIjoxMDB9fQ=="
+        }
+      ]
+    },
+    {
+      "name": "native request naming a model in the body is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "gemini",
+            "operation": "gemini",
+            "model": "logical",
+            "stream": false
+          },
+          "body": "eyJtb2RlbCI6IngiLCJjb250ZW50cyI6W119",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_semantics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "native request above the configured output ceiling is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "gemini",
+            "operation": "gemini",
+            "model": "logical",
+            "stream": false
+          },
+          "body": "eyJjb250ZW50cyI6W10sImdlbmVyYXRpb25Db25maWciOnsibWF4T3V0cHV0VG9rZW5zIjoxMDF9fQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "integer_limit"
+          }
+        }
+      ]
+    },
+    {
+      "name": "native request asking for several candidates is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "gemini",
+            "operation": "gemini",
+            "model": "logical",
+            "stream": false
+          },
+          "body": "eyJjb250ZW50cyI6W10sImdlbmVyYXRpb25Db25maWciOnsiY2FuZGlkYXRlQ291bnQiOjJ9fQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_choice_count"
+          }
+        }
+      ]
+    },
+    {
+      "name": "native generateContent response keeps its shape with the logical model version and exact cached usage",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "protocol": "gemini",
+            "operation": "gemini",
+            "model": "logical"
+          },
+          "body": "eyJjYW5kaWRhdGVzIjpbeyJjb250ZW50Ijp7InJvbGUiOiJtb2RlbCIsInBhcnRzIjpbeyJ0ZXh0Ijoi5aW9In1dfSwiZmluaXNoUmVhc29uIjoiTUFYX1RPS0VOUyJ9XSwidXNhZ2VNZXRhZGF0YSI6eyJwcm9tcHRUb2tlbkNvdW50Ijo5LCJjYW5kaWRhdGVzVG9rZW5Db3VudCI6MiwiY2FjaGVkQ29udGVudFRva2VuQ291bnQiOjR9LCJtb2RlbFZlcnNpb24iOiJnZW1pbmktdXBzdHJlYW0tMDAxIiwicmVzcG9uc2VJZCI6InIxIn0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "usage": {
+              "cached_input_tokens": "4",
+              "input_tokens": "5",
+              "output_tokens": "2"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "incomplete",
+              "bytes": ""
+            },
+            "needs_input": false
+          },
+          "expected_body": "eyJjYW5kaWRhdGVzIjpbeyJjb250ZW50Ijp7InJvbGUiOiJtb2RlbCIsInBhcnRzIjpbeyJ0ZXh0Ijoi5aW9In1dfSwiZmluaXNoUmVhc29uIjoiTUFYX1RPS0VOUyJ9XSwidXNhZ2VNZXRhZGF0YSI6eyJwcm9tcHRUb2tlbkNvdW50Ijo5LCJjYW5kaWRhdGVzVG9rZW5Db3VudCI6MiwiY2FjaGVkQ29udGVudFRva2VuQ291bnQiOjR9LCJtb2RlbFZlcnNpb24iOiJsb2dpY2FsIiwicmVzcG9uc2VJZCI6InIxIn0="
+        }
+      ]
+    },
+    {
+      "name": "native Gemini SSE passes frames through with the logical model version and withholds the finishing frame as the terminal",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm90b2NvbCI6ImdlbWluaSJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZGF0YTogeyJjYW5kaWRhdGVzIjpbeyJjb250ZW50Ijp7InJvbGUiOiJtb2RlbCIsInBhcnRzIjpbeyJ0ZXh0Ijoi5L2g5aW9In1dfX1dLCJ1c2FnZU1ldGFkYXRhIjp7InByb21wdFRva2VuQ291bnQiOjV9LCJtb2RlbFZlcnNpb24iOiJnZW1pbmktdXBzdHJlYW0tMDAxIn0KCmRhdGE6IHsiY2FuZGlkYXRlcyI6W3siY29udGVudCI6eyJyb2xlIjoibW9kZWwiLCJwYXJ0cyI6W3sidGV4dCI6IiEifV19LCJmaW5pc2hSZWFzb24iOiJTVE9QIn1dLCJ1c2FnZU1ldGFkYXRhIjp7InByb21wdFRva2VuQ291bnQiOjUsImNhbmRpZGF0ZXNUb2tlbkNvdW50IjozfSwibW9kZWxWZXJzaW9uIjoiZ2VtaW5pLXVwc3RyZWFtLTAwMSJ9Cgo=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 356,
+            "chunks": [
+              "ZGF0YTogeyJjYW5kaWRhdGVzIjpbeyJjb250ZW50Ijp7InJvbGUiOiJtb2RlbCIsInBhcnRzIjpbeyJ0ZXh0Ijoi5L2g5aW9In1dfX1dLCJ1c2FnZU1ldGFkYXRhIjp7InByb21wdFRva2VuQ291bnQiOjV9LCJtb2RlbFZlcnNpb24iOiJsb2dpY2FsIn0KCg=="
+            ],
+            "finality": "FINAL",
+            "needs_input": false,
+            "usage": {
+              "input_tokens": "5",
+              "output_tokens": "3"
+            },
+            "terminal": {
+              "kind": "complete",
+              "bytes": "ZGF0YTogeyJjYW5kaWRhdGVzIjpbeyJjb250ZW50Ijp7InJvbGUiOiJtb2RlbCIsInBhcnRzIjpbeyJ0ZXh0IjoiISJ9XX0sImZpbmlzaFJlYXNvbiI6IlNUT1AifV0sInVzYWdlTWV0YWRhdGEiOnsicHJvbXB0VG9rZW5Db3VudCI6NSwiY2FuZGlkYXRlc1Rva2VuQ291bnQiOjN9LCJtb2RlbFZlcnNpb24iOiJsb2dpY2FsIn0KCg=="
+            }
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_finish",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "FINAL",
+            "needs_input": false,
+            "usage": {
+              "input_tokens": "5",
+              "output_tokens": "3"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "native Gemini SSE EOF before a finish reason cannot fabricate a terminal",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm90b2NvbCI6ImdlbWluaSJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZGF0YTogeyJjYW5kaWRhdGVzIjpbeyJjb250ZW50Ijp7InJvbGUiOiJtb2RlbCIsInBhcnRzIjpbeyJ0ZXh0Ijoi5L2g5aW9In1dfX1dLCJ1c2FnZU1ldGFkYXRhIjp7InByb21wdFRva2VuQ291bnQiOjV9LCJtb2RlbFZlcnNpb24iOiJnZW1pbmktdXBzdHJlYW0tMDAxIn0KCg==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 157,
+            "chunks": [
+              "ZGF0YTogeyJjYW5kaWRhdGVzIjpbeyJjb250ZW50Ijp7InJvbGUiOiJtb2RlbCIsInBhcnRzIjpbeyJ0ZXh0Ijoi5L2g5aW9In1dfX1dLCJ1c2FnZU1ldGFkYXRhIjp7InByb21wdFRva2VuQ291bnQiOjV9LCJtb2RlbFZlcnNpb24iOiJsb2dpY2FsIn0KCg=="
+            ],
+            "usage": {
+              "input_tokens": "5"
+            },
+            "finality": "PARTIAL",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_finish",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "stream_truncated"
+          }
+        }
+      ]
     }
   ]
 }

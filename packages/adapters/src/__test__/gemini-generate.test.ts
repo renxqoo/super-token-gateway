@@ -57,8 +57,8 @@ async function run(
 
 test("package synthetic fixtures execute through the production WASM ABI", async () => {
   const result = await runPluginFixtures(supervisor, signed.pkg);
-  expect(result.cases).toBe(9);
-  expect(result.steps).toBe(14);
+  expect(result.cases).toBe(18);
+  expect(result.steps).toBe(27);
 });
 
 test("chat with system, tools and a tool round trip becomes generateContent with grouped function responses", async () => {

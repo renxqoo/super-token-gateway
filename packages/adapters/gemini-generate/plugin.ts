@@ -27,6 +27,7 @@ type DocumentInput = {
   protocol?: string;
   operation?: string;
   model?: string;
+  stream?: boolean;
 };
 type FrameInput = DocumentInput & {
   frame: {
@@ -45,6 +46,7 @@ type State = {
   tools: number;
   usage: Usage | null;
   done: boolean;
+  native: boolean;
 };
 class Slot {
   constructor(readonly spec: Record<string, unknown>) {}
@@ -312,19 +314,108 @@ function convertChoice(value: DocumentInput) {
     },
   };
 }
+function upstreamModel(input: GuestInput, value: DocumentInput) {
+  const map = object(input.config.model_map, 400),
+    upstream = map[value.model!];
+  if (typeof upstream !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(upstream))
+    fail("model_unavailable", 422);
+  return upstream;
+}
+function target(input: GuestInput, upstream: string, stream: boolean) {
+  const auth =
+    input.config.auth === "api-key"
+      ? { type: "api-key", header: "x-goog-api-key" }
+      : input.config.auth === "none"
+        ? { type: "none" }
+        : input.config.auth === "google-oauth"
+          ? { type: "google-oauth" }
+          : { type: "bearer" };
+  const method = stream ? "streamGenerateContent?alt=sse" : "generateContent";
+  let path = `/v1beta/models/${upstream}:${method}`;
+  if (input.config.path_style === "vertex") {
+    const project = input.config.project,
+      location = input.config.location;
+    if (
+      typeof project !== "string" ||
+      !/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(project) ||
+      typeof location !== "string" ||
+      !/^[a-z0-9-]{1,40}$/.test(location)
+    )
+      fail("unsupported_capability", 422);
+    path = `/v1/projects/${project}/locations/${location}/publishers/google/models/${upstream}:${method}`;
+  }
+  return {
+    path,
+    auth,
+    headers: {
+      "content-type": "application/json",
+      accept: stream ? "text/event-stream" : "application/json",
+    },
+  };
+}
+function prepareNative(input: GuestInput, value: DocumentInput) {
+  if (typeof value.stream !== "boolean") fail("invalid_stream", 400);
+  if (!Object.hasOwn(value.inspection, "/model"))
+    return inspect(value, [
+      "/*",
+      "/model",
+      "/generationConfig",
+      "/generationConfig/maxOutputTokens",
+      "/generationConfig/candidateCount",
+    ]);
+  if (fact(value, "/model").kind !== "missing") fail("unsupported_semantics", 422);
+  const upstream = upstreamModel(input, value);
+  const max = smallInteger(input.config.max_output_tokens, 1000000, 422),
+    inputTokens = smallInteger(input.config.max_input_tokens, 16 << 20, 422);
+  if (value.document.bytes > inputTokens) fail("input_ceiling", 413);
+  const config = fact(value, "/generationConfig").kind;
+  if (config !== "missing" && config !== "object") fail("invalid_request", 400);
+  const candidates = scalar(value, "/generationConfig/candidateCount", 400);
+  if (candidates !== undefined && smallInteger(candidates, 128, 422) !== 1)
+    fail("unsupported_choice_count", 422);
+  const requested = scalar(value, "/generationConfig/maxOutputTokens", 400);
+  const output = requested === undefined ? max : smallInteger(requested, max, 422);
+  if (output < 1) fail("invalid_output_ceiling", 422);
+  const edits =
+    requested !== undefined
+      ? []
+      : config === "object"
+        ? [{ op: "set", pointer: "/generationConfig/maxOutputTokens", value: String(output) }]
+        : [{ op: "set", pointer: "/generationConfig", value: `{"maxOutputTokens":${output}}` }];
+  return {
+    abi_version: 1,
+    kind: "prepared",
+    request: {
+      method: "POST",
+      ...target(input, upstream, value.stream),
+      body: { document: value.document.handle, edits },
+      manifest: {
+        operation: "gemini",
+        model: value.model,
+        upstream_model: upstream,
+        stream: value.stream,
+        ceilings: {
+          input_tokens: String(inputTokens),
+          output_tokens: String(output),
+          requests: "1",
+        },
+        input_bytes: value.document.bytes,
+      },
+    },
+  };
+}
 function prepare(input: GuestInput, value: DocumentInput) {
-  if (value.protocol !== "chat" || value.operation !== "chat") fail("unsupported_semantics", 422);
-  if (!value.document || !value.inspection || typeof value.model !== "string")
+  if (!value.document || !value.inspection || typeof value.model !== "string" || !value.model)
     fail("invalid_request", 400);
+  if (value.protocol === "gemini" && value.operation === "gemini")
+    return prepareNative(input, value);
+  if (value.protocol !== "chat" || value.operation !== "chat") fail("unsupported_semantics", 422);
   if (!Object.hasOwn(value.inspection, "/model")) return inspect(value, firstRound);
   if (!Object.hasOwn(value.inspection, "/tool_choice/type")) return inspect(value, secondRound);
   if (keys(value, "").some((key) => !requestKeys.includes(key))) fail("unsupported_semantics", 422);
-  const map = object(input.config.model_map, 400),
-    upstream = map[value.model],
+  const upstream = upstreamModel(input, value),
     model = scalar(value, "/model", 400);
-  if (typeof upstream !== "string" || !upstream || (model !== undefined && model !== value.model))
-    fail("model_unavailable", 422);
-  if (!/^[A-Za-z0-9._-]{1,128}$/.test(upstream)) fail("model_unavailable", 422);
+  if (model !== undefined && model !== value.model) fail("model_unavailable", 422);
   const n = scalar(value, "/n", 400),
     stream = scalar(value, "/stream", 400);
   if (n !== undefined && smallInteger(n, 128, 422) !== 1) fail("unsupported_choice_count", 422);
@@ -364,40 +455,13 @@ function prepare(input: GuestInput, value: DocumentInput) {
   if (tools) body.tools = tools;
   if (toolConfig) body.toolConfig = toolConfig;
   body.generationConfig = generation;
-  const auth =
-    input.config.auth === "api-key"
-      ? { type: "api-key", header: "x-goog-api-key" }
-      : input.config.auth === "none"
-        ? { type: "none" }
-        : input.config.auth === "google-oauth"
-          ? { type: "google-oauth" }
-          : { type: "bearer" };
-  const method = stream === true ? "streamGenerateContent?alt=sse" : "generateContent";
-  let path = `/v1beta/models/${upstream}:${method}`;
-  if (input.config.path_style === "vertex") {
-    const project = input.config.project,
-      location = input.config.location;
-    if (
-      typeof project !== "string" ||
-      !/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(project) ||
-      typeof location !== "string" ||
-      !/^[a-z0-9-]{1,40}$/.test(location)
-    )
-      fail("unsupported_capability", 422);
-    path = `/v1/projects/${project}/locations/${location}/publishers/google/models/${upstream}:${method}`;
-  }
   return {
     abi_version: 1,
     kind: "prepared",
     request: {
       method: "POST",
-      path,
-      headers: {
-        "content-type": "application/json",
-        accept: stream ? "text/event-stream" : "application/json",
-      },
+      ...target(input, upstream, stream === true),
       body: compose(value.document.handle, body),
-      auth,
       manifest: {
         operation: "chat",
         model: value.model,
@@ -543,6 +607,87 @@ function candidate(value: DocumentInput, firstTool: number) {
         : finishReason(reason, calls.length > 0 || firstTool > 0),
   };
 }
+const nativePointers = [
+  "/*",
+  "/candidates",
+  "/candidates/0/finishReason",
+  "/promptFeedback/blockReason",
+  "/usageMetadata/promptTokenCount",
+  "/usageMetadata/toolUsePromptTokenCount",
+  "/usageMetadata/candidatesTokenCount",
+  "/usageMetadata/cachedContentTokenCount",
+  "/usageMetadata/thoughtsTokenCount",
+];
+function nativeFinish(value: DocumentInput) {
+  if (fact(value, "/error").kind !== "missing") fail("upstream_error");
+  const listed = fact(value, "/candidates");
+  if (listed.kind === "missing") {
+    const blocked = scalar(value, "/promptFeedback/blockReason");
+    if (typeof blocked !== "string" || !blocked || blocked === "BLOCK_REASON_UNSPECIFIED")
+      fail("invalid_choices");
+    return "content_filter";
+  }
+  if (listed.kind !== "array" || count(value, "/candidates") !== 1) fail("invalid_choices");
+  const reason = scalar(value, "/candidates/0/finishReason");
+  return reason === undefined || reason === null ? "" : finishReason(reason, false);
+}
+function nativeBody(value: DocumentInput, model: string) {
+  return {
+    document: value.document.handle,
+    edits:
+      fact(value, "/modelVersion").kind === "missing"
+        ? []
+        : [{ op: "set", pointer: "/modelVersion", value: JSON.stringify(model) }],
+  };
+}
+function responseNative(value: DocumentInput) {
+  if (!Object.hasOwn(value.inspection, "/candidates")) return inspect(value, nativePointers);
+  const finish = nativeFinish(value);
+  if (!finish) fail("invalid_finish_reason");
+  let usage = measure(value, null);
+  if (usage?.input_tokens === undefined) fail("invalid_upstream_usage");
+  if (usage.output_tokens === undefined) usage = { ...usage, output_tokens: "0" };
+  return {
+    abi_version: 1,
+    kind: "output",
+    consumed: 0,
+    chunks: [],
+    body: nativeBody(value, value.model!),
+    usage,
+    finality: finality(usage),
+    terminal: {
+      kind: ["length", "content_filter"].includes(finish) ? "incomplete" : "complete",
+      bytes: "",
+    },
+    needs_input: false,
+  };
+}
+function nativeFrame(state: State, value: FrameInput) {
+  const frame = value.frame;
+  if (!Object.hasOwn(value.inspection, "/candidates")) return inspect(value, nativePointers);
+  state.lastFrame = frame.ordinal;
+  if (frame.event.value !== "" && frame.event.value !== "message") fail("invalid_stream");
+  const finish = nativeFinish(value);
+  state.usage = measure(value, state.usage);
+  const body = nativeBody(value, state.model);
+  if (!finish)
+    return output(state, {
+      handle: frame.handle,
+      disposition: "emit",
+      ...(body.edits.length ? { body } : {}),
+    });
+  if (state.usage?.input_tokens === undefined) fail("usage_required");
+  if (state.usage.output_tokens === undefined) state.usage = { ...state.usage, output_tokens: "0" };
+  state.done = true;
+  return output(
+    state,
+    { handle: frame.handle, disposition: "hold", ...(body.edits.length ? { body } : {}) },
+    {
+      kind: ["length", "content_filter"].includes(finish) ? "incomplete" : "complete",
+      bytes: "",
+    },
+  );
+}
 function response(_input: GuestInput, value: DocumentInput) {
   if (!value.document || !value.inspection || typeof value.model !== "string" || !value.model)
     fail("invalid_request");
@@ -602,6 +747,7 @@ function streamFrame(state: State, value: FrameInput) {
     state.lastFrame = frame.ordinal;
     return output(state, { handle: frame.handle, disposition: "drop" });
   }
+  if (state.native) return nativeFrame(state, value);
   if (!Object.hasOwn(value.inspection, "/responseId")) return inspect(value, candidatePointers);
   state.lastFrame = frame.ordinal;
   if (frame.event.value !== "" && frame.event.value !== "message") fail("invalid_stream");
@@ -673,8 +819,13 @@ export function invoke() {
       };
     if (input.hook === "prepare")
       return { result: prepare(input, document() as DocumentInput), state: null };
-    if (input.hook === "response")
-      return { result: response(input, document() as DocumentInput), state: null };
+    if (input.hook === "response") {
+      const value = document() as DocumentInput;
+      return {
+        result: value.protocol === "gemini" ? responseNative(value) : response(input, value),
+        state: null,
+      };
+    }
     if (input.hook === "error")
       return {
         result: { abi_version: 1, kind: "failure", status: 502, code: "upstream_error" },
@@ -685,7 +836,14 @@ export function invoke() {
     if (input.hook === "stream_open") {
       const payload = object(exactParse(new TextDecoder().decode(bytes), 400));
       if (typeof payload.model !== "string" || !payload.model) fail("invalid_model", 400);
+      if (
+        payload.protocol !== undefined &&
+        payload.protocol !== "chat" &&
+        payload.protocol !== "gemini"
+      )
+        fail("unsupported_semantics", 422);
       const state: State = {
+        native: payload.protocol === "gemini",
         session: input.session.id,
         sequence: input.session.sequence,
         model: payload.model,

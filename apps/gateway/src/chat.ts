@@ -211,7 +211,12 @@ async function plan(
   try {
     const transformed = await attempt.transformJSON(
       "prepare",
-      { protocol: facts.protocol, operation: facts.protocol, model: facts.model },
+      {
+        protocol: facts.protocol,
+        operation: facts.protocol,
+        model: facts.model,
+        ...(request.path ? { stream: request.path.stream } : {}),
+      },
       request.body,
       request.signal,
     );

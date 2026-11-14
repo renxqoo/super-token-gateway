@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { anthropicMessagesReleaseId } from "@gateway/plugin-sdk";
+import { anthropicMessagesReleaseId, geminiGenerateReleaseId } from "@gateway/plugin-sdk";
 import { syntheticAdminKey } from "../support/catalog.ts";
 import { settledCharge, withGatewayStack, type UpstreamCall } from "../support/gateway-process.ts";
 
@@ -69,12 +69,12 @@ async function allowOperation(stack: Stack, operation: string) {
   expect(tariff.status).toBe(201);
 }
 
-async function bindAnthropic(stack: Stack) {
+async function bind(stack: Stack, releaseId: string, maxOutputTokens = 100) {
   const { f, setup } = stack;
   const installed = await f.catalog.application.installBundled(await f.catalog.actor(), {
     command_id: crypto.randomUUID(),
-    release_id: anthropicMessagesReleaseId,
-    reason: "Synthetic Anthropic installation",
+    release_id: releaseId,
+    reason: "Synthetic native protocol installation",
   });
   const bound = await f.catalog.request(
     `/providers/${setup.provider.id}/plugin-binding`,
@@ -86,7 +86,7 @@ async function bindAnthropic(stack: Stack) {
       secret_reference: `channel:${setup.provider.id}`,
       config: {
         model_map: { [setup.model]: "synthetic" },
-        max_output_tokens: 100,
+        max_output_tokens: maxOutputTokens,
         max_input_tokens: 1000,
         auth: "api-key",
       },
@@ -110,7 +110,7 @@ test(
   () =>
     withGatewayStack({ reply }, async (stack) => {
       await allowOperation(stack, "messages");
-      await bindAnthropic(stack);
+      await bind(stack, anthropicMessagesReleaseId);
       const request = {
         max_tokens: 30,
         system: [{ type: "text", text: "规则", cache_control: { type: "ephemeral" } }],
@@ -163,6 +163,89 @@ test(
       expect(response.status).toBe(503);
       expect(((await response.json()) as { error: { code: string } }).error.code).toBe("no_route");
       expect(stack.received).toHaveLength(0);
+    }),
+  120000,
+);
+
+const geminiFrames = [
+  {
+    candidates: [{ content: { role: "model", parts: [{ text: "合成" }] } }],
+    usageMetadata: { promptTokenCount: 30 },
+    modelVersion: "synthetic-001",
+  },
+  {
+    candidates: [{ content: { role: "model", parts: [{ text: "回复" }] }, finishReason: "STOP" }],
+    usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 15 },
+    modelVersion: "synthetic-001",
+  },
+];
+const geminiResponse = {
+  candidates: [{ content: { role: "model", parts: [{ text: "合成回复" }] }, finishReason: "STOP" }],
+  usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 15 },
+  modelVersion: "synthetic-001",
+  responseId: "gem-1",
+};
+
+function geminiReply(call: UpstreamCall) {
+  if (call.path.includes(":streamGenerateContent"))
+    return new Response(
+      geminiFrames.map((frame) => `data: ${JSON.stringify(frame)}\r\n\r\n`).join(""),
+      {
+        headers: { "content-type": "text/event-stream" },
+      },
+    );
+  return Response.json(geminiResponse);
+}
+
+test(
+  "a Gemini client is served natively through the generateContent paths with the model and stream taken from the URL, the configured output ceiling filled in, and exact settlement",
+  () =>
+    withGatewayStack({ reply: geminiReply }, async (stack) => {
+      await allowOperation(stack, "gemini");
+      await bind(stack, geminiGenerateReleaseId, 40);
+      const request = {
+        contents: [{ role: "user", parts: [{ text: "你好" }] }],
+        generationConfig: { temperature: 0.5 },
+      };
+      const send = (method: string) =>
+        fetch(`${stack.gateway.origin}/v1beta/models/${stack.setup.model}:${method}`, {
+          method: "POST",
+          headers: { "x-goog-api-key": stack.setup.key.key, "content-type": "application/json" },
+          body: JSON.stringify(request),
+        });
+      const json = await send("generateContent");
+      expect(json.status).toBe(200);
+      expect(await json.json()).toEqual({ ...geminiResponse, modelVersion: stack.setup.model });
+      const call = stack.received.at(-1)!;
+      expect(call.path).toBe("/v1beta/models/synthetic:generateContent");
+      expect(call.googKey).toBeString();
+      expect(call.body).toEqual({
+        ...request,
+        generationConfig: { temperature: 0.5, maxOutputTokens: 40 },
+      });
+      expect(await settledCharge(stack.db, json.headers.get("x-request-id")!)).toMatchObject({
+        state: "SUCCEEDED",
+      });
+
+      const streamed = await send("streamGenerateContent");
+      expect(streamed.status).toBe(200);
+      const frames = (await streamed.text())
+        .split(/\r?\n\r?\n/)
+        .filter(Boolean)
+        .map((frame) => JSON.parse(frame.replace(/^data: /, "")));
+      expect(frames).toEqual(
+        geminiFrames.map((frame) => ({ ...frame, modelVersion: stack.setup.model })),
+      );
+      expect(stack.received.at(-1)!.path).toBe(
+        "/v1beta/models/synthetic:streamGenerateContent?alt=sse",
+      );
+      expect(await settledCharge(stack.db, streamed.headers.get("x-request-id")!)).toMatchObject({
+        state: "SUCCEEDED",
+      });
+
+      const unknown = await send("countTokens");
+      expect(unknown.status).toBe(404);
+      expect(stack.received).toHaveLength(2);
     }),
   120000,
 );

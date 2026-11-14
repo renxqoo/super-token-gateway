@@ -116,6 +116,7 @@ export const jsonMetadataSchema = z
     protocol: z.enum(protocols).optional(),
     operation: z.enum(operations).optional(),
     model: identity,
+    stream: z.boolean().optional(),
   })
   .strict();
 export const capabilitiesSchema = z
