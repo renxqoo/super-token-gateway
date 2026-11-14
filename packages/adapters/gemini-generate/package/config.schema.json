@@ -24,7 +24,20 @@
     "auth": {
       "type": "string",
       "maxLength": 20,
-      "enum": ["none", "bearer", "api-key"]
+      "enum": ["none", "bearer", "api-key", "google-oauth"]
+    },
+    "path_style": {
+      "type": "string",
+      "maxLength": 20,
+      "enum": ["gemini", "vertex"]
+    },
+    "project": {
+      "type": "string",
+      "maxLength": 63
+    },
+    "location": {
+      "type": "string",
+      "maxLength": 40
     }
   }
 }

@@ -1,7 +1,7 @@
 {
   "packages/adapters/gemini-generate/plugin.ts": {
-    "bytes": 27754,
-    "sha256": "52c85dc6d135bfcac52743c801e9f574e0391fbdb221805c813fedf8e0ac64fb"
+    "bytes": 28349,
+    "sha256": "9b2b54694c71746c048dce78934aa1678d79797d994a8648b57a6abe7dc3102d"
   },
   "packages/adapters/gemini-generate/plugin.d.ts": {
     "bytes": 59,
@@ -12,16 +12,16 @@
     "sha256": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2"
   },
   "packages/adapters/gemini-generate/package/module.wasm": {
-    "bytes": 2508376,
-    "sha256": "d067a206eb7296252efd5fe49a6b9c8b88fd9ee5d8daca543014ae490845664c"
+    "bytes": 2507679,
+    "sha256": "6626a5ae44ca8c85556f2ccd9403227598f04e20fb5ff06fb6ec3d4afffbdf0d"
   },
   "packages/adapters/gemini-generate/package/manifest.json": {
-    "bytes": 754,
-    "sha256": "d877615ce38465e04cc4cae581ba808e03ca01f6218385bc620e702f7e4396d7"
+    "bytes": 770,
+    "sha256": "ab6a7651574c2e2b700c5b5d53c1dc6da4512242a2f7b64c5fb148694efe316d"
   },
   "packages/adapters/gemini-generate/package/config.schema.json": {
-    "bytes": 646,
-    "sha256": "dab73682f6a54db8d5ff618bc4ad2eb5193431dd22db69d8e170f4c2c331434e"
+    "bytes": 912,
+    "sha256": "506a2b3c625b80e332c18a287293490b7ad35aa3bace833fb0865c993959914f"
   },
   "packages/adapters/gemini-generate/package/fixtures/cases.json": {
     "bytes": 9406,

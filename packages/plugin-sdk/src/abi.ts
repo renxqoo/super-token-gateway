@@ -128,9 +128,9 @@ export const capabilitiesSchema = z
       .max(4),
     hooks: z.array(z.enum(hooks)).min(1).max(32),
     auth: z
-      .array(z.enum(["none", "bearer", "api-key"]))
+      .array(z.enum(["none", "bearer", "api-key", "google-oauth"]))
       .min(1)
-      .max(3),
+      .max(4),
     resources: z.boolean(),
     balance: z.boolean(),
     stream_codec: z.enum(["sse", "none"]),
@@ -232,6 +232,7 @@ export const preparedSchema = z
     auth: z.discriminatedUnion("type", [
       z.object({ type: z.literal("none") }).strict(),
       z.object({ type: z.literal("bearer") }).strict(),
+      z.object({ type: z.literal("google-oauth") }).strict(),
       z
         .object({
           type: z.literal("api-key"),

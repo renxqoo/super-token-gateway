@@ -5140,7 +5140,7 @@
                     "enum": [
                       "gateway.openai-chat-1.1.0",
                       "gateway.anthropic-messages-1.0.0",
-                      "gateway.gemini-generate-1.0.0"
+                      "gateway.gemini-generate-1.1.0"
                     ]
                   },
                   "reason": {

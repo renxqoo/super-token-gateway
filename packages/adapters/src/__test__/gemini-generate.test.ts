@@ -26,12 +26,16 @@ const config = {
   max_input_tokens: 10000,
   auth: "api-key",
 };
-async function run(hook: "prepare" | "response", body: unknown) {
+async function run(
+  hook: "prepare" | "response",
+  body: unknown,
+  overrides: Record<string, unknown> = {},
+) {
   const a = host.create(signed.pkg, {
     tenant: "synthetic-tenant",
     attempt: crypto.randomUUID(),
     incarnation: crypto.randomUUID(),
-    config,
+    config: { ...config, ...overrides },
     deadlineAt: Date.now() + 30000,
   });
   try {
@@ -157,6 +161,39 @@ test("streaming prepare targets streamGenerateContent with SSE and refuses usage
       })
     ).result,
   ).toMatchObject({ kind: "failure", status: 422, code: "usage_required" });
+});
+
+test("Vertex path style targets the project and location publisher model with host google-oauth", async () => {
+  const vertex = {
+    path_style: "vertex",
+    project: "synthetic-project",
+    location: "us-central1",
+    auth: "google-oauth",
+  };
+  const request = { model: "logical", messages: [{ role: "user", content: "hi" }] };
+  expect((await run("prepare", request, vertex)).result).toMatchObject({
+    kind: "prepared",
+    request: {
+      path: "/v1/projects/synthetic-project/locations/us-central1/publishers/google/models/gemini-upstream:generateContent",
+      auth: { type: "google-oauth" },
+    },
+  });
+  expect((await run("prepare", { ...request, stream: true }, vertex)).result).toMatchObject({
+    request: {
+      path: "/v1/projects/synthetic-project/locations/us-central1/publishers/google/models/gemini-upstream:streamGenerateContent?alt=sse",
+    },
+  });
+  const { project: _project, ...projectless } = vertex;
+  for (const invalid of [
+    projectless,
+    { ...vertex, project: "Bad_Project" },
+    { ...vertex, location: "us/central1" },
+  ])
+    expect((await run("prepare", request, invalid)).result).toMatchObject({
+      kind: "failure",
+      status: 422,
+      code: "unsupported_capability",
+    });
 });
 
 test("unrepresentable chat semantics are refused instead of silently dropped", async () => {

@@ -199,6 +199,7 @@ export const candidateRefV1Schema = z.strictObject({
 export const dispatchAuthSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("none") }),
   z.strictObject({ type: z.literal("bearer") }),
+  z.strictObject({ type: z.literal("google-oauth") }),
   z.strictObject({
     type: z.literal("api-key"),
     header: z.enum(["api-key", "x-api-key", "x-goog-api-key"]),

@@ -3,7 +3,7 @@ import { z } from "zod";
 
 export const openAIChatReleaseId = "gateway.openai-chat-1.1.0" as const;
 export const anthropicMessagesReleaseId = "gateway.anthropic-messages-1.0.0" as const;
-export const geminiGenerateReleaseId = "gateway.gemini-generate-1.0.0" as const;
+export const geminiGenerateReleaseId = "gateway.gemini-generate-1.1.0" as const;
 export const bundledReleaseIds = [
   openAIChatReleaseId,
   anthropicMessagesReleaseId,

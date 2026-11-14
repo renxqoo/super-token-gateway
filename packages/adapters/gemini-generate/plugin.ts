@@ -369,13 +369,29 @@ function prepare(input: GuestInput, value: DocumentInput) {
       ? { type: "api-key", header: "x-goog-api-key" }
       : input.config.auth === "none"
         ? { type: "none" }
-        : { type: "bearer" };
+        : input.config.auth === "google-oauth"
+          ? { type: "google-oauth" }
+          : { type: "bearer" };
+  const method = stream === true ? "streamGenerateContent?alt=sse" : "generateContent";
+  let path = `/v1beta/models/${upstream}:${method}`;
+  if (input.config.path_style === "vertex") {
+    const project = input.config.project,
+      location = input.config.location;
+    if (
+      typeof project !== "string" ||
+      !/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(project) ||
+      typeof location !== "string" ||
+      !/^[a-z0-9-]{1,40}$/.test(location)
+    )
+      fail("unsupported_capability", 422);
+    path = `/v1/projects/${project}/locations/${location}/publishers/google/models/${upstream}:${method}`;
+  }
   return {
     abi_version: 1,
     kind: "prepared",
     request: {
       method: "POST",
-      path: `/v1beta/models/${upstream}:${stream === true ? "streamGenerateContent?alt=sse" : "generateContent"}`,
+      path,
       headers: {
         "content-type": "application/json",
         accept: stream ? "text/event-stream" : "application/json",

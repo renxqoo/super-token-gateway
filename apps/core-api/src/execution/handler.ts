@@ -1,4 +1,4 @@
-import { Limits, orderRouteCandidates } from "@gateway/runtime";
+import { Limits, orderRouteCandidates, VertexTokens } from "@gateway/runtime";
 import type { SQL } from "bun";
 import { z } from "zod";
 import {
@@ -7,6 +7,7 @@ import {
   candidateMetadataSchema,
   executionReceiptSchema,
   transientSendSchema,
+  dispatchAuthSchema,
   hostAuthorizationPlanV1Schema,
   type ExecutionKind,
   type CoreVerifiedCallerProjection,
@@ -84,6 +85,21 @@ export function createExecutionHandler(
     (options.maxAttempts ?? 3) > 5
   )
     throw new Error("Invalid attempt budget");
+  const cloudTokens = new VertexTokens();
+  async function material(
+    auth: z.infer<typeof dispatchAuthSchema>,
+    secret: Buffer,
+    signal: AbortSignal,
+  ) {
+    if (auth.type === "none") return { type: "none" };
+    if (auth.type !== "google-oauth") return { ...auth, value: secret.toString() };
+    const encoded = secret.toString();
+    if (!/^[A-Za-z0-9_-]+$/.test(encoded)) return undefined;
+    const token = await cloudTokens
+      .get(Buffer.from(encoded, "base64url").toString("utf8"), signal)
+      .catch(() => undefined);
+    return token ? { type: "bearer", value: token } : undefined;
+  }
   const store = createExecutionStore(db),
     routingLimits = new Limits(options.redisUrls, options.quotaNamespace),
     quota = createQuotaLeases({
@@ -482,6 +498,14 @@ export function createExecutionHandler(
                 );
           if (secret.length > 4096 || [...secret].some((byte) => byte < 33 || byte > 126))
             throw new Error("credential_invalid");
+          const authMaterial = await material(auth, secret, AbortSignal.timeout(remaining));
+          const left = Math.floor(
+            Math.min(
+              proofDeadline - performance.now(),
+              Date.parse(receipt.deadline_at!) - Date.now(),
+            ),
+          );
+          if (!authMaterial || left <= 1000) return { receipt };
           const transient = transientSendSchema.parse({
             grant_id: crypto.randomUUID(),
             owner_session_id: p.session_id,
@@ -490,9 +514,8 @@ export function createExecutionHandler(
             permit_epoch: data.permit_epoch,
             authorization_plan_digest: data.authorization_plan_digest,
             deadline_at: receipt.deadline_at,
-            remaining_ms: remaining,
-            auth_material:
-              auth.type === "none" ? { type: "none" } : { ...auth, value: secret.toString() },
+            remaining_ms: left,
+            auth_material: authMaterial,
           });
           if (proofDeadline <= performance.now() + 1000) return { receipt };
           return { receipt, transient_send: transient };
