@@ -257,6 +257,7 @@ export type UpstreamCall = {
   path: string;
   apiKey: string | null;
   azureKey: string | null;
+  googKey: string | null;
   authorization: string | null;
   body: Record<string, unknown>;
   signal: AbortSignal;
@@ -311,6 +312,7 @@ export function withGatewayStack(
             path: new URL(request.url).pathname + new URL(request.url).search,
             apiKey: request.headers.get("x-api-key"),
             azureKey: request.headers.get("api-key"),
+            googKey: request.headers.get("x-goog-api-key"),
             authorization: request.headers.get("authorization"),
             body: (await request.json()) as Record<string, unknown>,
             signal: request.signal,

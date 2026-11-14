@@ -1,4 +1,10 @@
-import { openAIChatReleaseId, type BundledReleaseId, type PackageFile } from "@gateway/plugin-sdk";
+import {
+  anthropicMessagesReleaseId,
+  geminiGenerateReleaseId,
+  openAIChatReleaseId,
+  type BundledReleaseId,
+  type PackageFile,
+} from "@gateway/plugin-sdk";
 import { fileURLToPath } from "node:url";
 async function packageFiles(name: string): Promise<PackageFile[]> {
   const root = new URL(`../${name}/package/`, import.meta.url);
@@ -13,8 +19,14 @@ export function openAIChatPackageFiles(): Promise<PackageFile[]> {
 export function anthropicMessagesPackageFiles(): Promise<PackageFile[]> {
   return packageFiles("anthropic-messages");
 }
+export function geminiGeneratePackageFiles(): Promise<PackageFile[]> {
+  return packageFiles("gemini-generate");
+}
+const bundledPackages: Record<BundledReleaseId, () => Promise<PackageFile[]>> = {
+  [openAIChatReleaseId]: openAIChatPackageFiles,
+  [anthropicMessagesReleaseId]: anthropicMessagesPackageFiles,
+  [geminiGenerateReleaseId]: geminiGeneratePackageFiles,
+};
 export function bundledPackageFiles(releaseId: BundledReleaseId): Promise<PackageFile[]> {
-  return releaseId === openAIChatReleaseId
-    ? openAIChatPackageFiles()
-    : anthropicMessagesPackageFiles();
+  return bundledPackages[releaseId]();
 }

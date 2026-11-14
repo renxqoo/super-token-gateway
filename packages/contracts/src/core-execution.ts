@@ -179,7 +179,7 @@ export const transientSendSchema = z.strictObject({
     z.strictObject({ type: z.literal("bearer"), value: z.string().max(4096) }),
     z.strictObject({
       type: z.literal("api-key"),
-      header: z.enum(["api-key", "x-api-key"]),
+      header: z.enum(["api-key", "x-api-key", "x-goog-api-key"]),
       value: z.string().max(4096),
     }),
   ]),

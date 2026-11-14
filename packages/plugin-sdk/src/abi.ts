@@ -232,7 +232,12 @@ export const preparedSchema = z
     auth: z.discriminatedUnion("type", [
       z.object({ type: z.literal("none") }).strict(),
       z.object({ type: z.literal("bearer") }).strict(),
-      z.object({ type: z.literal("api-key"), header: z.enum(["api-key", "x-api-key"]) }).strict(),
+      z
+        .object({
+          type: z.literal("api-key"),
+          header: z.enum(["api-key", "x-api-key", "x-goog-api-key"]),
+        })
+        .strict(),
     ]),
     manifest: z
       .object({

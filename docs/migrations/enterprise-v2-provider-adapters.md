@@ -24,7 +24,7 @@
 | j1 组合能力      | E1–E3 宿主实现、SDK schema、真实 helper 用例                      | 复制/解析/序列化/拼接、精确数字与 UTF-8、越界/冲突/非 null 槽/预算拒绝；旧包不变 |
 | j2 Anthropic     | `gateway.anthropic-messages` 插件 JSON/SSE、工具、usage、内置发布 | fixtures + 真实 Gateway→插件→mock 上游链路                                       |
 | j3 OpenAI 兼容族 | deepseek/ollama/azure 由配置覆盖路径/认证                         | Azure deployment 路径与 api-version、api-key；DeepSeek 缓存用量                  |
-| j4 Gemini/Vertex | Gemini 插件与 `google-oauth`                                      | Vertex 令牌刷新只在宿主；Gemini SSE                                              |
+| j4 Gemini/Vertex | Gemini 插件（j4a）与 Vertex `google-oauth`（j4b）                 | Vertex 令牌刷新只在宿主；Gemini SSE                                              |
 | j5 Bedrock       | `aws-eventstream` codec 与 `aws-sigv4`                            | 二进制帧边界/CRC/截断、签名绑定最终请求                                          |
 | j6 入站协议      | responses/messages/gemini 入口                                    | 与 legacy connectors 回归用例等价                                                |
 | j7 验收          | 自审、全量门禁、legacy connectors 退役条件                        | 同 T07 g4                                                                        |
@@ -35,12 +35,14 @@
 - **j2 Anthropic**：`packages/adapters/anthropic-messages`（`gateway.anthropic-messages-1.0.0`）。chat→messages：system/developer 提升为 `system` 文本块；user 文本与 http(s) 图片 URL；assistant 文本与 `tool_calls`→`tool_use`（空参数为 `{}`，参数串经 compose `parse`，非法为 400）；`tool`→`tool_result`；tools/tool_choice/parallel_tool_calls/stop/temperature/top_p/user 映射；`x-api-key` 与 `anthropic-version: 2023-06-01`。顶层与消息字段按白名单枚举，未声明字段、data URI 图片、`name`、strict 工具、`n>1` 均显式 422。响应与 SSE 转为 chat completion / chunk：多段文本 `concat`、`tool_use.input` `stringify`、stop_reason 与 legacy 相同映射、缓存用量拆为 `cached_input_tokens`/`cache_write_tokens`；SSE 丢弃 ping 与块边界帧，finish 帧与 usage 帧连同 `[DONE]` 作为终态候选保留到耐久屏障之后。
 - **E5 内置集合**：`bundledReleaseIds` = openai-chat 与 anthropic-messages；policy `release_ids`/`releases` 接受集合内 ID，Core 校验按 release 选择对应仓库内置文件；`plugins:sign-bundled` 增加必填 `--release-id`。
 - **j3 OpenAI 兼容族**：不新建插件，`gateway.openai-chat` 升为 1.1.0 并增加配置：`path_style: "azure"` + `api_version`（`YYYY-MM-DD[-preview]`，guest 校验）发往 `/openai/deployments/<upstream_model>/chat/completions?api-version=…`，部署名限 `[A-Za-z0-9._-]{1,64}`；配合 `auth: "api-key"`（`api-key` 头）。`output_field: "max_tokens"` 以 `max_tokens` 下发输出上限并把客户端 `max_completion_tokens` 改名，供 Ollama 等旧兼容端。DeepSeek 直接用默认配置（bearer，`/v1/chat/completions`），`prompt_cache_hit_tokens`/`prompt_cache_miss_tokens` 用量 1.0.0 已支持；Ollama 用 `auth: "none"`。legacy 的 Azure `apiVersion` 存于密文 JSON，v2 改为非秘密的绑定配置，密文只放 key。
+- **j4a Gemini**：`packages/adapters/gemini-generate`（`gateway.gemini-generate-1.0.0`），发往 `/v1beta/models/<upstream_model>:generateContent` 或 `:streamGenerateContent?alt=sse`，`auth: "api-key"` 使用 `x-goog-api-key`（ABI 与 Core 契约的 api-key 头枚举增加该值）。前缀 system/developer 合并为 `systemInstruction`，非前缀 system 422（同 legacy）；assistant `tool_calls`→`functionCall`（含 id，参数经 compose `parse`），连续 `tool` 消息按 `tool_call_id` 回查函数名并合并为一个 user 回合的 `functionResponse`（`response: {result}`）；tools→`functionDeclarations`/`parametersJsonSchema`，tool_choice→`functionCallingConfig`；`parallel_tool_calls: false`、`user`、图片、strict 工具 422。响应：单候选，文本 concat，`functionCall` 转 tool_calls（无 id 时 `call_<n>`），`STOP` 且有函数调用时为 `tool_calls`，安全类原因为 `content_filter`，prompt 被拦截时输出空内容的 `content_filter`；`thought` 部分 502 unsupported。用量与 legacy 相同：input = prompt + toolUsePrompt - cached，output = candidates + thoughts，reasoning = thoughts。SSE 无终止事件：带 `finishReason` 的帧携带最后增量与 finish 作为保留终态，usage 块与 `[DONE]` 以 `extra` 追加；其后数据或 EOF 前无 finish 均失败。
 - **构建**：`scripts/build-plugins.ts` 支持 `--adapter <name...>`，默认构建全部。
-- **测试**：`json-documents` 单测 3 例；`packages/adapters/src/__test__/anthropic-messages.test.ts` 4 例（含 14 个 fixture case/20 步经真实 helper）；`tests/integration/gateway-anthropic.test.ts` 1 例（真实 Gateway→插件→TLS 上游 JSON 与 SSE、结算 SUCCEEDED）。；j3：`openai-chat.test.ts` 新增 3 例（Azure 路径/认证、Azure 配置拒绝、max_tokens 字段），`tests/integration/gateway-openai-compatible.test.ts` 1 例（真实 Gateway 发往 Azure deployment 路径并结算）。
+- **测试**：`json-documents` 单测 3 例；`packages/adapters/src/__test__/anthropic-messages.test.ts` 4 例（含 14 个 fixture case/20 步经真实 helper）；`tests/integration/gateway-anthropic.test.ts` 1 例（真实 Gateway→插件→TLS 上游 JSON 与 SSE、结算 SUCCEEDED）。；j3：`openai-chat.test.ts` 新增 3 例（Azure 路径/认证、Azure 配置拒绝、max_tokens 字段），`tests/integration/gateway-openai-compatible.test.ts` 1 例（真实 Gateway 发往 Azure deployment 路径并结算）。；j4a：`gemini-generate.test.ts` 6 例（含 9 个 fixture case/14 步经真实 helper），`tests/integration/gateway-gemini.test.ts` 1 例（真实 Gateway JSON 与 CRLF SSE、`x-goog-api-key`、结算 SUCCEEDED）。
 
 ## 5. 已知差异与未完成
 
 - chat 响应 `created` 为 0：guest 无可信时钟，legacy 使用当前时间。
 - data URI 图片（需拆分 media type/base64）在 Anthropic 插件中 422，legacy 支持；需要新的通用字符串切分能力，未在 j2 实现。
 - 单轮 inspection 展开 ≤4096 个事实且事实 JSON ≤256KiB，超长对话会以宿主预算错误失败，而不是降级。
-- j4–j7 尚未开始。
+- Gemini 插件不支持图片（data URI 需切分，`gs://` 需 mime），legacy 支持。
+- j4b（Vertex）与 j5–j7 尚未开始。

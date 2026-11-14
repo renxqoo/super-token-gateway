@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 test("checked-in WASM cannot silently drift from its TypeScript SDK, adapter and pinned builder", async () => {
-  for (const adapter of ["openai-chat", "anthropic-messages"]) {
+  for (const adapter of ["openai-chat", "anthropic-messages", "gemini-generate"]) {
     const hashes = (await Bun.file(
       `packages/adapters/${adapter}/package/source-hashes.json`,
     ).json()) as Record<string, { bytes: number; sha256: string }>;

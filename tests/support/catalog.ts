@@ -8,6 +8,7 @@ import { createCatalogApplication } from "../../apps/core-api/src/plugins/applic
 import { catalogRoutes } from "../../apps/core-api/src/plugins/http.ts";
 import {
   anthropicMessagesReleaseId,
+  geminiGenerateReleaseId,
   openAIChatReleaseId,
   type BundledReleaseId,
   type ReleasePolicy,
@@ -92,6 +93,7 @@ export async function prepareCatalog(db: SQL) {
     };
     const openAI = await signRelease(openAIChatReleaseId),
       anthropic = await signRelease(anthropicMessagesReleaseId),
+      gemini = await signRelease(geminiGenerateReleaseId),
       release = openAI.signed;
     const policy: ReleasePolicy = {
       format: 1,
@@ -105,10 +107,10 @@ export async function prepareCatalog(db: SQL) {
           expires_at: "2099-01-01T00:00:00.000Z",
           revoked: false,
           purposes: ["package", "release"],
-          release_ids: [openAIChatReleaseId, anthropicMessagesReleaseId],
+          release_ids: [openAIChatReleaseId, anthropicMessagesReleaseId, geminiGenerateReleaseId],
         },
       ],
-      releases: [openAI.entry, anthropic.entry],
+      releases: [openAI.entry, anthropic.entry, gemini.entry],
       publishers: [
         {
           id: "synthetic-publisher",
