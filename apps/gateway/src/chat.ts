@@ -8,7 +8,8 @@ import {
   type SignedCoreEvidenceEventV1,
 } from "@gateway/contracts";
 import { CoreRpcError, type createCoreRpcClient } from "@gateway/core-client";
-import { canonical, type Protocol } from "@gateway/kernel";
+import { requestCharacters } from "@gateway/adapters/protocol";
+import { canonical, protocols, type Operation, type Protocol } from "@gateway/kernel";
 import {
   observeAttempt,
   type AbiResult,
@@ -40,7 +41,7 @@ export type ChatDependencies = {
 
 export type ChatRequest = {
   requestId: string;
-  protocol: Protocol;
+  operation: Operation;
   path?: { model: string; stream: boolean };
   body: Uint8Array;
   token: string;
@@ -53,7 +54,9 @@ export type ChatRequest = {
 type Attempt = ReturnType<ReturnType<typeof createPluginAttempts>["create"]>;
 type Bridge = ReturnType<typeof observeAttempt>;
 type Facts = {
-  protocol: Protocol;
+  operation: Operation;
+  protocol: Protocol | undefined;
+  inputCharacters: number | undefined;
   model: string;
   stream: boolean;
   fingerprint: string;
@@ -62,7 +65,7 @@ type Facts = {
 };
 type Candidate = ExecutionContextResponse["candidates"][number];
 type Plan = {
-  converted: boolean;
+  converted: Protocol | undefined;
   attempt: Attempt;
   attemptId: string;
   channelId: string;
@@ -155,8 +158,13 @@ function requestFacts(request: ChatRequest, totalTimeoutMs: number): Facts {
   const model = request.path ? request.path.model : value.model;
   if (typeof model !== "string" || !model)
     throw new GatewayError(400, "invalid_request", "A model is required");
+  const protocol = (protocols as readonly string[]).includes(request.operation)
+    ? (request.operation as Protocol)
+    : undefined;
   return {
-    protocol: request.protocol,
+    operation: request.operation,
+    protocol,
+    inputCharacters: requestCharacters(request.operation, value as Record<string, unknown>),
     model,
     stream: request.path ? request.path.stream : value.stream === true,
     fingerprint: sha256(body),
@@ -190,7 +198,7 @@ async function openContext(deps: ChatDependencies, request: ChatRequest, facts: 
         {
           customer_token: request.token,
           ip: request.ip,
-          operation: facts.protocol,
+          operation: facts.operation,
           model: facts.model,
           fingerprint: facts.fingerprint,
         },
@@ -221,20 +229,20 @@ async function plan(
     deadlineAt: Date.parse(facts.deadlineAt),
   });
   try {
-    const converted = !pkg.manifest.capabilities.operations.includes(facts.protocol);
+    const source = facts.protocol;
+    const converted =
+      source !== undefined && !pkg.manifest.capabilities.operations.includes(facts.operation);
     const transformed = await attempt.transformJSON(
       "prepare",
       converted
         ? { protocol: "chat", operation: "chat", model: facts.model }
         : {
-            protocol: facts.protocol,
-            operation: facts.protocol,
+            ...(source ? { protocol: source } : {}),
+            operation: facts.operation,
             model: facts.model,
             ...(request.path ? { stream: request.path.stream } : {}),
           },
-      converted
-        ? requestAsChat(request.body, facts.protocol, facts.model, request.path)
-        : request.body,
+      converted ? requestAsChat(request.body, source, facts.model, request.path) : request.body,
       request.signal,
     );
     const rejected = failure(transformed.result);
@@ -242,7 +250,7 @@ async function plan(
     if (
       transformed.result.kind !== "prepared" ||
       !transformed.body ||
-      transformed.result.request.manifest.operation !== (converted ? "chat" : facts.protocol)
+      transformed.result.request.manifest.operation !== (converted ? "chat" : facts.operation)
     )
       throw new GatewayError(502, "plugin_invalid", "The route's plugin did not prepare a request");
     const prepared = transformed.result.request,
@@ -262,7 +270,7 @@ async function plan(
     const headers = { ...prepared.headers, "content-type": "application/json" };
     const manifest = {
       version: 1,
-      operation: facts.protocol,
+      operation: facts.operation,
       model: prepared.manifest.model,
       upstream_model: prepared.manifest.upstream_model,
       stream: prepared.manifest.stream,
@@ -270,6 +278,9 @@ async function plan(
       quantities: {},
       resource_ids: [],
       ceilings: prepared.manifest.ceilings,
+      ...(facts.inputCharacters === undefined
+        ? {}
+        : { input_characters: String(facts.inputCharacters) }),
     };
     const projection = dispatchProjectionV1Schema.parse({
       version: 1,
@@ -277,7 +288,7 @@ async function plan(
       proposed_attempt_id: attemptId,
       origin: candidate.origin,
       method: prepared.method,
-      operation: facts.protocol,
+      operation: facts.operation,
       request_target_sha256: sha256(url.pathname + url.search),
       final_headers_digest: sha256(canonical(headers)),
       final_body_sha256: sha256(outbound),
@@ -291,7 +302,7 @@ async function plan(
     });
     const prepSessionId = crypto.randomUUID();
     return {
-      converted,
+      converted: converted ? source : undefined,
       attempt,
       attemptId,
       channelId: candidate.ref.channel_id,
@@ -820,7 +831,11 @@ async function relayJSON(
     const bytes = await readBounded(response.body, deps.config.max_response_bytes, signal);
     transformed = await bridge.transformJSON(
       "response",
-      { protocol: admitted.converted ? "chat" : facts.protocol, model: facts.model },
+      admitted.converted
+        ? { protocol: "chat", model: facts.model }
+        : facts.protocol
+          ? { protocol: facts.protocol, model: facts.model }
+          : { operation: facts.operation, model: facts.model },
       bytes,
       signal,
     );
@@ -846,7 +861,7 @@ async function relayJSON(
     throw new GatewayError(503, "evidence_unavailable", "Usage evidence could not be recorded");
   }
   const body = admitted.converted
-    ? responseFromChat(transformed.body, facts.protocol, facts.model)
+    ? responseFromChat(transformed.body, admitted.converted, facts.model)
     : transformed.body;
   return new Response(body.slice(), {
     status: 200,
@@ -864,7 +879,9 @@ function relaySSE(
   end: (ending: Ending) => Promise<void>,
 ) {
   const encoder = new TextEncoder();
-  const translated = admitted.converted ? streamFromChat(facts.protocol, facts.model) : undefined;
+  const translated = admitted.converted
+    ? streamFromChat(admitted.converted, facts.model)
+    : undefined;
   const emit = function* (bytes: Uint8Array) {
     if (translated) yield* translated.feed(bytes);
     else yield bytes;

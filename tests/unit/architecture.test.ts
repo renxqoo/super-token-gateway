@@ -160,7 +160,7 @@ test("deployment units start built entries, keep v2 processes under separate use
   const chat = caddy.indexOf("handle @chat"),
     legacy = caddy.indexOf("handle @legacy");
   expect(caddy).toContain(
-    "@chat {\n\t\tmethod POST\n\t\tpath /v1/chat/completions /v1/messages /v1beta/models/*\n\t}\n",
+    "@chat {\n\t\tmethod POST\n\t\tpath /v1/chat/completions /v1/messages /v1/embeddings /v1/moderations /v1/completions /v1beta/models/*\n\t}\n",
   );
   expect(chat).toBeGreaterThan(-1);
   expect(legacy).toBeGreaterThan(chat);

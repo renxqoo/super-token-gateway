@@ -58,7 +58,17 @@ function reply(call: UpstreamCall) {
   return Response.json(message);
 }
 
-async function allowOperation(stack: Stack, operation: string) {
+const requestTariff = {
+  pricing: { currency: "USD", rates: { requests: { numerator: "100", denominator: "1" } } },
+  ceilings: { requests: "1" },
+  basis: "REQUEST_COMPLETION",
+};
+
+async function allowOperation(
+  stack: Stack,
+  operation: string,
+  pricing: { pricing: unknown; ceilings: Record<string, string>; basis: string } = requestTariff,
+) {
   const { db, setup } = stack;
   await db`UPDATE models SET operations=array_append(operations,${operation}) WHERE name=${setup.model}`;
   await db`UPDATE routes SET operations=array_append(operations,${operation}) WHERE model_name=${setup.model}`;
@@ -67,9 +77,7 @@ async function allowOperation(stack: Stack, operation: string) {
     model: setup.model,
     operation,
     provider_id: setup.provider.id,
-    pricing: { currency: "USD", rates: { requests: { numerator: "100", denominator: "1" } } },
-    ceilings: { requests: "1" },
-    basis: "REQUEST_COMPLETION",
+    ...pricing,
   });
   expect(tariff.status).toBe(201);
 }
@@ -465,6 +473,89 @@ test(
       const continued = await send({ input: "继续", previous_response_id: "resp_synthetic" });
       expect(continued.status).toBe(422);
       expect(stack.received).toHaveLength(2);
+    }),
+  120000,
+);
+
+const embedding = (model: string) =>
+  `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.10000000000000001,-2]}],"model":${JSON.stringify(model)},"usage":{"prompt_tokens":4,"total_tokens":4}}`;
+const moderation = { id: "modr-1", model: "synthetic-2025", results: [{ flagged: false }] };
+const completion = {
+  id: "cmpl-1",
+  object: "text_completion",
+  model: "synthetic-2025",
+  choices: [{ text: "春眠", index: 0, finish_reason: "stop" }],
+  usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+};
+
+function nativeReply(call: UpstreamCall) {
+  if (call.path === "/v1/embeddings")
+    return new Response(embedding("synthetic-2025"), {
+      headers: { "content-type": "application/json" },
+    });
+  if (call.path === "/v1/moderations") return Response.json(moderation);
+  return Response.json(completion);
+}
+
+test(
+  "embeddings, moderations and completions are served by the v2 Gateway with only the model rewritten; embeddings settle by input characters and streaming is refused before the upstream",
+  () =>
+    withGatewayStack({ reply: nativeReply }, async (stack) => {
+      await allowOperation(stack, "embeddings", {
+        pricing: { currency: "USD", rates: { characters: { numerator: "7", denominator: "1" } } },
+        ceilings: { characters: "100" },
+        basis: "INPUT_CHARACTERS",
+      });
+      await allowOperation(stack, "moderations");
+      await allowOperation(stack, "completions");
+      const send = (path: string, body: Record<string, unknown>) =>
+        fetch(`${stack.gateway.origin}${path}`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${stack.setup.key.key}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ model: stack.setup.model, ...body }),
+        });
+
+      const embedded = await send("/v1/embeddings", { input: ["你好", "世界"] });
+      expect(embedded.status).toBe(200);
+      expect(await embedded.text()).toBe(embedding(stack.setup.model));
+      expect(stack.received.at(-1)).toMatchObject({
+        path: "/v1/embeddings",
+        body: { model: "synthetic", input: ["你好", "世界"] },
+      });
+      expect(await settledCharge(stack.db, embedded.headers.get("x-request-id")!)).toEqual({
+        amount: "28",
+        state: "SUCCEEDED",
+        billing_outcome: expect.any(String),
+      });
+
+      const moderated = await send("/v1/moderations", { input: "检查" });
+      expect(moderated.status).toBe(200);
+      expect(await moderated.json()).toEqual({ ...moderation, model: stack.setup.model });
+      expect(stack.received.at(-1)!.path).toBe("/v1/moderations");
+      expect(await settledCharge(stack.db, moderated.headers.get("x-request-id")!)).toMatchObject({
+        amount: "100",
+        state: "SUCCEEDED",
+      });
+
+      const completed = await send("/v1/completions", { prompt: "写诗", max_tokens: 20 });
+      expect(completed.status).toBe(200);
+      expect(await completed.json()).toEqual({ ...completion, model: stack.setup.model });
+      expect(stack.received.at(-1)).toMatchObject({
+        path: "/v1/completions",
+        body: { model: "synthetic", prompt: "写诗", max_tokens: 20 },
+      });
+      expect(await settledCharge(stack.db, completed.headers.get("x-request-id")!)).toMatchObject({
+        amount: "100",
+        state: "SUCCEEDED",
+      });
+
+      const calls = stack.received.length;
+      const streamed = await send("/v1/embeddings", { input: "x", stream: true });
+      expect(streamed.status).toBe(422);
+      expect(stack.received).toHaveLength(calls);
     }),
   120000,
 );

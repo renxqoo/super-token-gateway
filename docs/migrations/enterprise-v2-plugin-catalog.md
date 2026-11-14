@@ -4,12 +4,12 @@
 
 ## 发行与信任
 
-内置发行标识集合为 `gateway.openai-chat-1.2.0`、`gateway.anthropic-messages-1.2.0`、`gateway.gemini-generate-1.2.0` 与 `gateway.bedrock-anthropic-1.1.0`（`bundledReleaseIds`），内容必须分别等于已接纳的 `packages/adapters/<name>/package`。openai-chat 1.1.0 增加 `path_style`/`api_version`/`output_field` 配置，包字节变化，已签名的 1.0.0 发行物不再被新 policy 接受，部署方须重新签名并更新 policy；已安装的 1.0.0 版本及其绑定保持不变。安装 API 不接服务器文件路径、URL、构建脚本或替代 WASM。Core 的部署配置是 Core API 配置文件 `admin.plugins` 段的 `release_policy`、`release_directory`、`helper_executable`（T04.c c1 前为 Gateway 环境变量 `PLUGIN_RELEASE_POLICY`、`PLUGIN_RELEASE_DIRECTORY`、`PLUGIN_HELPER_EXECUTABLE`），三项必须同时设置；缺少该段时不装配 catalog API，没有 unsigned/dev fallback。配置目录是部署方控制的发行物目录，安装者只能从其中选择枚举 release_id。
+内置发行标识集合为 `gateway.openai-chat-1.3.0`、`gateway.anthropic-messages-1.2.0`、`gateway.gemini-generate-1.2.0` 与 `gateway.bedrock-anthropic-1.1.0`（`bundledReleaseIds`），内容必须分别等于已接纳的 `packages/adapters/<name>/package`。openai-chat 1.1.0 增加 `path_style`/`api_version`/`output_field` 配置，包字节变化，已签名的 1.0.0 发行物不再被新 policy 接受，部署方须重新签名并更新 policy；已安装的 1.0.0 版本及其绑定保持不变。安装 API 不接服务器文件路径、URL、构建脚本或替代 WASM。Core 的部署配置是 Core API 配置文件 `admin.plugins` 段的 `release_policy`、`release_directory`、`helper_executable`（T04.c c1 前为 Gateway 环境变量 `PLUGIN_RELEASE_POLICY`、`PLUGIN_RELEASE_DIRECTORY`、`PLUGIN_HELPER_EXECUTABLE`），三项必须同时设置；缺少该段时不装配 catalog API，没有 unsigned/dev fallback。配置目录是部署方控制的发行物目录，安装者只能从其中选择枚举 release_id。
 
 发行负责人在 Core 进程之外运行受控签名工具，显式提供权限为 0600 的 Ed25519 私钥文件。Core 只消费公钥和签名，不生成或持有发行私钥：
 
 ```sh
-bun run plugins:sign-bundled --private-key-file /secure/release-ed25519.pem --key-id approved-release-key --output-directory /release-artifacts --helper-executable /release/native/plugin-host --release-id gateway.openai-chat-1.2.0
+bun run plugins:sign-bundled --private-key-file /secure/release-ed25519.pem --key-id approved-release-key --output-directory /release-artifacts --helper-executable /release/native/plugin-host --release-id gateway.openai-chat-1.3.0
 ```
 
 该工具只读取受控 builtin，输出 `<output-directory>/<release-id>/package.json` 与 `release.json`，已有文件不会覆盖。package signature 签署 SDK 内容 digest；另一独立签名域 `gateway-plugin-release-v1\0` 签署规范 JSON release descriptor。descriptor 包含固定 source/name/version、内容与 wire envelope digest、每文件长度与 SHA256、ABI、schema、fixture、验证策略和 helper 二进制 digest。签名不包含自身，包内公钥不能成为 trust anchor。
@@ -34,7 +34,7 @@ bun run plugins:sign-bundled --private-key-file /secure/release-ed25519.pem --ke
 安装器调用同一公开 API，没有本地 SQL 或 builtin 直发捷径：
 
 ```sh
-bun run plugins:install-bundled --admin-url https://core.example/admin --credential-file /secure/operator-token --command-id '<stable uuid>' --release-id gateway.openai-chat-1.2.0 --reason 'Approved deployment'
+bun run plugins:install-bundled --admin-url https://core.example/admin --credential-file /secure/operator-token --command-id '<stable uuid>' --release-id gateway.openai-chat-1.3.0 --reason 'Approved deployment'
 ```
 
 可选 `--provider-id` 与 `--binding-file` 必须成对给出。binding 文件提供上述绑定字段，version_id 由真实 publication 回执填充；绑定失败后发布事实保留，同一 command/body 可以独立重试。所有 JSON 凭据文件与发行私钥都由 operator 显式提供，不能把生产密钥写入源码、参数日志或 fixture。
@@ -43,7 +43,7 @@ bun run plugins:install-bundled --admin-url https://core.example/admin --credent
 
 2026111204 追加真实 Drizzle `0002_plugin_catalog` 与受控 SQL；既有 v2/v3 SQL、checksum 和 snapshot 不变。package_bytes 存完整 SDK wire envelope，因此数据库上限从 decoded 32MiB 修正为 wire 44MiB；SDK 仍独立执行 decoded 总量、单文件与 fixtures 上限。历史 rows 原样保留，未有 signed descriptor 的历史包不能通过新 application 发布。
 
-流程是 immutable UPLOADED → 持久 leased VALIDATING → public `runPluginFixtures` 原生 helper → close/wait/reap 确认 → VALIDATED → 同事务 publication receipt/audit/PUBLISHED revision。实际 builtin（openai-chat 1.2.0）fixture 期望是 26 cases、40 steps，涵盖精确数字、缺 usage、错误、SSE 截断、取消与 Responses 透传等。结果只存有界 cases/steps、cleanup_confirmed 和错误类别，不存请求正文或 helper stdout。
+流程是 immutable UPLOADED → 持久 leased VALIDATING → public `runPluginFixtures` 原生 helper → close/wait/reap 确认 → VALIDATED → 同事务 publication receipt/audit/PUBLISHED revision。实际 builtin（openai-chat 1.3.0）fixture 期望是 33 cases、47 steps，涵盖精确数字、缺 usage、错误、SSE 截断、取消、Responses 透传与 embeddings/moderations/completions 原生操作等。结果只存有界 cases/steps、cleanup_confirmed 和错误类别，不存请求正文或 helper stdout。
 
 每次显式验证命令至多一个 run；run 固定 package/fixture/runtime/policy digest、requesting actor、owner/epoch/expiry。active slot 不被新 run 替换。失败只能 REJECTED；新命令可显式重验。无法确认清理时为 CLEANUP_PENDING，禁止发布和重叠验证。资源登记只含本 run helper pid/connection；恢复器不杀任意 PID，只在已登记进程组确认不存在时失败收尾，递增 epoch 后旧 epoch 不能提交。资源登记缺失或进程组仍存在时保持待清理，需要运维处理，不无限重试、不自动成功。正常关闭合并为一个 Promise；application shutdown 等待从启动阶段起的验证结束，数据库最后关闭。
 

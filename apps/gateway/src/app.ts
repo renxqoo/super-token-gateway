@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono";
-import type { Protocol } from "@gateway/kernel";
+import type { Operation } from "@gateway/kernel";
 import { GatewayError } from "@gateway/contracts";
 import { clientAddress, readBounded, type Lifecycle } from "@gateway/runtime";
 import { executeChat, type ChatDependencies } from "./chat.ts";
@@ -76,7 +76,7 @@ export function createGatewayApp(
   });
   async function serve(
     c: Context<GatewayEnv>,
-    protocol: Protocol,
+    operation: Operation,
     path?: { model: string; stream: boolean },
   ) {
     const requestId = crypto.randomUUID();
@@ -104,7 +104,7 @@ export function createGatewayApp(
       const response = await deps.lifecycle.track(
         executeChat(deps, {
           requestId,
-          protocol,
+          operation,
           ...(path ? { path } : {}),
           body,
           token,
@@ -134,6 +134,9 @@ export function createGatewayApp(
   app.post("/v1/chat/completions", (c) => serve(c, "chat"));
   app.post("/v1/messages", (c) => serve(c, "messages"));
   app.post("/v1/responses", (c) => serve(c, "responses"));
+  app.post("/v1/embeddings", (c) => serve(c, "embeddings"));
+  app.post("/v1/moderations", (c) => serve(c, "moderations"));
+  app.post("/v1/completions", (c) => serve(c, "completions"));
   app.post("/v1beta/models/:action", (c) => {
     const match = /^([A-Za-z0-9._-]{1,200}):(generateContent|streamGenerateContent)$/.exec(
       c.req.param("action"),

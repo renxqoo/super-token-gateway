@@ -343,11 +343,162 @@ function responsesFrame(state: State, value: FrameInput) {
   if (!type.startsWith("response.")) fail("invalid_stream");
   return streamOutput(state, { handle: frame.handle, disposition: "emit", ...body });
 }
+const nativeOperations = ["embeddings", "moderations", "completions"];
+function prepareNative(input: GuestInput, value: DocumentInput) {
+  const operation = value.operation!;
+  const query = inspect(value, ["", "/model", "/stream", "/n", "/max_tokens"]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object") throw new AdapterFailure(400, "invalid_request");
+  const map = object(input.config.model_map, 400),
+    upstream = map[value.model!];
+  if (typeof upstream !== "string" || !upstream || scalar(value, "/model", 400) !== value.model)
+    throw new AdapterFailure(422, "model_unavailable");
+  const stream = scalar(value, "/stream", 400);
+  if (stream !== undefined && typeof stream !== "boolean")
+    throw new AdapterFailure(400, "invalid_stream");
+  if (stream === true) throw new AdapterFailure(422, "unsupported_semantics");
+  const inputTokens = smallInteger(input.config.max_input_tokens, 16 << 20, 422);
+  if (value.document.bytes > inputTokens) throw new AdapterFailure(413, "input_ceiling");
+  const edits: { op: string; pointer: string; value?: string }[] = [
+    { op: "set", pointer: "/model", value: JSON.stringify(upstream) },
+  ];
+  const ceilings: Usage = { input_tokens: String(inputTokens), requests: "1" };
+  if (operation === "completions") {
+    const n = scalar(value, "/n", 400);
+    if (n !== undefined && smallInteger(n, 128, 422) !== 1)
+      throw new AdapterFailure(422, "unsupported_choice_count");
+    const max = smallInteger(input.config.max_output_tokens, 1000000, 422),
+      requested = scalar(value, "/max_tokens", 400),
+      output = requested === undefined ? max : smallInteger(requested, max, 422);
+    if (output < 1) throw new AdapterFailure(422, "invalid_output_ceiling");
+    if (requested === undefined)
+      edits.push({ op: "set", pointer: "/max_tokens", value: String(output) });
+    ceilings.output_tokens = String(output);
+  }
+  let path = `/v1/${operation}`;
+  if (input.config.path_style === "azure") {
+    const version = input.config.api_version;
+    if (typeof version !== "string" || !/^\d{4}-\d{2}-\d{2}(?:-preview)?$/.test(version))
+      throw new AdapterFailure(422, "unsupported_capability");
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(upstream))
+      throw new AdapterFailure(422, "model_unavailable");
+    path = `/openai/deployments/${upstream}/${operation}?api-version=${version}`;
+  }
+  return {
+    abi_version: 1,
+    kind: "prepared",
+    request: {
+      method: "POST",
+      path,
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: { document: value.document.handle, edits },
+      auth: authOf(input),
+      manifest: {
+        operation,
+        model: value.model,
+        upstream_model: upstream,
+        stream: false,
+        ceilings,
+        input_bytes: value.document.bytes,
+      },
+    },
+  };
+}
+const usageNames = [
+  "prompt_tokens",
+  "input_tokens",
+  "completion_tokens",
+  "output_tokens",
+  "prompt_cache_hit_tokens",
+  "prompt_cache_miss_tokens",
+];
+function inspectedUsage(value: DocumentInput) {
+  const usageFact = fact(value, "/usage");
+  if (!["object", "missing", "null"].includes(usageFact.kind)) fail("invalid_object");
+  const raw: Record<string, unknown> = {},
+    details: Record<string, unknown> = {},
+    outputDetails: Record<string, unknown> = {};
+  for (const name of usageNames) {
+    const current = scalar(value, `/usage/${name}`);
+    if (current !== undefined) raw[name] = current;
+  }
+  const cached = scalar(value, "/usage/prompt_tokens_details/cached_tokens"),
+    reasoning = scalar(value, "/usage/completion_tokens_details/reasoning_tokens");
+  if (cached !== undefined) details.cached_tokens = cached;
+  if (reasoning !== undefined) outputDetails.reasoning_tokens = reasoning;
+  raw.prompt_tokens_details = details;
+  raw.completion_tokens_details = outputDetails;
+  return usage({ usage: raw }, null);
+}
+function nativeResponse(value: DocumentInput) {
+  const query = inspect(value, [
+    "",
+    "/error",
+    "/model",
+    "/object",
+    "/data",
+    "/results",
+    "/choices",
+    "/choices/0",
+    "/choices/0/text",
+    "/choices/0/finish_reason",
+    "/usage",
+  ]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object") fail("invalid_object");
+  if (!["missing", "null"].includes(fact(value, "/error").kind)) fail("upstream_error");
+  if (value.operation !== "moderations") {
+    const usageQuery = inspect(value, [
+      "/usage/prompt_tokens_details/cached_tokens",
+      "/usage/completion_tokens_details/reasoning_tokens",
+      ...usageNames.map((name) => `/usage/${name}`),
+    ]);
+    if (usageQuery) return usageQuery;
+  }
+  let measured: Usage | null,
+    kind = "complete";
+  if (value.operation === "embeddings") {
+    if (scalar(value, "/object") !== "list" || fact(value, "/data").kind !== "array")
+      fail("invalid_object");
+    measured = inspectedUsage(value);
+    if (measured?.input_tokens !== undefined && measured.output_tokens === undefined)
+      measured = { ...measured, output_tokens: "0" };
+  } else if (value.operation === "moderations") {
+    if (fact(value, "/results").kind !== "array" || !fact(value, "/results").count)
+      fail("invalid_object");
+    measured = { requests: "1" };
+  } else {
+    if (
+      fact(value, "/choices").kind !== "array" ||
+      fact(value, "/choices").count !== 1 ||
+      fact(value, "/choices/0").kind !== "object" ||
+      fact(value, "/choices/0/text").kind !== "string"
+    )
+      fail("invalid_choices");
+    const finish = reason(scalar(value, "/choices/0/finish_reason"));
+    if (!["stop", "length", "content_filter"].includes(finish)) fail("invalid_finish_reason");
+    if (finish !== "stop") kind = "incomplete";
+    measured = inspectedUsage(value);
+  }
+  return {
+    abi_version: 1,
+    kind: "output",
+    consumed: 0,
+    chunks: [],
+    body: { document: value.document.handle, edits: modelEdit(value, "/model", value.model!) },
+    ...(measured ? { usage: measured } : {}),
+    finality: value.operation === "moderations" ? "FINAL" : finality(measured),
+    terminal: { kind, bytes: "" },
+    needs_input: false,
+  };
+}
 function prepare(input: GuestInput, value: DocumentInput) {
   if (!value.document || !value.inspection || typeof value.model !== "string" || !value.model)
     throw new AdapterFailure(400, "invalid_request");
   if (value.protocol === "responses" && value.operation === "responses")
     return prepareResponses(input, value);
+  if (value.protocol === undefined && nativeOperations.includes(value.operation ?? ""))
+    return prepareNative(input, value);
   if (value.protocol !== "chat" || value.operation !== "chat")
     throw new AdapterFailure(422, "unsupported_semantics");
   const query = inspect(value, preparePointers);
@@ -466,29 +617,7 @@ function response(_input: GuestInput, value: DocumentInput) {
     )
       fail("empty_response");
   }
-  const raw: Record<string, unknown> = {},
-    details: Record<string, unknown> = {},
-    outputDetails: Record<string, unknown> = {};
-  for (const name of [
-    "prompt_tokens",
-    "input_tokens",
-    "completion_tokens",
-    "output_tokens",
-    "prompt_cache_hit_tokens",
-    "prompt_cache_miss_tokens",
-  ]) {
-    const current = scalar(value, `/usage/${name}`);
-    if (current !== undefined) raw[name] = current;
-  }
-  const cached = scalar(value, "/usage/prompt_tokens_details/cached_tokens"),
-    reasoning = scalar(value, "/usage/completion_tokens_details/reasoning_tokens");
-  if (cached !== undefined) details.cached_tokens = cached;
-  if (reasoning !== undefined) outputDetails.reasoning_tokens = reasoning;
-  raw.prompt_tokens_details = details;
-  raw.completion_tokens_details = outputDetails;
-  const usageFact = fact(value, "/usage");
-  if (!["object", "missing", "null"].includes(usageFact.kind)) fail("invalid_object");
-  const measured = usage({ usage: raw }, null);
+  const measured = inspectedUsage(value);
   return {
     abi_version: 1,
     kind: "output",
@@ -787,7 +916,12 @@ export function invoke() {
     if (input.hook === "response") {
       const value = object(JSON.parse(new TextDecoder().decode(bytes))) as DocumentInput;
       return {
-        result: value.protocol === "responses" ? responsesResponse(value) : response(input, value),
+        result:
+          value.protocol === "responses"
+            ? responsesResponse(value)
+            : value.protocol === undefined && nativeOperations.includes(value.operation ?? "")
+              ? nativeResponse(value)
+              : response(input, value),
         state: null,
       };
     }

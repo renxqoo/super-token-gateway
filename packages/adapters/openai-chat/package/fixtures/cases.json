@@ -812,6 +812,204 @@
           }
         }
       ]
+    },
+    {
+      "name": "embeddings request keeps its input and only changes the upstream model",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "embeddings",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6WyLkvaDlpb0iLCLkuJbnlYwiXX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1/embeddings",
+              "headers": {
+                "accept": "application/json"
+              },
+              "auth": {
+                "type": "bearer"
+              },
+              "manifest": {
+                "operation": "embeddings",
+                "model": "logical",
+                "upstream_model": "upstream",
+                "stream": false,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "requests": "1"
+                },
+                "input_bytes": 47
+              }
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6InVwc3RyZWFtIiwiaW5wdXQiOlsi5L2g5aW9Iiwi5LiW55WMIl19"
+        }
+      ]
+    },
+    {
+      "name": "completions request fills the configured output ceiling",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "completions",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm9tcHQiOiLlhpnor5cifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1/completions",
+              "manifest": {
+                "operation": "completions",
+                "stream": false,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "output_tokens": "100",
+                  "requests": "1"
+                },
+                "input_bytes": 37
+              }
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6InVwc3RyZWFtIiwicHJvbXB0Ijoi5YaZ6K+XIiwibWF4X3Rva2VucyI6MTAwfQ=="
+        }
+      ]
+    },
+    {
+      "name": "streaming moderations are refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "moderations",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IngiLCJzdHJlYW0iOnRydWV9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_semantics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "embeddings response is metered from prompt tokens with no output",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "embeddings",
+            "model": "logical"
+          },
+          "body": "eyJvYmplY3QiOiJsaXN0IiwiZGF0YSI6W3sib2JqZWN0IjoiZW1iZWRkaW5nIiwiaW5kZXgiOjAsImVtYmVkZGluZyI6WzAuMTAwMDAwMDAwMDAwMDAwMDFdfV0sIm1vZGVsIjoidXBzdHJlYW0tMjAyNSIsInVzYWdlIjp7InByb21wdF90b2tlbnMiOjQsInRvdGFsX3Rva2VucyI6NH19",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "chunks": [],
+            "usage": {
+              "input_tokens": "4",
+              "output_tokens": "0"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            }
+          },
+          "expected_body": "eyJvYmplY3QiOiJsaXN0IiwiZGF0YSI6W3sib2JqZWN0IjoiZW1iZWRkaW5nIiwiaW5kZXgiOjAsImVtYmVkZGluZyI6WzAuMTAwMDAwMDAwMDAwMDAwMDFdfV0sIm1vZGVsIjoibG9naWNhbCIsInVzYWdlIjp7InByb21wdF90b2tlbnMiOjQsInRvdGFsX3Rva2VucyI6NH19"
+        }
+      ]
+    },
+    {
+      "name": "moderations response is final at one request",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "moderations",
+            "model": "logical"
+          },
+          "body": "eyJpZCI6Im1vZHItMSIsIm1vZGVsIjoidXBzdHJlYW0tMjAyNSIsInJlc3VsdHMiOlt7ImZsYWdnZWQiOmZhbHNlfV19",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "chunks": [],
+            "usage": {
+              "requests": "1"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            }
+          },
+          "expected_body": "eyJpZCI6Im1vZHItMSIsIm1vZGVsIjoibG9naWNhbCIsInJlc3VsdHMiOlt7ImZsYWdnZWQiOmZhbHNlfV19"
+        }
+      ]
+    },
+    {
+      "name": "completions response with length finish is incomplete and metered",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "completions",
+            "model": "logical"
+          },
+          "body": "eyJvYmplY3QiOiJ0ZXh0X2NvbXBsZXRpb24iLCJtb2RlbCI6InVwc3RyZWFtLTIwMjUiLCJjaG9pY2VzIjpbeyJ0ZXh0Ijoi5pilIiwiaW5kZXgiOjAsImZpbmlzaF9yZWFzb24iOiJsZW5ndGgifV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjMsImNvbXBsZXRpb25fdG9rZW5zIjoxfX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "chunks": [],
+            "usage": {
+              "input_tokens": "3",
+              "output_tokens": "1"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "incomplete",
+              "bytes": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "embeddings response without a data list is invalid",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "embeddings",
+            "model": "logical"
+          },
+          "body": "eyJvYmplY3QiOiJsaXN0IiwibW9kZWwiOiJ1cHN0cmVhbS0yMDI1IiwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6NH19",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "invalid_object"
+          }
+        }
+      ]
     }
   ]
 }
