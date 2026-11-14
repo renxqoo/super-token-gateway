@@ -5,7 +5,7 @@
   "dependencies": {
     "@gateway/kernel": "workspace:*",
     "@gateway/storage": "workspace:*",
-    "@gateway/connectors": "workspace:*",
+    "@gateway/adapters": "workspace:*",
     "@gateway/runtime": "workspace:*",
     "hono": "4.13.17",
     "zod": "4.6.7",

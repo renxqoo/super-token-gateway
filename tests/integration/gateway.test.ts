@@ -983,8 +983,8 @@ test("all provider-backed resource fields enforce ownership, including Gemini na
 
 test("precise numeric literals survive resource rewriting, forwarding and idempotency", async () => {
   const { resolveFileReferences } = await import("../../apps/legacy-gateway/src/resources.ts");
-  const { canonicalExact } = await import("@gateway/connectors");
-  const { parseProviderJson, stringifyExact } = await import("@gateway/connectors");
+  const { canonicalExact } = await import("@gateway/adapters/protocol");
+  const { parseProviderJson, stringifyExact } = await import("@gateway/adapters/protocol");
   const a = (
     await resolveFileReferences(
       deps,

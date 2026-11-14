@@ -1,10 +1,10 @@
 import { decrypt } from "@gateway/runtime";
 import { providerObject, GatewayError } from "@gateway/contracts";
-import { parseProviderJson, stringifyExact } from "@gateway/connectors";
+import { parseProviderJson, stringifyExact } from "@gateway/adapters/protocol";
 import type { Operation, Protocol } from "@gateway/kernel";
 import type { Route } from "@gateway/contracts";
 import { awsCredentials, azureCredentials, signBedrock, VertexTokens } from "@gateway/runtime";
-import { bedrockEventStream } from "@gateway/connectors";
+import { bedrockEventStream } from "@gateway/adapters/protocol";
 import type { Dependencies } from "./context.ts";
 import type { Config } from "./config.ts";
 const vertexTokens = new VertexTokens();

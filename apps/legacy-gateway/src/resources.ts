@@ -1,5 +1,10 @@
 import { GatewayError, providerObject, object, optionalObject, text } from "@gateway/contracts";
-import { extractUsage, parseProviderJson, stringifyExact, copyExact } from "@gateway/connectors";
+import {
+  extractUsage,
+  parseProviderJson,
+  stringifyExact,
+  copyExact,
+} from "@gateway/adapters/protocol";
 import { sha256 } from "@gateway/runtime";
 import type { BatchResourceMetadata, Resource, Route } from "@gateway/contracts";
 import type { Operation } from "@gateway/kernel";

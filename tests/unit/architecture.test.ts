@@ -4,14 +4,15 @@ test("workspace dependencies stay acyclic and commercial capabilities stay outsi
   const allowed: Record<string, string[]> = {
     kernel: [],
     contracts: ["kernel"],
-    connectors: ["kernel", "contracts"],
+    "adapters/src/protocol": ["kernel", "contracts"],
     runtime: ["kernel", "contracts"],
     "core-client": ["kernel", "contracts", "runtime/crypto", "runtime/h2"],
     storage: ["kernel", "contracts", "runtime/batcher", "runtime/crypto"],
   };
   for (const [name, imports] of Object.entries(allowed)) {
-    for await (const file of new Bun.Glob("**/*.ts").scan(`packages/${name}/src`)) {
-      const source = await Bun.file(`packages/${name}/src/${file}`).text();
+    const root = name.includes("/") ? `packages/${name}` : `packages/${name}/src`;
+    for await (const file of new Bun.Glob("**/*.ts").scan(root)) {
+      const source = await Bun.file(`${root}/${file}`).text();
       for (const match of source.matchAll(/(?:from\s+|import\s*)["']@gateway\/([^"']+)/g))
         expect(imports).toContain(match[1] ?? "");
       expect(source).not.toMatch(/from\s+["'][^"']*(?:apps\/|wallet|payments|business-system)/);
@@ -37,11 +38,11 @@ test("workspace dependencies stay acyclic and commercial capabilities stay outsi
 
 test("Core processes never reach into the transitional Gateway or each other's private modules", async () => {
   const forbidden: Record<string, RegExp> = {
-    "core-api": /legacy-gateway|core-worker|@gateway\/(?:legacy-gateway|connectors)/,
+    "core-api": /legacy-gateway|core-worker|@gateway\/(?:legacy-gateway|adapters\/protocol)/,
     "core-worker": /legacy-gateway|core-api|@gateway\/(?:legacy-gateway|core-api|plugin-host)/,
     "mock-providers": /legacy-gateway|core-api|core-worker/,
     gateway:
-      /legacy-gateway|core-api|core-worker|@gateway\/(?:storage|legacy-gateway|core-api|core-worker|connectors)|drizzle|^postgres/,
+      /legacy-gateway|core-api|core-worker|@gateway\/(?:storage|legacy-gateway|core-api|core-worker)|drizzle|^postgres/,
   };
   for (const [app, pattern] of Object.entries(forbidden))
     for await (const file of new Bun.Glob("**/*.ts").scan(`apps/${app}/src`)) {

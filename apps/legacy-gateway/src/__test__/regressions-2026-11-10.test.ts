@@ -5,9 +5,9 @@ import {
   decodeRequest,
   encodeRequest,
   publicUsage,
-} from "@gateway/connectors";
-import { parseProviderJson, stringifyExact } from "@gateway/connectors";
-import type { SSEEvent } from "@gateway/connectors";
+} from "@gateway/adapters/protocol";
+import { parseProviderJson, stringifyExact } from "@gateway/adapters/protocol";
+import type { SSEEvent } from "@gateway/adapters/protocol";
 import type { UsageEvidence } from "@gateway/contracts";
 import { MemoryBudget } from "@gateway/runtime";
 import { applyOutputBound } from "../input-policy.ts";

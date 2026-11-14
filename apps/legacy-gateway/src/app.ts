@@ -4,7 +4,7 @@ import { z, ZodError } from "zod";
 import { GatewayError, object, text, keySchema } from "@gateway/contracts";
 import { errorResponse } from "./http-errors.ts";
 import { sha256, verifier, createKey } from "@gateway/runtime";
-import { parseClientJson, copyExact } from "@gateway/connectors";
+import { parseClientJson, copyExact } from "@gateway/adapters/protocol";
 import type { Operation } from "@gateway/kernel";
 import type { Resource } from "@gateway/contracts";
 import { boundedRelay, readBounded, clientAddress, validateCidr, inCidrs } from "@gateway/runtime";

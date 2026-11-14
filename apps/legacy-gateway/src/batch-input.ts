@@ -1,4 +1,4 @@
-import { copyExact, parseClientJson, stringifyExact } from "@gateway/connectors";
+import { copyExact, parseClientJson, stringifyExact } from "@gateway/adapters/protocol";
 import { GatewayError, object, text } from "@gateway/contracts";
 import { batchIdentityDigest } from "@gateway/runtime";
 import type { BatchManifest, Resource, Route } from "@gateway/contracts";
@@ -6,7 +6,7 @@ import type { Operation } from "@gateway/kernel";
 import { readBounded } from "@gateway/runtime";
 import type { Auth, Dependencies } from "./context.ts";
 import { applyOutputBound, rejectUnmeteredTools } from "./input-policy.ts";
-import { prepareOperation } from "@gateway/connectors";
+import { prepareOperation } from "@gateway/adapters/protocol";
 import { queryResource, resolveFileReferences } from "./resources.ts";
 
 const endpoints: Record<string, Operation> = {

@@ -1,7 +1,7 @@
-import { canonicalExact } from "@gateway/connectors";
+import { canonicalExact } from "@gateway/adapters/protocol";
 import { GatewayError, providerObject as object } from "@gateway/contracts";
 
-import { extractUsage, parseProviderJson, stringifyExact } from "@gateway/connectors";
+import { extractUsage, parseProviderJson, stringifyExact } from "@gateway/adapters/protocol";
 import { sha256 } from "@gateway/runtime";
 import type { BatchResourceMetadata, Resource, Route } from "@gateway/contracts";
 import type { Operation, Protocol, Usage, Finality } from "@gateway/kernel";
@@ -13,9 +13,9 @@ import {
   presentResponse,
   prepareOperation,
   requestCharacters,
-} from "@gateway/connectors";
+} from "@gateway/adapters/protocol";
 import { readBounded, UpstreamPreDispatchError } from "@gateway/runtime";
-import type { StreamMeter } from "@gateway/connectors";
+import type { StreamMeter } from "@gateway/adapters/protocol";
 import type { RequestRecord } from "@gateway/storage";
 import type { RatePermit } from "@gateway/runtime";
 import type { Auth, Dependencies } from "./context.ts";

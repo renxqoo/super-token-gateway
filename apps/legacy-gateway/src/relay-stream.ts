@@ -1,7 +1,7 @@
 import { GatewayError } from "@gateway/contracts";
-import { SSEParser, encodeSSE } from "@gateway/connectors";
-import type { SSEEvent } from "@gateway/connectors";
-import type { StreamMeter } from "@gateway/connectors";
+import { SSEParser, encodeSSE } from "@gateway/adapters/protocol";
+import type { SSEEvent } from "@gateway/adapters/protocol";
+import type { StreamMeter } from "@gateway/adapters/protocol";
 import type { Dependencies } from "./context.ts";
 import { publishEvidence } from "./metering.ts";
 

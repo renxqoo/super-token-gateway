@@ -22,12 +22,12 @@
 - `apps/core-api`：Core 内部 mTLS RPC（身份、准入、执行许可）与 `/admin` 管理、插件目录监听。
 - `apps/core-worker`：消费签名数字证据，在一个 PG 事务内完成双方结算后 ACK。
 - `packages/kernel`：纯契约、精确数字、成本、加密、SSE；不依赖存储、HTTP 服务或业务系统。
-- `packages/connectors`：协议编码、转换损失策略、流事件及 usage 旁路提取；只依赖 kernel。
+- `packages/adapters/src/protocol`（`@gateway/adapters/protocol`）：协议编码、转换损失策略、流事件及 usage 旁路提取；只依赖 kernel 与 contracts。
 - `packages/storage`：PG 查询、迁移、不可变证据、幂等、资源归属与事件投递；只依赖 kernel。
 - `packages/runtime`：DNS/IP 固定、防 SSRF、Redis 分布式准入、内存/流/生命周期预算；只依赖 kernel。
 - `apps/mock-providers`：可独立启动的供应商模拟项目，只依赖 Hono，独立构造协议样本。
 
-HTTP 层通过无原始 SQL 能力的 Store/Funds 接口调用业务动作，数据库探活与关闭由独立生命周期接口装配。报价纯规则属于 kernel，响应验证/计量/媒体编码属于 connectors。测试检查 HTTP 无 SQL、依赖方向与输出落盘禁令。接口编排与供应商差异集中在各自模块；新增供应商应增加显式能力适配、合约 fixture 和故障用例。
+HTTP 层通过无原始 SQL 能力的 Store/Funds 接口调用业务动作，数据库探活与关闭由独立生命周期接口装配。报价纯规则属于 kernel，响应验证/计量/媒体编码属于 `adapters/src/protocol`。测试检查 HTTP 无 SQL、依赖方向与输出落盘禁令。接口编排与供应商差异集中在各自模块；新增供应商应增加显式能力适配、合约 fixture 和故障用例。
 
 ## 运行拓扑
 

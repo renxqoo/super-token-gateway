@@ -1,4 +1,4 @@
-import { SSEParser, parseProviderJson } from "@gateway/connectors";
+import { SSEParser, parseProviderJson } from "@gateway/adapters/protocol";
 import { optionalObject } from "@gateway/contracts";
 
 export class LatencyHistogram {

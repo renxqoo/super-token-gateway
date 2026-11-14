@@ -6,7 +6,6 @@
       "name": "super-token-gateway",
       "devDependencies": {
         "@gateway/adapters": "workspace:*",
-        "@gateway/connectors": "workspace:*",
         "@gateway/contracts": "workspace:*",
         "@gateway/core-client": "workspace:*",
         "@gateway/kernel": "workspace:*",
@@ -61,7 +60,7 @@
     "apps/legacy-gateway": {
       "name": "@gateway/legacy-gateway",
       "dependencies": {
-        "@gateway/connectors": "workspace:*",
+        "@gateway/adapters": "workspace:*",
         "@gateway/contracts": "workspace:*",
         "@gateway/core-api": "workspace:*",
         "@gateway/kernel": "workspace:*",
@@ -80,14 +79,9 @@
     "packages/adapters": {
       "name": "@gateway/adapters",
       "dependencies": {
-        "@gateway/plugin-sdk": "workspace:*",
-      },
-    },
-    "packages/connectors": {
-      "name": "@gateway/connectors",
-      "dependencies": {
         "@gateway/contracts": "workspace:*",
         "@gateway/kernel": "workspace:*",
+        "@gateway/plugin-sdk": "workspace:*",
       },
     },
     "packages/contracts": {
@@ -203,8 +197,6 @@
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.28.2", "", { "os": "win32", "cpu": "x64" }, "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g=="],
 
     "@gateway/adapters": ["@gateway/adapters@workspace:packages/adapters"],
-
-    "@gateway/connectors": ["@gateway/connectors@workspace:packages/connectors"],
 
     "@gateway/contracts": ["@gateway/contracts@workspace:packages/contracts"],
 

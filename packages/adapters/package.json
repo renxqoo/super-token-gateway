@@ -3,9 +3,12 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./protocol": "./src/protocol/index.ts"
   },
   "dependencies": {
+    "@gateway/contracts": "workspace:*",
+    "@gateway/kernel": "workspace:*",
     "@gateway/plugin-sdk": "workspace:*"
   }
 }
