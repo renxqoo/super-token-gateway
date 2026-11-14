@@ -1,0 +1,54 @@
+{
+  "packages/adapters/anthropic-messages/plugin.ts": {
+    "bytes": 27975,
+    "sha256": "b0c7d1a1e5fa82808e33af2e19e48c0159ddab86fed8c515f5da97f8c4e490eb"
+  },
+  "packages/adapters/anthropic-messages/plugin.d.ts": {
+    "bytes": 59,
+    "sha256": "96eb7fa2ca46fc25371ed0f1da56c267ee542f348ffa73346370a43296e34648"
+  },
+  "packages/plugin-sdk/src/guest.ts": {
+    "bytes": 6942,
+    "sha256": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2"
+  },
+  "packages/adapters/anthropic-messages/package/module.wasm": {
+    "bytes": 2509813,
+    "sha256": "b96e678ea52edf92536cf834b05294dc8a6a9965a39cf9ba88c946edad140e45"
+  },
+  "packages/adapters/anthropic-messages/package/manifest.json": {
+    "bytes": 759,
+    "sha256": "a2eb089452dde2935dfbb9cd61411abe30c96cd40c3a75b51728f2abed7e060d"
+  },
+  "packages/adapters/anthropic-messages/package/config.schema.json": {
+    "bytes": 646,
+    "sha256": "dab73682f6a54db8d5ff618bc4ad2eb5193431dd22db69d8e170f4c2c331434e"
+  },
+  "packages/adapters/anthropic-messages/package/fixtures/cases.json": {
+    "bytes": 17117,
+    "sha256": "9b0836caf009407fb3f61fe1a6dc59da972f0992d08577ecb5311a25bcf8a4c2"
+  },
+  "scripts/plugin-tools.json": {
+    "bytes": 1830,
+    "sha256": "86173fe40e6802e7b38b40b663b04df2190b16afa1fb13a527e853afb6e6738d"
+  },
+  "scripts/build-plugins.ts": {
+    "bytes": 11781,
+    "sha256": "06dd0d8993739416589e4634d7da0e98a06e49e7622e0d218de93c9be8b18878"
+  },
+  "scripts/setup-plugin-tools.py": {
+    "bytes": 8332,
+    "sha256": "90c25685e25c4c357062d064dae474ffcfec53a9e749cf9167c3fb0ec56a6191"
+  },
+  "scripts/plugin-builder/deterministic-preinit.patch": {
+    "bytes": 3172,
+    "sha256": "28dbd8480b2705040bbb1c6fec79c6773ea55bd3dc67a52b588adf5c41d9c805"
+  },
+  "scripts/plugin-builder/upstream-Cargo.lock": {
+    "bytes": 97632,
+    "sha256": "8c11a1e5117be6a0e2e1696d54d81d730c52c8329c5486429f3fc776896f0f7e"
+  },
+  "scripts/plugin-builder/Cargo.lock": {
+    "bytes": 97663,
+    "sha256": "59e4e9ce11a53ed1a05afc9f688f962bf6ab471cf71fdf9371b844f0841f7cac"
+  }
+}

@@ -172,7 +172,7 @@ export function createSSEStream(options: {
     }
     return { checked };
   }
-  function render(frame: SSEFrame, body: Uint8Array) {
+  function render(frame: SSEFrame, body: Uint8Array, dataOnly = false) {
     const data = new TextDecoder("utf-8", { fatal: true })
         .decode(body)
         .split("\n")
@@ -187,7 +187,7 @@ export function createSSEStream(options: {
           lines.push(...data);
           inserted = true;
         }
-      } else lines.push(line);
+      } else if (!dataOnly) lines.push(line);
     }
     if (!inserted) throw new PluginHostError("SSE_FRAME");
     return new TextEncoder().encode(lines.join("\n") + "\n\n");
@@ -356,18 +356,27 @@ export function createSSEStream(options: {
           materialized: ReturnType<Documents["materialize"]> | undefined,
           renderCharge = 0;
         try {
-          if (result.frame.body) {
+          const plan = result.frame;
+          if (plan.disposition === "drop" && (plan.body || plan.data_only || plan.extra?.length))
+            throw new PluginHostError("ABI_OUTPUT");
+          if (plan.body) {
             ensureIndex(frame);
-            materialized = documents.materialize(owner, result.frame.body);
+            materialized = documents.materialize(owner, plan.body);
             renderCharge = 8 * (materialized.bytes.length + frame.wire.length) + 512;
             adjust(renderCharge);
-            bytes = render(frame, materialized.bytes);
-          }
+            bytes = render(frame, materialized.bytes, plan.data_only === true);
+          } else if (plan.data_only) bytes = render(frame, frame.data, true);
+          if (plan.extra?.length)
+            bytes = Buffer.concat([
+              bytes,
+              ...plan.extra.map((literal) => Buffer.from(`data: ${literal}\n\n`)),
+            ]);
+          if (plan.disposition === "drop") bytes = new Uint8Array();
           if (bytes.length > 2 * (options.maxEventBytes ?? 1048576) + (64 << 10))
             throw new PluginHostError("SSE_OUTPUT_BUDGET");
-          options.takeOutput(bytes.length);
+          if (bytes.length) options.takeOutput(bytes.length);
           if (result.frame.disposition === "hold") hold(bytes);
-          else chunks.push(encoded(bytes));
+          else if (bytes.length) chunks.push(encoded(bytes));
         } finally {
           materialized?.release();
           if (renderCharge) adjust(-renderCharge);
@@ -462,6 +471,7 @@ export function createSSEStream(options: {
           JSON_DUPLICATE_KEY: "invalid_json",
           JSON_LIMIT: "invalid_json",
           JSON_NUMERIC_LIMIT: "numeric_limit",
+          JSON_COMPOSE_SOURCE: "invalid_json",
           STRING_BYTE_BUDGET: "tool_budget",
         };
         if (code[error.code])

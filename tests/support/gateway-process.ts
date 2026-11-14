@@ -254,6 +254,8 @@ export async function eventually(check: () => Promise<boolean>, label: string, m
 
 export type UpstreamCall = {
   index: number;
+  path: string;
+  apiKey: string | null;
   authorization: string | null;
   body: Record<string, unknown>;
   signal: AbortSignal;
@@ -305,6 +307,8 @@ export function withGatewayStack(
         const upstream = await startTlsUpstream(async (request) => {
           const call = {
             index: received.length,
+            path: new URL(request.url).pathname,
+            apiKey: request.headers.get("x-api-key"),
             authorization: request.headers.get("authorization"),
             body: (await request.json()) as Record<string, unknown>,
             signal: request.signal,

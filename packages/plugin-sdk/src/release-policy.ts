@@ -1,7 +1,10 @@
 import { createPublicKey, type KeyObject } from "node:crypto";
 import { z } from "zod";
 
-export const bundledReleaseId = "gateway.openai-chat-1.0.0" as const;
+export const openAIChatReleaseId = "gateway.openai-chat-1.0.0" as const;
+export const anthropicMessagesReleaseId = "gateway.anthropic-messages-1.0.0" as const;
+export const bundledReleaseIds = [openAIChatReleaseId, anthropicMessagesReleaseId] as const;
+export type BundledReleaseId = (typeof bundledReleaseIds)[number];
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const keyId = z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/);
 export const publisherNamespaceSchema = z
@@ -23,7 +26,7 @@ export const releasePolicySchema = z
             expires_at: z.iso.datetime(),
             revoked: z.boolean(),
             purposes: z.array(z.enum(["package", "release"])).min(1),
-            release_ids: z.array(z.literal(bundledReleaseId)).min(1),
+            release_ids: z.array(z.enum(bundledReleaseIds)).min(1),
           })
           .strict(),
       )
@@ -33,7 +36,7 @@ export const releasePolicySchema = z
       .array(
         z
           .object({
-            release_id: z.literal(bundledReleaseId),
+            release_id: z.enum(bundledReleaseIds),
             descriptor_digest: digest,
             package_digest: digest,
             abi_version: z.literal(1),

@@ -3,7 +3,7 @@ import type { SQL } from "bun";
 import { verifier } from "@gateway/runtime/crypto";
 import { createPluginCatalogStore } from "@gateway/storage";
 import { withCatalog, syntheticAdminKey, syntheticPepper } from "../support/catalog.ts";
-import { bundledReleaseId } from "@gateway/plugin-sdk";
+import { openAIChatReleaseId } from "@gateway/plugin-sdk";
 import { createPlatformAuthenticator } from "../../apps/core-api/src/platform/authentication.ts";
 const permissions = [
   "plugins:read",
@@ -62,7 +62,7 @@ test(
     withCatalog(async (f, db) => {
       const publication = await f.application.installBundled(await f.actor(), {
         command_id: crypto.randomUUID(),
-        release_id: bundledReleaseId,
+        release_id: openAIChatReleaseId,
         reason: "Actual signed publication for authorization races",
       });
       for (const mode of ["credential", "administrator", "permission", "expiry", "verifier"]) {
@@ -104,7 +104,7 @@ test(
     withCatalog(async (f, db) => {
       const publication = await f.application.installBundled(await f.actor(), {
         command_id: crypto.randomUUID(),
-        release_id: bundledReleaseId,
+        release_id: openAIChatReleaseId,
         reason: "Actual signed publication for NULL permission revocation",
       });
       const identity = await credential(db, ["plugins:bind"]),
@@ -158,7 +158,7 @@ test(
     withCatalog(async (f, db) => {
       const publication = await f.application.installBundled(await f.actor(), {
         command_id: crypto.randomUUID(),
-        release_id: bundledReleaseId,
+        release_id: openAIChatReleaseId,
         reason: "Actual signed publication for direct permission boundaries",
       });
       const store = createPluginCatalogStore(f.appDb),
@@ -209,7 +209,7 @@ test(
     withCatalog(async (f, db) => {
       const publication = await f.application.installBundled(await f.actor(), {
         command_id: crypto.randomUUID(),
-        release_id: bundledReleaseId,
+        release_id: openAIChatReleaseId,
         reason: "Actual publication for command first races",
       });
       for (const [revision, mode] of [
@@ -279,7 +279,7 @@ test(
     withCatalog(async (f, db) => {
       const publication = await f.application.installBundled(await f.actor(), {
         command_id: crypto.randomUUID(),
-        release_id: bundledReleaseId,
+        release_id: openAIChatReleaseId,
         reason: "Actual publication for natural credential expiry",
       });
       const identity = await credential(db),
@@ -320,6 +320,7 @@ test(
         await f.actor(),
         crypto.randomUUID(),
         "Actual signed package for permission checks",
+        openAIChatReleaseId,
       );
       for (const action of ["register", "validate", "publish", "bind", "recover"] as const) {
         const identity = await credential(db),
@@ -333,7 +334,7 @@ test(
         };
         const operation =
           action === "register"
-            ? f.application.register(actor, input.command_id, input.reason)
+            ? f.application.register(actor, input.command_id, input.reason, openAIChatReleaseId)
             : action === "bind"
               ? f.application.bind(actor, f.provider.id, f.binding(uploaded.version_id))
               : action === "recover"
@@ -359,7 +360,12 @@ test(
         before = await snapshot(db);
       await revoke(db, identity, "verifier");
       await expect(
-        f.application.register(actor, crypto.randomUUID(), "Old verifier must fail"),
+        f.application.register(
+          actor,
+          crypto.randomUUID(),
+          "Old verifier must fail",
+          openAIChatReleaseId,
+        ),
       ).rejects.toMatchObject({ status: 403 });
       expect(await snapshot(db)).toEqual(before);
       const replacement = await f.application.authenticate(`Bearer rotated-${identity.token}`);
@@ -367,6 +373,7 @@ test(
         replacement,
         crypto.randomUUID(),
         "Rotated credential can register",
+        openAIChatReleaseId,
       );
       expect(registered.state).toBe("UPLOADED");
       const receipts = await db`SELECT receipt FROM plugin_catalog_receipts`;
@@ -394,6 +401,7 @@ test(
         actor,
         crypto.randomUUID(),
         "Actual package for revoked initiator cleanup",
+        openAIChatReleaseId,
       );
       const controller = new AbortController();
       const pending = f.application.validate(
@@ -475,6 +483,7 @@ test(
         actors[0]!,
         crypto.randomUUID(),
         "Single install permission signed package",
+        openAIChatReleaseId,
       );
       const store = createPluginCatalogStore(f.appDb),
         auth = createPlatformAuthenticator(store, {

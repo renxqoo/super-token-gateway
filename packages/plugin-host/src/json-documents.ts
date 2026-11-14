@@ -11,7 +11,12 @@ type Node = {
 export type JSONDocument = JSONDocumentDescriptor;
 export type JSONFact = JSONNodeFact;
 export type JSONEdit = { op: "set" | "remove"; pointer: string; value?: string };
-export type JSONPlan = { document: string; edits: JSONEdit[] };
+export type JSONSlot =
+  | { at: string; from: string; mode: "value" | "parse" | "stringify" }
+  | { at: string; sources: string[]; mode: "concat" };
+export type JSONPlan =
+  | { document: string; edits: JSONEdit[] }
+  | { document: string; compose: { template: string; slots: JSONSlot[] } };
 type Document = { owner: string; bytes: Buffer; root: Node; charge: number; consumed: boolean };
 export function createJSONDocuments(maxBytes = 256 << 20) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1024 || maxBytes > 1024 ** 3)
@@ -158,6 +163,92 @@ export function createJSONDocuments(maxBytes = 256 << 20) {
   function drop(handle: string, doc: Document) {
     if (documents.delete(handle)) retained -= doc.charge;
   }
+  function publish(owner: string, handle: string, doc: Document, bytes: Uint8Array) {
+    index(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength), () => {});
+    const digest = sha256(bytes),
+      output = crypto.randomUUID();
+    doc.consumed = true;
+    drop(handle, doc);
+    reserve(bytes.length);
+    outputs.set(output, { owner, bytes });
+    return {
+      bytes,
+      digest,
+      release() {
+        if (outputs.delete(output)) retained -= bytes.length;
+      },
+    };
+  }
+  function compose(doc: Document, plan: { template: string; slots: JSONSlot[] }): Uint8Array {
+    const template = Buffer.from(plan.template);
+    if (template.length > 256 << 10 || plan.slots.length > 4096)
+      throw new PluginHostError("JSON_PLAN_BUDGET");
+    const charge = (amount: number) => {
+      reserve(amount);
+      doc.charge += amount;
+    };
+    charge(template.length * 7);
+    const root = index(template, charge);
+    const patches: { start: number; end: number; bytes: Buffer }[] = [];
+    let added = 0;
+    for (const slot of plan.slots) {
+      if (!["value", "parse", "stringify", "concat"].includes(slot.mode))
+        throw new PluginHostError("JSON_PLAN");
+      const target = lookup(root, pointer(slot.at));
+      if (!slot.at || target?.kind !== "null") throw new PluginHostError("JSON_PLAN");
+      if (slot.mode === "concat") {
+        if (!slot.sources.length || slot.sources.length > 256)
+          throw new PluginHostError("JSON_PLAN");
+        let text = "";
+        for (const from of slot.sources) {
+          const part = lookup(doc.root, pointer(from));
+          if (part?.kind !== "string") throw new PluginHostError("JSON_PLAN");
+          charge((part.end - part.start) * 6);
+          text += JSON.parse(doc.bytes.subarray(part.start, part.end).toString("utf8")) as string;
+        }
+        const bytes = Buffer.from(JSON.stringify(text));
+        added += bytes.length;
+        if (added > (16 << 20) + (64 << 10)) throw new PluginHostError("JSON_OUTPUT_BUDGET");
+        patches.push({ start: target.start, end: target.end, bytes });
+        continue;
+      }
+      const source = lookup(doc.root, pointer(slot.from));
+      if (!source) throw new PluginHostError("JSON_PLAN");
+      let bytes = doc.bytes.subarray(source.start, source.end);
+      if (slot.mode === "parse") {
+        if (source.kind !== "string") throw new PluginHostError("JSON_PLAN");
+        const decoded = Buffer.from(JSON.parse(bytes.toString("utf8")) as string);
+        charge(decoded.length * 7);
+        try {
+          index(decoded, charge);
+        } catch (error) {
+          if (error instanceof PluginHostError && error.code.startsWith("JSON_"))
+            throw new PluginHostError("JSON_COMPOSE_SOURCE");
+          throw error;
+        }
+        bytes = decoded;
+      } else if (slot.mode === "stringify")
+        bytes = Buffer.from(JSON.stringify(bytes.toString("utf8")));
+      added += bytes.length;
+      if (added > (16 << 20) + (64 << 10)) throw new PluginHostError("JSON_OUTPUT_BUDGET");
+      patches.push({ start: target.start, end: target.end, bytes });
+    }
+    patches.sort((a, b) => a.start - b.start);
+    for (let i = 1; i < patches.length; i++)
+      if (patches[i]!.start === patches[i - 1]!.start)
+        throw new PluginHostError("JSON_PLAN_OVERLAP");
+    const size = patches.reduce((n, p) => n + p.bytes.length - (p.end - p.start), template.length);
+    if (size > doc.bytes.length + template.length + (64 << 10) || size > (16 << 20) + (320 << 10))
+      throw new PluginHostError("JSON_OUTPUT_BUDGET");
+    const parts: Buffer[] = [];
+    let cursor = 0;
+    for (const patch of patches) {
+      parts.push(template.subarray(cursor, patch.start), patch.bytes);
+      cursor = patch.end;
+    }
+    parts.push(template.subarray(cursor));
+    return new Uint8Array(Buffer.concat(parts, size));
+  }
   return {
     register(owner: string, source: Uint8Array, selectedHandle?: string): JSONDocument {
       if (source.length > 16 << 20) throw new PluginHostError("JSON_BODY_BUDGET");
@@ -183,7 +274,43 @@ export function createJSONDocuments(maxBytes = 256 << 20) {
       if (paths.length > 16 || new Set(paths).size !== paths.length)
         throw new PluginHostError("JSON_INSPECTION_BUDGET");
       const facts: Record<string, JSONFact> = Object.create(null) as Record<string, JSONFact>;
+      const concrete: string[] = [];
       for (const path of paths) {
+        const parts = pointer(path);
+        if (!parts.includes("*")) {
+          concrete.push(path);
+          continue;
+        }
+        let prefixes: string[][] = [[]];
+        for (const part of parts) {
+          if (part !== "*") {
+            prefixes = prefixes.map((prefix) => [...prefix, part]);
+            continue;
+          }
+          const next: string[][] = [];
+          for (const prefix of prefixes) {
+            const node = lookup(doc.root, prefix);
+            const keys =
+              node?.kind === "array"
+                ? node.items!.map((_, n) => String(n))
+                : node?.kind === "object"
+                  ? [...node.children!.keys()]
+                  : [];
+            for (const key of keys) {
+              next.push([...prefix, key]);
+              if (next.length > 4096) throw new PluginHostError("JSON_INSPECTION_BUDGET");
+            }
+          }
+          prefixes = next;
+        }
+        for (const prefix of prefixes)
+          concrete.push(
+            "/" + prefix.map((part) => part.replace(/~/g, "~0").replace(/\//g, "~1")).join("/"),
+          );
+      }
+      if (concrete.length > 4096) throw new PluginHostError("JSON_INSPECTION_BUDGET");
+      for (const path of concrete) {
+        if (Object.hasOwn(facts, path)) continue;
         const node = lookup(doc.root, pointer(path));
         if (!node) {
           facts[path] = { kind: "missing", bytes: 0 };
@@ -218,12 +345,13 @@ export function createJSONDocuments(maxBytes = 256 << 20) {
             : {}),
         };
       }
-      if (Buffer.byteLength(JSON.stringify(facts)) > 128 << 10)
+      if (Buffer.byteLength(JSON.stringify(facts)) > 256 << 10)
         throw new PluginHostError("JSON_INSPECTION_BUDGET");
       return facts;
     },
     materialize(owner: string, plan: JSONPlan) {
       const doc = get(owner, plan.document);
+      if ("compose" in plan) return publish(owner, plan.document, doc, compose(doc, plan.compose));
       if (plan.edits.length > 32) throw new PluginHostError("JSON_PLAN_BUDGET");
       let replacementBytes = 0;
       const edits = plan.edits.map((edit) => {
@@ -325,21 +453,7 @@ export function createJSONDocuments(maxBytes = 256 << 20) {
         cursor = patch.end;
       }
       parts.push(doc.bytes.subarray(cursor));
-      const bytes = new Uint8Array(Buffer.concat(parts, size));
-      index(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength), () => {});
-      const digest = sha256(bytes),
-        output = crypto.randomUUID();
-      doc.consumed = true;
-      drop(plan.document, doc);
-      reserve(bytes.length);
-      outputs.set(output, { owner, bytes });
-      return {
-        bytes,
-        digest,
-        release() {
-          if (outputs.delete(output)) retained -= bytes.length;
-        },
-      };
+      return publish(owner, plan.document, doc, new Uint8Array(Buffer.concat(parts, size)));
     },
     discard(owner: string, handle: string) {
       const doc = documents.get(handle);

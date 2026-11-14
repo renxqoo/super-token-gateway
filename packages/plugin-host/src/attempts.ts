@@ -372,7 +372,21 @@ export function createPluginAttempts(
                     : undefined;
               if (!plan || plan.document !== document.handle)
                 throw new PluginHostError("JSON_HANDLE");
-              const materialized = documents.materialize(binding.id, plan);
+              let materialized: ReturnType<typeof documents.materialize>;
+              try {
+                materialized = documents.materialize(binding.id, plan);
+              } catch (error) {
+                if (error instanceof PluginHostError && error.code === "JSON_COMPOSE_SOURCE")
+                  return {
+                    result: {
+                      abi_version: 1,
+                      kind: "failure",
+                      status: hook === "prepare" ? 400 : 502,
+                      code: "invalid_json",
+                    },
+                  };
+                throw error;
+              }
               if (Date.now() >= options.deadlineAt || signal?.aborted || disposed)
                 throw new PluginHostError("DEADLINE");
               if (outputBytes + materialized.bytes.length > maxOutput)

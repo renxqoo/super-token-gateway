@@ -7,13 +7,13 @@ import { canonical } from "@gateway/kernel";
 import { GatewayError } from "@gateway/contracts";
 import { sha256, validateConfig } from "@gateway/plugin-sdk";
 import { createPlatformAuthenticator, type PlatformActor } from "../platform/authentication.ts";
-import { bundledReleaseId, releasePolicySchema } from "@gateway/plugin-sdk";
+import { bundledReleaseIds, releasePolicySchema, type BundledReleaseId } from "@gateway/plugin-sdk";
 import { verifyRelease } from "./releases.ts";
 import { validateCatalogPackage } from "./validator.ts";
 export const installBundledReleaseSchema = z
   .object({
     command_id: z.uuid(),
-    release_id: z.literal(bundledReleaseId),
+    release_id: z.enum(bundledReleaseIds),
     reason: z.string().min(1).max(500),
   })
   .strict();
@@ -145,10 +145,15 @@ export function createCatalogApplication(options: {
       release.trustExpiresAt,
     );
   }
-  async function register(actor: PlatformActor, commandId: string, reason: string) {
+  async function register(
+    actor: PlatformActor,
+    commandId: string,
+    reason: string,
+    releaseId: BundledReleaseId,
+  ) {
     available();
     auth.require(actor, "plugins:install-bundled");
-    const directory = resolve(options.releaseDirectory, bundledReleaseId);
+    const directory = resolve(options.releaseDirectory, z.enum(bundledReleaseIds).parse(releaseId));
     const bytes = await boundedFile(resolve(directory, "package.json"), 44 << 20);
     const signed = JSON.parse(
       new TextDecoder("utf-8", { fatal: true }).decode(
@@ -396,6 +401,7 @@ export function createCatalogApplication(options: {
           actor,
           catalogStageCommand(parsed.command_id, "register"),
           parsed.reason,
+          parsed.release_id,
         ),
         id = uploaded.version_id;
       const current = await store.truth(id);

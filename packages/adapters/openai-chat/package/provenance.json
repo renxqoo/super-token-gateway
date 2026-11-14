@@ -9,7 +9,7 @@
     "extism-js-url": "https://github.com/extism/js-pdk/releases/download/v1.7.0/extism-js-aarch64-macos-v1.7.0.gz",
     "extism-js-sha256": "12c01c2bb2240a6a05a4f8babe680c793c397d84e6a1497a7ca1312e78a475c3",
     "deterministic-builder-version": "deterministic-preinit-v1",
-    "deterministic-builder-binary-sha256": "b47d157c424296e083ec0ffc0e23e0271195de10622d3a12229e8a004ae80e39",
+    "deterministic-builder-binary-sha256": "457d2a6f6863c0ca4f28bf59d0b24bb18f0e73486c5090ffff036ccf3114579d",
     "deterministic-builder-source-url": "https://codeload.github.com/extism/js-pdk/tar.gz/refs/tags/v1.7.0",
     "deterministic-builder-source-sha256": "54cccf479ceb5a934b208d79d1171652f97bd13d6cd0e946885754bde8f7de25",
     "deterministic-builder-commit": "beacc9ad9e6bac6250143980b669d2e6c68aaa18",

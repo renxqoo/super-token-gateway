@@ -107,17 +107,6 @@ if (
   (await reported.exited) !== 0
 )
   throw new Error("PLUGIN_TOOL_VERSION");
-const output = `${root}packages/adapters/openai-chat/package/`;
-await build({
-  absWorkingDir: root,
-  entryPoints: ["packages/adapters/openai-chat/plugin.ts"],
-  bundle: true,
-  format: "cjs",
-  target: "es2020",
-  minify: true,
-  outfile: `${cache}openai-chat.js`,
-});
-await copyFile(`${root}packages/adapters/openai-chat/plugin.d.ts`, `${cache}openai-chat.d.ts`);
 async function compileOnce(name: string, cwd: string, output: string) {
   const child = Bun.spawn([compilerPath, `${name}.js`, "-i", `${name}.d.ts`, "-o", output], {
     cwd,
@@ -145,7 +134,95 @@ async function reproducible(name: string) {
     await rm(relocated, { recursive: true, force: true });
   }
 }
-await reproducible("openai-chat");
+const adapters = ["openai-chat", "anthropic-messages"];
+const selected = process.argv.includes("--adapter")
+  ? process.argv.slice(process.argv.indexOf("--adapter") + 1).filter((arg) => !arg.startsWith("--"))
+  : adapters;
+if (!selected.length || selected.some((name) => !adapters.includes(name)))
+  throw new Error("PLUGIN_ADAPTER_UNKNOWN");
+async function buildAdapter(name: string) {
+  const output = `${root}packages/adapters/${name}/package/`;
+  await build({
+    absWorkingDir: root,
+    entryPoints: [`packages/adapters/${name}/plugin.ts`],
+    bundle: true,
+    format: "cjs",
+    target: "es2020",
+    minify: true,
+    outfile: `${cache}${name}.js`,
+  });
+  await copyFile(`${root}packages/adapters/${name}/plugin.d.ts`, `${cache}${name}.d.ts`);
+  await reproducible(name);
+  await copyFile(`${cache}${name}.wasm`, `${output}module.wasm`);
+  const sources: Record<string, { bytes: number; sha256: string }> = {};
+  for (const path of [
+    `packages/adapters/${name}/plugin.ts`,
+    `packages/adapters/${name}/plugin.d.ts`,
+    "packages/plugin-sdk/src/guest.ts",
+    `packages/adapters/${name}/package/module.wasm`,
+    `packages/adapters/${name}/package/manifest.json`,
+    `packages/adapters/${name}/package/config.schema.json`,
+    `packages/adapters/${name}/package/fixtures/cases.json`,
+    "scripts/plugin-tools.json",
+    "scripts/build-plugins.ts",
+    "scripts/setup-plugin-tools.py",
+    "scripts/plugin-builder/deterministic-preinit.patch",
+    "scripts/plugin-builder/upstream-Cargo.lock",
+    "scripts/plugin-builder/Cargo.lock",
+  ]) {
+    const bytes = new Uint8Array(await Bun.file(`${root}${path}`).arrayBuffer());
+    sources[path] = { bytes: bytes.length, sha256: sha(bytes) };
+  }
+  await Bun.write(
+    `${output}provenance.json`,
+    JSON.stringify(
+      {
+        source: `packages/adapters/${name}/plugin.ts`,
+        tools: {
+          bun: Bun.version,
+          esbuild: lock.esbuild,
+          "lossless-json": lock["lossless-json"],
+          "extism-js-release": lock["extism-js"].release,
+          "extism-js-reported": lock["extism-js"].reported,
+          "extism-js-url": lock["extism-js"].url,
+          "extism-js-sha256": lock["extism-js"].sha256,
+          "deterministic-builder-version": lock.builder.version,
+          "deterministic-builder-binary-sha256": receipt.binarySha256,
+          "deterministic-builder-source-url": lock.builder.source.url,
+          "deterministic-builder-source-sha256": lock.builder.source.sha256,
+          "deterministic-builder-commit": lock.builder.source.commit,
+          "deterministic-builder-patch-sha256": lock.builder.patchSha256,
+          "deterministic-builder-lock-sha256": lock.builder.lockSha256,
+          "deterministic-builder-upstream-lock-sha256": lock.builder.upstreamLockSha256,
+          "engine-bootstrap-sha256": lock.builder.engine.sha256,
+          "engine-source-built": "false; exact verified official CLI slice",
+          "compiler-binary-reproducibility": "not verified",
+          "platforms-verified": lock.builder.platformsVerified.join(","),
+          "preinit-random-clock": "0x5a, epoch 0, resolution 1ns; builder only",
+          "rust-compiler": lock.builder.rustVersion,
+          "rust-profile": "release opt-level=0/debug=0/jobs=2",
+          "binaryen-release": lock.binaryen.release,
+          "binaryen-url": lock.binaryen.url,
+          "binaryen-sha256": lock.binaryen.sha256,
+          "pdk-native-base64-source":
+            "https://github.com/extism/js-pdk/blob/v1.7.0/crates/core/src/prelude/src/atob-btoa.ts",
+          "quickjs-license-source":
+            "rquickjs-sys 0.12.0 crate, SHA-256 698077537c286a169de8693b216672bcef148bf2e2e112ebf50758c68e9afa09",
+        },
+        licenses: [
+          "MIT: adapter, lossless-json, QuickJS",
+          "BSD-3-Clause: Extism JS-PDK",
+          "Apache-2.0: Binaryen build tool",
+          "Apache-2.0 WITH LLVM-exception: Wizer/Wasmtime build tools",
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  await Bun.write(`${output}source-hashes.json`, JSON.stringify(sources, null, 2) + "\n");
+  return sources;
+}
 await build({
   absWorkingDir: root,
   entryPoints: ["tests/support/plugins/isolation.ts"],
@@ -157,74 +234,8 @@ await build({
 });
 await copyFile(`${root}tests/support/plugins/isolation.d.ts`, `${cache}isolation.d.ts`);
 await reproducible("isolation");
-await copyFile(`${cache}openai-chat.wasm`, `${output}module.wasm`);
-const sources: Record<string, { bytes: number; sha256: string }> = {};
-for (const path of [
-  "packages/adapters/openai-chat/plugin.ts",
-  "packages/adapters/openai-chat/plugin.d.ts",
-  "packages/plugin-sdk/src/guest.ts",
-  "packages/adapters/openai-chat/package/module.wasm",
-  "packages/adapters/openai-chat/package/manifest.json",
-  "packages/adapters/openai-chat/package/config.schema.json",
-  "packages/adapters/openai-chat/package/fixtures/cases.json",
-  "scripts/plugin-tools.json",
-  "scripts/build-plugins.ts",
-  "scripts/setup-plugin-tools.py",
-  "scripts/plugin-builder/deterministic-preinit.patch",
-  "scripts/plugin-builder/upstream-Cargo.lock",
-  "scripts/plugin-builder/Cargo.lock",
-]) {
-  const bytes = new Uint8Array(await Bun.file(`${root}${path}`).arrayBuffer());
-  sources[path] = { bytes: bytes.length, sha256: sha(bytes) };
-}
-await Bun.write(
-  `${output}provenance.json`,
-  JSON.stringify(
-    {
-      source: "packages/adapters/openai-chat/plugin.ts",
-      tools: {
-        bun: Bun.version,
-        esbuild: lock.esbuild,
-        "lossless-json": lock["lossless-json"],
-        "extism-js-release": lock["extism-js"].release,
-        "extism-js-reported": lock["extism-js"].reported,
-        "extism-js-url": lock["extism-js"].url,
-        "extism-js-sha256": lock["extism-js"].sha256,
-        "deterministic-builder-version": lock.builder.version,
-        "deterministic-builder-binary-sha256": receipt.binarySha256,
-        "deterministic-builder-source-url": lock.builder.source.url,
-        "deterministic-builder-source-sha256": lock.builder.source.sha256,
-        "deterministic-builder-commit": lock.builder.source.commit,
-        "deterministic-builder-patch-sha256": lock.builder.patchSha256,
-        "deterministic-builder-lock-sha256": lock.builder.lockSha256,
-        "deterministic-builder-upstream-lock-sha256": lock.builder.upstreamLockSha256,
-        "engine-bootstrap-sha256": lock.builder.engine.sha256,
-        "engine-source-built": "false; exact verified official CLI slice",
-        "compiler-binary-reproducibility": "not verified",
-        "platforms-verified": lock.builder.platformsVerified.join(","),
-        "preinit-random-clock": "0x5a, epoch 0, resolution 1ns; builder only",
-        "rust-compiler": lock.builder.rustVersion,
-        "rust-profile": "release opt-level=0/debug=0/jobs=2",
-        "binaryen-release": lock.binaryen.release,
-        "binaryen-url": lock.binaryen.url,
-        "binaryen-sha256": lock.binaryen.sha256,
-        "pdk-native-base64-source":
-          "https://github.com/extism/js-pdk/blob/v1.7.0/crates/core/src/prelude/src/atob-btoa.ts",
-        "quickjs-license-source":
-          "rquickjs-sys 0.12.0 crate, SHA-256 698077537c286a169de8693b216672bcef148bf2e2e112ebf50758c68e9afa09",
-      },
-      licenses: [
-        "MIT: adapter, lossless-json, QuickJS",
-        "BSD-3-Clause: Extism JS-PDK",
-        "Apache-2.0: Binaryen build tool",
-        "Apache-2.0 WITH LLVM-exception: Wizer/Wasmtime build tools",
-      ],
-    },
-    null,
-    2,
-  ) + "\n",
-);
-await Bun.write(`${output}source-hashes.json`, JSON.stringify(sources, null, 2) + "\n");
+let sources: Record<string, { bytes: number; sha256: string }> = {};
+for (const name of selected) sources = await buildAdapter(name);
 await copyFile(`${cache}isolation.wasm`, `${root}tests/support/plugins/isolation.wasm`);
 await Bun.write(
   `${root}tests/support/plugins/provenance.json`,
@@ -261,6 +272,7 @@ const format = Bun.spawn(
   { cwd: root, env: { PATH: "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe" },
 );
 if ((await format.exited) !== 0) throw new Error("PLUGIN_PROVENANCE_FORMAT");
-console.log(
-  `Built OpenAI Chat WASM ${sources["packages/adapters/openai-chat/package/module.wasm"]!.sha256}`,
-);
+for (const name of selected)
+  console.log(
+    `Built ${name} WASM ${sha(await Bun.file(`${root}packages/adapters/${name}/package/module.wasm`).bytes())}`,
+  );

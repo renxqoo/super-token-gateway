@@ -9,7 +9,7 @@
 发行负责人在 Core 进程之外运行受控签名工具，显式提供权限为 0600 的 Ed25519 私钥文件。Core 只消费公钥和签名，不生成或持有发行私钥：
 
 ```sh
-bun run plugins:sign-bundled --private-key-file /secure/release-ed25519.pem --key-id approved-release-key --output-directory /release-artifacts --helper-executable /release/native/plugin-host
+bun run plugins:sign-bundled --private-key-file /secure/release-ed25519.pem --key-id approved-release-key --output-directory /release-artifacts --helper-executable /release/native/plugin-host --release-id gateway.openai-chat-1.0.0
 ```
 
 该工具只读取受控 builtin，输出 `<output-directory>/gateway.openai-chat-1.0.0/package.json` 与 `release.json`，已有文件不会覆盖。package signature 签署 SDK 内容 digest；另一独立签名域 `gateway-plugin-release-v1\0` 签署规范 JSON release descriptor。descriptor 包含固定 source/name/version、内容与 wire envelope digest、每文件长度与 SHA256、ABI、schema、fixture、验证策略和 helper 二进制 digest。签名不包含自身，包内公钥不能成为 trust anchor。

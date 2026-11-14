@@ -2,9 +2,9 @@ import { createPublicKey, verify } from "node:crypto";
 import { z } from "zod";
 import { canonical } from "@gateway/kernel";
 import { GatewayError } from "@gateway/contracts";
-import { openAIChatPackageFiles } from "@gateway/adapters";
+import { bundledPackageFiles } from "@gateway/adapters";
 import {
-  bundledReleaseId,
+  bundledReleaseIds,
   manifestSchema,
   packageDigest,
   publisherAdmits,
@@ -113,8 +113,8 @@ export async function verifyRelease(
       throw new Error("RELEASE_POLICY_EXPIRED");
     if (d.source.startsWith("upload:"))
       return verifyPublisherRelease(bytes, signed, policy, runtimeDigest, now);
-    if (d.release_id !== bundledReleaseId || d.source !== `bundled:${bundledReleaseId}`)
-      throw new Error("RELEASE_NOT_ALLOWED");
+    const releaseId = bundledReleaseIds.find((id) => id === d.release_id);
+    if (!releaseId || d.source !== `bundled:${releaseId}`) throw new Error("RELEASE_NOT_ALLOWED");
     if (
       new Set(policy.keys.map((k) => k.id)).size !== policy.keys.length ||
       new Set(policy.releases.map((r) => r.release_id)).size !== policy.releases.length
@@ -141,7 +141,7 @@ export async function verifyRelease(
         Date.parse(key.not_before) > now ||
         Date.parse(key.expires_at) <= now ||
         !key.purposes.includes(purpose) ||
-        !key.release_ids.includes(bundledReleaseId)
+        !key.release_ids.includes(releaseId)
       )
         throw new Error("RELEASE_KEY_DENIED");
       trustExpiresAt = Math.min(trustExpiresAt, Date.parse(key.expires_at));
@@ -172,7 +172,7 @@ export async function verifyRelease(
       bytes,
       new Map([[envelope.signature.key_id, usable(envelope.signature.key_id, "package")]]),
     );
-    const bundled = await openAIChatPackageFiles();
+    const bundled = await bundledPackageFiles(releaseId);
     if (
       pkg.digest !== packageDigest(bundled) ||
       canonical(describeRelease(pkg.files, bytes, runtimeDigest)) !== canonical(d)

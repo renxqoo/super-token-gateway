@@ -5137,7 +5137,7 @@
                   },
                   "release_id": {
                     "type": "string",
-                    "const": "gateway.openai-chat-1.0.0"
+                    "enum": ["gateway.openai-chat-1.0.0", "gateway.anthropic-messages-1.0.0"]
                   },
                   "reason": {
                     "type": "string",

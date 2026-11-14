@@ -2,8 +2,8 @@ import { createPrivateKey, sign } from "node:crypto";
 import { parseArgs } from "node:util";
 import { mkdir, writeFile, stat, rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { openAIChatPackageFiles } from "@gateway/adapters";
-import { bundledReleaseId, packageDigest, sha256 } from "@gateway/plugin-sdk";
+import { bundledPackageFiles } from "@gateway/adapters";
+import { bundledReleaseIds, packageDigest, sha256 } from "@gateway/plugin-sdk";
 import { canonical } from "@gateway/kernel";
 import { describeRelease, signedReleaseSchema } from "../apps/core-api/src/plugins/releases.ts";
 const { values } = parseArgs({
@@ -12,21 +12,32 @@ const { values } = parseArgs({
     "key-id": { type: "string" },
     "output-directory": { type: "string" },
     "helper-executable": { type: "string" },
+    "release-id": { type: "string" },
   },
   strict: true,
 });
 const keyPath = values["private-key-file"],
   keyId = values["key-id"],
   output = values["output-directory"],
-  helper = values["helper-executable"];
-if (!keyPath || !keyId || !output || !helper || !/^[A-Za-z0-9_.-]{1,100}$/.test(keyId))
-  throw new Error("Required: --private-key-file --key-id --output-directory --helper-executable");
+  helper = values["helper-executable"],
+  releaseId = bundledReleaseIds.find((id) => id === values["release-id"]);
+if (
+  !keyPath ||
+  !keyId ||
+  !output ||
+  !helper ||
+  !releaseId ||
+  !/^[A-Za-z0-9_.-]{1,100}$/.test(keyId)
+)
+  throw new Error(
+    "Required: --private-key-file --key-id --output-directory --helper-executable --release-id",
+  );
 const permissions = await stat(keyPath);
 if (!permissions.isFile() || (permissions.mode & 0o077) !== 0)
   throw new Error("Signing key must be a private regular file with mode 0600");
 const key = createPrivateKey(await Bun.file(keyPath).text());
 if (key.asymmetricKeyType !== "ed25519") throw new Error("An Ed25519 private key is required");
-const files = await openAIChatPackageFiles();
+const files = await bundledPackageFiles(releaseId);
 const envelope = new TextEncoder().encode(
   JSON.stringify({
     format: 1,
@@ -51,7 +62,7 @@ const release = signedReleaseSchema.parse({
     ).toString("base64"),
   },
 });
-const directory = resolve(output, bundledReleaseId);
+const directory = resolve(output, releaseId);
 await mkdir(resolve(output), { recursive: true, mode: 0o700 });
 await mkdir(directory, { mode: 0o700 });
 try {

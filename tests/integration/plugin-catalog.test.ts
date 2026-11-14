@@ -7,11 +7,11 @@ import { resolve } from "node:path";
 import { createPluginCatalogStore, Store } from "@gateway/storage";
 import { verifier } from "@gateway/runtime/crypto";
 import { withCatalog, syntheticAdminKey, syntheticPepper } from "../support/catalog.ts";
-import { bundledReleaseId } from "@gateway/plugin-sdk";
+import { openAIChatReleaseId } from "@gateway/plugin-sdk";
 import { catalogStageCommand } from "../../apps/core-api/src/plugins/application.ts";
 const install = () => ({
   command_id: crypto.randomUUID(),
-  release_id: bundledReleaseId,
+  release_id: openAIChatReleaseId,
   reason: "Synthetic accepted builtin installation",
 });
 test(
@@ -36,7 +36,7 @@ test(
             "--command-id",
             input.command_id,
             "--release-id",
-            bundledReleaseId,
+            openAIChatReleaseId,
             "--reason",
             input.reason,
           ],
@@ -205,8 +205,8 @@ test("public catalog rejects missing project revoked expired and insufficient pl
 test("external trust denies policy expiry revocation unknown keys tampered detached signatures and changed ABI schema or source", () =>
   withCatalog(async (f, db) => {
     const input = install(),
-      releasePath = resolve(f.directory, bundledReleaseId, "release.json"),
-      packagePath = resolve(f.directory, bundledReleaseId, "package.json");
+      releasePath = resolve(f.directory, openAIChatReleaseId, "release.json"),
+      packagePath = resolve(f.directory, openAIChatReleaseId, "package.json");
     const packageBytes = await Bun.file(packagePath).bytes();
     for (const change of [
       { expires_at: "2020-01-01T00:00:00.000Z" },
@@ -257,6 +257,7 @@ test(
           actor,
           crypto.randomUUID(),
           "Synthetic staged release",
+          openAIChatReleaseId,
         );
       const validated = await f.application.validate(actor, uploaded.version_id, {
         command_id: crypto.randomUUID(),
@@ -359,7 +360,12 @@ test(
 test("cancelled actual validation is REJECTED with reaped helper and cannot publish", () =>
   withCatalog(async (f, db) => {
     const actor = await f.actor(),
-      uploaded = await f.application.register(actor, crypto.randomUUID(), "Synthetic cancellation");
+      uploaded = await f.application.register(
+        actor,
+        crypto.randomUUID(),
+        "Synthetic cancellation",
+        openAIChatReleaseId,
+      );
     const controller = new AbortController();
     controller.abort();
     const result = await f.application.validate(
@@ -394,6 +400,7 @@ test("expired validation recovery advances epoch without adopting unknown result
         actor,
         crypto.randomUUID(),
         "Synthetic abandoned run",
+        openAIChatReleaseId,
       ),
       store = createPluginCatalogStore(db),
       id = uploaded.version_id,
@@ -464,6 +471,7 @@ test("current trust revocation after successful fixtures blocks publication with
         actor,
         crypto.randomUUID(),
         "Synthetic trust recheck",
+        openAIChatReleaseId,
       );
     await f.application.validate(actor, uploaded.version_id, {
       command_id: crypto.randomUUID(),
@@ -495,6 +503,7 @@ test("receipt insertion failure rolls back publication revision and audit before
         actor,
         crypto.randomUUID(),
         "Synthetic receipt rollback",
+        openAIChatReleaseId,
       );
     await f.application.validate(actor, uploaded.version_id, {
       command_id: crypto.randomUUID(),
@@ -531,6 +540,7 @@ test("cleanup confirmation loss persists CLEANUP_PENDING and blocks publication 
         actor,
         crypto.randomUUID(),
         "Synthetic cleanup confirmation loss",
+        openAIChatReleaseId,
       ),
       store = createPluginCatalogStore(db),
       d = f.release.descriptor,
@@ -555,7 +565,7 @@ test("cleanup confirmation loss persists CLEANUP_PENDING and blocks publication 
     const { verifyRelease } = await import("../../apps/core-api/src/plugins/releases.ts"),
       { validateCatalogPackage } = await import("../../apps/core-api/src/plugins/validator.ts"),
       { catalogHelper } = await import("../support/catalog.ts");
-    const bytes = await Bun.file(resolve(f.directory, bundledReleaseId, "package.json")).bytes(),
+    const bytes = await Bun.file(resolve(f.directory, openAIChatReleaseId, "package.json")).bytes(),
       verified = await verifyRelease(bytes, f.release, f.policy, d.runtime_digest);
     const actual = await validateCatalogPackage(verified.pkg, catalogHelper);
     expect(actual).toEqual({ cases: 15, steps: 24, cleanup_confirmed: true, error_code: null });
@@ -606,6 +616,7 @@ test("different publication commands at the same expected revision have one winn
         actor,
         crypto.randomUUID(),
         "Synthetic publication race",
+        openAIChatReleaseId,
       );
     await f.application.validate(actor, uploaded.version_id, {
       command_id: crypto.randomUUID(),
@@ -648,6 +659,7 @@ test("closing catalog while validation is starting waits for rejection and leave
         actor,
         crypto.randomUUID(),
         "Synthetic shutdown start race",
+        openAIChatReleaseId,
       );
     const pending = f.application.validate(actor, uploaded.version_id, {
       command_id: crypto.randomUUID(),
@@ -666,8 +678,8 @@ test("closing catalog while validation is starting waits for rejection and leave
 
 test("package signature is still mandatory under a valid separately signed release descriptor", () =>
   withCatalog(async (f, db) => {
-    const packagePath = resolve(f.directory, bundledReleaseId, "package.json"),
-      releasePath = resolve(f.directory, bundledReleaseId, "release.json"),
+    const packagePath = resolve(f.directory, openAIChatReleaseId, "package.json"),
+      releasePath = resolve(f.directory, openAIChatReleaseId, "release.json"),
       envelope = await Bun.file(packagePath).json();
     envelope.signature.value = "A".repeat(86) + "==";
     const bytes = new TextEncoder().encode(JSON.stringify(envelope)),
@@ -705,9 +717,10 @@ test("same immutable name version and content cannot be overwritten by different
         actor,
         crypto.randomUUID(),
         "Synthetic immutable package body",
+        openAIChatReleaseId,
       );
-    const packagePath = resolve(f.directory, bundledReleaseId, "package.json"),
-      releasePath = resolve(f.directory, bundledReleaseId, "release.json"),
+    const packagePath = resolve(f.directory, openAIChatReleaseId, "package.json"),
+      releasePath = resolve(f.directory, openAIChatReleaseId, "release.json"),
       before = await Bun.file(packagePath).bytes();
     const changed = Buffer.concat([before, Buffer.from("\n")]),
       descriptor = { ...f.release.descriptor, envelope_digest: sha256(changed) };
@@ -746,7 +759,12 @@ test("same immutable name version and content cannot be overwritten by different
 test("expired owned helper registration recovers only after actual reap and replays the original failed recovery receipt", () =>
   withCatalog(async (f, db) => {
     const actor = await f.actor(),
-      uploaded = await f.application.register(actor, crypto.randomUUID(), "Synthetic lost finish"),
+      uploaded = await f.application.register(
+        actor,
+        crypto.randomUUID(),
+        "Synthetic lost finish",
+        openAIChatReleaseId,
+      ),
       store = createPluginCatalogStore(db),
       d = f.release.descriptor,
       owner = crypto.randomUUID(),
@@ -772,7 +790,7 @@ test("expired owned helper registration recovers only after actual reap and repl
       { validateCatalogPackage } = await import("../../apps/core-api/src/plugins/validator.ts"),
       { catalogHelper } = await import("../support/catalog.ts");
     const verified = await verifyRelease(
-      await Bun.file(resolve(f.directory, bundledReleaseId, "package.json")).bytes(),
+      await Bun.file(resolve(f.directory, openAIChatReleaseId, "package.json")).bytes(),
       f.release,
       f.policy,
       d.runtime_digest,
@@ -823,6 +841,7 @@ test("release policy and signing key expiring while publication waits on a lock 
         actor,
         crypto.randomUUID(),
         "Synthetic locked trust expiry",
+        openAIChatReleaseId,
       );
     await f.application.validate(actor, uploaded.version_id, {
       command_id: crypto.randomUUID(),
@@ -886,6 +905,7 @@ test("policy expiry does not block cancelled owned validation from reaping and r
         initialActor,
         crypto.randomUUID(),
         "Synthetic policy expiry cleanup",
+        openAIChatReleaseId,
       );
     const until = new Date(Date.now() + 600).toISOString();
     await writeFile(f.policyPath, JSON.stringify({ ...f.policy, expires_at: until }));
@@ -951,6 +971,7 @@ test("lost finish transaction cannot rerun the same persisted active validation 
         actor,
         crypto.randomUUID(),
         "Synthetic lost finish regression",
+        openAIChatReleaseId,
       ),
       input = {
         command_id: crypto.randomUUID(),
@@ -1002,6 +1023,7 @@ test("concurrent validation replays share one real run and completed receipt sta
         actor,
         crypto.randomUUID(),
         "Synthetic shared validation command",
+        openAIChatReleaseId,
       ),
       input = {
         command_id: crypto.randomUUID(),

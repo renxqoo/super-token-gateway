@@ -6,7 +6,12 @@ import type { SQL } from "bun";
 import { createDatabase, migrate, Store } from "@gateway/storage";
 import { createCatalogApplication } from "../../apps/core-api/src/plugins/application.ts";
 import { catalogRoutes } from "../../apps/core-api/src/plugins/http.ts";
-import { bundledReleaseId, type ReleasePolicy } from "@gateway/plugin-sdk";
+import {
+  anthropicMessagesReleaseId,
+  openAIChatReleaseId,
+  type BundledReleaseId,
+  type ReleasePolicy,
+} from "@gateway/plugin-sdk";
 import { withDatabase } from "./database.ts";
 const registry = ".local/T04b1-resources.jsonl";
 export const syntheticAdminKey = "synthetic-platform-admin-key-0123456789";
@@ -45,29 +50,49 @@ export async function prepareCatalog(db: SQL) {
       mode: 0o600,
     });
     await writeFile(credentialPath, syntheticAdminKey, { mode: 0o600 });
-    const signer = Bun.spawn(
-      [
-        "bun",
-        "scripts/sign-bundled-release.ts",
-        "--private-key-file",
-        privatePath,
-        "--key-id",
-        "synthetic-catalog-test",
-        "--output-directory",
-        directory,
-        "--helper-executable",
-        catalogHelper,
-      ],
-      { env: { ...process.env, MINIMAX_API_KEY: "" }, stdout: "pipe", stderr: "pipe" },
-    );
-    const [stdout, stderr] = await Promise.all([
-      new Response(signer.stdout).text(),
-      new Response(signer.stderr).text(),
-    ]);
-    if (await signer.exited) throw new Error(`Synthetic release signing failed: ${stderr}`);
-    const descriptor = JSON.parse(stdout) as Record<string, unknown>,
-      release = await Bun.file(resolve(directory, bundledReleaseId, "release.json")).json();
-    const d = release.descriptor;
+    const signRelease = async (releaseId: BundledReleaseId) => {
+      const signer = Bun.spawn(
+        [
+          "bun",
+          "scripts/sign-bundled-release.ts",
+          "--private-key-file",
+          privatePath,
+          "--key-id",
+          "synthetic-catalog-test",
+          "--output-directory",
+          directory,
+          "--helper-executable",
+          catalogHelper,
+          "--release-id",
+          releaseId,
+        ],
+        { env: { ...process.env, MINIMAX_API_KEY: "" }, stdout: "pipe", stderr: "pipe" },
+      );
+      const [stdout, stderr] = await Promise.all([
+        new Response(signer.stdout).text(),
+        new Response(signer.stderr).text(),
+      ]);
+      if (await signer.exited) throw new Error(`Synthetic release signing failed: ${stderr}`);
+      const descriptor = JSON.parse(stdout) as Record<string, unknown>,
+        signed = await Bun.file(resolve(directory, releaseId, "release.json")).json();
+      return {
+        signed,
+        entry: {
+          release_id: releaseId,
+          descriptor_digest: String(descriptor.descriptor_digest),
+          package_digest: signed.descriptor.package_digest,
+          abi_version: 1 as const,
+          config_schema_digest: signed.descriptor.config_schema_digest,
+          fixture_digest: signed.descriptor.fixture_digest,
+          validation_policy_digest: signed.descriptor.validation_policy_digest,
+          runtime_digest: signed.descriptor.runtime_digest,
+          revoked: false,
+        },
+      };
+    };
+    const openAI = await signRelease(openAIChatReleaseId),
+      anthropic = await signRelease(anthropicMessagesReleaseId),
+      release = openAI.signed;
     const policy: ReleasePolicy = {
       format: 1,
       expires_at: "2099-01-01T00:00:00.000Z",
@@ -80,22 +105,10 @@ export async function prepareCatalog(db: SQL) {
           expires_at: "2099-01-01T00:00:00.000Z",
           revoked: false,
           purposes: ["package", "release"],
-          release_ids: [bundledReleaseId],
+          release_ids: [openAIChatReleaseId, anthropicMessagesReleaseId],
         },
       ],
-      releases: [
-        {
-          release_id: bundledReleaseId,
-          descriptor_digest: String(descriptor.descriptor_digest),
-          package_digest: d.package_digest,
-          abi_version: 1,
-          config_schema_digest: d.config_schema_digest,
-          fixture_digest: d.fixture_digest,
-          validation_policy_digest: d.validation_policy_digest,
-          runtime_digest: d.runtime_digest,
-          revoked: false,
-        },
-      ],
+      releases: [openAI.entry, anthropic.entry],
       publishers: [
         {
           id: "synthetic-publisher",

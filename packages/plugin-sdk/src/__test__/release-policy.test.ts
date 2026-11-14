@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { generateKeyPairSync, type KeyObject } from "node:crypto";
-import { bundledReleaseId, packageTrust, releasePolicySchema, verifyPackage } from "../index.ts";
+import { openAIChatReleaseId, packageTrust, releasePolicySchema, verifyPackage } from "../index.ts";
 import { syntheticChatPackage } from "../../../../tests/support/plugin-package.ts";
 
 const now = Date.parse("2030-06-01T00:00:00.000Z");
@@ -25,13 +25,13 @@ function policy(
         expires_at: "2031-01-01T00:00:00.000Z",
         revoked: false,
         purposes: ["package"],
-        release_ids: [bundledReleaseId],
+        release_ids: [openAIChatReleaseId],
         ...key,
       },
     ],
     releases: [
       {
-        release_id: bundledReleaseId,
+        release_id: openAIChatReleaseId,
         descriptor_digest: "b".repeat(64),
         package_digest: packageDigest,
         abi_version: 1,

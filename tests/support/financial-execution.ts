@@ -14,7 +14,7 @@ import { sha256 } from "@gateway/runtime/crypto";
 import { withIdentity, identityAudience } from "./internal-identity.ts";
 import { prepareCatalog, syntheticAdminKey, syntheticPepper } from "./catalog.ts";
 import { createCoreManagementApplication } from "../../apps/core-api/src/platform/management.ts";
-import { bundledReleaseId } from "@gateway/plugin-sdk";
+import { openAIChatReleaseId } from "@gateway/plugin-sdk";
 export const financialKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 export async function withFinancial(
   run: (fixture: Awaited<ReturnType<typeof prepareFinancial>>, db: SQL) => Promise<void>,
@@ -191,7 +191,7 @@ async function prepareFinancial(
       if (tariff.status !== 201) throw new Error(`Tariff creation: ${JSON.stringify(tariff)}`);
       const publication = await catalog.application.installBundled(await catalog.actor(), {
         command_id: crypto.randomUUID(),
-        release_id: bundledReleaseId,
+        release_id: openAIChatReleaseId,
         reason: "Synthetic financial prerequisite",
       });
       const binding = await catalog.application.bind(await catalog.actor(), provider.value.id, {

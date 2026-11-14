@@ -188,3 +188,126 @@ test("opaque string identity uses Unicode code units including escaped and split
   r.dispose("A");
   expect(r.snapshot().bytes).toBe(0);
 });
+test("a compose plan builds a new document from source slices, parsed argument strings and stringified values without changing numbers or UTF-8", () => {
+  const registry = createJSONDocuments(),
+    doc = registry.register(
+      "owner",
+      bytes(
+        '{"messages":[{"role":"system","content":"规则 🌏"},{"role":"assistant","tool_calls":[{"id":"call_1","function":{"name":"lookup","arguments":"{\\"n\\":9007199254740993,\\"d\\":0.10000000000000001}"}}]}],"keep":{"x":1e400}}',
+      ),
+    );
+  const result = registry.materialize("owner", {
+    document: doc.handle,
+    compose: {
+      template:
+        '{"system":null,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":null,"name":null,"input":null}]}],"raw":null,"text":null,"joined":null}',
+      slots: [
+        { at: "/system", from: "/messages/0/content", mode: "value" },
+        { at: "/messages/0/content/0/id", from: "/messages/1/tool_calls/0/id", mode: "value" },
+        {
+          at: "/messages/0/content/0/name",
+          from: "/messages/1/tool_calls/0/function/name",
+          mode: "value",
+        },
+        {
+          at: "/messages/0/content/0/input",
+          from: "/messages/1/tool_calls/0/function/arguments",
+          mode: "parse",
+        },
+        { at: "/raw", from: "/keep", mode: "value" },
+        { at: "/text", from: "/keep", mode: "stringify" },
+        {
+          at: "/joined",
+          sources: ["/messages/0/content", "/messages/1/tool_calls/0/id"],
+          mode: "concat",
+        },
+      ],
+    },
+  });
+  expect(new TextDecoder().decode(result.bytes)).toBe(
+    '{"system":"规则 🌏","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{"n":9007199254740993,"d":0.10000000000000001}}]}],"raw":{"x":1e400},"text":"{\\"x\\":1e400}","joined":"规则 🌏call_1"}',
+  );
+  expect(registry.snapshot().documents).toBe(0);
+  registry.dispose("owner");
+  expect(registry.snapshot().bytes).toBe(0);
+});
+
+test("compose rejects non-null or missing targets, missing sources, duplicate targets, unparsable argument strings and oversized templates", () => {
+  const registry = createJSONDocuments();
+  const source = '{"s":"text","bad":"{not json","n":1}';
+  for (const [compose, code] of [
+    [{ template: '{"a":1}', slots: [{ at: "/a", from: "/n", mode: "value" }] }, "JSON_PLAN"],
+    [{ template: '{"a":null}', slots: [{ at: "/b", from: "/n", mode: "value" }] }, "JSON_PLAN"],
+    [
+      { template: '{"a":null}', slots: [{ at: "/a", from: "/absent", mode: "value" }] },
+      "JSON_PLAN",
+    ],
+    [{ template: '{"a":null}', slots: [{ at: "/a", from: "/n", mode: "parse" }] }, "JSON_PLAN"],
+    [
+      {
+        template: '{"a":null}',
+        slots: [
+          { at: "/a", from: "/n", mode: "value" },
+          { at: "/a", from: "/s", mode: "value" },
+        ],
+      },
+      "JSON_PLAN_OVERLAP",
+    ],
+    [
+      { template: '{"a":null}', slots: [{ at: "/a", from: "/bad", mode: "parse" }] },
+      "JSON_COMPOSE_SOURCE",
+    ],
+    [{ template: '{"a":"' + "x".repeat(256 << 10) + '"}', slots: [] }, "JSON_PLAN_BUDGET"],
+    [{ template: "{broken", slots: [] }, "JSON_INVALID"],
+  ] as const) {
+    const doc = registry.register("owner", bytes(source));
+    expect(() =>
+      registry.materialize("owner", {
+        document: doc.handle,
+        compose: compose as unknown as {
+          template: string;
+          slots: { at: string; from: string; mode: "value" }[];
+        },
+      }),
+    ).toThrow(code);
+    registry.discard("owner", doc.handle);
+  }
+  registry.dispose("owner");
+  expect(registry.snapshot().bytes).toBe(0);
+});
+
+test("a wildcard segment expands over array elements into concrete pointer facts within the per-round budget", () => {
+  const registry = createJSONDocuments(),
+    doc = registry.register(
+      "owner",
+      bytes(
+        '{"messages":[{"role":"user","content":[{"type":"text"},{"type":"image_url"}]},{"role":"assistant","content":"hi"}],"obj":{"a":{"role":"x"}}}',
+      ),
+    );
+  const facts = registry.inspect("owner", doc.handle, [
+    "/messages/*/role",
+    "/messages/*/content/*/type",
+    "/obj/*/role",
+  ]);
+  expect(Object.keys(facts).sort()).toEqual([
+    "/messages/0/content/0/type",
+    "/messages/0/content/1/type",
+    "/messages/0/role",
+    "/messages/1/role",
+    "/obj/a/role",
+  ]);
+  expect(Object.keys(registry.inspect("owner", doc.handle, ["/*"])).sort()).toEqual([
+    "/messages",
+    "/obj",
+  ]);
+  expect(facts["/messages/1/role"]?.literal).toBe('"assistant"');
+  const many = registry.register(
+    "owner",
+    bytes(JSON.stringify({ items: Array.from({ length: 4097 }, () => 0) })),
+  );
+  expect(() => registry.inspect("owner", many.handle, ["/items/*"])).toThrow(
+    "JSON_INSPECTION_BUDGET",
+  );
+  registry.dispose("owner");
+  expect(registry.snapshot().bytes).toBe(0);
+});

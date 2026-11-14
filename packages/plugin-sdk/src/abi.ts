@@ -144,7 +144,7 @@ const headerSchema = z.record(
     .max(1024)
     .refine((s) => !/[\r\n\0]/.test(s)),
 );
-export const jsonPlanSchema = z
+const editPlanSchema = z
   .object({
     document: z.uuid(),
     edits: z
@@ -163,12 +163,54 @@ export const jsonPlanSchema = z
       .max(32),
   })
   .strict();
+const composePlanSchema = z
+  .object({
+    document: z.uuid(),
+    compose: z
+      .object({
+        template: z.string().max(256 << 10),
+        slots: z
+          .array(
+            z.union([
+              z
+                .object({
+                  at: z.string().min(1).max(2048),
+                  from: z.string().max(2048),
+                  mode: z.enum(["value", "parse", "stringify"]),
+                })
+                .strict(),
+              z
+                .object({
+                  at: z.string().min(1).max(2048),
+                  sources: z.array(z.string().max(2048)).min(1).max(256),
+                  mode: z.literal("concat"),
+                })
+                .strict(),
+            ]),
+          )
+          .max(4096),
+      })
+      .strict(),
+  })
+  .strict();
+export const jsonPlanSchema = z.union([editPlanSchema, composePlanSchema]);
 export type JSONBodyPlan = z.infer<typeof jsonPlanSchema>;
 export const framePlanSchema = z
   .object({
     handle: z.uuid(),
-    disposition: z.enum(["emit", "hold"]),
+    disposition: z.enum(["emit", "hold", "drop"]),
     body: jsonPlanSchema.optional(),
+    data_only: z.literal(true).optional(),
+    extra: z
+      .array(
+        z
+          .string()
+          .min(1)
+          .max(4096)
+          .refine((s) => !/[\r\n\0]/.test(s)),
+      )
+      .max(4)
+      .optional(),
   })
   .strict();
 export const preparedSchema = z

@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { RedisClient } from "bun";
 import { withCatalog, syntheticAdminKey, syntheticPepper } from "../tests/support/catalog.ts";
 import { prepareIdentity } from "../tests/support/internal-identity.ts";
-import { bundledReleaseId } from "@gateway/plugin-sdk";
+import { openAIChatReleaseId } from "@gateway/plugin-sdk";
 const registry = ".local/T04b1-resources.jsonl";
 const record = (event: string, details: Record<string, unknown>) =>
   appendFile(registry, JSON.stringify({ event, ...details }) + "\n", { mode: 0o600 });
@@ -43,6 +43,8 @@ await withCatalog(async (f, db) => {
       signedDirectory,
       "--helper-executable",
       helper,
+      "--release-id",
+      openAIChatReleaseId,
     ]);
     const output = await signed.stdout;
     assert.equal(await signed.child.exited, 0);
@@ -149,7 +151,7 @@ await withCatalog(async (f, db) => {
       "--command-id",
       crypto.randomUUID(),
       "--release-id",
-      bundledReleaseId,
+      openAIChatReleaseId,
       "--reason",
       "Synthetic compiled catalog acceptance",
       "--provider-id",

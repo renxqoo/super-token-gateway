@@ -3,7 +3,7 @@ import type { SQL } from "bun";
 import { resolve } from "node:path";
 import { createPluginCatalogStore, type CatalogKind } from "@gateway/storage";
 import { withCatalog, catalogHelper } from "../support/catalog.ts";
-import { bundledReleaseId } from "@gateway/plugin-sdk";
+import { openAIChatReleaseId } from "@gateway/plugin-sdk";
 import { verifyRelease } from "../../apps/core-api/src/plugins/releases.ts";
 import { validateCatalogPackage } from "../../apps/core-api/src/plugins/validator.ts";
 const bootstrap = { identity: "bootstrap:ADMIN_KEY", bootstrap: true } as const;
@@ -28,6 +28,7 @@ test(
           await f.actor(),
           crypto.randomUUID(),
           "Actual signed package for lease guards",
+          openAIChatReleaseId,
         ),
         owner = crypto.randomUUID(),
         d = f.release.descriptor;
@@ -195,6 +196,7 @@ test(
           await f.actor(),
           crypto.randomUUID(),
           "Actual signed package for revision guards",
+          openAIChatReleaseId,
         ),
         d = f.release.descriptor;
       const base: Record<string, unknown> = {
@@ -251,6 +253,7 @@ test(
           actor,
           crypto.randomUUID(),
           "Actual owned lease positive path",
+          openAIChatReleaseId,
         ),
         owner = crypto.randomUUID(),
         d = f.release.descriptor;
@@ -272,7 +275,7 @@ test(
         f.policy.expires_at,
       );
       const pkg = await verifyRelease(
-        await Bun.file(resolve(f.directory, bundledReleaseId, "package.json")).bytes(),
+        await Bun.file(resolve(f.directory, openAIChatReleaseId, "package.json")).bytes(),
         f.release,
         f.policy,
         d.runtime_digest,
