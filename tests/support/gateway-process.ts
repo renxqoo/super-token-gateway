@@ -136,7 +136,7 @@ export async function withSettlementRole<T>(db: SQL, run: (databaseUrl: string) 
 
 export async function startCoreWorker(
   namespace: string,
-  options: { databaseUrl: string; entry?: string; cwd?: string },
+  options: { databaseUrl: string; entry?: string; cwd?: string; env?: Record<string, string> },
 ) {
   const child = Bun.spawn(["bun", resolve(options.entry ?? "apps/core-worker/src/main.ts")], {
     ...(options.cwd ? { cwd: options.cwd } : {}),
@@ -147,6 +147,7 @@ export async function startCoreWorker(
       REDIS_NAMESPACE: namespace,
       WORKER_PORT: "0",
       SHUTDOWN_GRACE_MS: "5000",
+      ...options.env,
     },
     stdin: "ignore",
     stdout: "pipe",

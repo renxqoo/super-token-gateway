@@ -1,5 +1,7 @@
-import { createDatabase, SCHEMA_VERSION } from "@gateway/storage";
+import { createCoreRpcClient } from "@gateway/core-client";
+import { createCustomerFundsStore, createDatabase, SCHEMA_VERSION } from "@gateway/storage";
 import { loadCoreWorkerConfig } from "./config.ts";
+import { recoverExecutions, startPeriodic } from "./maintenance.ts";
 import { createSettlementWorker } from "./settlement/worker.ts";
 
 const config = loadCoreWorkerConfig();
@@ -11,7 +13,16 @@ if (schema[0]?.version !== SCHEMA_VERSION) {
   await db.close({ timeout: 1 });
   throw new Error("Incompatible database schema for the settlement worker");
 }
-const counters = { committed: 0, rejected: 0, quarantined: 0, failures: 0 };
+const counters = {
+  committed: 0,
+  rejected: 0,
+  quarantined: 0,
+  failures: 0,
+  reconciled: 0,
+  aborted: 0,
+  released: 0,
+  maintenance_failures: 0,
+};
 const settlement = createSettlementWorker({
   db,
   url: config.QUEUE_REDIS_URL,
@@ -33,6 +44,44 @@ const settlement = createSettlementWorker({
   },
 });
 await settlement.ready();
+const core = config.CORE_ORIGIN
+  ? createCoreRpcClient({
+      origin: config.CORE_ORIGIN,
+      servername: config.CORE_SERVERNAME!,
+      audience: config.CORE_AUDIENCE!,
+      expectedPeerSha256: config.CORE_PEER_SHA256!,
+      expectedSubjectAltname: config.CORE_SUBJECT_ALTNAME!,
+      key: await Bun.file(config.CORE_KEY_FILE!).text(),
+      cert: await Bun.file(config.CORE_CERT_FILE!).text(),
+      ca: await Bun.file(config.CORE_CA_FILE!).text(),
+    })
+  : undefined;
+const funds = createCustomerFundsStore(db);
+const maintenanceFailed = () => {
+  counters.maintenance_failures++;
+};
+const reconciliation = startPeriodic(
+  async () => {
+    const settled = await funds.reconcileKnownHolds(config.RECONCILE_BATCH);
+    counters.reconciled += settled;
+    return settled === config.RECONCILE_BATCH;
+  },
+  config.RECONCILE_INTERVAL_MS,
+  maintenanceFailed,
+);
+const recovery = core
+  ? startPeriodic(
+      async () => {
+        await core.startup();
+        const result = await recoverExecutions(db, core, config.RECOVERY_BATCH);
+        counters.aborted += result.aborted;
+        counters.released += result.released;
+        return result.candidates === config.RECOVERY_BATCH;
+      },
+      config.RECOVERY_INTERVAL_MS,
+      maintenanceFailed,
+    )
+  : undefined;
 let stopping = false;
 const health = Bun.serve({
   hostname: config.HOST,
@@ -61,7 +110,7 @@ async function shutdown() {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      settlement.close(),
+      Promise.all([settlement.close(), reconciliation.close(), recovery?.close()]),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, config.SHUTDOWN_GRACE_MS);
       }),
@@ -69,6 +118,7 @@ async function shutdown() {
   } finally {
     clearTimeout(timer);
     await health.stop(true);
+    await core?.close();
     await db.close({ timeout: 1 });
     console.log(JSON.stringify({ service: "core-worker", event: "stopped", ...counters }));
     process.exit(0);

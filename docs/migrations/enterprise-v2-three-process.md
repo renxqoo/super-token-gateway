@@ -84,7 +84,7 @@ legacy 测试原样保留，作为未迁能力的回归，删除随各自迁移�
 - 两套 Chat 实现并存至 T09；若部署未按路径分流，Chat 可能落到 legacy。c4 用部署配置与产物检查覆盖。
 - 跨故障域 HA、真实供应商与容量不在本单元范围（T14、T17、T19）。
 - `test:backup` 仍需 T12/T14 适配；`test:container` 按用户决定退役。
-- 没有回收遗留请求的进程：Gateway 在 begin 后被强杀、Core 不可达导致状态查询 5 次都失败、或 SIGTERM 宽限期后 Core client 已关闭时仍在执行的 CLOSE，都会留下未关闭的请求与保留的资金，Redis 并发槽按 30 秒租约自然过期。Core 已有 `execution_abort_recovery_v1`/`execution_quota_recovery_v1`，但尚无生产调用方，回收进程归后续任务。
+- 遗留请求回收已在 T05 e3 交付（见[客户资金记录](enterprise-v2-customer-funds.md) §8）：core-worker 中止已过期、从未授予的 RESERVED 预留并完成 RELEASE_PENDING 配额释放。Gateway 在 begin 后被强杀的 `SEND_GRANTED` 请求按 R06 保留双方占用，不自动释放。
 - 证据写入队列后 WAITAOF 未确认（副本落后或超时）时，Gateway 无法判断证据是否会被结算：JSON 返回 503 `usage_queue_unavailable`（提示先查询原请求再重试），SSE 以 `gateway_stream_error` 结束且无 `[DONE]`，但 worker 仍可能结算已入队的证据，客户可能已被收费。真实进程用例只覆盖了队列整体断开（未写入）的情形。
 - 续租失败一次即停止；attempt 之间（换渠道时的 context 与插件包下载）不续租，耗时超过 30 秒时下一次 next 可能因租约过期而失败。
 
@@ -153,7 +153,7 @@ c2 全量门禁：check 251 文件无类型错误；lint 0；fmt 358 文件；te
 
 - 被重试替代的 attempt 以及发送后被取消的 attempt，供应商 hold 为 `PARTIAL` 而非 `UNKNOWN`，预留按 ceiling 保留（手算 ceil(1000/3 + 30/3) = 344）；客户只按成功 attempt 收费一次。
 - 矩阵 3183 原写“RESERVED abort”；实现对私网字面量地址在准入前拒绝，比 RESERVED 后 abort 更早且无资金变动，只有主机名解析路径在 begin 后拒绝。
-- Gateway 在 begin 后被强杀时，permit 保持 `SEND_GRANTED`、供应商 hold 为 `HELD`、请求未关闭，重启的 Gateway 不重发。目前没有回收此类遗留请求的流程（Redis 并发槽按 30 秒租约自然过期），回收归后续任务。
+- Gateway 在 begin 后被强杀时，permit 保持 `SEND_GRANTED`、供应商 hold 为 `HELD`、请求未关闭，重启的 Gateway 不重发。此类请求按 R06 保留占用，不由回收流程释放；未授予的过期预留由 core-worker 回收（T05 e3）。
 - 启动时证据队列无法确认所需副本，Gateway 拒绝启动（`usage_queue_unavailable`）；运行中队列断开时 `/readyz` 转为 503。
 
 缺陷修复（先红后绿）：

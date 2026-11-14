@@ -23,3 +23,38 @@ test("a queue namespace that could escape its key prefix and unbounded settlemen
     loadCoreWorkerConfig({ ...valid, SETTLEMENT_CONCURRENCY: "64" }).SETTLEMENT_CONCURRENCY,
   ).toBe(64);
 });
+
+const core = {
+  CORE_ORIGIN: "https://127.0.0.1:9443",
+  CORE_SERVERNAME: "localhost",
+  CORE_AUDIENCE: "synthetic/core-api",
+  CORE_PEER_SHA256: "a".repeat(64),
+  CORE_SUBJECT_ALTNAME: "URI:spiffe://synthetic/core-api/coreA",
+  CORE_KEY_FILE: "worker.key",
+  CORE_CERT_FILE: "worker.pem",
+  CORE_CA_FILE: "ca.pem",
+};
+
+test("a partial Core recovery client is refused by the missing field names", () => {
+  expect(() =>
+    loadCoreWorkerConfig({ ...valid, CORE_ORIGIN: core.CORE_ORIGIN, CORE_KEY_FILE: "worker.key" }),
+  ).toThrow(
+    /^Invalid configuration fields: CORE_SERVERNAME, CORE_AUDIENCE, CORE_PEER_SHA256, CORE_SUBJECT_ALTNAME, CORE_CERT_FILE, CORE_CA_FILE$/,
+  );
+  expect(loadCoreWorkerConfig({ ...valid, ...core }).CORE_ORIGIN).toBe(core.CORE_ORIGIN);
+});
+
+test("production refuses a worker that cannot recover expired reservations through Core", () => {
+  expect(() => loadCoreWorkerConfig({ ...valid, NODE_ENV: "production" })).toThrow("CORE_ORIGIN");
+  expect(loadCoreWorkerConfig({ ...valid, NODE_ENV: "production", ...core }).NODE_ENV).toBe(
+    "production",
+  );
+  expect(loadCoreWorkerConfig(valid).CORE_ORIGIN).toBeUndefined();
+});
+
+test("maintenance batches beyond what one settlement or recovery call accepts are refused", () => {
+  expect(() => loadCoreWorkerConfig({ ...valid, RECONCILE_BATCH: "257" })).toThrow(
+    "RECONCILE_BATCH",
+  );
+  expect(() => loadCoreWorkerConfig({ ...valid, RECOVERY_BATCH: "101" })).toThrow("RECOVERY_BATCH");
+});

@@ -39,6 +39,7 @@
     "apps/core-worker": {
       "name": "@gateway/core-worker",
       "dependencies": {
+        "@gateway/core-client": "workspace:*",
         "@gateway/runtime": "workspace:*",
         "@gateway/storage": "workspace:*",
         "zod": "4.6.7",

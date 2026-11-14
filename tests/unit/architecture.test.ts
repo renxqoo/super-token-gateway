@@ -38,8 +38,7 @@ test("workspace dependencies stay acyclic and commercial capabilities stay outsi
 test("Core processes never reach into the transitional Gateway or each other's private modules", async () => {
   const forbidden: Record<string, RegExp> = {
     "core-api": /legacy-gateway|core-worker|@gateway\/(?:legacy-gateway|connectors)/,
-    "core-worker":
-      /legacy-gateway|core-api|@gateway\/(?:legacy-gateway|core-api|core-client|plugin-host)/,
+    "core-worker": /legacy-gateway|core-api|@gateway\/(?:legacy-gateway|core-api|plugin-host)/,
     "mock-providers": /legacy-gateway|core-api|core-worker/,
     gateway:
       /legacy-gateway|core-api|core-worker|@gateway\/(?:storage|legacy-gateway|core-api|core-worker|connectors)|drizzle|^postgres/,

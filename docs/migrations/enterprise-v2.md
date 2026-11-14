@@ -110,7 +110,7 @@ infra/              三进程权限、代理、原生服务与 HA 配置
 docs/               同步后的契约、部署、容量与本迁移记录
 ```
 
-依赖约束：`kernel` 不导入 I/O、HTTP 框架、PG、Redis、协议解析或应用代码；`contracts` 只依赖 kernel 和 schema 库；`plugin-sdk` 依赖 contracts/kernel；`adapters` 依赖 SDK 和纯规则，不依赖 storage/Core；`plugin-host` 依赖 SDK/contracts/runtime；`runtime` 不依赖 storage/应用。Batcher 的计时与 I/O 协作、crypto/摘要归 runtime；storage 依赖 kernel/contracts/Drizzle/PG 驱动，并只允许通过 runtime 的 `./batcher`、`./crypto` 两个内聚子路径复用这些能力，不依赖 runtime 根入口、队列、Redis或网络，不复制算法或为此新建泛化公共包。core-client 只依赖 contracts 和通用网络支持。Gateway 只组合 core-client、runtime、plugin-host、adapters、contracts/kernel，不依赖 storage 或 Core 业务模块。Core API/worker 可依赖 storage/runtime/contracts/kernel，不导入 Gateway 私有模块。UI 只使用公开管理契约，不导入 storage。架构测试检查上述窄边界及任意方向循环依赖。
+依赖约束：`kernel` 不导入 I/O、HTTP 框架、PG、Redis、协议解析或应用代码；`contracts` 只依赖 kernel 和 schema 库；`plugin-sdk` 依赖 contracts/kernel；`adapters` 依赖 SDK 和纯规则，不依赖 storage/Core；`plugin-host` 依赖 SDK/contracts/runtime；`runtime` 不依赖 storage/应用。Batcher 的计时与 I/O 协作、crypto/摘要归 runtime；storage 依赖 kernel/contracts/Drizzle/PG 驱动，并只允许通过 runtime 的 `./batcher`、`./crypto` 两个内聚子路径复用这些能力，不依赖 runtime 根入口、队列、Redis或网络，不复制算法或为此新建泛化公共包。core-client 只依赖 contracts 和通用网络支持。Gateway 只组合 core-client、runtime、plugin-host、adapters、contracts/kernel，不依赖 storage 或 Core 业务模块。Core API/worker 可依赖 storage/runtime/contracts/kernel，不导入 Gateway 私有模块；core-worker 另经 core-client 以自身服务身份调用 Core 内部 RPC 的恢复命令（`execution_quota_recovery_v1`、`execution_abort_recovery_v1`），不导入 core-api 或 plugin-host。UI 只使用公开管理契约，不导入 storage。架构测试检查上述窄边界及任意方向循环依赖。
 
 `Dependencies` 被每个进程的装配对象和各内聚模块需要的窄接口替代；不通过一个全量 Store 或全服务容器绕过边界。storage 将数据库异常翻译为领域失败，Core HTTP 只映射领域失败。Gateway HTTP 只映射 Core 契约错误和本地协议/传输失败，不识别 SQLSTATE。
 

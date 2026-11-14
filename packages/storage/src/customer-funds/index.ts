@@ -137,24 +137,10 @@ export function createCustomerFundsStore(db: SQL | TransactionSQL) {
       return rows[0];
     },
     async reconcileKnownHolds(limit = 32): Promise<number> {
-      const token = crypto.randomUUID();
-      const rows = await db<{ request_id: string }[]>`WITH candidates AS (
-        SELECT h.id,h.next_reconcile_at,1 AS priority FROM billing_holds h
-        WHERE h.state IN ('HELD','RECONCILING') AND h.next_reconcile_at<=now() AND (h.reconcile_until IS NULL OR h.reconcile_until<now())
-        AND (EXISTS(SELECT 1 FROM attempts a WHERE a.request_id=h.request_id AND a.evidence_id IS NOT NULL) OR EXISTS(SELECT 1 FROM billing_resolutions r WHERE r.request_id=h.request_id))
-        UNION ALL
-        SELECT h.id,h.next_reconcile_at,0 AS priority FROM billing_charges c JOIN billing_holds h ON h.id=c.hold_id
-        WHERE c.debt_atoms>0 AND h.state NOT IN ('HELD','RECONCILING') AND h.next_reconcile_at<=now() AND (h.reconcile_until IS NULL OR h.reconcile_until<now())
-      ),due AS (
-        SELECT h.id FROM candidates c JOIN billing_holds h ON h.id=c.id WHERE h.reconcile_until IS NULL OR h.reconcile_until<now()
-        ORDER BY c.priority,c.next_reconcile_at,h.id LIMIT ${limit} FOR UPDATE OF h SKIP LOCKED
-      ) UPDATE billing_holds h SET reconcile_token=${token},reconcile_until=now()+interval '30 seconds' FROM due WHERE h.id=due.id RETURNING h.request_id`;
-      if (!rows.length) return 0;
-      const result =
-        await db`SELECT settle_requests(${rows.map((r) => r.request_id)}::uuid[],${token}::uuid) AS result`;
-      return Object.values(result[0]?.result ?? {}).filter(
-        (value) => !["STALE_LEASE", "ERROR"].includes((value as { state: string }).state),
-      ).length;
+      const rows = await db<
+        { settled: number }[]
+      >`SELECT core_reconcile_holds_v1(${limit}) AS settled`;
+      return rows[0]?.settled ?? 0;
     },
     async resolve(requestId: string, value: ResolutionInput): Promise<Record<string, unknown>> {
       const input = resolutionSchema.parse(value);

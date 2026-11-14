@@ -134,6 +134,15 @@
           "checksum": "20fc0111d27e212b0c49d83eddfedde28e6a61b024d5755876eea0150e5c1618"
         }
       ]
+    },
+    {
+      "version": 2026111213,
+      "files": [
+        {
+          "path": "./sql/core-hold-reconciliation.sql",
+          "checksum": "d4200115089ae83b20e6564a90347e71050f7313ec9610614c245147d81e2300"
+        }
+      ]
     }
   ]
 }

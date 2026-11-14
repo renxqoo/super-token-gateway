@@ -16,7 +16,6 @@ export interface Dependencies {
   usage: Metering;
   store: Omit<Store, "db">;
   funds: Omit<FundsStore, "db">;
-  reconcileHolds(): Promise<number>;
   database: { ping(): Promise<void>; close(timeout?: number): Promise<void> };
   transport: ReturnType<typeof createTransport>;
   limits: Limits;
