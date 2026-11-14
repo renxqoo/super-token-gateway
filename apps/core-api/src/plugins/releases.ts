@@ -5,7 +5,9 @@ import { GatewayError } from "@gateway/contracts";
 import { openAIChatPackageFiles } from "@gateway/adapters";
 import {
   bundledReleaseId,
+  manifestSchema,
   packageDigest,
+  publisherAdmits,
   releasePolicySchema,
   verifyPackage,
   sha256,
@@ -25,10 +27,10 @@ const keyId = z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/);
 export const releaseDescriptorSchema = z
   .object({
     format: z.literal(1),
-    release_id: z.literal(bundledReleaseId),
-    source: z.literal("bundled:gateway.openai-chat-1.0.0"),
-    name: z.literal("gateway.openai-chat"),
-    version: z.literal("1.0.0"),
+    release_id: z.string().regex(/^[a-z][a-z0-9.-]{1,100}-\d+\.\d+\.\d+$/),
+    source: z.string().regex(/^(bundled|upload):[a-z][a-z0-9.-]{1,100}-\d+\.\d+\.\d+$/),
+    name: manifestSchema.shape.id,
+    version: manifestSchema.shape.version,
     package_digest: digest,
     envelope_digest: digest,
     abi_version: z.literal(1),
@@ -71,14 +73,19 @@ export function describeRelease(
   files: readonly PackageFile[],
   envelope: Uint8Array,
   runtimeDigest: string,
+  origin: "bundled" | "upload" = "bundled",
 ) {
   const file = (path: string) => files.find((f) => f.path === path)!.bytes;
+  const manifest = manifestSchema.parse(
+    JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(file("manifest.json"))),
+  );
+  const releaseId = `${manifest.id}-${manifest.version}`;
   return releaseDescriptorSchema.parse({
     format: 1,
-    release_id: bundledReleaseId,
-    source: `bundled:${bundledReleaseId}`,
-    name: "gateway.openai-chat",
-    version: "1.0.0",
+    release_id: releaseId,
+    source: `${origin}:${releaseId}`,
+    name: manifest.id,
+    version: manifest.version,
     package_digest: packageDigest(files),
     envelope_digest: sha256(envelope),
     abi_version: 1,
@@ -104,6 +111,10 @@ export async function verifyRelease(
       d = signed.descriptor;
     if (policy.revoked || Date.parse(policy.expires_at) <= now)
       throw new Error("RELEASE_POLICY_EXPIRED");
+    if (d.source.startsWith("upload:"))
+      return verifyPublisherRelease(bytes, signed, policy, runtimeDigest, now);
+    if (d.release_id !== bundledReleaseId || d.source !== `bundled:${bundledReleaseId}`)
+      throw new Error("RELEASE_NOT_ALLOWED");
     if (
       new Set(policy.keys.map((k) => k.id)).size !== policy.keys.length ||
       new Set(policy.releases.map((r) => r.release_id)).size !== policy.releases.length
@@ -130,7 +141,7 @@ export async function verifyRelease(
         Date.parse(key.not_before) > now ||
         Date.parse(key.expires_at) <= now ||
         !key.purposes.includes(purpose) ||
-        !key.release_ids.includes(d.release_id)
+        !key.release_ids.includes(bundledReleaseId)
       )
         throw new Error("RELEASE_KEY_DENIED");
       trustExpiresAt = Math.min(trustExpiresAt, Date.parse(key.expires_at));
@@ -182,4 +193,64 @@ export async function verifyRelease(
       "Plugin release does not satisfy the configured trust policy",
     );
   }
+}
+
+function verifyPublisherRelease(
+  bytes: Uint8Array,
+  signed: SignedRelease,
+  policy: z.infer<typeof releasePolicySchema>,
+  runtimeDigest: string,
+  now: number,
+) {
+  const d = signed.descriptor;
+  const ids = [...policy.keys, ...policy.publishers].map((k) => k.id);
+  if (new Set(ids).size !== ids.length) throw new Error("RELEASE_POLICY_DUPLICATE");
+  if (policy.releases.some((r) => r.release_id === d.release_id))
+    throw new Error("RELEASE_NOT_ALLOWED");
+  const publisher = policy.publishers.find((p) => p.id === signed.signature.key_id);
+  if (
+    !publisher ||
+    publisher.revoked ||
+    Date.parse(publisher.not_before) > now ||
+    Date.parse(publisher.expires_at) <= now ||
+    !publisherAdmits(publisher, { id: d.name })
+  )
+    throw new Error("RELEASE_KEY_DENIED");
+  const publicKey = createPublicKey(publisher.public_key);
+  if (publicKey.asymmetricKeyType !== "ed25519") throw new Error("RELEASE_KEY_TYPE");
+  if (
+    !verify(
+      null,
+      Buffer.from(`gateway-plugin-release-v1\0${canonical(d)}`),
+      publicKey,
+      Buffer.from(signed.signature.value, "base64"),
+    )
+  )
+    throw new Error("RELEASE_SIGNATURE");
+  if (
+    bytes.length > 44 << 20 ||
+    sha256(bytes) !== d.envelope_digest ||
+    d.runtime_digest !== runtimeDigest ||
+    d.validation_policy_digest !== validationPolicyDigest
+  )
+    throw new Error("RELEASE_CONTENT_MISMATCH");
+  const pkg = verifyPackage(bytes, new Map([[publisher.id, publicKey]]));
+  if (canonical(describeRelease(pkg.files, bytes, runtimeDigest, "upload")) !== canonical(d))
+    throw new Error("RELEASE_CONTENT_MISMATCH");
+  return {
+    pkg,
+    signed,
+    policy,
+    packageSignature: { key_id: publisher.id, value: packageSignatureValue(bytes) },
+    trustExpiresAt: new Date(
+      Math.min(Date.parse(policy.expires_at), Date.parse(publisher.expires_at)),
+    ).toISOString(),
+  };
+}
+function packageSignatureValue(bytes: Uint8Array): string {
+  return (
+    JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as {
+      signature: { value: string };
+    }
+  ).signature.value;
 }

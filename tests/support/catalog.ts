@@ -38,6 +38,7 @@ export async function prepareCatalog(db: SQL) {
     appDb: SQL | undefined;
   try {
     const keys = generateKeyPairSync("ed25519"),
+      publisher = generateKeyPairSync("ed25519"),
       privatePath = resolve(directory, "ephemeral-key.pem"),
       credentialPath = resolve(directory, "credential");
     await writeFile(privatePath, keys.privateKey.export({ type: "pkcs8", format: "pem" }), {
@@ -93,6 +94,16 @@ export async function prepareCatalog(db: SQL) {
           validation_policy_digest: d.validation_policy_digest,
           runtime_digest: d.runtime_digest,
           revoked: false,
+        },
+      ],
+      publishers: [
+        {
+          id: "synthetic-publisher",
+          public_key: publisher.publicKey.export({ format: "pem", type: "spki" }).toString(),
+          not_before: "2020-01-01T00:00:00.000Z",
+          expires_at: "2099-01-01T00:00:00.000Z",
+          revoked: false,
+          namespace: "synthetic",
         },
       ],
     };
@@ -175,6 +186,7 @@ export async function prepareCatalog(db: SQL) {
       policy,
       release,
       keys,
+      publisher,
       appDb,
       appUrl: url.toString(),
       get application() {

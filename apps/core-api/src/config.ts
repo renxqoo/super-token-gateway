@@ -53,7 +53,7 @@ const configSchema = z.strictObject({
       hostname: z.string(),
       port: z.number().int().min(0).max(65535),
       admin_key: z.string().min(32),
-      max_body_bytes: z.number().int().positive().max(16777216).optional(),
+      max_body_bytes: z.number().int().positive().max(67108864).optional(),
       shutdown_grace_ms: z.number().int().min(100).max(120000).optional(),
       plugins: z
         .strictObject({

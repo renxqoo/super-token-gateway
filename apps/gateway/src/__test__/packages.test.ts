@@ -24,7 +24,9 @@ const second = syntheticSignedPackage(
   key,
 );
 const keys = new Map([["synthetic-test-only", key.publicKey]]);
-const trustAll = (): ReadonlyMap<string, KeyObject> => keys;
+const trustAll = Object.assign((): ReadonlyMap<string, KeyObject> => keys, {
+  admits: () => true,
+});
 const deadline = new Date(Date.now() + 60000).toISOString();
 
 function downloads(served: Record<string, Uint8Array>) {
@@ -55,7 +57,10 @@ test("concurrent requests for one digest share a single verified download and la
 
 test("a digest outside the deployment trust is refused without downloading", async () => {
   const source = downloads({ [first.pkg.digest]: first.bytes });
-  const cache = createPackageCache(source.download, () => new Map());
+  const cache = createPackageCache(
+    source.download,
+    Object.assign(() => new Map<string, KeyObject>(), { admits: () => true }),
+  );
   await expect(cache.get(first.pkg.digest, deadline)).rejects.toThrow("not trusted");
   expect(source.calls).toEqual([]);
 });
@@ -64,6 +69,16 @@ test("Core serving a different validly signed package for the requested digest i
   const source = downloads({ [first.pkg.digest]: second.bytes });
   const cache = createPackageCache(source.download, trustAll);
   await expect(cache.get(first.pkg.digest, deadline)).rejects.toThrow("digest mismatch");
+  expect(cache.size()).toBe(0);
+});
+
+test("a validly signed package the deployment does not admit for its signer is refused and not cached", async () => {
+  const source = downloads({ [first.pkg.digest]: first.bytes });
+  const cache = createPackageCache(
+    source.download,
+    Object.assign((): ReadonlyMap<string, KeyObject> => keys, { admits: () => false }),
+  );
+  await expect(cache.get(first.pkg.digest, deadline)).rejects.toThrow("not trusted");
   expect(cache.size()).toBe(0);
 });
 

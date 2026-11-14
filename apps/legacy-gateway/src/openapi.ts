@@ -16,6 +16,7 @@ import {
 } from "@gateway/contracts";
 import {
   installBundledReleaseSchema,
+  uploadPluginSchema,
   bindPluginSchema,
   versionCommandSchema,
   recoveryCommandSchema,
@@ -343,6 +344,23 @@ export function openapi(): Record<string, unknown> {
     z.toJSONSchema(installBundledReleaseSchema),
     true,
   );
+  add("/admin/plugins", "get", "list_plugin_versions", undefined, true);
+  add("/admin/plugins", "post", "upload_plugin", z.toJSONSchema(uploadPluginSchema), true);
+  add(
+    "/admin/plugins/{id}/disable",
+    "post",
+    "disable_plugin",
+    z.toJSONSchema(versionCommandSchema),
+    true,
+  );
+  add(
+    "/admin/plugins/{id}/quarantine",
+    "post",
+    "quarantine_plugin",
+    z.toJSONSchema(versionCommandSchema),
+    true,
+  );
+  add("/admin/providers/{id}/plugin-bindings", "get", "plugin_binding_history", undefined, true);
   add("/admin/plugins/{id}", "get", "plugin_catalog_truth", undefined, true);
   add(
     "/admin/plugins/{id}/recover",

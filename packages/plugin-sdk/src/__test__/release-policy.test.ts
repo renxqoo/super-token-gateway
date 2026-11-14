@@ -87,3 +87,99 @@ test("an expired or revoked policy and a non-Ed25519 package key are refused out
   const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 }).publicKey;
   expect(() => packageTrust(policy(rsa, digestA), now)).toThrow("RELEASE_KEY_TYPE");
 });
+
+function publisher(publicKey: KeyObject, overrides: Record<string, unknown> = {}) {
+  return {
+    id: "publisher-key",
+    public_key: publicKey.export({ format: "pem", type: "spki" }).toString(),
+    not_before: "2030-01-01T00:00:00.000Z",
+    expires_at: "2031-01-01T00:00:00.000Z",
+    revoked: false,
+    namespace: "acme",
+    ...overrides,
+  };
+}
+
+test("a trusted publisher admits unlisted digests only for plugins inside its namespace", () => {
+  const deployment = generateKeyPairSync("ed25519"),
+    acme = generateKeyPairSync("ed25519");
+  const trust = packageTrust(
+    policy(deployment.publicKey, digestA, {}, {}, { publishers: [publisher(acme.publicKey)] }),
+    now,
+  );
+  const unlisted = "9".repeat(64);
+  expect([...trust(unlisted).keys()]).toEqual(["publisher-key"]);
+  expect(
+    trust.admits({
+      digest: unlisted,
+      signingKeyId: "publisher-key",
+      manifest: { id: "acme.chat" },
+    }),
+  ).toBe(true);
+  for (const id of ["gateway.openai-chat", "acmex.chat", "acme"])
+    expect(
+      trust.admits({ digest: unlisted, signingKeyId: "publisher-key", manifest: { id } }),
+    ).toBe(false);
+  expect(
+    trust.admits({ digest: digestA, signingKeyId: "deployment-key", manifest: { id: "any" } }),
+  ).toBe(true);
+  expect(
+    trust.admits({ digest: unlisted, signingKeyId: "deployment-key", manifest: { id: "acme.x" } }),
+  ).toBe(false);
+});
+
+test("revoked, expired, not-yet-valid or gateway-namespace publishers grant no trust", () => {
+  const deployment = generateKeyPairSync("ed25519"),
+    acme = generateKeyPairSync("ed25519");
+  for (const overrides of [
+    { revoked: true },
+    { expires_at: "2030-05-01T00:00:00.000Z" },
+    { not_before: "2030-07-01T00:00:00.000Z" },
+  ]) {
+    const trust = packageTrust(
+      policy(
+        deployment.publicKey,
+        digestA,
+        {},
+        {},
+        {
+          publishers: [publisher(acme.publicKey, overrides)],
+        },
+      ),
+      now,
+    );
+    expect(trust("9".repeat(64)).size).toBe(0);
+    expect(
+      trust.admits({
+        digest: "9".repeat(64),
+        signingKeyId: "publisher-key",
+        manifest: { id: "acme.chat" },
+      }),
+    ).toBe(false);
+  }
+  expect(() =>
+    policy(
+      deployment.publicKey,
+      digestA,
+      {},
+      {},
+      {
+        publishers: [publisher(acme.publicKey, { namespace: "gateway" })],
+      },
+    ),
+  ).toThrow();
+  expect(() =>
+    packageTrust(
+      policy(
+        deployment.publicKey,
+        digestA,
+        {},
+        {},
+        {
+          publishers: [publisher(acme.publicKey, { id: "deployment-key" })],
+        },
+      ),
+      now,
+    ),
+  ).toThrow("RELEASE_POLICY_DUPLICATE");
+});

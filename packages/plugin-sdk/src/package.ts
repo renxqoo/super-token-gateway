@@ -38,6 +38,7 @@ const envelopeSchema = z
   .strict();
 export type VerifiedPackage = {
   digest: string;
+  signingKeyId: string;
   moduleHash: string;
   module: Uint8Array;
   manifest: PluginManifest;
@@ -131,7 +132,15 @@ export function verifyPackage(
     !module.slice(0, 8).every((n, i) => n === [0, 97, 115, 109, 1, 0, 0, 0][i])
   )
     throw new Error("PACKAGE_MODULE");
-  const result = { digest, moduleHash: sha256(module), module, manifest, configSchema, files };
+  const result = {
+    digest,
+    signingKeyId: envelope.signature.key_id,
+    moduleHash: sha256(module),
+    module,
+    manifest,
+    configSchema,
+    files,
+  };
   verified.set(result, structuredClone(result));
   return result;
 }

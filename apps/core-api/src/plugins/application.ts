@@ -17,6 +17,18 @@ export const installBundledReleaseSchema = z
     reason: z.string().min(1).max(500),
   })
   .strict();
+export const uploadPluginSchema = z
+  .object({
+    command_id: z.uuid(),
+    package_base64: z
+      .string()
+      .min(1)
+      .max(Math.ceil((44 << 20) / 3) * 4)
+      .regex(/^[A-Za-z0-9+/]+={0,2}$/),
+    release: z.record(z.string(), z.unknown()),
+    reason: z.string().min(1).max(500),
+  })
+  .strict();
 export const bindPluginSchema = z
   .object({
     command_id: z.uuid(),
@@ -70,6 +82,7 @@ export function createCatalogApplication(options: {
     { digest: string; promise: Promise<CatalogReceipt> }
   >();
   const pendingValidations = new Set<Promise<CatalogReceipt>>();
+  let uploading = false;
   const shutdownControllers = new Set<AbortController>();
   const helperExecutable = resolve(options.helperExecutable);
   const policyFile = resolve(options.policyFile);
@@ -104,20 +117,17 @@ export function createCatalogApplication(options: {
       config_schema_digest: d.config_schema_digest,
     };
   }
-  async function register(actor: PlatformActor, commandId: string, reason: string) {
-    available();
-    auth.require(actor, "plugins:install-bundled");
-    const directory = resolve(options.releaseDirectory, bundledReleaseId);
-    const bytes = await boundedFile(resolve(directory, "package.json"), 44 << 20);
-    const signed = JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(
-        await boundedFile(resolve(directory, "release.json"), 256 << 10),
-      ),
-    );
-    const release = await trusted(bytes, signed);
+  function registration(
+    actor: PlatformActor,
+    permission: "plugins:install-bundled" | "plugins:upload",
+    commandId: string,
+    bytes: Uint8Array,
+    release: Awaited<ReturnType<typeof trusted>>,
+    reason: string,
+  ) {
     return store.command(
       "plugin_register_v1",
-      auth.authorization(actor, "plugins:install-bundled"),
+      auth.authorization(actor, permission),
       z.uuid().parse(commandId),
       {
         package_base64: Buffer.from(bytes).toString("base64"),
@@ -134,6 +144,45 @@ export function createCatalogApplication(options: {
       undefined,
       release.trustExpiresAt,
     );
+  }
+  async function register(actor: PlatformActor, commandId: string, reason: string) {
+    available();
+    auth.require(actor, "plugins:install-bundled");
+    const directory = resolve(options.releaseDirectory, bundledReleaseId);
+    const bytes = await boundedFile(resolve(directory, "package.json"), 44 << 20);
+    const signed = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(
+        await boundedFile(resolve(directory, "release.json"), 256 << 10),
+      ),
+    );
+    const release = await trusted(bytes, signed);
+    return registration(actor, "plugins:install-bundled", commandId, bytes, release, reason);
+  }
+  async function accept(actor: PlatformActor, parsed: z.infer<typeof uploadPluginSchema>) {
+    const bytes = new Uint8Array(Buffer.from(parsed.package_base64, "base64"));
+    const release = await trusted(bytes, parsed.release);
+    if (!release.signed.descriptor.source.startsWith("upload:"))
+      throw new GatewayError(
+        400,
+        "untrusted_plugin_release",
+        "Plugin release does not satisfy the configured trust policy",
+      );
+    return registration(actor, "plugins:upload", parsed.command_id, bytes, release, parsed.reason);
+  }
+  async function transition(
+    actor: PlatformActor,
+    kind: "plugin_disable_v1" | "plugin_quarantine_v1",
+    id: string,
+    input: unknown,
+  ) {
+    available();
+    auth.require(actor, "plugins:publish");
+    const parsed = versionCommandSchema.parse(input);
+    return store.command(kind, auth.authorization(actor, "plugins:publish"), parsed.command_id, {
+      version_id: z.uuid().parse(id),
+      expected_revision: parsed.expected_revision,
+      reason: parsed.reason,
+    });
   }
   async function runValidation(
     actor: PlatformActor,
@@ -217,6 +266,13 @@ export function createCatalogApplication(options: {
       owner,
     );
   }
+  function busy() {
+    return new GatewayError(
+      429,
+      "catalog_busy",
+      "Catalog is processing the maximum number of plugin operations",
+    );
+  }
   function validate(
     actor: PlatformActor,
     id: string,
@@ -238,6 +294,7 @@ export function createCatalogApplication(options: {
         );
       return existing.promise;
     }
+    if (pendingValidations.size >= 2) throw busy();
     const controller = new AbortController();
     shutdownControllers.add(controller);
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
@@ -289,6 +346,29 @@ export function createCatalogApplication(options: {
     register,
     validate,
     publish,
+    async upload(actor: PlatformActor, read: () => Promise<unknown>) {
+      available();
+      auth.require(actor, "plugins:upload");
+      if (uploading) throw busy();
+      uploading = true;
+      try {
+        return await accept(actor, uploadPluginSchema.parse(await read()));
+      } finally {
+        uploading = false;
+      }
+    },
+    disable: (actor: PlatformActor, id: string, input: unknown) =>
+      transition(actor, "plugin_disable_v1", id, input),
+    quarantine: (actor: PlatformActor, id: string, input: unknown) =>
+      transition(actor, "plugin_quarantine_v1", id, input),
+    async versions(actor: PlatformActor) {
+      auth.require(actor, "plugins:read");
+      return store.versions();
+    },
+    async bindings(actor: PlatformActor, channel: string) {
+      auth.require(actor, "plugins:read");
+      return store.bindings(z.uuid().parse(channel));
+    },
     async installBundled(actor: PlatformActor, input: unknown, signal?: AbortSignal) {
       const parsed = installBundledReleaseSchema.parse(input);
       auth.require(actor, "plugins:install-bundled");

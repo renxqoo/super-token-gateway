@@ -1,3 +1,5 @@
+import { canonical } from "@gateway/kernel";
+import { describeRelease } from "../../apps/core-api/src/plugins/releases.ts";
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { openAIChatPackageFiles } from "@gateway/adapters";
 import { packageDigest, verifyPackage, type PackageFile } from "@gateway/plugin-sdk";
@@ -62,4 +64,54 @@ export async function syntheticAdversarialPackage() {
         return file;
       }),
   );
+}
+export async function publisherUpload(
+  key: { privateKey: KeyObject },
+  runtimeDigest: string,
+  manifest: { id: string; version: string },
+  keyId = "synthetic-publisher",
+) {
+  const files = (await openAIChatPackageFiles()).map((file) =>
+    file.path === "manifest.json"
+      ? {
+          path: file.path,
+          bytes: new TextEncoder().encode(
+            JSON.stringify({ ...JSON.parse(new TextDecoder().decode(file.bytes)), ...manifest }),
+          ),
+        }
+      : file,
+  );
+  const bytes = new TextEncoder().encode(
+    JSON.stringify({
+      format: 1,
+      files: files.map((file) => ({
+        path: file.path,
+        data: Buffer.from(file.bytes).toString("base64"),
+      })),
+      signature: {
+        algorithm: "Ed25519",
+        key_id: keyId,
+        value: sign(null, Buffer.from(packageDigest(files), "hex"), key.privateKey).toString(
+          "base64",
+        ),
+      },
+    }),
+  );
+  const descriptor = describeRelease(files, bytes, runtimeDigest, "upload");
+  return {
+    bytes,
+    package_base64: Buffer.from(bytes).toString("base64"),
+    release: {
+      descriptor,
+      signature: {
+        algorithm: "Ed25519",
+        key_id: keyId,
+        value: sign(
+          null,
+          Buffer.from(`gateway-plugin-release-v1\0${canonical(descriptor)}`),
+          key.privateKey,
+        ).toString("base64"),
+      },
+    },
+  };
 }

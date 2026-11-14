@@ -7,7 +7,9 @@ export type CatalogKind =
   | "plugin_publish_v1"
   | "plugin_bind_v1"
   | "plugin_recover_v1"
-  | "plugin_resources_v1";
+  | "plugin_resources_v1"
+  | "plugin_disable_v1"
+  | "plugin_quarantine_v1";
 export type CatalogAuthorization =
   | { identity: "bootstrap:ADMIN_KEY"; bootstrap: true }
   | { identity: string; credentialId: string; administratorId: string; verifier: string };
@@ -108,6 +110,12 @@ export function createPluginCatalogStore(db: SQL) {
         await db`SELECT v.id,v.name,v.version,v.package_digest,v.abi_version,v.config_schema_digest,v.state,v.quarantined,v.revision::text,v.validation_result,r.receipt AS publication FROM plugin_versions v LEFT JOIN plugin_publication_receipts r ON r.version_id=v.id WHERE v.id=${id}::uuid`;
       if (!rows[0]) throw new GatewayError(404, "catalog_not_found", "Plugin version not found");
       return rows[0];
+    },
+    async versions() {
+      return db`SELECT id,name,version,package_digest,abi_version,config_schema_digest,state,quarantined,revision::text,created_at FROM plugin_versions ORDER BY created_at DESC,id LIMIT 200`;
+    },
+    async bindings(channel: string) {
+      return db`SELECT b.id,b.plugin_version_id,b.config_revision::text,b.config_digest,b.actor,b.created_at,v.name,v.version,v.package_digest,(c.binding_id=b.id) AS current FROM channel_plugin_bindings b JOIN plugin_versions v ON v.id=b.plugin_version_id JOIN channels c ON c.id=b.channel_id WHERE b.channel_id=${channel}::uuid ORDER BY b.config_revision DESC LIMIT 200`;
     },
     async binding(id: string) {
       const rows =

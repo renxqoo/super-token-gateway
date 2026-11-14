@@ -20,16 +20,45 @@ export function catalogRoutes(application: CatalogApplication) {
     );
   });
   const actor = (header: string | undefined) => application.authenticate(header);
-  const body = async (request: Request) =>
+  const body = async (request: Request, limit = 65536) =>
     JSON.parse(
       new TextDecoder("utf-8", { fatal: true }).decode(
         await readBounded(
           request.body,
-          65536,
-          AbortSignal.any([request.signal, AbortSignal.timeout(10000)]),
+          limit,
+          AbortSignal.any([request.signal, AbortSignal.timeout(limit > 65536 ? 120000 : 10000)]),
         ),
       ),
     );
+  app.get("/plugins", async (c) =>
+    c.json({ data: await application.versions(await actor(c.req.header("authorization"))) }),
+  );
+  app.post("/plugins", async (c) =>
+    c.json(
+      await application.upload(await actor(c.req.header("authorization")), () =>
+        body(c.req.raw, 64 << 20),
+      ),
+      201,
+    ),
+  );
+  for (const action of ["disable", "quarantine"] as const)
+    app.post(`/plugins/:id/${action}`, async (c) =>
+      c.json(
+        await application[action](
+          await actor(c.req.header("authorization")),
+          z.uuid().parse(c.req.param("id")),
+          await body(c.req.raw),
+        ),
+      ),
+    );
+  app.get("/providers/:id/plugin-bindings", async (c) =>
+    c.json({
+      data: await application.bindings(
+        await actor(c.req.header("authorization")),
+        z.uuid().parse(c.req.param("id")),
+      ),
+    }),
+  );
   app.post("/plugins/install-bundled-release", async (c) =>
     c.json(
       await application.installBundled(

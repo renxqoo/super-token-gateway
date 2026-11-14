@@ -4,6 +4,10 @@ import { z } from "zod";
 export const bundledReleaseId = "gateway.openai-chat-1.0.0" as const;
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const keyId = z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/);
+export const publisherNamespaceSchema = z
+  .string()
+  .regex(/^[a-z][a-z0-9-]{1,40}$/)
+  .refine((value) => value !== "gateway");
 export const releasePolicySchema = z
   .object({
     format: z.literal(1),
@@ -43,15 +47,37 @@ export const releasePolicySchema = z
       )
       .min(1)
       .max(100),
+    publishers: z
+      .array(
+        z
+          .object({
+            id: keyId,
+            public_key: z.string().min(1).max(4096),
+            not_before: z.iso.datetime(),
+            expires_at: z.iso.datetime(),
+            revoked: z.boolean(),
+            namespace: publisherNamespaceSchema,
+          })
+          .strict(),
+      )
+      .max(100)
+      .default([]),
   })
   .strict();
 export type ReleasePolicy = z.infer<typeof releasePolicySchema>;
+export function publisherAdmits(
+  publisher: { namespace: string },
+  manifest: { id: string },
+): boolean {
+  return manifest.id.startsWith(`${publisher.namespace}.`);
+}
 
 export function packageTrust(policy: ReleasePolicy, now = Date.now()) {
   if (policy.revoked || Date.parse(policy.expires_at) <= now)
     throw new Error("RELEASE_POLICY_EXPIRED");
+  const ids = [...policy.keys, ...policy.publishers].map((k) => k.id);
   if (
-    new Set(policy.keys.map((k) => k.id)).size !== policy.keys.length ||
+    new Set(ids).size !== ids.length ||
     new Set(policy.releases.map((r) => r.release_id)).size !== policy.releases.length
   )
     throw new Error("RELEASE_POLICY_DUPLICATE");
@@ -76,6 +102,30 @@ export function packageTrust(policy: ReleasePolicy, now = Date.now()) {
       if (key.release_ids.includes(release.release_id)) keys.set(key.id, publicKeys.get(key.id)!);
     byDigest.set(release.package_digest, keys);
   }
-  return (packageDigest: string): ReadonlyMap<string, KeyObject> =>
-    byDigest.get(packageDigest) ?? new Map();
+  const publishers = new Map<string, { key: KeyObject; namespace: string }>();
+  for (const publisher of policy.publishers) {
+    if (
+      publisher.revoked ||
+      Date.parse(publisher.not_before) > now ||
+      Date.parse(publisher.expires_at) <= now
+    )
+      continue;
+    const publicKey = createPublicKey(publisher.public_key);
+    if (publicKey.asymmetricKeyType !== "ed25519") throw new Error("RELEASE_KEY_TYPE");
+    publishers.set(publisher.id, { key: publicKey, namespace: publisher.namespace });
+  }
+  return Object.assign(
+    (packageDigest: string): ReadonlyMap<string, KeyObject> => {
+      const keys = new Map(byDigest.get(packageDigest));
+      for (const [id, publisher] of publishers) keys.set(id, publisher.key);
+      return keys;
+    },
+    {
+      admits(pkg: { digest: string; signingKeyId: string; manifest: { id: string } }): boolean {
+        if (byDigest.get(pkg.digest)?.has(pkg.signingKeyId)) return true;
+        const publisher = publishers.get(pkg.signingKeyId);
+        return publisher !== undefined && publisherAdmits(publisher, pkg.manifest);
+      },
+    },
+  );
 }

@@ -161,6 +161,15 @@
           "checksum": "0edd81cfe8834e7431e9a80d8423f3ad568d387ddf0066a1f1f44b9c382ecff3"
         }
       ]
+    },
+    {
+      "version": 2026111216,
+      "files": [
+        {
+          "path": "./sql/core-plugin-lifecycle.sql",
+          "checksum": "ae20e79968a940b8da477f19bd8cdf88a915c90e3506a775d5568e0e43faf8bb"
+        }
+      ]
     }
   ]
 }
