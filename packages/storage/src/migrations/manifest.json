@@ -197,6 +197,15 @@
           "checksum": "8661e948f44096a2a4d71d613b88131d219b7265566dac57db52e6fd4647897a"
         }
       ]
+    },
+    {
+      "version": 2026111220,
+      "files": [
+        {
+          "path": "./sql/core-files.sql",
+          "checksum": "e53ac514a5b4d97d58285d918a8c61e5fbeb0e998c9debc7f695a64ee4e47bbc"
+        }
+      ]
     }
   ]
 }

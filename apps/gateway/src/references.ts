@@ -76,6 +76,15 @@ export function collectReferences(value: unknown, resolvable: boolean): Referenc
         references.push({ pointer, resourceId: entry });
         continue;
       }
+      if (
+        key === "file_id" &&
+        resolvable &&
+        typeof entry === "string" &&
+        /^file_[0-9a-f]{32}$/.test(entry)
+      ) {
+        references.push({ pointer, resourceId: entry });
+        continue;
+      }
       if (unmanaged(key, entry)) refused();
       pending.push([entry, key, pointer]);
     }

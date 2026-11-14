@@ -145,6 +145,24 @@ export function createGatewayApp(
   app.post("/v1/chat/completions", (c) => serve(c, "chat"));
   app.post("/v1/messages", (c) => serve(c, "messages"));
   app.post("/v1/responses", (c) => serve(c, "responses"));
+  app.post("/v1/files", (c) => serve(c, "files"));
+  app.get("/v1/files", (c) =>
+    handle(c, (inbound) =>
+      listResources(deps, inbound, "file", {
+        limit: c.req.query("limit"),
+        after: c.req.query("after"),
+      }),
+    ),
+  );
+  app.get("/v1/files/:id", (c) =>
+    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "get")),
+  );
+  app.delete("/v1/files/:id", (c) =>
+    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "delete")),
+  );
+  app.get("/v1/files/:id/content", (c) =>
+    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "content")),
+  );
   app.get("/v1/responses", (c) =>
     handle(c, (inbound) =>
       listResources(deps, inbound, "response", {

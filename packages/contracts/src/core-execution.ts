@@ -84,17 +84,19 @@ const dispatch = {
 export const executionDataSchemas = {
   execution_abort_recovery_v1: z.strictObject({ attempt_id: internalUuidSchema }),
   execution_quota_recovery_v1: z.strictObject({ limit: z.number().int().min(1).max(100) }),
-  execution_context_v1: z.strictObject({
-    ...customerCredential,
-    operation: z.enum(operations),
-    model: z.string().min(1).max(150),
-    fingerprint: digestSchema,
-    resource_ids: z
-      .array(z.string().regex(/^(response|file)_[0-9a-f]{32}$/))
-      .min(1)
-      .max(16)
-      .optional(),
-  }),
+  execution_context_v1: z
+    .strictObject({
+      ...customerCredential,
+      operation: z.enum(operations),
+      model: z.string().min(1).max(150).optional(),
+      fingerprint: digestSchema,
+      resource_ids: z
+        .array(z.string().regex(/^(response|file)_[0-9a-f]{32}$/))
+        .min(1)
+        .max(16)
+        .optional(),
+    })
+    .refine((value) => value.model !== undefined || value.operation === "files"),
   execution_admit_v1: z.strictObject({
     ...dispatch,
     project_id: internalUuidSchema,

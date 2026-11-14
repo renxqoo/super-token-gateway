@@ -335,7 +335,7 @@ export function createExecutionHandler(
           verifier: verifier(data.customer_token, options.pepper),
           ip: data.ip,
           operation: data.operation,
-          model: data.model,
+          ...(data.model ? { model: data.model } : {}),
           fingerprint: data.fingerprint,
           max_attempts: options.maxAttempts ?? 3,
           ...(data.resource_ids ? { resource_ids: data.resource_ids } : {}),
@@ -349,7 +349,7 @@ export function createExecutionHandler(
             candidate,
           })),
           parsed.routing_strategy,
-          data.model,
+          String(snapshot.model),
           routingLimits,
         ).catch((error: unknown) => {
           if (error instanceof GatewayError && error.code === "no_route")

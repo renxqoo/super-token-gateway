@@ -346,13 +346,80 @@ function responsesResponse(value: DocumentInput) {
     ...(identity.resource ? { resource: identity.resource } : {}),
   };
 }
-function responsesResource(value: DocumentInput) {
-  const objects: Record<string, string> = {
-    get: "response",
-    cancel: "response",
-    delete: "response",
-    input_items: "list",
+function prepareFiles(input: GuestInput, value: DocumentInput) {
+  if (value.content !== "multipart") throw new AdapterFailure(400, "invalid_request");
+  const query = inspect(value, ["", "/purpose", "/file", "/model"]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object" || fact(value, "/file").kind !== "object")
+    throw new AdapterFailure(400, "invalid_request");
+  const purpose = scalar(value, "/purpose", 400);
+  if (typeof purpose !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(purpose))
+    throw new AdapterFailure(400, "invalid_request");
+  const map = object(input.config.model_map, 400),
+    upstream = map[value.model!],
+    model = fact(value, "/model");
+  if (
+    typeof upstream !== "string" ||
+    !upstream ||
+    (model.kind !== "missing" && scalar(value, "/model", 400) !== value.model)
+  )
+    throw new AdapterFailure(422, "model_unavailable");
+  if (input.config.path_style === "azure") throw new AdapterFailure(422, "unsupported_capability");
+  return {
+    abi_version: 1,
+    kind: "prepared",
+    request: {
+      method: "POST",
+      path: "/v1/files",
+      headers: { accept: "application/json" },
+      body: {
+        document: value.document.handle,
+        edits: model.kind === "missing" ? [] : [{ op: "remove", pointer: "/model" }],
+      },
+      body_format: "multipart",
+      auth: authOf(input),
+      manifest: {
+        operation: "files",
+        model: value.model,
+        upstream_model: upstream,
+        stream: false,
+        ceilings: { requests: "1" },
+        input_bytes: value.document.bytes,
+      },
+    },
   };
+}
+function filesResponse(value: DocumentInput) {
+  const query = inspect(value, ["", "/id", "/object", "/error"]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object") fail("invalid_object");
+  if (!["missing", "null"].includes(fact(value, "/error").kind)) fail("upstream_error");
+  if (scalar(value, "/object") !== "file") fail("invalid_object");
+  const identity = identityEdits(value, "/id", value.resource_id);
+  if (!identity.resource) fail("invalid_object");
+  return {
+    abi_version: 1,
+    kind: "output",
+    consumed: 0,
+    chunks: [],
+    body: { document: value.document.handle, edits: identity.edits },
+    usage: { requests: "1" },
+    finality: "FINAL",
+    terminal: { kind: "complete", bytes: "" },
+    needs_input: false,
+    resource: { kind: "file", remote_id: identity.resource.remote_id },
+  };
+}
+function responsesResource(value: DocumentInput) {
+  const file = value.resource_id?.startsWith("file_") === true;
+  const objects: Record<string, string> = file
+    ? { get: "file", delete: "file" }
+    : {
+        get: "response",
+        cancel: "response",
+        delete: "response",
+        input_items: "list",
+      };
   const query = inspect(value, ["", "/id", "/object", "/model", "/error"]);
   if (query) return query;
   if (fact(value, "").kind !== "object") fail("invalid_object");
@@ -363,7 +430,7 @@ function responsesResource(value: DocumentInput) {
     value.action === "input_items"
       ? []
       : [
-          ...(value.model ? modelEdit(value, "/model", value.model) : []),
+          ...(value.model && !file ? modelEdit(value, "/model", value.model) : []),
           ...identityEdits(value, "/id", value.resource_id).edits,
         ];
   return {
@@ -381,19 +448,22 @@ function resourceRequest(input: GuestInput, payload: Record<string, unknown>) {
   const remote = payload.remote_id,
     action = payload.action;
   if (
-    payload.kind !== "response" ||
+    (payload.kind !== "response" && payload.kind !== "file") ||
     typeof remote !== "string" ||
     !/^[A-Za-z0-9_.:-]{1,200}$/.test(remote) ||
     typeof action !== "string"
   )
     throw new AdapterFailure(422, "unsupported_capability");
   if (input.config.path_style === "azure") throw new AdapterFailure(422, "unsupported_capability");
-  const suffix: Record<string, [string, string]> = {
-    get: ["GET", ""],
-    delete: ["DELETE", ""],
-    cancel: ["POST", "/cancel"],
-    input_items: ["GET", "/input_items"],
-  };
+  const suffix: Record<string, [string, string]> =
+    payload.kind === "file"
+      ? { get: ["GET", ""], delete: ["DELETE", ""], content: ["GET", "/content"] }
+      : {
+          get: ["GET", ""],
+          delete: ["DELETE", ""],
+          cancel: ["POST", "/cancel"],
+          input_items: ["GET", "/input_items"],
+        };
   const route = suffix[action];
   if (!route) throw new AdapterFailure(422, "unsupported_capability");
   return {
@@ -401,8 +471,8 @@ function resourceRequest(input: GuestInput, payload: Record<string, unknown>) {
     kind: "resource_request",
     request: {
       method: route[0],
-      path: `/v1/responses/${remote}${route[1]}`,
-      headers: { accept: "application/json" },
+      path: `/v1/${payload.kind === "file" ? "files" : "responses"}/${remote}${route[1]}`,
+      headers: { accept: action === "content" ? "*/*" : "application/json" },
       auth: authOf(input),
     },
   };
@@ -907,9 +977,12 @@ function prepare(input: GuestInput, value: DocumentInput) {
   if (
     value.content === "multipart" &&
     !imageOperations.includes(value.operation ?? "") &&
-    !audioOperations.includes(value.operation ?? "")
+    !audioOperations.includes(value.operation ?? "") &&
+    value.operation !== "files"
   )
     throw new AdapterFailure(422, "unsupported_semantics");
+  if (value.protocol === undefined && value.operation === "files")
+    return prepareFiles(input, value);
   if (value.protocol === "responses" && value.operation === "responses")
     return prepareResponses(input, value);
   if (value.protocol === undefined && nativeOperations.includes(value.operation ?? ""))
@@ -1341,15 +1414,17 @@ export function invoke() {
             ? responsesResponse(value)
             : value.action !== undefined
               ? fail("invalid_object")
-              : value.protocol === undefined && nativeOperations.includes(value.operation ?? "")
-                ? nativeResponse(value)
-                : value.protocol === undefined && imageOperations.includes(value.operation ?? "")
-                  ? imagesResponse(value)
-                  : value.operation === "transcription" || value.operation === "translation"
-                    ? transcriptResponse(value)
-                    : value.operation === "speech"
-                      ? fail("invalid_object")
-                      : response(input, value),
+              : value.protocol === undefined && value.operation === "files"
+                ? filesResponse(value)
+                : value.protocol === undefined && nativeOperations.includes(value.operation ?? "")
+                  ? nativeResponse(value)
+                  : value.protocol === undefined && imageOperations.includes(value.operation ?? "")
+                    ? imagesResponse(value)
+                    : value.operation === "transcription" || value.operation === "translation"
+                      ? transcriptResponse(value)
+                      : value.operation === "speech"
+                        ? fail("invalid_object")
+                        : response(input, value),
         state: null,
       };
     }

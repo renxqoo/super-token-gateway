@@ -31,6 +31,9 @@ export type ResourceRequest = {
   signal: AbortSignal;
 };
 
+const contentType =
+  /^[A-Za-z0-9!#$&^_.+-]{1,64}\/[A-Za-z0-9!#$&^_.+-]{1,64}(;[ A-Za-z0-9=._-]{1,100})?$/;
+
 function deadline(seconds = 30) {
   return new Date(Date.now() + seconds * 1000).toISOString();
 }
@@ -127,26 +130,42 @@ export async function executeResource(
     );
     if (granted.state !== "GRANTED" || !granted.auth_material)
       throw new GatewayError(503, "resource_unavailable", "The resource action was not granted");
-    const signal = AbortSignal.any([
-      request.signal,
-      AbortSignal.timeout(Math.max(1, deadlineAt - Date.now())),
-    ]);
-    const empty = new Uint8Array();
-    const response = await deps.transport.fetch(
-      url,
-      {
-        method: prepared.request.method,
-        headers: authorize(prepared.request.headers, granted.auth_material, url, empty),
-        signal,
-      },
-      deps.config.allow_private_upstream,
-      deps.config.private_upstream_cidrs,
-    );
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw upstreamFailure(response.status);
+    const expiry = new AbortController(),
+      timer = setTimeout(() => expiry.abort(), Math.max(1, deadlineAt - Date.now()));
+    const signal = AbortSignal.any([request.signal, expiry.signal]);
+    let bytes: Uint8Array;
+    try {
+      const empty = new Uint8Array();
+      const response = await deps.transport.fetch(
+        url,
+        {
+          method: prepared.request.method,
+          headers: authorize(prepared.request.headers, granted.auth_material, url, empty),
+          signal,
+        },
+        deps.config.allow_private_upstream,
+        deps.config.private_upstream_cidrs,
+      );
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        throw upstreamFailure(response.status);
+      }
+      if (action === "content") {
+        clearTimeout(timer);
+        const type = response.headers.get("content-type") ?? "";
+        return new Response(response.body, {
+          status: 200,
+          headers: {
+            "content-type": contentType.test(type) ? type : "application/octet-stream",
+            "cache-control": "no-store",
+            "x-request-id": request.requestId,
+          },
+        });
+      }
+      bytes = await readBounded(response.body, deps.config.max_response_bytes, signal);
+    } finally {
+      clearTimeout(timer);
     }
-    const bytes = await readBounded(response.body, deps.config.max_response_bytes, signal);
     const transformed = await attempt.transformJSON(
       "resource_response",
       {

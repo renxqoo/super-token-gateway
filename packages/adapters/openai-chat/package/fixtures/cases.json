@@ -1810,12 +1810,12 @@
       ]
     },
     {
-      "name": "resource kinds other than responses are unsupported",
+      "name": "resource kinds other than responses and files are unsupported",
       "steps": [
         {
           "action": "invoke",
           "hook": "resource_prepare",
-          "input": "eyJraW5kIjogImZpbGUiLCAiYWN0aW9uIjogImdldCIsICJyZW1vdGVfaWQiOiAiZmlsZS0xIn0=",
+          "input": "eyJraW5kIjogImJhdGNoIiwgImFjdGlvbiI6ICJnZXQiLCAicmVtb3RlX2lkIjogImJhdGNoLTEifQ==",
           "expected": {
             "abi_version": 1,
             "kind": "failure",
@@ -1888,6 +1888,195 @@
             "status": 502,
             "code": "invalid_object"
           }
+        }
+      ]
+    },
+    {
+      "name": "multipart file upload drops the model field and is metered as one request",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "files",
+            "model": "logical",
+            "content": "multipart"
+          },
+          "body": "eyJwdXJwb3NlIjoiYXNzaXN0YW50cyIsImZpbGUiOnsiZmlsZSI6eyJuYW1lIjoiYS5qc29ubCIsInR5cGUiOiJhcHBsaWNhdGlvbi9qc29ubCIsImJ5dGVzIjozLCJzaGEyNTYiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIn19LCJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1/files",
+              "body_format": "multipart",
+              "auth": {
+                "type": "bearer"
+              },
+              "manifest": {
+                "operation": "files",
+                "model": "logical",
+                "upstream_model": "upstream",
+                "stream": false,
+                "ceilings": {
+                  "requests": "1"
+                }
+              }
+            }
+          },
+          "expected_body": "eyJwdXJwb3NlIjoiYXNzaXN0YW50cyIsImZpbGUiOnsiZmlsZSI6eyJuYW1lIjoiYS5qc29ubCIsInR5cGUiOiJhcHBsaWNhdGlvbi9qc29ubCIsImJ5dGVzIjozLCJzaGEyNTYiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIn19fQ=="
+        }
+      ]
+    },
+    {
+      "name": "file upload without a purpose is invalid",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "files",
+            "model": "logical",
+            "content": "multipart"
+          },
+          "body": "eyJmaWxlIjp7ImZpbGUiOnsibmFtZSI6ImEuanNvbmwiLCJ0eXBlIjoiYXBwbGljYXRpb24vanNvbmwiLCJieXRlcyI6Mywic2hhMjU2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCJ9fX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 400,
+            "code": "invalid_request"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an uploaded file is answered with the gateway identity and declares the upstream file",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "files",
+            "model": "logical",
+            "resource_id": "file_0123456789abcdef0123456789abcdef"
+          },
+          "body": "eyJpZCI6ImZpbGUtYWJjIiwib2JqZWN0IjoiZmlsZSIsImJ5dGVzIjozLCJmaWxlbmFtZSI6ImEuanNvbmwiLCJwdXJwb3NlIjoiYXNzaXN0YW50cyIsInN0YXR1cyI6InByb2Nlc3NlZCJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "usage": {
+              "requests": "1"
+            },
+            "finality": "FINAL",
+            "resource": {
+              "kind": "file",
+              "remote_id": "file-abc"
+            }
+          },
+          "expected_body": "eyJpZCI6ImZpbGVfMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJvYmplY3QiOiJmaWxlIiwiYnl0ZXMiOjMsImZpbGVuYW1lIjoiYS5qc29ubCIsInB1cnBvc2UiOiJhc3Npc3RhbnRzIiwic3RhdHVzIjoicHJvY2Vzc2VkIn0="
+        }
+      ]
+    },
+    {
+      "name": "file resource actions map to the upstream file paths",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "eyJraW5kIjogImZpbGUiLCAiYWN0aW9uIjogImdldCIsICJyZW1vdGVfaWQiOiAiZmlsZS1hYmMifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "resource_request",
+            "request": {
+              "method": "GET",
+              "path": "/v1/files/file-abc",
+              "headers": {
+                "accept": "application/json"
+              },
+              "auth": {
+                "type": "bearer"
+              }
+            }
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "eyJraW5kIjogImZpbGUiLCAiYWN0aW9uIjogImRlbGV0ZSIsICJyZW1vdGVfaWQiOiAiZmlsZS1hYmMifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "resource_request",
+            "request": {
+              "method": "DELETE",
+              "path": "/v1/files/file-abc",
+              "headers": {
+                "accept": "application/json"
+              },
+              "auth": {
+                "type": "bearer"
+              }
+            }
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "eyJraW5kIjogImZpbGUiLCAiYWN0aW9uIjogImNvbnRlbnQiLCAicmVtb3RlX2lkIjogImZpbGUtYWJjIn0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "resource_request",
+            "request": {
+              "method": "GET",
+              "path": "/v1/files/file-abc/content",
+              "headers": {
+                "accept": "*/*"
+              },
+              "auth": {
+                "type": "bearer"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "files cannot be cancelled",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "eyJraW5kIjogImZpbGUiLCAiYWN0aW9uIjogImNhbmNlbCIsICJyZW1vdGVfaWQiOiAiZmlsZS1hYmMifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_capability"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a retrieved file is answered with the gateway identity",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "resource_response",
+          "metadata": {
+            "model": "logical",
+            "action": "get",
+            "resource_id": "file_0123456789abcdef0123456789abcdef"
+          },
+          "body": "eyJpZCI6ImZpbGUtYWJjIiwib2JqZWN0IjoiZmlsZSIsImJ5dGVzIjozLCJmaWxlbmFtZSI6ImEuanNvbmwiLCJwdXJwb3NlIjoiYXNzaXN0YW50cyIsInN0YXR1cyI6InByb2Nlc3NlZCJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "finality": "UNKNOWN",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            }
+          },
+          "expected_body": "eyJpZCI6ImZpbGVfMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJvYmplY3QiOiJmaWxlIiwiYnl0ZXMiOjMsImZpbGVuYW1lIjoiYS5qc29ubCIsInB1cnBvc2UiOiJhc3Npc3RhbnRzIiwic3RhdHVzIjoicHJvY2Vzc2VkIn0="
         }
       ]
     }

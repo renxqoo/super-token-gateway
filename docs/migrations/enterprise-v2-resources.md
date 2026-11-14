@@ -27,7 +27,7 @@
 | l2     | R2/R3 Core 资源登记、动作许可、列表与 context 引用解析；legacy 行回填迁移                                                      | 集成：归属/跨项目 404、受限 Key、cursor 越权、变更许可只发一次                |
 | l3     | R4 + Responses：创建登记（JSON 与 SSE）、GET/DELETE/cancel/input_items/列表、`previous_response_id`；Caddy 切 `/v1/responses*` | 真实 Gateway→插件→上游；公开 ID 稳定且不暴露远端 ID                           |
 | l4     | R5 异步补证与 `background: true`                                                                                               | 无用户轮询时终态用量结算；Gateway 重启后仍可补证；租约过期旧 session 证据拒绝 |
-| l5     | files 与 R6 Batch                                                                                                              | Batch 现有回归迁移到 v2；完成/取消/失败用量                                   |
+| l5     | l5a files；l5b R6 Batch（Caddy 在 l5b 后切 `/v1/files*`、`/v1/batches*`）                                                      | Batch 现有回归迁移到 v2；完成/取消/失败用量                                   |
 | l6     | R7 视频                                                                                                                        | 创建、轮询补证、content                                                       |
 | l7     | 自审、全量门禁、T11 状态                                                                                                       | —                                                                             |
 
@@ -68,3 +68,13 @@
     - 客户删除未完成的后台响应后，补证以 FAILED/`resource_deleted` 结束请求并结算，资源保持 DELETED。
   - 宿主：`json-guest-boundary.test.ts` 新增 `pending` 无资源被 ABI_OUTPUT 拒绝、带资源被接受；openai-chat 1.6.0 fixture 63 cases/86 steps（后台透传、流式后台 422、`queued` 延迟用量并声明身份、无公开 ID 的 `in_progress` 无效）。
 - **l4 已知限制**：上游 `failed`/`cancelled` 与客户删除按 UNKNOWN 用量结束，供应商侧按预估上限处理而非真实部分用量；资源被删除以外的上游 404（远端过期）按退避无限重试，最长间隔 3600 秒；轮询只做 `response` 类，batch/video 在 l5/l6 接入；后台 + 流式不支持。
+- **l5a 设计（files）**：
+  - 上传 `POST /v1/files`（multipart：`purpose`、单个 `file`、可选 `model`）。未给 `model` 时由 Core context 选 Key 可见且开放 `files` 操作的第一个模型（按名称，与 legacy 一致），响应携带所选模型，Gateway 以其继续。迁移 2026111220 `core-files.sql` 重定义 `core_context_v1` 与 `core_resource_commit_v1`：除 `files` 外 model 仍必填；所有种类公开 ID 均为 `{kind}_{请求 ID 去连字符}`（一个请求只创建一个资源）。
+  - `purpose=batch` 在 l5b 前返回 422 `unsupported_semantics`，避免未校验的 JSONL 进入上游。
+  - openai-chat 1.7.0：`files` 操作走 multipart，移除 `model` 字段后上传 `/v1/files`，按 `requests=1` 计量；响应必须是 `object=file`，改写 `/id` 并声明 `file` 资源；资源动作 get/delete 映射 `/v1/files/{id}`，content 映射 `/v1/files/{id}/content`。
+  - 资源动作：`GET/DELETE /v1/files/{id}` 经 `resource_response` 改写身份；`GET /v1/files/{id}/content` 原样流式转发上游正文（不缓冲、不落库，`cache-control: no-store`，仅保留安全的 `content-type`）；`GET /v1/files` 列表与 responses 同一 keyset。
+  - 引用：请求中 `file_id` 为公开 `file_` ID 时作为引用收集（与 `previous_response_id` 同一解析、同渠道约束与 JSON 指针改写），其他值仍 422 `unmanaged_resource`；跨协议转换路径遇引用 422。
+- **l5a 测试**：
+  - `tests/integration/gateway-files.test.ts` 1 例：未给 model 的上传以 Key 默认模型执行并按请求结算，返回公开 `file_` ID 且不含远端 ID，上游 multipart 不带 `model`；取回改写身份并访问原渠道路径；content 原样流式返回、`content-type` 保留、`cache-control: no-store`；列表；Responses `input_file` 以公开 ID 引用时上游收到远端 ID；`purpose=batch` 422 且不触达上游；其他项目 Key 取回与 content 均 404；删除后取回 404 且不触达上游。
+  - `apps/gateway/src/__test__/references.test.ts` 新增公开 `file_` ID 收集与上游 ID、不可解析位置拒绝；openai-chat 1.7.0 fixture 69 cases/94 steps（上传去 model、缺 purpose、上传响应改写与声明、文件动作映射、文件不可取消、取回改写）。
+- **l5a 已知限制**：Caddy 仍把 `/v1/files*` 交 legacy，待 l5b Batch 完成后一起切换；content 流不计入 Gateway 排空等待；Azure 路径风格的文件操作 422。

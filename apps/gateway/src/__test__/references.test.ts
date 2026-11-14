@@ -66,6 +66,30 @@ test("a gateway response identity is collected with its pointer only where it ma
     expect(() => collectReferences(body, resolvable)).toThrow(expect.objectContaining(refused));
 });
 
+test("a gateway file identity is collected wherever a file_id appears, while upstream file identities stay refused", () => {
+  const id = `file_${"c".repeat(32)}`;
+  const collected = collectReferences(
+    {
+      input: [{ role: "user", content: [{ type: "input_file", file_id: id }] }],
+      messages: [{ content: [{ type: "file", file: { file_id: id } }] }],
+    },
+    true,
+  );
+  expect(collected).toHaveLength(2);
+  expect(collected).toEqual(
+    expect.arrayContaining([
+      { pointer: "/messages/0/content/0/file/file_id", resourceId: id },
+      { pointer: "/input/0/content/0/file_id", resourceId: id },
+    ]),
+  );
+  for (const [body, resolvable] of [
+    [{ input: [{ file_id: "file-upstream" }] }, true],
+    [{ input: [{ file_id: id }] }, false],
+  ] as const)
+    expect(() => collectReferences(body, resolvable)).toThrow(
+      expect.objectContaining({ code: "unmanaged_resource" }),
+    );
+});
 test("deeply nested bodies are walked without exhausting the call stack", () => {
   let nested: unknown = { file_id: "file-x" };
   for (let depth = 0; depth < 100000; depth++) nested = [nested];

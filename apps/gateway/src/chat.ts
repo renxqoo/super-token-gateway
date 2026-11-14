@@ -190,9 +190,24 @@ async function requestFacts(request: ChatRequest, totalTimeoutMs: number): Promi
       throw new GatewayError(400, "invalid_request", "Request body must be a JSON object");
     value = parsed;
   }
-  const references = collectReferences(value, request.operation === "responses" && !files);
+  const references = collectReferences(
+    value,
+    (request.operation === "responses" || request.operation === "chat") && !files,
+  );
   const model = request.path ? request.path.model : value.model;
-  if (typeof model !== "string" || !model)
+  if (request.operation === "files") {
+    const purpose = (value as Record<string, unknown>).purpose;
+    if (!files || typeof purpose !== "string")
+      throw new GatewayError(400, "invalid_request", "A multipart file and purpose are required");
+    if (purpose === "batch")
+      throw new GatewayError(
+        422,
+        "unsupported_semantics",
+        "Batch input files are not yet available through this route",
+      );
+    if (model !== undefined && (typeof model !== "string" || !model))
+      throw new GatewayError(400, "invalid_request", "model must be a non-empty string");
+  } else if (typeof model !== "string" || !model)
     throw new GatewayError(400, "invalid_request", "A model is required");
   const protocol = (protocols as readonly string[]).includes(request.operation)
     ? (request.operation as Protocol)
@@ -203,7 +218,7 @@ async function requestFacts(request: ChatRequest, totalTimeoutMs: number): Promi
     inputCharacters: requestCharacters(request.operation, value as Record<string, unknown>),
     document,
     files,
-    model,
+    model: typeof model === "string" ? model : "",
     stream: request.path ? request.path.stream : value.stream === true,
     fingerprint: sha256(body),
     deadlineAt: new Date(Date.now() + totalTimeoutMs).toISOString(),
@@ -242,7 +257,7 @@ async function openContext(deps: ChatDependencies, request: ChatRequest, facts: 
           customer_token: request.token,
           ip: request.ip,
           operation: facts.operation,
-          model: facts.model,
+          ...(facts.model ? { model: facts.model } : {}),
           fingerprint: facts.fingerprint,
           ...(facts.references.length
             ? { resource_ids: [...new Set(facts.references.map((r) => r.resourceId))] }
@@ -526,9 +541,10 @@ export function publicResourceId(kind: string, requestId: string) {
 }
 
 function createdResource(facts: Facts, admitted: Admitted) {
-  return facts.operation === "responses" && !admitted.converted
-    ? publicResourceId("response", facts.requestId)
-    : undefined;
+  if (admitted.converted) return undefined;
+  if (facts.operation === "responses") return publicResourceId("response", facts.requestId);
+  if (facts.operation === "files") return publicResourceId("file", facts.requestId);
+  return undefined;
 }
 
 async function commitResource(
@@ -928,7 +944,7 @@ async function dispatch(
 }
 
 export async function executeChat(deps: ChatDependencies, request: ChatRequest) {
-  const facts = await requestFacts(request, deps.config.total_timeout_ms);
+  let facts = await requestFacts(request, deps.config.total_timeout_ms);
   const external = { ...request, signal: AbortSignal.any([request.signal, request.drain]) };
   const tried = new Set<string>();
   let previous: { permit: Permit; ordinal: number } | undefined;
@@ -939,6 +955,7 @@ export async function executeChat(deps: ChatDependencies, request: ChatRequest) 
       if (external.signal.aborted)
         throw halt(request).error(new GatewayError(499, "cancelled", "Request cancelled"));
       const context = await openContext(deps, request, facts);
+      if (!facts.model) facts = { ...facts, model: context.model };
       const candidate = context.candidates.find((c) => !tried.has(c.ref.channel_id));
       if (!candidate) break;
       tried.add(candidate.ref.channel_id);
@@ -992,7 +1009,13 @@ async function relayJSON(
                 ? { resource_id: createdResource(facts, admitted) }
                 : {}),
             }
-          : { operation: facts.operation, model: facts.model },
+          : {
+              operation: facts.operation,
+              model: facts.model,
+              ...(createdResource(facts, admitted)
+                ? { resource_id: createdResource(facts, admitted) }
+                : {}),
+            },
       bytes,
       signal,
     );
