@@ -25,6 +25,20 @@
       "type": "string",
       "maxLength": 20,
       "enum": ["none", "bearer", "api-key"]
+    },
+    "path_style": {
+      "type": "string",
+      "maxLength": 20,
+      "enum": ["openai", "azure"]
+    },
+    "api_version": {
+      "type": "string",
+      "maxLength": 20
+    },
+    "output_field": {
+      "type": "string",
+      "maxLength": 30,
+      "enum": ["max_completion_tokens", "max_tokens"]
     }
   }
 }

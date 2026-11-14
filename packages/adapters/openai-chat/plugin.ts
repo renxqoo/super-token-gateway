@@ -208,9 +208,25 @@ function prepare(input: GuestInput, value: DocumentInput) {
     throw new AdapterFailure(422, "conflicting_output_ceiling");
   const output = smallInteger(maxCompletion ?? maxTokens ?? max, max, 422);
   if (output < 1) throw new AdapterFailure(422, "invalid_output_ceiling");
-  const edits = [{ op: "set", pointer: "/model", value: JSON.stringify(upstream) }];
-  if (maxTokens === undefined && maxCompletion === undefined)
+  const edits: { op: string; pointer: string; value?: string }[] = [
+    { op: "set", pointer: "/model", value: JSON.stringify(upstream) },
+  ];
+  if (input.config.output_field === "max_tokens") {
+    if (maxCompletion !== undefined)
+      edits.push({ op: "remove", pointer: "/max_completion_tokens" });
+    if (maxTokens === undefined)
+      edits.push({ op: "set", pointer: "/max_tokens", value: String(output) });
+  } else if (maxTokens === undefined && maxCompletion === undefined)
     edits.push({ op: "set", pointer: "/max_completion_tokens", value: String(output) });
+  let path = "/v1/chat/completions";
+  if (input.config.path_style === "azure") {
+    const version = input.config.api_version;
+    if (typeof version !== "string" || !/^\d{4}-\d{2}-\d{2}(?:-preview)?$/.test(version))
+      throw new AdapterFailure(422, "unsupported_capability");
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(upstream))
+      throw new AdapterFailure(422, "model_unavailable");
+    path = `/openai/deployments/${upstream}/chat/completions?api-version=${version}`;
+  }
   if (stream === true) {
     const options = fact(value, "/stream_options"),
       include = scalar(value, "/stream_options/include_usage", 400);
@@ -232,7 +248,7 @@ function prepare(input: GuestInput, value: DocumentInput) {
     kind: "prepared",
     request: {
       method: "POST",
-      path: "/v1/chat/completions",
+      path,
       headers: {
         "content-type": "application/json",
         accept: stream ? "text/event-stream" : "application/json",

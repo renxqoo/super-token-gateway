@@ -34,12 +34,13 @@
 - **j1 组合能力**：`packages/plugin-host/src/json-documents.ts` 实现 compose（value/parse/stringify/concat）与 `*` 通配展开；`attempts.ts`/`sse-stream.ts` 把 compose 源解析失败映射为 `invalid_json`（prepare 400，其余 502）；`sse-stream.ts` 实现 `drop`、`data_only` 与 `extra`；`packages/plugin-sdk/src/abi.ts` 增加对应 schema。旧 `edits` 计划、openai-chat 包字节与行为不变（本机源码构建的确定性 builder 重建出与提交一致的 `module.wasm`）。
 - **j2 Anthropic**：`packages/adapters/anthropic-messages`（`gateway.anthropic-messages-1.0.0`）。chat→messages：system/developer 提升为 `system` 文本块；user 文本与 http(s) 图片 URL；assistant 文本与 `tool_calls`→`tool_use`（空参数为 `{}`，参数串经 compose `parse`，非法为 400）；`tool`→`tool_result`；tools/tool_choice/parallel_tool_calls/stop/temperature/top_p/user 映射；`x-api-key` 与 `anthropic-version: 2023-06-01`。顶层与消息字段按白名单枚举，未声明字段、data URI 图片、`name`、strict 工具、`n>1` 均显式 422。响应与 SSE 转为 chat completion / chunk：多段文本 `concat`、`tool_use.input` `stringify`、stop_reason 与 legacy 相同映射、缓存用量拆为 `cached_input_tokens`/`cache_write_tokens`；SSE 丢弃 ping 与块边界帧，finish 帧与 usage 帧连同 `[DONE]` 作为终态候选保留到耐久屏障之后。
 - **E5 内置集合**：`bundledReleaseIds` = openai-chat 与 anthropic-messages；policy `release_ids`/`releases` 接受集合内 ID，Core 校验按 release 选择对应仓库内置文件；`plugins:sign-bundled` 增加必填 `--release-id`。
+- **j3 OpenAI 兼容族**：不新建插件，`gateway.openai-chat` 升为 1.1.0 并增加配置：`path_style: "azure"` + `api_version`（`YYYY-MM-DD[-preview]`，guest 校验）发往 `/openai/deployments/<upstream_model>/chat/completions?api-version=…`，部署名限 `[A-Za-z0-9._-]{1,64}`；配合 `auth: "api-key"`（`api-key` 头）。`output_field: "max_tokens"` 以 `max_tokens` 下发输出上限并把客户端 `max_completion_tokens` 改名，供 Ollama 等旧兼容端。DeepSeek 直接用默认配置（bearer，`/v1/chat/completions`），`prompt_cache_hit_tokens`/`prompt_cache_miss_tokens` 用量 1.0.0 已支持；Ollama 用 `auth: "none"`。legacy 的 Azure `apiVersion` 存于密文 JSON，v2 改为非秘密的绑定配置，密文只放 key。
 - **构建**：`scripts/build-plugins.ts` 支持 `--adapter <name...>`，默认构建全部。
-- **测试**：`json-documents` 单测 3 例；`packages/adapters/src/__test__/anthropic-messages.test.ts` 4 例（含 14 个 fixture case/20 步经真实 helper）；`tests/integration/gateway-anthropic.test.ts` 1 例（真实 Gateway→插件→TLS 上游 JSON 与 SSE、结算 SUCCEEDED）。
+- **测试**：`json-documents` 单测 3 例；`packages/adapters/src/__test__/anthropic-messages.test.ts` 4 例（含 14 个 fixture case/20 步经真实 helper）；`tests/integration/gateway-anthropic.test.ts` 1 例（真实 Gateway→插件→TLS 上游 JSON 与 SSE、结算 SUCCEEDED）。；j3：`openai-chat.test.ts` 新增 3 例（Azure 路径/认证、Azure 配置拒绝、max_tokens 字段），`tests/integration/gateway-openai-compatible.test.ts` 1 例（真实 Gateway 发往 Azure deployment 路径并结算）。
 
 ## 5. 已知差异与未完成
 
 - chat 响应 `created` 为 0：guest 无可信时钟，legacy 使用当前时间。
 - data URI 图片（需拆分 media type/base64）在 Anthropic 插件中 422，legacy 支持；需要新的通用字符串切分能力，未在 j2 实现。
 - 单轮 inspection 展开 ≤4096 个事实且事实 JSON ≤256KiB，超长对话会以宿主预算错误失败，而不是降级。
-- j3–j7 尚未开始。
+- j4–j7 尚未开始。

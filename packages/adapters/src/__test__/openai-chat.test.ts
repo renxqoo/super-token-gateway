@@ -30,14 +30,30 @@ const config = {
   max_input_tokens: 10000,
   auth: "bearer",
 };
-function attempt() {
+function attempt(overrides: Record<string, unknown> = {}) {
   return host.create(signed.pkg, {
     tenant: "synthetic-tenant",
     attempt: crypto.randomUUID(),
     incarnation: crypto.randomUUID(),
-    config,
+    config: { ...config, ...overrides },
     deadlineAt: Date.now() + 30000,
   });
+}
+async function prepareWith(overrides: Record<string, unknown>, body: unknown) {
+  const a = attempt(overrides);
+  try {
+    const transformed = await a.transformJSON(
+      "prepare",
+      { protocol: "chat", operation: "chat", model: "logical" },
+      encode(body),
+    );
+    return {
+      result: transformed.result,
+      body: transformed.body ? JSON.parse(new TextDecoder().decode(transformed.body)) : undefined,
+    };
+  } finally {
+    a.dispose();
+  }
 }
 function output(value: AbiResult & { output_id?: string }): OutputResult & { output_id?: string } {
   expect(value.kind).toBe("output");
@@ -99,6 +115,79 @@ test("the real WASM prepare maps models, preserves exact numbers and supplies a 
     a.dispose();
   }
 });
+test("Azure path style sends to the deployment path with api-version and the api-key header", async () => {
+  const { result, body } = await prepareWith(
+    {
+      path_style: "azure",
+      api_version: "2024-10-21",
+      auth: "api-key",
+      model_map: { logical: "gpt-4o-prod" },
+    },
+    { model: "logical", messages: [{ role: "user", content: "hi" }] },
+  );
+  expect(result).toMatchObject({
+    kind: "prepared",
+    request: {
+      path: "/openai/deployments/gpt-4o-prod/chat/completions?api-version=2024-10-21",
+      auth: { type: "api-key", header: "api-key" },
+      manifest: { upstream_model: "gpt-4o-prod" },
+    },
+  });
+  expect(body).toEqual({
+    model: "gpt-4o-prod",
+    messages: [{ role: "user", content: "hi" }],
+    max_completion_tokens: 100,
+  });
+});
+
+test("Azure path style without a valid api-version or with an unsafe deployment name is refused", async () => {
+  const request = { model: "logical", messages: [{ role: "user", content: "hi" }] };
+  expect((await prepareWith({ path_style: "azure" }, request)).result).toMatchObject({
+    kind: "failure",
+    status: 422,
+    code: "unsupported_capability",
+  });
+  expect(
+    (await prepareWith({ path_style: "azure", api_version: "latest" }, request)).result,
+  ).toMatchObject({ kind: "failure", status: 422 });
+  expect(
+    (
+      await prepareWith(
+        { path_style: "azure", api_version: "2024-10-21", model_map: { logical: "a/b" } },
+        request,
+      )
+    ).result,
+  ).toMatchObject({ kind: "failure", status: 422, code: "model_unavailable" });
+});
+
+test("max_tokens output field sends the ceiling as max_tokens and renames a client max_completion_tokens", async () => {
+  const supplied = await prepareWith(
+    { output_field: "max_tokens", auth: "none" },
+    { model: "logical", messages: [{ role: "user", content: "hi" }] },
+  );
+  expect(supplied.result).toMatchObject({
+    kind: "prepared",
+    request: { path: "/v1/chat/completions", auth: { type: "none" } },
+  });
+  expect(supplied.body).toEqual({
+    model: "upstream",
+    messages: [{ role: "user", content: "hi" }],
+    max_tokens: 100,
+  });
+  const renamed = await prepareWith(
+    { output_field: "max_tokens" },
+    { model: "logical", messages: [{ role: "user", content: "hi" }], max_completion_tokens: 40 },
+  );
+  expect(renamed.body).toEqual({
+    model: "upstream",
+    messages: [{ role: "user", content: "hi" }],
+    max_tokens: 40,
+  });
+  expect(renamed.result).toMatchObject({
+    request: { manifest: { ceilings: { output_tokens: "40" } } },
+  });
+});
+
 test("unrepresentable protocol, multiple choices and conflicting or excessive output limits are 422", async () => {
   for (const body of [{ n: 2 }, { max_tokens: 1, max_completion_tokens: 2 }, { max_tokens: 101 }]) {
     const a = attempt();

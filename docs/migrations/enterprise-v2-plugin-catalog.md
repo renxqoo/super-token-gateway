@@ -4,15 +4,15 @@
 
 ## 发行与信任
 
-唯一发行标识是 `gateway.openai-chat-1.0.0`，内容必须等于已接纳的 `packages/adapters/openai-chat/package`。安装 API 不接服务器文件路径、URL、构建脚本或替代 WASM。Core 的部署配置是 Core API 配置文件 `admin.plugins` 段的 `release_policy`、`release_directory`、`helper_executable`（T04.c c1 前为 Gateway 环境变量 `PLUGIN_RELEASE_POLICY`、`PLUGIN_RELEASE_DIRECTORY`、`PLUGIN_HELPER_EXECUTABLE`），三项必须同时设置；缺少该段时不装配 catalog API，没有 unsigned/dev fallback。配置目录是部署方控制的发行物目录，安装者只能从其中选择枚举 release_id。
+内置发行标识集合为 `gateway.openai-chat-1.1.0` 与 `gateway.anthropic-messages-1.0.0`（`bundledReleaseIds`），内容必须分别等于已接纳的 `packages/adapters/openai-chat/package` 与 `packages/adapters/anthropic-messages/package`。openai-chat 1.1.0 增加 `path_style`/`api_version`/`output_field` 配置，包字节变化，已签名的 1.0.0 发行物不再被新 policy 接受，部署方须重新签名并更新 policy；已安装的 1.0.0 版本及其绑定保持不变。安装 API 不接服务器文件路径、URL、构建脚本或替代 WASM。Core 的部署配置是 Core API 配置文件 `admin.plugins` 段的 `release_policy`、`release_directory`、`helper_executable`（T04.c c1 前为 Gateway 环境变量 `PLUGIN_RELEASE_POLICY`、`PLUGIN_RELEASE_DIRECTORY`、`PLUGIN_HELPER_EXECUTABLE`），三项必须同时设置；缺少该段时不装配 catalog API，没有 unsigned/dev fallback。配置目录是部署方控制的发行物目录，安装者只能从其中选择枚举 release_id。
 
 发行负责人在 Core 进程之外运行受控签名工具，显式提供权限为 0600 的 Ed25519 私钥文件。Core 只消费公钥和签名，不生成或持有发行私钥：
 
 ```sh
-bun run plugins:sign-bundled --private-key-file /secure/release-ed25519.pem --key-id approved-release-key --output-directory /release-artifacts --helper-executable /release/native/plugin-host --release-id gateway.openai-chat-1.0.0
+bun run plugins:sign-bundled --private-key-file /secure/release-ed25519.pem --key-id approved-release-key --output-directory /release-artifacts --helper-executable /release/native/plugin-host --release-id gateway.openai-chat-1.1.0
 ```
 
-该工具只读取受控 builtin，输出 `<output-directory>/gateway.openai-chat-1.0.0/package.json` 与 `release.json`，已有文件不会覆盖。package signature 签署 SDK 内容 digest；另一独立签名域 `gateway-plugin-release-v1\0` 签署规范 JSON release descriptor。descriptor 包含固定 source/name/version、内容与 wire envelope digest、每文件长度与 SHA256、ABI、schema、fixture、验证策略和 helper 二进制 digest。签名不包含自身，包内公钥不能成为 trust anchor。
+该工具只读取受控 builtin，输出 `<output-directory>/<release-id>/package.json` 与 `release.json`，已有文件不会覆盖。package signature 签署 SDK 内容 digest；另一独立签名域 `gateway-plugin-release-v1\0` 签署规范 JSON release descriptor。descriptor 包含固定 source/name/version、内容与 wire envelope digest、每文件长度与 SHA256、ABI、schema、fixture、验证策略和 helper 二进制 digest。签名不包含自身，包内公钥不能成为 trust anchor。
 
 工具输出的 descriptor_digest 及 descriptor 字段必须由部署发行管理方审查后写入独立 policy。policy 是严格 JSON：顶层 `format:1`、`expires_at`、`revoked`、`keys`、`releases`；每个 key 包含 `id/public_key/not_before/expires_at/revoked/purposes/release_ids`，purpose 只能为 package/release；每个 release 包含 `release_id/descriptor_digest/package_digest/abi_version/config_schema_digest/fixture_digest/validation_policy_digest/runtime_digest/revoked`。过期、未来生效、撤销、未知 key、目的或 release 范围不符、任何摘要/ABI/schema/source 不一致均拒绝。Core application 启动时读取并固定部署方控制的 policy snapshot；每次注册、验证、发布、绑定及可执行 binding 查询都按该 snapshot 重新核对当前时间与撤销状态。没有 policy 修改或热撤销 API，改写磁盘文件不会改变在运行实例的 snapshot。撤销更新的生效边界是运维先撤出并 drain 所有旧 snapshot 的 Core（等待在途命令完成），再用新 snapshot 启动实例；不能把滚动更新期间旧实例仍持有的 snapshot 声称为已即时跨 Core 撤销。测试通过关闭并重新装配 Core application 验证新撤销配置。历史 PUBLISHED 事实不因撤销而改写，新 snapshot 下 binding 查询会返回 `executable:false, trust_state:UNTRUSTED`。
 
@@ -34,7 +34,7 @@ bun run plugins:sign-bundled --private-key-file /secure/release-ed25519.pem --ke
 安装器调用同一公开 API，没有本地 SQL 或 builtin 直发捷径：
 
 ```sh
-bun run plugins:install-bundled --admin-url https://core.example/admin --credential-file /secure/operator-token --command-id '<stable uuid>' --release-id gateway.openai-chat-1.0.0 --reason 'Approved deployment'
+bun run plugins:install-bundled --admin-url https://core.example/admin --credential-file /secure/operator-token --command-id '<stable uuid>' --release-id gateway.openai-chat-1.1.0 --reason 'Approved deployment'
 ```
 
 可选 `--provider-id` 与 `--binding-file` 必须成对给出。binding 文件提供上述绑定字段，version_id 由真实 publication 回执填充；绑定失败后发布事实保留，同一 command/body 可以独立重试。所有 JSON 凭据文件与发行私钥都由 operator 显式提供，不能把生产密钥写入源码、参数日志或 fixture。
