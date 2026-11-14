@@ -18,6 +18,7 @@ import {
 } from "@gateway/plugin-host";
 import {
   UpstreamPreDispatchError,
+  signAwsRequest,
   readBounded,
   sha256,
   validateBaseUrl,
@@ -156,20 +157,29 @@ function requestFacts(request: ChatRequest, totalTimeoutMs: number): Facts {
 }
 
 async function openContext(deps: ChatDependencies, request: ChatRequest, facts: Facts) {
-  try {
-    return (await deps.core.execution(
-      "execution_context_v1",
-      {
-        customer_token: request.token,
-        ip: request.ip,
-        operation: "chat",
-        model: facts.model,
-        fingerprint: facts.fingerprint,
-      },
-      { deadlineAt: facts.deadlineAt },
-    )) as ExecutionContextResponse;
-  } catch (error) {
-    throw coreFailure(error);
+  for (let delay = 25; ; delay = Math.min(delay * 2, 200)) {
+    try {
+      return (await deps.core.execution(
+        "execution_context_v1",
+        {
+          customer_token: request.token,
+          ip: request.ip,
+          operation: "chat",
+          model: facts.model,
+          fingerprint: facts.fingerprint,
+        },
+        { deadlineAt: facts.deadlineAt },
+      )) as ExecutionContextResponse;
+    } catch (error) {
+      if (
+        !(error instanceof CoreRpcError) ||
+        error.detail.retryability !== "SAME_COMMAND" ||
+        request.signal.aborted ||
+        Date.now() + delay >= Date.parse(facts.deadlineAt)
+      )
+        throw coreFailure(error);
+      await Bun.sleep(delay);
+    }
   }
 }
 
@@ -451,10 +461,27 @@ async function closeRequest(deps: ChatDependencies, permit: Permit, reason: Clos
   });
 }
 
-function authorize(headers: Record<string, string>, reply: ExecutionReply) {
+function authorize(
+  headers: Record<string, string>,
+  reply: ExecutionReply,
+  url: URL,
+  body: Uint8Array,
+): Record<string, string> {
   const material = reply.transient_send!.auth_material;
   if (material.type === "bearer") return { ...headers, authorization: `Bearer ${material.value}` };
   if (material.type === "api-key") return { ...headers, [material.header]: material.value };
+  if (material.type === "aws-sigv4") {
+    const signed = new Headers(headers);
+    signAwsRequest(url, body, signed, {
+      accessKeyId: material.access_key_id,
+      sessionToken: material.session_token,
+      region: material.region,
+      service: material.service,
+      amzDate: material.amz_date,
+      signingKey: Buffer.from(material.signing_key, "hex"),
+    });
+    return Object.fromEntries(signed);
+  }
   return headers;
 }
 
@@ -647,7 +674,7 @@ async function dispatch(
       admitted.url,
       {
         method: admitted.prepared.method,
-        headers: authorize(admitted.headers, reply),
+        headers: authorize(admitted.headers, reply, admitted.url, admitted.outbound),
         body: admitted.outbound.slice(),
         signal,
       },

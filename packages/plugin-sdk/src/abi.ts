@@ -128,12 +128,12 @@ export const capabilitiesSchema = z
       .max(4),
     hooks: z.array(z.enum(hooks)).min(1).max(32),
     auth: z
-      .array(z.enum(["none", "bearer", "api-key", "google-oauth"]))
+      .array(z.enum(["none", "bearer", "api-key", "google-oauth", "aws-sigv4"]))
       .min(1)
-      .max(4),
+      .max(5),
     resources: z.boolean(),
     balance: z.boolean(),
-    stream_codec: z.enum(["sse", "none"]),
+    stream_codec: z.enum(["sse", "aws-eventstream", "none"]),
   })
   .strict();
 export type Capabilities = z.infer<typeof capabilitiesSchema>;
@@ -233,6 +233,7 @@ export const preparedSchema = z
       z.object({ type: z.literal("none") }).strict(),
       z.object({ type: z.literal("bearer") }).strict(),
       z.object({ type: z.literal("google-oauth") }).strict(),
+      z.object({ type: z.literal("aws-sigv4"), service: z.enum(["bedrock"]) }).strict(),
       z
         .object({
           type: z.literal("api-key"),

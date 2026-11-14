@@ -254,6 +254,9 @@ export async function eventually(check: () => Promise<boolean>, label: string, m
 
 export type UpstreamCall = {
   index: number;
+  url: string;
+  headers: Record<string, string>;
+  raw: string;
   path: string;
   apiKey: string | null;
   azureKey: string | null;
@@ -307,14 +310,18 @@ export function withGatewayStack(
       withSettlementRole(db, async (workerDatabaseUrl) => {
         const received: UpstreamCall[] = [];
         const upstream = await startTlsUpstream(async (request) => {
+          const raw = await request.text();
           const call = {
             index: received.length,
+            url: request.url,
+            headers: Object.fromEntries(request.headers),
+            raw,
             path: new URL(request.url).pathname + new URL(request.url).search,
             apiKey: request.headers.get("x-api-key"),
             azureKey: request.headers.get("api-key"),
             googKey: request.headers.get("x-goog-api-key"),
             authorization: request.headers.get("authorization"),
-            body: (await request.json()) as Record<string, unknown>,
+            body: JSON.parse(raw) as Record<string, unknown>,
             signal: request.signal,
           };
           received.push(call);

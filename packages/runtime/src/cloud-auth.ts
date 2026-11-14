@@ -72,19 +72,38 @@ const uriEncode = (value: string) =>
     /[!'()*]/g,
     (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
   );
-export function signBedrock(
+export type AwsSigningScope = {
+  accessKeyId: string;
+  sessionToken?: string | undefined;
+  region: string;
+  service: string;
+  amzDate: string;
+  signingKey: Uint8Array;
+};
+export function awsSigningKey(
+  secretAccessKey: string,
+  day: string,
+  region: string,
+  service: string,
+): Buffer {
+  const hmac = (key: string | Uint8Array, value: string) =>
+    createHmac("sha256", key).update(value).digest();
+  return hmac(hmac(hmac(hmac(`AWS4${secretAccessKey}`, day), region), service), "aws4_request");
+}
+export function awsAmzDate(now = new Date()): string {
+  return now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+}
+export function signAwsRequest(
   url: URL,
-  body: string,
+  body: string | Uint8Array,
   headers: Headers,
-  credentials: AwsCredentials,
-  now = new Date(),
+  scope: AwsSigningScope,
 ): void {
-  const date = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
-  const day = date.slice(0, 8);
+  const day = scope.amzDate.slice(0, 8);
   headers.set("host", url.host);
-  headers.set("x-amz-date", date);
+  headers.set("x-amz-date", scope.amzDate);
   headers.set("x-amz-content-sha256", sha256(body));
-  if (credentials.sessionToken) headers.set("x-amz-security-token", credentials.sessionToken);
+  if (scope.sessionToken) headers.set("x-amz-security-token", scope.sessionToken);
   const names = [...headers.keys()]
     .filter((key) => key !== "authorization" && key !== "accept")
     .sort();
@@ -105,18 +124,34 @@ export function signBedrock(
   const canonical = ["POST", path, query, canonicalHeaders, names.join(";"), sha256(body)].join(
     "\n",
   );
-  const scope = `${day}/${credentials.region}/bedrock/aws4_request`;
-  const toSign = `AWS4-HMAC-SHA256\n${date}\n${scope}\n${sha256(canonical)}`;
-  const hmac = (key: string | Uint8Array, value: string) =>
-    createHmac("sha256", key).update(value).digest();
-  const signing = hmac(
-    hmac(hmac(hmac(`AWS4${credentials.secretAccessKey}`, day), credentials.region), "bedrock"),
-    "aws4_request",
-  );
+  const credentialScope = `${day}/${scope.region}/${scope.service}/aws4_request`;
+  const toSign = `AWS4-HMAC-SHA256\n${scope.amzDate}\n${credentialScope}\n${sha256(canonical)}`;
   headers.set(
     "authorization",
-    `AWS4-HMAC-SHA256 Credential=${credentials.accessKeyId}/${scope}, SignedHeaders=${names.join(";")}, Signature=${createHmac("sha256", signing).update(toSign).digest("hex")}`,
+    `AWS4-HMAC-SHA256 Credential=${scope.accessKeyId}/${credentialScope}, SignedHeaders=${names.join(";")}, Signature=${createHmac("sha256", scope.signingKey).update(toSign).digest("hex")}`,
   );
+}
+export function signBedrock(
+  url: URL,
+  body: string,
+  headers: Headers,
+  credentials: AwsCredentials,
+  now = new Date(),
+): void {
+  const amzDate = awsAmzDate(now);
+  signAwsRequest(url, body, headers, {
+    accessKeyId: credentials.accessKeyId,
+    sessionToken: credentials.sessionToken,
+    region: credentials.region,
+    service: "bedrock",
+    amzDate,
+    signingKey: awsSigningKey(
+      credentials.secretAccessKey,
+      amzDate.slice(0, 8),
+      credentials.region,
+      "bedrock",
+    ),
+  });
 }
 type TokenFetch = (url: URL, init: RequestInit) => Promise<Response>;
 export class VertexTokens {

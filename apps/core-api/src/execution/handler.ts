@@ -1,4 +1,11 @@
-import { Limits, orderRouteCandidates, VertexTokens } from "@gateway/runtime";
+import {
+  awsAmzDate,
+  awsCredentials,
+  awsSigningKey,
+  Limits,
+  orderRouteCandidates,
+  VertexTokens,
+} from "@gateway/runtime";
 import type { SQL } from "bun";
 import { z } from "zod";
 import {
@@ -92,6 +99,29 @@ export function createExecutionHandler(
     signal: AbortSignal,
   ) {
     if (auth.type === "none") return { type: "none" };
+    if (auth.type === "aws-sigv4") {
+      let credentials: ReturnType<typeof awsCredentials>;
+      try {
+        credentials = awsCredentials(secret.toString());
+      } catch {
+        return undefined;
+      }
+      const amzDate = awsAmzDate();
+      return {
+        type: "aws-sigv4",
+        service: auth.service,
+        access_key_id: credentials.accessKeyId,
+        ...(credentials.sessionToken ? { session_token: credentials.sessionToken } : {}),
+        region: credentials.region,
+        amz_date: amzDate,
+        signing_key: awsSigningKey(
+          credentials.secretAccessKey,
+          amzDate.slice(0, 8),
+          credentials.region,
+          auth.service,
+        ).toString("hex"),
+      };
+    }
     if (auth.type !== "google-oauth") return { ...auth, value: secret.toString() };
     const encoded = secret.toString();
     if (!/^[A-Za-z0-9_-]+$/.test(encoded)) return undefined;

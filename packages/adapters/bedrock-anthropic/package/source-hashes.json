@@ -1,0 +1,58 @@
+{
+  "packages/adapters/anthropic-messages/messages.ts": {
+    "bytes": 28822,
+    "sha256": "c29c58d1502d64fb6c67d5b9feeaa7f85b1a25364f46e2dbde857c7abd6993c8"
+  },
+  "packages/adapters/bedrock-anthropic/package/manifest.json": {
+    "bytes": 754,
+    "sha256": "2d3127a39d65deb15da3a95fa328c5550c3afd03b9c67c01ed2367a0e74feb09"
+  },
+  "packages/adapters/bedrock-anthropic/plugin.ts": {
+    "bytes": 179,
+    "sha256": "9a121fd58b0ba75b7eebde5c54ac72261887e057399d4cce2f63074c2a692775"
+  },
+  "packages/plugin-sdk/src/guest.ts": {
+    "bytes": 6942,
+    "sha256": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2"
+  },
+  "packages/adapters/bedrock-anthropic/plugin.d.ts": {
+    "bytes": 59,
+    "sha256": "96eb7fa2ca46fc25371ed0f1da56c267ee542f348ffa73346370a43296e34648"
+  },
+  "packages/adapters/bedrock-anthropic/package/module.wasm": {
+    "bytes": 2508476,
+    "sha256": "75e0214672fa25b1d416f31debe9fb8edb016c042ad58335cde102b051b066a7"
+  },
+  "packages/adapters/bedrock-anthropic/package/config.schema.json": {
+    "bytes": 630,
+    "sha256": "bad3c8b83f6361bdb77c67fa0224db0de9f7ef8283781389fd369225a635b9a3"
+  },
+  "packages/adapters/bedrock-anthropic/package/fixtures/cases.json": {
+    "bytes": 13476,
+    "sha256": "7545b67c69dde2c71f1e0d0f693c101797f933bcf2ba4f17a09b048b1e77de39"
+  },
+  "scripts/plugin-tools.json": {
+    "bytes": 1830,
+    "sha256": "86173fe40e6802e7b38b40b663b04df2190b16afa1fb13a527e853afb6e6738d"
+  },
+  "scripts/build-plugins.ts": {
+    "bytes": 12000,
+    "sha256": "bfcdbbfc3c85cf9acf079bb331e59ea891d3b92beaecb3814639f706a95cd2f1"
+  },
+  "scripts/setup-plugin-tools.py": {
+    "bytes": 8332,
+    "sha256": "90c25685e25c4c357062d064dae474ffcfec53a9e749cf9167c3fb0ec56a6191"
+  },
+  "scripts/plugin-builder/deterministic-preinit.patch": {
+    "bytes": 3172,
+    "sha256": "28dbd8480b2705040bbb1c6fec79c6773ea55bd3dc67a52b588adf5c41d9c805"
+  },
+  "scripts/plugin-builder/upstream-Cargo.lock": {
+    "bytes": 97632,
+    "sha256": "8c11a1e5117be6a0e2e1696d54d81d730c52c8329c5486429f3fc776896f0f7e"
+  },
+  "scripts/plugin-builder/Cargo.lock": {
+    "bytes": 97663,
+    "sha256": "59e4e9ce11a53ed1a05afc9f688f962bf6ab471cf71fdf9371b844f0841f7cac"
+  }
+}

@@ -116,6 +116,22 @@ test("a retryable upstream 503 moves the same request to the other channel and c
     },
   ));
 
+test("a catalog row briefly locked by another transaction (identity_busy) delays the context instead of failing the request with 503", () =>
+  withGatewayStack({ reply: () => chatReplies.json() }, async ({ db, setup, received, send }) => {
+    let locked: () => void = () => undefined;
+    const ready = new Promise<void>((resolve) => (locked = resolve));
+    const holder = db.begin(async (tx) => {
+      await tx`SELECT id FROM channels WHERE id=${setup.provider.id} FOR UPDATE`;
+      locked();
+      await Bun.sleep(400);
+    });
+    await ready;
+    const response = await send();
+    await holder;
+    expect(JSON.parse(await expectStatus(response, 200)).choices[0].message.content).toBe("ok");
+    expect(received).toHaveLength(1);
+  }));
+
 test("a non-retryable upstream 400 fails the request after one send and settles a zero customer charge", () =>
   withGatewayStack(
     {

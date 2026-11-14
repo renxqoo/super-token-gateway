@@ -1,0 +1,303 @@
+{
+  "format": 1,
+  "config": {
+    "model_map": {
+      "logical": "anthropic.claude-upstream:0"
+    },
+    "max_output_tokens": 100,
+    "max_input_tokens": 10000,
+    "auth": "aws-sigv4"
+  },
+  "cases": [
+    {
+      "name": "chat request becomes a signed Bedrock invoke-with-response-stream body without model or stream",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "chat",
+            "operation": "chat",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJtZXNzYWdlcyI6W3sicm9sZSI6InVzZXIiLCJjb250ZW50Ijoi5L2g5aW9In1dLCJzdHJlYW0iOnRydWV9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/model/anthropic.claude-upstream%3A0/invoke-with-response-stream",
+              "headers": {
+                "accept": "application/json",
+                "x-amzn-bedrock-accept": "application/json"
+              },
+              "auth": {
+                "type": "aws-sigv4",
+                "service": "bedrock"
+              },
+              "manifest": {
+                "operation": "chat",
+                "model": "logical",
+                "upstream_model": "anthropic.claude-upstream:0",
+                "stream": true,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "output_tokens": "100",
+                  "requests": "1"
+                },
+                "input_bytes": 81
+              }
+            }
+          },
+          "expected_body": "eyJhbnRocm9waWNfdmVyc2lvbiI6ImJlZHJvY2stMjAyMy0wNS0zMSIsIm1heF90b2tlbnMiOjEwMCwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6IuS9oOWlvSJ9XX0="
+        }
+      ]
+    },
+    {
+      "name": "invoke response becomes a chat completion with exact cache usage",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "protocol": "chat",
+            "operation": "chat",
+            "model": "logical"
+          },
+          "body": "eyJpZCI6Im1zZ18xIiwidHlwZSI6Im1lc3NhZ2UiLCJyb2xlIjoiYXNzaXN0YW50IiwiY29udGVudCI6W3sidHlwZSI6InRleHQiLCJ0ZXh0Ijoi5L2g5aW9In0seyJ0eXBlIjoidGV4dCIsInRleHQiOiLwn4yPIn0seyJ0eXBlIjoidG9vbF91c2UiLCJpZCI6InRvb2x1XzEiLCJuYW1lIjoid2VhdGhlciIsImlucHV0Ijp7ImNpdHkiOiLljJfkuqwifX1dLCJtb2RlbCI6IngiLCJzdG9wX3JlYXNvbiI6InRvb2xfdXNlIiwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjo5MDA3MTk5MjU0NzQwOTkzLCJvdXRwdXRfdG9rZW5zIjoyLCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MywiY2FjaGVfY3JlYXRpb25faW5wdXRfdG9rZW5zIjo0fX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "usage": {
+              "input_tokens": "9007199254740993",
+              "output_tokens": "2",
+              "cached_input_tokens": "3",
+              "cache_write_tokens": "4"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            },
+            "needs_input": false
+          },
+          "expected_body": "eyJpZCI6Im1zZ18xIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MCwibW9kZWwiOiJsb2dpY2FsIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiLkvaDlpb3wn4yPIiwidG9vbF9jYWxscyI6W3siaWQiOiJ0b29sdV8xIiwidHlwZSI6ImZ1bmN0aW9uIiwiZnVuY3Rpb24iOnsibmFtZSI6IndlYXRoZXIiLCJhcmd1bWVudHMiOiJ7XCJjaXR5XCI6XCLljJfkuqxcIn0ifX1dfSwiZmluaXNoX3JlYXNvbiI6InRvb2xfY2FsbHMifV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjkwMDcxOTkyNTQ3NDEwMDAsImNvbXBsZXRpb25fdG9rZW5zIjoyLCJ0b3RhbF90b2tlbnMiOjkwMDcxOTkyNTQ3NDEwMDIsInByb21wdF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjozfX19"
+        }
+      ]
+    },
+    {
+      "name": "event stream chunks become chat chunks and withhold the finish, usage and DONE as the terminal",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "AAABTAAAAEvScyGcCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2liV1Z6YzJGblpWOXpkR0Z5ZENJc0ltMWxjM05oWjJVaU9uc2lhV1FpT2lKdGMyZGZNU0lzSW5SNWNHVWlPaUp0WlhOellXZGxJaXdpY205c1pTSTZJbUZ6YzJsemRHRnVkQ0lzSW1OdmJuUmxiblFpT2x0ZExDSnRiMlJsYkNJNkluZ2lMQ0oxYzJGblpTSTZleUpwYm5CMWRGOTBiMnRsYm5NaU9qa3dNRGN4T1RreU5UUTNOREE1T1RNc0ltOTFkSEIxZEY5MGIydGxibk1pT2pGOWZYMD0ifQ21gtQAAAB8AAAAS7gOSr8LOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjogImV5SjBlWEJsSWpvaWNHbHVaeUo5In0QwPr0AAAA2AAAAEs9qXPpCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5emRHRnlkQ0lzSW1sdVpHVjRJam93TENKamIyNTBaVzUwWDJKc2IyTnJJanA3SW5SNWNHVWlPaUowWlhoMElpd2lkR1Y0ZENJNklpSjlmUT09In070kLXAAAA4AAAAEus+ICuCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5a1pXeDBZU0lzSW1sdVpHVjRJam93TENKa1pXeDBZU0k2ZXlKMGVYQmxJam9pZEdWNGRGOWtaV3gwWVNJc0luUmxlSFFpT2lMa3ZhRGxwYjN3bjR5UEluMTkifeXQSDIAAACcAAAAS5DajWALOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjogImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTl6ZEc5d0lpd2lhVzVrWlhnaU9qQjkifbihMq4AAAD4AAAAS/xoXO0LOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjogImV5SjBlWEJsSWpvaWJXVnpjMkZuWlY5a1pXeDBZU0lzSW1SbGJIUmhJanA3SW5OMGIzQmZjbVZoYzI5dUlqb2laVzVrWDNSMWNtNGlMQ0p6ZEc5d1gzTmxjWFZsYm1ObElqcHVkV3hzZlN3aWRYTmhaMlVpT25zaWIzVjBjSFYwWDNSdmEyVnVjeUk2TW4xOSJ9br6HHwAAAIgAAABLBbq8Igs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiYnl0ZXMiOiAiZXlKMGVYQmxJam9pYldWemMyRm5aVjl6ZEc5d0luMD0ifbdrKvE=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 1436,
+            "chunks": [
+              "ZGF0YTogeyJpZCI6Im1zZ18xIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uLmNodW5rIiwiY3JlYXRlZCI6MCwibW9kZWwiOiJsb2dpY2FsIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsImRlbHRhIjp7InJvbGUiOiJhc3Npc3RhbnQiLCJjb250ZW50IjoiIn0sImZpbmlzaF9yZWFzb24iOm51bGx9XX0KCg==",
+              "ZGF0YTogeyJpZCI6Im1zZ18xIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uLmNodW5rIiwiY3JlYXRlZCI6MCwibW9kZWwiOiJsb2dpY2FsIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsImRlbHRhIjp7ImNvbnRlbnQiOiLkvaDlpb3wn4yPIn0sImZpbmlzaF9yZWFzb24iOm51bGx9XX0KCg=="
+            ],
+            "finality": "FINAL",
+            "needs_input": false,
+            "usage": {
+              "input_tokens": "9007199254740993",
+              "output_tokens": "2"
+            },
+            "terminal": {
+              "kind": "complete",
+              "bytes": "ZGF0YTogeyJpZCI6Im1zZ18xIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uLmNodW5rIiwiY3JlYXRlZCI6MCwibW9kZWwiOiJsb2dpY2FsIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsImRlbHRhIjp7fSwiZmluaXNoX3JlYXNvbiI6InN0b3AifV19CgpkYXRhOiB7ImlkIjoibXNnXzEiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24uY2h1bmsiLCJjcmVhdGVkIjowLCJtb2RlbCI6ImxvZ2ljYWwiLCJjaG9pY2VzIjpbXSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6OTAwNzE5OTI1NDc0MDk5MywiY29tcGxldGlvbl90b2tlbnMiOjIsInRvdGFsX3Rva2VucyI6OTAwNzE5OTI1NDc0MDk5NSwicHJvbXB0X3Rva2Vuc19kZXRhaWxzIjp7ImNhY2hlZF90b2tlbnMiOjB9fX0KCmRhdGE6IFtET05FXQoK"
+            }
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_finish",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "FINAL",
+            "needs_input": false,
+            "usage": {
+              "input_tokens": "9007199254740993",
+              "output_tokens": "2"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "a corrupted event stream message is an invalid stream",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "AAABTAAAAEvScyGcCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2liV1Z6YzJGblpWOXpkR0Z5ZENJc0ltMWxjM05oWjJVaU9uc2lhV1FpT2lKdGMyZGZNU0lzSW5SNWNHVWlPaUp0WlhOellXZGxJaXdpY205c1pTSTZJbUZ6YzJsemRHRnVkQ0lzSW1OdmJuUmxiblFpT2x0ZExDSnRiMlJsYkNJNkluZ2lMQ0oxYzJGblpTSTZleUpwYm5CMWRGOTBiMnRsYm5NaU9qa3dNRGN4T1RreU5UUTNOREE1T1RNc0ltOTFkSEIxZEY5MGIydGxibk1pT2pGOWZYMD0jfQ21gtQ=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "invalid_stream"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an exception message mid stream cannot become success",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "AAAAiAAAAGHeAXX0DTptZXNzYWdlLXR5cGUHAAlleGNlcHRpb24POmV4Y2VwdGlvbi10eXBlBwATdGhyb3R0bGluZ0V4Y2VwdGlvbg06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbnsibWVzc2FnZSI6InNsb3cgZG93biJ9TkO5WA==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "invalid_stream"
+          }
+        }
+      ]
+    },
+    {
+      "name": "EOF inside an event stream message is a truncation",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "AAABTAAAAEvScyGcCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2liV1Z6YzJGblpWOXpkR0Z5ZENJc0ltMWxjM05oWjJVaU9uc2lhV1FpT2lKdGMyZGZNU0lzSW5SNWNHVWlPaUp0WlhOellXZGxJaXdpY205c1pTSTZJbUZ6YzJsemRHRnVkQ0lzSW1OdmJuUmxiblFpT2x0ZExDSnRiMlJsYkNJNkluZ2lMQ0oxYzJGblpTSTZleUpwYm5CMWRGOTBiMnRsYm5NaU9qa3dNRGN4T1RreU5UUTNOREE1T1RNc0ltOTFkSEIxZEY5MGIydGxibk1pT2pGOWZYMD0ifQ0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 329,
+            "chunks": [],
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_finish",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "stream_truncated"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cancellation invalidates context",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "cancel",
+          "hook": "stream_feed",
+          "input": "AAABTAAAAEvScyGcCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ICJleUowZVhCbElqb2liV1Z6YzJGblpWOXpkR0Z5ZENJc0ltMWxjM05oWjJVaU9uc2lhV1FpT2lKdGMyZGZNU0lzSW5SNWNHVWlPaUp0WlhOellXZGxJaXdpY205c1pTSTZJbUZ6YzJsemRHRnVkQ0lzSW1OdmJuUmxiblFpT2x0ZExDSnRiMlJsYkNJNkluZ2lMQ0oxYzJGblpTSTZleUpwYm5CMWRGOTBiMnRsYm5NaU9qa3dNRGN4T1RreU5UUTNOREE1T1RNc0ltOTFkSEIxZEY5MGIydGxibk1pT2pGOWZYMD0ifQ21gtQ=",
+          "expected_error": "CALL_CANCELLED"
+        }
+      ]
+    },
+    {
+      "name": "balance explicitly unsupported",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "balance_prepare",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_capability"
+          }
+        }
+      ]
+    },
+    {
+      "name": "resource explicitly unsupported",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_capability"
+          }
+        }
+      ]
+    }
+  ]
+}

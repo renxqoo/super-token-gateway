@@ -1,23 +1,23 @@
 {
+  "packages/adapters/openai-chat/package/manifest.json": {
+    "bytes": 750,
+    "sha256": "599144f710816e35da24cf6c1e8f61538fc7401058491166fcf1b9129a0f606e"
+  },
   "packages/adapters/openai-chat/plugin.ts": {
     "bytes": 25005,
     "sha256": "6207d5a87ec0bed8ea9626cc55f749435e1468b83e5f4d53264dc864e5bbb084"
-  },
-  "packages/adapters/openai-chat/plugin.d.ts": {
-    "bytes": 59,
-    "sha256": "96eb7fa2ca46fc25371ed0f1da56c267ee542f348ffa73346370a43296e34648"
   },
   "packages/plugin-sdk/src/guest.ts": {
     "bytes": 6942,
     "sha256": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2"
   },
+  "packages/adapters/openai-chat/plugin.d.ts": {
+    "bytes": 59,
+    "sha256": "96eb7fa2ca46fc25371ed0f1da56c267ee542f348ffa73346370a43296e34648"
+  },
   "packages/adapters/openai-chat/package/module.wasm": {
     "bytes": 2510699,
     "sha256": "64b1e8ebc6ef0d91508c12195045427bad0a94032a6e58ae6265099b1461f902"
-  },
-  "packages/adapters/openai-chat/package/manifest.json": {
-    "bytes": 750,
-    "sha256": "599144f710816e35da24cf6c1e8f61538fc7401058491166fcf1b9129a0f606e"
   },
   "packages/adapters/openai-chat/package/config.schema.json": {
     "bytes": 958,
@@ -32,8 +32,8 @@
     "sha256": "86173fe40e6802e7b38b40b663b04df2190b16afa1fb13a527e853afb6e6738d"
   },
   "scripts/build-plugins.ts": {
-    "bytes": 11800,
-    "sha256": "e3080eb3b8797eb0bad6f984b72b021f9d81e1f4bddc94767c738dddf3c0e697"
+    "bytes": 12000,
+    "sha256": "bfcdbbfc3c85cf9acf079bb331e59ea891d3b92beaecb3814639f706a95cd2f1"
   },
   "scripts/setup-plugin-tools.py": {
     "bytes": 8332,

@@ -15,6 +15,7 @@ import {
 import { PluginHostError, type PluginSupervisor } from "./supervisor.ts";
 import { createJSONDocuments, type JSONDocument, type JSONFact } from "./json-documents.ts";
 import { createSSEStream } from "./sse-stream.ts";
+import { createAwsEventStreamDecoder } from "./aws-eventstream.ts";
 
 export type AttemptOptions = {
   tenant: string;
@@ -299,7 +300,7 @@ export function createPluginAttempts(
         if (outputBytes + bytes > maxOutput) throw new PluginHostError("OUTPUT_BUDGET");
         outputBytes += bytes;
       }
-      if (capabilities.stream_codec === "sse")
+      if (capabilities.stream_codec !== "none")
         sse = createSSEStream({
           owner: binding.id,
           documents,
@@ -311,6 +312,9 @@ export function createPluginAttempts(
           ...(options.maxEventBytes ? { maxEventBytes: options.maxEventBytes } : {}),
           maxInputBytes: batchInput,
           maxOutputBytes: maxOutput,
+          ...(capabilities.stream_codec === "aws-eventstream"
+            ? { decoder: createAwsEventStreamDecoder(options.maxEventBytes) }
+            : {}),
         });
       return {
         id: binding.id,

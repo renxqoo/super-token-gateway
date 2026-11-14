@@ -1,23 +1,27 @@
 {
-  "packages/adapters/anthropic-messages/plugin.ts": {
-    "bytes": 27975,
-    "sha256": "b0c7d1a1e5fa82808e33af2e19e48c0159ddab86fed8c515f5da97f8c4e490eb"
+  "packages/adapters/anthropic-messages/messages.ts": {
+    "bytes": 28822,
+    "sha256": "c29c58d1502d64fb6c67d5b9feeaa7f85b1a25364f46e2dbde857c7abd6993c8"
   },
-  "packages/adapters/anthropic-messages/plugin.d.ts": {
-    "bytes": 59,
-    "sha256": "96eb7fa2ca46fc25371ed0f1da56c267ee542f348ffa73346370a43296e34648"
+  "packages/adapters/anthropic-messages/package/manifest.json": {
+    "bytes": 759,
+    "sha256": "9db6d73815d8a398a56ad43ae599aff58886ca6a21653c39d15d6941e7762c06"
+  },
+  "packages/adapters/anthropic-messages/plugin.ts": {
+    "bytes": 161,
+    "sha256": "a51625cd8de5e45bf8c62b4653d2c837773020aeef74ac2551609265d418aa9c"
   },
   "packages/plugin-sdk/src/guest.ts": {
     "bytes": 6942,
     "sha256": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2"
   },
-  "packages/adapters/anthropic-messages/package/module.wasm": {
-    "bytes": 2509813,
-    "sha256": "b96e678ea52edf92536cf834b05294dc8a6a9965a39cf9ba88c946edad140e45"
+  "packages/adapters/anthropic-messages/plugin.d.ts": {
+    "bytes": 59,
+    "sha256": "96eb7fa2ca46fc25371ed0f1da56c267ee542f348ffa73346370a43296e34648"
   },
-  "packages/adapters/anthropic-messages/package/manifest.json": {
-    "bytes": 759,
-    "sha256": "a2eb089452dde2935dfbb9cd61411abe30c96cd40c3a75b51728f2abed7e060d"
+  "packages/adapters/anthropic-messages/package/module.wasm": {
+    "bytes": 2508497,
+    "sha256": "79411f771f7a0f06d5fa96104aaeb1071bfaab244b66fc29c3ca6443b764f978"
   },
   "packages/adapters/anthropic-messages/package/config.schema.json": {
     "bytes": 646,
@@ -32,8 +36,8 @@
     "sha256": "86173fe40e6802e7b38b40b663b04df2190b16afa1fb13a527e853afb6e6738d"
   },
   "scripts/build-plugins.ts": {
-    "bytes": 11800,
-    "sha256": "e3080eb3b8797eb0bad6f984b72b021f9d81e1f4bddc94767c738dddf3c0e697"
+    "bytes": 12000,
+    "sha256": "bfcdbbfc3c85cf9acf079bb331e59ea891d3b92beaecb3814639f706a95cd2f1"
   },
   "scripts/setup-plugin-tools.py": {
     "bytes": 8332,

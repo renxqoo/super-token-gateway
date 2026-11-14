@@ -4,7 +4,7 @@
 
 ## 发行与信任
 
-内置发行标识集合为 `gateway.openai-chat-1.1.0`、`gateway.anthropic-messages-1.0.0` 与 `gateway.gemini-generate-1.0.0`（`bundledReleaseIds`），内容必须分别等于已接纳的 `packages/adapters/<name>/package`。openai-chat 1.1.0 增加 `path_style`/`api_version`/`output_field` 配置，包字节变化，已签名的 1.0.0 发行物不再被新 policy 接受，部署方须重新签名并更新 policy；已安装的 1.0.0 版本及其绑定保持不变。安装 API 不接服务器文件路径、URL、构建脚本或替代 WASM。Core 的部署配置是 Core API 配置文件 `admin.plugins` 段的 `release_policy`、`release_directory`、`helper_executable`（T04.c c1 前为 Gateway 环境变量 `PLUGIN_RELEASE_POLICY`、`PLUGIN_RELEASE_DIRECTORY`、`PLUGIN_HELPER_EXECUTABLE`），三项必须同时设置；缺少该段时不装配 catalog API，没有 unsigned/dev fallback。配置目录是部署方控制的发行物目录，安装者只能从其中选择枚举 release_id。
+内置发行标识集合为 `gateway.openai-chat-1.1.0`、`gateway.anthropic-messages-1.1.0`、`gateway.gemini-generate-1.1.0` 与 `gateway.bedrock-anthropic-1.0.0`（`bundledReleaseIds`），内容必须分别等于已接纳的 `packages/adapters/<name>/package`。openai-chat 1.1.0 增加 `path_style`/`api_version`/`output_field` 配置，包字节变化，已签名的 1.0.0 发行物不再被新 policy 接受，部署方须重新签名并更新 policy；已安装的 1.0.0 版本及其绑定保持不变。安装 API 不接服务器文件路径、URL、构建脚本或替代 WASM。Core 的部署配置是 Core API 配置文件 `admin.plugins` 段的 `release_policy`、`release_directory`、`helper_executable`（T04.c c1 前为 Gateway 环境变量 `PLUGIN_RELEASE_POLICY`、`PLUGIN_RELEASE_DIRECTORY`、`PLUGIN_HELPER_EXECUTABLE`），三项必须同时设置；缺少该段时不装配 catalog API，没有 unsigned/dev fallback。配置目录是部署方控制的发行物目录，安装者只能从其中选择枚举 release_id。
 
 发行负责人在 Core 进程之外运行受控签名工具，显式提供权限为 0600 的 Ed25519 私钥文件。Core 只消费公钥和签名，不生成或持有发行私钥：
 

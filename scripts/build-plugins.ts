@@ -134,7 +134,7 @@ async function reproducible(name: string) {
     await rm(relocated, { recursive: true, force: true });
   }
 }
-const adapters = ["openai-chat", "anthropic-messages", "gemini-generate"];
+const adapters = ["openai-chat", "anthropic-messages", "gemini-generate", "bedrock-anthropic"];
 const selected = process.argv.includes("--adapter")
   ? process.argv.slice(process.argv.indexOf("--adapter") + 1).filter((arg) => !arg.startsWith("--"))
   : adapters;
@@ -142,20 +142,25 @@ if (!selected.length || selected.some((name) => !adapters.includes(name)))
   throw new Error("PLUGIN_ADAPTER_UNKNOWN");
 async function buildAdapter(name: string) {
   const output = `${root}packages/adapters/${name}/package/`;
-  await build({
+  const bundled = await build({
     absWorkingDir: root,
     entryPoints: [`packages/adapters/${name}/plugin.ts`],
     bundle: true,
     format: "cjs",
     target: "es2020",
     minify: true,
+    metafile: true,
     outfile: `${cache}${name}.js`,
   });
+  const inputs = Object.keys(bundled.metafile.inputs)
+    .filter((path) => path.startsWith("packages/"))
+    .sort();
   await copyFile(`${root}packages/adapters/${name}/plugin.d.ts`, `${cache}${name}.d.ts`);
   await reproducible(name);
   await copyFile(`${cache}${name}.wasm`, `${output}module.wasm`);
   const sources: Record<string, { bytes: number; sha256: string }> = {};
-  for (const path of [
+  for (const path of new Set([
+    ...inputs,
     `packages/adapters/${name}/plugin.ts`,
     `packages/adapters/${name}/plugin.d.ts`,
     "packages/plugin-sdk/src/guest.ts",
@@ -169,7 +174,7 @@ async function buildAdapter(name: string) {
     "scripts/plugin-builder/deterministic-preinit.patch",
     "scripts/plugin-builder/upstream-Cargo.lock",
     "scripts/plugin-builder/Cargo.lock",
-  ]) {
+  ])) {
     const bytes = new Uint8Array(await Bun.file(`${root}${path}`).arrayBuffer());
     sources[path] = { bytes: bytes.length, sha256: sha(bytes) };
   }

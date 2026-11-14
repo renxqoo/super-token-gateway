@@ -1,5 +1,6 @@
 import {
   anthropicMessagesReleaseId,
+  bedrockAnthropicReleaseId,
   geminiGenerateReleaseId,
   openAIChatReleaseId,
   type BundledReleaseId,
@@ -19,6 +20,9 @@ export function openAIChatPackageFiles(): Promise<PackageFile[]> {
 export function anthropicMessagesPackageFiles(): Promise<PackageFile[]> {
   return packageFiles("anthropic-messages");
 }
+export function bedrockAnthropicPackageFiles(): Promise<PackageFile[]> {
+  return packageFiles("bedrock-anthropic");
+}
 export function geminiGeneratePackageFiles(): Promise<PackageFile[]> {
   return packageFiles("gemini-generate");
 }
@@ -26,6 +30,7 @@ const bundledPackages: Record<BundledReleaseId, () => Promise<PackageFile[]>> = 
   [openAIChatReleaseId]: openAIChatPackageFiles,
   [anthropicMessagesReleaseId]: anthropicMessagesPackageFiles,
   [geminiGenerateReleaseId]: geminiGeneratePackageFiles,
+  [bedrockAnthropicReleaseId]: bedrockAnthropicPackageFiles,
 };
 export function bundledPackageFiles(releaseId: BundledReleaseId): Promise<PackageFile[]> {
   return bundledPackages[releaseId]();

@@ -178,6 +178,18 @@ export const transientSendSchema = z.strictObject({
     z.strictObject({ type: z.literal("none") }),
     z.strictObject({ type: z.literal("bearer"), value: z.string().max(4096) }),
     z.strictObject({
+      type: z.literal("aws-sigv4"),
+      service: z.enum(["bedrock"]),
+      access_key_id: z.string().regex(/^[A-Za-z0-9]{1,128}$/),
+      session_token: z
+        .string()
+        .regex(/^[\x21-\x7e]{1,16384}$/)
+        .optional(),
+      region: z.string().regex(/^[a-z]{2}(?:-[a-z]+)+-\d$/),
+      amz_date: z.string().regex(/^\d{8}T\d{6}Z$/),
+      signing_key: z.string().regex(/^[0-9a-f]{64}$/),
+    }),
+    z.strictObject({
       type: z.literal("api-key"),
       header: z.enum(["api-key", "x-api-key", "x-goog-api-key"]),
       value: z.string().max(4096),

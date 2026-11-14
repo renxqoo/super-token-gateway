@@ -22,6 +22,7 @@ export function createSSEStream(options: {
   maxEventBytes?: number;
   maxInputBytes: number;
   maxOutputBytes: number;
+  decoder?: { feed(bytes: Uint8Array): Uint8Array; finish(): void };
 }) {
   const { owner, documents } = options,
     adjust = (n: number) => documents.adjust(owner, n),
@@ -255,9 +256,13 @@ export function createSSEStream(options: {
       if (hook === "stream_feed") {
         if (latest?.terminal) throw new PluginHostError("SSE_AFTER_TERMINAL");
         if (ended) throw new PluginHostError("STREAM_FINISHED");
-        consumed = framer.feed(payload);
+        if (options.decoder) {
+          framer.feed(options.decoder.feed(payload));
+          consumed = payload.length;
+        } else consumed = framer.feed(payload);
       } else if (payload.length) throw new PluginHostError("INPUT_BUDGET");
       if (hook === "stream_finish" && !ended) {
+        options.decoder?.finish();
         framer.finish();
         ended = true;
       }
@@ -458,6 +463,7 @@ export function createSSEStream(options: {
           string,
           | "stream_frame_budget"
           | "stream_truncated"
+          | "invalid_stream"
           | "data_after_terminal"
           | "invalid_json"
           | "numeric_limit"
@@ -466,6 +472,7 @@ export function createSSEStream(options: {
           SSE_EVENT_BUDGET: "stream_frame_budget",
           SSE_WIRE_BUDGET: "stream_frame_budget",
           SSE_TRUNCATED: "stream_truncated",
+          EVENTSTREAM_INVALID: "invalid_stream",
           SSE_AFTER_TERMINAL: "data_after_terminal",
           JSON_INVALID: "invalid_json",
           JSON_DUPLICATE_KEY: "invalid_json",
