@@ -2,9 +2,10 @@ import { createCoreRpcClient } from "@gateway/core-client";
 import { createPluginAttempts, createPluginSupervisor } from "@gateway/plugin-host";
 import { Lifecycle, UsageProducer, createTransport, evidenceChannel } from "@gateway/runtime";
 import { createGatewayApp } from "./app.ts";
-import { createSendRegistry } from "./chat.ts";
+import { createSendRegistry, type ChatDependencies } from "./chat.ts";
 import { loadGatewayConfig } from "./config.ts";
 import { createPackageCache, loadPackageTrust } from "./packages.ts";
+import { startResourcePolling } from "./resource-poller.ts";
 
 const config = await loadGatewayConfig();
 const trust = await loadPackageTrust(config.plugins.trust_policy);
@@ -46,7 +47,7 @@ try {
   await release();
   throw error;
 }
-const app = createGatewayApp({
+const deps: ChatDependencies = {
   config,
   core,
   packages: createPackageCache(
@@ -56,8 +57,14 @@ const app = createGatewayApp({
   host,
   transport,
   grants,
-  lifecycle,
   publish: (events) => producer.publish({ events }),
+};
+const poller = startResourcePolling(deps, config.resource_poll_ms, () =>
+  console.log(JSON.stringify({ service: "gateway", event: "resource_poll_failed" })),
+);
+const app = createGatewayApp({
+  ...deps,
+  lifecycle,
   ready: async () => {
     await core.current();
     await producer.ready();
@@ -91,6 +98,7 @@ async function shutdown() {
   const stopped = server.stop(false);
   const drained = await lifecycle.drain(config.shutdown_grace_ms, 5000);
   grants.close();
+  await poller.close();
   await Promise.race([stopped, Bun.sleep(1000)]);
   await server.stop(true);
   await release();

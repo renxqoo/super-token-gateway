@@ -64,6 +64,23 @@ test("a guest cannot declare quantities outside its dimensions or reserve a diff
     expect(host.snapshot().json.bytes).toBe(0);
   }
 });
+test("a guest can defer usage with a pending terminal only when it declares the resource that will carry it", async () => {
+  const unowned = create("pending_unowned");
+  await expect(unowned.transformJSON("response", metadata, body)).rejects.toMatchObject({
+    code: "ABI_OUTPUT",
+  });
+  expect(unowned.snapshot().disposed).toBe(true);
+  const owned = create("pending_owned");
+  const transformed = await owned.transformJSON("response", metadata, body);
+  expect(transformed.result).toMatchObject({
+    kind: "output",
+    terminal: { kind: "pending" },
+    resource: { kind: "response", remote_id: "resp_synthetic" },
+  });
+  expect(new TextDecoder().decode(transformed.body!)).toBe('{"a":{"b":1}}');
+  owned.dispose();
+  expect(host.snapshot().json.bytes).toBe(0);
+});
 test("a consumed document cannot be replayed by the same guest into its next JSON epoch", async () => {
   const a = create("replay");
   expect((await a.transformJSON("prepare", metadata, body)).result.kind).toBe("prepared");

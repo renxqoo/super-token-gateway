@@ -490,7 +490,7 @@ export async function financialRpcSession(
       deadline = requestOptions.deadlineAt ?? new Date(Date.now() + 25000).toISOString(),
       trace = requestOptions.traceId ?? crypto.randomUUID();
     const parsed = raw ? data : executionDataSchemas[kind].parse(data),
-      path = `/_internal/core/v1/${({ execution_context_v1: "context", execution_admit_v1: "admissions", execution_next_v1: "attempts", execution_begin_v1: "begin", execution_abort_v1: "abort", execution_query_v1: "commands", execution_quota_v1: "quota", execution_quota_recovery_v1: "quota-recovery", execution_abort_recovery_v1: "abort-recovery", execution_resource_commit_v1: "resources/commit", execution_resource_v1: "resource-permits", execution_resource_list_v1: "resources/list" } as const)[kind]}`;
+      path = `/_internal/core/v1/${({ execution_context_v1: "context", execution_admit_v1: "admissions", execution_next_v1: "attempts", execution_begin_v1: "begin", execution_abort_v1: "abort", execution_query_v1: "commands", execution_quota_v1: "quota", execution_quota_recovery_v1: "quota-recovery", execution_abort_recovery_v1: "abort-recovery", execution_resource_commit_v1: "resources/commit", execution_resource_v1: "resource-permits", execution_resource_list_v1: "resources/list", execution_resource_claim_v1: "resources/claim", execution_resource_poll_v1: "resources/poll-permits", execution_resource_release_v1: "resources/release" } as const)[kind]}`;
     const body = {
       envelope: {
         command_id: command,

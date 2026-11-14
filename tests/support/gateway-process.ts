@@ -188,6 +188,7 @@ export async function startGateway(
       port: 0,
       total_timeout_ms: 20000,
       shutdown_grace_ms: 3000,
+      resource_poll_ms: 200,
       allow_private_upstream: true,
       core: {
         origin: `https://127.0.0.1:${port}`,

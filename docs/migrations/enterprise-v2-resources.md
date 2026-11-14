@@ -51,3 +51,20 @@
   - `tests/integration/core-resources-upgrade.test.ts` 1 例：2026111217 上建立已绑定与未绑定渠道的 legacy 资源，升级后前者 `binding_id` 为渠道绑定、后者为空。
   - openai-chat fixture 60 cases/83 steps（新增身份改写、身份变化、资源请求映射、资源回复改写/类型校验、续写透传）；`apps/gateway/src/__test__/references.test.ts` 5 例。
 - **l2/l3 已知限制**：资源动作只按 RPM 限流，不占并发配额；`background: true` 仍 422（l4）；资源动作不做异步补证（l4）；渠道重绑后资源仍按创建时绑定执行，未单独做可观察差异的测试。
+- **l4 设计（R5 落地）**：
+  - ABI 终止类型新增 `pending`：输出已交付但用量待异步终态，必须同时声明 `resource`；宿主拒绝无资源的 `pending`。openai-chat 1.6.0 对 `background: true` 放行（与 `stream: true` 同时出现仍 422），`queued`/`in_progress` 状态返回 `pending` 且不报用量。
+  - Gateway 收到 `pending`：以 `ACTIVE` 登记资源，执行证据以 `attempt_state=PARTIAL` 结束且不带 `request_state`，请求保持 `PENDING`，结算对 PARTIAL attempt 返回 WAITING，预授权保留至终态；配额租约按 COMPLETED 关闭。
+  - 迁移 2026111219 `core-resource-polling.sql`：`resources` 增加 `lease_session_id`、`lease_epoch`。三个 Gateway 命令：
+    - `execution_resource_claim_v1`（`/resources/claim`）：认领 v2 行（attempt 有 execution permit 且仍为 `PARTIAL`、`next_poll_at` 到期且无有效租约；已被客户删除的行同样认领），`lease_epoch+1`、租约 60 秒，返回解析结果与原 attempt 的 permit epoch。认领条件以 attempt 是否已终结为准而非资源状态，终态证据丢失或被拒时会再次认领补证。
+    - `execution_resource_poll_v1`（`/resources/poll-permits`）：仅当前租约持有 session 且 epoch 一致、租约未过期时下发凭证，按渠道 RPM 限流；插件隔离、渠道停用为 `no_route`。
+    - `execution_resource_release_v1`（`/resources/release`）：持有者写回资源状态与退避（未终态 2^n 秒，最少 1 秒、最多 3600 秒；已终态 60 秒后仅在 attempt 仍未终结时再认领）。
+  - 证据入口：`core_evidence_group_v1` 的主体核对改为“permit epoch 一致，且（permit 所有者 session，或 `async_partial`/`async_final` 事件由该 attempt 资源的当前租约 session 签名、`source_revision` 等于当前 `lease_epoch`）”。再次认领会递增 epoch，旧持有者此后入库的证据按 `evidence_subject_invalid` 拒绝并记入拒绝表。
+  - legacy 轮询 `claimResources` 排除有 execution permit 的 attempt 行，v2 行只由 v2 Gateway 认领。
+  - Gateway 轮询器按 `resource_poll_ms`（默认 5000）周期认领，经插件 `resource_prepare` 取回远端对象、`response` 钩子取用量：仍为 `pending` 则释放为 `ACTIVE`；完成则以自身 session 签发 `async_final`（`attempt_state=SUCCEEDED`、`request_state=SUCCEEDED`）后释放为 `COMPLETED`；上游 `failed`/`cancelled` 以 `FAILED` 结束请求；客户已删除且上游 404 时以 `FAILED`、`error_code=resource_deleted`、用量 UNKNOWN 结束请求以释放预授权；其他上游 404 或插件失败按失败退避重试。
+- **l4 测试**：
+  - `tests/integration/gateway-background.test.ts` 3 例（创建方 Gateway 轮询间隔 600 秒，排除其自身补证）：
+    - 后台请求得到 `queued` 与公开 ID、attempt 为 PARTIAL、无扣费、资源 ACTIVE；另起 `gatewayB`（不同 session，代表重启或其他实例）认领后先得 `in_progress` 再得 `completed`，`async_final` 由 `gateway:gatewayB` 签发并 ACCEPTED，请求 SUCCEEDED 结算，资源 COMPLETED，之后不再轮询；客户全程未查询。
+    - 租约：未持租约的 session 签发的 `async_final` 被拒；同一行在租约有效期内不可再认领；租约过期再认领 epoch 递增，旧 epoch 取凭证 403 `internal_owner_mismatch`、旧 epoch 证据被拒且无扣费；当前 epoch 证据 ACCEPTED 并结算；释放为 COMPLETED 后即使到期也不再认领。
+    - 客户删除未完成的后台响应后，补证以 FAILED/`resource_deleted` 结束请求并结算，资源保持 DELETED。
+  - 宿主：`json-guest-boundary.test.ts` 新增 `pending` 无资源被 ABI_OUTPUT 拒绝、带资源被接受；openai-chat 1.6.0 fixture 63 cases/86 steps（后台透传、流式后台 422、`queued` 延迟用量并声明身份、无公开 ID 的 `in_progress` 无效）。
+- **l4 已知限制**：上游 `failed`/`cancelled` 与客户删除按 UNKNOWN 用量结束，供应商侧按预估上限处理而非真实部分用量；资源被删除以外的上游 404（远端过期）按退避无限重试，最长间隔 3600 秒；轮询只做 `response` 类，batch/video 在 l5/l6 接入；后台 + 流式不支持。

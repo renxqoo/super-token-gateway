@@ -10,4 +10,4 @@ GRANT EXECUTE ON FUNCTION public.core_execution_batch_v1(jsonb) TO core_executio
 GRANT EXECUTE ON FUNCTION public.core_quota_recovery_v1(jsonb,jsonb) TO core_execution_api;
 GRANT EXECUTE ON FUNCTION public.core_abort_recovery_v1(jsonb,jsonb,jsonb) TO core_execution_api;
 GRANT EXECUTE ON FUNCTION public.core_plugin_package_v1(jsonb,text) TO core_execution_api;
-GRANT EXECUTE ON FUNCTION public.core_resource_commit_v1(jsonb,jsonb),public.core_resource_permit_v1(jsonb,jsonb),public.core_resource_list_v1(jsonb,jsonb) TO core_execution_api;
+GRANT EXECUTE ON FUNCTION public.core_resource_commit_v1(jsonb,jsonb),public.core_resource_permit_v1(jsonb,jsonb),public.core_resource_list_v1(jsonb,jsonb),public.core_resource_claim_v1(jsonb,jsonb),public.core_resource_poll_v1(jsonb,jsonb),public.core_resource_release_v1(jsonb,jsonb) TO core_execution_api;

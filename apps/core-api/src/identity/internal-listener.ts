@@ -163,6 +163,9 @@ export async function startCoreInternalListener(options: Options) {
     execution_resource_commit_v1: "/_internal/core/v1/resources/commit",
     execution_resource_v1: "/_internal/core/v1/resource-permits",
     execution_resource_list_v1: "/_internal/core/v1/resources/list",
+    execution_resource_claim_v1: "/_internal/core/v1/resources/claim",
+    execution_resource_poll_v1: "/_internal/core/v1/resources/poll-permits",
+    execution_resource_release_v1: "/_internal/core/v1/resources/release",
   };
   const execution = options.execution
     ? createExecutionHandler(db, options.execution, requireCaller)

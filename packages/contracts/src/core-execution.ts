@@ -23,6 +23,9 @@ export const executionKinds = [
   "execution_resource_commit_v1",
   "execution_resource_v1",
   "execution_resource_list_v1",
+  "execution_resource_claim_v1",
+  "execution_resource_poll_v1",
+  "execution_resource_release_v1",
 ] as const;
 export const resourceKinds = ["response", "file", "batch", "video"] as const;
 export const resourceActions = ["get", "delete", "cancel", "content", "input_items"] as const;
@@ -165,6 +168,18 @@ export const executionDataSchemas = {
     kind: z.enum(resourceKinds),
     limit: z.number().int().min(1).max(100),
     after: publicResourceIdSchema.optional(),
+  }),
+  execution_resource_claim_v1: z.strictObject({ limit: z.number().int().min(1).max(16) }),
+  execution_resource_poll_v1: z.strictObject({
+    resource_id: publicResourceIdSchema,
+    lease_epoch: atomsSchema,
+    auth: dispatchAuthSchema,
+  }),
+  execution_resource_release_v1: z.strictObject({
+    resource_id: publicResourceIdSchema,
+    lease_epoch: atomsSchema,
+    state: z.enum(["ACTIVE", "COMPLETED", "FAILED", "CANCELLED"]),
+    retry: z.boolean(),
   }),
 } as const;
 export const pluginPackageDataSchema = z.strictObject({ digest: digestSchema });
@@ -446,6 +461,23 @@ export const resourcePermitResponseSchema = z.strictObject({
   state: z.enum(["RESOLVED", "GRANTED", "REPLAYED", "DELETED"]),
   auth_material: transientSendSchema.shape.auth_material.optional(),
 });
+export const resourceClaimResponseSchema = z.strictObject({
+  leases: z
+    .array(
+      z.strictObject({
+        resource_id: publicResourceIdSchema,
+        attempt_id: internalUuidSchema,
+        permit_epoch: atomsSchema,
+        lease_epoch: atomsSchema,
+        resolution: resourceResolutionSchema,
+      }),
+    )
+    .max(16),
+});
+export const resourcePollResponseSchema = z.strictObject({
+  auth_material: transientSendSchema.shape.auth_material,
+});
+export const resourceReleaseResponseSchema = resourceCommitResponseSchema;
 export const resourceListResponseSchema = z.strictObject({
   data: z
     .array(

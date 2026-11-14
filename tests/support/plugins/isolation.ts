@@ -109,6 +109,23 @@ export function invoke() {
           },
           state: null,
         };
+      if (mode === "pending_unowned" || mode === "pending_owned")
+        return {
+          result: {
+            abi_version: 1,
+            kind: "output",
+            consumed: 0,
+            chunks: [],
+            body: { document: current, edits: [] },
+            finality: "UNKNOWN",
+            terminal: { kind: "pending", bytes: "" },
+            needs_input: false,
+            ...(mode === "pending_owned"
+              ? { resource: { kind: "response", remote_id: "resp_synthetic" } }
+              : {}),
+          },
+          state: null,
+        };
       if (mode === "trap") throw new Error("synthetic trap");
       if (mode === "loop") while (true) {}
       if (mode === "inspect_foreign")

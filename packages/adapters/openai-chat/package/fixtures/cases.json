@@ -566,7 +566,7 @@
       ]
     },
     {
-      "name": "background responses request is refused until resources migrate",
+      "name": "background responses request passes through with only the upstream model changed",
       "steps": [
         {
           "action": "json",
@@ -576,12 +576,105 @@
             "operation": "responses",
             "model": "logical"
           },
-          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IngiLCJiYWNrZ3JvdW5kIjp0cnVlfQ==",
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IngiLCJiYWNrZ3JvdW5kIjp0cnVlLCJtYXhfb3V0cHV0X3Rva2VucyI6NDB9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1/responses",
+              "headers": {
+                "accept": "application/json"
+              },
+              "auth": {
+                "type": "bearer"
+              },
+              "manifest": {
+                "operation": "responses",
+                "model": "logical",
+                "upstream_model": "upstream",
+                "stream": false,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "output_tokens": "40",
+                  "requests": "1"
+                },
+                "input_bytes": 72
+              }
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6InVwc3RyZWFtIiwiaW5wdXQiOiJ4IiwiYmFja2dyb3VuZCI6dHJ1ZSwibWF4X291dHB1dF90b2tlbnMiOjQwfQ=="
+        }
+      ]
+    },
+    {
+      "name": "streaming background responses request is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "responses",
+            "operation": "responses",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IngiLCJiYWNrZ3JvdW5kIjp0cnVlLCJzdHJlYW0iOnRydWV9",
           "expected": {
             "abi_version": 1,
             "kind": "failure",
             "status": 422,
             "code": "unsupported_semantics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a queued background response defers usage under the gateway identity and declares the upstream identity",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "protocol": "responses",
+            "operation": "responses",
+            "model": "logical",
+            "resource_id": "response_0123456789abcdef0123456789abcdef"
+          },
+          "body": "eyJpZCI6InJlc3BfYmdfMSIsIm9iamVjdCI6InJlc3BvbnNlIiwic3RhdHVzIjoicXVldWVkIiwiZXJyb3IiOm51bGwsIm1vZGVsIjoidXBzdHJlYW0tMjAyNSIsIm91dHB1dCI6W10sInVzYWdlIjpudWxsfQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "finality": "UNKNOWN",
+            "terminal": {
+              "kind": "pending",
+              "bytes": ""
+            },
+            "resource": {
+              "kind": "response",
+              "remote_id": "resp_bg_1"
+            }
+          },
+          "expected_body": "eyJpZCI6InJlc3BvbnNlXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwib2JqZWN0IjoicmVzcG9uc2UiLCJzdGF0dXMiOiJxdWV1ZWQiLCJlcnJvciI6bnVsbCwibW9kZWwiOiJsb2dpY2FsIiwib3V0cHV0IjpbXSwidXNhZ2UiOm51bGx9"
+        }
+      ]
+    },
+    {
+      "name": "an in-progress response without a gateway identity cannot defer usage",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "protocol": "responses",
+            "operation": "responses",
+            "model": "logical"
+          },
+          "body": "eyJpZCI6InJlc3BfYmdfMiIsIm9iamVjdCI6InJlc3BvbnNlIiwic3RhdHVzIjoiaW5fcHJvZ3Jlc3MiLCJlcnJvciI6bnVsbCwibW9kZWwiOiJ1cHN0cmVhbS0yMDI1Iiwib3V0cHV0IjpbXSwidXNhZ2UiOm51bGx9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "invalid_object"
           }
         }
       ]

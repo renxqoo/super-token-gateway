@@ -52,6 +52,21 @@ async function permit(
   }
 }
 
+export function resourceURL(deps: ChatDependencies, base: string, path: string) {
+  try {
+    const origin = validateBaseUrl(
+      base,
+      deps.config.allow_private_upstream,
+      deps.config.private_upstream_cidrs,
+    );
+    const url = new URL(path, origin);
+    if (url.origin !== origin.origin) throw new Error("origin");
+    return url;
+  } catch {
+    throw new GatewayError(502, "unsafe_upstream", "The upstream address is not permitted");
+  }
+}
+
 function upstreamFailure(status: number) {
   return status === 404
     ? new GatewayError(404, "not_found", "Resource not found")
@@ -102,18 +117,7 @@ export async function executeResource(
       );
     if (prepared.kind !== "resource_request")
       throw new GatewayError(502, "plugin_invalid", "The resource's plugin returned no request");
-    let url: URL;
-    try {
-      const origin = validateBaseUrl(
-        resolution.origin,
-        deps.config.allow_private_upstream,
-        deps.config.private_upstream_cidrs,
-      );
-      url = new URL(prepared.request.path, origin);
-      if (url.origin !== origin.origin) throw new Error("origin");
-    } catch {
-      throw new GatewayError(502, "unsafe_upstream", "The upstream address is not permitted");
-    }
+    const url = resourceURL(deps, resolution.origin, prepared.request.path);
     const commandId = crypto.randomUUID();
     const granted = await permit(
       deps,

@@ -21,6 +21,7 @@ const configSchema = z.strictObject({
   total_timeout_ms: z.number().int().min(1000).max(600000).default(180000),
   max_inflight: z.number().int().positive().max(100000).default(1024),
   quota_renew_ms: z.number().int().min(100).max(20000).default(10000),
+  resource_poll_ms: z.number().int().min(100).max(600000).default(5000),
   shutdown_grace_ms: z.number().int().min(100).max(120000).default(20000),
   trusted_proxy_cidrs: cidrs,
   allow_private_upstream: z.boolean().default(false),

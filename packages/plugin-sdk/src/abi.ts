@@ -278,7 +278,7 @@ export const resourceRequestSchema = preparedSchema
   .pick({ method: true, path: true, headers: true, auth: true })
   .strict();
 export const terminalSchema = z
-  .object({ kind: z.enum(["complete", "incomplete"]), bytes: base64Schema })
+  .object({ kind: z.enum(["complete", "incomplete", "pending"]), bytes: base64Schema })
   .strict();
 export const resultSchema = z.discriminatedUnion("kind", [
   z

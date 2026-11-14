@@ -801,6 +801,7 @@ export class Store {
     >`WITH due AS (SELECT id FROM resources WHERE state IN ('ACTIVE','PENDING_USAGE')
       AND kind IN ('batch','video','response','operation') AND next_poll_at<=now() AND (poll_until IS NULL OR poll_until<now())
       AND (attempt_id IS NULL OR EXISTS(SELECT 1 FROM attempts a WHERE a.id=resources.attempt_id AND a.state<>'DISPATCHING'))
+      AND NOT EXISTS(SELECT 1 FROM execution_permits p WHERE p.attempt_id=resources.attempt_id)
       ORDER BY next_poll_at LIMIT ${limit} FOR UPDATE SKIP LOCKED)
       UPDATE resources r SET poll_token=${token},poll_until=now()+interval '30 seconds'
       FROM due WHERE r.id=due.id RETURNING r.*`;

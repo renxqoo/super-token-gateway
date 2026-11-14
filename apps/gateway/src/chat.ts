@@ -70,6 +70,7 @@ type Facts = {
   deadlineAt: string;
   requestId: string;
   references: Reference[];
+  background: boolean;
 };
 type Candidate = ExecutionContextResponse["candidates"][number];
 type Plan = {
@@ -208,6 +209,10 @@ async function requestFacts(request: ChatRequest, totalTimeoutMs: number): Promi
     deadlineAt: new Date(Date.now() + totalTimeoutMs).toISOString(),
     requestId: request.requestId,
     references,
+    background:
+      request.operation === "responses" &&
+      !files &&
+      (value as Record<string, unknown>).background === true,
   };
 }
 
@@ -278,6 +283,12 @@ async function plan(
         422,
         "unsupported_semantics",
         "Stored responses cannot be continued through this route",
+      );
+    if (converted && facts.background)
+      throw new GatewayError(
+        422,
+        "unsupported_semantics",
+        "Background responses are not available through this route",
       );
     const transformed = await attempt.transformJSON(
       "prepare",
@@ -525,6 +536,7 @@ async function commitResource(
   admitted: Admitted,
   expected: string | undefined,
   declared: { kind: string; remote_id: string } | undefined,
+  state: "ACTIVE" | "COMPLETED" = "COMPLETED",
 ) {
   if (!expected && !declared) return;
   if (!expected || !declared || !expected.startsWith(`${declared.kind}_`))
@@ -538,7 +550,7 @@ async function commitResource(
           permit_epoch: admitted.permitEpoch,
           kind: declared.kind,
           remote_id: declared.remote_id,
-          state: "COMPLETED",
+          state,
         },
         shortDeadline(),
       )) as { resource_id: string };
@@ -990,13 +1002,25 @@ async function relayJSON(
     return finalFailure({ attempt_state: "UNKNOWN", error_code: "upstream_read_failed" }, invalid);
   }
   const result = transformed.result;
-  if (result.kind !== "output" || !result.terminal || !transformed.body)
+  const pending = result.kind === "output" && result.terminal?.kind === "pending";
+  if (
+    result.kind !== "output" ||
+    !result.terminal ||
+    !transformed.body ||
+    (pending && (!facts.background || !createdResource(facts, admitted)))
+  )
     return finalFailure(
       { attempt_state: "UNKNOWN", error_code: "upstream_invalid" },
       failure(result) ?? invalid,
     );
   try {
-    await commitResource(deps, admitted, createdResource(facts, admitted), result.resource);
+    await commitResource(
+      deps,
+      admitted,
+      createdResource(facts, admitted),
+      result.resource,
+      pending ? "ACTIVE" : "COMPLETED",
+    );
   } catch (error) {
     return finalFailure(
       { attempt_state: "UNKNOWN", error_code: "resource_unrecorded" },
@@ -1006,7 +1030,9 @@ async function relayJSON(
   try {
     await end({
       kind: "final",
-      outcome: { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
+      outcome: pending
+        ? { attempt_state: "PARTIAL" }
+        : { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
       reason: "COMPLETED",
     });
   } catch (error) {

@@ -44,7 +44,13 @@ export function createExecutionStore(db: SQL) {
     },
     async resource(
       p: CoreVerifiedCallerProjection,
-      fn: "core_resource_commit_v1" | "core_resource_permit_v1" | "core_resource_list_v1",
+      fn:
+        | "core_resource_commit_v1"
+        | "core_resource_permit_v1"
+        | "core_resource_list_v1"
+        | "core_resource_claim_v1"
+        | "core_resource_poll_v1"
+        | "core_resource_release_v1",
       data: Record<string, unknown>,
     ): Promise<Record<string, unknown>> {
       return db.begin(

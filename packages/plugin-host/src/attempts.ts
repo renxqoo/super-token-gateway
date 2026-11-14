@@ -289,6 +289,8 @@ export function createPluginAttempts(
               (hook !== "stream_feed" && result.consumed !== 0) ||
               bytes > input.output_budget ||
               (result.resource !== undefined && !capabilities.resources) ||
+              (result.terminal?.kind === "pending" &&
+                (frame || !result.resource || result.finality === "FINAL")) ||
               outputBytes + bytes > maxOutput ||
               (result.finality === "FINAL" &&
                 (!result.usage || !Object.keys(result.usage).length)) ||

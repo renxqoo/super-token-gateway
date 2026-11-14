@@ -200,11 +200,14 @@ function prepareResponses(input: GuestInput, value: DocumentInput) {
   if (typeof upstream !== "string" || !upstream || scalar(value, "/model", 400) !== value.model)
     throw new AdapterFailure(422, "model_unavailable");
   if (input.config.path_style === "azure") throw new AdapterFailure(422, "unsupported_capability");
-  if (scalar(value, "/background", 400) === true)
-    throw new AdapterFailure(422, "unsupported_semantics");
-  const stream = scalar(value, "/stream", 400);
+  const stream = scalar(value, "/stream", 400),
+    background = scalar(value, "/background", 400);
   if (stream !== undefined && typeof stream !== "boolean")
     throw new AdapterFailure(400, "invalid_stream");
+  if (background !== undefined && background !== null && typeof background !== "boolean")
+    throw new AdapterFailure(400, "invalid_request");
+  if (background === true && stream === true)
+    throw new AdapterFailure(422, "unsupported_semantics");
   const max = smallInteger(input.config.max_output_tokens, 1000000, 422),
     inputTokens = smallInteger(input.config.max_input_tokens, 16 << 20, 422);
   if (value.document.bytes > inputTokens) throw new AdapterFailure(413, "input_ceiling");
@@ -305,7 +308,26 @@ function responsesResponse(value: DocumentInput) {
   if (fact(value, "").kind !== "object") fail("invalid_object");
   if (!["missing", "null"].includes(fact(value, "/error").kind)) fail("upstream_error");
   if (scalar(value, "/object") !== "response") fail("invalid_object");
-  const kind = responseStatus(scalar(value, "/status")),
+  const status = scalar(value, "/status");
+  if (status === "queued" || status === "in_progress") {
+    const deferred = identityEdits(value, "/id", value.resource_id);
+    if (!deferred.resource) fail("invalid_object");
+    return {
+      abi_version: 1,
+      kind: "output",
+      consumed: 0,
+      chunks: [],
+      body: {
+        document: value.document.handle,
+        edits: [...modelEdit(value, "/model", value.model!), ...deferred.edits],
+      },
+      finality: "UNKNOWN",
+      terminal: { kind: "pending", bytes: "" },
+      needs_input: false,
+      resource: deferred.resource,
+    };
+  }
+  const kind = responseStatus(status),
     measured = responsesUsage(value, "/usage", null),
     identity = identityEdits(value, "/id", value.resource_id);
   return {

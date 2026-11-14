@@ -23,7 +23,7 @@ export type AttemptOutcome = Pick<
   "request_state" | "error_code" | "provider_request_id"
 > & { attempt_state?: "SUCCEEDED" | "FAILED" | "UNKNOWN" | "PARTIAL" };
 
-function pricedDimensions(usage: Record<string, string>): string[] {
+export function pricedDimensions(usage: Record<string, string>): string[] {
   return Object.keys(usage)
     .filter((key) => (dimensions as readonly string[]).includes(key))
     .sort();

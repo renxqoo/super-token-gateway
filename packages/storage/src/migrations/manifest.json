@@ -188,6 +188,15 @@
           "checksum": "453379ce967716347e44107bc5cc226ad5d58ddbebed446a372e28e0d2f49c50"
         }
       ]
+    },
+    {
+      "version": 2026111219,
+      "files": [
+        {
+          "path": "./sql/core-resource-polling.sql",
+          "checksum": "8661e948f44096a2a4d71d613b88131d219b7265566dac57db52e6fd4647897a"
+        }
+      ]
     }
   ]
 }

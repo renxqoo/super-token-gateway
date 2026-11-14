@@ -4,6 +4,9 @@ import {
   executionContextResponseSchema,
   resourceCommitResponseSchema,
   resourceListResponseSchema,
+  resourceClaimResponseSchema,
+  resourcePollResponseSchema,
+  resourceReleaseResponseSchema,
   resourcePermitResponseSchema,
   pluginPackageDataSchema,
   pluginPackageMaxBytes,
@@ -349,6 +352,9 @@ export function createCoreRpcClient(
           execution_resource_commit_v1: "resources/commit",
           execution_resource_v1: "resource-permits",
           execution_resource_list_v1: "resources/list",
+          execution_resource_claim_v1: "resources/claim",
+          execution_resource_poll_v1: "resources/poll-permits",
+          execution_resource_release_v1: "resources/release",
         } as const
       )[kind];
       const normalizedPath = `/_internal/core/v1/${path}`;
@@ -365,6 +371,10 @@ export function createCoreRpcClient(
           return permit;
         }
         if (kind === "execution_resource_list_v1") return resourceListResponseSchema.parse(value);
+        if (kind === "execution_resource_claim_v1") return resourceClaimResponseSchema.parse(value);
+        if (kind === "execution_resource_poll_v1") return resourcePollResponseSchema.parse(value);
+        if (kind === "execution_resource_release_v1")
+          return resourceReleaseResponseSchema.parse(value);
         if (kind === "execution_quota_v1" || kind === "execution_quota_recovery_v1") return value;
         const safe = executionReceiptSchema.parse(value.receipt);
         if (value.transient_send !== undefined) {

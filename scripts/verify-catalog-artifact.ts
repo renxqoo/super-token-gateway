@@ -171,8 +171,8 @@ await withCatalog(async (f, db) => {
     const result = (await db`SELECT state,result FROM plugin_validation_runs`)[0];
     assert.equal(result.state, "SUCCEEDED");
     assert.deepEqual(result.result, {
-      cases: 60,
-      steps: 83,
+      cases: 63,
+      steps: 86,
       cleanup_confirmed: true,
       error_code: null,
     });
@@ -196,8 +196,8 @@ await withCatalog(async (f, db) => {
         ],
         publication_revision: "3",
         binding_revision: "1",
-        cases: 60,
-        steps: 83,
+        cases: 63,
+        steps: 86,
       }),
     );
   } finally {

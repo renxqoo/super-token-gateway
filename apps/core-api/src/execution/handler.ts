@@ -93,6 +93,35 @@ export function createExecutionHandler(
   )
     throw new Error("Invalid attempt budget");
   const cloudTokens = new VertexTokens();
+  async function grantMaterial(
+    auth: z.infer<typeof dispatchAuthSchema>,
+    grant: Record<string, unknown>,
+    deadlineAt: string,
+  ) {
+    const secret =
+      auth.type === "none"
+        ? Buffer.alloc(0)
+        : Buffer.from(
+            decrypt(
+              String(grant.credential_ciphertext),
+              options.encryptionKey,
+              String(grant.channel_id),
+            ),
+          );
+    try {
+      if (secret.length > 4096 || [...secret].some((byte) => byte < 33 || byte > 126))
+        throw new Error("no_route");
+      const authMaterial = await material(
+        auth,
+        secret,
+        AbortSignal.timeout(Math.max(1, Date.parse(deadlineAt) - Date.now())),
+      );
+      if (!authMaterial) throw new Error("no_route");
+      return authMaterial;
+    } finally {
+      secret.fill(0);
+    }
+  }
   async function material(
     auth: z.infer<typeof dispatchAuthSchema>,
     secret: Buffer,
@@ -274,31 +303,31 @@ export function createExecutionHandler(
           await limitResource(`channel:${String(result.channel_id)}`, limits.channel);
         }
         if (result.state !== "GRANTED" || !data.auth) return { resolution, state: result.state };
-        const secret =
-          data.auth.type === "none"
-            ? Buffer.alloc(0)
-            : Buffer.from(
-                decrypt(
-                  String(result.credential_ciphertext),
-                  options.encryptionKey,
-                  String(result.channel_id),
-                ),
-              );
-        try {
-          if (secret.length > 4096 || [...secret].some((byte) => byte < 33 || byte > 126))
-            throw new Error("no_route");
-          const authMaterial = await material(
-            data.auth,
-            secret,
-            AbortSignal.timeout(
-              Math.max(1, Date.parse(String(resolution.deadline_at)) - Date.now()),
-            ),
-          );
-          if (!authMaterial) throw new Error("no_route");
-          return { resolution, state: result.state, auth_material: authMaterial };
-        } finally {
-          secret.fill(0);
-        }
+        return {
+          resolution,
+          state: result.state,
+          auth_material: await grantMaterial(data.auth, result, String(resolution.deadline_at)),
+        };
+      }
+      if (kind === "execution_resource_claim_v1")
+        return store.resource(
+          p,
+          "core_resource_claim_v1",
+          executionDataSchemas.execution_resource_claim_v1.parse(d),
+        );
+      if (kind === "execution_resource_release_v1")
+        return store.resource(
+          p,
+          "core_resource_release_v1",
+          executionDataSchemas.execution_resource_release_v1.parse(d),
+        );
+      if (kind === "execution_resource_poll_v1") {
+        const data = executionDataSchemas.execution_resource_poll_v1.parse(d);
+        const result = await store.resource(p, "core_resource_poll_v1", data);
+        await limitResource(`channel:${String(result.channel_id)}`, Number(result.rpm));
+        return {
+          auth_material: await grantMaterial(data.auth, result, String(result.deadline_at)),
+        };
       }
       if (kind === "execution_context_v1") {
         const data = executionDataSchemas.execution_context_v1.parse(d);

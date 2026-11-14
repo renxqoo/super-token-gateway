@@ -69,6 +69,9 @@ export const internalProofSchema = z.strictObject({
     "execution_resource_commit_v1",
     "execution_resource_v1",
     "execution_resource_list_v1",
+    "execution_resource_claim_v1",
+    "execution_resource_poll_v1",
+    "execution_resource_release_v1",
     "plugin_package_v1",
   ]),
   command_id: internalUuidSchema,
@@ -271,6 +274,9 @@ export type CoreVerifiedCallerProjection = Omit<CoreVerifiedPeerProjection, "end
     | "execution_resource_commit_v1"
     | "execution_resource_v1"
     | "execution_resource_list_v1"
+    | "execution_resource_claim_v1"
+    | "execution_resource_poll_v1"
+    | "execution_resource_release_v1"
     | "plugin_package_v1";
   command_id: string;
   method: "POST";
