@@ -152,6 +152,15 @@
           "checksum": "2224f8c614618618c68b12a25dca6903084b35a24b0690c4fd800d93a8e4a6f3"
         }
       ]
+    },
+    {
+      "version": 2026111215,
+      "files": [
+        {
+          "path": "./sql/core-catalog-read.sql",
+          "checksum": "0edd81cfe8834e7431e9a80d8423f3ad568d387ddf0066a1f1f44b9c382ecff3"
+        }
+      ]
     }
   ]
 }

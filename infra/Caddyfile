@@ -14,8 +14,9 @@ gateway.example.com {
 			lb_try_duration 0s
 		}
 	}
-	@wallets path /v1/wallets
-	handle @wallets {
+	@account path /v1/wallets /v1/models /v1/usage /v1/project/keys /v1/project/keys/*
+	@request path_regexp ^/v1/requests/[^/]+(/billing)?$
+	handle @account {
 		reverse_proxy 127.0.0.1:8095 {
 			health_uri /readyz
 			health_interval 5s
@@ -23,8 +24,7 @@ gateway.example.com {
 			lb_try_duration 0s
 		}
 	}
-	@billing path_regexp ^/v1/requests/[^/]+/billing$
-	handle @billing {
+	handle @request {
 		reverse_proxy 127.0.0.1:8095 {
 			health_uri /readyz
 			health_interval 5s

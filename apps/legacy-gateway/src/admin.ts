@@ -3,17 +3,22 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
 import {
-  currencySchema,
   GatewayError,
+  keyPatchSchema,
   keySchema,
+  modelPatchSchema,
   modelSchema,
+  organizationPatchSchema,
+  organizationSchema,
+  principalPatchSchema,
+  principalSchema,
+  projectPatchSchema,
   projectSchema,
   routePatchSchema,
   providerSchema,
   routeSchema,
 } from "@gateway/contracts";
 import { createKey, encrypt, secureEqual, verifier } from "@gateway/runtime";
-import { operations } from "@gateway/kernel";
 import {
   readBounded,
   validateBaseUrl,
@@ -42,53 +47,29 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
       throw new GatewayError(401, "unauthenticated", "Admin credential required");
     await next();
   });
-  const quotaFields = {
-    rpm: z.number().int().min(1).max(10000000).optional(),
-    tpm: z.number().int().min(1).max(1000000000).optional(),
-    concurrency: z.number().int().min(1).max(1000000).optional(),
-  };
   app.post("/organizations", async (c) => {
-    const v = z
-      .object({
-        external_ref: z.string().min(1).max(200),
-        name: z.string().min(1).max(100),
-        ...quotaFields,
-      })
-      .strict()
-      .parse(await body(c));
-    const key = await deps.store.createOrganization(v);
+    const key = await deps.store.createOrganization(organizationSchema.parse(await body(c)));
     return c.json({ id: key }, 201);
   });
   app.patch("/organizations/:id", async (c) => {
-    const v = z
-      .object({ enabled: z.boolean().optional(), ...quotaFields })
-      .strict()
-      .parse(await body(c));
-    await deps.store.updateOrganization(id(c.req.param("id")), v);
+    await deps.store.updateOrganization(
+      id(c.req.param("id")),
+      organizationPatchSchema.parse(await body(c)),
+    );
     return c.json({ updated: true });
   });
   app.post("/organizations/:id/principals", async (c) => {
-    const v = z
-      .object({
-        external_ref: z.string().min(1).max(200),
-        role: z.enum(["OWNER", "ADMIN", "MEMBER", "BILLING", "VIEWER"]),
-        ...quotaFields,
-      })
-      .strict()
-      .parse(await body(c));
-    const key = await deps.store.createPrincipal(id(c.req.param("id")), v);
+    const key = await deps.store.createPrincipal(
+      id(c.req.param("id")),
+      principalSchema.parse(await body(c)),
+    );
     return c.json({ id: key }, 201);
   });
   app.patch("/principals/:id", async (c) => {
-    const v = z
-      .object({
-        enabled: z.boolean().optional(),
-        role: z.enum(["OWNER", "ADMIN", "MEMBER", "BILLING", "VIEWER"]).optional(),
-        ...quotaFields,
-      })
-      .strict()
-      .parse(await body(c));
-    await deps.store.updatePrincipal(id(c.req.param("id")), v);
+    await deps.store.updatePrincipal(
+      id(c.req.param("id")),
+      principalPatchSchema.parse(await body(c)),
+    );
     return c.json({ updated: true });
   });
   app.get("/projects", async (c) => c.json({ data: await deps.store.projects() }));
@@ -98,18 +79,7 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
     return c.json({ id: projectId, ...input }, 201);
   });
   app.patch("/projects/:id", async (c) => {
-    const input = z
-      .object({
-        enabled: z.boolean().optional(),
-        name: z.string().min(1).max(100).optional(),
-        billing_currency: currencySchema.optional(),
-        rpm: z.number().int().min(1).max(10_000_000).optional(),
-        tpm: z.number().int().min(1).max(1_000_000_000).optional(),
-        concurrency: z.number().int().min(1).max(1_000_000).optional(),
-      })
-      .strict()
-      .parse(await body(c));
-    await deps.store.updateProject(id(c.req.param("id")), input);
+    await deps.store.updateProject(id(c.req.param("id")), projectPatchSchema.parse(await body(c)));
     return c.json({ updated: true });
   });
   app.get("/projects/:id/keys", async (c) =>
@@ -180,16 +150,7 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
     return c.json({ id: routeId }, 201);
   });
   app.patch("/models/:model", async (c) => {
-    const input = z
-      .object({
-        enabled: z.boolean().optional(),
-        operations: z.array(z.enum(operations)).min(1).optional(),
-        max_output_tokens: z.number().int().min(1).max(10_000_000).optional(),
-        routing_strategy: z.enum(["WEIGHTED", "ROUND_ROBIN", "LEAST_LATENCY"]).optional(),
-      })
-      .strict()
-      .parse(await body(c));
-    await deps.store.updateModel(c.req.param("model"), input);
+    await deps.store.updateModel(c.req.param("model"), modelPatchSchema.parse(await body(c)));
     return c.json({ updated: true });
   });
   app.get("/models/:model/routes", async (c) =>
@@ -201,21 +162,8 @@ export function adminRoutes(deps: Dependencies): Hono<Env> {
     return c.json({ updated: true });
   });
   app.patch("/keys/:id", async (c) => {
-    const input = z
-      .object({
-        models: z.array(z.string().min(1).max(150)).max(1000).optional(),
-        operations: z.array(z.enum(operations)).min(1).optional(),
-        allowed_cidrs: z
-          .array(z.string().min(2).max(60))
-          .max(100)
-          .transform((v) => v.map(validateCidr))
-          .optional(),
-        role: z.enum(["ADMIN", "INVOKER", "BILLING", "VIEWER"]).optional(),
-        ...quotaFields,
-        expires_at: z.iso.datetime().optional(),
-      })
-      .strict()
-      .parse(await body(c));
+    const input = keyPatchSchema.parse(await body(c));
+    if (input.allowed_cidrs) input.allowed_cidrs = input.allowed_cidrs.map(validateCidr);
     await deps.store.updateCredential(id(c.req.param("id")), input);
     return c.json({ updated: true });
   });

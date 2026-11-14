@@ -26,6 +26,7 @@ import { readBounded, validateCidr } from "@gateway/runtime";
 import { createPlatformAuthenticator, type PlatformPermission } from "./authentication.ts";
 import { registerCustomerFunds } from "./customer-funds.ts";
 import { registerUpstreamFunds } from "./upstream-funds.ts";
+import { registerIdentityCatalog } from "./identity-catalog.ts";
 export function createCoreManagementApplication(options: {
   db: SQL;
   adminKey: string;
@@ -281,5 +282,6 @@ export function createCoreManagementApplication(options: {
     ),
   );
   registerUpstreamFunds(app, { run, body });
+  registerIdentityCatalog(app, { run, audit, body });
   return app;
 }

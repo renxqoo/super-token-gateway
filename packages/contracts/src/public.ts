@@ -251,3 +251,64 @@ export interface MeteredUsage {
   usage: Usage;
   finality: Finality;
 }
+const quotaFields = {
+  rpm: z.number().int().min(1).max(10000000).optional(),
+  tpm: z.number().int().min(1).max(1000000000).optional(),
+  concurrency: z.number().int().min(1).max(1000000).optional(),
+};
+const principalRoles = ["OWNER", "ADMIN", "MEMBER", "BILLING", "VIEWER"] as const;
+export const organizationSchema = z
+  .object({
+    external_ref: z.string().min(1).max(200),
+    name: z.string().min(1).max(100),
+    ...quotaFields,
+  })
+  .strict();
+export const organizationPatchSchema = z
+  .object({ enabled: z.boolean().optional(), ...quotaFields })
+  .strict();
+export const principalSchema = z
+  .object({
+    external_ref: z.string().min(1).max(200),
+    role: z.enum(principalRoles),
+    ...quotaFields,
+  })
+  .strict();
+export const principalPatchSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    role: z.enum(principalRoles).optional(),
+    ...quotaFields,
+  })
+  .strict();
+export const projectPatchSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    name: z.string().min(1).max(100).optional(),
+    billing_currency: z
+      .string()
+      .regex(/^[A-Z]{3,8}$/)
+      .optional(),
+    rpm: z.number().int().min(1).max(10_000_000).optional(),
+    tpm: z.number().int().min(1).max(1_000_000_000).optional(),
+    concurrency: z.number().int().min(1).max(1_000_000).optional(),
+  })
+  .strict();
+export const modelPatchSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    operations: z.array(z.enum(operations)).min(1).optional(),
+    max_output_tokens: z.number().int().min(1).max(10_000_000).optional(),
+    routing_strategy: z.enum(["WEIGHTED", "ROUND_ROBIN", "LEAST_LATENCY"]).optional(),
+  })
+  .strict();
+export const keyPatchSchema = z
+  .object({
+    models: z.array(z.string().min(1).max(150)).max(1000).optional(),
+    operations: z.array(z.enum(operations)).min(1).optional(),
+    allowed_cidrs: z.array(z.string().min(2).max(60)).max(100).optional(),
+    role: z.enum(["ADMIN", "INVOKER", "BILLING", "VIEWER"]).optional(),
+    ...quotaFields,
+    expires_at: z.iso.datetime().optional(),
+  })
+  .strict();

@@ -164,4 +164,15 @@ test("deployment units start built entries, keep v2 processes under separate use
   expect(caddy.slice(chat, legacy)).toContain(`127.0.0.1:${example.port}`);
   expect(caddy.slice(legacy)).not.toContain(`127.0.0.1:${example.port}`);
   expect(caddy).not.toMatch(/\/admin|\/_internal/);
+  const account = caddy.indexOf("handle @account"),
+    request = caddy.indexOf("handle @request");
+  expect(caddy).toContain(
+    "@account path /v1/wallets /v1/models /v1/usage /v1/project/keys /v1/project/keys/*\n",
+  );
+  expect(caddy).toContain("@request path_regexp ^/v1/requests/[^/]+(/billing)?$\n");
+  for (const handle of [account, request]) {
+    expect(handle).toBeGreaterThan(-1);
+    expect(handle).toBeLessThan(legacy);
+  }
+  expect(caddy.slice(legacy)).not.toContain("127.0.0.1:8095");
 });

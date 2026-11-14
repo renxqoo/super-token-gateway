@@ -97,6 +97,12 @@ await withCatalog(async (f, db) => {
       ((await unknown.json()) as { error: { code: string } }).error.code,
       "unauthenticated",
     );
+    for (const path of ["/v1/models", "/v1/usage", "/v1/project/keys"]) {
+      const denied = await fetch(account + path, {
+        headers: { authorization: `Bearer gw_${"A".repeat(43)}` },
+      });
+      assert.equal(denied.status, 401);
+    }
     await record("process_started", { pid: identity.a.pid, purpose: "compiled-catalog-core-api" });
     assert.equal((await fetch(origin + "/readyz")).status, 200);
     const request = async (path: string, body?: unknown, method = body ? "POST" : "GET") => {

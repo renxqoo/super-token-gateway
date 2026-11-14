@@ -3,6 +3,7 @@ import { secureEqual, verifier } from "@gateway/runtime/crypto";
 import type { CatalogAuthorization, createPluginCatalogStore } from "@gateway/storage";
 const permissionNames = [
   "catalog:manage",
+  "catalog:read",
   "funding:read",
   "funding:recharge",
   "funding:adjust",
