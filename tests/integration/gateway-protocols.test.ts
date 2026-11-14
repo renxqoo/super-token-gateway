@@ -249,3 +249,113 @@ test(
     }),
   120000,
 );
+
+const responsesUsage = {
+  input_tokens: 30,
+  input_tokens_details: { cached_tokens: 0 },
+  output_tokens: 15,
+  output_tokens_details: { reasoning_tokens: 0 },
+  total_tokens: 45,
+};
+const responsesBody = {
+  id: "resp_synthetic",
+  object: "response",
+  created_at: 1,
+  status: "completed",
+  error: null,
+  model: "synthetic",
+  output: [
+    {
+      type: "message",
+      id: "msg_1",
+      role: "assistant",
+      content: [{ type: "output_text", text: "合成回复", annotations: [] }],
+    },
+  ],
+  usage: responsesUsage,
+};
+const responsesEvents: Record<string, unknown>[] = [
+  {
+    type: "response.created",
+    sequence_number: 0,
+    response: { ...responsesBody, status: "in_progress", output: [], usage: null },
+  },
+  {
+    type: "response.output_text.delta",
+    sequence_number: 1,
+    item_id: "msg_1",
+    output_index: 0,
+    content_index: 0,
+    delta: "合成回复",
+  },
+  { type: "response.completed", sequence_number: 2, response: responsesBody },
+];
+
+function responsesReply(call: UpstreamCall) {
+  if (call.body.stream)
+    return new Response(
+      responsesEvents
+        .map((data) => `event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`)
+        .join(""),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  return Response.json(responsesBody);
+}
+
+test(
+  "an OpenAI Responses client is served through /v1/responses with only the model rewritten, JSON and SSE, and exact settlement; previous_response_id is refused before reaching the upstream",
+  () =>
+    withGatewayStack({ reply: responsesReply }, async (stack) => {
+      await allowOperation(stack, "responses");
+      const send = (body: Record<string, unknown>) =>
+        fetch(`${stack.gateway.origin}/v1/responses`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${stack.setup.key.key}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ model: stack.setup.model, ...body }),
+        });
+      const request = { input: "你好", instructions: "简短", max_output_tokens: 30 };
+      const json = await send(request);
+      expect(json.status).toBe(200);
+      expect(await json.json()).toEqual({ ...responsesBody, model: stack.setup.model });
+      const call = stack.received.at(-1)!;
+      expect(call.path).toBe("/v1/responses");
+      expect(call.authorization).toStartWith("Bearer ");
+      expect(call.body).toEqual({ ...request, model: "synthetic" });
+      expect(await settledCharge(stack.db, json.headers.get("x-request-id")!)).toMatchObject({
+        state: "SUCCEEDED",
+      });
+
+      const streamed = await send({ ...request, stream: true });
+      expect(streamed.status).toBe(200);
+      const frames = (await streamed.text())
+        .split("\n\n")
+        .filter(Boolean)
+        .map((frame) => {
+          const [event, data] = frame.split("\n");
+          return [event!.replace(/^event: /, ""), JSON.parse(data!.replace(/^data: /, ""))];
+        });
+      const created = responsesEvents[0] as { response: Record<string, unknown> };
+      expect(frames).toEqual([
+        [
+          "response.created",
+          { ...created, response: { ...created.response, model: stack.setup.model } },
+        ],
+        ["response.output_text.delta", responsesEvents[1]],
+        [
+          "response.completed",
+          { ...responsesEvents[2], response: { ...responsesBody, model: stack.setup.model } },
+        ],
+      ]);
+      expect(await settledCharge(stack.db, streamed.headers.get("x-request-id")!)).toMatchObject({
+        state: "SUCCEEDED",
+      });
+
+      const continued = await send({ input: "继续", previous_response_id: "resp_synthetic" });
+      expect(continued.status).toBe(422);
+      expect(stack.received).toHaveLength(2);
+    }),
+  120000,
+);

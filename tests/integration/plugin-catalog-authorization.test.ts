@@ -539,8 +539,8 @@ test(
         reason: "Single validate permission actual fixture run",
       });
       expect(validated.result).toEqual({
-        cases: 15,
-        steps: 24,
+        cases: 26,
+        steps: 40,
         cleanup_confirmed: true,
         error_code: null,
       });

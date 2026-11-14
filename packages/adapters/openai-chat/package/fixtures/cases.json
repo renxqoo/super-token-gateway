@@ -444,6 +444,374 @@
           }
         }
       ]
+    },
+    {
+      "name": "responses request passes through with only the upstream model changed when it states its own output ceiling",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "responses",
+            "operation": "responses",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IuS9oOWlvSIsImluc3RydWN0aW9ucyI6IueugOefrSIsIm1heF9vdXRwdXRfdG9rZW5zIjo0MCwicmVhc29uaW5nIjp7ImVmZm9ydCI6ImxvdyJ9fQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1/responses",
+              "headers": {
+                "accept": "application/json"
+              },
+              "auth": {
+                "type": "bearer"
+              },
+              "manifest": {
+                "operation": "responses",
+                "model": "logical",
+                "upstream_model": "upstream",
+                "stream": false,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "output_tokens": "40",
+                  "requests": "1"
+                },
+                "input_bytes": 112
+              }
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6InVwc3RyZWFtIiwiaW5wdXQiOiLkvaDlpb0iLCJpbnN0cnVjdGlvbnMiOiLnroDnn60iLCJtYXhfb3V0cHV0X3Rva2VucyI6NDAsInJlYXNvbmluZyI6eyJlZmZvcnQiOiJsb3cifX0="
+        }
+      ]
+    },
+    {
+      "name": "streaming responses request without max_output_tokens gains the configured ceiling",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "responses",
+            "operation": "responses",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6W3sicm9sZSI6InVzZXIiLCJjb250ZW50Ijoi5L2g5aW9In1dLCJzdHJlYW0iOnRydWV9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1/responses",
+              "headers": {
+                "accept": "text/event-stream"
+              },
+              "auth": {
+                "type": "bearer"
+              },
+              "manifest": {
+                "operation": "responses",
+                "model": "logical",
+                "upstream_model": "upstream",
+                "stream": true,
+                "ceilings": {
+                  "input_tokens": "10000",
+                  "output_tokens": "100",
+                  "requests": "1"
+                },
+                "input_bytes": 78
+              }
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6InVwc3RyZWFtIiwiaW5wdXQiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6IuS9oOWlvSJ9XSwic3RyZWFtIjp0cnVlLCJtYXhfb3V0cHV0X3Rva2VucyI6MTAwfQ=="
+        }
+      ]
+    },
+    {
+      "name": "responses request continuing a previous response is refused until resources migrate",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "responses",
+            "operation": "responses",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IngiLCJwcmV2aW91c19yZXNwb25zZV9pZCI6InJlc3BfMCJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_semantics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "background responses request is refused until resources migrate",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "responses",
+            "operation": "responses",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IngiLCJiYWNrZ3JvdW5kIjp0cnVlfQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_semantics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "responses request above the configured output ceiling is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "protocol": "responses",
+            "operation": "responses",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJpbnB1dCI6IngiLCJtYXhfb3V0cHV0X3Rva2VucyI6MTAxfQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "integer_limit"
+          }
+        }
+      ]
+    },
+    {
+      "name": "completed response keeps its shape with the logical model and exact cached and reasoning usage",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "protocol": "responses",
+            "operation": "responses",
+            "model": "logical"
+          },
+          "body": "eyJpZCI6InJlc3BfMSIsIm9iamVjdCI6InJlc3BvbnNlIiwiY3JlYXRlZF9hdCI6MSwic3RhdHVzIjoiY29tcGxldGVkIiwiZXJyb3IiOm51bGwsIm1vZGVsIjoidXBzdHJlYW0tMjAyNSIsIm91dHB1dCI6W3sidHlwZSI6Im1lc3NhZ2UiLCJpZCI6Im0xIiwicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOlt7InR5cGUiOiJvdXRwdXRfdGV4dCIsInRleHQiOiLlpb0iLCJhbm5vdGF0aW9ucyI6W119XX1dLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjksImlucHV0X3Rva2Vuc19kZXRhaWxzIjp7ImNhY2hlZF90b2tlbnMiOjR9LCJvdXRwdXRfdG9rZW5zIjo2LCJvdXRwdXRfdG9rZW5zX2RldGFpbHMiOnsicmVhc29uaW5nX3Rva2VucyI6Mn0sInRvdGFsX3Rva2VucyI6MTV9fQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "usage": {
+              "input_tokens": "5",
+              "cached_input_tokens": "4",
+              "output_tokens": "6",
+              "reasoning_tokens": "2"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            },
+            "needs_input": false
+          },
+          "expected_body": "eyJpZCI6InJlc3BfMSIsIm9iamVjdCI6InJlc3BvbnNlIiwiY3JlYXRlZF9hdCI6MSwic3RhdHVzIjoiY29tcGxldGVkIiwiZXJyb3IiOm51bGwsIm1vZGVsIjoibG9naWNhbCIsIm91dHB1dCI6W3sidHlwZSI6Im1lc3NhZ2UiLCJpZCI6Im0xIiwicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOlt7InR5cGUiOiJvdXRwdXRfdGV4dCIsInRleHQiOiLlpb0iLCJhbm5vdGF0aW9ucyI6W119XX1dLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjksImlucHV0X3Rva2Vuc19kZXRhaWxzIjp7ImNhY2hlZF90b2tlbnMiOjR9LCJvdXRwdXRfdG9rZW5zIjo2LCJvdXRwdXRfdG9rZW5zX2RldGFpbHMiOnsicmVhc29uaW5nX3Rva2VucyI6Mn0sInRvdGFsX3Rva2VucyI6MTV9fQ=="
+        }
+      ]
+    },
+    {
+      "name": "incomplete response is an incomplete terminal",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "protocol": "responses",
+            "operation": "responses",
+            "model": "logical"
+          },
+          "body": "eyJpZCI6InJlc3BfMSIsIm9iamVjdCI6InJlc3BvbnNlIiwiY3JlYXRlZF9hdCI6MSwic3RhdHVzIjoiaW5jb21wbGV0ZSIsImVycm9yIjpudWxsLCJtb2RlbCI6InVwc3RyZWFtLTIwMjUiLCJvdXRwdXQiOlt7InR5cGUiOiJtZXNzYWdlIiwiaWQiOiJtMSIsInJvbGUiOiJhc3Npc3RhbnQiLCJjb250ZW50IjpbeyJ0eXBlIjoib3V0cHV0X3RleHQiLCJ0ZXh0Ijoi5aW9IiwiYW5ub3RhdGlvbnMiOltdfV19XSwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjo5LCJpbnB1dF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjo0fSwib3V0cHV0X3Rva2VucyI6Niwib3V0cHV0X3Rva2Vuc19kZXRhaWxzIjp7InJlYXNvbmluZ190b2tlbnMiOjJ9LCJ0b3RhbF90b2tlbnMiOjE1fX0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "usage": {
+              "input_tokens": "5",
+              "cached_input_tokens": "4",
+              "output_tokens": "6",
+              "reasoning_tokens": "2"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "incomplete",
+              "bytes": ""
+            },
+            "needs_input": false
+          },
+          "expected_body": "eyJpZCI6InJlc3BfMSIsIm9iamVjdCI6InJlc3BvbnNlIiwiY3JlYXRlZF9hdCI6MSwic3RhdHVzIjoiaW5jb21wbGV0ZSIsImVycm9yIjpudWxsLCJtb2RlbCI6ImxvZ2ljYWwiLCJvdXRwdXQiOlt7InR5cGUiOiJtZXNzYWdlIiwiaWQiOiJtMSIsInJvbGUiOiJhc3Npc3RhbnQiLCJjb250ZW50IjpbeyJ0eXBlIjoib3V0cHV0X3RleHQiLCJ0ZXh0Ijoi5aW9IiwiYW5ub3RhdGlvbnMiOltdfV19XSwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjo5LCJpbnB1dF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjo0fSwib3V0cHV0X3Rva2VucyI6Niwib3V0cHV0X3Rva2Vuc19kZXRhaWxzIjp7InJlYXNvbmluZ190b2tlbnMiOjJ9LCJ0b3RhbF90b2tlbnMiOjE1fX0="
+        }
+      ]
+    },
+    {
+      "name": "failed response cannot become success",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "protocol": "responses",
+            "operation": "responses",
+            "model": "logical"
+          },
+          "body": "eyJpZCI6InJlc3BfMSIsIm9iamVjdCI6InJlc3BvbnNlIiwiY3JlYXRlZF9hdCI6MSwic3RhdHVzIjoiZmFpbGVkIiwiZXJyb3IiOnsiY29kZSI6InNlcnZlcl9lcnJvciIsIm1lc3NhZ2UiOiJ4In0sIm1vZGVsIjoidXBzdHJlYW0tMjAyNSIsIm91dHB1dCI6W3sidHlwZSI6Im1lc3NhZ2UiLCJpZCI6Im0xIiwicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOlt7InR5cGUiOiJvdXRwdXRfdGV4dCIsInRleHQiOiLlpb0iLCJhbm5vdGF0aW9ucyI6W119XX1dLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjksImlucHV0X3Rva2Vuc19kZXRhaWxzIjp7ImNhY2hlZF90b2tlbnMiOjR9LCJvdXRwdXRfdG9rZW5zIjo2LCJvdXRwdXRfdG9rZW5zX2RldGFpbHMiOnsicmVhc29uaW5nX3Rva2VucyI6Mn0sInRvdGFsX3Rva2VucyI6MTV9fQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "upstream_error"
+          }
+        }
+      ]
+    },
+    {
+      "name": "responses SSE passes events through with the logical model and withholds response.completed as the terminal",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm90b2NvbCI6InJlc3BvbnNlcyJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZXZlbnQ6IHJlc3BvbnNlLmNyZWF0ZWQKZGF0YTogeyJ0eXBlIjoicmVzcG9uc2UuY3JlYXRlZCIsInNlcXVlbmNlX251bWJlciI6MCwicmVzcG9uc2UiOnsiaWQiOiJyZXNwXzEiLCJvYmplY3QiOiJyZXNwb25zZSIsInN0YXR1cyI6ImluX3Byb2dyZXNzIiwibW9kZWwiOiJ1cHN0cmVhbS0yMDI1Iiwib3V0cHV0IjpbXSwidXNhZ2UiOm51bGx9fQoKZXZlbnQ6IHJlc3BvbnNlLm91dHB1dF90ZXh0LmRlbHRhCmRhdGE6IHsidHlwZSI6InJlc3BvbnNlLm91dHB1dF90ZXh0LmRlbHRhIiwic2VxdWVuY2VfbnVtYmVyIjoxLCJpdGVtX2lkIjoibTEiLCJvdXRwdXRfaW5kZXgiOjAsImNvbnRlbnRfaW5kZXgiOjAsImRlbHRhIjoi5aW9In0KCmV2ZW50OiByZXNwb25zZS5jb21wbGV0ZWQKZGF0YTogeyJ0eXBlIjoicmVzcG9uc2UuY29tcGxldGVkIiwic2VxdWVuY2VfbnVtYmVyIjoyLCJyZXNwb25zZSI6eyJpZCI6InJlc3BfMSIsIm9iamVjdCI6InJlc3BvbnNlIiwic3RhdHVzIjoiY29tcGxldGVkIiwibW9kZWwiOiJ1cHN0cmVhbS0yMDI1Iiwib3V0cHV0IjpbXSwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjo5LCJpbnB1dF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjo0fSwib3V0cHV0X3Rva2VucyI6Niwib3V0cHV0X3Rva2Vuc19kZXRhaWxzIjp7InJlYXNvbmluZ190b2tlbnMiOjJ9LCJ0b3RhbF90b2tlbnMiOjE1fX19Cgo=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 701,
+            "chunks": [
+              "ZXZlbnQ6IHJlc3BvbnNlLmNyZWF0ZWQKZGF0YTogeyJ0eXBlIjoicmVzcG9uc2UuY3JlYXRlZCIsInNlcXVlbmNlX251bWJlciI6MCwicmVzcG9uc2UiOnsiaWQiOiJyZXNwXzEiLCJvYmplY3QiOiJyZXNwb25zZSIsInN0YXR1cyI6ImluX3Byb2dyZXNzIiwibW9kZWwiOiJsb2dpY2FsIiwib3V0cHV0IjpbXSwidXNhZ2UiOm51bGx9fQoK",
+              "ZXZlbnQ6IHJlc3BvbnNlLm91dHB1dF90ZXh0LmRlbHRhCmRhdGE6IHsidHlwZSI6InJlc3BvbnNlLm91dHB1dF90ZXh0LmRlbHRhIiwic2VxdWVuY2VfbnVtYmVyIjoxLCJpdGVtX2lkIjoibTEiLCJvdXRwdXRfaW5kZXgiOjAsImNvbnRlbnRfaW5kZXgiOjAsImRlbHRhIjoi5aW9In0KCg=="
+            ],
+            "finality": "FINAL",
+            "needs_input": false,
+            "usage": {
+              "input_tokens": "5",
+              "cached_input_tokens": "4",
+              "output_tokens": "6",
+              "reasoning_tokens": "2"
+            },
+            "terminal": {
+              "kind": "complete",
+              "bytes": "ZXZlbnQ6IHJlc3BvbnNlLmNvbXBsZXRlZApkYXRhOiB7InR5cGUiOiJyZXNwb25zZS5jb21wbGV0ZWQiLCJzZXF1ZW5jZV9udW1iZXIiOjIsInJlc3BvbnNlIjp7ImlkIjoicmVzcF8xIiwib2JqZWN0IjoicmVzcG9uc2UiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJtb2RlbCI6ImxvZ2ljYWwiLCJvdXRwdXQiOltdLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjksImlucHV0X3Rva2Vuc19kZXRhaWxzIjp7ImNhY2hlZF90b2tlbnMiOjR9LCJvdXRwdXRfdG9rZW5zIjo2LCJvdXRwdXRfdG9rZW5zX2RldGFpbHMiOnsicmVhc29uaW5nX3Rva2VucyI6Mn0sInRvdGFsX3Rva2VucyI6MTV9fX0KCg=="
+            }
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_finish",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "FINAL",
+            "needs_input": false,
+            "usage": {
+              "input_tokens": "5",
+              "cached_input_tokens": "4",
+              "output_tokens": "6",
+              "reasoning_tokens": "2"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "responses SSE EOF before response.completed cannot fabricate a terminal",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm90b2NvbCI6InJlc3BvbnNlcyJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZXZlbnQ6IHJlc3BvbnNlLmNyZWF0ZWQKZGF0YTogeyJ0eXBlIjoicmVzcG9uc2UuY3JlYXRlZCIsInNlcXVlbmNlX251bWJlciI6MCwicmVzcG9uc2UiOnsiaWQiOiJyZXNwXzEiLCJvYmplY3QiOiJyZXNwb25zZSIsInN0YXR1cyI6ImluX3Byb2dyZXNzIiwibW9kZWwiOiJ1cHN0cmVhbS0yMDI1Iiwib3V0cHV0IjpbXSwidXNhZ2UiOm51bGx9fQoK",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 198,
+            "chunks": [
+              "ZXZlbnQ6IHJlc3BvbnNlLmNyZWF0ZWQKZGF0YTogeyJ0eXBlIjoicmVzcG9uc2UuY3JlYXRlZCIsInNlcXVlbmNlX251bWJlciI6MCwicmVzcG9uc2UiOnsiaWQiOiJyZXNwXzEiLCJvYmplY3QiOiJyZXNwb25zZSIsInN0YXR1cyI6ImluX3Byb2dyZXNzIiwibW9kZWwiOiJsb2dpY2FsIiwib3V0cHV0IjpbXSwidXNhZ2UiOm51bGx9fQoK"
+            ],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_finish",
+          "input": "",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "stream_truncated"
+          }
+        }
+      ]
+    },
+    {
+      "name": "response.failed mid stream is an upstream failure",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "stream_open",
+          "input": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm90b2NvbCI6InJlc3BvbnNlcyJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "consumed": 0,
+            "chunks": [],
+            "finality": "UNKNOWN",
+            "needs_input": true
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "stream_feed",
+          "input": "ZXZlbnQ6IHJlc3BvbnNlLmNyZWF0ZWQKZGF0YTogeyJ0eXBlIjoicmVzcG9uc2UuY3JlYXRlZCIsInNlcXVlbmNlX251bWJlciI6MCwicmVzcG9uc2UiOnsiaWQiOiJyZXNwXzEiLCJvYmplY3QiOiJyZXNwb25zZSIsInN0YXR1cyI6ImluX3Byb2dyZXNzIiwibW9kZWwiOiJ1cHN0cmVhbS0yMDI1Iiwib3V0cHV0IjpbXSwidXNhZ2UiOm51bGx9fQoKZXZlbnQ6IHJlc3BvbnNlLmZhaWxlZApkYXRhOiB7InR5cGUiOiJyZXNwb25zZS5mYWlsZWQiLCJzZXF1ZW5jZV9udW1iZXIiOjEsInJlc3BvbnNlIjp7InN0YXR1cyI6ImZhaWxlZCJ9fQoK",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "upstream_error"
+          }
+        }
+      ]
     }
   ]
 }

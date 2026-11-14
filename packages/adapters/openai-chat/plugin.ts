@@ -29,6 +29,7 @@ type State = {
   };
   finished: boolean;
   finishKind: string;
+  native: boolean;
   content: boolean;
   usage: Usage | null;
   tools: Record<string, { id: string; name: string; args?: string }>;
@@ -175,11 +176,180 @@ function inspect(value: DocumentInput, paths: string[]) {
     ? { abi_version: 1, kind: "inspect", document: value.document.handle, pointers: missing }
     : undefined;
 }
+function authOf(input: GuestInput) {
+  return input.config.auth === "api-key"
+    ? { type: "api-key", header: "api-key" }
+    : input.config.auth === "none"
+      ? { type: "none" }
+      : { type: "bearer" };
+}
+function prepareResponses(input: GuestInput, value: DocumentInput) {
+  const query = inspect(value, [
+    "",
+    "/model",
+    "/stream",
+    "/max_output_tokens",
+    "/previous_response_id",
+    "/background",
+  ]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object") throw new AdapterFailure(400, "invalid_request");
+  const map = object(input.config.model_map, 400),
+    upstream = map[value.model!];
+  if (typeof upstream !== "string" || !upstream || scalar(value, "/model", 400) !== value.model)
+    throw new AdapterFailure(422, "model_unavailable");
+  if (input.config.path_style === "azure") throw new AdapterFailure(422, "unsupported_capability");
+  if (
+    !["missing", "null"].includes(fact(value, "/previous_response_id").kind) ||
+    scalar(value, "/background", 400) === true
+  )
+    throw new AdapterFailure(422, "unsupported_semantics");
+  const stream = scalar(value, "/stream", 400);
+  if (stream !== undefined && typeof stream !== "boolean")
+    throw new AdapterFailure(400, "invalid_stream");
+  const max = smallInteger(input.config.max_output_tokens, 1000000, 422),
+    inputTokens = smallInteger(input.config.max_input_tokens, 16 << 20, 422);
+  if (value.document.bytes > inputTokens) throw new AdapterFailure(413, "input_ceiling");
+  const requested = scalar(value, "/max_output_tokens", 400),
+    output = requested === undefined ? max : smallInteger(requested, max, 422);
+  if (output < 1) throw new AdapterFailure(422, "invalid_output_ceiling");
+  const edits: { op: string; pointer: string; value?: string }[] = [
+    { op: "set", pointer: "/model", value: JSON.stringify(upstream) },
+  ];
+  if (requested === undefined)
+    edits.push({ op: "set", pointer: "/max_output_tokens", value: String(output) });
+  return {
+    abi_version: 1,
+    kind: "prepared",
+    request: {
+      method: "POST",
+      path: "/v1/responses",
+      headers: {
+        "content-type": "application/json",
+        accept: stream ? "text/event-stream" : "application/json",
+      },
+      body: { document: value.document.handle, edits },
+      auth: authOf(input),
+      manifest: {
+        operation: "responses",
+        model: value.model,
+        upstream_model: upstream,
+        stream: stream === true,
+        ceilings: {
+          input_tokens: String(inputTokens),
+          output_tokens: String(output),
+          requests: "1",
+        },
+        input_bytes: value.document.bytes,
+      },
+    },
+  };
+}
+function responsesUsage(value: DocumentInput, base: string, previous: Usage | null) {
+  const usageFact = fact(value, base);
+  if (usageFact.kind !== "object") fail("invalid_upstream_usage");
+  const raw: Record<string, unknown> = {};
+  for (const name of ["input_tokens", "output_tokens"]) {
+    const n = scalar(value, `${base}/${name}`);
+    if (n !== undefined) raw[name] = n;
+  }
+  const cached = scalar(value, `${base}/input_tokens_details/cached_tokens`),
+    reasoning = scalar(value, `${base}/output_tokens_details/reasoning_tokens`);
+  if (cached !== undefined) raw.prompt_tokens_details = { cached_tokens: cached };
+  if (reasoning !== undefined) raw.completion_tokens_details = { reasoning_tokens: reasoning };
+  const measured = usage({ usage: raw }, previous);
+  if (measured?.input_tokens === undefined || measured.output_tokens === undefined)
+    fail("invalid_upstream_usage");
+  return measured;
+}
+const responseUsagePaths = (base: string) => [
+  base,
+  `${base}/input_tokens`,
+  `${base}/output_tokens`,
+  `${base}/input_tokens_details/cached_tokens`,
+  `${base}/output_tokens_details/reasoning_tokens`,
+];
+function responseStatus(status: unknown) {
+  if (status === "completed") return "complete";
+  if (status === "incomplete") return "incomplete";
+  if (status === "failed" || status === "cancelled") fail("upstream_error");
+  fail("invalid_object");
+}
+function modelEdit(value: DocumentInput, pointer: string, model: string) {
+  return fact(value, pointer).kind === "missing"
+    ? []
+    : [{ op: "set", pointer, value: JSON.stringify(model) }];
+}
+function responsesResponse(value: DocumentInput) {
+  const query = inspect(value, [
+    "",
+    "/error",
+    "/object",
+    "/status",
+    "/model",
+    ...responseUsagePaths("/usage"),
+  ]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object") fail("invalid_object");
+  if (!["missing", "null"].includes(fact(value, "/error").kind)) fail("upstream_error");
+  if (scalar(value, "/object") !== "response") fail("invalid_object");
+  const kind = responseStatus(scalar(value, "/status")),
+    measured = responsesUsage(value, "/usage", null);
+  return {
+    abi_version: 1,
+    kind: "output",
+    consumed: 0,
+    chunks: [],
+    body: { document: value.document.handle, edits: modelEdit(value, "/model", value.model!) },
+    usage: measured,
+    finality: finality(measured),
+    terminal: { kind, bytes: "" },
+    needs_input: false,
+  };
+}
+function responsesFrame(state: State, value: FrameInput) {
+  const frame = value.frame;
+  if (frame.ordinal !== smallInteger(state.lastFrame, Number.MAX_SAFE_INTEGER) + 1)
+    fail("stream_state");
+  if (!frame.data.bytes) {
+    state.lastFrame = frame.ordinal;
+    return streamOutput(state, { handle: frame.handle, disposition: "drop" });
+  }
+  const query = inspect(value, [
+    "",
+    "/type",
+    "/response/model",
+    "/response/status",
+    ...responseUsagePaths("/response/usage"),
+  ]);
+  if (query) return query;
+  const type = scalar(value, "/type");
+  if (typeof type !== "string" || (frame.event.value !== "" && frame.event.value !== type))
+    fail("invalid_stream");
+  state.lastFrame = frame.ordinal;
+  const edits = modelEdit(value, "/response/model", state.model),
+    body = edits.length ? { body: { document: value.document.handle, edits } } : {};
+  if (type === "error" || type === "response.failed") fail("upstream_error");
+  if (type === "response.completed" || type === "response.incomplete") {
+    const kind = responseStatus(scalar(value, "/response/status"));
+    state.usage = responsesUsage(value, "/response/usage", state.usage);
+    state.done = true;
+    return streamOutput(
+      state,
+      { handle: frame.handle, disposition: "hold", ...body },
+      { kind, bytes: "" },
+    );
+  }
+  if (!type.startsWith("response.")) fail("invalid_stream");
+  return streamOutput(state, { handle: frame.handle, disposition: "emit", ...body });
+}
 function prepare(input: GuestInput, value: DocumentInput) {
+  if (!value.document || !value.inspection || typeof value.model !== "string" || !value.model)
+    throw new AdapterFailure(400, "invalid_request");
+  if (value.protocol === "responses" && value.operation === "responses")
+    return prepareResponses(input, value);
   if (value.protocol !== "chat" || value.operation !== "chat")
     throw new AdapterFailure(422, "unsupported_semantics");
-  if (!value.document || !value.inspection || typeof value.model !== "string")
-    throw new AdapterFailure(400, "invalid_request");
   const query = inspect(value, preparePointers);
   if (query) return query;
   if (
@@ -237,12 +407,7 @@ function prepare(input: GuestInput, value: DocumentInput) {
       edits.push({ op: "set", pointer: "/stream_options", value: '{"include_usage":true}' });
     else edits.push({ op: "set", pointer: "/stream_options/include_usage", value: "true" });
   }
-  const auth =
-    input.config.auth === "api-key"
-      ? { type: "api-key", header: "api-key" }
-      : input.config.auth === "none"
-        ? { type: "none" }
-        : { type: "bearer" };
+  const auth = authOf(input);
   return {
     abi_version: 1,
     kind: "prepared",
@@ -416,6 +581,7 @@ function streamUsage(value: FrameInput, state: State) {
 function streamFrame(state: State, value: FrameInput) {
   const frame = value.frame;
   if (!frame || frame.data.handle !== value.document.handle) fail("stream_state");
+  if (state.native) return responsesFrame(state, value);
   if (!state.active) {
     if (frame.ordinal !== smallInteger(state.lastFrame, Number.MAX_SAFE_INTEGER) + 1)
       fail("stream_state");
@@ -618,14 +784,13 @@ export function invoke() {
         ),
         state: null,
       };
-    if (input.hook === "response")
+    if (input.hook === "response") {
+      const value = object(JSON.parse(new TextDecoder().decode(bytes))) as DocumentInput;
       return {
-        result: response(
-          input,
-          object(JSON.parse(new TextDecoder().decode(bytes))) as DocumentInput,
-        ),
+        result: value.protocol === "responses" ? responsesResponse(value) : response(input, value),
         state: null,
       };
+    }
     if (input.hook === "error")
       return {
         result: { abi_version: 1, kind: "failure", status: 502, code: "upstream_error" },
@@ -637,7 +802,14 @@ export function invoke() {
       const payload = object(exactParse(new TextDecoder().decode(bytes), 400));
       if (typeof payload.model !== "string" || !payload.model)
         throw new AdapterFailure(400, "invalid_model");
+      if (
+        payload.protocol !== undefined &&
+        payload.protocol !== "chat" &&
+        payload.protocol !== "responses"
+      )
+        throw new AdapterFailure(422, "unsupported_semantics");
       const state: State = {
+        native: payload.protocol === "responses",
         session: input.session.id,
         sequence: input.session.sequence,
         model: payload.model,
