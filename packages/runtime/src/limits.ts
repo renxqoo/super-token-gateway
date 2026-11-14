@@ -264,12 +264,84 @@ return {2,epoch}`,
   async health(providerId: string): Promise<{ open: boolean; latency: number }> {
     const shard = this.shard(`provider:${providerId}`);
     if (shard !== this) return shard.health(providerId);
-    const values = (await this.command("HMGET", [
+    const values = (await this.command("EVAL", [
+      `local t=redis.call('TIME')
+local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
+local h=redis.call('HMGET',KEYS[1],'open_until','latency','probe_until')
+local opened=tonumber(h[1] or '0')
+local open=opened>now or (opened~=0 and tonumber(h[3] or '0')>now)
+return {open and 1 or 0,h[2] or ''}`,
+      "1",
       `${this.namespace}:health:${providerId}`,
-      "open_until",
-      "latency",
-    ])) as (string | null)[];
-    return { open: Number(values[0] ?? 0) > Date.now(), latency: Number(values[1] ?? 100) };
+    ])) as [number, string];
+    return { open: Number(values[0]) === 1, latency: Number(values[1] || 100) };
+  }
+  async grantHealth(
+    providerId: string,
+    attemptId: string,
+    owner: string,
+    leaseMs: number,
+  ): Promise<boolean> {
+    const shard = this.shard(`provider:${providerId}`);
+    if (shard !== this) return shard.grantHealth(providerId, attemptId, owner, leaseMs);
+    const granted = await this.command("EVAL", [
+      `local existing=redis.call('GET',KEYS[2])
+if existing then return string.sub(existing,1,string.len(ARGV[3])+1)==ARGV[3]..'|' and 1 or 0 end
+local t=redis.call('TIME')
+local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
+local health=redis.call('HMGET',KEYS[1],'open_until','epoch','probe_until')
+local opened=tonumber(health[1] or '0')
+local epoch=health[2]
+if not epoch then epoch=ARGV[1] redis.call('HSET',KEYS[1],'epoch',epoch) redis.call('EXPIRE',KEYS[1],600) end
+local mode='closed'
+if opened~=0 then
+  if opened>now or tonumber(health[3] or '0')>now then return 0 end
+  redis.call('HSET',KEYS[1],'probe_until',now+tonumber(ARGV[2]),'probe_token',ARGV[1])
+  local retention=tonumber(ARGV[2])+600000
+  if redis.call('PTTL',KEYS[1])<retention then redis.call('PEXPIRE',KEYS[1],retention) end
+  mode='probe'
+end
+redis.call('SET',KEYS[2],ARGV[3]..'|'..mode..'|'..epoch,'PX',tonumber(ARGV[2]))
+return 1`,
+      "2",
+      `${this.namespace}:health:${providerId}`,
+      `${this.namespace}:health:${providerId}:attempt:${attemptId}`,
+      attemptId,
+      String(Math.max(1000, Math.ceil(leaseMs))),
+      owner,
+    ]);
+    return Number(granted) === 1;
+  }
+  async settleHealth(
+    providerId: string,
+    attemptId: string,
+    owner: string,
+    observation?: { failed: boolean; latency: number },
+  ): Promise<boolean> {
+    const shard = this.shard(`provider:${providerId}`);
+    if (shard !== this) return shard.settleHealth(providerId, attemptId, owner, observation);
+    const record = (await this.command("EVAL", [
+      `local value=redis.call('GET',KEYS[2])
+if not value or string.sub(value,1,string.len(ARGV[2])+1)~=ARGV[2]..'|' then return false end
+redis.call('DEL',KEYS[2])
+if redis.call('HGET',KEYS[1],'probe_token')==ARGV[1] and ARGV[3]=='1' then redis.call('HDEL',KEYS[1],'probe_until','probe_token') end
+return value`,
+      "2",
+      `${this.namespace}:health:${providerId}`,
+      `${this.namespace}:health:${providerId}:attempt:${attemptId}`,
+      attemptId,
+      owner,
+      observation ? "0" : "1",
+    ])) as string | null;
+    if (!record) return false;
+    const [, mode, epoch] = record.split("|");
+    if (observation)
+      await this.observe(providerId, observation.failed, observation.latency, 10_000, {
+        identity: attemptId,
+        halfOpen: mode === "probe",
+        epoch: epoch!,
+      });
+    return true;
   }
   async observe(
     providerId: string,

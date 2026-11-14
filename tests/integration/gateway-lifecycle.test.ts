@@ -65,17 +65,23 @@ test(
     ];
     return withGatewayStack(
       { reply: (call) => replies[call.index]!(), supplierCredit: "10000" },
-      async ({ db, received, send }) => {
-        for (let index = 0; index < replies.length; index++) {
-          const stream = index === replies.length - 1;
-          const response = await send({ stream });
-          const text = await response.text();
-          expect(response.status >= 400 || !text.includes("[DONE]")).toBe(true);
-          const outcome = await requestOutcome(db, response.headers.get("x-request-id")!);
-          expect(outcome.charged).toBe("0");
-          expect(outcome.state).not.toBe("SUCCEEDED");
+      async ({ f, db, setup, received, send }) => {
+        const redis = new RedisClient(process.env.REDIS_URL!);
+        try {
+          for (let index = 0; index < replies.length; index++) {
+            await redis.send("DEL", [`${f.namespace}:health:${setup.provider.id}`]);
+            const stream = index === replies.length - 1;
+            const response = await send({ stream });
+            const text = await response.text();
+            expect(response.status >= 400 || !text.includes("[DONE]")).toBe(true);
+            const outcome = await requestOutcome(db, response.headers.get("x-request-id")!);
+            expect(outcome.charged).toBe("0");
+            expect(outcome.state).not.toBe("SUCCEEDED");
+          }
+          expect(received).toHaveLength(replies.length);
+        } finally {
+          redis.close();
         }
-        expect(received).toHaveLength(replies.length);
       },
     );
   },
@@ -655,5 +661,92 @@ test(
       expect(received).toHaveLength(0);
       expect((await db`SELECT count(*)::integer n FROM billing_holds`)[0].n).toBe(0);
     }),
+  timeout,
+);
+
+test(
+  "three upstream 503 replies open the v2 channel circuit so the next request is refused without an upstream call, and one probe after cooldown closes it",
+  () => {
+    let healthy = false;
+    return withGatewayStack(
+      {
+        reply: () => (healthy ? chatReplies.json() : new Response("unavailable", { status: 503 })),
+        supplierCredit: "10000",
+      },
+      async ({ f, setup, received, send }) => {
+        const redis = new RedisClient(process.env.REDIS_URL!),
+          key = `${f.namespace}:health:${setup.provider.id}`;
+        try {
+          for (let i = 0; i < 3; i++) {
+            const response = await send();
+            expect(response.status).toBe(502);
+            expect((await response.json()).error.code).toBe("upstream_rejected");
+          }
+          expect(received).toHaveLength(3);
+          const refused = await send();
+          expect(refused.status).toBe(503);
+          expect((await refused.json()).error.code).toBe("no_route");
+          expect(received).toHaveLength(3);
+          healthy = true;
+          await redis.send("HSET", [key, "open_until", String(Date.now() - 1)]);
+          const probe = await send();
+          expect(probe.status).toBe(200);
+          await probe.text();
+          expect(received).toHaveLength(4);
+          expect(await redis.send("HMGET", [key, "fails", "open_until"])).toEqual(["0", "0"]);
+          expect((await send()).status).toBe(200);
+          expect(received).toHaveLength(5);
+        } finally {
+          redis.close();
+        }
+      },
+    );
+  },
+  timeout,
+);
+
+test(
+  "an admission the Gateway abandons after identity_busy releases its half-open probe instead of refusing the channel with no_route until the deadline",
+  () =>
+    withGatewayStack(
+      { reply: () => chatReplies.json() },
+      async ({ f, db, setup, received, send }) => {
+        const redis = new RedisClient(process.env.REDIS_URL!);
+        try {
+          await redis.send("HSET", [
+            `${f.namespace}:health:${setup.provider.id}`,
+            "open_until",
+            String(Date.now() - 1),
+            "fails",
+            "3",
+            "epoch",
+            "synthetic-epoch",
+          ]);
+          const locked = Promise.withResolvers<void>(),
+            release = Promise.withResolvers<void>();
+          const holder = db.begin(async (tx) => {
+            await tx`SELECT id FROM wallets WHERE project_id=${setup.project.id} FOR UPDATE`;
+            locked.resolve();
+            await release.promise;
+          });
+          await locked.promise;
+          try {
+            const busy = await send();
+            expect(busy.status).toBe(503);
+            await busy.text();
+          } finally {
+            release.resolve();
+            await holder;
+          }
+          expect(received).toHaveLength(0);
+          const probe = await send();
+          expect(probe.status).toBe(200);
+          await probe.text();
+          expect(received).toHaveLength(1);
+        } finally {
+          redis.close();
+        }
+      },
+    ),
   timeout,
 );

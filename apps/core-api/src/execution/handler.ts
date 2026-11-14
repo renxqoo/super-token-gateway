@@ -233,7 +233,14 @@ export function createExecutionHandler(
       });
       let computed: Record<string, unknown> = {},
         drafts: QuotaDescriptor[] = [],
-        proofDeadline = Number.POSITIVE_INFINITY;
+        proofDeadline = Number.POSITIVE_INFINITY,
+        health: { channel: string; attempt: string } | undefined;
+      const releaseHealth = async () => {
+        if (health)
+          await routingLimits
+            .settleHealth(health.channel, health.attempt, p.session_id)
+            .catch(() => {});
+      };
       if (kind === "execution_admit_v1" || kind === "execution_next_v1") {
         const data =
           kind === "execution_admit_v1"
@@ -339,26 +346,43 @@ export function createExecutionHandler(
           BigInt(Number.MAX_SAFE_INTEGER)
         )
           return rejected("quota_budget_exceeded");
-        for (const scope of scopes) {
-          const result = await quota
-            .acquire({
-              scope,
-              caller: `${p.service}:${p.instance_id}`,
-              kind,
-              command_id: e.command_id,
-              body_digest: e.body_digest,
-              owner_session_id: p.session_id,
-              deadline_ms: Date.parse(e.deadline_at),
-              tokens:
-                Number(tokenCount) *
-                (scope.kind === "channel" ? 1 : captured.execution_budget.max_attempts),
-            })
-            .catch((error: unknown) => {
-              if (error instanceof GatewayError && error.code === "rate_limited")
-                throw new Error("quota_unavailable");
-              throw error;
-            });
-          drafts.push(result.descriptor);
+        const channel = selected.ref.channel_id,
+          attempt = projection.proposed_attempt_id;
+        if (
+          !(await routingLimits.grantHealth(
+            channel,
+            attempt,
+            p.session_id,
+            Date.parse(e.deadline_at) - Date.now() + 10_000,
+          ))
+        )
+          throw new Error("no_route");
+        health = { channel, attempt };
+        try {
+          for (const scope of scopes) {
+            const result = await quota
+              .acquire({
+                scope,
+                caller: `${p.service}:${p.instance_id}`,
+                kind,
+                command_id: e.command_id,
+                body_digest: e.body_digest,
+                owner_session_id: p.session_id,
+                deadline_ms: Date.parse(e.deadline_at),
+                tokens:
+                  Number(tokenCount) *
+                  (scope.kind === "channel" ? 1 : captured.execution_budget.max_attempts),
+              })
+              .catch((error: unknown) => {
+                if (error instanceof GatewayError && error.code === "rate_limited")
+                  throw new Error("quota_unavailable");
+                throw error;
+              });
+            drafts.push(result.descriptor);
+          }
+        } catch (error) {
+          await releaseHealth();
+          throw error;
         }
         computed = {
           quote,
@@ -379,6 +403,18 @@ export function createExecutionHandler(
           throw new Error("quota_unavailable");
       } else if (kind === "execution_quota_v1") {
         const data = executionDataSchemas.execution_quota_v1.parse(d);
+        if (data.action === "OBSERVE") {
+          const observation = data.observation!;
+          await routingLimits.settleHealth(
+            observation.channel_id,
+            data.attempt_id,
+            p.session_id,
+            observation.outcome === "NOT_SENT"
+              ? undefined
+              : { failed: observation.outcome === "FAILURE", latency: observation.latency_ms },
+          );
+          return { state: "OBSERVED" };
+        }
         if (data.action === "CLOSE") {
           if (!data.reason) throw new Error("internal_request_invalid");
           const receipt = await store.closeQuota(p, e, data);
@@ -404,6 +440,7 @@ export function createExecutionHandler(
       try {
         const receipt = executionReceiptSchema.parse(result.receipt);
         if (receipt.command_state === "REJECTED") {
+          await releaseHealth();
           for (const draft of drafts)
             await quota
               .release(draft, {

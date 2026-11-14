@@ -59,6 +59,7 @@ type Candidate = ExecutionContextResponse["candidates"][number];
 type Plan = {
   attempt: Attempt;
   attemptId: string;
+  channelId: string;
   prepared: PreparedRequest;
   outbound: Uint8Array;
   url: URL;
@@ -66,6 +67,7 @@ type Plan = {
   dispatch: Record<string, unknown> & { dispatched_digest: string; prep_session_id: string };
 };
 type Permit = { attemptId: string; permitEpoch: string };
+type HealthOutcome = "SUCCESS" | "FAILURE" | "NOT_SENT";
 type Admitted = Plan & Permit & { begin: Record<string, string> };
 type CloseReason = "COMPLETED" | "FAILED" | "CANCELLED" | "DRAINED";
 type Ending =
@@ -74,6 +76,7 @@ type Ending =
 type Outcome = { response: Response } | { retry: GatewayError };
 
 const retryableStatuses = new Set([401, 403, 404, 408, 409, 429, 500, 502, 503, 504, 529]);
+const unhealthyStatuses = new Set([401, 403, 408, 409, 429, 500, 502, 503, 504, 529]);
 const maxOrdinal = 5;
 
 export function createSendRegistry() {
@@ -247,6 +250,7 @@ async function plan(
     return {
       attempt,
       attemptId,
+      channelId: candidate.ref.channel_id,
       prepared,
       outbound,
       url,
@@ -317,6 +321,11 @@ async function reserve(
         ))) as ExecutionReply;
   } catch (error) {
     planned.attempt.dispose();
+    const abandoned = {
+      attemptId: planned.attemptId,
+      permitEpoch: "1",
+      channelId: planned.channelId,
+    };
     if (
       !(error instanceof CoreRpcError) ||
       (error.detail.command_state === "UNKNOWN" && error.detail.retryability !== "NONE")
@@ -326,17 +335,25 @@ async function reserve(
         previous ? "execution_next_v1" : "execution_admit_v1",
         commandId,
       );
-      if (receipt?.command_state === "COMMITTED" && receipt.state === "RESERVED")
+      if (receipt?.command_state === "COMMITTED" && receipt.state === "RESERVED") {
         await abortBeforeSend(
           deps,
-          { attemptId: planned.attemptId, permitEpoch: receipt.permit_epoch ?? "1" },
+          { ...abandoned, permitEpoch: receipt.permit_epoch ?? "1" },
           "PREPARE_DISPOSED",
         );
+        throw coreFailure(error);
+      }
     }
+    await reportHealth(deps, abandoned, "NOT_SENT");
     throw coreFailure(error);
   }
   if (reply.receipt.state !== "RESERVED" || !reply.receipt.authorization_plan_digest) {
     planned.attempt.dispose();
+    await reportHealth(
+      deps,
+      { attemptId: planned.attemptId, permitEpoch: "1", channelId: planned.channelId },
+      "NOT_SENT",
+    );
     throw new GatewayError(503, "core_unavailable", "Execution authority is unavailable");
   }
   const permitEpoch = reply.receipt.permit_epoch ?? "1";
@@ -378,7 +395,7 @@ async function finalCommand(
 
 async function abortBeforeSend(
   deps: ChatDependencies,
-  permit: Permit,
+  permit: Permit & { channelId: string },
   reason: "CANCELLED" | "DEADLINE" | "PREPARE_DISPOSED",
 ) {
   await finalCommand(deps, "execution_abort_v1", {
@@ -387,6 +404,42 @@ async function abortBeforeSend(
     reason,
     close_request: true,
   });
+  await reportHealth(deps, permit, "NOT_SENT");
+}
+
+async function reportHealth(
+  deps: ChatDependencies,
+  permit: Permit & { channelId: string },
+  outcome: HealthOutcome,
+  latency = 0,
+) {
+  await deps.core
+    .execution(
+      "execution_quota_v1",
+      {
+        attempt_id: permit.attemptId,
+        permit_epoch: permit.permitEpoch,
+        action: "OBSERVE",
+        observation: {
+          channel_id: permit.channelId,
+          outcome,
+          latency_ms: Math.min(3_600_000, Math.max(0, Math.round(latency))),
+        },
+      },
+      shortDeadline(),
+    )
+    .catch(() => undefined);
+}
+
+function healthOutcome(
+  outcome: Omit<AttemptOutcome, "request_state">,
+  halted: boolean,
+): HealthOutcome {
+  if (outcome.attempt_state === "SUCCEEDED") return "SUCCESS";
+  const status = /^upstream_http_(\d+)$/.exec(outcome.error_code ?? "")?.[1];
+  if (status) return unhealthyStatuses.has(Number(status)) ? "FAILURE" : "SUCCESS";
+  if (halted || outcome.error_code === "evidence_unavailable") return "NOT_SENT";
+  return "FAILURE";
 }
 
 async function closeRequest(deps: ChatDependencies, permit: Permit, reason: CloseReason) {
@@ -513,6 +566,7 @@ async function dispatch(
     deps.grants.release(admitted.attemptId);
     await bridge.notExecuted(outcome).catch(() => undefined);
     bridge.dispose();
+    await reportHealth(deps, admitted, "NOT_SENT");
   };
   const beginCommand = crypto.randomUUID();
   let reply: ExecutionReply;
@@ -532,6 +586,7 @@ async function dispatch(
         deps.grants.release(admitted.attemptId);
         bridge.dispose();
         if (resolved === "absent") await abortBeforeSend(deps, admitted, "PREPARE_DISPOSED");
+        else await reportHealth(deps, admitted, "NOT_SENT");
       }
       throw unavailable;
     }
@@ -555,13 +610,21 @@ async function dispatch(
     throw halt(request).error(unavailable);
   }
   const stopRenewal = renewQuota(deps, admitted);
+  let started = performance.now();
   const end = async (ending: Ending) => {
     stopRenewal();
     deps.grants.release(admitted.attemptId);
+    const latency = performance.now() - started;
     try {
       await bridge.finish(ending.outcome);
     } finally {
       bridge.dispose();
+      await reportHealth(
+        deps,
+        admitted,
+        healthOutcome(ending.outcome, halt(request).halted),
+        latency,
+      );
       if (ending.kind === "final") await closeRequest(deps, admitted, ending.reason);
     }
   };
@@ -579,6 +642,7 @@ async function dispatch(
   };
   let response: Response;
   try {
+    started = performance.now();
     response = await deps.transport.fetch(
       admitted.url,
       {

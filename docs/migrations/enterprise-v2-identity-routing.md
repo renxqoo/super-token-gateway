@@ -11,7 +11,7 @@
 
 - **D1 管理面迁入 Core**：C14、C15、C17 缺失的路径在 Core `/admin` 以原路径与原请求体提供，复用同一 storage 函数；写操作要求 `catalog:manage`，读取新增平台权限 `catalog:read`（追加迁移替换授权枚举）；每个写与 `audit_events` 同事务。legacy 同名管理路由仍被 legacy 非 Chat 执行路径的测试装置使用，随 T16 清理旧 Store/execute 路径一并删除。
 - **D2 公开元数据与委派迁入 Core 公开监听**：C11、C12 在 e2 的公开监听实现，鉴权复用 `core_account_auth_v1`；角色规则与 legacy 相同：非 GET 需 ADMIN/INVOKER，BILLING 只访问 wallets/usage/requests/models，Key 管理仅 ADMIN。委派不得扩大 principal/model/operation/CIDR/配额/到期。Caddy 把这些路径改路由到 Core；公开角色仅获所需列权限。
-- **D3 熔断与延迟归 Core**：Core 在 `execution_admit_v1`/`execution_next_v1` 授予前为所选渠道取得健康许可（closed 或 half-open 探测，Redis 中按 attempt 记录模式与代次）；无许可时拒绝该候选。Gateway 在 `execution_next_v1`（上一 attempt）与 `execution_quota_v1 CLOSE`（最后 attempt）中附带已发送 attempt 的观测 `{failed, latency_ms}`，Core 以许可的模式/代次调用 `observe`；未发送的 attempt 不观测。失败分类沿用 legacy：可重试状态、401/403 与传输中断为失败。
+- **D3 熔断与延迟归 Core**：Core 在 `execution_admit_v1`/`execution_next_v1` 取得配额前为所选渠道取得健康许可：熔断关闭时为 closed 许可，冷却结束后只有一个 attempt 获得 half-open 探测许可；许可模式、熔断代次与持有会话以 attempt 为键写入 Redis（租期为命令期限 + 10 秒），同一 attempt 重放命令复用原许可。无许可返回 `no_route`；配额获取失败或准入被拒时立即释放许可。context 把熔断打开或探测进行中的渠道视为不健康。Gateway 对每个 attempt 以 `execution_quota_v1` 的 `OBSERVE` 动作（附 `channel_id`、`outcome`、`latency_ms`，不持久化为命令）上报一次：已发送 attempt 为 `SUCCESS`/`FAILURE`，未发送、被取消或证据通道故障为 `NOT_SENT`（只释放许可）。Core 只接受许可持有会话的首个观测，按许可模式与代次调用 `observe`，旧代次与非探测者的观测被丢弃。失败分类沿用 legacy：408/409/429/500/502/503/504/529、401/403 与传输/读取中断为失败，其他 HTTP 拒绝与成功响应为成功。
 - **D4 Retry-After**：v2 不对同一渠道在单请求内重试，Retry-After 不延长期限也不阻塞其他渠道；作为有意差异记录，不实现等待。
 - **D5 Redis 丢失**：配额或健康 Redis 不可用时 context/准入 fail-closed（不授予发送许可），恢复后无需重启即可继续；以真实 Redis 停止/恢复之外的可控手段（指向不可达端口的独立 Core）验证。
 
@@ -47,3 +47,29 @@
 | 缺陷     | 首次实现委派返回 500：`audit_configuration` 触发器以调用者权限写 `audit_events`，公开角色无 INSERT；补列级授权后通过                                                                                                                                                             |
 | 红绿证据 | 以 HEAD 版本公开监听运行，前 2 例失败（权限边界例在 HEAD 已成立）；恢复后 3 例通过                                                                                                                                                                                               |
 | 产物     | `verify-catalog-artifact.ts` 对编译后 Core 公开面的 models/usage/project keys 校验未知 Key 返回 401                                                                                                                                                                              |
+
+## 6. g3 实施记录
+
+| 项          | 结果                                                                                                                                                                                                                                                                              |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 运行时      | `Limits.grantHealth` 以 attempt 为键原子取得 closed/探测许可并记录模式、代次与持有会话；同一会话同一 attempt 重放复用许可；`settleHealth` 只接受持有会话的首个结算，按记录的模式与代次调用 `observe`，`NOT_SENT` 只释放探测；`health` 把探测进行中的半开渠道视为不健康            |
+| Core        | admit/next 在配额前取得健康许可，无许可返回 `no_route`；配额失败或准入被拒时释放；`execution_quota_v1` 新增 `OBSERVE` 动作（`observation` 与 `OBSERVE` 互为必需），不写命令表                                                                                                     |
+| Gateway     | 每个已发送 attempt 在 `end` 中上报 `SUCCESS`/`FAILURE` 与从发送到结束的延迟；未发送、中止、取消、证据通道故障与放弃的准入上报 `NOT_SENT`                                                                                                                                          |
+| 配置复核    | begin 在准入后重读 Key、项目、渠道、路由、模型与上游账户状态（已有实现），新增 6 例固定该行为且断言许可停留在 RESERVED                                                                                                                                                            |
+| Redis 丢失  | 经可切断/恢复的 TCP 代理连接 Redis 的 Core：切断后 context 与 admit 返回 `identity_store_unavailable`（SAME_COMMAND），命令未持久化、无持有；恢复后无需重启，同一 admit 命令成功                                                                                                  |
+| 测试        | `core-routing-health.test.ts` 9 例（熔断打开、旧代次与非持有会话观测被丢弃、单探测、`NOT_SENT` 释放、LEAST_LATENCY 按观测延迟排序、Redis 丢失与恢复、begin 复核 ×6）；`gateway-lifecycle.test.ts` 新增真实上游 503 三次打开熔断且第 4 次不调用上游、冷却后探测成功关闭熔断        |
+| 既有用例    | “空 choices 等不按成功计费”连续 5 次无效响应会在第 3 次后打开熔断，该用例关注计费，改为每次请求前清除该渠道健康状态                                                                                                                                                               |
+| 红绿证据    | 生产代码还原为 HEAD 时熔断/LEAST_LATENCY 3 例失败，恢复后通过；Redis 丢失与 begin 复核用例在 HEAD 已成立，作为行为约束保留                                                                                                                                                        |
+| 缺陷        | Gateway 在 `identity_busy` 等错误后放弃准入时不释放已授予的半开探测，渠道在命令期限 + 10 秒内一直 `no_route`。回归用例“an admission the Gateway abandons after identity_busy releases its half-open probe…”修复前返回 503、修复后 200；修复为 `reserve` 放弃准入时上报 `NOT_SENT` |
+| Retry-After | 按 D4 不实现单请求内同渠道等待；总期限由请求 deadline 约束                                                                                                                                                                                                                        |
+
+## 7. g4 审查与验收记录
+
+审查由实现者自审完成，不是独立审查。
+
+| 检查项   | 结论                                                                                                                                                                                                                            |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 许可泄漏 | 逐条核对 Gateway 每条放弃路径：准入失败（含状态未知、查询失败、非 RESERVED 回执）、begin 失败/未知、未发送、证据故障、取消，均上报 `NOT_SENT` 或观测；Core 侧配额失败与准入被拒即时释放；其余由记录租期（命令期限 + 10 秒）兜底 |
+| 自审发现 | begin 结果查询仍未知时 Gateway 不发送也不释放许可，已补 `NOT_SENT`；该路径依赖提交 ACK 丢失注入，由既有“lost begin acknowledgement”用例覆盖执行，未单独断言健康状态                                                             |
+| 安全     | 观测只结算持有会话的记录，伪造 `channel_id`/attempt 找不到记录即无效果；公开角色仍不能读 verifier 与审计                                                                                                                        |
+| 门禁     | `bun run verify` exit 0：类型检查 270 文件无错、fmt/lint 通过、单测 321 pass、集成 561 pass、构建与三组产物检查（7/14/10 项）通过                                                                                               |

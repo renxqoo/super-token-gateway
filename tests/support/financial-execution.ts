@@ -24,6 +24,7 @@ export async function withFinancial(
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
     managementFactory?: typeof createCoreManagementApplication;
     account?: { trustedProxyCidrs: string[] };
+    redisUrl?: string;
   } = {},
 ) {
   const namespace = `financial_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -63,7 +64,7 @@ export async function withFinancial(
       execution: {
         pepper: syntheticPepper,
         encryptionKey: financialKey,
-        redisUrls: [process.env.REDIS_URL!],
+        redisUrls: [options.redisUrl ?? process.env.REDIS_URL!],
         quotaNamespace: namespace,
         quotaGeneration: "v1",
         maxAttempts: 3,

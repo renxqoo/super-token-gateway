@@ -114,12 +114,21 @@ export const executionDataSchemas = {
     ]),
     command_id: internalUuidSchema,
   }),
-  execution_quota_v1: z.strictObject({
-    attempt_id: internalUuidSchema,
-    permit_epoch: atomsSchema,
-    action: z.enum(["ADOPT", "RENEW", "CLOSE", "RELEASE"]),
-    reason: z.enum(["COMPLETED", "FAILED", "CANCELLED", "DRAINED"]).optional(),
-  }),
+  execution_quota_v1: z
+    .strictObject({
+      attempt_id: internalUuidSchema,
+      permit_epoch: atomsSchema,
+      action: z.enum(["ADOPT", "RENEW", "CLOSE", "RELEASE", "OBSERVE"]),
+      reason: z.enum(["COMPLETED", "FAILED", "CANCELLED", "DRAINED"]).optional(),
+      observation: z
+        .strictObject({
+          channel_id: internalUuidSchema,
+          outcome: z.enum(["SUCCESS", "FAILURE", "NOT_SENT"]),
+          latency_ms: z.number().int().min(0).max(3_600_000),
+        })
+        .optional(),
+    })
+    .refine((value) => (value.action === "OBSERVE") === (value.observation !== undefined)),
 } as const;
 export const pluginPackageDataSchema = z.strictObject({ digest: digestSchema });
 export const pluginPackageMaxBytes = 46137344;

@@ -507,6 +507,9 @@ export async function tcpProxy(target: URL) {
       open = false;
       for (const socket of sockets) socket.destroy();
     },
+    resume() {
+      open = true;
+    },
     async close() {
       open = false;
       for (const socket of sockets) socket.destroy();
