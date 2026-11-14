@@ -48,6 +48,7 @@ const contextSchema = z.object({
   permit_state: z.string().nullable().optional(),
   execution_closed: z.boolean().nullable().optional(),
   max_output_tokens: z.number().int().positive(),
+  batch: z.object({ items: z.number().int().min(1).max(50000) }).optional(),
   routing_strategy: z.enum(["WEIGHTED", "ROUND_ROBIN", "LEAST_LATENCY"]),
   execution_budget: z.object({ max_attempts: z.number().int().min(1).max(5) }),
   project_id: z.string(),
@@ -302,6 +303,8 @@ export function createExecutionHandler(
           await limitResource(`key:${String(result.key_id)}`, limits.key);
           await limitResource(`channel:${String(result.channel_id)}`, limits.channel);
         }
+        if (data.action === "files")
+          return { resolution, state: result.state, files: result.files };
         if (result.state !== "GRANTED" || !data.auth) return { resolution, state: result.state };
         return {
           resolution,
@@ -401,7 +404,9 @@ export function createExecutionHandler(
             data.manifest.operation,
           ) &&
             output === undefined) ||
-          (output !== undefined && BigInt(output) > BigInt(captured.max_output_tokens))
+          (output !== undefined &&
+            BigInt(output) >
+              BigInt(captured.max_output_tokens) * BigInt(captured.batch?.items ?? 1))
         )
           return rejected("output_bound");
         if (

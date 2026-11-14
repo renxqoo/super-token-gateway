@@ -1,7 +1,7 @@
 {
   "format": 1,
   "id": "gateway.openai-chat",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "abi_version": 1,
   "sdk_version": "1.0.0",
   "module": "module.wasm",
@@ -19,7 +19,8 @@
       "speech",
       "transcription",
       "translation",
-      "files"
+      "files",
+      "batches"
     ],
     "dimensions": [
       "input_tokens",

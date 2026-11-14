@@ -206,6 +206,15 @@
           "checksum": "e53ac514a5b4d97d58285d918a8c61e5fbeb0e998c9debc7f695a64ee4e47bbc"
         }
       ]
+    },
+    {
+      "version": 2026111221,
+      "files": [
+        {
+          "path": "./sql/core-batches.sql",
+          "checksum": "850ca9ecf69ef43226eda4cd5261126af87e1a45e6ea1ce4aa1f7ef5bb5a6b5e"
+        }
+      ]
     }
   ]
 }

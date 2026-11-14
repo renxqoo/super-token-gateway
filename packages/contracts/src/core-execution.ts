@@ -28,7 +28,26 @@ export const executionKinds = [
   "execution_resource_release_v1",
 ] as const;
 export const resourceKinds = ["response", "file", "batch", "video"] as const;
-export const resourceActions = ["get", "delete", "cancel", "content", "input_items"] as const;
+export const resourceActions = [
+  "get",
+  "delete",
+  "cancel",
+  "content",
+  "input_items",
+  "files",
+] as const;
+export const batchEndpoints = {
+  "/v1/chat/completions": "chat",
+  "/v1/responses": "responses",
+  "/v1/embeddings": "embeddings",
+  "/v1/completions": "completions",
+  "/v1/moderations": "moderations",
+  "/v1/images/generations": "images",
+  "/v1/images/edits": "image_edits",
+} as const;
+const batchEndpointSchema = z.enum(
+  Object.keys(batchEndpoints) as [keyof typeof batchEndpoints, ...(keyof typeof batchEndpoints)[]],
+);
 export const publicResourceIdSchema = z
   .string()
   .regex(/^(response|file|batch|video)_[0-9a-f]{32}$/);
@@ -96,7 +115,11 @@ export const executionDataSchemas = {
         .max(16)
         .optional(),
     })
-    .refine((value) => value.model !== undefined || value.operation === "files"),
+    .refine((value) =>
+      value.operation === "batches"
+        ? value.model === undefined && value.resource_ids?.length === 1
+        : value.model !== undefined || value.operation === "files",
+    ),
   execution_admit_v1: z.strictObject({
     ...dispatch,
     project_id: internalUuidSchema,
@@ -157,14 +180,28 @@ export const executionDataSchemas = {
     kind: z.enum(resourceKinds),
     remote_id: opaqueResourceIdSchema,
     state: z.enum(["ACTIVE", "COMPLETED", "FAILED", "CANCELLED"]),
+    batch: z
+      .strictObject({
+        endpoint: batchEndpointSchema,
+        upstream_model: z.string().min(1).max(200),
+        items: z.number().int().min(1).max(50000),
+        ids_sha256: digestSchema,
+        ceilings: usageSchema,
+        images: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+      })
+      .optional(),
+    input_file_id: publicResourceIdSchema.optional(),
   }),
-  execution_resource_v1: z.strictObject({
-    ...customerCredential,
-    resource_id: publicResourceIdSchema,
-    action: z.enum(resourceActions),
-    auth: dispatchAuthSchema.optional(),
-    granted_command_id: internalUuidSchema.optional(),
-  }),
+  execution_resource_v1: z
+    .strictObject({
+      ...customerCredential,
+      resource_id: publicResourceIdSchema,
+      action: z.enum(resourceActions),
+      auth: dispatchAuthSchema.optional(),
+      granted_command_id: internalUuidSchema.optional(),
+      remote_ids: z.array(opaqueResourceIdSchema).min(1).max(3).optional(),
+    })
+    .refine((value) => (value.action === "files") === (value.remote_ids !== undefined)),
   execution_resource_list_v1: z.strictObject({
     ...customerCredential,
     kind: z.enum(resourceKinds),
@@ -301,6 +338,13 @@ export const executionContextResponseSchema = z.strictObject({
       z.strictObject({ resource_id: publicResourceIdSchema, remote_id: opaqueResourceIdSchema }),
     )
     .max(16)
+    .optional(),
+  batch: z
+    .strictObject({
+      endpoint: batchEndpointSchema,
+      ceilings: usageSchema,
+      items: z.number().int().min(1).max(50000),
+    })
     .optional(),
 });
 export const executionReplySchema = z.strictObject({
@@ -457,11 +501,20 @@ export const resourceResolutionSchema = z.strictObject({
   config: z.record(z.string(), z.unknown()),
   origin: z.string().max(250),
   deadline_at: internalInstantSchema,
+  batch: z
+    .strictObject({
+      endpoint: batchEndpointSchema,
+      items: z.number().int().min(1).max(50000),
+      ids_sha256: digestSchema,
+    })
+    .nullable()
+    .optional(),
 });
 export const resourcePermitResponseSchema = z.strictObject({
   resolution: resourceResolutionSchema,
   state: z.enum(["RESOLVED", "GRANTED", "REPLAYED", "DELETED"]),
   auth_material: transientSendSchema.shape.auth_material.optional(),
+  files: z.record(opaqueResourceIdSchema, publicResourceIdSchema).optional(),
 });
 export const resourceClaimResponseSchema = z.strictObject({
   leases: z

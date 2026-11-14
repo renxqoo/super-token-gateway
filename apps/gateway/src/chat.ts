@@ -31,6 +31,13 @@ import type { GatewayConfig } from "./config.ts";
 import type { createPackageCache } from "./packages.ts";
 import { collectReferences, type Reference } from "./references.ts";
 import { encodeForm, readForm, type FormFiles } from "./form.ts";
+import {
+  exposeBatchFiles,
+  parseBatchInput,
+  prepareBatchRows,
+  type BatchInput,
+  type BatchRecord,
+} from "./batches.ts";
 import { requestAsChat, responseFromChat, streamFromChat } from "./protocols.ts";
 
 export type ChatDependencies = {
@@ -71,6 +78,8 @@ type Facts = {
   requestId: string;
   references: Reference[];
   background: boolean;
+  batch: BatchInput | undefined;
+  batchEndpoint: string | undefined;
 };
 type Candidate = ExecutionContextResponse["candidates"][number];
 type Plan = {
@@ -83,6 +92,8 @@ type Plan = {
   url: URL;
   headers: Record<string, string>;
   dispatch: Record<string, unknown> & { dispatched_digest: string; prep_session_id: string };
+  commit: { batch: BatchRecord } | { input_file_id: string } | undefined;
+  files: Map<string, string>;
 };
 type Permit = { attemptId: string; permitEpoch: string };
 type HealthOutcome = "SUCCESS" | "FAILURE" | "NOT_SENT";
@@ -190,24 +201,46 @@ async function requestFacts(request: ChatRequest, totalTimeoutMs: number): Promi
       throw new GatewayError(400, "invalid_request", "Request body must be a JSON object");
     value = parsed;
   }
-  const references = collectReferences(
-    value,
-    (request.operation === "responses" || request.operation === "chat") && !files,
-  );
-  const model = request.path ? request.path.model : value.model;
+  const fields = value as Record<string, unknown>;
+  let references: Reference[],
+    batch: BatchInput | undefined,
+    batchEndpoint: string | undefined,
+    model = request.path ? request.path.model : value.model;
+  if (request.operation === "batches") {
+    const input = fields.input_file_id;
+    if (typeof input !== "string" || !/^file_[0-9a-f]{32}$/.test(input))
+      throw new GatewayError(400, "invalid_request", "input_file_id must name an uploaded file");
+    if (typeof fields.endpoint !== "string")
+      throw new GatewayError(400, "invalid_request", "endpoint is required");
+    if (model !== undefined)
+      throw new GatewayError(400, "invalid_request", "model is taken from the input file");
+    collectReferences({ ...fields, input_file_id: undefined }, false);
+    references = [{ pointer: "/input_file_id", resourceId: input }];
+    batchEndpoint = fields.endpoint;
+  } else
+    references = collectReferences(
+      value,
+      (request.operation === "responses" || request.operation === "chat") && !files,
+    );
   if (request.operation === "files") {
-    const purpose = (value as Record<string, unknown>).purpose;
+    const purpose = fields.purpose;
     if (!files || typeof purpose !== "string")
       throw new GatewayError(400, "invalid_request", "A multipart file and purpose are required");
-    if (purpose === "batch")
-      throw new GatewayError(
-        422,
-        "unsupported_semantics",
-        "Batch input files are not yet available through this route",
-      );
     if (model !== undefined && (typeof model !== "string" || !model))
       throw new GatewayError(400, "invalid_request", "model must be a non-empty string");
-  } else if (typeof model !== "string" || !model)
+    if (purpose === "batch") {
+      const descriptor = fields.file;
+      const data =
+        typeof descriptor === "object" && descriptor !== null && !Array.isArray(descriptor)
+          ? files.get(canonical(descriptor as Parameters<typeof canonical>[0]))?.[0]
+          : undefined;
+      if (!data) throw new GatewayError(400, "invalid_request", "A batch upload requires one file");
+      batch = parseBatchInput(data);
+      if (model !== undefined && model !== batch.model)
+        throw new GatewayError(400, "invalid_batch", "model must match the batch requests");
+      model = batch.model;
+    }
+  } else if (request.operation !== "batches" && (typeof model !== "string" || !model))
     throw new GatewayError(400, "invalid_request", "A model is required");
   const protocol = (protocols as readonly string[]).includes(request.operation)
     ? (request.operation as Protocol)
@@ -224,10 +257,9 @@ async function requestFacts(request: ChatRequest, totalTimeoutMs: number): Promi
     deadlineAt: new Date(Date.now() + totalTimeoutMs).toISOString(),
     requestId: request.requestId,
     references,
-    background:
-      request.operation === "responses" &&
-      !files &&
-      (value as Record<string, unknown>).background === true,
+    background: request.operation === "responses" && !files && fields.background === true,
+    batch,
+    batchEndpoint,
   };
 }
 
@@ -305,6 +337,44 @@ async function plan(
         "unsupported_semantics",
         "Background responses are not available through this route",
       );
+    let document = converted ? undefined : resolvedDocument(facts, context),
+      files = facts.files,
+      commit: Plan["commit"];
+    if (context.batch) {
+      if (facts.batchEndpoint !== context.batch.endpoint)
+        throw new GatewayError(
+          400,
+          "invalid_batch",
+          "endpoint must match the requests in the input file",
+        );
+      commit = { input_file_id: facts.references[0]!.resourceId };
+    }
+    if (facts.batch && files && document) {
+      const rows = await prepareBatchRows(
+        facts.batch,
+        () =>
+          deps.host.create(pkg, {
+            tenant: context.project_id,
+            attempt: crypto.randomUUID(),
+            incarnation: context.owner.incarnation_id,
+            config: candidate.config,
+            deadlineAt: Date.parse(facts.deadlineAt),
+          }),
+        request.signal,
+      );
+      const view = JSON.parse(new TextDecoder().decode(document)) as {
+        file: { file: Record<string, unknown> };
+      };
+      const previous = canonical(view.file as Parameters<typeof canonical>[0]);
+      view.file = {
+        file: { ...view.file.file, bytes: rows.bytes.length, sha256: sha256(rows.bytes) },
+      };
+      files = new Map(files);
+      files.delete(previous);
+      files.set(canonical(view.file as Parameters<typeof canonical>[0]), [rows.bytes]);
+      document = new TextEncoder().encode(JSON.stringify(view));
+      commit = { batch: rows.record };
+    }
     const transformed = await attempt.transformJSON(
       "prepare",
       converted
@@ -319,9 +389,7 @@ async function plan(
               ? {}
               : { input_characters: String(facts.inputCharacters) }),
           },
-      converted
-        ? requestAsChat(request.body, source, facts.model, request.path)
-        : resolvedDocument(facts, context),
+      document ?? requestAsChat(request.body, source as Protocol, facts.model, request.path),
       request.signal,
     );
     const rejected = failure(transformed.result);
@@ -330,17 +398,17 @@ async function plan(
       transformed.result.kind !== "prepared" ||
       !transformed.body ||
       transformed.result.request.manifest.operation !== (converted ? "chat" : facts.operation) ||
-      (transformed.result.request.body_format === "multipart") !== Boolean(facts.files)
+      (transformed.result.request.body_format === "multipart") !== Boolean(files)
     )
       throw new GatewayError(502, "plugin_invalid", "The route's plugin did not prepare a request");
     const prepared = transformed.result.request,
       boundary = `stg-${attemptId.replaceAll("-", "")}`;
     let outbound = transformed.body;
-    if (facts.files)
+    if (files)
       try {
         outbound = encodeForm(
           JSON.parse(new TextDecoder().decode(transformed.body)),
-          facts.files,
+          files,
           boundary,
         );
       } catch {
@@ -360,9 +428,7 @@ async function plan(
     }
     const headers = {
       ...prepared.headers,
-      "content-type": facts.files
-        ? `multipart/form-data; boundary=${boundary}`
-        : "application/json",
+      "content-type": files ? `multipart/form-data; boundary=${boundary}` : "application/json",
     };
     const manifest = {
       version: 1,
@@ -373,7 +439,7 @@ async function plan(
       input_bytes: prepared.manifest.input_bytes,
       quantities: prepared.manifest.quantities ?? {},
       resource_ids: [],
-      ceilings: prepared.manifest.ceilings,
+      ceilings: context.batch ? context.batch.ceilings : prepared.manifest.ceilings,
       ...(prepared.manifest.images === undefined ? {} : { images: prepared.manifest.images }),
       ...(facts.inputCharacters === undefined
         ? {}
@@ -399,6 +465,10 @@ async function plan(
     });
     const prepSessionId = crypto.randomUUID();
     return {
+      commit,
+      files: new Map(
+        (context.resources ?? []).map((resource) => [resource.remote_id, resource.resource_id]),
+      ),
       converted: converted ? source : undefined,
       attempt,
       attemptId,
@@ -544,6 +614,7 @@ function createdResource(facts: Facts, admitted: Admitted) {
   if (admitted.converted) return undefined;
   if (facts.operation === "responses") return publicResourceId("response", facts.requestId);
   if (facts.operation === "files") return publicResourceId("file", facts.requestId);
+  if (facts.operation === "batches") return publicResourceId("batch", facts.requestId);
   return undefined;
 }
 
@@ -567,6 +638,7 @@ async function commitResource(
           kind: declared.kind,
           remote_id: declared.remote_id,
           state,
+          ...admitted.commit,
         },
         shortDeadline(),
       )) as { resource_id: string };
@@ -1030,7 +1102,8 @@ async function relayJSON(
     result.kind !== "output" ||
     !result.terminal ||
     !transformed.body ||
-    (pending && (!facts.background || !createdResource(facts, admitted)))
+    (pending &&
+      (!(facts.background || facts.operation === "batches") || !createdResource(facts, admitted)))
   )
     return finalFailure(
       { attempt_state: "UNKNOWN", error_code: "upstream_invalid" },
@@ -1064,7 +1137,9 @@ async function relayJSON(
   }
   const body = admitted.converted
     ? responseFromChat(transformed.body, admitted.converted, facts.model)
-    : transformed.body;
+    : facts.operation === "batches"
+      ? exposeBatchFiles(transformed.body, admitted.files)
+      : transformed.body;
   return new Response(body.slice(), {
     status: 200,
     headers: { "content-type": "application/json", "x-request-id": facts.requestId },

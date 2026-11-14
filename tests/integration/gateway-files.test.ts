@@ -42,7 +42,7 @@ function reply(call: UpstreamCall) {
 }
 
 test(
-  "uploaded files get a gateway identity, are retrieved, streamed, listed, referenced and deleted on their original channel, and batch input is refused until it can be validated",
+  "uploaded files get a gateway identity, are retrieved, streamed, listed, referenced and deleted on their original channel, and malformed batch input is refused before reaching the upstream",
   () =>
     withGatewayStack({ reply, supplierCredit: "1000000" }, async (stack) => {
       await allowOperation(stack, "files");
@@ -108,9 +108,9 @@ test(
 
       const before = stack.received.length;
       const batch = await upload("batch");
-      expect(batch.status).toBe(422);
+      expect(batch.status).toBe(400);
       expect(((await batch.json()) as { error: { code: string } }).error.code).toBe(
-        "unsupported_semantics",
+        "invalid_batch",
       );
       const project = z.object({ id: z.uuid() }).parse(
         (

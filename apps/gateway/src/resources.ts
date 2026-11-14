@@ -5,6 +5,7 @@ import {
   type TransientSend,
 } from "@gateway/contracts";
 import { readBounded, validateBaseUrl } from "@gateway/runtime";
+import { batchFiles, exposeBatchFiles } from "./batches.ts";
 import { authorize, coreFailure, type ChatDependencies } from "./chat.ts";
 
 type ResourceKind = (typeof resourceKinds)[number];
@@ -184,7 +185,21 @@ export async function executeResource(
         action,
         granted_command_id: commandId,
       });
-    return new Response(transformed.body.slice(), {
+    let body = transformed.body;
+    if (resolution.kind === "batch") {
+      const remote = [...new Set(Object.values(batchFiles(body).files))];
+      const mapped = remote.length
+        ? (
+            (await permit(deps, request, {
+              resource_id: resourceId,
+              action: "files",
+              remote_ids: remote,
+            })) as Permit & { files?: Record<string, string> }
+          ).files
+        : {};
+      body = exposeBatchFiles(body, new Map(Object.entries(mapped ?? {})));
+    }
+    return new Response(body.slice(), {
       status: 200,
       headers: { "content-type": "application/json", "x-request-id": request.requestId },
     });

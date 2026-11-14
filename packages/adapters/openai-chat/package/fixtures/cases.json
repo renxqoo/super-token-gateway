@@ -1810,12 +1810,12 @@
       ]
     },
     {
-      "name": "resource kinds other than responses and files are unsupported",
+      "name": "resource kinds other than responses, files and batches are unsupported",
       "steps": [
         {
           "action": "invoke",
           "hook": "resource_prepare",
-          "input": "eyJraW5kIjogImJhdGNoIiwgImFjdGlvbiI6ICJnZXQiLCAicmVtb3RlX2lkIjogImJhdGNoLTEifQ==",
+          "input": "eyJraW5kIjogInZpZGVvIiwgImFjdGlvbiI6ICJnZXQiLCAicmVtb3RlX2lkIjogInZpZGVvLTEifQ==",
           "expected": {
             "abi_version": 1,
             "kind": "failure",
@@ -2077,6 +2077,174 @@
             }
           },
           "expected_body": "eyJpZCI6ImZpbGVfMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJvYmplY3QiOiJmaWxlIiwiYnl0ZXMiOjMsImZpbGVuYW1lIjoiYS5qc29ubCIsInB1cnBvc2UiOiJhc3Npc3RhbnRzIiwic3RhdHVzIjoicHJvY2Vzc2VkIn0="
+        }
+      ]
+    },
+    {
+      "name": "a batch is created against the upstream batches path and metered as one request",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "batches",
+            "model": "logical"
+          },
+          "body": "eyJpbnB1dF9maWxlX2lkIjoiZmlsZS1pbiIsImVuZHBvaW50IjoiL3YxL2NoYXQvY29tcGxldGlvbnMiLCJjb21wbGV0aW9uX3dpbmRvdyI6IjI0aCJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1/batches",
+              "auth": {
+                "type": "bearer"
+              },
+              "manifest": {
+                "operation": "batches",
+                "model": "logical",
+                "upstream_model": "upstream",
+                "stream": false,
+                "ceilings": {
+                  "requests": "1"
+                }
+              }
+            }
+          },
+          "expected_body": "eyJpbnB1dF9maWxlX2lkIjoiZmlsZS1pbiIsImVuZHBvaW50IjoiL3YxL2NoYXQvY29tcGxldGlvbnMiLCJjb21wbGV0aW9uX3dpbmRvdyI6IjI0aCJ9"
+        }
+      ]
+    },
+    {
+      "name": "a batch body naming a model is invalid",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "batches",
+            "model": "logical"
+          },
+          "body": "eyJpbnB1dF9maWxlX2lkIjoiZmlsZS1pbiIsImVuZHBvaW50IjoiL3YxL2NoYXQvY29tcGxldGlvbnMiLCJjb21wbGV0aW9uX3dpbmRvdyI6IjI0aCIsIm1vZGVsIjoibG9naWNhbCJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 400,
+            "code": "invalid_request"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a created batch is answered with the gateway identity and stays pending",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "batches",
+            "model": "logical",
+            "resource_id": "batch_0123456789abcdef0123456789abcdef"
+          },
+          "body": "eyJpZCI6ImJhdGNoX2FiYyIsIm9iamVjdCI6ImJhdGNoIiwiZW5kcG9pbnQiOiIvdjEvY2hhdC9jb21wbGV0aW9ucyIsImlucHV0X2ZpbGVfaWQiOiJmaWxlLWluIiwic3RhdHVzIjoidmFsaWRhdGluZyIsIm91dHB1dF9maWxlX2lkIjpudWxsLCJlcnJvcl9maWxlX2lkIjpudWxsfQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "finality": "UNKNOWN",
+            "terminal": {
+              "kind": "pending",
+              "bytes": ""
+            },
+            "resource": {
+              "kind": "batch",
+              "remote_id": "batch_abc"
+            }
+          },
+          "expected_body": "eyJpZCI6ImJhdGNoXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwib2JqZWN0IjoiYmF0Y2giLCJlbmRwb2ludCI6Ii92MS9jaGF0L2NvbXBsZXRpb25zIiwiaW5wdXRfZmlsZV9pZCI6ImZpbGUtaW4iLCJzdGF0dXMiOiJ2YWxpZGF0aW5nIiwib3V0cHV0X2ZpbGVfaWQiOm51bGwsImVycm9yX2ZpbGVfaWQiOm51bGx9"
+        }
+      ]
+    },
+    {
+      "name": "batch resource actions map to the upstream batch paths",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "eyJraW5kIjogImJhdGNoIiwgImFjdGlvbiI6ICJnZXQiLCAicmVtb3RlX2lkIjogImJhdGNoX2FiYyJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "resource_request",
+            "request": {
+              "method": "GET",
+              "path": "/v1/batches/batch_abc",
+              "headers": {
+                "accept": "application/json"
+              },
+              "auth": {
+                "type": "bearer"
+              }
+            }
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "eyJraW5kIjogImJhdGNoIiwgImFjdGlvbiI6ICJjYW5jZWwiLCAicmVtb3RlX2lkIjogImJhdGNoX2FiYyJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "resource_request",
+            "request": {
+              "method": "POST",
+              "path": "/v1/batches/batch_abc/cancel",
+              "headers": {
+                "accept": "application/json"
+              },
+              "auth": {
+                "type": "bearer"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "batches cannot be deleted",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "eyJraW5kIjogImJhdGNoIiwgImFjdGlvbiI6ICJkZWxldGUiLCAicmVtb3RlX2lkIjogImJhdGNoX2FiYyJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 422,
+            "code": "unsupported_capability"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a retrieved batch is answered with the gateway identity",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "resource_response",
+          "metadata": {
+            "model": "logical",
+            "action": "get",
+            "resource_id": "batch_0123456789abcdef0123456789abcdef"
+          },
+          "body": "eyJpZCI6ImJhdGNoX2FiYyIsIm9iamVjdCI6ImJhdGNoIiwiZW5kcG9pbnQiOiIvdjEvY2hhdC9jb21wbGV0aW9ucyIsImlucHV0X2ZpbGVfaWQiOiJmaWxlLWluIiwic3RhdHVzIjoidmFsaWRhdGluZyIsIm91dHB1dF9maWxlX2lkIjpudWxsLCJlcnJvcl9maWxlX2lkIjpudWxsfQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "finality": "UNKNOWN",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            }
+          },
+          "expected_body": "eyJpZCI6ImJhdGNoXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwib2JqZWN0IjoiYmF0Y2giLCJlbmRwb2ludCI6Ii92MS9jaGF0L2NvbXBsZXRpb25zIiwiaW5wdXRfZmlsZV9pZCI6ImZpbGUtaW4iLCJzdGF0dXMiOiJ2YWxpZGF0aW5nIiwib3V0cHV0X2ZpbGVfaWQiOm51bGwsImVycm9yX2ZpbGVfaWQiOm51bGx9"
         }
       ]
     }
