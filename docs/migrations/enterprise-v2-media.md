@@ -34,3 +34,16 @@
 - **k2 音频**：`gateway.openai-chat` 1.4.0 同时声明 speech/transcription/translation 与 `characters`/`audio_ms`/`audio_seconds` 维度（M6）。时长由 guest 从数字字面量精确换算：`seconds` 须为普通小数（不接受指数形式，legacy 接受），超过 3 位小数时只记 `audio_seconds`。speech 只以 `stream_format: "sse"` 流式，`stream` 字段 422（legacy 曾把 `stream: true` 当作 SSE，但上游返回二进制会失败）；translation 不支持流式；文本格式转写走二进制转发，只记 `requests: 1`。
 - **测试**：`apps/gateway/src/__test__/form.test.ts` 5 例（表单视图、原文件逐字节重建、伪造/复制/丢弃文件与非字符串文本拒绝、单值字段重复 400、畸形 400）；openai-chat fixture 增至 50 cases/68 steps；`tests/integration/gateway-media.test.ts` 2 例：图片 n=2 预扣 100、交付 1 张只收 50、n=9 422、multipart 编辑原文件逐字节到上游、图片 SSE 终态保留；speech 二进制逐字节与 4 字符×3=12 结算、转写 0.125 秒=125ms 结算、文本翻译转发与按次结算、流式翻译 422、上游中途断开时客户端连接报错且请求 FAILED/0 收费、attempt `UNKNOWN`/`binary_interrupted`。`tests/support/gateway-process.ts` 记录上游原始字节并共享 `allowOperation`。
 - **k3 音乐**：按 M8 实现 `packages/adapters/minimax-music`（发行 `gateway.minimax-music-1.0.0`，加入 `bundledReleaseIds`、构建列表与 Caddy 分流），Gateway 新增 `POST /v1/music/generations`。上游 `base_resp.status_code`/`data.status` 以数字字面量比较。测试：插件 fixture 11 cases/11 steps（字段原样只换 model、流式/url/翻唱与未知字段 422、未映射模型、`music_duration` 记 `music_ms`、缺时长 UNKNOWN、非零状态码/未完成/空音频/小数时长）；`gateway-media.test.ts` 新增 1 例：真实 Gateway→插件→上游 JSON 原样返回、Bearer、只改写 model，按 25364ms×1/100 进位结算 254，流式 422 且不触达上游。绑定配置的 `model_map` 须等于路由的 `upstream_model`（Core 准入校验），否则 409 `candidate_stale`。未做真实 MiniMax 调用（T19）。
+
+## 5. k4 审查与验收记录
+
+审查由实现者自审完成，不是独立审查。
+
+| 检查项         | 结论                                                                                                                                                                                                                       |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 覆盖           | C04：图片 JSON/multipart/SSE、n 校验与每图预扣、按交付张数结算；C05：speech 二进制/SSE 与字符计费、转写/翻译 JSON 精确时长与文本格式；C26：music 公共操作、`music_ms` 计量与预扣、证据链（mock）。C07 视频按 M7 移至 T11。 |
+| 自审发现       | 二进制转发首版在上游中断时正常关闭客户端流，客户端无法区分截断与完整，已改为连接报错并有回归断言；插件 inspect 往返前更新帧序号导致重入失败，已修正（fixture 覆盖）。                                                      |
+| 安全           | multipart 文件部件只以摘要描述交给插件，重建时逐字段核对且每个原部件恰好一次，插件不能伪造、复制或丢弃文件；二进制响应 content-type 只透传白名单；插件声明的 `quantities`/`binary.usage` 维度与 `images` 由宿主校验。      |
+| 与 legacy 差异 | speech `stream: true` 422（改用 `stream_format: "sse"`）；时长不接受指数字面量；音乐流式、url 输出与翻唱 422。                                                                                                             |
+| 未验证         | 真实 OpenAI/Azure 媒体端点与真实 MiniMax 音乐未调用（T19）；`music_duration` 单位为推断；2026-08-20 起 MiniMax 付费音乐不向新用户开放，T19 可能受账号条件限制。                                                            |
+| 门禁           | k3 提交前 `bun run verify` exit 0：单测 352、集成 584、三组产物检查（7/14/10 项）通过。                                                                                                                                    |
