@@ -128,3 +128,25 @@ test(
     }),
   40000,
 );
+
+test("a quota limit reply is a 429 rate limit and does not drop other commands sharing the Redis connection", () =>
+  withQuota(async (q) => {
+    const full = input();
+    full.scope.concurrency = 1;
+    await q.acquire(full);
+    const others = Array.from({ length: 40 }, () => input());
+    const outcomes = await Promise.allSettled([
+      ...Array.from({ length: 20 }, () => q.acquire({ ...full, command_id: crypto.randomUUID() })),
+      ...others.map((command) => q.acquire(command)),
+    ]);
+    const limited = outcomes.slice(0, 20),
+      unrelated = outcomes.slice(20);
+    expect(unrelated.filter((o) => o.status === "rejected")).toEqual([]);
+    for (const outcome of limited) {
+      expect(outcome.status).toBe("rejected");
+      expect((outcome as PromiseRejectedResult).reason).toMatchObject({
+        status: 429,
+        code: "rate_limited",
+      });
+    }
+  }));

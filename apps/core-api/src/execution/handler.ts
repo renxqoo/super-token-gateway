@@ -10,6 +10,7 @@ import {
   hostAuthorizationPlanV1Schema,
   type ExecutionKind,
   type CoreVerifiedCallerProjection,
+  GatewayError,
 } from "@gateway/contracts";
 import {
   canonical,
@@ -335,18 +336,24 @@ export function createExecutionHandler(
         )
           return rejected("quota_budget_exceeded");
         for (const scope of scopes) {
-          const result = await quota.acquire({
-            scope,
-            caller: `${p.service}:${p.instance_id}`,
-            kind,
-            command_id: e.command_id,
-            body_digest: e.body_digest,
-            owner_session_id: p.session_id,
-            deadline_ms: Date.parse(e.deadline_at),
-            tokens:
-              Number(tokenCount) *
-              (scope.kind === "channel" ? 1 : captured.execution_budget.max_attempts),
-          });
+          const result = await quota
+            .acquire({
+              scope,
+              caller: `${p.service}:${p.instance_id}`,
+              kind,
+              command_id: e.command_id,
+              body_digest: e.body_digest,
+              owner_session_id: p.session_id,
+              deadline_ms: Date.parse(e.deadline_at),
+              tokens:
+                Number(tokenCount) *
+                (scope.kind === "channel" ? 1 : captured.execution_budget.max_attempts),
+            })
+            .catch((error: unknown) => {
+              if (error instanceof GatewayError && error.code === "rate_limited")
+                throw new Error("quota_unavailable");
+              throw error;
+            });
           drafts.push(result.descriptor);
         }
         computed = {

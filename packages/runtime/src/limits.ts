@@ -123,13 +123,19 @@ export class Limits {
           }, this.commandTimeoutMs);
         }),
       ]);
-    } catch {
-      if (this.redis === client && !this.closed) {
+    } catch (error) {
+      const replied = (error as { code?: unknown })?.code === "ERR_REDIS_SERVER_ERROR";
+      if (!replied && this.redis === client && !this.closed) {
         client.close();
         this.redis = this.client();
         this.connecting = undefined;
       }
-      throw new GatewayError(503, "rate_limit_unavailable", "Distributed admission is unavailable");
+      throw new GatewayError(
+        503,
+        "rate_limit_unavailable",
+        "Distributed admission is unavailable",
+        replied ? { cause: error } : undefined,
+      );
     } finally {
       clearTimeout(timer);
     }

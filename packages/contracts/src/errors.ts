@@ -3,8 +3,9 @@ export class GatewayError extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "GatewayError";
   }
 }

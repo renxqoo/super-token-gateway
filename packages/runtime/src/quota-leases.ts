@@ -1,3 +1,4 @@
+import { GatewayError } from "@gateway/contracts";
 import { Limits } from "./limits.ts";
 import { sha256 } from "./crypto.ts";
 export const quotaLeaseTiming = Object.freeze({
@@ -175,7 +176,15 @@ export function createQuotaLeases(options: {
       ...keys(d),
       action,
       JSON.stringify({ ...d, identity: identity(d), ...input }),
-    ]);
+    ]).catch((error: unknown) => {
+      if (error instanceof GatewayError && (error.cause as Error)?.message === "ERR QUOTA_LIMIT")
+        throw new GatewayError(
+          429,
+          "rate_limited",
+          "Request rate, token budget or concurrency limit reached",
+        );
+      throw error;
+    });
     const r = JSON.parse(String(result)) as QuotaDescriptor;
     const elapsed = performance.now() - started;
     const proofDeadline =

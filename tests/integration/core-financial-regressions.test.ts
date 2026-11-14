@@ -539,3 +539,35 @@ test(
     }),
   30000,
 );
+
+test("an admission beyond channel concurrency reports retryable quota_unavailable instead of identity_store_unavailable", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap(),
+      client = f.client();
+    await client.startup();
+    expect(
+      await f.request(`/projects/${setup.project.id}/credits`, {
+        external_ref: "concurrency-headroom",
+        currency: "USD",
+        amount_atoms: "1000",
+        kind: "CASH",
+      }),
+    ).toMatchObject({ status: 201 });
+    for (let i = 0; i < 10; i++) await (await prepareFinancialAdmission(setup, client)).admit();
+    const limited = await (
+      await prepareFinancialAdmission(setup, client)
+    )
+      .admit()
+      .catch((error: unknown) => error);
+    expect(limited).toBeInstanceOf(CoreRpcError);
+    expect((limited as CoreRpcError).status).toBe(503);
+    expect((limited as CoreRpcError).detail).toMatchObject({
+      code: "quota_unavailable",
+      retryability: "SAME_COMMAND",
+    });
+    expect(
+      (
+        await db`SELECT count(*)::integer n FROM billing_holds h JOIN wallets w ON w.id=h.wallet_id WHERE w.project_id=${setup.project.id}`
+      )[0].n,
+    ).toBe(10);
+  }));
