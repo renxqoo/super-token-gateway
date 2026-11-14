@@ -35,6 +35,7 @@ export async function withIdentity(
     challengeTtl?: number;
     sessionTtl?: number;
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
+    account?: { trustedProxyCidrs: string[] };
   } = {},
 ) {
   await record("before", {
@@ -67,6 +68,7 @@ export async function prepareIdentity(
     challengeTtl?: number;
     sessionTtl?: number;
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
+    account?: { trustedProxyCidrs: string[] };
   },
 ) {
   const directory = await mkdtemp(resolve(tmpdir(), "gateway-identity-"));
@@ -75,8 +77,9 @@ export async function prepareIdentity(
     api = `gateway_identity_api_${suffix}`,
     deployer = `gateway_identity_deployer_${suffix}`,
     verifier = `gateway_identity_verifier_${suffix}`,
+    account = `gateway_identity_public_${suffix}`,
     password = randomUUID(),
-    roles = [api, deployer, verifier];
+    roles = options.account ? [api, deployer, verifier, account] : [api, deployer, verifier];
   const processes: Bun.Subprocess[] = [];
   const connections: Awaited<ReturnType<typeof createBoundedH2Client>>[] = [];
   const certificates = new Map<
@@ -173,6 +176,13 @@ export async function prepareIdentity(
           api,
         ),
       );
+    if (options.account)
+      await db.unsafe(
+        (await Bun.file("infra/core-public-role.sql").text()).replaceAll(
+          "core_public_api",
+          account,
+        ),
+      );
     function roleUrl(role: string) {
       const url = new URL(base);
       url.username = role;
@@ -195,6 +205,16 @@ export async function prepareIdentity(
           database_url: roleUrl(api),
           ...(options.execution ? { execution: options.execution } : {}),
           ...(options.admin ? { admin: options.admin } : {}),
+          ...(options.account
+            ? {
+                public: {
+                  database_url: roleUrl(account),
+                  hostname: "127.0.0.1",
+                  port: 0,
+                  trusted_proxy_cidrs: options.account.trustedProxyCidrs,
+                },
+              }
+            : {}),
           audience: identityAudience,
           hostname: "127.0.0.1",
           servername: "localhost",
@@ -231,7 +251,12 @@ export async function prepareIdentity(
         return JSON.parse(output.split("\n").find((line) => line.includes('"event":"ready"'))!);
       };
       const timeout = setTimeout(() => child.kill("SIGKILL"), 10000);
-      let ready: { port: number; session: StartupReceipt; admin_port?: number };
+      let ready: {
+        port: number;
+        session: StartupReceipt;
+        admin_port?: number;
+        public_port?: number;
+      };
       try {
         ready = await read();
       } finally {
@@ -298,6 +323,7 @@ export async function prepareIdentity(
       certificates,
       connection,
       apiUrl: roleUrl(api),
+      accountUrl: options.account ? roleUrl(account) : undefined,
       deployerUrl: roleUrl(deployer),
       verifierUrl: roleUrl(verifier),
       async close() {

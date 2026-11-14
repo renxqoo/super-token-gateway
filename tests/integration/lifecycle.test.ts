@@ -261,6 +261,7 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
       { version: 2026111208 },
       { version: 2026111209 },
       { version: 2026111210 },
+      { version: 2026111211 },
       { version: SCHEMA_VERSION },
     ]);
     expect(

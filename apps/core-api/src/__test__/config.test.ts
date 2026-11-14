@@ -58,3 +58,24 @@ test("an unknown admin field and a short bootstrap admin key are refused", async
 test("a missing config file path is refused before reading anything", async () => {
   await expect(loadCoreApiConfig("")).rejects.toThrow("CORE_API_CONFIG_FILE required");
 });
+
+test("the public account listener requires the execution pepper and valid trusted proxy ranges", async () => {
+  const publicListener = {
+    database_url: "postgres://public@127.0.0.1/db",
+    hostname: "127.0.0.1",
+    port: 0,
+  };
+  await expect(load({ ...listener, public: publicListener })).rejects.toThrow(
+    "Core API public listener requires the execution configuration",
+  );
+  await expect(
+    load({
+      ...listener,
+      execution,
+      public: { ...publicListener, trusted_proxy_cidrs: ["10.0.0.0/33"] },
+    }),
+  ).rejects.toThrow();
+  expect(
+    (await load({ ...listener, execution, public: publicListener })).public?.trusted_proxy_cidrs,
+  ).toEqual([]);
+});

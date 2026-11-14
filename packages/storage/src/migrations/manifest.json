@@ -125,6 +125,15 @@
           "checksum": "806574aeb510177b3f4643ba169c8a51edfe52ed521313c792f7027ecd212e0a"
         }
       ]
+    },
+    {
+      "version": 2026111212,
+      "files": [
+        {
+          "path": "./sql/core-account-access.sql",
+          "checksum": "20fc0111d27e212b0c49d83eddfedde28e6a61b024d5755876eea0150e5c1618"
+        }
+      ]
     }
   ]
 }

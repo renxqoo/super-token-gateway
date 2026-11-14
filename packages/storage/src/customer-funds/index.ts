@@ -123,9 +123,16 @@ export function createCustomerFundsStore(db: SQL | TransactionSQL) {
         fundingError(error);
       }
     },
-    async receipt(requestId: string, projectId: string): Promise<Record<string, unknown>> {
+    async receipt(
+      requestId: string,
+      projectId: string,
+      scope: { models: readonly string[]; operations: readonly string[] } = {
+        models: [],
+        operations: [],
+      },
+    ): Promise<Record<string, unknown>> {
       const rows =
-        await db`SELECT q.id,q.billing_currency,q.billing_outcome,h.state AS hold_state,h.amount_atoms::text AS reserved_atoms,h.credit_atoms::text AS credit_reserved_atoms,c.id AS charge_id,c.amount_atoms::text AS charged_atoms,c.funded_atoms::text,c.debt_atoms::text,c.refunded_atoms::text,c.pricing_id,c.evidence_id FROM gateway_requests q LEFT JOIN billing_holds h ON h.request_id=q.id LEFT JOIN billing_charges c ON c.request_id=q.id WHERE q.id=${requestId} AND q.project_id=${projectId}`;
+        await db`SELECT q.id,q.billing_currency,q.billing_outcome,h.state AS hold_state,h.amount_atoms::text AS reserved_atoms,h.credit_atoms::text AS credit_reserved_atoms,c.id AS charge_id,c.amount_atoms::text AS charged_atoms,c.funded_atoms::text,c.debt_atoms::text,c.refunded_atoms::text,c.pricing_id,c.evidence_id FROM gateway_requests q LEFT JOIN billing_holds h ON h.request_id=q.id LEFT JOIN billing_charges c ON c.request_id=q.id WHERE q.id=${requestId} AND q.project_id=${projectId} AND (${scope.models.length === 0} OR q.model=ANY(${[...scope.models]}::text[])) AND (${scope.operations.length === 0} OR q.operation=ANY(${[...scope.operations]}::text[]))`;
       if (!rows[0]) throw new GatewayError(404, "not_found", "Billing request not found");
       return rows[0];
     },

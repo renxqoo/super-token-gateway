@@ -14,6 +14,24 @@ gateway.example.com {
 			lb_try_duration 0s
 		}
 	}
+	@wallets path /v1/wallets
+	handle @wallets {
+		reverse_proxy 127.0.0.1:8095 {
+			health_uri /readyz
+			health_interval 5s
+			health_timeout 2s
+			lb_try_duration 0s
+		}
+	}
+	@billing path_regexp ^/v1/requests/[^/]+/billing$
+	handle @billing {
+		reverse_proxy 127.0.0.1:8095 {
+			health_uri /readyz
+			health_interval 5s
+			health_timeout 2s
+			lb_try_duration 0s
+		}
+	}
 	@legacy path /v1/* /v1beta/*
 	handle @legacy {
 		reverse_proxy 127.0.0.1:8088 127.0.0.1:8089 {

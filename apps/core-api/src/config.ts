@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { validateCidr } from "@gateway/runtime";
 const configSchema = z.strictObject({
   database_url: z.string().url(),
   execution: z
@@ -63,6 +64,15 @@ const configSchema = z.strictObject({
         .optional(),
     })
     .optional(),
+  public: z
+    .strictObject({
+      database_url: z.string().url(),
+      hostname: z.string(),
+      port: z.number().int().min(0).max(65535),
+      trusted_proxy_cidrs: z.array(z.string().max(64)).max(64).default([]),
+      shutdown_grace_ms: z.number().int().min(100).max(120000).optional(),
+    })
+    .optional(),
 });
 
 export type CoreApiConfig = z.infer<typeof configSchema>;
@@ -74,5 +84,8 @@ export async function loadCoreApiConfig(
   const config = configSchema.parse(await Bun.file(path).json());
   if (config.admin && !config.execution)
     throw new Error("Core API admin listener requires the execution configuration");
+  if (config.public && !config.execution)
+    throw new Error("Core API public listener requires the execution configuration");
+  for (const cidr of config.public?.trusted_proxy_cidrs ?? []) validateCidr(cidr);
   return config;
 }

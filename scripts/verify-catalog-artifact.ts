@@ -84,8 +84,19 @@ await withCatalog(async (f, db) => {
           helper_executable: helper,
         },
       },
+      account: { trustedProxyCidrs: [] },
     });
     const origin = `http://127.0.0.1:${identity.a.admin_port}`;
+    const account = `http://127.0.0.1:${identity.a.public_port}`;
+    assert.equal((await fetch(account + "/readyz")).status, 200);
+    const unknown = await fetch(account + "/v1/wallets", {
+      headers: { authorization: `Bearer gw_${"A".repeat(43)}` },
+    });
+    assert.equal(unknown.status, 401);
+    assert.equal(
+      ((await unknown.json()) as { error: { code: string } }).error.code,
+      "unauthenticated",
+    );
     await record("process_started", { pid: identity.a.pid, purpose: "compiled-catalog-core-api" });
     assert.equal((await fetch(origin + "/readyz")).status, 200);
     const request = async (path: string, body?: unknown, method = body ? "POST" : "GET") => {

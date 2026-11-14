@@ -23,6 +23,7 @@ export async function withFinancial(
     databasePort?: number;
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
     managementFactory?: typeof createCoreManagementApplication;
+    account?: { trustedProxyCidrs: string[] };
   } = {},
 ) {
   const namespace = `financial_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -58,6 +59,7 @@ export async function withFinancial(
       ...(options.databasePort ? { databasePort: options.databasePort } : {}),
       ...(options.entry ? { entry: options.entry } : {}),
       ...(options.limits ? { limits: options.limits } : {}),
+      ...(options.account ? { account: options.account } : {}),
       execution: {
         pepper: syntheticPepper,
         encryptionKey: financialKey,

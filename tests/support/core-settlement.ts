@@ -5,6 +5,7 @@ import type {
   CoreEvidenceGroupResult,
   ExecutionReply,
 } from "@gateway/contracts";
+import { createSettlementStore } from "@gateway/storage/settlement";
 import { prepareFinancialAdmission, withFinancial } from "./financial-execution.ts";
 
 export type Fixture = Parameters<Parameters<typeof withFinancial>[0]>[0];
@@ -74,4 +75,25 @@ export async function supplier(db: SQL, account: string) {
 export function committed(result: CoreEvidenceGroupResult | undefined) {
   if (result?.status !== "COMMITTED") throw new Error(JSON.stringify(result));
   return result;
+}
+
+export async function settledCharge(db: SQL, setup: Setup, client: Client) {
+  const { prepared, owner } = await granted(db, setup, client);
+  await createSettlementStore(db).persist([
+    {
+      events: [
+        event(owner, prepared.attemptId, {
+          finality: "FINAL",
+          usage: { input_tokens: "31", output_tokens: "2" },
+          final_dimensions: ["input_tokens", "output_tokens"],
+          attempt_state: "SUCCEEDED",
+          request_state: "SUCCEEDED",
+        }),
+      ],
+    },
+  ]);
+  const rows =
+    await db`SELECT id,amount_atoms::text FROM billing_charges WHERE request_id=${prepared.requestId}`;
+  expect(rows).toEqual([{ id: expect.any(String), amount_atoms: "100" }]);
+  return { request: prepared.requestId, charge: String(rows[0].id) };
 }

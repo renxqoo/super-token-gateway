@@ -1,10 +1,9 @@
 import { expect, test } from "bun:test";
 import type { SQL } from "bun";
 import { verifier } from "@gateway/runtime/crypto";
-import { createSettlementStore } from "@gateway/storage/settlement";
 import { withFinancial } from "../support/financial-execution.ts";
 import { syntheticPepper } from "../support/catalog.ts";
-import { event, granted, type Client, type Setup } from "../support/core-settlement.ts";
+import { granted, settledCharge as charged } from "../support/core-settlement.ts";
 
 async function administrator(db: SQL, permissions: string[]) {
   const id = crypto.randomUUID(),
@@ -12,27 +11,6 @@ async function administrator(db: SQL, permissions: string[]) {
   await db`INSERT INTO technical_administrators(id,name,permissions) VALUES(${id},'Synthetic funds administrator',${permissions}::text[])`;
   await db`INSERT INTO administrator_credentials(id,administrator_id,verifier,prefix) VALUES(${crypto.randomUUID()},${id},${verifier(token, syntheticPepper)},'synthetic')`;
   return { actor: `technical-admin:${id}`, token };
-}
-
-async function charged(db: SQL, setup: Setup, client: Client) {
-  const { prepared, owner } = await granted(db, setup, client);
-  await createSettlementStore(db).persist([
-    {
-      events: [
-        event(owner, prepared.attemptId, {
-          finality: "FINAL",
-          usage: { input_tokens: "31", output_tokens: "2" },
-          final_dimensions: ["input_tokens", "output_tokens"],
-          attempt_state: "SUCCEEDED",
-          request_state: "SUCCEEDED",
-        }),
-      ],
-    },
-  ]);
-  const rows =
-    await db`SELECT id,amount_atoms::text FROM billing_charges WHERE request_id=${prepared.requestId}`;
-  expect(rows).toEqual([{ id: expect.any(String), amount_atoms: "100" }]);
-  return { request: prepared.requestId, charge: String(rows[0].id) };
 }
 
 async function audits(db: SQL, resource: string) {
