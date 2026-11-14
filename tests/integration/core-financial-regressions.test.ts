@@ -571,3 +571,20 @@ test("an admission beyond channel concurrency reports retryable quota_unavailabl
       )[0].n,
     ).toBe(10);
   }));
+
+test("a context whose only supplier account awaits reconciliation reports no_route instead of identity_store_unavailable", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap(),
+      client = f.client();
+    await client.startup();
+    await db`UPDATE upstream_accounts SET state='RECONCILE_REQUIRED',revision=revision+1 WHERE id=${setup.provider.account_id}`;
+    const failure = await prepareFinancialAdmission(setup, client).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(CoreRpcError);
+    expect((failure as CoreRpcError).status).toBe(503);
+    expect((failure as CoreRpcError).detail).toMatchObject({
+      code: "no_route",
+      category: "DEPENDENCY",
+      retryability: "NONE",
+      command_state: "NOT_ATTEMPTED",
+    });
+  }));

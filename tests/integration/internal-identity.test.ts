@@ -495,7 +495,10 @@ test("HTTP1 and cleartext h2 cannot enter the internal authority", () =>
         session.destroy();
         resolve(true);
       }, 1500);
-      session.on("close", () => clearTimeout(timer));
+      session.on("close", () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
       const req = session.request({
         ":path": "/_internal/core/v1/identity/challenges",
         ":method": "POST",

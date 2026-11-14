@@ -6,6 +6,7 @@ import {
   type UpstreamRechargeReceipt,
 } from "@gateway/contracts";
 import { fundingActor, fundingFailure, fundingId, fundingInput } from "./validation.ts";
+import { lockVoucherReference } from "./vouchers.ts";
 
 function conflict(): never {
   throw new GatewayError(
@@ -48,21 +49,7 @@ export async function recordUpstreamRecharge(
         if (old.payload_digest !== digest) conflict();
         return old.receipt as UpstreamRechargeReceipt;
       }
-      const voucher = (
-        await tx`SELECT digest FROM financial_vouchers WHERE id=${parsed.voucher_id} FOR UPDATE`
-      )[0];
-      if (!voucher) throw new GatewayError(404, "voucher_not_found", "Financial voucher not found");
-      if (voucher.digest !== parsed.voucher_digest)
-        throw new GatewayError(
-          409,
-          "voucher_digest_mismatch",
-          "Voucher reference and digest do not match",
-        );
-      const eligibility = (
-        await tx`SELECT expires_at<=clock_timestamp() AS expired,EXISTS(SELECT 1 FROM upstream_funding_operations WHERE voucher_id=v.id) AS referenced FROM financial_vouchers v WHERE id=${parsed.voucher_id}`
-      )[0]!;
-      if (eligibility.expired && !eligibility.referenced)
-        throw new GatewayError(409, "voucher_expired", "Unreferenced voucher staging has expired");
+      await lockVoucherReference(tx, { id: parsed.voucher_id, digest: parsed.voucher_digest });
       if (
         !(await tx`SELECT ${parsed.completed_at}::timestamptz<=clock_timestamp() AS completed`)[0]
           .completed

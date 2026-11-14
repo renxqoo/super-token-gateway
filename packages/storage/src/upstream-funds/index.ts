@@ -18,6 +18,9 @@ import { fundingId, fundingFailure } from "./validation.ts";
 
 export { recordFinancialVoucher } from "./vouchers.ts";
 export { recordUpstreamRecharge } from "./recharge.ts";
+export { recordUpstreamAdjustment } from "./adjustment.ts";
+export { recordUpstreamReconciliation } from "./reconciliation.ts";
+export { createUpstreamAccountStore } from "./accounts.ts";
 export function createUpstreamFundingStore(db: SQL) {
   return {
     registerVoucher(input: FinancialVoucherRegistration, actor: string) {

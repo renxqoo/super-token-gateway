@@ -25,6 +25,7 @@ import { createKey, encrypt, verifier } from "@gateway/runtime/crypto";
 import { readBounded, validateCidr } from "@gateway/runtime";
 import { createPlatformAuthenticator, type PlatformPermission } from "./authentication.ts";
 import { registerCustomerFunds } from "./customer-funds.ts";
+import { registerUpstreamFunds } from "./upstream-funds.ts";
 export function createCoreManagementApplication(options: {
   db: SQL;
   adminKey: string;
@@ -279,5 +280,6 @@ export function createCoreManagementApplication(options: {
       ),
     ),
   );
+  registerUpstreamFunds(app, { run, body });
   return app;
 }

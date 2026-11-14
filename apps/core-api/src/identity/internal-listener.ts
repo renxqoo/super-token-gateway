@@ -478,6 +478,7 @@ export async function startCoreInternalListener(options: Options) {
         customer_forbidden: 403,
         context_invalid: 403,
         plugin_package_unavailable: 404,
+        no_route: 503,
       };
       const sqlcode = (error as { errno?: string })?.errno;
       const code = Object.hasOwn(codes, message)
@@ -493,7 +494,7 @@ export async function startCoreInternalListener(options: Options) {
         {
           code,
           category:
-            code.includes("busy") || code.includes("unavailable")
+            code.includes("busy") || code.includes("unavailable") || code === "no_route"
               ? "DEPENDENCY"
               : code.includes("invalid") || code.includes("large")
                 ? "VALIDATION"

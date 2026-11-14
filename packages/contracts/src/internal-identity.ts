@@ -174,6 +174,7 @@ export const internalErrorSchema = z.strictObject({
       "customer_forbidden",
       "context_invalid",
       "plugin_package_unavailable",
+      "no_route",
     ]),
   ]),
   category: z.enum(["AUTHENTICATION", "VALIDATION", "DEPENDENCY"]),

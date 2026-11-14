@@ -643,3 +643,17 @@ test(
   },
   timeout,
 );
+
+test(
+  "a supplier account awaiting reconciliation makes the v2 Gateway answer 503 no_route without calling upstream instead of core_unavailable",
+  () =>
+    withGatewayStack({ reply: () => chatReplies.json() }, async ({ db, setup, received, send }) => {
+      await db`UPDATE upstream_accounts SET state='RECONCILE_REQUIRED',revision=revision+1 WHERE id=${setup.provider.account_id}`;
+      const response = await send();
+      expect(response.status).toBe(503);
+      expect((await response.json()).error.code).toBe("no_route");
+      expect(received).toHaveLength(0);
+      expect((await db`SELECT count(*)::integer n FROM billing_holds`)[0].n).toBe(0);
+    }),
+  timeout,
+);

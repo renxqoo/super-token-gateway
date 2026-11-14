@@ -116,6 +116,7 @@ async function prepareFinancial(
     catalog,
     client,
     request,
+    management,
     async bootstrap(
       currency = "USD",
       creditedAtoms = "1000",

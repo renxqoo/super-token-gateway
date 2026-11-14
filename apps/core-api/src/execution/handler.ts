@@ -215,7 +215,11 @@ export function createExecutionHandler(
           parsed.routing_strategy,
           data.model,
           routingLimits,
-        );
+        ).catch((error: unknown) => {
+          if (error instanceof GatewayError && error.code === "no_route")
+            throw new Error("no_route");
+          throw error;
+        });
         return { ...snapshot, candidates: ordered.map((row) => row.candidate) };
       }
       if (kind !== "execution_query_v1" && kind !== "execution_quota_v1") {

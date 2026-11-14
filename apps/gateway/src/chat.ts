@@ -115,6 +115,12 @@ function coreFailure(error: unknown): GatewayError {
       );
     if (code === "quota_unavailable" || code === "internal_capacity")
       return new GatewayError(429, "rate_limited", "Admission capacity is exhausted");
+    if (code === "no_route")
+      return new GatewayError(
+        503,
+        "no_route",
+        "No healthy provider supports this model and operation",
+      );
   }
   return new GatewayError(503, "core_unavailable", "Execution authority is unavailable");
 }

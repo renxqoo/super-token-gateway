@@ -16,3 +16,6 @@ GRANT SELECT ON wallets,wallet_lots,money_journal,wallet_disputes,billing_resolu
 GRANT UPDATE(policy,manual_frozen,freeze_reason,evidence_disputed) ON wallets TO core_management_api;
 GRANT UPDATE(next_reconcile_at,reconcile_until) ON billing_holds TO core_management_api;
 GRANT INSERT ON billing_resolutions TO core_management_api;
+GRANT UPDATE(state,revision) ON upstream_accounts TO core_management_api;
+GRANT SELECT,INSERT ON reconciliations TO core_management_api;
+GRANT SELECT ON upstream_holds TO core_management_api;

@@ -1,4 +1,4 @@
-import type { SQL } from "bun";
+import type { SQL, TransactionSQL } from "bun";
 import { eq, sql } from "drizzle-orm";
 import {
   financialVoucherRegistrationSchema,
@@ -9,6 +9,27 @@ import { createRepositories } from "../database.ts";
 import { financialVouchers } from "../schema/index.ts";
 import { fundingActor, fundingFailure, fundingId, fundingInput } from "./validation.ts";
 
+const voucherReferenced = sql`(EXISTS(SELECT 1 FROM upstream_funding_operations WHERE voucher_id=financial_vouchers.id) OR EXISTS(SELECT 1 FROM reconciliations WHERE voucher_id=financial_vouchers.id))`;
+export async function lockVoucherReference(
+  tx: TransactionSQL,
+  voucher: { id: string; digest: string },
+): Promise<void> {
+  const found = (
+    await tx`SELECT digest FROM financial_vouchers WHERE id=${voucher.id} FOR UPDATE`
+  )[0];
+  if (!found) throw new GatewayError(404, "voucher_not_found", "Financial voucher not found");
+  if (found.digest !== voucher.digest)
+    throw new GatewayError(
+      409,
+      "voucher_digest_mismatch",
+      "Voucher reference and digest do not match",
+    );
+  const eligibility = (
+    await tx`SELECT expires_at<=clock_timestamp() AS expired,EXISTS(SELECT 1 FROM upstream_funding_operations WHERE voucher_id=v.id) OR EXISTS(SELECT 1 FROM reconciliations WHERE voucher_id=v.id) AS referenced FROM financial_vouchers v WHERE id=${voucher.id}`
+  )[0]!;
+  if (eligibility.expired && !eligibility.referenced)
+    throw new GatewayError(409, "voucher_expired", "Unreferenced voucher staging has expired");
+}
 function voucherSignature(content: Uint8Array, contentType: string): boolean {
   if (contentType === "image/png")
     return [137, 80, 78, 71, 13, 10, 26, 10].every((byte, index) => content[index] === byte);
@@ -23,7 +44,7 @@ const voucherMetadata = {
   size: sql<number>`octet_length(${financialVouchers.content})`,
   actor: financialVouchers.actor,
   expires_at: sql<string>`to_char(${financialVouchers.expiresAt} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
-  referenced: sql<boolean>`EXISTS(SELECT 1 FROM upstream_funding_operations WHERE voucher_id=financial_vouchers.id)`,
+  referenced: sql<boolean>`${voucherReferenced}`,
 };
 export async function recordFinancialVoucher(
   tx: SQL,
@@ -117,10 +138,10 @@ export async function cleanupFinancialVouchers(db: SQL, limit = 100): Promise<st
   try {
     return await db.begin(async (tx) => {
       const rows =
-        await tx`SELECT id FROM financial_vouchers v WHERE expires_at<=clock_timestamp() AND NOT EXISTS(SELECT 1 FROM upstream_funding_operations WHERE voucher_id=v.id) ORDER BY expires_at,id LIMIT ${limit} FOR UPDATE SKIP LOCKED`;
+        await tx`SELECT id FROM financial_vouchers v WHERE expires_at<=clock_timestamp() AND NOT EXISTS(SELECT 1 FROM upstream_funding_operations WHERE voucher_id=v.id) AND NOT EXISTS(SELECT 1 FROM reconciliations WHERE voucher_id=v.id) ORDER BY expires_at,id LIMIT ${limit} FOR UPDATE SKIP LOCKED`;
       if (!rows.length) return [];
       const deleted =
-        await tx`DELETE FROM financial_vouchers v WHERE id=ANY(${rows.map((row: { id: string }) => row.id)}::uuid[]) AND expires_at<=clock_timestamp() AND NOT EXISTS(SELECT 1 FROM upstream_funding_operations WHERE voucher_id=v.id) RETURNING id`;
+        await tx`DELETE FROM financial_vouchers v WHERE id=ANY(${rows.map((row: { id: string }) => row.id)}::uuid[]) AND expires_at<=clock_timestamp() AND NOT EXISTS(SELECT 1 FROM upstream_funding_operations WHERE voucher_id=v.id) AND NOT EXISTS(SELECT 1 FROM reconciliations WHERE voucher_id=v.id) RETURNING id`;
       return deleted.map((row: { id: string }) => row.id);
     });
   } catch (error) {

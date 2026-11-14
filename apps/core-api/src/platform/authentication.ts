@@ -5,6 +5,7 @@ const permissionNames = [
   "catalog:manage",
   "funding:read",
   "funding:recharge",
+  "funding:adjust",
   "customer:fund",
   "customer:read",
   "customer:adjust",

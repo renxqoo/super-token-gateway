@@ -50,6 +50,7 @@ test("actual v3 through financial schema upgrade preserves historical channels a
         { version: 2026111211 },
         { version: 2026111212 },
         { version: 2026111213 },
+        { version: 2026111214 },
       ]);
       expect(
         (await db`SELECT id,brand_id,account_id,secret,config_revision::text FROM channels`)[0],
@@ -67,7 +68,7 @@ test("actual v3 through financial schema upgrade preserves historical channels a
       expect(pkg.release_descriptor).toBeNull();
       expect((await db`SELECT count(*)::int AS n FROM plugin_validation_runs`)[0].n).toBe(0);
       await migrate(db);
-      expect((await db`SELECT count(*)::int AS n FROM schema_migrations`)[0].n).toBe(12);
+      expect((await db`SELECT count(*)::int AS n FROM schema_migrations`)[0].n).toBe(13);
     },
     { registry: ".local/T04b1-resources.jsonl" },
   ));

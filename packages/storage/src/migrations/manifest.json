@@ -143,6 +143,15 @@
           "checksum": "d4200115089ae83b20e6564a90347e71050f7313ec9610614c245147d81e2300"
         }
       ]
+    },
+    {
+      "version": 2026111214,
+      "files": [
+        {
+          "path": "./sql/core-upstream-funds.sql",
+          "checksum": "2224f8c614618618c68b12a25dca6903084b35a24b0690c4fd800d93a8e4a6f3"
+        }
+      ]
     }
   ]
 }

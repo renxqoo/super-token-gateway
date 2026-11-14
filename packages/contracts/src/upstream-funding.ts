@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { currencySchema, positiveAtomsSchema } from "./billing.ts";
+import { atomsSchema, currencySchema, positiveAtomsSchema } from "./billing.ts";
 import { digestSchema } from "./enterprise.ts";
 
 export function normalizeFundingTimestamp(value: string): string {
@@ -69,4 +69,64 @@ export type UpstreamRechargeReceipt = {
   payload_digest: string;
   balance_atoms: string;
   balance_revision: string;
+};
+export const signedAtomsSchema = z.string().regex(/^-?[1-9][0-9]{0,37}$/);
+const voucherReference = {
+  voucher_id: z
+    .uuid()
+    .transform((value) => value.toLowerCase())
+    .optional(),
+  voucher_digest: digestSchema.optional(),
+};
+const pairedVoucher = (value: {
+  voucher_id?: string | undefined;
+  voucher_digest?: string | undefined;
+}) => (value.voucher_id === undefined) === (value.voucher_digest === undefined);
+export const upstreamAdjustmentSchema = z
+  .object({
+    external_ref: z.string().min(1).max(200),
+    currency: currencySchema,
+    delta_atoms: signedAtomsSchema,
+    expected_revision: atomsSchema,
+    reason: z.string().trim().min(1).max(2000),
+    ...voucherReference,
+  })
+  .strict()
+  .refine(pairedVoucher, { message: "Voucher id and digest must be provided together" });
+export const upstreamReconciliationSchema = z
+  .object({
+    currency: currencySchema,
+    expected_revision: atomsSchema,
+    observed_atoms: atomsSchema.optional(),
+    invoice_atoms: atomsSchema.optional(),
+    adjustment_operation_id: z
+      .uuid()
+      .transform((value) => value.toLowerCase())
+      .optional(),
+    resume: z.boolean().default(false),
+    reason: z.string().trim().min(1).max(2000),
+    ...voucherReference,
+  })
+  .strict()
+  .refine(pairedVoucher, { message: "Voucher id and digest must be provided together" });
+export const supplierBrandSchema = z.object({ name: z.string().min(1).max(100) }).strict();
+export const supplierBrandPatchSchema = z.object({ enabled: z.boolean() }).strict();
+export const upstreamAccountSchema = z
+  .object({ brand_id: z.uuid(), name: z.string().min(1).max(200) })
+  .strict();
+export const upstreamAccountPatchSchema = z
+  .object({ state: z.enum(["ACTIVE", "DISABLED"]), reason: z.string().trim().min(1).max(2000) })
+  .strict();
+export type UpstreamAdjustmentInput = z.input<typeof upstreamAdjustmentSchema>;
+export type UpstreamReconciliationInput = z.input<typeof upstreamReconciliationSchema>;
+export type UpstreamAdjustmentReceipt = z.output<typeof upstreamAdjustmentSchema> & {
+  operation_id: string;
+  journal_id: string;
+  account_id: string;
+  kind: "ADJUSTMENT";
+  actor: string;
+  payload_digest: string;
+  balance_atoms: string;
+  balance_revision: string;
+  account_state: string;
 };
