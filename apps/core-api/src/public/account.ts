@@ -121,6 +121,17 @@ export function createCoreAccountApplication(options: {
       })),
     });
   });
+  app.get("/v1beta/models", async (c) => {
+    const resolved = await account(c, readers);
+    return c.json({
+      models: (await store.models(resolved.models))
+        .filter((model) => model.operations.includes("gemini"))
+        .map((model) => ({
+          name: `models/${model.name}`,
+          supportedGenerationMethods: ["generateContent", "streamGenerateContent"],
+        })),
+    });
+  });
   app.get("/v1/usage", async (c) => {
     const resolved = await account(c, readers);
     return c.json({

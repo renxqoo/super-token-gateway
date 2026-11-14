@@ -159,7 +159,9 @@ test("deployment units start built entries, keep v2 processes under separate use
   const caddy = await Bun.file("infra/Caddyfile").text();
   const chat = caddy.indexOf("handle @chat"),
     legacy = caddy.indexOf("handle @legacy");
-  expect(caddy).toContain("@chat path /v1/chat/completions\n");
+  expect(caddy).toContain(
+    "@chat {\n\t\tmethod POST\n\t\tpath /v1/chat/completions /v1/messages /v1beta/models/*\n\t}\n",
+  );
   expect(chat).toBeGreaterThan(-1);
   expect(legacy).toBeGreaterThan(chat);
   expect(caddy.slice(chat, legacy)).toContain(`127.0.0.1:${example.port}`);
@@ -168,7 +170,7 @@ test("deployment units start built entries, keep v2 processes under separate use
   const account = caddy.indexOf("handle @account"),
     request = caddy.indexOf("handle @request");
   expect(caddy).toContain(
-    "@account path /v1/wallets /v1/models /v1/usage /v1/project/keys /v1/project/keys/*\n",
+    "@account path /v1/wallets /v1/models /v1beta/models /v1/usage /v1/project/keys /v1/project/keys/*\n",
   );
   expect(caddy).toContain("@request path_regexp ^/v1/requests/[^/]+(/billing)?$\n");
   for (const handle of [account, request]) {

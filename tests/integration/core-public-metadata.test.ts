@@ -225,3 +225,32 @@ test("Core public account role can delegate and revoke keys but cannot read veri
       await connection.close();
     }
   }, options));
+
+test("Core public listener lists only Gemini-capable models in the key's scope at /v1beta/models and accepts x-goog-api-key", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap(),
+      call = publicApi(f),
+      project = setup.project.id;
+    const credential = await key(f, project, { role: "INVOKER" });
+    const list = (token: string) =>
+      call("/v1beta/models", "", { headers: { authorization: "", "x-goog-api-key": token } });
+    expect((await list(credential.key)).value).toEqual({ models: [] });
+    await db`UPDATE models SET operations=array_append(operations,'gemini') WHERE name=${setup.model}`;
+    expect(await list(credential.key)).toEqual({
+      status: 200,
+      value: {
+        models: [
+          {
+            name: `models/${setup.model}`,
+            supportedGenerationMethods: ["generateContent", "streamGenerateContent"],
+          },
+        ],
+      },
+    });
+    const scoped = await key(f, project, {
+      role: "INVOKER",
+      models: ["synthetic-unrelated-model"],
+    });
+    expect((await list(scoped.key)).value).toEqual({ models: [] });
+    expect((await list("gw_invalid")).status).toBe(401);
+  }, options));
