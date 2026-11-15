@@ -36,6 +36,7 @@ import type { GatewayConfig } from "./config.ts";
 import type { createPackageCache } from "./packages.ts";
 import { collectReferences, type Reference } from "./references.ts";
 import { rejectUnmeteredTools } from "./tool-policy.ts";
+import { idleGuard, stallGuard } from "./stream-deadlines.ts";
 import { encodeForm, readForm, type FormFiles } from "./form.ts";
 import {
   exposeBatchFiles,
@@ -108,6 +109,17 @@ type CloseReason = "COMPLETED" | "FAILED" | "CANCELLED" | "DRAINED";
 type Ending = { outcome: AttemptOutcome; reason: CloseReason };
 type Outcome =
   { response: Response } | { retry: GatewayError; conclude: (last: boolean) => Promise<void> };
+type Deadline = "upstream_header_timeout" | "upstream_idle_timeout" | "downstream_stalled";
+type Failed = Omit<AttemptOutcome, "request_state">;
+type Control = {
+  signal: AbortSignal;
+  expire: (cause: Deadline) => void;
+  cause: () => Deadline | undefined;
+  timeoutError: (fallback: GatewayError) => GatewayError;
+  end: (ending: Ending) => Promise<void>;
+  fail: (outcome: Failed, error: GatewayError) => Promise<never>;
+  abandon: (outcome: Failed, error: GatewayError) => Promise<Outcome>;
+};
 
 const retryableStatuses = new Set([401, 403, 404, 408, 409, 429, 500, 502, 503, 504, 529]);
 const unhealthyStatuses = new Set([401, 403, 408, 409, 429, 500, 502, 503, 504, 529]);
@@ -775,7 +787,12 @@ function healthOutcome(
   if (outcome.attempt_state === "SUCCEEDED") return "SUCCESS";
   const status = /^upstream_http_(\d+)$/.exec(outcome.error_code ?? "")?.[1];
   if (status) return unhealthyStatuses.has(Number(status)) ? "FAILURE" : "SUCCESS";
-  if (halted || outcome.error_code === "evidence_unavailable") return "NOT_SENT";
+  if (
+    halted ||
+    outcome.error_code === "evidence_unavailable" ||
+    outcome.error_code === "downstream_stalled"
+  )
+    return "NOT_SENT";
   return "FAILURE";
 }
 
@@ -895,12 +912,15 @@ async function dispatch(
   facts: Facts,
   admitted: Admitted,
 ): Promise<Outcome> {
-  const local = new AbortController();
+  const local = new AbortController(),
+    expiry = new AbortController(),
+    total = AbortSignal.timeout(Math.max(1, Date.parse(facts.deadlineAt) - Date.now()));
   const signal = AbortSignal.any([
     request.signal,
     request.drain,
     local.signal,
-    AbortSignal.timeout(Math.max(1, Date.parse(facts.deadlineAt) - Date.now())),
+    total,
+    expiry.signal,
   ]);
   try {
     deps.grants.open(admitted.attemptId, local);
@@ -1026,7 +1046,32 @@ async function dispatch(
       bridge.finish(requestState ? { ...outcome, request_state: requestState } : outcome),
     );
   };
+  const deadlineReached = () => total.aborted || Date.now() >= Date.parse(facts.deadlineAt);
+  const cause = () => (expiry.signal.aborted ? (expiry.signal.reason as Deadline) : undefined);
+  const control: Control = {
+    signal,
+    expire: (reason) => expiry.abort(reason),
+    cause,
+    timeoutError: (fallback) =>
+      deadlineReached()
+        ? new GatewayError(504, "request_deadline", "Request deadline reached")
+        : cause() === "upstream_header_timeout" || cause() === "upstream_idle_timeout"
+          ? new GatewayError(504, "upstream_timeout", "The upstream did not respond in time")
+          : fallback,
+    end,
+    fail: finalFailure,
+    abandon: (outcome, error) =>
+      !halt(request).halted && !local.signal.aborted && !deadlineReached()
+        ? retryLater(outcome, error)
+        : finalFailure(outcome, error),
+  };
   let response: Response;
+  const headerTimer = admitted.prepared.manifest.stream
+    ? setTimeout(
+        () => control.expire("upstream_header_timeout"),
+        deps.config.upstream_header_timeout_ms,
+      )
+    : undefined;
   try {
     started = performance.now();
     response = await deps.transport.fetch(
@@ -1054,7 +1099,11 @@ async function dispatch(
     if (error instanceof UpstreamPreDispatchError) {
       stopRenewal();
       const stop = halt(request),
-        final = stop.halted || signal.aborted || error.code === "unsafe_upstream";
+        final =
+          stop.halted ||
+          local.signal.aborted ||
+          deadlineReached() ||
+          error.code === "unsafe_upstream";
       if (!final) {
         deps.grants.release(admitted.attemptId);
         await reportHealth(deps, admitted, "NOT_SENT");
@@ -1074,12 +1123,15 @@ async function dispatch(
       throw stop.error(
         error.code === "unsafe_upstream"
           ? new GatewayError(502, "unsafe_upstream", "The upstream address is not permitted")
-          : unreachable,
+          : control.timeoutError(unreachable),
       );
     }
-    const interrupted = { attempt_state: "UNKNOWN" as const, error_code: "upstream_interrupted" };
-    if (signal.aborted) return finalFailure(interrupted, unreachable);
-    return retryLater(interrupted, unreachable);
+    return control.abandon(
+      { attempt_state: "UNKNOWN", error_code: cause() ?? "upstream_interrupted" },
+      control.timeoutError(unreachable),
+    );
+  } finally {
+    clearTimeout(headerTimer);
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
@@ -1089,19 +1141,21 @@ async function dispatch(
         : ("UNKNOWN" as const),
       error_code: `upstream_http_${response.status}`,
     };
-    if (!retryableStatuses.has(response.status) || signal.aborted)
+    if (!retryableStatuses.has(response.status))
       return finalFailure(rejected, upstreamRejection(response.status));
-    return retryLater(rejected, upstreamRejection(response.status));
+    return control.abandon(rejected, upstreamRejection(response.status));
   }
   const type = response.headers.get("content-type") ?? "";
-  return {
-    response:
-      admitted.prepared.binary && !/json|^text\/event-stream/i.test(type)
-        ? relayBinary(facts, admitted, bridge, response, type, signal, request, end)
-        : admitted.prepared.manifest.stream
-          ? relaySSE(deps, facts, admitted, bridge, response, signal, request, end)
-          : await relayJSON(deps, facts, admitted, bridge, response, signal, finalFailure, end),
-  };
+  const upstream = idleGuard(response.body, deps.config.upstream_idle_timeout_ms, () =>
+    control.expire("upstream_idle_timeout"),
+  );
+  if (admitted.prepared.binary && !/json|^text\/event-stream/i.test(type))
+    return {
+      response: relayBinary(deps, facts, admitted, bridge, upstream, type, request, control),
+    };
+  if (admitted.prepared.manifest.stream)
+    return relaySSE(deps, facts, admitted, bridge, upstream, request, control);
+  return relayJSON(deps, facts, admitted, bridge, upstream, control);
 }
 
 export async function executeChat(deps: ChatDependencies, request: ChatRequest) {
@@ -1155,14 +1209,9 @@ async function relayJSON(
   facts: Facts,
   admitted: Admitted,
   bridge: Bridge,
-  response: Response,
-  signal: AbortSignal,
-  finalFailure: (
-    outcome: Omit<AttemptOutcome, "request_state">,
-    error: GatewayError,
-  ) => Promise<never>,
-  end: (ending: Ending) => Promise<void>,
-) {
+  upstream: ReadableStream<Uint8Array>,
+  control: Control,
+): Promise<Outcome> {
   const invalid = new GatewayError(
     502,
     "upstream_invalid_response",
@@ -1170,7 +1219,7 @@ async function relayJSON(
   );
   let transformed: Awaited<ReturnType<Bridge["transformJSON"]>>;
   try {
-    const bytes = await readBounded(response.body, deps.config.max_response_bytes, signal);
+    const bytes = await readBounded(upstream, deps.config.max_response_bytes, control.signal);
     transformed = await bridge.transformJSON(
       "response",
       admitted.converted
@@ -1191,12 +1240,15 @@ async function relayJSON(
                 : {}),
             },
       bytes,
-      signal,
+      control.signal,
     );
   } catch (error) {
     if (error instanceof GatewayError && error.code === "usage_queue_unavailable")
-      return finalFailure({ attempt_state: "UNKNOWN", error_code: "evidence_unavailable" }, error);
-    return finalFailure({ attempt_state: "UNKNOWN", error_code: "upstream_read_failed" }, invalid);
+      return control.fail({ attempt_state: "UNKNOWN", error_code: "evidence_unavailable" }, error);
+    return control.abandon(
+      { attempt_state: "UNKNOWN", error_code: control.cause() ?? "upstream_read_failed" },
+      control.timeoutError(invalid),
+    );
   }
   const result = transformed.result;
   const pending = result.kind === "output" && result.terminal?.kind === "pending";
@@ -1208,7 +1260,7 @@ async function relayJSON(
       (!(facts.background || facts.operation === "batches" || facts.operation === "videos") ||
         !createdResource(facts, admitted)))
   )
-    return finalFailure(
+    return control.abandon(
       { attempt_state: "UNKNOWN", error_code: "upstream_invalid" },
       failure(result) ?? invalid,
     );
@@ -1221,13 +1273,13 @@ async function relayJSON(
       pending ? "ACTIVE" : "COMPLETED",
     );
   } catch (error) {
-    return finalFailure(
+    return control.fail(
       { attempt_state: "UNKNOWN", error_code: "resource_unrecorded" },
       error instanceof GatewayError ? error : invalid,
     );
   }
   try {
-    await end({
+    await control.end({
       outcome: pending
         ? { attempt_state: "PARTIAL" }
         : { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
@@ -1242,22 +1294,23 @@ async function relayJSON(
     : facts.operation === "batches"
       ? exposeBatchFiles(transformed.body, admitted.files)
       : transformed.body;
-  return new Response(body.slice(), {
-    status: 200,
-    headers: { "content-type": "application/json", "x-request-id": facts.requestId },
-  });
+  return {
+    response: new Response(body.slice(), {
+      status: 200,
+      headers: { "content-type": "application/json", "x-request-id": facts.requestId },
+    }),
+  };
 }
 
-function relaySSE(
+async function relaySSE(
   deps: ChatDependencies,
   facts: Facts,
   admitted: Admitted,
   bridge: Bridge,
-  response: Response,
-  signal: AbortSignal,
+  upstream: ReadableStream<Uint8Array>,
   request: ChatRequest,
-  end: (ending: Ending) => Promise<void>,
-) {
+  control: Control,
+): Promise<Outcome> {
   const encoder = new TextEncoder();
   const translated = admitted.converted
     ? streamFromChat(admitted.converted, facts.model)
@@ -1266,16 +1319,18 @@ function relaySSE(
     if (translated) yield* translated.feed(bytes);
     else yield bytes;
   };
+  let undelivered: { outcome: Failed; fault: unknown } | undefined;
   async function* frames(): AsyncGenerator<Uint8Array> {
     let terminal: { bytes: string } | undefined;
     let ended = false,
       delivered = false,
       failed = false,
-      recorded = false;
+      recorded = false,
+      fault: unknown;
     const expected = createdResource(facts, admitted);
-    const reader = response.body!.getReader();
+    const reader = upstream.getReader();
     const cancel = () => void reader.cancel().catch(() => undefined);
-    signal.addEventListener("abort", cancel, { once: true });
+    control.signal.addEventListener("abort", cancel, { once: true });
     const record = async (result: AbiResult) => {
       if (result.kind !== "output" || !result.resource) return result;
       if (recorded) throw new Error("resource_redeclared");
@@ -1332,36 +1387,38 @@ function relaySSE(
       await bridge.invoke("stream_finish");
       if (!terminal) throw new Error("stream_truncated");
       ended = true;
-      await end({
+      await control.end({
         outcome: { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
         reason: "COMPLETED",
       });
       const held = Buffer.from(terminal.bytes, "base64");
       if (held.length) yield* emit(held);
       if (translated) yield* translated.finish();
-    } catch {
+    } catch (error) {
       failed = true;
+      fault = error;
     } finally {
-      signal.removeEventListener("abort", cancel);
+      control.signal.removeEventListener("abort", cancel);
       cancel();
       if (!ended) {
         const stop = halt(request);
-        await end({
-          outcome: {
-            attempt_state: delivered ? "PARTIAL" : "UNKNOWN",
-            request_state: stop.requestState,
-            error_code:
-              stop.reason === "CANCELLED"
-                ? "client_cancelled"
-                : stop.reason === "DRAINED"
-                  ? "gateway_draining"
-                  : "stream_interrupted",
-          },
-          reason: stop.reason,
-        }).catch(() => undefined);
+        const outcome: Failed = {
+          attempt_state: delivered ? "PARTIAL" : "UNKNOWN",
+          error_code:
+            stop.reason === "CANCELLED"
+              ? "client_cancelled"
+              : stop.reason === "DRAINED"
+                ? "gateway_draining"
+                : (control.cause() ?? "stream_interrupted"),
+        };
+        if (!delivered && !recorded) undelivered = { outcome, fault };
+        else
+          await control
+            .end({ outcome: { ...outcome, request_state: stop.requestState }, reason: stop.reason })
+            .catch(() => undefined);
       }
     }
-    if (failed && halt(request).requestState !== "CANCELLED")
+    if (failed && !undelivered && halt(request).requestState !== "CANCELLED")
       yield encoder.encode(
         `data: ${JSON.stringify({
           error: {
@@ -1373,47 +1430,59 @@ function relaySSE(
       );
   }
   const iterator = frames();
-  return new Response(
-    new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        const next = await iterator.next();
-        if (next.done) controller.close();
-        else controller.enqueue(next.value);
+  const first = await iterator.next();
+  if (undelivered) {
+    const { outcome, fault } = undelivered;
+    if (fault instanceof GatewayError && fault.code === "usage_queue_unavailable")
+      return control.fail({ ...outcome, error_code: "evidence_unavailable" }, fault);
+    if (fault instanceof GatewayError || fault instanceof CoreRpcError)
+      return control.fail(outcome, coreFailure(fault));
+    return control.abandon(
+      outcome,
+      control.timeoutError(
+        new GatewayError(502, "upstream_invalid_response", "The upstream response was invalid"),
+      ),
+    );
+  }
+  return {
+    response: new Response(
+      stallGuard(
+        iterator,
+        first.done ? undefined : first.value,
+        deps.config.downstream_stall_timeout_ms,
+        () => control.expire("downstream_stalled"),
+      ),
+      {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          "x-request-id": facts.requestId,
+        },
       },
-      async cancel() {
-        await iterator.return(undefined);
-      },
-    }),
-    {
-      status: 200,
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        "x-request-id": facts.requestId,
-      },
-    },
-  );
+    ),
+  };
 }
 
 const binaryTypes =
   /^(?:audio\/[A-Za-z0-9.+-]{1,64}|text\/plain|text\/vtt|application\/x-subrip|application\/octet-stream)(?:\s*;.*)?$/i;
 
 function relayBinary(
+  deps: ChatDependencies,
   facts: Facts,
   admitted: Admitted,
   bridge: Bridge,
-  response: Response,
+  upstream: ReadableStream<Uint8Array>,
   type: string,
-  signal: AbortSignal,
   request: ChatRequest,
-  end: (ending: Ending) => Promise<void>,
+  control: Control,
 ) {
   async function* chunks(): AsyncGenerator<Uint8Array> {
     let ended = false,
       failed = false;
-    const reader = response.body!.getReader();
+    const reader = upstream.getReader();
     const cancel = () => void reader.cancel().catch(() => undefined);
-    signal.addEventListener("abort", cancel, { once: true });
+    control.signal.addEventListener("abort", cancel, { once: true });
     try {
       let held: Uint8Array | undefined;
       for (;;) {
@@ -1424,7 +1493,7 @@ function relayBinary(
       }
       await bridge.declare({ ...admitted.prepared.binary!.usage, requests: "1" });
       ended = true;
-      await end({
+      await control.end({
         outcome: { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
         reason: "COMPLETED",
       });
@@ -1432,34 +1501,31 @@ function relayBinary(
     } catch {
       failed = true;
     } finally {
-      signal.removeEventListener("abort", cancel);
+      control.signal.removeEventListener("abort", cancel);
       cancel();
       if (!ended) {
         const stop = halt(request);
-        await end({
-          outcome: {
-            attempt_state: "UNKNOWN",
-            request_state: stop.requestState,
-            error_code: stop.reason === "CANCELLED" ? "client_cancelled" : "binary_interrupted",
-          },
-          reason: stop.reason,
-        }).catch(() => undefined);
+        await control
+          .end({
+            outcome: {
+              attempt_state: "UNKNOWN",
+              request_state: stop.requestState,
+              error_code:
+                stop.reason === "CANCELLED"
+                  ? "client_cancelled"
+                  : (control.cause() ?? "binary_interrupted"),
+            },
+            reason: stop.reason,
+          })
+          .catch(() => undefined);
       }
     }
     if (failed) throw new GatewayError(502, "upstream_interrupted", "Binary response interrupted");
   }
-  const iterator = chunks();
   return new Response(
-    new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        const next = await iterator.next();
-        if (next.done) controller.close();
-        else controller.enqueue(next.value);
-      },
-      async cancel() {
-        await iterator.return(undefined);
-      },
-    }),
+    stallGuard(chunks(), undefined, deps.config.downstream_stall_timeout_ms, () =>
+      control.expire("downstream_stalled"),
+    ),
     {
       status: 200,
       headers: {

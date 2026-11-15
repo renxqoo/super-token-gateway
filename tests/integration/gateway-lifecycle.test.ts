@@ -89,7 +89,7 @@ test(
 );
 
 test(
-  "a Gateway refuses to start without durable evidence, and evidence lost after start withholds the terminal, tells JSON clients to query the request instead of claiming it was not recorded, and never re-sends",
+  "a Gateway refuses to start without durable evidence, and evidence lost after start withholds the terminal, tells stream clients that have received nothing yet and JSON clients to query the request instead of claiming it was not recorded, and never re-sends",
   () =>
     withGatewayStack(
       { reply: (call) => (call.body.stream ? chatReplies.sse() : chatReplies.json()) },
@@ -105,19 +105,18 @@ test(
             "gatewayB",
           );
           proxy.cut();
-          const response = await send({ stream: true, via: gateway });
-          expect(response.status).toBe(200);
-          const text = await response.text();
-          expect(text).toContain("gateway_stream_error");
-          expect(text).not.toContain("[DONE]");
-          expect(received).toHaveLength(1);
-          const json = await send({ via: gateway });
-          expect(json.status).toBe(503);
-          expect((await json.json()).error).toMatchObject({
+          const queryFirst = {
             code: "usage_queue_unavailable",
             message:
               "Durable usage acceptance is unavailable; query the original request before retrying",
-          });
+          };
+          const response = await send({ stream: true, via: gateway });
+          expect(response.status).toBe(503);
+          expect((await response.json()).error).toMatchObject(queryFirst);
+          expect(received).toHaveLength(1);
+          const json = await send({ via: gateway });
+          expect(json.status).toBe(503);
+          expect((await json.json()).error).toMatchObject(queryFirst);
           expect((await fetch(`${gateway.origin}/readyz`)).status).toBe(503);
           await Bun.sleep(500);
           expect(received).toHaveLength(2);

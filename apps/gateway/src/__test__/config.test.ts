@@ -43,7 +43,21 @@ test("a minimal production config loads with bounded defaults", async () => {
     trusted_proxy_cidrs: [],
     max_body_bytes: 16 << 20,
     total_timeout_ms: 180000,
+    upstream_header_timeout_ms: 30000,
+    upstream_idle_timeout_ms: 30000,
+    downstream_stall_timeout_ms: 30000,
   });
+});
+
+test("per-attempt deadlines outside 100 ms to the 600 s total ceiling are rejected", async () => {
+  for (const key of [
+    "upstream_header_timeout_ms",
+    "upstream_idle_timeout_ms",
+    "downstream_stall_timeout_ms",
+  ]) {
+    await expect(load({ ...base, [key]: 99 })).rejects.toThrow();
+    await expect(load({ ...base, [key]: 600001 })).rejects.toThrow();
+  }
 });
 
 test("production refuses private upstream bypass and evidence without an acknowledged replica", async () => {
