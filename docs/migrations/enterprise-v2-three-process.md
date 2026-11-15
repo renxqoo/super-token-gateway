@@ -83,7 +83,7 @@ legacy 测试原样保留，作为未迁能力的回归，删除随各自迁移�
 
 - 两套 Chat 实现并存至 T09；若部署未按路径分流，Chat 可能落到 legacy。c4 用部署配置与产物检查覆盖。
 - 跨故障域 HA、真实供应商与容量不在本单元范围（T14、T17、T19）。
-- `test:backup` 仍需 T12/T14 适配；`test:container` 按用户决定退役。
+- `test:backup` 已在 T12 e3 适配 v2（见[事件与归档记录](enterprise-v2-events.md) §6），原生部署演练属 T14；`test:container` 按用户决定退役。
 - 遗留请求回收已在 T05 e3 交付（见[客户资金记录](enterprise-v2-customer-funds.md) §8）：core-worker 中止已过期、从未授予的 RESERVED 预留并完成 RELEASE_PENDING 配额释放。Gateway 在 begin 后被强杀的 `SEND_GRANTED` 请求按 R06 保留双方占用，不自动释放。
 - 证据写入队列后 WAITAOF 未确认（副本落后或超时）时，Gateway 无法判断证据是否会被结算：JSON 返回 503 `usage_queue_unavailable`（提示先查询原请求再重试），SSE 以 `gateway_stream_error` 结束且无 `[DONE]`，但 worker 仍可能结算已入队的证据，客户可能已被收费。真实进程用例只覆盖了队列整体断开（未写入）的情形。
 - 续租失败一次即停止；attempt 之间（换渠道时的 context 与插件包下载）不续租，耗时超过 30 秒时下一次 next 可能因租约过期而失败。

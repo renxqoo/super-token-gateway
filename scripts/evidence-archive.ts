@@ -8,9 +8,19 @@ import { z } from "zod";
 import type { SQL } from "bun";
 import { evidenceMonth, SCHEMA_VERSION } from "@gateway/storage";
 
+const archiveSources = {
+  usage:
+    "SELECT to_jsonb(i)||jsonb_build_object('usage',p.usage) AS record,i.created_at,i.id FROM public.usage_event_index i JOIN public.usage_payloads p ON p.id=i.id AND p.created_at=i.created_at",
+  journal: "SELECT to_jsonb(e) AS record,e.created_at,e.id FROM public.money_journal e",
+  receipts: "SELECT to_jsonb(r) AS record,r.created_at,r.id FROM public.core_evidence_receipts r",
+  upstream:
+    "SELECT to_jsonb(j)||jsonb_build_object('entries',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.ordinal) FROM public.upstream_entries e WHERE e.journal_id=j.id)) AS record,j.created_at,j.id FROM public.upstream_journals j",
+} as const;
+type ArchiveKind = keyof typeof archiveSources;
+const archiveKinds = Object.keys(archiveSources) as ArchiveKind[];
 const manifestSchema = z
   .object({
-    version: z.literal(1),
+    version: z.literal(2),
     schema: z.literal(SCHEMA_VERSION),
     month: z.string(),
     semantics: z.literal("repeatable_read_snapshot_online_evidence_retained"),
@@ -20,15 +30,15 @@ const manifestSchema = z
       .array(
         z
           .object({
-            kind: z.enum(["usage", "journal"]),
-            filename: z.enum(["usage.ndjson.gz", "journal.ndjson.gz"]),
+            kind: z.enum(archiveKinds),
+            filename: z.string(),
             rows: z.number().int().nonnegative(),
             sha256: z.string().regex(/^[a-f0-9]{64}$/),
             content_sha256: z.string().regex(/^[a-f0-9]{64}$/),
           })
           .strict(),
       )
-      .length(2),
+      .length(archiveKinds.length),
   })
   .strict();
 function instantMicros(value: string): bigint {
@@ -54,7 +64,7 @@ export async function exportEvidenceArchive(
     throw new Error("Only completed UTC months can be archived");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const manifest: z.infer<typeof manifestSchema> = {
-    version: 1,
+    version: 2,
     schema: SCHEMA_VERSION,
     month,
     semantics: "repeatable_read_snapshot_online_evidence_retained",
@@ -70,19 +80,16 @@ export async function exportEvidenceArchive(
     const versions = await tx`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`;
     if (versions.length !== 1 || versions[0].version !== SCHEMA_VERSION)
       throw new Error("Archive schema mismatch");
-    for (const [kind, table] of [
-      ["usage", "usage_events"],
-      ["journal", "money_journal"],
-    ] as const) {
+    for (const kind of archiveKinds) {
       const hash = new Bun.CryptoHasher("sha256");
       let rows = 0,
         afterTime: string | null = null,
         afterId: string | null = null;
-      const filename = `${kind}.ndjson.gz` as "usage.ndjson.gz" | "journal.ndjson.gz";
+      const filename = `${kind}.ndjson.gz`;
       async function* records() {
         while (true) {
           const batch = await tx.unsafe(
-            `SELECT to_jsonb(e)::text AS record,e.created_at::text AS time,e.id::text AS id FROM public.${table} e WHERE e.created_at>=$1::timestamptz AND e.created_at<$2::timestamptz AND ($3::timestamptz IS NULL OR (e.created_at,e.id)>($3::timestamptz,$4::uuid)) ORDER BY e.created_at,e.id LIMIT 256`,
+            `SELECT s.record::text AS record,s.created_at::text AS time,s.id::text AS id FROM (${archiveSources[kind]}) s WHERE s.created_at>=$1::timestamptz AND s.created_at<$2::timestamptz AND ($3::timestamptz IS NULL OR (s.created_at,s.id)>($3::timestamptz,$4::uuid)) ORDER BY s.created_at,s.id LIMIT 256`,
             [range.start, range.end, afterTime, afterId],
           );
           if (!batch.length) break;
@@ -120,7 +127,7 @@ export async function verifyEvidenceArchive(path: string): Promise<z.infer<typeo
   if (metadata.length > 16384) throw new Error("Archive manifest exceeds budget");
   const manifest = manifestSchema.parse(JSON.parse(metadata));
   const range = evidenceMonth(manifest.month);
-  if (new Set(manifest.files.map((file) => file.kind)).size !== 2)
+  if (new Set(manifest.files.map((file) => file.kind)).size !== archiveKinds.length)
     throw new Error("Archive kinds must be unique");
   for (const file of manifest.files) {
     if (file.filename !== `${file.kind}.ndjson.gz`)

@@ -1,28 +1,44 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { chmod, mkdir } from "node:fs/promises";
+import { chmod, mkdir, rm } from "node:fs/promises";
 import { createDatabase, SCHEMA_VERSION } from "@gateway/storage";
-import { UsageProducer, usageChannel } from "@gateway/runtime";
-import { loadConfig } from "../apps/legacy-gateway/src/config.ts";
+import { UsageProducer, evidenceChannel, usageChannel, type QueueChannel } from "@gateway/runtime";
+import { loadCoreWorkerConfig } from "../apps/core-worker/src/config.ts";
 if (!Bun.argv.includes("--quiesced"))
   throw new Error(
     "Stop all admission/producer processes and drain the queue, then pass --quiesced. A PG-only snapshot of an active queue is incomplete.",
   );
-const config = loadConfig();
-const queue = new UsageProducer({
-  channel: usageChannel,
-  url: config.QUEUE_REDIS_URL,
-  namespace: config.REDIS_NAMESPACE,
-  replicas: config.QUEUE_REQUIRED_REPLICAS,
-  timeoutMs: config.QUEUE_ACK_TIMEOUT_MS,
-});
+const config = loadCoreWorkerConfig();
+const queues = [usageChannel, evidenceChannel].map(
+  (channel) =>
+    new UsageProducer<unknown>({
+      channel: channel as QueueChannel<unknown>,
+      url: config.QUEUE_REDIS_URL,
+      namespace: config.REDIS_NAMESPACE,
+      replicas: 0,
+      timeoutMs: config.QUEUE_ACK_TIMEOUT_MS,
+    }),
+);
 const assertDrained = async () => {
-  const counts = await queue.stats();
-  assert(
-    Object.values(counts).every((n) => n === 0),
-    "Queue must have no waiting, active, delayed or failed evidence",
-  );
+  for (const queue of queues) {
+    const counts = await queue.stats();
+    assert(
+      Object.values(counts).every((n) => n === 0),
+      `Queues must have no waiting, active, delayed or failed evidence: ${queue.options.channel.name} ${JSON.stringify(counts)}`,
+    );
+  }
 };
+const roles = [
+  "runtime-role.sql",
+  "core-identity-role.sql",
+  "core-catalog-role.sql",
+  "core-execution-role.sql",
+  "core-management-role.sql",
+  "core-public-role.sql",
+  "core-settlement-role.sql",
+];
+const digest = (table: string) =>
+  `(SELECT md5(coalesce(string_agg(h,'' ORDER BY h),'')) FROM (SELECT md5(to_jsonb(t)::text) AS h FROM ${table} t) rows)`;
 
 const connection = process.env.DATABASE_URL;
 if (!connection) throw new Error("DATABASE_URL is required");
@@ -71,6 +87,7 @@ const run = async (args: string[], input?: URL, output?: URL) => {
 };
 const owner = createDatabase(connection);
 let destination: ReturnType<typeof createDatabase> | undefined;
+let passed = false;
 try {
   await assertDrained();
   assert.equal(
@@ -84,7 +101,7 @@ try {
   );
   const counters = async (connection: typeof owner) =>
     (
-      await connection`SELECT
+      await connection.unsafe(`SELECT
     (SELECT count(*)::text FROM attempts) AS attempts,
     (SELECT count(*)::text FROM usage_events) AS usage,
     (SELECT count(*)::text FROM money_journal) AS journals,
@@ -95,9 +112,22 @@ try {
     (SELECT jsonb_agg(v ORDER BY currency) FROM(SELECT currency,sum(available_atoms)::text AS available,sum(reserved_atoms)::text AS reserved,sum(spent_atoms)::text AS spent,sum(expired_atoms)::text AS expired,sum(debt_atoms)::text AS debt,sum(credit_limit_atoms)::text AS credit_limit,sum(credit_reserved_atoms)::text AS credit_reserved,sum(credit_policy_version)::text AS credit_versions FROM wallets GROUP BY currency)v) AS balances,
     (SELECT count(*)::int FROM wallets w WHERE w.credit_reserved_atoms<>(SELECT coalesce(sum(h.credit_atoms),0) FROM billing_holds h WHERE h.wallet_id=w.id AND h.state IN ('HELD','RECONCILING'))) AS inconsistent_credit,
     (SELECT count(*)::int FROM money_journal j WHERE (SELECT sum((v->>'atoms')::numeric) FROM jsonb_array_elements(j.lines)v)<>0) AS unbalanced,
-    (SELECT count(*)::int FROM wallets w WHERE (w.available_atoms,w.reserved_atoms,w.spent_atoms,w.expired_atoms) IS DISTINCT FROM (SELECT ROW(coalesce(sum(l.available_atoms),0),coalesce(sum(l.reserved_atoms),0),coalesce(sum(l.spent_atoms),0),coalesce(sum(l.expired_atoms),0)) FROM wallet_lots l WHERE l.wallet_id=w.id)) AS inconsistent_wallets
-  `
-    )[0];
+    (SELECT count(*)::int FROM wallets w WHERE (w.available_atoms,w.reserved_atoms,w.spent_atoms,w.expired_atoms) IS DISTINCT FROM (SELECT ROW(coalesce(sum(l.available_atoms),0),coalesce(sum(l.reserved_atoms),0),coalesce(sum(l.spent_atoms),0),coalesce(sum(l.expired_atoms),0)) FROM wallet_lots l WHERE l.wallet_id=w.id)) AS inconsistent_wallets,
+    (SELECT jsonb_agg(v ORDER BY currency) FROM(SELECT currency,sum(balance_atoms)::text AS balance,sum(reserved_atoms)::text AS reserved,sum(spent_atoms)::text AS spent FROM upstream_account_balances GROUP BY currency)v) AS upstream_balances,
+    (SELECT count(*)::int FROM upstream_account_balances b WHERE (b.balance_atoms,b.reserved_atoms,b.spent_atoms) IS DISTINCT FROM (SELECT ROW(coalesce(sum(e.atoms) FILTER (WHERE e.account IN ('upstream:available','upstream:reserved')),0),coalesce(sum(e.atoms) FILTER (WHERE e.account='upstream:reserved'),0),coalesce(sum(e.atoms) FILTER (WHERE e.account='upstream:expense'),0)) FROM upstream_entries e JOIN upstream_journals j ON j.id=e.journal_id WHERE j.account_id=b.account_id AND e.currency=b.currency)) AS inconsistent_upstream,
+    (SELECT count(*)::int FROM (SELECT journal_id FROM upstream_entries GROUP BY journal_id HAVING sum(atoms)<>0) j) AS unbalanced_upstream,
+    (SELECT jsonb_object_agg(record_kind,n) FROM (SELECT record_kind,count(*)::text AS n FROM usage_event_index GROUP BY record_kind) k) AS evidence_kinds,
+    (SELECT jsonb_object_agg(state,n) FROM (SELECT state,count(*)::text AS n FROM event_deliveries GROUP BY state) d) AS deliveries,
+    ${digest("event_consumers")} AS consumers_digest,
+    ${digest("event_deliveries")} AS deliveries_digest,
+    ${digest("core_evidence_receipts")} AS receipts_digest,
+    ${digest("upstream_entries")} AS upstream_entries_digest,
+    ${digest("plugin_packages")} AS plugin_packages_digest,
+    ${digest("plugin_versions")} AS plugin_versions_digest,
+    ${digest("channel_plugin_bindings")} AS plugin_bindings_digest,
+    ${digest("resources")} AS resources_digest
+  `)
+    )[0] as Record<string, unknown>;
   let before: Record<string, unknown> = {};
   await owner.begin(async (tx) => {
     await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
@@ -139,14 +169,15 @@ try {
   restored.pathname = `/${restore}`;
   destination = createDatabase(restored.toString());
   await destination`REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC`;
-  await destination.unsafe(
-    await Bun.file(new URL("../infra/runtime-role.sql", import.meta.url)).text(),
-  );
+  for (const role of roles)
+    await destination.unsafe(await Bun.file(new URL(`../infra/${role}`, import.meta.url)).text());
   const after = await counters(destination);
   assert.deepEqual(after, before);
   assert.equal(after.unbalanced, 0);
   assert.equal(after.inconsistent_wallets, 0);
   assert.equal(after.inconsistent_credit, 0);
+  assert.equal(after.inconsistent_upstream, 0);
+  assert.equal(after.unbalanced_upstream, 0);
   assert.equal(
     (await destination`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`)[0]
       .version,
@@ -171,8 +202,10 @@ try {
       current_roles: "reapplied",
     }),
   );
+  passed = true;
 } finally {
-  queue.close();
+  for (const queue of queues) queue.close();
+  if (!passed) await rm(path, { force: true });
   await destination?.close();
   await owner.unsafe(`DROP DATABASE IF EXISTS ${restore} WITH (FORCE)`);
   await owner.close();

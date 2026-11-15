@@ -21,14 +21,18 @@
 - **E8 重试审计**：鉴权 → Redis 重试 → `audit_events`（`settlement_job.retry`）在同一 PG 事务中提交；Redis 与 PG 不能原子提交，若重试后审计事务失败，任务已重新排队但无审计行，接口返回错误，运维以队列状态核对。
 - **E9 指标**：`GET /admin/metrics` 返回 PG 数字量：未终结请求（ADMITTED/RUNNING/UNKNOWN）、HELD 预留、已过期未授予的 permit（恢复积压）、等待终态用量的 v2 资源、用量冲突数、各消费者未 ACK 数，以及队列计数。进程内计数仍由 core-worker `/readyz` 提供。
 - **E10 不迁移手动恢复触发**：v2 恢复由 core-worker 按 `RECOVERY_INTERVAL_MS` 连续执行，批满时立即续批，过期 permit 积压在指标中可见；legacy `POST /admin/recover` 不在 Core 提供，T18 随 legacy 删除。
+- **E11 月归档覆盖 v2 证据**：已证实缺口——`db:archive` 导出经 `usage_events` 视图，视图过滤 RAW，v2 签名原始事实不进归档（回归用例修复前 usage 2 行、RAW 0 行，且无回执与上游账本文件）。归档清单升为 `version: 2`，四类文件：`usage`（`usage_event_index` 全部记录种类连同 payload，含 RAW/CANONICAL/DISPUTED 与谱系列）、`journal`（`money_journal`）、`receipts`（`core_evidence_receipts`）、`upstream`（`upstream_journals` 连同按序的 `upstream_entries`）。仍为在线保留的可重复读快照；只在开发环境使用过的 version 1 清单不再校验（主规格授权不升级历史开发数据）。
+- **E12 分区迁移失败回滚**：`prepareEvidenceMonth` 在单事务内完成默认分区回落数据的搬移、约束与触发器摘除及恢复；中途失败整体回滚。
+- **E13 备份校验 v2 化**：`scripts/verify-backup.ts` 改读 core-worker 配置（`QUEUE_REDIS_URL`、`REDIS_NAMESPACE`、`QUEUE_ACK_TIMEOUT_MS`），dump 前后同时要求 legacy `usage-v1` 与 v2 `core-evidence-v1` 队列为空（legacy 删除前两者并存），失败信息带通道名与计数；恢复后重新应用全部 7 个角色文件；比较项新增上游余额、上游账本一致性（可用+占用腿=余额、占用腿=占用、费用腿=已用）与分录平衡、各记录种类证据数、投递状态，以及消费者、投递、回执、上游分录、插件包、插件版本、渠道绑定、资源的整行摘要。校验未通过时删除本次 dump 文件（原实现在拒绝时留下空文件）。
+- **E14 审计同事务核对**：Core 全部资金与配置写入口均在授权事务内写审计：管理与身份目录经 `audit_events`（`write`/`audit`），上游资金经 `upstream_audit_events`，插件目录命令在命令函数内写 `plugin_*` 审计；仅 claim/ACK 属数据面不审计（E3）。
 
 ## 3. 里程碑
 
-| 里程碑 | 内容                                                                                       | 状态   |
-| ------ | ------------------------------------------------------------------------------------------ | ------ |
-| e1     | Core 事件 API：usage、消费者登记、claim、ACK，权限、审计与角色                             | 完成   |
-| e2     | Core 运维：settlement 队列统计与失败任务重试（审计、不重发上游）、指标；手动恢复触发不迁移 | 完成   |
-| e3     | 归档与恢复：v2 分区/归档失败回滚、备份恢复后账本/ACK/插件/资源一致                         | 待执行 |
+| 里程碑 | 内容                                                                                       | 状态 |
+| ------ | ------------------------------------------------------------------------------------------ | ---- |
+| e1     | Core 事件 API：usage、消费者登记、claim、ACK，权限、审计与角色                             | 完成 |
+| e2     | Core 运维：settlement 队列统计与失败任务重试（审计、不重发上游）、指标；手动恢复触发不迁移 | 完成 |
+| e3     | 归档与恢复：v2 证据完整归档、分区迁移失败回滚、备份恢复后账本/ACK/插件/资源一致            | 完成 |
 
 ## 4. e1 记录
 
@@ -40,3 +44,10 @@
 
 - 测试 `tests/integration/core-operations.test.ts` 2 例：真实 Redis 队列中首次处理失败的任务，`operations:read` 可见 failed 计数与指标、无关权限 403；只读凭证重试 403 且任务仍 failed、处理次数不变；`operations:manage` 重试返回 `scheduled`，任务恰好再处理一次后从 failed 清空，审计行记录技术管理员；再次重试 404、非法 ID 400。未配置队列时 `settlement_queue` 为 null、`/queue` 404，回放消费者在指标中列出且未 ACK 为 0。
 - 红绿证据：去掉 `core-management-role.sql` 新增的 3 行列级授权，两例均 503；恢复后通过。
+
+## 6. e3 记录
+
+- `tests/integration/evidence-archive.test.ts` 2 例：真实 v2 请求结算后回填到已结束月份，归档四类文件行数与库内全部记录一致，usage 含全部 RAW 与 CANONICAL 并带 payload，回执覆盖该请求的 attempt，每个上游日记账分录多于一条且合计为 0，归档不含提示/回答正文，篡改回执文件后校验失败；在默认分区存在回落数据时以同名 domain 让日记账分区创建失败，`prepareEvidenceMonth --quiesced` 失败后回落行、分区缺失、约束与触发器状态与失败前完全一致且仍不可改写，移除障碍后重试成功搬移。
+- `tests/integration/backup-restore.test.ts` 1 例：真实 v2 Chat 与文件上传结算、消费者 ACK 后，停 worker 再产生一笔证据并停 Gateway，备份校验因 `core-evidence-v1` 有积压被拒且不留 dump；重启 worker 排空后备份恢复通过：钱包/授信/上游一致性与平衡计数均为 0，投递状态全部 ACKED，含 RAW 证据，整行摘要恢复前后一致，输出不含正文，恢复库已删除。
+- 红绿证据：归档回归在修复前失败（usage 2 行、缺 receipts/upstream），修复后通过；分区回滚与备份用例覆盖既有/新改行为。首次实现时增加的“无 RESERVED/SEND_GRANTED permit”前置条件被真实流量证伪（结算后 permit 仍为 SEND_GRANTED），已删除，静止条件以进程停止与两条队列 dump 前后为空为准。
+- 环境：`.env.local` 的 `DATABASE_URL` 指向 schema 2026111006 的历史开发库，`bun run test:backup --quiesced` 按设计在 schema 校验处拒绝（实测 2026111006 ≠ 2026111224）；不升级或重建该库，v2 备份校验由上述集成用例在独立库上执行。原生生产部署形态下的备份演练属 T14。
