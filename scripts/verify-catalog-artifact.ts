@@ -122,7 +122,7 @@ await withCatalog(async (f, db) => {
     const provider = await request("/admin/providers", {
       name: `artifact-provider-${crypto.randomUUID()}`,
       kind: "openai",
-      base_url: "https://127.0.0.1:1/v1",
+      base_url: "https://127.0.0.1:1",
       api_key: "synthetic-no-real-provider-key",
       concurrency: 1,
       rpm: 1,

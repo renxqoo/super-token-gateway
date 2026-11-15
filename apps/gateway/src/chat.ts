@@ -664,7 +664,7 @@ function shortDeadline() {
   return { deadlineAt: new Date(Date.now() + 5000).toISOString() };
 }
 
-async function finalCommand(
+async function sameCommand(
   deps: ChatDependencies,
   kind: "execution_abort_v1" | "execution_quota_v1",
   data: Record<string, unknown>,
@@ -673,10 +673,12 @@ async function finalCommand(
     end = Date.parse(options.deadlineAt) - 250;
   for (let delay = 25; ; delay = Math.min(delay * 2, 400)) {
     try {
-      return await deps.core.execution(kind, data, options);
+      await deps.core.execution(kind, data, options);
+      return "done" as const;
     } catch (error) {
-      if (error instanceof CoreRpcError && error.detail.retryability === "NONE") return;
-      if (Date.now() + delay >= end) return;
+      if (error instanceof CoreRpcError && error.detail.retryability === "NONE")
+        return "refused" as const;
+      if (Date.now() + delay >= end) return "unknown" as const;
       await Bun.sleep(delay);
     }
   }
@@ -687,7 +689,7 @@ async function abortBeforeSend(
   permit: Permit & { channelId: string },
   reason: "CANCELLED" | "DEADLINE" | "PREPARE_DISPOSED",
 ) {
-  await finalCommand(deps, "execution_abort_v1", {
+  await sameCommand(deps, "execution_abort_v1", {
     attempt_id: permit.attemptId,
     permit_epoch: permit.permitEpoch,
     reason,
@@ -732,7 +734,7 @@ function healthOutcome(
 }
 
 async function closeRequest(deps: ChatDependencies, permit: Permit, reason: CloseReason) {
-  await finalCommand(deps, "execution_quota_v1", {
+  await sameCommand(deps, "execution_quota_v1", {
     attempt_id: permit.attemptId,
     permit_epoch: permit.permitEpoch,
     action: "CLOSE",
@@ -825,14 +827,18 @@ async function resolveUnknownBegin(deps: ChatDependencies, commandId: string) {
 }
 
 function renewQuota(deps: ChatDependencies, permit: Permit) {
+  let renewing = false;
   const timer = setInterval(() => {
-    void deps.core
-      .execution(
-        "execution_quota_v1",
-        { attempt_id: permit.attemptId, permit_epoch: permit.permitEpoch, action: "RENEW" },
-        shortDeadline(),
-      )
-      .catch(() => clearInterval(timer));
+    if (renewing) return;
+    renewing = true;
+    void sameCommand(deps, "execution_quota_v1", {
+      attempt_id: permit.attemptId,
+      permit_epoch: permit.permitEpoch,
+      action: "RENEW",
+    }).then((outcome) => {
+      renewing = false;
+      if (outcome === "refused") clearInterval(timer);
+    });
   }, deps.config.quota_renew_ms);
   return () => clearInterval(timer);
 }

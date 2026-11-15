@@ -184,7 +184,7 @@ test(
         second = await f.request("/providers", {
           name: `shared-${crypto.randomUUID()}`,
           kind: "openai",
-          base_url: "https://second.synthetic.test/v1",
+          base_url: "https://second.synthetic.test",
           api_key: "second-synthetic-secret",
           concurrency: 10,
           rpm: 100,
@@ -303,6 +303,37 @@ test(
           await db`SELECT count(*)::integer n FROM upstream_funding_operations WHERE external_ref=${fail.external_ref}`
         )[0].n,
       ).toBe(0);
+    }),
+  30000,
+);
+
+test(
+  "a provider base_url with a path prefix is rejected instead of being silently dropped from upstream requests",
+  () =>
+    withFinancial(async (f, db) => {
+      const name = `prefixed-${crypto.randomUUID()}`,
+        provider = (base_url: string) =>
+          f.request("/providers", {
+            name,
+            kind: "openai",
+            base_url,
+            api_key: "prefixed-synthetic-secret",
+            concurrency: 1,
+            rpm: 1,
+          });
+      for (const base_url of [
+        "https://prefixed.synthetic.test/api/v1",
+        "https://prefixed.synthetic.test/v1/",
+      ]) {
+        const rejected = await provider(base_url);
+        expect(rejected.status).toBe(400);
+        expect((rejected.value.error as { code: string }).code).toBe("invalid_provider");
+      }
+      expect((await db`SELECT count(*)::integer n FROM channels WHERE name=${name}`)[0].n).toBe(0);
+      expect((await provider("https://prefixed.synthetic.test/")).status).toBe(201);
+      expect((await db`SELECT base_url FROM channels WHERE name=${name}`)[0].base_url).toBe(
+        "https://prefixed.synthetic.test",
+      );
     }),
   30000,
 );

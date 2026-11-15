@@ -198,7 +198,8 @@
           "base_url": {
             "type": "string",
             "maxLength": 1000,
-            "format": "uri"
+            "format": "uri",
+            "description": "HTTPS origin; a path, query, fragment or userinfo is rejected"
           },
           "api_key": {
             "type": "string",

@@ -45,7 +45,7 @@ export async function startTlsUpstream(fetch: (request: Request) => Response | P
     fetch,
   });
   return {
-    baseUrl: `https://127.0.0.1:${server.port}/v1`,
+    baseUrl: `https://127.0.0.1:${server.port}`,
     certificate,
     async stop() {
       await server.stop(true);

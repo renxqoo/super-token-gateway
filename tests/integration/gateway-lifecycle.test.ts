@@ -651,6 +651,57 @@ test(
 );
 
 test(
+  "a quota renewal that fails once on a lock conflict keeps renewing instead of letting the leases lapse for the rest of the attempt",
+  () => {
+    const hold = stall();
+    return withGatewayStack(
+      {
+        reply: async () => {
+          await hold.released;
+          return chatReplies.json();
+        },
+        gateway: { quota_renew_ms: 200 },
+      },
+      async ({ db, received, send }) => {
+        await db.unsafe(
+          "CREATE SEQUENCE renew_fault;GRANT USAGE,UPDATE ON SEQUENCE renew_fault TO PUBLIC;CREATE FUNCTION renew_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('renew_fault')=1 THEN RAISE EXCEPTION 'renew fault' USING ERRCODE='55P03';END IF;RETURN NEW;END $$;CREATE TRIGGER renew_fault BEFORE UPDATE ON execution_quota_leases FOR EACH ROW WHEN (OLD.state='ACTIVE' AND NEW.state='ACTIVE') EXECUTE FUNCTION renew_fault()",
+        );
+        try {
+          const pending = send();
+          const attempt = await onlyRequest(db);
+          await eventually(async () => received.length === 1, "upstream request");
+          await eventually(
+            async () => Number((await db`SELECT last_value FROM renew_fault`)[0].last_value) > 1,
+            "renewal after the injected failure",
+          );
+          const revisions = async (): Promise<number[]> =>
+            (
+              await db`SELECT lease_id,(descriptor->>'revision')::numeric AS revision FROM execution_quota_leases WHERE request_id=${attempt.request_id} AND state='ACTIVE' ORDER BY lease_id`
+            ).map((row: { revision: string }) => Number(row.revision));
+          const before = await revisions();
+          expect(before.length).toBeGreaterThan(0);
+          await Bun.sleep(1000);
+          const after = await revisions();
+          expect(after.length).toBe(before.length);
+          after.forEach((revision, index) => expect(revision).toBeGreaterThan(before[index]!));
+          hold.release();
+          const response = await pending;
+          expect(response.status).toBe(200);
+          await response.text();
+          await eventually(
+            async () => (await leaseStates(db, attempt.request_id)).join() === "RELEASED",
+            "released quota leases",
+          );
+        } finally {
+          hold.release();
+        }
+      },
+    );
+  },
+  timeout,
+);
+
+test(
   "a supplier account awaiting reconciliation makes the v2 Gateway answer 503 no_route without calling upstream instead of core_unavailable",
   () =>
     withGatewayStack({ reply: () => chatReplies.json() }, async ({ db, setup, received, send }) => {

@@ -91,7 +91,10 @@ export const providerSchema = z
   .object({
     name: z.string().min(1).max(100),
     kind: z.enum(providerKinds),
-    base_url: z.url().max(1000),
+    base_url: z
+      .url()
+      .max(1000)
+      .describe("HTTPS origin; a path, query, fragment or userinfo is rejected"),
     api_key: z.string().min(1).max(16384),
     concurrency: z.number().int().min(1).max(100_000).default(1000),
     rpm: z.number().int().min(1).max(10_000_000).default(1_000_000),

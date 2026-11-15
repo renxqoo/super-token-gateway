@@ -142,7 +142,7 @@ async function prepareFinancial(
       const providerResponse = await request("/providers", {
         name: model,
         kind: "openai",
-        base_url: upstream.baseUrl ?? "https://synthetic.provider.test/v1",
+        base_url: upstream.baseUrl ?? "https://synthetic.provider.test",
         api_key: "synthetic-upstream-secret",
         concurrency: 10,
         rpm: 100,

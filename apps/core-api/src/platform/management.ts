@@ -101,6 +101,7 @@ export function createCoreManagementApplication(options: {
     const url = new URL(input.base_url);
     if (
       url.protocol !== "https:" ||
+      url.pathname !== "/" ||
       url.username ||
       url.password ||
       url.search ||
@@ -120,7 +121,7 @@ export function createCoreManagementApplication(options: {
           provider = await recordProvider(
             tx,
             channel,
-            input,
+            { ...input, base_url: url.origin },
             secret,
             input.account_id && input.brand_id
               ? { account_id: input.account_id, brand_id: input.brand_id }
