@@ -4,6 +4,7 @@ export async function createCommitAckProxy() {
   const target = new URL(process.env.DATABASE_URL!),
     sockets = new Set<Socket>();
   let armed = false,
+    hold: "commit" | "acknowledgement" | undefined,
     triggers: string[] = [],
     finished: ((error?: Error) => void) | undefined,
     timer: ReturnType<typeof setTimeout> | undefined;
@@ -12,6 +13,7 @@ export async function createCommitAckProxy() {
     sockets.add(client);
     sockets.add(upstream);
     let drop = false,
+      withhold = false,
       primed = false,
       tail = Buffer.alloc(0);
     const close = () => {
@@ -39,22 +41,22 @@ export async function createCommitAckProxy() {
       if (armed && (!triggers.length || primed) && /COMMIT(?:\s+TRANSACTION)?\0/.test(text)) {
         drop = true;
         armed = false;
+        if (hold === "commit") {
+          withhold = true;
+          settle();
+        }
       }
       tail.fill(0);
       tail = Buffer.from(bytes.subarray(Math.max(0, bytes.length - 128)));
       bytes.fill(0);
-      upstream.write(chunk);
+      if (!withhold) upstream.write(chunk);
     });
     upstream.on("data", (chunk) => {
       const part = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
       if (drop) {
         if (part.includes(Buffer.from("COMMIT\0"))) {
-          const complete = finished;
-          finished = undefined;
-          clearTimeout(timer);
-          timer = undefined;
-          complete?.();
-          close();
+          settle();
+          if (!hold) close();
         }
       } else client.write(chunk);
     });
@@ -66,6 +68,13 @@ export async function createCommitAckProxy() {
       resolve();
     });
   });
+  function settle() {
+    const complete = finished;
+    finished = undefined;
+    clearTimeout(timer);
+    timer = undefined;
+    complete?.();
+  }
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Missing proxy port");
   await appendFile(
@@ -75,9 +84,10 @@ export async function createCommitAckProxy() {
   );
   return {
     port: address.port,
-    arm(trigger: string[] = [], timeoutMs = 3000) {
+    arm(trigger: string[] = [], timeoutMs = 3000, mode?: "commit" | "acknowledgement") {
       if (armed || finished) throw new Error("Proxy already armed");
       armed = true;
+      hold = mode;
       triggers = trigger;
       return new Promise<void>((resolve, reject) => {
         finished = (error) => (error ? reject(error) : resolve());

@@ -1,66 +1,10 @@
 import assert from "node:assert/strict";
-import type { UsageProducer, UsageConsumer } from "@gateway/runtime";
-import type { createDatabase } from "@gateway/storage";
-import type { Credential, UsageEvidence } from "@gateway/contracts";
-import {
-  createNativeFixture,
-  within,
-  type NativeProcess,
-} from "../tests/support/native-fixture.ts";
+import { dirname } from "node:path";
+import type { SQL } from "bun";
+import type { UsageProducer } from "@gateway/runtime";
+import type { CoreEvidenceGroupV1, ExecutionReply } from "@gateway/contracts";
+import { createNativeFixture, within } from "../tests/support/native-fixture.ts";
 
-async function worker() {
-  if (
-    process.env.DURABILITY_PHASE !== "BEFORE_COMMIT" &&
-    process.env.DURABILITY_PHASE !== "AFTER_COMMIT"
-  )
-    throw new Error("Invalid durability worker phase");
-  if (
-    !process.env.DURABILITY_MARKER ||
-    !process.env.DATABASE_URL ||
-    !process.env.QUEUE_REDIS_URL ||
-    !process.env.REDIS_NAMESPACE
-  )
-    throw new Error("Incomplete durability worker configuration");
-  setTimeout(() => process.exit(2), 60000);
-  const [{ UsageConsumer, usageChannel }, { createDatabase, Store }] = await Promise.all([
-    import("@gateway/runtime"),
-    import("@gateway/storage"),
-  ]);
-  const db = createDatabase(process.env.DATABASE_URL!, 2);
-  const store = new Store(db);
-  const consumer = new UsageConsumer({
-    channel: usageChannel,
-    url: process.env.QUEUE_REDIS_URL!,
-    namespace: process.env.REDIS_NAMESPACE!,
-    replicas: 1,
-    timeoutMs: 1000,
-    concurrency: 1,
-    lockDurationMs: 1000,
-    stalledIntervalMs: 1000,
-    process: async (events) => {
-      if (process.env.DURABILITY_PHASE === "BEFORE_COMMIT") {
-        await db.begin(async (tx) => {
-          const rows = await tx`SELECT persist_usage_batch(${events}::jsonb) AS result`;
-          assert(
-            Object.values(rows[0].result as Record<string, { status: string }>).every(
-              (r) => r.status !== "ERROR",
-            ),
-          );
-          await Bun.write(
-            process.env.DURABILITY_MARKER!,
-            "uncommitted evidence and ledger written",
-          );
-          await new Promise(() => {});
-        });
-      }
-      await store.persistUsage(events);
-      await Bun.write(process.env.DURABILITY_MARKER!, "reached");
-      await new Promise(() => {});
-    },
-  });
-  await consumer.ready();
-  await new Promise(() => {});
-}
 async function initializeFixture() {
   let interrupted = false;
   const onSignal = () => {
@@ -81,6 +25,12 @@ async function initializeFixture() {
   }
 }
 
+async function supplier(db: SQL, account: string) {
+  return (
+    await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM upstream_account_balances WHERE account_id=${account}`
+  )[0] as { balance: string; reserved: string; spent: string };
+}
+
 async function verify() {
   if (Bun.argv.length !== 2)
     throw new Error(
@@ -91,10 +41,9 @@ async function verify() {
   const id = crypto.randomUUID().replaceAll("-", "");
   const label = `gateway-durability-${id}`;
   let checkpoint = "fixture initialization";
-  let db: ReturnType<typeof createDatabase> | undefined;
-  let consumer: UsageConsumer | undefined;
-  let producer: UsageProducer | undefined;
-  let child: NativeProcess | undefined;
+  let producer: UsageProducer<CoreEvidenceGroupV1> | undefined;
+  let worker: { close(): Promise<void> } | undefined;
+  let financial: Promise<void> | undefined;
   const checks: string[] = [];
   let failureCause: unknown;
   const cleanupErrors: unknown[] = [];
@@ -114,10 +63,15 @@ async function verify() {
   try {
     checkpoint = "business dependency loading";
     const [
-      { UsageProducer, UsageConsumer, usageChannel },
-      { createDatabase, migrate, Store, createCustomerFundsStore },
+      { UsageProducer, evidenceChannel },
+      { createSettlementWorker },
+      { withFinancial, prepareFinancialAdmission },
     ] = await Promise.race([
-      Promise.all([import("@gateway/runtime"), import("@gateway/storage")]),
+      Promise.all([
+        import("@gateway/runtime"),
+        import("../apps/core-worker/src/settlement/worker.ts"),
+        import("../tests/support/financial-execution.ts"),
+      ]),
       interrupted.promise,
     ]);
     const primary = await fixture.startRedis("primary");
@@ -128,7 +82,7 @@ async function verify() {
       (await replica.command("INFO", "replication")).includes("master_link_status:up"),
     );
     producer = new UsageProducer({
-      channel: usageChannel,
+      channel: evidenceChannel,
       url: primaryURL,
       namespace: `${label}:topology`,
       replicas: 1,
@@ -152,7 +106,7 @@ async function verify() {
     producer = undefined;
     await primary.command("CONFIG", "SET", "maxmemory-policy", "noeviction");
     producer = new UsageProducer({
-      channel: usageChannel,
+      channel: evidenceChannel,
       url: primaryURL,
       namespace: `${label}:topology`,
       replicas: 0,
@@ -166,274 +120,193 @@ async function verify() {
       "production topology acknowledges every connected candidate and rejects live persistence drift",
     );
     const postgres = await fixture.startPostgres();
-    const url = new URL(postgres.url);
-    db = createDatabase(url.toString(), 4);
-    await migrate(db);
-    console.log(
-      JSON.stringify({ durabilityFixture: "ready", ownedResources: await fixture.resources() }),
-    );
-    const store = new Store(db);
-    const funds = createCustomerFundsStore(db);
-    const project = await store.createProject({
-      name: id,
-      rpm: 1000,
-      tpm: 1000000,
-      concurrency: 100,
-    });
-    const key = await store.createCredential(
-      project,
-      { name: "faults", models: [], operations: ["chat"] },
-      id,
-      "fixture",
-    );
-    await funds.credit(project, {
-      currency: "USD",
-      external_ref: "fixture",
-      amount_atoms: "10000",
-      kind: "CASH",
-      priority: 100,
-      models: [],
-      operations: [],
-    });
-    const provider = crypto.randomUUID();
-    await store.createProvider(
-      provider,
-      {
-        name: id,
-        kind: "openai",
-        base_url: "https://fixture.invalid/v1",
-        rpm: 1000,
-        concurrency: 100,
-      },
-      "fixture",
-    );
-    await store.createModel({ name: id, operations: ["chat"], max_output_tokens: 100 });
-    const rates = {
-      input_tokens: { numerator: "1", denominator: "1" },
-      output_tokens: { numerator: "1", denominator: "1" },
-    };
-    await store.createRoute(id, {
-      provider_id: provider,
-      upstream_model: id,
-      operations: ["chat"],
-      priority: 1,
-      weight: 1,
-      pricing: { currency: "USD", rates },
-      ceilings: { input_tokens: "100", output_tokens: "100" },
-    });
-    const route = (await store.routes(id, "chat"))[0]!;
-    const tariff = await funds.setTariff({
-      model: id,
-      operation: "chat",
-      basis: "PROVIDER_USAGE",
-      pricing: { currency: "USD", rates },
-      ceilings: { input_tokens: "100", output_tokens: "100" },
-    });
-    const evidence = async (): Promise<UsageEvidence> => {
-      const admitted = await store.admitInitial(
-        crypto.randomUUID(),
-        { id: key, project_id: project } as Credential,
-        "chat",
-        id,
-        null,
-        "fixture",
-        route,
-        {
-          currency: "USD",
-          amount_atoms: "100",
-          input_characters: "0",
-          prices: { [provider]: tariff.pricing_id },
-        },
-      );
-      return {
-        attemptId: admitted.attempt_id!,
-        source: "execution",
-        state: "SUCCEEDED",
-        finality: "FINAL",
-        usage: { input_tokens: "7", output_tokens: "5" },
-        requestState: "SUCCEEDED",
-      };
-    };
-    let expected = 0;
-    const consume = async (namespace: string, endpoint: string) => {
-      consumer = new UsageConsumer({
-        channel: usageChannel,
-        url: endpoint,
-        namespace,
-        replicas: 0,
-        timeoutMs: 1000,
-        concurrency: 1,
-        lockDurationMs: 1000,
-        stalledIntervalMs: 1000,
-        process: (events) => store.persistUsage(events),
-      });
-      await consumer.ready();
-      await until(
-        async () =>
-          Number(
-            (
-              await db!`SELECT count(*)::int AS n FROM billing_charges WHERE amount_atoms=12 AND funded_atoms=12`
-            )[0].n,
-          ) === expected,
-      );
-      const inspector = new UsageProducer({
-        channel: usageChannel,
-        url: endpoint,
-        namespace,
-        replicas: 0,
-        timeoutMs: 1000,
-      });
-      try {
-        await until(async () => {
-          const counts = await inspector.stats();
-          return Object.values(counts).every((n) => n === 0);
-        });
-      } finally {
-        inspector.close();
-      }
-      await within(consumer.close(), 3000, "Consumer close");
-      consumer = undefined;
-    };
-    for (const phase of ["BEFORE_COMMIT", "AFTER_COMMIT"]) {
-      checkpoint = phase;
-      const namespace = `${label}:${phase}`;
-      const marker = await fixture.write(`${phase}.marker`, "");
-      producer = new UsageProducer({
-        channel: usageChannel,
-        url: primaryURL,
-        namespace,
-        replicas: 1,
-        timeoutMs: 1000,
-      });
-      child = await fixture.startBun(
-        `worker-${phase}`,
-        import.meta.path,
-        {
-          DURABILITY_PHASE: phase,
-          DURABILITY_MARKER: marker,
-          DATABASE_URL: url.toString(),
-          QUEUE_REDIS_URL: primaryURL,
-          REDIS_NAMESPACE: namespace,
-        },
-        ["--durability-worker"],
-      );
-      await producer.publish(await evidence());
-      await until(async () => (await Bun.file(marker).text()) !== "");
-      await child.stop("SIGKILL");
-      child = undefined;
-      expected++;
-      if (phase === "AFTER_COMMIT")
-        assert.equal(
-          Number((await db`SELECT count(*)::int AS n FROM billing_charges`)[0].n),
-          expected,
+    const admission = await fixture.startRedis("admission");
+    process.env.DATABASE_URL = postgres.url;
+    process.env.REDIS_URL = admission.url;
+    process.env.PATH = [dirname(process.execPath), process.env.PATH].filter(Boolean).join(":");
+    checkpoint = "v2 financial fixture";
+    financial = withFinancial(
+      async (f, db) => {
+        console.log(
+          JSON.stringify({
+            durabilityFixture: "ready",
+            ownedResources: await fixture.resources(),
+          }),
         );
-      await consume(namespace, primaryURL);
-      producer.close();
-      producer = undefined;
-      assert.equal(
-        Number((await db`SELECT count(*)::int AS n FROM money_journal WHERE kind='SETTLE'`)[0].n),
-        expected,
-      );
-      checks.push(`SIGKILL ${phase}: recovered exactly once`);
-    }
-    const namespace = `${label}:AOF`;
-    producer = new UsageProducer({
-      channel: usageChannel,
-      url: primaryURL,
-      namespace,
-      replicas: 1,
-      timeoutMs: 1000,
-    });
-    await producer.publish(await evidence());
-    expected++;
-    assert.equal((await producer.stats()).waiting, 1);
-    producer.close();
-    producer = undefined;
-    await Promise.all([primary.stop("SIGKILL"), replica.stop("SIGKILL")]);
-    checkpoint = "primary AOF restart";
-    await primary.restart();
-    producer = new UsageProducer({
-      channel: usageChannel,
-      url: primaryURL,
-      namespace,
-      replicas: 0,
-      timeoutMs: 1000,
-    });
-    assert.equal((await producer.stats()).waiting, 1);
-    producer.close();
-    producer = undefined;
-    checks.push("primary hard restart retains acknowledged evidence from its AOF");
-    await primary.stop("SIGKILL");
-    checkpoint = "replica AOF promotion";
-    await replica.restart();
-    await replica.command("REPLICAOF", "NO", "ONE");
-    await consume(namespace, replicaURL);
-    checks.push("acknowledged replica promotion retains evidence and exact settlement");
-    checkpoint = "unsafe ingress rejection";
-    producer = new UsageProducer({
-      channel: usageChannel,
-      url: replicaURL,
-      namespace,
-      replicas: 1,
-      timeoutMs: 200,
-    });
-    await assert.rejects(producer.ready());
-    producer.close();
-    producer = undefined;
-    checks.push("promoted node without required durable replica rejects admission");
-    await replica.command("CONFIG", "SET", "appendfsync", "everysec");
-    producer = new UsageProducer({
-      channel: usageChannel,
-      url: replicaURL,
-      namespace,
-      replicas: 0,
-      timeoutMs: 200,
-    });
-    await assert.rejects(producer.ready());
-    producer.close();
-    producer = undefined;
-    await replica.command("CONFIG", "SET", "appendfsync", "always");
-    checks.push("unsafe persistence configuration rejects admission");
-    producer = new UsageProducer({
-      channel: usageChannel,
-      url: replicaURL,
-      namespace,
-      replicas: 0,
-      timeoutMs: 1000,
-    });
-    await assert.rejects(
-      producer.publish({
-        ...(await evidence()),
-        body: "PRIVATE_LLM_CONTENT_SENTINEL",
-      } as UsageEvidence),
+        const setup = await f.bootstrap();
+        const client = f.client();
+        await client.startup();
+        const account = setup.provider.account_id;
+        const evidence = async () => {
+          const prepared = await prepareFinancialAdmission(setup, client);
+          const admitted = (await prepared.admit()) as ExecutionReply;
+          await client.execution("execution_begin_v1", prepared.beginData(admitted.receipt), {
+            deadlineAt: prepared.deadline,
+          });
+          const fact = client.signEvidence({
+            event_id: crypto.randomUUID(),
+            attempt_id: prepared.attemptId,
+            permit_epoch: "1",
+            source: "execution",
+            source_revision: "1",
+            finality: "FINAL",
+            usage: { input_tokens: "30", output_tokens: "15" },
+            final_dimensions: ["input_tokens", "output_tokens"],
+            attempt_state: "SUCCEEDED",
+            request_state: "SUCCEEDED",
+          });
+          return {
+            requestId: prepared.requestId,
+            group: { events: [fact] } as CoreEvidenceGroupV1,
+          };
+        };
+        const namespace = `${label}:AOF`;
+        const settled = await evidence();
+        assert.deepEqual(await supplier(db, account), {
+          balance: "1000",
+          reserved: "30",
+          spent: "0",
+        });
+        checkpoint = "acknowledged v2 evidence";
+        producer = new UsageProducer({
+          channel: evidenceChannel,
+          url: primaryURL,
+          namespace,
+          replicas: 1,
+          timeoutMs: 1000,
+        });
+        await producer.publish(settled.group);
+        assert.equal((await producer.stats()).waiting, 1);
+        producer.close();
+        producer = undefined;
+        await Promise.all([primary.stop("SIGKILL"), replica.stop("SIGKILL")]);
+        checkpoint = "primary AOF restart";
+        await primary.restart();
+        producer = new UsageProducer({
+          channel: evidenceChannel,
+          url: primaryURL,
+          namespace,
+          replicas: 0,
+          timeoutMs: 1000,
+        });
+        assert.equal((await producer.stats()).waiting, 1);
+        producer.close();
+        producer = undefined;
+        checks.push("primary hard restart retains acknowledged v2 evidence from its AOF");
+        await primary.stop("SIGKILL");
+        checkpoint = "replica AOF promotion";
+        await replica.restart();
+        await replica.command("REPLICAOF", "NO", "ONE");
+        worker = createSettlementWorker({
+          db,
+          url: replicaURL,
+          namespace,
+          replicas: 0,
+          timeoutMs: 1000,
+          concurrency: 1,
+        });
+        const settlement = worker as ReturnType<typeof createSettlementWorker>;
+        await settlement.ready();
+        producer = new UsageProducer({
+          channel: evidenceChannel,
+          url: replicaURL,
+          namespace,
+          replicas: 0,
+          timeoutMs: 1000,
+        });
+        const inspector = producer;
+        await until(async () => Object.values(await inspector.stats()).every((n) => n === 0));
+        producer.close();
+        producer = undefined;
+        await within(settlement.close(), 3000, "Settlement worker close");
+        worker = undefined;
+        assert.deepEqual(
+          [
+            ...(await db`SELECT amount_atoms::text amount FROM billing_charges WHERE request_id=${settled.requestId}`),
+          ],
+          [{ amount: "100" }],
+        );
+        assert.deepEqual(await supplier(db, account), {
+          balance: "985",
+          reserved: "0",
+          spent: "15",
+        });
+        checks.push(
+          "acknowledged replica promotion retains v2 evidence and the settlement worker settles it once",
+        );
+        checkpoint = "unsafe ingress rejection";
+        producer = new UsageProducer({
+          channel: evidenceChannel,
+          url: replicaURL,
+          namespace,
+          replicas: 1,
+          timeoutMs: 200,
+        });
+        await assert.rejects(producer.ready());
+        producer.close();
+        producer = undefined;
+        checks.push("promoted node without required durable replica rejects admission");
+        await replica.command("CONFIG", "SET", "appendfsync", "everysec");
+        producer = new UsageProducer({
+          channel: evidenceChannel,
+          url: replicaURL,
+          namespace,
+          replicas: 0,
+          timeoutMs: 200,
+        });
+        await assert.rejects(producer.ready());
+        producer.close();
+        producer = undefined;
+        await replica.command("CONFIG", "SET", "appendfsync", "always");
+        checks.push("unsafe persistence configuration rejects admission");
+        checkpoint = "strict evidence payload";
+        const held = await evidence();
+        producer = new UsageProducer({
+          channel: evidenceChannel,
+          url: replicaURL,
+          namespace,
+          replicas: 0,
+          timeoutMs: 1000,
+        });
+        await assert.rejects(
+          producer.publish({
+            events: [
+              Object.assign({ body: "PRIVATE_LLM_CONTENT_SENTINEL" }, held.group.events[0]!),
+            ],
+          }),
+        );
+        assert.equal((await producer.stats()).waiting, 0);
+        producer.close();
+        producer = undefined;
+        const ledger = (
+          await db`SELECT
+            (SELECT count(*)::int FROM billing_charges) charges,
+            (SELECT count(*)::int FROM core_evidence_receipts) receipts,
+            (SELECT state FROM billing_holds WHERE request_id=${held.requestId}) held,
+            (SELECT count(*)::int FROM (SELECT journal_id FROM upstream_entries GROUP BY journal_id HAVING sum(atoms)<>0) j) unbalanced`
+        )[0] as { charges: number; receipts: number; held: string; unbalanced: number };
+        assert.deepEqual(ledger, { charges: 1, receipts: 1, held: "HELD", unbalanced: 0 });
+        assert.deepEqual(
+          await supplier(db, account),
+          { balance: "985", reserved: "30", spent: "15" },
+          "Invalid evidence cannot silently release an already-created hold",
+        );
+        checks.push(
+          "strict evidence payload rejects body; charges, receipts and supplier journals remain singular",
+        );
+        result = {
+          durability: "pass",
+          fixture: "native",
+          scope: "v2-core-settlement",
+          checks,
+          charges: ledger.charges,
+          supplier: await supplier(db, account),
+          tools: fixture.tools,
+        };
+      },
+      { redisUrl: admission.url },
     );
-    producer.close();
-    producer = undefined;
-    const wallet = (
-      await db`SELECT available_atoms::text,reserved_atoms::text,spent_atoms::text,debt_atoms::text FROM wallets`
-    )[0];
-    assert.equal(wallet.spent_atoms, String(expected * 12));
-    assert.equal(wallet.debt_atoms, "0");
-    assert.equal(
-      wallet.reserved_atoms,
-      "100",
-      "Invalid evidence cannot silently release an already-created hold",
-    );
-    assert.equal(Number((await db`SELECT count(*)::int AS n FROM usage_events`)[0].n), expected);
-    assert.equal(
-      Number((await db`SELECT count(*)::int AS n FROM money_journal WHERE kind='SETTLE'`)[0].n),
-      expected,
-    );
-    checks.push("strict usage payload rejects body; all monetary journals remain singular");
-    result = {
-      durability: "pass",
-      fixture: "native",
-      scope: "legacy-single-ledger",
-      checks,
-      charges: expected,
-      wallet,
-      tools: fixture.tools,
-    };
+    await Promise.race([financial, interrupted.promise]);
   } catch (error) {
     failureCause = new Error(`Durability fixture failed at ${checkpoint}`, { cause: error });
   } finally {
@@ -446,10 +319,9 @@ async function verify() {
       }
     }
     await Promise.all([
-      clean(() => child?.stop("SIGKILL")),
-      clean(() => consumer?.close()),
+      clean(() => worker?.close()),
       clean(() => producer?.close()),
-      clean(() => db?.close({ timeout: 1 })),
+      clean(() => financial?.catch(() => undefined)),
     ]);
     await clean(() => fixture.close());
     process.removeListener("SIGTERM", onSignal);
@@ -479,5 +351,4 @@ async function verify() {
   console.log(JSON.stringify({ ...result, ownedResources: resources }));
 }
 
-if (Bun.argv.length === 3 && Bun.argv[2] === "--durability-worker") await worker();
-else await verify();
+await verify();

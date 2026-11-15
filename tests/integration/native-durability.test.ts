@@ -158,13 +158,12 @@ async function probeOutput(stream: ReadableStream<Uint8Array>) {
 
 async function businessPreload(directory: string, evaluation: string, temporaryRoot?: string) {
   const preload = join(directory, "business-preload.ts");
-  const contents = `${evaluation}export class UsageProducer {}export class UsageConsumer {}`;
   const fixtureLoader = temporaryRoot
     ? `builder.onLoad({filter:new RegExp("/tests/support/native-fixture[.]ts$")},async(args)=>{const source=await Bun.file(args.path).text();const target='const temp = await realpath("/tmp");';if(source.split(target).length!==2)throw new Error("Synthetic fixture root target missing");return {contents:source.replace(target,${JSON.stringify(`const temp = ${JSON.stringify(temporaryRoot)};`)}),loader:"ts"};});`
     : "";
   await writeFile(
     preload,
-    `console.error("SYNTHETIC_LOADER_READY");Bun.plugin({name:"durability-business-boundary",setup(builder){builder.onLoad({filter:new RegExp("/packages/runtime/src/index[.]ts$")},()=>({contents:${JSON.stringify(contents)},loader:"ts"}));${fixtureLoader}}});`,
+    `console.error("SYNTHETIC_LOADER_READY");Bun.plugin({name:"durability-business-boundary",setup(builder){builder.onLoad({filter:new RegExp("/packages/runtime/src/index[.]ts$")},async(args)=>({contents:${JSON.stringify(evaluation)}+await Bun.file(args.path).text(),loader:"ts"}));${fixtureLoader}}});`,
     { mode: 0o600 },
   );
   return preload;
@@ -670,9 +669,26 @@ test("unexpected symlink disk inspection failures still stop owned services and 
   }
 });
 
+async function identityDirectories() {
+  return new Set((await readdir("/tmp")).filter((name) => name.startsWith("gateway-identity-")));
+}
+
+async function coreApiProcesses() {
+  return new Set(
+    (await probeProcesses())
+      .filter((entry) => entry.command.includes("apps/core-api/src/main.ts"))
+      .map((entry) => entry.pid),
+  );
+}
+
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  test(`durability ${signal} during initialized native services fails visibly after owned resources reach zero`, async () => {
+  test(`durability ${signal} during initialized native services fails visibly after owned resources reach zero and leaves no Core API child running`, async () => {
     const options = nativeFixtureOptions();
+    const existing = await coreApiProcesses();
+    const directories = await identityDirectories();
+    const orphans = async () => [...(await coreApiProcesses())].filter((pid) => !existing.has(pid));
+    const leftovers = async () =>
+      [...(await identityDirectories())].filter((name) => !directories.has(name));
     const child = Bun.spawn([process.execPath, "--no-env-file", script], {
       env: nativeChildEnvironment({
         PG_TOOLS_DIRECTORY: options.postgresToolsDirectory,
@@ -708,7 +724,12 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
         '"ownedResources":{"processes":[],"directories":[],"ports":[],"timers":0}',
       );
       expect(await Bun.file(directory).exists()).toBe(false);
+      expect(await orphans()).toEqual([]);
+      expect(await leftovers()).toEqual([]);
     } finally {
+      for (const pid of await orphans()) process.kill(pid, "SIGKILL");
+      for (const name of await leftovers())
+        await rm(join("/tmp", name), { recursive: true, force: true });
       if (child.exitCode === null) child.kill("SIGKILL");
       await within(child.exited, 2000, "Interrupted child reap");
       await within(Promise.allSettled([reading, errors]), 1000, "Interrupted readers");

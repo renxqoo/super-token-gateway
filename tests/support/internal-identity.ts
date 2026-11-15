@@ -304,16 +304,19 @@ export async function prepareIdentity(
       return client;
     }
     async function close() {
-      for (const c of connections) await c.close();
-      const errors = await Promise.allSettled([a.stop(), b.stop()]);
-      for (const role of roles) {
-        await db.unsafe(`DROP OWNED BY ${role}`);
-        await db.unsafe(`DROP ROLE ${role}`);
-        await record("role_dropped", { role });
+      try {
+        for (const c of connections) await c.close();
+        const errors = await Promise.allSettled([a.stop(), b.stop()]);
+        for (const role of roles) {
+          await db.unsafe(`DROP OWNED BY ${role}`);
+          await db.unsafe(`DROP ROLE ${role}`);
+          await record("role_dropped", { role });
+        }
+        for (const result of errors) if (result.status === "rejected") throw result.reason;
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+        await record("temp_removed", { directory });
       }
-      await rm(directory, { recursive: true, force: true });
-      await record("temp_removed", { directory });
-      for (const result of errors) if (result.status === "rejected") throw result.reason;
     }
     return {
       a,

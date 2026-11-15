@@ -1,6 +1,6 @@
 # T14.a 原生耐久设施
 
-本单元把 `scripts/verify-durability.ts` 迁为原生单轨，保留接受基线的八项有效断言。现有 `Store`、`FundsStore`、`persist_usage_batch` 与 usage queue 仍是旧单账本业务装配；本单元没有迁移 SQL、资金行为、Core 三服务或双方账本，不代表 T14/T18、容量或 HA 验收完成。
+本单元把 `scripts/verify-durability.ts` 迁为原生单轨，保留接受基线的八项有效断言。T14.a 交付时业务装配仍是旧单账本（`Store`、`FundsStore`、`persist_usage_batch` 与 usage queue）。T14 n2 起改为 v2：签名证据组经 `core-evidence-v1` 由 v2 结算 worker 落账；worker 提交前、提交后 ACK 前两个强杀窗口改由真实 core-worker 进程的集成回归 `tests/integration/core-worker-crash.test.ts` 承担，脚本保留其余六项（见[原生运维记录](enterprise-v2-native-operations.md) §5）。本文其余旧单账本描述是 T14.a 的历史记录，不代表 T18、容量或 HA 验收完成。
 
 ## 入口与配置
 
@@ -19,7 +19,7 @@ DURABILITY_REDIS_SERVER=/absolute/path/to/redis-server \
 bun --no-env-file scripts/verify-durability.ts
 ```
 
-`DATABASE_URL`、`REDIS_URL`、`QUEUE_REDIS_URL`、`REDIS_NAMESPACE` 不参与父脚本的资源选择。父脚本为本轮生成 PG owner、SCRAM 密码、Redis 密码、loopback 端口及 namespace。内部 `--durability-worker` 仅用于同一脚本的受监督 worker，要求完整的本轮 `DURABILITY_PHASE`、`DURABILITY_MARKER`、`DATABASE_URL`、`QUEUE_REDIS_URL`、`REDIS_NAMESPACE`；父脚本只传合成配置，不继承用户环境。环境变量不能单独激活内部 worker。
+`DATABASE_URL`、`REDIS_URL`、`QUEUE_REDIS_URL`、`REDIS_NAMESPACE` 不参与父脚本的资源选择。父脚本为本轮生成 PG owner、SCRAM 密码、Redis 密码、loopback 端口及 namespace。T14 n2 起父脚本在本轮 PG 上以 `tests/support/financial-execution.ts` 建立 v2 资金夹具：进程内 `DATABASE_URL`、`REDIS_URL` 指向本轮 PG 与本轮准入 Redis，PATH 前置当前 Bun 所在目录供夹具的 Core API 子进程使用；内部 `--durability-worker` 入口已删除。
 
 ## 所有权与生命周期
 
@@ -39,18 +39,18 @@ fix2 将原生工具预检与资金/队列依赖加载分开：父脚本先安�
 
 ## 保留与修正矩阵
 
-| 行为                       | 本单元处理与可观察证据                                                                                                                           |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 默认 Docker、外部 PG owner | 修正为显式工具预检和完全自有 cluster。缺工具时在建资源前失败；Docker sentinel 不被调用，提供的邻居端点无连接。                                   |
-| 生产拓扑与 live drift      | 保留所有 connected 可晋升候选均需确认；改 noeviction 后 ready 失败，声明零确认但存在候选时 ready 失败。                                          |
-| 提交前强杀                 | 保留未提交的 evidence/ledger 事务回滚，队列重投后仅结算一次。                                                                                    |
-| 提交后 ACK 前强杀          | 保留 PG 先提交；重投后只有单次 charge/journal，消费后队列计数归零。                                                                              |
-| 主 AOF 硬重启              | 保留两节点同时 KILL 后，主节点独立重启仍有已确认待消费证据。                                                                                     |
-| 副本 AOF 晋升              | 保留主节点停机时独立重启副本并晋升，恢复同笔精确结算。                                                                                           |
-| 缺少 durable 副本          | 保留晋升节点要求一个副本时拒绝准入，不自动降副本数。                                                                                             |
-| 错误持久化配置             | 保留 appendfsync everysec 拒绝准入，再恢复 always。                                                                                              |
-| 非法正文与资金唯一性       | 保留正文拒收；三笔人工算例各 7+5=12 atoms，spent=36、debt=0，非法证据对应 UNKNOWN hold 100 atoms 保留，三个 usage_events 与三个 SETTLE journal。 |
-| 生命周期与隔离缺口         | 新增真实进程、HTTP、PG/Redis 回归，验证环境隔离、SCRAM、期限、后代回收、部分启动、输出预算、邻居保护与 INT/TERM 后资源零。                       |
+| 行为                       | 本单元处理与可观察证据                                                                                                                                                           |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 默认 Docker、外部 PG owner | 修正为显式工具预检和完全自有 cluster。缺工具时在建资源前失败；Docker sentinel 不被调用，提供的邻居端点无连接。                                                                   |
+| 生产拓扑与 live drift      | 保留所有 connected 可晋升候选均需确认；改 noeviction 后 ready 失败，声明零确认但存在候选时 ready 失败。                                                                          |
+| 提交前强杀                 | T14 n2 迁至 `core-worker-crash.test.ts`：真实 core-worker 经代理扣住 COMMIT 时（事务内写入未提交）被 SIGKILL，回滚后无资金变动；重启 worker 经 BullMQ 停滞恢复重投，仅结算一次。 |
+| 提交后 ACK 前强杀          | T14 n2 迁至 `core-worker-crash.test.ts`：PG 已提交、COMMIT 应答被吞时 SIGKILL；重投后收费、回执、供应商与客户钱包均不变，队列计数归零。                                          |
+| 主 AOF 硬重启              | 保留两节点同时 KILL 后，主节点独立重启仍有已确认待消费证据。                                                                                                                     |
+| 副本 AOF 晋升              | 保留主节点停机时独立重启副本并晋升；T14 n2 起由 v2 结算 worker 消费晋升节点上的签名证据组，客户收费 100 一次、供应商 985/0/15。                                                  |
+| 缺少 durable 副本          | 保留晋升节点要求一个副本时拒绝准入，不自动降副本数。                                                                                                                             |
+| 错误持久化配置             | 保留 appendfsync everysec 拒绝准入，再恢复 always。                                                                                                                              |
+| 非法正文与资金唯一性       | 保留正文拒收（证据组与事件为严格 schema）；T14 n2 起断言 1 笔收费、1 条回执、上游日记账逐笔平衡，非法证据对应的客户 hold 保持 HELD、供应商预留 30 不被释放（985/30/15）。        |
+| 生命周期与隔离缺口         | 新增真实进程、HTTP、PG/Redis 回归，验证环境隔离、SCRAM、期限、后代回收、部分启动、输出预算、邻居保护与 INT/TERM 后资源零。                                                       |
 
 原始默认路径通过 harmless Docker sentinel 取得红灯：调用 network/rm/volume，未接触真实 Docker 或任何外部数据库。修复后的同一缺工具场景不会调用 sentinel。预检 TERM 的首次假工具用例未生成 marker，属于装置失败；修正 echo 版本后，旧 handler 实测在驱动退出后留下存活 probe，修复后 probe 回收。新增能力测试不伪造历史红灯。
 

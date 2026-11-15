@@ -339,7 +339,10 @@ async function prepareFinancial(
     async close() {
       for (const c of clients) await c.close();
       const { RedisClient } = await import("bun");
-      const redis = new RedisClient(process.env.REDIS_URL!);
+      const redis = new RedisClient(process.env.REDIS_URL!, {
+        autoReconnect: false,
+        connectionTimeout: 1000,
+      });
       try {
         await redis.connect();
         const keys = (await redis.send("KEYS", [`${namespace}:*`])) as string[];
