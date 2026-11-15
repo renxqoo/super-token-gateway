@@ -17,6 +17,8 @@ const permissionNames = [
   "plugins:bind",
   "plugins:recover",
   "plugins:upload",
+  "events:read",
+  "events:consume",
 ] as const;
 export type PlatformPermission = (typeof permissionNames)[number];
 export type PlatformActor = Readonly<{ identity: string; permissions: readonly string[] }>;

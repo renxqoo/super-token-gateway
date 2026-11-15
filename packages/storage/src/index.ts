@@ -1,5 +1,6 @@
 export * from "./database.ts";
 export * from "./store.ts";
+export * from "./events.ts";
 export * from "./funds.ts";
 export * from "./customer-funds/index.ts";
 export * from "./maintenance.ts";

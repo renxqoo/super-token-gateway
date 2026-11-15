@@ -27,6 +27,7 @@ import { createPlatformAuthenticator, type PlatformPermission } from "./authenti
 import { registerCustomerFunds } from "./customer-funds.ts";
 import { registerUpstreamFunds } from "./upstream-funds.ts";
 import { registerIdentityCatalog } from "./identity-catalog.ts";
+import { registerEvents } from "./events.ts";
 export function createCoreManagementApplication(options: {
   db: SQL;
   adminKey: string;
@@ -283,5 +284,6 @@ export function createCoreManagementApplication(options: {
   );
   registerUpstreamFunds(app, { run, body });
   registerIdentityCatalog(app, { run, audit, body });
+  registerEvents(app, { run, audit, body });
   return app;
 }

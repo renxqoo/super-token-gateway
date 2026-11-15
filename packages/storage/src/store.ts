@@ -1,6 +1,7 @@
 import { Batcher } from "@gateway/runtime/batcher";
 import { fundingError } from "./customer-funds/index.ts";
 import type { SQL } from "bun";
+import { createEventStore, recordEventConsumer, type UsageRecord } from "./events.ts";
 import {
   upstreamCostConfigurationSchema,
   opaqueResourceIdSchema,
@@ -8,7 +9,7 @@ import {
   GatewayError,
 } from "@gateway/contracts";
 import { sha256 } from "@gateway/runtime/crypto";
-import type { BillingQuote, Operation, Pricing, Finality, Usage } from "@gateway/kernel";
+import type { BillingQuote, Operation, Pricing, Usage } from "@gateway/kernel";
 import type {
   BatchResourceMetadata,
   Credential,
@@ -67,22 +68,6 @@ export interface RequestRecord {
   id: string;
   state: string;
   fingerprint: string;
-}
-export interface UsageRecord {
-  id: string;
-  seq: string;
-  project_id: string;
-  request_id: string;
-  attempt_id: string;
-  source: string;
-  semantics: "attempt_snapshot" | "disputed_snapshot";
-  snapshot_revision: string | null;
-  cost_revision: string | null;
-  finality: Finality;
-  usage: Usage;
-  cost_atoms: string | null;
-  currency: string;
-  cost_complete: boolean;
 }
 
 export interface TokenSummary {
@@ -583,24 +568,14 @@ export class Store {
       UNION SELECT jsonb_object_keys(p.rates) FROM attempts a JOIN billing_prices p ON p.id=a.billing_pricing_id WHERE a.id=${attemptId} AND p.basis='PROVIDER_USAGE'`;
     return rows.map((row) => row.dimension).filter((dimension) => dimension !== "requests");
   }
-  async usage(
+  usage(
     projectId: string | null,
     limit = 100,
     before?: string,
     models: string[] = [],
     operations: Operation[] = [],
   ): Promise<UsageRecord[]> {
-    if (
-      before !== undefined &&
-      (!/^[1-9][0-9]{0,18}$/.test(before) || BigInt(before) > 9223372036854775807n)
-    )
-      throw new GatewayError(400, "invalid_cursor", "Usage cursor must be a positive bigint");
-    return this.db<
-      UsageRecord[]
-    >`SELECT id,seq::text,project_id,request_id,attempt_id,source,CASE record_kind WHEN 'DISPUTED' THEN 'disputed_snapshot' ELSE 'attempt_snapshot' END AS semantics,snapshot_revision::text,(SELECT c.revision::text FROM upstream_costs c WHERE c.evidence_id=usage_events.id) AS cost_revision,finality,usage,cost_atoms::text,currency,cost_complete
-      FROM usage_events WHERE
-      EXISTS(SELECT 1 FROM gateway_requests q WHERE q.id=usage_events.request_id AND (${models.length === 0} OR q.model=ANY(${models})) AND (${operations.length === 0} OR q.operation=ANY(${operations}))) AND (${projectId}::uuid IS NULL OR project_id=${projectId})
-      AND (${before ?? null}::bigint IS NULL OR seq<${before ?? null}::bigint) ORDER BY seq DESC LIMIT ${limit}`;
+    return createEventStore(this.db).usage({ projectId, limit, before, models, operations });
   }
   async updateProject(
     id: string,
@@ -684,45 +659,20 @@ export class Store {
       .db`UPDATE api_keys SET models=coalesce(${patch.models ?? null}::text[],models),operations=coalesce(${patch.operations ?? null}::text[],operations),expires_at=coalesce(${patch.expires_at ?? null}::timestamptz,expires_at),allowed_cidrs=coalesce(${patch.allowed_cidrs ?? null}::text[],allowed_cidrs),role=coalesce(${patch.role ?? null},role),rpm=coalesce(${patch.rpm ?? null},rpm),tpm=coalesce(${patch.tpm ?? null},tpm),concurrency=coalesce(${patch.concurrency ?? null},concurrency) WHERE id=${id} AND enabled RETURNING id`;
     if (!rows.length) throw new GatewayError(404, "not_found", "Active credential not found");
   }
-  async createConsumer(name: string, replay: boolean): Promise<string> {
-    const id = crypto.randomUUID();
-    await this.db.begin(async (tx) => {
-      await tx`SELECT pg_advisory_xact_lock(81442592)`;
-      await tx`INSERT INTO event_consumers(id,name,replay_until) VALUES(${id},${name},${replay}::boolean::integer*(SELECT coalesce(max(seq),0) FROM usage_events))`;
-    });
-    return id;
+  createConsumer(name: string, replay: boolean): Promise<string> {
+    return this.db.begin((tx) => recordEventConsumer(tx, name, replay));
   }
-  async backfillConsumer(consumerId: string): Promise<void> {
-    const cursor = await this.db<{ complete: boolean }[]>`
-      SELECT replay_cursor>=replay_until AS complete FROM event_consumers WHERE id=${consumerId}`;
-    if (!cursor[0] || cursor[0].complete) return;
-    await this
-      .db`WITH owned AS (SELECT id,replay_cursor,replay_until FROM event_consumers WHERE id=${consumerId} AND replay_cursor<replay_until FOR UPDATE SKIP LOCKED),
-    page AS (SELECT e.id,e.seq FROM usage_events e,owned o WHERE e.seq>o.replay_cursor AND e.seq<=o.replay_until ORDER BY e.seq LIMIT 1000),
-    inserted AS (INSERT INTO event_deliveries(consumer_id,event_id) SELECT ${consumerId},id FROM page ON CONFLICT DO NOTHING RETURNING event_id)
-    UPDATE event_consumers c SET replay_cursor=coalesce((SELECT max(seq) FROM page),o.replay_until) FROM owned o WHERE c.id=o.id`;
+  backfillConsumer(consumerId: string): Promise<void> {
+    return createEventStore(this.db).backfill(consumerId);
   }
-  async claimEvents(
+  claimEvents(
     consumerId: string,
     limit: number,
   ): Promise<{ lease_token: string; events: UsageRecord[] }> {
-    await this.backfillConsumer(consumerId);
-    const token = crypto.randomUUID();
-    const events = await this.db<UsageRecord[]>`
-      WITH selected AS (SELECT consumer_id,event_id FROM event_deliveries
-        WHERE consumer_id=${consumerId} AND state<>'ACKED' AND (lease_until IS NULL OR lease_until<now())
-        ORDER BY event_id LIMIT ${limit} FOR UPDATE SKIP LOCKED), claimed AS (
-        UPDATE event_deliveries d SET state='LEASED',lease_token=${token},lease_until=now()+interval '30 seconds',attempts=d.attempts+1
-        FROM selected s WHERE d.consumer_id=s.consumer_id AND d.event_id=s.event_id RETURNING d.event_id)
-      SELECT e.id,e.seq::text,e.project_id,e.request_id,e.attempt_id,e.source,CASE e.record_kind WHEN 'DISPUTED' THEN 'disputed_snapshot' ELSE 'attempt_snapshot' END AS semantics,e.snapshot_revision::text,(SELECT c.revision::text FROM upstream_costs c WHERE c.evidence_id=e.id) AS cost_revision,e.finality,e.usage,e.cost_atoms::text,e.currency,e.cost_complete
-      FROM usage_events e JOIN claimed c ON e.id=c.event_id`;
-    return { lease_token: token, events };
+    return createEventStore(this.db).claim(consumerId, limit);
   }
-  async ackEvents(consumerId: string, token: string, ids: string[]): Promise<number> {
-    const rows = await this
-      .db`UPDATE event_deliveries SET state='ACKED',lease_until=NULL WHERE consumer_id=${consumerId}
-      AND lease_token=${token} AND event_id=ANY(${ids}) AND state='LEASED' AND lease_until>now() RETURNING event_id`;
-    return rows.length;
+  ackEvents(consumerId: string, token: string, ids: string[]): Promise<number> {
+    return createEventStore(this.db).ack(consumerId, token, ids);
   }
   async saveResource(
     projectId: string,

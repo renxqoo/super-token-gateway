@@ -224,6 +224,15 @@
           "checksum": "69c8eb9e83b467b43fab09f1eee64a9e01395877eaf82cf95cc742c77b2f9f45"
         }
       ]
+    },
+    {
+      "version": 2026111223,
+      "files": [
+        {
+          "path": "./sql/core-events.sql",
+          "checksum": "c04bcb499df981124e7d31057ce950abf76fddd17f3bcc23a5f1ad5e2a5d1e70"
+        }
+      ]
     }
   ]
 }

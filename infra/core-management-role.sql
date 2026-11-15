@@ -25,3 +25,9 @@ GRANT UPDATE(enabled,role,rpm,tpm,concurrency) ON principals TO core_management_
 GRANT UPDATE(name,enabled,rpm,tpm,concurrency,billing_currency) ON projects TO core_management_api;
 GRANT UPDATE(enabled,models,operations,expires_at,allowed_cidrs,role,rpm,tpm,concurrency) ON api_keys TO core_management_api;
 GRANT UPDATE(enabled,operations,max_output_tokens,routing_strategy) ON models TO core_management_api;
+GRANT SELECT(id,seq,project_id,request_id,attempt_id,source,record_kind,snapshot_revision,finality,usage,cost_atoms,currency,cost_complete) ON usage_events TO core_management_api;
+GRANT SELECT(evidence_id,revision) ON upstream_costs TO core_management_api;
+GRANT SELECT,INSERT ON event_consumers TO core_management_api;
+GRANT UPDATE(replay_cursor) ON event_consumers TO core_management_api;
+GRANT SELECT,INSERT ON event_deliveries TO core_management_api;
+GRANT UPDATE(state,lease_token,lease_until,attempts) ON event_deliveries TO core_management_api;
