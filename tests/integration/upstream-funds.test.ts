@@ -4,7 +4,7 @@ import {
   createRepositories,
   migrate,
   recordUpstreamRecharge,
-  Store,
+  createCatalogStore,
   createUpstreamFundingStore,
 } from "@gateway/storage";
 import { channels } from "@gateway/storage/schema";
@@ -27,7 +27,7 @@ function isolated(run: (db: SQL) => Promise<void>) {
 }
 async function account(db: SQL, name = crypto.randomUUID()) {
   const channel = crypto.randomUUID();
-  await new Store(db).createProvider(
+  await createCatalogStore(db).createProvider(
     channel,
     { name, kind: "openai", base_url: "http://fixture.invalid/v1", concurrency: 10, rpm: 100 },
     "synthetic-encrypted",

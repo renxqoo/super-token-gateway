@@ -1,5 +1,10 @@
 import { mkdir, chmod } from "node:fs/promises";
-import { createDatabase, migrate, Store, createCustomerFundsStore } from "@gateway/storage";
+import {
+  createDatabase,
+  migrate,
+  createCatalogStore,
+  createCustomerFundsStore,
+} from "@gateway/storage";
 import { createKey, encrypt, verifier } from "@gateway/runtime";
 import { operations } from "@gateway/kernel";
 import { loadConfig } from "../apps/legacy-gateway/src/config.ts";
@@ -8,7 +13,7 @@ const config = loadConfig();
 if (config.NODE_ENV === "production")
   throw new Error("The development mock seed is forbidden in production");
 const db = createDatabase(config.DATABASE_URL);
-const store = new Store(db);
+const store = createCatalogStore(db);
 try {
   await migrate(db);
   const existing = await db`SELECT id FROM projects WHERE external_ref='local-development'`;

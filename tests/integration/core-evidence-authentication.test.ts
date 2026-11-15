@@ -5,7 +5,7 @@ import type {
   CoreEvidenceGroupResult,
   ExecutionReply,
 } from "@gateway/contracts";
-import { Store } from "@gateway/storage";
+import { createCatalogStore } from "@gateway/storage";
 import { createSettlementStore } from "@gateway/storage/settlement";
 import { evidenceProofFields } from "@gateway/contracts";
 import { canonical } from "@gateway/kernel";
@@ -151,7 +151,7 @@ test("a security-revoked session keeps its anchored receipt but quarantines new 
       )[0],
     ).toEqual({ billing_outcome: "PENDING", selected_attempt_id: null });
     expect(
-      (await new Store(db).usage(setup.project.id)).map((row) => row.snapshot_revision),
+      (await createCatalogStore(db).usage(setup.project.id)).map((row) => row.snapshot_revision),
     ).toEqual(["2"]);
   }));
 

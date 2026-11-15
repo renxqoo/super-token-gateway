@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { SQL } from "bun";
 import type { ExecutionReply } from "@gateway/contracts";
-import { Store } from "@gateway/storage";
+import { createCatalogStore } from "@gateway/storage";
 import { createSettlementStore } from "@gateway/storage/settlement";
 import { sha256 } from "@gateway/runtime/crypto";
 import { prepareFinancialAdmission, withFinancial } from "../support/financial-execution.ts";
@@ -86,10 +86,9 @@ test("a later unknown outcome cannot downgrade a FINAL snapshot and provider usa
         ])
       )[0],
     );
-    expect((await new Store(db).usage(setup.project.id)).map((row) => row.finality)).toEqual([
-      "FINAL",
-      "FINAL",
-    ]);
+    expect(
+      (await createCatalogStore(db).usage(setup.project.id)).map((row) => row.finality),
+    ).toEqual(["FINAL", "FINAL"]);
     expect(
       await db`SELECT amount_atoms::text FROM billing_charges WHERE request_id=${prepared.requestId}`,
     ).toEqual([{ amount_atoms: "60" }]);

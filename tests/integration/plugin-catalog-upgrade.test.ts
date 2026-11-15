@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { migrate, Store } from "@gateway/storage";
+import { migrate, createCatalogStore } from "@gateway/storage";
 import manifest from "../../packages/storage/src/migrations/manifest.json";
 import { withDatabase } from "../support/database.ts";
 test("actual v3 through financial schema upgrade preserves historical channels audits costs and immutable packages", () =>
@@ -16,7 +16,7 @@ test("actual v3 through financial schema upgrade preserves historical channels a
         await db`INSERT INTO schema_migrations(version,checksum,manifest) VALUES(${entry.version},${checksum},${entry}::jsonb)`;
       }
       const id = crypto.randomUUID(),
-        store = new Store(db);
+        store = createCatalogStore(db);
       await store.createProvider(
         id,
         {

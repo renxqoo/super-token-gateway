@@ -11,7 +11,7 @@ import {
   projectPatchSchema,
 } from "@gateway/contracts";
 import { validateCidr } from "@gateway/runtime";
-import { Store } from "@gateway/storage";
+import { createCatalogStore } from "@gateway/storage";
 import type { PlatformPermission } from "./authentication.ts";
 
 export function registerIdentityCatalog(
@@ -28,7 +28,7 @@ export function registerIdentityCatalog(
 ) {
   const { run, audit, body } = tools;
   const id = (value: string | undefined) => z.uuid().parse(value);
-  const store = (tx: TransactionSQL) => new Store(tx);
+  const store = (tx: TransactionSQL) => createCatalogStore(tx);
   const write = <T>(
     header: string | undefined,
     action: string,

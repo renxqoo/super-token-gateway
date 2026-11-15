@@ -6,7 +6,7 @@ import {
   migrate,
   placeholder,
   sql,
-  Store,
+  createCatalogStore,
 } from "@gateway/storage";
 import {
   costVersions,
@@ -251,7 +251,7 @@ test("JSONB transaction commit and rollback use the explicit business pool", () 
 test("current JSONB object defaults retain their checks and typed default writes", () =>
   isolated(async (db) => {
     const repo = createRepositories(db);
-    const store = new Store(db);
+    const store = createCatalogStore(db);
     const provider = crypto.randomUUID();
     await store.createProvider(
       provider,

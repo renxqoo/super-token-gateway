@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ExecutionReply } from "@gateway/contracts";
-import { Store } from "@gateway/storage";
+import { createCatalogStore } from "@gateway/storage";
 import { createSettlementStore } from "@gateway/storage/settlement";
 import { prepareFinancialAdmission, withFinancial } from "../support/financial-execution.ts";
 import { body, committed, event, granted, supplier } from "../support/core-settlement.ts";
@@ -100,7 +100,7 @@ test("partial then final supplier evidence posts one combined ceiling and settle
       (await db`SELECT count(*)::integer n FROM upstream_costs WHERE attempt_id=${attempt}`)[0].n,
     ).toBe(2);
     expect(
-      (await new Store(db).usage(setup.project.id)).map((row) => [
+      (await createCatalogStore(db).usage(setup.project.id)).map((row) => [
         row.semantics,
         row.snapshot_revision,
         row.cost_revision,
@@ -253,7 +253,7 @@ test("contradicting finals are disputed before any charge and a later contradict
         .metering_conflict,
     ).toBe(true);
     expect(
-      (await new Store(db).usage(setup.project.id)).map((row) => [
+      (await createCatalogStore(db).usage(setup.project.id)).map((row) => [
         row.semantics,
         row.cost_revision,
         row.cost_atoms,
@@ -452,7 +452,10 @@ test("final evidence with an unfinished supplier dimension is a FINAL customer s
     ]);
     committed(result);
     expect(
-      (await new Store(db).usage(setup.project.id)).map((row) => [row.finality, row.cost_atoms]),
+      (await createCatalogStore(db).usage(setup.project.id)).map((row) => [
+        row.finality,
+        row.cost_atoms,
+      ]),
     ).toEqual([["FINAL", "10"]]);
     expect(await supplier(db, setup.provider.account_id)).toEqual({
       balance: "990",
@@ -486,9 +489,9 @@ test("provider usage pricing keeps the snapshot PARTIAL and the charge waiting u
       },
     ]);
     committed(first);
-    expect((await new Store(db).usage(setup.project.id)).map((row) => row.finality)).toEqual([
-      "PARTIAL",
-    ]);
+    expect(
+      (await createCatalogStore(db).usage(setup.project.id)).map((row) => row.finality),
+    ).toEqual(["PARTIAL"]);
     expect(
       await db`SELECT count(*)::integer n FROM billing_charges WHERE request_id=${prepared.requestId}`,
     ).toEqual([{ n: 0 }]);
@@ -507,10 +510,9 @@ test("provider usage pricing keeps the snapshot PARTIAL and the charge waiting u
       },
     ]);
     committed(second);
-    expect((await new Store(db).usage(setup.project.id)).map((row) => row.finality)).toEqual([
-      "FINAL",
-      "PARTIAL",
-    ]);
+    expect(
+      (await createCatalogStore(db).usage(setup.project.id)).map((row) => row.finality),
+    ).toEqual(["FINAL", "PARTIAL"]);
     expect(
       await db`SELECT amount_atoms::text FROM billing_charges WHERE request_id=${prepared.requestId}`,
     ).toEqual([{ amount_atoms: "60" }]);

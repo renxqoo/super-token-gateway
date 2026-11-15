@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { SQL } from "bun";
-import { Store } from "@gateway/storage";
+import { createCatalogStore } from "@gateway/storage";
 import { prepareFinancialAdmission, withFinancial } from "../support/financial-execution.ts";
 
 const digest = (seed: string) => new Bun.CryptoHasher("sha256").update(seed).digest("hex");
@@ -91,7 +91,7 @@ test("core attempts accept only signed snapshot lineage and public usage queries
       [canonical, "CANONICAL"],
       [disputed, "DISPUTED"],
     ]);
-    const store = new Store(db),
+    const store = createCatalogStore(db),
       project = String(
         (await db`SELECT project_id FROM gateway_requests WHERE id=${prepared.requestId}`)[0]
           .project_id,

@@ -13,7 +13,7 @@ import {
   financialVoucherUploadSchema,
 } from "@gateway/contracts";
 import {
-  Store,
+  createCatalogStore,
   recordProvider,
   recordRoute,
   recordRouteUpdate,
@@ -136,7 +136,7 @@ export function createCoreManagementApplication(options: {
   app.get("/providers", async (c) =>
     c.json({
       data: await run(c.req.header("authorization"), "funding:read", (tx) =>
-        new Store(tx).providers(),
+        createCatalogStore(tx).providers(),
       ),
     }),
   );
@@ -157,7 +157,7 @@ export function createCoreManagementApplication(options: {
         .parse(await body(c.req.raw));
     return c.json(
       await run(c.req.header("authorization"), "catalog:manage", async (tx, actor) => {
-        await new Store(tx).updateProvider(
+        await createCatalogStore(tx).updateProvider(
           channel,
           input,
           input.api_key ? encrypt(input.api_key, options.encryptionKey, channel) : undefined,
@@ -171,7 +171,7 @@ export function createCoreManagementApplication(options: {
     const input = modelSchema.parse(await body(c.req.raw));
     return c.json(
       await run(c.req.header("authorization"), "catalog:manage", async (tx, actor) => {
-        await new Store(tx).createModel(input);
+        await createCatalogStore(tx).createModel(input);
         await audit(tx, actor, "model.create", input.name);
         return { name: input.name };
       }),
@@ -182,7 +182,7 @@ export function createCoreManagementApplication(options: {
     const input = projectSchema.parse(await body(c.req.raw));
     return c.json(
       await run(c.req.header("authorization"), "catalog:manage", async (tx, actor) => {
-        const project = await new Store(tx).createProject(input);
+        const project = await createCatalogStore(tx).createProject(input);
         await audit(tx, actor, "project.create", project);
         return { id: project };
       }),
@@ -196,7 +196,7 @@ export function createCoreManagementApplication(options: {
     return c.json(
       await run(c.req.header("authorization"), "catalog:manage", async (tx, actor) => {
         const token = createKey();
-        const key = await new Store(tx).createCredential(
+        const key = await createCatalogStore(tx).createCredential(
           project,
           input,
           verifier(token, options.pepper),

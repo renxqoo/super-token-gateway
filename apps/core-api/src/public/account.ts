@@ -5,7 +5,7 @@ import { GatewayError, keySchema } from "@gateway/contracts";
 import type { Operation } from "@gateway/kernel";
 import { clientAddress, validateCidr } from "@gateway/runtime";
 import { createKey, verifier } from "@gateway/runtime/crypto";
-import { createCustomerFundsStore, Store } from "@gateway/storage";
+import { createCustomerFundsStore, createCatalogStore } from "@gateway/storage";
 import { openapi } from "../openapi.ts";
 
 type AccountEnv = { Bindings: { peerAddress?: string }; Variables: { requestId: string } };
@@ -44,7 +44,7 @@ export function createCoreAccountApplication(options: {
   trustedProxyCidrs: readonly string[];
 }) {
   const funds = createCustomerFundsStore(options.db),
-    store = new Store(options.db);
+    store = createCatalogStore(options.db);
   const app = new Hono<AccountEnv>();
   app.use("*", async (c, next) => {
     c.set("requestId", Bun.randomUUIDv7());

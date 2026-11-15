@@ -4,7 +4,7 @@ import { sha256 } from "@gateway/plugin-sdk";
 import { expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createPluginCatalogStore, Store } from "@gateway/storage";
+import { createPluginCatalogStore, createCatalogStore } from "@gateway/storage";
 import { verifier } from "@gateway/runtime/crypto";
 import { withCatalog, syntheticAdminKey, syntheticPepper } from "../support/catalog.ts";
 import { openAIChatReleaseId } from "@gateway/plugin-sdk";
@@ -159,7 +159,7 @@ test("public catalog rejects missing project revoked expired and insufficient pl
   withCatalog(async (f, db) => {
     const input = install();
     expect((await f.request("/plugins/install-bundled-release", input, "")).status).toBe(401);
-    const projects = new Store(db),
+    const projects = createCatalogStore(db),
       project = await projects.createProject({
         name: "Synthetic project",
         rpm: 1,

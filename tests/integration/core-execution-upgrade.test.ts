@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import type { SQL } from "bun";
-import { migrate, Store, createCustomerFundsStore, createDatabase } from "@gateway/storage";
+import {
+  migrate,
+  createCatalogStore,
+  createCustomerFundsStore,
+  createDatabase,
+} from "@gateway/storage";
 import manifest from "../../packages/storage/src/migrations/manifest.json";
 import { withDatabase } from "../support/database.ts";
 import { withFinancial } from "../support/financial-execution.ts";
@@ -15,7 +20,7 @@ async function install(db: SQL, versions: number) {
   }
 }
 async function historical(db: SQL) {
-  const store = new Store(db),
+  const store = createCatalogStore(db),
     project = await store.createProject({
       name: "historical",
       rpm: 100,
@@ -204,7 +209,7 @@ test("signed settlement append keeps gateway usage visible and its per-source un
       expect(
         await db`SELECT record_kind,snapshot_revision,final_dimensions FROM usage_event_index`,
       ).toEqual([{ record_kind: "GATEWAY", snapshot_revision: null, final_dimensions: null }]);
-      expect(await new Store(db).usage(null)).toEqual([
+      expect(await createCatalogStore(db).usage(null)).toEqual([
         expect.objectContaining({
           id: before[0].id,
           semantics: "attempt_snapshot",

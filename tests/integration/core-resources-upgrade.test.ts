@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { migrate, Store } from "@gateway/storage";
+import { migrate, createCatalogStore } from "@gateway/storage";
 import manifest from "../../packages/storage/src/migrations/manifest.json";
 import { withDatabase } from "../support/database.ts";
 
@@ -16,7 +16,7 @@ test("the resources append pins legacy resource rows to their channel's current 
       const checksum = new Bun.CryptoHasher("sha256").update(JSON.stringify(entry)).digest("hex");
       await db`INSERT INTO schema_migrations(version,checksum,manifest) VALUES(${entry.version},${checksum},${entry}::jsonb)`;
     }
-    const store = new Store(db),
+    const store = createCatalogStore(db),
       bound = crypto.randomUUID(),
       unbound = crypto.randomUUID();
     for (const id of [bound, unbound])

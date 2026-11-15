@@ -2,8 +2,8 @@ import { Batcher } from "@gateway/runtime/batcher";
 import { fundingError } from "./customer-funds/index.ts";
 import type { SQL } from "bun";
 import { createEventStore, recordEventConsumer, type UsageRecord } from "./events.ts";
+import { recordProvider, recordRoute, recordRouteUpdate } from "./catalog.ts";
 import {
-  upstreamCostConfigurationSchema,
   opaqueResourceIdSchema,
   batchResourceMetadataSchema,
   GatewayError,
@@ -762,83 +762,4 @@ export class Store {
       .db`UPDATE resources SET poll_until=NULL,poll_count=poll_count+1,next_poll_at=now()+least(3600,greatest(${failed ? 30 : 5},power(2,least(poll_count,11))::integer))*interval '1 second'
       WHERE id=${id} AND poll_token=${token}`;
   }
-}
-
-export async function recordProvider(
-  tx: SQL,
-  id: string,
-  input: ProviderInput,
-  secret: string,
-  existing?: { account_id: string; brand_id: string },
-) {
-  if (existing) {
-    const brand = (
-      await tx`SELECT id,name,enabled FROM supplier_brands WHERE id=${existing.brand_id} FOR SHARE`
-    )[0];
-    const account = (
-      await tx`SELECT id,brand_id,mode FROM upstream_accounts WHERE id=${existing.account_id} FOR SHARE`
-    )[0];
-    if (
-      !brand ||
-      !account ||
-      !brand.enabled ||
-      brand.name !== input.kind ||
-      account.brand_id !== brand.id ||
-      account.mode !== "PREPAID"
-    )
-      throw new GatewayError(403, "provider_account_mismatch", "Provider account binding denied");
-    await tx`INSERT INTO channels(id,name,kind,base_url,secret,concurrency,rpm,brand_id,account_id) VALUES(${id},${input.name},${input.kind},${input.base_url},${secret},${input.concurrency},${input.rpm},${brand.id},${account.id})`;
-    return {
-      id,
-      brand_id: brand.id as string,
-      account_id: account.id as string,
-      config_revision: "0",
-      binding_id: null,
-      funded: false,
-    };
-  }
-  const brandId = crypto.randomUUID();
-  const accountId = crypto.randomUUID();
-  const brands =
-    await tx`INSERT INTO supplier_brands(id,name) VALUES(${brandId},${input.kind}) ON CONFLICT(name) DO UPDATE SET name=excluded.name RETURNING id`;
-  await tx`INSERT INTO upstream_accounts(id,brand_id,name) VALUES(${accountId},${brands[0].id},${input.name})`;
-  await tx`INSERT INTO channels(id,name,kind,base_url,secret,concurrency,rpm,brand_id,account_id)
-        VALUES(${id},${input.name},${input.kind},${input.base_url},${secret},${input.concurrency},${input.rpm},${brands[0].id},${accountId})`;
-  return {
-    id,
-    brand_id: brands[0].id as string,
-    account_id: accountId,
-    config_revision: "0",
-    binding_id: null,
-    funded: false,
-  };
-}
-
-export async function recordRoute(tx: SQL, model: string, input: RouteInput) {
-  upstreamCostConfigurationSchema.parse({ pricing: input.pricing, ceilings: input.ceilings });
-  const id = crypto.randomUUID(),
-    pricingId = crypto.randomUUID();
-  await tx`INSERT INTO cost_versions(id,currency,rates,ceilings) VALUES(${pricingId},${input.pricing.currency},${input.pricing.rates},${input.ceilings})`;
-  await tx`INSERT INTO routes(id,model_name,provider_id,upstream_model,operations,priority,weight,pricing_id)
-        VALUES(${id},${model},${input.provider_id},${input.upstream_model},${[...new Set(input.operations)].sort()},${input.priority},${input.weight},${pricingId})`;
-  if (input.request_policy)
-    await tx`UPDATE routes SET request_policy=${input.request_policy} WHERE id=${id}`;
-
-  return id;
-}
-
-export async function recordRouteUpdate(
-  tx: SQL,
-  id: string,
-  patch: Parameters<Store["updateRoute"]>[1],
-): Promise<void> {
-  if (patch.pricing !== undefined || patch.ceilings !== undefined)
-    upstreamCostConfigurationSchema.parse({ pricing: patch.pricing, ceilings: patch.ceilings });
-
-  const pricingId = patch.pricing ? crypto.randomUUID() : null;
-  if (pricingId && patch.pricing)
-    await tx`INSERT INTO cost_versions(id,currency,rates,ceilings) VALUES(${pricingId},${patch.pricing.currency},${patch.pricing.rates},${patch.ceilings})`;
-  const rows =
-    await tx`UPDATE routes SET enabled=coalesce(${patch.enabled ?? null},enabled),priority=coalesce(${patch.priority ?? null},priority),weight=coalesce(${patch.weight ?? null},weight),pricing_id=coalesce(${pricingId}::uuid,pricing_id),request_policy=coalesce(${patch.request_policy ?? null}::jsonb,request_policy) WHERE id=${id} RETURNING id`;
-  if (!rows.length) throw new GatewayError(404, "not_found", "Route not found");
 }

@@ -3,7 +3,7 @@ import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { SQL } from "bun";
-import { createDatabase, migrate, Store } from "@gateway/storage";
+import { createDatabase, migrate, createCatalogStore } from "@gateway/storage";
 import { createCatalogApplication } from "../../apps/core-api/src/plugins/application.ts";
 import { catalogRoutes } from "../../apps/core-api/src/plugins/http.ts";
 import {
@@ -177,7 +177,7 @@ export async function prepareCatalog(db: SQL) {
     };
     const actor = () => application.authenticate(`Bearer ${syntheticAdminKey}`);
     const providerId = crypto.randomUUID();
-    const provider = await new Store(db).createProvider(
+    const provider = await createCatalogStore(db).createProvider(
       providerId,
       {
         name: `catalog-${providerId}`,
