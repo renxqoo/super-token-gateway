@@ -11,7 +11,6 @@ if (!(await Bun.file(file).exists())) {
       "REDIS_URL=redis://127.0.0.1:56382",
       "QUEUE_REDIS_URL=redis://127.0.0.1:56383",
       "QUEUE_REQUIRED_REPLICAS=0",
-      `POSTGRES_PASSWORD=${password}`,
       `ADMIN_KEY=${random()}`,
       `ENCRYPTION_KEY=${random()}`,
       `KEY_PEPPER=${random()}`,

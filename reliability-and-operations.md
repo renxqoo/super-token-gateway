@@ -2,9 +2,9 @@
 
 ## 本地环境
 
-`bun run setup:local` 生成并保护配置；`bun run infra:up` 仅使用已有 Docker 创建此项目专用 PG/Redis，或直接使用配置好的本机实例。它不安装 Docker、不清空共享服务。开发库与测试库隔离；生产禁止运行 mock seed。
+`bun run setup:local` 生成并保护配置；`bun run infra:up` 用 `PG_TOOLS_DIRECTORY` 与 `DURABILITY_REDIS_SERVER` 指定的本机工具，在 `.local/native-services/` 启动此项目专用 PG/Redis，或直接使用配置好的本机实例。它不安装软件、不使用 Docker、不清空共享服务，端口被其他进程占用时拒绝启动。开发库与测试库隔离；生产禁止运行 mock seed。
 
-开发端口：legacy 网关 8088、独立 mock 9088、PG 55442、准入 Redis 56382、耐久队列 Redis 56383、worker health 8099。`infra/compose.yaml` 是本地依赖配置，不是跨主机 HA 集群。不要运行 `down -v` 删除仍有用途的 usage 证据。
+开发端口：legacy 网关 8088、独立 mock 9088、PG 55442、准入 Redis 56382、耐久队列 Redis 56383、worker health 8099。`.local/native-services/` 是本地依赖数据，不是跨主机 HA 集群。不要删除仍有用途的 usage 证据目录。
 
 ## 生产发布
 
@@ -107,13 +107,13 @@ PG 与耐久队列共同构成恢复集。PG 单独备份不包含已经落盘�
 
 ## 本地容量配置
 
-Compose 为当前约12GiB Docker VM提供2GiB shared_buffers、6GiB effective_cache_size、4GiB max_wal_size 和15分钟checkpoint配置，保留fsync、full_page_writes、synchronous_commit=on。这些是本地测量配置；其他主机应按实际内存、磁盘、连接与WAL保留预算调整，不能直接照搬为通用最优值。参见[PG17内存说明](https://www.postgresql.org/docs/17/runtime-config-resource.html)与[WAL说明](https://www.postgresql.org/docs/17/wal-configuration.html)。
+本地原生 PG 使用 256MiB shared_buffers 与 200 连接上限，保留fsync、full_page_writes、synchronous_commit=on。这些是本地开发配置；其他主机应按实际内存、磁盘、连接与WAL保留预算调整，不能直接照搬为通用最优值。参见[PG17内存说明](https://www.postgresql.org/docs/17/runtime-config-resource.html)与[WAL说明](https://www.postgresql.org/docs/17/wal-configuration.html)。
 
 ## 本地多副本演练与热点验收
 
-`docker compose --env-file .env.local -p super-token-gateway -f infra/compose.yaml -f infra/compose.ha.yaml up -d --wait` 启动本地两个独立 AOF 副本；以 `QUEUE_REQUIRED_REPLICAS=2` 验证三节点写入。该 overlay 是同机演练模板；生产仍需独立故障域、稳定端点、旧主隔离和明确的晋升控制，不能由本地 Compose 推导99.99% SLO。
+同机 AOF 副本、副本晋升与缺副本拒绝由 `bun run test:durability` 在自有原生 PG/Redis 集群中演练；生产仍需独立故障域、稳定端点、旧主隔离和明确的晋升控制，不能由本地演练推导99.99% SLO。
 
-完整账务压测支持 `--wallets 1/10/1000` 与 `--hot-share 0.9`，报告每钱包负载、PG 锁等待、活动查询和停压排空。使用 `QUEUE_REQUIRED_REPLICAS=1` 或目标生产副本数实测，不以零副本成绩代替生产容量。修改 schema/队列后重新执行 `verify`、`test:durability`、`test:container`，备份恢复需在停止准入并排空队列后执行。
+完整账务压测支持 `--wallets 1/10/1000` 与 `--hot-share 0.9`，报告每钱包负载、PG 锁等待、活动查询和停压排空。使用 `QUEUE_REQUIRED_REPLICAS=1` 或目标生产副本数实测，不以零副本成绩代替生产容量。修改 schema/队列后重新执行 `verify`、`test:durability`，备份恢复需在停止准入并排空队列后执行。
 
 使用冷 tablespace 的生产恢复需先准备对应 tablespace 或显式用 pg_restore 的 --no-tablespaces 恢复到目标默认存储，再核对数据与权限。原生 PG 工具的本地备份复验可通过 PG_TOOLS_DIRECTORY 指定同主版本工具目录；密码经子进程环境传递，不放入命令行或输出。
 

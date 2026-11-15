@@ -2,29 +2,47 @@ name: verify
 on: [push, pull_request]
 jobs:
   gateway:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17@sha256:31ba9c94a03ada9988f2bb493a22a75eef3a185884533e5cdbcd498ea835b08f
-        env: { POSTGRES_USER: gateway, POSTGRES_PASSWORD: ci-only-password, POSTGRES_DB: gateway }
-        ports: ["5432:5432"]
-        options: --health-cmd "pg_isready -U gateway -d gateway" --health-interval 2s --health-timeout 2s --health-retries 30
-      redis:
-        image: redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
-        ports: ["6379:6379"]
+    runs-on: ubuntu-24.04
     env:
-      DATABASE_URL: postgres://gateway:ci-only-password@127.0.0.1:5432/gateway
-      REDIS_URL: redis://127.0.0.1:6379
-      QUEUE_REDIS_URL: redis://127.0.0.1:6380
+      DATABASE_URL: postgres://gateway:ci-only-password@127.0.0.1:55442/gateway_ci
+      REDIS_URL: redis://127.0.0.1:56382
+      QUEUE_REDIS_URL: redis://127.0.0.1:56383
       QUEUE_REQUIRED_REPLICAS: "0"
+      PG_TOOLS_DIRECTORY: ${{ github.workspace }}/.local/toolchain/pg17/bin
+      DURABILITY_REDIS_SERVER: ${{ github.workspace }}/.local/toolchain/redis74/bin/redis-server
+      MINIMAX_API_KEY: ""
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with: { bun-version: 1.4.4 }
-      - name: Start strict durable usage Redis
-        run: docker run -d --name gateway-queue --publish 127.0.0.1:6380:6379 redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7 redis-server --appendonly yes --appendfsync always --aof-load-truncated no --maxmemory-policy noeviction
+      - uses: actions/setup-go@v5
+        with: { go-version: 1.27.4, cache: false }
+      - id: toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            .local/toolchain/pg17
+            .local/toolchain/redis74
+          key: native-${{ runner.os }}-postgresql-17.11-contrib-redis-7.4.12
+      - name: Build PostgreSQL 17.11 and Redis 7.4.12 from verified sources
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .local/toolchain/src
+          cd .local/toolchain/src
+          curl -fsSLO https://ftp.postgresql.org/pub/source/v17.11/postgresql-17.11.tar.bz2
+          echo "dd27f2b3c59e73ed14aa3324901242bf69a032a6347805f274e6260322d42979  postgresql-17.11.tar.bz2" | sha256sum -c -
+          tar xjf postgresql-17.11.tar.bz2
+          (cd postgresql-17.11 && ./configure --prefix="$GITHUB_WORKSPACE/.local/toolchain/pg17" --without-icu --without-readline && make -j"$(nproc)" && make install && make -C contrib -j"$(nproc)" && make -C contrib install)
+          curl -fsSLO https://download.redis.io/releases/redis-7.4.12.tar.gz
+          echo "56588ee1648539556f2b6cf4e873e3734afbbe40fa952fec2fcd6b6d7dae2924  redis-7.4.12.tar.gz" | sha256sum -c -
+          tar xzf redis-7.4.12.tar.gz
+          (cd redis-7.4.12 && make -j"$(nproc)" && make PREFIX="$GITHUB_WORKSPACE/.local/toolchain/redis74" install)
       - run: bun install --frozen-lockfile
+      - run: bun run infra:up
       - run: bun run verify
       - run: bun run test:durability
+      - if: always()
+        run: bun run infra:down
       - uses: actions/upload-artifact@v4
         with: { name: gateway-artifacts, path: dist }

@@ -20,11 +20,15 @@ const usage = { prompt_tokens: 30, completion_tokens: 15 };
 const json = JSON.stringify({
   id: "artifact",
   model: "synthetic",
-  choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+  choices: [{ message: { role: "assistant", content: "artifact-answer" }, finish_reason: "stop" }],
   usage,
 });
 const sse = [
-  { id: "artifact", model: "synthetic", choices: [{ index: 0, delta: { content: "ok" } }] },
+  {
+    id: "artifact",
+    model: "synthetic",
+    choices: [{ index: 0, delta: { content: "artifact-answer" } }],
+  },
   {
     id: "artifact",
     model: "synthetic",
@@ -85,14 +89,15 @@ await withFinancial(
               },
               body: JSON.stringify({
                 model: setup.model,
-                messages: [{ role: "user", content: "artifact" }],
+                messages: [{ role: "user", content: "artifact-prompt" }],
                 max_completion_tokens: 30,
                 ...(stream ? { stream: true } : {}),
               }),
             });
             const text = await response.text();
             assert.equal(response.status, 200, text);
-            assert.ok(stream ? text.trimEnd().endsWith("data: [DONE]") : text.includes('"ok"'));
+            assert.ok(text.includes("artifact-answer"));
+            if (stream) assert.ok(text.trimEnd().endsWith("data: [DONE]"));
             checks++;
             const requestId = response.headers.get("x-request-id")!;
             await eventually(
@@ -133,6 +138,9 @@ await withFinancial(
           assert.equal(await gateway.stderr(), "");
           checks++;
           assert.equal((await worker.stop()).event, "stopped");
+          checks++;
+          const output = (await gateway.output()) + (await worker.output());
+          assert.ok(!output.includes("artifact-prompt") && !output.includes("artifact-answer"));
           checks++;
         } finally {
           gateway.kill();

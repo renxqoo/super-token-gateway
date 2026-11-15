@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { chmod, mkdir, rm } from "node:fs/promises";
 import { createDatabase, SCHEMA_VERSION } from "@gateway/storage";
 import { UsageProducer, evidenceChannel, usageChannel, type QueueChannel } from "@gateway/runtime";
@@ -43,12 +43,11 @@ const digest = (table: string) =>
 const connection = process.env.DATABASE_URL;
 if (!connection) throw new Error("DATABASE_URL is required");
 const url = new URL(connection);
-const container = process.env.PG_CONTAINER ?? "super-token-gateway-postgres-1";
-if (!/^[a-zA-Z0-9_.-]+$/.test(container)) throw new Error("Invalid explicit PG_CONTAINER");
-if (!["localhost", "127.0.0.1"].includes(url.hostname) || url.port !== "55442")
-  throw new Error(
-    "This verifier only targets the dedicated local PostgreSQL fixture on port 55442",
-  );
+const tools = process.env.PG_TOOLS_DIRECTORY;
+if (!tools || !isAbsolute(tools))
+  throw new Error("PG_TOOLS_DIRECTORY must be the absolute PostgreSQL 17 tools directory");
+if (!["localhost", "127.0.0.1"].includes(url.hostname))
+  throw new Error("This verifier only targets a loopback PostgreSQL server");
 const source = url.pathname.slice(1);
 if (!/^[a-zA-Z0-9_]+$/.test(source)) throw new Error("Invalid source database identifier");
 const restore = `gateway_restore_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -58,21 +57,13 @@ const path = new URL(`gateway-${Date.now()}.dump`, directory);
 await Bun.write(path, new Uint8Array());
 await chmod(path, 0o600);
 const run = async (args: string[], input?: URL, output?: URL) => {
-  const native = process.env.PG_TOOLS_DIRECTORY;
-  const command = native
-    ? [join(native, args[0]!), ...args.slice(1)]
-    : ["docker", "exec", ...(input ? ["-i"] : []), container, ...args];
-  const child = Bun.spawn(command, {
-    ...(native
-      ? {
-          env: {
-            ...process.env,
-            PGHOST: url.hostname,
-            PGPORT: url.port,
-            PGPASSWORD: decodeURIComponent(url.password),
-          },
-        }
-      : {}),
+  const child = Bun.spawn([join(tools, args[0]!), ...args.slice(1)], {
+    env: {
+      PATH: "/usr/bin:/bin",
+      PGHOST: url.hostname,
+      PGPORT: url.port,
+      PGPASSWORD: decodeURIComponent(url.password),
+    },
     stdin: input ? Bun.file(input) : "ignore",
     stdout: output ? Bun.file(output) : "pipe",
     stderr: "pipe",

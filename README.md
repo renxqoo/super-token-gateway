@@ -10,7 +10,7 @@ Gateway 管理技术组织/主体、项目、API Key/IP、模型别名、供应�
 
 ## 本地运行
 
-需要 Bun **1.4.4**、已有 Docker，或者已有 PostgreSQL 17 / Redis 7。脚本不安装 Docker。独立 mock 是另一个应用，仅使用 Hono，不依赖 Gateway 解析器或业务模块。
+需要 Bun **1.4.4**，以及本机已安装的 PostgreSQL 17 工具目录与 Redis 7.4 `redis-server`（分别写入 `.env.local` 的 `PG_TOOLS_DIRECTORY`、`DURABILITY_REDIS_SERVER` 绝对路径）。脚本不安装软件，也不使用 Docker。独立 mock 是另一个应用，仅使用 Hono，不依赖 Gateway 解析器或业务模块。
 
 `DATABASE_URL` 必须显式指向已创建的空开发库 `gateway_v2_dev`；已有旧 schema 的数据库会被拒绝并保留。
 
@@ -30,7 +30,7 @@ bun run dev
 bun run worker
 ```
 
-`setup:local` 生成权限为 `0600` 的 `.env.local`，保留已有密钥；`seed` 将开发调用凭证写入 `.local/client.env`。开发 PG、准入 Redis、耐久队列 Redis 分别使用 `127.0.0.1:55442`、`:56382`、`:56383`，不复用其他项目的数据。已有本机 PG/Redis 可以直接修改 `DATABASE_URL`、`REDIS_URL`、`QUEUE_REDIS_URL` 并跳过 `infra:up`。
+`setup:local` 生成权限为 `0600` 的 `.env.local`，保留已有密钥；`seed` 将开发调用凭证写入 `.local/client.env`。开发 PG、准入 Redis、耐久队列 Redis 分别使用 `127.0.0.1:55442`、`:56382`、`:56383`，不复用其他项目的数据。`infra:up` 在 `.local/native-services/` 下以本项目专属目录启动 PG（SCRAM、fsync/synchronous_commit/full_page_writes 开启）、准入 Redis 与 `appendfsync always` 的耐久队列 Redis，只监听 127.0.0.1，端口取自上述 URL；端口已被其他进程占用时拒绝启动，不接管或停止它。`infra:status`、`infra:down` 只操作自己登记且身份核对一致的进程。已有本机 PG/Redis 可以直接修改 `DATABASE_URL`、`REDIS_URL`、`QUEUE_REDIS_URL` 并跳过 `infra:up`。
 
 ```sh
 set -a
