@@ -45,6 +45,8 @@ T16 执行中追加的发现（R7 在对照 legacy `routing.test.ts` 迁移用�
 
 ## 4. legacy 残留清单（T16 输入）
 
+删除的逐例审计、缺口与里程碑见 [legacy 删除记录](enterprise-v2-legacy-removal.md)。
+
 - `apps/legacy-gateway/src`（21 个模块，含 `billing-worker.ts`、`worker-main.ts`、`recovery.ts`）及其 `__test__`；`infra/legacy-gateway@.service`、`legacy-gateway-worker.service`；Caddy 兜底（R6）。
 - `package.json`：`dev`、`start`、`worker` 指向 legacy；`test` 包含 `apps/legacy-gateway/src/__test__`。
 - `scripts/build.ts`、`scripts/seed.ts`、`scripts/verify-artifact.ts`（legacy 产物检查；其中容量生成器段落按 T14 N19 迁到 v2 产物检查）、`scripts/bench.ts`（R5）。
