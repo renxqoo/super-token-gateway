@@ -59,6 +59,30 @@ test("batch files violating the request rules are refused with invalid_batch", (
   expect(code(line("a", { tools: [{ file_id: "file-up" }] }))).toEqual([422, "unmanaged_resource"]);
 });
 
+test("a batch row carrying a server-executed tool is refused like a direct request instead of reaching the upstream unmetered", () => {
+  expect(code(`${line("a")}\n${line("b", { tools: [{ type: "web_search" }] })}`)).toEqual([
+    422,
+    "unmetered_tool",
+  ]);
+  expect(
+    code(
+      JSON.stringify({
+        custom_id: "r",
+        method: "POST",
+        url: "/v1/responses",
+        body: {
+          model: "m",
+          input: "x",
+          tools: [{ type: "web_search_preview" }],
+        },
+      }),
+    ),
+  ).toEqual([422, "unmetered_tool"]);
+  expect(
+    code(line("a", { tools: [{ type: "function", function: { name: "f" } }] })),
+  ).toBeUndefined();
+});
+
 test("embedding inputs and image counts are bounded across the whole batch", () => {
   const embed = (custom: string, count: number) =>
     line(custom, { input: Array.from({ length: count }, () => "x") }, { url: "/v1/embeddings" });

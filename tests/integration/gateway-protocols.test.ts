@@ -546,3 +546,116 @@ test(
     }),
   120000,
 );
+
+test(
+  "server-executed tools without a billing dimension are refused with 422 unmetered_tool before Core or the upstream sees the request, while client-executed tools are served on every protocol (the v2 Gateway forwarded unmetered hosted tools)",
+  () =>
+    withGatewayStack(
+      {
+        reply: (call) =>
+          call.path === "/v1/responses" ? responsesReply(call) : chatReplies.json(),
+      },
+      async (stack) => {
+        for (const operation of ["responses", "messages", "gemini"] as const)
+          await allowOperation(stack, operation);
+        const send = (protocol: "chat" | "responses" | "messages" | "gemini", body: object) =>
+          protocol === "gemini"
+            ? fetch(`${stack.gateway.origin}/v1beta/models/${stack.setup.model}:generateContent`, {
+                method: "POST",
+                headers: {
+                  "x-goog-api-key": stack.setup.key.key,
+                  "content-type": "application/json",
+                },
+                body: JSON.stringify({
+                  contents: [{ role: "user", parts: [{ text: "你好" }] }],
+                  generationConfig: { maxOutputTokens: 30 },
+                  ...body,
+                }),
+              })
+            : fetch(
+                `${stack.gateway.origin}/v1/${protocol === "chat" ? "chat/completions" : protocol}`,
+                {
+                  method: "POST",
+                  headers: {
+                    authorization: `Bearer ${stack.setup.key.key}`,
+                    "content-type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    model: stack.setup.model,
+                    ...(protocol === "responses"
+                      ? { input: "你好", max_output_tokens: 30 }
+                      : { messages: [{ role: "user", content: "你好" }], max_tokens: 30 }),
+                    ...body,
+                  }),
+                },
+              );
+        const requests = async () =>
+          (await stack.db`SELECT count(*)::integer n FROM gateway_requests`)[0].n as number;
+        const before = await requests();
+        for (const [protocol, body, code] of [
+          ["chat", { tools: [{ type: "web_search" }] }, "unmetered_tool"],
+          ["chat", { web_search_options: {} }, "unmetered_tool"],
+          ["responses", { tools: [{ type: "web_search_preview" }] }, "unmetered_tool"],
+          [
+            "responses",
+            { tools: [{ type: "code_interpreter", container: { type: "auto" } }] },
+            "unmetered_tool",
+          ],
+          ["responses", { tools: [{ type: "file_search" }] }, "unmetered_tool"],
+          [
+            "responses",
+            { tools: [{ type: "file_search", vector_store_ids: ["vs"] }] },
+            "unmanaged_resource",
+          ],
+          [
+            "messages",
+            { tools: [{ type: "web_search_20250305", name: "web_search" }] },
+            "unmetered_tool",
+          ],
+          [
+            "messages",
+            { tools: [{ type: "code_execution_20250522", name: "code_execution" }] },
+            "unmetered_tool",
+          ],
+          ["gemini", { tools: [{ googleSearch: {} }] }, "unmetered_tool"],
+          [
+            "gemini",
+            { tools: [{ functionDeclarations: [], codeExecution: {} }] },
+            "unmetered_tool",
+          ],
+          ["gemini", { tools: [{ urlContext: {} }] }, "unmetered_tool"],
+        ] as const) {
+          const refused = await send(protocol, body);
+          expect([protocol, refused.status]).toEqual([protocol, 422]);
+          expect((await refused.json()).error.code).toBe(code);
+        }
+        expect(stack.received).toHaveLength(0);
+        expect(await requests()).toBe(before);
+        for (const [protocol, body] of [
+          [
+            "chat",
+            {
+              tools: [
+                { type: "function", function: { name: "f", parameters: { type: "object" } } },
+              ],
+            },
+          ],
+          [
+            "responses",
+            { tools: [{ type: "function", name: "f", parameters: { type: "object" } }] },
+          ],
+          ["messages", { tools: [{ name: "f", input_schema: { type: "object" } }] }],
+          [
+            "gemini",
+            { tools: [{ functionDeclarations: [{ name: "f", parameters: { type: "object" } }] }] },
+          ],
+        ] as const) {
+          const served = await send(protocol, body);
+          expect([protocol, served.status]).toEqual([protocol, 200]);
+          await served.arrayBuffer();
+        }
+        expect(stack.received).toHaveLength(4);
+      },
+    ),
+  120000,
+);

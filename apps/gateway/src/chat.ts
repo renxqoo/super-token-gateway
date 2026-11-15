@@ -35,6 +35,7 @@ import {
 import type { GatewayConfig } from "./config.ts";
 import type { createPackageCache } from "./packages.ts";
 import { collectReferences, type Reference } from "./references.ts";
+import { rejectUnmeteredTools } from "./tool-policy.ts";
 import { encodeForm, readForm, type FormFiles } from "./form.ts";
 import {
   exposeBatchFiles,
@@ -226,11 +227,13 @@ async function requestFacts(request: ChatRequest, totalTimeoutMs: number): Promi
     collectReferences({ ...fields, input_file_id: undefined }, false);
     references = [{ pointer: "/input_file_id", resourceId: input }];
     batchEndpoint = fields.endpoint;
-  } else
+  } else {
     references = collectReferences(
       value,
       (request.operation === "responses" || request.operation === "chat") && !files,
     );
+    rejectUnmeteredTools(fields, request.operation);
+  }
   if (request.operation === "files") {
     const purpose = fields.purpose;
     if (!files || typeof purpose !== "string")

@@ -3,6 +3,7 @@ import { GatewayError, batchEndpoints } from "@gateway/contracts";
 import { rewriteJSON, type AbiResult } from "@gateway/plugin-host";
 import { batchIdentityDigest } from "@gateway/runtime";
 import { collectReferences } from "./references.ts";
+import { rejectUnmeteredTools } from "./tool-policy.ts";
 
 type Endpoint = keyof typeof batchEndpoints;
 type Attempt = {
@@ -98,6 +99,7 @@ export function parseBatchInput(bytes: Uint8Array): BatchInput {
     model = body.model;
     endpoint = row.url;
     collectReferences(body, false);
+    rejectUnmeteredTools(body, batchEndpoints[endpoint as Endpoint]);
     if (endpoint === "/v1/embeddings")
       embeddingInputs +=
         Array.isArray(body.input) && typeof body.input[0] !== "number" ? body.input.length : 1;
