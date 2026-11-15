@@ -1,4 +1,4 @@
-import { openapi } from "../apps/legacy-gateway/src/openapi.ts";
+import { openapi } from "../apps/core-api/src/openapi.ts";
 await Bun.write(
   new URL("../docs/openapi.json", import.meta.url),
   JSON.stringify(openapi(), null, 2) + "\n",

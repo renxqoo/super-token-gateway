@@ -1,5 +1,5 @@
 [Unit]
-Description=Legacy LLM Gateway usage and settlement worker
+Description=Legacy LLM Gateway usage and settlement worker (transitional; removed with legacy)
 After=network-online.target
 Wants=network-online.target
 [Service]

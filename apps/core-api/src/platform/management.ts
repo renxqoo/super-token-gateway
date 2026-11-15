@@ -10,6 +10,7 @@ import {
   routeSchema,
   routePatchSchema,
   upstreamRechargeSchema,
+  financialVoucherUploadSchema,
 } from "@gateway/contracts";
 import {
   Store,
@@ -231,14 +232,7 @@ export function createCoreManagementApplication(options: {
     );
   });
   app.post("/financial-vouchers", async (c) => {
-    const input = z
-      .strictObject({
-        content_base64: z.string().max(7 << 20),
-        content_type: z.enum(["image/png", "image/jpeg", "application/pdf"]),
-        digest: z.string().regex(/^[a-f0-9]{64}$/),
-        expires_at: z.string(),
-      })
-      .parse(await body(c.req.raw));
+    const input = financialVoucherUploadSchema.parse(await body(c.req.raw));
     const bytes = Buffer.from(input.content_base64, "base64");
     if (bytes.toString("base64") !== input.content_base64)
       throw new GatewayError(400, "invalid_voucher_content", "Canonical base64 required");

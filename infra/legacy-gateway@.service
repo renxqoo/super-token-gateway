@@ -1,5 +1,5 @@
 [Unit]
-Description=Legacy LLM Gateway instance %i (unmigrated routes)
+Description=Legacy LLM Gateway instance %i (transitional for unmigrated routes; removed with legacy)
 After=network-online.target
 Wants=network-online.target
 [Service]

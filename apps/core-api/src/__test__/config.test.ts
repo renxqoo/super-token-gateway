@@ -79,3 +79,25 @@ test("the public account listener requires the execution pepper and valid truste
     (await load({ ...listener, execution, public: publicListener })).public?.trusted_proxy_cidrs,
   ).toEqual([]);
 });
+
+test("the shipped example is refused until the operator fills the pepper, encryption key and admin key", async () => {
+  const path = resolve(import.meta.dir, "../../../../infra/core-api.example.json");
+  const refused = await loadCoreApiConfig(path).then(
+    () => [],
+    (error: { issues?: { path: PropertyKey[] }[] }) =>
+      (error.issues ?? []).map((issue) => issue.path.join(".")).sort(),
+  );
+  expect(refused).toEqual(["admin.admin_key", "execution.encryptionKey", "execution.pepper"]);
+  const example = await Bun.file(path).json();
+  const config = await load({
+    ...example,
+    execution: { ...example.execution, pepper: execution.pepper, encryptionKey: "55".repeat(32) },
+    admin: { ...example.admin, admin_key: admin.admin_key },
+  });
+  expect([config.admin?.hostname, config.public?.hostname]).toEqual(["127.0.0.1", "127.0.0.1"]);
+  expect(config.admin?.queue?.required_replicas).toBeGreaterThanOrEqual(1);
+  for (const url of [config.database_url, config.admin!.database_url, config.public!.database_url])
+    expect(new URL(url).searchParams.get("sslmode")).toBe("verify-full");
+  for (const url of [...config.execution!.redisUrls, config.admin!.queue!.url])
+    expect(url.startsWith("rediss://")).toBe(true);
+});

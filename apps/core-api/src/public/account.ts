@@ -6,6 +6,7 @@ import type { Operation } from "@gateway/kernel";
 import { clientAddress, validateCidr } from "@gateway/runtime";
 import { createKey, verifier } from "@gateway/runtime/crypto";
 import { createCustomerFundsStore, Store } from "@gateway/storage";
+import { openapi } from "../openapi.ts";
 
 type AccountEnv = { Bindings: { peerAddress?: string }; Variables: { requestId: string } };
 
@@ -99,6 +100,8 @@ export function createCoreAccountApplication(options: {
   const accounting = ["ADMIN", "BILLING"],
     readers = ["ADMIN", "INVOKER", "BILLING", "VIEWER"],
     administrators = ["ADMIN"];
+  const document = openapi();
+  app.get("/openapi.json", (c) => c.json(document));
   app.get("/v1/wallets", async (c) => {
     const resolved = await account(c, accounting);
     return c.json({ data: await funds.wallets(resolved.project_id) });

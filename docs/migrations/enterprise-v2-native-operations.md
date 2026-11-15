@@ -23,7 +23,7 @@
 | n1     | 原生依赖服务、Docker 退役、备份与 CI 原生化、容器有效断言迁移              | 完成   |
 | n2     | v2 结算故障窗口：core-worker 提交前/提交后 ACK 前强杀；耐久脚本结算腿迁 v2 | 完成   |
 | n3     | 内部身份轮换/伪造/过期/重放、helper 泄漏与 shutdown 覆盖核对与补齐         | 完成   |
-| n4     | 部署：三服务 systemd 单元与配置样例、legacy 单元过渡标注、OpenAPI          | 待执行 |
+| n4     | 部署：三服务 systemd 单元与配置样例、legacy 单元过渡标注、OpenAPI          | 完成   |
 | n5     | 容量发生器纳入 Core 与上游账本                                             | 待执行 |
 
 ## 4. n1 记录
@@ -70,3 +70,29 @@ n2 全量门禁（原生服务 55452/56392/56393，`.env.local` 未改）：`ver
 测试装置观察：在 `expect(...).rejects` 内直接调用 `prepareFinancialAdmission(...)` 时，Core 的拒绝应答在 3 秒客户端计时内未被处理，报 `Internal response timeout`；同一调用先发起再断言或直接 await 时 4–12 ms 收到 `internal_peer_forbidden`（独立探针复现，Core 行为正确）。用例改为 await 结果后断言。
 
 n3 全量门禁（原生服务）：`verify` 退出 0，单测 365、集成 613（较 n2 增 6：`internal-identity.test.ts` 4、`core-evidence-authentication.test.ts` 1、`core-execution-recovery.test.ts` 1）、产物 7/14/11。n3 未改耐久路径，`test:durability` 沿用 n2 结果。
+
+## 7. n4 部署与 OpenAPI
+
+当前行为（代码核对，2026-11-15）：
+
+- systemd：三服务单元与 legacy 两单元已在 T04.c c4 交付，由架构用例约束入口、非 root、加固项与用户互异。`core-api.service` 读取的 `/etc/llm-gateway/core-api.json`、`core-worker.service` 读取的 `/etc/llm-gateway/core-worker.env` 没有样例，只有 `infra/gateway.example.json`。
+- OpenAPI：生成器仍在 `apps/legacy-gateway/src/openapi.ts`，`/openapi.json` 只由 legacy 网关提供，Caddy 不转发该路径（公网 404）。按实际 Hono 路由表比对：v2 Gateway 的 `POST /v1/music/generations`（T10 k3）与 Core 管理监听的 18 个上游资金路由（T12：supplier-brands、upstream-accounts 及其 recharges/balances/holds/journal/reconciliations/adjustments、financial-vouchers）不在文档中；文档中的 `POST /admin/recover` 只由 legacy 管理路由提供（[E10](enterprise-v2-events.md)，随 legacy 删除）。
+- 发布文档：`reliability-and-operations.md` 仍写 Docker 镜像与 `test:container`（n1 已退役）、运行 schema `2026111202`（实际为 manifest 末项，当前 2026111224）、“其余 `/v1` 与 `/v1beta` 代理到 legacy”（T09–T12 后公开推理、资源、账户与请求证据路径已分别到 v2 Gateway 与 Core 公开监听），没有内部证书、Core pin 与 CA 的轮换步骤。
+
+决策：
+
+- **N7 OpenAPI 归 Core**：生成器移到 `apps/core-api/src/openapi.ts`，Core 公开监听提供 `GET /openapi.json`，Caddy 把该路径转到 Core 公开监听；legacy 删除自身的 `/openapi.json` 路由，推理与资源路由表改为 legacy 私有常量，不再从文档生成器取。不放进 `apps/gateway`：文档需要 Core 管理与插件目录的 schema，而架构约束禁止 v2 Gateway 依赖 `@gateway/core-api` 与 storage；主规格测试矩阵相应改为 `apps/core-api/src/__test__/openapi.test.ts`。上游资金请求体直接取 `@gateway/contracts` 的 schema（按输入形态导出 JSON Schema），凭证上传体取 Core 管理路由实际使用的 schema。
+- **N8 路由与文档双向一致**：`tests/unit/openapi.test.ts` 取 v2 Gateway、Core 公开、Core 管理（插件目录与管理路由，配置队列时的路由一并计入）以及 legacy 管理路由的实际 Hono 路由表：每个 v2 Gateway 与 Core 路由在发布文档中有同方法条目，每个文档条目由某个运行进程提供（路径参数按段匹配，`/v1beta/models/{model}:generateContent` 对应 `/v1beta/models/:action`）。legacy 删除时文档中的 legacy 专有条目随之失败，须同步删除。
+- **N9 配置样例**：新增 `infra/core-api.example.json` 与 `infra/core-worker.example.env`。Core API 样例的 pepper、加密主密钥与管理 key 留空，未填写时加载失败且只报这三个字段，样例密钥不会被原样部署；数据库 URL 中的口令为占位文本，填错只会认证失败。三个样例与 Caddyfile 的配对由架构用例核对：Core audience、内部 RPC 主机名与端口、Core 证书 SAN 与 Gateway 配置一致，worker 的 Core 字段与 Gateway 一致，worker `REDIS_NAMESPACE` 与 Gateway 队列 namespace 一致，Caddy 指向的 Core 公开端口与 Core 样例一致。
+- **N10 legacy 单元标注**：`legacy-gateway@.service`、`legacy-gateway-worker.service` 的 Description 标明过渡期与随 legacy 删除；文件名与用户不变。
+- 发布文档同步修正上述过期内容，新增按 n3 已验证行为编写的轮换步骤。
+
+实施与验证：
+
+- OpenAPI：生成器与同步用例随 `git mv` 移到 Core（`apps/core-api/src/openapi.ts`、`__test__/openapi.test.ts`），新增“Core 公开监听无需凭证返回发布文档且 `cache-control: no-store`”。文档新增 `/v1/music/generations` 与 18 个上游资金管理路由（holds/journal 的 currency、channel_id、before 查询参数，对账重放 200）；凭证上传体抽为 `@gateway/contracts` 的 `financialVoucherUploadSchema`，Core 管理路由与文档共用。legacy 去掉 `/openapi.json` 与对 `@gateway/core-api` 的依赖（锁文件同步）。Caddy `@account` 加入 `/openapi.json`。
+- `tests/unit/openapi.test.ts` 2 例：负对照从发布文档删去 music 条目、再加一个无人提供的 `/v1/stale` 时两例分别只报该路径失败，重新生成后通过。legacy 专有条目当前只有 `POST /admin/recover`。
+- 配置样例：Core API 样例未填密钥时只报 `admin.admin_key`、`execution.encryptionKey`、`execution.pepper`，填入后加载且两个 HTTP 监听只绑定 loopback、PG 为 `sslmode=verify-full`、Redis 为 `rediss`；worker 样例以 production 加载且 Core 恢复客户端完整。架构用例核对三个单元引用的配置名均有样例、样例间 Core 地址/证书/audience/队列配对与 Caddy 公开端口一致。负对照：样例预填 pepper、公开端口改为 8097 时对应用例失败，恢复后通过。
+- 发布文档：补 Core 公开连接角色 `core_public_api`、Core 三个监听的示例端口；去掉 Docker 段落，改为原生产物与 `test:artifact`；schema 改为 manifest 末项；Caddy 路由按实际分组描述；新增“内部证书与 pin 轮换”（客户端证书、Core 服务端证书、CA 重叠信任包、私钥泄露四种步骤）。
+- 未验证：本机无 systemd 与 caddy，`systemd-analyze verify`、`caddy validate` 未执行；PG `sslmode=verify-full` 只经配置加载核对，未连接真实 TLS PG。
+
+n4 全量门禁（原生服务）：`verify` 退出 0，类型检查 316 文件、lint 0、格式 460 文件，单测 371（较 n3 增 6：Core OpenAPI 公开监听 1、Core/worker 样例各 1、路由双向一致 2、部署样例配对 1）、集成 613、产物 7/14/11。n4 未改耐久路径，`test:durability` 沿用 n2 结果。

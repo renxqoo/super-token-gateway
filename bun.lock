@@ -63,7 +63,6 @@
       "dependencies": {
         "@gateway/adapters": "workspace:*",
         "@gateway/contracts": "workspace:*",
-        "@gateway/core-api": "workspace:*",
         "@gateway/kernel": "workspace:*",
         "@gateway/runtime": "workspace:*",
         "@gateway/storage": "workspace:*",

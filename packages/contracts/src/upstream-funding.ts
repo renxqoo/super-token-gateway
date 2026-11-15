@@ -49,6 +49,12 @@ export const financialVoucherRegistrationSchema = z
     expires_at: fundingTimestampSchema,
   })
   .strict();
+export const financialVoucherUploadSchema = z.strictObject({
+  content_base64: z.string().max(7 << 20),
+  content_type: z.enum(["image/png", "image/jpeg", "application/pdf"]),
+  digest: z.string().regex(/^[a-f0-9]{64}$/),
+  expires_at: z.string(),
+});
 export type UpstreamRechargeInput = z.input<typeof upstreamRechargeSchema>;
 export type FinancialVoucherRegistration = z.input<typeof financialVoucherRegistrationSchema>;
 export type UpstreamRechargeReceipt = {

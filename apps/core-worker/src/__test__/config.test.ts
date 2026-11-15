@@ -58,3 +58,21 @@ test("maintenance batches beyond what one settlement or recovery call accepts ar
   );
   expect(() => loadCoreWorkerConfig({ ...valid, RECOVERY_BATCH: "101" })).toThrow("RECOVERY_BATCH");
 });
+
+test("the shipped production example loads with a complete Core recovery client over TLS", async () => {
+  const text = await Bun.file(
+    new URL("../../../../infra/core-worker.example.env", import.meta.url),
+  ).text();
+  const env = Object.fromEntries(
+    text
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
+  );
+  const config = loadCoreWorkerConfig(env);
+  expect(config.NODE_ENV).toBe("production");
+  expect(config.CORE_ORIGIN?.startsWith("https://")).toBe(true);
+  expect(config.QUEUE_REDIS_URL.startsWith("rediss://")).toBe(true);
+  expect(new URL(config.DATABASE_URL).searchParams.get("sslmode")).toBe("verify-full");
+  expect(config.HOST).toBe("127.0.0.1");
+});

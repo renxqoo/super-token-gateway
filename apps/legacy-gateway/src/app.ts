@@ -9,7 +9,6 @@ import type { Operation } from "@gateway/kernel";
 import type { Resource } from "@gateway/contracts";
 import { boundedRelay, readBounded, clientAddress, validateCidr, inCidrs } from "@gateway/runtime";
 import type { Dependencies, Env } from "./context.ts";
-import { openapi, resourceActions, inferencePaths } from "./openapi.ts";
 import { adminRoutes } from "./admin.ts";
 import { execute } from "./execution.ts";
 import { parseBatchInput } from "./batch-input.ts";
@@ -22,7 +21,28 @@ import {
   videoContent,
 } from "./resources.ts";
 
-const routes = inferencePaths as Record<string, Operation>;
+const routes: Record<string, Operation> = {
+  "/v1/chat/completions": "chat",
+  "/v1/responses": "responses",
+  "/v1/messages": "messages",
+  "/v1/embeddings": "embeddings",
+  "/v1/images/generations": "images",
+  "/v1/images/edits": "image_edits",
+  "/v1/audio/speech": "speech",
+  "/v1/audio/transcriptions": "transcription",
+  "/v1/audio/translations": "translation",
+  "/v1/files": "files",
+  "/v1/batches": "batches",
+  "/v1/videos": "videos",
+  "/v1/moderations": "moderations",
+  "/v1/completions": "completions",
+};
+const resourceActions = {
+  files: ["get", "delete", "content"],
+  batches: ["get", "cancel"],
+  videos: ["get", "delete", "content"],
+  responses: ["get", "delete", "cancel", "input_items"],
+} as const;
 
 export function createApp(deps: Dependencies): Hono<Env> {
   const app = new Hono<Env>();
@@ -120,7 +140,6 @@ export function createApp(deps: Dependencies): Hono<Env> {
     }
   });
   app.route("/admin", adminRoutes(deps));
-  app.get("/openapi.json", (c) => c.json(openapi()));
 
   const publicApi = new Hono<Env>();
   const authenticate: MiddlewareHandler<Env> = async (c, next) => {

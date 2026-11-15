@@ -177,7 +177,7 @@ test("deployment units start built entries, keep v2 processes under separate use
   const account = caddy.indexOf("handle @account"),
     request = caddy.indexOf("handle @request");
   expect(caddy).toContain(
-    "@account path /v1/wallets /v1/models /v1beta/models /v1/usage /v1/project/keys /v1/project/keys/*\n",
+    "@account path /v1/wallets /v1/models /v1beta/models /v1/usage /v1/project/keys /v1/project/keys/* /openapi.json\n",
   );
   expect(caddy).toContain("@request path_regexp ^/v1/requests/[^/]+(/billing)?$\n");
   for (const handle of [account, request]) {
@@ -185,4 +185,68 @@ test("deployment units start built entries, keep v2 processes under separate use
     expect(handle).toBeLessThan(legacy);
   }
   expect(caddy.slice(legacy)).not.toContain("127.0.0.1:8095");
+});
+
+test("the shipped Core API, worker and Gateway examples and the Caddyfile agree on how the processes reach each other", async () => {
+  const core = await Bun.file("infra/core-api.example.json").json();
+  const gateway = await Bun.file("infra/gateway.example.json").json();
+  const worker = Object.fromEntries(
+    (await Bun.file("infra/core-worker.example.env").text())
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
+  );
+  for (const [unit, pattern] of [
+    [
+      "core-api.service",
+      /^Environment=CORE_API_CONFIG_FILE=\/etc\/llm-gateway\/(core-api)\.(json)$/m,
+    ],
+    ["core-worker.service", /^EnvironmentFile=\/etc\/llm-gateway\/(core-worker)\.(env)$/m],
+    [
+      "gateway@.service",
+      /^Environment=GATEWAY_CONFIG_FILE=\/etc\/llm-gateway\/(gateway)-%i\.(json)$/m,
+    ],
+  ] as const) {
+    const match = pattern.exec(await Bun.file(`infra/${unit}`).text());
+    expect(match).not.toBeNull();
+    expect(await Bun.file(`infra/${match![1]}.example.${match![2]}`).exists()).toBe(true);
+  }
+  const origin = new URL(gateway.core.origin);
+  expect([origin.hostname, Number(origin.port), gateway.core.servername]).toEqual([
+    core.servername,
+    core.port,
+    core.servername,
+  ]);
+  expect([gateway.core.audience, gateway.core.ca_file]).toEqual([core.audience, core.ca_file]);
+  expect({
+    origin: worker.CORE_ORIGIN,
+    servername: worker.CORE_SERVERNAME,
+    audience: worker.CORE_AUDIENCE,
+    peer_sha256: worker.CORE_PEER_SHA256,
+    subject_altname: worker.CORE_SUBJECT_ALTNAME,
+    ca_file: worker.CORE_CA_FILE,
+  }).toEqual({
+    origin: gateway.core.origin,
+    servername: gateway.core.servername,
+    audience: gateway.core.audience,
+    peer_sha256: gateway.core.peer_sha256,
+    subject_altname: gateway.core.subject_altname,
+    ca_file: gateway.core.ca_file,
+  });
+  expect([worker.QUEUE_REDIS_URL, worker.REDIS_NAMESPACE]).toEqual([
+    gateway.queue.url,
+    gateway.queue.namespace,
+  ]);
+  expect([core.admin.queue.url, core.admin.queue.namespace]).toEqual([
+    gateway.queue.url,
+    gateway.queue.namespace,
+  ]);
+  expect(core.admin.plugins.helper_executable).toBe(gateway.plugins.helper_executable);
+  const caddy = await Bun.file("infra/Caddyfile").text();
+  for (const handle of ["@account", "@request"]) {
+    const upstream = new RegExp(`handle ${handle} \\{\\s*reverse_proxy ([^{]+)\\{`).exec(caddy);
+    expect(upstream?.[1]?.trim()).toBe(`${core.public.hostname}:${core.public.port}`);
+  }
+  expect(caddy).not.toContain(`:${core.admin.port}`);
+  expect(caddy).not.toContain(`:${core.port}`);
 });

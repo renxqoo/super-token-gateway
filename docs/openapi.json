@@ -1771,6 +1771,89 @@
         }
       }
     },
+    "/v1/music/generations": {
+      "post": {
+        "operationId": "music",
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-gateway-currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            },
+            "description": "Wallet and tariff currency; defaults to project currency. No FX conversion."
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Repeated intentions return 409 and their original request ID; Gateway cannot replay response bodies."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Native provider request. Logical model alias replaces the upstream model. Unsupported cross-protocol semantics return 422."
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/files": {
       "post": {
         "operationId": "files",
@@ -7485,6 +7568,1396 @@
             }
           }
         }
+      }
+    },
+    "/admin/supplier-brands": {
+      "get": {
+        "operationId": "supplier_brands",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_supplier_brand",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/supplier-brands/{id}": {
+      "patch": {
+        "operationId": "update_supplier_brand",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": ["enabled"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/upstream-accounts": {
+      "get": {
+        "operationId": "upstream_accounts",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_upstream_account",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "brand_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": ["brand_id", "name"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/upstream-accounts/{id}": {
+      "get": {
+        "operationId": "upstream_account",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "update_upstream_account",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "enum": ["ACTIVE", "DISABLED"]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                },
+                "required": ["state", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/upstream-accounts/{id}/balances": {
+      "get": {
+        "operationId": "upstream_balances",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/admin/upstream-accounts/{id}/recharges": {
+      "get": {
+        "operationId": "upstream_recharges",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "post": {
+        "operationId": "record_upstream_recharge",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "external_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "payment_currency": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3,8}$"
+                  },
+                  "payment_atoms": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,37}$"
+                  },
+                  "credited_currency": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3,8}$"
+                  },
+                  "credited_atoms": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,37}$"
+                  },
+                  "voucher_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "voucher_digest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "completed_at": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                },
+                "required": [
+                  "external_ref",
+                  "payment_currency",
+                  "payment_atoms",
+                  "credited_currency",
+                  "credited_atoms",
+                  "voucher_id",
+                  "voucher_digest",
+                  "completed_at",
+                  "reason"
+                ],
+                "additionalProperties": false,
+                "description": "Records a completed supplier recharge against a registered voucher. Timestamps are UTC with at most six fractional digits."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/upstream-accounts/{id}/recharges/{ref}": {
+      "get": {
+        "operationId": "upstream_recharge_receipt",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/admin/upstream-accounts/{id}/adjustments": {
+      "post": {
+        "operationId": "record_upstream_adjustment",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "external_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "currency": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3,8}$"
+                  },
+                  "delta_atoms": {
+                    "type": "string",
+                    "pattern": "^-?[1-9][0-9]{0,37}$"
+                  },
+                  "expected_revision": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,37})$"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "voucher_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "voucher_digest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "external_ref",
+                  "currency",
+                  "delta_atoms",
+                  "expected_revision",
+                  "reason"
+                ],
+                "additionalProperties": false,
+                "description": "Signed atom delta at the expected balance revision. voucher_id and voucher_digest are provided together or not at all."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/upstream-accounts/{id}/holds": {
+      "get": {
+        "operationId": "upstream_holds",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            }
+          },
+          {
+            "in": "query",
+            "name": "channel_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/admin/upstream-accounts/{id}/journal": {
+      "get": {
+        "operationId": "upstream_journal",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "currency",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3,8}$"
+            }
+          },
+          {
+            "in": "query",
+            "name": "channel_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      }
+    },
+    "/admin/upstream-accounts/{id}/reconciliations": {
+      "get": {
+        "operationId": "upstream_reconciliations",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        }
+      },
+      "post": {
+        "operationId": "record_upstream_reconciliation",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "currency": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3,8}$"
+                  },
+                  "expected_revision": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,37})$"
+                  },
+                  "observed_atoms": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,37})$"
+                  },
+                  "invoice_atoms": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,37})$"
+                  },
+                  "adjustment_operation_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "resume": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "voucher_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "voucher_digest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": ["currency", "expected_revision", "reason"],
+                "additionalProperties": false,
+                "description": "Reconciles the book balance at the expected revision; a replay of the same reconciliation returns 200 instead of 201. voucher_id and voucher_digest are provided together or not at all."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/financial-vouchers": {
+      "post": {
+        "operationId": "register_financial_voucher",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "content_base64": {
+                    "type": "string",
+                    "maxLength": 7340032
+                  },
+                  "content_type": {
+                    "type": "string",
+                    "enum": ["image/png", "image/jpeg", "application/pdf"]
+                  },
+                  "digest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "expires_at": {
+                    "type": "string"
+                  }
+                },
+                "required": ["content_base64", "content_type", "digest", "expires_at"],
+                "additionalProperties": false,
+                "description": "Canonical base64 of a PNG, JPEG or PDF voucher of at most 5 MiB whose SHA-256 is digest."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/financial-vouchers/{id}": {
+      "get": {
+        "operationId": "financial_voucher",
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success; output content is never retained by Gateway. A stream that fails after its headers ends with a gateway_stream_error event instead of its normal terminal"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "402": {
+            "description": "Insufficient eligible funds or frozen wallet"
+          },
+          "403": {
+            "description": "Scope denied"
+          },
+          "404": {
+            "description": "Owned resource or model not found"
+          },
+          "409": {
+            "description": "Configuration/payload conflict or an already accepted intention"
+          },
+          "413": {
+            "description": "Byte budget exceeded"
+          },
+          "422": {
+            "description": "Unsupported capability or semantics"
+          },
+          "429": {
+            "description": "Rate, token or concurrency budget exceeded"
+          },
+          "502": {
+            "description": "Provider, conversion or usage finalization failed"
+          },
+          "503": {
+            "description": "Admission or durable storage unavailable"
+          },
+          "504": {
+            "description": "Deadline reached"
+          }
+        },
+        "description": "Returns the stored voucher bytes as an attachment with their registered content type."
       }
     },
     "/admin/recover": {

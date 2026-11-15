@@ -12,17 +12,27 @@
 2. 准备专用 PG、准入 Redis、耐久队列 Redis 和数据库迁移 owner。用迁移账号运行 `bun dist/tools/migrate.js --database <确切新库名>`。`MIGRATION_DATABASE_URL` 可独立于 `DATABASE_URL`。每个进程使用独立登录账号，只授予对应角色：
    - Core API 内部连接（`database_url`）：`infra/core-identity-role.sql` 的 `core_identity_api` 与 `infra/core-execution-role.sql` 的 `core_execution_api`。
    - Core API 管理连接（`admin.database_url`）：`infra/core-management-role.sql` 的 `core_management_api` 与 `infra/core-catalog-role.sql` 的 `core_catalog`。
+   - Core API 公开连接（`public.database_url`）：`infra/core-public-role.sql` 的 `core_public_api`。
    - Core 结算 worker：`infra/core-settlement-role.sql` 的 `core_settlement_worker`，只能读 schema 版本与启动 session 公钥、执行证据持久化函数。
    - v2 Gateway：没有数据库账号。
    - 过渡期 legacy 网关与其 worker：`infra/runtime-role.sql` 的 `gateway_runtime` 与 `gateway_worker`，T16 随 legacy 删除。
-3. 发布 dist 到 `/opt/llm-gateway/releases/<版本>/`，将 current 指向该目录。进程必须只读。密钥与配置放在 `/etc/llm-gateway/` 或由外部 secret manager 注入，文件权限 0600 且只属于对应进程用户，禁止打入镜像：Core API 读取 `core-api.json`（含 pepper、加密主密钥、管理 key），worker 读取 `core-worker.env`，v2 Gateway 实例读取 `gateway-<实例>.json`（只有 mTLS 客户端证书、Core 证书指纹与证据队列地址，参考 `infra/gateway.example.json`）。
-4. 安装 `infra/core-api.service`、`infra/core-worker.service`、`infra/gateway@.service`（v2，实例 1/2 监听 127.0.0.1:8090/8091），以及过渡期的 `infra/legacy-gateway@.service`（127.0.0.1:8088/8089）和 `infra/legacy-gateway-worker.service`。Core API、Core worker、v2 Gateway、legacy 网关与 legacy worker 分别使用 `llm-core`、`llm-core-worker`、`llm-gateway`、`llm-legacy-gateway`、`llm-legacy-worker` 五个低权限用户，互相读不到对方的配置与密钥（v2 Gateway 尤其不能读到 legacy 的 `DATABASE_URL`、`KEY_PEPPER` 与 `ENCRYPTION_KEY`）。v2 Gateway 的内部 mTLS 身份先用 `dist/tools/identity-provision.js` 登记。v2 Gateway 启动时向 Core 建立 session，须在 Core API 就绪后启动（同机部署时单元已声明 `After=core-api.service`，Core 不可达时启动失败并由 systemd 重试）；worker 只依赖 PG 与耐久队列。
+3. 发布 dist 到 `/opt/llm-gateway/releases/<版本>/`，将 current 指向该目录。进程必须只读。密钥与配置放在 `/etc/llm-gateway/` 或由外部 secret manager 注入，文件权限 0600 且只属于对应进程用户，禁止打入镜像：Core API 读取 `core-api.json`（含 pepper、加密主密钥、管理 key，参考 `infra/core-api.example.json`：这三项在样例中留空，不填写时拒绝启动），worker 读取 `core-worker.env`（参考 `infra/core-worker.example.env`），v2 Gateway 实例读取 `gateway-<实例>.json`（只有 mTLS 客户端证书、Core 证书指纹与证据队列地址，参考 `infra/gateway.example.json`）。三个样例的 audience、Core 内部地址与证书 SAN、队列 namespace 及 Caddy 指向的 Core 公开端口互相一致，替换时成组修改。
+4. 安装 `infra/core-api.service`（内部 RPC、管理监听 127.0.0.1:8096 与公开监听 127.0.0.1:8095 同一进程）、`infra/core-worker.service`、`infra/gateway@.service`（v2，实例 1/2 监听 127.0.0.1:8090/8091），以及过渡期的 `infra/legacy-gateway@.service`（127.0.0.1:8088/8089）和 `infra/legacy-gateway-worker.service`。Core API、Core worker、v2 Gateway、legacy 网关与 legacy worker 分别使用 `llm-core`、`llm-core-worker`、`llm-gateway`、`llm-legacy-gateway`、`llm-legacy-worker` 五个低权限用户，互相读不到对方的配置与密钥（v2 Gateway 尤其不能读到 legacy 的 `DATABASE_URL`、`KEY_PEPPER` 与 `ENCRYPTION_KEY`）。v2 Gateway 的内部 mTLS 身份先用 `dist/tools/identity-provision.js` 登记。v2 Gateway 启动时向 Core 建立 session，须在 Core API 就绪后启动（同机部署时单元已声明 `After=core-api.service`，Core 不可达时启动失败并由 systemd 重试）；worker 只依赖 PG 与耐久队列。
 5. v2 Gateway 配置 `production: true`、`allow_private_upstream: false`，证据队列 `required_replicas` 等于所有可晋升 AOF 副本数且至少 1，`queue.namespace` 必须与 Core worker 的 `REDIS_NAMESPACE`（默认 `stg`）相同，`core.audience` 形如 `<部署名>/core-api` 且与 Core API 的 `audience` 一致；legacy 配置 `NODE_ENV=production`、`ALLOW_PRIVATE_UPSTREAM=false`。PG/Redis 使用已验证的 TLS 连接，供应商为公网 HTTPS 地址。配置业务系统与 Gateway 的独立访问凭证。
-6. 修改 `infra/Caddyfile` 的真实域名和实例地址，运行 `caddy validate`，切入已通过 `/readyz` 的新实例，再逐个 SIGTERM 旧实例。`/v1/chat/completions` 只代理到 v2 Gateway，其余 `/v1` 与 `/v1beta` 在迁移完成前代理到 legacy；Core 管理监听与内部 RPC 不暴露公网。
+6. 修改 `infra/Caddyfile` 的真实域名和实例地址，运行 `caddy validate`，切入已通过 `/readyz` 的新实例，再逐个 SIGTERM 旧实例。`@chat`、`@resources` 列出的推理与资源路径只代理到 v2 Gateway；`@account`、`@request` 列出的钱包、模型列表、用量、项目 Key、请求证据与 `/openapi.json` 代理到 Core 公开监听；只有未列出的 `/v1`、`/v1beta` 路径在 legacy 删除前仍落到 legacy。Core 管理监听与内部 RPC 不暴露公网。
 
-可用 `docker build -f infra/Dockerfile -t <镜像> .` 构建另一种发布成品。运行时建议 `--read-only --tmpfs /tmp:size=64m --cap-drop ALL --security-opt no-new-privileges`、非 root 和内存限制；使用 `bun run test:container` 验证真实依赖、独立 worker、JSON/SSE、精确账单与 SIGTERM。镜像包含 Bun 1.4.4 与独立 bundle，不需要生产安装 node_modules。
+发布成品是 `dist/` 下的独立 bundle、`dist/tools` 运维工具与 `dist/native/plugin-host`，生产不安装 node_modules；`bun run test:artifact` 在独立空目录启动编译产物，检查真实依赖、三进程 JSON/SSE、双方精确记账、SIGTERM 与输出不含正文。只读根、非 root 与能力收紧由 systemd 单元提供，单元需在 Linux 部署机用 `systemd-analyze verify` 检查。
 
-运行进程只接受当前 v2 schema2026111202。迁移工具要求 `--database <确切名称>` 匹配连接 URL，首次只接受空库；已知 v2 版本按 checksummed manifest 顺序应用。旧开发 schema06–2026111201 不升级、不修改，必须为 v2 建独立新库。应用回退须使用相同数据库契约并保留已确认队列、账本及费率证据。详见 [数据库契约](database.md)。
+运行进程只接受 checksummed manifest 的最新版本（当前 2026111224）。迁移工具要求 `--database <确切名称>` 匹配连接 URL，首次只接受空库；已知 v2 版本按 checksummed manifest 顺序应用。旧开发 schema06–2026111201 不升级、不修改，必须为 v2 建独立新库。应用回退须使用相同数据库契约并保留已确认队列、账本及费率证据。详见 [数据库契约](database.md)。
+
+## 内部证书与 pin 轮换
+
+内部 RPC 只用 TLS 1.3 双向认证且不发会话票据，每次重连都完整验证证书。Core 按 `ca_file` 校验对端证书链，并要求叶证书已登记、未 RETIRE、未安全撤销；Gateway 与 worker 除 CA 与主机名外还固定 Core 服务端叶证书 DER 的 SHA-256（`core.peer_sha256` / `CORE_PEER_SHA256`）与完整 SAN（`core.subject_altname` / `CORE_SUBJECT_ALTNAME`）。登记与变更使用 `dist/tools/identity-provision.js`、`dist/tools/identity-revoke.js`，连接 `INTERNAL_IDENTITY_DEPLOY_DATABASE_URL`（授予 `core_identity_deployer` 的登录账号）。
+
+1. Gateway、worker 或 Core 自身客户端证书（`client_cert_file`）到期轮换：用同一 CA、同一 URI SAN 签发新叶证书；`identity-provision.js --service <服务> --instance <实例> --certificate <新证书> --uri-san <URI> --hostname <主机名>` 登记（同一实例可同时持有多张证书）；替换该实例配置中的证书与私钥并重启；旧进程退出后 `identity-revoke.js --service <服务> --instance <实例> --certificate-sha256 <旧证书指纹> --action RETIRE`。旧 session 已签名、仍在队列中的证据照常按捕获公钥验证并只入账一次，新实例不能接管旧尝试的发送权。
+2. Core 服务端证书轮换：计算新叶证书指纹（`openssl x509 -in core.pem -outform DER | sha256sum`），替换 Core 的 `key_file`/`cert_file` 并重启 Core API，然后逐个更新 Gateway 的 `core.peer_sha256`（SAN 变化时同时改 `core.subject_altname`）与 worker 的 `CORE_PEER_SHA256` 并重启。pin 只有一个值：Core 换证后到对应进程重启前，Gateway 的 `/readyz` 因无法与 Core 建立新连接返回 503 并被 Caddy 摘除，worker 的执行恢复调用失败、计入 `/readyz` 的 `maintenance_failures` 并按 `RECOVERY_INTERVAL_MS` 重试（证据结算不经 Core，不受影响），因此安排在低峰窗口逐台完成。
+3. CA 轮换：先把新旧 CA 合并为一个 PEM 信任包，作为 Core 与全部 Gateway、worker 的 `ca_file`/`core.ca_file`/`CORE_CA_FILE` 并逐个重启；再按第 1、2 步换成新 CA 签发的证书；全部旧叶证书 RETIRE 后从信任包删除旧 CA 并再次逐个重启。只信任单个 CA 的一端会拒绝另一 CA 签发的对端。
+4. 私钥泄露：对泄露证书执行 `--action SECURITY_REVOKE`（可加 `--session <session_id>`），已连接 session 的下一个请求即被拒；该 session 尚未锚定的证据只隔离不入账，原 UNKNOWN 与资金责任保留，按第 1 步换证后重启。
 
 ## 高可用依赖
 

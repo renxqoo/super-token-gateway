@@ -13,6 +13,14 @@ import {
   refundSchema,
   adjustmentSchema,
   resolutionSchema,
+  supplierBrandSchema,
+  supplierBrandPatchSchema,
+  upstreamAccountSchema,
+  upstreamAccountPatchSchema,
+  upstreamRechargeSchema,
+  upstreamAdjustmentSchema,
+  upstreamReconciliationSchema,
+  financialVoucherUploadSchema,
 } from "@gateway/contracts";
 import {
   installBundledReleaseSchema,
@@ -20,10 +28,10 @@ import {
   bindPluginSchema,
   versionCommandSchema,
   recoveryCommandSchema,
-} from "@gateway/core-api/catalog";
+} from "./plugins/application.ts";
 import { operations } from "@gateway/kernel";
 
-export const inferencePaths: Record<string, string> = {
+const inferencePaths: Record<string, string> = {
   "/v1/chat/completions": "chat",
   "/v1/responses": "responses",
   "/v1/messages": "messages",
@@ -33,13 +41,14 @@ export const inferencePaths: Record<string, string> = {
   "/v1/audio/speech": "speech",
   "/v1/audio/transcriptions": "transcription",
   "/v1/audio/translations": "translation",
+  "/v1/music/generations": "music",
   "/v1/files": "files",
   "/v1/batches": "batches",
   "/v1/videos": "videos",
   "/v1/moderations": "moderations",
   "/v1/completions": "completions",
 };
-export const resourceActions = {
+const resourceActions = {
   files: ["get", "delete", "content"],
   batches: ["get", "cancel"],
   videos: ["get", "delete", "content"],
@@ -541,6 +550,105 @@ export function openapi(): Record<string, unknown> {
     },
     true,
   );
+  const input = (schema: z.ZodType) => z.toJSONSchema(schema, { io: "input" });
+  add("/admin/supplier-brands", "get", "supplier_brands", undefined, true);
+  add("/admin/supplier-brands", "post", "create_supplier_brand", input(supplierBrandSchema), true);
+  add(
+    "/admin/supplier-brands/{id}",
+    "patch",
+    "update_supplier_brand",
+    input(supplierBrandPatchSchema),
+    true,
+  );
+  add("/admin/upstream-accounts", "get", "upstream_accounts", undefined, true);
+  add(
+    "/admin/upstream-accounts",
+    "post",
+    "create_upstream_account",
+    input(upstreamAccountSchema),
+    true,
+  );
+  add("/admin/upstream-accounts/{id}", "get", "upstream_account", undefined, true);
+  add(
+    "/admin/upstream-accounts/{id}",
+    "patch",
+    "update_upstream_account",
+    input(upstreamAccountPatchSchema),
+    true,
+  );
+  add("/admin/upstream-accounts/{id}/balances", "get", "upstream_balances", undefined, true);
+  add("/admin/upstream-accounts/{id}/recharges", "get", "upstream_recharges", undefined, true);
+  add(
+    "/admin/upstream-accounts/{id}/recharges",
+    "post",
+    "record_upstream_recharge",
+    {
+      ...input(upstreamRechargeSchema),
+      description:
+        "Records a completed supplier recharge against a registered voucher. Timestamps are UTC with at most six fractional digits.",
+    },
+    true,
+  );
+  add(
+    "/admin/upstream-accounts/{id}/recharges/{ref}",
+    "get",
+    "upstream_recharge_receipt",
+    undefined,
+    true,
+  );
+  add(
+    "/admin/upstream-accounts/{id}/adjustments",
+    "post",
+    "record_upstream_adjustment",
+    {
+      ...input(upstreamAdjustmentSchema),
+      description:
+        "Signed atom delta at the expected balance revision. voucher_id and voucher_digest are provided together or not at all.",
+    },
+    true,
+  );
+  for (const [ledger, id] of [
+    ["holds", "upstream_holds"],
+    ["journal", "upstream_journal"],
+  ] as const)
+    add(`/admin/upstream-accounts/{id}/${ledger}`, "get", id, undefined, true).parameters = [
+      { in: "path", name: "id", required: true, schema: { type: "string" } },
+      { in: "query", name: "currency", schema: { type: "string", pattern: "^[A-Z]{3,8}$" } },
+      { in: "query", name: "channel_id", schema: { type: "string", format: "uuid" } },
+      { in: "query", name: "before", schema: { type: "string", format: "uuid" } },
+    ];
+  add(
+    "/admin/upstream-accounts/{id}/reconciliations",
+    "get",
+    "upstream_reconciliations",
+    undefined,
+    true,
+  );
+  add(
+    "/admin/upstream-accounts/{id}/reconciliations",
+    "post",
+    "record_upstream_reconciliation",
+    {
+      ...input(upstreamReconciliationSchema),
+      description:
+        "Reconciles the book balance at the expected revision; a replay of the same reconciliation returns 200 instead of 201. voucher_id and voucher_digest are provided together or not at all.",
+    },
+    true,
+  );
+  add(
+    "/admin/financial-vouchers",
+    "post",
+    "register_financial_voucher",
+    {
+      ...input(financialVoucherUploadSchema),
+      description:
+        "Canonical base64 of a PNG, JPEG or PDF voucher of at most 5 MiB whose SHA-256 is digest.",
+    },
+    true,
+  );
+  add("/admin/financial-vouchers/{id}", "get", "financial_voucher", undefined, true)[
+    "description"
+  ] = "Returns the stored voucher bytes as an attachment with their registered content type.";
   add("/admin/recover", "post", "admin_recover", undefined, true);
   add("/admin/queue", "get", "usage_queue_stats", undefined, true);
   add("/admin/queue/jobs/{id}/retry", "post", "retry_usage_job", undefined, true);

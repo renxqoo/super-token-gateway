@@ -28,7 +28,7 @@ gateway.example.com {
 			lb_try_duration 0s
 		}
 	}
-	@account path /v1/wallets /v1/models /v1beta/models /v1/usage /v1/project/keys /v1/project/keys/*
+	@account path /v1/wallets /v1/models /v1beta/models /v1/usage /v1/project/keys /v1/project/keys/* /openapi.json
 	@request path_regexp ^/v1/requests/[^/]+(/billing)?$
 	handle @account {
 		reverse_proxy 127.0.0.1:8095 {
