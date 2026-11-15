@@ -95,3 +95,18 @@
   - Gateway：`POST/GET /v1/videos`、`GET/DELETE /v1/videos/{id}`、`GET /v1/videos/{id}/content`（复用文件 content 的流式转发）；创建允许待定结果。Caddy 起 `/v1/videos`、`/v1/videos/*` 经 `@resources` 转 v2。
 - **l6 测试**：`tests/integration/gateway-videos.test.ts` 3 例：创建返回公开 ID 与逻辑模型、上游收到上游模型与秒数；无客户端轮询由轮询器按终态 8 秒结算金额 80（人工算例 8×10）且 `async_final` FINAL；取回改写、content 流式（`video/mp4`、`no-store`）、列表、删除到原渠道后 content 404 且不触达上游；上游失败时请求 FAILED、金额 0、attempt `upstream_error`；流式请求 400 且不触达上游。openai-chat 1.9.0 fixture 84 cases/112 steps。
 - **l6 已知限制**：Gemini 长任务视频（legacy `predictLongRunning`）未迁移，gemini-generate 插件不声明 `videos`；Azure 路径风格 422；视频删除不改变已结算账单。
+
+## 5. 验收（l7）
+
+| 主规格条目                                      | 覆盖                                                                                                                                                                                             |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 归属、cursor、固定渠道版本                      | `gateway-resources`（跨项目、受限 Key、未知 ID、cursor 越权 404，动作固定到登记绑定）；`core-resources-upgrade`（legacy 行回填）                                                                 |
+| 变更单次 grant、重放不再发凭证                  | `gateway-resources`（cancel 重放 REPLAYED 无凭证材料、伪造提交 403 `internal_owner_mismatch`）                                                                                                   |
+| 背景补证、迟到与租约 fencing、不跨 Gateway 重派 | `gateway-background`（另一 Gateway 补证、旧 epoch 证据与凭证拒绝、删除未完成响应按 FAILED 收口）                                                                                                 |
+| Batch 行身份与 ceiling、完成/取消/失败用量      | `gateway-batches`、`apps/gateway/src/__test__/batches.test.ts`（行规则、聚合 ceilings、`batch_completed`/`batch_cancelled` FINAL 金额人工算例；失败与过期走 `batch_failed`，与完成共用汇总路径） |
+| 数字资源白名单与引用隔离                        | `gateway-references`、`references.test.ts`、`gateway-files`（公开 ID 引用、上游 ID 拒绝）                                                                                                        |
+| 正常动作 HTTP 覆盖                              | `gateway-resources`、`gateway-files`、`gateway-batches`、`gateway-videos` 覆盖创建、取回、删除、取消、input_items、content 与列表                                                                |
+
+- 全量门禁：l6 提交前 `bun run verify` 通过（单测 365、集成 598、产物检查 7/14/10）。
+- 切流后 legacy 已发放的资源行仍由 legacy worker 补证（v2 只认领带 v2 permit 的行），直至 T18 移除 legacy；v2 对这些行的取回、删除等动作按回填的绑定执行。
+- 汇总已知限制：后台 Responses 失败/取消/删除按 UNKNOWN 用量收口；Batch 行内文件引用不支持、取消批次未列全行时等待人工 resolution；content 流不计入 Gateway 排空等待；Gemini 长任务视频与 Azure 路径风格的资源操作未迁移。
