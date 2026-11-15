@@ -143,7 +143,7 @@
 
 `packages/runtime/src/usage-queue.ts` 的耐久 producer/consumer 增加 `QueueChannel` 参数：`usageChannel` 保持原队列名 `usage-v1` 与前缀 `{ns:usage}`，在途任务不受影响；`evidenceChannel` 使用 `core-evidence-v1`、`{ns:core-evidence}`，载荷为 `{version:1,groups}`。生产侧沿用同一 WAITAOF 耐久确认。
 
-`apps/core-api/src/settlement/worker.ts` 的 `createSettlementWorker` 消费 evidenceChannel：processor 等 `persist` 的外层 PG 事务提交后才 resolve，BullMQ 随后 ACK。任一组 `ERROR`（锁忙、PG 不可用）则抛错，整个 job 不 ACK 并按既有有界退避重试，已提交的组在重投时按 receipt 收敛为 DUPLICATE；`REJECTED` 组 ACK 并经 `onRejected` 告警，不无限重投。
+`apps/core-api/src/settlement/worker.ts` 的 `createSettlementWorker` 消费 evidenceChannel：processor 等 `persist` 的外层 PG 事务提交后才 resolve，BullMQ 随后 ACK。锁冲突（`55P03`、`40P01`）的组先在 job 内以 1–200 ms 抖动退避只重投这些组，2 秒预算内仍冲突，或任一组为其他 `ERROR`（如 PG 不可用）时抛错，整个 job 不 ACK 并按既有有界退避重试（core-worker 位于 `apps/core-worker/src/settlement/worker.ts`，T14 n5 F2），已提交的组在重投时按 receipt 收敛为 DUPLICATE；`REJECTED` 组 ACK 并经 `onRejected` 告警，不无限重投。
 
 ### 对设计的修订（④）
 

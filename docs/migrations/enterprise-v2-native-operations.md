@@ -18,13 +18,13 @@
 
 ## 3. 里程碑
 
-| 里程碑 | 内容                                                                       | 状态   |
-| ------ | -------------------------------------------------------------------------- | ------ |
-| n1     | 原生依赖服务、Docker 退役、备份与 CI 原生化、容器有效断言迁移              | 完成   |
-| n2     | v2 结算故障窗口：core-worker 提交前/提交后 ACK 前强杀；耐久脚本结算腿迁 v2 | 完成   |
-| n3     | 内部身份轮换/伪造/过期/重放、helper 泄漏与 shutdown 覆盖核对与补齐         | 完成   |
-| n4     | 部署：三服务 systemd 单元与配置样例、legacy 单元过渡标注、OpenAPI          | 完成   |
-| n5     | 容量发生器纳入 Core 与上游账本                                             | 待执行 |
+| 里程碑 | 内容                                                                       | 状态 |
+| ------ | -------------------------------------------------------------------------- | ---- |
+| n1     | 原生依赖服务、Docker 退役、备份与 CI 原生化、容器有效断言迁移              | 完成 |
+| n2     | v2 结算故障窗口：core-worker 提交前/提交后 ACK 前强杀；耐久脚本结算腿迁 v2 | 完成 |
+| n3     | 内部身份轮换/伪造/过期/重放、helper 泄漏与 shutdown 覆盖核对与补齐         | 完成 |
+| n4     | 部署：三服务 systemd 单元与配置样例、legacy 单元过渡标注、OpenAPI          | 完成 |
+| n5     | 容量发生器纳入 Core 与上游账本                                             | 完成 |
 
 ## 4. n1 记录
 
@@ -96,3 +96,46 @@ n3 全量门禁（原生服务）：`verify` 退出 0，单测 365、集成 613�
 - 未验证：本机无 systemd 与 caddy，`systemd-analyze verify`、`caddy validate` 未执行；PG `sslmode=verify-full` 只经配置加载核对，未连接真实 TLS PG。
 
 n4 全量门禁（原生服务）：`verify` 退出 0，类型检查 316 文件、lint 0、格式 460 文件，单测 371（较 n3 增 6：Core OpenAPI 公开监听 1、Core/worker 样例各 1、路由双向一致 2、部署样例配对 1）、集成 613、产物 7/14/11。n4 未改耐久路径，`test:durability` 沿用 n2 结果。
+
+## 8. n5 容量发生器
+
+当前行为（代码核对，2026-11-15）：
+
+- `scripts/bench-system.ts` 仍驱动 legacy 单体：直连 PG 建库迁移，用 legacy `Store` 与资金存储种数据，启动 `dist/legacy-gateway/main.js` 与 `worker-main.js`，走 `usage-v1` 队列与 legacy 计费（`--billing-mode`，期望收费 59）；没有 Core API、core-worker、签名证据或上游账本断言。
+- `scripts/capacity-cleanup.ts` 清理 `{namespace:usage}` 作用域，v2 证据队列 `{namespace:core-evidence}` 不在清理范围。
+- `scripts/bench.ts --metrics` 读 legacy 的 `/admin/metrics`，v2 Gateway 没有该路由；错误码分桶用 legacy 码白名单，v2 的 `core_unavailable` 等落入 `other`。
+
+决策：
+
+- **N11 单一容量入口驱动 v2 三进程**：`bench-system.ts` 用编译产物启动 Core API（`dist/core-api/main.js`，管理面取编译后的 `platform/management.js`）、1–8 个 Gateway（`dist/gateway/main.js`）与 core-worker（`dist/core-worker/main.js`），复用产物检查的夹具（`withFinancial`、`startGateway`、`startCoreWorker`、`withSettlementRole`）。`withIdentity`/`withFinancial` 新增 `gateways`（2–8），为额外 Gateway 实例签发内部证书；`startGateway` 可指定实例名，上游证书可选。运行前要求已 `bun run build`。
+- **N12 TLS 上游**：Core 只接受 HTTPS 渠道，且候选只取 origin、路径由插件决定。每次运行生成只含 `IP:127.0.0.1` SAN 的一天期自签证书（私钥 0600，位于本次运行目录），证书只经 `NODE_EXTRA_CA_CERTS` 交给 Gateway。标准 mock（`dist/mock-providers/main.js`）与预序列化 fixture（`scripts/bench-upstream.ts`）新增 `MOCK_TLS_KEY_FILE`/`MOCK_TLS_CERT_FILE`，两者须同时设置；预序列化 fixture 改为响应插件实际调用的 `/v1/chat/completions`。
+- **N13 期望值**：渠道成本费率 input 3、cached 1、output 7；上游返回 prompt 10（cached 3）、completion 5，插件计量 input 7、cached 3、output 5（标准 mock 另有 reasoning 2，无费率不计价），供应成本 7×3+3×1+5×7=59；客户 `REQUEST_COMPLETION` 每请求 100。
+- **N14 账务审计**（失败按名称列出）：
+  - 每请求恰一个成功 attempt、一个 SETTLED hold 与一条 SETTLE 流水；客户 charge 100 全额现金、无欠款与退款；钱包逐个按请求数核对 reserved、debt、spent、available。
+  - 所有 usage 快照 FINAL，用量与成本精确；每请求至少一个快照。同一 attempt 的两条证据（revision 1 用量、revision 2 结局）乱序到达时旧 revision 记 STALE，因此一个请求有 1–2 个规范快照；收据只允许 ACCEPTED 与 STALE，冲突为 0。
+  - 供应账户 reserved 0、spent = 请求数 × 59、余额 = 授信 − spent，`upstream_cost_heads` 每请求一条；客户与供应 journal 均平衡；charge 与 hold、钱包、项目、币种、证据的归属一致；证据队列清零。
+- **N15 外部消费**：经 Core 管理 `/consumers` claim/ACK；只 ACK 已有精确 charge 的请求的事件，每个规范快照都须 ACK。严格在线验收的身份 TSV 每请求只写一次，在该请求全部规范快照都已 ACK 时写入，保持逐请求交集语义。
+- **N16 资源与遥测**：每秒按进程树采样 Gateway（含 helper）、Core API、core-worker 与上游的 RSS 和 CPU，连同证据队列计数、worker `/readyz` 计数、PG 锁等待与活动查询；不再传 `--metrics`。负载器错误码按响应中的技术码分桶（最多 32 类）。
+- **N17 参数**：移除只对 legacy 有意义的 `--pool`（legacy Gateway 连接池）、`--batch`（legacy worker 批量）、`--billing-mode`、`--provider`（legacy anthropic fixture）、`--wal-lz4`、`--profile`（在临时库开启 pg_stat_statements）；新增 `--gateway-inflight`（Gateway `max_inflight`）。`--concurrency` 默认 8（见 F3），`--worker-concurrency` 默认 8（与 `SETTLEMENT_CONCURRENCY` 默认值一致），其余参数保留。
+- **N18 清理**：证据队列按 `${namespace}:*` 与 `{namespace:core-evidence}:*` 清理，`capacity.test.ts` 相应改为 v2 作用域，legacy `{namespace:usage}` 视为邻居保留；Core 准入 key 与临时库由夹具清理。
+- **N19 产物检查**：`scripts/verify-artifact.ts` 从仓库根以 1 请求运行生成器的断言改为 v2 口径：每个规范快照均 ACK 且每请求已确认、供应 spent = 请求数 × 59、证据队列清零、审计记录的夹具库已删除、两个 Redis 无 `bench:<id>` 键；去掉已移除的 `--pool`。该段随 T16 删除 legacy 产物检查时迁到 v2 产物检查。
+
+发现与处置（n5 冒烟暴露）：
+
+| 编号    | 发现                                                                                                                                                                                                                                                                                                                                                 | 处置                                                                                                                                                                                                                                                                                                                        |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F1 缺陷 | begin 对钱包与供应余额取 `FOR NO KEY UPDATE NOWAIT`，与并发 admit、begin、结算争用同一热点行时 Core 返回 `identity_busy`（事务已回滚）；Gateway 只对 context、admit 重试，begin 直接 503 `core_unavailable`。8 路并发 64 个请求实测 4 个 503                                                                                                         | begin 与 context、admit 共用同一有界退避（同一 command id，至请求取消或 deadline）；其余未知结果仍按查询处理。回归用例“a row briefly locked by another transaction when the Gateway begins the send (identity_busy at begin)…”（审计触发器只在 begin 时对测试持有的行 `FOR UPDATE NOWAIT`），修复前 503，修复后 200         |
+| F2 缺陷 | 结算 worker 的并发 job 争用同一供应余额与钱包行，NOWAIT 失败的组使整个 job 抛错，走 BullMQ 指数退避（250 ms 起、10 次，合计约 255 秒，耗尽进入 failed 集）。默认 `SETTLEMENT_CONCURRENCY=8` 下 5 秒冒烟停压 60 秒后仍有 43 个 hold 未结、delayed 70 余个；worker 并发 1 时全部结清                                                                   | worker 对 `55P03`、`40P01` 的组在 job 内以 1–200 ms 抖动退避只重投这些组，2 秒预算内仍冲突再按原退避；其他 ERROR 不变。回归用例“a supplier balance briefly locked by a concurrent settlement (lock conflict) is retried inside the job…”修复前 delayed 1，修复后 0 且一次结算为 985/0/15。修复后同一冒烟 176 个请求全部结清 |
+| F3 记录 | Core 内部监听 `streams` 的配置上限为 16（schema `max(16)`），Gateway 的 Core 客户端单 session 在途上限 32；超出时立即返回 429 `internal_capacity`（Gateway 映射为 429 `rate_limited`），或由客户端本地拒绝（503 `core_unavailable`），没有排队或背压。48 个并发请求打一个 Gateway：16 成功、16 个 429、16 个 503；`--concurrency 64` 时约 94% 为 429 | 属 T17“必要产品性能修复”；n5 默认并发取 8                                                                                                                                                                                                                                                                                   |
+| F4 记录 | 管理接口接受带路径的 `base_url`，但 `core_candidates_v1` 只取 origin，插件给出绝对路径 `/v1/chat/completions`，路径前缀被静默丢弃；带前缀的 OpenAI 兼容上游（如 `/api/v1`）会请求错误路径。origin 取自可信候选、路径由插件决定是既定设计，问题在于管理面接受后静默忽略                                                                               | 交 T15 审查、T16 处置                                                                                                                                                                                                                                                                                                       |
+
+基线（不作容量结论）：2 个 Gateway、并发 4、3 个钱包、标准 mock 时 33.6 RPS，p50 108 ms、p99 280 ms；约 7 秒负载内 Core API CPU 0.73 秒、worker 0.26 秒、Gateway 合计 3.3 秒，受延迟而非 CPU 限制。容量曲线由 T17 测定。
+
+验证（原生服务，队列零副本）：
+
+- 标准 JSON（2 个 Gateway、3 个钱包、并发 4、5 秒）有效：182 个请求、321 个快照全部精确并 ACK，客户 spent 18200，供应 spent 10738（= 182 × 59）。SSE 有效：125 个请求、供应 7375。预序列化 fixture 固定速率 40/s 有效：计划 200 个全部发出，含预热共 212 个，供应 12508。worker 延后启动且无消费者有效：216 个请求、供应 12744、ACK 0。60 ms 场景延迟生效（p50 174 ms）。
+- 修复前的冒烟分别以 `http_validity`、`unsettled_holds`、`evidence_queue_backlog` 等判失败，审计能识别 F1、F2。
+- 每次运行后队列 Redis 与准入 Redis 无 `bench:` 键残留，无残留进程与临时库。
+- 未执行：`--online-capacity`（需 AOF 副本与 60 秒整数倍窗口）、`--hot-share` 热点与 1000 钱包，属 T17。
+
+n5 全量门禁（原生服务）：`verify` 退出 0，类型检查 316 文件、lint 0、格式 460 文件，单测 371、集成 615（较 n4 增 2：begin 锁冲突与结算 job 内锁冲突重试回归）、产物 legacy 9/目录 7/身份 7/执行 14/Gateway 11、插件产物 84 例 112 步；`test:durability` 通过（scope `v2-core-settlement`，6 项）。首次门禁在 `test:artifact` 失败：`verify-artifact.ts` 仍按 legacy 审计断言每请求一次 ACK 与 `pending` 字段，按 N19 改为 v2 口径后通过。

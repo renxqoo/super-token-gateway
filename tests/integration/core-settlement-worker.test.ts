@@ -126,6 +126,76 @@ test("the settlement worker acknowledges a job only after its group commits and 
     }
   }));
 
+test("a supplier balance briefly locked by a concurrent settlement (lock conflict) is retried inside the job instead of entering exponential backoff", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap(),
+      client = f.client();
+    await client.startup();
+    const prepared = await prepareFinancialAdmission(setup, client);
+    const admission = (await prepared.admit()) as ExecutionReply;
+    await client.execution("execution_begin_v1", prepared.beginData(admission.receipt), {
+      deadlineAt: prepared.deadline,
+    });
+    const fact = client.signEvidence({
+      event_id: crypto.randomUUID(),
+      attempt_id: prepared.attemptId,
+      permit_epoch: "1",
+      source: "execution",
+      source_revision: "1",
+      finality: "FINAL",
+      usage: { input_tokens: "30", output_tokens: "15" },
+      final_dimensions: ["input_tokens", "output_tokens"],
+      attempt_state: "SUCCEEDED",
+      request_state: "SUCCEEDED",
+    });
+    const options = {
+      url: process.env.QUEUE_REDIS_URL!,
+      namespace: `core-evidence:${crypto.randomUUID()}`,
+      replicas: 0,
+      timeoutMs: 1000,
+    };
+    const producer = new UsageProducer({ ...options, channel: evidenceChannel });
+    const worker = createSettlementWorker({ ...options, db });
+    let delayed = 0;
+    try {
+      await producer.ready();
+      await worker.ready();
+      const held = new Error("release supplier balance");
+      await db
+        .begin(async (tx) => {
+          await tx`SELECT 1 FROM upstream_account_balances WHERE account_id=${setup.provider.account_id} FOR UPDATE`;
+          await producer.publish({ events: [fact] });
+          await eventually(async () => (await producer.stats()).active === 1, "job processing");
+          const end = Date.now() + 600;
+          while (Date.now() < end) {
+            delayed = Math.max(delayed, (await producer.stats()).delayed ?? 0);
+            await Bun.sleep(10);
+          }
+          throw held;
+        })
+        .catch((error) => {
+          if (error !== held) throw error;
+        });
+      await eventually(
+        async () =>
+          Object.values(await producer.stats()).reduce((sum, count) => sum + count, 0) === 0,
+        "committed acknowledgement",
+      );
+      expect(delayed).toBe(0);
+      expect(
+        await db`SELECT outcome FROM core_evidence_receipts WHERE event_id=${fact.event_id}`,
+      ).toEqual([{ outcome: "ACCEPTED" }]);
+      expect(await supplier(db, setup.provider.account_id)).toEqual({
+        balance: "985",
+        reserved: "0",
+        spent: "15",
+      });
+    } finally {
+      await worker.close();
+      producer.close();
+    }
+  }));
+
 test("rejections in a retried job are alerted once on acknowledgement and an ungranted fact raises a quarantine alert once", () =>
   withFinancial(async (f, db) => {
     const setup = await f.bootstrap(),

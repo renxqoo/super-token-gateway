@@ -97,7 +97,7 @@ HTTP 408、409、429、500、502、503、504、529 允许重试或切换，401�
 
 `billing_settled_total` 等消费回调计数描述完成作业的返回结果。作业内部分提交、忙项重试和已提交作业重投可能使回调时间晚于实际 PG 提交，窗口内账务验收使用已提交收据及实际 ACK。
 
-`scripts/bench-system.ts --online-capacity --seconds 60 --upstream precomputed --rate 6150 --target-rps 6000` 使用预序列化无延迟 Chat 上游，保留在线 worker、资金预扣和外部消费。需提供测试 owner 的 DATABASE_URL、准入 Redis、独立的 AOF always 证据主节点及落盘副本，设置 QUEUE_REQUIRED_REPLICAS=1。该入口创建并清理独立测试数据库和命名空间；REDIS_EXTRA_URLS 的所有端点参与清理。完整命令与本机配置、结果见 validation.md。
+`scripts/bench-system.ts` 在 `bun run build` 后用编译产物启动 Core API、1–8 个 Gateway（`--instances`）与 core-worker，上游为本次运行自签证书的 TLS 标准 mock 或预序列化 fixture（`--upstream precomputed`）；审计客户资金、供应账本（每请求成本 59）、签名证据收据与 Core 事件 ACK，并按进程树记录 RSS 与 CPU。严格在线形式为 `--online-capacity --seconds 60 --upstream precomputed --rate <每秒> --target-rps <每秒>`。需提供测试 owner 的 DATABASE_URL、准入 Redis、独立的 AOF always 证据主节点及落盘副本，设置 QUEUE_REQUIRED_REPLICAS=1。该入口创建并清理独立测试数据库、准入与证据队列命名空间。参数与审计项见 [T14 n5](docs/migrations/enterprise-v2-native-operations.md)。历史 legacy 单体测量的命令、本机配置与结果见 validation.md。
 
 严格窗口验收按 request ID 求有效 HTTP 完成与已确认收据 ACK 的交集。每页 ACK 前逐对核对 request_id、evidence_id、数字用量及金额，最后再核对全量预扣、扣款、流水与队列。`--record-request-ids` 将技术身份和完成时刻写入有背压的TSV文件；外部ACK单独记录，运行后用64MiB排序预算逐行合并核对。严格在线验收支持60秒的整数倍、最长3600秒，每分钟完成交集和对应发出窗口的全部响应延迟均须达标，尾批包含在延迟预算内；普通吞吐测试使用固定大小直方图。
 

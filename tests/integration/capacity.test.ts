@@ -32,11 +32,12 @@ test("cleanup keeps neighboring namespaces even when their names contain the fix
   if (!url) throw new Error("REDIS_URL is required");
   const redis = new RedisClient(url);
   const namespace = `bench:${crypto.randomUUID().replaceAll("-", "")}`;
-  const owned = [`${namespace}:marker`, `{${namespace}:usage}:marker`];
+  const owned = [`${namespace}:marker`, `{${namespace}:core-evidence}:marker`];
   const neighbors = [
     `other:${namespace}:marker`,
     `${namespace}suffix:marker`,
     `{${namespace}:other}:marker`,
+    `{${namespace}:usage}:marker`,
   ];
   try {
     for (const key of [...owned, ...neighbors]) await redis.send("SETEX", [key, "60", "preserve"]);

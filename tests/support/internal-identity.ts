@@ -36,6 +36,7 @@ export async function withIdentity(
     sessionTtl?: number;
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
     account?: { trustedProxyCidrs: string[] };
+    gateways?: number;
   } = {},
 ) {
   await record("before", {
@@ -69,8 +70,12 @@ export async function prepareIdentity(
     sessionTtl?: number;
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
     account?: { trustedProxyCidrs: string[] };
+    gateways?: number;
   },
 ) {
+  const gateways = options.gateways ?? 2;
+  if (!Number.isSafeInteger(gateways) || gateways < 2 || gateways > 8)
+    throw new Error("Identity fixture supports two to eight Gateway identities");
   const directory = await mkdtemp(resolve(tmpdir(), "gateway-identity-"));
   await record("temp_created", { directory });
   const suffix = randomUUID().replaceAll("-", ""),
@@ -116,6 +121,16 @@ export async function prepareIdentity(
       ["gatewayB", "gateway", "gatewayB", "spiffe://synthetic/gateway/gatewayB"],
       ["worker", "core-worker", "workerA", "spiffe://synthetic/core-worker/workerA"],
       ["extra", "gateway", "extra", "spiffe://synthetic/gateway/extra"],
+      ...Array.from(
+        { length: gateways - 2 },
+        (_, index) =>
+          [
+            `gateway${index + 3}`,
+            "gateway",
+            `gateway${index + 3}`,
+            `spiffe://synthetic/gateway/gateway${index + 3}`,
+          ] as const,
+      ),
     ] as const) {
       openssl([
         "req",

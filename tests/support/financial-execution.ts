@@ -25,6 +25,7 @@ export async function withFinancial(
     managementFactory?: typeof createCoreManagementApplication;
     account?: { trustedProxyCidrs: string[] };
     redisUrl?: string;
+    gateways?: number;
   } = {},
 ) {
   const namespace = `financial_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -61,6 +62,7 @@ export async function withFinancial(
       ...(options.entry ? { entry: options.entry } : {}),
       ...(options.limits ? { limits: options.limits } : {}),
       ...(options.account ? { account: options.account } : {}),
+      ...(options.gateways ? { gateways: options.gateways } : {}),
       execution: {
         pepper: syntheticPepper,
         encryptionKey: financialKey,

@@ -148,6 +148,28 @@ test("a catalog row briefly locked by another transaction (identity_busy) delays
     expect(received).toHaveLength(1);
   }));
 
+test("a row briefly locked by another transaction when the Gateway begins the send (identity_busy at begin) retries the begin instead of failing the request with 503", () =>
+  withGatewayStack({ reply: () => chatReplies.json() }, async ({ db, received, send }) => {
+    await db.unsafe(
+      "CREATE TABLE begin_contention(id int PRIMARY KEY);INSERT INTO begin_contention VALUES(1);GRANT SELECT,UPDATE ON begin_contention TO PUBLIC;CREATE FUNCTION begin_contention() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='execution_begin_v1' THEN PERFORM 1 FROM begin_contention FOR UPDATE NOWAIT;END IF;RETURN NEW;END $$;CREATE TRIGGER begin_contention BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION begin_contention()",
+    );
+    let locked: () => void = () => undefined;
+    const ready = new Promise<void>((resolve) => (locked = resolve));
+    const holder = db.begin(async (tx) => {
+      await tx`SELECT id FROM begin_contention FOR UPDATE`;
+      locked();
+      await Bun.sleep(400);
+    });
+    await ready;
+    const response = await send();
+    await holder;
+    expect(JSON.parse(await expectStatus(response, 200)).choices[0].message.content).toBe("ok");
+    expect(received).toHaveLength(1);
+    expect(
+      await db`SELECT p.state FROM execution_permits p JOIN attempts a ON a.id=p.attempt_id WHERE a.request_id=${response.headers.get("x-request-id")}`,
+    ).toEqual([{ state: "SEND_GRANTED" }]);
+  }));
+
 test("a non-retryable upstream 400 fails the request after one send and settles a zero customer charge", () =>
   withGatewayStack(
     {

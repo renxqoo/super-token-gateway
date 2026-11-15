@@ -16,11 +16,16 @@ const output = JSON.stringify({
     prompt_tokens_details: { cached_tokens: 3 },
   },
 });
+const tlsKey = process.env.MOCK_TLS_KEY_FILE,
+  tlsCert = process.env.MOCK_TLS_CERT_FILE;
+if (Boolean(tlsKey) !== Boolean(tlsCert))
+  throw new Error("MOCK_TLS_KEY_FILE and MOCK_TLS_CERT_FILE must be set together");
 let requests = 0;
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port,
   idleTimeout: 30,
+  ...(tlsKey && tlsCert ? { tls: { key: Bun.file(tlsKey), cert: Bun.file(tlsCert) } } : {}),
   async fetch(request) {
     const { pathname } = new URL(request.url);
     if (pathname === "/healthz") return Response.json({ status: "ready" });
@@ -34,7 +39,7 @@ const server = Bun.serve({
         cancellations: 0,
         bytes: requests * Buffer.byteLength(output),
       });
-    if (pathname !== "/openai/v1/chat/completions" || request.method !== "POST")
+    if (pathname !== "/v1/chat/completions" || request.method !== "POST")
       return new Response(null, { status: 404 });
     await request.arrayBuffer();
     requests++;

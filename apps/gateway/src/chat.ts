@@ -877,10 +877,12 @@ async function dispatch(
   let reply: ExecutionReply;
   try {
     if (signal.aborted) throw halt(request).error(unavailable);
-    reply = (await deps.core.execution("execution_begin_v1", admitted.begin, {
-      commandId: beginCommand,
-      deadlineAt: facts.deadlineAt,
-    })) as ExecutionReply;
+    reply = (await whileBusy(request, facts, () =>
+      deps.core.execution("execution_begin_v1", admitted.begin, {
+        commandId: beginCommand,
+        deadlineAt: facts.deadlineAt,
+      }),
+    )) as ExecutionReply;
   } catch (error) {
     if (error instanceof CoreRpcError && error.detail.command_state === "UNKNOWN") {
       const resolved = await resolveUnknownBegin(deps, beginCommand);

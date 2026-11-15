@@ -1,4 +1,16 @@
-import { mkdir } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdir, rm } from "node:fs/promises";
+import { resolve } from "node:path";
+import type { SQL } from "bun";
+import { RedisClient } from "bun";
+import { UsageProducer, evidenceChannel } from "@gateway/runtime";
+import type { createCoreManagementApplication } from "../apps/core-api/src/platform/management.ts";
+import { withFinancial } from "../tests/support/financial-execution.ts";
+import {
+  startCoreWorker,
+  startGateway,
+  withSettlementRole,
+} from "../tests/support/gateway-process.ts";
 import { cleanupCapacityNamespaces } from "./capacity-cleanup.ts";
 import {
   auditCapacityIdentities,
@@ -10,9 +22,7 @@ import {
   passesCapacityTarget,
   passesOnlineCapacity,
 } from "./benchmark-lib.ts";
-import { createDatabase, migrate, Store, createCustomerFundsStore } from "@gateway/storage";
-import { createKey, verifier, encrypt } from "@gateway/runtime";
-import { RedisClient } from "bun";
+
 const args = Bun.argv.slice(2);
 const option = (name: string, fallback: string) => {
   const at = args.indexOf(name);
@@ -24,8 +34,9 @@ if (!Number.isSafeInteger(targetRps) || targetRps < 0 || targetRps > 100000)
 const seconds = Number(option("--seconds", "10"));
 const instances = Number(option("--instances", "1"));
 const wallets = Number(option("--wallets", "1"));
-const concurrency = Number(option("--concurrency", "64"));
-const pool = Number(option("--pool", "16"));
+const concurrency = Number(option("--concurrency", "8"));
+const workerConcurrency = Number(option("--worker-concurrency", "8"));
+const gatewayInflight = Number(option("--gateway-inflight", "10000"));
 const stream = args.includes("--stream");
 const observe = args.includes("--observe");
 const requireOnlineCapacity = args.includes("--online-capacity");
@@ -34,60 +45,52 @@ if (requireOnlineCapacity && (seconds < 60 || seconds % 60 !== 0))
 const maxP99Ms = Number(option("--max-p99-ms", String(CONTRACT_MAX_P99_MS)));
 if (!Number.isFinite(maxP99Ms) || maxP99Ms <= 0 || maxP99Ms > CONTRACT_MAX_P99_MS)
   throw new Error(`P99 budget must be within the ${CONTRACT_MAX_P99_MS} ms capacity contract`);
-const lz4 = args.includes("--wal-lz4");
-const providerKind = option("--provider", "openai");
-if (providerKind !== "openai" && providerKind !== "anthropic")
-  throw new Error("Unsupported fixture provider");
-const scenario = JSON.parse(option("--scenario", "{}"));
+const scenario = JSON.parse(option("--scenario", "{}")) as Record<string, unknown>;
 const upstreamMode = option("--upstream", "standard");
 if (!["standard", "precomputed"].includes(upstreamMode))
   throw new Error("Invalid benchmark upstream");
-if (
-  upstreamMode === "precomputed" &&
-  (stream || providerKind !== "openai" || Object.keys(scenario).length)
-)
-  throw new Error("Precomputed upstream requires plain OpenAI JSON");
-const upstreamStats = async (action = "stats") => {
-  const response = await fetch(`http://127.0.0.1:19088/__control/${action}`, {
-    method: action === "stats" ? "GET" : "POST",
-    headers: { authorization: `Bearer control-${id}`, "content-type": "application/json" },
-    ...(action === "scenarios" ? { body: JSON.stringify({ model: "demo", scenario }) } : {}),
-    signal: AbortSignal.timeout(2000),
-  });
-  if (!response.ok) throw new Error("Mock telemetry unavailable");
-  return response.json();
-};
-const billingMode = option("--billing-mode", "paid");
-if (!["paid", "free"].includes(billingMode)) throw new Error("Invalid billing mode");
-const expectedCharge = billingMode === "paid" ? "59" : "0";
+if (upstreamMode === "precomputed" && (stream || Object.keys(scenario).length))
+  throw new Error("Precomputed upstream requires plain JSON without scenarios");
 const workerMode = option("--worker-mode", "live");
 if (!["live", "deferred"].includes(workerMode)) throw new Error("Invalid worker mode");
-const drainSeconds = Number(option("--drain-seconds", "60"));
-if (!Number.isSafeInteger(drainSeconds) || drainSeconds < 1 || drainSeconds > 600)
-  throw new Error("Invalid drain budget");
 const consumerMode = option("--consumer-mode", "live");
 if (!["live", "none"].includes(consumerMode)) throw new Error("Invalid consumer mode");
 if (requireOnlineCapacity && (workerMode !== "live" || consumerMode !== "live"))
   throw new Error("Online capacity requires live settlement and consumer ACK");
+const drainSeconds = Number(option("--drain-seconds", "60"));
+if (!Number.isSafeInteger(drainSeconds) || drainSeconds < 1 || drainSeconds > 600)
+  throw new Error("Invalid drain budget");
 const hotShare = Number(option("--hot-share", "0"));
 if (!Number.isFinite(hotShare) || hotShare < 0 || hotShare > 1)
   throw new Error("Invalid hot wallet share");
 if (
-  ![seconds, instances, wallets, concurrency, pool].every(
+  ![seconds, instances, wallets, concurrency, workerConcurrency, gatewayInflight].every(
     (v) => Number.isSafeInteger(v) && v > 0,
   ) ||
   seconds > 3600 ||
   instances > 8 ||
   wallets > 1000 ||
   concurrency > 8192 ||
-  instances * pool + 16 > 90
+  workerConcurrency > 64 ||
+  gatewayInflight > 100000
 )
   throw new Error("Invalid capacity bounds");
-const base = process.env.DATABASE_URL;
-if (!base || !process.env.REDIS_URL || !process.env.QUEUE_REDIS_URL)
+if (!process.env.DATABASE_URL || !process.env.REDIS_URL || !process.env.QUEUE_REDIS_URL)
   throw new Error("Local PG, admission Redis and durable queue Redis URLs are required");
-if (requireOnlineCapacity && Number(process.env.QUEUE_REQUIRED_REPLICAS ?? "0") < 1)
+const requiredReplicas = Number(process.env.QUEUE_REQUIRED_REPLICAS ?? "0");
+if (!Number.isSafeInteger(requiredReplicas) || requiredReplicas < 0 || requiredReplicas > 5)
+  throw new Error("Invalid QUEUE_REQUIRED_REPLICAS");
+if (requireOnlineCapacity && requiredReplicas < 1)
   throw new Error("Online capacity requires an acknowledged AOF replica");
+for (const artifact of [
+  "dist/core-api/main.js",
+  "dist/core-api/platform/management.js",
+  "dist/gateway/main.js",
+  "dist/core-worker/main.js",
+  "dist/mock-providers/main.js",
+])
+  if (!(await Bun.file(artifact).exists()))
+    throw new Error(`${artifact} is missing; run bun run build first`);
 const storageBudget = await capacityStorageBudget(
   process.cwd(),
   seconds * Number(option("--rate", String(targetRps || 6000))),
@@ -96,571 +99,673 @@ if (requireOnlineCapacity && !storageBudget.sufficient)
   throw new Error(
     `Capacity storage budget insufficient: ${storageBudget.available} bytes available, ${storageBudget.estimated + storageBudget.reserve} required; no fixture created`,
   );
+
+const expectedUsage = {
+  input_tokens: "7",
+  cached_input_tokens: "3",
+  output_tokens: "5",
+  ...(upstreamMode === "standard" ? { reasoning_tokens: "2" } : {}),
+};
+const expectedCost = "59";
+const expectedCharge = "100";
+const supplierCredit = "1000000000000000000";
+const walletCredit = "1000000000000000000";
+const upstreamPort = 19088;
 const id = crypto.randomUUID().replaceAll("-", "");
-const database = `gateway_bench_${id}`;
 const namespace = `bench:${id}`;
-const directory = `.local/phase2/bench-${id}`;
-await mkdir(directory, { recursive: true });
-const owner = createDatabase(base, 2);
-await owner.unsafe(`CREATE DATABASE ${database}`);
-if (lz4) await owner.unsafe(`ALTER DATABASE ${database} SET wal_compression=lz4`);
-const url = new URL(base);
-url.pathname = `/${database}`;
-const db = createDatabase(url.toString(), 4);
-const processes: ReturnType<typeof Bun.spawn>[] = [];
-let telemetryTimer: ReturnType<typeof setInterval> | undefined;
-let sampling: Promise<void> | undefined;
-let consuming = false;
-let consume: Promise<void> | undefined;
-let ackWriter: Awaited<ReturnType<typeof createIdentityWriter>> | undefined;
-let loadProcess: ReturnType<typeof Bun.spawn> | undefined;
-let lastStorageCheck = 0;
-let telemetryErrors = 0;
-const env = {
-  ...process.env,
-  NODE_ENV: "test",
-  QUEUE_REQUIRED_REPLICAS: process.env.QUEUE_REQUIRED_REPLICAS ?? "0",
-  DATABASE_URL: url.toString(),
-  REDIS_URL: process.env.REDIS_URL!,
-  REDIS_EXTRA_URLS: process.env.REDIS_EXTRA_URLS ?? "",
-  REDIS_NAMESPACE: namespace,
-  ADMIN_KEY: `bench-${id}`,
-  ENCRYPTION_KEY: "22".repeat(32),
-  KEY_PEPPER: `pepper-${id}`,
-  ALLOW_PRIVATE_UPSTREAM: "true",
-  HOST: "127.0.0.1",
-  TOTAL_TIMEOUT_MS: "30000",
-  DB_POOL_SIZE: String(pool),
-  MAX_INFLIGHT: "10000",
-  QUEUE_BATCH_SIZE: option("--batch", "64"),
-  QUEUE_BATCH_DELAY_MS: process.env.QUEUE_BATCH_DELAY_MS ?? "1",
-  QUEUE_MAX_PENDING_JOBS: process.env.QUEUE_MAX_PENDING_JOBS ?? "1000",
-  BILLING_CONCURRENCY: option("--worker-concurrency", "16"),
-  WORKER_PORT: "18099",
-  MOCK_CONTROL_TOKEN: `control-${id}`,
+const directory = `.local/capacity/bench-${id}`;
+await mkdir(directory, { recursive: true, mode: 0o700 });
+const controlToken = `control-${id}`;
+const upstreamCertificate = resolve(directory, "upstream.pem"),
+  upstreamKey = resolve(directory, "upstream.key");
+const upstreamTls = { ca: "" };
+const compiled = (await import(resolve("dist/core-api/platform/management.js"))) as {
+  createCoreManagementApplication: typeof createCoreManagementApplication;
 };
-function spawn(entry: string, extra: Record<string, string>, label: string) {
-  const output = Bun.file(`${directory}/${label}.log`);
-  const child = Bun.spawn([process.execPath, entry], {
-    env: { ...env, ...extra },
-    stdout: output,
-    stderr: output,
+
+type Fixture = Parameters<Parameters<typeof withFinancial>[0]>[0];
+type UsageEvent = {
+  id: string;
+  request_id: string;
+  finality: string;
+  currency: string;
+  cost_complete: boolean;
+  cost_atoms: string | null;
+  usage: Record<string, string>;
+};
+
+async function upstreamStats(action = "stats") {
+  const response = await fetch(`https://127.0.0.1:${upstreamPort}/__control/${action}`, {
+    tls: upstreamTls,
+    method: action === "stats" ? "GET" : "POST",
+    headers: { authorization: `Bearer ${controlToken}`, "content-type": "application/json" },
+    ...(action === "scenarios" ? { body: JSON.stringify({ model: "synthetic", scenario }) } : {}),
+    signal: AbortSignal.timeout(2000),
   });
-  processes.push(child);
-  return child;
+  if (!response.ok) throw new Error("Mock telemetry unavailable");
+  return (await response.json()) as { active?: number; requests?: number };
 }
-const wait = async (port: number) => {
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    try {
-      if ((await fetch(`http://127.0.0.1:${port}/${port === 19088 ? "healthz" : "livez"}`)).ok)
-        return;
-    } catch {}
-    await Bun.sleep(25);
-  }
-  throw new Error(`Process ${port} did not become ready`);
-};
-try {
-  const redisSettings: Record<string, unknown> = {};
-  for (const [name, redisURL] of [
-    ["admission", process.env.REDIS_URL],
-    ...(process.env.REDIS_EXTRA_URLS ?? "")
-      .split(",")
-      .map((url) => url.trim())
-      .filter(Boolean)
-      .map((url, index) => [`admission-${index + 2}`, url] as const),
-    ["evidence", process.env.QUEUE_REDIS_URL],
-  ] as const) {
-    const redis = new RedisClient(redisURL);
-    try {
-      await redis.connect();
-      redisSettings[name] = await redis.send("CONFIG", [
-        "GET",
-        "appendonly",
-        "appendfsync",
-        "no-appendfsync-on-rewrite",
-        "aof-load-truncated",
-        "maxmemory-policy",
-        "auto-aof-rewrite-min-size",
-      ]);
-    } finally {
-      redis.close();
-    }
-  }
-  await migrate(db);
-  const databaseSettings = await db<
-    { name: string; setting: string; unit: string | null }[]
-  >`SELECT name,setting,unit FROM pg_settings WHERE name IN ('server_version','shared_buffers','effective_cache_size','work_mem','max_wal_size','checkpoint_timeout','wal_compression','fsync','full_page_writes','synchronous_commit','random_page_cost','autovacuum_naptime','track_functions','track_wal_io_timing','jit') ORDER BY name`;
-  for (const name of ["fsync", "full_page_writes", "synchronous_commit"])
-    if (!databaseSettings.some((row) => row.name === name && row.setting === "on"))
-      throw new Error(`Financial capacity measurement requires ${name}=on`);
-  if (args.includes("--profile")) {
-    await db`CREATE EXTENSION pg_stat_statements`;
-    await db.unsafe(`ALTER DATABASE ${database} SET pg_stat_statements.track='all'`);
-    await db.unsafe(`ALTER DATABASE ${database} SET track_functions='all'`);
-    await db.unsafe(`ALTER DATABASE ${database} SET track_wal_io_timing=on`);
-  }
-  const walBefore = (
-    await db`SELECT wal_records::text,wal_fpi::text,wal_bytes::text,wal_sync,wal_write,wal_sync_time,wal_write_time FROM pg_stat_wal`
-  )[0];
-  const checkpoint = async () =>
-    (
-      await db`SELECT num_timed,num_requested,restartpoints_timed,write_time,sync_time,buffers_written FROM pg_stat_checkpointer`
-    )[0];
-  const checkpointBefore = await checkpoint();
-  const admissionInfo = async () => {
-    const redis = new RedisClient(env.REDIS_URL);
-    try {
-      await redis.connect();
-      return String(await redis.send("INFO", ["persistence"]));
-    } finally {
-      redis.close();
-    }
-  };
-  const admissionBefore = await admissionInfo();
-  const store = new Store(db);
-  const funds = createCustomerFundsStore(db);
-  const provider = crypto.randomUUID();
-  await store.createProvider(
-    provider,
-    {
-      name: "benchmark",
-      kind: providerKind,
-      base_url: `http://127.0.0.1:19088/${providerKind}/v1`,
-      concurrency: 100000,
-      rpm: 10000000,
-    },
-    encrypt("benchmark-key", env.ENCRYPTION_KEY, provider),
+
+function cpuSeconds(value: string) {
+  const [days, clock] = value.includes("-") ? value.split("-") : ["0", value];
+  return (
+    Number(days) * 86400 + clock!.split(":").reduce((total, part) => total * 60 + Number(part), 0)
   );
-  await store.createModel({ name: "bench", operations: ["chat"], max_output_tokens: 4096 });
-  await store.createRoute("bench", {
-    provider_id: provider,
-    upstream_model: "demo",
-    operations: ["chat"],
-    priority: 10,
-    weight: 1,
-    pricing: {
-      currency: "USD",
+}
+
+function processTrees(roots: Record<string, number[]>) {
+  const listed = spawnSync("ps", ["-A", "-o", "pid=,ppid=,rss=,time="], { encoding: "utf8" });
+  if (listed.status !== 0) throw new Error("Process sampling failed");
+  const rows = listed.stdout
+    .trim()
+    .split("\n")
+    .map((line) => line.trim().split(/\s+/))
+    .map(([pid, ppid, rss, time]) => ({
+      pid: Number(pid),
+      ppid: Number(ppid),
+      rss: Number(rss) * 1024,
+      cpu: cpuSeconds(time ?? "0"),
+    }));
+  const children = new Map<number, typeof rows>();
+  for (const row of rows) children.set(row.ppid, [...(children.get(row.ppid) ?? []), row]);
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  const usage: Record<string, { rss_bytes: number; cpu_seconds: number; processes: number }> = {};
+  for (const [role, pids] of Object.entries(roots)) {
+    const total = { rss_bytes: 0, cpu_seconds: 0, processes: 0 };
+    const pending = pids.flatMap((pid) => (byPid.has(pid) ? [byPid.get(pid)!] : []));
+    while (pending.length) {
+      const row = pending.pop()!;
+      total.rss_bytes += row.rss;
+      total.cpu_seconds += row.cpu;
+      total.processes++;
+      pending.push(...(children.get(row.pid) ?? []));
+    }
+    usage[role] = total;
+  }
+  return usage;
+}
+
+async function created(
+  pending: Promise<{ status: number; value: Record<string, unknown> }>,
+  label: string,
+  status = 201,
+) {
+  const response = await pending;
+  if (response.status !== status)
+    throw new Error(`${label} failed with ${response.status}: ${JSON.stringify(response.value)}`);
+  return response.value;
+}
+
+async function provision(f: Fixture) {
+  const setup = await f.bootstrap(
+    "USD",
+    supplierCredit,
+    100,
+    "REQUEST_COMPLETION",
+    {
       rates: {
         input_tokens: { numerator: "3", denominator: "1" },
         cached_input_tokens: { numerator: "1", denominator: "1" },
         output_tokens: { numerator: "7", denominator: "1" },
       },
+      ceilings: { input_tokens: "4096", cached_input_tokens: "4096", output_tokens: "4096" },
     },
-    ceilings: {
-      input_tokens: "16777216",
-      output_tokens: "1000000",
-      cached_input_tokens: "16777216",
-    },
-  });
-  await funds.setTariff({
-    model: "bench",
-    operation: "chat",
-    pricing: {
-      currency: "USD",
-      rates: {
-        input_tokens: { numerator: billingMode === "paid" ? "3" : "0", denominator: "1" },
-        cached_input_tokens: { numerator: billingMode === "paid" ? "1" : "0", denominator: "1" },
-        output_tokens: { numerator: billingMode === "paid" ? "7" : "0", denominator: "1" },
-      },
-    },
-    ceilings: { input_tokens: "4096", cached_input_tokens: "4096", output_tokens: "4096" },
-    basis: "PROVIDER_USAGE",
-  });
-  const keys: string[] = [];
-  const projects: string[] = [];
-  for (let i = 0; i < wallets; i++) {
-    const project = await store.createProject({
-      name: `wallet-${i}`,
-      rpm: 10000000,
-      tpm: 1000000000,
-      concurrency: 100000,
-    });
-    projects.push(project);
-    await funds.credit(project, {
-      currency: "USD",
-      external_ref: "benchmark-credit",
-      amount_atoms: "1000000000000000000",
-      kind: "CASH",
-      priority: 100,
-      models: [],
-      operations: [],
-    });
-    const key = createKey();
-    keys.push(key);
-    await store.createCredential(
-      project,
-      { name: "benchmark", models: [], operations: ["chat"] },
-      verifier(key, env.KEY_PEPPER),
-      key.slice(0, 12),
-    );
+    { baseUrl: `https://127.0.0.1:${upstreamPort}`, maxInputTokens: 4096 },
+  );
+  await created(
+    f.request(
+      `/providers/${setup.provider.id}`,
+      { concurrency: 100000, rpm: 10000000 },
+      undefined,
+      "PATCH",
+    ),
+    "Provider limits",
+    200,
+  );
+  const projects = [setup.project.id],
+    keys = [setup.key.key],
+    credited = new Map([[setup.project.id, BigInt(walletCredit) + 1000n]]);
+  for (let index = 1; index < wallets; index++) {
+    const project = (await created(
+      f.request("/projects", {
+        name: `capacity-${index}`,
+        billing_currency: "USD",
+        rpm: 10000000,
+        tpm: 1000000000,
+        concurrency: 100000,
+      }),
+      "Project",
+    )) as { id: string };
+    const key = (await created(
+      f.request(`/projects/${project.id}/keys`, {
+        name: "capacity",
+        models: [setup.model],
+        operations: ["chat"],
+      }),
+      "Key",
+    )) as { key: string };
+    projects.push(project.id);
+    keys.push(key.key);
+    credited.set(project.id, BigInt(walletCredit));
   }
-  for (const table of [
-    "projects",
-    "api_keys",
-    "channels",
-    "models",
-    "routes",
-    "cost_versions",
-    "billing_prices",
-    "billing_tariffs",
-    "wallets",
-    "wallet_lots",
-  ])
-    await db.unsafe(`ANALYZE ${table}`);
-  const consumer =
-    consumerMode === "live" ? await store.createConsumer(`bench-${id}`, false) : undefined;
-  const mock = spawn(
-    upstreamMode === "precomputed" ? "scripts/bench-upstream.ts" : "dist/mock-providers/main.js",
-    { MOCK_PORT: "19088" },
-    "mock",
+  await created(
+    f.request(
+      `/projects/${setup.project.id}`,
+      { rpm: 10000000, tpm: 1000000000, concurrency: 100000 },
+      undefined,
+      "PATCH",
+    ),
+    "Project limits",
+    200,
   );
-  await wait(19088);
-  if (Object.keys(scenario).length) await upstreamStats("scenarios");
-  const ports = Array.from({ length: instances }, (_, i) => 18081 + i);
-  for (const port of ports)
-    spawn("dist/legacy-gateway/main.js", { PORT: String(port) }, `gateway-${port}`);
-  for (const port of ports) await wait(port);
-  let workerStarted = false;
-  const startWorker = async () => {
-    spawn("dist/legacy-gateway/worker-main.js", { DB_POOL_SIZE: "16" }, "worker");
-    await wait(18099);
-    workerStarted = true;
-  };
-  if (workerMode === "live") await startWorker();
-  const timeline: {
-    at: number;
-    queue: Record<string, number>;
-    worker_metrics: string;
-    lock_waiters: number;
-    active_queries: number;
-    upstream_active: number;
-    completed_at?: number;
-    external_acked?: number;
-    receipt_confirmed_acks?: number;
-    waits: { wait_event_type: string; wait_event: string; count: number }[] | undefined;
-    checkpoint?: unknown;
-  }[] = [];
-  const samplingStart = Date.now();
-  let delivered = 0;
-  let receiptConfirmedAcks = 0;
-  const ackPath = `${directory}/ack.identities.tsv`;
-  ackWriter = requireOnlineCapacity ? await createIdentityWriter(ackPath) : undefined;
-  let unconfirmedReceipts = 0;
-  telemetryTimer = setInterval(
-    () => {
-      if (sampling) return;
-      sampling = (async () => {
-        if (requireOnlineCapacity && Date.now() - lastStorageCheck >= 1000) {
-          lastStorageCheck = Date.now();
-          const storage = await capacityStorageBudget(process.cwd(), 0);
-          if (storage.available < storage.reserve) {
-            await Bun.write(
-              `${directory}/abort.json`,
-              JSON.stringify({
-                reason: "storage_reserve_exhausted",
-                storage,
-                at: new Date().toISOString(),
-              }),
-            );
-            loadProcess?.kill("SIGTERM");
-            throw new Error("Capacity disk reserve exhausted");
-          }
-        }
-        const headers = { authorization: `Bearer ${env.ADMIN_KEY}` };
-        const [queue, worker, upstream] = await Promise.all([
-          fetch(`http://127.0.0.1:${ports[0]}/admin/queue`, {
-            headers,
-            signal: AbortSignal.timeout(2000),
-          }),
-          workerStarted
-            ? fetch("http://127.0.0.1:18099/metrics", {
-                headers,
-                signal: AbortSignal.timeout(2000),
-              })
-            : Promise.resolve(new Response("")),
-          upstreamStats(),
-        ]);
-        if (!queue.ok || !worker.ok) throw new Error("Capacity telemetry unavailable");
-        const activity = (
-          await db`SELECT count(*) FILTER(WHERE wait_event_type='Lock')::int AS locks,count(*) FILTER(WHERE state='active')::int AS active FROM pg_stat_activity WHERE datname=current_database()`
-        )[0];
-        const waits = observe
-          ? await db<
-              { wait_event_type: string; wait_event: string; count: number }[]
-            >`SELECT coalesce(wait_event_type,'CPU') AS wait_event_type,coalesce(wait_event,'CPU') AS wait_event,count(*)::int FROM pg_stat_activity WHERE datname=current_database() AND state='active' AND pid<>pg_backend_pid() GROUP BY 1,2 ORDER BY 3 DESC`
-          : undefined;
-        const workerMetrics = await worker.text();
-        const sampleTime = Date.now();
-        const externalAcked = delivered;
-        const receiptSnapshot = receiptConfirmedAcks;
-        timeline.push({
-          waits,
-          checkpoint: observe ? await checkpoint() : undefined,
-          completed_at: sampleTime,
-          external_acked: externalAcked,
-          receipt_confirmed_acks: receiptSnapshot,
-          lock_waiters: activity.locks,
-          active_queries: activity.active,
-          upstream_active: upstream.active,
-          at: Date.now() - samplingStart,
-          queue: (await queue.json()) as Record<string, number>,
-          worker_metrics: workerMetrics,
-        });
-      })()
-        .catch(() => {
-          telemetryErrors++;
-        })
-        .finally(() => {
-          sampling = undefined;
-        });
-    },
-    requireOnlineCapacity ? 250 : 1000,
+  for (const project of projects)
+    await created(
+      f.request(`/projects/${project}/credits`, {
+        external_ref: `capacity-${project}`,
+        currency: "USD",
+        amount_atoms: walletCredit,
+        kind: "CASH",
+      }),
+      "Customer credit",
+    );
+  return { setup, projects, keys, credited };
+}
+
+async function confirmedRequests(db: SQL, requests: string[]) {
+  const rows = await db<{ request_id: string }[]>`SELECT c.request_id FROM billing_charges c
+    WHERE c.request_id=ANY(${requests}::uuid[]) AND c.amount_atoms=${expectedCharge}::numeric
+    AND c.funded_atoms=${expectedCharge}::numeric AND c.debt_atoms=0 AND c.refunded_atoms=0 AND c.currency='USD'`;
+  return new Set(rows.map((row) => row.request_id));
+}
+
+function preciseEvidence(event: UsageEvent) {
+  return (
+    event.finality === "FINAL" &&
+    event.currency === "USD" &&
+    event.cost_complete &&
+    event.cost_atoms === expectedCost &&
+    JSON.stringify(Object.entries(event.usage).sort()) ===
+      JSON.stringify(Object.entries(expectedUsage).sort())
   );
-  consuming = true;
-  consume = (async () => {
-    while (consuming && consumer) {
+}
+
+async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
+  const spawned: Bun.Subprocess[] = [];
+  const services: { alive(): boolean; kill(): void; stop(): Promise<unknown> }[] = [];
+  let telemetryTimer: ReturnType<typeof setInterval> | undefined;
+  let sampling: Promise<void> | undefined;
+  let consuming = false;
+  let consume: Promise<void> | undefined;
+  let ackWriter: Awaited<ReturnType<typeof createIdentityWriter>> | undefined;
+  let loadProcess: Bun.Subprocess | undefined;
+  const queue = new UsageProducer({
+    channel: evidenceChannel,
+    url: process.env.QUEUE_REDIS_URL!,
+    namespace,
+    replicas: 0,
+    timeoutMs: 2000,
+  });
+  try {
+    const databaseSettings = await db<
+      { name: string; setting: string; unit: string | null }[]
+    >`SELECT name,setting,unit FROM pg_settings WHERE name IN ('server_version','shared_buffers','effective_cache_size','work_mem','max_wal_size','checkpoint_timeout','wal_compression','fsync','full_page_writes','synchronous_commit','max_connections') ORDER BY name`;
+    for (const name of ["fsync", "full_page_writes", "synchronous_commit"])
+      if (!databaseSettings.some((row) => row.name === name && row.setting === "on"))
+        throw new Error(`Financial capacity measurement requires ${name}=on`);
+    const redisSettings: Record<string, unknown> = {};
+    for (const [name, url] of [
+      ["admission", process.env.REDIS_URL!],
+      ["evidence", process.env.QUEUE_REDIS_URL!],
+    ] as const) {
+      const redis = new RedisClient(url, { autoReconnect: false, connectionTimeout: 1000 });
       try {
-        const page = await store.claimEvents(consumer, 500);
-        if (page.events.length) {
-          const receipts = requireOnlineCapacity
-            ? (
-                await db<{ n: number }[]>`SELECT count(*)::int AS n
-            FROM unnest(${page.events.map((event) => event.request_id)}::uuid[],${page.events.map((event) => event.id)}::uuid[]) expected(request_id,evidence_id)
-            JOIN billing_charges c ON c.request_id=expected.request_id AND c.evidence_id=expected.evidence_id
-            WHERE c.amount_atoms=${expectedCharge}::numeric AND c.funded_atoms=${expectedCharge}::numeric
-            AND c.currency='USD' AND c.debt_atoms=0 AND c.refunded_atoms=0`
-              )[0]!.n
-            : page.events.length;
-          const numericEvidence =
-            !requireOnlineCapacity ||
-            page.events.every(
-              (event) =>
-                event.finality === "FINAL" &&
-                event.currency === "USD" &&
-                event.cost_complete &&
-                event.cost_atoms === "59" &&
-                event.usage.input_tokens === "7" &&
-                event.usage.cached_input_tokens === "3" &&
-                event.usage.output_tokens === "5",
-            );
-          const acknowledged = await store.ackEvents(
-            consumer,
-            page.lease_token,
-            page.events.map((event) => event.id),
-          );
-          delivered += acknowledged;
-          if (requireOnlineCapacity && receipts === page.events.length && numericEvidence) {
-            receiptConfirmedAcks += acknowledged;
-            if (acknowledged === page.events.length) {
-              await ackWriter!.write(
-                page.events.map((event) => event.request_id),
-                Date.now(),
-              );
-            }
-          } else if (requireOnlineCapacity) unconfirmedReceipts += acknowledged;
-        } else await Bun.sleep(10);
-      } catch {
-        await Bun.sleep(50);
+        await redis.connect();
+        redisSettings[name] = await redis.send("CONFIG", [
+          "GET",
+          "appendonly",
+          "appendfsync",
+          "aof-load-truncated",
+          "maxmemory-policy",
+        ]);
+      } finally {
+        redis.close();
       }
     }
-  })();
-  const reportPath = `${directory}/http.json`;
-  const load = Bun.spawn(
-    [
-      process.execPath,
-      "scripts/bench.ts",
-      "--url",
-      ports.map((p) => `http://127.0.0.1:${p}`).join(","),
-      "--model",
-      "bench",
-      "--seconds",
-      String(seconds),
-      "--concurrency",
-      String(concurrency),
-      "--warmup-concurrency",
-      option("--warmup-concurrency", String(Math.min(256, concurrency))),
-      "--metrics",
-      ...(requireOnlineCapacity ? ["--record-request-ids"] : []),
-      "--output",
-      reportPath,
-      "--hot-share",
-      String(hotShare),
-      ...(stream ? ["--stream"] : []),
-      ...(args.includes("--rate") ? ["--rate", option("--rate", "0")] : []),
-    ],
-    {
-      env: { ...env, BENCH_API_KEYS: keys.join(",") },
-      stdout: Bun.file(`${directory}/load.log`),
-      stderr: Bun.file(`${directory}/load.log`),
-    },
-  );
-  loadProcess = load;
-  processes.push(load);
-  const exit = await load.exited;
-  if (!(await Bun.file(reportPath).exists()))
-    throw new Error(
-      `Load generator exited ${exit} without a report; inspect ${directory}/load.log`,
+    const output = Bun.file(`${directory}/upstream.log`);
+    const upstream = Bun.spawn(
+      [
+        process.execPath,
+        upstreamMode === "precomputed"
+          ? "scripts/bench-upstream.ts"
+          : "dist/mock-providers/main.js",
+      ],
+      {
+        env: {
+          PATH: process.env.PATH,
+          MOCK_PORT: String(upstreamPort),
+          MOCK_CONTROL_TOKEN: controlToken,
+          MOCK_TLS_KEY_FILE: upstreamKey,
+          MOCK_TLS_CERT_FILE: upstreamCertificate,
+        },
+        stdout: output,
+        stderr: output,
+      },
     );
-  const drainStart = Date.now();
-  if (workerMode === "deferred") await startWorker();
-  let pending = 1;
-  while (Date.now() - drainStart < drainSeconds * 1000) {
-    const rows =
-      await db`SELECT EXISTS(SELECT 1 FROM billing_holds WHERE state NOT IN ('SETTLED','RELEASED')) AS waiting`;
-    pending = rows[0].waiting ? 1 : 0;
-    if (!pending) break;
-    await Bun.sleep(100);
-  }
-  while (Date.now() - drainStart < drainSeconds * 1000) {
-    const rows =
-      await db`SELECT EXISTS(SELECT 1 FROM event_deliveries WHERE state<>'ACKED') AS waiting`;
-    if (!rows[0].waiting) break;
-    await Bun.sleep(25);
-  }
-  consuming = false;
-  await consume;
-  await ackWriter?.close();
-  let queueStats: Record<string, number> = {};
-  do {
-    const response = await fetch(`http://127.0.0.1:${ports[0]}/admin/queue`, {
-      headers: { authorization: `Bearer ${env.ADMIN_KEY}` },
-    });
-    if (!response.ok) throw new Error("Queue audit unavailable");
-    queueStats = (await response.json()) as Record<string, number>;
-    if (Object.values(queueStats).every((n) => n === 0)) break;
-    await Bun.sleep(25);
-  } while (Date.now() - drainStart < drainSeconds * 1000);
-  const serviceDrainedAt = Date.now();
-  clearInterval(telemetryTimer);
-  pending = Number(
-    (
-      await db`SELECT count(*)::int AS n FROM billing_holds WHERE state NOT IN ('SETTLED','RELEASED')`
-    )[0].n,
-  );
-  const accounting = await db.begin(async (audit) => {
-    await audit`SET LOCAL statement_timeout=120000`;
-    return audit`SELECT (SELECT count(*)::int FROM gateway_requests) AS requests,(SELECT count(*)::int FROM attempts) AS attempts,(SELECT count(*)::int FROM usage_events WHERE finality='FINAL' AND usage->>'input_tokens'='7' AND usage->>'cached_input_tokens'='3' AND usage->>'output_tokens'='5' AND cost_atoms=59 AND cost_complete) AS precise_usage,(SELECT count(*)::int FROM billing_charges WHERE amount_atoms=${expectedCharge}::numeric AND funded_atoms=${expectedCharge}::numeric AND debt_atoms=0 AND refunded_atoms=0) AS precise_charges,(SELECT count(*)::int FROM billing_holds WHERE state='SETTLED') AS settled_holds,(SELECT sum(reserved_atoms)::text FROM wallets) AS reserved,(SELECT sum(spent_atoms)::text FROM wallets) AS spent,(SELECT sum(debt_atoms)::text FROM wallets) AS debt,(SELECT count(*)::int FROM event_deliveries WHERE state='ACKED') AS acknowledged,(SELECT count(*)::int FROM money_journal WHERE kind='SETTLE') AS settlement_journals,(SELECT count(*)::int FROM money_journal j WHERE (SELECT sum((v->>'atoms')::numeric) FROM jsonb_array_elements(j.lines)v)<>0) AS unbalanced_journals`;
-  });
-  const check = accounting[0];
-  let valid =
-    exit === 0 &&
-    !pending &&
-    check.requests === check.attempts &&
-    check.requests === check.precise_usage &&
-    check.requests === check.precise_charges &&
-    check.requests === check.settled_holds &&
-    (consumerMode === "live" ? check.requests : 0) === check.acknowledged &&
-    (billingMode === "paid" ? check.requests : 0) === check.settlement_journals &&
-    check.reserved === "0" &&
-    check.debt === "0" &&
-    BigInt(check.spent) === BigInt(check.requests) * BigInt(expectedCharge) &&
-    !check.unbalanced_journals;
-  const http = await Bun.file(reportPath).json();
-  const ownership = (
-    await db`SELECT count(*)::int AS mismatches FROM billing_charges c
-    JOIN billing_holds h ON h.id=c.hold_id JOIN wallets w ON w.id=h.wallet_id
-    JOIN gateway_requests q ON q.id=c.request_id LEFT JOIN usage_event_index e ON e.id=c.evidence_id
-    WHERE h.request_id<>q.id OR w.project_id<>q.project_id OR c.currency<>w.currency
-    OR (e.id IS NOT NULL AND e.request_id<>q.id)`
-  )[0]!.mismatches;
-  const walletMismatches = (
-    await db`SELECT count(*)::int AS mismatches
-    FROM unnest(${projects}::uuid[],${http.wallet_calls}::bigint[]) expected(project_id,calls)
-    LEFT JOIN wallets w ON w.project_id=expected.project_id AND w.currency='USD'
-    WHERE w.id IS NULL OR w.reserved_atoms<>0 OR w.debt_atoms<>0
-    OR w.spent_atoms<>expected.calls*${expectedCharge}::numeric
-    OR w.available_atoms<>1000000000000000000::numeric-expected.calls*${expectedCharge}::numeric`
-  )[0]!.mismatches;
-  valid = valid && ownership === 0 && walletMismatches === 0;
-  valid = valid && http.invalid === 0 && !(http.shed ?? 0) && http.completed === http.succeeded;
-  if (args.includes("--rate")) {
-    const planned = seconds * Number(option("--rate", "0"));
-    valid = valid && http.offered === planned && http.completed + http.shed === planned;
-  }
-  valid = valid && check.requests === http.succeeded + http.warmup_requests;
-  const profile =
-    await db`SELECT funcname,calls,total_time,self_time FROM pg_stat_user_functions ORDER BY total_time DESC LIMIT 25`;
-  valid = valid && Object.values(queueStats).every((n) => n === 0);
-  clearInterval(telemetryTimer);
-  await sampling;
-  valid = valid && telemetryErrors === 0 && timeline.length >= Math.max(1, Math.floor(seconds / 2));
-  const windowStart = Date.parse(http.measurement_started_at);
-  const windowEnd = windowStart + seconds * 1000;
-  const identityAudit = requireOnlineCapacity
-    ? await auditCapacityIdentities(http.identity_log, ackPath, windowStart, seconds)
-    : undefined;
-  valid =
-    valid &&
-    (!identityAudit ||
-      (identityAudit.matchedRequests === http.succeeded &&
-        identityAudit.httpOnly === 0 &&
-        identityAudit.ackOnly === http.warmup_requests));
-  const withinWindow = timeline
-    .filter((sample) => (sample.completed_at ?? Infinity) <= windowEnd)
-    .at(-1);
-  const settledByWindow =
-    Number(
-      /^gateway_billing_settled_total (\d+)$/m.exec(withinWindow?.worker_metrics ?? "")?.[1] ?? 0,
-    ) - http.warmup_requests;
-  const ackedByWindow = (withinWindow?.external_acked ?? 0) - http.warmup_requests;
-  const receiptAcksByWindow = (withinWindow?.receipt_confirmed_acks ?? 0) - http.warmup_requests;
-  valid =
-    valid &&
-    (!requireOnlineCapacity ||
-      (unconfirmedReceipts === 0 &&
-        receiptConfirmedAcks === (consumerMode === "live" ? check.requests : 0)));
-  const onlineCapacity = requireOnlineCapacity
-    ? {
-        ...identityAudit!,
-        maxP99Ms,
-        drainAfterWindowMs: Math.max(0, serviceDrainedAt - windowEnd),
-        receiptAcksByWindow,
-        settledByWindow,
-        ackedByWindow,
-        sampledBeforeWindowEndMs: windowEnd - (withinWindow?.completed_at ?? 0),
-        httpByWindow: http.minute_windows?.["0"]?.succeeded ?? 0,
+    spawned.push(upstream);
+    const upstreamDeadline = Date.now() + 10000;
+    for (;;) {
+      try {
+        if ((await fetch(`https://127.0.0.1:${upstreamPort}/healthz`, { tls: upstreamTls })).ok)
+          break;
+      } catch {}
+      if (Date.now() > upstreamDeadline) throw new Error("Benchmark upstream did not start");
+      await Bun.sleep(25);
+    }
+    if (Object.keys(scenario).length) await upstreamStats("scenarios");
+    const { setup, projects, keys, credited } = await provision(f);
+    const consumer =
+      consumerMode === "live"
+        ? (
+            (await created(
+              f.request("/consumers", { name: `bench-${id}`, replay: false }),
+              "Consumer",
+            )) as {
+              id: string;
+            }
+          ).id
+        : undefined;
+    let worker: Awaited<ReturnType<typeof startCoreWorker>> | undefined;
+    const startWorker = async () => {
+      worker = await startCoreWorker(namespace, {
+        databaseUrl: workerDatabaseUrl,
+        entry: "dist/core-worker/main.js",
+        env: { SETTLEMENT_CONCURRENCY: String(workerConcurrency) },
+      });
+      services.push(worker);
+    };
+    if (workerMode === "live") await startWorker();
+    const names = [
+      "gateway",
+      "gatewayB",
+      ...Array.from({ length: 6 }, (_, i) => `gateway${i + 3}`),
+    ];
+    const gateways = [];
+    for (const instance of names.slice(0, instances)) {
+      const gateway = await startGateway(f, {
+        namespace,
+        upstreamCertificate,
+        instance,
+        entry: "dist/gateway/main.js",
+        overrides: {
+          total_timeout_ms: 30000,
+          shutdown_grace_ms: 20000,
+          resource_poll_ms: 5000,
+          max_inflight: gatewayInflight,
+          queue: {
+            url: process.env.QUEUE_REDIS_URL,
+            namespace,
+            required_replicas: requiredReplicas,
+          },
+        },
+      });
+      services.push(gateway);
+      gateways.push(gateway);
+    }
+    for (const table of [
+      "projects",
+      "api_keys",
+      "channels",
+      "models",
+      "routes",
+      "wallets",
+      "wallet_lots",
+      "upstream_account_balances",
+    ])
+      await db.unsafe(`ANALYZE ${table}`);
+    const roots = {
+      gateway: gateways.map((gateway) => gateway.pid),
+      core_api: [f.identity.a.pid],
+      core_worker: worker ? [worker.pid] : [],
+      upstream: [upstream.pid],
+    };
+    const resources: { at: number; usage: ReturnType<typeof processTrees> }[] = [];
+    let lastResourceSample = 0;
+    const timeline: Record<string, unknown>[] = [];
+    const samplingStart = Date.now();
+    const ackedRequests = new Set<string>();
+    let delivered = 0,
+      receiptConfirmedAcks = 0,
+      imprecise = 0,
+      expiredLeases = 0,
+      ackShortfall = 0,
+      consumerErrors = 0,
+      telemetryErrors = 0,
+      lastStorageCheck = 0;
+    const ackPath = `${directory}/ack.identities.tsv`;
+    ackWriter = requireOnlineCapacity ? await createIdentityWriter(ackPath) : undefined;
+    telemetryTimer = setInterval(
+      () => {
+        if (sampling) return;
+        sampling = (async () => {
+          if (requireOnlineCapacity && Date.now() - lastStorageCheck >= 1000) {
+            lastStorageCheck = Date.now();
+            const storage = await capacityStorageBudget(process.cwd(), 0);
+            if (storage.available < storage.reserve) {
+              await Bun.write(
+                `${directory}/abort.json`,
+                JSON.stringify({ reason: "storage_reserve_exhausted", storage }),
+              );
+              loadProcess?.kill("SIGTERM");
+              throw new Error("Capacity disk reserve exhausted");
+            }
+          }
+          const [stats, workerState, upstreamState, activity] = await Promise.all([
+            queue.stats(),
+            worker
+              ? fetch(`http://127.0.0.1:${worker.port}/readyz`, {
+                  signal: AbortSignal.timeout(2000),
+                }).then(async (response) => ({
+                  status: response.status,
+                  ...((await response.json()) as Record<string, unknown>),
+                }))
+              : Promise.resolve(undefined),
+            upstreamStats(),
+            db<
+              { locks: number; active: number }[]
+            >`SELECT count(*) FILTER(WHERE wait_event_type='Lock')::int AS locks,count(*) FILTER(WHERE state='active')::int AS active FROM pg_stat_activity WHERE datname=current_database()`,
+          ]);
+          if (Date.now() - lastResourceSample >= 1000) {
+            lastResourceSample = Date.now();
+            if (worker && !roots.core_worker.length) roots.core_worker.push(worker.pid);
+            resources.push({ at: lastResourceSample - samplingStart, usage: processTrees(roots) });
+          }
+          const waits = observe
+            ? await db`SELECT coalesce(wait_event_type,'CPU') AS wait_event_type,coalesce(wait_event,'CPU') AS wait_event,count(*)::int FROM pg_stat_activity WHERE datname=current_database() AND state='active' AND pid<>pg_backend_pid() GROUP BY 1,2 ORDER BY 3 DESC`
+            : undefined;
+          const at = Date.now();
+          timeline.push({
+            at: at - samplingStart,
+            completed_at: at,
+            queue: stats,
+            worker: workerState,
+            upstream_active: upstreamState.active ?? 0,
+            lock_waiters: activity[0]!.locks,
+            active_queries: activity[0]!.active,
+            external_acked: delivered,
+            receipt_confirmed_acks: receiptConfirmedAcks,
+            acked_requests: ackedRequests.size,
+            ...(waits ? { waits: [...waits] } : {}),
+          });
+        })()
+          .catch(() => {
+            telemetryErrors++;
+          })
+          .finally(() => {
+            sampling = undefined;
+          });
+      },
+      requireOnlineCapacity ? 250 : 1000,
+    );
+    consuming = true;
+    consume = (async () => {
+      let leases: { token: string; at: number; events: UsageEvent[] }[] = [];
+      while (consuming && consumer) {
+        try {
+          const page = (await created(
+            f.request(`/consumers/${consumer}/claim`, { limit: 500 }),
+            "Event claim",
+            200,
+          )) as { lease_token: string; events: UsageEvent[] };
+          if (page.events.length)
+            leases.push({ token: page.lease_token, at: Date.now(), events: page.events });
+          let progressed = false;
+          const kept: typeof leases = [];
+          for (const lease of leases) {
+            const confirmed = await confirmedRequests(
+              db,
+              lease.events.map((event) => event.request_id),
+            );
+            const ready = lease.events.filter(
+              (event) => confirmed.has(event.request_id) && preciseEvidence(event),
+            );
+            imprecise += lease.events.filter(
+              (event) => confirmed.has(event.request_id) && !preciseEvidence(event),
+            ).length;
+            const remaining = lease.events.filter((event) => !confirmed.has(event.request_id));
+            if (ready.length) {
+              const { acknowledged } = (await created(
+                f.request(`/consumers/${consumer}/ack`, {
+                  lease_token: lease.token,
+                  event_ids: ready.map((event) => event.id),
+                }),
+                "Event ACK",
+                200,
+              )) as { acknowledged: number };
+              delivered += acknowledged;
+              if (acknowledged === ready.length) {
+                receiptConfirmedAcks += acknowledged;
+                const touched = [...new Set(ready.map((event) => event.request_id))].filter(
+                  (request) => !ackedRequests.has(request),
+                );
+                const completed = touched.length
+                  ? await db<{ request_id: string }[]>`SELECT a.request_id FROM attempts a
+                      JOIN usage_event_index i ON i.attempt_id=a.id AND i.record_kind<>'RAW'
+                      LEFT JOIN event_deliveries d ON d.consumer_id=${consumer} AND d.event_id=i.id
+                      WHERE a.request_id=ANY(${touched}::uuid[]) GROUP BY a.request_id
+                      HAVING bool_and(d.state IS NOT DISTINCT FROM 'ACKED')`
+                  : [];
+                for (const row of completed) ackedRequests.add(row.request_id);
+                if (completed.length)
+                  await ackWriter?.write(
+                    completed.map((row) => row.request_id),
+                    Date.now(),
+                  );
+              } else ackShortfall += ready.length - acknowledged;
+              progressed = true;
+            }
+            lease.events = remaining;
+            if (remaining.length && Date.now() - lease.at <= 25000) kept.push(lease);
+            else expiredLeases += remaining.length;
+          }
+          leases = kept;
+          if (!page.events.length && !progressed) await Bun.sleep(10);
+        } catch {
+          consumerErrors++;
+          await Bun.sleep(50);
+        }
       }
-    : undefined;
-  const result = {
-    storageBudget,
-    ownershipMismatches: ownership,
-    walletMismatches,
-    receiptConfirmedAcks,
-    unconfirmedReceipts,
-    onlineCapacity,
-    databaseSettings,
-    redisSettings,
-    queue: {
-      batchSize: Number(env.QUEUE_BATCH_SIZE),
-      batchDelayMs: Number(env.QUEUE_BATCH_DELAY_MS ?? 1),
-      maxPendingJobs: Number(env.QUEUE_MAX_PENDING_JOBS ?? 1000),
-      requiredReplicas: Number(env.QUEUE_REQUIRED_REPLICAS ?? 0),
-      workerConcurrency: Number(env.BILLING_CONCURRENCY),
-    },
-    telemetryErrors,
-    timeline,
-    queueStats,
-    admissionBefore,
-    admissionAfter: await admissionInfo(),
-    checkpointBefore,
-    checkpointAfter: await checkpoint(),
-    walBefore,
-    walAfter: (
-      await db`SELECT wal_records::text,wal_fpi::text,wal_bytes::text,wal_sync,wal_write,wal_sync_time,wal_write_time FROM pg_stat_wal`
-    )[0],
-    profile,
-    attemptOutcomes:
-      await db`SELECT state,error_code,count(*)::int AS count FROM attempts GROUP BY state,error_code ORDER BY count(*) DESC`,
-    statements: args.includes("--profile")
-      ? await db`SELECT query,calls::text,round(total_exec_time::numeric,2)::text AS total_ms,round(mean_exec_time::numeric,3)::text AS mean_ms,rows::text,shared_blks_hit::text,shared_blks_read::text,wal_bytes::text FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) ORDER BY total_exec_time DESC LIMIT 40`
-      : undefined,
-    relations:
-      await db`SELECT relname,n_tup_ins::text,n_tup_upd::text,n_tup_hot_upd::text,n_dead_tup::text FROM pg_stat_user_tables ORDER BY n_tup_upd DESC LIMIT 15`,
-    id,
-    valid,
-    targetRps,
-    capacityPassed:
+    })();
+    const reportPath = `${directory}/http.json`;
+    const loadOutput = Bun.file(`${directory}/load.log`);
+    loadProcess = Bun.spawn(
+      [
+        process.execPath,
+        "scripts/bench.ts",
+        "--url",
+        gateways.map((gateway) => gateway.origin).join(","),
+        "--model",
+        setup.model,
+        "--seconds",
+        String(seconds),
+        "--concurrency",
+        String(concurrency),
+        "--warmup-concurrency",
+        option("--warmup-concurrency", String(Math.min(256, concurrency))),
+        ...(requireOnlineCapacity ? ["--record-request-ids"] : []),
+        "--output",
+        reportPath,
+        "--hot-share",
+        String(hotShare),
+        ...(stream ? ["--stream"] : []),
+        ...(args.includes("--rate") ? ["--rate", option("--rate", "0")] : []),
+      ],
+      {
+        env: { PATH: process.env.PATH, BENCH_API_KEYS: keys.join(",") },
+        stdout: loadOutput,
+        stderr: loadOutput,
+      },
+    );
+    spawned.push(loadProcess);
+    const exit = await loadProcess.exited;
+    if (!(await Bun.file(reportPath).exists()))
+      throw new Error(
+        `Load generator exited ${exit} without a report; inspect ${directory}/load.log`,
+      );
+    const drainStart = Date.now();
+    if (workerMode === "deferred") await startWorker();
+    const withinDrain = () => Date.now() - drainStart < drainSeconds * 1000;
+    while (withinDrain()) {
+      const rows =
+        await db`SELECT EXISTS(SELECT 1 FROM billing_holds WHERE state NOT IN ('SETTLED','RELEASED')) AS waiting`;
+      if (!rows[0].waiting) break;
+      await Bun.sleep(100);
+    }
+    while (consumer && withinDrain()) {
+      const rows =
+        await db`SELECT EXISTS(SELECT 1 FROM event_deliveries WHERE consumer_id=${consumer} AND state<>'ACKED') AS waiting`;
+      if (!rows[0].waiting) break;
+      await Bun.sleep(25);
+    }
+    let queueStats: Record<string, number> = {};
+    do {
+      queueStats = await queue.stats();
+      if (Object.values(queueStats).every((n) => n === 0)) break;
+      await Bun.sleep(25);
+    } while (withinDrain());
+    const serviceDrainedAt = Date.now();
+    consuming = false;
+    await consume;
+    await ackWriter?.close();
+    clearInterval(telemetryTimer);
+    await sampling;
+    const check = (
+      await db.begin(async (audit) => {
+        await audit`SET LOCAL statement_timeout=120000`;
+        return audit`SELECT (SELECT count(*)::int FROM gateway_requests) AS requests,
+          (SELECT count(*)::int FROM attempts) AS attempts,
+          (SELECT count(*)::int FROM attempts WHERE state='SUCCEEDED') AS succeeded_attempts,
+          (SELECT count(*)::int FROM usage_events) AS usage_events,
+          (SELECT count(DISTINCT request_id)::int FROM usage_events) AS usage_requests,
+          (SELECT count(*)::int FROM core_evidence_receipts WHERE outcome NOT IN ('ACCEPTED','STALE')) AS unexpected_receipts,
+          (SELECT count(*)::int FROM usage_events WHERE finality='FINAL' AND usage=${expectedUsage}::jsonb AND cost_atoms=${expectedCost}::numeric AND cost_complete) AS precise_usage,
+          (SELECT count(*)::int FROM billing_charges WHERE amount_atoms=${expectedCharge}::numeric AND funded_atoms=${expectedCharge}::numeric AND debt_atoms=0 AND refunded_atoms=0) AS precise_charges,
+          (SELECT count(*)::int FROM billing_holds WHERE state='SETTLED') AS settled_holds,
+          (SELECT sum(reserved_atoms)::text FROM wallets) AS reserved,
+          (SELECT sum(spent_atoms)::text FROM wallets) AS spent,
+          (SELECT sum(debt_atoms)::text FROM wallets) AS debt,
+          (SELECT count(*)::int FROM event_deliveries WHERE state='ACKED') AS acknowledged,
+          (SELECT count(*)::int FROM money_journal WHERE kind='SETTLE') AS settlement_journals,
+          (SELECT count(*)::int FROM money_journal j WHERE (SELECT sum((v->>'atoms')::numeric) FROM jsonb_array_elements(j.lines) v)<>0) AS unbalanced_journals,
+          (SELECT count(*)::int FROM upstream_cost_heads) AS supplier_cost_heads,
+          (SELECT count(*)::int FROM usage_conflicts) AS conflicts,
+          (SELECT count(*)::int FROM (SELECT journal_id FROM upstream_entries GROUP BY journal_id HAVING sum(atoms)<>0) j) AS unbalanced_supplier_journals`;
+      })
+    )[0] as Record<string, number | string>;
+    const requests = Number(check.requests);
+    const supplier = (
+      await db<
+        { balance: string; reserved: string; spent: string }[]
+      >`SELECT balance_atoms::text AS balance,reserved_atoms::text AS reserved,spent_atoms::text AS spent FROM upstream_account_balances WHERE account_id=${setup.provider.account_id} AND currency='USD'`
+    )[0];
+    const supplierSpent = BigInt(requests) * BigInt(expectedCost);
+    const supplierExact =
+      supplier?.reserved === "0" &&
+      supplier.spent === String(supplierSpent) &&
+      BigInt(supplier.balance) === BigInt(supplierCredit) - supplierSpent;
+    const permits = [
+      ...(await db`SELECT state,count(*)::int AS count FROM execution_permits GROUP BY state ORDER BY state`),
+    ] as { state: string; count: number }[];
+    const usageShapes = [
+      ...(await db`SELECT record_kind,snapshot_revision::text AS revision,finality,usage,cost_atoms::text AS cost,cost_complete,count(*)::int AS count FROM usage_events GROUP BY 1,2,3,4,5,6 ORDER BY 7 DESC LIMIT 20`),
+    ];
+    const receipts = [
+      ...(await db`SELECT outcome,count(*)::int AS count FROM core_evidence_receipts GROUP BY outcome ORDER BY outcome`),
+    ] as { outcome: string; count: number }[];
+    const http = await Bun.file(reportPath).json();
+    const ownership = (
+      await db`SELECT count(*)::int AS mismatches FROM billing_charges c
+      JOIN billing_holds h ON h.id=c.hold_id JOIN wallets w ON w.id=h.wallet_id
+      JOIN gateway_requests q ON q.id=c.request_id LEFT JOIN usage_event_index e ON e.id=c.evidence_id
+      WHERE h.request_id<>q.id OR w.project_id<>q.project_id OR c.currency<>w.currency
+      OR (e.id IS NOT NULL AND e.request_id<>q.id)`
+    )[0]!.mismatches as number;
+    const walletMismatches = (
+      await db`SELECT count(*)::int AS mismatches
+      FROM unnest(${projects}::uuid[],${http.wallet_calls}::bigint[],${projects.map((project) => String(credited.get(project)))}::numeric[]) expected(project_id,calls,credited)
+      LEFT JOIN wallets w ON w.project_id=expected.project_id AND w.currency='USD'
+      WHERE w.id IS NULL OR w.reserved_atoms<>0 OR w.debt_atoms<>0
+      OR w.spent_atoms<>expected.calls*${expectedCharge}::numeric
+      OR w.available_atoms<>expected.credited-expected.calls*${expectedCharge}::numeric`
+    )[0]!.mismatches as number;
+    const windowStart = Date.parse(http.measurement_started_at);
+    const windowEnd = windowStart + seconds * 1000;
+    const identityAudit = requireOnlineCapacity
+      ? await auditCapacityIdentities(http.identity_log, ackPath, windowStart, seconds)
+      : undefined;
+    const expectedAcks = consumerMode === "live" ? Number(check.usage_events) : 0;
+    const failures: string[] = [];
+    const require = (condition: boolean, label: string) => {
+      if (!condition) failures.push(label);
+    };
+    require(exit === 0, "load_generator_exit");
+    require(Number(check.attempts) === requests, "extra_or_missing_attempts");
+    require(Number(check.succeeded_attempts) === requests, "unsuccessful_attempts");
+    require(Number(check.usage_requests) === requests, "requests_without_usage");
+    require(Number(check.precise_usage) === Number(check.usage_events), "imprecise_usage");
+    require(Number(check.unexpected_receipts) === 0, "unexpected_evidence_receipts");
+    require(Number(check.precise_charges) === requests, "imprecise_customer_charges");
+    require(Number(check.settled_holds) === requests, "unsettled_holds");
+    require(Number(check.settlement_journals) === requests, "customer_settlement_journals");
+    require(Number(check.acknowledged) === expectedAcks, "external_acks");
+    require(check.reserved === "0" && check.debt === "0", "customer_reservations_or_debt");
+    require(BigInt(check.spent ?? "0") ===
+      BigInt(requests) * BigInt(expectedCharge), "customer_spent");
+    require(Number(check.unbalanced_journals) === 0, "unbalanced_customer_journals");
+    require(Number(check.supplier_cost_heads) === requests, "supplier_cost_heads");
+    require(supplierExact, "supplier_ledger");
+    require(Number(check.unbalanced_supplier_journals) === 0, "unbalanced_supplier_journals");
+    require(Number(check.conflicts) === 0, "evidence_conflicts");
+    require(ownership === 0, "charge_ownership");
+    require(walletMismatches === 0, "wallet_balances");
+    require(http.invalid === 0 &&
+      !(http.shed ?? 0) &&
+      http.completed === http.succeeded, "http_validity");
+    if (args.includes("--rate")) {
+      const planned = seconds * Number(option("--rate", "0"));
+      require(http.offered === planned &&
+        http.completed + (http.shed ?? 0) === planned, "planned_arrivals");
+    }
+    require(requests === http.succeeded + http.warmup_requests, "request_count");
+    require(Object.values(queueStats).every((n) => n === 0), "evidence_queue_backlog");
+    require(telemetryErrors === 0 &&
+      timeline.length >= Math.max(1, Math.floor(seconds / 2)), "telemetry");
+    require(consumerErrors === 0 &&
+      imprecise === 0 &&
+      expiredLeases === 0 &&
+      ackShortfall === 0 &&
+      receiptConfirmedAcks === expectedAcks &&
+      ackedRequests.size === (consumerMode === "live" ? requests : 0), "receipt_confirmed_acks");
+    if (identityAudit)
+      require(identityAudit.matchedRequests === http.succeeded &&
+        identityAudit.httpOnly === 0 &&
+        identityAudit.ackOnly === http.warmup_requests, "identity_intersection");
+    const valid = failures.length === 0;
+    const withinWindow = timeline
+      .filter((sample) => Number(sample.completed_at ?? Infinity) <= windowEnd)
+      .at(-1);
+    const onlineCapacity = identityAudit
+      ? {
+          ...identityAudit,
+          maxP99Ms,
+          drainAfterWindowMs: Math.max(0, serviceDrainedAt - windowEnd),
+          receiptAckedRequestsByWindow:
+            Number(withinWindow?.acked_requests ?? 0) - http.warmup_requests,
+          ackedEventsByWindow: Number(withinWindow?.external_acked ?? 0),
+          sampledBeforeWindowEndMs: windowEnd - Number(withinWindow?.completed_at ?? 0),
+          httpByWindow: http.minute_windows?.["0"]?.succeeded ?? 0,
+        }
+      : undefined;
+    const capacityPassed =
       targetRps > 0
         ? passesCapacityTarget(valid, http, targetRps) &&
           (!onlineCapacity ||
@@ -673,93 +778,154 @@ try {
               maxP99Ms,
               onlineCapacity.drainAfterWindowMs,
             ))
-        : undefined,
-    seconds,
-    instances,
-    wallets,
-    hotShare,
-    pool,
-    concurrency,
-    stream,
-    billingMode,
-    providerKind,
-    upstreamMode,
-    admissionEndpoints: [
-      env.REDIS_URL,
-      ...(env.REDIS_EXTRA_URLS ?? "")
-        .split(",")
-        .map((url) => url.trim())
-        .filter(Boolean),
-    ].length,
-    scenario,
-    upstream: await upstreamStats(),
-    consumerMode,
-    workerMode,
-    drainSeconds,
-    expectedChargeAtoms: expectedCharge,
-    expectedUpstreamCostAtoms: "59",
-    http,
-    accounting: check,
-    pending,
-    delivered,
-    drain_ms: serviceDrainedAt - drainStart,
-    audit_ms: Date.now() - serviceDrainedAt,
-    financial_duration_seconds: (serviceDrainedAt - samplingStart) / 1000,
-    financial_completed_rps:
-      Math.round((check.requests * 100000) / (serviceDrainedAt - samplingStart)) / 100,
-    database_bytes: Number(
-      (await db`SELECT pg_database_size(current_database())::text AS size`)[0].size,
-    ),
-  };
-  await Bun.write(`${directory}/audit.json`, JSON.stringify(result, null, 2));
-  console.log(
-    JSON.stringify({
-      directory,
-      billingMode,
-      consumerMode,
-      workerMode,
-      drainSeconds,
+        : undefined;
+    const result = {
+      id,
+      scope: "v2-three-process",
       valid,
-      rps: http.successful_rps,
+      failures,
+      capacityPassed,
       targetRps,
-      capacityPassed: result.capacityPassed,
-      financial_completed_rps: result.financial_completed_rps,
-      invalid: http.invalid,
+      seconds,
+      instances,
+      wallets,
+      hotShare,
+      concurrency,
+      stream,
+      upstreamMode,
+      scenario,
+      workerMode,
+      workerConcurrency,
+      consumerMode,
+      gatewayInflight,
+      requiredReplicas,
+      drainSeconds,
+      expectedChargeAtoms: expectedCharge,
+      expectedSupplierCostAtoms: expectedCost,
+      storageBudget,
+      databaseSettings: [...databaseSettings],
+      redisSettings,
       accounting: check,
-      pending,
-      drain_ms: result.drain_ms,
-    }),
-  );
-  if (!valid || result.capacityPassed === false) process.exitCode = 1;
-  void mock;
-} finally {
-  consuming = false;
-  clearInterval(telemetryTimer);
-  for (const child of processes) {
-    if (child.exitCode === null) child.kill("SIGTERM");
+      supplier,
+      permits,
+      receipts,
+      usageShapes,
+      ownershipMismatches: ownership,
+      walletMismatches,
+      delivered,
+      receiptConfirmedAcks,
+      ackedRequests: ackedRequests.size,
+      imprecise,
+      expiredLeases,
+      ackShortfall,
+      consumerErrors,
+      telemetryErrors,
+      processes: Object.fromEntries(
+        Object.keys(roots).map((role) => [
+          role,
+          {
+            peak_rss_bytes: Math.max(
+              0,
+              ...resources.map((sample) => sample.usage[role]!.rss_bytes),
+            ),
+            cpu_seconds:
+              (resources.at(-1)?.usage[role]?.cpu_seconds ?? 0) -
+              (resources[0]?.usage[role]?.cpu_seconds ?? 0),
+            peak_processes: Math.max(
+              0,
+              ...resources.map((sample) => sample.usage[role]!.processes),
+            ),
+          },
+        ]),
+      ),
+      resources,
+      onlineCapacity,
+      queueStats,
+      timeline,
+      upstream: await upstreamStats(),
+      http,
+      drain_ms: serviceDrainedAt - drainStart,
+      financial_duration_seconds: (serviceDrainedAt - samplingStart) / 1000,
+      financial_completed_rps:
+        Math.round((requests * 100000) / (serviceDrainedAt - samplingStart)) / 100,
+      database: String((await db`SELECT current_database() AS name`)[0].name),
+      database_bytes: Number(
+        (await db`SELECT pg_database_size(current_database())::text AS size`)[0].size,
+      ),
+    };
+    for (const service of [...services].reverse()) if (service.alive()) await service.stop();
+    return result;
+  } finally {
+    consuming = false;
+    clearInterval(telemetryTimer);
+    for (const child of spawned) if (child.exitCode === null) child.kill("SIGTERM");
+    for (const service of services) service.kill();
+    await Promise.allSettled(spawned.map((child) => child.exited));
+    await Promise.allSettled([consume, sampling]);
+    await ackWriter?.close().catch(() => undefined);
+    queue.close();
   }
-  await Promise.allSettled(processes.map((p) => p.exited));
-  await Promise.allSettled([consume, sampling]);
-  await ackWriter?.close().catch(() => undefined);
-  await db.close();
-  await owner.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
-  await owner.close();
-  const cleanup = await cleanupCapacityNamespaces(
+}
+
+let result: Awaited<ReturnType<typeof measure>> | undefined;
+try {
+  execFileSync(
+    "openssl",
     [
-      process.env.REDIS_URL!,
-      ...(process.env.REDIS_EXTRA_URLS ?? "")
-        .split(",")
-        .map((url) => url.trim())
-        .filter(Boolean),
-      process.env.QUEUE_REDIS_URL!,
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-days",
+      "1",
+      "-subj",
+      "/CN=127.0.0.1",
+      "-addext",
+      "subjectAltName=IP:127.0.0.1",
+      "-keyout",
+      upstreamKey,
+      "-out",
+      upstreamCertificate,
     ],
-    namespace,
+    { stdio: "pipe" },
   );
+  upstreamTls.ca = await Bun.file(upstreamCertificate).text();
+  await withFinancial(
+    (f, db) =>
+      withSettlementRole(db, async (workerDatabaseUrl) => {
+        result = await measure(f, db, workerDatabaseUrl);
+      }),
+    {
+      entry: "dist/core-api/main.js",
+      managementFactory: compiled.createCoreManagementApplication,
+      gateways: Math.max(2, instances),
+    },
+  );
+} finally {
+  await rm(upstreamKey, { force: true });
+  const cleanup = await cleanupCapacityNamespaces([process.env.QUEUE_REDIS_URL!], namespace);
   await Bun.write(`${directory}/cleanup.json`, JSON.stringify(cleanup) + "\n");
   if (cleanup.failed) {
     process.exitCode = 1;
-    console.error(
-      `Capacity fixture cleanup could not reach ${cleanup.failed} endpoint(s); other endpoints were still cleaned`,
-    );
+    console.error("Capacity fixture cleanup could not reach the evidence queue");
   }
 }
+if (!result) throw new Error("Capacity run produced no audit");
+await Bun.write(`${directory}/audit.json`, JSON.stringify(result, null, 2));
+console.log(
+  JSON.stringify({
+    directory,
+    scope: result.scope,
+    valid: result.valid,
+    failures: result.failures,
+    rps: result.http.successful_rps,
+    targetRps,
+    capacityPassed: result.capacityPassed,
+    financial_completed_rps: result.financial_completed_rps,
+    accounting: result.accounting,
+    supplier: result.supplier,
+    drain_ms: result.drain_ms,
+  }),
+);
+if (!result.valid || result.capacityPassed === false) process.exitCode = 1;

@@ -167,10 +167,10 @@ export async function startGateway(
   f: Fixture,
   options: {
     namespace: string;
-    upstreamCertificate: string;
+    upstreamCertificate?: string;
     core?: "coreA" | "coreB";
     entry?: string;
-    instance?: "gateway" | "gatewayB";
+    instance?: string;
     overrides?: Record<string, unknown>;
     cwd?: string;
   },
@@ -218,7 +218,7 @@ export async function startGateway(
     env: {
       PATH: process.env.PATH,
       GATEWAY_CONFIG_FILE: configFile,
-      NODE_EXTRA_CA_CERTS: options.upstreamCertificate,
+      ...(options.upstreamCertificate ? { NODE_EXTRA_CA_CERTS: options.upstreamCertificate } : {}),
       MINIMAX_API_KEY: "",
     },
     stdin: "ignore",

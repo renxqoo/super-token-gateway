@@ -109,8 +109,6 @@ try {
       "1",
       "--wallets",
       "1",
-      "--pool",
-      "1",
       "--worker-concurrency",
       "1",
       "--drain-seconds",
@@ -143,13 +141,13 @@ try {
   assert.equal(audit.http.invalid, 0);
   assert(audit.accounting.requests > 1);
   assert.equal(audit.accounting.precise_charges, audit.accounting.requests);
-  assert.equal(audit.accounting.acknowledged, audit.accounting.requests);
-  assert.equal(audit.pending, 0);
+  assert.equal(audit.accounting.acknowledged, audit.accounting.usage_events);
+  assert.equal(audit.ackedRequests, audit.accounting.requests);
+  assert.equal(audit.supplier.spent, String(audit.accounting.requests * 59));
+  assert(Object.values(audit.queueStats).every((count) => count === 0));
   assert.equal((await Bun.file(new URL("cleanup.json", benchmarkDirectory)).json()).failed, 0);
   assert.equal(
-    (
-      await owner`SELECT count(*)::int AS n FROM pg_database WHERE datname=${`gateway_bench_${audit.id}`}`
-    )[0].n,
+    (await owner`SELECT count(*)::int AS n FROM pg_database WHERE datname=${audit.database}`)[0].n,
     0,
   );
   for (const endpoint of [redisURL, queueURL]) {

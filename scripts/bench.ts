@@ -156,21 +156,7 @@ let inflightShed = 0;
 let lastDispatchOverrunMs = 0;
 const transportErrors = new Map<string, number>();
 const gatewayErrors = new Map<string, number>();
-const knownGatewayErrors = new Set([
-  "usage_queue_unavailable",
-  "usage_commit_failed",
-  "wallet_busy",
-  "overloaded",
-  "memory_limited",
-  "rate_limited",
-  "rate_limit_unavailable",
-  "request_deadline",
-  "result_finalize_failed",
-  "upstream_unavailable",
-  "upstream_capacity",
-  "no_route",
-  "server_error",
-]);
+
 const collectMetrics = options.includes("--metrics");
 if (collectMetrics && !process.env.ADMIN_KEY)
   throw new Error("--metrics requires this Gateway's ADMIN_KEY");
@@ -258,7 +244,11 @@ const invoke = async (arrivalWindow?: number) => {
         if (value && typeof value === "object" && "error" in value) {
           const error = value.error;
           if (error && typeof error === "object" && "code" in error) {
-            if (typeof error.code === "string" && knownGatewayErrors.has(error.code))
+            if (
+              typeof error.code === "string" &&
+              /^[a-z][a-z0-9_]{0,63}$/.test(error.code) &&
+              (gatewayErrors.has(error.code) || gatewayErrors.size < 32)
+            )
               code = error.code;
           }
         }
