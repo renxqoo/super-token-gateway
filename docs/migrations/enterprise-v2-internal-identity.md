@@ -116,7 +116,7 @@ Gateway -> core-client契约RPC -> runtime通用h2 -> Core真实listener
 
 WeakMap防误接线，不防同进程恶意代码；Core role/应用代码是明确受信边界，storage不是对任意调用者的h2认证oracle。测试替身只在公共 tests/support，经测试装配使用，不进入生产exports；不能通过导出生产 authenticate/mint 加 resolver 来方便测试。身份检查不替代业务schema/project/key授权，也不替代同事务撤销屏障。后续架构验收静态扫描所有新增模块和依赖循环，并以真实listener验证伪造context拒绝；本轮只有静态图与有限模型，不宣称已运行该产品验收。
 
-建议首版有限默认（新增配置对象，由服务装配校验，名称不是现有env；容量由T14/T17验证）：identity request/response各8KiB；普通数字命令及receipt各256KiB；context含短期token最多32KiB；队列单签名事实64KiB、组最多128项/1MiB。插件包分发走既有包独立上限/独立pool，不套256KiB JSON。header解码后最多16KiB/32项；每session最多32并行stream、peer最多4连接、全进程最多128连接/256在途JSON命令且预留总16MiB接收缓冲，剩余请求立即429，不建无限队列。identity并发16、结算/租约独立限额及PG池，避免刷新挤占资金。
+建议首版有限默认（新增配置对象，由服务装配校验，名称不是现有env；容量由T14/T17验证）：identity request/response各8KiB；普通数字命令及receipt各256KiB；context含短期token最多32KiB（T16 起实现为 512KiB：候选数上限 5、单个 binding config 可达 64KiB，32KiB 不足以容纳合法目录，见[审查 R8](enterprise-v2-review.md)）；队列单签名事实64KiB、组最多128项/1MiB。插件包分发走既有包独立上限/独立pool，不套256KiB JSON。header解码后最多16KiB/32项；每session最多32并行stream、peer最多4连接、全进程最多128连接/256在途JSON命令且预留总16MiB接收缓冲，剩余请求立即429，不建无限队列。identity并发16、结算/租约独立限额及PG池，避免刷新挤占资金。
 
 TLS连接/握手3s，首个HEADERS等待1s，body读取2s、连续无进展1s，普通RPC单次处理≤10s、identity≤5s、服务端idle连接30s、单连接最大生存5min后GOAWAY排空。`deadline_at`保持已接纳命令/执行的原始期限，不把单次RPC的10s处理预算误作整个推理执行期限；当前`apps/gateway/src/config.ts:71`的TOTAL_TIMEOUT_MS默认180000、合法上限3600000，Core部署使用同一受控总期限上限，接受时须`now<deadline`且不超过其上限。有效期内重放由权威命令仲裁拦截；业务原始deadline不得更改，命令过期只允许另签短期只读status请求，不延长旧命令。接收时和事务发grant前再检查PG当前时间；锁用try/NOWAIT，PG statement budget不长于剩余deadline（现有8s默认上界），事务取消后仍查询原命令处理commit未知。不得用客户端时间决定过期，不把时钟容差延长发送期限；T14测时钟漂移告警/拒绝。deadline后begin即使数据库已有成功也仅返回安全状态，不重发grant。
 

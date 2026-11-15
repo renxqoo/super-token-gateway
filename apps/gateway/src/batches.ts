@@ -145,6 +145,7 @@ export async function prepareBatchRows(
   input: BatchInput,
   open: () => Attempt,
   signal: AbortSignal,
+  inspect: (body: Uint8Array) => void,
 ): Promise<{ bytes: Uint8Array; record: BatchRecord }> {
   const lines: string[] = Array.from({ length: input.rows.length }, () => "");
   const ceilings: Record<string, string> = {};
@@ -179,6 +180,7 @@ export async function prepareBatchRows(
             "invalid_batch",
             `Batch line ${index + 1} cannot be sent through this route`,
           );
+        inspect(transformed.body);
         upstream = result.request.manifest.upstream_model;
         sumQuantities(ceilings, result.request.manifest.ceilings as Record<string, string>);
         lines[index] =

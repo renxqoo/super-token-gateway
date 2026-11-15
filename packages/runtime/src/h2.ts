@@ -474,7 +474,7 @@ export async function createBoundedH2Client(options: {
       headers: OutgoingHttpHeaders,
       body: Uint8Array,
       signal?: AbortSignal,
-      binary?: { maxBytes: number; timeoutMs: number },
+      reply?: { maxBytes: number; timeoutMs?: number; binary?: boolean },
     ): Promise<{ status: number; body: Buffer }> {
       if (closed || session.closed || session.destroyed || active >= 32)
         throw new Error("Internal transport unavailable");
@@ -483,10 +483,10 @@ export async function createBoundedH2Client(options: {
         session,
         headers,
         body,
-        binary?.maxBytes ?? options.responseBytes ?? 8192,
-        binary?.timeoutMs ?? timeout,
+        reply?.maxBytes ?? options.responseBytes ?? 8192,
+        reply?.timeoutMs ?? timeout,
         signal,
-        binary !== undefined,
+        reply?.binary === true,
       );
       pending.add(task);
       try {

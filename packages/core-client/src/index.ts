@@ -10,6 +10,7 @@ import {
   resourcePermitResponseSchema,
   pluginPackageDataSchema,
   pluginPackageMaxBytes,
+  executionContextResponseMaxBytes,
   executionReceiptSchema,
   transientSendSchema,
   type ExecutionKind,
@@ -95,7 +96,7 @@ export function createCoreRpcClient(
     path: string,
     body: Buffer,
     proof?: string,
-    binary?: { maxBytes: number; timeoutMs: number },
+    reply?: { maxBytes: number; timeoutMs?: number; binary?: boolean },
   ) {
     const c = await connection();
     return c.request(
@@ -111,7 +112,7 @@ export function createCoreRpcClient(
       },
       body,
       undefined,
-      binary,
+      reply,
     );
   }
   function parseReply(response: { status: number; body: Buffer }) {
@@ -130,8 +131,8 @@ export function createCoreRpcClient(
     }
     return parsed;
   }
-  async function request(path: string, body: Buffer, proof?: string) {
-    return parseReply(await send(path, body, proof));
+  async function request(path: string, body: Buffer, proof?: string, maxBytes?: number) {
+    return parseReply(await send(path, body, proof, maxBytes ? { maxBytes } : undefined));
   }
   function signed(
     kind: ExecutionKind | "plugin_package_v1",
@@ -360,7 +361,12 @@ export function createCoreRpcClient(
       const normalizedPath = `/_internal/core/v1/${path}`;
       const { owner, body, proof } = signed(kind, normalizedPath, parsedData, requestOptions);
       try {
-        const value = (await request(normalizedPath, body, proof)) as Record<string, unknown>;
+        const value = (await request(
+          normalizedPath,
+          body,
+          proof,
+          kind === "execution_context_v1" ? executionContextResponseMaxBytes : undefined,
+        )) as Record<string, unknown>;
         if (kind === "execution_context_v1") return executionContextResponseSchema.parse(value);
         if (kind === "execution_resource_commit_v1")
           return resourceCommitResponseSchema.parse(value);
@@ -412,6 +418,7 @@ export function createCoreRpcClient(
         const response = await send(path, body, proof, {
           maxBytes: pluginPackageMaxBytes,
           timeoutMs: 30000,
+          binary: true,
         });
         if (response.status !== 200) parseReply(response);
         return new Uint8Array(response.body);

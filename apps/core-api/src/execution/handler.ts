@@ -359,7 +359,12 @@ export function createExecutionHandler(
             throw new Error("no_route");
           throw error;
         });
-        return { ...snapshot, candidates: ordered.map((row) => row.candidate) };
+        return {
+          ...snapshot,
+          candidates: ordered
+            .slice(0, parsed.execution_budget.max_attempts)
+            .map((row) => row.candidate),
+        };
       }
       if (kind !== "execution_query_v1" && kind !== "execution_quota_v1") {
         const previous = await store.lookup(p, e);

@@ -223,6 +223,7 @@ export const executionDataSchemas = {
 } as const;
 export const pluginPackageDataSchema = z.strictObject({ digest: digestSchema });
 export const pluginPackageMaxBytes = 46137344;
+export const executionContextResponseMaxBytes = 524288;
 export const hostAuthorizationPlanV1Schema = z.strictObject({
   version: z.literal(1),
   owner: z.strictObject({
@@ -332,7 +333,7 @@ export const executionContextResponseSchema = z.strictObject({
       concurrency: z.number().int().positive(),
     }),
   ),
-  candidates: z.array(candidateMetadataSchema).max(128),
+  candidates: z.array(candidateMetadataSchema).max(5),
   resources: z
     .array(
       z.strictObject({ resource_id: publicResourceIdSchema, remote_id: opaqueResourceIdSchema }),

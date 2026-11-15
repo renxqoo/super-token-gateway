@@ -270,7 +270,7 @@ export type UpstreamCall = {
 };
 type Process = Awaited<ReturnType<typeof startGateway>>;
 type GatewayStack = Parameters<Parameters<typeof withGatewayStack>[1]>[0];
-const boundedSupplier = {
+export const boundedSupplier = {
   rates: {
     input_tokens: { numerator: "1", denominator: "3" },
     output_tokens: { numerator: "1", denominator: "3" },

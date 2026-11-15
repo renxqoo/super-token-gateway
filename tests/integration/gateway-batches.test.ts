@@ -317,3 +317,29 @@ test(
     ),
   240000,
 );
+
+test("a batch upload whose rows the route request policy refuses is rejected before reaching the upstream, and clearing the policy accepts it (batch rows bypassed route request_policy)", () =>
+  withGatewayStack(
+    {
+      reply: upstream("completed", [completion("a", 10, 5)]),
+      supplierCredit: "1000000",
+    },
+    async (stack) => {
+      const api = await prepare(stack);
+      const [route] = await stack.db`SELECT id FROM routes WHERE model_name=${stack.setup.model}`;
+      const patch = async (request_policy: Record<string, unknown>) =>
+        expect(
+          (await stack.f.request(`/routes/${route.id}`, { request_policy }, undefined, "PATCH"))
+            .status,
+        ).toBe(200);
+      await patch({ blocked_parameters: ["max_tokens"] });
+      const before = stack.received.length;
+      const refused = await api.upload(rows(stack, ["a"]));
+      expect(refused.status).toBe(422);
+      expect(await errorCode(refused)).toBe("unsupported_capability");
+      expect(stack.received.length).toBe(before);
+      await patch({});
+      expect((await api.upload(rows(stack, ["a"]))).status).toBe(200);
+      expect(stack.received.length).toBe(before + 1);
+    },
+  ));

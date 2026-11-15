@@ -14,6 +14,7 @@ import {
   executionDataSchemas,
   pluginPackageDataSchema,
   pluginPackageMaxBytes,
+  executionContextResponseMaxBytes,
   type ExecutionKind,
   registrationProofFields,
   commandProofFields,
@@ -456,7 +457,15 @@ export async function startCoreInternalListener(options: Options) {
               }),
               limits.responseBytes,
             );
-          } else h2JsonReply(stream, 200, result, limits.responseBytes);
+          } else
+            h2JsonReply(
+              stream,
+              200,
+              result,
+              endpoint === "execution_context_v1"
+                ? executionContextResponseMaxBytes
+                : limits.responseBytes,
+            );
         }
       }
     } catch (caughtError) {

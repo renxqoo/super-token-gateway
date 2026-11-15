@@ -287,6 +287,7 @@ async function prepareFinancial(
         apiKey: string;
         maxInputTokens: number;
         ceilings: Record<string, string>;
+        modelMap?: Record<string, string>;
       },
     ) {
       const created = await request("/providers", {
@@ -330,7 +331,7 @@ async function prepareFinancial(
         brand_id: setup.provider.brand_id,
         secret_reference: `channel:${provider.id}`,
         config: {
-          model_map: { [setup.model]: "synthetic" },
+          model_map: { ...channel.modelMap, [setup.model]: "synthetic" },
           max_output_tokens: 100,
           max_input_tokens: channel.maxInputTokens,
           auth: "bearer",

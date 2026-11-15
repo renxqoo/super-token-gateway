@@ -3,13 +3,18 @@ import {
   dispatchProjectionV1Schema,
   executionRejectionStatus,
   prepBindingV1,
+  requestPolicySchema,
   type ExecutionContextResponse,
   type ExecutionReply,
   type TransientSend,
   type SignedCoreEvidenceEventV1,
 } from "@gateway/contracts";
 import { CoreRpcError, type createCoreRpcClient } from "@gateway/core-client";
-import { requestCharacters } from "@gateway/adapters/protocol";
+import {
+  parseClientJson,
+  requestCharacters,
+  validateRequestPolicy,
+} from "@gateway/adapters/protocol";
 import { canonical, protocols, type Operation, type Protocol } from "@gateway/kernel";
 import {
   observeAttempt,
@@ -99,10 +104,9 @@ type Permit = { attemptId: string; permitEpoch: string };
 type HealthOutcome = "SUCCESS" | "FAILURE" | "NOT_SENT";
 type Admitted = Plan & Permit & { begin: Record<string, string> };
 type CloseReason = "COMPLETED" | "FAILED" | "CANCELLED" | "DRAINED";
-type Ending =
-  | { kind: "final"; outcome: AttemptOutcome; reason: CloseReason }
-  | { kind: "retry"; outcome: Omit<AttemptOutcome, "request_state"> };
-type Outcome = { response: Response } | { retry: GatewayError };
+type Ending = { outcome: AttemptOutcome; reason: CloseReason };
+type Outcome =
+  { response: Response } | { retry: GatewayError; conclude: (last: boolean) => Promise<void> };
 
 const retryableStatuses = new Set([401, 403, 404, 408, 409, 429, 500, 502, 503, 504, 529]);
 const unhealthyStatuses = new Set([401, 403, 408, 409, 429, 500, 502, 503, 504, 529]);
@@ -303,6 +307,31 @@ async function openContext(deps: ChatDependencies, request: ChatRequest, facts: 
   }
 }
 
+class RoutePolicyRejection extends GatewayError {}
+
+function enforceRoutePolicy(body: Uint8Array, policy: unknown) {
+  const parsed = requestPolicySchema.parse(policy);
+  if (
+    !parsed.allowed_parameters &&
+    !parsed.blocked_parameters?.length &&
+    !Object.keys(parsed.parameter_ranges ?? {}).length
+  )
+    return;
+  let document: Record<string, unknown>;
+  try {
+    document = parseClientJson(new TextDecoder().decode(body)) as Record<string, unknown>;
+  } catch {
+    throw new GatewayError(502, "plugin_invalid", "The route's plugin did not prepare a request");
+  }
+  try {
+    validateRequestPolicy(document, parsed);
+  } catch (error) {
+    if (error instanceof GatewayError)
+      throw new RoutePolicyRejection(error.status, error.code, error.message);
+    throw error;
+  }
+}
+
 async function plan(
   deps: ChatDependencies,
   request: ChatRequest,
@@ -361,6 +390,7 @@ async function plan(
             deadlineAt: Date.parse(facts.deadlineAt),
           }),
         request.signal,
+        (body) => enforceRoutePolicy(body, candidate.request_policy),
       );
       const view = JSON.parse(new TextDecoder().decode(document)) as {
         file: { file: Record<string, unknown> };
@@ -401,6 +431,7 @@ async function plan(
       (transformed.result.request.body_format === "multipart") !== Boolean(files)
     )
       throw new GatewayError(502, "plugin_invalid", "The route's plugin did not prepare a request");
+    enforceRoutePolicy(transformed.body, candidate.request_policy);
     const prepared = transformed.result.request,
       boundary = `stg-${attemptId.replaceAll("-", "")}`;
     let outbound = transformed.body;
@@ -938,7 +969,7 @@ async function dispatch(
         healthOutcome(ending.outcome, halt(request).halted),
         latency,
       );
-      if (ending.kind === "final") await closeRequest(deps, admitted, ending.reason);
+      await closeRequest(deps, admitted, ending.reason);
     }
   };
   const finalFailure = async (
@@ -947,11 +978,38 @@ async function dispatch(
   ): Promise<never> => {
     const stop = halt(request);
     await end({
-      kind: "final",
       outcome: { ...outcome, request_state: stop.requestState },
       reason: stop.reason,
     }).catch(() => undefined);
     throw stop.error(error);
+  };
+  const deferred = (
+    error: GatewayError,
+    publish: (requestState?: "FAILED" | "CANCELLED") => Promise<unknown>,
+  ): Outcome => ({
+    retry: error,
+    async conclude(last) {
+      const stop = halt(request);
+      await publish(last ? stop.requestState : undefined).catch(() => undefined);
+      bridge.dispose();
+      if (last) await closeRequest(deps, admitted, stop.reason);
+    },
+  });
+  const retryLater = async (
+    outcome: Omit<AttemptOutcome, "request_state">,
+    error: GatewayError,
+  ): Promise<Outcome> => {
+    stopRenewal();
+    deps.grants.release(admitted.attemptId);
+    await reportHealth(
+      deps,
+      admitted,
+      healthOutcome(outcome, halt(request).halted),
+      performance.now() - started,
+    );
+    return deferred(error, (requestState) =>
+      bridge.finish(requestState ? { ...outcome, request_state: requestState } : outcome),
+    );
   };
   let response: Response;
   try {
@@ -982,12 +1040,21 @@ async function dispatch(
       stopRenewal();
       const stop = halt(request),
         final = stop.halted || signal.aborted || error.code === "unsafe_upstream";
+      if (!final) {
+        deps.grants.release(admitted.attemptId);
+        await reportHealth(deps, admitted, "NOT_SENT");
+        return deferred(unreachable, (requestState) =>
+          bridge.notExecuted({
+            ...(requestState ? { request_state: requestState } : {}),
+            error_code: "upstream_not_dispatched",
+          }),
+        );
+      }
       await neverSent({
-        ...(final ? { request_state: stop.requestState } : {}),
+        request_state: stop.requestState,
         error_code:
           error.code === "unsafe_upstream" ? "unsafe_upstream" : "upstream_not_dispatched",
       });
-      if (!final) return { retry: unreachable };
       await closeRequest(deps, admitted, stop.reason);
       throw stop.error(
         error.code === "unsafe_upstream"
@@ -997,8 +1064,7 @@ async function dispatch(
     }
     const interrupted = { attempt_state: "UNKNOWN" as const, error_code: "upstream_interrupted" };
     if (signal.aborted) return finalFailure(interrupted, unreachable);
-    await end({ kind: "retry", outcome: interrupted }).catch(() => undefined);
-    return { retry: unreachable };
+    return retryLater(interrupted, unreachable);
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
@@ -1010,8 +1076,7 @@ async function dispatch(
     };
     if (!retryableStatuses.has(response.status) || signal.aborted)
       return finalFailure(rejected, upstreamRejection(response.status));
-    await end({ kind: "retry", outcome: rejected }).catch(() => undefined);
-    return { retry: upstreamRejection(response.status) };
+    return retryLater(rejected, upstreamRejection(response.status));
   }
   const type = response.headers.get("content-type") ?? "";
   return {
@@ -1028,7 +1093,8 @@ export async function executeChat(deps: ChatDependencies, request: ChatRequest) 
   let facts = await requestFacts(request, deps.config.total_timeout_ms);
   const external = { ...request, signal: AbortSignal.any([request.signal, request.drain]) };
   const tried = new Set<string>();
-  let previous: { permit: Permit; ordinal: number } | undefined;
+  let previous:
+    { permit: Permit; ordinal: number; conclude: (last: boolean) => Promise<void> } | undefined;
   let lastError: GatewayError | undefined;
   for (let ordinal = 1; ordinal <= maxOrdinal; ordinal++) {
     let admitted: Admitted;
@@ -1037,24 +1103,35 @@ export async function executeChat(deps: ChatDependencies, request: ChatRequest) 
         throw halt(request).error(new GatewayError(499, "cancelled", "Request cancelled"));
       const context = await openContext(deps, request, facts);
       if (!facts.model) facts = { ...facts, model: context.model };
-      const candidate = context.candidates.find((c) => !tried.has(c.ref.channel_id));
-      if (!candidate) break;
-      tried.add(candidate.ref.channel_id);
-      const planned = await plan(deps, external, facts, context, candidate);
+      const untried = context.candidates.filter((c) => !tried.has(c.ref.channel_id));
+      if (!untried.length) break;
+      let planned: Plan | undefined, refused: RoutePolicyRejection | undefined;
+      for (const candidate of untried) {
+        tried.add(candidate.ref.channel_id);
+        try {
+          planned = await plan(deps, external, facts, context, candidate);
+          break;
+        } catch (error) {
+          if (!(error instanceof RoutePolicyRejection)) throw error;
+          refused ??= error;
+        }
+      }
+      if (!planned) throw refused!;
       admitted = await reserve(deps, request, facts, context, planned, previous);
     } catch (error) {
       if (!previous) throw error;
-      await closeRequest(deps, previous.permit, halt(request).reason);
+      await previous.conclude(true);
       throw halt(request).error(lastError ?? coreFailure(error));
     }
+    await previous?.conclude(false);
     const outcome = await dispatch(deps, request, facts, admitted);
     if ("response" in outcome) return outcome.response;
     lastError = outcome.retry;
-    previous = { permit: admitted, ordinal };
+    previous = { permit: admitted, ordinal, conclude: outcome.conclude };
   }
   if (!previous) throw new GatewayError(404, "model_not_found", "No route serves this model");
-  await closeRequest(deps, previous.permit, "FAILED");
-  throw lastError!;
+  await previous.conclude(true);
+  throw halt(request).error(lastError!);
 }
 
 async function relayJSON(
@@ -1135,7 +1212,6 @@ async function relayJSON(
   }
   try {
     await end({
-      kind: "final",
       outcome: pending
         ? { attempt_state: "PARTIAL" }
         : { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
@@ -1241,7 +1317,6 @@ function relaySSE(
       if (!terminal) throw new Error("stream_truncated");
       ended = true;
       await end({
-        kind: "final",
         outcome: { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
         reason: "COMPLETED",
       });
@@ -1256,7 +1331,6 @@ function relaySSE(
       if (!ended) {
         const stop = halt(request);
         await end({
-          kind: "final",
           outcome: {
             attempt_state: delivered ? "PARTIAL" : "UNKNOWN",
             request_state: stop.requestState,
@@ -1335,7 +1409,6 @@ function relayBinary(
       await bridge.declare({ ...admitted.prepared.binary!.usage, requests: "1" });
       ended = true;
       await end({
-        kind: "final",
         outcome: { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
         reason: "COMPLETED",
       });
@@ -1348,7 +1421,6 @@ function relayBinary(
       if (!ended) {
         const stop = halt(request);
         await end({
-          kind: "final",
           outcome: {
             attempt_state: "UNKNOWN",
             request_state: stop.requestState,
