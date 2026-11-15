@@ -369,3 +369,69 @@ test(
     }),
   30000,
 );
+
+test(
+  "a core-worker identity can neither open, admit nor begin Gateway executions and cannot sign evidence for a Gateway attempt",
+  () =>
+    withFinancial(async (f, db) => {
+      const setup = await f.bootstrap(),
+        owner = f.client(),
+        worker = f.client(f.identity.b.port, "worker");
+      await owner.startup();
+      await worker.startup();
+      const refusal = (pending: Promise<unknown>) =>
+        pending.then(
+          () => "accepted",
+          (error: unknown) => String(error),
+        );
+      expect(await refusal(prepareFinancialAdmission(setup, worker))).toContain(
+        "internal_peer_forbidden",
+      );
+      const prepared = await prepareFinancialAdmission(setup, owner);
+      await expect(
+        worker.execution("execution_admit_v1", prepared.data, {
+          commandId: prepared.command,
+          deadlineAt: prepared.deadline,
+        }),
+      ).rejects.toThrow("internal_peer_forbidden");
+      const admission = await prepared.admit();
+      await expect(
+        worker.execution("execution_begin_v1", prepared.beginData(admission.receipt), {
+          deadlineAt: prepared.deadline,
+        }),
+      ).rejects.toThrow("internal_peer_forbidden");
+      await owner.execution("execution_begin_v1", prepared.beginData(admission.receipt), {
+        deadlineAt: prepared.deadline,
+      });
+      expect(() =>
+        worker.signEvidence({
+          event_id: crypto.randomUUID(),
+          attempt_id: prepared.attemptId,
+          permit_epoch: "1",
+          source: "execution",
+          source_revision: "1",
+          finality: "FINAL",
+          usage: { input_tokens: "30", output_tokens: "15" },
+          final_dimensions: ["input_tokens", "output_tokens"],
+          attempt_state: "SUCCEEDED",
+          request_state: "SUCCEEDED",
+        }),
+      ).toThrow("Only gateway produces evidence");
+      expect(
+        (
+          await db`SELECT p.state,s.service FROM execution_permits p JOIN internal_startup_sessions s ON s.session_id=p.owner_session_id WHERE p.attempt_id=${prepared.attemptId}`
+        )[0],
+      ).toEqual({ state: "SEND_GRANTED", service: "gateway" });
+      expect(
+        (
+          await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+        )[0],
+      ).toEqual({ balance: "1000", reserved: "30", spent: "0" });
+      expect(
+        (
+          await db`SELECT count(*)::int n FROM billing_charges WHERE request_id=${prepared.requestId}`
+        )[0].n,
+      ).toBe(0);
+    }),
+  30000,
+);

@@ -22,7 +22,7 @@
 | ------ | -------------------------------------------------------------------------- | ------ |
 | n1     | 原生依赖服务、Docker 退役、备份与 CI 原生化、容器有效断言迁移              | 完成   |
 | n2     | v2 结算故障窗口：core-worker 提交前/提交后 ACK 前强杀；耐久脚本结算腿迁 v2 | 完成   |
-| n3     | 内部身份轮换/伪造/过期/重放、helper 泄漏与 shutdown 覆盖核对与补齐         | 待执行 |
+| n3     | 内部身份轮换/伪造/过期/重放、helper 泄漏与 shutdown 覆盖核对与补齐         | 完成   |
 | n4     | 部署：三服务 systemd 单元与配置样例、legacy 单元过渡标注、OpenAPI          | 待执行 |
 | n5     | 容量发生器纳入 Core 与上游账本                                             | 待执行 |
 
@@ -45,3 +45,28 @@
 - 耐久脚本在 ready 后收到 SIGTERM/SIGINT 时留下 2 个孤儿 Core API 进程与 `/tmp/gateway-identity-*` 目录（含合成 CA 与证书）。根因：fixture 关闭本轮 Redis 后，`financial-execution.ts` 清理用的 `RedisClient` 默认自动重连，对已停端口约 31 秒才拒绝，脚本退出前身份夹具来不及停止 Core API；即便停止成功，身份夹具 `close` 在 PG 已停时 DROP ROLE 抛错，跳过了临时目录删除。修复：清理客户端 `autoReconnect: false`、`connectionTimeout: 1000`；身份夹具在 `finally` 中删除临时目录；脚本在收尾中对资金夹具自身清理做有界等待。回归：两个信号用例新增“无本轮 Core API 进程残留”“无本轮身份目录残留”断言，修复前分别得到 2 个孤儿进程与 1 个残留目录的红灯，修复后通过。
 
 n2 全量门禁（原生服务 55452/56392/56393，`.env.local` 未改）：`verify` 退出 0，单测 365、集成 607（较 n1 增 2，均为 `core-worker-crash.test.ts`）、产物 7/14/11；`test:durability` 通过（scope `v2-core-settlement`，6 项）；`native-durability.test.ts` 17 例通过。
+
+## 6. n3 记录
+
+按[内部身份设计](enterprise-v2-internal-identity.md) T14 验收行逐项核对，已有覆盖记来源，缺口补测：
+
+| 验收项                                    | 证据                                                                                                                                                                                                                                                                                                                        |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 伪造与篡改                                | 已有：`internal-identity.test.ts`“signed command tampering and forged context…”、`core-evidence-authentication.test.ts`“a tampered signature is rejected…”                                                                                                                                                                  |
+| 重放                                      | 已有：注册响应丢失跨 Core 回放同一 session、过期 session 只回放原 receipt、证据重投为 duplicate                                                                                                                                                                                                                             |
+| 已连接 session 下一 stream 撤销           | 已有：“shared PG security revoke … rejects next stream on already connected Core A”                                                                                                                                                                                                                                         |
+| 过期与未生效证书（时钟漂移）              | **新增**：可信 CA 签发且已预配置的过期证书、未生效证书在 TLS 握手即被拒，同法签发的有效证书得到 200；Core RPC 客户端对 pin 与 SAN 均匹配但已过期/未生效的 Core 服务端证书拒绝建流（服务端收到 0 个 stream，有效对照 >0）                                                                                                    |
+| TLS 会话票据与 early data                 | **新增**：内部 TLS 服务端不发会话票据，重连只能完整握手（`isSessionReused` 均为 false）；0-RTT 需要票据派生的 PSK，因此同时排除 early data。负对照：临时去掉 `SSL_OP_NO_TICKET` 后收到 2 张票据且重连复用，用例失败；已恢复原文件                                                                                           |
+| 证书/pin/CA 轮换                          | 已有：pin 或完整 SAN 不符即拒（Core 证书轮换须同步 Gateway pin）。**新增**：只信任原 CA 时拒绝新 CA 签发的对端，CA 重叠信任包同时接受新旧 CA 对端（传输层与 Core 同一 `listenBoundedH2`）；正常 RETIRE/DISABLE 链见下行                                                                                                     |
+| 正常轮换后旧链证据                        | **新增**：旧 session 已签名的事实在 session DISABLE、证书 RETIRE、旧 Gateway 关闭后仍按捕获公钥验证（`VERIFIED`）并只入账一次（客户 100、供应商 985/0/15，重投为 duplicate）；经 Core B 启动的新 owner 不能 begin 旧 attempt，其为旧 attempt 签发的 NOT_EXECUTED 以 `evidence_subject_invalid` 整组拒绝、不留回执、不动资金 |
+| 反向 CoreWorker→Gateway 身份              | 已有：Gateway 不能调用 worker recovery、worker 不能取插件包。**新增**：core-worker 身份不能取执行上下文、admit 或 begin（均 `internal_peer_forbidden`），客户端拒绝以 worker 身份签发证据，permit 仍归 gateway session、资金不动                                                                                            |
+| 真实进程/连接强杀、跨 Core、老 owner 死亡 | 已有：`gateway-lifecycle` 14 例、`core-worker-crash`（n2）、跨 Core 注册/重连用例                                                                                                                                                                                                                                           |
+| helper 泄漏                               | 已有：plugin-host 对 helper 崩溃、超时、取消、SIGSTOP 后进程组回收及 close 结清全部排队承诺的真实进程用例                                                                                                                                                                                                                   |
+| shutdown                                  | 已有：Gateway SIGTERM 宽限内完成/超时 503 `draining`、worker 停止重启；`test:artifact` 对三个编译产物检查 SIGTERM 退出事件                                                                                                                                                                                                  |
+| 边界/缓冲                                 | 已有：连接、stream、header、接收预算与 watchdog 用例；任务 RSS 属容量（T17），本里程碑不声称                                                                                                                                                                                                                                |
+
+未覆盖与说明：session `expires_at` 由守卫触发器保护不可改，自然到期以设计表中等价的正常 DISABLE 路径验证，未等待真实 TTL；Core API 进程重启不参与证据结算路径，未在轮换链中重启 Core。
+
+测试装置观察：在 `expect(...).rejects` 内直接调用 `prepareFinancialAdmission(...)` 时，Core 的拒绝应答在 3 秒客户端计时内未被处理，报 `Internal response timeout`；同一调用先发起再断言或直接 await 时 4–12 ms 收到 `internal_peer_forbidden`（独立探针复现，Core 行为正确）。用例改为 await 结果后断言。
+
+n3 全量门禁（原生服务）：`verify` 退出 0，单测 365、集成 613（较 n2 增 6：`internal-identity.test.ts` 4、`core-evidence-authentication.test.ts` 1、`core-execution-recovery.test.ts` 1）、产物 7/14/11。n3 未改耐久路径，`test:durability` 沿用 n2 结果。

@@ -392,3 +392,74 @@ test("a group with facts from two producers settles both together and rolls back
       spent: "30",
     });
   }));
+
+test("facts signed before a normal rotation settle once after the session is disabled, its certificate retired and the old Gateway gone, while a new owner cannot begin or close the old chain", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap(),
+      client = f.client();
+    await client.startup();
+    const prepared = await prepareFinancialAdmission(setup, client);
+    const admission = (await prepared.admit()) as ExecutionReply;
+    await client.execution("execution_begin_v1", prepared.beginData(admission.receipt), {
+      deadlineAt: prepared.deadline,
+    });
+    const store = createSettlementStore(db);
+    const fact = client.signEvidence(
+      body(prepared.attemptId, {
+        finality: "FINAL",
+        usage: { input_tokens: "30", output_tokens: "15" },
+        final_dimensions: ["input_tokens", "output_tokens"],
+        attempt_state: "SUCCEEDED",
+        request_state: "SUCCEEDED",
+      }),
+    );
+    const identity = await owner(db, prepared.attemptId);
+    await db`SELECT internal_identity_change_v1('gateway',${identity.gateway_instance_id},NULL,${identity.owner_session_id}::uuid,'DISABLE')`;
+    await db`SELECT internal_identity_change_v1('gateway',${identity.gateway_instance_id},${identity.certificate_sha256},NULL,'RETIRE')`;
+    await client.close();
+
+    const successor = f.client(f.identity.b.port, "gatewayB");
+    await successor.startup();
+    await expect(
+      successor.execution("execution_begin_v1", prepared.beginData(admission.receipt), {
+        deadlineAt: prepared.deadline,
+      }),
+    ).rejects.toThrow();
+    const takeover = successor.signEvidence(
+      body(prepared.attemptId, {
+        finality: "NOT_EXECUTED",
+        attempt_state: "NOT_EXECUTED",
+        request_state: "FAILED",
+        error_code: "begin_outcome_unknown",
+      }),
+    );
+    expect(await store.persist([{ events: [takeover] }])).toEqual([
+      { status: "REJECTED", error: "evidence_subject_invalid" },
+    ]);
+    expect(
+      (
+        await db`SELECT count(*)::int n FROM core_evidence_receipts WHERE event_id=${takeover.event_id}`
+      )[0].n,
+    ).toBe(0);
+    expect(await supplier(db, setup.provider.account_id)).toEqual({
+      balance: "1000",
+      reserved: "30",
+      spent: "0",
+    });
+
+    expect(outcomes((await store.persist([{ events: [fact] }]))[0])).toEqual([["ACCEPTED", false]]);
+    expect(outcomes((await store.persist([{ events: [fact] }]))[0])).toEqual([["ACCEPTED", true]]);
+    expect(await supplier(db, setup.provider.account_id)).toEqual({
+      balance: "985",
+      reserved: "0",
+      spent: "15",
+    });
+    expect(
+      await db`SELECT amount_atoms::text amount FROM billing_charges WHERE request_id=${prepared.requestId}`,
+    ).toEqual([{ amount: "100" }]);
+    expect(
+      (
+        await db`SELECT p.owner_session_id::text owner,r.authentication_disposition FROM execution_permits p JOIN core_evidence_receipts r ON r.event_id=${fact.event_id} WHERE p.attempt_id=${prepared.attemptId}`
+      )[0],
+    ).toEqual({ owner: identity.owner_session_id, authentication_disposition: "VERIFIED" });
+  }));

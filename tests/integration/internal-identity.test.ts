@@ -1,6 +1,9 @@
 import { connect as netConnect } from "node:net";
 import { listenBoundedH2, h2JsonReply, readBoundedData } from "@gateway/runtime/h2";
-import { appendFile } from "node:fs/promises";
+import { appendFile, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
+import { connect as tlsConnect } from "node:tls";
 import {
   openRawH2,
   h2Frame,
@@ -21,7 +24,7 @@ import {
   commandProofFields,
   type CoreVerifiedCallerProjection,
 } from "@gateway/contracts";
-import { randomBytes, randomUUID, sign } from "node:crypto";
+import { X509Certificate, randomBytes, randomUUID, sign } from "node:crypto";
 import { expect, test } from "bun:test";
 import {
   identityRegistry,
@@ -1609,4 +1612,290 @@ test("another workload certificate from the same CA and DNS cannot receive even 
     }
     expect(received).toBe(0);
     for (const value of Object.values(impostor.stats())) expect(value).toBe(0);
+  }));
+
+function certificateTime(offsetDays: number) {
+  const iso = new Date(Date.now() + offsetDays * 86400000).toISOString();
+  return `${iso.replace(/[-:T]/g, "").slice(2, 14)}Z`;
+}
+
+async function issueDatedCertificate(
+  directory: string,
+  name: string,
+  uri: string,
+  startDays: number,
+  endDays: number,
+  authority = "ca",
+) {
+  const openssl = (args: string[]) =>
+    execFileSync("openssl", args, { cwd: directory, stdio: "pipe" });
+  await writeFile(join(directory, `${name}.index`), "", { mode: 0o600 });
+  await writeFile(join(directory, `${name}.serial`), `${randomBytes(8).toString("hex")}\n`, {
+    mode: 0o600,
+  });
+  await writeFile(
+    join(directory, `${name}.cnf`),
+    `[ca]\ndefault_ca=dated\n[dated]\ndatabase=${name}.index\nserial=${name}.serial\nnew_certs_dir=.\ndefault_md=sha256\npolicy=any\n[any]\ncommonName=supplied\n[leaf]\nsubjectAltName=DNS:localhost,URI:${uri}\nextendedKeyUsage=serverAuth,clientAuth\nbasicConstraints=CA:FALSE\n`,
+    { mode: 0o600 },
+  );
+  openssl([
+    "req",
+    "-newkey",
+    "rsa:2048",
+    "-nodes",
+    "-keyout",
+    `${name}.key`,
+    "-out",
+    `${name}.csr`,
+    "-subj",
+    `/CN=${name}`,
+  ]);
+  openssl([
+    "ca",
+    "-batch",
+    "-notext",
+    "-config",
+    `${name}.cnf`,
+    "-cert",
+    `${authority}.pem`,
+    "-keyfile",
+    `${authority}.key`,
+    "-in",
+    `${name}.csr`,
+    "-out",
+    `${name}.pem`,
+    "-startdate",
+    certificateTime(startDays),
+    "-enddate",
+    certificateTime(endDays),
+    "-extensions",
+    "leaf",
+  ]);
+  const cert = await Bun.file(join(directory, `${name}.pem`)).text();
+  return {
+    cert,
+    key: await Bun.file(join(directory, `${name}.key`)).text(),
+    x509: new X509Certificate(cert),
+  };
+}
+
+async function provisionDated(
+  db: SQL,
+  service: "gateway" | "core-api",
+  instance: string,
+  issued: Awaited<ReturnType<typeof issueDatedCertificate>>,
+) {
+  await db`SELECT internal_identity_provision_v1(${service},${instance},${sha256(issued.x509.raw)},${`spiffe://synthetic/${service}/${instance}`},${issued.x509.subjectAltName},${new Date(issued.x509.validFrom).toISOString()}::timestamptz,${new Date(issued.x509.validTo).toISOString()}::timestamptz)`;
+}
+
+test("TLS refuses provisioned certificates from the trusted CA that have expired or are not yet valid", () =>
+  withIdentity(async (f, db) => {
+    const windows = [
+      ["valid", -1, 1],
+      ["expired", -3, -1],
+      ["early", 1, 2],
+    ] as const;
+    const outcomes: Record<string, number | "refused"> = {};
+    for (const [name, start, end] of windows) {
+      const issued = await issueDatedCertificate(
+        f.directory,
+        name,
+        `spiffe://synthetic/gateway/${name}`,
+        start,
+        end,
+      );
+      await provisionDated(db, "gateway", name, issued);
+      let connection: Awaited<ReturnType<typeof f.connection>> | undefined;
+      try {
+        connection = await f.connection("gateway", f.a.port, {
+          cert: issued.cert,
+          key: issued.key,
+        });
+        outcomes[name] = (await challengeIdentity(connection, f.a.port, startupIdentity())).status;
+      } catch {
+        outcomes[name] = "refused";
+      } finally {
+        await connection?.close();
+      }
+    }
+    expect(outcomes).toEqual({ valid: 200, expired: "refused", early: "refused" });
+  }));
+
+test("Core RPC refuses a pinned Core server certificate that has expired or is not yet valid", () =>
+  withIdentity(async (f) => {
+    const gateway = f.certificates.get("gateway")!;
+    const received: Record<string, number> = {};
+    for (const [name, start, end] of [
+      ["core-valid", -1, 1],
+      ["core-expired", -3, -1],
+      ["core-early", 1, 2],
+    ] as const) {
+      const issued = await issueDatedCertificate(
+        f.directory,
+        name,
+        `spiffe://synthetic/core-api/${name}`,
+        start,
+        end,
+      );
+      received[name] = 0;
+      const server = await listenBoundedH2(
+        {
+          hostname: "127.0.0.1",
+          port: 0,
+          key: issued.key,
+          cert: issued.cert,
+          ca: f.ca,
+          limits: { drainMs: 100 },
+        },
+        async (stream) => {
+          received[name]!++;
+          h2JsonReply(stream, 400, { error: "unexpected_command" });
+        },
+      );
+      try {
+        const client = createCoreRpcClient({
+          origin: `https://127.0.0.1:${server.port}`,
+          servername: "localhost",
+          key: gateway.key,
+          cert: gateway.cert,
+          ca: f.ca,
+          audience: identityAudience,
+          expectedPeerSha256: sha256(issued.x509.raw),
+          expectedSubjectAltname: issued.x509.subjectAltName ?? "",
+        });
+        try {
+          await expect(client.startup()).rejects.toThrow();
+        } finally {
+          await client.close();
+        }
+      } finally {
+        await server.stop();
+      }
+    }
+    expect(received["core-valid"]).toBeGreaterThan(0);
+    expect(received["core-expired"]).toBe(0);
+    expect(received["core-early"]).toBe(0);
+  }));
+
+test("the internal TLS server issues no session ticket so every reconnect repeats the full certificate handshake", () =>
+  withIdentity(async (f) => {
+    const gateway = f.certificates.get("gateway")!;
+    const handshake = (session?: Buffer) =>
+      new Promise<{ tickets: Buffer[]; reused: boolean }>((resolve, reject) => {
+        const tickets: Buffer[] = [];
+        const socket = tlsConnect({
+          host: "127.0.0.1",
+          port: f.a.port,
+          servername: "localhost",
+          key: gateway.key,
+          cert: gateway.cert,
+          ca: f.ca,
+          ALPNProtocols: ["h2"],
+          minVersion: "TLSv1.3",
+          maxVersion: "TLSv1.3",
+          ...(session ? { session } : {}),
+        });
+        socket.on("session", (ticket: Buffer) => tickets.push(ticket));
+        socket.once("error", reject);
+        socket.once("secureConnect", () => {
+          socket.resume();
+          setTimeout(() => {
+            const reused = socket.isSessionReused();
+            socket.destroy();
+            resolve({ tickets, reused });
+          }, 300);
+        });
+      });
+    const first = await handshake();
+    const second = await handshake(first.tickets.at(-1));
+    expect({ tickets: first.tickets.length, reused: [first.reused, second.reused] }).toEqual({
+      tickets: 0,
+      reused: [false, false],
+    });
+  }));
+
+test("a CA rotation bundle accepts internal peers from both authorities while single-authority trust refuses the new one", () =>
+  withIdentity(async (f) => {
+    execFileSync(
+      "openssl",
+      [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "rotated.key",
+        "-out",
+        "rotated.pem",
+        "-days",
+        "2",
+        "-subj",
+        "/CN=Synthetic Rotated CA",
+      ],
+      { cwd: f.directory, stdio: "pipe" },
+    );
+    const rotatedCa = await Bun.file(join(f.directory, "rotated.pem")).text();
+    const rotated = await issueDatedCertificate(
+      f.directory,
+      "gateway-rotated",
+      "spiffe://synthetic/gateway/gateway-rotated",
+      -1,
+      1,
+      "rotated",
+    );
+    const core = f.certificates.get("coreA")!;
+    const outcomes: Record<string, number | "refused"> = {};
+    for (const [trust, ca] of [
+      ["single", f.ca],
+      ["bundle", `${f.ca}\n${rotatedCa}`],
+    ] as const) {
+      const server = await listenBoundedH2(
+        {
+          hostname: "127.0.0.1",
+          port: 0,
+          key: core.key,
+          cert: core.cert,
+          ca,
+          limits: { drainMs: 100 },
+        },
+        async (stream) => {
+          h2JsonReply(stream, 200, { trusted: true });
+        },
+      );
+      try {
+        for (const [peer, credentials] of [
+          [
+            "original",
+            { cert: f.certificates.get("gateway")!.cert, key: f.certificates.get("gateway")!.key },
+          ],
+          ["rotated", { cert: rotated.cert, key: rotated.key }],
+        ] as const) {
+          let connection: Awaited<ReturnType<typeof f.connection>> | undefined;
+          try {
+            connection = await f.connection("gateway", server.port, { ...credentials, ca: f.ca });
+            outcomes[`${trust}:${peer}`] = (
+              await identityRequest(
+                connection,
+                server.port,
+                "/_internal/core/v1/identity/challenges",
+                {},
+              )
+            ).status;
+          } catch {
+            outcomes[`${trust}:${peer}`] = "refused";
+          } finally {
+            await connection?.close();
+          }
+        }
+      } finally {
+        await server.stop();
+      }
+    }
+    expect(outcomes).toEqual({
+      "single:original": 200,
+      "single:rotated": "refused",
+      "bundle:original": 200,
+      "bundle:rotated": 200,
+    });
   }));
