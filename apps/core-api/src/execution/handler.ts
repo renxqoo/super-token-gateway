@@ -521,13 +521,23 @@ export function createExecutionHandler(
               })
               .catch((error: unknown) => {
                 if (error instanceof GatewayError && error.code === "rate_limited")
-                  throw new Error("quota_unavailable");
+                  throw new Error(scope.kind === "channel" ? "channel_capacity" : "quota_limited");
                 throw error;
               });
             drafts.push(result.descriptor);
           }
         } catch (error) {
           await releaseHealth();
+          const message = error instanceof Error ? error.message : "";
+          if (message === "channel_capacity" || message === "quota_limited")
+            for (const draft of drafts)
+              await quota
+                .release(draft, {
+                  state: "REJECTED",
+                  command_id: e.command_id,
+                  body_digest: e.body_digest,
+                })
+                .catch(() => {});
           throw error;
         }
         computed = {

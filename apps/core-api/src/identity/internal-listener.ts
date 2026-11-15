@@ -487,6 +487,8 @@ export async function startCoreInternalListener(options: Options) {
         identity_busy: 503,
         command_conflict: 409,
         quota_unavailable: 503,
+        quota_limited: 429,
+        channel_capacity: 429,
         quota_release_denied: 409,
         candidate_stale: 409,
         cost_unbounded: 422,

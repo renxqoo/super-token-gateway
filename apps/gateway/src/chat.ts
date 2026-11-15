@@ -159,7 +159,12 @@ export function coreFailure(error: unknown): GatewayError {
         code,
         "The request was rejected by admission policy",
       );
-    if (code === "quota_unavailable" || code === "internal_capacity")
+    if (
+      code === "quota_unavailable" ||
+      code === "quota_limited" ||
+      code === "channel_capacity" ||
+      code === "internal_capacity"
+    )
       return new GatewayError(429, "rate_limited", "Admission capacity is exhausted");
     if (code === "no_route")
       return new GatewayError(
@@ -307,7 +312,7 @@ async function openContext(deps: ChatDependencies, request: ChatRequest, facts: 
   }
 }
 
-class RoutePolicyRejection extends GatewayError {}
+class CandidateRefusal extends GatewayError {}
 
 function enforceRoutePolicy(body: Uint8Array, policy: unknown) {
   const parsed = requestPolicySchema.parse(policy);
@@ -327,7 +332,7 @@ function enforceRoutePolicy(body: Uint8Array, policy: unknown) {
     validateRequestPolicy(document, parsed);
   } catch (error) {
     if (error instanceof GatewayError)
-      throw new RoutePolicyRejection(error.status, error.code, error.message);
+      throw new CandidateRefusal(error.status, error.code, error.message);
     throw error;
   }
 }
@@ -600,7 +605,14 @@ async function reserve(
       }
     }
     await reportHealth(deps, abandoned, "NOT_SENT");
-    throw coreFailure(error);
+    const failure = coreFailure(error);
+    if (
+      error instanceof CoreRpcError &&
+      error.detail.command_state === "NOT_ATTEMPTED" &&
+      (error.detail.code === "channel_capacity" || error.detail.code === "no_route")
+    )
+      throw new CandidateRefusal(failure.status, failure.code, failure.message);
+    throw failure;
   }
   if (reply.receipt.state !== "RESERVED" || !reply.receipt.authorization_plan_digest) {
     planned.attempt.dispose();
@@ -1105,19 +1117,20 @@ export async function executeChat(deps: ChatDependencies, request: ChatRequest) 
       if (!facts.model) facts = { ...facts, model: context.model };
       const untried = context.candidates.filter((c) => !tried.has(c.ref.channel_id));
       if (!untried.length) break;
-      let planned: Plan | undefined, refused: RoutePolicyRejection | undefined;
+      let reserved: Admitted | undefined, refused: CandidateRefusal | undefined;
       for (const candidate of untried) {
         tried.add(candidate.ref.channel_id);
         try {
-          planned = await plan(deps, external, facts, context, candidate);
+          const planned = await plan(deps, external, facts, context, candidate);
+          reserved = await reserve(deps, request, facts, context, planned, previous);
           break;
         } catch (error) {
-          if (!(error instanceof RoutePolicyRejection)) throw error;
+          if (!(error instanceof CandidateRefusal)) throw error;
           refused ??= error;
         }
       }
-      if (!planned) throw refused!;
-      admitted = await reserve(deps, request, facts, context, planned, previous);
+      if (!reserved) throw refused!;
+      admitted = reserved;
     } catch (error) {
       if (!previous) throw error;
       await previous.conclude(true);

@@ -540,7 +540,7 @@ test(
   30000,
 );
 
-test("an admission beyond channel concurrency reports retryable quota_unavailable instead of identity_store_unavailable", () =>
+test("an admission beyond channel concurrency reports a channel_capacity refusal instead of identity_store_unavailable", () =>
   withFinancial(async (f, db) => {
     const setup = await f.bootstrap(),
       client = f.client();
@@ -560,16 +560,48 @@ test("an admission beyond channel concurrency reports retryable quota_unavailabl
       .admit()
       .catch((error: unknown) => error);
     expect(limited).toBeInstanceOf(CoreRpcError);
-    expect((limited as CoreRpcError).status).toBe(503);
+    expect((limited as CoreRpcError).status).toBe(429);
     expect((limited as CoreRpcError).detail).toMatchObject({
-      code: "quota_unavailable",
-      retryability: "SAME_COMMAND",
+      code: "channel_capacity",
+      retryability: "NONE",
+      command_state: "NOT_ATTEMPTED",
     });
     expect(
       (
         await db`SELECT count(*)::integer n FROM billing_holds h JOIN wallets w ON w.id=h.wallet_id WHERE w.project_id=${setup.project.id}`
       )[0].n,
     ).toBe(10);
+  }));
+
+test("an admission refused by the key's concurrency reports quota_limited and frees the project slot it had taken instead of holding it until the lease expires", () =>
+  withFinancial(async (f) => {
+    const setup = await f.bootstrap(),
+      client = f.client();
+    await client.startup();
+    expect(
+      (await f.request(`/projects/${setup.project.id}`, { concurrency: 2 }, undefined, "PATCH"))
+        .status,
+    ).toBe(200);
+    expect(
+      (await f.request(`/keys/${setup.key.id}`, { concurrency: 1 }, undefined, "PATCH")).status,
+    ).toBe(200);
+    await (await prepareFinancialAdmission(setup, client)).admit();
+    const limited = await (
+      await prepareFinancialAdmission(setup, client)
+    )
+      .admit()
+      .catch((error: unknown) => error);
+    expect(limited).toBeInstanceOf(CoreRpcError);
+    expect((limited as CoreRpcError).status).toBe(429);
+    expect((limited as CoreRpcError).detail).toMatchObject({
+      code: "quota_limited",
+      retryability: "NONE",
+      command_state: "NOT_ATTEMPTED",
+    });
+    expect(
+      (await f.request(`/keys/${setup.key.id}`, { concurrency: 2 }, undefined, "PATCH")).status,
+    ).toBe(200);
+    await (await prepareFinancialAdmission(setup, client)).admit();
   }));
 
 test("a context whose only supplier account awaits reconciliation reports no_route instead of identity_store_unavailable", () =>

@@ -6,6 +6,7 @@ import {
   eventually,
   requestOutcome,
   settledCharge,
+  stall,
   withGatewayStack,
 } from "../support/gateway-process.ts";
 
@@ -271,6 +272,67 @@ test("a route request policy refusing the prepared request skips that channel be
       ]);
     },
   ));
+
+test("a channel whose own concurrency is full is skipped at admission and the request is served by the next channel instead of 429 rate_limited, without the refused admission holding a customer concurrency slot; when every channel is full the request gets 429 and nothing is reserved", () => {
+  const gates = new Map<string | null, ReturnType<typeof stall>>();
+  return withGatewayStack(
+    {
+      reply: async (call) => {
+        await gates.get(call.authorization)?.released;
+        return chatReplies.json();
+      },
+      channels: 2,
+      supplierCredit: "1000000",
+    },
+    async ({ f, db, setup, received, send }) => {
+      const [first] =
+        await db`SELECT id FROM routes WHERE model_name=${setup.model} AND provider_id=${setup.provider.id}`;
+      const [second] =
+        await db`SELECT provider_id FROM routes WHERE model_name=${setup.model} AND provider_id<>${setup.provider.id}`;
+      const patch = async (path: string, body: Record<string, unknown>) =>
+        expect((await f.request(path, body, undefined, "PATCH")).status).toBe(200);
+      await patch(`/routes/${first.id}`, { priority: 10 });
+      await patch(`/providers/${setup.provider.id}`, { concurrency: 1 });
+      await patch(`/projects/${setup.project.id}`, { concurrency: 2 });
+      const count = async (table: "gateway_requests" | "billing_holds") =>
+        (await db`SELECT count(*)::integer n FROM ${db(table)}`)[0].n as number;
+      try {
+        gates.set("Bearer synthetic-upstream-secret", stall());
+        const holding = send();
+        holding.catch(() => undefined);
+        await eventually(async () => received.length === 1, "first channel occupied");
+        const fallback = await send();
+        await expectStatus(fallback, 200);
+        expect(received.map((call) => call.authorization)).toEqual([
+          "Bearer synthetic-upstream-secret",
+          "Bearer synthetic-upstream-secret-2",
+        ]);
+        expect(
+          await db`SELECT count(*)::integer n FROM attempts WHERE request_id=${fallback.headers.get("x-request-id")}`,
+        ).toEqual([{ n: 1 }]);
+
+        await patch(`/providers/${second.provider_id}`, { concurrency: 1 });
+        await patch(`/projects/${setup.project.id}`, { concurrency: 3 });
+        gates.set("Bearer synthetic-upstream-secret-2", stall());
+        const occupying = send();
+        occupying.catch(() => undefined);
+        await eventually(async () => received.length === 3, "second channel occupied");
+        const requests = await count("gateway_requests"),
+          holds = await count("billing_holds");
+        const saturated = await send();
+        expect(JSON.parse(await expectStatus(saturated, 429)).error.code).toBe("rate_limited");
+        expect(received).toHaveLength(3);
+        expect(await count("gateway_requests")).toBe(requests);
+        expect(await count("billing_holds")).toBe(holds);
+        for (const gate of gates.values()) gate.release();
+        await expectStatus(await holding, 200);
+        await expectStatus(await occupying, 200);
+      } finally {
+        for (const gate of gates.values()) gate.release();
+      }
+    },
+  );
+}, 30000);
 
 test("upstream statuses are classified like legacy: transient and authorization failures move to the other channel, 400 and 422 stop after one send", () => {
   let next: number | undefined;

@@ -500,6 +500,55 @@ test("native PostgreSQL uses a private SCRAM cluster with durable settings and r
   }
 });
 
+async function sharedMemorySegments(): Promise<Set<number>> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "/usr/bin/ipcs",
+      ["-m"],
+      { env: nativeChildEnvironment(), timeout: 1000, maxBuffer: 1048576 },
+      (error, output) => {
+        if (error) return reject(error);
+        resolve(
+          new Set(
+            output.split("\n").flatMap((line) => {
+              const match = /^(?:m\s+|0x[0-9a-f]+\s+)(\d+)\s/.exec(line);
+              return match ? [Number(match[1])] : [];
+            }),
+          ),
+        );
+      },
+    );
+  });
+}
+
+async function postmasterSegment(directory: string) {
+  const line = (await readFile(join(directory, "postmaster.pid"), "utf8")).split("\n")[6] ?? "";
+  const match = /^\s*\d+\s+(\d+)\s*$/.exec(line);
+  if (!match) throw new Error("PostgreSQL did not record its shared memory segment");
+  return Number(match[1]);
+}
+
+for (const frozen of [false, true]) {
+  test(`a native PostgreSQL closed while a client session is open leaves no shared memory segment behind ${frozen ? "when it cannot shut down and is killed at the stop deadline" : "after its fast shutdown"}`, async () => {
+    const fixture = await createNativeFixture();
+    let db: SQL | undefined;
+    try {
+      const pg = await fixture.startPostgres();
+      db = new SQL(pg.url, { max: 1 });
+      expect(await db`SELECT 1 AS ok`).toEqual([{ ok: 1 }]);
+      const segment = await postmasterSegment(pg.directory);
+      expect(await sharedMemorySegments()).toContain(segment);
+      if (frozen) process.kill(pg.pid, "SIGSTOP");
+      await empty(fixture);
+      expect(exists(pg.pid)).toBe(false);
+      expect(await sharedMemorySegments()).not.toContain(segment);
+    } finally {
+      await db?.close({ timeout: 0 }).catch(() => undefined);
+      await fixture.close();
+    }
+  });
+}
+
 test("native child HTTP readiness excludes ambient secrets and automatic dotenv loading", async () => {
   const fixture = await createNativeFixture();
   const previous = process.env.T14_AMBIENT_SECRET;
@@ -682,13 +731,14 @@ async function coreApiProcesses() {
 }
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  test(`durability ${signal} during initialized native services fails visibly after owned resources reach zero and leaves no Core API child running`, async () => {
+  test(`durability ${signal} during initialized native services fails visibly after owned resources reach zero and leaves no Core API child or PostgreSQL shared memory segment behind`, async () => {
     const options = nativeFixtureOptions();
     const existing = await coreApiProcesses();
     const directories = await identityDirectories();
     const orphans = async () => [...(await coreApiProcesses())].filter((pid) => !existing.has(pid));
     const leftovers = async () =>
       [...(await identityDirectories())].filter((name) => !directories.has(name));
+    const segments = await sharedMemorySegments();
     const child = Bun.spawn([process.execPath, "--no-env-file", script], {
       env: nativeChildEnvironment({
         PG_TOOLS_DIRECTORY: options.postgresToolsDirectory,
@@ -726,6 +776,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
       expect(await Bun.file(directory).exists()).toBe(false);
       expect(await orphans()).toEqual([]);
       expect(await leftovers()).toEqual([]);
+      expect([...(await sharedMemorySegments())].filter((id) => !segments.has(id))).toEqual([]);
     } finally {
       for (const pid of await orphans()) process.kill(pid, "SIGKILL");
       for (const name of await leftovers())

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import {
   chmod,
@@ -122,7 +122,52 @@ export interface NativeProcess {
   readonly exited: Promise<number | null>;
   readonly running: boolean;
   readonly output: string;
+  readonly killed: boolean;
   stop(signal?: "SIGTERM" | "SIGKILL"): Promise<void>;
+}
+
+interface Shutdown {
+  signal: NodeJS.Signals;
+  leaderOnly: boolean;
+}
+
+interface Segment {
+  key: number;
+  id: number;
+}
+
+async function postmasterSegment(data: string): Promise<Segment | undefined> {
+  const text = await readFile(join(data, "postmaster.pid"), "utf8").catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  });
+  const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(text.split("\n")[6] ?? "");
+  return match ? { key: Number(match[1]), id: Number(match[2]) } : undefined;
+}
+
+function system(command: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      command,
+      args,
+      { env: nativeChildEnvironment(), timeout: 1000, maxBuffer: 1048576 },
+      (error, output) => (error ? reject(error) : resolve(output)),
+    );
+  });
+}
+
+async function releaseSegment(segment: Segment): Promise<void> {
+  try {
+    const listed = (await system("/usr/bin/ipcs", ["-m"])).split("\n").some((line) => {
+      const darwin = /^m\s+(\d+)\s+(0x[0-9a-f]+)\s/.exec(line);
+      const linux = /^(0x[0-9a-f]+)\s+(\d+)\s/.exec(line);
+      const [id, key] = darwin ? [darwin[1], darwin[2]] : linux ? [linux[2], linux[1]] : [];
+      return Number(id) === segment.id && Number.parseInt(key ?? "", 16) === segment.key;
+    });
+    if (listed) await system("/usr/bin/ipcrm", ["-m", String(segment.id)]);
+  } catch (error) {
+    throw new Error("PostgreSQL shared memory release failed", { cause: error });
+  }
 }
 
 async function startProcess(
@@ -131,6 +176,7 @@ async function startProcess(
   name: string,
   stopTimeoutMs: number,
   onFailure: (error: Error) => void,
+  shutdown: Shutdown = { signal: "SIGTERM", leaderOnly: false },
 ): Promise<NativeProcess> {
   const previousMask = process.umask(0o077);
   const child = (() => {
@@ -184,20 +230,28 @@ async function startProcess(
     readersClosed = true;
   });
   let stopped: Promise<void> | undefined;
+  let killed = false;
   async function stop(signal: "SIGTERM" | "SIGKILL" = "SIGTERM"): Promise<void> {
     if (stopped) return stopped;
     stopped = (async () => {
-      const signalGroup = (value: NodeJS.Signals) => {
+      const send = (value: NodeJS.Signals, target: number) => {
         try {
-          process.kill(-pid, value);
+          process.kill(target, value);
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
         }
       };
-      if ((await members(pid)).length) signalGroup(signal);
+      const kill = () => {
+        killed = true;
+        send("SIGKILL", -pid);
+      };
+      if ((await members(pid)).length) {
+        if (signal === "SIGKILL") kill();
+        else send(shutdown.signal, shutdown.leaderOnly ? pid : -pid);
+      }
       const deadline = Date.now() + (signal === "SIGKILL" ? 0 : stopTimeoutMs);
       while (Date.now() < deadline && (await members(pid)).length) await Bun.sleep(20);
-      if ((await members(pid)).length) signalGroup("SIGKILL");
+      if ((await members(pid)).length) kill();
       await within(exited, 2000, `${name} reap`);
       const end = Date.now() + 2000;
       while ((await members(pid)).length) {
@@ -227,6 +281,9 @@ async function startProcess(
     },
     get output() {
       return output;
+    },
+    get killed() {
+      return killed;
     },
     stop,
   };
@@ -298,6 +355,7 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
   const processes: NativeProcess[] = [];
   const launches = new Set<Promise<NativeProcess>>();
   const ports: number[] = [];
+  const clusters: { child: NativeProcess; data: string }[] = [];
   let failure: Error | undefined;
   let closing: Promise<void> | undefined;
   let removed = false;
@@ -345,12 +403,15 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
     name: string,
     command: string[],
     env: Record<string, string> = {},
+    shutdown?: Shutdown,
   ): Promise<NativeProcess> {
     healthy();
-    const pending = startProcess(command, env, name, stopTimeoutMs, fail).then((child) => {
-      processes.push(child);
-      return child;
-    });
+    const pending = startProcess(command, env, name, stopTimeoutMs, fail, shutdown).then(
+      (child) => {
+        processes.push(child);
+        return child;
+      },
+    );
     launches.add(pending);
     try {
       const child = await pending;
@@ -419,7 +480,13 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
       `listen_addresses = '127.0.0.1'\nport = ${port}\nunix_socket_directories = '${socket}'\ncluster_name = '${name}'\nshared_buffers = '32MB'\nwork_mem = '2MB'\nmax_connections = 64\nmax_wal_size = '64MB'\nmin_wal_size = '32MB'\nfsync = on\nsynchronous_commit = on\nfull_page_writes = on\nlog_min_messages = warning\nlog_min_error_statement = panic\nlog_error_verbosity = terse\n`,
       { mode: 0o600 },
     );
-    const child = await launch("postgres", [postgres.path, "-D", data]);
+    const child = await launch(
+      "postgres",
+      [postgres.path, "-D", data],
+      {},
+      { signal: "SIGINT", leaderOnly: true },
+    );
+    clusters.push({ child, data });
     const url = `postgres://${username}:${password}@127.0.0.1:${port}/postgres`;
     const db = new SQL(url, {
       max: 1,
@@ -553,11 +620,20 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
     clearInterval(budgetTimer);
     closing = (async () => {
       await Promise.allSettled(launches);
+      const segments = await Promise.all(
+        clusters.map(async ({ child, data }) => ({
+          child,
+          segment: await postmasterSegment(data).catch(() => undefined),
+        })),
+      );
       const results = await Promise.allSettled(processes.map((child) => child.stop()));
       await budgetWork;
       const errors = results.flatMap((result) =>
         result.status === "rejected" ? [result.reason] : [],
       );
+      for (const { child, segment } of segments)
+        if (child.killed && segment !== undefined)
+          await releaseSegment(segment).catch((error: unknown) => errors.push(error));
       const alive = (await resources()).processes;
       if (alive.length) errors.push(new Error("Native fixture still owns live process groups"));
       if (!alive.length) {

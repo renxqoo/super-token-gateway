@@ -174,6 +174,8 @@ export const internalErrorSchema = z.strictObject({
       "identity_store_unavailable",
       "command_conflict",
       "quota_unavailable",
+      "quota_limited",
+      "channel_capacity",
       "quota_release_denied",
       "candidate_stale",
       "cost_unbounded",
