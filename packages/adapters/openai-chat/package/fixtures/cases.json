@@ -1810,12 +1810,12 @@
       ]
     },
     {
-      "name": "resource kinds other than responses, files and batches are unsupported",
+      "name": "resource kinds outside responses, files, batches and videos are unsupported",
       "steps": [
         {
           "action": "invoke",
           "hook": "resource_prepare",
-          "input": "eyJraW5kIjogInZpZGVvIiwgImFjdGlvbiI6ICJnZXQiLCAicmVtb3RlX2lkIjogInZpZGVvLTEifQ==",
+          "input": "eyJraW5kIjogIm9wZXJhdGlvbiIsICJhY3Rpb24iOiAiZ2V0IiwgInJlbW90ZV9pZCI6ICJvcC0xIn0=",
           "expected": {
             "abi_version": 1,
             "kind": "failure",
@@ -2245,6 +2245,275 @@
             }
           },
           "expected_body": "eyJpZCI6ImJhdGNoXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwib2JqZWN0IjoiYmF0Y2giLCJlbmRwb2ludCI6Ii92MS9jaGF0L2NvbXBsZXRpb25zIiwiaW5wdXRfZmlsZV9pZCI6ImZpbGUtaW4iLCJzdGF0dXMiOiJ2YWxpZGF0aW5nIiwib3V0cHV0X2ZpbGVfaWQiOm51bGwsImVycm9yX2ZpbGVfaWQiOm51bGx9"
+        }
+      ]
+    },
+    {
+      "name": "a video request is sent to the upstream videos path with its requested seconds as the ceiling",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "videos",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm9tcHQiOiLmtbfmtaoiLCJzZWNvbmRzIjoiOCJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "prepared",
+            "request": {
+              "method": "POST",
+              "path": "/v1/videos",
+              "auth": {
+                "type": "bearer"
+              },
+              "manifest": {
+                "operation": "videos",
+                "model": "logical",
+                "upstream_model": "upstream",
+                "stream": false,
+                "ceilings": {
+                  "video_seconds": "8"
+                }
+              }
+            }
+          },
+          "expected_body": "eyJtb2RlbCI6InVwc3RyZWFtIiwicHJvbXB0Ijoi5rW35rWqIiwic2Vjb25kcyI6IjgifQ=="
+        }
+      ]
+    },
+    {
+      "name": "a video request with an invalid duration is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "videos",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm9tcHQiOiJ4Iiwic2Vjb25kcyI6IjAifQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 400,
+            "code": "invalid_request"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a streaming video request is refused",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "prepare",
+          "metadata": {
+            "operation": "videos",
+            "model": "logical"
+          },
+          "body": "eyJtb2RlbCI6ImxvZ2ljYWwiLCJwcm9tcHQiOiJ4Iiwic3RyZWFtIjp0cnVlfQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 400,
+            "code": "invalid_stream"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a queued video is answered with the gateway identity and stays pending",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "videos",
+            "model": "logical",
+            "resource_id": "video_0123456789abcdef0123456789abcdef"
+          },
+          "body": "eyJpZCI6InZpZGVvX3VwIiwib2JqZWN0IjoidmlkZW8iLCJtb2RlbCI6InNvcmEtdXAiLCJzdGF0dXMiOiJxdWV1ZWQiLCJzZWNvbmRzIjoiOCJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "finality": "UNKNOWN",
+            "terminal": {
+              "kind": "pending",
+              "bytes": ""
+            },
+            "resource": {
+              "kind": "video",
+              "remote_id": "video_up"
+            }
+          },
+          "expected_body": "eyJpZCI6InZpZGVvXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwib2JqZWN0IjoidmlkZW8iLCJtb2RlbCI6ImxvZ2ljYWwiLCJzdGF0dXMiOiJxdWV1ZWQiLCJzZWNvbmRzIjoiOCJ9"
+        }
+      ]
+    },
+    {
+      "name": "a completed video is metered by its final seconds",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "videos",
+            "model": "logical",
+            "resource_id": "video_0123456789abcdef0123456789abcdef"
+          },
+          "body": "eyJpZCI6InZpZGVvX3VwIiwib2JqZWN0IjoidmlkZW8iLCJtb2RlbCI6InNvcmEtdXAiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJzZWNvbmRzIjoiOCJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "usage": {
+              "video_seconds": "8"
+            },
+            "finality": "FINAL",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            },
+            "resource": {
+              "kind": "video",
+              "remote_id": "video_up"
+            }
+          },
+          "expected_body": "eyJpZCI6InZpZGVvXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwib2JqZWN0IjoidmlkZW8iLCJtb2RlbCI6ImxvZ2ljYWwiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJzZWNvbmRzIjoiOCJ9"
+        }
+      ]
+    },
+    {
+      "name": "a failed video is an upstream error",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "response",
+          "metadata": {
+            "operation": "videos",
+            "model": "logical",
+            "resource_id": "video_0123456789abcdef0123456789abcdef"
+          },
+          "body": "eyJpZCI6InZpZGVvX3VwIiwib2JqZWN0IjoidmlkZW8iLCJzdGF0dXMiOiJmYWlsZWQiLCJlcnJvciI6eyJjb2RlIjoieCJ9fQ==",
+          "expected": {
+            "abi_version": 1,
+            "kind": "failure",
+            "status": 502,
+            "code": "upstream_error"
+          }
+        }
+      ]
+    },
+    {
+      "name": "video resource actions map to the upstream video paths",
+      "steps": [
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "eyJraW5kIjogInZpZGVvIiwgImFjdGlvbiI6ICJnZXQiLCAicmVtb3RlX2lkIjogInZpZGVvX3VwIn0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "resource_request",
+            "request": {
+              "method": "GET",
+              "path": "/v1/videos/video_up",
+              "headers": {
+                "accept": "application/json"
+              },
+              "auth": {
+                "type": "bearer"
+              }
+            }
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "eyJraW5kIjogInZpZGVvIiwgImFjdGlvbiI6ICJkZWxldGUiLCAicmVtb3RlX2lkIjogInZpZGVvX3VwIn0=",
+          "expected": {
+            "abi_version": 1,
+            "kind": "resource_request",
+            "request": {
+              "method": "DELETE",
+              "path": "/v1/videos/video_up",
+              "headers": {
+                "accept": "application/json"
+              },
+              "auth": {
+                "type": "bearer"
+              }
+            }
+          }
+        },
+        {
+          "action": "invoke",
+          "hook": "resource_prepare",
+          "input": "eyJraW5kIjogInZpZGVvIiwgImFjdGlvbiI6ICJjb250ZW50IiwgInJlbW90ZV9pZCI6ICJ2aWRlb191cCJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "resource_request",
+            "request": {
+              "method": "GET",
+              "path": "/v1/videos/video_up/content",
+              "headers": {
+                "accept": "*/*"
+              },
+              "auth": {
+                "type": "bearer"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "a retrieved video is answered with the gateway identity and logical model",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "resource_response",
+          "metadata": {
+            "model": "logical",
+            "action": "get",
+            "resource_id": "video_0123456789abcdef0123456789abcdef"
+          },
+          "body": "eyJpZCI6InZpZGVvX3VwIiwib2JqZWN0IjoidmlkZW8iLCJtb2RlbCI6InNvcmEtdXAiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJzZWNvbmRzIjoiOCJ9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "finality": "UNKNOWN",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            }
+          },
+          "expected_body": "eyJpZCI6InZpZGVvXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwib2JqZWN0IjoidmlkZW8iLCJtb2RlbCI6ImxvZ2ljYWwiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJzZWNvbmRzIjoiOCJ9"
+        }
+      ]
+    },
+    {
+      "name": "a deleted video is answered with the gateway identity",
+      "steps": [
+        {
+          "action": "json",
+          "hook": "resource_response",
+          "metadata": {
+            "model": "logical",
+            "action": "delete",
+            "resource_id": "video_0123456789abcdef0123456789abcdef"
+          },
+          "body": "eyJpZCI6InZpZGVvX3VwIiwib2JqZWN0IjoidmlkZW8uZGVsZXRlZCIsImRlbGV0ZWQiOnRydWV9",
+          "expected": {
+            "abi_version": 1,
+            "kind": "output",
+            "finality": "UNKNOWN",
+            "terminal": {
+              "kind": "complete",
+              "bytes": ""
+            }
+          },
+          "expected_body": "eyJpZCI6InZpZGVvXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwib2JqZWN0IjoidmlkZW8uZGVsZXRlZCIsImRlbGV0ZWQiOnRydWV9"
         }
       ]
     }

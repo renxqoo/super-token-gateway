@@ -43,7 +43,7 @@ bun run plugins:install-bundled --admin-url https://core.example/admin --credent
 
 2026111204 追加真实 Drizzle `0002_plugin_catalog` 与受控 SQL；既有 v2/v3 SQL、checksum 和 snapshot 不变。package_bytes 存完整 SDK wire envelope，因此数据库上限从 decoded 32MiB 修正为 wire 44MiB；SDK 仍独立执行 decoded 总量、单文件与 fixtures 上限。历史 rows 原样保留，未有 signed descriptor 的历史包不能通过新 application 发布。
 
-流程是 immutable UPLOADED → 持久 leased VALIDATING → public `runPluginFixtures` 原生 helper → close/wait/reap 确认 → VALIDATED → 同事务 publication receipt/audit/PUBLISHED revision。实际 builtin（openai-chat 1.8.0）fixture 期望是 75 cases、101 steps，涵盖精确数字、缺 usage、错误、SSE 截断、取消、Responses 透传与资源身份改写/资源动作、后台 Responses 的待定用量、文件上传与文件资源动作、Batch 创建与资源动作、embeddings/moderations/completions 原生操作与图片/音频等。结果只存有界 cases/steps、cleanup_confirmed 和错误类别，不存请求正文或 helper stdout。
+流程是 immutable UPLOADED → 持久 leased VALIDATING → public `runPluginFixtures` 原生 helper → close/wait/reap 确认 → VALIDATED → 同事务 publication receipt/audit/PUBLISHED revision。实际 builtin（openai-chat 1.9.0）fixture 期望是 84 cases、112 steps，涵盖精确数字、缺 usage、错误、SSE 截断、取消、Responses 透传与资源身份改写/资源动作、后台 Responses 的待定用量、文件上传与文件资源动作、Batch 创建与资源动作、视频创建与终态秒数计量、embeddings/moderations/completions 原生操作与图片/音频等。结果只存有界 cases/steps、cleanup_confirmed 和错误类别，不存请求正文或 helper stdout。
 
 每次显式验证命令至多一个 run；run 固定 package/fixture/runtime/policy digest、requesting actor、owner/epoch/expiry。active slot 不被新 run 替换。失败只能 REJECTED；新命令可显式重验。无法确认清理时为 CLEANUP_PENDING，禁止发布和重叠验证。资源登记只含本 run helper pid/connection；恢复器不杀任意 PID，只在已登记进程组确认不存在时失败收尾，递增 epoch 后旧 epoch 不能提交。资源登记缺失或进程组仍存在时保持待清理，需要运维处理，不无限重试、不自动成功。正常关闭合并为一个 Promise；application shutdown 等待从启动阶段起的验证结束，数据库最后关闭。
 

@@ -15,7 +15,7 @@ const install = () => ({
   reason: "Synthetic accepted builtin installation",
 });
 test(
-  "signed builtin CLI validates 75 cases and 101 steps before atomic publication and revisioned HTTP binding",
+  "signed builtin CLI validates 84 cases and 112 steps before atomic publication and revisioned HTTP binding",
   () =>
     withCatalog(async (f, db) => {
       const server = Bun.serve({
@@ -57,8 +57,8 @@ test(
         )[0];
         expect(run.state).toBe("SUCCEEDED");
         expect(run.result).toEqual({
-          cases: 75,
-          steps: 101,
+          cases: 84,
+          steps: 112,
           cleanup_confirmed: true,
           error_code: null,
         });
@@ -443,7 +443,7 @@ test("expired validation recovery advances epoch without adopting unknown result
           version_id: id,
           run_id: start.run_id,
           lease_epoch: "1",
-          result: { cases: 75, steps: 101, cleanup_confirmed: true, error_code: null },
+          result: { cases: 84, steps: 112, cleanup_confirmed: true, error_code: null },
           reason: "Old epoch cannot succeed",
         },
         owner,
@@ -568,7 +568,7 @@ test("cleanup confirmation loss persists CLEANUP_PENDING and blocks publication 
     const bytes = await Bun.file(resolve(f.directory, openAIChatReleaseId, "package.json")).bytes(),
       verified = await verifyRelease(bytes, f.release, f.policy, d.runtime_digest);
     const actual = await validateCatalogPackage(verified.pkg, catalogHelper);
-    expect(actual).toEqual({ cases: 75, steps: 101, cleanup_confirmed: true, error_code: null });
+    expect(actual).toEqual({ cases: 84, steps: 112, cleanup_confirmed: true, error_code: null });
     const lostConfirmation = { ...actual, cleanup_confirmed: false, error_code: "CLEANUP_PENDING" };
     const result = await store.command(
       "plugin_finish_v1",

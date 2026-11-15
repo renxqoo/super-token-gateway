@@ -17,7 +17,7 @@ gateway.example.com {
 			lb_try_duration 0s
 		}
 	}
-	@resources path /v1/responses /v1/responses/* /v1/files /v1/files/* /v1/batches /v1/batches/*
+	@resources path /v1/responses /v1/responses/* /v1/files /v1/files/* /v1/batches /v1/batches/* /v1/videos /v1/videos/*
 	handle @resources {
 		reverse_proxy 127.0.0.1:8090 127.0.0.1:8091 {
 			lb_policy least_conn

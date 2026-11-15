@@ -147,6 +147,24 @@ export function createGatewayApp(
   app.post("/v1/responses", (c) => serve(c, "responses"));
   app.post("/v1/files", (c) => serve(c, "files"));
   app.post("/v1/batches", (c) => serve(c, "batches"));
+  app.post("/v1/videos", (c) => serve(c, "videos"));
+  app.get("/v1/videos", (c) =>
+    handle(c, (inbound) =>
+      listResources(deps, inbound, "video", {
+        limit: c.req.query("limit"),
+        after: c.req.query("after"),
+      }),
+    ),
+  );
+  app.get("/v1/videos/:id", (c) =>
+    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "get")),
+  );
+  app.delete("/v1/videos/:id", (c) =>
+    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "delete")),
+  );
+  app.get("/v1/videos/:id/content", (c) =>
+    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "content")),
+  );
   app.get("/v1/batches", (c) =>
     handle(c, (inbound) =>
       listResources(deps, inbound, "batch", {

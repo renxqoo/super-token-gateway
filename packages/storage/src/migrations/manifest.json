@@ -215,6 +215,15 @@
           "checksum": "850ca9ecf69ef43226eda4cd5261126af87e1a45e6ea1ce4aa1f7ef5bb5a6b5e"
         }
       ]
+    },
+    {
+      "version": 2026111222,
+      "files": [
+        {
+          "path": "./sql/core-videos.sql",
+          "checksum": "69c8eb9e83b467b43fab09f1eee64a9e01395877eaf82cf95cc742c77b2f9f45"
+        }
+      ]
     }
   ]
 }

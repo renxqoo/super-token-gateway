@@ -227,7 +227,7 @@ async function observeBatch(
 async function observe(deps: ChatDependencies, lease: Lease, stop: AbortSignal): Promise<Release> {
   const resolution = lease.resolution,
     deadlineAt = Date.parse(resolution.deadline_at);
-  if (!["response", "batch"].includes(resolution.kind) || !resolution.model) return retry;
+  if (!["response", "batch", "video"].includes(resolution.kind) || !resolution.model) return retry;
   const pkg = await deps.packages.get(resolution.package_digest, resolution.deadline_at);
   const owner = await deps.core.startup();
   const open: Opener = () =>
@@ -265,7 +265,11 @@ async function observe(deps: ChatDependencies, lease: Lease, stop: AbortSignal):
     const bytes = await readBounded(response.body, deps.config.max_response_bytes, signal);
     const { result } = await attempt.transformJSON(
       "response",
-      { protocol: "responses", model: resolution.model, resource_id: resolution.resource_id },
+      {
+        ...(resolution.kind === "video" ? { operation: "videos" } : { protocol: "responses" }),
+        model: resolution.model,
+        resource_id: resolution.resource_id,
+      },
       bytes,
       signal,
     );

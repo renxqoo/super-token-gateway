@@ -1,7 +1,7 @@
 {
   "format": 1,
   "id": "gateway.openai-chat",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "abi_version": 1,
   "sdk_version": "1.0.0",
   "module": "module.wasm",
@@ -20,7 +20,8 @@
       "transcription",
       "translation",
       "files",
-      "batches"
+      "batches",
+      "videos"
     ],
     "dimensions": [
       "input_tokens",
@@ -31,7 +32,8 @@
       "images",
       "characters",
       "audio_ms",
-      "audio_seconds"
+      "audio_seconds",
+      "video_seconds"
     ],
     "protocols": ["chat", "responses"],
     "hooks": [

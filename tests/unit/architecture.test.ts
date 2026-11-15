@@ -169,7 +169,7 @@ test("deployment units start built entries, keep v2 processes under separate use
   expect(caddy).not.toMatch(/\/admin|\/_internal/);
   const resources = caddy.indexOf("handle @resources");
   expect(caddy).toContain(
-    "@resources path /v1/responses /v1/responses/* /v1/files /v1/files/* /v1/batches /v1/batches/*\n",
+    "@resources path /v1/responses /v1/responses/* /v1/files /v1/files/* /v1/batches /v1/batches/* /v1/videos /v1/videos/*\n",
   );
   expect(resources).toBeGreaterThan(chat);
   expect(resources).toBeLessThan(legacy);

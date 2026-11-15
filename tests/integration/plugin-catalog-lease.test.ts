@@ -299,7 +299,7 @@ test(
           );
         },
       });
-      expect(result).toEqual({ cases: 75, steps: 101, cleanup_confirmed: true, error_code: null });
+      expect(result).toEqual({ cases: 84, steps: 112, cleanup_confirmed: true, error_code: null });
       expect(() => process.kill(-pid, 0)).toThrow();
       const command = crypto.randomUUID(),
         finishBody = { ...body, result };

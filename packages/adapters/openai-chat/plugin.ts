@@ -440,6 +440,106 @@ function batchesResponse(value: DocumentInput) {
     resource: { kind: "batch", remote_id: identity.resource.remote_id },
   };
 }
+function videoSeconds(literal: unknown, status: 400 | 502) {
+  const text = typeof literal === "number" ? String(literal) : literal;
+  if (
+    typeof text !== "string" ||
+    !/^(0|[1-9][0-9]{0,4})(\.[0-9]{1,3})?$/.test(text) ||
+    Number(text) <= 0 ||
+    Number(text) > 3600
+  )
+    throw new AdapterFailure(status, status === 400 ? "invalid_request" : "invalid_upstream_usage");
+  return text.includes(".") ? text.replace(/0+$/, "").replace(/\.$/, "") : text;
+}
+function prepareVideos(input: GuestInput, value: DocumentInput) {
+  const form = value.content === "multipart";
+  const query = inspect(value, ["", "/model", "/prompt", "/seconds", "/stream"]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object" || typeof scalar(value, "/prompt", 400) !== "string")
+    throw new AdapterFailure(400, "invalid_request");
+  const stream = scalar(value, "/stream", 400);
+  if (stream !== undefined && stream !== false && stream !== "false")
+    throw new AdapterFailure(400, "invalid_stream");
+  const upstream = object(input.config.model_map, 400)[value.model!];
+  if (typeof upstream !== "string" || !upstream || scalar(value, "/model", 400) !== value.model)
+    throw new AdapterFailure(422, "model_unavailable");
+  if (input.config.path_style === "azure") throw new AdapterFailure(422, "unsupported_capability");
+  const seconds = scalar(value, "/seconds", 400);
+  return {
+    abi_version: 1,
+    kind: "prepared",
+    request: {
+      method: "POST",
+      path: "/v1/videos",
+      headers: { accept: "application/json" },
+      body: {
+        document: value.document.handle,
+        edits: [{ op: "set", pointer: "/model", value: JSON.stringify(upstream) }],
+      },
+      ...(form ? { body_format: "multipart" } : {}),
+      auth: authOf(input),
+      manifest: {
+        operation: "videos",
+        model: value.model,
+        upstream_model: upstream,
+        stream: false,
+        ceilings: seconds === undefined ? {} : { video_seconds: videoSeconds(seconds, 400) },
+        input_bytes: value.document.bytes,
+      },
+    },
+  };
+}
+function videosResponse(value: DocumentInput) {
+  const query = inspect(value, [
+    "",
+    "/id",
+    "/object",
+    "/model",
+    "/status",
+    "/seconds",
+    "/error",
+    "/usage/video_seconds",
+  ]);
+  if (query) return query;
+  if (fact(value, "").kind !== "object" || scalar(value, "/object") !== "video")
+    fail("invalid_object");
+  const status = scalar(value, "/status");
+  if (status === "failed" || !["missing", "null"].includes(fact(value, "/error").kind))
+    fail("upstream_error");
+  const identity = identityEdits(value, "/id", value.resource_id);
+  if (!identity.resource) fail("invalid_object");
+  const edits = [
+    ...identity.edits,
+    ...(value.model ? modelEdit(value, "/model", value.model) : []),
+  ];
+  const resource = { kind: "video", remote_id: identity.resource.remote_id };
+  if (status === "queued" || status === "in_progress")
+    return {
+      abi_version: 1,
+      kind: "output",
+      consumed: 0,
+      chunks: [],
+      body: { document: value.document.handle, edits },
+      finality: "UNKNOWN",
+      terminal: { kind: "pending", bytes: "" },
+      needs_input: false,
+      resource,
+    };
+  if (status !== "completed") fail("invalid_object");
+  const reported = scalar(value, "/usage/video_seconds");
+  return {
+    abi_version: 1,
+    kind: "output",
+    consumed: 0,
+    chunks: [],
+    body: { document: value.document.handle, edits },
+    usage: { video_seconds: videoSeconds(reported ?? scalar(value, "/seconds"), 502) },
+    finality: "FINAL",
+    terminal: { kind: "complete", bytes: "" },
+    needs_input: false,
+    resource,
+  };
+}
 function filesResponse(value: DocumentInput) {
   const query = inspect(value, ["", "/id", "/object", "/error"]);
   if (query) return query;
@@ -463,17 +563,20 @@ function filesResponse(value: DocumentInput) {
 }
 function responsesResource(value: DocumentInput) {
   const file = value.resource_id?.startsWith("file_") === true,
-    batch = value.resource_id?.startsWith("batch_") === true;
+    batch = value.resource_id?.startsWith("batch_") === true,
+    video = value.resource_id?.startsWith("video_") === true;
   const objects: Record<string, string> = file
     ? { get: "file", delete: "file" }
-    : batch
-      ? { get: "batch", cancel: "batch" }
-      : {
-          get: "response",
-          cancel: "response",
-          delete: "response",
-          input_items: "list",
-        };
+    : video
+      ? { get: "video", delete: "video.deleted" }
+      : batch
+        ? { get: "batch", cancel: "batch" }
+        : {
+            get: "response",
+            cancel: "response",
+            delete: "response",
+            input_items: "list",
+          };
   const query = inspect(value, ["", "/id", "/object", "/model", "/error"]);
   if (query) return query;
   if (fact(value, "").kind !== "object") fail("invalid_object");
@@ -502,7 +605,7 @@ function resourceRequest(input: GuestInput, payload: Record<string, unknown>) {
   const remote = payload.remote_id,
     action = payload.action;
   if (
-    !["response", "file", "batch"].includes(String(payload.kind)) ||
+    !["response", "file", "batch", "video"].includes(String(payload.kind)) ||
     typeof remote !== "string" ||
     !/^[A-Za-z0-9_.:-]{1,200}$/.test(remote) ||
     typeof action !== "string"
@@ -514,12 +617,14 @@ function resourceRequest(input: GuestInput, payload: Record<string, unknown>) {
       ? { get: ["GET", ""], delete: ["DELETE", ""], content: ["GET", "/content"] }
       : payload.kind === "batch"
         ? { get: ["GET", ""], cancel: ["POST", "/cancel"] }
-        : {
-            get: ["GET", ""],
-            delete: ["DELETE", ""],
-            cancel: ["POST", "/cancel"],
-            input_items: ["GET", "/input_items"],
-          };
+        : payload.kind === "video"
+          ? { get: ["GET", ""], delete: ["DELETE", ""], content: ["GET", "/content"] }
+          : {
+              get: ["GET", ""],
+              delete: ["DELETE", ""],
+              cancel: ["POST", "/cancel"],
+              input_items: ["GET", "/input_items"],
+            };
   const route = suffix[action];
   if (!route) throw new AdapterFailure(422, "unsupported_capability");
   return {
@@ -527,7 +632,7 @@ function resourceRequest(input: GuestInput, payload: Record<string, unknown>) {
     kind: "resource_request",
     request: {
       method: route[0],
-      path: `/v1/${{ file: "files", batch: "batches" }[String(payload.kind)] ?? "responses"}/${remote}${route[1]}`,
+      path: `/v1/${{ file: "files", batch: "batches", video: "videos" }[String(payload.kind)] ?? "responses"}/${remote}${route[1]}`,
       headers: { accept: action === "content" ? "*/*" : "application/json" },
       auth: authOf(input),
     },
@@ -1034,7 +1139,8 @@ function prepare(input: GuestInput, value: DocumentInput) {
     value.content === "multipart" &&
     !imageOperations.includes(value.operation ?? "") &&
     !audioOperations.includes(value.operation ?? "") &&
-    value.operation !== "files"
+    value.operation !== "files" &&
+    value.operation !== "videos"
   )
     throw new AdapterFailure(422, "unsupported_semantics");
   if (value.protocol === undefined && value.operation === "files")
@@ -1045,6 +1151,8 @@ function prepare(input: GuestInput, value: DocumentInput) {
     value.content !== "multipart"
   )
     return prepareBatches(input, value);
+  if (value.protocol === undefined && value.operation === "videos")
+    return prepareVideos(input, value);
   if (value.protocol === "responses" && value.operation === "responses")
     return prepareResponses(input, value);
   if (value.protocol === undefined && nativeOperations.includes(value.operation ?? ""))
@@ -1480,16 +1588,19 @@ export function invoke() {
                 ? filesResponse(value)
                 : value.protocol === undefined && value.operation === "batches"
                   ? batchesResponse(value)
-                  : value.protocol === undefined && nativeOperations.includes(value.operation ?? "")
-                    ? nativeResponse(value)
+                  : value.protocol === undefined && value.operation === "videos"
+                    ? videosResponse(value)
                     : value.protocol === undefined &&
-                        imageOperations.includes(value.operation ?? "")
-                      ? imagesResponse(value)
-                      : value.operation === "transcription" || value.operation === "translation"
-                        ? transcriptResponse(value)
-                        : value.operation === "speech"
-                          ? fail("invalid_object")
-                          : response(input, value),
+                        nativeOperations.includes(value.operation ?? "")
+                      ? nativeResponse(value)
+                      : value.protocol === undefined &&
+                          imageOperations.includes(value.operation ?? "")
+                        ? imagesResponse(value)
+                        : value.operation === "transcription" || value.operation === "translation"
+                          ? transcriptResponse(value)
+                          : value.operation === "speech"
+                            ? fail("invalid_object")
+                            : response(input, value),
         state: null,
       };
     }

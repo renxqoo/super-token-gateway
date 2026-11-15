@@ -615,6 +615,7 @@ function createdResource(facts: Facts, admitted: Admitted) {
   if (facts.operation === "responses") return publicResourceId("response", facts.requestId);
   if (facts.operation === "files") return publicResourceId("file", facts.requestId);
   if (facts.operation === "batches") return publicResourceId("batch", facts.requestId);
+  if (facts.operation === "videos") return publicResourceId("video", facts.requestId);
   return undefined;
 }
 
@@ -1103,7 +1104,8 @@ async function relayJSON(
     !result.terminal ||
     !transformed.body ||
     (pending &&
-      (!(facts.background || facts.operation === "batches") || !createdResource(facts, admitted)))
+      (!(facts.background || facts.operation === "batches" || facts.operation === "videos") ||
+        !createdResource(facts, admitted)))
   )
     return finalFailure(
       { attempt_state: "UNKNOWN", error_code: "upstream_invalid" },

@@ -469,8 +469,8 @@ test("package synthetic fixtures execute through the production WASM ABI", async
   const observers = supervisor.snapshot().observers;
   const result = await runPluginFixtures(supervisor, signed.pkg);
   expect(supervisor.snapshot().observers).toBe(observers);
-  expect(result.cases).toBe(75);
-  expect(result.steps).toBe(101);
+  expect(result.cases).toBe(84);
+  expect(result.steps).toBe(112);
   expect(result.state.attempts).toBe(0);
   expect(result.state.json.bytes).toBe(0);
   const rejected = syntheticSignedPackage(
