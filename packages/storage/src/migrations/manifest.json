@@ -233,6 +233,15 @@
           "checksum": "c04bcb499df981124e7d31057ce950abf76fddd17f3bcc23a5f1ad5e2a5d1e70"
         }
       ]
+    },
+    {
+      "version": 2026111224,
+      "files": [
+        {
+          "path": "./sql/core-operations.sql",
+          "checksum": "84cb635bda476b9ed50abc229877e216c4bef40ec0f529b113141688e975bf2a"
+        }
+      ]
     }
   ]
 }

@@ -31,3 +31,6 @@ GRANT SELECT,INSERT ON event_consumers TO core_management_api;
 GRANT UPDATE(replay_cursor) ON event_consumers TO core_management_api;
 GRANT SELECT,INSERT ON event_deliveries TO core_management_api;
 GRANT UPDATE(state,lease_token,lease_until,attempts) ON event_deliveries TO core_management_api;
+GRANT SELECT(state,granted_at,expires_at) ON execution_permits TO core_management_api;
+GRANT SELECT(attempt_id,binding_id) ON resources TO core_management_api;
+GRANT SELECT(id) ON usage_conflicts TO core_management_api;

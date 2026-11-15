@@ -1,6 +1,7 @@
 import type { SQL } from "bun";
 import { Hono } from "hono";
 import { createDatabase } from "@gateway/storage";
+import { UsageProducer, evidenceChannel } from "@gateway/runtime";
 import { loadCoreApiConfig, type CoreApiConfig } from "./config.ts";
 import { startCoreInternalListener } from "./identity/internal-listener.ts";
 import { createCoreManagementApplication } from "./platform/management.ts";
@@ -121,6 +122,15 @@ function startAdminListener(admin: AdminConfig, execution: Execution) {
     void db.close({ timeout: 1 });
     throw error;
   }
+  const queue = admin.queue
+    ? new UsageProducer({
+        url: admin.queue.url,
+        namespace: admin.queue.namespace,
+        replicas: admin.queue.required_replicas,
+        timeoutMs: admin.queue.ack_timeout_ms,
+        channel: evidenceChannel,
+      })
+    : undefined;
   let stopping = false;
   const app = new Hono<{ Bindings: { peerAddress?: string } }>();
   health(app, db, () => stopping);
@@ -132,6 +142,7 @@ function startAdminListener(admin: AdminConfig, execution: Execution) {
       adminKey: admin.admin_key,
       pepper: execution.pepper,
       encryptionKey: execution.encryptionKey,
+      ...(queue ? { queue } : {}),
     }),
   );
   return serveHttp({
@@ -144,6 +155,7 @@ function startAdminListener(admin: AdminConfig, execution: Execution) {
       stopping = true;
     },
     close: async () => {
+      queue?.close();
       try {
         await catalog?.close();
       } finally {
