@@ -120,7 +120,7 @@ test("a retryable upstream 503 moves the same request to the other channel and c
     },
   ));
 
-test("a client that cancels after a retryable upstream refusal, while the next attempt waits for admission, is never admitted or sent to the next channel and the request closes CANCELLED with its leases released and no charge", () => {
+test("a client that cancels after a retryable upstream refusal, while the next attempt waits for admission, never has that attempt granted or sent to the next channel and the request closes CANCELLED with its leases released and no charge", () => {
   const unlock = stall();
   let lockWallet = async () => ({ transaction: Promise.resolve() as Promise<unknown> });
   let holder: Awaited<ReturnType<typeof lockWallet>> | undefined;
@@ -162,8 +162,16 @@ test("a client that cancels after a retryable upstream refusal, while the next a
       await Bun.sleep(500);
       expect(received).toHaveLength(1);
       expect(
-        await db`SELECT ordinal,error_code FROM attempts WHERE request_id=${requestId} ORDER BY ordinal`,
+        await db`SELECT ordinal,error_code FROM attempts WHERE request_id=${requestId} AND ordinal=1`,
       ).toEqual([{ ordinal: 1, error_code: "upstream_http_503" }]);
+      expect(
+        await db`SELECT p.state,p.granted_at IS NOT NULL AS granted FROM execution_permits p JOIN attempts a ON a.id=p.attempt_id WHERE a.request_id=${requestId} AND a.ordinal>1`,
+      ).not.toContainEqual(expect.objectContaining({ granted: true }));
+      expect(
+        (
+          await db`SELECT p.state FROM execution_permits p JOIN attempts a ON a.id=p.attempt_id WHERE a.request_id=${requestId} AND a.ordinal>1`
+        ).every((row: { state: string }) => row.state === "ABORTED"),
+      ).toBe(true);
       await eventually(
         async () =>
           (

@@ -478,7 +478,7 @@ test(
       await db.unsafe(
         `CREATE FUNCTION admission_gate() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='execution_admit_v1' THEN PERFORM pg_advisory_xact_lock(${gate.key}::bigint);END IF;RETURN NEW;END $$;CREATE TRIGGER admission_gate BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION admission_gate()`,
       );
-      const winner = prepared.admit();
+      const winner = prepared.admit().catch((error: unknown) => error);
       try {
         await financialBlockedBy(db, gate.pid);
         const loser = await rpc.send(
@@ -497,7 +497,11 @@ test(
       } finally {
         await gate.release();
       }
-      const accepted = await winner;
+      const first = await winner;
+      const accepted =
+        first instanceof Error && first.message === "identity_busy"
+          ? await prepared.admit()
+          : (first as ExecutionReply);
       expect(accepted.receipt.state).toBe("RESERVED");
       const begin = (await rpc.execution(
         "execution_begin_v1",

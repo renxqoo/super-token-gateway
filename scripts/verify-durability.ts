@@ -167,6 +167,35 @@ async function verify() {
           reserved: "30",
           spent: "0",
         });
+        checkpoint = "replica fsync acknowledgement after a stalled replica";
+        producer = new UsageProducer({
+          channel: evidenceChannel,
+          url: primaryURL,
+          namespace: `${label}:stall`,
+          replicas: 1,
+          timeoutMs: 3000,
+        });
+        await producer.publish(settled.group);
+        for (let round = 0; round < 5; round++) {
+          let published: Promise<void> | undefined;
+          let resumed = 0;
+          process.kill(replica.pid, "SIGSTOP");
+          try {
+            published = producer.publish(settled.group);
+            await Bun.sleep(200);
+          } finally {
+            resumed = performance.now();
+            process.kill(replica.pid, "SIGCONT");
+          }
+          await published;
+          const waited = performance.now() - resumed;
+          assert.ok(waited < 300, `replica acknowledgement waited ${Math.round(waited)}ms`);
+        }
+        producer.close();
+        producer = undefined;
+        checks.push(
+          "a replica that resumes with a stale fsync acknowledgement confirms evidence without waiting for its periodic ACK",
+        );
         checkpoint = "acknowledged v2 evidence";
         producer = new UsageProducer({
           channel: evidenceChannel,

@@ -7,6 +7,7 @@ export class ExecutionOutcomeUnknown extends Error {
     this.name = "ExecutionOutcomeUnknown";
   }
 }
+const busyRetryMs = 1000;
 export function createExecutionStore(db: SQL) {
   const batch = new Batcher<
     {
@@ -73,9 +74,16 @@ export function createExecutionStore(db: SQL) {
       data: unknown,
       computed: unknown,
     ) {
-      const result = await batch.add({ projection: projection(p), envelope: e, data, computed });
-      if (result.error) throw new Error(String(result.error));
-      return result;
+      const until = Math.min(Date.parse(e.deadline_at), Date.now() + busyRetryMs);
+      for (let delay = 1; ; delay = Math.min(delay * 2, 16)) {
+        const result = await batch.add({ projection: projection(p), envelope: e, data, computed });
+        if (result.error === "identity_busy" && Date.now() + delay < until) {
+          await Bun.sleep(delay);
+          continue;
+        }
+        if (result.error) throw new Error(String(result.error));
+        return result;
+      }
     },
     async recoverAbort(p: CoreVerifiedCallerProjection, e: ExecutionEnvelope, d: unknown) {
       return db.begin(

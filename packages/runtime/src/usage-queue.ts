@@ -50,6 +50,7 @@ const failure = () =>
     "Durable usage acceptance is unavailable; query the original request before retrying",
   );
 
+const waitSliceMs = 25;
 export class UsageProducer<T> {
   private generation: Generation | undefined;
   private readonly stopping = new AbortController();
@@ -262,18 +263,18 @@ export class UsageProducer<T> {
         await this.bounded(async () => {
           await g.queue.add("evidence", payload, { jobId });
           this.backlog++;
-          const proof = (await g.raw.send("WAITAOF", [
-            "1",
-            String(this.options.replicas),
-            String(this.options.timeoutMs),
-          ])) as number[];
-          if (
-            g.broken ||
-            !g.raw.connected ||
-            Number(proof[0]) !== 1 ||
-            Number(proof[1]) < this.options.replicas
-          )
-            throw failure();
+          const until = Date.now() + this.options.timeoutMs;
+          for (;;) {
+            const slice = Math.max(1, Math.min(waitSliceMs, until - Date.now()));
+            const proof = (await g.raw.send("WAITAOF", [
+              "1",
+              String(this.options.replicas),
+              String(slice),
+            ])) as number[];
+            if (g.broken || !g.raw.connected) throw failure();
+            if (Number(proof[0]) === 1 && Number(proof[1]) >= this.options.replicas) break;
+            if (Date.now() >= until) throw failure();
+          }
         }, g);
         return events.map(() => undefined);
       } catch {

@@ -89,3 +89,31 @@ test("a v2 admission for one wallet is not blocked by a transaction holding anot
     await busy.admit();
     expect(await reserved(hot.project.id)).toBe("100");
   }));
+
+test("an admission meeting a briefly held wallet lock is reserved after the lock is released instead of being refused with identity_busy", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap(),
+      client = f.client();
+    await client.startup();
+    const locked = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    const holder = db.begin(async (tx) => {
+      await tx`SELECT id FROM wallets WHERE project_id=${setup.project.id} FOR UPDATE`;
+      locked.resolve();
+      await release.promise;
+    });
+    await locked.promise;
+    const prepared = await prepareFinancialAdmission(setup, client);
+    const admission = prepared.admit();
+    setTimeout(() => release.resolve(), 300);
+    try {
+      expect((await admission).receipt.state).toBe("RESERVED");
+    } finally {
+      release.resolve();
+      await holder;
+    }
+    expect(
+      (await db`SELECT reserved_atoms::text FROM wallets WHERE project_id=${setup.project.id}`)[0]
+        .reserved_atoms,
+    ).toBe("100");
+  }));

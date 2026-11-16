@@ -615,6 +615,7 @@ async function reserve(
           deps,
           { ...abandoned, permitEpoch: receipt.permit_epoch ?? "1" },
           "PREPARE_DISPOSED",
+          !previous,
         );
         throw coreFailure(error);
       }
@@ -746,12 +747,13 @@ async function abortBeforeSend(
   deps: ChatDependencies,
   permit: Permit & { channelId: string },
   reason: "CANCELLED" | "DEADLINE" | "PREPARE_DISPOSED",
+  closeRequest: boolean,
 ) {
   await sameCommand(deps, "execution_abort_v1", {
     attempt_id: permit.attemptId,
     permit_epoch: permit.permitEpoch,
     reason,
-    close_request: true,
+    close_request: closeRequest,
   });
   await reportHealth(deps, permit, "NOT_SENT");
 }
@@ -911,7 +913,12 @@ async function dispatch(
   request: ChatRequest,
   facts: Facts,
   admitted: Admitted,
+  previous: { conclude: (last: boolean) => Promise<void> } | undefined,
 ): Promise<Outcome> {
+  const notSent = async (reason: "CANCELLED" | "DEADLINE" | "PREPARE_DISPOSED") => {
+    await abortBeforeSend(deps, admitted, reason, !previous);
+    await previous?.conclude(true);
+  };
   const local = new AbortController(),
     expiry = new AbortController(),
     total = AbortSignal.timeout(Math.max(1, Date.parse(facts.deadlineAt) - Date.now()));
@@ -926,7 +933,7 @@ async function dispatch(
     deps.grants.open(admitted.attemptId, local);
   } catch (error) {
     admitted.attempt.dispose();
-    await abortBeforeSend(deps, admitted, "PREPARE_DISPOSED");
+    await notSent("PREPARE_DISPOSED");
     throw error;
   }
   const unavailable = new GatewayError(
@@ -959,22 +966,24 @@ async function dispatch(
     if (error instanceof CoreRpcError && error.detail.command_state === "UNKNOWN") {
       const resolved = await resolveUnknownBegin(deps, beginCommand);
       if (resolved === "granted") {
+        await previous?.conclude(false);
         await neverSent({ request_state: "FAILED", error_code: "begin_outcome_unknown" });
         await closeRequest(deps, admitted, "FAILED");
       } else {
         deps.grants.release(admitted.attemptId);
         bridge.dispose();
-        if (resolved === "absent") await abortBeforeSend(deps, admitted, "PREPARE_DISPOSED");
-        else await reportHealth(deps, admitted, "NOT_SENT");
+        if (resolved === "absent") await notSent("PREPARE_DISPOSED");
+        else {
+          await previous?.conclude(false);
+          await reportHealth(deps, admitted, "NOT_SENT");
+        }
       }
       throw unavailable;
     }
     deps.grants.release(admitted.attemptId);
     bridge.dispose();
     const stop = halt(request);
-    await abortBeforeSend(
-      deps,
-      admitted,
+    await notSent(
       stop.requestState === "CANCELLED"
         ? "CANCELLED"
         : Date.now() >= Date.parse(facts.deadlineAt)
@@ -983,6 +992,7 @@ async function dispatch(
     );
     throw error instanceof GatewayError ? error : coreFailure(error);
   }
+  await previous?.conclude(false);
   if (!reply.transient_send || !deps.grants.consume(admitted.attemptId)) {
     await neverSent({ request_state: "FAILED", error_code: "send_not_authorized" });
     await closeRequest(deps, admitted, halt(request).reason);
@@ -1193,8 +1203,7 @@ export async function executeChat(deps: ChatDependencies, request: ChatRequest) 
       await previous.conclude(true);
       throw halt(request).error(lastError ?? coreFailure(error));
     }
-    await previous?.conclude(false);
-    const outcome = await dispatch(deps, request, facts, admitted);
+    const outcome = await dispatch(deps, request, facts, admitted, previous);
     if ("response" in outcome) return outcome.response;
     lastError = outcome.retry;
     previous = { permit: admitted, ordinal, conclude: outcome.conclude };
