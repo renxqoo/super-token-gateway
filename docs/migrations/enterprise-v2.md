@@ -1,6 +1,6 @@
 # Enterprise v2 迁移规格与执行记录
 
-状态：基础/SDK/ORM/资金前置、插件目录、native启动、内部身份及T04.b.2a资金准入已核验合入main。最近主树单次完整verify通过：Go33/45、unit284/4057、integration463/10411、全部产物；独立原生耐久8项通过（仍为legacy单账本范围）。v2026111206冻结，只能追加v7。b.2b结算/c三进程及后续迁移继续；独立冷假helper首次未READY历史失败保留UNKNOWN，不宣称根因解决。日期：2026-11-12。起点：`main`，`ce5b4145a18959efcb7cc7cb927db2295cd8dd8f`，当前保持未提交。本文是本次范围、设计裁决、迁移矩阵、任务依赖和验收状态的权威记录；实现改变设计时先更新决定和影响。
+状态（2026-11-16）：T01–T07、T09–T12、T14、T15 已完成；T08、T16 部分完成；T17 进行中，实测约 50–80 RPS，未达 3000 RPS 门槛；T19、T18 未开始；T13 暂缓。逐项进度与遗留事项见 [enterprise-v2-progress.md](enterprise-v2-progress.md)，性能改进建议见 [capacity-improvement-plan.md](../performance/capacity-improvement-plan.md)。
 
 ## 1. 授权、事实与完成边界
 
