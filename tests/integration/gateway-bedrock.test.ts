@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { bedrockAnthropicReleaseId } from "@gateway/plugin-sdk";
-import { signBedrock } from "@gateway/runtime";
+import { awsSigningKey, signAwsRequest } from "@gateway/runtime";
 import { bedrockChunk } from "../support/aws-eventstream.ts";
 import { syntheticAdminKey } from "../support/catalog.ts";
 import { settledCharge, withGatewayStack, type UpstreamCall } from "../support/gateway-process.ts";
@@ -46,16 +46,19 @@ function expectedSignature(call: UpstreamCall) {
   const headers = new Headers(
     signed.filter((name) => name !== "host").map((name) => [name, call.headers[name]!]),
   );
-  const date = call.headers["x-amz-date"]!;
-  signBedrock(
-    new URL(call.url),
-    call.raw,
-    headers,
-    credentials,
-    new Date(
-      `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T${date.slice(9, 11)}:${date.slice(11, 13)}:${date.slice(13, 15)}Z`,
+  const amzDate = call.headers["x-amz-date"]!;
+  signAwsRequest(new URL(call.url), call.raw, headers, {
+    accessKeyId: credentials.accessKeyId,
+    region: credentials.region,
+    service: "bedrock",
+    amzDate,
+    signingKey: awsSigningKey(
+      credentials.secretAccessKey,
+      amzDate.slice(0, 8),
+      credentials.region,
+      "bedrock",
     ),
-  );
+  });
   return headers.get("authorization");
 }
 

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import {
   opaqueResourceIdSchema,
   resourceCommitSchema,
-  usageEvidenceSchema,
+  usageSchema,
   tariffSchema,
   upstreamCostConfigurationSchema,
 } from "../index.ts";
@@ -36,14 +36,7 @@ test("resource commits reject model content, arbitrary metadata and music pseudo
     expect(resourceCommitSchema.safeParse({ ...data, ...added }).success).toBe(false);
 });
 test("music evidence carries integer milliseconds and tariffs require matching ceilings", () => {
-  expect(
-    usageEvidenceSchema.parse({
-      attemptId: crypto.randomUUID(),
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage: { music_ms: "125" },
-    }).usage,
-  ).toEqual({ music_ms: "125" });
+  expect(usageSchema.parse({ music_ms: "125" })).toEqual({ music_ms: "125" });
   expect(() =>
     tariffSchema.parse({
       model: "music",

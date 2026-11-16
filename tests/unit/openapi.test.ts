@@ -4,7 +4,6 @@ import { createGatewayApp } from "../../apps/gateway/src/app.ts";
 import { createCoreAccountApplication } from "../../apps/core-api/src/public/account.ts";
 import { createCoreManagementApplication } from "../../apps/core-api/src/platform/management.ts";
 import { catalogRoutes } from "../../apps/core-api/src/plugins/http.ts";
-import { adminRoutes } from "../../apps/legacy-gateway/src/admin.ts";
 
 type Operation = { method: string; path: string };
 type RouteTable = { routes: { method: string; path: string }[] };
@@ -53,9 +52,8 @@ async function contract() {
       "/admin",
     ),
   ];
-  const legacy = operations(adminRoutes({} as never), "/admin");
   await db.close();
-  return { documented, v2, legacy };
+  return { documented, v2 };
 }
 
 test("every route the v2 Gateway and Core serve is documented in the published OpenAPI with its method", async () => {
@@ -66,14 +64,8 @@ test("every route the v2 Gateway and Core serve is documented in the published O
   expect(v2).toContainEqual({ method: "post", path: "/admin/upstream-accounts/:id/recharges" });
 });
 
-test("every documented OpenAPI operation is served by a deployed process", async () => {
-  const { documented, v2, legacy } = await contract();
-  const deployed = [...v2, ...legacy];
-  const unserved = documented.filter((entry) => !deployed.some((route) => serves(route, entry)));
+test("every documented OpenAPI operation is served by the v2 Gateway or Core", async () => {
+  const { documented, v2 } = await contract();
+  const unserved = documented.filter((entry) => !v2.some((route) => serves(route, entry)));
   expect(unserved).toEqual([]);
-  const legacyOnly = documented.filter(
-    (entry) =>
-      !v2.some((route) => serves(route, entry)) && legacy.some((route) => serves(route, entry)),
-  );
-  expect(legacyOnly).toEqual([{ method: "post", path: "/admin/recover" }]);
 });

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { providerKinds, operations, dimensions } from "@gateway/kernel";
-import type { Operation, ProviderKind, Pricing, Usage, Finality } from "@gateway/kernel";
+import type { Operation, Usage, Finality } from "@gateway/kernel";
 const positiveInteger = z.string().regex(/^[1-9][0-9]{0,37}$/);
 const integer = z.string().regex(/^(0|[1-9][0-9]{0,37})$/);
 export const rateSchema = z.object({ numerator: integer, denominator: positiveInteger }).strict();
@@ -215,40 +215,6 @@ export interface Credential {
   principal_concurrency?: number;
   models: string[];
   operations: Operation[];
-}
-export interface Route {
-  id: string;
-  model_name: string;
-  provider_id: string;
-  kind: ProviderKind;
-  base_url: string;
-  secret: string;
-  upstream_model: string;
-  operations: Operation[];
-  priority: number;
-  weight: number;
-  pricing_id: string;
-  pricing: Pricing;
-  ceilings: Usage;
-  request_policy?: RequestPolicy;
-  concurrency: number;
-  rpm: number;
-}
-export type { BatchManifest, BatchResourceMetadata } from "./enterprise.ts";
-import type { BatchManifest } from "./enterprise.ts";
-export interface Resource {
-  id: string;
-  project_id: string;
-  provider_id: string;
-  remote_id: string;
-  kind: string;
-  state: string;
-  model: string | null;
-  created_at: Date;
-  attempt_id: string | null;
-  batch_endpoint: string | null;
-  batch_upstream_model: string | null;
-  batch_manifest: BatchManifest | null;
 }
 export interface MeteredUsage {
   usage: Usage;

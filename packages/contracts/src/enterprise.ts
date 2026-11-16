@@ -17,7 +17,7 @@ export const batchManifestSchema = z
     images: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
   })
   .strict();
-export const batchResourceMetadataSchema = z
+const batchResourceMetadataSchema = z
   .object({
     endpoint: z
       .string()
@@ -75,7 +75,5 @@ export const resourceCommitSchema = z
 export type CommandEnvelope = z.infer<typeof commandEnvelopeSchema>;
 export type PluginBinding = z.infer<typeof pluginBindingSchema>;
 export type ResourceCommit = z.infer<typeof resourceCommitSchema>;
-export type BatchManifest = z.infer<typeof batchManifestSchema>;
-export type BatchResourceMetadata = z.infer<typeof batchResourceMetadataSchema>;
 
 export { upstreamCostConfigurationSchema, type UpstreamCostConfiguration } from "./public.ts";

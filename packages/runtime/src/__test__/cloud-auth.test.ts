@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import { generateKeyPairSync, verify } from "node:crypto";
-import { VertexTokens, signBedrock, validateCloudCredentials } from "../cloud-auth.ts";
+import {
+  VertexTokens,
+  awsAmzDate,
+  awsSigningKey,
+  signAwsRequest,
+  validateCloudCredentials,
+} from "../cloud-auth.ts";
 test("Vertex signs service-account assertions and coalesces refresh before token expiry", async () => {
   const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const secret = JSON.stringify({
@@ -67,18 +73,15 @@ test("Bedrock signing binds payload, session, region and encoded model path", ()
     "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-fixture%3A0/invoke",
   );
   const headers = new Headers({ "content-type": "application/json" });
-  signBedrock(
-    url,
-    "{}",
-    headers,
-    {
-      accessKeyId: "AKIDEXAMPLE",
-      secretAccessKey: "SECRET",
-      region: "us-east-1",
-      sessionToken: "SESSION",
-    },
-    new Date("2026-01-01T00:00:00Z"),
-  );
+  const amzDate = awsAmzDate(new Date("2026-01-01T00:00:00Z"));
+  signAwsRequest(url, "{}", headers, {
+    accessKeyId: "AKIDEXAMPLE",
+    sessionToken: "SESSION",
+    region: "us-east-1",
+    service: "bedrock",
+    amzDate,
+    signingKey: awsSigningKey("SECRET", amzDate.slice(0, 8), "us-east-1", "bedrock"),
+  });
   expect(headers.get("authorization")).toContain(
     "Credential=AKIDEXAMPLE/20260101/us-east-1/bedrock/aws4_request",
   );

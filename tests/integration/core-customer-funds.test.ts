@@ -72,7 +72,7 @@ test("Core admin refunds and adjusts a settled v2 charge idempotently, rejects a
     ]);
   }));
 
-test("Core admin credit, credit policy, wallet freeze and tariffs keep the legacy contracts under customer permissions", () =>
+test("Core admin credit, credit policy, wallet freeze and tariffs keep their published contracts under customer permissions", () =>
   withFinancial(async (f, db) => {
     const setup = await f.bootstrap(),
       funder = await administrator(db, ["customer:fund"]),

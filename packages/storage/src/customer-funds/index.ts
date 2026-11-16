@@ -20,7 +20,7 @@ import type {
   ResolutionInput,
 } from "@gateway/contracts";
 
-export function fundingError(error: unknown): never {
+function fundingError(error: unknown): never {
   const failure = error as { code?: string; errno?: string; message?: string };
   const code = failure.errno ?? failure.code;
   const statuses: Record<string, number> = {

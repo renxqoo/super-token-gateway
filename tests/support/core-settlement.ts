@@ -5,6 +5,7 @@ import type {
   CoreEvidenceGroupResult,
   ExecutionReply,
 } from "@gateway/contracts";
+import { CoreRpcError } from "@gateway/core-client";
 import { createSettlementStore } from "@gateway/storage/settlement";
 import { prepareFinancialAdmission, withFinancial } from "./financial-execution.ts";
 
@@ -18,16 +19,42 @@ export async function granted(
   client: Client,
   options: Parameters<typeof prepareFinancialAdmission>[2] = {},
 ) {
-  const prepared = await prepareFinancialAdmission(setup, client, options);
-  const admission = (await prepared.admit()) as ExecutionReply;
-  await client.execution("execution_begin_v1", prepared.beginData(admission.receipt), {
-    deadlineAt: prepared.deadline,
-  });
+  const until = Date.now() + 15000;
+  const prepared = await sameCommand(
+    () => prepareFinancialAdmission(setup, client, options),
+    until,
+  );
+  const admission = (await sameCommand(() => prepared.admit(), until)) as ExecutionReply;
+  const begin = crypto.randomUUID();
+  await sameCommand(
+    () =>
+      client.execution("execution_begin_v1", prepared.beginData(admission.receipt), {
+        commandId: begin,
+        deadlineAt: prepared.deadline,
+      }),
+    until,
+  );
   const permit = (
     await db`SELECT permit_epoch::text,state FROM execution_permits WHERE attempt_id=${prepared.attemptId}`
   )[0];
   expect(permit.state).toBe("SEND_GRANTED");
   return { prepared, owner: { client, permit_epoch: String(permit.permit_epoch) } };
+}
+
+async function sameCommand<T>(send: () => Promise<T>, until: number): Promise<T> {
+  for (;;) {
+    try {
+      return await send();
+    } catch (error) {
+      if (
+        !(error instanceof CoreRpcError) ||
+        error.detail.retryability !== "SAME_COMMAND" ||
+        Date.now() >= until
+      )
+        throw error;
+      await Bun.sleep(10);
+    }
+  }
 }
 
 export type Signer = { client: Client; permit_epoch: string };

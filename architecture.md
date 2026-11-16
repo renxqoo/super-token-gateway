@@ -17,8 +17,7 @@
 
 ## 模块
 
-- `apps/gateway`：v2 公开 Gateway，无 PG；经 Core 内部 RPC 取得执行许可，宿主受控发送、签名证据入队，当前承载 `/v1/chat/completions`。
-- `apps/legacy-gateway`：过渡单体 Gateway，直连 PG，承载尚未迁到 v2 的公开能力；各迁移任务逐项删除其路由，T16 整体删除。
+- `apps/gateway`：v2 公开 Gateway，无 PG；经 Core 内部 RPC 取得执行许可，宿主受控发送、签名证据入队，承载全部公开推理与资源接口。
 - `apps/core-api`：Core 内部 mTLS RPC（身份、准入、执行许可）与 `/admin` 管理、插件目录监听。
 - `apps/core-worker`：消费签名数字证据，在一个 PG 事务内完成双方结算后 ACK。
 - `packages/kernel`：纯契约、精确数字、成本、加密、SSE；不依赖存储、HTTP 服务或业务系统。

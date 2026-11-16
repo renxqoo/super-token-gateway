@@ -16,18 +16,6 @@ export interface StreamDelta {
   id?: string;
   name?: string;
 }
-export interface StreamMeter {
-  readonly source: string;
-  readonly target: string;
-  usage: Usage | undefined;
-  terminal: boolean;
-  failed: boolean;
-  holdTerminal: boolean;
-  remoteId: string | undefined;
-  publicId: string | undefined;
-  consume(event: SSEEvent): { chunks: Uint8Array[]; terminal: boolean };
-  finalize(): Uint8Array[];
-}
 export class StreamTranslator {
   usage: Usage | undefined;
   terminal = false;

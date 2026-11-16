@@ -1,9 +1,8 @@
-import { canonicalExact } from "../json.ts";
 import { quoteReservation } from "@gateway/kernel";
 import { requestCharacters } from "../characters.ts";
 import { expect, test } from "bun:test";
 import { calculateCost } from "@gateway/kernel";
-import { extractUsage, parseClientJson, parseProviderJson } from "../index.ts";
+import { extractUsage, parseClientJson, parseProviderJson, stringifyExact } from "../index.ts";
 import type { Operation, ReservationPrice } from "@gateway/kernel";
 
 test.each([
@@ -125,7 +124,7 @@ test("JSON usage retains exact integers at and above the safe integer boundary",
 });
 
 test("metering precision preserves persisted request fingerprints for exact large client integers", () => {
-  expect(canonicalExact(parseClientJson('{"value":9007199254740992}'))).toBe(
+  expect(stringifyExact(parseClientJson('{"value":9007199254740992}'))).toBe(
     '{"value":9007199254740992}',
   );
 });

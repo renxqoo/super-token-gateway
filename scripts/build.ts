@@ -2,10 +2,6 @@ import { chmod, mkdir, rm } from "node:fs/promises";
 if (Bun.version !== "1.4.4") throw new Error("Build requires Bun 1.4.4");
 await rm(new URL("../dist/", import.meta.url), { recursive: true, force: true });
 for (const [entries, directory] of [
-  [
-    ["apps/legacy-gateway/src/main.ts", "apps/legacy-gateway/src/worker-main.ts"],
-    "dist/legacy-gateway",
-  ],
   [["apps/mock-providers/src/main.ts"], "dist/mock-providers"],
   [["apps/core-api/src/main.ts", "apps/core-api/src/platform/management.ts"], "dist/core-api"],
   [["apps/core-worker/src/main.ts"], "dist/core-worker"],
@@ -83,6 +79,4 @@ await Bun.write(
     2,
   ) + "\n",
 );
-console.log(
-  "Built v2 Gateway, legacy gateway, Core API, Core worker, migration, mock and isolated plugin artifacts",
-);
+console.log("Built Gateway, Core API, Core worker, migration, mock and isolated plugin artifacts");

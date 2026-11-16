@@ -654,7 +654,6 @@ export function openapi(): Record<string, unknown> {
   add("/admin/financial-vouchers/{id}", "get", "financial_voucher", undefined, true)[
     "description"
   ] = "Returns the stored voucher bytes as an attachment with their registered content type.";
-  add("/admin/recover", "post", "admin_recover", undefined, true);
   add("/admin/queue", "get", "usage_queue_stats", undefined, true);
   add("/admin/queue/jobs/{id}/retry", "post", "retry_usage_job", undefined, true);
   add("/admin/metrics", "get", "metrics", undefined, true);

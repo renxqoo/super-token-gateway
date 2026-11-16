@@ -30,8 +30,7 @@
 | /admin/consumers            | POST name、replay                                   |
 | /admin/consumers/:id/claim  | POST limit=1..500，返回 events 与 lease_token       |
 | /admin/consumers/:id/ack    | POST lease_token、event_ids                         |
-| /admin/recover              | POST 过期尝试恢复；不能触发重新执行                 |
-| /admin/metrics              | GET Prometheus 文本                                 |
+| /admin/metrics              | GET 未结请求、预扣、积压等计数的 JSON               |
 
 供应商地址和种类建立后不原地改变；需要换账号/地址时建新供应商和路由，旧资源继续绑定原账号。模型名用作路径参数时应 URL 编码。列表有服务端硬上限（项目/Key 200、供应商 500、模型/路由 2000）；应按技术项目隔离容量。
 

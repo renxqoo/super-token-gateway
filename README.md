@@ -12,25 +12,18 @@ Gateway 管理技术组织/主体、项目、API Key/IP、模型别名、供应�
 
 需要 Bun **1.4.4**，以及本机已安装的 PostgreSQL 17 工具目录与 Redis 7.4 `redis-server`（分别写入 `.env.local` 的 `PG_TOOLS_DIRECTORY`、`DURABILITY_REDIS_SERVER` 绝对路径）。脚本不安装软件，也不使用 Docker。独立 mock 是另一个应用，仅使用 Hono，不依赖 Gateway 解析器或业务模块。
 
-`DATABASE_URL` 必须显式指向已创建的空开发库 `gateway_v2_dev`；已有旧 schema 的数据库会被拒绝并保留。
+`DATABASE_URL` 指向本机开发 PG，账号需要 `CREATEDB`：`bun run dev` 只在其中新建并删除自己的临时库；`db:migrate` 只接受空库，已有旧 schema 的数据库会被拒绝并保留。
 
 ```sh
 bun install --frozen-lockfile
 bun run setup:local
 bun run infra:up
-bun run db:migrate -- --database gateway_v2_dev
-bun run seed
-```
-
-然后分别在三个终端运行：
-
-```sh
-bun run mock
 bun run dev
-bun run worker
 ```
 
-`setup:local` 生成权限为 `0600` 的 `.env.local`，保留已有密钥；`seed` 将开发调用凭证写入 `.local/client.env`。开发 PG、准入 Redis、耐久队列 Redis 分别使用 `127.0.0.1:55442`、`:56382`、`:56383`，不复用其他项目的数据。`infra:up` 在 `.local/native-services/` 下以本项目专属目录启动 PG（SCRAM、fsync/synchronous_commit/full_page_writes 开启）、准入 Redis 与 `appendfsync always` 的耐久队列 Redis，只监听 127.0.0.1，端口取自上述 URL；端口已被其他进程占用时拒绝启动，不接管或停止它。`infra:status`、`infra:down` 只操作自己登记且身份核对一致的进程。已有本机 PG/Redis 可以直接修改 `DATABASE_URL`、`REDIS_URL`、`QUEUE_REDIS_URL` 并跳过 `infra:up`。
+`bun run dev` 构建原生插件 helper 后，在 `DATABASE_URL` 所在 PG 上新建一个临时库，以源码启动 Core API、core-worker、v2 Gateway 与 TLS 上游替身（独立 mock 应用），经管理接口创建渠道、插件绑定、模型、价目、项目、Key 和资金，把 Gateway 地址、Key 与模型名写入权限为 `0600` 的 `.local/client.env`（覆盖已有文件）。Ctrl-C 停止全部进程并删除临时库与队列命名空间；数据不跨次保留。持久的开发或生产部署按[运维手册](reliability-and-operations.md)用 `bun run db:migrate -- --database <库名>` 初始化后分别启动三个进程。
+
+`setup:local` 生成权限为 `0600` 的 `.env.local`，保留已有密钥。开发 PG、准入 Redis、耐久队列 Redis 分别使用 `127.0.0.1:55442`、`:56382`、`:56383`，不复用其他项目的数据。`infra:up` 在 `.local/native-services/` 下以本项目专属目录启动 PG（SCRAM、fsync/synchronous_commit/full_page_writes 开启）、准入 Redis 与 `appendfsync always` 的耐久队列 Redis，只监听 127.0.0.1，端口取自上述 URL；端口已被其他进程占用时拒绝启动，不接管或停止它。`infra:status`、`infra:down` 只操作自己登记且身份核对一致的进程。已有本机 PG/Redis 可以直接修改 `DATABASE_URL`、`REDIS_URL`、`QUEUE_REDIS_URL` 并跳过 `infra:up`。
 
 ```sh
 set -a
@@ -38,10 +31,10 @@ set -a
 set +a
 curl "$GATEWAY_URL/v1/chat/completions" \
   -H "Authorization: Bearer $GATEWAY_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"demo","messages":[{"role":"user","content":"hello"}],"max_completion_tokens":32}'
+  -d "{\"model\":\"$GATEWAY_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_completion_tokens\":32}"
 ```
 
-管理凭证在 `.env.local`，不要发到聊天或提交仓库。管理 API 示例见 [API 契约](api-contracts.md)。
+`.local/client.env` 与 `.env.local` 不要发到聊天或提交仓库。管理 API 示例见 [API 契约](api-contracts.md)。
 
 ## 能力
 
@@ -64,13 +57,15 @@ Key 支持 IPv4/IPv6 CIDR、模型/操作权限及角色。转发头只接受 `T
 ```sh
 bun run verify
 bun run openapi
-bun run bench --model gpt-4o-mini --seconds 30 --concurrency 32
-bun run bench --model gpt-4o-mini --seconds 30 --concurrency 32 --stream
+bun run bench --seconds 30 --concurrency 32
+bun run bench --seconds 30 --concurrency 32 --stream
 ```
+
+`bench` 默认读取 `.local/client.env` 的 Gateway 地址、Key 与模型，也可用 `--url`、`--model` 与 `BENCH_API_KEY` 指定。
 
 测试使用真实 PostgreSQL、Redis 和真实 HTTP mock，自动创建并删除独立测试数据库。测试数据库账号需要 `CREATEDB`，生产运行账号不需要。验证内容和实测数据见 [验收报告](validation.md)；不会把短时本机测试描述为 10,000 RPS 持续一小时或完整机房高可用验证。
 
-`bun run build` 输出无需 `node_modules` 的 v2 Gateway（`GATEWAY_CONFIG_FILE=<json> bun dist/gateway/main.js`，无 PG，承载 Chat）、过渡 legacy Gateway 及其 worker、Core API、Core 结算 worker、迁移工具与独立 mock。legacy 入口为 `bun dist/legacy-gateway/main.js` 与 `bun dist/legacy-gateway/worker-main.js`，承载尚未迁到 v2 的公开能力；Core API 为 `CORE_API_CONFIG_FILE=<json> bun dist/core-api/main.js`（内部 mTLS 监听，配置 `admin` 段时另起 `/admin` 管理与插件目录监听），Core 结算 worker 为 `bun dist/core-worker/main.js`（`DATABASE_URL`、`QUEUE_REDIS_URL`、`REDIS_NAMESPACE`、`WORKER_PORT` 等环境变量）。三进程拆分进度见 [T04.c 记录](docs/migrations/enterprise-v2-three-process.md)。Linux、双实例、最小权限、发布/回滚与恢复步骤见 [运维手册](reliability-and-operations.md)。
+`bun run build` 输出无需 `node_modules` 的 v2 Gateway（`GATEWAY_CONFIG_FILE=<json> bun dist/gateway/main.js`，无 PG，承载全部公开推理与资源接口）、Core API、Core 结算 worker、迁移工具与独立 mock。Core API 为 `CORE_API_CONFIG_FILE=<json> bun dist/core-api/main.js`（内部 mTLS 监听，配置 `admin` 段时另起 `/admin` 管理与插件目录监听），Core 结算 worker 为 `bun dist/core-worker/main.js`（`DATABASE_URL`、`QUEUE_REDIS_URL`、`REDIS_NAMESPACE`、`WORKER_PORT` 等环境变量）。三进程拆分进度见 [T04.c 记录](docs/migrations/enterprise-v2-three-process.md)。Linux、双实例、最小权限、发布/回滚与恢复步骤见 [运维手册](reliability-and-operations.md)。
 
 T04.a 增加独立插件组件：`@gateway/plugin-host` 提供有界 Bun 监督、已验证包与 attempt API，`@gateway/plugin-sdk` 定义 ABI v1，`@gateway/adapters` 提供 OpenAI Chat WASM 包及锁定来源的构建入口。当前 Gateway 装配和资金路径仍由 T04.b/c 迁移。原生构建需要 Go 1.27.4；`PLUGIN_GO` 可指定该 Go 的绝对路径，Go 缓存保存在 `.local`。`bun run verify` 包含显式 native gofmt/vet/`go test ./__test__`；完整 race 入口为 `bun run test:native:race`。CI 和部署环境须安装同版本 Go。
 

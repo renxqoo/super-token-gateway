@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createRepositories, migrate, SCHEMA_VERSION, Store } from "@gateway/storage";
+import { createCatalogStore, createRepositories, migrate, SCHEMA_VERSION } from "@gateway/storage";
 import { supplierBrands, upstreamAccounts, upstreamAccountBalances } from "@gateway/storage/schema";
 import { withDatabase } from "../support/database.ts";
 
@@ -177,18 +177,18 @@ test("package and financial voucher bytes are bounded", () =>
     expect((await db`SELECT count(*)::int AS n FROM financial_vouchers`)[0].n).toBe(0);
   }));
 
-test("resource URLs and arbitrary metadata are rejected before persistence", () =>
+test("resource rows reject URL identities and unknown bindings, and cost ceilings must be objects", () =>
   withDatabase(async (db) => {
     await migrate(db);
-    const store = new Store(db);
-    const project = await store.createProject({
+    const catalog = createCatalogStore(db);
+    const project = await catalog.createProject({
       name: "resource-validation",
       rpm: 100,
       tpm: 1000,
       concurrency: 10,
     });
     const channel = crypto.randomUUID();
-    await store.createProvider(
+    await catalog.createProvider(
       channel,
       {
         name: "resource-validation",
@@ -199,34 +199,8 @@ test("resource URLs and arbitrary metadata are rejected before persistence", () 
       },
       "encrypted-fixture",
     );
-    for (const remote of ["https://media.example/file", "file?signed=token"])
-      await expect(
-        store.saveResource(project, channel, remote, "file", null),
-      ).rejects.toMatchObject({ status: 502, code: "invalid_upstream" });
-    const invalidBatch = {
-      endpoint: "/v1/embeddings",
-      upstreamModel: "model",
-      manifest: {
-        items: 1,
-        idsSha256: "a".repeat(64),
-        download_url: "https://media.example/?signed=token",
-      },
-    };
-    await expect(
-      store.saveResource(
-        project,
-        channel,
-        "files/stable",
-        "file",
-        null,
-        null,
-        undefined,
-        invalidBatch,
-      ),
-    ).rejects.toMatchObject({ status: 502, code: "invalid_upstream" });
-    expect((await db`SELECT count(*)::int AS n FROM resources`)[0].n).toBe(0);
-    const id = await store.saveResource(project, channel, "files/stable", "file", null);
-    expect((await store.resource(id, project)).remote_id).toBe("files/stable");
+    const id = `file_${crypto.randomUUID().replaceAll("-", "")}`;
+    await db`INSERT INTO resources(id,project_id,provider_id,remote_id,kind) VALUES(${id},${project},${channel},'files/stable','file')`;
     expect((await db`SELECT binding_id FROM resources WHERE id=${id}`)[0].binding_id).toBeNull();
     await expect(
       db`UPDATE resources SET binding_id=${crypto.randomUUID()} WHERE id=${id}`,
@@ -315,15 +289,15 @@ test("RECHARGE cannot persist NULL payment atoms while adjustments retain option
 test("resource manifests reject JSON null and wrong field types instead of CHECK unknown bypass", () =>
   withDatabase(async (db) => {
     await migrate(db);
-    const store = new Store(db);
-    const project = await store.createProject({
+    const catalog = createCatalogStore(db);
+    const project = await catalog.createProject({
       name: "batch-facts",
       rpm: 100,
       tpm: 1000,
       concurrency: 2,
     });
     const channel = crypto.randomUUID();
-    await store.createProvider(
+    await catalog.createProvider(
       channel,
       {
         name: "batch-facts",

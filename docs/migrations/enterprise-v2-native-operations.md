@@ -118,7 +118,7 @@ n4 全量门禁（原生服务）：`verify` 退出 0，类型检查 316 文件�
 - **N16 资源与遥测**：每秒按进程树采样 Gateway（含 helper）、Core API、core-worker 与上游的 RSS 和 CPU，连同证据队列计数、worker `/readyz` 计数、PG 锁等待与活动查询；不再传 `--metrics`。负载器错误码按响应中的技术码分桶（最多 32 类）。
 - **N17 参数**：移除只对 legacy 有意义的 `--pool`（legacy Gateway 连接池）、`--batch`（legacy worker 批量）、`--billing-mode`、`--provider`（legacy anthropic fixture）、`--wal-lz4`、`--profile`（在临时库开启 pg_stat_statements）；新增 `--gateway-inflight`（Gateway `max_inflight`）。`--concurrency` 默认 8（见 F3），`--worker-concurrency` 默认 8（与 `SETTLEMENT_CONCURRENCY` 默认值一致），其余参数保留。
 - **N18 清理**：证据队列按 `${namespace}:*` 与 `{namespace:core-evidence}:*` 清理，`capacity.test.ts` 相应改为 v2 作用域，legacy `{namespace:usage}` 视为邻居保留；Core 准入 key 与临时库由夹具清理。
-- **N19 产物检查**：`scripts/verify-artifact.ts` 从仓库根以 1 请求运行生成器的断言改为 v2 口径：每个规范快照均 ACK 且每请求已确认、供应 spent = 请求数 × 59、证据队列清零、审计记录的夹具库已删除、两个 Redis 无 `bench:<id>` 键；去掉已移除的 `--pool`。该段随 T16 删除 legacy 产物检查时迁到 v2 产物检查。
+- **N19 产物检查**：`scripts/verify-artifact.ts` 从仓库根以 1 请求运行生成器的断言改为 v2 口径：每个规范快照均 ACK 且每请求已确认、供应 spent = 请求数 × 59、证据队列清零、审计记录的夹具库已删除、两个 Redis 无 `bench:<id>` 键；去掉已移除的 `--pool`。该段随 T16 删除 legacy 产物检查时迁到 v2 产物检查（T16 l4 完成：`verify-artifact.ts` 只保留该段与空 cwd 迁移/归档工具检查，见[删除记录](enterprise-v2-legacy-removal.md) §6）。
 
 发现与处置（n5 冒烟暴露）：
 

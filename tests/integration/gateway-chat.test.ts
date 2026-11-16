@@ -521,7 +521,7 @@ test("a channel whose own concurrency is full is skipped at admission and the re
   );
 }, 30000);
 
-test("upstream statuses are classified like legacy: transient and authorization failures move to the other channel, 400 and 422 stop after one send", () => {
+test("transient and authorization upstream failures move to the other channel while 400 and 422 stop after one send", () => {
   let next: number | undefined;
   return withGatewayStack(
     {

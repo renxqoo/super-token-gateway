@@ -58,18 +58,6 @@
         "zod": "4.6.7",
       },
     },
-    "apps/legacy-gateway": {
-      "name": "@gateway/legacy-gateway",
-      "dependencies": {
-        "@gateway/adapters": "workspace:*",
-        "@gateway/contracts": "workspace:*",
-        "@gateway/kernel": "workspace:*",
-        "@gateway/runtime": "workspace:*",
-        "@gateway/storage": "workspace:*",
-        "hono": "4.13.17",
-        "zod": "4.6.7",
-      },
-    },
     "apps/mock-providers": {
       "name": "mock-model-providers",
       "dependencies": {
@@ -209,8 +197,6 @@
     "@gateway/gateway": ["@gateway/gateway@workspace:apps/gateway"],
 
     "@gateway/kernel": ["@gateway/kernel@workspace:packages/kernel"],
-
-    "@gateway/legacy-gateway": ["@gateway/legacy-gateway@workspace:apps/legacy-gateway"],
 
     "@gateway/plugin-host": ["@gateway/plugin-host@workspace:packages/plugin-host"],
 

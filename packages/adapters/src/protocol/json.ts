@@ -1,5 +1,5 @@
 import { GatewayError } from "@gateway/contracts";
-import { normalizedNumber, canonical, DomainError } from "@gateway/kernel";
+import { normalizedNumber, DomainError } from "@gateway/kernel";
 const numericLiterals = new WeakMap<object, Map<string, string>>();
 export function normalizedProviderNumber(source: string): ReturnType<typeof normalizedNumber> {
   try {
@@ -11,14 +11,6 @@ export function normalizedProviderNumber(source: string): ReturnType<typeof norm
 }
 export function numberLiteral(parent: object, key: string): string | undefined {
   return numericLiterals.get(parent)?.get(key);
-}
-export function canonicalExact(value: unknown): string {
-  try {
-    return canonical(value, numberLiteral);
-  } catch (error) {
-    if (error instanceof DomainError) throw new GatewayError(400, error.code, error.message);
-    throw error;
-  }
 }
 const rawJson = (JSON as JSON & { rawJSON: (source: string) => unknown }).rawJSON;
 function parseExactJson(source: string, preserveMeteringIntegers: boolean): unknown {

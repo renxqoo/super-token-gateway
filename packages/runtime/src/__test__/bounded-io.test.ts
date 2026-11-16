@@ -1,66 +1,6 @@
 import { expect, test } from "bun:test";
-import { boundedRelay, MemoryBudget, readBounded, safeFetch } from "../index.ts";
+import { readBounded, safeFetch } from "../index.ts";
 
-test("global memory reservations cannot oversubscribe and leases release once", () => {
-  const budget = new MemoryBudget(1024);
-  const a = budget.lease();
-  const b = budget.lease();
-  a.update(700);
-  expect(() => b.update(400)).toThrow("capacity");
-  expect(budget.bufferedBytes).toBe(700);
-  a.update(-300);
-  b.update(624);
-  expect(budget.bufferedBytes).toBe(1024);
-  a.close();
-  a.close();
-  a.update(500);
-  b.close();
-  expect(budget.bufferedBytes).toBe(0);
-});
-test("idle unconsumed relay cancels source and completes cleanup once", async () => {
-  let cancelled = 0;
-  let cleaned = 0;
-  const source = new ReadableStream<Uint8Array>({
-    pull(c) {
-      c.enqueue(new Uint8Array(65536));
-    },
-    cancel() {
-      cancelled++;
-    },
-  });
-  const relay = boundedRelay(source, new AbortController().signal, 30, 300, () => {
-    cleaned++;
-  });
-  await Bun.sleep(80);
-  expect(cancelled).toBe(1);
-  expect(cleaned).toBe(1);
-  await relay.cancel().catch(() => undefined);
-  expect(cleaned).toBe(1);
-});
-test("aborting a pending source read releases bounded reader", async () => {
-  let cleanup = 0;
-  const controller = new AbortController();
-  const relay = boundedRelay(
-    new ReadableStream<Uint8Array>({
-      pull() {
-        return new Promise(() => {});
-      },
-    }),
-    controller.signal,
-    200,
-    500,
-    () => {
-      cleanup++;
-    },
-  );
-  const reader = relay.getReader();
-  const pending = reader.read();
-  controller.abort();
-  await expect(pending).rejects.toThrow();
-  await Bun.sleep(10);
-  expect(cleanup).toBe(1);
-  reader.releaseLock();
-});
 test("body budgets cancel chunked overflow and timeout instead of buffering forever", async () => {
   let cancels = 0;
   const stream = () =>

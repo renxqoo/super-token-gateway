@@ -26,23 +26,14 @@ test("workspace dependencies stay acyclic and commercial capabilities stay outsi
     dependencies: Record<string, string>;
   };
   expect(Object.keys(mock.dependencies)).toEqual(["hono"]);
-  for await (const file of new Bun.Glob("**/*.ts").scan("apps/legacy-gateway/src")) {
-    const source = await Bun.file(`apps/legacy-gateway/src/${file}`).text();
-    if (["app.ts", "admin.ts"].includes(file)) expect(source).not.toMatch(/@gateway\/storage/);
-    expect(source).not.toMatch(/\.db\s*(?:`|<|\.)|\.unsafe\s*\(/);
-    expect(source).not.toMatch(
-      /(?:Bun\.write|writeFile|appendFile|console\.(?:debug|error|log)\([^\n]*(?:body|content|response))/,
-    );
-  }
 });
 
-test("Core processes never reach into the transitional Gateway or each other's private modules", async () => {
+test("Core processes and the Gateway never reach into each other's private modules", async () => {
   const forbidden: Record<string, RegExp> = {
-    "core-api": /legacy-gateway|core-worker|@gateway\/(?:legacy-gateway|adapters\/protocol)/,
-    "core-worker": /legacy-gateway|core-api|@gateway\/(?:legacy-gateway|core-api|plugin-host)/,
-    "mock-providers": /legacy-gateway|core-api|core-worker/,
-    gateway:
-      /legacy-gateway|core-api|core-worker|@gateway\/(?:storage|legacy-gateway|core-api|core-worker)|drizzle|^postgres/,
+    "core-api": /core-worker|@gateway\/adapters\/protocol/,
+    "core-worker": /core-api|@gateway\/(?:core-api|plugin-host)/,
+    "mock-providers": /core-api|core-worker/,
+    gateway: /core-api|core-worker|@gateway\/(?:storage|core-api|core-worker)|drizzle|^postgres/,
   };
   for (const [app, pattern] of Object.entries(forbidden))
     for await (const file of new Bun.Glob("**/*.ts").scan(`apps/${app}/src`)) {
@@ -66,13 +57,7 @@ test("the v2 Gateway has no database path and reads only its config file from th
       if (name.startsWith("@gateway/")) pending.push(`packages/${name.slice(9)}`);
     }
   }
-  for (const name of [
-    "@gateway/storage",
-    "@gateway/core-api",
-    "@gateway/legacy-gateway",
-    "drizzle-orm",
-    "postgres",
-  ])
+  for (const name of ["@gateway/storage", "@gateway/core-api", "drizzle-orm", "postgres"])
     expect(closure.has(name)).toBe(false);
   const reads = new Set<string>();
   for await (const file of new Bun.Glob("**/*.ts").scan("apps/gateway/src")) {
@@ -146,8 +131,6 @@ test("deployment units start built entries, keep v2 processes under separate use
     "core-api.service",
     "core-worker.service",
     "gateway@.service",
-    "legacy-gateway-worker.service",
-    "legacy-gateway@.service",
   ]);
   const gateway = units["gateway@.service"]!;
   expect(gateway.ExecStart).toEqual(["/usr/local/bin/bun dist/gateway/main.js"]);
@@ -158,22 +141,29 @@ test("deployment units start built entries, keep v2 processes under separate use
   const example = (await Bun.file("infra/gateway.example.json").json()) as { port: number };
   const caddy = await Bun.file("infra/Caddyfile").text();
   const chat = caddy.indexOf("handle @chat"),
-    legacy = caddy.indexOf("handle @legacy");
+    fallback = caddy.indexOf('handle {\n\t\trespond "Not found" 404\n\t}');
   expect(caddy).toContain(
     "@chat {\n\t\tmethod POST\n\t\tpath /v1/chat/completions /v1/messages /v1/responses /v1/embeddings /v1/moderations /v1/completions /v1/images/generations /v1/images/edits /v1/audio/speech /v1/audio/transcriptions /v1/audio/translations /v1/music/generations /v1beta/models/*\n\t}\n",
   );
   expect(chat).toBeGreaterThan(-1);
-  expect(legacy).toBeGreaterThan(chat);
-  expect(caddy.slice(chat, legacy)).toContain(`127.0.0.1:${example.port}`);
-  expect(caddy.slice(legacy)).not.toContain(`127.0.0.1:${example.port}`);
+  expect(fallback).toBeGreaterThan(chat);
+  expect(caddy.slice(chat, fallback)).toContain(`127.0.0.1:${example.port}`);
+  expect(caddy.slice(fallback)).not.toContain("reverse_proxy");
+  expect(
+    new Set(
+      [...caddy.matchAll(/reverse_proxy ([^{\n]+)/g)].flatMap((match) =>
+        match[1]!.trim().split(/\s+/),
+      ),
+    ),
+  ).toEqual(new Set([`127.0.0.1:${example.port}`, "127.0.0.1:8091", "127.0.0.1:8095"]));
   expect(caddy).not.toMatch(/\/admin|\/_internal/);
   const resources = caddy.indexOf("handle @resources");
   expect(caddy).toContain(
     "@resources path /v1/responses /v1/responses/* /v1/files /v1/files/* /v1/batches /v1/batches/* /v1/videos /v1/videos/*\n",
   );
   expect(resources).toBeGreaterThan(chat);
-  expect(resources).toBeLessThan(legacy);
-  expect(caddy.slice(resources, legacy)).toContain(`127.0.0.1:${example.port}`);
+  expect(resources).toBeLessThan(fallback);
+  expect(caddy.slice(resources, fallback)).toContain(`127.0.0.1:${example.port}`);
   const account = caddy.indexOf("handle @account"),
     request = caddy.indexOf("handle @request");
   expect(caddy).toContain(
@@ -182,9 +172,8 @@ test("deployment units start built entries, keep v2 processes under separate use
   expect(caddy).toContain("@request path_regexp ^/v1/requests/[^/]+(/billing)?$\n");
   for (const handle of [account, request]) {
     expect(handle).toBeGreaterThan(-1);
-    expect(handle).toBeLessThan(legacy);
+    expect(handle).toBeLessThan(fallback);
   }
-  expect(caddy.slice(legacy)).not.toContain("127.0.0.1:8095");
 });
 
 test("the shipped Core API, worker and Gateway examples and the Caddyfile agree on how the processes reach each other", async () => {

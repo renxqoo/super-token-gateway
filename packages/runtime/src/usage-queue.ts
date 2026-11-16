@@ -5,10 +5,8 @@ import {
   GatewayError,
   coreEvidenceBatchV1Schema,
   coreEvidenceGroupV1Schema,
-  usageEvidenceSchema,
-  usageBatchSchema,
 } from "@gateway/contracts";
-import type { CoreEvidenceGroupV1, UsageEvidence } from "@gateway/contracts";
+import type { CoreEvidenceGroupV1 } from "@gateway/contracts";
 
 export interface QueueChannel<T> {
   name: string;
@@ -17,13 +15,6 @@ export interface QueueChannel<T> {
   encode(items: T[]): unknown;
   decode(payload: unknown): T[];
 }
-export const usageChannel: QueueChannel<UsageEvidence> = {
-  name: "usage-v1",
-  scope: "usage",
-  parse: (item) => usageEvidenceSchema.safeParse(item).data,
-  encode: (events) => ({ version: 1, events }),
-  decode: (payload) => usageBatchSchema.parse(payload).events,
-};
 export const evidenceChannel: QueueChannel<CoreEvidenceGroupV1> = {
   name: "core-evidence-v1",
   scope: "core-evidence",
@@ -59,7 +50,7 @@ const failure = () =>
     "Durable usage acceptance is unavailable; query the original request before retrying",
   );
 
-export class UsageProducer<T = UsageEvidence> {
+export class UsageProducer<T> {
   private generation: Generation | undefined;
   private readonly stopping = new AbortController();
   private readonly batch: Batcher<T, void>;
@@ -298,7 +289,7 @@ export class UsageProducer<T = UsageEvidence> {
   }
 }
 
-export interface UsageConsumerOptions<T = UsageEvidence> extends UsageQueueOptions {
+export interface UsageConsumerOptions<T> extends UsageQueueOptions {
   channel: QueueChannel<T>;
   concurrency?: number;
   process: (events: T[]) => Promise<unknown>;
@@ -306,7 +297,7 @@ export interface UsageConsumerOptions<T = UsageEvidence> extends UsageQueueOptio
   stalledIntervalMs?: number;
   onCommitted?: (events: number, lagSeconds: number) => void;
 }
-export class UsageConsumer<T = UsageEvidence> {
+export class UsageConsumer<T> {
   readonly worker: Worker;
   private readonly adapter: ReturnType<typeof createBunRedisClient>;
   private readonly raw: RedisClient;

@@ -1,39 +1,27 @@
 import { expect, test } from "bun:test";
 import { requestPolicySchema, object } from "@gateway/contracts";
-import { parseClientJson } from "../index.ts";
-import { prepareOperation } from "../index.ts";
+import { parseClientJson, validateRequestPolicy } from "../index.ts";
 
-test("route policy rejects incompatible native parameters while retaining unconfigured extensions", () => {
+test("route policy rejects blocked and unlisted native parameters and accepts unconfigured extensions", () => {
   const body = { model: "alias", messages: [], temperature: 0, custom_extension: { value: false } };
-  expect(prepareOperation(body, "chat", "openai", "target").body.custom_extension).toEqual({
-    value: false,
-  });
+  expect(() => validateRequestPolicy(body)).not.toThrow();
+  expect(() => validateRequestPolicy(body, { blocked_parameters: ["temperature"] })).toThrow(
+    "temperature",
+  );
   expect(() =>
-    prepareOperation(body, "chat", "openai", "target", { blocked_parameters: ["temperature"] }),
-  ).toThrow("temperature");
-  expect(() =>
-    prepareOperation(body, "chat", "openai", "target", {
-      allowed_parameters: ["model", "messages", "temperature"],
-    }),
+    validateRequestPolicy(body, { allowed_parameters: ["model", "messages", "temperature"] }),
   ).toThrow("custom_extension");
-  expect(body.model).toBe("alias");
 });
 
-test("route policy checks converted target field names and inclusive model limits", () => {
+test("route policy limits are inclusive and reject out-of-range or non-numeric values", () => {
   const policy = {
     parameter_ranges: { max_tokens: { maximum: 64 }, temperature: { minimum: 0, maximum: 1 } },
   };
-  const body = { messages: [], max_completion_tokens: 64, temperature: 0 };
-  expect(prepareOperation(body, "chat", "deepseek", "target", policy).body.max_tokens).toBe(64);
-  expect(() =>
-    prepareOperation({ ...body, max_completion_tokens: 65 }, "chat", "deepseek", "target", policy),
-  ).toThrow("max_tokens");
-  expect(() =>
-    prepareOperation({ ...body, temperature: 1.1 }, "chat", "deepseek", "target", policy),
-  ).toThrow("temperature");
-  expect(() =>
-    prepareOperation({ ...body, temperature: "0" }, "chat", "deepseek", "target", policy),
-  ).toThrow("temperature");
+  const body = { messages: [], max_tokens: 64, temperature: 0 };
+  expect(() => validateRequestPolicy(body, policy)).not.toThrow();
+  expect(() => validateRequestPolicy({ ...body, max_tokens: 65 }, policy)).toThrow("max_tokens");
+  expect(() => validateRequestPolicy({ ...body, temperature: 1.1 }, policy)).toThrow("temperature");
+  expect(() => validateRequestPolicy({ ...body, temperature: "0" }, policy)).toThrow("temperature");
 });
 
 test("route policy matches nested array controls without scanning user tool arguments", () => {
@@ -47,16 +35,13 @@ test("route policy matches nested array controls without scanning user tool argu
       },
     ],
   };
-  expect(() => prepareOperation(body, "chat", "openai", "target", policy)).toThrow("strict");
-  expect(
-    prepareOperation(
+  expect(() => validateRequestPolicy(body, policy)).toThrow("strict");
+  expect(() =>
+    validateRequestPolicy(
       { messages: [{ role: "tool", content: '{"strict":true}', tool_call_id: "call" }] },
-      "chat",
-      "openai",
-      "target",
       policy,
-    ).protocol,
-  ).toBe("chat");
+    ),
+  ).not.toThrow();
 });
 
 test("invalid policy paths and reversed or empty ranges fail configuration validation", () => {
@@ -77,18 +62,16 @@ test("native extended precision numbers cannot cross a model range through binar
     ["9007199254740993", { maximum: 9007199254740992 }],
   ] as const) {
     const body = object(parseClientJson(`{"messages":[],"temperature":${literal}}`));
-    expect(() =>
-      prepareOperation(body, "chat", "openai", "target", {
-        parameter_ranges: { temperature: range },
-      }),
-    ).toThrow("temperature");
+    expect(() => validateRequestPolicy(body, { parameter_ranges: { temperature: range } })).toThrow(
+      "temperature",
+    );
   }
   const body = object(
     parseClientJson('{"contents":[],"generationConfig":{"temperature":0.9999999999999999999}}'),
   );
-  expect(
-    prepareOperation(body, "gemini", "gemini", "target", {
+  expect(() =>
+    validateRequestPolicy(body, {
       parameter_ranges: { "generationConfig.temperature": { maximum: 1 } },
-    }).protocol,
-  ).toBe("gemini");
+    }),
+  ).not.toThrow();
 });

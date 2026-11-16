@@ -1,9 +1,6 @@
 import { GatewayError, object, optionalObject, text } from "@gateway/contracts";
-import { stringifyExact, parseProviderJson, copyExact } from "./json.ts";
-import type { Protocol, ProviderKind, Operation } from "@gateway/kernel";
-import type { RequestPolicy } from "@gateway/contracts";
-import { providerAdapter, providerProtocol } from "./adapters.ts";
-import { validateRequestPolicy } from "./policy.ts";
+import { stringifyExact, parseProviderJson } from "./json.ts";
+import type { Protocol } from "@gateway/kernel";
 
 export type Part =
   | { type: "text"; text: string }
@@ -722,73 +719,4 @@ export function encodeRequest(
       };
   }
   return body;
-}
-
-export function prepareRequest(
-  body: Record<string, unknown>,
-  source: Protocol,
-  kind: ProviderKind,
-  model: string,
-): { body: Record<string, unknown>; protocol: Protocol } {
-  const target = providerProtocol(kind, source);
-  const outbound =
-    target === source
-      ? copyExact(body, { ...body, model })
-      : encodeRequest(decodeRequest(body, source), target, model);
-  return { body: providerAdapter(kind).prepare(outbound, target), protocol: target };
-}
-
-export function prepareOperation(
-  body: Record<string, unknown>,
-  operation: Operation,
-  kind: ProviderKind,
-  model: string,
-  policy?: RequestPolicy,
-): { body: Record<string, unknown>; protocol: Operation } {
-  if (["chat", "responses", "messages", "gemini"].includes(operation)) {
-    const prepared = prepareRequest(body, operation as Protocol, kind, model);
-    validateRequestPolicy(prepared.body, policy);
-    return prepared;
-  }
-  if (!providerAdapter(kind).operations.includes(operation))
-    throw new GatewayError(
-      422,
-      "unsupported_capability",
-      "This provider does not support the requested native operation",
-    );
-  let outbound: Record<string, unknown> = copyExact(body, { ...body, model });
-  if (operation === "batches" || operation === "files") delete outbound.model;
-  if (kind === "gemini" && operation === "videos") {
-    if (
-      Object.keys(body).some(
-        (field) => !["model", "prompt", "seconds", "aspect_ratio", "size"].includes(field),
-      )
-    )
-      throw new GatewayError(
-        422,
-        "conversion_loss",
-        "This video adapter supports prompt, duration and aspect ratio; unsupported fields cannot be converted",
-      );
-    const size = body.size;
-    const aspect = size === "1280x720" ? "16:9" : size === "720x1280" ? "9:16" : undefined;
-    if (
-      (size !== undefined && !aspect) ||
-      (aspect && body.aspect_ratio && aspect !== body.aspect_ratio)
-    )
-      throw new GatewayError(
-        422,
-        "conversion_loss",
-        "Video size cannot be represented by this provider",
-      );
-    outbound = {
-      instances: [{ prompt: body.prompt }],
-      parameters: {
-        durationSeconds: Number(body.seconds ?? 8),
-        sampleCount: 1,
-        ...(aspect || body.aspect_ratio ? { aspectRatio: aspect ?? body.aspect_ratio } : {}),
-      },
-    };
-  }
-  validateRequestPolicy(outbound, policy);
-  return { body: outbound, protocol: operation };
 }

@@ -491,7 +491,7 @@ T04.c只依赖：context/metadata、admission或next的RESERVED回执、begin首
 | grant前abort与begin竞争                                  | abort先赢→ABORTED/NOT_EXECUTED、供应R0/客户按条件RELEASE；begin先赢→abort拒绝/UNKNOWN      | 前者send0，后者≤1；不能两边都宣称成功                                         |
 | grant后owner死亡/重启新incarnation                       | 不转移、不重取grant，UNKNOWN仍占用；新启动旧session证明无效                                | 不新增物理发送；恢复器无重发                                                  |
 | 撤销/disabled/rebind与begin并发                          | SHARE/UPDATE提交点可解释；管理员响应之后新begin无grant；旧grant保留责任                    | 检验审计时间与事务commit交错；FOR KEY SHARE对照探针不能作为屏障成功           |
-| FOR KEY SHARE读wallet与新admission并发                   | 钱包NOKEYUPDATE可继续，不误报资金不足；独立钱包不被热wallet阻塞                            | 保留billing:955/lifecycle:237有效断言；不拿此测试证明撤销                     |
+| FOR KEY SHARE读wallet与新admission并发                   | 钱包NOKEYUPDATE可继续，不误报资金不足；独立钱包不被热wallet阻塞                            | 保留billing:833/lifecycle:323有效断言；不拿此测试证明撤销                     |
 | shared account两channel并发E60、余额100                  | 同(account,currency)最多成功1、另一稳定上游不足；客户失败组无hold；reserved60              | 一grant/发送；无各channel预算超卖                                             |
 | 缺成本价/缺任何priced ceiling/缺binding/必要量不有界     | 有类型拒绝，客户与供应hold均0；显式零费率+显式ceiling才可0成本                             | provider调用0；不能用空rates成功                                              |
 | partial→final、多个attempt含UNKNOWN                      | 完全符合A/B/C，delta不能sum revision；旧UNKNOWN保留，客户只selected                        | 每attempt≤1send；用SQL独立查head与journal净额                                 |

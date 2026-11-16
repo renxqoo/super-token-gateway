@@ -190,30 +190,23 @@ async function admit(
     if (s.hold !== amount) await tariff(s, BigInt(amount));
   }
   const ceilings = { input_tokens: "100", output_tokens: String(output) };
-  const deadline = Date.now() + 15000;
-  for (;;) {
-    try {
-      const admitted = await granted(db, p.setup, client, { ceilings, ...options });
-      const request = admitted.prepared.requestId;
-      expect(
-        (await db`SELECT amount_atoms::text FROM billing_holds WHERE request_id=${request}`)[0],
-      ).toEqual({ amount_atoms: amount });
-      return {
-        ...admitted,
-        request,
-        attempt: admitted.prepared.attemptId,
-        pricing: s.pricing!,
-        setup: p.setup,
-        ceilings,
-      };
-    } catch (error) {
-      if (!(error instanceof CoreRpcError)) throw error;
-      if (error.detail.retryability === "SAME_COMMAND" && Date.now() < deadline) {
-        await Bun.sleep(10);
-        continue;
-      }
-      throw { status: error.status, code: error.detail.code };
-    }
+  try {
+    const admitted = await granted(db, p.setup, client, { ceilings, ...options });
+    const request = admitted.prepared.requestId;
+    expect(
+      (await db`SELECT amount_atoms::text FROM billing_holds WHERE request_id=${request}`)[0],
+    ).toEqual({ amount_atoms: amount });
+    return {
+      ...admitted,
+      request,
+      attempt: admitted.prepared.attemptId,
+      pricing: s.pricing!,
+      setup: p.setup,
+      ceilings,
+    };
+  } catch (error) {
+    if (!(error instanceof CoreRpcError)) throw error;
+    throw { status: error.status, code: error.detail.code };
   }
 }
 
@@ -1318,10 +1311,10 @@ test("a retained failed evidence job is alerted on but does not close admission 
   const id = crypto.randomUUID();
   const namespace = `test-usage:failed:${id}`;
   const neighborNamespace = `test-usage:failed-neighbor:${id}`;
-  const cleanup = createUsageQueueCleanup(namespace, evidenceChannel);
-  const neighborCleanup = createUsageQueueCleanup(neighborNamespace, evidenceChannel);
+  const cleanup = createUsageQueueCleanup(namespace);
+  const neighborCleanup = createUsageQueueCleanup(neighborNamespace);
   for (const unowned of ["", "*", "test-usage:*", `${namespace}:*`, `queue-failed:${id}`])
-    expect(() => createUsageQueueCleanup(unowned, evidenceChannel)).toThrow("owned test namespace");
+    expect(() => createUsageQueueCleanup(unowned)).toThrow("owned test namespace");
   const options = {
     url: process.env.QUEUE_REDIS_URL!,
     namespace,
@@ -1385,7 +1378,7 @@ test("evidence queue backlog blocks new admission while accepting facts for alre
   await credit(p.id, "1000");
   const requests = [await admit(s, p), await admit(s, p)];
   const namespace = `test-usage:pressure:${crypto.randomUUID()}`;
-  const cleanup = createUsageQueueCleanup(namespace, evidenceChannel);
+  const cleanup = createUsageQueueCleanup(namespace);
   const options = {
     url: process.env.QUEUE_REDIS_URL!,
     namespace,
@@ -1423,7 +1416,7 @@ test("every permitted in-flight operation can finish a simultaneous durable evid
   await credit(p.id, "1000");
   const q = await admit(s, p);
   const namespace = `test-usage:burst:${crypto.randomUUID()}`;
-  const cleanup = createUsageQueueCleanup(namespace, evidenceChannel);
+  const cleanup = createUsageQueueCleanup(namespace);
   const options = {
     url: process.env.QUEUE_REDIS_URL!,
     namespace,

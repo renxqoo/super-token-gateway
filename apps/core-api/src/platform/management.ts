@@ -22,8 +22,9 @@ import {
   recordUpstreamRecharge,
   createUpstreamFundingStore,
 } from "@gateway/storage";
+import type { ProviderKind } from "@gateway/kernel";
 import { createKey, encrypt, verifier } from "@gateway/runtime/crypto";
-import { validateCidr } from "@gateway/runtime";
+import { validateCidr, validateCloudCredentials } from "@gateway/runtime";
 import { readJsonBody } from "../request-body.ts";
 import { createPlatformAuthenticator, type PlatformPermission } from "./authentication.ts";
 import { registerCustomerFunds } from "./customer-funds.ts";
@@ -106,6 +107,7 @@ export function createCoreManagementApplication(options: {
         "invalid_provider",
         "HTTPS origin and bounded credential required",
       );
+    validateCloudCredentials(input.kind, input.api_key);
     return c.json(
       await run(c.req.header("authorization"), "catalog:manage", async (tx, actor) => {
         const channel = crypto.randomUUID(),
@@ -149,6 +151,12 @@ export function createCoreManagementApplication(options: {
         .parse(await body(c.req.raw));
     return c.json(
       await run(c.req.header("authorization"), "catalog:manage", async (tx, actor) => {
+        if (input.api_key) {
+          const [provider] = await tx<
+            { kind: ProviderKind }[]
+          >`SELECT kind FROM channels WHERE id=${channel}`;
+          if (provider) validateCloudCredentials(provider.kind, input.api_key);
+        }
         await createCatalogStore(tx).updateProvider(
           channel,
           input,

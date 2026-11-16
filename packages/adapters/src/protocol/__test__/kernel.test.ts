@@ -1,4 +1,3 @@
-import { canonicalExact } from "../json.ts";
 import { describe, expect, test } from "bun:test";
 import { SSEParser, extractUsage, parseProviderJson, stringifyExact } from "../index.ts";
 import { calculateCost } from "@gateway/kernel";
@@ -19,8 +18,8 @@ describe("precise cost and usage evidence", () => {
     expect(() =>
       extractUsage({ usage: { prompt_tokens: 10, input_tokens: 11 } }, "openai"),
     ).toThrow("aliases disagree");
-    expect(canonicalExact(parseProviderJson('{"values":[9007199254740993]}'))).not.toBe(
-      canonicalExact(parseProviderJson('{"values":[9007199254740992]}')),
+    expect(stringifyExact(parseProviderJson('{"values":[9007199254740993]}'))).not.toBe(
+      stringifyExact(parseProviderJson('{"values":[9007199254740992]}')),
     );
   });
   test("sums rational dimensions before a single rounding", () => {

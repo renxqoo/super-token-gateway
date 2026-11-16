@@ -113,29 +113,3 @@ export type TariffInput = z.infer<typeof tariffSchema>;
 export type RefundInput = z.infer<typeof refundSchema>;
 export type AdjustmentInput = z.infer<typeof adjustmentSchema>;
 export type ResolutionInput = z.infer<typeof resolutionSchema>;
-
-export const usageEvidenceSchema = z
-  .object({
-    attemptId: z.uuid(),
-    source: z
-      .string()
-      .regex(/^[a-z0-9_]{1,80}$/)
-      .default("execution"),
-    state: z.enum(["DISPATCHING", "SUCCEEDED", "NOT_EXECUTED", "UNKNOWN", "PARTIAL", "FAILED"]),
-    finality: z.enum(["FINAL", "PARTIAL", "UNKNOWN", "ESTIMATED"]),
-    usage: usageSchema.default({}),
-    code: z
-      .string()
-      .regex(/^[a-z0-9_]{1,80}$/)
-      .optional(),
-    providerRequestId: z
-      .string()
-      .regex(/^[\x21-\x7e]{1,200}$/)
-      .optional(),
-    requestState: z.enum(["RUNNING", "SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"]).optional(),
-  })
-  .strict();
-export type UsageEvidence = z.infer<typeof usageEvidenceSchema>;
-export const usageBatchSchema = z
-  .object({ version: z.literal(1), events: z.array(usageEvidenceSchema).min(1).max(128) })
-  .strict();

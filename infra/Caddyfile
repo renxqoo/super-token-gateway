@@ -46,18 +46,6 @@ gateway.example.com {
 			lb_try_duration 0s
 		}
 	}
-	@legacy path /v1/* /v1beta/*
-	handle @legacy {
-		reverse_proxy 127.0.0.1:8088 127.0.0.1:8089 {
-			lb_policy least_conn
-			health_uri /readyz
-			health_interval 5s
-			health_timeout 2s
-			fail_duration 10s
-			flush_interval -1
-			lb_try_duration 0s
-		}
-	}
 	handle {
 		respond "Not found" 404
 	}

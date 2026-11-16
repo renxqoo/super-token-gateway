@@ -35,7 +35,7 @@ export function awsCredentials(secret: string): AwsCredentials {
     ...(value.sessionToken ? { sessionToken: text(value.sessionToken) } : {}),
   };
 }
-export function azureCredentials(secret: string): { key: string; version: string } {
+function azureCredentials(secret: string): { key: string; version: string } {
   const value = secret.startsWith("{") ? cloudCredentials(secret) : { apiKey: secret };
   const key = text(value.apiKey);
   const version = text(value.apiVersion, "2024-10-21");
@@ -130,28 +130,6 @@ export function signAwsRequest(
     "authorization",
     `AWS4-HMAC-SHA256 Credential=${scope.accessKeyId}/${credentialScope}, SignedHeaders=${names.join(";")}, Signature=${createHmac("sha256", scope.signingKey).update(toSign).digest("hex")}`,
   );
-}
-export function signBedrock(
-  url: URL,
-  body: string,
-  headers: Headers,
-  credentials: AwsCredentials,
-  now = new Date(),
-): void {
-  const amzDate = awsAmzDate(now);
-  signAwsRequest(url, body, headers, {
-    accessKeyId: credentials.accessKeyId,
-    sessionToken: credentials.sessionToken,
-    region: credentials.region,
-    service: "bedrock",
-    amzDate,
-    signingKey: awsSigningKey(
-      credentials.secretAccessKey,
-      amzDate.slice(0, 8),
-      credentials.region,
-      "bedrock",
-    ),
-  });
 }
 type TokenFetch = (url: URL, init: RequestInit) => Promise<Response>;
 export class VertexTokens {

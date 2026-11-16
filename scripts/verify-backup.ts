@@ -2,31 +2,26 @@ import assert from "node:assert/strict";
 import { isAbsolute, join } from "node:path";
 import { chmod, mkdir, rm } from "node:fs/promises";
 import { createDatabase, SCHEMA_VERSION } from "@gateway/storage";
-import { UsageProducer, evidenceChannel, usageChannel, type QueueChannel } from "@gateway/runtime";
+import { UsageProducer, evidenceChannel } from "@gateway/runtime";
 import { loadCoreWorkerConfig } from "../apps/core-worker/src/config.ts";
 if (!Bun.argv.includes("--quiesced"))
   throw new Error(
     "Stop all admission/producer processes and drain the queue, then pass --quiesced. A PG-only snapshot of an active queue is incomplete.",
   );
 const config = loadCoreWorkerConfig();
-const queues = [usageChannel, evidenceChannel].map(
-  (channel) =>
-    new UsageProducer<unknown>({
-      channel: channel as QueueChannel<unknown>,
-      url: config.QUEUE_REDIS_URL,
-      namespace: config.REDIS_NAMESPACE,
-      replicas: 0,
-      timeoutMs: config.QUEUE_ACK_TIMEOUT_MS,
-    }),
-);
+const queue = new UsageProducer({
+  channel: evidenceChannel,
+  url: config.QUEUE_REDIS_URL,
+  namespace: config.REDIS_NAMESPACE,
+  replicas: 0,
+  timeoutMs: config.QUEUE_ACK_TIMEOUT_MS,
+});
 const assertDrained = async () => {
-  for (const queue of queues) {
-    const counts = await queue.stats();
-    assert(
-      Object.values(counts).every((n) => n === 0),
-      `Queues must have no waiting, active, delayed or failed evidence: ${queue.options.channel.name} ${JSON.stringify(counts)}`,
-    );
-  }
+  const counts = await queue.stats();
+  assert(
+    Object.values(counts).every((n) => n === 0),
+    `Queues must have no waiting, active, delayed or failed evidence: ${evidenceChannel.name} ${JSON.stringify(counts)}`,
+  );
 };
 const roles = [
   "runtime-role.sql",
@@ -195,7 +190,7 @@ try {
   );
   passed = true;
 } finally {
-  for (const queue of queues) queue.close();
+  queue.close();
   if (!passed) await rm(path, { force: true });
   await destination?.close();
   await owner.unsafe(`DROP DATABASE IF EXISTS ${restore} WITH (FORCE)`);

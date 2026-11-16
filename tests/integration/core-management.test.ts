@@ -339,6 +339,51 @@ test(
 );
 
 test(
+  "malformed Azure, Bedrock and Vertex credentials are rejected with 422 when a provider is created or its key replaced instead of being stored and failing every request",
+  () =>
+    withFinancial(async (f, db) => {
+      const name = `cloud-${crypto.randomUUID()}`,
+        create = (kind: string, api_key: string) =>
+          f.request("/providers", {
+            name,
+            kind,
+            base_url: "https://cloud.synthetic.test/",
+            api_key,
+            concurrency: 1,
+            rpm: 1,
+          });
+      for (const [kind, api_key] of [
+        ["azure", '{"apiKey":"synthetic","apiVersion":"latest"}'],
+        ["bedrock", '{"accessKeyId":"AKIDSYNTHETIC"}'],
+        ["vertex", '{"access_token":"expired","expires_at":"2000-01-01T00:00:00Z"}'],
+        ["vertex", '{"type":"service_account","client_email":"invalid","private_key":"invalid"}'],
+      ] as const) {
+        const rejected = await create(kind, api_key);
+        expect(rejected.status).toBe(422);
+        expect((rejected.value.error as { code: string }).code).toBe("invalid_cloud_credentials");
+      }
+      expect((await db`SELECT count(*)::integer n FROM channels WHERE name=${name}`)[0].n).toBe(0);
+      const created = await create(
+        "bedrock",
+        '{"accessKeyId":"AKIDSYNTHETIC","secretAccessKey":"synthetic","region":"us-east-1"}',
+      );
+      expect(created.status).toBe(201);
+      const id = (created.value as { id: string }).id;
+      const before = (await db`SELECT secret FROM channels WHERE id=${id}`)[0].secret;
+      const replaced = await f.request(
+        `/providers/${id}`,
+        { api_key: '{"accessKeyId":"AKIDSYNTHETIC","region":"us-east-1"}' },
+        undefined,
+        "PATCH",
+      );
+      expect(replaced.status).toBe(422);
+      expect((replaced.value.error as { code: string }).code).toBe("invalid_cloud_credentials");
+      expect((await db`SELECT secret FROM channels WHERE id=${id}`)[0].secret).toEqual(before);
+    }),
+  30000,
+);
+
+test(
   "a chunked management body without Content-Length is cut at its byte budget with 413 and at its time budget with 408 body_timeout instead of 503 management_unavailable, releasing the body and creating nothing",
   () =>
     withFinancial(async (f, db) => {

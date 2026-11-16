@@ -1,22 +1,13 @@
 import { expect, test } from "bun:test";
-import {
-  StreamTranslator,
-  decodeRequest,
-  encodeRequest,
-  encodeResponse,
-  imageCount,
-  prepareRequest,
-} from "../index.ts";
+import { StreamTranslator, decodeRequest, encodeRequest, encodeResponse } from "../index.ts";
 import type { Protocol } from "@gateway/kernel";
+
+const convert = (body: Record<string, unknown>, source: Protocol, target: Protocol) =>
+  encodeRequest(decodeRequest(body, source), target, "target");
 
 test("cross-protocol conversion rejects effort instead of silently dropping it", () => {
   const body = { messages: [{ role: "user", content: "solve" }], output_config: { effort: "low" } };
-  expect(() => prepareRequest(body, "messages", "gemini", "target")).toThrow(
-    "output_config.effort",
-  );
-  expect(prepareRequest(body, "messages", "anthropic", "target").body.output_config).toEqual({
-    effort: "low",
-  });
+  expect(() => convert(body, "messages", "gemini")).toThrow("output_config.effort");
 });
 
 test("cross-protocol conversion rejects audio and video instead of sending them as images", () => {
@@ -26,19 +17,14 @@ test("cross-protocol conversion rejects audio and video instead of sending them 
       { fileData: { mimeType, fileUri: "gs://media" } },
     ]) {
       const body = { contents: [{ role: "user", parts: [part] }] };
-      expect(() => prepareRequest(body, "gemini", "anthropic", "target")).toThrow(
-        "image media type",
-      );
-      expect(prepareRequest(body, "gemini", "gemini", "target").body.contents).toEqual(
-        body.contents,
-      );
+      expect(() => convert(body, "gemini", "messages")).toThrow("image media type");
     }
   }
 });
 
 test("cross-protocol conversion rejects strict output and nested tool controls instead of losing them", () => {
   expect(() =>
-    prepareRequest(
+    convert(
       {
         messages: [],
         response_format: {
@@ -47,12 +33,11 @@ test("cross-protocol conversion rejects strict output and nested tool controls i
         },
       },
       "chat",
-      "anthropic",
-      "target",
+      "messages",
     ),
   ).toThrow("strict");
   expect(() =>
-    prepareRequest(
+    convert(
       {
         messages: [],
         tools: [
@@ -65,7 +50,6 @@ test("cross-protocol conversion rejects strict output and nested tool controls i
       },
       "messages",
       "gemini",
-      "target",
     ),
   ).toThrow("cache_control");
 });
@@ -75,16 +59,7 @@ test("cross-protocol conversion rejects versioned Anthropic tools instead of wea
     messages: [{ role: "user", content: "run" }],
     tools: [{ type: "bash_20250124", name: "bash" }],
   };
-  expect(() => prepareRequest(body, "messages", "openai", "target")).toThrow("versioned tool");
-  expect(prepareRequest(body, "messages", "anthropic", "target").body.tools).toEqual(body.tools);
-});
-
-test("image quantity follows payloads across object, split and metadata shapes", () => {
-  expect(imageCount({ url: "image" })).toBe(1);
-  expect(imageCount([{ url: "image" }, { b64_json: "image" }])).toBe(1);
-  expect(imageCount([{ url: "a", b64_json: "a" }, { url: "b" }])).toBe(2);
-  expect(imageCount([{ revised_prompt: "metadata" }, { b64_json: "image" }])).toBe(1);
-  expect(imageCount([{ url: "", b64_json: "" }, null])).toBe(0);
+  expect(() => convert(body, "messages", "chat")).toThrow("versioned tool");
 });
 
 test("cross-protocol requests preserve zero, ordered tools and results", () => {

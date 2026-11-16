@@ -21,7 +21,7 @@ if not tokenValue or tonumber(ARGV[5])~=0 then redis.call('INCRBY',tokenKey,ARGV
 if not tokenValue then redis.call('PEXPIREAT',tokenKey,(math.floor(now/60000)+2)*60000) end
 return tokenKey`;
 
-export type RatePermit = (() => Promise<void>) & {
+type RatePermit = (() => Promise<void>) & {
   adjustTokens: (actual: number) => Promise<void>;
 };
 

@@ -1,9 +1,11 @@
 import { test, expect } from "bun:test";
 import {
+  createCatalogStore,
   createDatabase,
+  createEventStore,
   createRepositories,
   migrate,
-  Store,
+  recordEventConsumer,
   createCustomerFundsStore,
   createUpstreamFundingStore,
   prepareEvidenceMonth,
@@ -13,9 +15,14 @@ import {
 import { exportEvidenceArchive, verifyEvidenceArchive } from "../../scripts/evidence-archive.ts";
 import { mkdir, rm, appendFile } from "node:fs/promises";
 import { installV2Baseline } from "../support/schema-baseline.ts";
+import {
+  baselineAdmission,
+  baselineChatFixture,
+  baselineEvidence,
+} from "../support/baseline-ledger.ts";
 import { pluginVersions } from "@gateway/storage/schema";
 
-test("v2 through financial upgrade preserves settled receipts ACKs open hold and immutable plugin package before replay", async () => {
+test("v2 through financial upgrade preserves settled receipts, ACKs and immutable plugin package, and an open baseline hold settles by explicit resolution", async () => {
   const base = process.env.DATABASE_URL;
   if (!base) throw new Error("DATABASE_URL required");
   const name = `gateway_test_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -26,43 +33,15 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
   const db = createDatabase(url.toString(), 1);
   try {
     await installV2Baseline(db);
-    const store = new Store(db);
     const funds = createCustomerFundsStore(db);
-    const tenant = await store.createProject({
+    const tenant = await createCatalogStore(db).createProject({
       name: "schema09-upgrade",
       rpm: 1000,
       tpm: 10000,
       concurrency: 100,
     });
-    const key = await store.createCredential(
-      tenant,
-      { name: "fixture", models: [], operations: ["chat"] },
-      crypto.randomUUID(),
-      "fixture",
-    );
-    const provider = crypto.randomUUID();
-    await store.createProvider(
-      provider,
-      {
-        name: "fixture",
-        kind: "openai",
-        base_url: "http://fixture.invalid/v1",
-        concurrency: 100,
-        rpm: 1000,
-      },
-      "encrypted-fixture",
-    );
-    await store.createModel({ name: "fixture", operations: ["chat"], max_output_tokens: 100 });
-    await store.createRoute("fixture", {
-      provider_id: provider,
-      upstream_model: "fixture",
-      operations: ["chat"],
-      priority: 1,
-      weight: 1,
-      pricing: { currency: "USD", rates: { requests: { numerator: "1", denominator: "1" } } },
-      ceilings: { requests: "1" },
-    });
-    const route = (await store.routes("fixture", "chat"))[0]!;
+    const fixture = await baselineChatFixture(db, tenant);
+    const provider = fixture.provider;
     const tariff = await funds.setTariff({
       model: "fixture",
       operation: "chat",
@@ -79,60 +58,32 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
       models: [],
       operations: [],
     });
-    const credential = {
-      id: key,
-      project_id: tenant,
-      models: [],
-      operations: ["chat"] as ["chat"],
-    };
-    const quote = {
-      currency: "USD",
-      amount_atoms: "10",
-      input_characters: "0",
-      prices: { [provider]: tariff.pricing_id },
-    };
-    const first = await store.admitInitial(
-      crypto.randomUUID(),
-      credential,
-      "chat",
-      "fixture",
-      "settled",
-      "fixture",
-      route,
-      quote,
-    );
-    const pending = await store.admitInitial(
-      crypto.randomUUID(),
-      credential,
-      "chat",
-      "fixture",
-      "pending",
-      "fixture",
-      route,
-      quote,
-    );
+    const admission = { ...fixture, project: tenant, tariffPricing: tariff.pricing_id };
+    const first = await baselineAdmission(db, {
+      ...admission,
+      digest: "settled",
+      fingerprint: "fixture",
+    });
+    const pending = await baselineAdmission(db, {
+      ...admission,
+      digest: "pending",
+      fingerprint: "fixture",
+    });
     expect(
-      (await db`SELECT binding_id FROM attempts WHERE id=${first.attempt_id}`)[0].binding_id,
+      (await db`SELECT binding_id FROM attempts WHERE id=${first.attempt}`)[0].binding_id,
     ).toBeNull();
     await expect(
-      db`UPDATE attempts SET binding_id=${crypto.randomUUID()} WHERE id=${first.attempt_id}`,
+      db`UPDATE attempts SET binding_id=${crypto.randomUUID()} WHERE id=${first.attempt}`,
     ).rejects.toMatchObject({ errno: "23503" });
-    const consumer = await store.createConsumer("fixture", false);
-    const fact = {
-      attemptId: first.attempt_id!,
-      source: "execution",
-      state: "SUCCEEDED" as const,
-      finality: "FINAL" as const,
-      requestState: "SUCCEEDED" as const,
-      usage: { requests: "1" },
-    };
-    await store.persistUsage([fact]);
+    const consumer = await db.begin((tx) => recordEventConsumer(tx, "fixture", false));
+    const events = createEventStore(db);
+    await baselineEvidence(db, first.attempt, "SUCCEEDED");
     const leaseToken = crypto.randomUUID();
     const leased =
       await db`UPDATE event_deliveries SET state='LEASED',lease_token=${leaseToken},lease_until=now()+interval '30 seconds',attempts=attempts+1 WHERE consumer_id=${consumer} AND state<>'ACKED' RETURNING event_id`;
     expect(leased).toHaveLength(1);
     expect(
-      await store.ackEvents(
+      await events.ack(
         consumer,
         leaseToken,
         leased.map((row: { event_id: string }) => row.event_id),
@@ -307,12 +258,12 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
     await expect(
       db.begin(async (tx) => {
         await tx`SET LOCAL ROLE gateway_runtime`;
-        await tx`UPDATE gateway_requests SET billing_outcome='FAILED' WHERE id=${pending.record.id}`;
+        await tx`UPDATE gateway_requests SET billing_outcome='FAILED' WHERE id=${pending.request}`;
       }),
     ).rejects.toMatchObject({ errno: "42501" });
     await db.begin(async (tx) => {
       await tx`SET LOCAL ROLE gateway_runtime`;
-      await tx`UPDATE gateway_requests SET updated_at=updated_at WHERE id=${pending.record.id}`;
+      await tx`UPDATE gateway_requests SET updated_at=updated_at WHERE id=${pending.request}`;
     });
     expect(
       (
@@ -345,25 +296,23 @@ test("v2 through financial upgrade preserves settled receipts ACKs open hold and
         await tx`UPDATE wallets SET credit_limit_atoms=100 WHERE project_id=${tenant}`;
       }),
     ).rejects.toMatchObject({ errno: "42501" });
-    expect(await store.persistUsage([fact])).toEqual({ REPLAYED: 1 });
-    expect(await store.persistUsage([{ ...fact, attemptId: pending.attempt_id! }])).toEqual({
-      SETTLED: 1,
-    });
+    expect(
+      await funds.resolve(pending.request, {
+        external_ref: "upgraded-settlement",
+        action: "SETTLE",
+        usage: { requests: "1" },
+        pricing_id: tariff.pricing_id,
+        reason: "EVIDENCE_RECONCILIATION",
+      }),
+    ).toMatchObject({ replayed: false });
+    expect(await funds.reconcileKnownHolds()).toBe(1);
     expect((await funds.wallets(tenant))[0]).toMatchObject({
       available_atoms: "994",
       reserved_atoms: "0",
       spent_atoms: "6",
     });
-    const next = await store.claimEvents(consumer, 10);
-    expect(next.events).toHaveLength(1);
-    expect(next.events[0]!.request_id).toBe(pending.record.id);
-    expect(
-      await store.ackEvents(
-        consumer,
-        next.lease_token,
-        next.events.map((event) => event.id),
-      ),
-    ).toBe(1);
+    const next = await events.claim(consumer, 10);
+    expect(next.events).toEqual([]);
   } finally {
     await db.close();
     await owner.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
@@ -382,9 +331,8 @@ test("baseline replay preserves funded wallets and permits concurrent foreign-ke
   let db = createDatabase(url.toString(), 1);
   try {
     await migrate(db);
-    const store = new Store(db);
     let funds = createCustomerFundsStore(db);
-    const project = await store.createProject({
+    const project = await createCatalogStore(db).createProject({
       name: "function-upgrade",
       rpm: 1000,
       tpm: 10000,
@@ -428,7 +376,7 @@ test("baseline replay preserves funded wallets and permits concurrent foreign-ke
   }
 });
 
-test("baseline preserves exact evidence and funds and archives verified monthly snapshots", async () => {
+test("evidence written at the v2 baseline survives the upgrade, closes by explicit resolution and archives verified monthly snapshots", async () => {
   const base = process.env.DATABASE_URL;
   if (!base) throw new Error("DATABASE_URL required");
   const name = `gateway_test_lifecycle_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -439,44 +387,15 @@ test("baseline preserves exact evidence and funds and archives verified monthly 
   let db = createDatabase(url.toString(), 1);
   const directory = new URL(`../../.local/${name}/`, import.meta.url);
   try {
-    await migrate(db);
-    const store = new Store(db),
-      funds = createCustomerFundsStore(db);
-    const project = await store.createProject({
+    await installV2Baseline(db);
+    const funds = createCustomerFundsStore(db);
+    const project = await createCatalogStore(db).createProject({
       name: "upgrade",
       rpm: 1000,
       tpm: 100000,
       concurrency: 100,
     });
-    const key = await store.createCredential(
-      project,
-      { name: "fixture", models: [], operations: ["chat"] },
-      crypto.randomUUID(),
-      "fixture",
-    );
-    const provider = crypto.randomUUID();
-    await store.createProvider(
-      provider,
-      {
-        name: "fixture",
-        kind: "openai",
-        base_url: "http://fixture.invalid/v1",
-        concurrency: 100,
-        rpm: 1000,
-      },
-      "encrypted-fixture",
-    );
-    await store.createModel({ name: "fixture", operations: ["chat"], max_output_tokens: 100 });
-    await store.createRoute("fixture", {
-      provider_id: provider,
-      upstream_model: "fixture",
-      operations: ["chat"],
-      priority: 1,
-      weight: 1,
-      pricing: { currency: "USD", rates: { requests: { numerator: "1", denominator: "1" } } },
-      ceilings: { requests: "1" },
-    });
-    const route = (await store.routes("fixture", "chat"))[0]!;
+    const fixture = await baselineChatFixture(db, project);
     const tariff = await funds.setTariff({
       model: "fixture",
       operation: "chat",
@@ -493,59 +412,19 @@ test("baseline preserves exact evidence and funds and archives verified monthly 
       models: [],
       operations: [],
     });
-    const credential = {
-      id: key,
-      project_id: project,
-      models: [],
-      operations: ["chat"] as ["chat"],
-    };
-    const quote = {
-      currency: "USD",
-      amount_atoms: "10",
-      input_characters: "0",
-      prices: { [provider]: tariff.pricing_id },
-    };
-    const first = await store.admitInitial(
-      crypto.randomUUID(),
-      credential,
-      "chat",
-      "fixture",
-      "same-intent",
-      "fixture",
-      route,
-      quote,
-    );
-    await store.persistUsage([
-      {
-        attemptId: first.attempt_id!,
-        source: "execution",
-        state: "SUCCEEDED",
-        finality: "FINAL",
-        usage: { requests: "1" },
-        requestState: "SUCCEEDED",
-      },
-    ]);
-    const second = await store.admitInitial(
-      crypto.randomUUID(),
-      credential,
-      "chat",
-      "fixture",
-      null,
-      "unknown",
-      route,
-      quote,
-    );
-    await store.persistUsage([
-      {
-        attemptId: second.attempt_id!,
-        source: "execution",
-        state: "UNKNOWN",
-        finality: "UNKNOWN",
-        usage: {},
-        requestState: "UNKNOWN",
-      },
-    ]);
-    await prepareEvidenceMonth(db, "2025-01");
+    const admission = { ...fixture, project, tariffPricing: tariff.pricing_id };
+    const first = await baselineAdmission(db, {
+      ...admission,
+      digest: "same-intent",
+      fingerprint: "fixture",
+    });
+    await baselineEvidence(db, first.attempt, "SUCCEEDED");
+    const second = await baselineAdmission(db, {
+      ...admission,
+      digest: null,
+      fingerprint: "unknown",
+    });
+    await baselineEvidence(db, second.attempt, "UNKNOWN");
     await db.begin(async (tx) => {
       await tx`ALTER TABLE usage_payloads ALTER CONSTRAINT usage_payloads_id_created_at_fkey DEFERRABLE INITIALLY DEFERRED`;
       await tx`ALTER TABLE journal_payloads ALTER CONSTRAINT journal_payloads_id_created_at_fkey DEFERRABLE INITIALLY DEFERRED`;
@@ -570,7 +449,8 @@ test("baseline preserves exact evidence and funds and archives verified monthly 
       await tx`ALTER TABLE journal_payloads ALTER CONSTRAINT journal_payloads_id_created_at_fkey NOT DEFERRABLE`;
     });
     const snapshot = async () => ({
-      usage: await db`SELECT to_jsonb(e)::text AS row FROM usage_events e ORDER BY id`,
+      usage:
+        await db`SELECT (to_jsonb(e)-ARRAY['record_kind','snapshot_revision','final_dimensions'])::text AS row FROM usage_events e ORDER BY id`,
       journal: await db`SELECT to_jsonb(e)::text AS row FROM money_journal e ORDER BY id`,
       wallets: await db`SELECT to_jsonb(e)::text AS row FROM wallets e ORDER BY id`,
       holds: await db`SELECT to_jsonb(e)::text AS row FROM billing_holds e ORDER BY id`,
@@ -586,32 +466,20 @@ test("baseline preserves exact evidence and funds and archives verified monthly 
         await db`SELECT to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI:SS.US') AS instant FROM usage_events ORDER BY created_at`
       ).map((row: { instant: string }) => row.instant),
     ).toEqual(["2025-01-15 00:00:00.000001", "2025-01-15 00:00:00.000002"]);
-    const upgraded = new Store(db);
-    const replay = await upgraded.admitInitial(
-      crypto.randomUUID(),
-      credential,
-      "chat",
-      "fixture",
-      "same-intent",
-      "fixture",
-      route,
-      quote,
-    );
-    expect(replay.created).toBe(false);
-    expect(replay.record.id).toBe(first.record.id);
-    await upgraded.persistUsage([
-      {
-        attemptId: second.attempt_id!,
-        source: "execution",
-        state: "SUCCEEDED",
-        finality: "FINAL",
-        usage: { requests: "1" },
-        requestState: "SUCCEEDED",
-      },
-    ]);
+    await funds.resolve(second.request, {
+      external_ref: "upgraded-settlement",
+      action: "SETTLE",
+      usage: { requests: "1" },
+      pricing_id: tariff.pricing_id,
+      reason: "EVIDENCE_RECONCILIATION",
+    });
+    expect(await funds.reconcileKnownHolds()).toBe(1);
     expect(
-      (await db`SELECT state FROM billing_holds WHERE request_id=${second.record.id}`)[0].state,
+      (await db`SELECT state FROM billing_holds WHERE request_id=${second.request}`)[0].state,
     ).toBe("SETTLED");
+    await expect(prepareEvidenceMonth(db, "2025-01")).rejects.toThrow("--quiesced");
+    await prepareEvidenceMonth(db, "2025-01", true);
+    expect((await db`SELECT count(*)::int AS n FROM usage_payloads_202501`)[0].n).toBe(2);
     await moveEvidenceMonth(db, "2025-01", "pg_default");
     await expect(
       db`INSERT INTO usage_payloads SELECT id,created_at+interval '1 day',usage FROM usage_events LIMIT 1`,

@@ -23,7 +23,8 @@ if (await Bun.file(clientFile).exists())
         return [line.slice(0, at), line.slice(at + 1)];
       }),
   );
-const url = option("--url", client.GATEWAY_URL ?? "http://127.0.0.1:8088");
+const url = option("--url", client.GATEWAY_URL ?? "");
+if (!url) throw new Error("--url or .local/client.env is required");
 const tokens = (
   process.env.BENCH_API_KEYS ??
   process.env.BENCH_API_KEY ??
@@ -67,7 +68,8 @@ const output = option("--output", `reports/gateway-${Date.now()}.json`);
 await mkdir(dirname(output), { recursive: true });
 const identityPath = `${output}.identities.tsv`;
 const identityWriter = recordIds ? await createIdentityWriter(identityPath) : undefined;
-const model = option("--model", "demo");
+const model = option("--model", client.GATEWAY_MODEL ?? "");
+if (!model) throw new Error("--model or .local/client.env is required");
 const stream = options.includes("--stream");
 const payload = JSON.stringify({
   model,
@@ -151,56 +153,11 @@ const statuses = new Map<number, number>();
 const firstByteLatency = new LatencyHistogram();
 const schedulingGaps = new LatencyHistogram();
 let peakDriverInflight = 0;
-let peakServerInflight = 0;
 let inflightShed = 0;
 let lastDispatchOverrunMs = 0;
 const transportErrors = new Map<string, number>();
 const gatewayErrors = new Map<string, number>();
 
-const collectMetrics = options.includes("--metrics");
-if (collectMetrics && !process.env.ADMIN_KEY)
-  throw new Error("--metrics requires this Gateway's ADMIN_KEY");
-const metrics = async (): Promise<Record<string, number>> => {
-  const snapshots = await Promise.all(
-    urls.map(async (url) => {
-      const response = await fetch(`${url.replace(/\/$/, "")}/admin/metrics`, {
-        headers: { authorization: `Bearer ${process.env.ADMIN_KEY}` },
-        signal: AbortSignal.timeout(2000),
-      });
-      if (!response.ok) throw new Error("Unable to collect Gateway metrics");
-      return Object.fromEntries(
-        (await response.text()).split("\n").flatMap((line) => {
-          const match = /^(gateway_[a-z_]+) ([0-9.e+-]+)$/.exec(line);
-          return match ? [[match[1] ?? "", Number(match[2])]] : [];
-        }),
-      );
-    }),
-  );
-  const total: Record<string, number> = {};
-  for (const snapshot of snapshots)
-    for (const [key, value] of Object.entries(snapshot)) total[key] = (total[key] ?? 0) + value;
-  return total;
-};
-const metricsBefore = collectMetrics ? await metrics() : undefined;
-let serverPeakRSS = 0;
-let peakBufferedBytes = 0;
-let collecting: Promise<void> | undefined;
-let nextSample = 0;
-const sampleServer = () => {
-  if (Date.now() < nextSample) return;
-  nextSample = Date.now() + 500;
-  if (collectMetrics && !collecting)
-    collecting = metrics()
-      .then((value) => {
-        serverPeakRSS = Math.max(serverPeakRSS, value.gateway_rss_bytes ?? 0);
-        peakBufferedBytes = Math.max(peakBufferedBytes, value.gateway_buffered_bytes ?? 0);
-        peakServerInflight = Math.max(peakServerInflight, value.gateway_inflight ?? 0);
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        collecting = undefined;
-      });
-};
 const startedAt = new Date().toISOString();
 let warmupRequests = 0;
 let succeeded = 0;
@@ -309,7 +266,6 @@ measuredStart = started;
 deadline = started + duration * 1000;
 const sampler = setInterval(() => {
   peakRSS = Math.max(peakRSS, process.memoryUsage().rss);
-  sampleServer();
 }, 100);
 if (rate > 0) {
   const pending = new Set<Promise<void>>();
@@ -349,25 +305,10 @@ httpAgent.destroy();
 httpsAgent.destroy();
 const elapsed = (performance.now() - started) / 1000;
 const cpu = process.cpuUsage(cpuStart);
-await collecting;
 await identityWriter?.close();
-const metricsAfter = collectMetrics ? await metrics() : undefined;
 const quantile = (value: number) => latencies.quantile(value);
-const artifacts = collectMetrics
-  ? {
-      gateway_sha256: new Bun.CryptoHasher("sha256")
-        .update(
-          await Bun.file(new URL("../dist/legacy-gateway/main.js", import.meta.url)).arrayBuffer(),
-        )
-        .digest("hex"),
-      manifest_sha256: new Bun.CryptoHasher("sha256")
-        .update(await Bun.file(new URL("../dist/manifest.json", import.meta.url)).arrayBuffer())
-        .digest("hex"),
-    }
-  : undefined;
 const report = {
   label: option("--label", "gateway"),
-  ...(artifacts ? { artifacts } : {}),
   timestamp: new Date().toISOString(),
   started_at: startedAt,
   warmup_requests: warmupRequests,
@@ -442,29 +383,6 @@ const report = {
   ),
   histogram_samples: latencies.count,
   load_generator_peak_rss_bytes: peakRSS,
-  ...(metricsBefore && metricsAfter
-    ? {
-        server_metrics: {
-          sampled_peak_rss_bytes: serverPeakRSS,
-          sampled_peak_buffered_bytes: peakBufferedBytes,
-          sampled_peak_inflight: peakServerInflight,
-          cpu_seconds_including_warmup:
-            (metricsAfter.gateway_cpu_seconds_total ?? 0) -
-            (metricsBefore.gateway_cpu_seconds_total ?? 0),
-          usage_queue_accepted:
-            (metricsAfter.gateway_usage_queue_accepted_total ?? 0) -
-            (metricsBefore.gateway_usage_queue_accepted_total ?? 0),
-          usage_queue_failures:
-            (metricsAfter.gateway_usage_queue_failures_total ?? 0) -
-            (metricsBefore.gateway_usage_queue_failures_total ?? 0),
-          failure_metrics: Object.fromEntries(
-            Object.keys(metricsAfter)
-              .filter((key) => key.startsWith("gateway_upstream_failure_"))
-              .map((key) => [key, (metricsAfter[key] ?? 0) - (metricsBefore[key] ?? 0)]),
-          ),
-        },
-      }
-    : {}),
 };
 await mkdir(new URL("../reports/", import.meta.url), { recursive: true });
 await Bun.write(output, `${JSON.stringify(report, null, 2)}\n`);
