@@ -65,6 +65,9 @@ const drainSeconds = Number(option("--drain-seconds", "60"));
 if (!Number.isSafeInteger(drainSeconds) || drainSeconds < 1 || drainSeconds > 600)
   throw new Error("Invalid drain budget");
 const hotShare = Number(option("--hot-share", "0"));
+const supplierAccounts = Number(option("--supplier-accounts", "1"));
+if (!Number.isSafeInteger(supplierAccounts) || supplierAccounts < 1 || supplierAccounts > 64)
+  throw new Error("Invalid supplier account count");
 if (!Number.isFinite(hotShare) || hotShare < 0 || hotShare > 1)
   throw new Error("Invalid hot wallet share");
 if (
@@ -215,20 +218,24 @@ async function created(
   return response.value;
 }
 
+const supplierRates = {
+  input_tokens: { numerator: "3", denominator: "1" },
+  cached_input_tokens: { numerator: "1", denominator: "1" },
+  output_tokens: { numerator: "7", denominator: "1" },
+};
+const supplierCeilings = {
+  input_tokens: "4096",
+  cached_input_tokens: "4096",
+  output_tokens: "4096",
+};
+
 async function provision(f: Fixture) {
   const setup = await f.bootstrap(
     "USD",
     supplierCredit,
     100,
     "REQUEST_COMPLETION",
-    {
-      rates: {
-        input_tokens: { numerator: "3", denominator: "1" },
-        cached_input_tokens: { numerator: "1", denominator: "1" },
-        output_tokens: { numerator: "7", denominator: "1" },
-      },
-      ceilings: { input_tokens: "4096", cached_input_tokens: "4096", output_tokens: "4096" },
-    },
+    { rates: supplierRates, ceilings: supplierCeilings },
     { baseUrl: `https://127.0.0.1:${upstreamPort}`, maxInputTokens: 4096 },
   );
   await created(
@@ -287,7 +294,75 @@ async function provision(f: Fixture) {
       }),
       "Customer credit",
     );
-  return { setup, projects, keys, credited };
+  const accounts = [setup.provider.account_id];
+  for (let index = 1; index < supplierAccounts; index++) {
+    const provider = (await created(
+      f.request("/providers", {
+        name: `capacity-supplier-${index}`,
+        kind: "openai",
+        base_url: `https://127.0.0.1:${upstreamPort}`,
+        api_key: `capacity-upstream-${index}`,
+        concurrency: 100000,
+        rpm: 10000000,
+      }),
+      "Supplier provider",
+    )) as { id: string; account_id: string; brand_id: string };
+    await created(
+      f.request(`/models/${setup.model}/routes`, {
+        provider_id: provider.id,
+        upstream_model: "synthetic",
+        operations: ["chat"],
+        pricing: { currency: "USD", rates: supplierRates },
+        ceilings: supplierCeilings,
+      }),
+      "Supplier route",
+    );
+    await created(
+      f.request("/tariffs", {
+        model: setup.model,
+        operation: "chat",
+        provider_id: provider.id,
+        pricing: { currency: "USD", rates: { requests: { numerator: "100", denominator: "1" } } },
+        ceilings: { requests: "1" },
+        basis: "REQUEST_COMPLETION",
+      }),
+      "Supplier tariff",
+    );
+    await f.catalog.application.bind(await f.catalog.actor(), provider.id, {
+      ...f.catalog.binding(setup.publication.version_id),
+      account_id: provider.account_id,
+      brand_id: provider.brand_id,
+      secret_reference: `channel:${provider.id}`,
+      config: {
+        model_map: { [setup.model]: "synthetic" },
+        max_output_tokens: 100,
+        max_input_tokens: 4096,
+        auth: "bearer",
+      },
+    });
+    const voucherBytes = Buffer.from(`%PDF-capacity-supplier-${index}`);
+    const voucher = (await created(
+      f.request("/financial-vouchers", {
+        content_base64: voucherBytes.toString("base64"),
+        content_type: "application/pdf",
+        digest: new Bun.CryptoHasher("sha256").update(voucherBytes).digest("hex"),
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      }),
+      "Supplier voucher",
+    )) as { id: string; digest: string };
+    await created(
+      f.request(`/upstream-accounts/${provider.account_id}/recharges`, {
+        ...setup.rechargeInput,
+        external_ref: `capacity-supplier-${index}-${provider.id}`,
+        credited_atoms: supplierCredit,
+        voucher_id: voucher.id,
+        voucher_digest: voucher.digest,
+      }),
+      "Supplier recharge",
+    );
+    accounts.push(provider.account_id);
+  }
+  return { setup, projects, keys, credited, accounts };
 }
 
 async function confirmedRequests(db: SQL, requests: string[]) {
@@ -381,7 +456,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       await Bun.sleep(25);
     }
     if (Object.keys(scenario).length) await upstreamStats("scenarios");
-    const { setup, projects, keys, credited } = await provision(f);
+    const { setup, projects, keys, credited, accounts } = await provision(f);
     const consumer =
       consumerMode === "live"
         ? (
@@ -685,14 +760,15 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     const requests = Number(check.requests);
     const supplier = (
       await db<
-        { balance: string; reserved: string; spent: string }[]
-      >`SELECT balance_atoms::text AS balance,reserved_atoms::text AS reserved,spent_atoms::text AS spent FROM upstream_account_balances WHERE account_id=${setup.provider.account_id} AND currency='USD'`
+        { balance: string; reserved: string; spent: string; accounts: number }[]
+      >`SELECT sum(balance_atoms)::text AS balance,sum(reserved_atoms)::text AS reserved,sum(spent_atoms)::text AS spent,count(*)::int AS accounts FROM upstream_account_balances WHERE account_id=ANY(${accounts}::uuid[]) AND currency='USD'`
     )[0];
     const supplierSpent = BigInt(requests) * BigInt(expectedCost);
     const supplierExact =
+      Number(supplier?.accounts) === accounts.length &&
       supplier?.reserved === "0" &&
       supplier.spent === String(supplierSpent) &&
-      BigInt(supplier.balance) === BigInt(supplierCredit) - supplierSpent;
+      BigInt(supplier.balance) === BigInt(supplierCredit) * BigInt(accounts.length) - supplierSpent;
     const permits = [
       ...(await db`SELECT state,count(*)::int AS count FROM execution_permits GROUP BY state ORDER BY state`),
     ] as { state: string; count: number }[];
@@ -812,6 +888,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       instances,
       wallets,
       hotShare,
+      supplierAccounts,
       concurrency,
       stream,
       requestTimeoutMs,

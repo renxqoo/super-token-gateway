@@ -320,3 +320,23 @@ test("a closed-mode success admitted before the breaker opened cannot close the 
     expect(await open()).toBe(true);
     expect(await limits.command("HGET", [key, "fails"])).toBe("3");
   }));
+
+test("route candidates for a model served by eight channels are built without copying plugin package bytes into temporary files instead of spilling every request's sort to disk", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap();
+    for (let index = 2; index <= 8; index++)
+      await f.addChannel(setup, {
+        baseUrl: `https://channel-${index}.example.test`,
+        apiKey: `synthetic-upstream-secret-${index}`,
+        maxInputTokens: 1000,
+        ceilings: { input_tokens: "100", output_tokens: "50" },
+      });
+    const candidates = await db.begin(async (tx) => {
+      await tx`SET LOCAL work_mem='4MB'`;
+      await tx`SET LOCAL temp_file_limit=0`;
+      return (
+        await tx`SELECT jsonb_array_length(public.core_candidates_v1(${setup.model},'chat','USD')) AS count`
+      )[0].count;
+    });
+    expect(candidates).toBe(8);
+  }));

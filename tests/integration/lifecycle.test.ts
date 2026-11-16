@@ -236,6 +236,7 @@ test("v2 through financial upgrade preserves settled receipts, ACKs and immutabl
       { version: 2026111222 },
       { version: 2026111223 },
       { version: 2026111224 },
+      { version: 2026111225 },
       { version: SCHEMA_VERSION },
     ]);
     expect(

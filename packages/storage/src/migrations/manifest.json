@@ -251,6 +251,15 @@
           "checksum": "99cf41ca5578faa52b9e1023f83c8147307872ab287bc25d8d6a50da9f700746"
         }
       ]
+    },
+    {
+      "version": 2026111226,
+      "files": [
+        {
+          "path": "./sql/core-candidates-projection.sql",
+          "checksum": "f58db0acddede2eff7022ff481710bbaacd944dc2b1adf781ef6d5d03601aac9"
+        }
+      ]
     }
   ]
 }

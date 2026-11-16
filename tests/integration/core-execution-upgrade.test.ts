@@ -123,7 +123,7 @@ test("v5 to financial append preserves historical wallets requests and null cata
         ),
       ).toEqual(before.commands);
       expect((await db`SELECT count(*)::integer n FROM upstream_holds`)[0].n).toBe(0);
-      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(24);
+      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(25);
     },
     { max: 4, registry: ".local/T04b2a-resources.jsonl" },
   ));
@@ -225,7 +225,7 @@ test("signed settlement append keeps gateway usage visible and its per-source un
         .catch((error) => error);
       expect(duplicate).toMatchObject({ errno: "23505" });
       expect((await db`SELECT count(*)::integer n FROM usage_event_index`)[0].n).toBe(1);
-      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(24);
+      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(25);
     },
     { max: 4, registry: ".local/T04b2b-resources.jsonl" },
   ));
@@ -256,7 +256,7 @@ test("authentication append upgrades an empty signed settlement schema without r
       expect(
         (await db`SELECT version,checksum FROM schema_migrations ORDER BY version`).slice(0, 6),
       ).toEqual(before);
-      expect((await db`SELECT max(version) v FROM schema_migrations`)[0].v).toBe(2026111225);
+      expect((await db`SELECT max(version) v FROM schema_migrations`)[0].v).toBe(2026111226);
       expect(
         (
           await db`SELECT array_agg(column_name::text ORDER BY column_name) c FROM information_schema.columns WHERE table_name='core_evidence_receipts' AND column_name IN ('authentication_disposition','signature','signature_payload_digest')`
