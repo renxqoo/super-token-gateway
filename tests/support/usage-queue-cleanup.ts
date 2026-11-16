@@ -1,13 +1,17 @@
 import { RedisClient } from "bun";
+import type { QueueChannel } from "@gateway/runtime";
 
-export function createUsageQueueCleanup(namespace: string) {
+export function createUsageQueueCleanup(
+  namespace: string,
+  channel: Pick<QueueChannel<unknown>, "name" | "scope">,
+) {
   if (
     !/^test-usage:[a-z][a-z0-9-]{0,31}:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(
       namespace,
     )
   )
     throw new Error("Usage queue cleanup requires an owned test namespace");
-  const prefix = `{${namespace}:usage}:usage-v1:`;
+  const prefix = `{${namespace}:${channel.scope}}:${channel.name}:`;
   async function withClient<T>(url: string, run: (redis: RedisClient) => Promise<T>): Promise<T> {
     const redis = new RedisClient(url, {
       connectionTimeout: 1000,

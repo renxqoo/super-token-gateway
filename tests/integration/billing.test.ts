@@ -1,41 +1,157 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import {
-  createDatabase,
-  migrate,
-  Store,
-  FundsStore,
-  createCustomerFundsStore,
-} from "@gateway/storage";
 import type { SQL } from "bun";
-import type { Route, Credential, UsageEvidence } from "@gateway/contracts";
+import type { CoreEvidenceGroupV1, ExecutionReply } from "@gateway/contracts";
+import { CoreRpcError } from "@gateway/core-client";
 import type { Usage } from "@gateway/kernel";
+import { UsageProducer, evidenceChannel } from "@gateway/runtime";
+import { sha256 } from "@gateway/runtime/crypto";
+import {
+  createCustomerFundsStore,
+  createDatabase,
+  createEventStore,
+  migrate,
+  recordEventConsumer,
+} from "@gateway/storage";
+import { createSettlementStore } from "@gateway/storage/settlement";
+import { prepareFinancialAdmission, withFinancial } from "../support/financial-execution.ts";
+import {
+  committed,
+  event,
+  granted,
+  type Client,
+  type EventBody,
+  type Fixture,
+  type Setup,
+} from "../support/core-settlement.ts";
 import { createUsageQueueCleanup } from "../support/usage-queue-cleanup.ts";
-const database = `gateway_test_funds_${crypto.randomUUID().replaceAll("-", "")}`;
-let owner: SQL;
+import { createSettlementWorker } from "../../apps/core-worker/src/settlement/worker.ts";
+
+let f: Fixture;
 let db: SQL;
-let store: Store;
+let client: Client;
 let funds: ReturnType<typeof createCustomerFundsStore>;
-let route: Route;
-let pricingId: string;
-async function project(currency = "USD") {
-  const id = await store.createProject({
-    name: crypto.randomUUID(),
-    rpm: 100000,
-    tpm: 100000000,
-    concurrency: 1000,
+let settlement: ReturnType<typeof createSettlementStore>;
+const finished = Promise.withResolvers<void>();
+let running: Promise<void>;
+
+beforeAll(async () => {
+  const ready = Promise.withResolvers<void>();
+  running = withFinancial(async (fixture, owner) => {
+    f = fixture;
+    db = owner;
+    client = f.client();
+    await client.startup();
+    funds = createCustomerFundsStore(db);
+    settlement = createSettlementStore(db);
+    ready.resolve();
+    await finished.promise;
   });
-  await db`UPDATE projects SET billing_currency=${currency} WHERE id=${id}`;
-  const key = await store.createCredential(
-    id,
-    { name: "test", models: [], operations: ["chat"] },
-    crypto.randomUUID(),
-    "test",
+  await Promise.race([ready.promise, running]);
+}, 120000);
+afterAll(async () => {
+  finished.resolve();
+  await running;
+}, 120000);
+
+type Rates = Record<string, { numerator: string; denominator: string }>;
+type Scope = { setup: Setup; hold?: string; pricing?: string; custom?: boolean };
+type Project = { id: string; setup: Setup };
+type Admitted = Awaited<ReturnType<typeof granted>> & {
+  request: string;
+  attempt: string;
+  pricing: string;
+  setup: Setup;
+  ceilings: Record<string, string>;
+};
+type Signed = ReturnType<typeof event>;
+
+const standard: Rates = {
+  input_tokens: { numerator: "3", denominator: "1" },
+  output_tokens: { numerator: "7", denominator: "1" },
+};
+const max = "9".repeat(38);
+const insufficient = { status: 402, code: "insufficient_funds" };
+
+async function scope(): Promise<Scope> {
+  const setup = await f.bootstrap("USD", "9".repeat(37), 100, "PROVIDER_USAGE", {
+    rates: {
+      input_tokens: { numerator: "0", denominator: "1" },
+      output_tokens: { numerator: "0", denominator: "1" },
+    },
+    ceilings: { input_tokens: "16777216", output_tokens: "1000000" },
+  });
+  const limits = await f.request(
+    `/providers/${setup.provider.id}`,
+    { concurrency: 100000, rpm: 10000000 },
+    undefined,
+    "PATCH",
   );
+  if (limits.status !== 200) throw new Error(`Provider limits: ${JSON.stringify(limits)}`);
+  return { setup };
+}
+
+async function setTariff(s: Scope, rates: Rates, ceilings: Record<string, string>) {
+  const response = await f.request("/tariffs", {
+    model: s.setup.model,
+    operation: "chat",
+    provider_id: s.setup.provider.id,
+    pricing: { currency: "USD", rates },
+    ceilings,
+    basis: "PROVIDER_USAGE",
+  });
+  if (response.status !== 201) throw new Error(`Tariff: ${JSON.stringify(response)}`);
+  return String(response.value.pricing_id);
+}
+
+async function tariff(s: Scope, amount: bigint) {
+  const { input, output } = hold(amount);
+  s.pricing = await setTariff(s, standard, {
+    input_tokens: input,
+    output_tokens: String(output),
+  });
+  s.hold = String(amount);
+  s.custom = false;
+  return s.pricing;
+}
+
+async function custom(s: Scope, rates: Rates, ceilings: Record<string, string>) {
+  s.pricing = await setTariff(s, rates, ceilings);
+  delete s.hold;
+  s.custom = true;
+  return s.pricing;
+}
+
+async function key(s: Scope, project: string, role?: string) {
+  const created = await f.request(`/projects/${project}/keys`, {
+    name: "funds",
+    models: [s.setup.model],
+    operations: ["chat"],
+    ...(role ? { role } : {}),
+  });
+  if (created.status !== 201) throw new Error(`Key: ${JSON.stringify(created)}`);
+  return { id: String(created.value.id), key: String(created.value.key) };
+}
+
+async function project(s: Scope): Promise<Project> {
+  const created = await f.request("/projects", {
+    name: crypto.randomUUID(),
+    billing_currency: "USD",
+    rpm: 10000000,
+    tpm: 1000000000,
+    concurrency: 1000000,
+  });
+  const id = String(created.value.id);
+  return { id, setup: { ...s.setup, project: { id }, key: await key(s, id) } };
+}
+
+async function elsewhere(p: Project) {
+  const s = await scope();
   return {
-    id,
-    credential: { id: key, project_id: id, models: [], operations: ["chat"] } as Credential,
+    s,
+    p: { id: p.id, setup: { ...s.setup, project: { id: p.id }, key: await key(s, p.id) } },
   };
 }
+
 async function credit(
   id: string,
   amount: string,
@@ -53,57 +169,118 @@ async function credit(
     ...extra,
   });
 }
-async function admit(
-  credential: Credential,
-  amount = "100",
-  currency = "USD",
-  version = pricingId,
-) {
-  const request = crypto.randomUUID();
-  const quote = {
-    currency,
-    amount_atoms: amount,
-    input_characters: "0",
-    prices: { [route.provider_id]: version },
-  };
-  const payload = {
-    id: request,
-    key_id: credential.id,
-    project_id: credential.project_id,
-    operation: "chat",
-    model: "funds-model",
-    digest: null,
-    fingerprint: "fixture",
-    route_id: route.id,
-    cost_pricing_id: route.pricing_id,
-    quote,
-  };
-  let rows = await db`SELECT admit_gateway_batch(${[payload]}::jsonb)->'0' AS result`;
-  const deadline = Date.now() + 2000;
-  while (rows[0].result.error === "55P03" && Date.now() < deadline) {
-    await Bun.sleep(5);
-    rows = await db`SELECT admit_gateway_batch(${[payload]}::jsonb)->'0' AS result`;
+
+function hold(amount: bigint) {
+  for (const output of [10, ...Array.from({ length: 100 }, (_, i) => 100 - i)]) {
+    const rest = amount - 7n * BigInt(output);
+    if (rest >= 0n && rest % 3n === 0n) return { input: String(rest / 3n), output };
   }
-  if (rows[0].result.error) throw { errno: rows[0].result.error };
-  return { request, attempt: String(rows[0].result.attempt_id) };
+  throw new Error(`No 3·input + 7·output hold equals ${amount}`);
 }
-async function complete(
-  request: string,
-  attempt: string,
-  usage: Usage = { input_tokens: "7", output_tokens: "5" },
-) {
-  await store.persistUsage([
+
+async function admit(
+  s: Scope,
+  p: Project,
+  amount = "100",
+  options: Parameters<typeof granted>[3] = {},
+): Promise<Admitted> {
+  let output = 10;
+  if (!s.custom) {
+    output = hold(BigInt(amount)).output;
+    if (s.hold !== amount) await tariff(s, BigInt(amount));
+  }
+  const ceilings = { input_tokens: "100", output_tokens: String(output) };
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    try {
+      const admitted = await granted(db, p.setup, client, { ceilings, ...options });
+      const request = admitted.prepared.requestId;
+      expect(
+        (await db`SELECT amount_atoms::text FROM billing_holds WHERE request_id=${request}`)[0],
+      ).toEqual({ amount_atoms: amount });
+      return {
+        ...admitted,
+        request,
+        attempt: admitted.prepared.attemptId,
+        pricing: s.pricing!,
+        setup: p.setup,
+        ceilings,
+      };
+    } catch (error) {
+      if (!(error instanceof CoreRpcError)) throw error;
+      if (error.detail.retryability === "SAME_COMMAND" && Date.now() < deadline) {
+        await Bun.sleep(10);
+        continue;
+      }
+      throw { status: error.status, code: error.detail.code };
+    }
+  }
+}
+
+async function retry(q: Admitted): Promise<Admitted> {
+  const prepared = await prepareFinancialAdmission(q.setup, client, {
+    requestId: q.request,
+    deadline: q.prepared.deadline,
+    ceilings: q.ceilings,
+  });
+  const next = (await client.execution(
+    "execution_next_v1",
     {
-      source: "execution",
-      attemptId: attempt,
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage,
-      requestState: "SUCCEEDED",
+      context_id: prepared.data.context_id,
+      dispatch_projection: prepared.data.dispatch_projection,
+      dispatched_digest: prepared.data.dispatched_digest,
+      manifest: prepared.data.manifest,
+      prep_session_id: prepared.data.prep_session_id,
+      prep_binding_digest: prepared.data.prep_binding_digest,
+      request_id: q.request,
+      previous_attempt_id: q.attempt,
+      expected_ordinal: 2,
+      visible_output: false,
     },
-  ]);
+    { deadlineAt: prepared.deadline },
+  )) as ExecutionReply;
+  await client.execution("execution_begin_v1", prepared.beginData(next.receipt), {
+    deadlineAt: prepared.deadline,
+  });
+  return { ...q, prepared, owner: { client, permit_epoch: "1" }, attempt: prepared.attemptId };
+}
+
+function fact(q: Admitted, fields: Partial<EventBody>) {
+  return event(q.owner, q.attempt, fields);
+}
+
+function final(q: Admitted, usage: Usage, fields: Partial<EventBody> = {}) {
+  return fact(q, {
+    finality: "FINAL",
+    usage,
+    final_dimensions: Object.keys(usage) as EventBody["final_dimensions"],
+    attempt_state: "SUCCEEDED",
+    request_state: "SUCCEEDED",
+    ...fields,
+  });
+}
+
+function unknown(q: Admitted) {
+  return fact(q, { finality: "UNKNOWN", attempt_state: "UNKNOWN" });
+}
+
+function notExecuted(q: Admitted, fields: Partial<EventBody> = {}) {
+  return fact(q, { finality: "NOT_EXECUTED", attempt_state: "NOT_EXECUTED", ...fields });
+}
+
+async function persist(...events: Signed[]) {
+  return (await settlement.persist([{ events }]))[0]!;
+}
+
+async function settle(request: string) {
   return db`SELECT (settle_requests(ARRAY[${request}::uuid])->${request}::text) AS result`;
 }
+
+async function complete(q: Admitted, usage: Usage = { input_tokens: "7", output_tokens: "5" }) {
+  committed(await persist(final(q, usage)));
+  return settle(q.request);
+}
+
 async function invariant(id: string) {
   const rows =
     await db`SELECT w.available_atoms::text,w.reserved_atoms::text,w.spent_atoms::text,w.expired_atoms::text,w.debt_atoms::text,w.freeze_reason,coalesce(sum(l.available_atoms),0)::text AS lots_available,coalesce(sum(l.reserved_atoms),0)::text AS lots_reserved,coalesce(sum(l.spent_atoms),0)::text AS lots_spent,coalesce(sum(l.expired_atoms),0)::text AS lots_expired FROM wallets w LEFT JOIN wallet_lots l ON l.wallet_id=w.id WHERE w.project_id=${id} GROUP BY w.id`;
@@ -136,56 +313,21 @@ async function invariant(id: string) {
   expect(unpaid).toHaveLength(0);
   return rows[0];
 }
-test("expected admission rejections become item outcomes without re-evaluating the whole batch", async () => {
-  const funded = await project();
+
+test("expected admission rejections leave no request behind and do not disturb funded admissions", async () => {
+  const s = await scope();
+  const funded = await project(s);
   await credit(funded.id, "1000");
-  const broke = await project();
+  const broke = await project(s);
   await credit(broke.id, "1");
-  const frozen = await project();
+  const frozen = await project(s);
   await credit(frozen.id, "1000");
   await funds.configure(frozen.id, "USD", { frozen: true });
-  const input = (
-    p: Awaited<ReturnType<typeof project>>,
-    amount: string,
-    digest: string | null,
-  ) => ({
-    id: crypto.randomUUID(),
-    key_id: p.credential.id,
-    project_id: p.id,
-    operation: "chat",
-    model: "funds-model",
-    digest,
-    fingerprint: "fixture",
-    route_id: route.id,
-    cost_pricing_id: route.pricing_id,
-    quote: {
-      currency: "USD",
-      amount_atoms: amount,
-      input_characters: "0",
-      prices: { [route.provider_id]: pricingId },
-    },
-  });
-  const brokeDigest = crypto.randomUUID();
-  const inputs = [
-    input(funded, "10", null),
-    input(broke, "100", brokeDigest),
-    input(frozen, "10", null),
-    { ...input(funded, "10", null), key_id: crypto.randomUUID() },
-    input(funded, "10", crypto.randomUUID()),
-  ];
-  const { result, calls } = await db.begin(async (tx) => {
-    await tx`SET LOCAL track_functions='pl'`;
-    const rows = await tx`SELECT admit_gateway_batch(${inputs}::jsonb) AS result`;
-    const stats =
-      await tx`SELECT calls FROM pg_stat_xact_user_functions WHERE funcname='admit_gateway_batch'`;
-    return { result: rows[0].result, calls: Number(stats[0].calls) };
-  });
-  expect(result["0"]).toMatchObject({ created: true });
-  expect(result["1"]).toEqual({ error: "P0402" });
-  expect(result["2"]).toEqual({ error: "P0402" });
-  expect(result["3"]).toEqual({ error: "P0401" });
-  expect(result["4"]).toMatchObject({ created: true });
-  expect(calls).toBe(1);
+  const brokeDigest = sha256(crypto.randomUUID());
+  await admit(s, funded, "10", { intent: null });
+  await expect(admit(s, broke, "100", { intent: brokeDigest })).rejects.toEqual(insufficient);
+  await expect(admit(s, frozen, "10", { intent: null })).rejects.toEqual(insufficient);
+  await admit(s, funded, "10");
   expect((await db`SELECT 1 FROM gateway_requests WHERE intent_digest=${brokeDigest}`).length).toBe(
     0,
   );
@@ -197,31 +339,28 @@ test("expected admission rejections become item outcomes without re-evaluating t
     available_atoms: "1",
     reserved_atoms: "0",
   });
+  expect((await funds.wallets(frozen.id))[0]).toMatchObject({
+    available_atoms: "1000",
+    reserved_atoms: "0",
+  });
 });
 
 test("holds that cannot progress without new evidence back off and do not delay debt collection", async () => {
-  const waiting = await project();
+  const s = await scope();
+  const waiting = await project(s);
   await credit(waiting.id, "1000");
   for (let i = 0; i < 40; i++) {
-    const q = await admit(waiting.credential, "1");
-    await store.persistUsage([
-      {
-        attemptId: q.attempt,
-        source: "execution",
-        state: "UNKNOWN",
-        finality: "UNKNOWN",
-        usage: {},
-      },
-    ]);
+    const q = await admit(s, waiting, "10");
+    committed(await persist(unknown(q)));
   }
   const [{ id: wallet }] = await db`SELECT id FROM wallets WHERE project_id=${waiting.id}`;
   await db`UPDATE billing_holds SET created_at=now()-interval '2 hours',next_reconcile_at=now()-interval '1 minute' WHERE wallet_id=${wallet}`;
-  const indebted = await project();
-  await credit(indebted.id, "1");
-  const q = await admit(indebted.credential, "1");
-  await complete(q.request, q.attempt);
+  const indebted = await project(s);
+  await credit(indebted.id, "10");
+  const q = await admit(s, indebted, "10");
+  await complete(q);
   expect((await funds.wallets(indebted.id))[0]).toMatchObject({
-    debt_atoms: "55",
+    debt_atoms: "46",
     freeze_reason: "DEBT",
   });
   await credit(indebted.id, "100");
@@ -238,22 +377,23 @@ test("holds that cannot progress without new evidence back off and do not delay 
 });
 
 test("a gift-funded release does not re-wake cash debt that it cannot collect", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1", "GIFT", { models: ["other"] });
   await funds.configureCredit(p.id, "USD", {
     external_ref: "limit",
     expected_version: "0",
     credit_limit_atoms: "1000",
   });
-  const indebted = await admit(p.credential, "60");
-  await complete(indebted.request, indebted.attempt);
+  const indebted = await admit(s, p, "60");
+  await complete(indebted);
   expect((await funds.wallets(p.id))[0]).toMatchObject({ debt_atoms: "56", freeze_reason: null });
   await credit(p.id, "100", "GIFT");
-  const gifted = await admit(p.credential, "60");
-  await complete(gifted.request, gifted.attempt);
-  const [hold] =
+  const gifted = await admit(s, p, "60");
+  await complete(gifted);
+  const [held] =
     await db`SELECT next_reconcile_at>now()+interval '59 minutes' AS deferred FROM billing_holds WHERE request_id=${indebted.request}`;
-  expect(hold.deferred).toBe(true);
+  expect(held.deferred).toBe(true);
   expect((await funds.wallets(p.id))[0]).toMatchObject({ debt_atoms: "56" });
   await credit(p.id, "100");
   while ((await funds.reconcileKnownHolds(32)) > 0);
@@ -262,28 +402,37 @@ test("a gift-funded release does not re-wake cash debt that it cannot collect", 
 });
 
 test("concurrent requests reserve existing debt and in-flight credit before admitting more work", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "100");
   await funds.configureCredit(p.id, "USD", {
     external_ref: "limit",
     expected_version: "0",
     credit_limit_atoms: "50",
   });
-  const outcomes = await Promise.allSettled(
-    Array.from({ length: 3 }, () => admit(p.credential, "60")),
-  );
+  await tariff(s, 60n);
+  const outcomes = await Promise.allSettled(Array.from({ length: 3 }, () => admit(s, p, "60")));
   const accepted = outcomes.filter((r) => r.status === "fulfilled").map((r) => r.value);
   expect(accepted).toHaveLength(2);
-  expect(
-    outcomes.flatMap((r) => (r.status === "rejected" ? [r.reason as { errno: string }] : [])),
-  ).toEqual([{ errno: "P0402" }]);
+  expect(outcomes.flatMap((r) => (r.status === "rejected" ? [r.reason] : []))).toEqual([
+    insufficient,
+  ]);
   expect((await funds.wallets(p.id))[0]).toMatchObject({
     available_atoms: "0",
     reserved_atoms: "100",
     credit_reserved_atoms: "20",
     available_credit_atoms: "30",
   });
-  for (const q of accepted) await complete(q.request, q.attempt);
+  const credit_atoms = new Map(
+    (
+      await db<
+        { request_id: string; credit_atoms: string }[]
+      >`SELECT request_id,credit_atoms::text FROM billing_holds WHERE request_id=ANY(${accepted.map((q) => q.request)}::uuid[])`
+    ).map((row) => [row.request_id, BigInt(row.credit_atoms)]),
+  );
+  accepted.sort((x, y) => Number(credit_atoms.get(x.request)! - credit_atoms.get(y.request)!));
+  expect([...credit_atoms.values()].sort()).toEqual([0n, 20n]);
+  for (const q of accepted) await complete(q);
   expect((await funds.wallets(p.id))[0]).toMatchObject({
     credit_reserved_atoms: "0",
     debt_atoms: "12",
@@ -294,18 +443,17 @@ test("concurrent requests reserve existing debt and in-flight credit before admi
 });
 
 test("unknown credit holds remain committed until an explicit release and duplicate release is harmless", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1", "GIFT", { models: ["other"] });
   await funds.configureCredit(p.id, "USD", {
     external_ref: "limit",
     expected_version: "0",
     credit_limit_atoms: "60",
   });
-  const q = await admit(p.credential, "60");
-  await store.persistUsage([
-    { attemptId: q.attempt, source: "execution", state: "UNKNOWN", finality: "UNKNOWN", usage: {} },
-  ]);
-  await expect(admit(p.credential, "1")).rejects.toMatchObject({ errno: "P0402" });
+  const q = await admit(s, p, "60");
+  committed(await persist(unknown(q)));
+  await expect(admit(s, p, "10")).rejects.toEqual(insufficient);
   expect((await funds.wallets(p.id))[0]).toMatchObject({ credit_reserved_atoms: "60" });
   const resolution = {
     external_ref: "release",
@@ -314,9 +462,9 @@ test("unknown credit holds remain committed until an explicit release and duplic
     reason: "ADMIN_WRITE_OFF" as const,
   };
   await funds.resolve(q.request, resolution);
-  await db`SELECT settle_requests(ARRAY[${q.request}::uuid])`;
+  await settle(q.request);
   await funds.resolve(q.request, resolution);
-  await db`SELECT settle_requests(ARRAY[${q.request}::uuid])`;
+  await settle(q.request);
   expect((await funds.wallets(p.id))[0]).toMatchObject({
     reserved_atoms: "0",
     credit_reserved_atoms: "0",
@@ -327,22 +475,23 @@ test("unknown credit holds remain committed until an explicit release and duplic
 });
 
 test("credit settlement and refunds debit once, gifts do not repay old debt, and cash restores credit", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1", "GIFT", { models: ["other"] });
   await funds.configureCredit(p.id, "USD", {
     external_ref: "limit",
     expected_version: "0",
     credit_limit_atoms: "100",
   });
-  const q = await admit(p.credential, "60");
-  const settled = await complete(q.request, q.attempt);
-  await complete(q.request, q.attempt);
+  const q = await admit(s, p, "60");
+  const settled = await complete(q);
+  await complete(q);
   expect((await funds.wallets(p.id))[0]).toMatchObject({
     debt_atoms: "56",
     credit_reserved_atoms: "0",
   });
   await credit(p.id, "100", "GIFT");
-  await db`SELECT settle_requests(ARRAY[${q.request}::uuid])`;
+  await settle(q.request);
   expect((await funds.wallets(p.id))[0]).toMatchObject({
     debt_atoms: "56",
     available_credit_atoms: "44",
@@ -355,7 +504,7 @@ test("credit settlement and refunds debit once, gifts do not repay old debt, and
     available_credit_atoms: "60",
   });
   await credit(p.id, "50");
-  await db`SELECT settle_requests(ARRAY[${q.request}::uuid])`;
+  await settle(q.request);
   expect((await funds.wallets(p.id))[0]).toMatchObject({
     debt_atoms: "0",
     available_atoms: "111",
@@ -365,15 +514,16 @@ test("credit settlement and refunds debit once, gifts do not repay old debt, and
 });
 
 test("actual overrun keeps the full receivable and freezes new promises beyond the credit limit", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1");
   await funds.configureCredit(p.id, "USD", {
     external_ref: "limit",
     expected_version: "0",
     credit_limit_atoms: "50",
   });
-  const q = await admit(p.credential, "50");
-  await complete(q.request, q.attempt, { input_tokens: "50", output_tokens: "50" });
+  const q = await admit(s, p, "50");
+  await complete(q, { input_tokens: "50", output_tokens: "50" });
   expect((await funds.wallets(p.id))[0]).toMatchObject({
     available_atoms: "0",
     credit_reserved_atoms: "0",
@@ -382,16 +532,19 @@ test("actual overrun keeps the full receivable and freezes new promises beyond t
     available_credit_atoms: "0",
     freeze_reason: "DEBT",
   });
-  await expect(admit(p.credential, "0")).rejects.toMatchObject({ errno: "P0402" });
+  const next = await elsewhere(p);
+  await expect(admit(next.s, next.p, "10")).rejects.toEqual(insufficient);
   await credit(p.id, "449");
-  await db`SELECT settle_requests(ARRAY[${q.request}::uuid])`;
+  await settle(q.request);
   expect((await funds.wallets(p.id))[0]).toMatchObject({ debt_atoms: "50", freeze_reason: null });
-  await admit(p.credential, "0");
+  await credit(p.id, "10");
+  await admit(next.s, next.p, "10");
   await invariant(p.id);
 });
 
 test("credit policy retries preserve their original result without overwriting a newer policy", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1");
   const input = { external_ref: "first", expected_version: "0", credit_limit_atoms: "100" };
   const results = await Promise.all(
@@ -418,7 +571,7 @@ test("credit policy retries preserve their original result without overwriting a
   await expect(
     funds.configureCredit(p.id, "USD", { ...input, external_ref: "stale" }),
   ).rejects.toMatchObject({ status: 409 });
-  const q = await admit(p.credential, "60");
+  const q = await admit(s, p, "60");
   await expect(
     funds.configureCredit(p.id, "USD", {
       external_ref: "lower",
@@ -427,124 +580,15 @@ test("credit policy retries preserve their original result without overwriting a
     }),
   ).rejects.toMatchObject({ status: 409 });
   await funds.configure(p.id, "USD", { frozen: true });
-  await expect(admit(p.credential, "0")).rejects.toMatchObject({ errno: "P0402" });
-  await complete(q.request, q.attempt);
+  await expect(admit(s, p, "10")).rejects.toEqual(insufficient);
+  await complete(q);
   expect((await funds.wallets(p.id))[0]).toMatchObject({ freeze_reason: "MANUAL" });
   await invariant(p.id);
 });
 
-test("Responses completion racing initial evidence cannot leave final usage and credit held forever", async () => {
-  const p = await project();
-  await credit(p.id, "1", "GIFT", { models: ["other"] });
-  await funds.configureCredit(p.id, "USD", {
-    external_ref: "credit",
-    expected_version: "0",
-    credit_limit_atoms: "100",
-  });
-  const q = await admit(p.credential, "100");
-  const resource = await store.saveResource(
-    p.id,
-    route.provider_id,
-    `response_${crypto.randomUUID()}`,
-    "response",
-    "funds-model",
-    q.attempt,
-  );
-  await store.updateResource(resource, "PENDING_USAGE", "in_progress");
-  let initial: Promise<unknown> | undefined;
-  try {
-    await db.begin(async (tx) => {
-      await tx`SELECT id FROM gateway_requests WHERE id=${q.request} FOR NO KEY UPDATE`;
-      initial = store.persistUsage([
-        {
-          attemptId: q.attempt,
-          source: "execution",
-          state: "SUCCEEDED",
-          finality: "FINAL",
-          usage: { requests: "1" },
-          requestState: "SUCCEEDED",
-        },
-      ]);
-      const end = Date.now() + 1500;
-      let blocked = false;
-      while (Date.now() < end) {
-        blocked =
-          (
-            await db`SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%persist_usage_batch%'`
-          ).length > 0;
-        if (blocked) break;
-        await Bun.sleep(5);
-      }
-      expect(blocked).toBe(true);
-      await store.updateResource(resource, "COMPLETED", "completed");
-    });
-  } finally {
-    await initial;
-  }
-  await store.persistUsage([
-    {
-      attemptId: q.attempt,
-      source: "async_final",
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage: { requests: "1", input_tokens: "7", output_tokens: "5" },
-    },
-  ]);
-  expect(await funds.receipt(q.request, p.id)).toMatchObject({
-    hold_state: "SETTLED",
-    charged_atoms: "56",
-    debt_atoms: "56",
-  });
-  expect((await funds.wallets(p.id))[0]).toMatchObject({
-    credit_reserved_atoms: "0",
-    debt_atoms: "56",
-  });
-  await invariant(p.id);
-});
-
-test("an async resource completing after backed-off evidence wakes its hold without waiting an hour", async () => {
-  const p = await project();
-  await credit(p.id, "100");
-  const q = await admit(p.credential, "100");
-  const resource = await store.saveResource(
-    p.id,
-    route.provider_id,
-    `response_${crypto.randomUUID()}`,
-    "response",
-    "funds-model",
-    q.attempt,
-  );
-  await store.updateResource(resource, "PENDING_USAGE", "in_progress");
-  await db`UPDATE billing_holds SET created_at=now()-interval '2 hours' WHERE request_id=${q.request}`;
-  await store.persistUsage([
-    {
-      attemptId: q.attempt,
-      source: "execution",
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage: { requests: "1", input_tokens: "7", output_tokens: "5" },
-      requestState: "SUCCEEDED",
-    },
-  ]);
-  const [waiting] =
-    await db`SELECT h.state,q.billing_outcome,h.next_reconcile_at>now()+interval '59 minutes' AS deferred FROM billing_holds h JOIN gateway_requests q ON q.id=h.request_id WHERE h.request_id=${q.request}`;
-  expect(waiting).toMatchObject({
-    state: "RECONCILING",
-    billing_outcome: "PENDING",
-    deferred: true,
-  });
-  await store.updateResource(resource, "COMPLETED", "completed");
-  while ((await funds.reconcileKnownHolds(32)) > 0);
-  expect(await funds.receipt(q.request, p.id)).toMatchObject({
-    billing_outcome: "SUCCESS",
-    hold_state: "SETTLED",
-    charged_atoms: "56",
-  });
-  await invariant(p.id);
-});
-
 test("credit atoms above IEEE754 remain exact and cannot fund another currency", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1", "GIFT", { models: ["other"] });
   await funds.credit(p.id, {
     currency: "EUR",
@@ -560,12 +604,12 @@ test("credit atoms above IEEE754 remain exact and cannot fund another currency",
     expected_version: "0",
     credit_limit_atoms: "9007199254740993",
   });
-  const q = await admit(p.credential, "9007199254740993");
-  await expect(admit(p.credential, "1")).rejects.toMatchObject({ errno: "P0402" });
+  const q = await admit(s, p, "9007199254740993");
+  await expect(admit(s, p, "10")).rejects.toEqual(insufficient);
   expect(
     (await funds.wallets(p.id)).find((w) => (w as { currency: string }).currency === "USD"),
   ).toMatchObject({ credit_reserved_atoms: "9007199254740993", available_credit_atoms: "0" });
-  await complete(q.request, q.attempt);
+  await complete(q);
   expect(
     (await funds.wallets(p.id)).find((w) => (w as { currency: string }).currency === "USD"),
   ).toMatchObject({
@@ -580,13 +624,15 @@ test("credit atoms above IEEE754 remain exact and cannot fund another currency",
 });
 
 test("concurrent credit reduction and admission cannot commit promises beyond the resulting limit", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1", "GIFT", { models: ["other"] });
   await funds.configureCredit(p.id, "USD", {
     external_ref: "open",
     expected_version: "0",
     credit_limit_atoms: "1000",
   });
+  await tariff(s, 100n);
   const reducing = funds.configureCredit(p.id, "USD", {
     external_ref: "reduce",
     expected_version: "1",
@@ -597,7 +643,7 @@ test("concurrent credit reduction and admission cannot commit promises beyond th
       () => true,
       () => false,
     ),
-    Promise.allSettled(Array.from({ length: 10 }, () => admit(p.credential, "100"))),
+    Promise.allSettled(Array.from({ length: 10 }, () => admit(s, p, "100"))),
   ]);
   const accepted = admitted.filter((result) => result.status === "fulfilled").length;
   expect(accepted).toBeGreaterThanOrEqual(1);
@@ -612,15 +658,16 @@ test("concurrent credit reduction and admission cannot commit promises beyond th
 });
 
 test("charge adjustments freeze and reopen the same credit boundary without turning credit into cash", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1", "GIFT", { models: ["other"] });
   await funds.configureCredit(p.id, "USD", {
     external_ref: "limit",
     expected_version: "0",
     credit_limit_atoms: "100",
   });
-  const q = await admit(p.credential, "60");
-  const result = await complete(q.request, q.attempt);
+  const q = await admit(s, p, "60");
+  const result = await complete(q);
   const charge = String(result[0].result.charge_id);
   await funds.adjust(charge, {
     external_ref: "up",
@@ -645,113 +692,61 @@ test("charge adjustments freeze and reopen the same credit boundary without turn
   });
   await invariant(p.id);
 });
+
 test("admission and settlement avoid randomly scattered new index keys for an existing request UUID", async () => {
-  const tenant = await project();
+  const s = await scope();
+  const tenant = await project(s);
   await credit(tenant.id, "1000");
-  const { request, attempt } = await admit(tenant.credential);
-  await complete(request, attempt);
+  const q = await admit(s, tenant);
+  await complete(q);
   const ids = await db<
     { charge_id: string; hold_id: string; journal_id: string; kind: string }[]
   >`SELECT c.id AS charge_id,h.id AS hold_id,j.id AS journal_id,j.kind
     FROM billing_charges c JOIN billing_holds h ON h.id=c.hold_id
     JOIN money_journal j ON j.wallet_id=h.wallet_id AND j.reference IN ('hold:'||h.request_id,'settle:'||h.request_id)
-    WHERE c.request_id=${request} ORDER BY j.kind`;
+    WHERE c.request_id=${q.request} ORDER BY j.kind`;
   expect(ids.map((row) => row.kind)).toEqual(["HOLD", "SETTLE"]);
   const timeOrdered = /^[a-f0-9]{8}-[a-f0-9]{4}-7[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
-  expect(attempt).toMatch(timeOrdered);
   for (const row of ids) {
-    expect(row.hold_id).toBe(request);
+    expect(row.hold_id).toBe(q.request);
     expect(row.charge_id).toMatch(timeOrdered);
     expect(row.journal_id).toMatch(timeOrdered);
   }
   expect(await invariant(tenant.id)).toMatchObject({ reserved_atoms: "0" });
 });
 
-test("a concurrent quote burst must not starve independent funding behind a locked tariff catalog", async () => {
-  const tenant = await project();
-  await credit(tenant.id, "1000");
-  const url = new URL(process.env.DATABASE_URL!);
-  url.pathname = `/${database}`;
-  const constrained = createDatabase(url.href, 2);
-  const isolated = createCustomerFundsStore(constrained);
-  const quoting = new FundsStore(constrained);
-  const acquired = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
-  const lock = db.begin(async (tx) => {
-    await tx`LOCK TABLE billing_tariffs IN ACCESS EXCLUSIVE MODE`;
-    acquired.resolve();
-    await release.promise;
-  });
-  await acquired.promise;
-  const quotes = Array.from({ length: 32 }, () =>
-    quoting.quote("funds-model", "chat", "USD", [route.provider_id], { inputCharacters: "1" }, 1),
-  );
-  let creditFinished = false;
-  let credited: Promise<unknown> | undefined;
-  try {
-    const deadline = Date.now() + 1000;
-    let waiting = false;
-    while (!waiting && Date.now() < deadline) {
-      waiting = (
-        await db`SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%DISTINCT ON(provider.id)%') AS waiting`
-      )[0].waiting;
-      if (!waiting) await Bun.sleep(5);
-    }
-    expect(waiting).toBe(true);
-    credited = isolated
-      .credit(tenant.id, {
-        currency: "USD",
-        external_ref: "during-quote-load",
-        amount_atoms: "1",
-        kind: "CASH",
-        priority: 100,
-        models: [],
-        operations: [],
-      })
-      .then(() => {
-        creditFinished = true;
-      });
-    await Promise.race([credited, Bun.sleep(300)]);
-    expect(creditFinished).toBe(true);
-  } finally {
-    release.resolve();
-    await lock;
-    await Promise.allSettled([...quotes, ...(credited ? [credited] : [])]);
-    await constrained.close();
-  }
-  const captured = await Promise.all(quotes);
-  expect(captured).toHaveLength(32);
-  expect(captured.every((quote) => quote.prices[route.provider_id] === pricingId)).toBe(true);
-  expect(await invariant(tenant.id)).toMatchObject({
-    available_atoms: "1001",
-    reserved_atoms: "0",
-  });
-});
-
 test("covered settlement and an over-hold peer on the same wallet preserve exact independent charges", async () => {
-  const mixed = await project();
-  const peer = await project();
+  const s = await scope();
+  const mixed = await project(s);
+  const peer = await project(s);
   await credit(mixed.id, "1000");
   await credit(peer.id, "1000");
-  const covered = await admit(mixed.credential);
-  const over = await admit(mixed.credential);
-  const independent = await admit(peer.credential);
-  const events: UsageEvidence[] = [covered, over, independent].map((record, index) => ({
-    attemptId: record.attempt,
-    source: "execution",
-    state: "SUCCEEDED",
-    finality: "FINAL",
-    requestState: "SUCCEEDED",
-    usage:
-      index === 1
-        ? { input_tokens: "14", output_tokens: "10" }
-        : { input_tokens: "7", output_tokens: "5" },
+  const covered = await admit(s, mixed);
+  const over = await admit(s, mixed);
+  const independent = await admit(s, peer);
+  const groups = [covered, over, independent].map((record, index) => ({
+    events: [
+      final(
+        record,
+        index === 1
+          ? { input_tokens: "14", output_tokens: "10" }
+          : { input_tokens: "7", output_tokens: "5" },
+      ),
+    ],
   }));
-  expect(await store.persistUsage(events)).toEqual({ SETTLED: 3 });
+  const first = await settlement.persist(groups);
+  expect(
+    first.map((group) => committed(group).receipts.map((r) => [r.outcome, r.duplicate])),
+  ).toEqual([[["ACCEPTED", false]], [["ACCEPTED", false]], [["ACCEPTED", false]]]);
   expect((await funds.receipt(covered.request, mixed.id)).charged_atoms).toBe("56");
   expect((await funds.receipt(over.request, mixed.id)).charged_atoms).toBe("112");
   expect((await funds.receipt(independent.request, peer.id)).charged_atoms).toBe("56");
-  expect(await store.persistUsage(events)).toEqual({ REPLAYED: 3 });
+  const replay = await settlement.persist(groups);
+  expect(replay.map((group) => committed(group).receipts.map((r) => r.duplicate))).toEqual([
+    [true],
+    [true],
+    [true],
+  ]);
   expect(await invariant(mixed.id)).toMatchObject({
     spent_atoms: "168",
     available_atoms: "832",
@@ -764,211 +759,87 @@ test("covered settlement and an over-hold peer on the same wallet preserve exact
   });
 });
 
-test("a 256-event transaction preserves every receipt and repeated atomic job at the batch boundary", async () => {
-  const tenant = await project();
+test("a 128-group evidence batch preserves every receipt and a repeated batch at the boundary is a replay", async () => {
+  const s = await scope();
+  const tenant = await project(s);
   await credit(tenant.id, "30000");
-  const events: UsageEvidence[] = [];
-  for (let index = 0; index < 256; index++) {
-    const record = await admit(tenant.credential);
-    events.push({
-      attemptId: record.attempt,
-      source: "execution",
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      requestState: "SUCCEEDED",
-      usage: { input_tokens: "7", output_tokens: "5" },
+  const groups: CoreEvidenceGroupV1[] = [];
+  for (let index = 0; index < 128; index++)
+    groups.push({
+      events: [final(await admit(s, tenant), { input_tokens: "7", output_tokens: "5" })],
     });
-  }
-  const rows = await db<
-    {
-      result: Record<string, { status: string; billing: { state: string; charged_atoms: string } }>;
-    }[]
-  >`SELECT persist_usage_batch(${events}::jsonb) AS result`;
-  expect(Object.keys(rows[0]!.result)).toHaveLength(256);
-  for (const result of Object.values(rows[0]!.result))
-    expect(result).toMatchObject({
-      status: "APPLIED",
-      billing: { state: "SETTLED", charged_atoms: "56" },
-    });
-  expect(
-    await Promise.all([
-      store.persistUsage(events.slice(0, 128)),
-      store.persistUsage(events.slice(128)),
-    ]),
-  ).toEqual([{ REPLAYED: 128 }, { REPLAYED: 128 }]);
+  const results = await settlement.persist(groups);
+  expect(results).toHaveLength(128);
+  for (const result of results)
+    expect(committed(result).receipts.map((r) => [r.outcome, r.duplicate])).toEqual([
+      ["ACCEPTED", false],
+    ]);
+  const charges = await db<
+    { amount_atoms: string; n: number }[]
+  >`SELECT c.amount_atoms::text,count(*)::int AS n FROM billing_charges c JOIN gateway_requests q ON q.id=c.request_id WHERE q.project_id=${tenant.id} GROUP BY c.amount_atoms`;
+  expect([...charges]).toEqual([{ amount_atoms: "56", n: 128 }]);
+  const replays = [
+    ...(await settlement.persist(groups.slice(0, 64))),
+    ...(await settlement.persist(groups.slice(64))),
+  ];
+  for (const result of replays)
+    expect(committed(result).receipts.map((r) => r.duplicate)).toEqual([true]);
   expect(await invariant(tenant.id)).toMatchObject({
-    available_atoms: "15664",
-    spent_atoms: "14336",
+    available_atoms: "22832",
+    spent_atoms: "7168",
     reserved_atoms: "0",
   });
 });
 
-test("a locked wallet does not block admission or evidence for another wallet", async () => {
-  const hot = await project();
-  const cold = await project();
+test("a locked wallet does not block evidence for another wallet in the same batch", async () => {
+  const s = await scope();
+  const hot = await project(s);
+  const cold = await project(s);
   await credit(hot.id, "1000");
   await credit(cold.id, "1000");
-  const quote = {
-    currency: "USD",
-    amount_atoms: "100",
-    input_characters: "0",
-    prices: { [route.provider_id]: pricingId },
-  };
-  const unlocked = Promise.withResolvers<void>();
-  const locked = Promise.withResolvers<void>();
+  const hotRequest = await admit(s, hot);
+  const coldRequest = await admit(s, cold);
+  const usage = { input_tokens: "7", output_tokens: "5" };
+  const unlocked = Promise.withResolvers<void>(),
+    locked = Promise.withResolvers<void>();
   const lock = db.begin(async (tx) => {
     await tx`SELECT id FROM wallets WHERE project_id=${hot.id} FOR UPDATE`;
     locked.resolve();
     await unlocked.promise;
   });
   await locked.promise;
-  const hotAdmission = store.admitInitial(
-    crypto.randomUUID(),
-    hot.credential,
-    "chat",
-    "funds-model",
-    null,
-    "hot",
-    route,
-    quote,
-  );
-  const coldAdmission = store.admitInitial(
-    crypto.randomUUID(),
-    cold.credential,
-    "chat",
-    "funds-model",
-    null,
-    "cold",
-    route,
-    quote,
-  );
-  let coldCompleted = false;
-  void coldAdmission.then(
-    () => {
-      coldCompleted = true;
-    },
-    () => {},
-  );
+  let results: Awaited<ReturnType<typeof settlement.persist>>;
   try {
-    await Promise.race([coldAdmission, Bun.sleep(300)]);
-    expect(coldCompleted).toBe(true);
+    const started = performance.now();
+    results = await settlement.persist([
+      { events: [final(hotRequest, usage)] },
+      { events: [final(coldRequest, usage)] },
+    ]);
+    expect(performance.now() - started).toBeLessThan(5000);
   } finally {
     unlocked.resolve();
     await lock;
-    await Promise.allSettled([hotAdmission, coldAdmission]);
   }
-  expect((await invariant(hot.id)).reserved_atoms).toBe("100");
-  expect((await invariant(cold.id)).reserved_atoms).toBe("100");
-  const admitted = await Promise.all([hotAdmission, coldAdmission]);
-  const unlockedAgain = Promise.withResolvers<void>(),
-    lockedAgain = Promise.withResolvers<void>();
-  const secondLock = db.begin(async (tx) => {
-    await tx`SELECT id FROM wallets WHERE project_id=${hot.id} FOR UPDATE`;
-    lockedAgain.resolve();
-    await unlockedAgain.promise;
-  });
-  await lockedAgain.promise;
-  const ingestion = store.persistUsage(
-    admitted.map((record) => ({
-      attemptId: record.attempt_id!,
-      source: "execution",
-      state: "SUCCEEDED" as const,
-      finality: "FINAL" as const,
-      usage: { input_tokens: "7", output_tokens: "5" },
-      requestState: "SUCCEEDED" as const,
-    })),
-  );
-  try {
-    const end = Date.now() + 1000;
-    let settled = false;
-    while (Date.now() < end) {
-      settled =
-        (await db`SELECT state FROM billing_holds WHERE request_id=${admitted[1]!.record.id}`)[0]
-          ?.state === "SETTLED";
-      if (settled) break;
-      await Bun.sleep(5);
-    }
-    expect(settled).toBe(true);
-  } finally {
-    unlockedAgain.resolve();
-    await secondLock;
-    await ingestion;
-  }
-  expect((await invariant(hot.id)).reserved_atoms).toBe("0");
+  expect(results[0]).toEqual({ status: "ERROR", error: "55P03" });
+  committed(results[1]);
   expect((await invariant(cold.id)).reserved_atoms).toBe("0");
-});
-
-beforeAll(async () => {
-  const base = process.env.DATABASE_URL;
-  if (!base) throw new Error("DATABASE_URL required");
-  owner = createDatabase(base);
-  await owner.unsafe(`CREATE DATABASE ${database}`);
-  const url = new URL(base);
-  url.pathname = `/${database}`;
-  db = createDatabase(url.toString());
-  await migrate(db);
-  store = new Store(db);
-  funds = createCustomerFundsStore(db);
-  const provider = crypto.randomUUID();
-  await store.createProvider(
-    provider,
-    {
-      name: "funds",
-      kind: "openai",
-      base_url: "http://fixture.invalid/v1",
-      rpm: 100000,
-      concurrency: 1000,
-    },
-    "encrypted-fixture",
-  );
-  await store.createModel({ name: "funds-model", operations: ["chat"], max_output_tokens: 100 });
-  await store.createRoute("funds-model", {
-    provider_id: provider,
-    upstream_model: "mock",
-    operations: ["chat"],
-    priority: 1,
-    weight: 1,
-    pricing: {
-      currency: "USD",
-      rates: {
-        input_tokens: { numerator: "1", denominator: "1" },
-        output_tokens: { numerator: "1", denominator: "1" },
-      },
-    },
-    ceilings: { input_tokens: "16777216", output_tokens: "1000000" },
-  });
-  route = (await store.routes("funds-model", "chat"))[0]!;
-  const tariff = await funds.setTariff({
-    model: "funds-model",
-    operation: "chat",
-    pricing: {
-      currency: "USD",
-      rates: {
-        input_tokens: { numerator: "3", denominator: "1" },
-        output_tokens: { numerator: "7", denominator: "1" },
-      },
-    },
-    ceilings: { input_tokens: "100", output_tokens: "100" },
-    basis: "PROVIDER_USAGE",
-  });
-  pricingId = tariff.pricing_id;
-});
-afterAll(async () => {
-  await db?.close();
-  if (owner) {
-    await owner.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
-    await owner.close();
-  }
+  expect((await invariant(hot.id)).reserved_atoms).toBe("100");
+  committed(await persist(final(hotRequest, usage)));
+  expect((await invariant(hot.id)).reserved_atoms).toBe("0");
+  expect((await funds.receipt(hotRequest.request, hot.id)).charged_atoms).toBe("56");
+  expect((await funds.receipt(coldRequest.request, cold.id)).charged_atoms).toBe("56");
 });
 
 test("foreign-key readers do not make a funded wallet appear busy", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "100");
+  await tariff(s, 100n);
   const result = await db.begin(async (tx) => {
     await tx`SELECT id FROM wallets WHERE project_id=${p.id} FOR KEY SHARE`;
-    return admit(p.credential, "100");
+    return admit(s, p, "100");
   });
-  await complete(result.request, result.attempt);
+  await complete(result);
   const wallet = await invariant(p.id);
   expect(wallet.available_atoms).toBe("44");
   expect(wallet.reserved_atoms).toBe("0");
@@ -976,7 +847,7 @@ test("foreign-key readers do not make a funded wallet appear busy", async () => 
 });
 
 test("credit is concurrent-idempotent and currency isolated", async () => {
-  const p = await project();
+  const p = await project(await scope());
   const input = {
     currency: "USD",
     external_ref: "invoice",
@@ -997,22 +868,19 @@ test("credit is concurrent-idempotent and currency isolated", async () => {
   const wallets = (await funds.wallets(p.id)) as { currency: string; available_atoms: string }[];
   expect(wallets.find((w) => w.currency === "EUR")?.available_atoms).toBe("2000");
 });
+
 test("gift-first reservation and duplicate settlement charge exactly 56 atoms", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1000");
   await credit(p.id, "60", "GIFT");
-  const q = await admit(p.credential);
+  const q = await admit(s, p);
   const held = await invariant(p.id);
   expect(held.reserved_atoms).toBe("100");
   expect(held.available_atoms).toBe("960");
-  const a = await complete(q.request, q.attempt);
+  const a = await complete(q);
   expect(a[0].result.state).toBe("SETTLED");
-  const replays = await Promise.all(
-    Array.from(
-      { length: 8 },
-      () => db`SELECT (settle_requests(ARRAY[${q.request}::uuid])->${q.request}::text) AS result`,
-    ),
-  );
+  const replays = await Promise.all(Array.from({ length: 8 }, () => settle(q.request)));
   expect(replays.every((r) => r[0].result.replayed)).toBe(true);
   const w = await invariant(p.id);
   expect(w.available_atoms).toBe("1004");
@@ -1024,103 +892,78 @@ test("gift-first reservation and duplicate settlement charge exactly 56 atoms", 
     lots.find((l: { kind: string; spent_atoms: string }) => l.kind === "GIFT").spent_atoms,
   ).toBe("56");
 });
+
 test("concurrent holds never overspend and failures roll back request creation", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1000");
-  const all = await Promise.allSettled(
-    Array.from({ length: 20 }, () => admit(p.credential, "100")),
-  );
+  await tariff(s, 100n);
+  const all = await Promise.allSettled(Array.from({ length: 20 }, () => admit(s, p, "100")));
   expect(all.filter((r) => r.status === "fulfilled")).toHaveLength(10);
+  expect(all.flatMap((r) => (r.status === "rejected" ? [r.reason] : []))).toEqual(
+    Array.from({ length: 10 }, () => insufficient),
+  );
   const w = await invariant(p.id);
   expect(w.available_atoms).toBe("0");
   expect(w.reserved_atoms).toBe("1000");
   const count = await db`SELECT count(*)::int AS n FROM gateway_requests WHERE project_id=${p.id}`;
   expect(count[0].n).toBe(10);
 });
+
+test("concurrent admissions observe prior allocations across cash and gift sources", async () => {
+  const s = await scope();
+  const p = await project(s);
+  await credit(p.id, "940");
+  await credit(p.id, "60", "GIFT");
+  await tariff(s, 100n);
+  const all = await Promise.allSettled(Array.from({ length: 20 }, () => admit(s, p, "100")));
+  expect(all.filter((r) => r.status === "fulfilled")).toHaveLength(10);
+  expect(all.flatMap((r) => (r.status === "rejected" ? [r.reason] : []))).toEqual(
+    Array.from({ length: 10 }, () => insufficient),
+  );
+  const wallet = await invariant(p.id);
+  expect(wallet.available_atoms).toBe("0");
+  expect(wallet.reserved_atoms).toBe("1000");
+  const lots = await db<
+    { kind: string; reserved_atoms: string }[]
+  >`SELECT kind,reserved_atoms::text FROM wallet_lots WHERE wallet_id=(SELECT id FROM wallets WHERE project_id=${p.id})`;
+  expect(lots.find((l) => l.kind === "GIFT")?.reserved_atoms).toBe("60");
+  expect(lots.find((l) => l.kind === "CASH")?.reserved_atoms).toBe("940");
+});
+
 test("missing final usage stays held until explicit reconciliation", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "200");
-  const q = await admit(p.credential);
-  await store.persistUsage([
-    {
-      source: "execution",
-      attemptId: q.attempt,
-      state: "SUCCEEDED",
-      finality: "UNKNOWN",
-      usage: {},
-      requestState: "SUCCEEDED",
-    },
-  ]);
-  const result =
-    await db`SELECT (settle_requests(ARRAY[${q.request}::uuid])->${q.request}::text) AS result`;
+  const q = await admit(s, p);
+  committed(
+    await persist(
+      fact(q, { finality: "UNKNOWN", attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" }),
+    ),
+  );
+  const result = await settle(q.request);
   expect(result[0].result.state).toBe("WAITING");
   expect((await invariant(p.id)).reserved_atoms).toBe("100");
   await funds.resolve(q.request, {
     external_ref: "invoice",
     action: "SETTLE",
     usage: { input_tokens: "7", output_tokens: "5" },
-    pricing_id: pricingId,
+    pricing_id: q.pricing,
     reason: "PROVIDER_INVOICE",
   });
-  const resolved =
-    await db`SELECT (settle_requests(ARRAY[${q.request}::uuid])->${q.request}::text) AS result`;
+  const resolved = await settle(q.request);
   expect(resolved[0].result.charged_atoms).toBe("56");
   await invariant(p.id);
 });
 
-test("Batch cancellation settles once even when final rows precede the creation evidence", async () => {
-  const p = await project();
-  await credit(p.id, "100");
-  const perRequest = await funds.setTariff({
-    model: "funds-model",
-    operation: "chat",
-    provider_id: route.provider_id,
-    pricing: { currency: "USD", rates: { requests: { numerator: "7", denominator: "1" } } },
-    ceilings: { requests: "1" },
-    basis: "REQUEST_COMPLETION",
-  });
-  for (const finalFirst of [false, true]) {
-    const { request, attempt } = await admit(p.credential, "7", "USD", perRequest.pricing_id);
-    const resource = await store.saveResource(
-      p.id,
-      route.provider_id,
-      `batch-${request}`,
-      "batch",
-      "funds-model",
-      attempt,
-    );
-    const creation: UsageEvidence = {
-      source: "execution",
-      attemptId: attempt,
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage: { requests: "1" },
-      requestState: "SUCCEEDED",
-    };
-    const final: UsageEvidence = {
-      source: "batch_cancelled",
-      attemptId: attempt,
-      state: "FAILED",
-      finality: "FINAL",
-      usage: { requests: "1", input_tokens: "7", output_tokens: "5" },
-    };
-    await store.updateResource(resource, "PENDING_USAGE", "cancelled");
-    for (const evidence of finalFirst ? [final, creation] : [creation, final])
-      await store.persistUsage([evidence]);
-    expect(await funds.receipt(request, p.id)).toMatchObject({
-      billing_outcome: "CANCELLED",
-      hold_state: "RELEASED",
-      charged_atoms: "0",
-    });
-    expect((await invariant(p.id)).available_atoms).toBe("100");
-  }
-});
 test("expired reserved gift is consumed but its unused hold and refund cannot revive", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
+  await tariff(s, 100n);
   await credit(p.id, "100", "GIFT", { expires_at: new Date(Date.now() + 1000).toISOString() });
-  const q = await admit(p.credential);
+  const q = await admit(s, p);
   await Bun.sleep(1100);
-  const result = await complete(q.request, q.attempt);
+  const result = await complete(q);
   expect(result[0].result.charged_atoms).toBe("56");
   let w = await invariant(p.id);
   expect(w.expired_atoms).toBe("44");
@@ -1135,28 +978,33 @@ test("expired reserved gift is consumed but its unused hold and refund cannot re
   expect(w.spent_atoms).toBe("0");
   expect(w.available_atoms).toBe("0");
 });
+
 test("over-hold usage records debt, freezes admission, then cash topup pays debt", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "100");
-  const q = await admit(p.credential, "50");
-  const result = await complete(q.request, q.attempt, { input_tokens: "50", output_tokens: "50" });
+  const q = await admit(s, p, "50");
+  const result = await complete(q, { input_tokens: "50", output_tokens: "50" });
   expect(result[0].result.charged_atoms).toBe("500");
   let w = await invariant(p.id);
   expect(w.debt_atoms).toBe("400");
   expect(w.freeze_reason).toBe("DEBT");
-  await expect(admit(p.credential, "0")).rejects.toMatchObject({ errno: "P0402" });
+  const next = await elsewhere(p);
+  await expect(admit(next.s, next.p, "10")).rejects.toEqual(insufficient);
   await credit(p.id, "450");
-  await db`SELECT (settle_requests(ARRAY[${q.request}::uuid])->${q.request}::text)`;
+  await settle(q.request);
   w = await invariant(p.id);
   expect(w.debt_atoms).toBe("0");
   expect(w.available_atoms).toBe("50");
   expect(w.freeze_reason).toBeNull();
 });
+
 test("refund and adjustment are idempotent and preserve lot sums", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1000");
-  const q = await admit(p.credential);
-  const result = await complete(q.request, q.attempt);
+  const q = await admit(s, p);
+  const result = await complete(q);
   const charge = String(result[0].result.charge_id);
   const refund = { external_ref: "refund", amount_atoms: "6", reason: "CUSTOMER_REFUND" as const };
   await funds.refund(charge, refund);
@@ -1173,15 +1021,17 @@ test("refund and adjustment are idempotent and preserve lot sums", async () => {
   await funds.adjust(charge, { ...adjustment, external_ref: "down", target_atoms: "10" });
   expect((await invariant(p.id)).spent_atoms).toBe("10");
 });
+
 test("gift scopes and configured cash-first priority govern reservation", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "100", "GIFT", { models: ["another-model"] });
-  await expect(admit(p.credential, "1")).rejects.toMatchObject({ errno: "P0402" });
+  await expect(admit(s, p, "10")).rejects.toEqual(insufficient);
   await credit(p.id, "100");
   await credit(p.id, "100", "GIFT");
   await funds.configure(p.id, "USD", { policy: "CASH_FIRST" });
-  const q = await admit(p.credential, "100");
-  await complete(q.request, q.attempt);
+  const q = await admit(s, p, "100");
+  await complete(q);
   const lots =
     await db`SELECT kind,models,spent_atoms::text FROM wallet_lots WHERE wallet_id=(SELECT id FROM wallets WHERE project_id=${p.id})`;
   expect(
@@ -1189,6 +1039,7 @@ test("gift scopes and configured cash-first priority govern reservation", async 
   ).toBe("56");
   await invariant(p.id);
 });
+
 test("SQL price rounds the exact sum once including sub-atom fractions", async () => {
   const rows =
     await db`SELECT exact_billing_price('{"input_tokens":"1","output_tokens":"1"}', '{"input_tokens":{"numerator":"1","denominator":"3"},"output_tokens":{"numerator":"1","denominator":"3"}}')::text AS atoms`;
@@ -1196,54 +1047,30 @@ test("SQL price rounds the exact sum once including sub-atom fractions", async (
 });
 
 test("mixed cache TTL charges remain exact and missing TTL evidence retains the hold until enrichment", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1000");
   const rates = {
     cache_write_5m_tokens: { numerator: "5", denominator: "4" },
     cache_write_1h_tokens: { numerator: "2", denominator: "1" },
   };
-  const tariff = await funds.setTariff({
-    model: "funds-model",
-    operation: "chat",
-    pricing: { currency: "USD", rates },
-    ceilings: { cache_write_5m_tokens: "100", cache_write_1h_tokens: "100" },
-    basis: "PROVIDER_USAGE",
-  });
-  const q = await admit(p.credential, "325", "USD", tariff.pricing_id);
-  await complete(q.request, q.attempt, { cache_write_tokens: "200" });
+  await custom(s, rates, { cache_write_5m_tokens: "100", cache_write_1h_tokens: "100" });
+  const q = await admit(s, p, "325");
+  committed(await persist(final(q, { cache_write_tokens: "200" })));
   expect((await funds.receipt(q.request, p.id)).charged_atoms).toBeNull();
   expect((await invariant(p.id)).reserved_atoms).toBe("325");
-  await store.persistUsage([
-    {
-      attemptId: q.attempt,
-      source: "provider_invoice",
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage: {
-        cache_write_tokens: "200",
-        cache_write_5m_tokens: "100",
-        cache_write_1h_tokens: "100",
-      },
-    },
-  ]);
+  const enrichment = final(
+    q,
+    { cache_write_tokens: "200", cache_write_5m_tokens: "100", cache_write_1h_tokens: "100" },
+    { source: "provider_invoice" },
+  );
+  committed(await persist(enrichment));
   expect((await funds.receipt(q.request, p.id)).charged_atoms).toBe("325");
   expect((await invariant(p.id)).spent_atoms).toBe("325");
-  expect(await store.tokenSummary(q.request)).toEqual({ complete: false, tokens: 200 });
   const [cost] =
     await db`SELECT exact_billing_price(${{ cache_write_5m_tokens: "100", cache_write_1h_tokens: "100" }}::jsonb,${rates}::jsonb)::text AS atoms`;
   expect(cost.atoms).toBe("325");
-  const replay = {
-    attemptId: q.attempt,
-    source: "provider_invoice",
-    state: "SUCCEEDED",
-    finality: "FINAL",
-    usage: {
-      cache_write_tokens: "200",
-      cache_write_5m_tokens: "100",
-      cache_write_1h_tokens: "100",
-    },
-  } as const;
-  await store.persistUsage([replay]);
+  committed(await persist(enrichment));
   expect((await invariant(p.id)).spent_atoms).toBe("325");
 });
 
@@ -1258,36 +1085,47 @@ test("SQL rejects aggregate plus TTL rates and inconsistent cache write partitio
   await expect(
     db`INSERT INTO billing_prices(id,currency,rates,ceilings,basis) VALUES(${crypto.randomUUID()},'USD',${rates}::jsonb,'{"cache_write_tokens":"10","cache_write_1h_tokens":"10"}','PROVIDER_USAGE')`,
   ).rejects.toThrow("cache write");
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "100");
-  const q = await admit(p.credential);
+  const q = await admit(s, p);
+  const inconsistent = {
+    input_tokens: "7",
+    output_tokens: "5",
+    cache_write_tokens: "3",
+    cache_write_5m_tokens: "1",
+    cache_write_1h_tokens: "1",
+  };
+  expect(() => final(q, inconsistent)).toThrow("Provider cache write partitions disagree");
+  const signed = final(q, { input_tokens: "7", output_tokens: "5" });
   await expect(
-    db`SELECT record_usage_evidence(${q.attempt}::uuid,${crypto.randomUUID()}::uuid,'execution','SUCCEEDED','FINAL','{"cache_write_tokens":"3","cache_write_5m_tokens":"1","cache_write_1h_tokens":"1"}',0,true,NULL,NULL)`,
-  ).rejects.toThrow("cache write partitions");
+    settlement.persist([
+      {
+        events: [{ ...signed, usage: inconsistent, final_dimensions: Object.keys(inconsistent) }],
+      },
+    ]),
+  ).rejects.toThrow("Provider cache write partitions disagree");
+  expect((await invariant(p.id)).reserved_atoms).toBe("100");
 });
 
 test("refund waiting across gift expiry cannot resurrect credit or block later funding", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
+  await tariff(s, 100n);
   const expires = Date.now() + 900;
   await credit(p.id, "100", "GIFT", { expires_at: new Date(expires).toISOString() });
-  const q = await admit(p.credential);
-  const result = await complete(q.request, q.attempt);
+  const q = await admit(s, p);
+  const result = await complete(q);
   const charge = String(result[0].result.charge_id);
-  let locked!: () => void;
-  const holding = new Promise<void>((r) => {
-    locked = r;
-  });
-  let unlock!: () => void;
-  const release = new Promise<void>((r) => {
-    unlock = r;
-  });
+  const holding = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
   const blocker = db.begin(async (tx) => {
     await tx`SELECT id FROM wallets WHERE project_id=${p.id} FOR UPDATE`;
-    locked();
-    await release;
+    holding.resolve();
+    await release.promise;
     await tx`SELECT expire_wallet(id) FROM wallets WHERE project_id=${p.id}`;
   });
-  await holding;
+  await holding.promise;
   const refund = funds.refund(charge, {
     external_ref: "cross-expiry",
     amount_atoms: "10",
@@ -1298,7 +1136,7 @@ test("refund waiting across gift expiry cannot resurrect credit or block later f
     let waiting = false;
     while (Date.now() < until) {
       const rows =
-        await owner`SELECT 1 FROM pg_stat_activity WHERE datname=${database} AND wait_event_type='Lock' AND query LIKE '%refund_billing_charge%'`;
+        await db`SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%refund_billing_charge%'`;
       if (rows.length) {
         waiting = true;
         break;
@@ -1308,7 +1146,7 @@ test("refund waiting across gift expiry cannot resurrect credit or block later f
     expect(waiting).toBe(true);
     await Bun.sleep(Math.max(0, expires - Date.now() + 50));
   } finally {
-    unlock();
+    release.resolve();
   }
   await blocker;
   await refund;
@@ -1319,138 +1157,71 @@ test("refund waiting across gift expiry cannot resurrect credit or block later f
   await credit(p.id, "1");
   expect((await invariant(p.id)).available_atoms).toBe("1");
 });
-test("only the delivered retry is charged while every attempt cost remains available", async () => {
-  const p = await project();
+
+test("only the delivered retry is charged while every attempt keeps its own usage record", async () => {
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1000");
-  const q = await admit(p.credential);
-  await store.persistUsage([
-    {
-      source: "execution",
-      attemptId: q.attempt,
-      state: "UNKNOWN",
-      finality: "FINAL",
-      usage: { input_tokens: "20", output_tokens: "20" },
-    },
-  ]);
-  const second = await store.startAttempt(q.request, 2, route);
-  const result = await complete(q.request, second);
+  const q = await admit(s, p);
+  committed(
+    await persist(
+      fact(q, {
+        finality: "FINAL",
+        usage: { input_tokens: "20", output_tokens: "10" },
+        final_dimensions: ["input_tokens", "output_tokens"],
+        attempt_state: "UNKNOWN",
+      }),
+    ),
+  );
+  const second = await retry(q);
+  const result = await complete(second);
   expect(result[0].result.charged_atoms).toBe("56");
-  const facts =
-    await db`SELECT count(*)::int AS n,sum(cost_atoms)::text AS total FROM usage_events WHERE request_id=${q.request}`;
-  expect(facts[0]).toMatchObject({ n: 2, total: "52" });
+  const facts = await db<
+    { attempt_id: string }[]
+  >`SELECT attempt_id FROM usage_events WHERE request_id=${q.request}`;
+  expect(new Set(facts.map((row) => row.attempt_id))).toEqual(new Set([q.attempt, second.attempt]));
+  expect(
+    (await db`SELECT selected_attempt_id FROM gateway_requests WHERE id=${q.request}`)[0]
+      .selected_attempt_id,
+  ).toBe(second.attempt);
   expect((await invariant(p.id)).spent_atoms).toBe("56");
 });
+
 test("conflicting FINAL evidence freezes funds even after settlement until explicit resolution", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1000");
-  const q = await admit(p.credential);
-  await complete(q.request, q.attempt);
-  const conflict = await store.persistUsage([
-    {
-      attemptId: q.attempt,
-      source: "provider_invoice",
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage: { input_tokens: "8", output_tokens: "5" },
-    },
-  ]);
-  expect(conflict).toMatchObject({ CONFLICT: 1 });
+  const q = await admit(s, p);
+  await complete(q);
+  const conflict = await persist(
+    final(q, { input_tokens: "8", output_tokens: "5" }, { source: "provider_invoice" }),
+  );
+  expect(committed(conflict).receipts.map((r) => r.outcome)).toEqual(["CONFLICT"]);
   await invariant(p.id);
   expect(((await funds.wallets(p.id)) as { freeze_reason: string }[])[0]?.freeze_reason).toBe(
     "EVIDENCE_CONFLICT",
   );
-  await expect(admit(p.credential, "1")).rejects.toMatchObject({ errno: "P0402" });
+  const next = await elsewhere(p);
+  await expect(admit(next.s, next.p, "10")).rejects.toEqual(insufficient);
   await funds.resolve(q.request, {
     external_ref: "reviewed-invoice",
     action: "SETTLE",
     usage: { input_tokens: "8", output_tokens: "5" },
-    pricing_id: pricingId,
+    pricing_id: q.pricing,
     reason: "EVIDENCE_RECONCILIATION",
   });
-  await db`SELECT (settle_requests(ARRAY[${q.request}::uuid])->${q.request}::text)`;
+  await settle(q.request);
   const w = await invariant(p.id);
   expect(w.freeze_reason).toBeNull();
   expect(w.spent_atoms).toBe("59");
 });
-test("strict BullMQ evidence retries PG failure and duplicate deliveries debit once", async () => {
-  const { UsageProducer, UsageConsumer, usageChannel } = await import("@gateway/runtime");
-  const p = await project();
-  await credit(p.id, "1000");
-  const q = await admit(p.credential);
-  const options = {
-    url: process.env.QUEUE_REDIS_URL!,
-    namespace: `funds-queue:${crypto.randomUUID()}`,
-    replicas: 0,
-    timeoutMs: 1000,
-  };
-  let failing = true;
-  let deliveries = 0;
-  const producer = new UsageProducer({ ...options, channel: usageChannel });
-  const consumer = new UsageConsumer({
-    channel: usageChannel,
-    ...options,
-    process: async (events) => {
-      deliveries++;
-      if (failing) throw new Error("injected PG unavailable");
-      return store.persistUsage(events);
-    },
-  });
-  const evidence = {
-    attemptId: q.attempt,
-    source: "execution",
-    state: "SUCCEEDED" as const,
-    finality: "FINAL" as const,
-    usage: { input_tokens: "7", output_tokens: "5" },
-    requestState: "SUCCEEDED" as const,
-  };
-  try {
-    await producer.ready();
-    await consumer.ready();
-    await producer.publish(evidence);
-    const until = Date.now() + 1000;
-    while (!deliveries && Date.now() < until) await Bun.sleep(5);
-    expect(deliveries).toBeGreaterThan(0);
-    expect((await funds.receipt(q.request, p.id)).charged_atoms).toBeNull();
-    expect((await invariant(p.id)).reserved_atoms).toBe("100");
-    failing = false;
-    const deadline = Date.now() + 4000;
-    while ((await funds.receipt(q.request, p.id)).charged_atoms !== "56" && Date.now() < deadline)
-      await Bun.sleep(10);
-    expect((await funds.receipt(q.request, p.id)).charged_atoms).toBe("56");
-    await producer.publish(evidence);
-    await Bun.sleep(100);
-    expect((await invariant(p.id)).spent_atoms).toBe("56");
-    const journals =
-      await db`SELECT id FROM money_journal WHERE reference=${`settle:${q.request}`}`;
-    expect(journals).toHaveLength(1);
-  } finally {
-    producer.close();
-    await consumer.close();
-    const redis = new Bun.RedisClient(options.url);
-    try {
-      let cursor = "0";
-      do {
-        const [next, keys] = (await redis.send("SCAN", [
-          cursor,
-          "MATCH",
-          `{${options.namespace}:usage}:*`,
-          "COUNT",
-          "1000",
-        ])) as [string, string[]];
-        cursor = next;
-        if (keys.length) await redis.send("UNLINK", keys);
-      } while (cursor !== "0");
-    } finally {
-      redis.close();
-    }
-  }
-});
 
 test("partial debt refund and downward adjustment conserve funded, receivable and waived amounts", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "10");
-  const q = await admit(p.credential, "10");
-  const r = await complete(q.request, q.attempt, { input_tokens: "0", output_tokens: "3" });
+  const q = await admit(s, p, "10");
+  const r = await complete(q, { input_tokens: "0", output_tokens: "3" });
   const charge = String(r[0].result.charge_id);
   expect((await invariant(p.id)).debt_atoms).toBe("11");
   await funds.refund(charge, {
@@ -1479,76 +1250,16 @@ test("partial debt refund and downward adjustment conserve funded, receivable an
   });
 });
 
-test("late completed, cancelled or failed resources from an earlier attempt cannot replace delivered retry", async () => {
-  for (const status of ["completed", "cancelled", "failed"]) {
-    const p = await project();
-    await credit(p.id, "1000");
-    const q = await admit(p.credential);
-    const resource = await store.saveResource(
-      p.id,
-      route.provider_id,
-      `late-${crypto.randomUUID()}`,
-      "response",
-      "funds-model",
-      q.attempt,
-    );
-    await store.persistUsage([
-      {
-        source: "execution",
-        attemptId: q.attempt,
-        state: "UNKNOWN",
-        finality: "FINAL",
-        usage: { input_tokens: "20", output_tokens: "20" },
-      },
-    ]);
-    const second = await store.startAttempt(q.request, 2, route);
-    await store.persistUsage([
-      {
-        source: "execution",
-        attemptId: second,
-        state: "SUCCEEDED",
-        finality: "FINAL",
-        usage: { input_tokens: "7", output_tokens: "5" },
-        requestState: "SUCCEEDED",
-      },
-    ]);
-    await store.updateResource(resource, "COMPLETED", status);
-    const selected =
-      await db`SELECT selected_attempt_id,billing_outcome FROM gateway_requests WHERE id=${q.request}`;
-    expect(selected[0]).toMatchObject({ selected_attempt_id: second, billing_outcome: "SUCCESS" });
-    const rows =
-      await db`SELECT (settle_requests(ARRAY[${q.request}::uuid])->${q.request}::text) AS result`;
-    expect(rows[0].result.charged_atoms).toBe("56");
-    await invariant(p.id);
-  }
-});
-
 test("terminal rejection arriving before earlier attempt evidence converges to full release", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "100");
-  const q = await admit(p.credential);
-  const later = await store.startAttempt(q.request, 2, route);
-  await store.persistUsage([
-    {
-      attemptId: later,
-      source: "execution_outcome",
-      state: "NOT_EXECUTED",
-      finality: "UNKNOWN",
-      usage: {},
-      requestState: "FAILED",
-    },
-  ]);
+  const q = await admit(s, p);
+  const later = await retry(q);
+  committed(await persist(notExecuted(later, { request_state: "FAILED" })));
   expect((await funds.receipt(q.request, p.id)).hold_state).toBe("RECONCILING");
   expect((await invariant(p.id)).reserved_atoms).toBe("100");
-  await store.persistUsage([
-    {
-      attemptId: q.attempt,
-      source: "execution",
-      state: "NOT_EXECUTED",
-      finality: "UNKNOWN",
-      usage: {},
-    },
-  ]);
+  committed(await persist(notExecuted(q)));
   const receipt = await funds.receipt(q.request, p.id);
   expect(receipt.billing_outcome).toBe("FAILED");
   expect(receipt.hold_state).toBe("RELEASED");
@@ -1556,8 +1267,9 @@ test("terminal rejection arriving before earlier attempt evidence converges to f
 });
 
 test("incompatible old database is rejected without modifying its records", async () => {
-  const name = `${database}_old`;
-  await owner.unsafe(`CREATE DATABASE ${name}`);
+  const name = `gateway_test_funds_old_${crypto.randomUUID().replaceAll("-", "")}`;
+  const maintenance = createDatabase(process.env.DATABASE_URL!, 1);
+  await maintenance.unsafe(`CREATE DATABASE ${name}`);
   const url = new URL(process.env.DATABASE_URL!);
   url.pathname = `/${name}`;
   const old = createDatabase(url.toString(), 1);
@@ -1566,61 +1278,50 @@ test("incompatible old database is rejected without modifying its records", asyn
     await old`INSERT INTO schema_migrations VALUES(8)`;
     await old`CREATE TABLE retained_record(value text)`;
     await old`INSERT INTO retained_record VALUES('keep')`;
-    const { assemble } = await import("../../apps/legacy-gateway/src/assembly.ts");
-    const { loadConfig } = await import("../../apps/legacy-gateway/src/config.ts");
     for (const version of [8, 2026111005]) {
       await old`UPDATE schema_migrations SET version=${version}`;
       await expect(migrate(old)).rejects.toThrow("Incompatible database schema");
-      await expect(
-        assemble(
-          loadConfig({
-            ...process.env,
-            NODE_ENV: "test",
-            DATABASE_URL: url.toString(),
-            REDIS_NAMESPACE: `incompatible:${crypto.randomUUID()}`,
-            ADMIN_KEY: "test-" + "a".repeat(40),
-            ENCRYPTION_KEY: "11".repeat(32),
-            KEY_PEPPER: "p".repeat(40),
-          }),
-        ),
-      ).rejects.toThrow("Incompatible database schema");
       expect((await old`SELECT value FROM retained_record`)[0]?.value).toBe("keep");
       expect((await old`SELECT version FROM schema_migrations`)[0]?.version).toBe(version);
     }
   } finally {
     await old.close();
-    await owner.unsafe(`DROP DATABASE ${name} WITH (FORCE)`);
+    await maintenance.unsafe(`DROP DATABASE ${name} WITH (FORCE)`);
+    await maintenance.close();
   }
 });
 
 test("explicit RELEASE with a captured pricing reference releases the original hold", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "200");
-  const q = await admit(p.credential);
+  const q = await admit(s, p);
   await funds.resolve(q.request, {
     external_ref: "release-with-price",
     action: "RELEASE",
-    pricing_id: pricingId,
+    pricing_id: q.pricing,
     usage: {},
     reason: "PROVIDER_INVOICE",
   });
-  const rows =
-    await db`SELECT (settle_requests(ARRAY[${q.request}::uuid])->${q.request}::text) AS result`;
+  const rows = await settle(q.request);
   expect(rows[0].result.state).toBe("RELEASED");
   const w = await invariant(p.id);
   expect(w.available_atoms).toBe("200");
   expect(w.reserved_atoms).toBe("0");
 });
 
-test("a retained failed usage job is alerted on but does not close admission until failed jobs reach their own bound; teardown leaves no queue metadata", async () => {
-  const { UsageProducer, usageChannel } = await import("@gateway/runtime");
+test("a retained failed evidence job is alerted on but does not close admission until failed jobs reach their own bound; teardown leaves no queue metadata", async () => {
+  const s = await scope();
+  const p = await project(s);
+  await credit(p.id, "1000");
+  const q = await admit(s, p);
   const id = crypto.randomUUID();
   const namespace = `test-usage:failed:${id}`;
   const neighborNamespace = `test-usage:failed-neighbor:${id}`;
-  const cleanup = createUsageQueueCleanup(namespace);
-  const neighborCleanup = createUsageQueueCleanup(neighborNamespace);
+  const cleanup = createUsageQueueCleanup(namespace, evidenceChannel);
+  const neighborCleanup = createUsageQueueCleanup(neighborNamespace, evidenceChannel);
   for (const unowned of ["", "*", "test-usage:*", `${namespace}:*`, `queue-failed:${id}`])
-    expect(() => createUsageQueueCleanup(unowned)).toThrow("owned test namespace");
+    expect(() => createUsageQueueCleanup(unowned, evidenceChannel)).toThrow("owned test namespace");
   const options = {
     url: process.env.QUEUE_REDIS_URL!,
     namespace,
@@ -1628,40 +1329,27 @@ test("a retained failed usage job is alerted on but does not close admission unt
     timeoutMs: 1000,
     maxPendingJobs: 2,
   };
-  const producer = new UsageProducer({ ...options, channel: usageChannel });
+  const producer = new UsageProducer({ ...options, channel: evidenceChannel });
   const redis = new Bun.RedisClient(options.url);
   const neighbor = new UsageProducer({
-    channel: usageChannel,
     ...options,
+    channel: evidenceChannel,
     namespace: neighborNamespace,
   });
   let neighborKeys: string[] = [];
   try {
     try {
       await neighbor.ready();
-      await neighbor.publish({
-        attemptId: crypto.randomUUID(),
-        source: "execution",
-        state: "SUCCEEDED",
-        finality: "FINAL",
-        usage: { input_tokens: "1" },
-      });
+      await neighbor.publish({ events: [final(q, { input_tokens: "1", output_tokens: "0" })] });
       neighborKeys = await neighborCleanup.keys(options.url);
       expect(neighborKeys.length).toBeGreaterThan(0);
       await producer.ready();
-      await redis.send("ZADD", [
-        `{${namespace}:usage}:usage-v1:failed`,
-        String(Date.now()),
-        "retained",
-      ]);
+      const failed = `{${namespace}:${evidenceChannel.scope}}:${evidenceChannel.name}:failed`;
+      await redis.send("ZADD", [failed, String(Date.now()), "retained"]);
       expect((await producer.stats()).failed).toBe(1);
       await Bun.sleep(150);
       await producer.ready();
-      await redis.send("ZADD", [
-        `{${namespace}:usage}:usage-v1:failed`,
-        String(Date.now()),
-        "retained-2",
-      ]);
+      await redis.send("ZADD", [failed, String(Date.now()), "retained-2"]);
       await Bun.sleep(150);
       await expect(producer.ready()).rejects.toMatchObject({
         status: 503,
@@ -1676,8 +1364,8 @@ test("a retained failed usage job is alerted on but does not close admission unt
     expect(await cleanup.keys(options.url)).toHaveLength(0);
     expect(await neighborCleanup.keys(options.url)).toEqual(neighborKeys);
     const reader = new UsageProducer({
-      channel: usageChannel,
       ...options,
+      channel: evidenceChannel,
       namespace: neighborNamespace,
     });
     try {
@@ -1691,141 +1379,100 @@ test("a retained failed usage job is alerted on but does not close admission unt
   }
 });
 
-test("queue backlog blocks new admission while accepting facts for already-admitted calls", async () => {
-  const { UsageProducer, UsageConsumer, usageChannel } = await import("@gateway/runtime");
-  const p = await project();
+test("evidence queue backlog blocks new admission while accepting facts for already-admitted calls", async () => {
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1000");
-  const requests = await Promise.all([admit(p.credential), admit(p.credential)]);
+  const requests = [await admit(s, p), await admit(s, p)];
+  const namespace = `test-usage:pressure:${crypto.randomUUID()}`;
+  const cleanup = createUsageQueueCleanup(namespace, evidenceChannel);
   const options = {
     url: process.env.QUEUE_REDIS_URL!,
-    namespace: `queue-pressure:${crypto.randomUUID()}`,
+    namespace,
     replicas: 0,
     timeoutMs: 1000,
     maxPendingJobs: 1,
   };
-  const producer = new UsageProducer({ ...options, channel: usageChannel });
-  let consumer: import("@gateway/runtime").UsageConsumer | undefined;
-  const event = (attemptId: string) => ({
-    attemptId,
-    source: "execution",
-    state: "SUCCEEDED" as const,
-    finality: "FINAL" as const,
-    usage: { input_tokens: "7", output_tokens: "5" },
-    requestState: "SUCCEEDED" as const,
+  const producer = new UsageProducer({ ...options, channel: evidenceChannel });
+  let worker: ReturnType<typeof createSettlementWorker> | undefined;
+  const group = (q: Admitted) => ({
+    events: [final(q, { input_tokens: "7", output_tokens: "5" })],
   });
   try {
     await producer.ready();
-    await producer.publish(event(requests[0]!.attempt));
+    await producer.publish(group(requests[0]!));
     await expect(producer.ready()).rejects.toMatchObject({ status: 503 });
-    await producer.publish(event(requests[1]!.attempt));
+    await producer.publish(group(requests[1]!));
     expect((await producer.stats()).waiting).toBe(2);
-    consumer = new UsageConsumer({
-      channel: usageChannel,
-      ...options,
-      process: (events) => store.persistUsage(events),
-    });
-    await consumer.ready();
+    worker = createSettlementWorker({ ...options, db });
+    await worker.ready();
     const end = Date.now() + 5000;
     while ((await invariant(p.id)).spent_atoms !== "112" && Date.now() < end) await Bun.sleep(10);
     expect((await invariant(p.id)).spent_atoms).toBe("112");
     await producer.ready();
   } finally {
     producer.close();
-    await consumer?.close();
-    const redis = new Bun.RedisClient(options.url);
-    try {
-      let cursor = "0";
-      do {
-        const [next, keys] = (await redis.send("SCAN", [
-          cursor,
-          "MATCH",
-          `{${options.namespace}:usage}:*`,
-          "COUNT",
-          "1000",
-        ])) as [string, string[]];
-        cursor = next;
-        if (keys.length) await redis.send("UNLINK", keys);
-      } while (cursor !== "0");
-    } finally {
-      redis.close();
-    }
+    await worker?.close();
+    await cleanup.remove(options.url);
   }
 });
 
 test("every permitted in-flight operation can finish a simultaneous durable evidence burst", async () => {
-  const { UsageProducer, usageChannel } = await import("@gateway/runtime");
+  const s = await scope();
+  const p = await project(s);
+  await credit(p.id, "1000");
+  const q = await admit(s, p);
+  const namespace = `test-usage:burst:${crypto.randomUUID()}`;
+  const cleanup = createUsageQueueCleanup(namespace, evidenceChannel);
   const options = {
     url: process.env.QUEUE_REDIS_URL!,
-    namespace: `queue-burst:${crypto.randomUUID()}`,
+    namespace,
     replicas: 0,
     timeoutMs: 2000,
     maxInFlight: 10000,
   };
-  const producer = new UsageProducer({ ...options, channel: usageChannel });
+  const producer = new UsageProducer({ ...options, channel: evidenceChannel });
+  const group = { events: [final(q, { input_tokens: "7", output_tokens: "5" })] };
   try {
     await producer.ready();
     const outcomes = await Promise.allSettled(
-      Array.from({ length: 10000 }, () =>
-        producer.publish({
-          attemptId: crypto.randomUUID(),
-          source: "execution",
-          state: "SUCCEEDED",
-          finality: "FINAL",
-          usage: { input_tokens: "7", output_tokens: "5" },
-          requestState: "SUCCEEDED",
-        }),
-      ),
+      Array.from({ length: 10000 }, () => producer.publish(group)),
     );
     expect(outcomes.filter((r) => r.status === "rejected")).toHaveLength(0);
     expect((await producer.stats()).waiting).toBe(Math.ceil(10000 / 64));
   } finally {
     producer.close();
-    const redis = new Bun.RedisClient(options.url);
-    try {
-      let cursor = "0";
-      do {
-        const [next, keys] = (await redis.send("SCAN", [
-          cursor,
-          "MATCH",
-          `{${options.namespace}:usage}:*`,
-          "COUNT",
-          "1000",
-        ])) as [string, string[]];
-        cursor = next;
-        if (keys.length) await redis.send("UNLINK", keys);
-      } while (cursor !== "0");
-    } finally {
-      redis.close();
-    }
+    await cleanup.remove(options.url);
   }
 });
 
 test("indexed recovery handles unknown holds and settled debt without releasing missing evidence", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1000");
-  const unknown = await admit(p.credential, "100");
-  const debt = await admit(p.credential, "100");
-  await store.persistUsage([
-    {
-      attemptId: unknown.attempt,
-      source: "execution",
-      state: "SUCCEEDED",
-      finality: "UNKNOWN",
-      usage: {},
-      requestState: "SUCCEEDED",
-    },
-  ]);
-  await complete(debt.request, debt.attempt, { input_tokens: "1000", output_tokens: "0" });
+  const unknownHold = await admit(s, p, "100");
+  const debt = await admit(s, p, "100");
+  committed(
+    await persist(
+      fact(unknownHold, {
+        finality: "UNKNOWN",
+        attempt_state: "SUCCEEDED",
+        request_state: "SUCCEEDED",
+      }),
+    ),
+  );
+  await complete(debt, { input_tokens: "1000", output_tokens: "0" });
   expect((await invariant(p.id)).debt_atoms).toBe("2100");
+  while ((await funds.reconcileKnownHolds(32)) > 0);
   await credit(p.id, "2200");
-  await db`UPDATE billing_holds SET next_reconcile_at=now() WHERE request_id=ANY(${[unknown.request, debt.request]}::uuid[])`;
+  await db`UPDATE billing_holds SET next_reconcile_at=now() WHERE request_id=ANY(${[unknownHold.request, debt.request]}::uuid[])`;
   expect(await funds.reconcileKnownHolds()).toBe(2);
   let wallet = await invariant(p.id);
   expect(wallet.debt_atoms).toBe("0");
   expect(wallet.reserved_atoms).toBe("100");
   expect(wallet.available_atoms).toBe("100");
-  expect((await funds.receipt(unknown.request, p.id)).hold_state).toBe("RECONCILING");
-  await funds.resolve(unknown.request, {
+  expect((await funds.receipt(unknownHold.request, p.id)).hold_state).toBe("RECONCILING");
+  await funds.resolve(unknownHold.request, {
     external_ref: "explicit-release",
     action: "RELEASE",
     usage: {},
@@ -1838,58 +1485,23 @@ test("indexed recovery handles unknown holds and settled debt without releasing 
   expect(wallet.spent_atoms).toBe("3000");
 });
 
-test("one admission batch observes prior allocations across cash and gift sources", async () => {
-  const p = await project();
-  await credit(p.id, "940");
-  await credit(p.id, "60", "GIFT");
-  const inputs = Array.from({ length: 20 }, () => ({
-    id: crypto.randomUUID(),
-    key_id: p.credential.id,
-    project_id: p.id,
-    operation: "chat",
-    model: "funds-model",
-    digest: null,
-    fingerprint: "batch",
-    route_id: route.id,
-    cost_pricing_id: route.pricing_id,
-    quote: {
-      currency: "USD",
-      amount_atoms: "100",
-      input_characters: "0",
-      prices: { [route.provider_id]: pricingId },
-    },
-  }));
-  const rows = await db`SELECT admit_gateway_batch(${inputs}::jsonb) AS result`;
-  const results = Object.values(rows[0].result) as { created?: boolean; error?: string }[];
-  expect(results.filter((r) => r.created)).toHaveLength(10);
-  expect(results.filter((r) => r.error === "P0402")).toHaveLength(10);
-  const wallet = await invariant(p.id);
-  expect(wallet.available_atoms).toBe("0");
-  expect(wallet.reserved_atoms).toBe("1000");
-  const lots = await db<
-    { kind: string; reserved_atoms: string }[]
-  >`SELECT kind,reserved_atoms::text FROM wallet_lots WHERE wallet_id=(SELECT id FROM wallets WHERE project_id=${p.id})`;
-  expect(lots.find((l) => l.kind === "GIFT")?.reserved_atoms).toBe("60");
-  expect(lots.find((l) => l.kind === "CASH")?.reserved_atoms).toBe("940");
-});
-
 test("returned cash wakes prior debt collection while returned gifts cannot repay it", async () => {
   for (const [operation, kind] of [
     ["refund", "CASH"],
     ["release", "CASH"],
     ["release", "GIFT"],
   ] as const) {
-    const p = await project();
+    const s = await scope();
+    const p = await project(s);
     await credit(p.id, "200", kind);
-    const a = await admit(p.credential, "100");
-    const b = await admit(p.credential, "100");
+    const a = await admit(s, p, "100");
+    const b = await admit(s, p, "100");
     let charge: string | undefined;
     if (operation === "refund")
       charge = String(
-        (await complete(a.request, a.attempt, { input_tokens: "31", output_tokens: "1" }))[0].result
-          .charge_id,
+        (await complete(a, { input_tokens: "31", output_tokens: "1" }))[0].result.charge_id,
       );
-    await complete(b.request, b.attempt, { input_tokens: "50", output_tokens: "0" });
+    await complete(b, { input_tokens: "50", output_tokens: "0" });
     expect((await invariant(p.id)).debt_atoms).toBe("50");
     if (operation === "refund")
       await funds.refund(charge!, {
@@ -1897,17 +1509,7 @@ test("returned cash wakes prior debt collection while returned gifts cannot repa
         amount_atoms: "100",
         reason: "CUSTOMER_REFUND",
       });
-    else
-      await store.persistUsage([
-        {
-          attemptId: a.attempt,
-          source: "execution",
-          state: "NOT_EXECUTED",
-          finality: "UNKNOWN",
-          usage: {},
-          requestState: "FAILED",
-        },
-      ]);
+    else committed(await persist(notExecuted(a, { request_state: "FAILED" })));
     const recovered = await funds.reconcileKnownHolds();
     if (kind === "CASH") expect(recovered).toBeGreaterThanOrEqual(1);
     const wallet = await invariant(p.id);
@@ -1918,8 +1520,9 @@ test("returned cash wakes prior debt collection while returned gifts cannot repa
 });
 
 test("journal validation rejects malformed, unbalanced, cross-wallet and wrong-currency entries", async () => {
-  const p = await project();
-  const other = await project();
+  const s = await scope();
+  const p = await project(s);
+  const other = await project(s);
   await credit(p.id, "10");
   await credit(other.id, "10");
   const sources = await db<
@@ -1957,21 +1560,17 @@ test("journal validation rejects malformed, unbalanced, cross-wallet and wrong-c
 });
 
 test("debt collection pays known obligations while leaving unresolved disputed charges held", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "100");
-  const a = await admit(p.credential, "50");
-  const b = await admit(p.credential, "50");
-  await complete(a.request, a.attempt, { input_tokens: "31", output_tokens: "1" });
-  await complete(b.request, b.attempt, { input_tokens: "31", output_tokens: "1" });
-  await store.persistUsage([
-    {
-      attemptId: a.attempt,
-      source: "disputed-final",
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage: { input_tokens: "32", output_tokens: "1" },
-    },
-  ]);
+  const a = await admit(s, p, "50");
+  const b = await admit(s, p, "50");
+  await complete(a, { input_tokens: "31", output_tokens: "1" });
+  await complete(b, { input_tokens: "31", output_tokens: "1" });
+  const disputed = await persist(
+    final(a, { input_tokens: "32", output_tokens: "1" }, { source: "provider_invoice" }),
+  );
+  expect(committed(disputed).receipts.map((r) => r.outcome)).toEqual(["CONFLICT"]);
   await credit(p.id, "50");
   await funds.reconcileKnownHolds();
   const left = await funds.receipt(a.request, p.id);
@@ -1981,87 +1580,53 @@ test("debt collection pays known obligations while leaving unresolved disputed c
   const wallet = await invariant(p.id);
   expect(wallet.available_atoms).toBe("0");
   expect(wallet.debt_atoms).toBe("50");
-  expect(wallet.freeze_reason).toBe("EVIDENCE_CONFLICT");
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    freeze_reason: "EVIDENCE_CONFLICT",
+    evidence_disputed: true,
+  });
 });
 
 test("a post-calculation monetary overflow cannot contaminate a valid peer settlement", async () => {
-  const p = await project();
-  const max = "9".repeat(38);
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, max);
-  const initial = await admit(p.credential, max);
-  await complete(initial.request, initial.attempt, {
-    input_tokens: (BigInt(max) / 3n).toString(),
-    output_tokens: "0",
-  });
-  await credit(p.id, "2", "CASH", { priority: 101 });
-  const a = await admit(p.credential, "1");
-  const b = await admit(p.credential, "1");
-  const events = [
-    {
-      attemptId: a.attempt,
-      source: "execution",
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage: { input_tokens: "1", output_tokens: "0" },
-      requestState: "SUCCEEDED",
-    },
-    {
-      attemptId: b.attempt,
-      source: "execution",
-      state: "NOT_EXECUTED",
-      finality: "UNKNOWN",
-      usage: {},
-      requestState: "FAILED",
-    },
-  ];
-  const rows = await db`SELECT persist_usage_batch(${events}::jsonb) AS result`;
-  expect(rows[0].result["0"].status).toBe("ERROR");
-  expect(rows[0].result["1"].billing.state).toBe("RELEASED");
+  const initial = await admit(s, p, max);
+  await complete(initial, { input_tokens: (BigInt(max) / 3n).toString(), output_tokens: "0" });
+  await credit(p.id, "20", "CASH", { priority: 101 });
+  const next = await elsewhere(p);
+  const a = await admit(next.s, next.p, "10");
+  const b = await admit(next.s, next.p, "10");
+  const results = await settlement.persist([
+    { events: [final(a, { input_tokens: "1", output_tokens: "0" })] },
+    { events: [notExecuted(b, { request_state: "FAILED" })] },
+  ]);
+  expect(results[0]).toEqual({ status: "ERROR", error: "P0500" });
+  committed(results[1]);
   const wallet = await invariant(p.id);
   expect(wallet.spent_atoms).toBe(max);
-  expect(wallet.reserved_atoms).toBe("1");
-  expect(wallet.available_atoms).toBe("1");
+  expect(wallet.reserved_atoms).toBe("10");
+  expect(wallet.available_atoms).toBe("10");
   expect(wallet.debt_atoms).toBe("0");
   expect((await funds.receipt(a.request, p.id)).charged_atoms).toBeNull();
   expect((await funds.receipt(b.request, p.id)).charged_atoms).toBe("0");
 });
 
-test("one batch keeps currency, scoped grants, captured pricing and duplicate facts independent", async () => {
-  const p = await project();
+test("one batch keeps scoped grants, captured pricing, other currencies and duplicate facts independent", async () => {
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "200");
-  await credit(p.id, "40", "GIFT", { models: ["funds-model"] });
+  await credit(p.id, "40", "GIFT", { models: [s.setup.model] });
   await credit(p.id, "200", "CASH", { currency: "EUR" });
-  await credit(p.id, "40", "GIFT", { currency: "EUR", models: ["unrelated"] });
-  const euro = await funds.setTariff({
-    model: "funds-model",
-    operation: "chat",
-    basis: "PROVIDER_USAGE",
-    pricing: {
-      currency: "EUR",
-      rates: {
-        input_tokens: { numerator: "1", denominator: "1" },
-        output_tokens: { numerator: "2", denominator: "1" },
-      },
-    },
-    ceilings: { input_tokens: "100", output_tokens: "100" },
-  });
-  const usd = await admit(p.credential);
-  const eur = await admit(p.credential, "100", "EUR", euro.pricing_id);
-  const event = (attemptId: string) => ({
-    attemptId,
-    source: "execution",
-    state: "SUCCEEDED" as const,
-    finality: "FINAL" as const,
-    usage: { input_tokens: "7", output_tokens: "5" },
-    requestState: "SUCCEEDED" as const,
-  });
-  const counts = await store.persistUsage([
-    event(usd.attempt),
-    event(eur.attempt),
-    event(usd.attempt),
+  await credit(p.id, "40", "GIFT", { currency: "EUR", models: [s.setup.model] });
+  const q = await admit(s, p);
+  await tariff(s, 10n);
+  const usage = final(q, { input_tokens: "7", output_tokens: "5" });
+  expect(
+    committed(await persist(usage, usage)).receipts.map((r) => [r.outcome, r.duplicate]),
+  ).toEqual([
+    ["ACCEPTED", false],
+    ["ACCEPTED", true],
   ]);
-  expect(counts.SETTLED).toBe(2);
-  expect(counts.REPLAYED).toBe(1);
   await invariant(p.id);
   const wallets = await db<
     { currency: string; available_atoms: string; spent_atoms: string; reserved_atoms: string }[]
@@ -2072,8 +1637,8 @@ test("one batch keeps currency, scoped grants, captured pricing and duplicate fa
     reserved_atoms: "0",
   });
   expect(wallets.find((w) => w.currency === "EUR")).toMatchObject({
-    available_atoms: "223",
-    spent_atoms: "17",
+    available_atoms: "240",
+    spent_atoms: "0",
     reserved_atoms: "0",
   });
   const gift = await db<
@@ -2081,27 +1646,20 @@ test("one batch keeps currency, scoped grants, captured pricing and duplicate fa
   >`SELECT w.currency,l.spent_atoms::text FROM wallet_lots l JOIN wallets w ON w.id=l.wallet_id WHERE w.project_id=${p.id} AND l.kind='GIFT'`;
   expect(gift.find((l) => l.currency === "USD")?.spent_atoms).toBe("40");
   expect(gift.find((l) => l.currency === "EUR")?.spent_atoms).toBe("0");
-  const evidence = await db<
-    { currency: string; cost_atoms: string }[]
-  >`SELECT e.currency,e.cost_atoms::text FROM usage_events e WHERE e.request_id=ANY(${[usd.request, eur.request]}::uuid[])`;
-  expect(evidence).toHaveLength(2);
-  expect(evidence.every((e) => e.currency === "USD" && e.cost_atoms === "12")).toBe(true);
 });
 
 test("contradictory final facts in the same batch cannot charge before the dispute is known", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "1000");
-  const q = await admit(p.credential);
-  const event = {
-    attemptId: q.attempt,
-    state: "SUCCEEDED" as const,
-    finality: "FINAL" as const,
-    requestState: "SUCCEEDED" as const,
-  };
-  await store.persistUsage([
-    { ...event, source: "execution", usage: { input_tokens: "7", output_tokens: "5" } },
-    { ...event, source: "async-final", usage: { input_tokens: "8", output_tokens: "5" } },
-  ]);
+  const q = await admit(s, p);
+  const group = await persist(
+    final(q, { input_tokens: "7", output_tokens: "5" }),
+    final(q, { input_tokens: "8", output_tokens: "5" }, { source: "provider_invoice" }),
+  );
+  expect(committed(group).receipts.map((r) => r.outcome)).toEqual(["CONFLICT", "CONFLICT"]);
+  expect((await funds.receipt(q.request, p.id)).charged_atoms).toBeNull();
+  expect((await settle(q.request))[0].result.state).toBe("CONFLICT");
   expect((await funds.receipt(q.request, p.id)).charged_atoms).toBeNull();
   const wallet = await invariant(p.id);
   expect(wallet.reserved_atoms).toBe("100");
@@ -2110,55 +1668,43 @@ test("contradictory final facts in the same batch cannot charge before the dispu
 });
 
 test("pre-collection overflow cannot roll back another wallet's valid fact and charge", async () => {
-  const p = await project();
-  const max = "9".repeat(38);
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, max);
-  const initial = await admit(p.credential, max);
-  await complete(initial.request, initial.attempt, {
-    input_tokens: (BigInt(max) / 3n).toString(),
-    output_tokens: "0",
+  const initial = await admit(s, p, max);
+  await complete(initial, { input_tokens: (BigInt(max) / 3n).toString(), output_tokens: "0" });
+  await funds.configureCredit(p.id, "USD", {
+    external_ref: "limit",
+    expected_version: "0",
+    credit_limit_atoms: "10",
   });
-  const debt = await admit(p.credential, "0");
-  await complete(debt.request, debt.attempt, { input_tokens: "1", output_tokens: "0" });
+  const next = await elsewhere(p);
+  const debt = await admit(next.s, next.p, "10");
   await credit(p.id, "1", "CASH", { priority: 101 });
-  const peer = await project();
+  const peer = await project(next.s);
   await credit(peer.id, "100");
-  const good = await admit(peer.credential);
-  const facts = [
-    {
-      attemptId: debt.attempt,
-      source: "execution",
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage: { input_tokens: "1", output_tokens: "0" },
-      requestState: "SUCCEEDED",
-    },
-    {
-      attemptId: good.attempt,
-      source: "execution",
-      state: "SUCCEEDED",
-      finality: "FINAL",
-      usage: { input_tokens: "7", output_tokens: "5" },
-      requestState: "SUCCEEDED",
-    },
-  ];
-  const rows = await db`SELECT persist_usage_batch(${facts}::jsonb) AS result`;
-  expect(rows[0].result["0"].status).toBe("ERROR");
-  expect(rows[0].result["1"].billing.state).toBe("SETTLED");
+  const good = await admit(next.s, peer);
+  const results = await settlement.persist([
+    { events: [final(debt, { input_tokens: "1", output_tokens: "0" })] },
+    { events: [final(good, { input_tokens: "7", output_tokens: "5" })] },
+  ]);
+  expect(results[0]).toEqual({ status: "ERROR", error: "P0500" });
+  committed(results[1]);
   const wallet = await invariant(p.id);
   expect(wallet.spent_atoms).toBe(max);
   expect(wallet.available_atoms).toBe("1");
-  expect(wallet.debt_atoms).toBe("3");
   expect((await invariant(peer.id)).spent_atoms).toBe("56");
 });
 
 test("fully spent refundable buckets retain their slot and refunds do not exceed the source budget", async () => {
-  const p = await project();
+  const s = await scope();
+  const p = await project(s);
+  await custom(s, { input_tokens: { numerator: "3", denominator: "1" } }, { input_tokens: "1" });
   let first: string | undefined;
   for (let priority = 0; priority < 256; priority++) {
     await credit(p.id, "3", "CASH", { priority });
-    const q = await admit(p.credential, "3");
-    const rows = await complete(q.request, q.attempt, { input_tokens: "1", output_tokens: "0" });
+    const q = await admit(s, p, "3");
+    const rows = await complete(q, { input_tokens: "1", output_tokens: "0" });
     first ??= String(rows[0].result.charge_id);
   }
   await expect(credit(p.id, "3", "CASH", { priority: 256 })).rejects.toMatchObject({ status: 422 });
@@ -2177,221 +1723,121 @@ test("fully spent refundable buckets retain their slot and refunds do not exceed
 });
 
 test("completed replay cursors skip historical scans without missing later live evidence", async () => {
-  const p = await project();
-  await credit(p.id, "100");
-  const q = await admit(p.credential);
-  const live = await store.createConsumer(`live-${crypto.randomUUID()}`, false);
-  expect((await store.claimEvents(live, 500)).events).toHaveLength(0);
-  const event = (source: string) => ({
-    attemptId: q.attempt,
-    source,
-    state: "SUCCEEDED" as const,
-    finality: "FINAL" as const,
-    usage: { input_tokens: "7", output_tokens: "5" },
-    requestState: "SUCCEEDED" as const,
-  });
-  for (let offset = 0; offset < 1001; offset += 128)
-    await store.persistUsage(
-      Array.from({ length: Math.min(128, 1001 - offset) }, (_, i) =>
-        event(`history_${offset + i}`),
-      ),
-    );
-  const drain = async (consumer: string, expected: number) => {
+  const s = await scope();
+  const p = await project(s);
+  await credit(p.id, "1000000");
+  const consumer = (name: string, replay: boolean) =>
+    db.begin((tx) => recordEventConsumer(tx, `${name}-${crypto.randomUUID()}`, replay));
+  const events = createEventStore(db);
+  const live = await consumer("live", false);
+  expect((await events.claim(live, 500)).events).toHaveLength(0);
+  const settled = async (count: number) => {
+    const admitted: Admitted[] = [];
+    for (let index = 0; index < count; index++) admitted.push(await admit(s, p));
+    for (let offset = 0; offset < count; offset += 128)
+      for (const result of await settlement.persist(
+        admitted
+          .slice(offset, offset + 128)
+          .map((q) => ({ events: [final(q, { input_tokens: "7", output_tokens: "5" })] })),
+      ))
+        committed(result);
+  };
+  await settled(1001);
+  const drain = async (id: string) => {
     const seen = new Set<string>();
     for (;;) {
-      const page = await store.claimEvents(consumer, 500);
+      const page = await events.claim(id, 500);
       if (!page.events.length) break;
       for (const value of page.events) {
         expect(seen.has(value.id)).toBe(false);
         seen.add(value.id);
       }
       expect(
-        await store.ackEvents(
-          consumer,
+        await events.ack(
+          id,
           page.lease_token,
           page.events.map((e) => e.id),
         ),
       ).toBe(page.events.length);
     }
-    expect(seen.size).toBe(expected);
+    return seen.size;
   };
-  await drain(live, 1001);
-  const history = await db`SELECT count(*)::int AS n FROM usage_events`;
-  const replay = await store.createConsumer(`replay-${crypto.randomUUID()}`, true);
-  await drain(replay, Number(history[0].n));
-  await store.persistUsage([event("after_replay")]);
-  await drain(live, 1);
-  await drain(replay, 1);
-  const wallet = await invariant(p.id);
-  expect(wallet.spent_atoms).toBe("56");
+  expect(await drain(live)).toBe(1001);
+  const history = (await db`SELECT count(*)::int AS n FROM usage_events`)[0].n;
+  const replay = await consumer("replay", true);
+  expect(await drain(replay)).toBe(history);
+  await settled(1);
+  expect(await drain(live)).toBe(1);
+  expect(await drain(replay)).toBe(1);
+  expect((await invariant(p.id)).spent_atoms).toBe(String(1002 * 56));
 });
 
-test("batch admission isolates rejected allocations, authorizes each item and arbitrates repeated intents", async () => {
-  const p = await project();
+test("intent arbitration, key permission and funds are decided per admission and only funded intents reserve", async () => {
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "100");
-  const denied = await store.createCredential(
-    p.id,
-    { name: "billing-only", models: [], operations: ["chat"], role: "BILLING" },
-    crypto.randomUUID(),
-    "test",
-  );
-  const input = (amount: string) => ({
-    id: crypto.randomUUID(),
-    key_id: p.credential.id,
-    project_id: p.id,
-    operation: "chat",
-    model: "funds-model",
-    digest: null as string | null,
-    fingerprint: "batch",
-    route_id: route.id,
-    cost_pricing_id: route.pricing_id,
-    quote: { currency: "USD", amount_atoms: amount, prices: { [route.provider_id]: pricingId } },
+  const billing = { ...p, setup: { ...p.setup, key: await key(s, p.id, "BILLING") } };
+  const intent = sha256(crypto.randomUUID());
+  await expect(admit(s, p, "200")).rejects.toEqual(insufficient);
+  await expect(admit(s, billing, "10")).rejects.toMatchObject({ status: 403 });
+  const accepted = await admit(s, p, "60", { intent });
+  await expect(admit(s, p, "60", { intent })).rejects.toMatchObject({
+    status: 409,
+    code: "already_accepted",
   });
-  const accepted = { ...input("60"), digest: "unique-intent" };
-  const items = [
-    input("200"),
-    { ...input("1"), cost_pricing_id: crypto.randomUUID() },
-    { ...input("1"), key_id: denied },
-    accepted,
-    { ...accepted, id: crypto.randomUUID() },
-    { ...accepted, id: crypto.randomUUID(), fingerprint: "conflict" },
-    { ...input("1"), id: accepted.id },
-    input("40"),
-    input("1"),
-  ];
-  const rows = await db`SELECT admit_gateway_batch(${items}::jsonb) AS result`;
-  const result = rows[0].result;
-  expect(result["0"].error).toBe("P0402");
-  expect(result["1"].error).toBe("P0422");
-  expect(result["2"].error).toBe("P0403");
-  expect(result["3"].created).toBe(true);
-  expect(result["4"].created).toBe(false);
-  expect(result["4"].record.id).toBe(accepted.id);
-  expect(result["5"].error).toBe("P0409");
-  expect(result["6"].error).toBe("23505");
-  expect(result["7"].created).toBe(true);
-  expect(result["8"].error).toBe("P0402");
+  await expect(
+    admit(s, p, "60", { intent, fingerprint: sha256("conflicting-input") }),
+  ).rejects.toMatchObject({ status: 409, code: "idempotency_conflict" });
+  await expect(admit(s, p, "60", { requestId: accepted.request })).rejects.toMatchObject({
+    status: 409,
+  });
+  await admit(s, p, "40");
+  await expect(admit(s, p, "10")).rejects.toEqual(insufficient);
   expect((await invariant(p.id)).reserved_atoms).toBe("100");
   const counts =
     await db`SELECT (SELECT count(*)::int FROM gateway_requests WHERE project_id=${p.id}) AS requests,(SELECT count(*)::int FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.project_id=${p.id}) AS attempts`;
-  expect(counts[0].requests).toBe(2);
-  expect(counts[0].attempts).toBe(2);
+  expect(counts[0]).toEqual({ requests: 2, attempts: 2 });
 });
 
 test("expiry overflow on one wallet does not roll back a valid peer admission", async () => {
-  const p = await project();
-  const max = "9".repeat(38);
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, max, "GIFT", { expires_at: new Date(Date.now() + 100).toISOString() });
   await Bun.sleep(150);
-  await admit(p.credential, "0");
+  await db`SELECT expire_wallet(id) FROM wallets WHERE project_id=${p.id}`;
   expect((await invariant(p.id)).expired_atoms).toBe(max);
   await credit(p.id, "1", "GIFT", { expires_at: new Date(Date.now() + 100).toISOString() });
+  await credit(p.id, "10");
   await Bun.sleep(150);
-  const peer = await project();
+  const peer = await project(s);
   await credit(peer.id, "100");
-  const input = (credential: Credential, amount: string) => ({
-    id: crypto.randomUUID(),
-    key_id: credential.id,
-    project_id: credential.project_id,
-    operation: "chat",
-    model: "funds-model",
-    digest: null,
-    fingerprint: "expiry",
-    route_id: route.id,
-    cost_pricing_id: route.pricing_id,
-    quote: { currency: "USD", amount_atoms: amount, prices: { [route.provider_id]: pricingId } },
-  });
-  const items = [input(p.credential, "0"), input(peer.credential, "100")];
-  const rows = await db`SELECT admit_gateway_batch(${items}::jsonb) AS result`;
-  expect(rows[0].result["0"].error).toBe("22003");
-  expect(rows[0].result["1"].created).toBe(true);
-  expect((await invariant(peer.id)).reserved_atoms).toBe("100");
-  expect((await invariant(p.id)).available_atoms).toBe("1");
+  await tariff(s, 10n);
+  const outcomes = await Promise.allSettled([admit(s, p, "10"), admit(s, peer, "10")]);
+  expect(outcomes[0].status).toBe("rejected");
+  expect(outcomes[1].status).toBe("fulfilled");
+  expect((await invariant(peer.id)).reserved_atoms).toBe("10");
+  expect(await invariant(p.id)).toMatchObject({ available_atoms: "11", reserved_atoms: "0" });
 });
 
-test("concurrent intents across different currency wallets still reserve exactly once", async () => {
-  const p = await project();
+test("concurrent admissions of one intent reserve exactly once", async () => {
+  const s = await scope();
+  const p = await project(s);
   await credit(p.id, "100");
-  await credit(p.id, "100", "CASH", { currency: "CNY" });
-  const cny = crypto.randomUUID();
-  await db`INSERT INTO billing_prices(id,currency,rates,ceilings,basis) SELECT ${cny},'CNY',rates,ceilings,basis FROM billing_prices WHERE id=${pricingId}`;
-  const inputs = Array.from({ length: 20 }, (_, i) => ({
-    id: crypto.randomUUID(),
-    key_id: p.credential.id,
-    project_id: p.id,
-    operation: "chat",
-    model: "funds-model",
-    digest: "cross-currency-intent",
-    fingerprint: "same-intent",
-    route_id: route.id,
-    cost_pricing_id: route.pricing_id,
-    quote: {
-      currency: i % 2 ? "USD" : "CNY",
-      amount_atoms: "100",
-      prices: { [route.provider_id]: i % 2 ? pricingId : cny },
-    },
-  }));
-  const rows = await Promise.all(
-    inputs.map(async (input) => {
-      const deadline = Date.now() + 2000;
-      let rows = await db`SELECT admit_gateway_batch(${[input]}::jsonb)->'0' AS result`;
-      while (rows[0].result.error === "55P03" && Date.now() < deadline) {
-        await Bun.sleep(5);
-        rows = await db`SELECT admit_gateway_batch(${[input]}::jsonb)->'0' AS result`;
-      }
-      return rows;
-    }),
+  await tariff(s, 100n);
+  const intent = sha256(crypto.randomUUID());
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: 20 }, () => admit(s, p, "100", { intent })),
   );
-  const results = rows.map((row) => row[0].result);
-  expect(results.filter((result) => result.created)).toHaveLength(1);
-  expect(results.filter((result) => result.created === false)).toHaveLength(19);
-  expect(new Set(results.map((result) => result.record.id)).size).toBe(1);
+  expect(outcomes.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+  expect(outcomes.flatMap((r) => (r.status === "rejected" ? [r.reason] : []))).toEqual(
+    Array.from({ length: 19 }, () => ({ status: 409, code: "already_accepted" })),
+  );
   await invariant(p.id);
-  const summary =
-    await db`SELECT sum(available_atoms)::text AS available,sum(reserved_atoms)::text AS reserved FROM wallets WHERE project_id=${p.id}`;
-  expect(summary[0].available).toBe("100");
-  expect(summary[0].reserved).toBe("100");
+  expect((await funds.wallets(p.id))[0]).toMatchObject({
+    available_atoms: "0",
+    reserved_atoms: "100",
+  });
   const attempts =
     await db`SELECT count(*)::int AS n FROM attempts a JOIN gateway_requests q ON q.id=a.request_id WHERE q.project_id=${p.id}`;
   expect(attempts[0].n).toBe(1);
-});
-
-test("cross-job batching never splits conflicting facts in one atomic input group", async () => {
-  const p = await project(),
-    disputed = await project();
-  await credit(p.id, "1000");
-  await credit(disputed.id, "1000");
-  const first = await admit(p.credential),
-    second = await admit(disputed.credential);
-  const batching = new Store(db);
-  const filler = {
-    attemptId: first.attempt,
-    source: "execution",
-    state: "SUCCEEDED" as const,
-    finality: "FINAL" as const,
-    usage: { input_tokens: "7", output_tokens: "5" },
-    requestState: "SUCCEEDED" as const,
-  };
-  await Promise.all([
-    batching.persistUsage(Array.from({ length: 127 }, () => ({ ...filler }))),
-    batching.persistUsage([
-      {
-        ...filler,
-        attemptId: second.attempt,
-        source: "first_final",
-        usage: { input_tokens: "1", output_tokens: "1" },
-      },
-      {
-        ...filler,
-        attemptId: second.attempt,
-        source: "conflicting_final",
-        usage: { input_tokens: "2", output_tokens: "1" },
-      },
-    ]),
-  ]);
-  expect((await db`SELECT id FROM billing_charges WHERE request_id=${second.request}`).length).toBe(
-    0,
-  );
-  expect((await invariant(disputed.id)).reserved_atoms).toBe("100");
-  expect((await invariant(disputed.id)).freeze_reason).toBe("EVIDENCE_CONFLICT");
 });

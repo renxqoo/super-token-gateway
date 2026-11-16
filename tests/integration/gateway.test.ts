@@ -2168,8 +2168,8 @@ test("production worker role advances async resources and commits queued usage w
   const id = crypto.randomUUID();
   const workerNamespace = `test-usage:worker:${id}`;
   const neighborNamespace = `test-usage:worker-neighbor:${id}`;
-  const cleanup = createUsageQueueCleanup(workerNamespace);
-  const neighborCleanup = createUsageQueueCleanup(neighborNamespace);
+  const cleanup = createUsageQueueCleanup(workerNamespace, usageChannel);
+  const neighborCleanup = createUsageQueueCleanup(neighborNamespace, usageChannel);
   const role = `worker_${suffix}`;
   const password = crypto.randomUUID().replaceAll("-", "");
   await testDb.unsafe(
