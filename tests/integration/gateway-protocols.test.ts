@@ -548,6 +548,37 @@ test(
 );
 
 test(
+  "completions on a character tariff are charged for the prompt's characters, for a string and a list of prompts, instead of settling to zero",
+  () =>
+    withGatewayStack({ reply: nativeReply }, async (stack) => {
+      await allowOperation(stack, "completions", {
+        pricing: { currency: "USD", rates: { characters: { numerator: "7", denominator: "1" } } },
+        ceilings: { characters: "100" },
+        basis: "INPUT_CHARACTERS",
+      });
+      for (const [prompt, amount] of [
+        ["写诗", "14"],
+        [["写诗", "作画吧"], "35"],
+      ] as const) {
+        const completed = await fetch(`${stack.gateway.origin}/v1/completions`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${stack.setup.key.key}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ model: stack.setup.model, prompt, max_tokens: 20 }),
+        });
+        expect(completed.status).toBe(200);
+        await completed.text();
+        expect(await settledCharge(stack.db, completed.headers.get("x-request-id")!)).toMatchObject(
+          { amount, state: "SUCCEEDED" },
+        );
+      }
+    }),
+  120000,
+);
+
+test(
   "server-executed tools without a billing dimension are refused with 422 unmetered_tool before Core or the upstream sees the request, while client-executed tools are served on every protocol (the v2 Gateway forwarded unmetered hosted tools)",
   () =>
     withGatewayStack(
@@ -657,5 +688,78 @@ test(
         expect(stack.received).toHaveLength(4);
       },
     ),
+  120000,
+);
+
+test(
+  "a key's CIDR allow-list is checked against the transport address on the chat and Gemini native paths, so a forged x-forwarded-for neither admits nor refuses it unless the peer is a trusted proxy",
+  () =>
+    withGatewayStack({ reply: () => chatReplies.json() }, async (stack) => {
+      await allowOperation(stack, "gemini");
+      const { f, setup, received } = stack;
+      const restrict = async (allowed_cidrs: string[]) =>
+        expect(
+          (await f.request(`/keys/${setup.key.id}`, { allowed_cidrs }, undefined, "PATCH")).status,
+        ).toBe(200);
+      const answers = async (via: { origin: string }, forwarded: string) => {
+        const results: string[] = [];
+        for (const [path, headers, body] of [
+          [
+            "/v1/chat/completions",
+            { authorization: `Bearer ${setup.key.key}` },
+            {
+              model: setup.model,
+              messages: [{ role: "user", content: "合成" }],
+              max_completion_tokens: 30,
+            },
+          ],
+          [
+            `/v1beta/models/${setup.model}:generateContent`,
+            { "x-goog-api-key": setup.key.key },
+            {
+              contents: [{ role: "user", parts: [{ text: "合成" }] }],
+              generationConfig: { maxOutputTokens: 30 },
+            },
+          ],
+        ] as const) {
+          const response = await fetch(`${via.origin}${path}`, {
+            method: "POST",
+            headers: {
+              ...headers,
+              "content-type": "application/json",
+              "x-forwarded-for": forwarded,
+            },
+            body: JSON.stringify(body),
+          });
+          const text = await response.text();
+          results.push(
+            response.status === 200 ? "200" : `${response.status}:${JSON.parse(text).error.code}`,
+          );
+        }
+        return results;
+      };
+      await restrict(["10.0.0.0/8"]);
+      expect(await answers(stack.gateway, "10.1.2.3")).toEqual([
+        "403:permission_denied",
+        "403:permission_denied",
+      ]);
+      await restrict(["127.0.0.0/8"]);
+      expect(await answers(stack.gateway, "10.1.2.3")).toEqual(["200", "200"]);
+      const proxied = await stack.startGateway(
+        { trusted_proxy_cidrs: ["127.0.0.0/8"] },
+        "gatewayB",
+      );
+      expect(await answers(proxied, "10.1.2.3")).toEqual([
+        "403:permission_denied",
+        "403:permission_denied",
+      ]);
+      await restrict(["10.0.0.0/8"]);
+      expect(await answers(proxied, "10.1.2.3")).toEqual(["200", "200"]);
+      expect(await answers(stack.gateway, "10.1.2.3")).toEqual([
+        "403:permission_denied",
+        "403:permission_denied",
+      ]);
+      expect(received).toHaveLength(4);
+    }),
   120000,
 );

@@ -285,6 +285,7 @@ export function withGatewayStack(
     gateway?: Record<string, unknown>;
     databasePort?: number;
     supplierCredit?: string;
+    maxAttempts?: number;
   },
   run: (stack: {
     f: Fixture;
@@ -298,6 +299,7 @@ export function withGatewayStack(
     startGateway: (
       overrides?: Record<string, unknown>,
       instance?: "gateway" | "gatewayB",
+      core?: "coreA" | "coreB",
     ) => Promise<Process>;
     startWorker: () => Promise<Awaited<ReturnType<typeof startCoreWorker>>>;
     send: (input?: {
@@ -365,11 +367,13 @@ export function withGatewayStack(
           const launch = async (
             overrides: Record<string, unknown> = {},
             instance: "gateway" | "gatewayB" = "gateway",
+            core: "coreA" | "coreB" = "coreA",
           ) => {
             const gateway = await startGateway(f, {
               namespace,
               upstreamCertificate: upstream.certificate,
               instance,
+              core,
               overrides: { ...options.gateway, ...overrides },
             });
             processes.push(gateway);
@@ -412,7 +416,10 @@ export function withGatewayStack(
           await clearQueueNamespace(namespace);
         }
       }),
-    options.databasePort ? { databasePort: options.databasePort } : {},
+    {
+      ...(options.databasePort ? { databasePort: options.databasePort } : {}),
+      ...(options.maxAttempts ? { maxAttempts: options.maxAttempts } : {}),
+    },
   );
 }
 

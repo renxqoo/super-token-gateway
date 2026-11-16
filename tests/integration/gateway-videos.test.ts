@@ -75,7 +75,9 @@ test(
         const text = await created.text();
         expect(JSON.parse(text)).toMatchObject({ id, status: "queued", model: stack.setup.model });
         expect(text).not.toContain("video_up");
-        expect(stack.received.at(-1)!.body).toMatchObject({ model: "synthetic", seconds: "8" });
+        expect(
+          stack.received.filter((call) => call.method === "POST" && call.path === "/v1/videos"),
+        ).toMatchObject([{ body: { model: "synthetic", seconds: "8" } }]);
 
         expect(await settledCharge(stack.db, requestId)).toEqual({
           amount: "80",

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { RedisClient } from "bun";
 import { CoreRpcError } from "@gateway/core-client";
+import { Limits } from "@gateway/runtime";
 import type { ExecutionReply } from "@gateway/contracts";
 import { prepareFinancialAdmission, withFinancial } from "../support/financial-execution.ts";
 import { eventually, tcpProxy } from "../support/gateway-process.ts";
@@ -203,3 +204,119 @@ for (const [change, expected] of [
         await db`SELECT state FROM execution_permits WHERE attempt_id=${prepared.attemptId}`,
       ).toEqual([{ state: "RESERVED" }]);
     }));
+
+async function withHealth(
+  run: (health: {
+    limits: Limits;
+    grant: (attempt: string, leaseMs?: number) => Promise<boolean>;
+    settle: (attempt: string, failed?: boolean) => Promise<boolean>;
+    open: () => Promise<boolean>;
+    trip: () => Promise<void>;
+    cool: () => Promise<void>;
+    key: string;
+  }) => Promise<void>,
+) {
+  const limits = new Limits(process.env.REDIS_URL!, `health-${crypto.randomUUID()}`),
+    channel = crypto.randomUUID(),
+    owner = "core-session",
+    key = `${limits.namespace}:health:${channel}`;
+  const grant = (attempt: string, leaseMs = 60000) =>
+    limits.grantHealth(channel, attempt, owner, leaseMs);
+  const settle = (attempt: string, failed?: boolean) =>
+    limits.settleHealth(
+      channel,
+      attempt,
+      owner,
+      failed === undefined ? undefined : { failed, latency: 20 },
+    );
+  try {
+    await run({
+      limits,
+      grant,
+      settle,
+      open: async () => (await limits.health(channel)).open,
+      trip: async () => {
+        for (let i = 0; i < 3; i++) {
+          const attempt = crypto.randomUUID();
+          expect(await grant(attempt)).toBe(true);
+          expect(await settle(attempt, true)).toBe(true);
+        }
+        expect((await limits.health(channel)).open).toBe(true);
+      },
+      cool: async () => {
+        await limits.command("HSET", [key, "open_until", String(Date.now() - 1)]);
+      },
+      key,
+    });
+  } finally {
+    const keys = (await limits.command("KEYS", [`${limits.namespace}:*`])) as string[];
+    if (keys.length) await limits.command("DEL", keys);
+    limits.close();
+  }
+}
+
+test("a half-open probe released without an observation cannot report later over its replacement probe, so only the replacement's result moves the circuit", () =>
+  withHealth(async ({ limits, grant, settle, open, trip, cool, key }) => {
+    await trip();
+    await cool();
+    expect(await grant("released")).toBe(true);
+    expect(await grant("excess")).toBe(false);
+    expect(await settle("released")).toBe(true);
+    expect(await grant("replacement")).toBe(true);
+    expect(await grant("excess-2")).toBe(false);
+    expect(await settle("released", false)).toBe(false);
+    expect(await open()).toBe(true);
+    expect(await grant("excess-3")).toBe(false);
+    expect(await settle("replacement", true)).toBe(true);
+    for (let i = 0; i < 3; i++) expect(await settle("released", false)).toBe(false);
+    expect(await open()).toBe(true);
+    expect(await limits.command("HGET", [key, "fails"])).toBe("4");
+  }));
+
+test("a half-open probe whose lease expired cannot report a success that closes the circuit or removes its replacement probe's exclusivity", () =>
+  withHealth(async ({ limits, grant, settle, open, trip, cool, key }) => {
+    await trip();
+    await cool();
+    expect(await grant("expired", 1000)).toBe(true);
+    await Bun.sleep(1100);
+    expect(await settle("expired", false)).toBe(false);
+    expect(await limits.command("HGET", [key, "fails"])).toBe("3");
+    expect(await grant("current")).toBe(true);
+    expect(await grant("excess")).toBe(false);
+    expect(await settle("expired", false)).toBe(false);
+    expect(await grant("excess-2")).toBe(false);
+    expect(await settle("current", true)).toBe(true);
+    expect(await open()).toBe(true);
+  }));
+
+test("a half-open probe with a lease longer than the health retention keeps the health record and its exclusivity for the whole lease", () =>
+  withHealth(async ({ limits, grant, settle, trip, cool, key }) => {
+    await trip();
+    await cool();
+    expect(await grant("long", 700000)).toBe(true);
+    expect(Number(await limits.command("PTTL", [key]))).toBeGreaterThanOrEqual(700000);
+    expect(await grant("excess")).toBe(false);
+    expect(await settle("long")).toBe(true);
+  }));
+
+test("a closed-mode success admitted before the breaker opened cannot close the circuit while the recovery probe is pending, nor erase failures counted after recovery", () =>
+  withHealth(async ({ limits, grant, settle, open, trip, cool, key }) => {
+    expect(await grant("old-during-probe")).toBe(true);
+    expect(await grant("old-after-recovery")).toBe(true);
+    await trip();
+    await cool();
+    expect(await grant("probe")).toBe(true);
+    expect(await settle("old-during-probe", false)).toBe(true);
+    expect(await open()).toBe(true);
+    expect(await grant("excess")).toBe(false);
+    expect(await settle("probe", false)).toBe(true);
+    expect(await open()).toBe(false);
+    const current = ["current-0", "current-1", "current-2"];
+    for (const attempt of current) expect(await grant(attempt)).toBe(true);
+    expect(await settle(current[0]!, true)).toBe(true);
+    expect(await settle(current[1]!, true)).toBe(true);
+    expect(await settle("old-after-recovery", false)).toBe(true);
+    expect(await settle(current[2]!, true)).toBe(true);
+    expect(await open()).toBe(true);
+    expect(await limits.command("HGET", [key, "fails"])).toBe("3");
+  }));

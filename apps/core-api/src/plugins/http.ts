@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
-import { readBounded } from "@gateway/runtime";
+import { readJsonBody } from "../request-body.ts";
 import type { CatalogApplication } from "./application.ts";
 import { versionCommandSchema } from "./application.ts";
 export function catalogRoutes(application: CatalogApplication) {
@@ -20,16 +20,8 @@ export function catalogRoutes(application: CatalogApplication) {
     );
   });
   const actor = (header: string | undefined) => application.authenticate(header);
-  const body = async (request: Request, limit = 65536) =>
-    JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(
-        await readBounded(
-          request.body,
-          limit,
-          AbortSignal.any([request.signal, AbortSignal.timeout(limit > 65536 ? 120000 : 10000)]),
-        ),
-      ),
-    );
+  const body = (request: Request, limit = 65536) =>
+    readJsonBody(request, limit, limit > 65536 ? 120000 : 10000);
   app.get("/plugins", async (c) =>
     c.json({ data: await application.versions(await actor(c.req.header("authorization"))) }),
   );

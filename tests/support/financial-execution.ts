@@ -26,6 +26,7 @@ export async function withFinancial(
     account?: { trustedProxyCidrs: string[] };
     redisUrl?: string;
     gateways?: number;
+    maxAttempts?: number;
   } = {},
 ) {
   const namespace = `financial_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -69,7 +70,7 @@ export async function withFinancial(
         redisUrls: [options.redisUrl ?? process.env.REDIS_URL!],
         quotaNamespace: namespace,
         quotaGeneration: "v1",
-        maxAttempts: 3,
+        maxAttempts: options.maxAttempts ?? 3,
       },
     },
   );

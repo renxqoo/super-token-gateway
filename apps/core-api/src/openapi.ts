@@ -161,7 +161,12 @@ export function openapi(): Record<string, unknown> {
       operationId: id,
       security: [{ [admin ? "adminKey" : "projectKey"]: [] }],
       parameters,
-      responses,
+      responses: admin
+        ? {
+            ...responses,
+            "408": { description: "Request body not received within the time budget" },
+          }
+        : responses,
     };
     if (schema) value.requestBody = { required: true, content: { "application/json": { schema } } };
     (paths[path] ??= {})[method] = value;

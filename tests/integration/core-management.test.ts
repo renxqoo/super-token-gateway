@@ -7,7 +7,7 @@ import {
   financialBalances,
   financialProviderSchema,
 } from "../support/financial-execution.ts";
-import { syntheticPepper } from "../support/catalog.ts";
+import { syntheticAdminKey, syntheticPepper } from "../support/catalog.ts";
 import { verifier } from "@gateway/runtime/crypto";
 import type { SQL } from "bun";
 async function credential(
@@ -336,4 +336,63 @@ test(
       );
     }),
   30000,
+);
+
+test(
+  "a chunked management body without Content-Length is cut at its byte budget with 413 and at its time budget with 408 body_timeout instead of 503 management_unavailable, releasing the body and creating nothing",
+  () =>
+    withFinancial(async (f, db) => {
+      const name = `chunked-${crypto.randomUUID()}`;
+      const post = (body: ReadableStream<Uint8Array>) =>
+        f.management.request("http://management.test/projects", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${syntheticAdminKey}`,
+            "content-type": "application/json",
+          },
+          body,
+          duplex: "half",
+        } as RequestInit);
+      const mebibyte = new Uint8Array(1 << 20).fill(120);
+      let pulled = 0,
+        oversizedReleased = false;
+      const oversized = await post(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(`{"name":"${name}","padding":"`));
+          },
+          pull(controller) {
+            if (pulled++ < 64) controller.enqueue(mebibyte);
+            else controller.close();
+          },
+          cancel() {
+            oversizedReleased = true;
+          },
+        }),
+      );
+      expect([oversized.status, (await oversized.json()).error.code]).toEqual([
+        413,
+        "body_too_large",
+      ]);
+      expect(pulled).toBeLessThan(16);
+      expect(oversizedReleased).toBe(true);
+
+      let stalledReleased = false;
+      const started = performance.now();
+      const stalled = await post(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(`{"name":"${name}`));
+          },
+          cancel() {
+            stalledReleased = true;
+          },
+        }),
+      );
+      expect([stalled.status, (await stalled.json()).error.code]).toEqual([408, "body_timeout"]);
+      expect(performance.now() - started).toBeLessThan(15000);
+      expect(stalledReleased).toBe(true);
+      expect((await db`SELECT count(*)::integer n FROM projects WHERE name=${name}`)[0].n).toBe(0);
+    }),
+  60000,
 );

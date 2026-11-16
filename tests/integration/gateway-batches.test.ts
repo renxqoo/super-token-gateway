@@ -343,3 +343,61 @@ test("a batch upload whose rows the route request policy refuses is rejected bef
       expect(stack.received.length).toBe(before + 1);
     },
   ));
+
+test("a batch upload whose rows the preferred channel's request policy refuses is uploaded through the compatible channel instead of being rejected", () =>
+  withGatewayStack(
+    {
+      reply: upstream("completed", [completion("a", 10, 5)]),
+      supplierCredit: "1000000",
+      channels: 2,
+    },
+    async (stack) => {
+      const api = await prepare(stack);
+      const routes = Object.fromEntries(
+        (
+          await stack.db`SELECT id,provider_id FROM routes WHERE model_name=${stack.setup.model}`
+        ).map((row: { id: string; provider_id: string }) => [
+          row.provider_id === stack.setup.provider.id ? "first" : "second",
+          row,
+        ]),
+      ) as Record<"first" | "second", { id: string; provider_id: string }>;
+      for (const operation of ["files", "batches"])
+        expect(
+          (
+            await stack.f.request("/tariffs", {
+              model: stack.setup.model,
+              operation,
+              provider_id: routes.second.provider_id,
+              ...(operation === "files"
+                ? {
+                    pricing: {
+                      currency: "USD",
+                      rates: { requests: { numerator: "100", denominator: "1" } },
+                    },
+                    ceilings: { requests: "1" },
+                    basis: "REQUEST_COMPLETION",
+                  }
+                : tokenTariff),
+            })
+          ).status,
+        ).toBe(201);
+      const patch = async (route: string, body: Record<string, unknown>) =>
+        expect((await stack.f.request(`/routes/${route}`, body, undefined, "PATCH")).status).toBe(
+          200,
+        );
+      await patch(routes.first.id, {
+        priority: 10,
+        request_policy: { blocked_parameters: ["max_tokens"] },
+      });
+      const before = stack.received.length;
+      const uploaded = await api.upload(rows(stack, ["a"]));
+      expect(uploaded.status).toBe(200);
+      expect(stack.received.slice(before).map((call) => [call.path, call.authorization])).toEqual([
+        ["/v1/files", "Bearer synthetic-upstream-secret-2"],
+      ]);
+      await patch(routes.first.id, { request_policy: {} });
+      const preferred = await api.upload(rows(stack, ["a"]));
+      expect(preferred.status).toBe(200);
+      expect(stack.received.at(-1)!.authorization).toBe("Bearer synthetic-upstream-secret");
+    },
+  ));

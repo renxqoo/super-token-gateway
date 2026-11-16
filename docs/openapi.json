@@ -3898,6 +3898,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -3947,6 +3950,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -4018,6 +4024,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -4106,6 +4115,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -4155,6 +4167,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -4226,6 +4241,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -4306,6 +4324,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -4355,6 +4376,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -4426,6 +4450,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -4534,6 +4561,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -4592,6 +4622,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -4664,6 +4697,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -4722,6 +4758,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -4851,6 +4890,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -4909,6 +4951,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -4980,6 +5025,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -5184,6 +5232,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -5271,6 +5322,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -5320,6 +5374,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -5420,6 +5477,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -5509,6 +5569,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -5600,6 +5663,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -5661,6 +5727,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -5721,6 +5790,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -5817,6 +5889,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -5907,6 +5982,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -5996,6 +6074,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -6120,6 +6201,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -6171,6 +6255,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -6232,6 +6319,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -6304,6 +6394,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -6372,6 +6465,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -6452,6 +6548,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -6521,6 +6620,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -6589,6 +6691,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -6661,6 +6766,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -6710,6 +6818,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -6782,6 +6893,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -6852,6 +6966,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -6924,6 +7041,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -6985,6 +7105,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -7086,6 +7209,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -7177,6 +7303,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -7276,6 +7405,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -7362,6 +7494,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -7443,6 +7578,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -7522,6 +7660,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -7599,6 +7740,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -7648,6 +7792,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -7730,6 +7877,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -7800,6 +7950,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -7849,6 +8002,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -7936,6 +8092,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -7994,6 +8153,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -8080,6 +8242,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -8141,6 +8306,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -8199,6 +8367,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -8333,6 +8504,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -8393,6 +8567,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -8532,6 +8709,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -8617,6 +8797,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -8678,6 +8861,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -8736,6 +8922,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -8844,6 +9033,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -8936,6 +9128,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -8989,6 +9184,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -9040,6 +9238,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
@@ -9102,6 +9303,9 @@
           "404": {
             "description": "Owned resource or model not found"
           },
+          "408": {
+            "description": "Request body not received within the time budget"
+          },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"
           },
@@ -9153,6 +9357,9 @@
           },
           "404": {
             "description": "Owned resource or model not found"
+          },
+          "408": {
+            "description": "Request body not received within the time budget"
           },
           "409": {
             "description": "Configuration/payload conflict or an already accepted intention"

@@ -263,3 +263,54 @@ test(
     ),
   180000,
 );
+
+test(
+  "VIEWER and BILLING keys of the owning project cannot cancel or delete a stored response, and the upstream resource is never touched",
+  () =>
+    withGatewayStack({ reply, supplierCredit: "1000000" }, async (stack) => {
+      await allowOperation(stack, "responses");
+      const owner = { authorization: `Bearer ${stack.setup.key.key}` };
+      const created = await fetch(`${stack.gateway.origin}/v1/responses`, {
+        method: "POST",
+        headers: { ...owner, "content-type": "application/json" },
+        body: JSON.stringify({ model: stack.setup.model, max_output_tokens: 30, input: "x" }),
+      });
+      expect(created.status).toBe(200);
+      const id = publicId(created);
+      const calls = stack.received.length;
+      for (const role of ["VIEWER", "BILLING"]) {
+        const { key } = z.object({ key: z.string() }).parse(
+          (
+            await stack.f.request(`/projects/${stack.setup.project.id}/keys`, {
+              name: role.toLowerCase(),
+              role,
+              models: [stack.setup.model],
+              operations: ["responses"],
+            })
+          ).value,
+        );
+        for (const [path, method] of [
+          [`/v1/responses/${id}/cancel`, "POST"],
+          [`/v1/responses/${id}`, "DELETE"],
+        ] as const) {
+          const response = await fetch(`${stack.gateway.origin}${path}`, {
+            method,
+            headers: { authorization: `Bearer ${key}` },
+          });
+          expect([role, method, response.status, (await response.json()).error.code]).toEqual([
+            role,
+            method,
+            403,
+            "permission_denied",
+          ]);
+        }
+      }
+      expect(stack.received.length).toBe(calls);
+      const retrieved = await fetch(`${stack.gateway.origin}/v1/responses/${id}`, {
+        headers: owner,
+      });
+      expect(retrieved.status).toBe(200);
+      expect(await retrieved.json()).toMatchObject({ id, status: "completed" });
+    }),
+  180000,
+);

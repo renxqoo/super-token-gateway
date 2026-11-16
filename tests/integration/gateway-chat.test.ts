@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { RedisClient, SQL } from "bun";
+import { request } from "node:http";
 import {
   boundedSupplier,
   chatReplies,
@@ -116,6 +117,91 @@ test("a retryable upstream 503 moves the same request to the other channel and c
       const [request] =
         await db`SELECT r.state,r.selected_attempt_id=a.id AS second_selected FROM gateway_requests r JOIN attempts a ON a.request_id=r.id AND a.ordinal=2 WHERE r.id=${requestId}`;
       expect(request).toEqual({ state: "SUCCEEDED", second_selected: true });
+    },
+  ));
+
+test("a client that cancels after a retryable upstream refusal, while the next attempt waits for admission, is never admitted or sent to the next channel and the request closes CANCELLED with its leases released and no charge", () => {
+  const unlock = stall();
+  let lockWallet = async () => ({ transaction: Promise.resolve() as Promise<unknown> });
+  let holder: Awaited<ReturnType<typeof lockWallet>> | undefined;
+  return withGatewayStack(
+    {
+      channels: 2,
+      reply: async (call) => {
+        if (call.index > 0) return chatReplies.json();
+        holder = await lockWallet();
+        return Response.json({ error: { message: "busy" } }, { status: 503 });
+      },
+    },
+    async ({ db, setup, received, send }) => {
+      lockWallet = async () => {
+        const locked = stall();
+        const transaction = db.begin(async (tx) => {
+          await tx`SELECT w.id FROM wallets w JOIN api_keys k ON k.project_id=w.project_id WHERE k.id=${setup.key.id} FOR UPDATE OF w`;
+          locked.release();
+          await unlock.released;
+        });
+        await locked.released;
+        return { transaction };
+      };
+      const controller = new AbortController();
+      const pending = send({ signal: controller.signal }).catch((error: unknown) => error);
+      await eventually(async () => received.length === 1, "first send");
+      await Bun.sleep(600);
+      controller.abort();
+      expect(await pending).toBeInstanceOf(Error);
+      await Bun.sleep(300);
+      unlock.release();
+      await holder?.transaction;
+      const [{ id: requestId }] = await db`SELECT id FROM gateway_requests`;
+      expect(await requestOutcome(db, requestId)).toEqual({
+        state: "CANCELLED",
+        billing_outcome: "CANCELLED",
+        charged: "0",
+      });
+      await Bun.sleep(500);
+      expect(received).toHaveLength(1);
+      expect(
+        await db`SELECT ordinal,error_code FROM attempts WHERE request_id=${requestId} ORDER BY ordinal`,
+      ).toEqual([{ ordinal: 1, error_code: "upstream_http_503" }]);
+      await eventually(
+        async () =>
+          (
+            await db`SELECT count(*)::integer n FROM execution_quota_leases WHERE request_id=${requestId} AND state<>'RELEASED'`
+          )[0].n === 0,
+        "released quota leases",
+      );
+      expect(
+        await db`SELECT state FROM billing_holds WHERE request_id=${requestId}`,
+      ).not.toContainEqual({ state: "HELD" });
+      const next = await send();
+      expect(next.status).toBe(200);
+      await next.text();
+    },
+  );
+});
+
+test("a manually frozen wallet is refused with 402 insufficient_funds before any request record, hold or upstream call, and unfreezing restores service", () =>
+  withGatewayStack(
+    { reply: () => chatReplies.json(), channels: 2 },
+    async ({ f, db, setup, received, send }) => {
+      const wallet = `/projects/${setup.project.id}/wallets/USD`;
+      expect((await f.request(wallet, { frozen: true }, undefined, "PATCH")).status).toBe(200);
+      const refused = await send();
+      expect(JSON.parse(await expectStatus(refused, 402)).error.code).toBe("insufficient_funds");
+      expect(received).toHaveLength(0);
+      expect(
+        await db`SELECT (SELECT count(*) FROM gateway_requests)::integer AS requests,(SELECT count(*) FROM billing_holds)::integer AS holds,(SELECT count(*) FROM upstream_holds)::integer AS supplier_holds`,
+      ).toEqual([{ requests: 0, holds: 0, supplier_holds: 0 }]);
+      expect(await supplier(db, setup.provider.account_id)).toMatchObject({ reserved: "0" });
+      expect(
+        (
+          await db`SELECT reserved_atoms::text FROM wallets WHERE project_id=${setup.project.id}`
+        )[0],
+      ).toEqual({ reserved_atoms: "0" });
+      expect((await f.request(wallet, { frozen: false }, undefined, "PATCH")).status).toBe(200);
+      await expectStatus(await send(), 200);
+      expect(received).toHaveLength(1);
     },
   ));
 
@@ -269,6 +355,107 @@ test("a route request policy refusing the prepared request skips that channel be
       expect(received.map((call) => call.authorization)).toEqual([
         "Bearer synthetic-upstream-secret-2",
         "Bearer synthetic-upstream-secret",
+      ]);
+    },
+  ));
+
+test("a disabled route or a disabled channel is excluded before any send, and when every candidate is disabled the request answers 503 no_route without a request record, a hold or an upstream call", () =>
+  withGatewayStack(
+    { reply: () => chatReplies.json(), channels: 2 },
+    async ({ f, db, setup, received, send }) => {
+      const routes = Object.fromEntries(
+        (await db`SELECT id,provider_id FROM routes WHERE model_name=${setup.model}`).map(
+          (row: { id: string; provider_id: string }) => [
+            row.provider_id === setup.provider.id ? "first" : "second",
+            row.id,
+          ],
+        ),
+      ) as { first: string; second: string };
+      const [second] = await db`SELECT provider_id AS id FROM routes WHERE id=${routes.second}`;
+      const patch = async (path: string, body: Record<string, unknown>) =>
+        expect((await f.request(path, body, undefined, "PATCH")).status).toBe(200);
+
+      await patch(`/routes/${routes.first}`, { enabled: false });
+      for (let i = 0; i < 2; i++) await expectStatus(await send(), 200);
+      expect(received.map((call) => call.authorization)).toEqual([
+        "Bearer synthetic-upstream-secret-2",
+        "Bearer synthetic-upstream-secret-2",
+      ]);
+
+      await patch(`/routes/${routes.first}`, { enabled: true });
+      await patch(`/providers/${second.id}`, { enabled: false });
+      for (let i = 0; i < 2; i++) await expectStatus(await send(), 200);
+      expect(received.slice(2).map((call) => call.authorization)).toEqual([
+        "Bearer synthetic-upstream-secret",
+        "Bearer synthetic-upstream-secret",
+      ]);
+
+      await patch(`/routes/${routes.first}`, { enabled: false });
+      const requests = (await db`SELECT count(*)::integer n FROM gateway_requests`)[0].n;
+      const holds = (await db`SELECT count(*)::integer n FROM billing_holds`)[0].n;
+      const refused = await send();
+      expect(JSON.parse(await expectStatus(refused, 503)).error.code).toBe("no_route");
+      expect(received).toHaveLength(4);
+      expect((await db`SELECT count(*)::integer n FROM gateway_requests`)[0].n).toBe(requests);
+      expect((await db`SELECT count(*)::integer n FROM billing_holds`)[0].n).toBe(holds);
+    },
+  ));
+
+test("ROUND_ROBIN alternates real upstream calls between same-priority channels with an offset shared by Gateways on different Core instances", () =>
+  withGatewayStack(
+    { reply: () => chatReplies.json(), channels: 2 },
+    async ({ f, setup, received, send, gateway, startGateway }) => {
+      expect(
+        (
+          await f.request(
+            `/models/${encodeURIComponent(setup.model)}`,
+            { routing_strategy: "ROUND_ROBIN" },
+            undefined,
+            "PATCH",
+          )
+        ).status,
+      ).toBe(200);
+      const other = await startGateway({}, "gatewayB", "coreB");
+      for (const via of [gateway, other, gateway, other, gateway, other])
+        await expectStatus(await send({ via }), 200);
+      const order = received.map((call) => call.authorization);
+      const [first, second] = order as [string, string];
+      expect([first, second].sort()).toEqual([
+        "Bearer synthetic-upstream-secret",
+        "Bearer synthetic-upstream-secret-2",
+      ]);
+      expect(order).toEqual([first, second, first, second, first, second]);
+    },
+  ));
+
+test("WEIGHTED routing follows a route weight update on the next request instead of a stale preference", () =>
+  withGatewayStack(
+    { reply: () => chatReplies.json(), channels: 2 },
+    async ({ f, db, setup, received, send }) => {
+      const routes = Object.fromEntries(
+        (await db`SELECT id,provider_id FROM routes WHERE model_name=${setup.model}`).map(
+          (row: { id: string; provider_id: string }) => [
+            row.provider_id === setup.provider.id ? "first" : "second",
+            row.id,
+          ],
+        ),
+      ) as { first: string; second: string };
+      const weigh = async (first: number, second: number) => {
+        for (const [route, weight] of [
+          [routes.first, first],
+          [routes.second, second],
+        ] as const)
+          expect((await f.request(`/routes/${route}`, { weight }, undefined, "PATCH")).status).toBe(
+            200,
+          );
+      };
+      await weigh(1000, 0.001);
+      for (let i = 0; i < 3; i++) await expectStatus(await send(), 200);
+      await weigh(0.001, 1000);
+      for (let i = 0; i < 3; i++) await expectStatus(await send(), 200);
+      expect(received.map((call) => call.authorization)).toEqual([
+        ...Array(3).fill("Bearer synthetic-upstream-secret"),
+        ...Array(3).fill("Bearer synthetic-upstream-secret-2"),
       ]);
     },
   ));
@@ -441,6 +628,47 @@ test(
   30000,
 );
 
+for (const maxAttempts of [1, 5])
+  test(
+    `Core's attempt budget of ${maxAttempts} bounds the sends across six failing channels, each channel sent at most once, and the request is finalized FAILED with a zero charge`,
+    () =>
+      withGatewayStack(
+        {
+          reply: () => Response.json({ error: { message: "busy" } }, { status: 503 }),
+          channels: 6,
+          supplierCredit: "1000000",
+          maxAttempts,
+        },
+        async ({ db, received, send }) => {
+          const response = await send();
+          expect(JSON.parse(await expectStatus(response, 502)).error.code).toBe(
+            "upstream_rejected",
+          );
+          const requestId = response.headers.get("x-request-id")!;
+          expect(received).toHaveLength(maxAttempts);
+          expect(new Set(received.map((call) => call.authorization)).size).toBe(maxAttempts);
+          await eventually(
+            async () =>
+              (
+                await db`SELECT count(*)::integer n FROM attempts WHERE request_id=${requestId} AND evidence_id IS NOT NULL`
+              )[0].n === maxAttempts,
+            "attempt evidence",
+          );
+          expect(
+            (
+              await db`SELECT state FROM attempts WHERE request_id=${requestId} ORDER BY ordinal`
+            ).map((row: { state: string }) => row.state),
+          ).toEqual(Array(maxAttempts).fill("UNKNOWN"));
+          expect(await requestOutcome(db, requestId)).toEqual({
+            state: "FAILED",
+            billing_outcome: "FAILED",
+            charged: "0",
+          });
+        },
+      ),
+    60000,
+  );
+
 test("a model whose channel carries a large plugin model map, or that is routed to six channels, still answers instead of 503 core_unavailable (the context reply exceeded the 8 KiB internal budget)", () =>
   withGatewayStack(
     { reply: () => chatReplies.json(), supplierCredit: "1000000" },
@@ -536,3 +764,136 @@ test(
     ),
   30000,
 );
+
+test(
+  "a refused upstream connection is never sent or charged, does not count against that channel's health, and the request is served by the next channel",
+  () =>
+    withGatewayStack(
+      { reply: () => chatReplies.json(), supplierCredit: "1000000" },
+      async ({ f, db, setup, received, send }) => {
+        const closed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+        const deadUrl = `https://127.0.0.1:${closed.port}`;
+        await closed.stop(true);
+        const dead = await f.addChannel(setup, {
+          baseUrl: deadUrl,
+          apiKey: "synthetic-refused-secret",
+          maxInputTokens: 1000,
+          ceilings: boundedSupplier.ceilings,
+        });
+        const [preferred] =
+          await db`SELECT id FROM routes WHERE model_name=${setup.model} AND provider_id=${dead.id}`;
+        expect(
+          (await f.request(`/routes/${preferred.id}`, { priority: 10 }, undefined, "PATCH")).status,
+        ).toBe(200);
+        const response = await send();
+        expect(JSON.parse(await expectStatus(response, 200)).choices[0].message.content).toBe("ok");
+        expect(received).toHaveLength(1);
+        const requestId = response.headers.get("x-request-id")!;
+        expect((await settledCharge(db, requestId)).amount).toBe("100");
+        await eventually(
+          async () =>
+            (
+              await db`SELECT count(*)::integer n FROM attempts WHERE request_id=${requestId} AND evidence_id IS NOT NULL`
+            )[0].n === 2,
+          "attempt evidence",
+        );
+        expect(
+          await db`SELECT a.ordinal,a.state,a.error_code,h.final_cost_atoms::text AS cost FROM attempts a JOIN upstream_holds h ON h.attempt_id=a.id WHERE a.request_id=${requestId} ORDER BY a.ordinal`,
+        ).toEqual([
+          { ordinal: 1, state: "NOT_EXECUTED", error_code: "upstream_not_dispatched", cost: "0" },
+          { ordinal: 2, state: "SUCCEEDED", error_code: null, cost: "15" },
+        ]);
+        const redis = new RedisClient(process.env.REDIS_URL!);
+        try {
+          expect(await redis.send("HGET", [`${f.namespace}:health:${dead.id}`, "fails"])).not.toBe(
+            "1",
+          );
+        } finally {
+          redis.close();
+        }
+      },
+    ),
+  60000,
+);
+
+test("a send refused because every local upstream connection slot and wait slot is taken is never sent or charged and does not open the channel's breaker", () => {
+  const gate = stall();
+  return withGatewayStack(
+    {
+      reply: async (call) => {
+        if (call.index === 0) await gate.released;
+        return chatReplies.json();
+      },
+      gateway: { upstream_pool_size: 1 },
+      supplierCredit: "1000000",
+    },
+    async ({ f, db, setup, received, gateway }) => {
+      const dedicated = () =>
+        new Promise<{ status: number; id: string; text: string }>((resolve, reject) => {
+          const outgoing = request(
+            `${gateway.origin}/v1/chat/completions`,
+            {
+              method: "POST",
+              agent: false,
+              headers: {
+                authorization: `Bearer ${setup.key.key}`,
+                "content-type": "application/json",
+              },
+            },
+            (response) => {
+              let text = "";
+              response.on("data", (chunk) => (text += chunk));
+              response.on("end", () =>
+                resolve({
+                  status: response.statusCode!,
+                  id: String(response.headers["x-request-id"]),
+                  text,
+                }),
+              );
+            },
+          );
+          outgoing.on("error", reject);
+          outgoing.end(
+            JSON.stringify({
+              model: setup.model,
+              messages: [{ role: "user", content: "合成" }],
+              max_completion_tokens: 30,
+            }),
+          );
+        });
+      const holding = dedicated();
+      await eventually(async () => received.length === 1, "first send holds the only slot");
+      const waiting = dedicated();
+      await Bun.sleep(300);
+      const refused = await dedicated();
+      expect([refused.status, JSON.parse(refused.text).error.code]).toEqual([
+        502,
+        "upstream_unavailable",
+      ]);
+      const requestId = refused.id;
+      expect(await requestOutcome(db, requestId)).toEqual({
+        state: "FAILED",
+        billing_outcome: "FAILED",
+        charged: "0",
+      });
+      expect(
+        await db`SELECT a.state,a.error_code,h.final_cost_atoms::text AS cost FROM attempts a JOIN upstream_holds h ON h.attempt_id=a.id WHERE a.request_id=${requestId}`,
+      ).toEqual([{ state: "NOT_EXECUTED", error_code: "upstream_not_dispatched", cost: "0" }]);
+      gate.release();
+      expect((await Promise.all([holding, waiting])).map((r) => r.status)).toEqual([200, 200]);
+      expect(received).toHaveLength(2);
+      const redis = new RedisClient(process.env.REDIS_URL!);
+      try {
+        expect(
+          await redis.send("HMGET", [
+            `${f.namespace}:health:${setup.provider.id}`,
+            "fails",
+            "open_until",
+          ]),
+        ).not.toContain("1");
+      } finally {
+        redis.close();
+      }
+    },
+  );
+}, 60000);

@@ -23,7 +23,8 @@ import {
   createUpstreamFundingStore,
 } from "@gateway/storage";
 import { createKey, encrypt, verifier } from "@gateway/runtime/crypto";
-import { readBounded, validateCidr } from "@gateway/runtime";
+import { validateCidr } from "@gateway/runtime";
+import { readJsonBody } from "../request-body.ts";
 import { createPlatformAuthenticator, type PlatformPermission } from "./authentication.ts";
 import { registerCustomerFunds } from "./customer-funds.ts";
 import { registerUpstreamFunds } from "./upstream-funds.ts";
@@ -40,16 +41,7 @@ export function createCoreManagementApplication(options: {
   const auth = createPlatformAuthenticator(createPluginCatalogStore(options.db), options);
   const app = new Hono();
   const id = (value: string) => z.uuid().parse(value);
-  const body = async (request: Request) =>
-    JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(
-        await readBounded(
-          request.body,
-          8 << 20,
-          AbortSignal.any([request.signal, AbortSignal.timeout(10000)]),
-        ),
-      ),
-    );
+  const body = (request: Request) => readJsonBody(request, 8 << 20, 10000);
   async function run<T>(
     header: string | undefined,
     permission: PlatformPermission,
