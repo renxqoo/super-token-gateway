@@ -247,7 +247,7 @@ l3 以一个共享 Core 夹具（`withFinancial`）重写：每例自建模型�
 ### 6.5 发现
 
 - R16：v2 管理面创建渠道或替换 Key 时不校验云凭证结构（legacy 在管理面校验）。已在本里程碑修复，见[审查记录](enterprise-v2-review.md)。
-- R17：v2 图片 JSON 应答按 `data` 项数计张。修改插件需要升版并重建包，单独提交修复。
+- R17：v2 图片 JSON 应答按 `data` 项数计张。修改插件需要升版并重建包，l4 之后单独提交修复（openai-chat 1.9.1，处置见审查记录）。
 - l3 测试夹具缺陷：`billing.test.ts` 的 `admit` 在 Core 回 `SAME_COMMAND` 时从头重新准备并新建请求。若 admit 已提交而 begin 回忙，旧请求的预扣留在钱包上，新请求得到 `insufficient_funds`，“concurrent holds…”等并发用例约三分之二的轮次失败（l4 首轮门禁暴露，单独连跑 6 轮中 4 轮失败）。公共夹具 `granted` 改为：准备阶段（不落账）可整体重试，admit 与 begin 各以原命令 id 重试，与契约中 `SAME_COMMAND` 的含义一致；`admit` 不再自行重试。修复后连跑 8 轮全部通过。产品代码不变。
 
 ### 6.6 门禁

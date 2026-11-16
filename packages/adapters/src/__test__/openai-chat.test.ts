@@ -60,12 +60,12 @@ function output(value: AbiResult & { output_id?: string }): OutputResult & { out
   if (value.kind !== "output") throw new Error("unexpected result");
   return value;
 }
-async function responseResult(source: string) {
+async function responseResult(source: string, metadata: Record<string, unknown> = {}) {
   const a = attempt();
   try {
     return await a.transformJSON(
       "response",
-      { model: "logical" },
+      { model: "logical", ...metadata },
       new TextEncoder().encode(source),
     );
   } finally {
@@ -254,6 +254,25 @@ test("empty or malformed JSON, upstream errors and invalid final usage never pro
     expect(result.kind).toBe("failure");
     if (result.kind === "failure") expect(result.status).toBe(502);
   }
+});
+test("image responses are billed per delivered image, not per data entry", async () => {
+  const images = async (data: unknown) =>
+    (await responseResult(JSON.stringify({ created: 1, data }), { operation: "images" })).result;
+  const cases: [unknown[], string][] = [
+    [[{ revised_prompt: "metadata only" }, { b64_json: "aW1n" }], "1"],
+    [
+      [
+        { url: "https://cdn.example/a.png", b64_json: "aW1n" },
+        { url: "https://cdn.example/b.png" },
+      ],
+      "2",
+    ],
+    [[{ url: "", b64_json: "" }, { revised_prompt: "metadata only" }], "0"],
+    [Array.from({ length: 8 }, () => ({ b64_json: "aW1n" })), "8"],
+  ];
+  for (const [data, count] of cases) expect(output(await images(data)).usage?.images).toBe(count);
+  const excessive = await images(Array.from({ length: 9 }, () => ({ b64_json: "aW1n" })));
+  expect(excessive.kind).toBe("failure");
 });
 test("cached and reasoning usage are exact cumulative dimensions and invalid partitions fail", async () => {
   const source =

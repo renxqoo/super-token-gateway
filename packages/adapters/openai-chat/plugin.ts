@@ -817,9 +817,20 @@ function imagesResponse(value: DocumentInput) {
   if (fact(value, "").kind !== "object") fail("invalid_object");
   if (!["missing", "null"].includes(fact(value, "/error").kind)) fail("upstream_error");
   const data = fact(value, "/data");
-  if (data.kind !== "array" || !data.count) fail("invalid_object");
+  if (data.kind !== "array" || !data.count || data.count > 8) fail("invalid_object");
   const tokens = inspect(value, ["/usage", "/usage/input_tokens", "/usage/output_tokens"]);
   if (tokens) return tokens;
+  const payloads = Array.from({ length: data.count }, (_, index) => [
+    `/data/${index}/url`,
+    `/data/${index}/b64_json`,
+  ]);
+  const items = inspect(value, payloads.flat());
+  if (items) return items;
+  const delivered = (field: number) =>
+    payloads.filter((paths) => {
+      const payload = fact(value, paths[field]!);
+      return payload.kind === "string" && !payload.empty;
+    }).length;
   if (!["object", "missing", "null"].includes(fact(value, "/usage").kind)) fail("invalid_object");
   const raw: Record<string, unknown> = {};
   for (const name of ["input_tokens", "output_tokens"]) {
@@ -832,7 +843,7 @@ function imagesResponse(value: DocumentInput) {
     consumed: 0,
     chunks: [],
     body: { document: value.document.handle, edits: [] },
-    usage: { ...usage({ usage: raw }, null), images: String(data.count) },
+    usage: { ...usage({ usage: raw }, null), images: String(Math.max(delivered(0), delivered(1))) },
     finality: "FINAL",
     terminal: { kind: "complete", bytes: "" },
     needs_input: false,
