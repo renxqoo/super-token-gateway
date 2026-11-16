@@ -3,6 +3,7 @@ import { RedisClient, SQL } from "bun";
 import { request } from "node:http";
 import {
   boundedSupplier,
+  chatFrames,
   chatReplies,
   eventually,
   requestOutcome,
@@ -905,6 +906,104 @@ test("a send refused because every local upstream connection slot and wait slot 
     },
   );
 }, 60000);
+
+test("an upstream SSE read carrying 400 events relays every event and settles SUCCEEDED instead of dropping the events past the plugin's 256 ready frames and ending stream_interrupted", () =>
+  withGatewayStack(
+    {
+      reply: () => {
+        const [finish, usage] = chatFrames().slice(1);
+        return chatReplies.sse([
+          ...Array.from({ length: 400 }, () => ({
+            id: "chain",
+            model: "synthetic",
+            choices: [{ index: 0, delta: { content: "x" } }],
+          })),
+          finish,
+          usage,
+        ]);
+      },
+    },
+    async ({ db, send }) => {
+      const response = await send({ stream: true });
+      const text = await expectStatus(response, 200);
+      const content = text
+        .split("\n\n")
+        .filter((event) => event.startsWith("data: {"))
+        .map(
+          (event) => JSON.parse(event.slice(6)) as { choices?: { delta?: { content?: string } }[] },
+        )
+        .map((frame) => frame.choices?.[0]?.delta?.content ?? "")
+        .join("");
+      expect(content).toBe("x".repeat(400) + "k");
+      expect(text).not.toContain("gateway_stream_error");
+      expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+      expect(await settledCharge(db, response.headers.get("x-request-id")!)).toEqual({
+        amount: "100",
+        state: "SUCCEEDED",
+        billing_outcome: "SUCCESS",
+      });
+    },
+  ));
+
+test("a Gateway keeps serving after Core closes its internal connection at the connection lifetime instead of answering 503 core_unavailable to every later request", () =>
+  withGatewayStack(
+    { reply: () => chatReplies.json(), limits: { lifetimeMs: 1500, drainMs: 200 } },
+    async ({ send }) => {
+      const statuses = [];
+      for (let round = 0; round < 3; round++) {
+        if (round) await Bun.sleep(2000);
+        const response = await send();
+        statuses.push(
+          response.status === 200 ? 200 : `${response.status} ${await response.text()}`,
+        );
+        if (response.status === 200) await response.arrayBuffer();
+      }
+      expect(statuses).toEqual([200, 200, 200]);
+    },
+  ));
+
+test("requests under steady concurrent load all succeed across repeated Core connection rotations instead of some answering 503 core_unavailable at each rotation", () =>
+  withGatewayStack(
+    {
+      reply: () => chatReplies.json(),
+      limits: { lifetimeMs: 1500 },
+      supplierCredit: "1000000000",
+    },
+    async ({ f, setup, send }) => {
+      expect(
+        (
+          await f.request(`/projects/${setup.project.id}/credits`, {
+            external_ref: `rotation-${setup.project.id}`,
+            currency: "USD",
+            amount_atoms: "1000000000",
+            kind: "CASH",
+          })
+        ).status,
+      ).toBe(201);
+      for (const [path, limits] of [
+        [`/providers/${setup.provider.id}`, { concurrency: 1000, rpm: 1000000 }],
+        [`/projects/${setup.project.id}`, { concurrency: 1000, rpm: 1000000, tpm: 1000000000 }],
+      ] as const)
+        expect((await f.request(path, limits, undefined, "PATCH")).status).toBe(200);
+      const outcomes = new Map<string, number>();
+      const until = Date.now() + 10000;
+      await Promise.all(
+        Array.from({ length: 20 }, async () => {
+          while (Date.now() < until) {
+            const response = await send();
+            const key =
+              response.status === 200
+                ? "200"
+                : `${response.status} ${((await response.json()) as { error: { code: string } }).error.code}`;
+            if (response.status === 200) await response.arrayBuffer();
+            outcomes.set(key, (outcomes.get(key) ?? 0) + 1);
+          }
+        }),
+      );
+      expect([...outcomes.keys()]).toEqual(["200"]);
+      expect(outcomes.get("200")).toBeGreaterThan(100);
+    },
+  ));
 
 test("48 concurrent requests on one Gateway complete instead of being refused by internal stream limits", () =>
   withGatewayStack(

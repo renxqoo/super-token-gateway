@@ -52,6 +52,7 @@ export function createSSEStream(options: {
     running = false,
     closed = false,
     batchCharge = 0;
+  let backlog: Uint8Array = new Uint8Array(0);
   const metadata = (value: string) => ({
     bytes: Buffer.byteLength(value),
     ...(Buffer.byteLength(value) <= 4096 ? { value } : {}),
@@ -259,11 +260,16 @@ export function createSSEStream(options: {
         if (latest?.terminal) throw new PluginHostError("SSE_AFTER_TERMINAL");
         if (ended) throw new PluginHostError("STREAM_FINISHED");
         if (options.decoder) {
-          framer.feed(options.decoder.feed(payload));
-          consumed = payload.length;
+          if (backlog.length) consumed = 0;
+          else {
+            const decoded = options.decoder.feed(payload);
+            backlog = decoded.subarray(framer.feed(decoded));
+            consumed = payload.length;
+          }
         } else consumed = framer.feed(payload);
       } else if (payload.length) throw new PluginHostError("INPUT_BUDGET");
       if (hook === "stream_finish" && !ended) {
+        if (backlog.length) throw new PluginHostError("SSE_TRUNCATED");
         options.decoder?.finish();
         framer.finish();
         ended = true;
@@ -272,6 +278,7 @@ export function createSSEStream(options: {
         queries = 0,
         frames = 0;
       while (steps++ < 32 && frames < 128) {
+        if (!current && backlog.length) backlog = backlog.subarray(framer.feed(backlog));
         current ??= framer.peek();
         if (!current) break;
         const frame = current;
@@ -446,7 +453,8 @@ export function createSSEStream(options: {
         chunks,
         ...(declared ? { resource: declared } : {}),
         ...(candidate ? { terminal: candidate } : {}),
-        needs_input: !candidate && !current && framer.snapshot().ready === 0 && !ended,
+        needs_input:
+          !candidate && !current && framer.snapshot().ready === 0 && !backlog.length && !ended,
       };
       const size =
         chunks.reduce((n, s) => n + Buffer.byteLength(s, "base64"), 0) +

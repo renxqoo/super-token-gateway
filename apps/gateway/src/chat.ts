@@ -1383,14 +1383,15 @@ async function relaySSE(
       for (;;) {
         const next = await reader.read();
         if (next.done) break;
-        for (let offset = 0; offset < next.value.length; offset += 64 << 10) {
-          let waiting = yield* settle(
-            await record(
-              await bridge.invoke("stream_feed", next.value.subarray(offset, offset + (64 << 10))),
-            ),
+        for (let offset = 0; offset < next.value.length && !terminal;) {
+          const fed = await record(
+            await bridge.invoke("stream_feed", next.value.subarray(offset, offset + (64 << 10))),
           );
+          let waiting = yield* settle(fed);
           while (!waiting)
             waiting = yield* settle(await record(await bridge.invoke("stream_drain")));
+          if (fed.kind !== "output" || fed.consumed < 1) throw new Error("stream_feed_stalled");
+          offset += fed.consumed;
         }
       }
       await bridge.invoke("stream_finish");

@@ -52,6 +52,9 @@ if (
 const hotShare = Number(option("--hot-share", "0"));
 if (!Number.isFinite(hotShare) || hotShare < 0 || hotShare > 1)
   throw new Error("Invalid hot wallet share");
+const requestTimeoutMs = Number(option("--request-timeout-ms", "30000"));
+if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTimeoutMs > 600000)
+  throw new Error("Invalid request timeout");
 const walletCalls = new Uint32Array(tokens.length);
 if (!Number.isSafeInteger(rate) || rate < 0 || rate > 100000)
   throw new Error("Invalid offered RPS");
@@ -136,7 +139,7 @@ const call = (
         request.destroy(
           Object.assign(new Error("Benchmark request deadline"), { code: "REQUEST_DEADLINE" }),
         ),
-      30000,
+      requestTimeoutMs,
     );
     request.once("error", reject);
     request.once("close", () => clearTimeout(deadline));

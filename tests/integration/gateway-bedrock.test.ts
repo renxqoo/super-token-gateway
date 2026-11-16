@@ -62,46 +62,52 @@ function expectedSignature(call: UpstreamCall) {
   return headers.get("authorization");
 }
 
+type GatewayStack = Parameters<Parameters<typeof withGatewayStack>[1]>[0];
+
+async function bindBedrock(stack: GatewayStack) {
+  const { f, setup } = stack,
+    catalog = f.catalog;
+  const installed = await catalog.application.installBundled(await catalog.actor(), {
+    command_id: crypto.randomUUID(),
+    release_id: bedrockAnthropicReleaseId,
+    reason: "Synthetic Bedrock installation",
+  });
+  expect(
+    (
+      await f.request(
+        `/providers/${setup.provider.id}`,
+        { api_key: JSON.stringify(credentials) },
+        syntheticAdminKey,
+        "PATCH",
+      )
+    ).status,
+  ).toBe(200);
+  const bound = await catalog.request(
+    `/providers/${setup.provider.id}/plugin-binding`,
+    {
+      ...catalog.binding(installed.version_id),
+      expected_revision: "1",
+      account_id: setup.provider.account_id,
+      brand_id: setup.provider.brand_id,
+      secret_reference: `channel:${setup.provider.id}`,
+      config: {
+        model_map: { [setup.model]: "synthetic" },
+        max_output_tokens: 100,
+        max_input_tokens: 1000,
+        auth: "aws-sigv4",
+      },
+    },
+    syntheticAdminKey,
+    "PUT",
+  );
+  expect(bound.status).toBe(201);
+}
+
 test(
   "a Bedrock channel signs the final request in the Gateway with a Core-derived key and decodes the binary event stream into chat SSE with exact settlement",
   () =>
     withGatewayStack({ reply }, async (stack) => {
-      const { f, setup } = stack,
-        catalog = f.catalog;
-      const installed = await catalog.application.installBundled(await catalog.actor(), {
-        command_id: crypto.randomUUID(),
-        release_id: bedrockAnthropicReleaseId,
-        reason: "Synthetic Bedrock installation",
-      });
-      expect(
-        (
-          await f.request(
-            `/providers/${setup.provider.id}`,
-            { api_key: JSON.stringify(credentials) },
-            syntheticAdminKey,
-            "PATCH",
-          )
-        ).status,
-      ).toBe(200);
-      const bound = await catalog.request(
-        `/providers/${setup.provider.id}/plugin-binding`,
-        {
-          ...catalog.binding(installed.version_id),
-          expected_revision: "1",
-          account_id: setup.provider.account_id,
-          brand_id: setup.provider.brand_id,
-          secret_reference: `channel:${setup.provider.id}`,
-          config: {
-            model_map: { [setup.model]: "synthetic" },
-            max_output_tokens: 100,
-            max_input_tokens: 1000,
-            auth: "aws-sigv4",
-          },
-        },
-        syntheticAdminKey,
-        "PUT",
-      );
-      expect(bound.status).toBe(201);
+      await bindBedrock(stack);
       const json = await stack.send({ content: "你好" });
       expect(json.status).toBe(200);
       expect(await json.json()).toMatchObject({
@@ -143,5 +149,50 @@ test(
         state: "SUCCEEDED",
       });
     }),
+  120000,
+);
+
+test(
+  "a Bedrock event stream whose single read decodes into hundreds of small events relays every event and settles SUCCEEDED instead of dropping the events past the 256 ready frames",
+  () =>
+    withGatewayStack(
+      {
+        reply: (call) =>
+          call.path.endsWith("/invoke-with-response-stream")
+            ? new Response(
+                Buffer.concat(
+                  [
+                    ...events.slice(0, 2),
+                    ...Array.from({ length: 800 }, () => ({ type: "ping" })),
+                    ...Array.from({ length: 400 }, () => ({
+                      type: "content_block_delta",
+                      index: 0,
+                      delta: { type: "text_delta", text: "x" },
+                    })),
+                    ...events.slice(4),
+                  ].map(bedrockChunk),
+                ),
+                { headers: { "content-type": "application/vnd.amazon.eventstream" } },
+              )
+            : Response.json(message),
+      },
+      async (stack) => {
+        await bindBedrock(stack);
+        const streamed = await stack.send({ stream: true });
+        expect(streamed.status).toBe(200);
+        const frames = (await streamed.text())
+          .split("\n\n")
+          .filter(Boolean)
+          .map((frame) => frame.replace(/^data: /, ""));
+        expect(frames.at(-1)).toBe("[DONE]");
+        const chunks = frames.slice(0, -1).map((frame) => JSON.parse(frame));
+        expect(chunks.map((c) => c.choices?.[0]?.delta?.content ?? "").join("")).toBe(
+          "x".repeat(400),
+        );
+        expect(await settledCharge(stack.db, streamed.headers.get("x-request-id")!)).toMatchObject({
+          state: "SUCCEEDED",
+        });
+      },
+    ),
   120000,
 );

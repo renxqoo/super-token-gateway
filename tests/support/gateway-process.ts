@@ -286,6 +286,7 @@ export function withGatewayStack(
     databasePort?: number;
     supplierCredit?: string;
     maxAttempts?: number;
+    limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
   },
   run: (stack: {
     f: Fixture;
@@ -419,6 +420,7 @@ export function withGatewayStack(
     {
       ...(options.databasePort ? { databasePort: options.databasePort } : {}),
       ...(options.maxAttempts ? { maxAttempts: options.maxAttempts } : {}),
+      ...(options.limits ? { limits: options.limits } : {}),
     },
   );
 }

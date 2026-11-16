@@ -39,6 +39,9 @@ const concurrency = Number(option("--concurrency", "8"));
 const workerConcurrency = Number(option("--worker-concurrency", "8"));
 const gatewayInflight = Number(option("--gateway-inflight", "10000"));
 const stream = args.includes("--stream");
+const requestTimeoutMs = Number(option("--request-timeout-ms", "30000"));
+if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTimeoutMs > 600000)
+  throw new Error("Invalid request timeout");
 const observe = args.includes("--observe");
 const requireOnlineCapacity = args.includes("--online-capacity");
 if (requireOnlineCapacity && (seconds < 60 || seconds % 60 !== 0))
@@ -413,7 +416,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
         instance,
         entry: "dist/gateway/main.js",
         overrides: {
-          total_timeout_ms: 30000,
+          total_timeout_ms: requestTimeoutMs,
           shutdown_grace_ms: 20000,
           resource_poll_ms: 5000,
           max_inflight: gatewayInflight,
@@ -613,6 +616,8 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
         "--hot-share",
         String(hotShare),
         ...(stream ? ["--stream"] : []),
+        "--request-timeout-ms",
+        String(requestTimeoutMs),
         ...(args.includes("--rate") ? ["--rate", option("--rate", "0")] : []),
       ],
       {
@@ -809,6 +814,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       hotShare,
       concurrency,
       stream,
+      requestTimeoutMs,
       upstreamMode,
       scenario,
       workerMode,
