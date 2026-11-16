@@ -70,7 +70,7 @@ export const boundedH2Defaults: Readonly<H2Limits> = Object.freeze({
   headerCount: 32,
   connections: 128,
   connectionsPerPeer: 4,
-  streams: 16,
+  streams: 256,
   streamsPerSession: 32,
   receiveBytes: 16 * 1024 * 1024,
   headersMs: 1000,
@@ -399,6 +399,12 @@ export async function listenBoundedH2(
     },
   };
 }
+export class InternalTransportBusy extends Error {
+  constructor() {
+    super("Internal transport busy");
+    this.name = "InternalTransportBusy";
+  }
+}
 export async function createBoundedH2Client(options: {
   origin: string;
   servername: string;
@@ -462,6 +468,38 @@ export async function createBoundedH2Client(options: {
     sessionEnded = false,
     active = 0;
   const pending = new Set<Promise<{ status: number; body: Buffer }>>();
+  const waiting: { resume: () => void; fail: () => void }[] = [];
+  async function slot(signal?: AbortSignal) {
+    if (active < 32) {
+      active++;
+      return;
+    }
+    if (waiting.length >= 224) throw new InternalTransportBusy();
+    await new Promise<void>((resolve, reject) => {
+      const waiter = {
+        resume() {
+          signal?.removeEventListener("abort", abort);
+          resolve();
+        },
+        fail() {
+          signal?.removeEventListener("abort", abort);
+          reject(new Error("Internal transport unavailable"));
+        },
+      };
+      function abort() {
+        waiting.splice(waiting.indexOf(waiter), 1);
+        waiter.fail();
+      }
+      if (signal?.aborted) return reject(new Error("Internal transport unavailable"));
+      signal?.addEventListener("abort", abort, { once: true });
+      waiting.push(waiter);
+    });
+  }
+  function release() {
+    const next = waiting.shift();
+    if (next) next.resume();
+    else active--;
+  }
   session.on("goaway", () => {
     closed = true;
   });
@@ -476,9 +514,13 @@ export async function createBoundedH2Client(options: {
       signal?: AbortSignal,
       reply?: { maxBytes: number; timeoutMs?: number; binary?: boolean },
     ): Promise<{ status: number; body: Buffer }> {
-      if (closed || session.closed || session.destroyed || active >= 32)
+      if (closed || session.closed || session.destroyed)
         throw new Error("Internal transport unavailable");
-      active++;
+      await slot(signal);
+      if (closed || session.closed || session.destroyed) {
+        release();
+        throw new Error("Internal transport unavailable");
+      }
       const task = sendH2(
         session,
         headers,
@@ -492,12 +534,13 @@ export async function createBoundedH2Client(options: {
       try {
         return await task;
       } finally {
-        active--;
+        release();
         pending.delete(task);
       }
     },
     async close() {
       closed = true;
+      for (const waiter of waiting.splice(0)) waiter.fail();
       if (!sessionEnded) {
         const ended = new Promise<void>((resolve) => session.once("close", () => resolve()));
         session.destroy();

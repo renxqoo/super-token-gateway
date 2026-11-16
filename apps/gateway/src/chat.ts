@@ -294,7 +294,7 @@ async function whileBusy<T>(request: ChatRequest, facts: Facts, run: () => Promi
     } catch (error) {
       if (
         !(error instanceof CoreRpcError) ||
-        error.detail.code !== "identity_busy" ||
+        (error.detail.code !== "identity_busy" && error.detail.code !== "internal_capacity") ||
         request.signal.aborted ||
         Date.now() + delay >= Date.parse(facts.deadlineAt)
       )

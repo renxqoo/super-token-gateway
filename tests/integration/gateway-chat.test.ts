@@ -897,3 +897,67 @@ test("a send refused because every local upstream connection slot and wait slot 
     },
   );
 }, 60000);
+
+test("48 concurrent requests on one Gateway complete instead of being refused by internal stream limits", () =>
+  withGatewayStack(
+    {
+      reply: async () => {
+        await Bun.sleep(300);
+        return chatReplies.json();
+      },
+      supplierCredit: "1000000000",
+    },
+    async ({ f, setup, send }) => {
+      const credit = await f.request(`/projects/${setup.project.id}/credits`, {
+        external_ref: `r2-${setup.project.id}`,
+        currency: "USD",
+        amount_atoms: "1000000000",
+        kind: "CASH",
+      });
+      expect(credit.status).toBe(201);
+      for (const [path, limits] of [
+        [`/providers/${setup.provider.id}`, { concurrency: 1000, rpm: 1000000 }],
+        [`/projects/${setup.project.id}`, { concurrency: 1000, rpm: 1000000, tpm: 1000000000 }],
+      ] as const)
+        expect((await f.request(path, limits, undefined, "PATCH")).status).toBe(200);
+      const responses = await Promise.all(Array.from({ length: 48 }, () => send()));
+      expect(responses.map((response) => response.status)).toEqual(
+        Array.from({ length: 48 }, () => 200),
+      );
+    },
+  ));
+
+test("requests beyond the Gateway plugin attempt budget are refused as 503 overloaded instead of 500 internal_error", () =>
+  withGatewayStack(
+    {
+      reply: async () => {
+        await Bun.sleep(1500);
+        return chatReplies.json();
+      },
+      supplierCredit: "1000000000",
+    },
+    async ({ f, setup, send }) => {
+      const credit = await f.request(`/projects/${setup.project.id}/credits`, {
+        external_ref: `overload-${setup.project.id}`,
+        currency: "USD",
+        amount_atoms: "1000000000",
+        kind: "CASH",
+      });
+      expect(credit.status).toBe(201);
+      for (const [path, limits] of [
+        [`/providers/${setup.provider.id}`, { concurrency: 1000, rpm: 1000000 }],
+        [`/projects/${setup.project.id}`, { concurrency: 1000, rpm: 1000000, tpm: 1000000000 }],
+      ] as const)
+        expect((await f.request(path, limits, undefined, "PATCH")).status).toBe(200);
+      const outcomes = await Promise.all(
+        Array.from({ length: 160 }, async (_, index) => {
+          await Bun.sleep(index < 80 ? 0 : 200);
+          const response = await send();
+          if (response.status === 200) return "200";
+          const body = (await response.json()) as { error: { code: string } };
+          return `${response.status} ${body.error.code}`;
+        }),
+      );
+      expect([...new Set(outcomes)].sort()).toEqual(["200", "503 overloaded"]);
+    },
+  ));

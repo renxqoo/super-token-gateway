@@ -26,6 +26,7 @@ function endpoint(variable: string, protocol: string) {
 }
 
 const database = endpoint("DATABASE_URL", "postgres:");
+const queuePort = Number(endpoint("QUEUE_REDIS_URL", "redis:").port);
 const services = [
   {
     name: "postgres",
@@ -39,10 +40,19 @@ const services = [
   },
   {
     name: "queue-redis",
-    port: Number(endpoint("QUEUE_REDIS_URL", "redis:").port),
+    port: queuePort,
     directory: join(root, "queue-redis"),
   },
-] as const;
+  ...(process.env.QUEUE_REPLICA_URL
+    ? [
+        {
+          name: "queue-replica",
+          port: Number(endpoint("QUEUE_REPLICA_URL", "redis:").port),
+          directory: join(root, "queue-replica"),
+        },
+      ]
+    : []),
+];
 type Service = (typeof services)[number];
 
 function owned(service: Service, pid: number) {
@@ -172,7 +182,8 @@ async function startPostgres(service: Service) {
 
 async function startRedis(service: Service) {
   await mkdir(service.directory, { recursive: true, mode: 0o700 });
-  const queue = service.name === "queue-redis";
+  const replica = service.name === "queue-replica";
+  const queue = service.name === "queue-redis" || replica;
   const pid = launch(service, tool("DURABILITY_REDIS_SERVER", "redis-server"), [
     "--bind",
     "127.0.0.1",
@@ -185,6 +196,7 @@ async function startRedis(service: Service) {
     "--appendonly",
     "yes",
     ...(queue ? ["--appendfsync", "always", "--aof-load-truncated", "no"] : []),
+    ...(replica ? ["--replicaof", "127.0.0.1", String(queuePort)] : []),
     "--maxmemory",
     queue ? "512mb" : "256mb",
     "--maxmemory-policy",

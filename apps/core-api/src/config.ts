@@ -31,7 +31,7 @@ const configSchema = z.strictObject({
       headerCount: z.number().int().positive().max(32),
       connections: z.number().int().positive().max(128),
       connectionsPerPeer: z.number().int().positive().max(4),
-      streams: z.number().int().positive().max(16),
+      streams: z.number().int().positive().max(256),
       streamsPerSession: z.number().int().positive().max(32),
       receiveBytes: z.number().int().positive().max(16777216),
       headersMs: z.number().int().positive().max(1000),

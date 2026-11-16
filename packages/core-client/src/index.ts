@@ -29,7 +29,7 @@ import {
 } from "@gateway/contracts";
 import { canonical } from "@gateway/kernel";
 import { sha256 } from "@gateway/runtime/crypto";
-import { createBoundedH2Client } from "@gateway/runtime/h2";
+import { createBoundedH2Client, InternalTransportBusy } from "@gateway/runtime/h2";
 
 export class CoreRpcError extends Error {
   constructor(
@@ -99,21 +99,32 @@ export function createCoreRpcClient(
     reply?: { maxBytes: number; timeoutMs?: number; binary?: boolean },
   ) {
     const c = await connection();
-    return c.request(
-      {
-        ":authority": new URL(options.origin).port
-          ? `${options.servername}:${new URL(options.origin).port}`
-          : options.servername,
-        ":method": "POST",
-        ":path": path,
-        "content-type": "application/json",
-        "content-length": String(body.length),
-        ...(proof ? { "x-stg-proof": proof } : {}),
-      },
-      body,
-      undefined,
-      reply,
-    );
+    return c
+      .request(
+        {
+          ":authority": new URL(options.origin).port
+            ? `${options.servername}:${new URL(options.origin).port}`
+            : options.servername,
+          ":method": "POST",
+          ":path": path,
+          "content-type": "application/json",
+          "content-length": String(body.length),
+          ...(proof ? { "x-stg-proof": proof } : {}),
+        },
+        body,
+        undefined,
+        reply,
+      )
+      .catch((error: unknown) => {
+        if (!(error instanceof InternalTransportBusy)) throw error;
+        throw new CoreRpcError({
+          code: "internal_capacity",
+          category: "DEPENDENCY",
+          retryability: "SAME_COMMAND",
+          command_state: "NOT_ATTEMPTED",
+          message: "Internal request rejected",
+        });
+      });
   }
   function parseReply(response: { status: number; body: Buffer }) {
     let parsed: unknown;

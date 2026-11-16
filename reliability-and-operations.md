@@ -121,7 +121,7 @@ PG 与耐久队列共同构成恢复集。PG 单独备份不包含已经落盘�
 
 同机 AOF 副本、副本晋升与缺副本拒绝由 `bun run test:durability` 在自有原生 PG/Redis 集群中演练；生产仍需独立故障域、稳定端点、旧主隔离和明确的晋升控制，不能由本地演练推导99.99% SLO。
 
-完整账务压测支持 `--wallets 1/10/1000` 与 `--hot-share 0.9`，报告每钱包负载、PG 锁等待、活动查询和停压排空。使用 `QUEUE_REQUIRED_REPLICAS=1` 或目标生产副本数实测，不以零副本成绩代替生产容量。修改 schema/队列后重新执行 `verify`、`test:durability`，备份恢复需在停止准入并排空队列后执行。
+完整账务压测支持 `--wallets 1/10/1000` 与 `--hot-share 0.9`，报告每钱包负载、PG 锁等待、活动查询和停压排空。使用 `QUEUE_REQUIRED_REPLICAS=1` 或目标生产副本数实测，不以零副本成绩代替生产容量。本机原生服务设置 `QUEUE_REPLICA_URL=redis://127.0.0.1:<端口>` 时，`bun run infra:up` 另起一个与证据队列同为 appendonly/appendfsync always/aof-load-truncated no/noeviction 的 AOF 副本（`.local/native-services/queue-replica`），并以 `replicaof` 指向 `QUEUE_REDIS_URL`；未设置时不启动副本。副本挂在门禁共用的队列 Redis 上，运行 `verify` 前须停止副本（`redis-cli -p <副本端口> SHUTDOWN`）：`gateway-lifecycle` 断言队列无副本时 `required_replicas: 1` 的 Gateway 拒绝启动，副本在线会使该断言失败。修改 schema/队列后重新执行 `verify`、`test:durability`，备份恢复需在停止准入并排空队列后执行。
 
 使用冷 tablespace 的生产恢复需先准备对应 tablespace 或显式用 pg_restore 的 --no-tablespaces 恢复到目标默认存储，再核对数据与权限。原生 PG 工具的本地备份复验可通过 PG_TOOLS_DIRECTORY 指定同主版本工具目录；密码经子进程环境传递，不放入命令行或输出。
 

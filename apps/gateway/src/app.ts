@@ -1,11 +1,19 @@
 import { Hono, type Context } from "hono";
 import type { Operation } from "@gateway/kernel";
 import { GatewayError } from "@gateway/contracts";
+import { PluginHostError } from "@gateway/plugin-host";
 import { clientAddress, readBounded, type Lifecycle } from "@gateway/runtime";
 import { executeChat, type ChatDependencies } from "./chat.ts";
 import { executeResource, listResources, type ResourceRequest } from "./resources.ts";
 
 export type GatewayEnv = { Bindings: { peerAddress?: string } };
+
+const pluginCapacity = new Set([
+  "ATTEMPT_BUDGET",
+  "PENDING_BUDGET",
+  "QUEUE_TIMEOUT",
+  "STATE_BUDGET",
+]);
 
 function errorResponse(error: unknown, requestId: string) {
   const known = error instanceof GatewayError;
@@ -131,11 +139,12 @@ export function createGatewayApp(
     } catch (error) {
       release?.();
       return errorResponse(
-        error instanceof GatewayError && error.code === "overloaded"
+        (error instanceof GatewayError && error.code === "overloaded") ||
+          (error instanceof PluginHostError && pluginCapacity.has(error.code))
           ? new GatewayError(
               503,
               deps.lifecycle.accepting ? "overloaded" : "draining",
-              error.message,
+              "Gateway admission capacity reached",
             )
           : error,
         requestId,

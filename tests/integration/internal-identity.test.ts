@@ -846,6 +846,82 @@ test("bounded in-flight streams reject excess work and cancellation leaves the s
     { limits: { streams: 4 } },
   ));
 
+test("identity streams beyond 16 concurrent are refused with internal_capacity while the process stream budget is larger", () =>
+  withIdentity(
+    async (f) => {
+      const cert = f.certificates.get("gateway")!,
+        session = h2Connect(`https://127.0.0.1:${f.a.port}`, {
+          servername: "localhost",
+          ca: f.ca,
+          key: cert.key,
+          cert: cert.cert,
+        });
+      session.on("error", () => {});
+      const held: ReturnType<typeof session.request>[] = [];
+      const headers = (length: number) => ({
+        ":authority": `localhost:${f.a.port}`,
+        ":method": "POST",
+        ":path": "/_internal/core/v1/identity/challenges",
+        "content-type": "application/json",
+        "content-length": String(length),
+      });
+      function request(raw: Buffer) {
+        return new Promise<{ status: number; body: string }>((resolve, reject) => {
+          const s = session.request(headers(raw.length));
+          let status = 0,
+            body = "";
+          s.on("response", (h) => (status = Number(h[":status"])));
+          s.on("data", (c) => (body += c));
+          s.once("end", () => resolve({ status, body }));
+          s.once("error", reject);
+          s.end(raw);
+        });
+      }
+      function challenge() {
+        const identity = startupIdentity();
+        return Buffer.from(
+          JSON.stringify({
+            registration_id: identity.registrationId,
+            public_key_spki: identity.spki,
+            boot_nonce: identity.boot,
+            contract_version: 1,
+          }),
+        );
+      }
+      try {
+        await new Promise<void>((resolve, reject) => {
+          session.once("connect", resolve);
+          session.once("error", reject);
+        });
+        for (let i = 0; i < 16; i++) {
+          const s = session.request(headers(100));
+          s.on("error", () => {});
+          s.write("{");
+          held.push(s);
+        }
+        await new Promise<void>((resolve, reject) =>
+          session.ping((error) => (error ? reject(error) : resolve())),
+        );
+        const rejected = await request(challenge());
+        expect(rejected.status).toBe(429);
+        expect(JSON.parse(rejected.body)).toMatchObject({
+          code: "internal_capacity",
+          retryability: "SAME_COMMAND",
+          command_state: "NOT_ATTEMPTED",
+        });
+        for (const s of held.splice(0)) s.close();
+        await new Promise<void>((resolve, reject) =>
+          session.ping((error) => (error ? reject(error) : resolve())),
+        );
+        expect((await request(challenge())).status).toBe(200);
+      } finally {
+        for (const s of held) s.close();
+        session.destroy();
+      }
+    },
+    { limits: { streams: 64 } },
+  ));
+
 test("header count byte and duplicate proof budgets fail safely without blocking later commands", () =>
   withIdentity(async (f) => {
     const cert = f.certificates.get("gateway")!,

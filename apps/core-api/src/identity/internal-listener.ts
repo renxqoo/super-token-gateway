@@ -58,6 +58,14 @@ type Options = {
   challengeTtlSeconds?: number;
   sessionTtlSeconds?: number;
 };
+const capacityRejection = {
+  code: "internal_capacity",
+  category: "DEPENDENCY",
+  retryability: "SAME_COMMAND",
+  command_state: "NOT_ATTEMPTED",
+  message: "Internal request rejected",
+} as const;
+const identityConcurrency = 16;
 function reject(code: string): never {
   throw new Error(code);
 }
@@ -99,7 +107,8 @@ export async function startCoreInternalListener(options: Options) {
         endpoint: "current-session" | "plugin_package_v1" | ExecutionKind;
       };
   const contexts = new WeakMap<object, Snapshot>();
-  let activeContexts = 0;
+  let activeContexts = 0,
+    identityStreams = 0;
   function mint(snapshot: Snapshot) {
     const context = Object.freeze({});
     contexts.set(context, snapshot);
@@ -204,6 +213,7 @@ export async function startCoreInternalListener(options: Options) {
   ) {
     let context: object | undefined,
       committedBeginResponse = false,
+      identityCounted = false,
       raw: Buffer | undefined,
       reserved: Awaited<ReturnType<typeof db.reserve>> | undefined;
     try {
@@ -248,6 +258,19 @@ export async function startCoreInternalListener(options: Options) {
         )
       )
         return reject("internal_request_invalid");
+      if (
+        endpoint === "challenges" ||
+        endpoint === "registrations" ||
+        endpoint === "current-session"
+      ) {
+        if (identityStreams >= identityConcurrency) {
+          h2JsonReply(stream, 429, capacityRejection, limits.responseBytes);
+          stream.resume();
+          return;
+        }
+        identityStreams++;
+        identityCounted = true;
+      }
       try {
         raw = await readBoundedData(stream, headers, limits, signal);
       } catch (error) {
@@ -535,6 +558,7 @@ export async function startCoreInternalListener(options: Options) {
       );
     } finally {
       raw?.fill(0);
+      if (identityCounted) identityStreams--;
       if (context && contexts.delete(context)) activeContexts--;
       await reserved?.release();
     }
@@ -545,13 +569,7 @@ export async function startCoreInternalListener(options: Options) {
       {
         ...options,
         rejections: {
-          capacity: {
-            code: "internal_capacity",
-            category: "DEPENDENCY",
-            retryability: "SAME_COMMAND",
-            command_state: "NOT_ATTEMPTED",
-            message: "Internal request rejected",
-          },
+          capacity: capacityRejection,
           headers: {
             code: "internal_request_invalid",
             category: "VALIDATION",

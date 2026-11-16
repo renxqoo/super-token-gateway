@@ -28,8 +28,13 @@ const producer = new UsageProducer({
   maxInFlight: config.max_inflight,
   requireAllReplicas: config.production,
 });
+const pluginAttempts = 128;
 const host = createPluginAttempts(
-  createPluginSupervisor({ executable: config.plugins.helper_executable }),
+  createPluginSupervisor({
+    executable: config.plugins.helper_executable,
+    maxPending: pluginAttempts,
+  }),
+  { maxAttempts: pluginAttempts, maxStateBytes: pluginAttempts * (256 << 10) },
 );
 const transport = createTransport(config.upstream_pool_size);
 const grants = createSendRegistry();
