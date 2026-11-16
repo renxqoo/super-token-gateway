@@ -73,6 +73,22 @@ try {
   assert.equal(benchmarkResult.valid, true);
   const benchmarkDirectory = new URL(benchmarkResult.directory + "/", root);
   const audit = await Bun.file(new URL("audit.json", benchmarkDirectory)).json();
+  for (const [path, digest] of Object.entries(audit.environment.artifacts))
+    assert.equal(
+      digest,
+      new Bun.CryptoHasher("sha256")
+        .update(await Bun.file(new URL(path, root)).bytes())
+        .digest("hex"),
+    );
+  assert.deepEqual(Object.keys(audit.environment.artifacts).sort(), [
+    "dist/core-api/main.js",
+    "dist/core-api/platform/management.js",
+    "dist/core-worker/main.js",
+    "dist/gateway/main.js",
+    "dist/manifest.json",
+    "dist/mock-providers/main.js",
+    "dist/native/plugin-host",
+  ]);
   assert.equal(audit.http.offered, 1);
   assert.equal(audit.http.succeeded, 1);
   assert.equal(audit.http.invalid, 0);
@@ -125,7 +141,7 @@ try {
     JSON.stringify({
       artifact: "pass",
       checks: [
-        "fresh-schema benchmark initialization, exact settlement, ACK and cleanup",
+        "fresh-schema benchmark initialization, exact settlement, ACK, cleanup and tested artifact digests",
         "compiled migration SQL assets and archive CLI from an empty working directory",
       ],
     }),

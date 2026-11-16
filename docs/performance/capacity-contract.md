@@ -4,7 +4,7 @@
 
 ## 固定口径
 
-基线沿用单机多实例、1000 钱包、正费率短 Chat JSON。报告硬件、OS、Bun/PG/Redis 版本、产物与源码哈希、实例/连接/批次预算、上游时延和响应尺寸。PG fsync/synchronous_commit/full_page_writes 保持开启，证据 Redis AOF always/noeviction，至少一个 AOF 副本确认，worker 与外部消费者全程在线。
+基线沿用单机多实例、1000 钱包、正费率短 Chat JSON。报告硬件、OS、Bun/PG/Redis 版本、产物与源码哈希、实例/连接/批次预算、上游时延和响应尺寸。`bench-system` 的 `audit.json` 以 `environment` 记录 OS、CPU 型号与核数、内存、Bun 版本及被测产物（三进程入口、管理面模块、原生插件 helper、上游替身与 `dist/manifest.json`）的 SHA-256，运行前计算；PG 与 Redis 设置分别在 `databaseSettings`、`redisSettings`。PG fsync/synchronous_commit/full_page_writes 保持开启，证据 Redis AOF always/noeviction，至少一个 AOF 副本确认，worker 与外部消费者全程在线。
 
 60 秒固定到达窗口中，同一 request ID 必须同时满足有效 HTTP 完成、精确 PG 证据及账单已提交、外部实际 ACK。交集每秒平均至少 6000，且包含末批收尾的 HTTP 成功吞吐至少 6000；不四舍五入。全部计划请求均发送且有效完成，漏发、传输/HTTP 错误、无效正文、额外上游尝试、账务差异、失败队列均为 0。结束后核对逐钱包资金、来源、流水、用量、ACK 和排空，不把排空后成绩算入窗口。
 

@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
+import { cpus, release, totalmem } from "node:os";
 import { resolve } from "node:path";
 import type { SQL } from "bun";
 import { RedisClient } from "bun";
@@ -82,15 +83,30 @@ if (!Number.isSafeInteger(requiredReplicas) || requiredReplicas < 0 || requiredR
   throw new Error("Invalid QUEUE_REQUIRED_REPLICAS");
 if (requireOnlineCapacity && requiredReplicas < 1)
   throw new Error("Online capacity requires an acknowledged AOF replica");
+const artifacts: Record<string, string> = {};
 for (const artifact of [
   "dist/core-api/main.js",
   "dist/core-api/platform/management.js",
   "dist/gateway/main.js",
   "dist/core-worker/main.js",
+  "dist/native/plugin-host",
   "dist/mock-providers/main.js",
-])
-  if (!(await Bun.file(artifact).exists()))
-    throw new Error(`${artifact} is missing; run bun run build first`);
+  "dist/manifest.json",
+]) {
+  const file = Bun.file(artifact);
+  if (!(await file.exists())) throw new Error(`${artifact} is missing; run bun run build first`);
+  artifacts[artifact] = new Bun.CryptoHasher("sha256").update(await file.bytes()).digest("hex");
+}
+const environment = {
+  platform: process.platform,
+  arch: process.arch,
+  os_release: release(),
+  cpu_model: cpus()[0]?.model ?? "unknown",
+  cpu_count: cpus().length,
+  memory_bytes: totalmem(),
+  bun: Bun.version,
+  artifacts,
+};
 const storageBudget = await capacityStorageBudget(
   process.cwd(),
   seconds * Number(option("--rate", String(targetRps || 6000))),
@@ -782,6 +798,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     const result = {
       id,
       scope: "v2-three-process",
+      environment,
       valid,
       failures,
       capacityPassed,
