@@ -253,3 +253,38 @@ l3 以一个共享 Core 夹具（`withFinancial`）重写：每例自建模型�
 ### 6.6 门禁
 
 l4 全量门禁（原生服务，Bun 1.4.4）：`verify` 退出 0，类型检查 289 文件、lint 0、格式 433 文件，单测 354（较 l3 减 37：legacy 单测、`bedrock-stream`、`MemoryBudget`/`boundedRelay`、`imageCount` 等只测已删实现的用例）、集成 440（l3 为 649；减 `gateway.test.ts` 运行时 157 例、`routing.test.ts` 53 例，增 R16 1 例）、产物 目录 7/身份 7/执行 14/Gateway 11、插件产物 84 例 112 步、`verify-artifact` 2 项；`test:durability` 通过（`v2-core-settlement` 6 项）；`test:backup -- --quiesced` 通过；门禁前后本机 SysV 共享内存段均为 1。首轮门禁集成 2 例失败：`backup-restore` 断言的拒绝文案被 l4 改写（已恢复原文案），billing 并发用例为 §6.5 所述夹具缺陷。
+
+## 7. l5 SQL 清理（2026-11-16）
+
+### 7.1 核对
+
+在全新迁移到 2026111224 的库上，以触发器、视图、约束、默认值、索引引用的函数，以及生产 TypeScript（`apps`、`packages`、`scripts`，不含单测）与 `infra/core-*.sql` 中出现的函数名为根，沿 `pg_proc` 源码中的调用关系求可达集。不可达的函数共 8 个：
+
+| 函数                                                                     | 处置                                                                                   |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| `admit_gateway_batch(jsonb)`                                             | 删除：legacy 准入入口（`allocate_customer_batch_v1` 的包装），只授予 `gateway_runtime` |
+| `persist_usage_batch(jsonb)`                                             | 删除：legacy 证据入库入口，只授予 `gateway_worker`                                     |
+| `ingest_initial_usage(jsonb,uuid[])`                                     | 删除：只被 `persist_usage_batch` 调用                                                  |
+| `commit_usage_evidence(…11 个参数)`、`record_usage_evidence(…10 个参数)` | 删除：只在 `persist_usage_batch` 调用链上                                              |
+| `gateway_token_summary(uuid)`                                            | 删除：legacy 网关查询，只授予 legacy 两个角色                                          |
+| `prepare_evidence_month(date)`                                           | 保留：基线安装时创建证据月分区，不属 legacy 入口                                       |
+| `validate_money_journal()`                                               | 保留：未挂到任何触发器的基线校验函数，不属 legacy 入口；记录在此，不在 T16 处理        |
+
+`settle_requests`、`exact_billing_price`、`expire_wallet`、`wallet_freeze_reason` 仍被 v2 SQL 调用，保留。
+
+### 7.2 迁移 2026111225（`sql/legacy-removal.sql`）
+
+- 删除上表 6 个函数。
+- `gateway_runtime`、`gateway_worker` 若存在，撤销其在 `public` 模式上的全部表、序列、函数与模式权限。角色是集群级对象，同一集群的其他库可能仍有授权，迁移不删除角色；运维在集群内全部库迁移后执行 `DROP ROLE`（见运维手册）。
+- `infra/runtime-role.sql` 删除；`verify-backup.ts` 恢复后不再执行它。
+
+### 7.3 用例
+
+- `lifecycle` 升级用例：基线时按 2026111203 角色夹具授权，迁移后两个角色对资金、目录、身份表的读取均为 42501，6 个函数不存在；不再在当前 schema 上重新执行已删的角色脚本。
+- `internal-identity`“legacy runtime role grants cannot expose identity tables…”删除：它把已删的角色脚本施加到当前 schema 上验证身份表撤权，迁移后两角色已无任何权限，由上条覆盖。
+- `plugin-catalog-roles` 原以改名的 legacy 角色脚本与目录角色共同验证不能经 GUC 绕过受控变更；改为只验证仍存在的目录角色。
+- `core-execution-upgrade`：Core 执行角色不能调用 `admit_gateway_batch` 的断言随函数删除去掉；“signed settlement append…”在迁移后用 `persist_usage_batch` 重放的断言去掉（每来源唯一性仍由直接插入的 23505 断言）；迁移条数与末版本随新迁移更新。
+
+### 7.4 门禁
+
+l5 全量门禁（原生服务）：`verify` 退出 0，类型检查 289 文件、lint 0、格式 433 文件，单测 355、集成 439（删 `internal-identity` legacy 角色用例 1 例）、产物 目录 7/身份 7/执行 14/Gateway 11、插件产物 84 例 112 步；`test:durability` 通过（`v2-core-settlement`）；原生门禁库 `gateway_native` 迁到 2026111225 后 `test:backup -- --quiesced` 通过；共享内存段为 1。首轮门禁：`test:backup` 因门禁库仍在 2026111224 拒绝（预期，迁移后通过）；集成 3 例在 Core 安装内置插件时校验失败（`plugin_validation_failed`，用例耗时 4.7–6.3 秒，接近原生 helper 5 秒启动期限），同时 `gateway-plugin-lifecycle` 首个请求回 500；三个文件单独连跑 2 轮全部通过，第二轮全量门禁亦通过，首轮时机器 1 分钟负载约 7。校验失败原因码随测试库删除未能取得，按负载下 helper 启动超时推断，未证实；l5 未改插件宿主代码。

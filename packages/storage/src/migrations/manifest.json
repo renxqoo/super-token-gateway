@@ -242,6 +242,15 @@
           "checksum": "84cb635bda476b9ed50abc229877e216c4bef40ec0f529b113141688e975bf2a"
         }
       ]
+    },
+    {
+      "version": 2026111225,
+      "files": [
+        {
+          "path": "./sql/legacy-removal.sql",
+          "checksum": "99cf41ca5578faa52b9e1023f83c8147307872ab287bc25d8d6a50da9f700746"
+        }
+      ]
     }
   ]
 }

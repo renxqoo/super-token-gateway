@@ -102,6 +102,8 @@ T16 l4 全量门禁（原生服务，Bun 1.4.4）：`verify` 退出 0，类型�
 
 T16 R17 全量门禁（原生服务）：`verify` 退出 0，类型检查 289 文件、lint 0、格式 433 文件，单测 355（增 1：R17）、集成 440、产物 目录 7/身份 7/执行 14/Gateway 11、插件产物 84 例 112 步、`verify-artifact` 2 项；`test:durability`、`test:backup -- --quiesced` 通过；共享内存段为 1。首轮 `verify` 在单测失败：发布的 OpenAPI 文档含插件 release id 枚举，升版后需以 `bun scripts/openapi.ts` 重新生成。
 
+T16 l5 全量门禁（原生服务）：`verify` 退出 0，类型检查 289 文件、lint 0、格式 433 文件，单测 355、集成 439（删 `internal-identity` legacy 角色用例 1 例）、产物 目录 7/身份 7/执行 14/Gateway 11、插件产物 84 例 112 步；`test:durability` 通过（`v2-core-settlement`）；原生门禁库 `gateway_native` 迁到 2026111225 后 `test:backup -- --quiesced` 通过；共享内存段为 1。首轮门禁：`test:backup` 因门禁库仍在 2026111224 拒绝（预期，迁移后通过）；集成 3 例在 Core 安装内置插件时校验失败（`plugin_validation_failed`，用例耗时 4.7–6.3 秒，接近原生 helper 5 秒启动期限），同时 `gateway-plugin-lifecycle` 首个请求回 500；三个文件单独连跑 2 轮全部通过，第二轮全量门禁亦通过，首轮时机器 1 分钟负载约 7。校验失败原因码随测试库删除未能取得，按负载下 helper 启动超时推断，未证实；l5 未改插件宿主代码。
+
 ## 6. 未执行
 
 - 全新上下文独立审查（见 §1）。

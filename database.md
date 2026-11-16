@@ -36,9 +36,9 @@ Batch 终态与证据在同事务结算，保留每个 Batch 的数字摘要；�
 | resources                          | 虚拟 ID、原供应商 opaque ID、项目/模型归属、状态与轮询租约；没有正文或下载 URI                 |
 | audit_events                       | 配置变更动作与哈希 ID，不保存配置值、密钥或请求内容                                            |
 
-准入与用量摄入按排序取得可用钱包锁（SKIP LOCKED），只对已锁钱包加载余额；忙钱包不阻塞同批冷钱包。Store 只重试忙项，指数退避至50ms；HTTP 准入沿用请求取消/总期限，其他调用有2秒预算。用量超过本轮重试预算仍保留队列作业，不 ACK 丢失事实。
+准入与用量摄入按排序取得可用钱包锁（SKIP LOCKED），只对已锁钱包加载余额；忙钱包不阻塞同批冷钱包。忙项由调用方以同一命令重试，准入沿用请求取消/总期限。用量超过本轮重试预算仍保留队列作业，不 ACK 丢失事实。
 
-worker 通过唯一 `persist_usage_batch` 入口，在钱包先于请求/attempt 的锁顺序下去重、合并证据、创建消费者投递并调用 `settle_requests` 完成资金事务。HTTP runtime 无此入口的执行权限。配置审计由触发器和配置更改同事务提交。
+core-worker 通过唯一 `persist_core_evidence_groups_v1` 入口，校验签名证据组后在钱包先于请求/attempt 的锁顺序下去重、合并证据、创建消费者投递并调用 `settle_requests` 完成资金事务。Core API 与 Gateway 无此入口的执行权限。配置审计由触发器和配置更改同事务提交。
 
 相同模型、操作、币种和供应商集合的费率加载共享在途查询，每个请求再按自己的输入和输出上限计算预扣。费率变更提交后清理缓存和在途索引，较早的加载可完成已有调用，回写缓存前需核对其加载身份。失败加载从索引移除，后续调用可以重试。
 
@@ -52,7 +52,7 @@ FINAL 证据不会被后到 PARTIAL/UNKNOWN 降级。选定证据由 attempts.ev
 
 资金表包括 wallets/wallet_lots、holds/allocations、charges、refunds/adjustments/resolutions 和不可变平衡 money_journal。不存在 usage 结算 outbox；外部 event_deliveries 只用于业务消费。
 
-生产使用独立迁移 owner、受限 gateway_runtime 和 gateway_worker 登录账号，执行 `infra/runtime-role.sql` 授予最小权限。保持 synchronous_commit=on，监控 WAL、连接数、锁等待和磁盘空间；不通过关闭 fsync 或异步丢证据换取压测数字。
+生产使用独立迁移 owner；Core 各进程使用 `infra/core-*-role.sql` 授予的最小权限账号，v2 Gateway 没有数据库账号。保持 synchronous_commit=on，监控 WAL、连接数、锁等待和磁盘空间；不通过关闭 fsync 或异步丢证据换取压测数字。
 
 ## 分区、归档与留存
 
@@ -74,4 +74,4 @@ FINAL 证据不会被后到 PARTIAL/UNKNOWN 降级。选定证据由 attempts.ev
 
 资源只保存稳定 opaque ID、既有定义状态与严格的 Batch 数字摘要，拒绝 URL、query、正文和未知 metadata；music 没有伪造持久化资源。music_ms 为整数毫秒，与 audio_ms 独立。包最大 32 MiB、财务凭证最大 5 MiB；财务凭证的持久化权限与模型正文禁存规则分开。
 
-当前旧进程角色权限仍按 `infra/runtime-role.sql` 实测；新敏感包、财务凭证与管理员 credential 表对这两个旧角色明确撤权。T04/T14 进一步拆 Core API/worker 最小权限及 Gateway 无 PG 权限。完整基线、测试迁移与权限责任见 [T03 基础层记录](docs/migrations/enterprise-v2-foundation.md)。
+legacy 网关的 `gateway_runtime`、`gateway_worker` 两个角色由 T16 l5 迁移 2026111225 撤销本库全部权限，其专用入口 `admit_gateway_batch`、`persist_usage_batch` 等一并删除；Core API/worker 的最小权限与 Gateway 无 PG 权限见 T04/T14。完整基线、测试迁移与权限责任见 [T03 基础层记录](docs/migrations/enterprise-v2-foundation.md)。

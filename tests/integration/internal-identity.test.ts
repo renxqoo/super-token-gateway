@@ -1513,32 +1513,6 @@ test("actual shared receive budget caps reserved bytes before stream count and r
     }
   }));
 
-test("legacy runtime role grants cannot expose identity tables or registration functions", () =>
-  withIdentity(async (_f, db) => {
-    await db.unsafe(await Bun.file("infra/runtime-role.sql").text());
-    for (const role of ["gateway_runtime", "gateway_worker"]) {
-      const connection = await db.reserve();
-      try {
-        await connection.unsafe(`SET ROLE ${role}`);
-        for (const table of [
-          "internal_service_instances",
-          "internal_service_certificates",
-          "internal_startup_registrations",
-          "internal_startup_sessions",
-        ])
-          await expect(connection.unsafe(`SELECT * FROM ${table}`)).rejects.toMatchObject({
-            errno: "42501",
-          });
-        await expect(
-          connection`SELECT internal_identity_read_peer_v1(repeat('a',64))`,
-        ).rejects.toMatchObject({ errno: "42501" });
-      } finally {
-        await connection.unsafe("RESET ROLE");
-        await connection.release();
-      }
-    }
-  }));
-
 test("Core RPC rejects a CA-valid hostname-valid server when the provisioned pin or complete SAN differs", () =>
   withIdentity(async (f) => {
     const gateway = f.certificates.get("gateway")!,

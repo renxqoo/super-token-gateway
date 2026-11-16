@@ -24,7 +24,6 @@ const assertDrained = async () => {
   );
 };
 const roles = [
-  "runtime-role.sql",
   "core-identity-role.sql",
   "core-catalog-role.sql",
   "core-execution-role.sql",

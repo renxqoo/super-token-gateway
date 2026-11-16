@@ -190,17 +190,27 @@ test("v2 through financial upgrade preserves settled receipts, ACKs and immutabl
       ).rejects.toMatchObject({ errno: "42501" });
     }
     await migrate(db);
-    await db.unsafe(
-      await Bun.file(new URL("../../infra/runtime-role.sql", import.meta.url)).text(),
-    );
-    for (const table of ["plugin_packages", "financial_vouchers", "administrator_credentials"]) {
-      await expect(
-        db.begin(async (tx) => {
-          await tx`SET LOCAL ROLE gateway_runtime`;
-          await tx.unsafe(`SELECT * FROM ${table}`);
-        }),
-      ).rejects.toMatchObject({ errno: "42501" });
-    }
+    for (const role of ["gateway_runtime", "gateway_worker"])
+      for (const table of [
+        "wallets",
+        "gateway_requests",
+        "channels",
+        "plugin_packages",
+        "financial_vouchers",
+        "administrator_credentials",
+        "internal_service_instances",
+      ])
+        await expect(
+          db.begin(async (tx) => {
+            await tx.unsafe(`SET LOCAL ROLE ${role}`);
+            await tx.unsafe(`SELECT * FROM ${table}`);
+          }),
+        ).rejects.toMatchObject({ errno: "42501" });
+    expect(
+      (
+        await db`SELECT count(*)::integer n FROM pg_proc WHERE pronamespace='public'::regnamespace AND proname IN ('admit_gateway_batch','persist_usage_batch','ingest_initial_usage','commit_usage_evidence','record_usage_evidence','gateway_token_summary')`
+      )[0].n,
+    ).toBe(0);
 
     expect(await db`SELECT version FROM schema_migrations ORDER BY version`).toEqual([
       { version: 2026111202 },
@@ -225,6 +235,7 @@ test("v2 through financial upgrade preserves settled receipts, ACKs and immutabl
       { version: 2026111221 },
       { version: 2026111222 },
       { version: 2026111223 },
+      { version: 2026111224 },
       { version: SCHEMA_VERSION },
     ]);
     expect(
@@ -261,17 +272,19 @@ test("v2 through financial upgrade preserves settled receipts, ACKs and immutabl
         await tx`UPDATE gateway_requests SET billing_outcome='FAILED' WHERE id=${pending.request}`;
       }),
     ).rejects.toMatchObject({ errno: "42501" });
-    await db.begin(async (tx) => {
-      await tx`SET LOCAL ROLE gateway_runtime`;
-      await tx`UPDATE gateway_requests SET updated_at=updated_at WHERE id=${pending.request}`;
-    });
+    await expect(
+      db.begin(async (tx) => {
+        await tx`SET LOCAL ROLE gateway_runtime`;
+        await tx`UPDATE gateway_requests SET updated_at=updated_at WHERE id=${pending.request}`;
+      }),
+    ).rejects.toMatchObject({ errno: "42501" });
     expect(
       (
         await db`SELECT has_function_privilege('public','public.wallet_freeze_reason(boolean,boolean,numeric,numeric,numeric)','EXECUTE') AS public_execute,
           has_function_privilege('gateway_runtime','public.wallet_freeze_reason(boolean,boolean,numeric,numeric,numeric)','EXECUTE') AS runtime_execute,
           (SELECT proacl IS NOT NULL FROM pg_proc WHERE proname='wallet_freeze_reason') AS explicit_acl`
       )[0],
-    ).toEqual({ public_execute: false, runtime_execute: true, explicit_acl: true });
+    ).toEqual({ public_execute: false, runtime_execute: false, explicit_acl: true });
     expect((await funds.wallets(tenant))[0]).toMatchObject({
       credit_limit_atoms: "0",
       credit_reserved_atoms: "0",

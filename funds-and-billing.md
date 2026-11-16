@@ -48,7 +48,7 @@ Batch 结果按文件和行标识检查重复。只有每行都有某项维度�
 
 BullMQ 6.7.2 使用 Bun 原生 Redis 适配器。作业只保存严格白名单的数字 usage、attempt UUID、状态、来源与受限错误码，不含 LLM 正文。生产要求独立 AOF always/noeviction Redis、本机与配置的 AOF 副本确认；同连接入队/WAITAOF 期间断线即丢弃该连接代次，不透明重连后伪造确认。确认未知最多以同一 jobId 重试，无法确认则不交付正常成功终态。
 
-worker 的唯一入口 `persist_usage_batch → settle_requests` 在 PG 中原子写证据、客户账单、资金来源分配和平衡流水，PG commit 后 ACK。完成作业可以移除，失败作业保留并告警；单条失败不撤销同批其他已提交事实，重投时逐条幂等。无最终证据的预扣留在 PG 对账；已丢失的队列不能由 PG 还原其数字，不得把丢证解释为零。
+core-worker 的唯一入口 `persist_core_evidence_groups_v1 → settle_requests` 在 PG 中原子写证据、客户账单、资金来源分配和平衡流水，PG commit 后 ACK。完成作业可以移除，失败作业保留并告警；单条失败不撤销同批其他已提交事实，重投时逐条幂等。无最终证据的预扣留在 PG 对账；已丢失的队列不能由 PG 还原其数字，不得把丢证解释为零。
 
 外部 usage 消费同样是至少一次：创建 consumer，claim 获取 30 秒租约，在自己的事务中按 event_id 去重后 ack。历史回放按短注册屏障确定水位，分块补投，避免注册期间长时间阻塞实时计量。seq 是诊断浏览序号，不能当提交顺序游标。
 
