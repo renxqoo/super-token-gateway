@@ -1,0 +1,103 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:net";
+import { RedisClient } from "bun";
+const root = process.cwd();
+const directory = await mkdtemp("/private/tmp/s1-integration-redis-");
+const listener = createServer();
+await new Promise<void>((resolve, reject) => {
+  listener.once("error", reject);
+  listener.listen(0, "127.0.0.1", resolve);
+});
+const address = listener.address();
+if (!address || typeof address === "string") throw new Error("Port allocation failed");
+const port = address.port;
+await new Promise<void>((resolve, reject) =>
+  listener.close((error) => (error ? reject(error) : resolve())),
+);
+let redis: Bun.Subprocess | undefined, tests: Bun.Subprocess | undefined;
+let result: Record<string, unknown> = { directory, port };
+const interrupted = () => {
+  if (tests?.exitCode === null) tests.kill("SIGTERM");
+};
+process.once("SIGTERM", interrupted);
+process.once("SIGINT", interrupted);
+try {
+  const output = Bun.file(`${directory}/redis.log`);
+  redis = Bun.spawn(
+    [
+      `${root}/.local/toolchain/redis74/bin/redis-server`,
+      "--bind",
+      "127.0.0.1",
+      "--port",
+      String(port),
+      "--save",
+      "",
+      "--appendonly",
+      "yes",
+      "--appendfsync",
+      "always",
+      "--aof-load-truncated",
+      "no",
+      "--maxmemory-policy",
+      "noeviction",
+      "--dir",
+      directory,
+    ],
+    { stdin: "ignore", stdout: output, stderr: output },
+  );
+  const url = `redis://127.0.0.1:${port}`;
+  await Bun.sleep(100);
+  const client = new RedisClient(url, { autoReconnect: false, connectionTimeout: 1000 });
+  try {
+    await client.connect();
+    await client.send("PING", []);
+    result = {
+      ...result,
+      redis_pid: redis.pid,
+      settings: await client.send("CONFIG", [
+        "GET",
+        "appendonly",
+        "appendfsync",
+        "aof-load-truncated",
+        "maxmemory-policy",
+      ]),
+      replication: await client.send("INFO", ["replication"]),
+    };
+  } finally {
+    client.close();
+  }
+  const log = Bun.file(`${root}/.local/performance-implementation/s2-batch-focused.log`);
+  await Bun.write(log, "");
+  tests = Bun.spawn([process.execPath, "--env-file=.env.local", "test", "tests/integration/internal-identity-cache.test.ts", "tests/integration/internal-identity.test.ts", "tests/integration/internal-identity-inputs.test.ts", "tests/integration/core-execution.test.ts", "tests/integration/core-execution-batch-identity.test.ts", "tests/integration/core-routing-health.test.ts", "tests/integration/core-execution-upgrade.test.ts", "tests/integration/plugin-catalog-upgrade.test.ts", "--timeout", "30000"], {
+    env: { ...process.env, QUEUE_REDIS_URL: url },
+    stdin: "ignore",
+    stdout: log,
+    stderr: log,
+  });
+  result.exit_code = await tests.exited;
+  process.exitCode = Number(result.exit_code);
+} catch (error) {
+  result.error = String(error);
+  process.exitCode = 1;
+} finally {
+  if (tests?.exitCode === null) tests.kill("SIGKILL");
+  if (tests) await tests.exited;
+  if (redis?.exitCode === null) {
+    redis.kill("SIGTERM");
+    const timer = setTimeout(() => redis?.kill("SIGKILL"), 5000);
+    await redis.exited;
+    clearTimeout(timer);
+  }
+  await rm(directory, { recursive: true, force: true });
+  result.cleaned = {
+    redis_stopped: redis?.exitCode !== null || redis?.signalCode !== null,
+    directory_removed: !(await Bun.file(directory).exists()),
+  };
+  await Bun.write(
+    `${root}/.local/performance-implementation/s2-batch-focused-result.json`,
+    JSON.stringify(result, null, 2) + "\n",
+  );
+  process.off("SIGTERM", interrupted);
+  process.off("SIGINT", interrupted);
+}
+console.log(JSON.stringify(result));

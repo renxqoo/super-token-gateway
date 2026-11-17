@@ -1,0 +1,70 @@
+import { build } from "esbuild";
+import { generateKeyPairSync, sign } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { packageDigest, verifyPackage, createPluginSupervisor, createPluginAttempts, runPluginFixtures, PluginHostError } from "@gateway/plugin-host";
+import { bundledPackageFiles, } from "@gateway/adapters";
+import { bundledReleaseIds, pluginModuleInfo } from "@gateway/plugin-sdk";
+import { exactParse, exactStringify } from "@gateway/plugin-sdk/guest";
+
+const root = process.cwd(), directory = resolve(".local/performance-implementation/native-probe-build");
+await mkdir(directory, { recursive: true });
+const inject = resolve(".local/performance-implementation/native-probe-host.ts");
+const names = ["openai-chat", "anthropic-messages", "bedrock-anthropic", "gemini-generate", "minimax-music"];
+const key = generateKeyPairSync("ed25519");
+const wasm = createPluginSupervisor({ executable: resolve(".local/plugin-host"), native: { slots: 2 } });
+const records: unknown[] = [];
+let comparisons = 0;
+try {
+  for (const [index, name] of names.entries()) {
+    const entry = resolve(directory, `${name}.ts`), output = resolve(directory, `${name}.js`);
+    await Bun.write(entry, `import { invoke } from ${JSON.stringify(resolve(`packages/adapters/${name}/plugin.ts`))};\nimport { scope } from ${JSON.stringify(inject)};\nexport function call(input: string) { return scope(input, invoke); }\n`);
+    const built = await build({ entryPoints: [entry], bundle: true, format: "esm", platform: "node", target: "es2020", outfile: output, inject: [inject], metafile: true });
+    const inputs: Record<string, string> = {};
+    for (const file of Object.keys(built.metafile!.inputs)) inputs[file] = new Bun.CryptoHasher("sha256").update(await Bun.file(file).bytes()).digest("hex");
+    const native = await import(pathToFileURL(output).href);
+    const files = await bundledPackageFiles(bundledReleaseIds.find((id) => id.startsWith(`gateway.${name}-`))!);
+    const digest = packageDigest(files);
+    const pkg = verifyPackage(new TextEncoder().encode(JSON.stringify({ format: 1, files: files.map((f) => ({ path: f.path, data: Buffer.from(f.bytes).toString("base64") })), signature: { algorithm: "Ed25519", key_id: "probe-only", value: sign(null, Buffer.from(digest, "hex"), key.privateKey).toString("base64") } })), new Map([["probe-only", key.publicKey]]));
+    function invoke(input: Uint8Array, state?: Uint8Array) {
+      const response = native.call(`{"input":${JSON.stringify(Buffer.from(input).toString("base64"))},"state":${state?.length ? new TextDecoder().decode(state) : "null"}}`);
+      const value = exactParse(response) as { output: string; state: unknown };
+      return { output: new Uint8Array(Buffer.from(value.output, "base64")), state: new TextEncoder().encode(exactStringify(value.state)) };
+    }
+    let calls = 0;
+    const shadow = { ...wasm, async call(hash: string, input: Uint8Array, state: Uint8Array | undefined, options: Parameters<typeof wasm.call>[3]) {
+      const expected = await wasm.call(hash, input, state, options), actual = invoke(input, state);
+      if (!Buffer.from(expected.output).equals(Buffer.from(actual.output)) || !Buffer.from(expected.state).equals(Buffer.from(actual.state))) throw new Error(`NATIVE_PROBE_DIFFERENCE:${name}:${calls}`);
+      calls++; comparisons++;
+      return expected;
+    } };
+    const fixture = await runPluginFixtures(shadow, pkg);
+    const record: Record<string, unknown> = { name, digest, fixture, byte_identical_calls: calls, inputs };
+    if (index === 0) {
+      const local = { ...wasm, onDisconnect: () => () => {}, async load(module: Parameters<typeof wasm.load>[0]) { return { hash: pluginModuleInfo(module as never).hash, connection: "native-probe" }; }, async call(_hash: string, input: Uint8Array, state?: Uint8Array, options?: Parameters<typeof wasm.call>[3]) { if (options?.signal?.aborted) throw new PluginHostError("CALL_CANCELLED"); return invoke(input, state); } };
+      const config = { model_map: { logical: "upstream" }, max_output_tokens: 100, max_input_tokens: 10000, auth: "bearer" };
+      const request = new TextEncoder().encode(JSON.stringify({ model: "logical", messages: [{ role: "user", content: "synthetic" }], max_completion_tokens: 32 }));
+      const response = new TextEncoder().encode(JSON.stringify({ id: "synthetic", model: "upstream", choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+      for (const [executor, supervisor] of [["wasm", wasm], ["native-probe", local]] as const) {
+        const host = createPluginAttempts(supervisor);
+        const one = async () => { const a = host.create(pkg, { tenant: "probe", attempt: crypto.randomUUID(), incarnation: crypto.randomUUID(), config, deadlineAt: Date.now() + 30000 }); try { await a.transformJSON("prepare", { protocol: "chat", operation: "chat", model: "logical" }, request); await a.transformJSON("response", { model: "logical" }, response); } finally { a.dispose(); } };
+        try {
+          for (let n = 0; n < 20; n++) await one();
+          const cpu = process.cpuUsage(), started = performance.now();
+          for (let n = 0; n < 200; n++) await one();
+          const elapsed = performance.now() - started, used = process.cpuUsage(cpu);
+          record[executor] = { iterations: 200, elapsed_ms: elapsed, wall_ms_per_pipeline: elapsed / 200, main_process_cpu_ms_per_pipeline: (used.user + used.system) / 1000 / 200 };
+          const snapshot = host.snapshot();
+          if (snapshot.stateBytes !== 0 || snapshot.attempts !== 0 || snapshot.json.bytes !== 0) throw new Error("NATIVE_PROBE_RESOURCE_LEAK");
+        } finally { host.dispose(); }
+      }
+    }
+    records.push(record);
+  }
+} finally {
+  await wasm.close();
+}
+const result = { scope: "isolated prototype; no platform trust classification, hard CPU preemption or persisted executor selection", comparisons, records, helper: wasm.snapshot() };
+await Bun.write(".local/performance-implementation/native-executor-probe-result.json", JSON.stringify(result, null, 2) + "\n");
+console.log(JSON.stringify(result));

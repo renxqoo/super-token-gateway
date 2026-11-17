@@ -6,7 +6,9 @@ import {
   sessionSchema,
   sha256,
   validateConfig,
-  verifiedPackageSnapshot,
+  verifiedPackageRuntime,
+  pluginModuleInfo,
+  type PluginModule,
   type AbiResult,
   type Hook,
   type SessionIdentity,
@@ -50,7 +52,7 @@ export function createPluginAttempts(
   const unsubscribe = supervisor.onDisconnect((connection) => {
     for (const [owner, current] of connections) if (current === connection) live.get(owner)?.();
   });
-  const modules = new Map<string, { bytes: Uint8Array; refs: number }>();
+  const modules = new Map<string, { module: PluginModule; byteLength: number; refs: number }>();
   let retained = 0,
     reserved = 0,
     closed = false;
@@ -86,8 +88,8 @@ export function createPluginAttempts(
         options.deadlineAt - Date.now() > 2147483647
       )
         throw new PluginHostError("CONFIG_INVALID");
-      const trusted = verifiedPackageSnapshot(pkg);
-      const moduleHash = trusted.moduleHash;
+      const trusted = verifiedPackageRuntime(pkg);
+      const { hash: moduleHash, byteLength } = pluginModuleInfo(trusted.module);
       const config = validateConfig(trusted.configSchema, options.config);
       const binding: Omit<SessionIdentity, "sequence"> = {
         id: crypto.randomUUID(),
@@ -98,19 +100,18 @@ export function createPluginAttempts(
         config: sha256(canonical(config)),
       };
       sessionSchema.parse({ ...binding, sequence: 0 });
-      let code = modules.get(trusted.moduleHash);
+      let code = modules.get(moduleHash);
       if (!code) {
         if (
           modules.size >= 4 ||
-          [...modules.values()].reduce((n, item) => n + item.bytes.length, trusted.module.length) >
-            32 << 20
+          [...modules.values()].reduce((n, item) => n + item.byteLength, byteLength) > 32 << 20
         )
           throw new PluginHostError("MODULE_BUDGET");
-        code = { bytes: trusted.module, refs: 0 };
-        modules.set(trusted.moduleHash, code);
+        code = { module: trusted.module, byteLength, refs: 0 };
+        modules.set(moduleHash, code);
       }
       code.refs++;
-      const module = code.bytes,
+      const module = code.module,
         entrypoint = trusted.manifest.entrypoint,
         capabilities = trusted.manifest.capabilities;
       let state: Uint8Array | undefined,
@@ -472,7 +473,7 @@ export function createPluginAttempts(
       attempts: live.size,
       stateBytes: retained,
       reservedStateBytes: reserved,
-      moduleBytes: [...modules.values()].reduce((n, item) => n + item.bytes.length, 0),
+      moduleBytes: [...modules.values()].reduce((n, item) => n + item.byteLength, 0),
       json: documents.snapshot(),
       closed,
     }),

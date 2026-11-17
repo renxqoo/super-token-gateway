@@ -1,0 +1,82 @@
+{
+  "at": "2026-11-17T03:56:12.879Z",
+  "benchmark_rounds": 27,
+  "benchmark_cleanup_errors": 0,
+  "owned_processes_remaining": [],
+  "protected_processes": [
+    {
+      "pid": 40766,
+      "started": "Mon Nov 16 16:27:47 2026",
+      "cpu_seconds": 25.84,
+      "command": "bun apps/core-api/src/main.ts"
+    },
+    {
+      "pid": 40771,
+      "started": "Mon Nov 16 16:27:47 2026",
+      "cpu_seconds": 26.01,
+      "command": "bun apps/core-api/src/main.ts"
+    }
+  ],
+  "database": {
+    "owned_remaining": [],
+    "protected_reference": [
+      {
+        "datname": "newapi_bench_1794879563902"
+      }
+    ],
+    "foundation_count": 25,
+    "settings": [
+      {
+        "name": "fsync",
+        "setting": "on"
+      },
+      {
+        "name": "full_page_writes",
+        "setting": "on"
+      },
+      {
+        "name": "synchronous_commit",
+        "setting": "on"
+      }
+    ]
+  },
+  "evidence": {
+    "settings": {
+      "maxmemory-policy": "noeviction",
+      "appendonly": "yes",
+      "aof-load-truncated": "no",
+      "appendfsync": "always"
+    },
+    "replication": "# Replication\r\nrole:master\r\nconnected_slaves:1\r\nslave0:ip=127.0.0.1,port=56394,state=online,offset=2141255798,lag=0\r\nmaster_failover_state:no-failover\r\nmaster_replid:4b5db8b4157c2a9b4e26d0b101e3b88741c75789\r\nmaster_replid2:0000000000000000000000000000000000000000\r\nmaster_repl_offset:2141255798\r\nsecond_repl_offset:-1\r\nrepl_backlog_active:1\r\nrepl_backlog_size:1048576\r\nrepl_backlog_first_byte_offset:2140195279\r\nrepl_backlog_histlen:1060520\r\n"
+  },
+  "isolated_integration": {
+    "directory": "/private/tmp/p0-integration-redis-Lv3zFn",
+    "port": 57695,
+    "redis_pid": 54955,
+    "settings": {
+      "maxmemory-policy": "noeviction",
+      "appendfsync": "always",
+      "aof-load-truncated": "no",
+      "appendonly": "yes"
+    },
+    "replication": "# Replication\r\nrole:master\r\nconnected_slaves:0\r\nmaster_failover_state:no-failover\r\nmaster_replid:b471a95d2706baf7b96ee627dbb72f2ce0c11c20\r\nmaster_replid2:0000000000000000000000000000000000000000\r\nmaster_repl_offset:0\r\nsecond_repl_offset:-1\r\nrepl_backlog_active:0\r\nrepl_backlog_size:1048576\r\nrepl_backlog_first_byte_offset:0\r\nrepl_backlog_histlen:0\r\n",
+    "exit_code": 0,
+    "cleaned": {
+      "redis_stopped": true,
+      "directory_removed": true
+    },
+    "directory_exists": false
+  },
+  "notes": [
+    "Shared native PG/Redis and all 25 preexisting foundation databases are preserved; registration proves each predates this task (background count was 21).",
+    "PG background and Redis admission/evidence PIDs are shared services and are excluded from owned process cleanup."
+  ],
+  "temporary_work_directory_removed": true,
+  "temporary_report_fragments_removed": true,
+  "retained_outputs": [
+    "docs/performance/p0-2026-11-17.md",
+    "docs/performance/evidence-p0-2026-11-17",
+    "dist build artifacts",
+    "shared existing test resource registries"
+  ]
+}

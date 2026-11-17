@@ -302,7 +302,7 @@ export class UsageConsumer<T> {
   readonly worker: Worker;
   private readonly adapter: ReturnType<typeof createBunRedisClient>;
   private readonly raw: RedisClient;
-  private readonly pending = new Set<Promise<unknown>>();
+  private closing: Promise<void> | undefined;
   constructor(readonly options: UsageConsumerOptions<T>) {
     const channel = options.channel;
     const raw = new RedisClient(options.url, {
@@ -317,15 +317,9 @@ export class UsageConsumer<T> {
       channel.name,
       async (job) => {
         const events = channel.decode(job.data);
-        const processing = options.process(events);
-        this.pending.add(processing);
-        try {
-          const result = await processing;
-          options.onCommitted?.(events.length, Math.max(0, Date.now() - job.timestamp) / 1000);
-          return result;
-        } finally {
-          this.pending.delete(processing);
-        }
+        const result = await options.process(events);
+        options.onCommitted?.(events.length, Math.max(0, Date.now() - job.timestamp) / 1000);
+        return result;
       },
       {
         connection: this.adapter,
@@ -355,23 +349,35 @@ export class UsageConsumer<T> {
       clearTimeout(timer);
     }
   }
-  async close(): Promise<void> {
-    await this.worker.pause(true);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        Promise.allSettled(this.pending).then(() => undefined),
-        new Promise<void>((resolve) => {
-          timer = setTimeout(() => {
-            resolve();
-          }, 10000);
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
-      await this.worker.close(true);
-      this.adapter.status = "end";
-      this.raw.close();
-    }
+  close(): Promise<void> {
+    this.closing ??= (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let stopped = false;
+      try {
+        await Promise.race([
+          (async () => {
+            await this.worker.pause(true);
+            if (stopped) return;
+            await this.worker.backend.disconnectBlocking(true);
+            while (!stopped && this.worker.isRunning()) await Bun.sleep(10);
+          })(),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, 10000);
+          }),
+        ]);
+      } catch {
+        this.options.onError?.();
+      } finally {
+        stopped = true;
+        clearTimeout(timer);
+        try {
+          await this.worker.close(true);
+        } finally {
+          this.adapter.status = "end";
+          this.raw.close();
+        }
+      }
+    })();
+    return this.closing;
   }
 }

@@ -1,3 +1,4 @@
+import { verifiedPackageRuntime } from "@gateway/plugin-sdk";
 import {
   GatewayError,
   dispatchProjectionV1Schema,
@@ -18,6 +19,7 @@ import {
 import { canonical, protocols, type Operation, type Protocol } from "@gateway/kernel";
 import {
   observeAttempt,
+  PluginHostError,
   rewriteJSON,
   type AbiResult,
   type AttemptOutcome,
@@ -373,7 +375,8 @@ async function plan(
   try {
     const source = facts.protocol;
     const converted =
-      source !== undefined && !pkg.manifest.capabilities.operations.includes(facts.operation);
+      source !== undefined &&
+      !verifiedPackageRuntime(pkg).manifest.capabilities.operations.includes(facts.operation);
     if (converted && facts.references.length)
       throw new GatewayError(
         422,
@@ -791,11 +794,17 @@ function healthOutcome(
   if (status) return unhealthyStatuses.has(Number(status)) ? "FAILURE" : "SUCCESS";
   if (
     halted ||
+    outcome.error_code?.startsWith("plugin_host_") ||
     outcome.error_code === "evidence_unavailable" ||
     outcome.error_code === "downstream_stalled"
   )
     return "NOT_SENT";
   return "FAILURE";
+}
+
+function responseFailureCode(error: unknown, fallback: string): string {
+  if (!(error instanceof PluginHostError)) return fallback;
+  return `plugin_host_${/^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code.toLowerCase() : "unknown"}`;
 }
 
 async function closeRequest(deps: ChatDependencies, permit: Permit, reason: CloseReason) {
@@ -1255,7 +1264,10 @@ async function relayJSON(
     if (error instanceof GatewayError && error.code === "usage_queue_unavailable")
       return control.fail({ attempt_state: "UNKNOWN", error_code: "evidence_unavailable" }, error);
     return control.abandon(
-      { attempt_state: "UNKNOWN", error_code: control.cause() ?? "upstream_read_failed" },
+      {
+        attempt_state: "UNKNOWN",
+        error_code: control.cause() ?? responseFailureCode(error, "upstream_read_failed"),
+      },
       control.timeoutError(invalid),
     );
   }
@@ -1419,7 +1431,7 @@ async function relaySSE(
               ? "client_cancelled"
               : stop.reason === "DRAINED"
                 ? "gateway_draining"
-                : (control.cause() ?? "stream_interrupted"),
+                : (control.cause() ?? responseFailureCode(fault, "stream_interrupted")),
         };
         if (!delivered && !recorded) undelivered = { outcome, fault };
         else

@@ -1,0 +1,10 @@
+{
+  "gpt-4o-mini": {
+    "status": 200,
+    "bytes": 370
+  },
+  "synthetic": {
+    "status": 200,
+    "bytes": 368
+  }
+}

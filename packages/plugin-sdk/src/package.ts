@@ -4,6 +4,7 @@ import { base64Schema, capabilitiesSchema, sha256 } from "./abi.ts";
 import { configSchemaSchema, type ConfigSchema } from "./config.ts";
 import { fixtureSuiteSchema } from "./fixtures.ts";
 import { exactParse } from "./guest.ts";
+import { adoptPluginModule, type PluginModule } from "./module.ts";
 
 export const manifestSchema = z
   .object({
@@ -45,11 +46,33 @@ export type VerifiedPackage = {
   configSchema: ConfigSchema;
   files: readonly PackageFile[];
 };
-const verified = new WeakMap<VerifiedPackage, VerifiedPackage>();
+export type VerifiedPackageRuntime = Readonly<{
+  digest: string;
+  signingKeyId: string;
+  module: PluginModule;
+  manifest: PluginManifest;
+  configSchema: ConfigSchema;
+}>;
+const verified = new WeakMap<
+  VerifiedPackage,
+  { snapshot: VerifiedPackage; runtime: VerifiedPackageRuntime }
+>();
+function freezeMetadata<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) freezeMetadata(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+export function verifiedPackageRuntime(pkg: VerifiedPackage): VerifiedPackageRuntime {
+  const original = verified.get(pkg);
+  if (!original) throw new Error("PACKAGE_NOT_VERIFIED");
+  return original.runtime;
+}
 export function verifiedPackageSnapshot(pkg: VerifiedPackage): VerifiedPackage {
   const original = verified.get(pkg);
   if (!original) throw new Error("PACKAGE_NOT_VERIFIED");
-  return structuredClone(original);
+  return structuredClone(original.snapshot);
 }
 export function packageDigest(files: readonly PackageFile[]): string {
   if (files.length < 6 || files.length > 128) throw new Error("PACKAGE_FILES");
@@ -141,6 +164,14 @@ export function verifyPackage(
     configSchema,
     files,
   };
-  verified.set(result, structuredClone(result));
+  const snapshot = structuredClone(result);
+  const runtime = Object.freeze({
+    digest: snapshot.digest,
+    signingKeyId: snapshot.signingKeyId,
+    module: adoptPluginModule(snapshot.module, snapshot.moduleHash),
+    manifest: freezeMetadata(snapshot.manifest),
+    configSchema: freezeMetadata(snapshot.configSchema),
+  });
+  verified.set(result, { snapshot, runtime });
   return result;
 }

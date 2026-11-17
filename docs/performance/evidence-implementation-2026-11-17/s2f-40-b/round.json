@@ -1,0 +1,91 @@
+{
+  "stage": "S2f local plugin failure classification",
+  "label": "s2f-40-b",
+  "target": 40,
+  "rate": 41,
+  "requests": 2508,
+  "valid": true,
+  "failures": [],
+  "capacityPassed": true,
+  "p99": 457.91,
+  "onlineCapacity": {
+    "fullyCompletedByWindow": 2455,
+    "minuteCompletions": [
+      2455
+    ],
+    "matchedRequests": 2460,
+    "httpOnly": 0,
+    "ackOnly": 48,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 134,
+    "receiptAckedRequestsByWindow": 2445,
+    "ackedEventsByWindow": 4620,
+    "sampledBeforeWindowEndMs": 245,
+    "httpByWindow": 2455
+  },
+  "process_cpu_ms": {
+    "gateway": 2.6196172248803826,
+    "core_api": 3.3253588516746406,
+    "core_worker": 1.2001594896331738,
+    "upstream": 0.24322169059011164,
+    "redis_admission": 0.8094098883572531,
+    "redis_evidence": 0.5382775119617089,
+    "redis_evidence_replica": 0.3269537480063769,
+    "pg": 20.43859649122807,
+    "pg_shared": 0.007974481658692014,
+    "plugin_helper": 9.42982456140351
+  },
+  "total_cpu_ms": 38.68819776714511,
+  "pg": {
+    "calls": 190661,
+    "exec_ms": 76119.65347799996,
+    "wal_bytes": 150129604,
+    "wal_records": 1103030,
+    "calls_per_request": 76.02113237639553,
+    "exec_ms_per_request": 30.350739026315775,
+    "wal_bytes_per_request": 59860.28867623604,
+    "wal_records_per_request": 439.804625199362
+  },
+  "pg_valid": true,
+  "cpu_sampling_errors": 0,
+  "artifacts": {
+    "dist/core-api/main.js": "a8d5b5107a6ab154ebf25124248d5d872259e70cc1552d56568e4eb0f7b9be6d",
+    "dist/core-api/platform/management.js": "f316bd94ba1804f40b4360141c8e70d15ce3747c17c95c74b89612e70dae3ef8",
+    "dist/gateway/main.js": "cd68f076433304e2fa7f4adea4a85c482339837308ec8c927cb75f6673404d2f",
+    "dist/core-worker/main.js": "715a26d76e7217fd6c76632891557c21cac24e13858a0a79a520f3692de1516d",
+    "dist/native/plugin-host": "c2767f5be29a843e0586ca31b4e8baa9d2fbe81527599cdcfaad23a7a7962663",
+    "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+    "dist/manifest.json": "0ec371e73b6b15f24cf33350b81e8a844864dfbdb09b387dc558d17f34fd9ecf"
+  },
+  "command": [
+    "QUEUE_REQUIRED_REPLICAS=1",
+    ".local/toolchain/bun-1.4.4/bun",
+    "--env-file=.env.local",
+    "--env-file=.local/native-gate.env",
+    "scripts/bench-system.ts",
+    "--online-capacity",
+    "--seconds",
+    "60",
+    "--wallets",
+    "1000",
+    "--concurrency",
+    "256",
+    "--warmup-concurrency",
+    "16",
+    "--worker-concurrency",
+    "8",
+    "--rate",
+    "41",
+    "--target-rps",
+    "40",
+    "--drain-seconds",
+    "120"
+  ],
+  "exit_code": 0,
+  "original_audit_sha256": "abb6cedeae0ef2ed89f1de2b0fc510d4b4c54b3833f26863e604f29e0da78c1a",
+  "audit_sha256": "39ef41bfc134c2418c2a3fb2e6df76ca0d9126d68914882f0326076cac430df6",
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  }
+}

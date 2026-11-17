@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
 import { cpus, release, totalmem } from "node:os";
 import { resolve } from "node:path";
@@ -23,6 +23,13 @@ import {
   passesCapacityTarget,
   passesOnlineCapacity,
 } from "./benchmark-lib.ts";
+
+import {
+  createDatabaseMetrics,
+  discoverRedisProcesses,
+  startProcessSampler,
+  summarizeStatements,
+} from "./benchmark-metrics.ts";
 
 const args = Bun.argv.slice(2);
 const option = (name: string, fallback: string) => {
@@ -166,45 +173,6 @@ async function upstreamStats(action = "stats") {
   });
   if (!response.ok) throw new Error("Mock telemetry unavailable");
   return (await response.json()) as { active?: number; requests?: number };
-}
-
-function cpuSeconds(value: string) {
-  const [days, clock] = value.includes("-") ? value.split("-") : ["0", value];
-  return (
-    Number(days) * 86400 + clock!.split(":").reduce((total, part) => total * 60 + Number(part), 0)
-  );
-}
-
-function processTrees(roots: Record<string, number[]>) {
-  const listed = spawnSync("ps", ["-A", "-o", "pid=,ppid=,rss=,time="], { encoding: "utf8" });
-  if (listed.status !== 0) throw new Error("Process sampling failed");
-  const rows = listed.stdout
-    .trim()
-    .split("\n")
-    .map((line) => line.trim().split(/\s+/))
-    .map(([pid, ppid, rss, time]) => ({
-      pid: Number(pid),
-      ppid: Number(ppid),
-      rss: Number(rss) * 1024,
-      cpu: cpuSeconds(time ?? "0"),
-    }));
-  const children = new Map<number, typeof rows>();
-  for (const row of rows) children.set(row.ppid, [...(children.get(row.ppid) ?? []), row]);
-  const byPid = new Map(rows.map((row) => [row.pid, row]));
-  const usage: Record<string, { rss_bytes: number; cpu_seconds: number; processes: number }> = {};
-  for (const [role, pids] of Object.entries(roots)) {
-    const total = { rss_bytes: 0, cpu_seconds: 0, processes: 0 };
-    const pending = pids.flatMap((pid) => (byPid.has(pid) ? [byPid.get(pid)!] : []));
-    while (pending.length) {
-      const row = pending.pop()!;
-      total.rss_bytes += row.rss;
-      total.cpu_seconds += row.cpu;
-      total.processes++;
-      pending.push(...(children.get(row.pid) ?? []));
-    }
-    usage[role] = total;
-  }
-  return usage;
 }
 
 async function created(
@@ -392,6 +360,8 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
   let consume: Promise<void> | undefined;
   let ackWriter: Awaited<ReturnType<typeof createIdentityWriter>> | undefined;
   let loadProcess: Bun.Subprocess | undefined;
+  let databaseMetrics: Awaited<ReturnType<typeof createDatabaseMetrics>> | undefined;
+  let processSampler: ReturnType<typeof startProcessSampler> | undefined;
   const queue = new UsageProducer({
     channel: evidenceChannel,
     url: process.env.QUEUE_REDIS_URL!,
@@ -522,8 +492,21 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       core_worker: worker ? [worker.pid] : [],
       upstream: [upstream.pid],
     };
-    const resources: { at: number; usage: ReturnType<typeof processTrees> }[] = [];
-    let lastResourceSample = 0;
+    const databaseUrl = new URL(process.env.DATABASE_URL!);
+    databaseUrl.pathname = `/${(await db`SELECT current_database() AS name`)[0].name}`;
+    databaseMetrics = await createDatabaseMetrics(databaseUrl.toString());
+    const redisRoots = await discoverRedisProcesses({
+      redis_admission: process.env.REDIS_URL!,
+      redis_evidence: process.env.QUEUE_REDIS_URL!,
+    });
+    processSampler = startProcessSampler(async () => ({
+      ...roots,
+      ...redisRoots,
+      ...(await databaseMetrics!.roots()),
+    }));
+    await databaseMetrics.resetOwned();
+    const statementsBefore = await databaseMetrics.snapshot();
+    await processSampler.start();
     const timeline: Record<string, unknown>[] = [];
     const samplingStart = Date.now();
     const ackedRequests = new Set<string>();
@@ -568,11 +551,6 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
               { locks: number; active: number }[]
             >`SELECT count(*) FILTER(WHERE wait_event_type='Lock')::int AS locks,count(*) FILTER(WHERE state='active')::int AS active FROM pg_stat_activity WHERE datname=current_database()`,
           ]);
-          if (Date.now() - lastResourceSample >= 1000) {
-            lastResourceSample = Date.now();
-            if (worker && !roots.core_worker.length) roots.core_worker.push(worker.pid);
-            resources.push({ at: lastResourceSample - samplingStart, usage: processTrees(roots) });
-          }
           const waits = observe
             ? await db`SELECT coalesce(wait_event_type,'CPU') AS wait_event_type,coalesce(wait_event,'CPU') AS wait_event,count(*)::int FROM pg_stat_activity WHERE datname=current_database() AND state='active' AND pid<>pg_backend_pid() GROUP BY 1,2 ORDER BY 3 DESC`
             : undefined;
@@ -708,7 +686,10 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
         `Load generator exited ${exit} without a report; inspect ${directory}/load.log`,
       );
     const drainStart = Date.now();
-    if (workerMode === "deferred") await startWorker();
+    if (workerMode === "deferred") {
+      await startWorker();
+      roots.core_worker = worker ? [worker.pid] : [];
+    }
     const withinDrain = () => Date.now() - drainStart < drainSeconds * 1000;
     while (withinDrain()) {
       const rows =
@@ -734,6 +715,14 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     await ackWriter?.close();
     clearInterval(telemetryTimer);
     await sampling;
+    const measuredRequests = (await db`SELECT count(*)::int AS count FROM gateway_requests`)[0]
+      .count as number;
+    const processCpu = await processSampler.stop(Math.max(1, measuredRequests));
+    const pgStatements = summarizeStatements(
+      statementsBefore,
+      await databaseMetrics.snapshot(),
+      Math.max(1, measuredRequests),
+    );
     const check = (
       await db.begin(async (audit) => {
         await audit`SET LOCAL statement_timeout=120000`;
@@ -772,6 +761,10 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     const permits = [
       ...(await db`SELECT state,count(*)::int AS count FROM execution_permits GROUP BY state ORDER BY state`),
     ] as { state: string; count: number }[];
+    const attemptFailures = [
+      ...(await db`SELECT state,error_code,count(*)::int AS count FROM attempts
+        WHERE error_code IS NOT NULL GROUP BY state,error_code ORDER BY count DESC,state,error_code LIMIT 25`),
+    ];
     const usageShapes = [
       ...(await db`SELECT record_kind,snapshot_revision::text AS revision,finality,usage,cost_atoms::text AS cost,cost_complete,count(*)::int AS count FROM usage_events GROUP BY 1,2,3,4,5,6 ORDER BY 7 DESC LIMIT 20`),
     ];
@@ -846,6 +839,8 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       require(identityAudit.matchedRequests === http.succeeded &&
         identityAudit.httpOnly === 0 &&
         identityAudit.ackOnly === http.warmup_requests, "identity_intersection");
+    require(processCpu.errors === 0, "process_cpu_sampling");
+    require(pgStatements.valid, "pg_statement_statistics");
     const valid = failures.length === 0;
     const withinWindow = timeline
       .filter((sample) => Number(sample.completed_at ?? Infinity) <= windowEnd)
@@ -908,6 +903,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       accounting: check,
       supplier,
       permits,
+      attemptFailures,
       receipts,
       usageShapes,
       ownershipMismatches: ownership,
@@ -920,25 +916,10 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       ackShortfall,
       consumerErrors,
       telemetryErrors,
-      processes: Object.fromEntries(
-        Object.keys(roots).map((role) => [
-          role,
-          {
-            peak_rss_bytes: Math.max(
-              0,
-              ...resources.map((sample) => sample.usage[role]!.rss_bytes),
-            ),
-            cpu_seconds:
-              (resources.at(-1)?.usage[role]?.cpu_seconds ?? 0) -
-              (resources[0]?.usage[role]?.cpu_seconds ?? 0),
-            peak_processes: Math.max(
-              0,
-              ...resources.map((sample) => sample.usage[role]!.processes),
-            ),
-          },
-        ]),
-      ),
-      resources,
+      processes: processCpu.processes,
+      processCpu,
+      pgStatements,
+      resources: processCpu.samples,
       onlineCapacity,
       queueStats,
       timeline,
@@ -958,6 +939,8 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
   } finally {
     consuming = false;
     clearInterval(telemetryTimer);
+    await processSampler?.close();
+    await databaseMetrics?.close();
     for (const child of spawned) if (child.exitCode === null) child.kill("SIGTERM");
     for (const service of services) service.kill();
     await Promise.allSettled(spawned.map((child) => child.exited));

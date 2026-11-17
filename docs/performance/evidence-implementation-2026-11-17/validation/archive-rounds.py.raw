@@ -1,0 +1,19 @@
+from pathlib import Path
+import hashlib,json,shutil,subprocess
+root=Path.cwd();base=root/'docs/performance/evidence-implementation-2026-11-17'
+rounds=[]
+for stage,label,log in [('S1','s1-40-a','s1-bench40.log'),('S2a','s2-40-a','s2-bench40-a.log'),('S2a','s2-40-b','s2-bench40-b.log')]:
+ printed=json.loads((root/'.local/performance-implementation'/log).read_text().strip().splitlines()[-1]);src=root/printed['directory'];dst=base/label;dst.mkdir(parents=True,exist_ok=True)
+ for name in ['audit.json','http.json','http.json.identities.tsv','ack.identities.tsv','cleanup.json']:
+  if name in ['audit.json','http.json','cleanup.json']: shutil.copyfile(src/name,dst/(name+'.raw'))
+  shutil.copyfile(src/name,dst/name)
+ subprocess.run([str(root/'.local/toolchain/bun-1.4.4/bun'),'fmt','--no-script',*[str(dst/n) for n in ['audit.json','http.json','cleanup.json']]],check=True,capture_output=True)
+ for n in ['audit.json','http.json','cleanup.json']:assert json.loads((dst/n).read_text())==json.loads((dst/(n+'.raw')).read_text())
+ a=json.loads((src/'audit.json').read_text());assert a['pgStatements']['valid'] and a['processCpu']['errors']==0
+ assert all(v['cpu_ms_per_request']>=0 for v in a['processCpu']['processes'].values())
+ cpu={k:v['cpu_ms_per_request'] for k,v in a['processCpu']['processes'].items()}
+ r={'stage':stage,'label':label,'target':40,'rate':41,'requests':a['accounting']['requests'],'capacityPassed':a['capacityPassed'],'p99':a['http']['latency_ms']['p99'],'onlineCapacity':a['onlineCapacity'],'process_cpu_ms':cpu,'total_cpu_ms':sum(v for k,v in cpu.items() if k not in ['upstream','pg_shared']),'pg':a['pgStatements']['topLevel'],'artifacts':a['environment']['artifacts'],'command':['QUEUE_REQUIRED_REPLICAS=1','.local/toolchain/bun-1.4.4/bun','--env-file=.env.local','--env-file=.local/native-gate.env','scripts/bench-system.ts','--online-capacity','--seconds','60','--wallets','1000','--concurrency','256','--warmup-concurrency','16','--worker-concurrency','8','--rate','41','--target-rps','40','--drain-seconds','120'],'exit_code':0,'original_audit_sha256':hashlib.sha256((dst/'audit.json.raw').read_bytes()).hexdigest(),'audit_sha256':hashlib.sha256((dst/'audit.json').read_bytes()).hexdigest(),'cleanup':json.loads((dst/'cleanup.json').read_text())}
+ (dst/'round.json').write_text(json.dumps(r,ensure_ascii=False,indent=2)+'\n');rounds.append(r)
+assert rounds[1]['artifacts']==rounds[2]['artifacts']
+(base/'rounds.json').write_text(json.dumps(rounds,ensure_ascii=False,indent=2)+'\n')
+for r in rounds: print(json.dumps({k:r[k] for k in ['label','requests','capacityPassed','p99','total_cpu_ms','process_cpu_ms','pg']},ensure_ascii=False))

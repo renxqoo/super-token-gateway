@@ -1,0 +1,7 @@
+import { SQL } from "bun";
+const target = new URL(process.env.MIGRATION_DATABASE_URL ?? process.env.DATABASE_URL!);
+target.pathname = "/postgres";
+const db = new SQL(target.toString(), {max: 1});
+try {
+ console.log(JSON.stringify(await db`SELECT name,default_version,installed_version FROM pg_available_extensions WHERE name IN ('pgcrypto','pg_stat_statements') ORDER BY name`));
+} finally { await db.close(); }

@@ -1,0 +1,66 @@
+import { expect } from "bun:test";
+import { currentCommand, registeredIdentity, withIdentity } from "../../tests/support/internal-identity.ts";
+import { createInternalIdentityStore } from "@gateway/storage/internal-identity";
+import { canonical } from "@gateway/kernel";
+import { sha256 } from "@gateway/runtime/crypto";
+await withIdentity(async (f, db) => {
+  await db.unsafe(await Bun.file(".local/performance-implementation/core-execution-identity-batch.sql").text());
+  const client = await f.connection();
+  const identity = await registeredIdentity(client, f.a.port);
+  const command = currentCommand(identity);
+  const store = createInternalIdentityStore(db);
+  const peer = (await store.readPeerDirectory(identity.receipt.certificate_sha256))!;
+  const session = (await store.readStartupSession(identity.receipt.session_id))!;
+  const projection = {
+    service: session.service, instance_id: session.instance_id,
+    certificate_sha256: session.certificate_sha256,
+    instance_revision: peer.instance_revision, certificate_revision: peer.certificate_revision,
+    raw_body_sha256: command.proof.raw_body_sha256,
+    session_id: session.session_id, incarnation_id: session.incarnation_id,
+    key_sha256: session.public_key_sha256, session_revision: session.session_revision,
+    command_type: "execution_query_v1", command_id: crypto.randomUUID(),
+    method: "POST", normalized_path: "/_internal/core/v1/commands",
+    deadline_at: new Date(Date.now() + 20000).toISOString(), trace_id: "batch-probe",
+  };
+  function item(data: unknown, changes = {}) {
+    const p = { ...projection, command_id: crypto.randomUUID(), ...changes };
+    const e = {
+      command_id: p.command_id, caller_incarnation: p.incarnation_id,
+      deadline_at: p.deadline_at, trace_id: p.trace_id, contract_version: 1,
+      body_digest: sha256(canonical({ kind: p.command_type, contract_version: 1,
+        owner: { service: p.service, instance_id: p.instance_id, session_id: p.session_id, incarnation_id: p.incarnation_id },
+        deadline_at: p.deadline_at, data })),
+    };
+    return { projection: p, envelope: e, data, computed: {} };
+  }
+  const good = { kind: "execution_begin_v1", command_id: crypto.randomUUID() };
+  const mixed = [item(good, { session_revision: "2" }), item(good)];
+  const result = (await db`SELECT core_execution_batch_v1(${mixed}::jsonb) value`)[0].value;
+  expect(result).toEqual([{ error: "internal_session_invalid" }, { receipt: { command_state: "NOT_FOUND" } }]);
+  const ready = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const held = db.begin(async (tx) => {
+    const batch = [item({ kind: "execution_begin_v1", command_id: "bad" }), item(good)];
+    const value = (await tx`SELECT core_execution_batch_v1(${batch}::jsonb) value`)[0].value;
+    expect(value).toEqual([{ error: "identity_store_unavailable" }, { receipt: { command_state: "NOT_FOUND" } }]);
+    ready.resolve();
+    await release.promise;
+  });
+  await Promise.race([ready.promise, held]);
+  let done = false;
+  const writer = Promise.resolve(db`SELECT internal_identity_change_v1('gateway','gatewayA',NULL,${session.session_id}::uuid,'DISABLE')`).then(() => { done = true; });
+  try {
+    let blocked = false;
+    for (let n = 0; n < 100; n++) {
+      const rows = await db`SELECT wait_event_type FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND query LIKE 'SELECT internal_identity_change_v1%'`;
+      if (rows.some((r: {wait_event_type:string}) => r.wait_event_type === "Lock")) { blocked = true; break; }
+      await Bun.sleep(5);
+    }
+    expect(blocked).toBe(true);
+    expect(done).toBe(false);
+  } finally {
+    release.resolve();
+    await held;
+    await writer;
+  }
+  console.log(JSON.stringify({ sql: "pass", stale_group_isolated: true, failed_item_preserves_identity_lock: true }));
+});

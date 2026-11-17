@@ -1,0 +1,79 @@
+[
+  {
+    "command": "bun run check",
+    "exit_code": 0,
+    "result": "294 TypeScript files checked"
+  },
+  {
+    "command": "bun run lint",
+    "exit_code": 0,
+    "result": "0 errors/warnings"
+  },
+  {
+    "command": "bun run fmt:check",
+    "exit_code": 0,
+    "result": "All 533 files formatted at final check"
+  },
+  {
+    "command": "bun run test",
+    "exit_code": 0,
+    "passed": 369,
+    "failed": 0,
+    "files": 56,
+    "expects": 5242
+  },
+  {
+    "command": "bun run test:integration (native shared evidence replica present)",
+    "exit_code": 1,
+    "passed": 447,
+    "failed": 1,
+    "files": 65,
+    "expects": 12135,
+    "reason": "gateway-lifecycle negative startup test assumes no evidence replica"
+  },
+  {
+    "command": "bun run test:integration (isolated AOF always evidence Redis, no replica)",
+    "exit_code": 0,
+    "passed": 448,
+    "failed": 0,
+    "files": 65,
+    "expects": 12121
+  },
+  {
+    "command": "bun run build",
+    "exit_code": 0,
+    "result": "Built all declared artifacts"
+  },
+  {
+    "command": "bun run test:artifact",
+    "exit_code": 0,
+    "scripts": 5,
+    "checks": 41,
+    "catalog_cases": 84,
+    "catalog_steps": 112
+  },
+  {
+    "command": "bun run test:durability",
+    "exit_code": 0,
+    "checks": 7,
+    "owned_resources_remaining": 0
+  },
+  {
+    "command": "bun run test:native",
+    "exit_code": 0,
+    "top_level_go_tests": 33,
+    "pass_records_including_subtests": 45
+  },
+  {
+    "command": "bun run test:plugin-artifact",
+    "exit_code": 0,
+    "cases": 84,
+    "steps": 112,
+    "pending": 0
+  },
+  {
+    "command": "bun run test:backup",
+    "exit_code": null,
+    "result": "Not run: native source not globally quiesced; existing processes were not stopped. Integration backup/restore tests passed, and do not replace this standalone command."
+  }
+]

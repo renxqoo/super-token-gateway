@@ -106,6 +106,10 @@ test("mutable public package views cannot substitute code or manifest after sign
   const fresh = await syntheticChatPackage();
   fresh.pkg.module.fill(0);
   fresh.pkg.manifest.entrypoint = "not_the_signed_function";
+  fresh.pkg.digest = "f".repeat(64);
+  fresh.pkg.moduleHash = "e".repeat(64);
+  fresh.pkg.configSchema.properties = {};
+  fresh.pkg.configSchema.required = [];
   const a = host.create(fresh.pkg, {
     tenant: "synthetic",
     attempt: crypto.randomUUID(),

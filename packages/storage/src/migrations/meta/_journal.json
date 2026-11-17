@@ -50,6 +50,20 @@
       "when": 1794555964904,
       "tag": "0006_settlement_authentication",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794898683399,
+      "tag": "0007_catalog_cache",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794900737769,
+      "tag": "0008_request_quota_index",
+      "breakpoints": true
     }
   ]
 }

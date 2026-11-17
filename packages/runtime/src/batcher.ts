@@ -7,6 +7,7 @@ export class Batcher<Input, Output> {
     reject: (error: unknown) => void;
   }[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private immediateScheduled = false;
   private active = 0;
   private pendingWeight = 0;
   constructor(
@@ -37,6 +38,17 @@ export class Batcher<Input, Output> {
       clearTimeout(this.timer);
       this.timer = undefined;
       this.flush();
+    } else if (this.active === 0) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+      if (!this.immediateScheduled) {
+        this.immediateScheduled = true;
+        queueMicrotask(() => {
+          this.immediateScheduled = false;
+          if (this.active === 0) this.flush();
+          else this.schedule();
+        });
+      }
     } else if (!this.timer)
       this.timer = setTimeout(() => {
         this.timer = undefined;

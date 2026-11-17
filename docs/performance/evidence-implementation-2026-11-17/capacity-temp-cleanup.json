@@ -1,0 +1,12 @@
+{
+  "removed": [
+    ".local/capacity/bench-27dba1a91ca547f98ca96391bf6e252b",
+    ".local/capacity/bench-f558f0855e59411985b4d0e3e48a60f7",
+    ".local/capacity/bench-0bfc28dc6e8d4dd3a4636fb51b3923d5",
+    ".local/capacity/bench-17ec41646c454a2c873001cf875ca3eb",
+    ".local/capacity/bench-14fd4705d2dd48509f43c235279593bb"
+  ],
+  "count": 5,
+  "verified_original_bytes": true,
+  "process_and_database_cleanup_per_round": true
+}

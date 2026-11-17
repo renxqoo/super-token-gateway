@@ -1,0 +1,114 @@
+import { SQL, RedisClient } from "bun";
+import { stat } from "node:fs/promises";
+import { readProcessRows } from "../../scripts/benchmark-metrics.ts";
+const root = "docs/performance/evidence-p0-2026-11-17";
+const manifest = await Bun.file(`${root}/rounds.json`).json();
+const names: string[] = [],
+  owned: { pid: number; started: string }[] = [];
+let cleanupErrors = 0;
+for (const row of manifest) {
+  const audit = await Bun.file(`${root}/${row.audit}`).json();
+  names.push(audit.database);
+  for (const role of [
+    "gateway",
+    "core_api",
+    "core_worker",
+    "upstream",
+    "plugin_helper",
+    "new_api",
+    ...(row.label.startsWith("reference-") ? ["redis"] : []),
+  ])
+    owned.push(...(audit.processes[role]?.pids ?? []));
+  if (
+    audit.cleanup &&
+    (!audit.cleanup.database_dropped ||
+      !audit.cleanup.runtime_removed ||
+      audit.cleanup.errors.length ||
+      audit.cleanup.processes.some((p: { stopped: boolean }) => !p.stopped))
+  )
+    cleanupErrors++;
+}
+const listed = readProcessRows();
+const remaining = owned.filter((p) =>
+  listed.some((now) => now.pid === p.pid && now.started === p.started),
+);
+const db = new SQL(process.env.DATABASE_URL!, { max: 1 });
+let databaseResult;
+try {
+  databaseResult = {
+    owned_remaining: await db`SELECT datname FROM pg_database WHERE datname=ANY(${names}::text[])`,
+    protected_reference:
+      await db`SELECT datname FROM pg_database WHERE datname='newapi_bench_1794879563902'`,
+    foundation_count: (
+      await db`SELECT count(*)::int AS count FROM pg_database WHERE datname LIKE 'gateway_test_foundation_%'`
+    )[0].count,
+    settings:
+      await db`SELECT name,setting FROM pg_settings WHERE name IN ('fsync','synchronous_commit','full_page_writes') ORDER BY name`,
+  };
+} finally {
+  await db.close();
+}
+const redis = new RedisClient(process.env.QUEUE_REDIS_URL!, { autoReconnect: false });
+let evidence;
+try {
+  await redis.connect();
+  evidence = {
+    settings: await redis.send("CONFIG", [
+      "GET",
+      "appendonly",
+      "appendfsync",
+      "aof-load-truncated",
+      "maxmemory-policy",
+    ]),
+    replication: await redis.send("INFO", ["replication"]),
+  };
+} finally {
+  redis.close();
+}
+const isolated = await Bun.file(".local/p0-evidence/integration-isolated-result.json").json();
+let isolatedDirectoryExists = true;
+try {
+  await stat(isolated.directory);
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code === "ENOENT") isolatedDirectoryExists = false;
+  else throw error;
+}
+const result = {
+  at: new Date().toISOString(),
+  benchmark_rounds: manifest.length,
+  benchmark_cleanup_errors: cleanupErrors,
+  owned_processes_remaining: remaining,
+  protected_processes: listed
+    .filter((p) => [40766, 40771].includes(p.pid))
+    .map((p) => ({
+      pid: p.pid,
+      started: p.started,
+      cpu_seconds: p.cpu_seconds,
+      command: p.command,
+    })),
+  database: databaseResult,
+  evidence,
+  isolated_integration: { ...isolated, directory_exists: isolatedDirectoryExists },
+  notes: [
+    "Shared native PG/Redis and all 25 preexisting foundation databases are preserved; registration proves each predates this task (background count was 21).",
+    "PG background and Redis admission/evidence PIDs are shared services and are excluded from owned process cleanup.",
+  ],
+};
+await Bun.write(`${root}/resource-cleanup.json`, JSON.stringify(result, null, 2) + "\n");
+console.log(
+  JSON.stringify({
+    remaining_processes: remaining.length,
+    remaining_databases: databaseResult.owned_remaining.length,
+    foundation_count: databaseResult.foundation_count,
+    protected_processes: result.protected_processes.map((p) => p.pid),
+    isolated_directory_exists: isolatedDirectoryExists,
+    benchmark_cleanup_errors: cleanupErrors,
+  }),
+);
+if (
+  remaining.length ||
+  databaseResult.owned_remaining.length ||
+  isolatedDirectoryExists ||
+  cleanupErrors
+)
+  process.exitCode = 1;

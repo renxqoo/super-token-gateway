@@ -1,0 +1,87 @@
+beyond-new-api/03-server-design.md:117:### 3.3 `execution_contexts`
+beyond-new-api/03-server-design.md:119:热路径不再写入。permit 以 `context_digest = H(J(payload))` 替代对 context 行的引用；现有恢复与升级路径若读取 `execution_contexts`，改为读取 permit 快照。**待核对**：所有引用 `execution_contexts` 的外键、函数与测试。
+infra/core-execution-role.sql:6:REVOKE ALL ON execution_contexts,execution_commands,execution_permits,execution_quota_leases,upstream_holds,upstream_account_balances,channels,api_keys,wallets FROM core_execution_api;
+beyond-new-api/02-architecture.md:63:  A->>P: 读 session；core_context_v1（身份重核、候选与摘要、写 execution_contexts）
+beyond-new-api/02-architecture.md:126:- 问题：context 每请求写 `execution_contexts` 并在 SQL 内算候选与摘要；而 context 本来“只是一份候选，不能代替当前授权”（`enterprise-v2-core-execution.md:288`）。
+beyond-new-api/04-spec.md:39:| SR-17 | context 改为 Core 签名令牌，热路径不写 `execution_contexts`                                             | 单元：MAC、owner、过期、fingerprint 篡改各自被拒为 `context_invalid`；集成：多次 context 不产生 PG 写入                                   |
+beyond-new-api/04-spec.md:101:| `execution_contexts` 的全部引用                                                                                     | SR-17 迁移范围          | P1 开工前核对                          |
+docs/performance/capacity-improvement-plan.md:42:- 合并 context 与首次准入：同一次 RPC、同一事务内计算候选并准入，候选只算一次；`execution_contexts` 只保存后续 attempt 需要的快照。
+tests/integration/core-execution.test.ts:862:        JSON.stringify(await db`SELECT to_jsonb(c) value FROM execution_contexts c`),
+tests/integration/core-execution-upgrade.test.ts:143:      expect((await db`SELECT to_regclass('execution_contexts') relation`)[0].relation).toBeNull();
+packages/storage/src/sql/core-resources.sql:104: INSERT INTO public.execution_contexts(id,project_id,key_id,owner_session_id,operation,model,ip,fingerprint,snapshot,expires_at) VALUES(id,(auth->>'project_id')::uuid,k,(p->>'session_id')::uuid,input->>'operation',input->>'model',input->>'ip',input->>'fingerprint',snapshot,expiry);
+packages/storage/src/sql/core-batches.sql:35: INSERT INTO public.execution_contexts(id,project_id,key_id,owner_session_id,operation,model,ip,fingerprint,snapshot,expires_at) VALUES(id,(auth->>'project_id')::uuid,k,(p->>'session_id')::uuid,input->>'operation',input->>'model',input->>'ip',input->>'fingerprint',snapshot,expiry);
+packages/storage/src/sql/core-batches.sql:311:DECLARE ctx public.execution_contexts%ROWTYPE;cmd public.execution_commands%ROWTYPE;q public.gateway_requests%ROWTYPE;permit public.execution_permits%ROWTYPE;a public.attempts%ROWTYPE;h public.upstream_holds%ROWTYPE;balance public.upstream_account_balances%ROWTYPE;
+packages/storage/src/sql/core-batches.sql:322:  SELECT * INTO ctx FROM public.execution_contexts WHERE id=(d->>'context_id')::uuid;
+packages/storage/src/sql/core-batches.sql:329:  SELECT * INTO ctx FROM public.execution_contexts WHERE id=CASE WHEN kind='execution_query_v1' THEN cmd.context_id ELSE permit.context_id END;
+packages/storage/src/migrations/0004_financial_admission.sql:1:CREATE TABLE "execution_contexts" (
+packages/storage/src/migrations/0004_financial_admission.sql:46:ALTER TABLE "execution_contexts" ADD CONSTRAINT "execution_contexts_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+packages/storage/src/migrations/0004_financial_admission.sql:47:ALTER TABLE "execution_contexts" ADD CONSTRAINT "execution_contexts_key_id_api_keys_id_fk" FOREIGN KEY ("key_id") REFERENCES "public"."api_keys"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+packages/storage/src/migrations/0004_financial_admission.sql:48:ALTER TABLE "execution_contexts" ADD CONSTRAINT "execution_contexts_owner_session_id_internal_startup_sessions_session_id_fk" FOREIGN KEY ("owner_session_id") REFERENCES "public"."internal_startup_sessions"("session_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+packages/storage/src/migrations/0004_financial_admission.sql:53:ALTER TABLE "execution_commands" ADD CONSTRAINT "execution_commands_context_id_execution_contexts_id_fk" FOREIGN KEY ("context_id") REFERENCES "public"."execution_contexts"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+packages/storage/src/migrations/0004_financial_admission.sql:55:ALTER TABLE "execution_permits" ADD CONSTRAINT "execution_permits_context_id_execution_contexts_id_fk" FOREIGN KEY ("context_id") REFERENCES "public"."execution_contexts"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+packages/storage/src/sql/core-execution-recovery.sql:2:DECLARE permit public.execution_permits%ROWTYPE;cmd public.execution_commands%ROWTYPE;q public.gateway_requests%ROWTYPE;h public.upstream_holds%ROWTYPE;ctx public.execution_contexts%ROWTYPE;
+packages/storage/src/sql/core-execution-recovery.sql:19: SELECT * INTO ctx FROM public.execution_contexts WHERE id=permit.context_id;
+packages/storage/src/sql/core-files.sql:26: INSERT INTO public.execution_contexts(id,project_id,key_id,owner_session_id,operation,model,ip,fingerprint,snapshot,expires_at) VALUES(id,(auth->>'project_id')::uuid,k,(p->>'session_id')::uuid,input->>'operation',input->>'model',input->>'ip',input->>'fingerprint',snapshot,expiry);
+packages/storage/src/schema/enterprise.ts:60:    contextId: uuid("context_id").references((): AnyPgColumn => executionContexts.id),
+packages/storage/src/schema/enterprise.ts:90:    contextId: uuid("context_id").references((): AnyPgColumn => executionContexts.id),
+packages/storage/src/schema/enterprise.ts:444:export const executionContexts = pgTable("execution_contexts", {
+packages/storage/src/sql/core-execution.sql:82: INSERT INTO public.execution_contexts(id,project_id,key_id,owner_session_id,operation,model,ip,fingerprint,snapshot,expires_at) VALUES(id,(auth->>'project_id')::uuid,k,(p->>'session_id')::uuid,input->>'operation',input->>'model',input->>'ip',input->>'fingerprint',snapshot,expiry);
+packages/storage/src/sql/core-execution.sql:236:CREATE TRIGGER core_context_immutable BEFORE UPDATE OR DELETE ON public.execution_contexts FOR EACH ROW EXECUTE FUNCTION public.immutable_row();
+packages/storage/src/sql/core-execution.sql:252:DECLARE ctx public.execution_contexts%ROWTYPE;cmd public.execution_commands%ROWTYPE;q public.gateway_requests%ROWTYPE;permit public.execution_permits%ROWTYPE;a public.attempts%ROWTYPE;h public.upstream_holds%ROWTYPE;balance public.upstream_account_balances%ROWTYPE;
+packages/storage/src/sql/core-execution.sql:263:  SELECT * INTO ctx FROM public.execution_contexts WHERE id=(d->>'context_id')::uuid;
+packages/storage/src/sql/core-execution.sql:270:  SELECT * INTO ctx FROM public.execution_contexts WHERE id=CASE WHEN kind='execution_query_v1' THEN cmd.context_id ELSE permit.context_id END;
+packages/storage/src/sql/core-execution.sql:420:DECLARE ctx public.execution_contexts%ROWTYPE;permit public.execution_permits%ROWTYPE;channel public.channels%ROWTYPE;auth jsonb;leases jsonb;BEGIN
+packages/storage/src/sql/core-execution.sql:427: SELECT * INTO ctx FROM public.execution_contexts ec WHERE ec.id=context_id;
+packages/storage/src/sql/core-execution.sql:451:DECLARE cmd public.execution_commands%ROWTYPE;ctx public.execution_contexts%ROWTYPE;BEGIN
+packages/storage/src/sql/core-execution.sql:455: SELECT * INTO ctx FROM public.execution_contexts WHERE id=cmd.context_id;
+packages/storage/src/migrations/meta/0006_snapshot.json:5535:        "execution_commands_context_id_execution_contexts_id_fk": {
+packages/storage/src/migrations/meta/0006_snapshot.json:5536:          "name": "execution_commands_context_id_execution_contexts_id_fk",
+packages/storage/src/migrations/meta/0006_snapshot.json:5538:          "tableTo": "execution_contexts",
+packages/storage/src/migrations/meta/0006_snapshot.json:5566:    "public.execution_contexts": {
+packages/storage/src/migrations/meta/0006_snapshot.json:5567:      "name": "execution_contexts",
+packages/storage/src/migrations/meta/0006_snapshot.json:5640:        "execution_contexts_project_id_projects_id_fk": {
+packages/storage/src/migrations/meta/0006_snapshot.json:5641:          "name": "execution_contexts_project_id_projects_id_fk",
+packages/storage/src/migrations/meta/0006_snapshot.json:5642:          "tableFrom": "execution_contexts",
+packages/storage/src/migrations/meta/0006_snapshot.json:5649:        "execution_contexts_key_id_api_keys_id_fk": {
+packages/storage/src/migrations/meta/0006_snapshot.json:5650:          "name": "execution_contexts_key_id_api_keys_id_fk",
+packages/storage/src/migrations/meta/0006_snapshot.json:5651:          "tableFrom": "execution_contexts",
+packages/storage/src/migrations/meta/0006_snapshot.json:5658:        "execution_contexts_owner_session_id_internal_startup_sessions_session_id_fk": {
+packages/storage/src/migrations/meta/0006_snapshot.json:5659:          "name": "execution_contexts_owner_session_id_internal_startup_sessions_session_id_fk",
+packages/storage/src/migrations/meta/0006_snapshot.json:5660:          "tableFrom": "execution_contexts",
+packages/storage/src/migrations/meta/0006_snapshot.json:5873:        "execution_permits_context_id_execution_contexts_id_fk": {
+packages/storage/src/migrations/meta/0006_snapshot.json:5874:          "name": "execution_permits_context_id_execution_contexts_id_fk",
+packages/storage/src/migrations/meta/0006_snapshot.json:5876:          "tableTo": "execution_contexts",
+packages/storage/src/migrations/meta/0004_snapshot.json:4920:        "execution_commands_context_id_execution_contexts_id_fk": {
+packages/storage/src/migrations/meta/0004_snapshot.json:4921:          "name": "execution_commands_context_id_execution_contexts_id_fk",
+packages/storage/src/migrations/meta/0004_snapshot.json:4923:          "tableTo": "execution_contexts",
+packages/storage/src/migrations/meta/0004_snapshot.json:4951:    "public.execution_contexts": {
+packages/storage/src/migrations/meta/0004_snapshot.json:4952:      "name": "execution_contexts",
+packages/storage/src/migrations/meta/0004_snapshot.json:5025:        "execution_contexts_project_id_projects_id_fk": {
+packages/storage/src/migrations/meta/0004_snapshot.json:5026:          "name": "execution_contexts_project_id_projects_id_fk",
+packages/storage/src/migrations/meta/0004_snapshot.json:5027:          "tableFrom": "execution_contexts",
+packages/storage/src/migrations/meta/0004_snapshot.json:5034:        "execution_contexts_key_id_api_keys_id_fk": {
+packages/storage/src/migrations/meta/0004_snapshot.json:5035:          "name": "execution_contexts_key_id_api_keys_id_fk",
+packages/storage/src/migrations/meta/0004_snapshot.json:5036:          "tableFrom": "execution_contexts",
+packages/storage/src/migrations/meta/0004_snapshot.json:5043:        "execution_contexts_owner_session_id_internal_startup_sessions_session_id_fk": {
+packages/storage/src/migrations/meta/0004_snapshot.json:5044:          "name": "execution_contexts_owner_session_id_internal_startup_sessions_session_id_fk",
+packages/storage/src/migrations/meta/0004_snapshot.json:5045:          "tableFrom": "execution_contexts",
+packages/storage/src/migrations/meta/0004_snapshot.json:5258:        "execution_permits_context_id_execution_contexts_id_fk": {
+packages/storage/src/migrations/meta/0004_snapshot.json:5259:          "name": "execution_permits_context_id_execution_contexts_id_fk",
+packages/storage/src/migrations/meta/0004_snapshot.json:5261:          "tableTo": "execution_contexts",
+packages/storage/src/migrations/meta/0005_snapshot.json:5394:        "execution_commands_context_id_execution_contexts_id_fk": {
+packages/storage/src/migrations/meta/0005_snapshot.json:5395:          "name": "execution_commands_context_id_execution_contexts_id_fk",
+packages/storage/src/migrations/meta/0005_snapshot.json:5397:          "tableTo": "execution_contexts",
+packages/storage/src/migrations/meta/0005_snapshot.json:5425:    "public.execution_contexts": {
+packages/storage/src/migrations/meta/0005_snapshot.json:5426:      "name": "execution_contexts",
+packages/storage/src/migrations/meta/0005_snapshot.json:5499:        "execution_contexts_project_id_projects_id_fk": {
+packages/storage/src/migrations/meta/0005_snapshot.json:5500:          "name": "execution_contexts_project_id_projects_id_fk",
+packages/storage/src/migrations/meta/0005_snapshot.json:5501:          "tableFrom": "execution_contexts",
+packages/storage/src/migrations/meta/0005_snapshot.json:5508:        "execution_contexts_key_id_api_keys_id_fk": {
+packages/storage/src/migrations/meta/0005_snapshot.json:5509:          "name": "execution_contexts_key_id_api_keys_id_fk",
+packages/storage/src/migrations/meta/0005_snapshot.json:5510:          "tableFrom": "execution_contexts",
+packages/storage/src/migrations/meta/0005_snapshot.json:5517:        "execution_contexts_owner_session_id_internal_startup_sessions_session_id_fk": {
+packages/storage/src/migrations/meta/0005_snapshot.json:5518:          "name": "execution_contexts_owner_session_id_internal_startup_sessions_session_id_fk",
+packages/storage/src/migrations/meta/0005_snapshot.json:5519:          "tableFrom": "execution_contexts",
+packages/storage/src/migrations/meta/0005_snapshot.json:5732:        "execution_permits_context_id_execution_contexts_id_fk": {
+packages/storage/src/migrations/meta/0005_snapshot.json:5733:          "name": "execution_permits_context_id_execution_contexts_id_fk",
+packages/storage/src/migrations/meta/0005_snapshot.json:5735:          "tableTo": "execution_contexts",

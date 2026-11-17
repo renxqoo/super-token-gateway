@@ -1,4 +1,5 @@
 import { SQL } from "bun";
+import { createIdentityReadCache } from "./read-cache.ts";
 import { X509Certificate, randomBytes } from "node:crypto";
 import type { ServerHttp2Stream, IncomingHttpHeaders } from "node:http2";
 import {
@@ -106,6 +107,22 @@ export async function startCoreInternalListener(options: Options) {
         rawDigest: string;
         endpoint: "current-session" | "plugin_package_v1" | ExecutionKind;
       };
+  const peerReads = createIdentityReadCache({
+    capacity: 4096,
+    maxPending: 64,
+    ttlMs: 1000,
+    load: (hash, signal) => createInternalIdentityStore(db, signal).readPeerDirectory(hash),
+  });
+  const sessionReads = createIdentityReadCache({
+    capacity: 4096,
+    maxPending: 64,
+    ttlMs: 1000,
+    load: (id, signal) => createInternalIdentityStore(db, signal).readStartupSession(id),
+  });
+  function invalidateIdentityReads() {
+    peerReads.invalidate();
+    sessionReads.invalidate();
+  }
   const contexts = new WeakMap<object, Snapshot>();
   let activeContexts = 0,
     identityStreams = 0;
@@ -183,6 +200,8 @@ export async function startCoreInternalListener(options: Options) {
   async function authenticatePeer(
     stream: ServerHttp2Stream,
     requestStore: ReturnType<typeof createInternalIdentityStore>,
+    cached: boolean,
+    signal: AbortSignal,
   ) {
     let observed: ReturnType<typeof readH2Peer>;
     try {
@@ -190,7 +209,10 @@ export async function startCoreInternalListener(options: Options) {
     } catch {
       return reject("internal_peer_forbidden");
     }
-    const peer = await requestStore.readPeerDirectory(sha256(observed.leaf_der));
+    const hash = sha256(observed.leaf_der);
+    const peer = cached
+      ? await peerReads.get(hash, signal)
+      : await requestStore.readPeerDirectory(hash);
     if (
       !peer ||
       peer.subject_altname_exact !== observed.subject_altname_exact ||
@@ -281,9 +303,11 @@ export async function startCoreInternalListener(options: Options) {
         );
       }
       if (signal.aborted) return reject("internal_deadline");
-      reserved = await db.reserve({ signal });
-      const requestStore = createInternalIdentityStore(reserved, signal);
-      const peer = await authenticatePeer(stream, requestStore);
+      const startupRequest = endpoint === "challenges" || endpoint === "registrations";
+      if (startupRequest) reserved = await db.reserve({ signal });
+      const requestStore = createInternalIdentityStore(reserved ?? db, signal);
+      const peer = await authenticatePeer(stream, requestStore, !startupRequest, signal);
+      signal.throwIfAborted();
       const rawDigest = sha256(raw);
       let parsed: unknown;
       try {
@@ -371,7 +395,8 @@ export async function startCoreInternalListener(options: Options) {
         } catch {
           return reject("internal_proof_invalid");
         }
-        const session = await requestStore.readStartupSession(proof.session_id);
+        const session = await sessionReads.get(proof.session_id, signal);
+        signal.throwIfAborted();
         if (
           !session ||
           session.service !== peer.service ||
@@ -435,10 +460,6 @@ export async function startCoreInternalListener(options: Options) {
         );
         if (expected !== e.body_digest) return reject("internal_proof_invalid");
         context = mint({ scope: "command", peer, session, proof, rawDigest, endpoint });
-        if (endpoint !== "current-session") {
-          await reserved.release();
-          reserved = undefined;
-        }
         if (endpoint === "plugin_package_v1") {
           const bytes = await execution!.pluginPackage(
             context,
@@ -450,7 +471,7 @@ export async function startCoreInternalListener(options: Options) {
         const result =
           endpoint === "current-session"
             ? await requestStore.current(requireCaller(context))
-            : await execution!.handle(context, endpoint, request.data);
+            : await execution!.handle(context, endpoint, request.data, signal);
         if (!signal.aborted) {
           const receipt = executionReceiptSchema.safeParse(
             (result as { receipt?: unknown }).receipt,
@@ -564,7 +585,23 @@ export async function startCoreInternalListener(options: Options) {
     }
   }
   let listener: Awaited<ReturnType<typeof listenBoundedH2>>;
+  let invalidation: Awaited<ReturnType<typeof db.listen>> | undefined;
+  async function closeDependencies() {
+    peerReads.close();
+    sessionReads.close();
+    try {
+      await invalidation?.unlisten();
+    } finally {
+      execution?.close();
+      await db.close({ timeout: 5 });
+    }
+  }
   try {
+    invalidation = await db.listen(
+      "stg_identity",
+      invalidateIdentityReads,
+      invalidateIdentityReads,
+    );
     listener = await listenBoundedH2(
       {
         ...options,
@@ -589,8 +626,7 @@ export async function startCoreInternalListener(options: Options) {
       onStream,
     );
   } catch (error) {
-    execution?.close();
-    await db.close();
+    await closeDependencies();
     throw error;
   }
   const certificate = new X509Certificate(options.cert);
@@ -622,15 +658,13 @@ export async function startCoreInternalListener(options: Options) {
       async stop() {
         await startup.close();
         await listener.stop();
-        execution?.close();
-        await db.close();
+        await closeDependencies();
       },
     };
   } catch (error) {
     await startup.close();
     await listener.stop();
-    execution?.close();
-    await db.close();
+    await closeDependencies();
     throw error;
   }
 }

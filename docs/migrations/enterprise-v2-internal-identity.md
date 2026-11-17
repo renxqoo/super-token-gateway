@@ -256,3 +256,9 @@ LEGACY无session：历史无Core permit/无startup身份的既存行只读保留
 本轮产品测试 0；未跑 check/lint/fmt:check/test/integration/build/artifact/container/durability/backup/native/完整 TLS，不重复已关闭 R1/R2 的 crypto/WeakMap/147 调度模型。无产品、master、测试、SQL、index/HEAD 主动写入，无 PG/Redis/真实模型/Docker/Go/Cargo/commit/push/子代理。首次 git status 后才建立 index 二进制 baseline，缺该此前区间的 hash，不能补造；后续以 GIT_OPTIONAL_LOCKS=0 核 index 初末 hash、ls-files --stage 语义与 cached diff，并完整复核输入。原官方来源链接作为已审查规范依据保留；本轮未重新访问互联网，不将其当新增运行证据。
 
 完成必要修订即冻结停止写，交 fresh 独立 R3 窄复核；本修订不自行接纳、不实施产品、不分配 DDL 版本，不解除 b.1 接纳后串行 identity 前置 unit 再 financial b.2/c 的依赖。
+
+## 2026-11-17 中间件预读缓存
+
+Core中间件为已注册命令复用私有peer/session预读，TTL为1秒、每类上限4096条与64个并行冷加载；同key并发合并，未知身份和失败不缓存。startup challenge/registration仍直接读数据库。身份表写入同事务发送stg_identity通知，监听确认或重新连接均清空缓存；在途旧代读取不能重新填充新代缓存。
+
+预读不授予资金、资源或插件访问权。每条命令仍按自身raw digest、Ed25519证明、owner、路径、envelope及deadline验证，随后调用原数据库当前身份屏障，持三层共享锁核对revision与吊销状态。缓存命中、通知丢失、旧读取与重连均不能跳过该屏障。关闭后不保留缓存条目或监听连接；请求取消不取消其他请求共享的有界读取。全部线性化与历史补证规则保持原契约。

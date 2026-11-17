@@ -1,0 +1,6 @@
+{
+  "symptom": "exited backend makes end-minus-start CPU negative",
+  "initial": { "pg": { "rss_bytes": 204800, "cpu_seconds": 5, "processes": 2 } },
+  "final": { "pg": { "rss_bytes": 102400, "cpu_seconds": 2, "processes": 1 } },
+  "cpu_seconds": -3
+}

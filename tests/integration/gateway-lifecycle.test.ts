@@ -474,6 +474,67 @@ test(
 );
 
 test(
+  "a killed local plugin helper preserves the unknown send without poisoning the shared upstream channel",
+  () => {
+    const responseGate = stall();
+    return withGatewayStack(
+      {
+        reply: async (call) => {
+          if (call.index === 0) await responseGate.released;
+          return chatReplies.json();
+        },
+      },
+      async ({ f, db, setup, received, gateway, send, startGateway }) => {
+        const other = await startGateway({}, "gatewayB", "coreB");
+        const pending = send();
+        try {
+          await eventually(async () => received.length === 1, "dispatched response waits");
+          const helpers = execFileSync("pgrep", ["-P", String(gateway.pid)])
+            .toString()
+            .trim()
+            .split("\n")
+            .filter(Boolean);
+          expect(helpers.length).toBeGreaterThan(0);
+          for (const pid of helpers) process.kill(Number(pid), "SIGKILL");
+          await Bun.sleep(100);
+        } finally {
+          responseGate.release();
+        }
+        const failed = await pending;
+        expect(failed.status).toBe(502);
+        await failed.text();
+        const requestId = failed.headers.get("x-request-id")!;
+        expect(await requestOutcome(db, requestId)).toMatchObject({
+          state: "FAILED",
+          charged: "0",
+        });
+        const [attempt] = await db`SELECT a.state,a.error_code,h.state AS hold,
+          b.reserved_atoms::text AS reserved FROM attempts a JOIN upstream_holds h ON h.attempt_id=a.id
+          JOIN upstream_account_balances b ON b.account_id=h.account_id AND b.currency=h.currency
+          WHERE a.request_id=${requestId}`;
+        expect(attempt).toMatchObject({ state: "UNKNOWN", hold: "PARTIAL" });
+        expect(BigInt(attempt.reserved)).toBeGreaterThan(0n);
+        const redis = new RedisClient(process.env.REDIS_URL!);
+        try {
+          expect(
+            await redis.send("HGET", [`${f.namespace}:health:${setup.provider.id}`, "fails"]),
+          ).not.toBe("1");
+        } finally {
+          redis.close();
+        }
+        expect(attempt.error_code).toMatch(/^plugin_host_[a-z0-9_]+$/);
+        const healthy = await send({ via: other });
+        expect(healthy.status).toBe(200);
+        await healthy.text();
+        expect((await settledCharge(db, healthy.headers.get("x-request-id")!)).amount).toBe("100");
+        expect(received).toHaveLength(2);
+      },
+    );
+  },
+  timeout,
+);
+
+test(
   "a killed plugin helper fails the in-flight stream without a terminal or re-send, and the next request uses a restarted helper",
   () =>
     withGatewayStack(
@@ -483,7 +544,7 @@ test(
             ? slowStream(chatFrames().slice(0, 1), 100, () => undefined)
             : chatReplies.json(),
       },
-      async ({ db, received, gateway, send }) => {
+      async ({ f, db, setup, received, gateway, send }) => {
         const response = await send({ stream: true });
         const reader = response.body!.getReader();
         await reader.read();
@@ -507,6 +568,17 @@ test(
           state: "FAILED",
           charged: "0",
         });
+        expect(
+          (await db`SELECT error_code FROM attempts WHERE request_id=${requestId}`)[0].error_code,
+        ).toMatch(/^plugin_host_[a-z0-9_]+$/);
+        const redis = new RedisClient(process.env.REDIS_URL!);
+        try {
+          expect(
+            await redis.send("HGET", [`${f.namespace}:health:${setup.provider.id}`, "fails"]),
+          ).not.toBe("1");
+        } finally {
+          redis.close();
+        }
         await eventually(
           async () => (await leaseStates(db, requestId)).join() === "RELEASED",
           "released quota leases",

@@ -1,0 +1,207 @@
+{
+  "method": "Exclusive leaf samples classified by ancestry; sample-count proportions, not wall-time timeDeltas. Absolute ms are estimates scaled to observed process CPU. async/native gaps and profiler overhead limit precision. Historical 7.1 is a normalization, not a recovered historical measurement.",
+  "samples": 15116,
+  "requests": 2492,
+  "observed_cpu_ms_per_request": 8.194221508828251,
+  "wall_duration_seconds": 62.72824025,
+  "groups": [
+    {
+      "category": "module_sha256",
+      "samples": 8968,
+      "sample_share": 0.593278645144218,
+      "estimated_profile_cpu_ms_per_request": 4.861456634769235,
+      "normalized_historical_7_1_ms": 4.212278380523948,
+      "wall_attributed_seconds": 27.288049,
+      "top_stacks": [
+        [
+          "update::0 <- sha2562:packages/plugin-sdk/src/abi.ts:17983 <- load:packages/plugin-host/src/supervisor.ts:18975 <- load:packages/plugin-host/src/supervisor.ts:18975 <- invokeRaw:packages/plugin-host/src/attempts.ts:20465",
+          8959
+        ],
+        [
+          "digest::0 <- load:packages/plugin-host/src/supervisor.ts:18975 <- load:packages/plugin-host/src/supervisor.ts:18975 <- invokeRaw:packages/plugin-host/src/attempts.ts:20465 <- invokeRaw:packages/plugin-host/src/attempts.ts:20465",
+          9
+        ]
+      ]
+    },
+    {
+      "category": "other_runtime_application_unattributed",
+      "samples": 1822,
+      "sample_share": 0.12053453294522361,
+      "estimated_profile_cpu_ms_per_request": 0.9876866624163188,
+      "normalized_historical_7_1_ms": 0.8557951839110876,
+      "wall_attributed_seconds": 10.691698,
+      "top_stacks": [
+        ["::0 <- processTicksAndRejections::7 <- (root)::0", 61],
+        ["::0 <- ::0 <- processTicksAndRejections::7 <- (root)::0", 38],
+        [
+          "invokeRaw:packages/plugin-host/src/attempts.ts:20465 <- ::0 <- processTicksAndRejections::7 <- (root)::0",
+          28
+        ]
+      ]
+    },
+    {
+      "category": "schema_validation",
+      "samples": 1340,
+      "sample_share": 0.08864779042074623,
+      "estimated_profile_cpu_ms_per_request": 0.7263996309757778,
+      "normalized_historical_7_1_ms": 0.6293993119872983,
+      "wall_attributed_seconds": 7.070315,
+      "top_stacks": [
+        [
+          "::3 <- :node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/schemas.js:12238 <- ::3 <- :node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/schemas.js:12238 <- fn:node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/parse.js:10740",
+          55
+        ],
+        [
+          "runChecks:node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/schemas.js:11360 <- ::3 <- :node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/schemas.js:12238 <- ::3 <- :node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/schemas.js:12238",
+          48
+        ],
+        [
+          "::3 <- :node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/schemas.js:12238 <- fn:node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/parse.js:10740 <- execution:packages/core-client/src/index.ts:17625 <- ::0",
+          34
+        ]
+      ]
+    },
+    {
+      "category": "package_snapshot_clone",
+      "samples": 744,
+      "sample_share": 0.049219370203757606,
+      "estimated_profile_cpu_ms_per_request": 0.4033144219746109,
+      "normalized_historical_7_1_ms": 0.349457528446679,
+      "wall_attributed_seconds": 6.191268,
+      "top_stacks": [
+        [
+          "structuredClone::0 <- create:packages/plugin-host/src/attempts.ts:20414 <- plan:apps/gateway/src/chat.ts:53941 <- ::0 <- processTicksAndRejections::7",
+          743
+        ],
+        [
+          "structuredClone::0 <- verifyPackage:packages/plugin-sdk/src/package.ts:18361 <- fetchVerified:apps/gateway/src/packages.ts:55174 <- ::0 <- processTicksAndRejections::7",
+          1
+        ]
+      ]
+    },
+    {
+      "category": "json_canonical_other_sha256",
+      "samples": 646,
+      "sample_share": 0.04273617359089706,
+      "estimated_profile_cpu_ms_per_request": 0.3501896728435466,
+      "normalized_historical_7_1_ms": 0.3034268324953691,
+      "wall_attributed_seconds": 2.815993,
+      "top_stacks": [
+        [
+          "parse::0 <- parseReply:packages/core-client/src/index.ts:17484 <- request:packages/core-client/src/index.ts:17501 <- ::0 <- processTicksAndRejections::7",
+          70
+        ],
+        [
+          "parse::0 <- invokeRaw:packages/plugin-host/src/attempts.ts:20465 <- ::0 <- processTicksAndRejections::7 <- (root)::0",
+          50
+        ],
+        [
+          "stringify::0 <- canonical:packages/kernel/src/canonical.ts:16010 <- :packages/kernel/src/canonical.ts:16026 <- map::1 <- canonical:packages/kernel/src/canonical.ts:16010",
+          36
+        ]
+      ]
+    },
+    {
+      "category": "http2",
+      "samples": 634,
+      "sample_share": 0.041942312781159036,
+      "estimated_profile_cpu_ms_per_request": 0.3436846015213754,
+      "normalized_historical_7_1_ms": 0.29779042074622913,
+      "wall_attributed_seconds": 4.435205,
+      "top_stacks": [
+        [
+          "setStreamReading::0 <- streamOnResume:node:http2:1515 <- _read:node:http2:1806 <- :internal:streams/readable:319 <- resume_:internal:streams/readable:588",
+          137
+        ],
+        [
+          "request::0 <- request:node:http2:3800 <- :packages/runtime/src/h2.ts:17337 <- Promise::1 <- sendH2:packages/runtime/src/h2.ts:17336",
+          137
+        ],
+        [
+          "assertSingleValueHeaders:node:http2:2521 <- request:node:http2:3800 <- :packages/runtime/src/h2.ts:17337 <- Promise::1 <- sendH2:packages/runtime/src/h2.ts:17336",
+          28
+        ]
+      ]
+    },
+    {
+      "category": "plugin_ipc_supervision",
+      "samples": 456,
+      "sample_share": 0.030166710770044985,
+      "estimated_profile_cpu_ms_per_request": 0.2471927102425035,
+      "normalized_historical_7_1_ms": 0.21418364646731938,
+      "wall_attributed_seconds": 1.748393,
+      "top_stacks": [
+        [
+          "pull::0 <- read:internal:streams/native-readable:19 <- :internal:streams/readable:319 <- :packages/plugin-host/src/supervisor.ts:18904 <- emit:node:events:85",
+          36
+        ],
+        [
+          "read:packages/plugin-host/src/supervisor.ts:18654 <- :packages/plugin-host/src/supervisor.ts:18904 <- emit:node:events:85 <- emitReadable_:internal:streams/readable:398 <- processTicksAndRejections::7",
+          28
+        ],
+        [
+          "write::0 <- writeFast:internal:fs/streams:370 <- write:packages/plugin-host/src/supervisor.ts:18743 <- pump:packages/plugin-host/src/supervisor.ts:18783 <- :packages/plugin-host/src/supervisor.ts:18945",
+          27
+        ]
+      ]
+    },
+    {
+      "category": "plugin_json_documents",
+      "samples": 278,
+      "sample_share": 0.018391108758930935,
+      "estimated_profile_cpu_ms_per_request": 0.15070081896363152,
+      "normalized_historical_7_1_ms": 0.13057687218840963,
+      "wall_attributed_seconds": 0.799505,
+      "top_stacks": [
+        [
+          "pointer:packages/plugin-host/src/json-documents.ts:19137 <- inspect:packages/plugin-host/src/json-documents.ts:19390 <- transformJSON:packages/plugin-host/src/attempts.ts:20610 <- ::0 <- processTicksAndRejections::7",
+          36
+        ],
+        [
+          "inspect:packages/plugin-host/src/json-documents.ts:19390 <- transformJSON:packages/plugin-host/src/attempts.ts:20610 <- ::0 <- processTicksAndRejections::7 <- (root)::0",
+          22
+        ],
+        [
+          ":packages/plugin-host/src/json-documents.ts:19140 <- map::1 <- pointer:packages/plugin-host/src/json-documents.ts:19137 <- inspect:packages/plugin-host/src/json-documents.ts:19390 <- transformJSON:packages/plugin-host/src/attempts.ts:20610",
+          15
+        ]
+      ]
+    },
+    {
+      "category": "rpc_ed25519",
+      "samples": 171,
+      "sample_share": 0.01131251653876687,
+      "estimated_profile_cpu_ms_per_request": 0.0926972663409388,
+      "normalized_historical_7_1_ms": 0.08031886742524477,
+      "wall_attributed_seconds": 1.322711,
+      "top_stacks": [
+        [
+          "sign::0 <- signed:packages/core-client/src/index.ts:17504 <- execution:packages/core-client/src/index.ts:17625 <- execution:packages/core-client/src/index.ts:17625 <- whileBusy:apps/gateway/src/chat.ts:53895",
+          114
+        ],
+        [
+          "sign::0 <- signed:packages/core-client/src/index.ts:17504 <- execution:packages/core-client/src/index.ts:17625 <- execution:packages/core-client/src/index.ts:17625 <- reportHealth:apps/gateway/src/chat.ts:54222",
+          33
+        ],
+        [
+          "sign::0 <- signed:packages/core-client/src/index.ts:17504 <- execution:packages/core-client/src/index.ts:17625 <- execution:packages/core-client/src/index.ts:17625 <- sameCommand:apps/gateway/src/chat.ts:54198",
+          24
+        ]
+      ]
+    },
+    {
+      "category": "evidence_ed25519",
+      "samples": 57,
+      "sample_share": 0.003770838846255623,
+      "estimated_profile_cpu_ms_per_request": 0.030899088780312937,
+      "normalized_historical_7_1_ms": 0.026772955808414923,
+      "wall_attributed_seconds": 0.359441,
+      "top_stacks": [
+        [
+          "sign::0 <- signEvidence:packages/core-client/src/index.ts:17713 <- record:apps/gateway/src/chat.ts:54353 <- emit:packages/plugin-host/src/evidence.ts:20715 <- emit:packages/plugin-host/src/evidence.ts:20715",
+          57
+        ]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "trusted_requests": 0,
+  "positive_preconsume_requests": 0,
+  "zero_preconsumed_settlements": 153933,
+  "source": "new-api billing_session.go preConsume and billing.go SettleBilling log branches"
+}

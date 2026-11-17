@@ -33,10 +33,39 @@ export function createExecutionStore(db: SQL) {
   );
   const projection = (p: CoreVerifiedCallerProjection) => ({ ...p });
   return {
-    async context(p: CoreVerifiedCallerProjection, id: string, input: Record<string, unknown>) {
-      return (
-        await db`SELECT core_context_v1(${projection(p)}::jsonb,${id}::uuid,${input}::jsonb) value`
-      )[0].value;
+    async context(
+      p: CoreVerifiedCallerProjection,
+      id: string,
+      input: Record<string, unknown>,
+      signal?: AbortSignal,
+    ) {
+      const until =
+        performance.now() + Math.min(Date.parse(p.deadline_at) - Date.now(), busyRetryMs);
+      let lastBusyError: unknown;
+      for (let delay = 1; ; delay = Math.min(delay * 2, 16)) {
+        signal?.throwIfAborted();
+        if (lastBusyError !== undefined && !(performance.now() < until)) throw lastBusyError;
+        const query = db`SELECT core_context_v1(${projection(p)}::jsonb,${id}::uuid,${input}::jsonb) value`;
+        const cancel = () => {
+          query.cancel();
+        };
+        signal?.addEventListener("abort", cancel, { once: true });
+        if (signal?.aborted) cancel();
+        try {
+          const rows = await query;
+          signal?.throwIfAborted();
+          return rows[0].value;
+        } catch (error) {
+          signal?.throwIfAborted();
+          const code = (error as { errno?: string } | null)?.errno;
+          if ((code !== "55P03" && code !== "P0503") || !(performance.now() + delay < until))
+            throw error;
+          lastBusyError = error;
+        } finally {
+          signal?.removeEventListener("abort", cancel);
+        }
+        await Bun.sleep(delay);
+      }
     },
     async preflight(p: CoreVerifiedCallerProjection, contextId?: string, attemptId?: string) {
       return (

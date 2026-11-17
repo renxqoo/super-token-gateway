@@ -1,0 +1,74 @@
+{
+  "label": "gateway",
+  "timestamp": "2026-11-17T02:43:30.780Z",
+  "started_at": "2026-11-17T02:43:27.748Z",
+  "warmup_requests": 3173,
+  "warmup_concurrency": 64,
+  "model": "gpt-4o-mini",
+  "runtime": "1.4.4",
+  "platform": "darwin/arm64",
+  "workload": "chat-json",
+  "transport": "Bun node:http(s) with bounded persistent agents",
+  "transport_errors": {},
+  "gateway_errors": {},
+  "duration_seconds": 2.0025626250000004,
+  "concurrency": 2048,
+  "measurement_started_at": "2026-11-17T02:43:28.778Z",
+  "hot_wallet_share": 0,
+  "wallet_calls": [320, 320, 320, 319, 319, 319, 319, 319, 319, 319],
+  "load_model": "open-loop",
+  "offered_rps": 10,
+  "offered": 20,
+  "shed": 0,
+  "inflight_shed": 0,
+  "last_dispatch_overrun_ms": 0.0002919999997175182,
+  "load_generator_peak_inflight": 1,
+  "scheduler_gap_ms": {
+    "p99": 2.36,
+    "max": 3.2
+  },
+  "load_generator_cpu_seconds": 0.055211,
+  "first_body_byte_ms": {
+    "p50": 2.25,
+    "p95": 3.93,
+    "p99": 4.77
+  },
+  "completed": 20,
+  "succeeded": 20,
+  "invalid": 0,
+  "successful_rps": 9.99,
+  "success_ratio": 1,
+  "latency_ms": {
+    "p50": 2.39,
+    "p95": 4.14,
+    "p99": 4.93,
+    "p999": 4.93
+  },
+  "statuses": {
+    "200": 20
+  },
+  "minute_windows": {
+    "0": {
+      "completed": 20,
+      "succeeded": 20,
+      "invalid": 0,
+      "latency_ms": {
+        "p50": 2.39,
+        "p95": 4.14,
+        "p99": 4.93,
+        "p999": 4.93
+      }
+    }
+  },
+  "latency_windows": {
+    "0": {
+      "samples": 20,
+      "p50": 2.39,
+      "p95": 4.14,
+      "p99": 4.93,
+      "p999": 4.93
+    }
+  },
+  "histogram_samples": 20,
+  "load_generator_peak_rss_bytes": 44991256
+}

@@ -481,6 +481,7 @@ export const executionQuotaLeases = pgTable(
   },
   (t) => [
     unique().on(t.attemptId, t.scopeKind, t.scopeId),
+    index("execution_quota_request_idx").on(t.requestId),
     uniqueIndex("execution_request_common_quota_unique")
       .on(t.requestId, t.scopeKind, t.scopeId)
       .where(sql`scope_kind<>'channel'`),

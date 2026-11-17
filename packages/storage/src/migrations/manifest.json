@@ -260,6 +260,46 @@
           "checksum": "f58db0acddede2eff7022ff481710bbaacd944dc2b1adf781ef6d5d03601aac9"
         }
       ]
+    },
+    {
+      "version": 2026111701,
+      "files": [
+        {
+          "path": "./sql/core-identity-read-cache.sql",
+          "checksum": "046f3efbd7e0e084500523fa4fde7ff182af2dc89f5e340274567fcadc5f4c3d"
+        }
+      ]
+    },
+    {
+      "version": 2026111702,
+      "files": [
+        {
+          "path": "./sql/core-execution-identity-batch.sql",
+          "checksum": "b5d190dc13c8b30fd7fa1c1ba01260c54126b7d0ba4b7c2fb5a9bf6cc324fd4c"
+        }
+      ]
+    },
+    {
+      "version": 2026111703,
+      "files": [
+        {
+          "path": "./migrations/0007_catalog_cache.sql",
+          "checksum": "c59cb1e11d6b88c76bdea75b4dcf3c1db8167e77e82e9bc06bb8692431c154b8"
+        },
+        {
+          "path": "./sql/core-catalog-cache.sql",
+          "checksum": "16e08a82189f49df860b28ee0fe1e5803a45fdc3aa12f67afde162adb4e6b061"
+        }
+      ]
+    },
+    {
+      "version": 2026111704,
+      "files": [
+        {
+          "path": "./migrations/0008_request_quota_index.sql",
+          "checksum": "5ed2ac404838806591e745295268e1990175ce0cbc7cf3ce808716be220a88ef"
+        }
+      ]
     }
   ]
 }

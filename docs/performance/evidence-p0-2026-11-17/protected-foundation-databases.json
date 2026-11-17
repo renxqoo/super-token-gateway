@@ -1,0 +1,132 @@
+{
+  "user_provided_count": 21,
+  "observed_count": 25,
+  "all_registered_before_task": true,
+  "databases": [
+    {
+      "database": "gateway_test_foundation_c9e14efaf5ff402d98e69baf100a902c",
+      "created_at": "2026-11-15T15:30:40.850Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_f83c2d74006d4caa9cde369cd9daf05a",
+      "created_at": "2026-11-15T15:34:51.675Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_02439ba5e28f432d8593aaad366346dd",
+      "created_at": "2026-11-15T09:43:45.623Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_2ace92655e534cad99dc64720291e16a",
+      "created_at": "2026-11-15T10:39:41.009Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_cb7be76000854b51b0d98fa84ccb07a7",
+      "created_at": "2026-11-15T15:31:31.219Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_c15a8e2b224c4ae89077b1ac075fa6bd",
+      "created_at": "2026-11-16T12:21:46.726Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_e9c2181fbfe34b66b94893d7c87e1444",
+      "created_at": "2026-11-16T09:49:41.650Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_8ca04a7dc8d246de976926c235638955",
+      "created_at": "2026-11-15T10:39:19.703Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_d432d7ab95164ad29b1300861ee022f2",
+      "created_at": "2026-11-15T15:39:16.501Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_741296c96561443b99e33d387749dc58",
+      "created_at": "2026-11-16T09:52:09.247Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_7fb4b537a17f483da786e96671d02b83",
+      "created_at": "2026-11-15T15:38:57.796Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_bdd00888c5fc4ce1a3b3fb9ba33bae06",
+      "created_at": "2026-11-15T15:30:53.946Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_09236dad99794a53a9c99e36b59b8233",
+      "created_at": "2026-11-15T09:51:51.026Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_8f9869a5f1de4638a9ad79cf34888a7f",
+      "created_at": "2026-11-15T15:31:17.015Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_c6f61fca1fcf4af4932ff31b4f06054d",
+      "created_at": "2026-11-15T15:38:51.597Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_3621f955c4a848a9aed6a251cfacb0eb",
+      "created_at": "2026-11-15T15:38:54.602Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_b23a6cb329084ef2966064e0aeab4241",
+      "created_at": "2026-11-15T09:51:56.053Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_7e24dea9c98741e2a8c18691210774c8",
+      "created_at": "2026-11-16T08:27:46.662Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_105ea573ac104e9c9a2189e6e0307186",
+      "created_at": "2026-11-15T15:35:13.480Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_314c167db4fa4c0fa579fddb77657489",
+      "created_at": "2026-11-15T09:41:33.023Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_5a6e08a3cd3a445a9fdbf784e5a24e3d",
+      "created_at": "2026-11-15T10:39:09.849Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_5bc9e0528e544760ba11adc5c68cd73e",
+      "created_at": "2026-11-15T10:39:28.428Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_f71dc9411c7c47818910911830dc7993",
+      "created_at": "2026-11-15T15:30:47.544Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_98cc07bb34024eddae9b7485c4d6775b",
+      "created_at": "2026-11-15T15:35:31.047Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    },
+    {
+      "database": "gateway_test_foundation_efd0b0079aae48bb9459677b81c4bf39",
+      "created_at": "2026-11-15T15:31:53.288Z",
+      "registration_file": ".local/identity-resources.jsonl"
+    }
+  ]
+}

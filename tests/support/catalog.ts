@@ -16,6 +16,7 @@ import {
   type ReleasePolicy,
 } from "@gateway/plugin-sdk";
 import { withDatabase } from "./database.ts";
+import { reportCatalogFailure } from "./catalog-diagnostics.ts";
 const registry = ".local/T04b1-resources.jsonl";
 export const syntheticAdminKey = "synthetic-platform-admin-key-0123456789";
 export const syntheticPepper = "synthetic-platform-pepper-0123456789";
@@ -29,6 +30,9 @@ export async function withCatalog(
       const fixture = await prepareCatalog(db);
       try {
         await run(fixture, db);
+      } catch (error) {
+        await reportCatalogFailure(db, error);
+        throw error;
       } finally {
         await fixture.close();
       }

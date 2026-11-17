@@ -15,6 +15,7 @@ import { withIdentity, identityAudience } from "./internal-identity.ts";
 import { prepareCatalog, syntheticAdminKey, syntheticPepper } from "./catalog.ts";
 import { createCoreManagementApplication } from "../../apps/core-api/src/platform/management.ts";
 import { openAIChatReleaseId } from "@gateway/plugin-sdk";
+import { reportCatalogFailure } from "./catalog-diagnostics.ts";
 export const financialKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 export async function withFinancial(
   run: (fixture: Awaited<ReturnType<typeof prepareFinancial>>, db: SQL) => Promise<void>,
@@ -49,7 +50,12 @@ export async function withFinancial(
           encryptionKey: financialKey,
         });
         fixture = await prepareFinancial(f, db, catalog, management, namespace);
-        await run(fixture, db);
+        try {
+          await run(fixture, db);
+        } catch (error) {
+          await reportCatalogFailure(db, error);
+          throw error;
+        }
       } finally {
         try {
           await fixture?.close();

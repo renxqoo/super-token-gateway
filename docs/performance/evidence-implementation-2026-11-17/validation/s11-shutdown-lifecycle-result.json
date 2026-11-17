@@ -1,0 +1,17 @@
+{
+  "directory": "/private/tmp/s1-integration-redis-3cdXOn",
+  "port": 51938,
+  "redis_pid": 42207,
+  "settings": {
+    "appendonly": "yes",
+    "maxmemory-policy": "noeviction",
+    "aof-load-truncated": "no",
+    "appendfsync": "always"
+  },
+  "replication": "# Replication\r\nrole:master\r\nconnected_slaves:0\r\nmaster_failover_state:no-failover\r\nmaster_replid:4e69b2de4749b6201091fbf6cc32a54ee72d81e1\r\nmaster_replid2:0000000000000000000000000000000000000000\r\nmaster_repl_offset:0\r\nsecond_repl_offset:-1\r\nrepl_backlog_active:0\r\nrepl_backlog_size:1048576\r\nrepl_backlog_first_byte_offset:0\r\nrepl_backlog_histlen:0\r\n",
+  "exit_code": 1,
+  "cleaned": {
+    "redis_stopped": true,
+    "directory_removed": true
+  }
+}

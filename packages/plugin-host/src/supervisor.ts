@@ -1,6 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isAbsolute } from "node:path";
-import { base64Schema, sha256 } from "@gateway/plugin-sdk";
+import {
+  base64Schema,
+  ownPluginModule,
+  pluginModuleInfo,
+  pluginModuleBase64,
+  type PluginModule,
+} from "@gateway/plugin-sdk";
 
 type Operation = "load" | "call" | "stats" | "cancel" | "close" | "drain";
 export type PluginHostDiagnostics = {
@@ -607,12 +613,15 @@ export function createPluginSupervisor(options: SupervisorOptions) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    async load(module: Uint8Array, signal?: AbortSignal) {
-      if (module.length > (native.maxModuleBytes ?? 8 << 20))
+    async load(module: Uint8Array | PluginModule, signal?: AbortSignal) {
+      const byteLength =
+        module instanceof Uint8Array ? module.byteLength : pluginModuleInfo(module).byteLength;
+      if (byteLength > (native.maxModuleBytes ?? 8 << 20))
         throw new PluginHostError("MODULE_BUDGET");
       if (signal?.aborted) throw new PluginHostError("CALL_CANCELLED");
-      const c = start(),
-        hash = sha256(module);
+      const owned = module instanceof Uint8Array ? ownPluginModule(module) : module;
+      const hash = pluginModuleInfo(owned).hash;
+      const c = start();
       let load = c.loaded.get(hash);
       if (!load) {
         load = { controller: new AbortController(), waiters: new Set(), ready: false };
@@ -621,7 +630,7 @@ export function createPluginSupervisor(options: SupervisorOptions) {
         void send(
           c,
           "load",
-          { hash, module: Buffer.from(module).toString("base64") },
+          { hash, module: pluginModuleBase64(owned) },
           (native.compileMs ?? 5000) + 250,
           current.controller.signal,
         ).then(

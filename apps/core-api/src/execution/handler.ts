@@ -246,7 +246,7 @@ export function createExecutionHandler(
     async pluginPackage(context: object, digest: string) {
       return store.pluginPackage(requireCaller(context), digest);
     },
-    async handle(context: object, kind: ExecutionKind, input: unknown) {
+    async handle(context: object, kind: ExecutionKind, input: unknown, signal?: AbortSignal) {
       const p = requireCaller(context);
       if (p.command_type !== kind) throw new Error("internal_proof_invalid");
       const wire = z
@@ -334,15 +334,20 @@ export function createExecutionHandler(
       }
       if (kind === "execution_context_v1") {
         const data = executionDataSchemas.execution_context_v1.parse(d);
-        const snapshot = await store.context(p, crypto.randomUUID(), {
-          verifier: verifier(data.customer_token, options.pepper),
-          ip: data.ip,
-          operation: data.operation,
-          ...(data.model ? { model: data.model } : {}),
-          fingerprint: data.fingerprint,
-          max_attempts: options.maxAttempts ?? 3,
-          ...(data.resource_ids ? { resource_ids: data.resource_ids } : {}),
-        });
+        const snapshot = await store.context(
+          p,
+          crypto.randomUUID(),
+          {
+            verifier: verifier(data.customer_token, options.pepper),
+            ip: data.ip,
+            operation: data.operation,
+            ...(data.model ? { model: data.model } : {}),
+            fingerprint: data.fingerprint,
+            max_attempts: options.maxAttempts ?? 3,
+            ...(data.resource_ids ? { resource_ids: data.resource_ids } : {}),
+          },
+          signal,
+        );
         const parsed = contextSchema.parse(snapshot);
         const ordered = await orderRouteCandidates(
           parsed.candidates.map((candidate) => ({

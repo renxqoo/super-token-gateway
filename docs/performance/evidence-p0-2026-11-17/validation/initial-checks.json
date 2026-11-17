@@ -1,0 +1,38 @@
+[
+  {
+    "name": "check",
+    "exit_code": 0
+  },
+  {
+    "name": "lint",
+    "exit_code": 0
+  },
+  {
+    "name": "test",
+    "exit_code": 0
+  },
+  {
+    "name": "integration",
+    "exit_code": 1
+  },
+  {
+    "name": "build",
+    "exit_code": 0
+  },
+  {
+    "name": "artifact",
+    "exit_code": 0
+  },
+  {
+    "name": "durability",
+    "exit_code": 0
+  },
+  {
+    "name": "native",
+    "exit_code": 0
+  },
+  {
+    "name": "plugin-artifact",
+    "exit_code": 0
+  }
+]

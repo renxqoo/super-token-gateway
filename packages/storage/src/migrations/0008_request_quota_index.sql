@@ -1,0 +1,1 @@
+CREATE INDEX "execution_quota_request_idx" ON "execution_quota_leases" USING btree ("request_id");

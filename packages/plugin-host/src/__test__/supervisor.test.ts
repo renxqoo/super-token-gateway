@@ -1,3 +1,4 @@
+import { ownPluginModule, type PluginModule } from "@gateway/plugin-sdk";
 import { expect, test } from "bun:test";
 import { mkdtemp, chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -342,3 +343,29 @@ test("fresh native parents complete READY, cold and warm loads with isolated gue
     });
   }
 }, 15000);
+
+test("immutable module handles retain executable bytes across caller mutation, eviction and forged copies", async () => {
+  const source = new Uint8Array(fixture);
+  const module = ownPluginModule(source);
+  source.fill(0);
+  const host = createPluginSupervisor({ executable, native: { maxModules: 1 } });
+  try {
+    const first = await host.load(module);
+    expect(
+      decoded((await host.call(first.hash, input({ value: "before" }), undefined)).output),
+    ).toMatchObject({ previous: null, value: "before" });
+    await host.load(
+      await Bun.file(
+        new URL("../../../adapters/openai-chat/package/module.wasm", import.meta.url),
+      ).bytes(),
+    );
+    await expect(host.load({ ...module } as PluginModule)).rejects.toThrow("MODULE_NOT_OWNED");
+    const reloaded = await host.load(module);
+    expect(
+      decoded((await host.call(reloaded.hash, input({ value: "after" }), undefined)).output),
+    ).toMatchObject({ previous: null, value: "after" });
+  } finally {
+    await host.close();
+  }
+  expect(host.snapshot()).toMatchObject({ timers: 0, pending: 0, loaded: 0 });
+});

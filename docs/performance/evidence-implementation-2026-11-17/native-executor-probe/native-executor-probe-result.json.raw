@@ -1,0 +1,246 @@
+{
+  "scope": "isolated prototype; no platform trust classification, hard CPU preemption or persisted executor selection",
+  "comparisons": 466,
+  "records": [
+    {
+      "name": "openai-chat",
+      "digest": "e647b9cc7b79d690621dc187a709ebd24e10129b1757e76e0264e8de54ff3779",
+      "fixture": {
+        "cases": 84,
+        "steps": 112,
+        "state": {
+          "attempts": 0,
+          "stateBytes": 0,
+          "reservedStateBytes": 0,
+          "moduleBytes": 0,
+          "json": {
+            "documents": 0,
+            "outputs": 0,
+            "bytes": 0,
+            "peakBytes": 925819,
+            "maxBytes": 268435456
+          },
+          "closed": true
+        }
+      },
+      "byte_identical_calls": 234,
+      "inputs": {
+        ".local/performance-implementation/native-probe-host.ts": "b04aa5dd1ba23dd85cd006e1f83d8c35b1d9806468713e37905b39cab4749edc",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/config.js": "369f7da8636b8ad75ef56f9bdb7f69f29b4f461a66e46622193ca013e6755c92",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/utils.js": "aec4e0e2649ce0871b1cab689046aa3f255ac5914f28c6b4269d6fa43fdf96c6",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/LosslessNumber.js": "1a67a2f25e9312a8adb4130796b50180942ca117a91df0e084dcf2550efaaf62",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/numberParsers.js": "0d46c610aa237f01fbf12376fd9836c8d9251055bb3f87e7b22dc5b680514df9",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/revive.js": "28d52f7536bf3da6a593f0e6014221e6dfd0f193e66346574a3714fd83b06d28",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/parse.js": "c31958812e1c3cd1c48a56c63471704233fd4c210fb5c8773bea7ab9c75ea627",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/reviveDate.js": "9fe6290d695b3e858520e56abd27bd5de004c441f63880106cdf969c066938e1",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/stringify.js": "1804d5f8477fa5224c63b83eea4dc48600002cbcd4e823781aeac69cbaa30710",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/types.js": "01ae2a5b120382f9a648ced7ee8507493a134f216d100fc61600c6c9738235d2",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/index.js": "79e0d8d51c60eecd34978dbaa44be0cbbc270cd2b999347695ffd5f9f551885d",
+        "packages/plugin-sdk/src/guest.ts": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2",
+        "packages/adapters/openai-chat/package/manifest.json": "1e9f0fb349fe3aac5a4ba84f050c9830b84b505fc772edc673c1536228518dc6",
+        "packages/adapters/openai-chat/plugin.ts": "c24dcb48acf27dc9b4c7b696047a3cb931aa54b6e85f2342280f4cf03baaeadc",
+        ".local/performance-implementation/native-probe-build/openai-chat.ts": "01d51de392d2825cae606c02d71b52608253306f1595c5a5578daf905b71d814"
+      },
+      "wasm": {
+        "iterations": 200,
+        "elapsed_ms": 1064.1407920000001,
+        "wall_ms_per_pipeline": 5.32070396,
+        "main_process_cpu_ms_per_pipeline": 0.459395
+      },
+      "native-probe": {
+        "iterations": 200,
+        "elapsed_ms": 22.394624999999905,
+        "wall_ms_per_pipeline": 0.11197312499999952,
+        "main_process_cpu_ms_per_pipeline": 0.29283000000000003
+      }
+    },
+    {
+      "name": "anthropic-messages",
+      "digest": "ed6b10ab1afcc396b40596856b104aea591b1ef4446c2438e3ee3bb2557824e8",
+      "fixture": {
+        "cases": 22,
+        "steps": 33,
+        "state": {
+          "attempts": 0,
+          "stateBytes": 0,
+          "reservedStateBytes": 0,
+          "moduleBytes": 0,
+          "json": {
+            "documents": 0,
+            "outputs": 0,
+            "bytes": 0,
+            "peakBytes": 1537130,
+            "maxBytes": 268435456
+          },
+          "closed": true
+        }
+      },
+      "byte_identical_calls": 95,
+      "inputs": {
+        "packages/adapters/anthropic-messages/package/manifest.json": "d0ce575775b596222cca84f0c7a2e995b0a36815f24dd9cc6401b01a58c8b8f2",
+        ".local/performance-implementation/native-probe-host.ts": "b04aa5dd1ba23dd85cd006e1f83d8c35b1d9806468713e37905b39cab4749edc",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/config.js": "369f7da8636b8ad75ef56f9bdb7f69f29b4f461a66e46622193ca013e6755c92",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/utils.js": "aec4e0e2649ce0871b1cab689046aa3f255ac5914f28c6b4269d6fa43fdf96c6",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/LosslessNumber.js": "1a67a2f25e9312a8adb4130796b50180942ca117a91df0e084dcf2550efaaf62",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/numberParsers.js": "0d46c610aa237f01fbf12376fd9836c8d9251055bb3f87e7b22dc5b680514df9",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/revive.js": "28d52f7536bf3da6a593f0e6014221e6dfd0f193e66346574a3714fd83b06d28",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/parse.js": "c31958812e1c3cd1c48a56c63471704233fd4c210fb5c8773bea7ab9c75ea627",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/reviveDate.js": "9fe6290d695b3e858520e56abd27bd5de004c441f63880106cdf969c066938e1",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/stringify.js": "1804d5f8477fa5224c63b83eea4dc48600002cbcd4e823781aeac69cbaa30710",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/types.js": "01ae2a5b120382f9a648ced7ee8507493a134f216d100fc61600c6c9738235d2",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/index.js": "79e0d8d51c60eecd34978dbaa44be0cbbc270cd2b999347695ffd5f9f551885d",
+        "packages/plugin-sdk/src/guest.ts": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2",
+        "packages/adapters/anthropic-messages/messages.ts": "b52e69a33ede9a11d1f6d09154b5477be46600d23e5cf9a3822ba6eb9f7485b4",
+        "packages/adapters/anthropic-messages/plugin.ts": "a51625cd8de5e45bf8c62b4653d2c837773020aeef74ac2551609265d418aa9c",
+        ".local/performance-implementation/native-probe-build/anthropic-messages.ts": "4694a1cbfcb64bb60bdb7cd5e3941a2d7d8e576565740be7de4270f066f8308c"
+      }
+    },
+    {
+      "name": "bedrock-anthropic",
+      "digest": "e609c7c9873381d122c17d58638bc4f8d0cf7beac4e482c6a464b486d26be0ed",
+      "fixture": {
+        "cases": 17,
+        "steps": 29,
+        "state": {
+          "attempts": 0,
+          "stateBytes": 0,
+          "reservedStateBytes": 0,
+          "moduleBytes": 0,
+          "json": {
+            "documents": 0,
+            "outputs": 0,
+            "bytes": 0,
+            "peakBytes": 1537130,
+            "maxBytes": 268435456
+          },
+          "closed": true
+        }
+      },
+      "byte_identical_calls": 68,
+      "inputs": {
+        "packages/adapters/bedrock-anthropic/package/manifest.json": "cfe827c5414a359f02c633b7b65fcc2537bf2c55bccc718c03a6eb158be94c21",
+        ".local/performance-implementation/native-probe-host.ts": "b04aa5dd1ba23dd85cd006e1f83d8c35b1d9806468713e37905b39cab4749edc",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/config.js": "369f7da8636b8ad75ef56f9bdb7f69f29b4f461a66e46622193ca013e6755c92",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/utils.js": "aec4e0e2649ce0871b1cab689046aa3f255ac5914f28c6b4269d6fa43fdf96c6",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/LosslessNumber.js": "1a67a2f25e9312a8adb4130796b50180942ca117a91df0e084dcf2550efaaf62",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/numberParsers.js": "0d46c610aa237f01fbf12376fd9836c8d9251055bb3f87e7b22dc5b680514df9",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/revive.js": "28d52f7536bf3da6a593f0e6014221e6dfd0f193e66346574a3714fd83b06d28",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/parse.js": "c31958812e1c3cd1c48a56c63471704233fd4c210fb5c8773bea7ab9c75ea627",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/reviveDate.js": "9fe6290d695b3e858520e56abd27bd5de004c441f63880106cdf969c066938e1",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/stringify.js": "1804d5f8477fa5224c63b83eea4dc48600002cbcd4e823781aeac69cbaa30710",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/types.js": "01ae2a5b120382f9a648ced7ee8507493a134f216d100fc61600c6c9738235d2",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/index.js": "79e0d8d51c60eecd34978dbaa44be0cbbc270cd2b999347695ffd5f9f551885d",
+        "packages/plugin-sdk/src/guest.ts": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2",
+        "packages/adapters/anthropic-messages/messages.ts": "b52e69a33ede9a11d1f6d09154b5477be46600d23e5cf9a3822ba6eb9f7485b4",
+        "packages/adapters/bedrock-anthropic/plugin.ts": "9a121fd58b0ba75b7eebde5c54ac72261887e057399d4cce2f63074c2a692775",
+        ".local/performance-implementation/native-probe-build/bedrock-anthropic.ts": "6e72a8b7bbfff037428d5c9c9a25d40eee7ba02cb835ddc299efa46ed81033de"
+      }
+    },
+    {
+      "name": "gemini-generate",
+      "digest": "31552b0f2268e701ef84eceeb7ef4b476f3b5174e40ccaf794e6d308161be361",
+      "fixture": {
+        "cases": 18,
+        "steps": 27,
+        "state": {
+          "attempts": 0,
+          "stateBytes": 0,
+          "reservedStateBytes": 0,
+          "moduleBytes": 0,
+          "json": {
+            "documents": 0,
+            "outputs": 0,
+            "bytes": 0,
+            "peakBytes": 550835,
+            "maxBytes": 268435456
+          },
+          "closed": true
+        }
+      },
+      "byte_identical_calls": 47,
+      "inputs": {
+        ".local/performance-implementation/native-probe-host.ts": "b04aa5dd1ba23dd85cd006e1f83d8c35b1d9806468713e37905b39cab4749edc",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/config.js": "369f7da8636b8ad75ef56f9bdb7f69f29b4f461a66e46622193ca013e6755c92",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/utils.js": "aec4e0e2649ce0871b1cab689046aa3f255ac5914f28c6b4269d6fa43fdf96c6",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/LosslessNumber.js": "1a67a2f25e9312a8adb4130796b50180942ca117a91df0e084dcf2550efaaf62",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/numberParsers.js": "0d46c610aa237f01fbf12376fd9836c8d9251055bb3f87e7b22dc5b680514df9",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/revive.js": "28d52f7536bf3da6a593f0e6014221e6dfd0f193e66346574a3714fd83b06d28",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/parse.js": "c31958812e1c3cd1c48a56c63471704233fd4c210fb5c8773bea7ab9c75ea627",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/reviveDate.js": "9fe6290d695b3e858520e56abd27bd5de004c441f63880106cdf969c066938e1",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/stringify.js": "1804d5f8477fa5224c63b83eea4dc48600002cbcd4e823781aeac69cbaa30710",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/types.js": "01ae2a5b120382f9a648ced7ee8507493a134f216d100fc61600c6c9738235d2",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/index.js": "79e0d8d51c60eecd34978dbaa44be0cbbc270cd2b999347695ffd5f9f551885d",
+        "packages/plugin-sdk/src/guest.ts": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2",
+        "packages/adapters/gemini-generate/package/manifest.json": "f6e0a8c83eca37b09bace3c89b2d804c08ee83b28065aa55bc8402d07b5ae7ed",
+        "packages/adapters/gemini-generate/plugin.ts": "a8287c5c179d4cf19956bf216ccfdc0c560add1e1aa26426bca106afa29038c7",
+        ".local/performance-implementation/native-probe-build/gemini-generate.ts": "cb7a3cbd340894d95cbb1350527ed39cce283230d06f6d8099c106b46c540e7a"
+      }
+    },
+    {
+      "name": "minimax-music",
+      "digest": "77bfbbeccaab6f41a524c496fa569384cae6ab191c9d17534149da7d29f08bf2",
+      "fixture": {
+        "cases": 11,
+        "steps": 11,
+        "state": {
+          "attempts": 0,
+          "stateBytes": 0,
+          "reservedStateBytes": 0,
+          "moduleBytes": 0,
+          "json": {
+            "documents": 0,
+            "outputs": 0,
+            "bytes": 0,
+            "peakBytes": 149051,
+            "maxBytes": 268435456
+          },
+          "closed": true
+        }
+      },
+      "byte_identical_calls": 22,
+      "inputs": {
+        ".local/performance-implementation/native-probe-host.ts": "b04aa5dd1ba23dd85cd006e1f83d8c35b1d9806468713e37905b39cab4749edc",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/config.js": "369f7da8636b8ad75ef56f9bdb7f69f29b4f461a66e46622193ca013e6755c92",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/utils.js": "aec4e0e2649ce0871b1cab689046aa3f255ac5914f28c6b4269d6fa43fdf96c6",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/LosslessNumber.js": "1a67a2f25e9312a8adb4130796b50180942ca117a91df0e084dcf2550efaaf62",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/numberParsers.js": "0d46c610aa237f01fbf12376fd9836c8d9251055bb3f87e7b22dc5b680514df9",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/revive.js": "28d52f7536bf3da6a593f0e6014221e6dfd0f193e66346574a3714fd83b06d28",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/parse.js": "c31958812e1c3cd1c48a56c63471704233fd4c210fb5c8773bea7ab9c75ea627",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/reviveDate.js": "9fe6290d695b3e858520e56abd27bd5de004c441f63880106cdf969c066938e1",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/stringify.js": "1804d5f8477fa5224c63b83eea4dc48600002cbcd4e823781aeac69cbaa30710",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/types.js": "01ae2a5b120382f9a648ced7ee8507493a134f216d100fc61600c6c9738235d2",
+        "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/index.js": "79e0d8d51c60eecd34978dbaa44be0cbbc270cd2b999347695ffd5f9f551885d",
+        "packages/plugin-sdk/src/guest.ts": "207de6e9868d57711192bf6ef8ca277797e4f8be94f7d1d0f9c9cd806f0146f2",
+        "packages/adapters/minimax-music/package/manifest.json": "6fa40d3e45fba9d13fc9f722e5e6b7639331b63e2d6f4fbbea518071d1a9b97c",
+        "packages/adapters/minimax-music/plugin.ts": "46f7016e717b914222a9a5abad3815631491b3ae3415f9ef200c02a357dd888f",
+        ".local/performance-implementation/native-probe-build/minimax-music.ts": "b76ead55cce67733447ac13d62525f1566e14b52e116c487d85645a5e4d671c4"
+      }
+    }
+  ],
+  "helper": {
+    "starts": 1,
+    "observers": 0,
+    "pid": 36621,
+    "connection": "f6cbd8cc-96e3-4e25-bf0f-bf6777af2907",
+    "pending": 0,
+    "pendingBytes": 0,
+    "writeBytes": 0,
+    "dead": true,
+    "closed": true,
+    "loaded": 0,
+    "loading": 0,
+    "waiters": 0,
+    "queued": 0,
+    "active": 0,
+    "inflight": 0,
+    "timers": 0,
+    "ready": false,
+    "diagnostics": {
+      "phase": "idle",
+      "frameBytes": 0,
+      "startupMs": 22,
+      "writeMs": 0,
+      "connection": "f6cbd8cc-96e3-4e25-bf0f-bf6777af2907"
+    }
+  }
+}
