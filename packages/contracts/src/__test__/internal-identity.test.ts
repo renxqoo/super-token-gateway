@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { dispatchProjectionV1Schema } from "../internal-identity.ts";
+import { dispatchProjectionV1Schema, dispatchProjectionV2Schema } from "../internal-identity.ts";
 function dispatch() {
   const id = "123e4567-e89b-42d3-a456-426614174000",
     hash = "b".repeat(64);
@@ -31,6 +31,26 @@ function dispatch() {
     deadline_at: "2026-11-12T12:00:00.000Z",
   };
 }
+
+test("V2 dispatch requires a bounded execution identity while historical V1 remains independently readable", () => {
+  const old = dispatch();
+  expect(dispatchProjectionV1Schema.safeParse(old).success).toBe(true);
+  expect(dispatchProjectionV2Schema.safeParse(old).success).toBe(false);
+  const current = {
+    ...old,
+    version: 2,
+    execution: { version: 1, kind: "builtin-worker", artifact_digest: "a".repeat(64) },
+  };
+  expect(dispatchProjectionV2Schema.safeParse(current).success).toBe(true);
+  for (const execution of [
+    undefined,
+    { ...current.execution, kind: "javascript" },
+    { ...current.execution, version: 2 },
+    { ...current.execution, artifact_digest: "arbitrary" },
+    { ...current.execution, code: "untrusted" },
+  ])
+    expect(dispatchProjectionV2Schema.safeParse({ ...current, execution }).success).toBe(false);
+});
 for (const field of [
   "headers",
   "path",

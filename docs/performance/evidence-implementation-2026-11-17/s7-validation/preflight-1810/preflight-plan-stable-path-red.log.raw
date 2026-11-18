@@ -1,0 +1,28 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-query-plans.test.ts:
+{"preflightReadProbe":{"before":{"scans":"9","tuples":"0","indexes":"1","inserts":"4097"},"after":{"scans":"11","tuples":"4098","indexes":"2"}}}
+79 |       const after = (
+80 |         await db`SELECT seq_scan::text scans,seq_tup_read::text tuples,idx_scan::text indexes FROM pg_stat_user_tables WHERE relid='execution_permits'::regclass`
+81 |       )[0];
+82 |       console.log(JSON.stringify({ preflightReadProbe: { before, after } }));
+83 |       expect(BigInt(after.scans) + BigInt(after.indexes)).toBeGreaterThan(BigInt(before.scans) + BigInt(before.indexes));
+84 |       expect(Number(BigInt(after.tuples) - BigInt(before.tuples))).toBeLessThanOrEqual(16);
+                                                                        ^
+error: expect(received).toBeLessThanOrEqual(expected)
+
+Expected: <= 16
+Received: 4098
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-query-plans.test.ts:84:68)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:68:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:57:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:51:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:41:9)
+(fail) preflight does not scan unrelated permits after a cold table grows, including context-only requests [2566.69ms]
+
+ 0 pass
+ 1 fail
+ 9 expect() calls
+Ran 1 test across 1 file. [2.64s]

@@ -1,0 +1,35 @@
+CREATE OR REPLACE FUNCTION core_funding.make_evidence_snapshot_v1(attempt uuid,project uuid,request_id uuid,currency text,revision numeric,kind text,source text,finality text,usage jsonb,finals text[],parent uuid,input uuid,cost numeric,complete boolean)
+RETURNS core_funding.evidence_snapshot_stage_v1
+LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE fact public.usage_event_index%ROWTYPE;
+BEGIN
+ fact.id=gen_random_uuid();
+ fact.created_at=transaction_timestamp();
+ fact.project_id=project;
+ fact.request_id=request_id;
+ fact.attempt_id=attempt;
+ fact.source=source;
+ fact.finality=finality;
+ fact.cost_atoms=cost;
+ fact.currency=currency;
+ fact.cost_complete=coalesce(complete,false);
+ fact.record_kind=kind;
+ fact.snapshot_revision=revision;
+ fact.snapshot_digest=encode(sha256(convert_to(
+  '{"attempt_id":'||coalesce(to_jsonb(attempt)::text,'null')||
+  ',"cost_atoms":'||coalesce(to_jsonb(cost::text)::text,'null')||
+  ',"final_dimensions":'||coalesce(public.core_canonical_v1(to_jsonb(finals)),'null')||
+  ',"finality":'||coalesce(to_jsonb(finality)::text,'null')||
+  ',"input":'||coalesce(to_jsonb(input)::text,'null')||
+  ',"parent":'||coalesce(to_jsonb(parent)::text,'null')||
+  ',"record_kind":'||coalesce(to_jsonb(kind)::text,'null')||
+  ',"snapshot_revision":'||coalesce(to_jsonb(revision::text)::text,'null')||
+  ',"source":'||coalesce(to_jsonb(source)::text,'null')||
+  ',"usage":'||coalesce(public.core_canonical_v1(usage),'null')||'}',
+  'UTF8'
+ )),'hex');
+ fact.final_dimensions=finals;
+ fact.parent_evidence_id=parent;
+ fact.input_fact_id=input;
+ RETURN ROW(fact,usage)::core_funding.evidence_snapshot_stage_v1;
+END $$;

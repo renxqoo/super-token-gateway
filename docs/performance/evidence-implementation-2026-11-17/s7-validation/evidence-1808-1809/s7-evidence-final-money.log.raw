@@ -1,0 +1,21 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-execution-upgrade.test.ts:
+(pass) Core execution runtime role cannot read money or invoke private allocation kernels [1201.19ms]
+
+tests/integration/gateway-json-evidence.test.ts:
+(pass) a successful JSON response durably queues both signed facts together and settles customer and supplier exactly once [3813.19ms]
+
+tests/integration/core-evidence-batch.test.ts:
+(pass) independent signed groups write their facts and costs together while preserving each receipt and charge [2131.13ms]
+(pass) a billing failure after coalesced facts rolls back its whole original two-request group and replays only that group [2158.05ms]
+(pass) shared_wallet groups keep their original customer settlement order instead of coalescing [2239.99ms]
+(pass) expiring_lot groups keep their original customer settlement order instead of coalescing [2186.30ms]
+(pass) two revisions within one signed group preserve final dimensions and round the complete supplier cost once [2160.26ms]
+(pass) evidence upgrade preserves a column-scoped owner without granting extra request reads or timestamp writes [2192.35ms]
+
+ 8 pass
+ 7 filtered out
+ 0 fail
+ 148 expect() calls
+Ran 8 tests across 3 files. [18.16s]

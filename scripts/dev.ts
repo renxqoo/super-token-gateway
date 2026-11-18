@@ -51,7 +51,10 @@ await withFinancial((f, db) =>
         const patched = await f.request(path, limits, undefined, "PATCH");
         if (patched.status !== 200) throw new Error(`Development limits: ${patched.status}`);
       }
-      const worker = await startCoreWorker(namespace, { databaseUrl: workerDatabaseUrl });
+      const worker = await startCoreWorker(namespace, {
+        databaseUrl: workerDatabaseUrl,
+        identity: f.identity,
+      });
       const gateway = await startGateway(f, {
         namespace,
         upstreamCertificate: upstream.certificate,

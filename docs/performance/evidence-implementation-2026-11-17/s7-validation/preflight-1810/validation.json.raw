@@ -1,0 +1,376 @@
+{
+  "at": "2026-11-17T23:03:44.051346+00:00",
+  "state": {
+    "at": "2026-11-17T23:02:43.553540+00:00",
+    "goal_status": "active",
+    "previous_goal_turn": "progress: actual scan plans and controlled planning experiment changed next implementation",
+    "runtime_migration": 2026111810,
+    "migrations": 42,
+    "migration_sha256": "7f6bf972d19ce1f76d8b4f06b8d3484a24e04da90266a8c6593eeff04e5b6d88",
+    "old41_manifest_entries_unchanged": true,
+    "source_dist_sql_and_manifest_equal": true,
+    "last_formal_stable_rps": 60,
+    "preflight_preparation_not_reproducing": {
+      "preflight-plan-red.log": {
+        "exit_code": 0,
+        "pass": 1,
+        "fail": 0,
+        "assertions": 9
+      },
+      "preflight-plan-empty-red.log": {
+        "exit_code": 0,
+        "pass": 1,
+        "fail": 0,
+        "assertions": 9
+      },
+      "preflight-plan-generic-red.log": {
+        "exit_code": 0,
+        "pass": 1,
+        "fail": 0,
+        "assertions": 9
+      },
+      "preflight-plan-unanalyzed-red.log": {
+        "exit_code": 0,
+        "pass": 1,
+        "fail": 0,
+        "assertions": 9
+      }
+    },
+    "preflight_red": {
+      "log": "preflight-plan-stable-path-red.log",
+      "exit_code": 1,
+      "pass": 0,
+      "fail": 1,
+      "assertions": 9,
+      "sequential_rows": 4098
+    },
+    "preflight_green": {
+      "log": "preflight-plan-green.log",
+      "exit_code": 0,
+      "pass": 1,
+      "fail": 0,
+      "assertions": 9,
+      "sequential_rows": 0,
+      "index_scan_delta": 4
+    },
+    "regressions": {
+      "exit_code": 0,
+      "pass": 18,
+      "fail": 0,
+      "assertions": 175,
+      "files": 4
+    },
+    "upgrades": {
+      "exit_code": 0,
+      "pass": 3,
+      "fail": 0,
+      "assertions": 54,
+      "files": 3
+    },
+    "check": {
+      "exit_code": 0,
+      "files": 353
+    },
+    "lint": {
+      "exit_code": 0
+    },
+    "format_before_report": {
+      "exit_code": 0,
+      "files": 738
+    },
+    "build": {
+      "exit_code": 0,
+      "migrations": 42,
+      "all_checksums_verified": true,
+      "source_dist_equal": true
+    },
+    "receipt_prototypes": {
+      "scope": "not reproduced, no receipt product code changed; experimental case removed before delivery with source retained",
+      "receipt-plan-red.log": {
+        "exit_code": 0,
+        "pass": 1,
+        "fail": 0,
+        "assertions": 11,
+        "fetched_rows": 30
+      },
+      "receipt-plan-stable-red.log": {
+        "exit_code": 0,
+        "pass": 1,
+        "fail": 0,
+        "assertions": 19,
+        "fetched_rows": 3
+      }
+    },
+    "independent_review": "No new permission/owner/NULL/lease scope/authorization semantics issue found; publicpreflight remains a projection followed by original quota/BEGIN authority recheck",
+    "diagnostic": {
+      "exit_code": 1,
+      "capacityPassed": false,
+      "valid": false,
+      "target": 300,
+      "rate": 301,
+      "window_complete_rps": 95.95,
+      "p99": 1821.73,
+      "shed": 1404,
+      "http200": 11639,
+      "http503": 5017,
+      "requests_including_warmup": 11730,
+      "receipt_and_acks": 23460,
+      "customer_spent": "1173000",
+      "supplier_spent": "692070",
+      "both_reserved": "0",
+      "pg_valid": true,
+      "cpu_sampling_errors": 0,
+      "pg_cpu_ms_per_admitted": 42.337595907928396,
+      "service_cpu_ms_per_admitted": 48.352941176470594,
+      "preflight_calls": 23460,
+      "preflight_exec_ms": 9950.501037999993,
+      "cpu_denominator": "admitted includes warmup; CPU also includes rejected work; not normal all-success cost",
+      "record": "docs/performance/evidence-implementation-2026-11-17/s7-preflight-300-failed/round.json"
+    },
+    "cleanup": {
+      "at": "2026-11-17T22:57:25.267Z",
+      "database": "gateway_native",
+      "original_27_names_and_oids_equal": true,
+      "foundation_count": 27,
+      "remaining_recent_databases": [],
+      "remaining_recent_core_processes": [],
+      "remaining_recent_identity_roles": [],
+      "remaining_recent_temp_directories": [],
+      "protected_reference_present": true,
+      "protected_processes": [
+        {
+          "pid": 40766,
+          "started": "Mon Nov 16 16:27:47 2026",
+          "command": "bun apps/core-api/src/main.ts"
+        },
+        {
+          "pid": 40771,
+          "started": "Mon Nov 16 16:27:47 2026",
+          "command": "bun apps/core-api/src/main.ts"
+        }
+      ],
+      "rounds": [
+        {
+          "label": "s7-preflight-300-failed",
+          "database": "gateway_test_foundation_9874430b3ec6450896544061e1f91abf",
+          "database_absent": true,
+          "live_owned_sampled_pids": [],
+          "namespace_cleanup": {
+            "cleaned": 1,
+            "failed": 0
+          },
+          "archive_hashes_verified": true,
+          "source_directory_removed": true
+        }
+      ]
+    },
+    "residue": "Prior approximately2.22GB sharedPG profiling log tail retained; original and other writers not truncated",
+    "pending": [
+      "Reproduce remaining receipt/cold-plan accesses and address the evidence bottleneck",
+      "Final complete repository gates on final performance candidate",
+      "Strict >3000 and >new-api stable full-chain with CPU<=2ms/request",
+      "Fresh same-day reference and same-concurrency comparison",
+      "Fault, restore and productionHA completion audit"
+    ],
+    "long_test": "60-minute test remains outside user authorization",
+    "no_commit_push_deploy": true,
+    "format_final": {
+      "exit_code": 0,
+      "files": 739
+    },
+    "disk_gib_approx": 31
+  },
+  "temporary_files": {
+    "archive-preflight-evidence.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/archive-preflight-evidence.py.raw",
+      "sha256": "09f8959f454342b7497f3c88eaf3a52a8b0064e5e785afcfa7d8f501335c2c66",
+      "bytes": 3196,
+      "temporary_source_removed": true
+    },
+    "archive-preflight-round.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/archive-preflight-round.py.raw",
+      "sha256": "f37a6468acc890f5aabe26f73fa3b4ba443302eaff89699fb0719a84018082e6",
+      "bytes": 3976,
+      "temporary_source_removed": true
+    },
+    "cleanup-preflight-statements.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/cleanup-preflight-statements.ts.raw",
+      "sha256": "57c86add5d0c74c1c218fa59ebec1735cf29120ee7c4a1694ba693a7fe9e8dc4",
+      "bytes": 2952,
+      "temporary_source_removed": true
+    },
+    "inspect-preflight-cleanup.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/inspect-preflight-cleanup.ts.raw",
+      "sha256": "c36d15b9ea25ffa873237eb2c56375e4d29c345a3aebb1fa06215cb201a89445",
+      "bytes": 4860,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-build.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-build.log.raw",
+      "sha256": "e78614cafed479a219187a0e6dd738c39731b553f606e0926d6288f4e2be7dd1",
+      "bytes": 168,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-check.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-check.log.raw",
+      "sha256": "6d2eaa7126e62f2092a6c94354f4c908aa91ddcf8fd5a7f79d981de01cbe0ad2",
+      "bytes": 66,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-diagnostic-300.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-diagnostic-300.log.raw",
+      "sha256": "73855ac2d3a07f136411d9b0ae2fae13c103b7cf4acb100fb4b6b5d614728343",
+      "bytes": 871,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-empty-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-empty-red.log.raw",
+      "sha256": "f61d1496ac057a6505da8a74013bdbac4844b86dba63e31d5b8120e3debb563a",
+      "bytes": 261,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-final-check.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-final-check.log.raw",
+      "sha256": "1754d930b5857cbef43028a04d8e378c5885a74b2419ad581685f1ec6f253ea7",
+      "bytes": 66,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-final-format.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-final-format.log.raw",
+      "sha256": "fa166bc1b375d5acb438636327e119f702518a51e522802a7973d9118ff7c112",
+      "bytes": 59,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-format.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-format.log.raw",
+      "sha256": "2c41a995516dd85f0bd11104c681da090574b2d842d6d156837dadfaecc62a21",
+      "bytes": 59,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-generic-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-generic-red.log.raw",
+      "sha256": "7829fdff272bdd700e5a0510fc724d0417fabddc6c2c539a61d782f3fdb3c5c1",
+      "bytes": 402,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-green.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-green.log.raw",
+      "sha256": "73a8ed7be91128a5f5b1c09a10181d019530d0b18de00d0d79ded0839493979b",
+      "bytes": 402,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-lint.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-lint.log.raw",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-red.log.raw",
+      "sha256": "f3e4b8248ca9066e447370c42ed318ced5085af788c74c3e783d948bffa90473",
+      "bytes": 261,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-regressions.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-regressions.log.raw",
+      "sha256": "15e4f3c5392f80482ca107d5e73ff2499e70f26b8b216167bc38af0fdd27f500",
+      "bytes": 2351,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-resources-after.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-resources-after.json.raw",
+      "sha256": "3c5559accd22d47a95c657d1435e8970005b82806eed891f3f97c3df376a4571",
+      "bytes": 1003,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-stable-path-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-stable-path-red.log.raw",
+      "sha256": "3abc56e2f64e4e01dc9cda872ad0668ff37815eef0491a48e9ca17c3cfe2af96",
+      "bytes": 1714,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-stage.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-stage.json.raw",
+      "sha256": "df14eb5422743c9066228799a4c6508a3978bb2090b58d559f6aaf6a80f3aaf7",
+      "bytes": 5136,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-statements-cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-statements-cleanup.json.raw",
+      "sha256": "3fd5c628c524a2eaf752ca39b1f9ebbe5eae160a649cdd618ccbc0bfd1ac3e89",
+      "bytes": 1767,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-unanalyzed-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-unanalyzed-red.log.raw",
+      "sha256": "61f5e2bd38025eecd4085ffb3ce460b2b4070d8f42413d71a857c00fbde8732a",
+      "bytes": 402,
+      "temporary_source_removed": true
+    },
+    "preflight-plan-upgrade.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/preflight-plan-upgrade.log.raw",
+      "sha256": "af64be44be7bc7fc25f0689d11944886764e1e73ca6ffc84c5fea1f3477c79ef",
+      "bytes": 666,
+      "temporary_source_removed": true
+    },
+    "receipt-index-candidate-review.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/receipt-index-candidate-review.json.raw",
+      "sha256": "50efa2c0694fac711f41dee2c21de6f8a21a746ef6accc1c144be32fad2aa1b7",
+      "bytes": 989,
+      "temporary_source_removed": true
+    },
+    "receipt-plan-prototype.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/receipt-plan-prototype.ts.raw",
+      "sha256": "890a737ff0d465ad831aaf8ae0b2789faf79c6f21b419af0f68ca98f36fc9781",
+      "bytes": 8823,
+      "temporary_source_removed": true
+    },
+    "receipt-plan-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/receipt-plan-red.log.raw",
+      "sha256": "6888c37c593bd1458889ea7e663302132e5c818229a9547c3fee11ef416c5b02",
+      "bytes": 403,
+      "temporary_source_removed": true
+    },
+    "receipt-plan-stable-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/receipt-plan-stable-red.log.raw",
+      "sha256": "0d9dbda19e5fffb37dd1dea3bf6e211c0d9bc46aee208234ef67bb0c591d4a5d",
+      "bytes": 398,
+      "temporary_source_removed": true
+    }
+  },
+  "source_snapshots": {
+    "packages/storage/src/sql/core-preflight-reads.sql": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/source-packages__storage__src__sql__core-preflight-reads.sql.raw",
+      "sha256": "7f6bf972d19ce1f76d8b4f06b8d3484a24e04da90266a8c6593eeff04e5b6d88",
+      "bytes": 2355
+    },
+    "packages/storage/src/migrations/manifest.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/source-packages__storage__src__migrations__manifest.json.raw",
+      "sha256": "b549b827a60bce9633c7522b084d325eb37e8265e5c4b33b3f9b3c98fbeba4ec",
+      "bytes": 12719
+    },
+    "tests/integration/core-query-plans.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/source-tests__integration__core-query-plans.test.ts.raw",
+      "sha256": "a0a22a4278511bebec71c174f149ab6fac788f4b47c58dd1f1f34e69784a9a6a",
+      "bytes": 4976
+    },
+    "tests/integration/core-execution-upgrade.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/source-tests__integration__core-execution-upgrade.test.ts.raw",
+      "sha256": "11cfaa8aa3cec5f035ed117af7a9bbc8b699be550e245416f276623f2ec2747d",
+      "bytes": 14638
+    },
+    "tests/integration/plugin-catalog-upgrade.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/source-tests__integration__plugin-catalog-upgrade.test.ts.raw",
+      "sha256": "920491b515e116f3f0d51c49f666d192580c435bd9af775f6f6b18b54ae43b3f",
+      "bytes": 4372
+    },
+    "tests/integration/lifecycle.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810/source-tests__integration__lifecycle.test.ts.raw",
+      "sha256": "5650dbe5a95864f8613c703cefa8322397cb80caf22330fd12642295aca12495",
+      "bytes": 22891
+    }
+  },
+  "source_scope": "1810 preflight only; no receipt product changes; prototypes archived for diagnosis, not delivered as regressions",
+  "actual_commands": "Stable Bun1.4.4 with both native env files for all PG tests/benchmark; native55452 and AOFalways+replica1; full milestone gates remain pending",
+  "protected_resources": "Original27 database names/OIDs, referenceDB and PIDs40766/40771 retained; main, no commit/push/deploy"
+}

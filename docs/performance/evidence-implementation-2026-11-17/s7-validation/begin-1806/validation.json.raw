@@ -1,0 +1,344 @@
+{
+  "at": "2026-11-17T20:23:08.528651+00:00",
+  "scope": "1806 customer authority setwise row locks and bounded catalog memo; BEGIN permit/command/audit setwise writes; admissions/evidence body still not fully setwise",
+  "migration": {
+    "version": 2026111806,
+    "files": [
+      {
+        "path": "./sql/core-begin-batch.sql",
+        "checksum": "2a41a23e5aa2cdfb37dcca7e59afd192ad49d4651e560bbf2ac99915b11ab1d2"
+      }
+    ]
+  },
+  "source_sha256": {
+    "packages/storage/src/sql/core-begin-batch.sql": "2a41a23e5aa2cdfb37dcca7e59afd192ad49d4651e560bbf2ac99915b11ab1d2",
+    "packages/storage/src/migrations/manifest.json": "65f8d72bd03ec1ace06cf98d2dbd3b2c4aa5a1c246ea8c9d05f6adf73fd320bb",
+    "tests/integration/core-begin-batch.test.ts": "c5f562665956bfe71545d13f232d219681363cf39d9e001b57872c53ad510636",
+    "tests/integration/core-execution.test.ts": "643e1c3d7074fbf69c434915a40734fcd4af95f25cd08d77316f7eee15ebddda",
+    "tests/integration/core-execution-batch-identity.test.ts": "f0f036096f463e2aa0c729793b877f31d18087b6643f82653f8c31bf837f0e8e",
+    "tests/integration/core-execution-upgrade.test.ts": "63d9e9150da03e7995c1c2276f7000c80fc8495655dc4fa0dadd5a287638cfe4"
+  },
+  "verified_1804_through_1806_checksums": {
+    "./migrations/0012_funding-holds.sql": "3bb5f8d94d11beab1120799cd508f893f6ce58ee2e514610f96c2cafe94bc248",
+    "./sql/core-funding-migration.sql": "3eec13df2ed56e313553a653e21f14ba9388a0a7033d5a4e763048390cb57b45",
+    "./sql/core-funding-engine.sql": "5771350849cd37b1e463c8c3e0d6ee7ee12bd2ef04a583da5247c7b03e6f1c2e",
+    "./sql/core-funding-execution.sql": "6fbf410afe7e3c5e71c02652131a0043d807e01ef2d1cb357b748798f6fc4cb0",
+    "./sql/core-funding-settlement.sql": "d2c91e9998f963e146d62b9b490028ad885aa42e244a34e4018e1d7d9cd1b4f6",
+    "./sql/core-funding-entry.sql": "3b89a717ebba84947707fe3b63b3f30c4b03c3f6a57e72d087ca58e3aaacce3f",
+    "./sql/core-funding-batch.sql": "269aafa904cb48c3f4ff9130dd81ef9b4fa153f651280bf9f265872b4321d9f7",
+    "./sql/core-begin-batch.sql": "2a41a23e5aa2cdfb37dcca7e59afd192ad49d4651e560bbf2ac99915b11ab1d2"
+  },
+  "runs": [
+    {
+      "log": "s7-begin-red.log",
+      "exit_code": 1,
+      "interpretation": "1805 behavior; 2 independent BEGINs performed 2 statements per table instead of setwise writes",
+      "pass": 0,
+      "fail": 1,
+      "assertions": 7
+    },
+    {
+      "log": "s7-begin-first.log",
+      "exit_code": 1,
+      "interpretation": "initial1806 optional organization/principal JSON null decoding failed during admission",
+      "pass": 0,
+      "fail": 4
+    },
+    {
+      "log": "s7-begin-null-authorities.log",
+      "exit_code": 0,
+      "interpretation": "JSON null restored as SQL NULL; first real batch/money/replay path passed",
+      "pass": 1,
+      "fail": 0,
+      "assertions": 17
+    },
+    {
+      "log": "s7-begin-boundaries.log",
+      "exit_code": 0,
+      "interpretation": "initial new BEGIN and original identity batch rules; before singleton/UUID refinements",
+      "pass": 11,
+      "fail": 0,
+      "assertions": 79
+    },
+    {
+      "log": "s7-begin-existing-contracts.log",
+      "exit_code": 1,
+      "interpretation": "27 passed; same-command gate fixture cast legal transient HTTP error to success receipt",
+      "pass": 27,
+      "fail": 1,
+      "assertions": 228
+    },
+    {
+      "log": "s7-begin-same-command.log",
+      "exit_code": 0,
+      "interpretation": "actual503 identity_store_unavailable UNKNOWN/SAME_COMMAND; same original ID/deadline retry with all lease assertions preserved",
+      "pass": 1,
+      "fail": 0,
+      "assertions": 8
+    },
+    {
+      "log": "s7-begin-final-targeted.log",
+      "exit_code": 0,
+      "interpretation": "singleton-aware implementation: new BEGIN, runtime denial and JSON/SSE signed queue settlement; before UUID fix",
+      "pass": 8,
+      "fail": 0,
+      "assertions": 92
+    },
+    {
+      "log": "s7-begin-final-commit.log",
+      "exit_code": 0,
+      "interpretation": "singleton-aware implementation: unknown commit, authorization locks and typed same-command retry; before UUID fix",
+      "pass": 4,
+      "fail": 0,
+      "assertions": 25
+    },
+    {
+      "log": "s7-begin-uuid-red.log",
+      "exit_code": 1,
+      "interpretation": "new staged BEGIN defect: case alias of same UUID received second fresh grant; no claim of passing money/sending contract",
+      "pass": 0,
+      "fail": 1,
+      "assertions": 3
+    },
+    {
+      "log": "s7-begin-uuid-green.log",
+      "exit_code": 0,
+      "interpretation": "current SQL after PG UUID canonical identity fix; all six new BEGIN boundaries",
+      "pass": 6,
+      "fail": 0,
+      "assertions": 75
+    }
+  ],
+  "test_batches_overlap": true,
+  "current_runtime_sql_bound_runs": [
+    "s7-begin-uuid-green.log"
+  ],
+  "last_test_format_only_after_execution": true,
+  "checks": [
+    {
+      "command": "bun run check",
+      "log": "s7-begin-uuid-check.log",
+      "exit_code": 0
+    },
+    {
+      "command": "bun run lint",
+      "log": "s7-begin-uuid-lint.log",
+      "exit_code": 0
+    },
+    {
+      "command": "bun run fmt:check",
+      "log": "s7-begin-uuid-format.log",
+      "exit_code": 0
+    },
+    {
+      "command": "bun test tests/unit/architecture.test.ts",
+      "log": "s7-begin-uuid-architecture.log",
+      "exit_code": 0
+    },
+    {
+      "command": "bun run build",
+      "log": "s7-begin-uuid-build.log",
+      "exit_code": 0
+    }
+  ],
+  "initial_typecheck": {
+    "log": "s7-begin-check.log",
+    "exit_code": 1,
+    "errors": 3,
+    "cause": "new fixture SQL row map/destructure types were implicit any"
+  },
+  "temporary_test_diagnostic_marker_removed": true,
+  "artifacts_sha256": {
+    "dist/core-api/main.js": "b2ca67613b84b9d925bcf3d554e77387bd2795ea3be744bacbbb9bc4310e4c3f",
+    "dist/core-api/platform/management.js": "07f95de6d0bdffa832a13fb320d2032f635ecc915e73a5f452cea2efa59d3f6c",
+    "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+    "dist/core-worker/main.js": "5c6cea47e411b47ab2d46035108351516330c4de89d24a9e24a3ef259a697ea3",
+    "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+    "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+    "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+    "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+    "dist/manifest.json": "446ab5d37db7b0bfda0d0cebd3669238d07755e5692c2c99a7a06dd11879e147",
+    "dist/tools/sql/core-begin-batch.sql": "2a41a23e5aa2cdfb37dcca7e59afd192ad49d4651e560bbf2ac99915b11ab1d2",
+    "dist/tools/migrations/manifest.json": "65f8d72bd03ec1ace06cf98d2dbd3b2c4aa5a1c246ea8c9d05f6adf73fd320bb"
+  },
+  "built_migration_sql_and_manifest_byte_equal_source": true,
+  "resources": {
+    "at": "2026-11-17T20:21:00.512Z",
+    "database": "gateway_native",
+    "foundation_count": 27,
+    "original_27_names_and_oids_equal": true,
+    "remaining_recent_databases": [],
+    "recent_fixture_created": 63,
+    "recent_fixture_without_dropped_record": [],
+    "sampled_recent_core_pids": 126,
+    "remaining_recent_core_pids": [],
+    "remaining_recent_identity_roles": [],
+    "protected_reference_present": true,
+    "protected_processes_confirmed": [
+      {
+        "pid": 40766,
+        "started": "Mon Nov 16 16:27:47 2026",
+        "command": "bun"
+      },
+      {
+        "pid": 40771,
+        "started": "Mon Nov 16 16:27:47 2026",
+        "command": "bun"
+      }
+    ]
+  },
+  "archive": {
+    "s7-begin-red.log": {
+      "file": "s7-begin-red.log",
+      "sha256": "033542fe749707b8e512a338276c16d7233d8351bb9da23711c5bf07f84d38cd",
+      "bytes": 1858
+    },
+    "s7-begin-first.log": {
+      "file": "s7-begin-first.log",
+      "sha256": "7375245d4bdba5fa8c7a91e028212ce6d2c47ba622c51fc44f0b9bfa6479459e",
+      "bytes": 2526
+    },
+    "s7-begin-check.log": {
+      "file": "s7-begin-check.log",
+      "sha256": "587aba1f2c73574e33921cb7f17e8c9d2e24355c0e412e870d1ceec8cbcafd46",
+      "bytes": 474
+    },
+    "s7-begin-null-authorities.log": {
+      "file": "s7-begin-null-authorities.log",
+      "sha256": "0afba1ff7c03d78dcde735a63ca0435ed5bd96c322b00d521ba2fe258ee734e0",
+      "bytes": 272
+    },
+    "s7-begin-check-fixed.log": {
+      "file": "s7-begin-check-fixed.log",
+      "sha256": "1a54cb1f6816f4b2ea3a6a1365b30da99088d29c1eb173f4b6df12d878dc9798",
+      "bytes": 66
+    },
+    "s7-begin-boundaries.log": {
+      "file": "s7-begin-boundaries.log",
+      "sha256": "4c67e2fc281f75aa7498791e238eb4e421a7274c09e284da3b8558beca4fa36b",
+      "bytes": 1408
+    },
+    "s7-begin-existing-contracts.log": {
+      "file": "s7-begin-existing-contracts.log",
+      "sha256": "b3e0d0dc07364db1385d24d71a0180b9c54f65c0bb3b0a4609e636ccfcaa1d3e",
+      "bytes": 4667
+    },
+    "s7-begin-same-command.log": {
+      "file": "s7-begin-same-command.log",
+      "sha256": "4095840fe941650e91f5fbf67d818b20f53cd0b2bc1290159cb40b0c72817917",
+      "bytes": 389
+    },
+    "s7-begin-final-targeted.log": {
+      "file": "s7-begin-final-targeted.log",
+      "sha256": "98526000272cc323926ba6f1f543468ed02fc562620cab8650eda03f88e1c2a2",
+      "bytes": 1124
+    },
+    "s7-begin-final-commit.log": {
+      "file": "s7-begin-final-commit.log",
+      "sha256": "3f815dbb1bfb9c0ca2d78ffe16761b1b51fdf3455c4870ad51e9fffda79da1bd",
+      "bytes": 671
+    },
+    "s7-begin-final-check.log": {
+      "file": "s7-begin-final-check.log",
+      "sha256": "57f5d2994ba0b53c1c6a0abe9734f5e7cb69cf7600f812877cd5aebcf13f22e3",
+      "bytes": 67
+    },
+    "s7-begin-final-lint.log": {
+      "file": "s7-begin-final-lint.log",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25
+    },
+    "s7-begin-final-architecture.log": {
+      "file": "s7-begin-final-architecture.log",
+      "sha256": "4ee757bc3ef83aa0c6fa279c30da8274470d7f1900b0f3455cfe673bc08874b9",
+      "bytes": 888
+    },
+    "s7-begin-final-format.log": {
+      "file": "s7-begin-final-format.log",
+      "sha256": "6f4f6ae944c34a74672b01c2972bb267f232d4b96d0e5aafe3db5c54dd19126f",
+      "bytes": 59
+    },
+    "s7-begin-uuid-red.log": {
+      "file": "s7-begin-uuid-red.log",
+      "sha256": "ddac7706622c927719744337d1c5c4de623d46a6ac1cf29c7157c8355a30542f",
+      "bytes": 4425
+    },
+    "s7-begin-uuid-green.log": {
+      "file": "s7-begin-uuid-green.log",
+      "sha256": "d5bc63ec99be1562d7367ad52d3e42c3412b5a79dee0e33a038bfc12e8d37de1",
+      "bytes": 767
+    },
+    "s7-begin-uuid-check.log": {
+      "file": "s7-begin-uuid-check.log",
+      "sha256": "6ad176a83666708064bcc4fbf0804925485225db88e9dd8ec3f913dea6c996c2",
+      "bytes": 67
+    },
+    "s7-begin-uuid-lint.log": {
+      "file": "s7-begin-uuid-lint.log",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25
+    },
+    "s7-begin-uuid-architecture.log": {
+      "file": "s7-begin-uuid-architecture.log",
+      "sha256": "a23097d01b85225238cb1a26cd6c64d52139fbbd0f8af9c35286680dace244cb",
+      "bytes": 886
+    },
+    "s7-begin-uuid-format.log": {
+      "file": "s7-begin-uuid-format.log",
+      "sha256": "6f4f6ae944c34a74672b01c2972bb267f232d4b96d0e5aafe3db5c54dd19126f",
+      "bytes": 59
+    },
+    "s7-begin-build.log": {
+      "file": "s7-begin-build.log",
+      "sha256": "e78614cafed479a219187a0e6dd738c39731b553f606e0926d6288f4e2be7dd1",
+      "bytes": 168
+    },
+    "s7-begin-uuid-build.log": {
+      "file": "s7-begin-uuid-build.log",
+      "sha256": "e78614cafed479a219187a0e6dd738c39731b553f606e0926d6288f4e2be7dd1",
+      "bytes": 168
+    },
+    "s7-begin-resources.json": {
+      "file": "s7-begin-resources.json.raw",
+      "sha256": "06047435ff58fa221f8adcf735369bdc1e159135089213169ead5b1f0f1f4f4b",
+      "bytes": 407
+    },
+    "inspect-begin-resources.ts": {
+      "file": "inspect-begin-resources.ts.raw",
+      "sha256": "b33889a808934a246c92969d192a9a758751560a78532875bb5443b40f99a264",
+      "bytes": 2212
+    }
+  },
+  "command_prefix": [
+    "env",
+    "PATH=.local/toolchain/bun-1.4.4:.local/toolchain/go/bin:$PATH",
+    ".local/toolchain/bun-1.4.4/bun",
+    "--env-file=.env.local",
+    "--env-file=.local/native-gate.env"
+  ],
+  "test_files": [
+    "tests/integration/core-begin-batch.test.ts",
+    "tests/integration/core-execution-batch-identity.test.ts",
+    "tests/integration/core-first-chain.test.ts",
+    "tests/integration/core-execution.test.ts",
+    "tests/integration/core-identity-catalog.test.ts",
+    "tests/integration/core-commit-unknown.test.ts",
+    "tests/integration/core-execution-upgrade.test.ts",
+    "tests/integration/core-funding-upgrade.test.ts"
+  ],
+  "independent_readonly_reviews": [
+    "financial_batch_audit: design natural-expiry fix, actual implementation, singleton and UUID alias patches",
+    "module_ownership_audit: typed SAME_COMMAND gate fixture change preserves lease cleanup defect detection"
+  ],
+  "new_performance_measurement": false,
+  "latest_verified_stable_rps": 60,
+  "full_checks_not_run": [
+    "full unit suite",
+    "full integration suite",
+    "test:artifact",
+    "test:durability",
+    "test:backup",
+    "new capacity/concurrency"
+  ],
+  "reason": "Continue implementing full setwise admission/evidence milestone; targeted money/auth/once-send/unknown-COMMIT checks completed without repeating full gates or capacity per helper."
+}

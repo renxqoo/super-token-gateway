@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { generateKeyPairSync, type KeyObject } from "node:crypto";
 import { openAIChatReleaseId, packageTrust, releasePolicySchema, verifyPackage } from "../index.ts";
 import { syntheticChatPackage } from "../../../../tests/support/plugin-package.ts";
+import { syntheticSignedPackage } from "../../../../tests/support/plugin-package.ts";
+import { openAIChatPackageFiles } from "@gateway/adapters";
 
 const now = Date.parse("2030-06-01T00:00:00.000Z");
 const digestA = "a".repeat(64);
@@ -58,6 +60,90 @@ test("a listed release's package verifies with its bound key and an unbound sign
   expect(trust(keys.publicKey)(digestA).size).toBe(0);
   const stranger = generateKeyPairSync("ed25519").publicKey;
   expect(() => verifyPackage(signed.bytes, trust(stranger)(signed.pkg.digest))).toThrow();
+});
+
+test("platform classification uses authenticated private package identity and cannot be forged by public field mutation", async () => {
+  const keys = generateKeyPairSync("ed25519");
+  const signed = await syntheticChatPackage(keys);
+  const trust = packageTrust(
+    policy(keys.publicKey, signed.pkg.digest, { id: "synthetic-test-only" }),
+    now,
+  );
+  expect(trust.isPlatform(signed.pkg, now)).toBe(true);
+  const copy = { ...signed.pkg };
+  signed.pkg.digest = "9".repeat(64);
+  signed.pkg.signingKeyId = "unlisted";
+  signed.pkg.manifest.id = "acme.chat";
+  expect(trust.isPlatform(signed.pkg, now)).toBe(true);
+  expect(() => trust.isPlatform(copy, now)).toThrow();
+  expect(trust.isPlatform(signed.pkg, Date.parse("2031-01-01T00:00:00.000Z"))).toBe(false);
+});
+
+test("a matching key id cannot impersonate the actual deployment signing key for platform execution", async () => {
+  const deployment = generateKeyPairSync("ed25519");
+  const legitimate = await syntheticChatPackage(deployment);
+  const stranger = syntheticSignedPackage(
+    [...legitimate.pkg.files],
+    generateKeyPairSync("ed25519"),
+  );
+  const trust = packageTrust(
+    policy(deployment.publicKey, legitimate.pkg.digest, { id: "synthetic-test-only" }),
+    now,
+  );
+  expect(stranger.pkg.digest).toBe(legitimate.pkg.digest);
+  expect(trust.isPlatform(legitimate.pkg, now)).toBe(true);
+  expect(trust.isPlatform(stranger.pkg, now)).toBe(false);
+});
+
+test("publisher admission never grants platform execution even when its public view impersonates an approved package", async () => {
+  const platform = generateKeyPairSync("ed25519"),
+    publisherKey = generateKeyPairSync("ed25519");
+  const files = (await openAIChatPackageFiles()).map((file) =>
+    file.path === "manifest.json"
+      ? {
+          path: file.path,
+          bytes: new TextEncoder().encode(
+            JSON.stringify({
+              ...JSON.parse(new TextDecoder().decode(file.bytes)),
+              id: "acme.chat",
+            }),
+          ),
+        }
+      : file,
+  );
+  const uploaded = syntheticSignedPackage(files, publisherKey).pkg;
+  const trusted = packageTrust(
+    policy(
+      platform.publicKey,
+      digestA,
+      {},
+      {},
+      { publishers: [publisher(publisherKey.publicKey, { id: "synthetic-test-only" })] },
+    ),
+    now,
+  );
+  expect(trusted.admits(uploaded)).toBe(true);
+  expect(trusted.isPlatform(uploaded, now)).toBe(false);
+  uploaded.digest = digestA;
+  uploaded.signingKeyId = "deployment-key";
+  uploaded.manifest.id = "gateway.openai-chat";
+  expect(trusted.isPlatform(uploaded, now)).toBe(false);
+});
+
+test("platform classification rejects revoked, unbound and naturally expired grants", async () => {
+  const keys = generateKeyPairSync("ed25519");
+  const signed = await syntheticChatPackage(keys);
+  for (const [key, release] of [
+    [{ expires_at: "2030-06-01T00:00:01.000Z" }, {}],
+    [{}, { revoked: true }],
+    [{ purposes: ["release"] }, {}],
+  ] as const) {
+    const trusted = packageTrust(
+      policy(keys.publicKey, signed.pkg.digest, { id: "synthetic-test-only", ...key }, release),
+      now,
+    );
+    expect(trusted.isPlatform(signed.pkg, now + 1000)).toBe(false);
+  }
 });
 
 test("revoked releases, release-only keys and keys outside their validity window grant no package trust", () => {

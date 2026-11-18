@@ -1,0 +1,139 @@
+{
+  "stopping": false,
+  "results": [
+    {
+      "label": "check",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "check"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:16:16.602Z",
+      "elapsed_ms": 102.27316699999999,
+      "log": ".local/performance-implementation/s3c-validation-check.log"
+    },
+    {
+      "label": "lint",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "lint"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:16:16.704Z",
+      "elapsed_ms": 37.701583,
+      "log": ".local/performance-implementation/s3c-validation-lint.log"
+    },
+    {
+      "label": "fmt",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "fmt:check"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:16:16.742Z",
+      "elapsed_ms": 27.08487500000001,
+      "log": ".local/performance-implementation/s3c-validation-fmt.log"
+    },
+    {
+      "label": "unit",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:16:16.769Z",
+      "elapsed_ms": 60450.52029099999,
+      "log": ".local/performance-implementation/s3c-validation-unit.log"
+    },
+    {
+      "label": "build",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "build"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:17:17.220Z",
+      "elapsed_ms": 280.4179579999982,
+      "log": ".local/performance-implementation/s3c-validation-build.log"
+    },
+    {
+      "label": "integration",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "--env-file=.env.local",
+        "--env-file=.local/native-gate.env",
+        ".local/performance-implementation/s3c-integration-isolated.ts"
+      ],
+      "code": 1,
+      "started": "2026-11-17T12:17:17.500Z",
+      "elapsed_ms": 1077728.315625,
+      "log": ".local/performance-implementation/s3c-validation-integration.log"
+    },
+    {
+      "label": "native",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:native"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:35:15.229Z",
+      "elapsed_ms": 14558.976125000045,
+      "log": ".local/performance-implementation/s3c-validation-native.log"
+    },
+    {
+      "label": "plugin-artifact",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:plugin-artifact"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:35:29.788Z",
+      "elapsed_ms": 1600.654291999992,
+      "log": ".local/performance-implementation/s3c-validation-plugin-artifact.log"
+    },
+    {
+      "label": "artifact",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:artifact"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:35:31.389Z",
+      "elapsed_ms": 14931.976958000101,
+      "log": ".local/performance-implementation/s3c-validation-artifact.log"
+    },
+    {
+      "label": "durability",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:durability"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:35:46.321Z",
+      "elapsed_ms": 5735.515291000018,
+      "log": ".local/performance-implementation/s3c-validation-durability.log"
+    },
+    {
+      "label": "backup",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "--env-file=.env.local",
+        "--env-file=.local/native-gate.env",
+        ".local/performance-implementation/s3c-backup-own.ts"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:35:52.056Z",
+      "elapsed_ms": 4228.238333000103,
+      "log": ".local/performance-implementation/s3c-validation-backup.log"
+    }
+  ]
+}

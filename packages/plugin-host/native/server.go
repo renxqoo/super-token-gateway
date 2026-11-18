@@ -266,9 +266,12 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output *os.File
 		cancel()
 		input.Close()
 	}
-	write := func(r Response) {
+	writeFrame := func(r Response, completed func()) {
 		writeMu.Lock()
 		defer writeMu.Unlock()
+		if completed != nil {
+			completed()
+		}
 		if output.SetWriteDeadline(time.Now().Add(duration(s.config.WriteMS))) != nil {
 			fail(code("OUTPUT_FAILED"))
 			return
@@ -277,6 +280,7 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output *os.File
 			fail(code("OUTPUT_FAILED"))
 		}
 	}
+	write := func(r Response) { writeFrame(r, nil) }
 	monitorDone := make(chan struct{})
 	go func() { defer close(monitorDone); s.monitor(ctx, fail) }()
 	readDone := make(chan struct{})
@@ -396,13 +400,19 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output *os.File
 					}
 					s.bufferedOutputBytes += responseBytes
 					s.mu.Unlock()
-					write(response)
+					req.Module = nil
+					req.Input = nil
+					req.State = nil
+					writeFrame(response, func() {
+						s.mu.Lock()
+						delete(s.tasks, req.ID)
+						s.pendingBytes -= taskBytes
+						s.mu.Unlock()
+						<-s.capacity
+					})
 					s.mu.Lock()
 					s.bufferedOutputBytes -= responseBytes
-					delete(s.tasks, req.ID)
-					s.pendingBytes -= taskBytes
 					s.mu.Unlock()
-					<-s.capacity
 				}(req)
 			default:
 				s.mu.Lock()

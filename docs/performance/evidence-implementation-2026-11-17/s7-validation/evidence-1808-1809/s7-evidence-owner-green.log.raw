@@ -1,0 +1,10 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-evidence-batch.test.ts:
+(pass) evidence upgrade preserves a column-scoped owner without granting extra request reads or timestamp writes [2177.08ms]
+
+ 1 pass
+ 5 filtered out
+ 0 fail
+ 16 expect() calls
+Ran 1 test across 1 file. [2.25s]

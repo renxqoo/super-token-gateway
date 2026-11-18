@@ -1,0 +1,95 @@
+from pathlib import Path
+import heapq
+import json
+import re
+
+root=Path.cwd()
+private=root/'.local/performance-implementation'
+start=json.loads((private/'pg-plan-profile-start.json').read_text())
+run=json.loads((private/'pg-plan-profile-run.log').read_text().strip().splitlines()[-1])
+audit=json.loads((root/run['directory']/'audit.json').read_text())
+pids={row['pid'] for row in audit['processes']['pg']['pids']}
+header=re.compile(r'^\d{4}-\d\d-\d\d .*?\[(\d+)\] LOG:  duration: ([\d.]+) ms  plan:$')
+boundary=re.compile(r'^\d{4}-\d\d-\d\d .*?\[\d+\] [A-Z]+:')
+groups={}
+seen=0
+errors=[]
+decoder=json.JSONDecoder()
+
+def category(text):
+    if 'FROM public.core_evidence_receipts r WHERE r.attempt_id=' in text and 'r.revision_claim' in text:
+        return 'receipt_revision'
+    if 'FROM public.execution_quota_leases l JOIN public.execution_permits ep' in text and 'core_preflight_v1.attempt_id' in text:
+        return 'preflight_leases'
+    if 'FROM public.execution_permits WHERE attempt_id=ANY(attempt_ids)' in text and 'FOR NO KEY UPDATE NOWAIT' in text:
+        return 'evidence_permit_locks'
+    if 'FROM public.gateway_requests WHERE id=ANY(request_ids)' in text and 'FOR UPDATE NOWAIT' in text:
+        return 'evidence_request_locks'
+    if 'array_agg(k ORDER BY k.id)' in text and 'public.api_keys' in text:
+        return 'customer_keys'
+    return None
+
+def finish(meta, lines, kind):
+    global seen
+    if meta is None or kind is None:
+        return
+    seen+=1
+    try:
+        text=''.join(lines).lstrip()
+        obj,_=decoder.raw_decode(text)
+        obj.pop('Query Parameters',None)
+        record={'pid':meta[0],'duration_ms':meta[1],'query':obj['Query Text'],'plan':obj['Plan']}
+        if 'Triggers' in obj:
+            record['triggers']=obj['Triggers']
+        group=groups.setdefault(kind,{'count':0,'total_logged_duration_ms':0,'first':[],'last':[],'slowest':[]})
+        group['count']+=1
+        group['total_logged_duration_ms']+=meta[1]
+        if len(group['first'])<3:
+            group['first'].append(record)
+        group['last']=(group['last']+[record])[-3:]
+        group['slowest'].append(record)
+        group['slowest'].sort(key=lambda item:item['duration_ms'],reverse=True)
+        group['slowest']=group['slowest'][:8]
+    except Exception as error:
+        errors.append({'pid':meta[0],'duration_ms':meta[1],'error':str(error)[:200]})
+
+with open(root/start['log'],'r',encoding='utf8',errors='replace') as handle:
+    handle.seek(start['offset'])
+    meta=None
+    lines=[]
+    kind=None
+    for line in handle:
+        if boundary.match(line):
+            finish(meta,lines,kind)
+            match=header.match(line.rstrip('\n'))
+            meta=(int(match[1]),float(match[2])) if match and int(match[1]) in pids else None
+            lines=[]
+            kind=None
+            continue
+        if meta is None:
+            continue
+        if '"Query Text":' in line:
+            try:
+                text=json.loads('{'+line.strip().rstrip(',')+'}')['Query Text']
+                kind=category(text)
+            except Exception:
+                kind=None
+        if kind is not None or len(lines)<2:
+            lines.append(line)
+    finish(meta,lines,kind)
+    end=handle.tell()
+
+result={'scope':'Sampled actual plans from owned1809 fixture backends only; auto_explain overhead, not capacity/CPU evidence','database':audit['database'],'capacity_directory':run['directory'],'profile_exit_code':1,'offset':start['offset'],'end_offset':end,'shared_log_bytes_appended':end-start['offset'],'owned_sampled_pids':sorted(pids),'selected_plans':seen,'parse_errors':errors,'groups':groups}
+(private/'pg-plan-profile-plans.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+
+def scans(node):
+    result=[]
+    if 'Scan' in node['Node Type']:
+        result.append({key:node[key] for key in ['Node Type','Relation Name','Index Name','Actual Rows','Actual Loops','Rows Removed by Filter','Shared Hit Blocks','Shared Read Blocks'] if key in node})
+    for child in node.get('Plans',[]):
+        result.extend(scans(child))
+    return result
+
+for name,group in groups.items():
+    print(json.dumps({'kind':name,'count':group['count'],'first':[(r['duration_ms'],scans(r['plan'])) for r in group['first'][:1]],'slowest':[(r['duration_ms'],scans(r['plan'])) for r in group['slowest'][:1]],'last':[(r['duration_ms'],scans(r['plan'])) for r in group['last'][-1:]]}))
+print(json.dumps({'selected_plans':seen,'parse_errors':len(errors),'shared_log_bytes_appended':end-start['offset']}))

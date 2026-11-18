@@ -87,6 +87,8 @@ try {
     "dist/gateway/main.js",
     "dist/manifest.json",
     "dist/mock-providers/main.js",
+    "dist/native/builtin-adapters/registry.json",
+    "dist/native/builtin-adapters/worker.js",
     "dist/native/plugin-host",
   ]);
   assert.equal(audit.http.offered, 1);

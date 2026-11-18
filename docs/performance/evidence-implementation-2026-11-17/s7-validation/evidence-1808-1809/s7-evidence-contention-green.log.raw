@@ -1,0 +1,10 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-evidence-batch.test.ts:
+(pass) a busy supplier cell does not materialize facts that its coalesced group will roll back [2272.32ms]
+
+ 1 pass
+ 6 filtered out
+ 0 fail
+ 22 expect() calls
+Ran 1 test across 1 file. [2.34s]

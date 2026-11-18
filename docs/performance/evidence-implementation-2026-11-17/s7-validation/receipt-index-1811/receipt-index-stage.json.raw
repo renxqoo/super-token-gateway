@@ -1,0 +1,67 @@
+{
+  "migration": 2026111811,
+  "schema_manifest_entries": 43,
+  "previous_42_manifest_entries_unchanged": true,
+  "revision": "event-leading same-triple core_receipt_delivery unique constraint",
+  "red": {
+    "exit_code": 1,
+    "passed": 0,
+    "failed": 1,
+    "assertions": 5,
+    "heap_rows_visited": 10001
+  },
+  "initial_green": {
+    "exit_code": 0,
+    "passed": 1,
+    "failed": 0,
+    "assertions": 9,
+    "heap_rows_visited": 0
+  },
+  "final_targeted": {
+    "exit_code": 0,
+    "passed": 10,
+    "failed": 0,
+    "assertions": 180,
+    "files": 3,
+    "seconds": 24.31
+  },
+  "history_consumers": {
+    "exit_code": 0,
+    "passed": 3,
+    "failed": 0,
+    "assertions": 54,
+    "files": 3,
+    "filtered": 9
+  },
+  "gates": {
+    "check": {
+      "exit_code": 0,
+      "files": 354
+    },
+    "lint": {
+      "exit_code": 0
+    },
+    "fmt_check_before_round_archive": {
+      "exit_code": 0,
+      "files": 741
+    },
+    "build": {
+      "exit_code": 0,
+      "manifest_entries": 43,
+      "source_artifact_binding": true
+    }
+  },
+  "diagnostic": {
+    "label": "s7-receipt-index-300-failed",
+    "exit_code": 1,
+    "window_complete_rps": 115.4,
+    "capacity_passed": false,
+    "excluded_from_stability": true
+  },
+  "review": "Independent read-only financial_batch_audit: no new money, ACL, FK or uniqueness blocker; migration quiescence required; data-bearing current-schema rebuild is not a true 1810-prefix upgrade proof",
+  "limits": [
+    "row-visit statistic is not total index items, buffers or CPU",
+    "one failed diagnostic is not stable capacity or a universal benefit",
+    "final full gates and >3000 full-chain/concurrency/HA acceptance remain pending"
+  ]
+}

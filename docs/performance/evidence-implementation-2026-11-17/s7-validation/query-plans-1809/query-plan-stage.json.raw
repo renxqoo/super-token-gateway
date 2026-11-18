@@ -1,0 +1,105 @@
+{
+  "at": "2026-11-17T22:38:54.033811+00:00",
+  "goal_status": "active",
+  "previous_goal_turn": "progress: 1809 late-lock root cause fixed and measured; goal not narrowed",
+  "this_stage": "actual plans and isolated planning experiment; no product code changes",
+  "runtime_migration": 2026111809,
+  "last_formal_stable_rps": 60,
+  "profile": {
+    "selected_plans": 7831,
+    "parse_errors": 0,
+    "groups": {
+      "preflight_leases": 987,
+      "customer_keys": 208,
+      "evidence_request_locks": 1298,
+      "evidence_permit_locks": 1298,
+      "receipt_revision": 4040
+    },
+    "source_log": 135432482,
+    "end_log": 2355033364,
+    "shared_log_bytes_appended": 2219600882,
+    "intended_log_min_duration_ms": 0.5,
+    "actual_integer_log_min_duration_ms": 0,
+    "no_capacity_or_cpu_claim": true
+  },
+  "custom_plan_experiment": {
+    "product_artifacts_unchanged": true,
+    "only_own_database_new_connections": "force_custom_plan",
+    "initial_administrator_connection": "auto",
+    "exit_code": 1,
+    "capacityPassed": false,
+    "window_rps": 152.55,
+    "p99": 1892.11,
+    "shed": 3231,
+    "http503": 5452,
+    "pg_cpu_ms_per_admitted": 32.3816067653277,
+    "service_cpu_ms_per_admitted": 39.10887949260042,
+    "requests_including_warmup": 9460,
+    "facts_receipts_acks": 18920,
+    "customer_spent": "946000",
+    "supplier_spent": "558140",
+    "both_reserved": "0"
+  },
+  "checks": "docs and source/record integrity only; runtime unchanged, no repeat full gates",
+  "resources": {
+    "at": "2026-11-17T22:36:01.912Z",
+    "database": "gateway_native",
+    "original_27_names_and_oids_equal": true,
+    "foundation_count": 27,
+    "remaining_recent_databases": [],
+    "remaining_recent_core_processes": [],
+    "remaining_recent_identity_roles": [],
+    "remaining_recent_temp_directories": [],
+    "protected_reference_present": true,
+    "protected_processes": [
+      {
+        "pid": 40766,
+        "started": "Mon Nov 16 16:27:47 2026",
+        "command": "bun apps/core-api/src/main.ts"
+      },
+      {
+        "pid": 40771,
+        "started": "Mon Nov 16 16:27:47 2026",
+        "command": "bun apps/core-api/src/main.ts"
+      }
+    ],
+    "rounds": [
+      {
+        "label": "s7-pg-plans-profile",
+        "database": "gateway_test_foundation_54ba01b0a89e4e60a21a50bc9f092533",
+        "database_absent": true,
+        "live_owned_sampled_pids": [],
+        "namespace_cleanup": {
+          "cleaned": 1,
+          "failed": 0
+        },
+        "archive_hashes_verified": true,
+        "source_directory_removed": true
+      },
+      {
+        "label": "s7-custom-plans-300-failed",
+        "database": "gateway_test_foundation_8742cb2091564ec384c61033e25f8081",
+        "database_absent": true,
+        "live_owned_sampled_pids": [],
+        "namespace_cleanup": {
+          "cleaned": 1,
+          "failed": 0
+        },
+        "archive_hashes_verified": true,
+        "source_directory_removed": true
+      }
+    ]
+  },
+  "residue": {
+    "shared_pg_log": ".local/native-services/postgres.log",
+    "new_bytes_during_profile_interval": 2219600882,
+    "action": "retained; original log and other writers not truncated; no shared service restarted",
+    "remaining_disk_gib_approx": 31
+  },
+  "next_actions": [
+    "Implement NULL-attempt preflight short circuit and request/lease-directed permit reads",
+    "Use actual-parameter planning for demonstrated receipt/array-lock access and key-prefetch lookups; preserve pure calculation caching",
+    "Add deterministic cold-statistics/data-growth regressions through public operations",
+    "Re-measure strict capacity without profiling overhead; final complete gates and >3000/same-concurrency/HA/fault evidence remain required"
+  ]
+}

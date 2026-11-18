@@ -1,0 +1,30 @@
+{
+  "at_utc": "2026-11-17T18:29:14.193533+00:00",
+  "owned_scratch_files": [
+    {
+      "path": ".local/performance-implementation/s7-entry-restricted.sql",
+      "sha256_before_delete": "d504605ac7bbe05a43d1a45bc9587711d5b1d1bcda3bcd88a6ba7e9c7e43bbf4",
+      "removed": true
+    },
+    {
+      "path": ".local/performance-implementation/probe-funding-cut.ts",
+      "sha256_before_delete": "760f2458fb6a99075cfcc8376becd429755d3348cff2c75a941d8f3162187e2f",
+      "removed": true
+    },
+    {
+      "path": ".local/performance-implementation/build-funding-cut.py",
+      "sha256_before_delete": "8ecccdc3fc519e84473776ea2b24e81089f6c1a9ef87f8510c1f2cb1983e1534",
+      "removed": true
+    },
+    {
+      "path": ".local/performance-implementation/inspect-funding-cut.ts",
+      "sha256_before_delete": "7b9f032c5cd7989bf0beff6b0eb017ed7bd80b2a51f437f5f60e1e25837c9d32",
+      "removed": true
+    }
+  ],
+  "test_resources": "each fixture completed its finally cleanup; foundation count returned to the starting 27",
+  "protected_resources": "40766/40771 and newapi_bench_1794879563902 confirmed present by retained-resources.json.raw",
+  "preexisting_foundation_databases_deleted": false,
+  "committed": false,
+  "pushed": false
+}

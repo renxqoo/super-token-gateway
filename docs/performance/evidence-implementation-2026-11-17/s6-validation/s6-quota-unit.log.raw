@@ -1,0 +1,12 @@
+bun test v1.4.4 (38afee6c8)
+
+apps/core-worker/src/__test__/maintenance.test.ts:
+(pass) a failing maintenance task is reported once and waits for its interval instead of spinning, and close interrupts the wait [2007.75ms]
+(pass) a task that reports more work is called again immediately until it reports none [6.55ms]
+(pass) commit notifications coalesce into one follow-up while a recovery is running and wake an idle recovery [9.26ms]
+(pass) a full release batch schedules more work without expired permits while a short or failed batch stops [5.37ms]
+
+ 4 pass
+ 0 fail
+ 12 expect() calls
+Ran 4 tests across 1 file. [2.05s]

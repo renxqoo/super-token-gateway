@@ -1,0 +1,33 @@
+from pathlib import Path
+from datetime import datetime,timezone
+import hashlib
+import json
+import shutil
+
+root=Path.cwd();private=root/'.local/performance-implementation'
+destination=root/'docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811'
+destination.mkdir(parents=True,exist_ok=True)
+owned=set(private.glob('receipt-index-*.log'))
+for name in ['cleanup-receipt-statements.ts','receipt-index-statements-cleanup.json','archive-receipt-round.py','inspect-receipt-cleanup.ts','receipt-index-resources-after.json','receipt-index-stage.json','archive-receipt-evidence.py']:
+    source=private/name;assert source.is_file(),name;owned.add(source)
+manifest={}
+for source in sorted(owned):
+    target=destination/(source.name+'.raw');assert not target.exists(),str(target)
+    shutil.copyfile(source,target);digest=hashlib.sha256(source.read_bytes()).hexdigest()
+    assert hashlib.sha256(target.read_bytes()).hexdigest()==digest
+    manifest[source.name]={'archive':str(target.relative_to(root)),'sha256':digest,'bytes':source.stat().st_size,'temporary_source_removed':False}
+sources={}
+for name in ['packages/storage/src/schema/enterprise.ts', 'packages/storage/src/migrations/0013_receipt-delivery-lookup.sql', 'packages/storage/src/migrations/meta/0013_snapshot.json', 'packages/storage/src/migrations/meta/_journal.json', 'packages/storage/src/migrations/manifest.json', 'tests/integration/core-receipt-index.test.ts', 'tests/integration/core-execution-upgrade.test.ts', 'tests/integration/plugin-catalog-upgrade.test.ts', 'tests/integration/lifecycle.test.ts', 'beyond-new-api/10-funding-engine.md', 'docs/performance/implementation-2026-11-17.md']:
+    source=root/name;target=destination/('source-'+name.replace('/','__')+'.raw');assert not target.exists()
+    shutil.copyfile(source,target);digest=hashlib.sha256(source.read_bytes()).hexdigest();assert hashlib.sha256(target.read_bytes()).hexdigest()==digest
+    sources[name]={'archive':str(target.relative_to(root)),'sha256':digest,'bytes':source.stat().st_size}
+state=json.loads((private/'receipt-index-stage.json').read_text())
+validation={'at':datetime.now(timezone.utc).isoformat(),'state':state,'temporary_files':manifest,'source_snapshots':sources,'source_scope':'1811 event-leading receipt unique constraint; cold-plan red/green and data-bearing current-schema rebuild; failed default300 diagnostic','actual_commands':'Stable Bun1.4.4 with both native env files for all PG tests/benchmark; native55452 and AOFalways+replica1; full milestone gates remain pending','protected_resources':'Original27 database names/OIDs, referenceDB and PIDs40766/40771 retained; main, no commit/push/deploy'}
+for source in sorted(owned):
+    record=manifest[source.name];target=root/record['archive']
+    assert hashlib.sha256(source.read_bytes()).hexdigest()==record['sha256']
+    assert hashlib.sha256(target.read_bytes()).hexdigest()==record['sha256']
+    source.unlink();record['temporary_source_removed']=not source.exists()
+assert all(record['temporary_source_removed'] for record in manifest.values())
+(destination/'validation.json.raw').write_text(json.dumps(validation,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'temporary_files_archived_verified_removed':len(manifest),'source_snapshots':len(sources),'validation':str((destination/'validation.json.raw').relative_to(root))}))

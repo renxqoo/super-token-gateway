@@ -1,0 +1,81 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-execution-recovery.test.ts:
+(pass) healthy unexpired RESERVED refuses technical abort and Gateway cannot invoke worker recovery [2145.98ms]
+107 |           )[0].closed,
+108 |         ).toBe(true);
+109 |         const release = (await worker.execution("execution_quota_recovery_v1", { limit: 100 })) as {
+110 |           released: number;
+111 |         };
+112 |         expect(release.released).toBe(3);
+                                       ^
+error: expect(received).toBe(expected)
+
+Expected: 3
+Received: 0
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-execution-recovery.test.ts:112:34)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:58:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:56:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:50:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:39:9)
+(fail) deadline recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2423.83ms]
+(pass) customer recovery aborts only never-granted RESERVED and closes the last customer hold atomically [1985.81ms]
+(pass) instance recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2100.69ms]
+(pass) certificate recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2102.80ms]
+(pass) session recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2244.72ms]
+(pass) security revocation never lets recovery release SEND_GRANTED money and current owner can close after key revocation [2019.96ms]
+(pass) quota recovery converges when Redis adoption committed but both PG ACTIVE and post-close RELEASED replies failed [2191.46ms]
+(pass) begin locks first and the competing begin or technical abort cannot cross its uncommitted transition [1969.01ms]
+(pass) recovery locks first and the competing begin or technical abort cannot cross its uncommitted transition [3226.19ms]
+(pass) technical abort audit failure rolls back both releases closure and command receipt [2006.18ms]
+(pass) a core-worker identity can neither open, admit nor begin Gateway executions and cannot sign evidence for a Gateway attempt [2173.75ms]
+
+tests/integration/core-worker-crash.test.ts:
+111 |         "stalled evidence redelivered and acknowledged",
+112 |         60000,
+113 |       );
+114 |       const after = await ledger(db, setup.provider.account_id, requestId);
+115 |       expect(after.charges).toEqual([{ amount: "100" }]);
+116 |       expect(after.receipts).toBe(before!.receipts + 1);
+                                   ^
+error: expect(received).toBe(expected)
+
+Expected: 1
+Received: 2
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-worker-crash.test.ts:116:30)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:58:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:56:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:50:9)
+(fail) a settlement worker killed with its commit unsent moves no money and the restarted worker settles the evidence exactly once [33222.15ms]
+(pass) a settlement worker killed after its commit but before acknowledging the job charges the redelivered evidence only once [33284.76ms]
+
+tests/integration/execution-runtime-history.test.ts:
+(pass) actual V1 reserved and granted permits survive the appended migration without new sends or fabricated identities [2160.21ms]
+
+tests/integration/core-settlement-regressions.test.ts:
+(pass) a later unknown outcome cannot downgrade a FINAL snapshot and provider usage pricing is still charged [2328.21ms]
+(pass) a same-content revision replay after an ESTIMATED receipt is a replay instead of a constraint error [2010.04ms]
+(pass) in-group copies of a contested revision are each recorded as conflicts instead of a constraint error [2032.30ms]
+(pass) a third in-group claim equal to the first contested value is also contested and nothing becomes canonical [2089.23ms]
+(pass) a dispute whose exposure is covered by the posted cost leaves the supplier hold unsettled without a final cost [2072.17ms]
+(pass) an evidence group meeting a held wallet lock reports busy at once instead of waiting for the lock timeout [2100.44ms]
+(pass) signature and subject rejections leave a bounded technical audit without claiming the events [1993.41ms]
+(pass) manual example A: a known request fee posts while temporary tokens stay reserved and the final adds only the difference [2034.74ms]
+(pass) manual example B: an overrun with an unknown dimension freezes at once, posts in full below zero and a recharge does not revive the account [2175.81ms]
+(pass) manual example C: a successful retry does not release the earlier unknown attempt and total supplier cost is 80 [2210.91ms]
+(pass) a supplier cost beyond 38 digits is an OVERFLOW dispute that freezes the account instead of a failing group [2028.16ms]
+(pass) a new copy grouped after a duplicate of an unanchored conflict is a conflict instead of a retried busy group [2070.42ms]
+(pass) a revision is accepted from its new event regardless of order when a grouped copy reuses a claimed event id [2127.46ms]
+
+2 tests failed:
+(fail) deadline recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2423.83ms]
+(fail) a settlement worker killed with its commit unsent moves no money and the restarted worker settles the evidence exactly once [33222.15ms]
+
+ 26 pass
+ 2 fail
+ 260 expect() calls
+Ran 28 tests across 4 files. [122.61s]

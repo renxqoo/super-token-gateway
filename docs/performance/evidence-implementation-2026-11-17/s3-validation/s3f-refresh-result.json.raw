@@ -1,0 +1,35 @@
+[
+  {
+    "label": "unit",
+    "command": [
+      "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+      "run",
+      "test"
+    ],
+    "code": 0,
+    "elapsed_ms": 61828.161625,
+    "log": ".local/performance-implementation/s3f-refresh-unit.log"
+  },
+  {
+    "label": "build",
+    "command": [
+      "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+      "run",
+      "build"
+    ],
+    "code": 0,
+    "elapsed_ms": 277.07704200000444,
+    "log": ".local/performance-implementation/s3f-refresh-build.log"
+  },
+  {
+    "label": "artifact",
+    "command": [
+      "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+      "run",
+      "test:artifact"
+    ],
+    "code": 0,
+    "elapsed_ms": 15116.923584000004,
+    "log": ".local/performance-implementation/s3f-refresh-artifact.log"
+  }
+]

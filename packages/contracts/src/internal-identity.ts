@@ -243,11 +243,25 @@ export const dispatchProjectionV1Schema = z.strictObject({
   billable_manifest_sha256: digestSchema,
   deadline_at: internalInstantSchema,
 });
+export const executionRuntimeV1Schema = z.strictObject({
+  version: z.literal(1),
+  kind: z.enum(["wasm", "builtin-worker"]),
+  artifact_digest: digestSchema,
+});
+export const executionRuntimesSchema = z
+  .record(digestSchema, z.array(executionRuntimeV1Schema).max(17))
+  .refine((value) => Object.keys(value).length <= 128);
+export const dispatchProjectionV2Schema = dispatchProjectionV1Schema.extend({
+  version: z.literal(2),
+  execution: executionRuntimeV1Schema,
+});
 export type InternalService = z.infer<typeof internalServiceSchema>;
 export type StartupChallenge = z.infer<typeof startupChallengeSchema>;
 export type StartupReceipt = z.infer<typeof startupReceiptSchema>;
 export type InternalProof = z.infer<typeof internalProofSchema>;
 export type DispatchProjectionV1 = z.infer<typeof dispatchProjectionV1Schema>;
+export type DispatchProjectionV2 = z.infer<typeof dispatchProjectionV2Schema>;
+export type ExecutionRuntimeV1 = z.infer<typeof executionRuntimeV1Schema>;
 export type CoreVerifiedPeerProjection = {
   service: InternalService;
   instance_id: string;

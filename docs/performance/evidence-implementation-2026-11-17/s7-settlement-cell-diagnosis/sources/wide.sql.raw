@@ -1,0 +1,93 @@
+ALTER TABLE core_funding.balance_cells DROP CONSTRAINT funding_cell_range;
+ALTER TABLE core_funding.balance_cells ADD CONSTRAINT funding_cell_range CHECK (cell BETWEEN 0 AND 63);
+CREATE OR REPLACE FUNCTION core_funding.transfer_v1(account uuid,cur text,target_cell integer,balance_delta numeric,spent_delta numeric,revision_delta numeric,ref text) RETURNS uuid LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE root public.upstream_account_balances%ROWTYPE;c core_funding.balance_cells%ROWTYPE;prior core_funding.budget_transfers%ROWTYPE;transfer uuid;transfer_kind text;BEGIN
+ IF account IS NULL OR cur IS NULL OR target_cell IS NULL OR target_cell NOT BETWEEN 0 AND 63 OR ref IS NULL OR length(ref) NOT BETWEEN 1 AND 200
+  OR balance_delta IS NULL OR spent_delta IS NULL OR revision_delta IS NULL
+  OR EXISTS(SELECT 1 FROM unnest(ARRAY[balance_delta,spent_delta,revision_delta]) d WHERE abs(d)>99999999999999999999999999999999999999 OR d<>trunc(d))
+  OR (balance_delta,spent_delta,revision_delta)=(0,0,0) THEN RAISE EXCEPTION 'funding_transfer_invalid' USING ERRCODE='P0400';END IF;
+ IF NOT core_funding.held_v1(account,true) THEN RAISE EXCEPTION 'funding_outer_transaction_required' USING ERRCODE='P0F01';END IF;
+ transfer_kind=CASE WHEN balance_delta>0 THEN 'GRANT' WHEN balance_delta<0 THEN 'RECLAIM' ELSE 'HEADROOM' END;
+ SELECT * INTO prior FROM core_funding.budget_transfers t WHERE t.account_id=account AND t.currency=cur AND t.reference=ref;
+ IF FOUND THEN
+  IF (prior.cell,prior.kind,prior.balance_delta,prior.spent_allocation_atoms,prior.spent_limit_delta,prior.revision_limit_delta) IS DISTINCT FROM (target_cell,transfer_kind,balance_delta,0::numeric,spent_delta,revision_delta) THEN RAISE EXCEPTION 'funding_transfer_conflict' USING ERRCODE='P0409';END IF;
+  RETURN prior.id;
+ END IF;
+ PERFORM 1 FROM public.upstream_accounts WHERE id=account FOR SHARE NOWAIT;
+ SELECT * INTO root FROM public.upstream_account_balances b WHERE b.account_id=account AND b.currency=cur FOR NO KEY UPDATE NOWAIT;
+ IF NOT FOUND THEN RAISE EXCEPTION 'funding_balance_missing' USING ERRCODE='P0404';END IF;
+ IF root.reserved_atoms<>0 THEN RAISE EXCEPTION 'funding_root_not_migrated' USING ERRCODE='P0422';END IF;
+ INSERT INTO core_funding.balance_cells(account_id,currency,cell,spent_limit,revision_limit) VALUES(account,cur,target_cell,0,0) ON CONFLICT DO NOTHING;
+ SELECT * INTO c FROM core_funding.balance_cells b WHERE b.account_id=account AND b.currency=cur AND b.cell=target_cell FOR NO KEY UPDATE NOWAIT;
+ IF balance_delta>0 AND balance_delta>root.balance_atoms OR balance_delta<0 AND -balance_delta>greatest(c.balance_atoms-c.reserved_atoms,0) THEN RAISE EXCEPTION 'funding_budget_unavailable' USING ERRCODE='P0422';END IF;
+ IF c.spent_limit+spent_delta<c.spent_atoms OR c.revision_limit+revision_delta<c.revision THEN RAISE EXCEPTION 'funding_headroom_unavailable' USING ERRCODE='P0422';END IF;
+ IF EXISTS(SELECT 1 FROM unnest(ARRAY[root.balance_atoms-balance_delta,c.balance_atoms+balance_delta,c.spent_limit+spent_delta,c.revision_limit+revision_delta]) d WHERE abs(d)>99999999999999999999999999999999999999) THEN RAISE EXCEPTION 'funding_counter_overflow' USING ERRCODE='22003';END IF;
+ UPDATE public.upstream_account_balances SET balance_atoms=balance_atoms-balance_delta WHERE account_id=account AND currency=cur;
+ UPDATE core_funding.balance_cells SET balance_atoms=balance_atoms+balance_delta,spent_limit=spent_limit+spent_delta,revision_limit=revision_limit+revision_delta WHERE account_id=account AND currency=cur AND cell=target_cell;
+ transfer=gen_random_uuid();
+ INSERT INTO core_funding.budget_transfers(id,account_id,currency,cell,kind,reference,balance_delta,spent_limit_delta,revision_limit_delta) VALUES(transfer,account,cur,target_cell,transfer_kind,ref,balance_delta,spent_delta,revision_delta);
+ RETURN transfer;
+END $$;
+CREATE OR REPLACE FUNCTION core_funding.reserve_v1(account uuid,cur text,attempt uuid,amount numeric) RETURNS smallint LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE target smallint;preferred integer=get_byte(uuid_send(attempt),15)%64;c core_funding.balance_cells%ROWTYPE;free numeric;root numeric;budget_grant numeric;seed record;slots integer=64;actual_spent numeric;BEGIN
+ IF NOT core_funding.held_v1(account) THEN RAISE EXCEPTION 'funding_fence_required' USING ERRCODE='P0403';END IF;
+ IF amount IS NULL OR amount<0 OR amount<>trunc(amount) OR amount>99999999999999999999999999999999999999 THEN RAISE EXCEPTION 'funding_budget_invalid' USING ERRCODE='P0400';END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.upstream_accounts WHERE id=account AND state='ACTIVE' AND mode='PREPAID') THEN RAISE EXCEPTION 'upstream_funds_unavailable' USING ERRCODE='P0402';END IF;
+ SELECT * INTO c FROM core_funding.balance_cells WHERE account_id=account AND currency=cur AND balance_atoms-reserved_atoms>=amount AND revision<revision_limit
+ ORDER BY (cell-preferred+64)%64 LIMIT 1 FOR NO KEY UPDATE SKIP LOCKED;
+ IF NOT FOUND THEN
+  IF NOT core_funding.held_v1(account,true) THEN
+   IF EXISTS(SELECT 1 FROM core_funding.balance_cells WHERE account_id=account AND currency=cur AND balance_atoms-reserved_atoms>=amount AND revision<revision_limit) THEN RAISE EXCEPTION 'core_busy' USING ERRCODE='P0503';END IF;
+   RAISE EXCEPTION 'funding_outer_transaction_required' USING ERRCODE='P0F01';
+  END IF;
+  SELECT balance_atoms-reserved_atoms INTO free FROM public.core_upstream_balances_v1 WHERE account_id=account AND currency=cur;
+  IF free IS NULL OR free<amount THEN RAISE EXCEPTION 'upstream_funds_unavailable' USING ERRCODE='P0402';END IF;
+  INSERT INTO core_funding.balance_cells(account_id,currency,cell,spent_limit,revision_limit) SELECT account,cur,i,0,0 FROM generate_series(0,63) i ON CONFLICT DO NOTHING;
+  IF NOT EXISTS(SELECT 1 FROM core_funding.balance_cells WHERE account_id=account AND currency=cur AND revision<revision_limit) THEN
+   SELECT spent_atoms INTO actual_spent FROM public.core_upstream_balances_v1 WHERE account_id=account AND currency=cur;
+   FOR seed IN SELECT cell,balance_atoms,reserved_atoms,spent_atoms,revision FROM core_funding.balance_cells WHERE account_id=account AND currency=cur ORDER BY (cell-preferred+64)%64 FOR NO KEY UPDATE NOWAIT LOOP
+    IF seed.cell=preferred THEN PERFORM core_funding.collect_v1(account,cur,greatest(amount-(seed.balance_atoms-seed.reserved_atoms),0),preferred);END IF;
+    SELECT balance_atoms INTO STRICT root FROM public.upstream_account_balances WHERE account_id=account AND currency=cur;
+    budget_grant=least(root,greatest(CASE WHEN seed.cell=preferred THEN amount-(seed.balance_atoms-seed.reserved_atoms) ELSE 0 END,div(root,slots)));
+    IF budget_grant>0 THEN PERFORM core_funding.transfer_v1(account,cur,seed.cell,budget_grant,0,0,'initialize:'||attempt||':'||seed.cell);END IF;
+    PERFORM core_funding.headroom_v1(account,cur,seed.cell,seed.spent_atoms+CASE WHEN actual_spent<99999999999999999999999999999999999999 THEN 1 ELSE 0 END,seed.revision+1);
+    slots=slots-1;
+   END LOOP;
+  END IF;
+  SELECT * INTO STRICT c FROM core_funding.balance_cells WHERE account_id=account AND currency=cur AND cell=preferred FOR NO KEY UPDATE NOWAIT;
+  IF c.balance_atoms-c.reserved_atoms<amount THEN
+   PERFORM core_funding.collect_v1(account,cur,amount-(c.balance_atoms-c.reserved_atoms),preferred);
+   SELECT balance_atoms INTO STRICT root FROM public.upstream_account_balances WHERE account_id=account AND currency=cur;
+   budget_grant=least(root,greatest(amount-(c.balance_atoms-c.reserved_atoms),div(free,64)));
+   IF budget_grant>0 THEN PERFORM core_funding.transfer_v1(account,cur,preferred,budget_grant,0,0,'reserve:'||attempt);END IF;
+  END IF;
+  PERFORM core_funding.headroom_v1(account,cur,preferred,c.spent_atoms,c.revision+1);
+  SELECT * INTO STRICT c FROM core_funding.balance_cells WHERE account_id=account AND currency=cur AND cell=preferred;
+ END IF;
+ target=c.cell;
+ IF c.balance_atoms-c.reserved_atoms<amount OR c.revision>=c.revision_limit THEN RAISE EXCEPTION 'funding_allocation_inconsistent' USING ERRCODE='P0500';END IF;
+ UPDATE core_funding.balance_cells SET reserved_atoms=reserved_atoms+amount,revision=revision+1 WHERE account_id=account AND currency=cur AND cell=target;
+ RETURN target;
+END $$;
+CREATE OR REPLACE FUNCTION core_funding.reserve_batch_v1(account uuid,cur text,attempt uuid,amount numeric,pending jsonb) RETURNS jsonb LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE c core_funding.balance_cells%ROWTYPE;entry jsonb;k text;preferred integer=get_byte(uuid_send(attempt),15)%64;BEGIN
+ IF NOT core_funding.held_v1(account) THEN RAISE EXCEPTION 'funding_fence_required' USING ERRCODE='P0403';END IF;
+ IF jsonb_typeof(pending->'cells') IS DISTINCT FROM 'object' OR amount IS NULL OR amount<0 OR amount<>trunc(amount) OR amount>99999999999999999999999999999999999999 THEN RAISE EXCEPTION 'funding_budget_invalid' USING ERRCODE='P0400';END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.upstream_accounts WHERE id=account AND state='ACTIVE' AND mode='PREPAID') THEN RAISE EXCEPTION 'upstream_funds_unavailable' USING ERRCODE='P0402';END IF;
+ SELECT state.* INTO c FROM core_funding.balance_cells state
+ WHERE state.account_id=account AND state.currency=cur
+  AND state.balance_atoms-coalesce((pending->'cells'->(state.account_id::text||':'||state.currency||':'||state.cell::text)->'next'->>'reserved_atoms')::numeric,state.reserved_atoms)>=amount
+  AND coalesce((pending->'cells'->(state.account_id::text||':'||state.currency||':'||state.cell::text)->'next'->>'revision')::numeric,state.revision)<state.revision_limit
+ ORDER BY (state.cell-preferred+64)%64 LIMIT 1 FOR NO KEY UPDATE OF state SKIP LOCKED;
+ IF NOT FOUND THEN
+  IF EXISTS(SELECT 1 FROM core_funding.balance_cells state
+   WHERE state.account_id=account AND state.currency=cur
+    AND state.balance_atoms-coalesce((pending->'cells'->(state.account_id::text||':'||state.currency||':'||state.cell::text)->'next'->>'reserved_atoms')::numeric,state.reserved_atoms)>=amount
+    AND coalesce((pending->'cells'->(state.account_id::text||':'||state.currency||':'||state.cell::text)->'next'->>'revision')::numeric,state.revision)<state.revision_limit) THEN RAISE EXCEPTION 'core_busy' USING ERRCODE='P0503';END IF;
+  RAISE EXCEPTION 'funding_outer_transaction_required' USING ERRCODE='P0F01';
+ END IF;
+ k=account::text||':'||cur||':'||c.cell::text;entry=pending->'cells'->k;
+ IF entry IS NULL THEN entry=jsonb_build_object('base',to_jsonb(c),'next',to_jsonb(c));ELSE c=jsonb_populate_record(NULL::core_funding.balance_cells,entry->'next');END IF;
+ pending=jsonb_set(pending,ARRAY['cells',k],jsonb_build_object('base',entry->'base','next',(entry->'next')||jsonb_build_object('reserved_atoms',c.reserved_atoms+amount,'revision',c.revision+1)));
+ RETURN jsonb_build_object('cell',c.cell,'pending',pending);
+END $$;

@@ -1,0 +1,391 @@
+{
+  "at": "2026-11-17T22:20:07.826995+00:00",
+  "goal_status": "active",
+  "current_runtime_migration": 2026111809,
+  "migration_sha256": "e400e85a7e03d98b0404d245ee80b4b66074e5d68a9b18eca09f028cdd11f06d",
+  "unit": {
+    "command": "bun run test",
+    "session_id": 27004,
+    "terminal": true,
+    "exit_code": 0,
+    "pass": 446,
+    "fail": 0,
+    "assertions": 8008,
+    "files": 70,
+    "log": "s7-funding-unit.log"
+  },
+  "build": {
+    "command": "bun run build",
+    "terminal": true,
+    "exit_code": 0,
+    "log": "s7-funding-build.log",
+    "manifest_migrations": 40,
+    "all_checksums_verified": true,
+    "dist_sql_and_manifest_equal_source": true
+  },
+  "integration": {
+    "command": "bun run test:integration",
+    "session_id": 22579,
+    "terminal": true,
+    "exit_code": 1,
+    "log": "s7-funding-integration.log",
+    "last_observed_pass_lines": 485,
+    "last_observed_fail_lines": 7,
+    "instruction": "First full gate exit1 is preserved; all original10 failed fixture cases now pass targeted. Final complete gate remains required on the final performance candidate.",
+    "pass": 562,
+    "fail": 10,
+    "assertions": 13229,
+    "files": 90,
+    "seconds": 1279.44,
+    "failure_titles": [
+      "a killed local plugin helper preserves the unknown send without poisoning the shared upstream channel",
+      "a Gateway refuses to start without durable evidence, and evidence lost after start withholds the terminal, tells stream clients that have received nothing yet and JSON clients to query the request instead of claiming it was not recorded, and never re-sends",
+      "v2 through financial upgrade preserves settled receipts, ACKs and immutable plugin package, and an open baseline hold settles by explicit resolution",
+      "funding SHARE holds the exact platform credential through recharge receipt journal audit commit",
+      "a lost admission acknowledgement is resolved by status query: the committed reservation is aborted and both parties' funds are released instead of staying reserved",
+      "begin re-reads authority and denies send after admission when UPDATE upstream_accounts SET state='DISABLED',revision=revision+1",
+      "a disabled route or a disabled channel is excluded before any send, and when every candidate is disabled the request answers 503 no_route without a request record, a hold or an upstream call",
+      "a channel whose own concurrency is full is skipped at admission and the request is served by the next channel instead of 429 rate_limited, without the refused admission holding a customer concurrency slot; when every channel is full the request gets 429 and nothing is reserved",
+      "Drizzle and Bun.SQL preserve atoms above Number precision in each currency",
+      "actual v3 through financial schema upgrade preserves historical channels audits costs and immutable packages"
+    ],
+    "targeted_after_fixture_fixes": {
+      "exit_code": 0,
+      "pass": 10,
+      "fail": 0,
+      "assertions": 118,
+      "files": 7,
+      "log": "s7-funding-fixtures-green.log"
+    }
+  },
+  "observed_failures": [
+    {
+      "test": "funding SHARE holds the exact platform credential through recharge receipt journal audit commit",
+      "symptom": "30000ms timeout",
+      "source": "tests/integration/core-management.test.ts:68",
+      "evidence": "financialBlockedBy before try/finally can leave blocker gate unreleased; original barrier locks root row but current funding root uses NOWAIT. Need a targeted reproduction with guaranteed cleanup, then barrier at audit insertion to verify credential held through receipt/journal/audit commit; do not extend timeout."
+    },
+    {
+      "test": "Drizzle and Bun.SQL preserve atoms above Number precision in each currency",
+      "symptom": "P0F01 funding_outer_transaction_required from root guard",
+      "source": "tests/integration/schema.test.ts:74",
+      "evidence": "Typed direct INSERT of nonzero root balance/revision needs real core_funding_control_v1(account,false) on the same Drizzle transaction before insert; retain original 9007199254740993 / aggregate 27021597764222979 and rollback assertions."
+    },
+    {
+      "test": "actual v3 through financial schema upgrade preserves historical channels audits costs and immutable packages",
+      "symptom": "hard-coded migration list and count stop at 32/1707; omits all eight 1801-1808 appends (+24 diff lines)",
+      "source": "tests/integration/plugin-catalog-upgrade.test.ts:40",
+      "instruction": "After current full suite finishes, append explicit versions1801-1808 and change terminal count32→40; retain historical channel/audit/cost/package assertions."
+    },
+    {
+      "test": "Gateway refuses to start without durable evidence",
+      "symptom": "required_replicas=1 unexpectedly starts, because native evidence Redis has one real replica",
+      "source": "tests/integration/gateway-lifecycle.test.ts:92",
+      "evidence": "Test hard-codes insufficient topology assuming no replica; source native topology intentionally has 56393/56394. Keep native durability unchanged; after suite ends read actual connected_slaves and require one more within config bound, asserting original usage_queue_unavailable; preserve proxy.cut and stream/JSON no-resend checks."
+    },
+    {
+      "test": "lost admission acknowledgement releases committed reservation",
+      "symptom": "requestOutcome times out at 15s",
+      "source": "tests/integration/gateway-lifecycle.test.ts:434",
+      "hypothesis": "Fault proxy arms core_execution_batch_v1 and may drop the cold fast transaction that only returned funding_slow, before any request exists. After gate ends, capture post-response PG rows to prove this; if confirmed, target core_execution_slow_v1 and assert initial cells empty to test the actual committed reservation. Do not weaken original no-upstream, ABORTED and both R=0 assertions."
+    },
+    {
+      "test": "killed local plugin helper preserves unknown send",
+      "symptom": "attempt UNKNOWN/hold PARTIAL assertions passed but joined root reserved=0",
+      "source": "tests/integration/gateway-lifecycle.test.ts:511",
+      "evidence": "Query still JOINs upstream_account_balances; R now belongs to cells. After gate ends migrate consumer to core_upstream_balances_v1 and retain reserved>0."
+    },
+    {
+      "test": "begin re-reads authority after UPDATE upstream_accounts DISABLED",
+      "symptom": "P0F01 from guard_account_v1",
+      "source": "tests/integration/core-routing-health.test.ts:180",
+      "evidence": "Fixture already acquires EX for setup.provider.account_id, but tx.unsafe(change) updates every account. Scope UPDATE to the actual account protected by that fence and retain candidate_stale and reserved permit assertions."
+    }
+  ],
+  "observed_orphan_pending_final_cleanup": {
+    "database": "gateway_test_foundation_82e059787875412da082932c53472d69",
+    "pg_backend_pid": 59732,
+    "last_state": "idle in transaction with no blockers; only owner connection remained after timed-out test",
+    "instruction": "Prove ownership/current state again and clean only this run resources after live full suite finishes; never touch original27 databases or protected PIDs.",
+    "actual_cleanup": "2026-11-17T21:35:00.140Z ownership verified, no active connections, dropped only own82e database; exists_after0"
+  },
+  "checks_before_full_gate": {
+    "check": {
+      "exit_code": 0,
+      "files": 352
+    },
+    "lint": {
+      "exit_code": 0
+    },
+    "fmt": {
+      "exit_code": 0,
+      "files": 733
+    },
+    "architecture": {
+      "exit_code": 0,
+      "pass": 7,
+      "assertions": 684
+    }
+  },
+  "targeted": {
+    "s7-evidence-red.log": {
+      "exit_code": 1,
+      "pass": 0,
+      "fail": 1,
+      "assertions": 12
+    },
+    "s7-evidence-first.log": {
+      "exit_code": 1,
+      "pass": 0,
+      "fail": 1,
+      "assertions": 12
+    },
+    "s7-evidence-coalesce-diagnostic.log": {
+      "exit_code": 1,
+      "pass": 0,
+      "fail": 1,
+      "assertions": 5
+    },
+    "s7-evidence-coalesce-fixed.log": {
+      "exit_code": 0,
+      "pass": 1,
+      "fail": 0,
+      "assertions": 27
+    },
+    "s7-evidence-money.log": {
+      "exit_code": 0,
+      "pass": 18,
+      "fail": 0,
+      "assertions": 202,
+      "before_column_acl_fix": true
+    },
+    "s7-evidence-owner-red.log": {
+      "exit_code": 1,
+      "pass": 0,
+      "fail": 1,
+      "assertions": 8
+    },
+    "s7-evidence-owner-green.log": {
+      "exit_code": 0,
+      "pass": 1,
+      "fail": 0,
+      "assertions": 16
+    },
+    "s7-evidence-final-money.log": {
+      "exit_code": 0,
+      "pass": 8,
+      "fail": 0,
+      "assertions": 148
+    }
+  },
+  "independent_review": {
+    "agent": "/root/financial_batch_audit",
+    "column_acl_regression": "fixed and statically rechecked after actual red/green upgrade; no product permission widening"
+  },
+  "pending": [
+    "capture actual receipt/preflight/permit query plans and address costly access/retries",
+    "continue reducing actual funding/RPC/context costs",
+    "final complete integration and all required gates on final candidate",
+    "strict >3000 stability and same-concurrency comparison",
+    "fault/production HA completion audit"
+  ],
+  "capacity": {
+    "new_measurements": true,
+    "last_stable_rps": 60,
+    "diagnostic_1808": {
+      "target": 300,
+      "rate": 301,
+      "exit_code": 1,
+      "passed": false,
+      "window_complete_rps": 92.33333333333333,
+      "p99": 2225.87,
+      "pg_cpu_ms_per_admitted": 57.618946923239584,
+      "service_cpu_ms_per_admitted": 64.62994290547684,
+      "pg_valid": true,
+      "record": "docs/performance/evidence-implementation-2026-11-17/s7-setwise-300-failed/round.json"
+    },
+    "diagnostic_1809": {
+      "target": 300,
+      "rate": 301,
+      "exit_code": 1,
+      "passed": false,
+      "window_complete_rps": 93.38333333333334,
+      "p99": 2190,
+      "pg_cpu_ms_per_admitted": 48.28748890860693,
+      "service_cpu_ms_per_admitted": 54.78162279404516,
+      "pg_valid": true,
+      "record": "docs/performance/evidence-implementation-2026-11-17/s7-early-lock-300-failed/round.json"
+    }
+  },
+  "cleanup": "Both capacity directories SHA archived and removed; all recent owned DBs/Core processes/roles/temp directories absent. Evidence files are being archived before deleting only named own temporary files.",
+  "safety": "No commit/push/deploy; source main; original27 DB names/OIDs and newapi_bench_1794879563902 and PIDs40766/40771 must stay untouched.",
+  "first_integration_before_fixture_fixes_sha256": {
+    "tests/integration/core-management.test.ts": "bb7e99564bc6a278703318c619ef96cb6a66e5b6b2ff33049778350d166f5e9e",
+    "tests/integration/schema.test.ts": "f9cc6662a6c87d762d0120ecf0851aa14fd3dd4e745b3d8c255e0ff77753a29c",
+    "tests/integration/plugin-catalog-upgrade.test.ts": "fc2dea80486732ae48ff11360b9ed91ea1edd08385937f1c6e892940ffbe5098",
+    "tests/integration/gateway-lifecycle.test.ts": "c826a52f1ebbc783b277a69cc3afac42b11bd5ad52d46de0e80518806054f64f",
+    "tests/integration/core-routing-health.test.ts": "967eb902c873976fa7a4b6c3508514bdf05a11d27c5ecfbae58ebedb197ad63f",
+    "tests/integration/gateway-chat.test.ts": "617ea7f6d4a7238b2f6b23f6ecf88c8a2db691d9e563b62c1263bc0d7ec425db",
+    "tests/integration/lifecycle.test.ts": "9e7647a8f3a64feb72a98a43fc7d2f65b2ee51dd2c28dd3215f70d98727afe00"
+  },
+  "fixture_fixes_applied_after_respective_first_gate_cases_finished": [
+    "schema typed root INSERT real EX fence",
+    "historical version list1801-1808/count40",
+    "queue refusal requires connected replicas plus one",
+    "UNKNOWN supplier R reads summary view",
+    "account revocation UPDATE scoped to fenced account"
+  ],
+  "temporary_test_diagnostics_pending_removal": [],
+  "pending_initial_gate_additional_failures": [
+    "gateway-chat disabled preferred route/channel returns upstream_funds_unavailable instead of using alternate",
+    "gateway-chat full preferred channel returns 429 instead of alternate",
+    "lifecycle v2 upgrade expected migration list omits intermediate appends"
+  ],
+  "milestone_checks_runtime_migration": 2026111808,
+  "first_integration_before_fixture_fixes_exit_code": 1,
+  "artifact": {
+    "runtime_migration": 2026111808,
+    "exit_code": 0,
+    "scripts": 5,
+    "named_checks": 41,
+    "catalog_cases": 84,
+    "catalog_steps": 112,
+    "log": "s7-funding-artifact.log"
+  },
+  "durability": {
+    "runtime_migration": 2026111808,
+    "exit_code": 0,
+    "checks": 7,
+    "owned_resources_empty": true,
+    "log": "s7-funding-durability.log"
+  },
+  "backup": {
+    "runtime_migration": 2026111808,
+    "verifier_exit_code": 0,
+    "requests": 3,
+    "receipts": 6,
+    "external_acks": 6,
+    "source_funds": {
+      "balance": "999955",
+      "reserved": "0",
+      "spent": "45"
+    },
+    "own_dump_removed": true,
+    "result": "s7-funding-backup.json"
+  },
+  "contention_1809": {
+    "symptom": "Late cell NOWAIT failure causes rolled-back evidence writes",
+    "red": {
+      "exit_code": 1,
+      "pass": 0,
+      "fail": 1,
+      "assertions": 8,
+      "attempted_snapshot_rows": 16
+    },
+    "green": {
+      "exit_code": 0,
+      "pass": 1,
+      "fail": 0,
+      "assertions": 22,
+      "attempted_snapshot_rows": 4
+    },
+    "money": {
+      "exit_code": 0,
+      "pass": 13,
+      "fail": 0,
+      "assertions": 203,
+      "files": 3,
+      "before_final_estimated_narrowing": true
+    },
+    "check": {
+      "exit_code": 0,
+      "files": 352
+    },
+    "lint": {
+      "exit_code": 0
+    },
+    "format": {
+      "exit_code": 0,
+      "files": 735
+    },
+    "build": {
+      "exit_code": 0,
+      "migrations": 41,
+      "all_checksums_verified": true,
+      "source_dist_equal": true
+    },
+    "estimated_boundary_red": {
+      "exit_code": 1,
+      "pass": 0,
+      "fail": 1,
+      "assertions": 1,
+      "error": "55P03"
+    },
+    "final_evidence": {
+      "exit_code": 0,
+      "pass": 8,
+      "fail": 0,
+      "assertions": 137,
+      "files": 1,
+      "note": "Final test title clarified supplier-only settlement after execution; behavior and assertions unchanged."
+    },
+    "version_consumers": {
+      "exit_code": 0,
+      "pass": 3,
+      "fail": 0,
+      "assertions": 54,
+      "files": 3,
+      "before_final_estimated_narrowing": true
+    },
+    "independent_review": "No new funds/ACL/lock-order issue found; final ESTIMATED exclusion statically rechecked, existing customer settlement/close remains."
+  },
+  "cleanup_result": {
+    "at": "2026-11-17T22:16:39.445Z",
+    "database": "gateway_native",
+    "original_27_names_and_oids_equal": true,
+    "foundation_count": 27,
+    "remaining_recent_databases": [],
+    "remaining_recent_core_processes": [],
+    "remaining_recent_identity_roles": [],
+    "remaining_recent_temp_directories": [],
+    "protected_reference_present": true,
+    "protected_processes": [
+      {
+        "pid": 40766,
+        "started": "Mon Nov 16 16:27:47 2026",
+        "command": "bun apps/core-api/src/main.ts"
+      },
+      {
+        "pid": 40771,
+        "started": "Mon Nov 16 16:27:47 2026",
+        "command": "bun apps/core-api/src/main.ts"
+      }
+    ],
+    "rounds": [
+      {
+        "label": "s7-setwise-300-failed",
+        "database": "gateway_test_foundation_9dcdad5298e84835847cc228fba270bd",
+        "database_absent": true,
+        "live_owned_sampled_pids": [],
+        "namespace_cleanup": {
+          "cleaned": 1,
+          "failed": 0
+        },
+        "archive_hashes_verified": true,
+        "source_directory_removed": true
+      },
+      {
+        "label": "s7-early-lock-300-failed",
+        "database": "gateway_test_foundation_151870a1e2be44239f91cdfb03ca61c1",
+        "database_absent": true,
+        "live_owned_sampled_pids": [],
+        "namespace_cleanup": {
+          "cleaned": 1,
+          "failed": 0
+        },
+        "archive_hashes_verified": true,
+        "source_directory_removed": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "legacy_exposure_function": null,
+  "old_exposure_callers": [],
+  "root_references": [
+    {
+      "nspname": "core_funding",
+      "proname": "audit_v1",
+      "arguments": "account uuid, cur text",
+      "source_sha256": "ca0135a11cbbbaeeec40b42bcb98e92a8957af2fb70dcfda40881661aee3856a"
+    },
+    {
+      "nspname": "core_funding",
+      "proname": "check_account_v1",
+      "arguments": "account uuid",
+      "source_sha256": "7146426668af016feb0bced5d3a6c938f8a42f283c38278ea0058cddec2a3009"
+    },
+    {
+      "nspname": "core_funding",
+      "proname": "check_coverage_v1",
+      "arguments": "",
+      "source_sha256": "05fc7adee92c838006f3aa197adac6ecde133ad23adb02da21aa2b1dd60ba474"
+    },
+    {
+      "nspname": "core_funding",
+      "proname": "check_root_v1",
+      "arguments": "",
+      "source_sha256": "76c130cf7f61f45553549a0132f2428a530bb151641827952793c6aedb37c1d2"
+    },
+    {
+      "nspname": "core_funding",
+      "proname": "collect_v1",
+      "arguments": "account uuid, cur text, needed numeric, exclude_cell integer",
+      "source_sha256": "1f91ae45f983d1e88e478697207596503feecaa99b7aa49e82629727dc9b1fd8"
+    },
+    {
+      "nspname": "core_funding",
+      "proname": "guard_cell_v1",
+      "arguments": "",
+      "source_sha256": "0e52e6cb74a3af1fcf8f4023b3fbd6d462669c147ec4a85952f603f295a8ede6"
+    },
+    {
+      "nspname": "core_funding",
+      "proname": "headroom_v1",
+      "arguments": "account uuid, cur text, target integer, needed_spent numeric, needed_revision numeric",
+      "source_sha256": "04b116c4e60d29ff4091466ca48e7ce165b6adc1a346f9d16bd01a631e488ed2"
+    },
+    {
+      "nspname": "core_funding",
+      "proname": "normalize_v1",
+      "arguments": "account uuid, cur text",
+      "source_sha256": "c7161dd02165bf9e2136f35d4ba34f41e40b9f144ce50ad08600e8f36049eae2"
+    },
+    {
+      "nspname": "core_funding",
+      "proname": "offset_debt_v1",
+      "arguments": "account uuid, cur text, needed numeric",
+      "source_sha256": "2d42512ab75e8a9d2d16f1a1cc0ecc6966f0c1238c5371141422be260e9ba2a0"
+    },
+    {
+      "nspname": "core_funding",
+      "proname": "reserve_v1",
+      "arguments": "account uuid, cur text, attempt uuid, amount numeric",
+      "source_sha256": "f614a909a08ca3e1c11403b4a98c44e5c59d2ecb2d7adf18968277c66ff7dc12"
+    },
+    {
+      "nspname": "core_funding",
+      "proname": "transfer_v1",
+      "arguments": "account uuid, cur text, target_cell integer, balance_delta numeric, spent_delta numeric, revision_delta numeric, ref text",
+      "source_sha256": "1f25341ecb2567c6eb1d8d10efcca1013ec2446c7baa3f55ac3521b3387be1e4"
+    },
+    {
+      "nspname": "public",
+      "proname": "core_upstream_fund_v1",
+      "arguments": "account uuid, cur text, delta numeric, adjustment boolean",
+      "source_sha256": "0527f403f5e7a84594d8f993ac3865d5f9263436636e558e8e7d0a2007567dbf"
+    },
+    {
+      "nspname": "public",
+      "proname": "core_upstream_normalize_v1",
+      "arguments": "account uuid",
+      "source_sha256": "c3854e952aed286af8c6d686335365d60d7165fb5d459929b35f5cf65365ed47"
+    }
+  ],
+  "applied_migration": {
+    "version": 2026111804,
+    "checksum": "46f6893fc1a26c4ce150d242ce243b419d21359c40a60caa79a4d838f29f8238",
+    "manifest": {
+      "files": [
+        {
+          "path": "./migrations/0012_funding-holds.sql",
+          "checksum": "3bb5f8d94d11beab1120799cd508f893f6ce58ee2e514610f96c2cafe94bc248"
+        },
+        {
+          "path": "./sql/core-funding-migration.sql",
+          "checksum": "3eec13df2ed56e313553a653e21f14ba9388a0a7033d5a4e763048390cb57b45"
+        },
+        {
+          "path": "./sql/core-funding-engine.sql",
+          "checksum": "5771350849cd37b1e463c8c3e0d6ee7ee12bd2ef04a583da5247c7b03e6f1c2e"
+        },
+        {
+          "path": "./sql/core-funding-execution.sql",
+          "checksum": "6fbf410afe7e3c5e71c02652131a0043d807e01ef2d1cb357b748798f6fc4cb0"
+        },
+        {
+          "path": "./sql/core-funding-settlement.sql",
+          "checksum": "d2c91e9998f963e146d62b9b490028ad885aa42e244a34e4018e1d7d9cd1b4f6"
+        },
+        {
+          "path": "./sql/core-funding-entry.sql",
+          "checksum": "3b89a717ebba84947707fe3b63b3f30c4b03c3f6a57e72d087ca58e3aaacce3f"
+        }
+      ],
+      "version": 2026111804
+    }
+  }
+}

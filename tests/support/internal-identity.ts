@@ -37,6 +37,8 @@ export async function withIdentity(
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
     account?: { trustedProxyCidrs: string[] };
     gateways?: number;
+    initializeDatabase?: (db: SQL) => Promise<void>;
+    executionRoleFile?: string;
   } = {},
 ) {
   await record("before", {
@@ -48,7 +50,8 @@ export async function withIdentity(
   });
   await withDatabase(
     async (db) => {
-      await migrate(db);
+      if (options.initializeDatabase) await options.initializeDatabase(db);
+      else await migrate(db);
       const f = await prepareIdentity(db, options);
       try {
         await run(f, db);
@@ -71,6 +74,7 @@ export async function prepareIdentity(
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
     account?: { trustedProxyCidrs: string[] };
     gateways?: number;
+    executionRoleFile?: string;
   },
 ) {
   const gateways = options.gateways ?? 2;
@@ -186,10 +190,9 @@ export async function prepareIdentity(
     );
     if (options.execution)
       await db.unsafe(
-        (await Bun.file("infra/core-execution-role.sql").text()).replaceAll(
-          "core_execution_api",
-          api,
-        ),
+        (
+          await Bun.file(options.executionRoleFile ?? "infra/core-execution-role.sql").text()
+        ).replaceAll("core_execution_api", api),
       );
     if (options.account)
       await db.unsafe(

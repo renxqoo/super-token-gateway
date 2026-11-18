@@ -1,0 +1,899 @@
+{
+  "at": "2026-11-17T22:20:07.932757+00:00",
+  "status": "goal active; formal stable60, two300 diagnostics failed; final full gates required",
+  "gate_status": {
+    "at": "2026-11-17T22:20:07.826995+00:00",
+    "goal_status": "active",
+    "current_runtime_migration": 2026111809,
+    "migration_sha256": "e400e85a7e03d98b0404d245ee80b4b66074e5d68a9b18eca09f028cdd11f06d",
+    "unit": {
+      "command": "bun run test",
+      "session_id": 27004,
+      "terminal": true,
+      "exit_code": 0,
+      "pass": 446,
+      "fail": 0,
+      "assertions": 8008,
+      "files": 70,
+      "log": "s7-funding-unit.log"
+    },
+    "build": {
+      "command": "bun run build",
+      "terminal": true,
+      "exit_code": 0,
+      "log": "s7-funding-build.log",
+      "manifest_migrations": 40,
+      "all_checksums_verified": true,
+      "dist_sql_and_manifest_equal_source": true
+    },
+    "integration": {
+      "command": "bun run test:integration",
+      "session_id": 22579,
+      "terminal": true,
+      "exit_code": 1,
+      "log": "s7-funding-integration.log",
+      "last_observed_pass_lines": 485,
+      "last_observed_fail_lines": 7,
+      "instruction": "First full gate exit1 is preserved; all original10 failed fixture cases now pass targeted. Final complete gate remains required on the final performance candidate.",
+      "pass": 562,
+      "fail": 10,
+      "assertions": 13229,
+      "files": 90,
+      "seconds": 1279.44,
+      "failure_titles": [
+        "a killed local plugin helper preserves the unknown send without poisoning the shared upstream channel",
+        "a Gateway refuses to start without durable evidence, and evidence lost after start withholds the terminal, tells stream clients that have received nothing yet and JSON clients to query the request instead of claiming it was not recorded, and never re-sends",
+        "v2 through financial upgrade preserves settled receipts, ACKs and immutable plugin package, and an open baseline hold settles by explicit resolution",
+        "funding SHARE holds the exact platform credential through recharge receipt journal audit commit",
+        "a lost admission acknowledgement is resolved by status query: the committed reservation is aborted and both parties' funds are released instead of staying reserved",
+        "begin re-reads authority and denies send after admission when UPDATE upstream_accounts SET state='DISABLED',revision=revision+1",
+        "a disabled route or a disabled channel is excluded before any send, and when every candidate is disabled the request answers 503 no_route without a request record, a hold or an upstream call",
+        "a channel whose own concurrency is full is skipped at admission and the request is served by the next channel instead of 429 rate_limited, without the refused admission holding a customer concurrency slot; when every channel is full the request gets 429 and nothing is reserved",
+        "Drizzle and Bun.SQL preserve atoms above Number precision in each currency",
+        "actual v3 through financial schema upgrade preserves historical channels audits costs and immutable packages"
+      ],
+      "targeted_after_fixture_fixes": {
+        "exit_code": 0,
+        "pass": 10,
+        "fail": 0,
+        "assertions": 118,
+        "files": 7,
+        "log": "s7-funding-fixtures-green.log"
+      }
+    },
+    "observed_failures": [
+      {
+        "test": "funding SHARE holds the exact platform credential through recharge receipt journal audit commit",
+        "symptom": "30000ms timeout",
+        "source": "tests/integration/core-management.test.ts:68",
+        "evidence": "financialBlockedBy before try/finally can leave blocker gate unreleased; original barrier locks root row but current funding root uses NOWAIT. Need a targeted reproduction with guaranteed cleanup, then barrier at audit insertion to verify credential held through receipt/journal/audit commit; do not extend timeout."
+      },
+      {
+        "test": "Drizzle and Bun.SQL preserve atoms above Number precision in each currency",
+        "symptom": "P0F01 funding_outer_transaction_required from root guard",
+        "source": "tests/integration/schema.test.ts:74",
+        "evidence": "Typed direct INSERT of nonzero root balance/revision needs real core_funding_control_v1(account,false) on the same Drizzle transaction before insert; retain original 9007199254740993 / aggregate 27021597764222979 and rollback assertions."
+      },
+      {
+        "test": "actual v3 through financial schema upgrade preserves historical channels audits costs and immutable packages",
+        "symptom": "hard-coded migration list and count stop at 32/1707; omits all eight 1801-1808 appends (+24 diff lines)",
+        "source": "tests/integration/plugin-catalog-upgrade.test.ts:40",
+        "instruction": "After current full suite finishes, append explicit versions1801-1808 and change terminal count32→40; retain historical channel/audit/cost/package assertions."
+      },
+      {
+        "test": "Gateway refuses to start without durable evidence",
+        "symptom": "required_replicas=1 unexpectedly starts, because native evidence Redis has one real replica",
+        "source": "tests/integration/gateway-lifecycle.test.ts:92",
+        "evidence": "Test hard-codes insufficient topology assuming no replica; source native topology intentionally has 56393/56394. Keep native durability unchanged; after suite ends read actual connected_slaves and require one more within config bound, asserting original usage_queue_unavailable; preserve proxy.cut and stream/JSON no-resend checks."
+      },
+      {
+        "test": "lost admission acknowledgement releases committed reservation",
+        "symptom": "requestOutcome times out at 15s",
+        "source": "tests/integration/gateway-lifecycle.test.ts:434",
+        "hypothesis": "Fault proxy arms core_execution_batch_v1 and may drop the cold fast transaction that only returned funding_slow, before any request exists. After gate ends, capture post-response PG rows to prove this; if confirmed, target core_execution_slow_v1 and assert initial cells empty to test the actual committed reservation. Do not weaken original no-upstream, ABORTED and both R=0 assertions."
+      },
+      {
+        "test": "killed local plugin helper preserves unknown send",
+        "symptom": "attempt UNKNOWN/hold PARTIAL assertions passed but joined root reserved=0",
+        "source": "tests/integration/gateway-lifecycle.test.ts:511",
+        "evidence": "Query still JOINs upstream_account_balances; R now belongs to cells. After gate ends migrate consumer to core_upstream_balances_v1 and retain reserved>0."
+      },
+      {
+        "test": "begin re-reads authority after UPDATE upstream_accounts DISABLED",
+        "symptom": "P0F01 from guard_account_v1",
+        "source": "tests/integration/core-routing-health.test.ts:180",
+        "evidence": "Fixture already acquires EX for setup.provider.account_id, but tx.unsafe(change) updates every account. Scope UPDATE to the actual account protected by that fence and retain candidate_stale and reserved permit assertions."
+      }
+    ],
+    "observed_orphan_pending_final_cleanup": {
+      "database": "gateway_test_foundation_82e059787875412da082932c53472d69",
+      "pg_backend_pid": 59732,
+      "last_state": "idle in transaction with no blockers; only owner connection remained after timed-out test",
+      "instruction": "Prove ownership/current state again and clean only this run resources after live full suite finishes; never touch original27 databases or protected PIDs.",
+      "actual_cleanup": "2026-11-17T21:35:00.140Z ownership verified, no active connections, dropped only own82e database; exists_after0"
+    },
+    "checks_before_full_gate": {
+      "check": {
+        "exit_code": 0,
+        "files": 352
+      },
+      "lint": {
+        "exit_code": 0
+      },
+      "fmt": {
+        "exit_code": 0,
+        "files": 733
+      },
+      "architecture": {
+        "exit_code": 0,
+        "pass": 7,
+        "assertions": 684
+      }
+    },
+    "targeted": {
+      "s7-evidence-red.log": {
+        "exit_code": 1,
+        "pass": 0,
+        "fail": 1,
+        "assertions": 12
+      },
+      "s7-evidence-first.log": {
+        "exit_code": 1,
+        "pass": 0,
+        "fail": 1,
+        "assertions": 12
+      },
+      "s7-evidence-coalesce-diagnostic.log": {
+        "exit_code": 1,
+        "pass": 0,
+        "fail": 1,
+        "assertions": 5
+      },
+      "s7-evidence-coalesce-fixed.log": {
+        "exit_code": 0,
+        "pass": 1,
+        "fail": 0,
+        "assertions": 27
+      },
+      "s7-evidence-money.log": {
+        "exit_code": 0,
+        "pass": 18,
+        "fail": 0,
+        "assertions": 202,
+        "before_column_acl_fix": true
+      },
+      "s7-evidence-owner-red.log": {
+        "exit_code": 1,
+        "pass": 0,
+        "fail": 1,
+        "assertions": 8
+      },
+      "s7-evidence-owner-green.log": {
+        "exit_code": 0,
+        "pass": 1,
+        "fail": 0,
+        "assertions": 16
+      },
+      "s7-evidence-final-money.log": {
+        "exit_code": 0,
+        "pass": 8,
+        "fail": 0,
+        "assertions": 148
+      }
+    },
+    "independent_review": {
+      "agent": "/root/financial_batch_audit",
+      "column_acl_regression": "fixed and statically rechecked after actual red/green upgrade; no product permission widening"
+    },
+    "pending": [
+      "capture actual receipt/preflight/permit query plans and address costly access/retries",
+      "continue reducing actual funding/RPC/context costs",
+      "final complete integration and all required gates on final candidate",
+      "strict >3000 stability and same-concurrency comparison",
+      "fault/production HA completion audit"
+    ],
+    "capacity": {
+      "new_measurements": true,
+      "last_stable_rps": 60,
+      "diagnostic_1808": {
+        "target": 300,
+        "rate": 301,
+        "exit_code": 1,
+        "passed": false,
+        "window_complete_rps": 92.33333333333333,
+        "p99": 2225.87,
+        "pg_cpu_ms_per_admitted": 57.618946923239584,
+        "service_cpu_ms_per_admitted": 64.62994290547684,
+        "pg_valid": true,
+        "record": "docs/performance/evidence-implementation-2026-11-17/s7-setwise-300-failed/round.json"
+      },
+      "diagnostic_1809": {
+        "target": 300,
+        "rate": 301,
+        "exit_code": 1,
+        "passed": false,
+        "window_complete_rps": 93.38333333333334,
+        "p99": 2190,
+        "pg_cpu_ms_per_admitted": 48.28748890860693,
+        "service_cpu_ms_per_admitted": 54.78162279404516,
+        "pg_valid": true,
+        "record": "docs/performance/evidence-implementation-2026-11-17/s7-early-lock-300-failed/round.json"
+      }
+    },
+    "cleanup": "Both capacity directories SHA archived and removed; all recent owned DBs/Core processes/roles/temp directories absent. Evidence files are being archived before deleting only named own temporary files.",
+    "safety": "No commit/push/deploy; source main; original27 DB names/OIDs and newapi_bench_1794879563902 and PIDs40766/40771 must stay untouched.",
+    "first_integration_before_fixture_fixes_sha256": {
+      "tests/integration/core-management.test.ts": "bb7e99564bc6a278703318c619ef96cb6a66e5b6b2ff33049778350d166f5e9e",
+      "tests/integration/schema.test.ts": "f9cc6662a6c87d762d0120ecf0851aa14fd3dd4e745b3d8c255e0ff77753a29c",
+      "tests/integration/plugin-catalog-upgrade.test.ts": "fc2dea80486732ae48ff11360b9ed91ea1edd08385937f1c6e892940ffbe5098",
+      "tests/integration/gateway-lifecycle.test.ts": "c826a52f1ebbc783b277a69cc3afac42b11bd5ad52d46de0e80518806054f64f",
+      "tests/integration/core-routing-health.test.ts": "967eb902c873976fa7a4b6c3508514bdf05a11d27c5ecfbae58ebedb197ad63f",
+      "tests/integration/gateway-chat.test.ts": "617ea7f6d4a7238b2f6b23f6ecf88c8a2db691d9e563b62c1263bc0d7ec425db",
+      "tests/integration/lifecycle.test.ts": "9e7647a8f3a64feb72a98a43fc7d2f65b2ee51dd2c28dd3215f70d98727afe00"
+    },
+    "fixture_fixes_applied_after_respective_first_gate_cases_finished": [
+      "schema typed root INSERT real EX fence",
+      "historical version list1801-1808/count40",
+      "queue refusal requires connected replicas plus one",
+      "UNKNOWN supplier R reads summary view",
+      "account revocation UPDATE scoped to fenced account"
+    ],
+    "temporary_test_diagnostics_pending_removal": [],
+    "pending_initial_gate_additional_failures": [
+      "gateway-chat disabled preferred route/channel returns upstream_funds_unavailable instead of using alternate",
+      "gateway-chat full preferred channel returns 429 instead of alternate",
+      "lifecycle v2 upgrade expected migration list omits intermediate appends"
+    ],
+    "milestone_checks_runtime_migration": 2026111808,
+    "first_integration_before_fixture_fixes_exit_code": 1,
+    "artifact": {
+      "runtime_migration": 2026111808,
+      "exit_code": 0,
+      "scripts": 5,
+      "named_checks": 41,
+      "catalog_cases": 84,
+      "catalog_steps": 112,
+      "log": "s7-funding-artifact.log"
+    },
+    "durability": {
+      "runtime_migration": 2026111808,
+      "exit_code": 0,
+      "checks": 7,
+      "owned_resources_empty": true,
+      "log": "s7-funding-durability.log"
+    },
+    "backup": {
+      "runtime_migration": 2026111808,
+      "verifier_exit_code": 0,
+      "requests": 3,
+      "receipts": 6,
+      "external_acks": 6,
+      "source_funds": {
+        "balance": "999955",
+        "reserved": "0",
+        "spent": "45"
+      },
+      "own_dump_removed": true,
+      "result": "s7-funding-backup.json"
+    },
+    "contention_1809": {
+      "symptom": "Late cell NOWAIT failure causes rolled-back evidence writes",
+      "red": {
+        "exit_code": 1,
+        "pass": 0,
+        "fail": 1,
+        "assertions": 8,
+        "attempted_snapshot_rows": 16
+      },
+      "green": {
+        "exit_code": 0,
+        "pass": 1,
+        "fail": 0,
+        "assertions": 22,
+        "attempted_snapshot_rows": 4
+      },
+      "money": {
+        "exit_code": 0,
+        "pass": 13,
+        "fail": 0,
+        "assertions": 203,
+        "files": 3,
+        "before_final_estimated_narrowing": true
+      },
+      "check": {
+        "exit_code": 0,
+        "files": 352
+      },
+      "lint": {
+        "exit_code": 0
+      },
+      "format": {
+        "exit_code": 0,
+        "files": 735
+      },
+      "build": {
+        "exit_code": 0,
+        "migrations": 41,
+        "all_checksums_verified": true,
+        "source_dist_equal": true
+      },
+      "estimated_boundary_red": {
+        "exit_code": 1,
+        "pass": 0,
+        "fail": 1,
+        "assertions": 1,
+        "error": "55P03"
+      },
+      "final_evidence": {
+        "exit_code": 0,
+        "pass": 8,
+        "fail": 0,
+        "assertions": 137,
+        "files": 1,
+        "note": "Final test title clarified supplier-only settlement after execution; behavior and assertions unchanged."
+      },
+      "version_consumers": {
+        "exit_code": 0,
+        "pass": 3,
+        "fail": 0,
+        "assertions": 54,
+        "files": 3,
+        "before_final_estimated_narrowing": true
+      },
+      "independent_review": "No new funds/ACL/lock-order issue found; final ESTIMATED exclusion statically rechecked, existing customer settlement/close remains."
+    },
+    "cleanup_result": {
+      "at": "2026-11-17T22:16:39.445Z",
+      "database": "gateway_native",
+      "original_27_names_and_oids_equal": true,
+      "foundation_count": 27,
+      "remaining_recent_databases": [],
+      "remaining_recent_core_processes": [],
+      "remaining_recent_identity_roles": [],
+      "remaining_recent_temp_directories": [],
+      "protected_reference_present": true,
+      "protected_processes": [
+        {
+          "pid": 40766,
+          "started": "Mon Nov 16 16:27:47 2026",
+          "command": "bun apps/core-api/src/main.ts"
+        },
+        {
+          "pid": 40771,
+          "started": "Mon Nov 16 16:27:47 2026",
+          "command": "bun apps/core-api/src/main.ts"
+        }
+      ],
+      "rounds": [
+        {
+          "label": "s7-setwise-300-failed",
+          "database": "gateway_test_foundation_9dcdad5298e84835847cc228fba270bd",
+          "database_absent": true,
+          "live_owned_sampled_pids": [],
+          "namespace_cleanup": {
+            "cleaned": 1,
+            "failed": 0
+          },
+          "archive_hashes_verified": true,
+          "source_directory_removed": true
+        },
+        {
+          "label": "s7-early-lock-300-failed",
+          "database": "gateway_test_foundation_151870a1e2be44239f91cdfb03ca61c1",
+          "database_absent": true,
+          "live_owned_sampled_pids": [],
+          "namespace_cleanup": {
+            "cleaned": 1,
+            "failed": 0
+          },
+          "archive_hashes_verified": true,
+          "source_directory_removed": true
+        }
+      ]
+    }
+  },
+  "temporary_files": {
+    ".local/performance-implementation/archive-1808-diagnostic.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/archive-1808-diagnostic.py.raw",
+      "sha256": "064b3a45e8e75ac184e78b5144115f692ad979f6593a81658b9e1e638ce7fd48",
+      "bytes": 3912,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/archive-1809-diagnostic.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/archive-1809-diagnostic.py.raw",
+      "sha256": "adc437bb25e47f26b5166fded0a2cf2f569333f0b90e277eca77508ac6e307b9",
+      "bytes": 3924,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/archive-evidence-1808-1809.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/archive-evidence-1808-1809.py.raw",
+      "sha256": "202c3da577223e4c450c21e372e9a45ddf3ab4d4ca3ce7476622d6baebe412ce",
+      "bytes": 4081,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/cleanup-1808-statements.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/cleanup-1808-statements.ts.raw",
+      "sha256": "2b2f5d19b47a938e270c86b16c11296488bd9eeb3c33bb51e34378017b713458",
+      "bytes": 2945,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/cleanup-1809-statements.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/cleanup-1809-statements.ts.raw",
+      "sha256": "3ddf986670a42427dc84f1a36acaadfc9740cbcd405e71ec6c4afc12a58412c4",
+      "bytes": 2945,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/inspect-1809-cleanup.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/inspect-1809-cleanup.ts.raw",
+      "sha256": "20581a9cd7c1385158367b87ef8c69af33082e38191c8a883db502194248ebd0",
+      "bytes": 4879,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/inspect-funding-resources.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/inspect-funding-resources.ts.raw",
+      "sha256": "65b6b50d95ffade3c951136abcc90aa3de6ad2de650637c97db06ad8747afed8",
+      "bytes": 2236,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/render-evidence-migration.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/render-evidence-migration.py.raw",
+      "sha256": "8d49b450e1a60915e0bac798ccc43ab39ba16096c36354130d589b57a91ebad5",
+      "bytes": 11608,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-1808-diagnostic-300.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-1808-diagnostic-300.log.raw",
+      "sha256": "8b13153cdbc2afc1ed5fad8a745e68b8a896510d14284f9c4ac8ed1874ba809d",
+      "bytes": 862,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-1808-statements-cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-1808-statements-cleanup.json.raw",
+      "sha256": "51f68a05670ac9a52d8e812101061c37a6b99ae6ede0460fc6b12dee6a6a1dda",
+      "bytes": 865,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-1809-diagnostic-300.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-1809-diagnostic-300.log.raw",
+      "sha256": "3a7718ee4e7cd65580b9e9db96e1920a9b301d5b218c65151980a048d8c9d4b1",
+      "bytes": 871,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-1809-resources-after.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-1809-resources-after.json.raw",
+      "sha256": "11a3eea22ccbf31dd4bdb5ff4d7107813d2ad1bce3ee25d8565dfea3e09fc42d",
+      "bytes": 1361,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-1809-statements-cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-1809-statements-cleanup.json.raw",
+      "sha256": "29de203d5d6eb5da4107da099d07c6a635966457621d9a136a69f01a271c59a4",
+      "bytes": 1137,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-check.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-check.log.raw",
+      "sha256": "bedc7d5e065d5a7b23519d511ea241afbffac46cf82bafc7406ca6fd2dd2624a",
+      "bytes": 42,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-coalesce-diagnostic.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-coalesce-diagnostic.log.raw",
+      "sha256": "139d4fcc9ca9fd6907c93e3bbc34894dcaba77de0ba6edbb68768e74e7386830",
+      "bytes": 1388,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-coalesce-fixed.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-coalesce-fixed.log.raw",
+      "sha256": "ac05f2fdcc8accdc9f6c121476f114b366f5fc16beb2c3667199a8b37c21a96f",
+      "bytes": 269,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-build.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-build.log.raw",
+      "sha256": "e78614cafed479a219187a0e6dd738c39731b553f606e0926d6288f4e2be7dd1",
+      "bytes": 168,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-check.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-check.log.raw",
+      "sha256": "ceee9f9cdb0a439861eb7488b2abec62502ae6c12c68c8d46494c882ff859973",
+      "bytes": 67,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-final-build.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-final-build.log.raw",
+      "sha256": "e78614cafed479a219187a0e6dd738c39731b553f606e0926d6288f4e2be7dd1",
+      "bytes": 168,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-final-check.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-final-check.log.raw",
+      "sha256": "f38f5d6c79c9baba3c3a92968933359cbcad3637cdc2f0c96e630f9d965187a3",
+      "bytes": 66,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-final-format.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-final-format.log.raw",
+      "sha256": "ce772df4c32efef060c887085e87782efa3edd468531e1675fe8037368973408",
+      "bytes": 59,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-final-lint.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-final-lint.log.raw",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-final.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-final.log.raw",
+      "sha256": "41874beacba57e84be3f2c0bbb68a15975e895dbc391cc6e1037cdbb87e4ee01",
+      "bytes": 1093,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-format.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-format.log.raw",
+      "sha256": "1b7e7cba7a762255d39ef7af4a45150d98b2be5ddab3a50b0e36ce9e262c6764",
+      "bytes": 59,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-green.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-green.log.raw",
+      "sha256": "9e057ee6ebfc7dd53e6a4ce5eb335c9581a3701aa5a792ec55121f546f622b3e",
+      "bytes": 269,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-lint.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-lint.log.raw",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-money.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-money.log.raw",
+      "sha256": "b220c6ad11f6508c51dbfddf224e0e7dca1faba0c55057cd4801948a418ab997",
+      "bytes": 1886,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-red.log.raw",
+      "sha256": "f8336bfc0100cf0db9ed3dba9c2dbcc4913a8346d61930e2ddb7e20f115bb434",
+      "bytes": 921,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-contention-upgrade.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-contention-upgrade.log.raw",
+      "sha256": "2b6d984515bc1cf9c4ad6621094a89b4f46316313e0e3c4e789cce1bec58c053",
+      "bytes": 666,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-estimated-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-estimated-red.log.raw",
+      "sha256": "c4c9da456e8bbea78f2d4e330795d5896b791d77a25c2e7578c4616e1432bce9",
+      "bytes": 929,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-final-architecture.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-final-architecture.log.raw",
+      "sha256": "b8e97535d2bb4e94356105d5417d2a688b961a0fac1ab48bebdec86bf217cf74",
+      "bytes": 887,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-final-check.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-final-check.log.raw",
+      "sha256": "32aeb3310c4306c5da7cb25e936c7efd0037eb606aed4f8f3d4db5397466b078",
+      "bytes": 67,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-final-format.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-final-format.log.raw",
+      "sha256": "0578056092b68517a75aff944ee09f37efdad93dbc6ade17052c2560ee988151",
+      "bytes": 59,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-final-lint.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-final-lint.log.raw",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-final-money.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-final-money.log.raw",
+      "sha256": "6b8508fd857ae8246ba262e3b9a652aa07918a1d3c22ea8f661371e0320687f3",
+      "bytes": 1227,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-first.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-first.log.raw",
+      "sha256": "94257259cb25549de2de303a1150eadb1d35cea55fe3477199caea99804dda07",
+      "bytes": 2533,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-money.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-money.log.raw",
+      "sha256": "e660cdcf8e66bda5e4d9a816f176ce6fce22486dd2ea62ad1002b23d5d431617",
+      "bytes": 2621,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-owner-green.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-owner-green.log.raw",
+      "sha256": "5f58f3ef8d60c1db69ff67f8cb95b7a86031cc9e737e4c7222989925f1ee871d",
+      "bytes": 287,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-owner-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-owner-red.log.raw",
+      "sha256": "745d30994e69af85c59d13a13c4f3a817ff368c4c52cc01fe27c4eb2738443ca",
+      "bytes": 1426,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-evidence-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-evidence-red.log.raw",
+      "sha256": "2061059cf6102601085f02c1c397fa8a41c79783314536d21b0cbf3a8be19c12",
+      "bytes": 2709,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-architecture.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-architecture.log.raw",
+      "sha256": "c638527bdb01ce8ad71bdd41ae58be2cfbd5e4880b00593a7d6afc775d516013",
+      "bytes": 1410,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-artifact.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-artifact.log.raw",
+      "sha256": "8d9ae890d999929192e5f7bcd0c061775947dddc7f02652a7de849911db97b01",
+      "bytes": 1267,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-backup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-backup.json.raw",
+      "sha256": "2b03f1773274b06d2f427268a761048cafd0f066c6e3966e1a4c1483f0ed1d5e",
+      "bytes": 2651,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-backup.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-backup.log.raw",
+      "sha256": "4e10d6eac52067b69c012a8f2249d7841abe6d2d66a470ab623fbe7777851498",
+      "bytes": 2115,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-build.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-build.log.raw",
+      "sha256": "e78614cafed479a219187a0e6dd738c39731b553f606e0926d6288f4e2be7dd1",
+      "bytes": 168,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-check-final.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-check-final.log.raw",
+      "sha256": "4b8afa6cfcd16b4ab3e7d4abac01d44393ad9ca32d31d8f73504773e8f2147e9",
+      "bytes": 66,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-check.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-check.log.raw",
+      "sha256": "75ac02836f9d3179ea29d806a177a313ab9bf0ea606cd15dd39c84f11da4fefa",
+      "bytes": 66,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-durability.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-durability.log.raw",
+      "sha256": "d1cb2687d380e16255d5d8bd7cd1c0e9a04bc0fa0bf160ce9f36212e40551839",
+      "bytes": 1962,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-final-check.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-final-check.log.raw",
+      "sha256": "dd5d28c8555ffd643d103bcbb71fc719ad5c08f4fd1ce862abe72965b74f9c1b",
+      "bytes": 67,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-final-focused.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-final-focused.log.raw",
+      "sha256": "eaec411afa02d476caac530663d47f89a154abf342f8ed8d166c68877eb3935e",
+      "bytes": 611,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-final-format-fixed.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-final-format-fixed.log.raw",
+      "sha256": "0578056092b68517a75aff944ee09f37efdad93dbc6ade17052c2560ee988151",
+      "bytes": 59,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-final-format.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-final-format.log.raw",
+      "sha256": "9c88c65b0b2f49fc8b14783b0240f1b496771478f80348de22b6bda964140afb",
+      "bytes": 156,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-final-lint.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-final-lint.log.raw",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-fixtures-check-fixed.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-fixtures-check-fixed.log.raw",
+      "sha256": "faea51472b1a4a65dc0f0f38bcc7140ac0b0aa4d0f141eddc0ce5bf71b8c6a61",
+      "bytes": 42,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-fixtures-check.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-fixtures-check.log.raw",
+      "sha256": "5c5b4ff08a62bd44c5fbfecae4665e567d3e841f9d0e93ba42a7c5cb3781abfa",
+      "bytes": 180,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-fixtures-green.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-fixtures-green.log.raw",
+      "sha256": "982aa542a0d28f9730d4b7081ec2ac4eccc37b39b5e7b2c73890b5a98f8d0877",
+      "bytes": 2160,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-fixtures-repro.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-fixtures-repro.log.raw",
+      "sha256": "79f8de086c93795a6322194e2f49873a0b2498da83e1848cc68afc4bdb094c45",
+      "bytes": 7552,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-format.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-format.log.raw",
+      "sha256": "0e8aa87fe0563f70bd82fe43006bf9897a970b3a0eddd510cc8c7204bdc209d4",
+      "bytes": 231,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-gate-status.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-gate-status.json.raw",
+      "sha256": "cbd720ba177a754e55310e378aecbad99dc40c39d6481eb10a0b07b378d3836b",
+      "bytes": 15943,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-generate.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-generate.log.raw",
+      "sha256": "69849523ec9a112925df624763f6c4713acc6dc2ada52b7a4ef79484ee0cd218",
+      "bytes": 3440,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-integration.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-integration.log.raw",
+      "sha256": "9c4a62eb9f44c48f936911066e405fa67d095dd18ef97a64dd2fd816c6e483f1",
+      "bytes": 93594,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-lint.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-lint.log.raw",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-manual-cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-manual-cleanup.json.raw",
+      "sha256": "fb177db3f167569096ddc9adf541b7f8ebda7ef5b5bc07359452d0cb2a0bb049",
+      "bytes": 250,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-resources-before-cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-resources-before-cleanup.json.raw",
+      "sha256": "f8400b8d4d796e7d19531220db173bc96692613f9c116a35bd02e50a224c26dd",
+      "bytes": 668,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-schema-refresh.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-schema-refresh.log.raw",
+      "sha256": "69849523ec9a112925df624763f6c4713acc6dc2ada52b7a4ef79484ee0cd218",
+      "bytes": 3440,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-transfers-green.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-transfers-green.log.raw",
+      "sha256": "169f3d47b52c9e0fee11ab828f5b774a0020951ec569fbbdccacb8c03c9a7365",
+      "bytes": 760,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-unit.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-unit.log.raw",
+      "sha256": "a4b82b68cb0c8de33aaaf01d663ef22e66fbe18312dbf51809a404b722194328",
+      "bytes": 49748,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/s7-funding-unmigrated-audit-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/s7-funding-unmigrated-audit-red.log.raw",
+      "sha256": "4c578666ac3fa3ad610b090f8941acf5ee46af7355d9fb183fc8fec838606a85",
+      "bytes": 1172,
+      "temporary_source_removed": true
+    },
+    ".local/performance-implementation/verify-funded-backup.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/verify-funded-backup.ts.raw",
+      "sha256": "4c8480b235f17a2608a07e389c240c7a2d9092ce59f0b875dd2a5d5c9313eba5",
+      "bytes": 4272,
+      "temporary_source_removed": true
+    }
+  },
+  "current_source_snapshots": {
+    "packages/storage/src/sql/core-evidence-batch.sql": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-packages__storage__src__sql__core-evidence-batch.sql.raw",
+      "sha256": "ee7a80072ccbd8d202db315ed301e0a4e2afbad59f89939dd36c3d64b05840d4",
+      "bytes": 53965,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "packages/storage/src/sql/core-evidence-locks.sql": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-packages__storage__src__sql__core-evidence-locks.sql.raw",
+      "sha256": "e400e85a7e03d98b0404d245ee80b4b66074e5d68a9b18eca09f028cdd11f06d",
+      "bytes": 31116,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "packages/storage/src/migrations/manifest.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-packages__storage__src__migrations__manifest.json.raw",
+      "sha256": "fb654da4c62a0867a43fdc47971078fb999f74587242d42571a6bc1b7384166a",
+      "bytes": 12491,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "tests/integration/core-evidence-batch.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-tests__integration__core-evidence-batch.test.ts.raw",
+      "sha256": "9c27f95a72006b0184015f94efa4294d9f959a3140560411915e87a5ed10e603",
+      "bytes": 23854,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "tests/integration/core-execution-upgrade.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-tests__integration__core-execution-upgrade.test.ts.raw",
+      "sha256": "dcdc44f2f3d1f1a29544cd12426c747af68ba97a437960e30ed42ceefdb3f854",
+      "bytes": 14638,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "tests/integration/core-management.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-tests__integration__core-management.test.ts.raw",
+      "sha256": "2bc7ddd02e44d4775cbbc94c544d6c55be0f555c3c76b55e340b0348bafbf723",
+      "bytes": 17458,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "tests/integration/schema.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-tests__integration__schema.test.ts.raw",
+      "sha256": "b2eb3c66b1229abcb76cc7e0ee376162adce685fc55b14ece6826a6a074158ea",
+      "bytes": 16407,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "tests/integration/plugin-catalog-upgrade.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-tests__integration__plugin-catalog-upgrade.test.ts.raw",
+      "sha256": "28a731e99d5f402961f9677e8db9f4f6bc6a23624b138a7c4f345ab0282bab83",
+      "bytes": 4339,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "tests/integration/gateway-lifecycle.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-tests__integration__gateway-lifecycle.test.ts.raw",
+      "sha256": "9c5533b51ddf7189fe4bc6ce510f3330b8a354fae5885f0083a24066df29cd6a",
+      "bytes": 33547,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "tests/integration/core-routing-health.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-tests__integration__core-routing-health.test.ts.raw",
+      "sha256": "94e1fdd00d9960b7dd3826eed825c363cbefd0092d9b95917fd9f442a5f51dc0",
+      "bytes": 14417,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "tests/integration/gateway-chat.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-tests__integration__gateway-chat.test.ts.raw",
+      "sha256": "8c4f913c28c140d7efb5307f1985c37149e5f4837c3a9c086eafbde05ed9f4c0",
+      "bytes": 46743,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "tests/integration/lifecycle.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-tests__integration__lifecycle.test.ts.raw",
+      "sha256": "28be54b40e440e484b0da8eaf12739d32f6eef943ab8db93f903d145ced2e0a4",
+      "bytes": 22860,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "scripts/bench-system.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-scripts__bench-system.ts.raw",
+      "sha256": "6c52b150f083582ce826579c7a337f4cd2f7dcd1148b8414ac20f41675fce08b",
+      "bytes": 43402,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    },
+    "scripts/benchmark-metrics.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/source-scripts__benchmark-metrics.ts.raw",
+      "sha256": "3f2e4a91efa37664c1c40f14308fdeaa93e64aeba68a59b9c8b4ae0b7af99e01",
+      "bytes": 13024,
+      "state": "current1809; not a claim that historical1808 full gates ran this test snapshot"
+    }
+  },
+  "cleanup_refusal": "First capacity-directory cleanup refused unarchived load.log/upstream.log/public certificate. All six files were subsequently SHA archived before deletion.",
+  "preserved": "Original27 database names/OIDs, reference database and PIDs40766/40771; no commit/push/deploy"
+}

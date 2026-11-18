@@ -1,0 +1,109 @@
+{
+  "scope": "Only missing databases with deleted service roles linked to this task's audited fixture",
+  "reset": [
+    {
+      "dbid": "31229501",
+      "users": ["31231524", "31231535"],
+      "sources": [
+        {
+          "path": "docs/performance/evidence-implementation-2026-11-17/s2e-40-a/audit.json",
+          "database": "gateway_test_foundation_916d2d8d0f234d8fbd5d196d1f9c34d2"
+        }
+      ],
+      "matched_service_statements": 13
+    },
+    {
+      "dbid": "31252774",
+      "users": ["31254797", "31254808"],
+      "sources": [
+        {
+          "path": "docs/performance/evidence-implementation-2026-11-17/s2f-40-a/audit.json",
+          "database": "gateway_test_foundation_32ebeb10503d4b9fb8bdccb668f02109"
+        }
+      ],
+      "matched_service_statements": 12
+    },
+    {
+      "dbid": "31264886",
+      "users": ["31266909", "31266920"],
+      "sources": [
+        {
+          "path": "docs/performance/evidence-implementation-2026-11-17/s2f-40-b/audit.json",
+          "database": "gateway_test_foundation_4ae119a8bd78432bb2423503a12a894d"
+        }
+      ],
+      "matched_service_statements": 13
+    },
+    {
+      "dbid": "31442569",
+      "users": ["31444621", "31444628", "31444632"],
+      "sources": [
+        {
+          "path": ".local/capacity/bench-a6873643ca4a4bbaa11e5762cb88300c/audit.json",
+          "database": "gateway_test_foundation_0b3a0a3f25c6459cb2451702cf99c16d"
+        }
+      ],
+      "matched_service_statements": 20
+    },
+    {
+      "dbid": "31458609",
+      "users": ["31460661", "31460672"],
+      "sources": [
+        {
+          "path": "docs/performance/evidence-implementation-2026-11-17/s3b-native-40-a/audit.json",
+          "database": "gateway_test_foundation_85ac2c401e334b55a7fe0e6b2a9b9ddd"
+        },
+        {
+          "path": ".local/capacity/bench-1fd13471e53648048ae4003b2223a4cb/audit.json",
+          "database": "gateway_test_foundation_85ac2c401e334b55a7fe0e6b2a9b9ddd"
+        }
+      ],
+      "matched_service_statements": 18
+    },
+    {
+      "dbid": "31479186",
+      "users": ["31481238", "31481249"],
+      "sources": [
+        {
+          "path": ".local/capacity/bench-4fc922801ca84d1a83205fc2e00a6742/audit.json",
+          "database": "gateway_test_foundation_63f49a6e1db6409281666bc5a3b5d7c3"
+        }
+      ],
+      "matched_service_statements": 18
+    },
+    {
+      "dbid": "31491449",
+      "users": ["31493501", "31493512"],
+      "sources": [
+        {
+          "path": ".local/capacity/bench-217186145d63497cb0008d74162feaf4/audit.json",
+          "database": "gateway_test_foundation_b91500fc7b4d43ea87ad3bac3bdf1332"
+        }
+      ],
+      "matched_service_statements": 18
+    },
+    {
+      "dbid": "31503694",
+      "users": ["31505746", "31505757"],
+      "sources": [
+        {
+          "path": ".local/capacity/bench-0f4a89237a964bf284d706b64063a652/audit.json",
+          "database": "gateway_test_foundation_2f64fd13992043fcbe902f8c453d578d"
+        }
+      ],
+      "matched_service_statements": 18
+    },
+    {
+      "dbid": "31520731",
+      "users": ["31522783", "31522794"],
+      "sources": [
+        {
+          "path": ".local/capacity/bench-36680b99f984424fa698422621d4e244/audit.json",
+          "database": "gateway_test_foundation_a0652fb6aec6464b8169aa4963210acb"
+        }
+      ],
+      "matched_service_statements": 18
+    }
+  ],
+  "count_note": "Matched service statement rows only; scoped reset also removes other roles rows for these same proven owned missing databases. Total removed rows were not sampled."
+}

@@ -1,13 +1,11 @@
 import type { SQL } from "bun";
-import { eq, sql } from "drizzle-orm";
 import {
   GatewayError,
   type FinancialVoucherRegistration,
   type UpstreamRechargeInput,
   type UpstreamRechargeReceipt,
 } from "@gateway/contracts";
-import { createRepositories } from "../database.ts";
-import { upstreamAccountBalances } from "../schema/index.ts";
+import { withDatabaseTransaction } from "../transaction.ts";
 import { recordUpstreamRecharge } from "./recharge.ts";
 import {
   registerFinancialVoucher,
@@ -38,7 +36,15 @@ export function createUpstreamFundingStore(db: SQL) {
       actor: string,
     ): Promise<UpstreamRechargeReceipt> {
       try {
-        return await db.begin((tx) => recordUpstreamRecharge(tx, accountId, input, actor));
+        const account = fundingId(accountId);
+        return await withDatabaseTransaction(
+          db,
+          { deadline: performance.now() + 4000 },
+          async (tx) => {
+            await tx`SELECT core_funding_control_v1(${account}::uuid,false)`;
+            return recordUpstreamRecharge(tx, account, input, actor);
+          },
+        );
       } catch (error) {
         fundingFailure(error);
       }
@@ -58,19 +64,19 @@ export function createUpstreamFundingStore(db: SQL) {
     },
     async balances(accountId: string) {
       try {
-        return await createRepositories(db)
-          .select({
-            currency: upstreamAccountBalances.currency,
-            balance_atoms: upstreamAccountBalances.balanceAtoms,
-            reserved_atoms: upstreamAccountBalances.reservedAtoms,
-            spent_atoms: upstreamAccountBalances.spentAtoms,
-            adjustment_atoms: upstreamAccountBalances.adjustmentAtoms,
-            revision: upstreamAccountBalances.revision,
-            available_atoms: sql<string>`(${upstreamAccountBalances.balanceAtoms}-${upstreamAccountBalances.reservedAtoms})::text`,
-          })
-          .from(upstreamAccountBalances)
-          .where(eq(upstreamAccountBalances.accountId, fundingId(accountId)))
-          .orderBy(upstreamAccountBalances.currency);
+        return [
+          ...(await db<
+            {
+              currency: string;
+              balance_atoms: string;
+              reserved_atoms: string;
+              spent_atoms: string;
+              adjustment_atoms: string;
+              revision: string;
+              available_atoms: string;
+            }[]
+          >`SELECT currency,balance_atoms::text,reserved_atoms::text,spent_atoms::text,adjustment_atoms::text,revision::text,(balance_atoms-reserved_atoms)::text available_atoms FROM core_upstream_balances_v1 WHERE account_id=${fundingId(accountId)} ORDER BY currency`),
+        ];
       } catch (error) {
         fundingFailure(error);
       }

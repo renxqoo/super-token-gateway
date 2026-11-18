@@ -1,0 +1,472 @@
+CREATE SEQUENCE core_funding.capacity_prof_group_success_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_success_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_success_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_success_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_success_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_success_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_success_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_success_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_success_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_success_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_success_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_declined_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_declined_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_declined_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_declined_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_declined_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_declined_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_declined_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_declined_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_declined_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_declined_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_declined_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_wallets_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_wallets_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_wallets_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_wallets_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_wallets_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_wallets_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_wallets_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_wallets_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_wallets_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_wallets_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_wallets_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_upstream_holds_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_upstream_holds_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_upstream_holds_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_upstream_holds_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_upstream_holds_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_upstream_holds_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_upstream_holds_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_upstream_holds_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_upstream_holds_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_upstream_holds_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_upstream_holds_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_balance_cells_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_balance_cells_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_balance_cells_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_balance_cells_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_balance_cells_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_balance_cells_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_balance_cells_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_balance_cells_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_balance_cells_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_balance_cells_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_balance_cells_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_gateway_requests_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_gateway_requests_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_gateway_requests_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_gateway_requests_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_gateway_requests_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_gateway_requests_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_gateway_requests_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_gateway_requests_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_gateway_requests_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_gateway_requests_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_gateway_requests_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_attempts_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_attempts_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_attempts_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_attempts_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_attempts_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_attempts_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_attempts_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_attempts_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_attempts_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_attempts_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_attempts_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_billing_holds_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_billing_holds_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_billing_holds_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_billing_holds_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_billing_holds_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_billing_holds_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_billing_holds_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_billing_holds_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_billing_holds_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_billing_holds_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_billing_holds_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_execution_permits_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_execution_permits_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_execution_permits_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_execution_permits_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_execution_permits_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_execution_permits_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_execution_permits_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_execution_permits_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_execution_permits_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_execution_permits_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_execution_permits_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_identity_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_identity_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_identity_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_identity_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_identity_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_identity_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_identity_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_identity_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_identity_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_identity_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_identity_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_account_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_account_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_account_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_account_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_account_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_account_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_account_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_account_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_account_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_account_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_account_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_deadlock_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_deadlock_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_deadlock_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_deadlock_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_deadlock_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_deadlock_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_deadlock_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_deadlock_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_deadlock_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_deadlock_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_deadlock_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_dependency_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_dependency_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_dependency_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_dependency_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_dependency_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_dependency_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_dependency_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_dependency_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_dependency_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_dependency_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_dependency_100000;
+CREATE SEQUENCE core_funding.capacity_prof_group_other_1;
+CREATE SEQUENCE core_funding.capacity_prof_group_other_2;
+CREATE SEQUENCE core_funding.capacity_prof_group_other_4;
+CREATE SEQUENCE core_funding.capacity_prof_group_other_8;
+CREATE SEQUENCE core_funding.capacity_prof_group_other_16;
+CREATE SEQUENCE core_funding.capacity_prof_group_other_32;
+CREATE SEQUENCE core_funding.capacity_prof_group_other_64;
+CREATE SEQUENCE core_funding.capacity_prof_group_other_128;
+CREATE SEQUENCE core_funding.capacity_prof_group_other_256;
+CREATE SEQUENCE core_funding.capacity_prof_group_other_512;
+CREATE SEQUENCE core_funding.capacity_prof_group_other_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_success_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_success_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_success_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_success_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_success_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_success_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_success_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_success_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_success_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_success_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_success_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_declined_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_declined_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_declined_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_declined_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_declined_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_declined_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_declined_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_declined_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_declined_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_declined_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_declined_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_wallets_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_wallets_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_wallets_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_wallets_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_wallets_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_wallets_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_wallets_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_wallets_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_wallets_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_wallets_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_wallets_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_upstream_holds_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_upstream_holds_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_upstream_holds_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_upstream_holds_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_upstream_holds_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_upstream_holds_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_upstream_holds_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_upstream_holds_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_upstream_holds_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_upstream_holds_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_upstream_holds_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_balance_cells_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_balance_cells_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_balance_cells_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_balance_cells_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_balance_cells_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_balance_cells_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_balance_cells_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_balance_cells_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_balance_cells_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_balance_cells_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_balance_cells_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_gateway_requests_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_gateway_requests_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_gateway_requests_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_gateway_requests_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_gateway_requests_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_gateway_requests_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_gateway_requests_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_gateway_requests_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_gateway_requests_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_gateway_requests_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_gateway_requests_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_attempts_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_attempts_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_attempts_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_attempts_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_attempts_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_attempts_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_attempts_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_attempts_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_attempts_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_attempts_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_attempts_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_billing_holds_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_billing_holds_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_billing_holds_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_billing_holds_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_billing_holds_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_billing_holds_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_billing_holds_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_billing_holds_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_billing_holds_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_billing_holds_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_billing_holds_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_execution_permits_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_execution_permits_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_execution_permits_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_execution_permits_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_execution_permits_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_execution_permits_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_execution_permits_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_execution_permits_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_execution_permits_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_execution_permits_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_execution_permits_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_identity_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_identity_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_identity_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_identity_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_identity_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_identity_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_identity_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_identity_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_identity_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_identity_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_identity_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_account_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_account_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_account_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_account_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_account_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_account_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_account_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_account_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_account_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_account_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_account_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_deadlock_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_deadlock_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_deadlock_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_deadlock_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_deadlock_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_deadlock_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_deadlock_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_deadlock_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_deadlock_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_deadlock_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_deadlock_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_dependency_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_dependency_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_dependency_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_dependency_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_dependency_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_dependency_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_dependency_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_dependency_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_dependency_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_dependency_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_dependency_100000;
+CREATE SEQUENCE core_funding.capacity_prof_merged_other_1;
+CREATE SEQUENCE core_funding.capacity_prof_merged_other_2;
+CREATE SEQUENCE core_funding.capacity_prof_merged_other_4;
+CREATE SEQUENCE core_funding.capacity_prof_merged_other_8;
+CREATE SEQUENCE core_funding.capacity_prof_merged_other_16;
+CREATE SEQUENCE core_funding.capacity_prof_merged_other_32;
+CREATE SEQUENCE core_funding.capacity_prof_merged_other_64;
+CREATE SEQUENCE core_funding.capacity_prof_merged_other_128;
+CREATE SEQUENCE core_funding.capacity_prof_merged_other_256;
+CREATE SEQUENCE core_funding.capacity_prof_merged_other_512;
+CREATE SEQUENCE core_funding.capacity_prof_merged_other_100000;
+
+CREATE FUNCTION core_funding.capacity_record_v1(scope text, state text, msg text, started timestamptz) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+DECLARE kind text; cost numeric; bucket integer;
+BEGIN
+ kind=CASE WHEN state='00000' THEN 'success' WHEN state='na' THEN 'declined'
+  WHEN state='40P01' THEN 'deadlock' WHEN state='P0E01' THEN 'dependency'
+  WHEN msg LIKE '%balance_cells%' THEN 'balance_cells'
+  WHEN msg LIKE '%upstream_holds%' THEN 'upstream_holds'
+  WHEN msg LIKE '%wallets%' THEN 'wallets'
+  WHEN msg LIKE '%gateway_requests%' THEN 'gateway_requests'
+  WHEN msg LIKE '%billing_holds%' THEN 'billing_holds'
+  WHEN msg LIKE '%attempts%' THEN 'attempts'
+  WHEN msg LIKE '%execution_permits%' THEN 'execution_permits'
+  WHEN msg LIKE '%internal_service_%' OR msg LIKE '%internal_startup_%' THEN 'identity'
+  WHEN msg LIKE '%upstream_accounts%' OR state='P0F01' THEN 'account'
+  ELSE 'other' END;
+ cost=extract(epoch FROM clock_timestamp()-started)*1000;
+ bucket=CASE WHEN cost<=1 THEN 1 WHEN cost<=2 THEN 2 WHEN cost<=4 THEN 4 WHEN cost<=8 THEN 8 WHEN cost<=16 THEN 16 WHEN cost<=32 THEN 32 WHEN cost<=64 THEN 64 WHEN cost<=128 THEN 128 WHEN cost<=256 THEN 256 WHEN cost<=512 THEN 512 ELSE 100000 END;
+ PERFORM nextval(format('core_funding.capacity_prof_%s_%s_%s',scope,kind,bucket)::regclass);
+END $$;
+REVOKE ALL ON FUNCTION core_funding.capacity_record_v1(text,text,text,timestamptz) FROM PUBLIC;
+DO $$
+DECLARE role text;
+BEGIN
+ SELECT pg_get_userbyid(proowner) INTO role FROM pg_proc WHERE oid='core_funding.persist_v1(jsonb,boolean)'::regprocedure;
+ EXECUTE format('GRANT EXECUTE ON FUNCTION core_funding.capacity_record_v1(text,text,text,timestamptz) TO %I',role);
+ SELECT pg_get_userbyid(proowner) INTO role FROM pg_proc WHERE oid='core_funding.coalesce_groups_v1(jsonb,jsonb)'::regprocedure;
+ EXECUTE format('GRANT EXECUTE ON FUNCTION core_funding.capacity_record_v1(text,text,text,timestamptz) TO %I',role);
+END $$;
+
+CREATE OR REPLACE FUNCTION core_funding.persist_v1(p_groups jsonb,bulk boolean) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE g jsonb;pending jsonb=CASE WHEN bulk THEN '{"cells":{},"journals":[],"entries":[]}'::jsonb END;applied jsonb;results jsonb='[]';failure text;message text;batch uuid=gen_random_uuid();ordinal integer=0;reason text;ev jsonb;started timestamptz;BEGIN
+ IF jsonb_typeof(p_groups) IS DISTINCT FROM 'array' OR jsonb_array_length(p_groups) NOT BETWEEN 1 AND 128 THEN RAISE EXCEPTION 'evidence_batch_invalid' USING ERRCODE='P0400';END IF;
+ IF bulk AND jsonb_array_length(p_groups)>1 THEN
+  started=clock_timestamp();
+  BEGIN
+   applied=core_funding.coalesce_groups_v1(p_groups,pending);
+   IF applied IS NOT NULL THEN
+    PERFORM core_funding.flush_v1(applied->'pending');
+    PERFORM core_funding.capacity_record_v1('merged','00000','success',started);
+    RETURN applied->'results';
+   END IF;
+   PERFORM core_funding.capacity_record_v1('merged','na','declined',started);
+  EXCEPTION WHEN OTHERS THEN
+   GET STACKED DIAGNOSTICS failure=RETURNED_SQLSTATE,message=MESSAGE_TEXT;
+   PERFORM core_funding.capacity_record_v1('merged',failure,message,started);
+   pending='{"cells":{},"journals":[],"entries":[]}'::jsonb;results='[]';END;
+ END IF;
+ BEGIN
+ FOR g IN SELECT value FROM jsonb_array_elements(p_groups) LOOP
+  reason=NULL;
+  IF jsonb_typeof(g) IS NOT DISTINCT FROM 'object' AND g?'rejected' THEN
+   IF g->>'rejected' IS DISTINCT FROM 'evidence_signature_invalid' THEN RAISE EXCEPTION 'evidence_batch_invalid' USING ERRCODE='P0400';END IF;
+   reason=g->>'rejected';results=results||jsonb_build_array(jsonb_build_object('status','REJECTED','error',reason));
+  ELSE
+   started=clock_timestamp();
+   BEGIN
+    applied=core_funding.evidence_group_v1(g,pending);
+    PERFORM core_funding.capacity_record_v1('group','00000','success',started);
+    results=results||jsonb_build_array(applied->'result');
+    IF bulk THEN pending=applied->'pending';END IF;
+   EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS failure=RETURNED_SQLSTATE,message=MESSAGE_TEXT;
+    PERFORM core_funding.capacity_record_v1('group',failure,message,started);
+    IF failure IN ('P0400','P0403') THEN reason=message;results=results||jsonb_build_array(jsonb_build_object('status','REJECTED','error',message));
+    ELSE results=results||jsonb_build_array(jsonb_build_object('status','ERROR','error',failure));END IF;
+   END;
+  END IF;
+  IF reason IS NOT NULL THEN
+   FOR ev IN SELECT value FROM jsonb_array_elements(g->'events') LOOP
+    INSERT INTO public.core_evidence_rejections(id,batch_id,ordinal,reason,origin_identity,origin_session_id,event_id,attempt_id)
+    VALUES(gen_random_uuid(),batch,ordinal,reason,ev->>'origin_identity',(ev->>'origin_session_id')::uuid,(ev->>'event_id')::uuid,(ev->>'attempt_id')::uuid);
+    ordinal=ordinal+1;
+   END LOOP;
+  END IF;
+ END LOOP;
+ IF bulk THEN PERFORM core_funding.flush_v1(pending);END IF;
+ EXCEPTION WHEN OTHERS THEN
+  IF NOT bulk THEN RAISE;END IF;
+  RETURN core_funding.persist_v1(p_groups,false);
+ END;
+ RETURN results;
+END $$;
+
+
+
+CREATE OR REPLACE FUNCTION core_funding.coalesce_groups_v1(groups jsonb, pending jsonb)
+RETURNS jsonb LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE
+ events jsonb;
+ attempt_owners jsonb;
+ event_owners jsonb;
+ request_owners jsonb;
+ applied jsonb;
+ result jsonb;
+ results jsonb='[]';
+ started timestamptz:=clock_timestamp();
+BEGIN
+ IF EXISTS (
+  SELECT 1 FROM jsonb_array_elements(groups) g
+  WHERE jsonb_typeof(g) IS DISTINCT FROM 'object' OR g-'events'<>'{}'::jsonb
+   OR jsonb_typeof(g->'events') IS DISTINCT FROM 'array'
+   OR jsonb_array_length(g->'events') NOT BETWEEN 1 AND 64
+ ) THEN RETURN NULL; END IF;
+
+ SELECT jsonb_agg(e.value ORDER BY g.n,e.n),
+  jsonb_object_agg(((e.value->>'attempt_id')::uuid)::text,g.n),
+  jsonb_object_agg(((e.value->>'event_id')::uuid)::text,g.n)
+ INTO events,attempt_owners,event_owners
+ FROM jsonb_array_elements(groups) WITH ORDINALITY g(value,n)
+ CROSS JOIN LATERAL jsonb_array_elements(g.value->'events') WITH ORDINALITY e(value,n);
+ IF jsonb_array_length(events)>64 THEN RETURN NULL; END IF;
+
+ IF EXISTS (
+  SELECT 1 FROM jsonb_array_elements(groups) WITH ORDINALITY g(value,n)
+  CROSS JOIN LATERAL jsonb_array_elements(g.value->'events') e
+  GROUP BY (e->>'attempt_id')::uuid HAVING count(DISTINCT g.n)>1
+ ) OR EXISTS (
+  SELECT 1 FROM jsonb_array_elements(groups) WITH ORDINALITY g(value,n)
+  CROSS JOIN LATERAL jsonb_array_elements(g.value->'events') e
+  GROUP BY (e->>'event_id')::uuid HAVING count(DISTINCT g.n)>1
+ ) THEN RETURN NULL; END IF;
+
+ IF EXISTS (
+  SELECT 1 FROM jsonb_each_text(attempt_owners) o(attempt_id,group_number)
+  CROSS JOIN LATERAL (
+   SELECT h.wallet_id,w.has_expiring_lots FROM public.attempts t
+   JOIN public.billing_holds h ON h.request_id=t.request_id
+   JOIN public.wallets w ON w.id=h.wallet_id
+   WHERE t.id=o.attempt_id::uuid OFFSET 0
+  ) w
+  GROUP BY w.wallet_id HAVING count(DISTINCT o.group_number)>1 OR bool_or(w.has_expiring_lots)
+ ) THEN RETURN NULL; END IF;
+
+ applied=core_funding.evidence_group_v1(
+  jsonb_build_object('events',events),pending||jsonb_build_object('partition',attempt_owners)
+ );
+ result=applied->'result';
+ SELECT jsonb_object_agg(t.request_id::text,o.group_number) INTO request_owners
+ FROM jsonb_each_text(attempt_owners) o(attempt_id,group_number)
+ CROSS JOIN LATERAL (SELECT request_id FROM public.attempts WHERE id=o.attempt_id::uuid OFFSET 0) t;
+
+ FOR i IN 1..jsonb_array_length(groups) LOOP
+  IF applied->'blocked_groups' @> jsonb_build_array(i) THEN
+   PERFORM core_funding.capacity_record_v1('group','55P03','balance_cells',started);
+   results=results||jsonb_build_array(jsonb_build_object('status','ERROR','error','55P03'));
+   CONTINUE;
+  END IF;
+  results=results||jsonb_build_array(jsonb_build_object(
+   'status','COMMITTED',
+   'receipts',coalesce((
+    SELECT jsonb_agg(r.value ORDER BY r.n)
+    FROM jsonb_array_elements(result->'receipts') WITH ORDINALITY r(value,n)
+    WHERE (event_owners->>(((r.value->>'event_id')::uuid)::text))::integer=i
+   ),'[]'),
+   'billing',coalesce((
+    SELECT jsonb_object_agg(b.key,b.value) FROM jsonb_each(result->'billing') b
+    WHERE (request_owners->>b.key)::integer=i
+   ),'{}')
+  ));
+ END LOOP;
+ RETURN jsonb_build_object('results',results,'pending',(applied->'pending')-'partition');
+END $$;

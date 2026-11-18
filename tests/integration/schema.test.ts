@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { createCatalogStore, createRepositories, migrate, SCHEMA_VERSION } from "@gateway/storage";
+import {
+  createCatalogStore,
+  createRepositories,
+  migrate,
+  SCHEMA_VERSION,
+  sql,
+} from "@gateway/storage";
 import { supplierBrands, upstreamAccounts, upstreamAccountBalances } from "@gateway/storage/schema";
 import { withDatabase } from "../support/database.ts";
 
@@ -17,7 +23,7 @@ test("new v2 baseline initializes once without fabricated upstream funding", () 
     ).toBe(SCHEMA_VERSION);
     expect(
       (
-        await db`SELECT (SELECT count(*)::int FROM upstream_account_balances) AS balances,(SELECT count(*)::int FROM upstream_funding_operations) AS funding`
+        await db`SELECT (SELECT count(*)::int FROM core_upstream_balances_v1) AS balances,(SELECT count(*)::int FROM upstream_funding_operations) AS funding`
       )[0],
     ).toEqual({ balances: 0, funding: 0 });
   }));
@@ -80,6 +86,7 @@ test("Drizzle and Bun.SQL preserve atoms above Number precision in each currency
     await repo.transaction(async (tx) => {
       await tx.insert(supplierBrands).values({ id: brand, name: "typed-test" });
       await tx.insert(upstreamAccounts).values({ id: account, brandId: brand, name: "isolated" });
+      await tx.execute(sql`SELECT core_funding_control_v1(${account}::uuid,false)`);
       await tx.insert(upstreamAccountBalances).values(
         ["CNY", "USD", "HKD"].map((currency) => ({
           accountId: account,
@@ -96,7 +103,7 @@ test("Drizzle and Bun.SQL preserve atoms above Number precision in each currency
       ["USD", "9007199254740993", "9007199254740993"],
     ]);
     expect(
-      (await db`SELECT sum(balance_atoms)::text AS total FROM upstream_account_balances`)[0].total,
+      (await db`SELECT sum(balance_atoms)::text AS total FROM core_upstream_balances_v1`)[0].total,
     ).toBe("27021597764222979");
     await expect(
       repo.transaction(async (tx) => {

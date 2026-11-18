@@ -1,0 +1,87 @@
+{
+  "at": "2026-11-17T21:55:40.024Z",
+  "source": "gateway_test_foundation_6c4fae99a1ab45398f1cbae5a6b887f1",
+  "source_requests": 3,
+  "receipts": 6,
+  "external_acks": 6,
+  "source_funds": {
+    "balance": "999955",
+    "reserved": "0",
+    "spent": "45"
+  },
+  "stopped_owned_pids": [
+    98171,
+    98162,
+    98117,
+    98123
+  ],
+  "verifier_exit_code": 0,
+  "verifier": {
+    "backup_restore": "pass",
+    "file": "/Users/wr/work/super-token-gateway/.local/backups/gateway-1794952539313.dump",
+    "bytes": 2425112,
+    "sha256": "c9a45176b5ce81338e5ed49f3a632320ed5f4a6dc5c27c256669a67cecfe3085",
+    "attempts": "3",
+    "usage": "6",
+    "journals": "7",
+    "holds": "3",
+    "charges": "3",
+    "lots": "1",
+    "credit_policies": "0",
+    "balances": [
+      {
+        "debt": "0",
+        "spent": "300",
+        "expired": "0",
+        "currency": "USD",
+        "reserved": "0",
+        "available": "700",
+        "credit_limit": "0",
+        "credit_reserved": "0",
+        "credit_versions": "0"
+      }
+    ],
+    "inconsistent_credit": 0,
+    "unbalanced": 0,
+    "inconsistent_wallets": 0,
+    "upstream_balances": [
+      {
+        "spent": "45",
+        "balance": "999955",
+        "currency": "USD",
+        "reserved": "0"
+      }
+    ],
+    "inconsistent_upstream": 0,
+    "inconsistent_funding_cells": 0,
+    "inconsistent_hold_reserves": 0,
+    "unbalanced_upstream": 0,
+    "evidence_kinds": {
+      "RAW": "6",
+      "CANONICAL": "6"
+    },
+    "deliveries": {
+      "ACKED": "6"
+    },
+    "consumers_digest": "ad6fb92c0cf947ad1d9802aee74ff03b",
+    "deliveries_digest": "4d11a4cce2492183aa02edeb8e7187a7",
+    "receipts_digest": "5dcc3f212e01af3325f96c06567705a6",
+    "upstream_entries_digest": "0350c7f9c541212d3111d3d71c0fa689",
+    "funding_roots_digest": "e929ce5f6616ae57e98617b98f0dfc43",
+    "funding_holds_digest": "d9adf038ca7bf2f87de7cfe36d58f1b2",
+    "funding_cells_digest": "522a3173a4b29797c8fcddd1d21242f0",
+    "funding_transfers_digest": "569776e85fa363f57af7930465d50bfd",
+    "plugin_packages_digest": "58e9d8e77a2ff120f0d915669410e126",
+    "plugin_versions_digest": "40ffb0169be11bd3531ac77018ec0df2",
+    "plugin_bindings_digest": "5103a4aae192ee6528cc2a59ae234c7a",
+    "runtime_approvals": "0",
+    "runtime_approvals_digest": "d41d8cd98f00b204e9800998ecf8427e",
+    "execution_permits_digest": "0140c5fb16669a15ed8b0d03298b8b7c",
+    "resources_digest": "d41d8cd98f00b204e9800998ecf8427e",
+    "queue": "quiesced and drained",
+    "immutable_trigger": "verified",
+    "current_roles": "reapplied",
+    "runtime_permissions": "owner-only"
+  },
+  "dump_removed_after_sha_verification": true
+}

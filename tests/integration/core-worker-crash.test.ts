@@ -30,7 +30,7 @@ async function ledger(db: SQL, account: string, requestId: string) {
   const [charges, receipts, supplier, wallets] = await Promise.all([
     db`SELECT amount_atoms::text amount FROM billing_charges WHERE request_id=${requestId}`,
     db`SELECT count(*)::int n FROM core_evidence_receipts r JOIN attempts a ON a.id=r.attempt_id WHERE a.request_id=${requestId}`,
-    db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM upstream_account_balances WHERE account_id=${account}`,
+    db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM core_upstream_balances_v1 WHERE account_id=${account}`,
     db`SELECT sum(reserved_atoms)::text reserved,sum(spent_atoms)::text spent FROM wallets`,
   ]);
   return {
@@ -63,6 +63,7 @@ async function crashDuringSettlement(
     const held = proxy.arm(['"attempt_state":"SUCCEEDED"'], 20000, mode);
     doomed = await startCoreWorker(stack.namespace, {
       databaseUrl: url.toString(),
+      identity: stack.f.identity,
       env: { SETTLEMENT_CONCURRENCY: "1" },
     });
     const response = await stack.send();
@@ -97,6 +98,7 @@ test(
         expect(await openSettlements(db, role)).toBe(1);
         before = await ledger(db, setup.provider.account_id, id);
         expect(before.charges).toEqual([]);
+        expect(before.receipts).toBe(0);
       });
       await eventually(
         async () => (await openSettlements(db, role)) === 0,
@@ -112,7 +114,7 @@ test(
       );
       const after = await ledger(db, setup.provider.account_id, requestId);
       expect(after.charges).toEqual([{ amount: "100" }]);
-      expect(after.receipts).toBe(before!.receipts + 1);
+      expect(after.receipts).toBe(2);
       expect(after.supplier).toEqual({ balance: "985", reserved: "0", spent: "15" });
       expect(BigInt(after.customer.spent) - BigInt(before!.customer.spent)).toBe(100n);
     }),

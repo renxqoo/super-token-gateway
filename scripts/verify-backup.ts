@@ -98,8 +98,10 @@ try {
     (SELECT count(*)::int FROM wallets w WHERE w.credit_reserved_atoms<>(SELECT coalesce(sum(h.credit_atoms),0) FROM billing_holds h WHERE h.wallet_id=w.id AND h.state IN ('HELD','RECONCILING'))) AS inconsistent_credit,
     (SELECT count(*)::int FROM money_journal j WHERE (SELECT sum((v->>'atoms')::numeric) FROM jsonb_array_elements(j.lines)v)<>0) AS unbalanced,
     (SELECT count(*)::int FROM wallets w WHERE (w.available_atoms,w.reserved_atoms,w.spent_atoms,w.expired_atoms) IS DISTINCT FROM (SELECT ROW(coalesce(sum(l.available_atoms),0),coalesce(sum(l.reserved_atoms),0),coalesce(sum(l.spent_atoms),0),coalesce(sum(l.expired_atoms),0)) FROM wallet_lots l WHERE l.wallet_id=w.id)) AS inconsistent_wallets,
-    (SELECT jsonb_agg(v ORDER BY currency) FROM(SELECT currency,sum(balance_atoms)::text AS balance,sum(reserved_atoms)::text AS reserved,sum(spent_atoms)::text AS spent FROM upstream_account_balances GROUP BY currency)v) AS upstream_balances,
-    (SELECT count(*)::int FROM upstream_account_balances b WHERE (b.balance_atoms,b.reserved_atoms,b.spent_atoms) IS DISTINCT FROM (SELECT ROW(coalesce(sum(e.atoms) FILTER (WHERE e.account IN ('upstream:available','upstream:reserved')),0),coalesce(sum(e.atoms) FILTER (WHERE e.account='upstream:reserved'),0),coalesce(sum(e.atoms) FILTER (WHERE e.account='upstream:expense'),0)) FROM upstream_entries e JOIN upstream_journals j ON j.id=e.journal_id WHERE j.account_id=b.account_id AND e.currency=b.currency)) AS inconsistent_upstream,
+    (SELECT jsonb_agg(v ORDER BY currency) FROM(SELECT currency,sum(balance_atoms)::text AS balance,sum(reserved_atoms)::text AS reserved,sum(spent_atoms)::text AS spent FROM core_upstream_balances_v1 GROUP BY currency)v) AS upstream_balances,
+    (SELECT count(*)::int FROM core_upstream_balances_v1 b WHERE (b.balance_atoms,b.reserved_atoms,b.spent_atoms) IS DISTINCT FROM (SELECT ROW(coalesce(sum(e.atoms) FILTER (WHERE e.account IN ('upstream:available','upstream:reserved')),0),coalesce(sum(e.atoms) FILTER (WHERE e.account='upstream:reserved'),0),coalesce(sum(e.atoms) FILTER (WHERE e.account='upstream:expense'),0)) FROM upstream_entries e JOIN upstream_journals j ON j.id=e.journal_id WHERE j.account_id=b.account_id AND e.currency=b.currency)) AS inconsistent_upstream,
+    (SELECT count(*)::int FROM core_funding.balance_cells c WHERE c.reserved_atoms<>(SELECT coalesce(sum(h.current_reserved_atoms),0) FROM upstream_holds h WHERE (h.account_id,h.currency,h.funding_cell)=(c.account_id,c.currency,c.cell)) OR (c.balance_atoms+c.spent_atoms,c.spent_limit,c.revision_limit) IS DISTINCT FROM (SELECT ROW(coalesce(sum(t.balance_delta+t.spent_allocation_atoms),0),coalesce(sum(t.spent_limit_delta),0),coalesce(sum(t.revision_limit_delta),0)) FROM core_funding.budget_transfers t WHERE (t.account_id,t.currency,t.cell)=(c.account_id,c.currency,c.cell))) AS inconsistent_funding_cells,
+    (SELECT count(*)::int FROM upstream_holds h WHERE h.current_reserved_atoms<>(SELECT coalesce(sum(e.atoms),0) FROM upstream_journals j JOIN upstream_entries e ON e.journal_id=j.id WHERE j.attempt_id=h.attempt_id AND e.account='upstream:reserved')) AS inconsistent_hold_reserves,
     (SELECT count(*)::int FROM (SELECT journal_id FROM upstream_entries GROUP BY journal_id HAVING sum(atoms)<>0) j) AS unbalanced_upstream,
     (SELECT jsonb_object_agg(record_kind,n) FROM (SELECT record_kind,count(*)::text AS n FROM usage_event_index GROUP BY record_kind) k) AS evidence_kinds,
     (SELECT jsonb_object_agg(state,n) FROM (SELECT state,count(*)::text AS n FROM event_deliveries GROUP BY state) d) AS deliveries,
@@ -107,9 +109,16 @@ try {
     ${digest("event_deliveries")} AS deliveries_digest,
     ${digest("core_evidence_receipts")} AS receipts_digest,
     ${digest("upstream_entries")} AS upstream_entries_digest,
+    ${digest("upstream_account_balances")} AS funding_roots_digest,
+    ${digest("upstream_holds")} AS funding_holds_digest,
+    ${digest("core_funding.balance_cells")} AS funding_cells_digest,
+    ${digest("core_funding.budget_transfers")} AS funding_transfers_digest,
     ${digest("plugin_packages")} AS plugin_packages_digest,
     ${digest("plugin_versions")} AS plugin_versions_digest,
     ${digest("channel_plugin_bindings")} AS plugin_bindings_digest,
+    (SELECT count(*)::text FROM core_execution_runtime.approvals) AS runtime_approvals,
+    ${digest("core_execution_runtime.approvals")} AS runtime_approvals_digest,
+    ${digest("execution_permits")} AS execution_permits_digest,
     ${digest("resources")} AS resources_digest
   `)
     )[0] as Record<string, unknown>;
@@ -154,14 +163,35 @@ try {
   restored.pathname = `/${restore}`;
   destination = createDatabase(restored.toString());
   await destination`REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC`;
+  for (const schema of ["core_catalog_cache", "core_execution_runtime"]) {
+    await destination.unsafe(`REVOKE ALL ON SCHEMA ${schema} FROM PUBLIC`);
+    await destination.unsafe(`REVOKE ALL ON ALL TABLES IN SCHEMA ${schema} FROM PUBLIC`);
+    await destination.unsafe(`REVOKE ALL ON ALL FUNCTIONS IN SCHEMA ${schema} FROM PUBLIC`);
+  }
   for (const role of roles)
     await destination.unsafe(await Bun.file(new URL(`../infra/${role}`, import.meta.url)).text());
+  for (const role of ["core_execution_api", "core_catalog", "core_settlement_worker"]) {
+    assert.equal(
+      (
+        await destination`SELECT has_schema_privilege(${role},'core_execution_runtime','USAGE') allowed`
+      )[0].allowed,
+      false,
+    );
+    assert.equal(
+      (
+        await destination`SELECT has_function_privilege(${role},'core_execution_runtime.approve_v1(text,jsonb,jsonb,boolean,text,text)','EXECUTE') allowed`
+      )[0].allowed,
+      false,
+    );
+  }
   const after = await counters(destination);
   assert.deepEqual(after, before);
   assert.equal(after.unbalanced, 0);
   assert.equal(after.inconsistent_wallets, 0);
   assert.equal(after.inconsistent_credit, 0);
   assert.equal(after.inconsistent_upstream, 0);
+  assert.equal(after.inconsistent_funding_cells, 0);
+  assert.equal(after.inconsistent_hold_reserves, 0);
   assert.equal(after.unbalanced_upstream, 0);
   assert.equal(
     (await destination`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`)[0]
@@ -185,6 +215,7 @@ try {
       queue: "quiesced and drained",
       immutable_trigger: first ? "verified" : "no usage fixture",
       current_roles: "reapplied",
+      runtime_permissions: "owner-only",
     }),
   );
   passed = true;

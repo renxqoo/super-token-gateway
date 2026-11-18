@@ -1,0 +1,67 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/native-durability.test.ts: (run #1)
+(pass) business dependency load failure closes the preflight fixture before any service starts [583.41ms]
+
+tests/integration/native-durability.test.ts: (run #2)
+(pass) business dependency load failure closes the preflight fixture before any service starts [637.13ms]
+
+tests/integration/native-durability.test.ts: (run #3)
+(pass) business dependency load failure closes the preflight fixture before any service starts [605.72ms]
+
+tests/integration/native-durability.test.ts: (run #4)
+(pass) business dependency load failure closes the preflight fixture before any service starts [606.63ms]
+
+tests/integration/native-durability.test.ts: (run #5)
+(pass) business dependency load failure closes the preflight fixture before any service starts [714.65ms]
+
+tests/integration/native-durability.test.ts: (run #6)
+(pass) business dependency load failure closes the preflight fixture before any service starts [1029.89ms]
+
+tests/integration/native-durability.test.ts: (run #7)
+(pass) business dependency load failure closes the preflight fixture before any service starts [1087.19ms]
+
+tests/integration/native-durability.test.ts: (run #8)
+(pass) business dependency load failure closes the preflight fixture before any service starts [1107.44ms]
+
+tests/integration/native-durability.test.ts: (run #9)
+(pass) business dependency load failure closes the preflight fixture before any service starts [932.22ms]
+
+tests/integration/native-durability.test.ts: (run #10)
+(pass) business dependency load failure closes the preflight fixture before any service starts [987.96ms]
+
+tests/integration/native-durability.test.ts: (run #11)
+(pass) business dependency load failure closes the preflight fixture before any service starts [620.19ms]
+
+tests/integration/native-durability.test.ts: (run #12)
+(pass) business dependency load failure closes the preflight fixture before any service starts [955.77ms]
+
+tests/integration/native-durability.test.ts: (run #13)
+(pass) business dependency load failure closes the preflight fixture before any service starts [1576.00ms]
+
+tests/integration/native-durability.test.ts: (run #14)
+(pass) business dependency load failure closes the preflight fixture before any service starts [670.93ms]
+
+tests/integration/native-durability.test.ts: (run #15)
+(pass) business dependency load failure closes the preflight fixture before any service starts [615.67ms]
+
+tests/integration/native-durability.test.ts: (run #16)
+(pass) business dependency load failure closes the preflight fixture before any service starts [623.09ms]
+
+tests/integration/native-durability.test.ts: (run #17)
+(pass) business dependency load failure closes the preflight fixture before any service starts [1608.26ms]
+
+tests/integration/native-durability.test.ts: (run #18)
+(pass) business dependency load failure closes the preflight fixture before any service starts [1129.21ms]
+
+tests/integration/native-durability.test.ts: (run #19)
+(pass) business dependency load failure closes the preflight fixture before any service starts [730.00ms]
+
+tests/integration/native-durability.test.ts: (run #20)
+(pass) business dependency load failure closes the preflight fixture before any service starts [1220.39ms]
+
+ 20 pass
+ 360 filtered out
+ 0 fail
+ 160 expect() calls
+Ran 20 tests across 1 file. [18.06s]

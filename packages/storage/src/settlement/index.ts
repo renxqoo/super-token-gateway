@@ -11,6 +11,7 @@ import {
 import { canonical } from "@gateway/kernel";
 import { sha256 } from "@gateway/runtime/crypto";
 import { z } from "zod";
+import { withDatabaseConnection, withDatabaseTransaction } from "../transaction.ts";
 
 const resultsSchema = z.array(coreEvidenceGroupResultSchema);
 
@@ -30,14 +31,21 @@ function authenticate(event: SignedCoreEvidenceEventV1, key: KeyObject | undefin
 export function createSettlementStore(db: SQL) {
   return {
     async persist(groups: CoreEvidenceGroupV1[]): Promise<CoreEvidenceGroupResult[]> {
+      const deadline = performance.now() + 8000;
       const parsed = z.array(coreEvidenceGroupV1Schema).min(1).max(128).parse(groups);
       const sessions = [
         ...new Set(parsed.flatMap((g) => g.events.map((e) => e.origin_session_id))),
       ];
       const keys = new Map<string, { key: KeyObject; digest: string }>();
-      for (const row of await db<
-        { session_id: string; public_key_spki: Buffer; public_key_sha256: string }[]
-      >`SELECT session_id::text,public_key_spki,public_key_sha256 FROM internal_startup_sessions WHERE session_id=ANY(${sessions}::uuid[])`)
+      const sessionRows = await withDatabaseConnection(
+        db,
+        { deadline },
+        (connection) =>
+          connection<
+            { session_id: string; public_key_spki: Buffer; public_key_sha256: string }[]
+          >`SELECT session_id::text,public_key_spki,public_key_sha256 FROM internal_startup_sessions WHERE session_id=ANY(${sessions}::uuid[])`,
+      );
+      for (const row of sessionRows)
         keys.set(row.session_id, {
           key: createPublicKey({
             key: Buffer.from(row.public_key_spki),
@@ -64,12 +72,46 @@ export function createSettlementStore(db: SQL) {
               })),
             };
       });
-      const persisted = resultsSchema.parse(
-        await db.begin(
-          async (tx) =>
-            (await tx`SELECT persist_core_evidence_groups_v1(${verified}::jsonb) value`)[0].value,
-        ),
-      );
+      const chunks: (typeof verified)[] = [];
+      let chunk: typeof verified = [];
+      let attempts = new Set<string>();
+      for (const group of verified) {
+        const combined = new Set([...attempts, ...group.events.map((event) => event.attempt_id)]);
+        if (combined.size > 128 && chunk.length) {
+          chunks.push(chunk);
+          chunk = [];
+          attempts = new Set();
+        }
+        chunk.push(group);
+        for (const event of group.events) attempts.add(event.attempt_id);
+      }
+      if (chunk.length) chunks.push(chunk);
+      const persisted: CoreEvidenceGroupResult[] = [];
+      for (const chunk of chunks) {
+        const results = resultsSchema.parse(
+          await withDatabaseTransaction(
+            db,
+            { deadline },
+            async (tx) =>
+              (await tx`SELECT persist_core_evidence_groups_v1(${chunk}::jsonb) value`)[0].value,
+          ),
+        );
+        if (results.length !== chunk.length) throw new Error("evidence_batch_result_mismatch");
+        for (let i = 0; i < results.length; i++) {
+          const result = results[i]!;
+          if (result.status === "ERROR" && result.error === "P0F01")
+            results[i] = coreEvidenceGroupResultSchema.parse(
+              await withDatabaseTransaction(
+                db,
+                { deadline },
+                async (tx) =>
+                  (await tx`SELECT persist_core_evidence_slow_v1(${chunk[i]}::jsonb) value`)[0]
+                    .value,
+              ),
+            );
+        }
+        persisted.push(...results);
+      }
       if (persisted.length !== verified.length) throw new Error("evidence_batch_result_mismatch");
       return persisted;
     },

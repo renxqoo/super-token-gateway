@@ -1,0 +1,23 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-funding-upgrade.test.ts:
+34 |       await migrate(db);
+35 |       expect(
+36 |         (
+37 |           await db`SELECT has_function_privilege(${limited},'public.core_upstream_fund_v1(uuid,text,numeric,boolean)','EXECUTE') allowed`
+38 |         )[0].allowed,
+39 |       ).toBe(false);
+             ^
+error: expect(received).toBe(expected)
+
+Expected: false
+Received: true
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-funding-upgrade.test.ts:39:9)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+(fail) funding upgrade cannot turn an account-id reader or revision-only writer into a balance reader or money writer [228.38ms]
+
+ 0 pass
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [273.00ms]

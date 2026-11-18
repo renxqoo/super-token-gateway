@@ -1,0 +1,283 @@
+{
+  "stage": "1813 keyed admission and settlement reads",
+  "label": "s7-admission-settlement-early-lock-300-failed",
+  "target": 300,
+  "rate": 301,
+  "runtime_migration": 2026111813,
+  "worker_schedule": "v2",
+  "exit_code": 1,
+  "valid": false,
+  "capacity_passed": false,
+  "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+  "online_capacity": {
+    "fullyCompletedByWindow": 5847,
+    "minuteCompletions": [5847],
+    "matchedRequests": 13595,
+    "httpOnly": 0,
+    "ackOnly": 87,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 25586,
+    "receiptAckedRequestsByWindow": 5844,
+    "ackedEventsByWindow": 11862,
+    "sampledBeforeWindowEndMs": 85,
+    "httpByWindow": 13393
+  },
+  "window_complete_rps": 97.45,
+  "http": {
+    "offered": 18060,
+    "shed": 457,
+    "statuses": {
+      "200": 13595,
+      "503": 4008
+    },
+    "latency_ms": {
+      "p50": 613.44,
+      "p95": 1337.93,
+      "p99": 1459.02,
+      "p999": 1792.37
+    }
+  },
+  "process_cpu_ms_per_admitted": {
+    "gateway": 2.2409004531501244,
+    "core_api": 1.812600497003362,
+    "core_worker": 0.6987282561029089,
+    "upstream": 0.13302148808653705,
+    "redis_admission": 0.5810554012571238,
+    "redis_evidence": 0.09793889782195403,
+    "redis_evidence_replica": 0.05993275836865906,
+    "pg": 29.58558690249963,
+    "pg_shared": 0.022657506212542127
+  },
+  "service_cpu_ms_per_admitted": 35.07674316620376,
+  "cpu_sampling_errors": 0,
+  "pg_top_level": {
+    "calls": 253943,
+    "exec_ms": 487586.11096300045,
+    "wal_bytes": 910203356,
+    "wal_records": 5357156,
+    "calls_per_request": 18.560371290746968,
+    "exec_ms_per_request": 35.63704947836577,
+    "wal_bytes_per_request": 66525.60707498904,
+    "wal_records_per_request": 391.54772694050575
+  },
+  "pg_valid": true,
+  "near_59s": {
+    "at": 59104,
+    "queue": {
+      "waiting": 1633,
+      "active": 8,
+      "delayed": 1,
+      "failed": 0
+    },
+    "persistence": {
+      "calls": 3606,
+      "jobs": 4552,
+      "groups": 15592,
+      "events": 31184,
+      "max_jobs": 4,
+      "max_groups": 61,
+      "lock_conflicts": 9774,
+      "errors": 0,
+      "active_jobs": 8
+    }
+  },
+  "last_persistence_sample": {
+    "calls": 6836,
+    "jobs": 9094,
+    "groups": 29968,
+    "events": 59936,
+    "max_jobs": 4,
+    "max_groups": 61,
+    "lock_conflicts": 16017,
+    "errors": 0,
+    "active_jobs": 4
+  },
+  "accounting": {
+    "requests": 13682,
+    "attempts": 13682,
+    "succeeded_attempts": 13682,
+    "usage_events": 27364,
+    "usage_requests": 13682,
+    "unexpected_receipts": 0,
+    "precise_usage": 27364,
+    "precise_charges": 13682,
+    "settled_holds": 13682,
+    "reserved": "0",
+    "spent": "1368200",
+    "debt": "0",
+    "acknowledged": 27364,
+    "settlement_journals": 13682,
+    "unbalanced_journals": 0,
+    "supplier_cost_heads": 13682,
+    "conflicts": 0,
+    "inconsistent_hold_reserves": 0,
+    "inconsistent_funding_budgets": 0,
+    "inconsistent_cell_reserves": 0,
+    "unbalanced_supplier_journals": 0
+  },
+  "supplier": {
+    "balance": "999999999999192762",
+    "reserved": "0",
+    "spent": "807238",
+    "accounts": 1
+  },
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os_release": "27.0.0",
+    "cpu_model": "Apple M6",
+    "cpu_count": 12,
+    "memory_bytes": 25769803776,
+    "bun": "1.4.4",
+    "artifacts": {
+      "dist/core-api/main.js": "7dfa57fdf995a1eec78fc0fa7d00e893666dc4f8363bbf6360feaaf2b5a3267e",
+      "dist/core-api/platform/management.js": "419c37970d8c3bc59f90e302b607c095512b065c67e1353b8f28418e6f6272f9",
+      "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+      "dist/core-worker/main.js": "f8d790cd071651f842b4e1eb498a3b3114bc72447fd4e4d9638e74082c02a71b",
+      "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+      "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+      "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+      "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+      "dist/manifest.json": "3fd9ecc152edf678a8e2bd86bdc4f9d960c09e7f2971a455f94abddef4fa67c6"
+    }
+  },
+  "database_settings": [
+    {
+      "name": "checkpoint_timeout",
+      "setting": "300",
+      "unit": "s"
+    },
+    {
+      "name": "effective_cache_size",
+      "setting": "524288",
+      "unit": "8kB"
+    },
+    {
+      "name": "fsync",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "full_page_writes",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "max_connections",
+      "setting": "200",
+      "unit": null
+    },
+    {
+      "name": "max_wal_size",
+      "setting": "1024",
+      "unit": "MB"
+    },
+    {
+      "name": "server_version",
+      "setting": "17.11",
+      "unit": null
+    },
+    {
+      "name": "shared_buffers",
+      "setting": "32768",
+      "unit": "8kB"
+    },
+    {
+      "name": "synchronous_commit",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "wal_compression",
+      "setting": "off",
+      "unit": null
+    },
+    {
+      "name": "work_mem",
+      "setting": "4096",
+      "unit": "kB"
+    }
+  ],
+  "redis_settings": {
+    "admission": {
+      "maxmemory-policy": "noeviction",
+      "aof-load-truncated": "yes",
+      "appendfsync": "everysec",
+      "appendonly": "yes"
+    },
+    "evidence": {
+      "maxmemory-policy": "noeviction",
+      "appendonly": "yes",
+      "aof-load-truncated": "no",
+      "appendfsync": "always"
+    }
+  },
+  "database_bytes": 572741299,
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "files": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-admission-settlement-early-lock-300-failed/audit.json.raw",
+      "sha256": "4f8dcfb9d25b95bae9c10758b886ae9317326a8bcce34d49fae3afd82fd49d81",
+      "bytes": 719333
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-admission-settlement-early-lock-300-failed/http.json.raw",
+      "sha256": "4bffd809f70d25fa067bbc711ed73e3f828f78fb388c48d2e478e61baeba20b9",
+      "bytes": 10087
+    },
+    "http.json.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-admission-settlement-early-lock-300-failed/http.json.identities.tsv",
+      "sha256": "002d6839e77dc13bdcd4e521e9e0a62af562403fcc762e89400524e88fbe295e",
+      "bytes": 693345
+    },
+    "ack.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-admission-settlement-early-lock-300-failed/ack.identities.tsv",
+      "sha256": "17c7d534cbff4e4d200a745b6356bbb4c19a971f8e7dfd9a0fc4545dccdbaca5",
+      "bytes": 697782
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-admission-settlement-early-lock-300-failed/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    }
+  },
+  "command": [
+    "QUEUE_REQUIRED_REPLICAS=1",
+    ".local/toolchain/bun-1.4.4/bun",
+    "--env-file=.env.local",
+    "--env-file=.local/native-gate.env",
+    "scripts/bench-system.ts",
+    "--online-capacity",
+    "--seconds",
+    "60",
+    "--instances",
+    "1",
+    "--wallets",
+    "1000",
+    "--supplier-accounts",
+    "1",
+    "--concurrency",
+    "256",
+    "--warmup-concurrency",
+    "16",
+    "--worker-concurrency",
+    "8",
+    "--gateway-inflight",
+    "10000",
+    "--drain-seconds",
+    "120",
+    "--request-timeout-ms",
+    "30000",
+    "--plugin-runtime",
+    "builtin-worker",
+    "--target-rps",
+    "300",
+    "--rate",
+    "301",
+    "--upstream",
+    "standard"
+  ]
+}

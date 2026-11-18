@@ -7,3 +7,5 @@ GRANT SELECT(session_id,public_key_spki,public_key_sha256) ON internal_startup_s
 GRANT EXECUTE ON FUNCTION public.persist_core_evidence_groups_v1(jsonb) TO core_settlement_worker;
 GRANT EXECUTE ON FUNCTION public.core_reconcile_holds_v1(integer) TO core_settlement_worker;
 GRANT SELECT(attempt_id,state,granted_at,expires_at) ON execution_permits TO core_settlement_worker;
+
+GRANT EXECUTE ON FUNCTION public.persist_core_evidence_slow_v1(jsonb) TO core_settlement_worker;

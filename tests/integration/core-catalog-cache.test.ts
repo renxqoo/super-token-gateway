@@ -80,7 +80,10 @@ const changes: Array<[string, (db: SQL, setup: Setup, fixture: Fixture) => Promi
   [
     "account disable",
     (db, s) =>
-      db`UPDATE upstream_accounts SET state='DISABLED',revision=revision+1 WHERE id=${s.provider.account_id}`,
+      db.begin(async (tx) => {
+        await tx`SELECT core_funding_control_v1(${s.provider.account_id}::uuid,true)`;
+        return tx`UPDATE upstream_accounts SET state='DISABLED',revision=revision+1 WHERE id=${s.provider.account_id}`;
+      }),
   ],
   [
     "tariff disable",

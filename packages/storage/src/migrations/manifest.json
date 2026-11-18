@@ -300,6 +300,254 @@
           "checksum": "5ed2ac404838806591e745295268e1990175ce0cbc7cf3ce808716be220a88ef"
         }
       ]
+    },
+    {
+      "version": 2026111705,
+      "files": [
+        {
+          "path": "./migrations/0009_execution_runtime.sql",
+          "checksum": "719077beace01b7486f142a7561944dc9cb5fac4f02e1af4d3fed84b783e9367"
+        },
+        {
+          "path": "./sql/core-execution-runtime.sql",
+          "checksum": "51f883814b989cba80f304d37221f9e0657262a665866350c795b401bc77da96"
+        }
+      ]
+    },
+    {
+      "version": 2026111706,
+      "files": [
+        {
+          "path": "./sql/core-catalog-progress.sql",
+          "checksum": "98e262f9e2a6703111ff8a22cac5f52b20757026a6b5173df906c598c4089a05"
+        }
+      ]
+    },
+    {
+      "version": 2026111707,
+      "files": [
+        {
+          "path": "./sql/core-canonical-fast.sql",
+          "checksum": "edf3dead373ad82b7a549966fe87b44f716273a39e92dc4c3cfd8ddb5834ddeb"
+        }
+      ]
+    },
+    {
+      "version": 2026111801,
+      "files": [
+        {
+          "path": "./sql/core-success-quota.sql",
+          "checksum": "eb29808c79f5586a5ce9737ed3b7bfa5a6782d3cafe468644c0aefa46d94283b"
+        }
+      ]
+    },
+    {
+      "version": 2026111802,
+      "files": [
+        {
+          "path": "./migrations/0010_quota_expiry.sql",
+          "checksum": "59ad1ce0b86a00bd6349ff43abc89ea4041f89dcefbed317dadbc477da2153b9"
+        },
+        {
+          "path": "./sql/core-quota-expiry.sql",
+          "checksum": "fbd74546e8d455defe25b16a7b0171d0e76dd064278bf88087f2f71d67939ee9"
+        }
+      ]
+    },
+    {
+      "version": 2026111803,
+      "files": [
+        {
+          "path": "./migrations/0011_funding_engine.sql",
+          "checksum": "6dbcf2394f89fd71f82a525297146aba95b7f75d7143a097ebeeb3f28cc0b642"
+        },
+        {
+          "path": "./sql/core-funding-foundation.sql",
+          "checksum": "b4007ad395e95c81a34c5832dde8709f5955dcb1a691c66cde077e2235a3c1ca"
+        },
+        {
+          "path": "./sql/core-pricing-programs.sql",
+          "checksum": "e49972e96acc07553733cd515f46f66782fc5619808567852f7ff6a59694202c"
+        }
+      ]
+    },
+    {
+      "version": 2026111804,
+      "files": [
+        {
+          "path": "./migrations/0012_funding-holds.sql",
+          "checksum": "3bb5f8d94d11beab1120799cd508f893f6ce58ee2e514610f96c2cafe94bc248"
+        },
+        {
+          "path": "./sql/core-funding-migration.sql",
+          "checksum": "3eec13df2ed56e313553a653e21f14ba9388a0a7033d5a4e763048390cb57b45"
+        },
+        {
+          "path": "./sql/core-funding-engine.sql",
+          "checksum": "5771350849cd37b1e463c8c3e0d6ee7ee12bd2ef04a583da5247c7b03e6f1c2e"
+        },
+        {
+          "path": "./sql/core-funding-execution.sql",
+          "checksum": "6fbf410afe7e3c5e71c02652131a0043d807e01ef2d1cb357b748798f6fc4cb0"
+        },
+        {
+          "path": "./sql/core-funding-settlement.sql",
+          "checksum": "d2c91e9998f963e146d62b9b490028ad885aa42e244a34e4018e1d7d9cd1b4f6"
+        },
+        {
+          "path": "./sql/core-funding-entry.sql",
+          "checksum": "3b89a717ebba84947707fe3b63b3f30c4b03c3f6a57e72d087ca58e3aaacce3f"
+        }
+      ]
+    },
+    {
+      "version": 2026111805,
+      "files": [
+        {
+          "path": "./sql/core-funding-batch.sql",
+          "checksum": "269aafa904cb48c3f4ff9130dd81ef9b4fa153f651280bf9f265872b4321d9f7"
+        }
+      ]
+    },
+    {
+      "version": 2026111806,
+      "files": [
+        {
+          "path": "./sql/core-begin-batch.sql",
+          "checksum": "2a41a23e5aa2cdfb37dcca7e59afd192ad49d4651e560bbf2ac99915b11ab1d2"
+        }
+      ]
+    },
+    {
+      "version": 2026111807,
+      "files": [
+        {
+          "path": "./sql/core-admit-batch.sql",
+          "checksum": "5ecb23911fb4ba17c061a350bf2d8588b63ab490451b3480c82e7756eccc41fb"
+        }
+      ]
+    },
+    {
+      "version": 2026111808,
+      "files": [
+        {
+          "path": "./sql/core-evidence-batch.sql",
+          "checksum": "ee7a80072ccbd8d202db315ed301e0a4e2afbad59f89939dd36c3d64b05840d4"
+        }
+      ]
+    },
+    {
+      "version": 2026111809,
+      "files": [
+        {
+          "path": "./sql/core-evidence-locks.sql",
+          "checksum": "e400e85a7e03d98b0404d245ee80b4b66074e5d68a9b18eca09f028cdd11f06d"
+        }
+      ]
+    },
+    {
+      "version": 2026111810,
+      "files": [
+        {
+          "path": "./sql/core-preflight-reads.sql",
+          "checksum": "7f6bf972d19ce1f76d8b4f06b8d3484a24e04da90266a8c6593eeff04e5b6d88"
+        }
+      ]
+    },
+    {
+      "version": 2026111811,
+      "files": [
+        {
+          "path": "./migrations/0013_receipt-delivery-lookup.sql",
+          "checksum": "33893addbe793934b188c7ded943adfbc77d07a98d84562853ae4f491a3faab6"
+        }
+      ]
+    },
+    {
+      "version": 2026111812,
+      "files": [
+        {
+          "path": "./migrations/0014_attempts-metering-conflict.sql",
+          "checksum": "0f2196bc8786aca613b779b1c7f6f8d19512f58407f2b305343ea26d536e627a"
+        },
+        {
+          "path": "./sql/core-evidence-coalesce-reads.sql",
+          "checksum": "2dc873affd389ff829cdc940e4ccc89d599637d9f88cc967111cb2e9fceee7b4"
+        }
+      ]
+    },
+    {
+      "version": 2026111813,
+      "files": [
+        {
+          "path": "./sql/core-admission-authority-reads.sql",
+          "checksum": "57112ecc97f522e49f8832dcc210b247ae9ab1ac255809046bdb5fd1eca9be67"
+        },
+        {
+          "path": "./sql/core-evidence-authority-reads.sql",
+          "checksum": "d3623a9efc2da43f0c9f5750dc016be798b0b7626794c35871f3cf96a3c71fde"
+        },
+        {
+          "path": "./sql/core-evidence-cell-isolation.sql",
+          "checksum": "572ec38d7ebaca84b0d7e2c2e9f50df0f545e492f3bbad926c3cf8994b8dabbf"
+        }
+      ]
+    },
+    {
+      "version": 2026111814,
+      "files": [
+        {
+          "path": "./sql/core-evidence-staging.sql",
+          "checksum": "056b4df3ad2e83d587223e5dbef5c04d2cc4b115dc56bb65e3e74ed97e82bd4f"
+        }
+      ]
+    },
+    {
+      "version": 2026111815,
+      "files": [
+        {
+          "path": "./sql/core-evidence-final-costs.sql",
+          "checksum": "b395af524960d58ac51a36b53660b41493962204a2f44fad759d3e53e6a00b3a"
+        }
+      ]
+    },
+    {
+      "version": 2026111816,
+      "files": [
+        {
+          "path": "./sql/core-route-projection.sql",
+          "checksum": "35544dcfdc4b4a5f5a7951b8e3fbf2741948c88cf1b40e95a426169dee63618b"
+        }
+      ]
+    },
+    {
+      "version": 2026111817,
+      "files": [
+        {
+          "path": "./sql/core-settlement-cell-totals.sql",
+          "checksum": "767590cbb0d557caf11dd26060ae0d366b203712b98fead06440fd6bcdb400e9"
+        },
+        {
+          "path": "./sql/core-bound-admission.sql",
+          "checksum": "00ad14398b53463222c6b379f7d674c6a728eff00eec775bc22e687c93ca29ef"
+        },
+        {
+          "path": "./sql/core-reserved-send.sql",
+          "checksum": "3c41ce90a05e92c4aee9b4de2fad4155c94b805da890e174fbed9f6125c0f7f0"
+        },
+        {
+          "path": "./sql/core-shared-wallet-settlement.sql",
+          "checksum": "310e0c64f39c79e58c2972f0a9af519a6f1de285bc9120d8084a0bfa42926c1f"
+        },
+        {
+          "path": "./sql/core-canonical-key-order.sql",
+          "checksum": "21178f1c59e0fb77a6b23b455f4828aa679faf12a88e1b80e0d7cc3e7b755700"
+        },
+        {
+          "path": "./sql/core-quota-activation.sql",
+          "checksum": "4b72febafcb23d9df5a85e4b75fe1f12fc1767e60142b558004e937bdbeda0f9"
+        }
+      ]
     }
   ]
 }

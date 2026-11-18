@@ -236,7 +236,11 @@ test(
           status: "validating",
         });
         expect(createdText).not.toContain("file-up");
-        expect(stack.received.at(-1)!.body.input_file_id).toMatch(/^file-up-/);
+        expect(
+          stack.received
+            .filter((call) => call.method === "POST" && call.path === "/v1/batches")
+            .map((call) => call.body.input_file_id),
+        ).toEqual([`file-up-${sent.index}`]);
 
         expect(await settledCharge(stack.db, requestId)).toEqual({
           amount: "7",

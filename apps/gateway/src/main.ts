@@ -1,14 +1,19 @@
+import { createTerminalBudget } from "./terminal-budget.ts";
 import { createCoreRpcClient } from "@gateway/core-client";
-import { createPluginAttempts, createPluginSupervisor } from "@gateway/plugin-host";
 import { Lifecycle, UsageProducer, createTransport, evidenceChannel } from "@gateway/runtime";
 import { createGatewayApp } from "./app.ts";
 import { createSendRegistry, type ChatDependencies } from "./chat.ts";
 import { loadGatewayConfig } from "./config.ts";
 import { createPackageCache, loadPackageTrust } from "./packages.ts";
 import { startResourcePolling } from "./resource-poller.ts";
+import { createGatewayPluginRuntime } from "./plugin-runtime.ts";
 
 const config = await loadGatewayConfig();
 const trust = await loadPackageTrust(config.plugins.trust_policy);
+const host = await createGatewayPluginRuntime({
+  executable: config.plugins.helper_executable,
+  trust,
+});
 const core = createCoreRpcClient({
   origin: config.core.origin,
   servername: config.core.servername,
@@ -28,14 +33,6 @@ const producer = new UsageProducer({
   maxInFlight: config.max_inflight,
   requireAllReplicas: config.production,
 });
-const pluginAttempts = 128;
-const host = createPluginAttempts(
-  createPluginSupervisor({
-    executable: config.plugins.helper_executable,
-    maxPending: pluginAttempts,
-  }),
-  { maxAttempts: pluginAttempts, maxStateBytes: pluginAttempts * (256 << 10) },
-);
 const transport = createTransport(config.upstream_pool_size);
 const grants = createSendRegistry();
 const lifecycle = new Lifecycle(config.max_inflight);
@@ -62,6 +59,7 @@ const deps: ChatDependencies = {
   host,
   transport,
   grants,
+  terminalBudget: createTerminalBudget(config.max_inflight),
   publish: (events) => producer.publish({ events }),
 };
 const poller = startResourcePolling(deps, config.resource_poll_ms, () =>

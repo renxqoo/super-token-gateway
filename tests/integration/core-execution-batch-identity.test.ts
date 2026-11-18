@@ -185,13 +185,21 @@ test("runtime cannot forge cached authority times by calling private batch kerne
     try {
       for (const query of [
         () =>
-          role`SELECT core_execution_item_v2('{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{"session_expires_at":"infinity"}'::jsonb)`,
+          role`SELECT core_funding.execution_item_v1('{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{"session_expires_at":"infinity"}'::jsonb,'{}'::jsonb,NULL::jsonb)`,
+        () =>
+          role`SELECT core_funding.run_execution_v1('[]'::jsonb,'{}'::jsonb[],'{}'::integer[],'{}'::jsonb[],'{}'::jsonb[],true,'{}'::numeric[])`,
+        () => role`SELECT core_funding.flush_begin_v1('{}'::jsonb)`,
         () => role`SELECT core_caller_projection_v2('{}'::jsonb)`,
       ])
         await expect(query()).rejects.toMatchObject({ errno: "42501" });
       expect(
         (
           await db`SELECT to_regprocedure('public.core_execution_v1(jsonb,jsonb,jsonb,jsonb)') value`
+        )[0].value,
+      ).toBeNull();
+      expect(
+        (
+          await db`SELECT to_regprocedure('public.core_execution_item_v2(jsonb,jsonb,jsonb,jsonb,jsonb)') value`
         )[0].value,
       ).toBeNull();
     } finally {

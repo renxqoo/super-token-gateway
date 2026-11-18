@@ -1,0 +1,17 @@
+{
+  "run": "bench-47579d9d452c48039e080d2aa689fd4f",
+  "outcome": "aborted_before_financial_audit",
+  "postgres_error": "ERR_POSTGRES_CONNECTION_REFUSED",
+  "fixture_directory_budget_mib": 384,
+  "has_accounting_audit": false,
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "fixtureCleanup": {
+    "processes": [],
+    "directories": [],
+    "ports": [],
+    "timers": 0
+  }
+}

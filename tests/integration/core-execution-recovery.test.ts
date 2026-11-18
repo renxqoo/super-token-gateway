@@ -48,7 +48,7 @@ test(
       ).rejects.toThrow("internal_peer_forbidden");
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
         )[0].reserved_atoms,
       ).toBe("30");
     }),
@@ -93,7 +93,7 @@ for (const mode of ["deadline", "customer", "instance", "certificate", "session"
         expect(result.transient_send).toBeUndefined();
         expect(
           (
-            await db`SELECT balance_atoms::text,reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+            await db`SELECT balance_atoms::text,reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
           )[0],
         ).toEqual({ balance_atoms: "1000", reserved_atoms: "0" });
         expect(
@@ -157,7 +157,7 @@ test(
       });
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
         )[0].reserved_atoms,
       ).toBe("30");
       expect(
@@ -219,7 +219,7 @@ test(
       ).toBe(3);
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
         )[0].reserved_atoms,
       ).toBe("30");
     }),
@@ -244,7 +244,7 @@ for (const first of ["begin", "recovery"] as const)
         const gate = await financialGate(db),
           action = first === "begin" ? "execution_begin_v1" : "execution_abort_recovery_v1";
         await db.unsafe(
-          `CREATE FUNCTION recovery_gate() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='${action}' THEN PERFORM pg_advisory_xact_lock(${gate.key}::bigint);END IF;RETURN NEW;END $$;CREATE TRIGGER recovery_gate BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION recovery_gate()`,
+          `CREATE FUNCTION recovery_gate() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE prior_timeout text;BEGIN IF NEW.action='${action}' THEN prior_timeout=current_setting('lock_timeout');PERFORM set_config('lock_timeout','0',true);PERFORM pg_advisory_xact_lock(${gate.key}::bigint);PERFORM set_config('lock_timeout',prior_timeout,true);END IF;RETURN NEW;END $$;CREATE TRIGGER recovery_gate BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION recovery_gate()`,
         );
         const command = crypto.randomUUID(),
           deadline = prepared.deadline;
@@ -258,8 +258,12 @@ for (const first of ["begin", "recovery"] as const)
                 { attempt_id: prepared.attemptId },
                 { commandId: command, deadlineAt: deadline },
               );
+        const pendingDone = pending.then(
+          () => undefined,
+          () => undefined,
+        );
         try {
-          await financialBlockedBy(db, gate.pid);
+          const blocked = await financialBlockedBy(db, gate.pid);
           const competing = await (
             first === "begin"
               ? worker.execution(
@@ -273,13 +277,18 @@ for (const first of ["begin", "recovery"] as const)
           ).catch((error) => error as Error);
           expect(competing).toBeInstanceOf(Error);
           expect(["identity_busy", "core_busy"]).toContain((competing as Error).message);
+          expect(await financialBlockedBy(db, gate.pid)).toBe(blocked);
           expect(
             (
               await db`SELECT state FROM execution_permits WHERE attempt_id=${prepared.attemptId}`
             )[0].state,
           ).toBe("RESERVED");
         } finally {
-          await gate.release();
+          try {
+            await gate.release();
+          } finally {
+            await pendingDone;
+          }
         }
         const result = (await pending) as ExecutionReply;
         expect(result.receipt.state).toBe(first === "begin" ? "SEND_GRANTED" : "ABORTED");
@@ -299,7 +308,7 @@ for (const first of ["begin", "recovery"] as const)
         );
         expect(
           (
-            await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+            await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
           )[0].reserved_atoms,
         ).toBe(first === "begin" ? "30" : "0");
       }),
@@ -346,7 +355,7 @@ test(
       ).toBe("100");
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
         )[0].reserved_atoms,
       ).toBe("30");
       expect(
@@ -424,7 +433,7 @@ test(
       ).toEqual({ state: "SEND_GRANTED", service: "gateway" });
       expect(
         (
-          await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+          await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
         )[0],
       ).toEqual({ balance: "1000", reserved: "30", spent: "0" });
       expect(

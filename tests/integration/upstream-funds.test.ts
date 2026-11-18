@@ -316,6 +316,7 @@ test("audit failure rolls back balance receipt journal and voucher association i
       "CREATE FUNCTION fail_funding_audit() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'injected audit failure'; END$$; CREATE TRIGGER fail_funding_audit BEFORE INSERT ON upstream_audit_events FOR EACH ROW EXECUTE FUNCTION fail_funding_audit()",
     );
     await db.begin(async (tx) => {
+      await tx`SELECT core_funding_control_v1(${owner.id}::uuid,false)`;
       await tx`SELECT id FROM upstream_accounts WHERE id=${owner.id} FOR SHARE`;
       await expect(recordUpstreamRecharge(tx, owner.id, input, actor)).rejects.toMatchObject({
         status: 503,
@@ -326,7 +327,10 @@ test("audit failure rolls back balance receipt journal and voucher association i
     expect((await store.voucher(input.voucher_id)).referenced).toBe(false);
     expect(await counts(db)).toEqual({ operations: 0, journals: 0, entries: 0, audits: 0 });
     await db`DROP TRIGGER fail_funding_audit ON upstream_audit_events`;
-    const receipt = await db.begin((tx) => recordUpstreamRecharge(tx, owner.id, input, actor));
+    const receipt = await db.begin(async (tx) => {
+      await tx`SELECT core_funding_control_v1(${owner.id}::uuid,false)`;
+      return recordUpstreamRecharge(tx, owner.id, input, actor);
+    });
     expect(receipt.balance_atoms).toBe(hundred);
     expect((await store.voucher(input.voucher_id)).referenced).toBe(true);
   }));
@@ -357,7 +361,10 @@ test("recharge never revives disabled quarantined or reconciliation-required acc
       "CREATE FUNCTION guard_funding_caches() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN IF NEW.reserved_atoms IS DISTINCT FROM OLD.reserved_atoms OR NEW.spent_atoms IS DISTINCT FROM OLD.spent_atoms OR NEW.adjustment_atoms IS DISTINCT FROM OLD.adjustment_atoms THEN RAISE EXCEPTION 'funding changed exposure caches';END IF; RETURN NEW; END$$; CREATE TRIGGER guard_funding_caches BEFORE UPDATE ON upstream_account_balances FOR EACH ROW EXECUTE FUNCTION guard_funding_caches()",
     );
     for (const state of ["DISABLED", "QUARANTINED", "RECONCILE_REQUIRED"]) {
-      await db`UPDATE upstream_accounts SET state=${state} WHERE id=${owner.id}`;
+      await db.begin(async (tx) => {
+        await tx`SELECT core_funding_control_v1(${owner.id}::uuid,true)`;
+        await tx`UPDATE upstream_accounts SET state=${state} WHERE id=${owner.id}`;
+      });
       await store.recharge(owner.id, await fact(store), actor);
       expect(
         (await db`SELECT state,revision::text FROM upstream_accounts WHERE id=${owner.id}`)[0],
@@ -472,6 +479,7 @@ test("cleanup racing an in-flight committed recharge cannot delete its reference
       commit = resolve;
     });
     const funding = db.begin(async (tx) => {
+      await tx`SELECT core_funding_control_v1(${owner.id}::uuid,false)`;
       const receipt = await recordUpstreamRecharge(tx, owner.id, input, actor);
       ready();
       await release;
@@ -497,6 +505,7 @@ test("outer rollback or deferred constraint failure cannot turn a returned recha
     let returned: string | undefined;
     await expect(
       db.begin(async (tx) => {
+        await tx`SELECT core_funding_control_v1(${owner.id}::uuid,false)`;
         returned = (await recordUpstreamRecharge(tx, owner.id, input, actor)).operation_id;
         expect((await tx`SELECT count(*)::int AS n FROM upstream_funding_operations`)[0].n).toBe(1);
         expect(await counts(db)).toEqual({ operations: 0, journals: 0, entries: 0, audits: 0 });
@@ -507,6 +516,7 @@ test("outer rollback or deferred constraint failure cannot turn a returned recha
     expect(await store.balances(owner.id)).toEqual([]);
     await expect(
       db.begin(async (tx) => {
+        await tx`SELECT core_funding_control_v1(${owner.id}::uuid,false)`;
         returned = (await recordUpstreamRecharge(tx, owner.id, input, actor)).operation_id;
         await tx`INSERT INTO upstream_journals(id,account_id,currency,kind,reference) VALUES(${crypto.randomUUID()},${owner.id},'USD','TEST_OPENING','synthetic-deferred-failure')`;
       }),

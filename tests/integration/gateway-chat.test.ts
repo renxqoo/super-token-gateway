@@ -23,7 +23,7 @@ async function expectStatus(response: Response, status: number) {
 
 async function supplier(db: SQL, account: string) {
   return (
-    await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM upstream_account_balances WHERE account_id=${account}`
+    await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM core_upstream_balances_v1 WHERE account_id=${account}`
   )[0];
 }
 
@@ -311,8 +311,13 @@ test("the settlement worker's least-privilege role settles a chat but cannot rea
         "SELECT * FROM channels LIMIT 1",
         "SELECT boot_nonce FROM internal_startup_sessions LIMIT 1",
         "UPDATE upstream_account_balances SET reserved_atoms=0",
+        "SELECT * FROM core_funding.balance_cells LIMIT 1",
+        "UPDATE core_funding.balance_cells SET reserved_atoms=0",
+        "SELECT * FROM core_funding.budget_transfers LIMIT 1",
+        "SELECT core_funding_control_v1(NULL::uuid,false)",
         "SELECT core_execution_batch_v1('[]'::jsonb)",
         "SELECT core_quota_close_v1('{}'::jsonb,'{}'::jsonb,'{}'::jsonb)",
+        "SELECT core_quota_expire_v1(100)",
       ])
         await expect(worker.unsafe(statement)).rejects.toThrow("permission denied");
     } finally {
@@ -370,7 +375,7 @@ test("a route request policy refusing the prepared request skips that channel be
 
 test("a disabled route or a disabled channel is excluded before any send, and when every candidate is disabled the request answers 503 no_route without a request record, a hold or an upstream call", () =>
   withGatewayStack(
-    { reply: () => chatReplies.json(), channels: 2 },
+    { reply: () => chatReplies.json(), channels: 2, supplierCredit: "2000" },
     async ({ f, db, setup, received, send }) => {
       const routes = Object.fromEntries(
         (await db`SELECT id,provider_id FROM routes WHERE model_name=${setup.model}`).map(
@@ -439,7 +444,7 @@ test("ROUND_ROBIN alternates real upstream calls between same-priority channels 
 
 test("WEIGHTED routing follows a route weight update on the next request instead of a stale preference", () =>
   withGatewayStack(
-    { reply: () => chatReplies.json(), channels: 2 },
+    { reply: () => chatReplies.json(), channels: 2, supplierCredit: "2100" },
     async ({ f, db, setup, received, send }) => {
       const routes = Object.fromEntries(
         (await db`SELECT id,provider_id FROM routes WHERE model_name=${setup.model}`).map(
@@ -494,10 +499,10 @@ test("a channel whose own concurrency is full is skipped at admission and the re
         (await db`SELECT count(*)::integer n FROM ${db(table)}`)[0].n as number;
       try {
         gates.set("Bearer synthetic-upstream-secret", stall());
-        const holding = send();
+        const holding = send({ content: "quota-first-held" });
         holding.catch(() => undefined);
         await eventually(async () => received.length === 1, "first channel occupied");
-        const fallback = await send();
+        const fallback = await send({ content: "quota-fallback-complete" });
         await expectStatus(fallback, 200);
         expect(received.map((call) => call.authorization)).toEqual([
           "Bearer synthetic-upstream-secret",
@@ -507,12 +512,27 @@ test("a channel whose own concurrency is full is skipped at admission and the re
           await db`SELECT count(*)::integer n FROM attempts WHERE request_id=${fallback.headers.get("x-request-id")}`,
         ).toEqual([{ n: 1 }]);
 
+        const fallbackId = fallback.headers.get("x-request-id")!;
+        await settledCharge(db, fallbackId);
+        await eventually(async () => {
+          const [leases] =
+            await db`SELECT count(*)::int total,count(*) FILTER(WHERE state='RELEASED')::int released FROM execution_quota_leases WHERE request_id=${fallbackId}`;
+          return leases.total === 3 && leases.released === 3;
+        }, "completed fallback quota slots released");
         await patch(`/providers/${second.provider_id}`, { concurrency: 1 });
         await patch(`/projects/${setup.project.id}`, { concurrency: 3 });
         gates.set("Bearer synthetic-upstream-secret-2", stall());
-        const occupying = send();
+        const occupying = send({ content: "quota-second-held" });
         occupying.catch(() => undefined);
-        await eventually(async () => received.length === 3, "second channel occupied");
+        await eventually(
+          async () =>
+            received.some(
+              (call) =>
+                call.authorization === "Bearer synthetic-upstream-secret-2" &&
+                call.raw.includes("quota-second-held"),
+            ),
+          "second channel occupied by its own request",
+        );
         const requests = await count("gateway_requests"),
           holds = await count("billing_holds");
         const saturated = await send();

@@ -10,12 +10,17 @@ import type { SQL } from "bun";
 import { z } from "zod";
 import {
   executionEnvelopeSchema,
+  executionContextResponseMaxBytes,
+  routeTicketMaxBytes,
+  routeTicketSchema,
   executionDataSchemas,
   candidateMetadataSchema,
   executionReceiptSchema,
+  quotaRecoveryResultSchema,
   transientSendSchema,
   dispatchAuthSchema,
-  hostAuthorizationPlanV1Schema,
+  hostAuthorizationPlanV2Schema,
+  executionRuntimesSchema,
   type ExecutionKind,
   type CoreVerifiedCallerProjection,
   GatewayError,
@@ -28,7 +33,7 @@ import {
   type Usage,
   type Pricing,
 } from "@gateway/kernel";
-import { decrypt, sha256, verifier } from "@gateway/runtime/crypto";
+import { decrypt, encrypt, sha256, verifier } from "@gateway/runtime/crypto";
 import {
   createQuotaLeases,
   type QuotaDescriptor,
@@ -43,10 +48,20 @@ export type ExecutionOptions = {
   quotaGeneration: string;
   maxAttempts?: number | undefined;
 };
+const leaseStateSchema = z.object({
+  permit_epoch: z.string(),
+  permit_state: z.string(),
+  execution_closed: z.boolean(),
+  leases: z.array(
+    z.object({
+      state: z.string(),
+      descriptor: z.custom<QuotaDescriptor>(),
+      attempt_id: z.string(),
+      permit_epoch: z.string(),
+    }),
+  ),
+});
 const contextSchema = z.object({
-  permit_epoch: z.string().nullable().optional(),
-  permit_state: z.string().nullable().optional(),
-  execution_closed: z.boolean().nullable().optional(),
   max_output_tokens: z.number().int().positive(),
   batch: z.object({ items: z.number().int().min(1).max(50000) }).optional(),
   routing_strategy: z.enum(["WEIGHTED", "ROUND_ROBIN", "LEAST_LATENCY"]),
@@ -64,17 +79,43 @@ const contextSchema = z.object({
     }),
   ),
   candidates: z.array(candidateMetadataSchema),
-  leases: z
-    .array(
-      z.object({
-        state: z.string(),
-        descriptor: z.custom<QuotaDescriptor>(),
-        attempt_id: z.string(),
-        permit_epoch: z.string(),
-      }),
-    )
-    .optional(),
 });
+const admissionCandidateSchema = z.object(
+  candidateMetadataSchema.pick({
+    ref: true,
+    cost_currency: true,
+    cost_rates: true,
+    cost_ceilings: true,
+    customer_currency: true,
+    customer_rates: true,
+    customer_ceilings: true,
+    customer_basis: true,
+    channel_limits: true,
+  }).shape,
+);
+const admissionContextSchema = contextSchema.extend({
+  candidates: z.array(admissionCandidateSchema),
+});
+const routeClaimsSchema = z.object({
+  verifier: z.string(),
+  ip: z.string(),
+  model: z.string(),
+  fingerprint: z.string(),
+  expires_at: z.string(),
+  candidate_digests: z.array(z.string()),
+  execution_runtimes: executionRuntimesSchema,
+  captured: admissionContextSchema,
+});
+function routeBinding(p: CoreVerifiedCallerProjection, id: string) {
+  return JSON.stringify([
+    "stg.chat.route.v1",
+    p.service,
+    p.instance_id,
+    p.session_id,
+    p.incarnation_id,
+    id,
+  ]);
+}
 function quantityExceeds(left: string, right: string) {
   const [a, af = ""] = left.split("."),
     [b, bf = ""] = right.split(".");
@@ -181,22 +222,23 @@ export function createExecutionHandler(
     attempt: string,
     epoch: string,
     release = false,
+    leaseState?: unknown,
   ) {
-    const current = contextSchema.parse(await store.preflight(p, undefined, attempt));
+    const current = leaseStateSchema.parse(leaseState ?? (await store.readLeaseState(p, attempt)));
     if (current.permit_epoch !== epoch) throw new Error("internal_owner_mismatch");
     if (!release && current.execution_closed)
       return { proofs: [], deadline: performance.now(), descriptors: [], closed: true };
     const proofs: { lease_id: string; revision: string }[] = [],
       descriptors: QuotaDescriptor[] = [];
     let deadline = Number.POSITIVE_INFINITY;
-    const relevant = (current.leases ?? []).filter((lease) =>
+    const relevant = current.leases.filter((lease) =>
       release
         ? ["RELEASE_PENDING", "RELEASED"].includes(lease.state)
         : lease.descriptor.scope_kind !== "channel" || lease.attempt_id === attempt,
     );
     if (
       !release &&
-      (!["RESERVED", "SEND_GRANTED", "UNKNOWN"].includes(current.permit_state ?? "") ||
+      (!["RESERVED", "SEND_GRANTED", "UNKNOWN"].includes(current.permit_state) ||
         relevant.some((lease) => !["ADOPTION_PENDING", "ACTIVE"].includes(lease.state)))
     )
       throw new Error("quota_release_denied");
@@ -233,7 +275,7 @@ export function createExecutionHandler(
       deadline,
       descriptors,
       closed: false,
-      retained: (current.leases ?? []).filter(
+      retained: current.leases.filter(
         (lease) => !["RELEASE_PENDING", "RELEASED"].includes(lease.state),
       ).length,
     };
@@ -250,7 +292,13 @@ export function createExecutionHandler(
       const p = requireCaller(context);
       if (p.command_type !== kind) throw new Error("internal_proof_invalid");
       const wire = z
-        .strictObject({ envelope: executionEnvelopeSchema, data: executionDataSchemas[kind] })
+        .strictObject({
+          envelope: executionEnvelopeSchema,
+          data: executionDataSchemas[kind],
+          ...(kind === "execution_admit_v1" || kind === "execution_next_v1"
+            ? { route_ticket: routeTicketSchema.optional() }
+            : {}),
+        })
         .parse(input);
       const e = wire.envelope,
         d = wire.data;
@@ -277,7 +325,15 @@ export function createExecutionHandler(
             );
           } catch {}
         }
-        return store.recoverQuota(p, completed);
+        const result = await store.recoverQuota(p, completed);
+        const recovery = await store.expireQuota(p, limit);
+        return quotaRecoveryResultSchema.parse({
+          released: result.released,
+          pending: items.length,
+          failed: items.length - completed.length,
+          expired: recovery.expired,
+          expiry_more: recovery.more,
+        });
       }
       if (kind === "execution_resource_commit_v1")
         return store.resource(p, "core_resource_commit_v1", d as Record<string, unknown>);
@@ -334,21 +390,59 @@ export function createExecutionHandler(
       }
       if (kind === "execution_context_v1") {
         const data = executionDataSchemas.execution_context_v1.parse(d);
-        const snapshot = await store.context(
-          p,
-          crypto.randomUUID(),
-          {
-            verifier: verifier(data.customer_token, options.pepper),
+        const id = crypto.randomUUID();
+        const project =
+          data.route_projection === true && data.operation === "chat" && !data.resource_ids;
+        const input = {
+          verifier: verifier(data.customer_token, options.pepper),
+          ip: data.ip,
+          operation: data.operation,
+          ...(data.model ? { model: data.model } : {}),
+          fingerprint: data.fingerprint,
+          max_attempts: options.maxAttempts ?? 3,
+          ...(data.resource_ids ? { resource_ids: data.resource_ids } : {}),
+        };
+        let snapshot = await store.context(p, project ? null : id, input, signal);
+        let parsed = contextSchema.parse(snapshot);
+        let ticket: string | undefined;
+        if (project) {
+          const claims = JSON.stringify({
+            verifier: input.verifier,
             ip: data.ip,
-            operation: data.operation,
-            ...(data.model ? { model: data.model } : {}),
+            model: data.model,
             fingerprint: data.fingerprint,
-            max_attempts: options.maxAttempts ?? 3,
-            ...(data.resource_ids ? { resource_ids: data.resource_ids } : {}),
-          },
-          signal,
-        );
-        const parsed = contextSchema.parse(snapshot);
+            expires_at: snapshot.expires_at,
+            execution_runtimes: snapshot.execution_runtimes,
+            captured: admissionContextSchema.parse(parsed),
+            candidate_digests: snapshot.candidate_digests,
+          });
+          if (4 * Math.ceil((Buffer.byteLength(claims) + 28) / 3) <= routeTicketMaxBytes) {
+            ticket = encrypt(claims, options.encryptionKey, routeBinding(p, id));
+          }
+          const allowed = executionRuntimesSchema.parse(snapshot.execution_runtimes);
+          if (
+            ticket &&
+            Buffer.byteLength(
+              JSON.stringify({
+                ...snapshot,
+                context_id: id,
+                route_ticket: ticket,
+                execution_runtimes: Object.fromEntries(
+                  parsed.candidates.map((candidate) => [
+                    candidate.ref.package_digest,
+                    allowed[candidate.ref.package_digest] ?? [],
+                  ]),
+                ),
+              }),
+            ) > executionContextResponseMaxBytes
+          )
+            ticket = undefined;
+          if (!ticket) {
+            snapshot = await store.context(p, id, input, signal);
+            parsed = contextSchema.parse(snapshot);
+          }
+        }
+        delete snapshot.candidate_digests;
         const ordered = await orderRouteCandidates(
           parsed.candidates.map((candidate) => ({
             id: candidate.ref.route_id,
@@ -364,20 +458,38 @@ export function createExecutionHandler(
             throw new Error("no_route");
           throw error;
         });
+        const candidates = ordered
+          .slice(0, parsed.execution_budget.max_attempts)
+          .map((row) => row.candidate);
+        const runtimes = executionRuntimesSchema.parse(snapshot.execution_runtimes);
         return {
           ...snapshot,
-          candidates: ordered
-            .slice(0, parsed.execution_budget.max_attempts)
-            .map((row) => row.candidate),
+          context_id: id,
+          ...(ticket ? { route_ticket: ticket } : {}),
+          candidates,
+          execution_runtimes: Object.fromEntries(
+            candidates.map((candidate) => [
+              candidate.ref.package_digest,
+              runtimes[candidate.ref.package_digest] ?? [],
+            ]),
+          ),
         };
       }
-      if (kind !== "execution_query_v1" && kind !== "execution_quota_v1") {
+      const admitting = kind === "execution_admit_v1" || kind === "execution_next_v1";
+      let beginLeaseState: unknown;
+      if (kind === "execution_begin_v1") {
+        const data = executionDataSchemas.execution_begin_v1.parse(d);
+        const prepared = await store.prepareBegin(p, e, data.attempt_id);
+        if (prepared.receipt) return { receipt: executionReceiptSchema.parse(prepared.receipt) };
+        beginLeaseState = prepared.leases;
+      } else if (!admitting && kind !== "execution_query_v1" && kind !== "execution_quota_v1") {
         const previous = await store.lookup(p, e);
         if (previous) return { receipt: executionReceiptSchema.parse(previous) };
       }
+      let route: Record<string, unknown> | undefined;
       const rejected = async (code: string) => ({
         receipt: executionReceiptSchema.parse(
-          (await store.execute(p, e, d, { rejection: code })).receipt,
+          (await store.execute(p, e, d, { rejection: code, ...(route ? { route } : {}) })).receipt,
         ),
       });
       let computed: Record<string, unknown> = {},
@@ -390,12 +502,74 @@ export function createExecutionHandler(
             .settleHealth(health.channel, health.attempt, p.session_id)
             .catch(() => {});
       };
-      if (kind === "execution_admit_v1" || kind === "execution_next_v1") {
+      if (admitting) {
         const data =
           kind === "execution_admit_v1"
             ? executionDataSchemas.execution_admit_v1.parse(d)
             : executionDataSchemas.execution_next_v1.parse(d);
-        const captured = contextSchema.parse(await store.preflight(p, data.context_id));
+        let claims: z.infer<typeof routeClaimsSchema> | undefined;
+        if (typeof wire.route_ticket === "string") {
+          try {
+            claims = routeClaimsSchema.parse(
+              JSON.parse(
+                decrypt(wire.route_ticket, options.encryptionKey, routeBinding(p, data.context_id)),
+              ),
+            );
+          } catch {
+            throw new Error("context_invalid");
+          }
+        }
+        const { receipt, context: snapshot } = await store.prepareAdmission(
+          p,
+          e,
+          data.context_id,
+          claims,
+        );
+        if (receipt !== null) return { receipt: executionReceiptSchema.parse(receipt) };
+        if (!claims && snapshot && typeof snapshot === "object" && "candidate_digests" in snapshot)
+          throw new Error("context_invalid");
+        const captured = claims?.captured ?? admissionContextSchema.parse(snapshot);
+        if (claims) {
+          const {
+            verifier,
+            ip,
+            model,
+            fingerprint,
+            expires_at,
+            candidate_digests,
+            execution_runtimes,
+          } = claims;
+          route = {
+            verifier,
+            ip,
+            model,
+            fingerprint,
+            expires_at,
+            snapshot: {
+              candidate_digests,
+              execution_runtimes,
+              execution_budget: captured.execution_budget,
+              scopes: captured.scopes,
+              customer_currency: captured.customer_currency,
+            },
+          };
+          const auth = z
+            .object({
+              project_id: z.string(),
+              key_id: z.string(),
+              customer_currency: z.string(),
+              scopes: contextSchema.shape.scopes,
+            })
+            .parse(snapshot);
+          if (
+            auth.project_id !== captured.project_id ||
+            auth.key_id !== captured.key_id ||
+            auth.customer_currency !== captured.customer_currency ||
+            canonical(auth.scopes) !== canonical(captured.scopes) ||
+            Date.parse(expires_at) <= Date.now()
+          )
+            return rejected("context_stale");
+        }
         const projection = data.dispatch_projection;
         const selected = captured.candidates.find(
           (c) => canonical(c.ref) === canonical(projection.candidate_ref),
@@ -404,7 +578,7 @@ export function createExecutionHandler(
         if (
           sha256(canonical(["stg.internal.billable-manifest", "1", data.manifest])) !==
             projection.billable_manifest_sha256 ||
-          sha256(canonical(["stg.internal.dispatch-projection", "1", projection])) !==
+          sha256(canonical(["stg.internal.dispatch-projection", "2", projection])) !==
             data.dispatched_digest
         )
           throw new Error("internal_request_invalid");
@@ -549,12 +723,13 @@ export function createExecutionHandler(
           quote,
           estimated_quantities: estimated,
           supplier_atoms: supplier,
+          ...(route ? { route } : {}),
           leases: drafts,
           token_count: tokenCount.toString(),
         };
       } else if (kind === "execution_begin_v1") {
         const data = executionDataSchemas.execution_begin_v1.parse(d),
-          proof = await synchronize(p, data.attempt_id, data.permit_epoch);
+          proof = await synchronize(p, data.attempt_id, data.permit_epoch, false, beginLeaseState);
         proofDeadline = proof.deadline;
         computed = {
           proofs: proof.proofs,
@@ -615,7 +790,7 @@ export function createExecutionHandler(
           await synchronize(p, receipt.attempt_id!, receipt.permit_epoch!, true).catch(() => {});
         if (kind !== "execution_begin_v1" || result.fresh_transition !== true) return { receipt };
         const data = executionDataSchemas.execution_begin_v1.parse(d);
-        const plan = hostAuthorizationPlanV1Schema.parse(result.snapshot);
+        const plan = hostAuthorizationPlanV2Schema.parse(result.snapshot);
         const remaining = Math.floor(
           Math.min(
             proofDeadline - performance.now(),

@@ -1,0 +1,76 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-success-quota.test.ts:
+(pass) accepted success closes execution and recovery releases its three quotas once while a partial attempt keeps its quota and responsibility [2317.26ms]
+(pass) a customer settlement failure rolls back automatic execution closure and quota release with every evidence and money write [2033.17ms]
+
+tests/integration/core-quota-progress.test.ts:
+142 |     } finally {
+143 |       response.body.fill(0);
+144 |     }
+145 |     if (response.status >= 400) {
+146 |       const error = internalErrorSchema.safeParse(parsed);
+147 |       if (error.success) throw new CoreRpcError(error.data, response.status);
+                                     ^
+CoreRpcError: internal_deadline
+ detail: {
+  code: "internal_deadline",
+  category: "AUTHENTICATION",
+  retryability: "NONE",
+  command_state: "NOT_ATTEMPTED",
+  message: "Internal request rejected",
+},
+ status: 408,
+
+      at parseReply (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:147:32)
+      at request (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:153:12)
+      at async execution (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:382:30)
+      at async sameCommand (/Users/wr/work/super-token-gateway/tests/support/core-settlement.ts:47:20)
+      at async granted (/Users/wr/work/super-token-gateway/tests/support/core-settlement.ts:29:9)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-quota-progress.test.ts:42:24)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:58:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:56:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:50:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:39:9)
+(fail) short retry leases in an ineligible prefix cannot starve a later fully expired request [4356.96ms]
+(pass) a completed Redis release racing with technical expiry stays expired and does not roll back other released projections [4696.29ms]
+
+tests/integration/core-quota-expiry.test.ts:
+65 |         failed: 3,
+66 |         expired: 0,
+67 |       expiry_more: false,
+68 |       });
+69 |     });
+70 |     expect(await worker.execution("execution_quota_recovery_v1", { limit: 100 })).toEqual({
+                                                                                       ^
+error: expect(received).toEqual(expected)
+
+  {
+    "expired": 2,
+    "expiry_more": false,
+-   "failed": 0,
+-   "pending": 0,
++   "failed": 3,
++   "pending": 3,
+    "released": 0,
+  }
+
+- Expected  - 2
++ Received  + 2
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-quota-expiry.test.ts:70:83)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:58:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:56:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:50:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:39:9)
+(fail) technical quota expiry skips locked requests, clears missing Redis tombstones after the total deadline, preserves unknown money and accepts late real usage [5797.79ms]
+
+tests/integration/gateway-json-evidence.test.ts:
+(pass) a successful JSON response durably queues both signed facts together and settles customer and supplier exactly once [3604.26ms]
+
+ 4 pass
+ 2 fail
+ 82 expect() calls
+Ran 6 tests across 4 files. [22.88s]

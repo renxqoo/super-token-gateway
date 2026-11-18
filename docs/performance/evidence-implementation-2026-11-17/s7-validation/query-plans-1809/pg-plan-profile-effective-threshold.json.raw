@@ -1,0 +1,1 @@
+{"scope":"read-only new session, sample_rate0, no global changes","settings":[{"name":"auto_explain.log_min_duration","setting":"0","vartype":"integer","unit":"ms"},{"name":"auto_explain.sample_rate","setting":"0","vartype":"real","unit":null}]}

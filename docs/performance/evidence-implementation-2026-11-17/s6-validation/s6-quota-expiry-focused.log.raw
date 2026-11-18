@@ -1,0 +1,16 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-success-quota.test.ts:
+(pass) accepted success closes execution and recovery releases its three quotas once while a partial attempt keeps its quota and responsibility [2211.36ms]
+(pass) a customer settlement failure rolls back automatic execution closure and quota release with every evidence and money write [2044.42ms]
+
+tests/integration/core-quota-expiry.test.ts:
+(pass) technical quota expiry skips locked requests, clears missing Redis tombstones after the total deadline, preserves unknown money and accepts late real usage [5604.61ms]
+
+tests/integration/gateway-json-evidence.test.ts:
+(pass) a successful JSON response durably queues both signed facts together and settles customer and supplier exactly once [3762.26ms]
+
+ 4 pass
+ 0 fail
+ 84 expect() calls
+Ran 4 tests across 3 files. [13.70s]

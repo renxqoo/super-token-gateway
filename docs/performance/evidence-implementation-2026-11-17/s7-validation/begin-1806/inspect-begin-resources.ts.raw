@@ -1,0 +1,31 @@
+import { SQL } from "bun";
+const baseline = await Bun.file(".local/performance-implementation/foundation-resource-inspection.json").json();
+const recent = (await Bun.file(".local/identity-resources.jsonl").text()).trim().split("\n").map(line => JSON.parse(line)).filter(r => r.at >= "2026-11-17T19:15:00Z");
+const created = [...new Set<string>(recent.filter(r => r.event === "created").map(r => r.name))];
+const dropped = new Set<string>(recent.filter(r => r.event === "dropped").map(r => r.name));
+const pids = [...new Set<number>(recent.filter(r => r.event === "process_started").map(r => r.pid))];
+const alive: number[] = [];
+for (const pid of pids) {
+  try { process.kill(pid, 0); alive.push(pid); } catch (error: any) { if (error.code !== "ESRCH") throw error; }
+}
+const roles = [...new Set<string>(recent.filter(r => r.event === "role_created").map(r => r.role))];
+const db = new SQL(process.env.DATABASE_URL!, { max: 1 });
+let result: unknown;
+try {
+  const current = await db`SELECT datname,oid::int oid FROM pg_database WHERE datname LIKE 'gateway_test_foundation_%' ORDER BY datname`;
+  result = {
+    at: new Date().toISOString(),
+    database: (await db`SELECT current_database() name`)[0].name,
+    foundation_count: current.length,
+    original_27_names_and_oids_equal: baseline.rows.every((before: any) => current.some((after: any) => after.datname === before.datname && Number(after.oid) === Number(before.oid))),
+    remaining_recent_databases: current.filter((row: any) => created.includes(row.datname)).map((r: any) => r.datname),
+    recent_fixture_created: created.length,
+    recent_fixture_without_dropped_record: created.filter(name => !dropped.has(name)),
+    sampled_recent_core_pids: pids.length,
+    remaining_recent_core_pids: alive,
+    remaining_recent_identity_roles: await db`SELECT rolname FROM pg_roles WHERE rolname=ANY(${roles}::text[])`,
+    protected_reference_present: (await db`SELECT count(*)::integer n FROM pg_database WHERE datname='newapi_bench_1794879563902'`)[0].n === 1,
+  };
+} finally { await db.close(); }
+await Bun.write(".local/performance-implementation/s7-begin-resources.json", JSON.stringify(result, null, 2) + "\n");
+console.log(JSON.stringify(result));

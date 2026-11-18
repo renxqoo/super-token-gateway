@@ -1,13 +1,17 @@
-import type { KeyObject } from "node:crypto";
-import { verifyPackage, type VerifiedPackage } from "@gateway/plugin-host";
+import { verifyPackage, readPluginArtifact, type VerifiedPackage } from "@gateway/plugin-host";
 import { packageTrust, releasePolicySchema } from "@gateway/plugin-sdk";
 
-export type PackageTrust = ((digest: string) => ReadonlyMap<string, KeyObject>) & {
-  admits(pkg: VerifiedPackage): boolean;
-};
+export type PackageTrust = ReturnType<typeof packageTrust>;
 
 export async function loadPackageTrust(path: string, now = Date.now()): Promise<PackageTrust> {
-  return packageTrust(releasePolicySchema.parse(await Bun.file(path).json()), now);
+  return packageTrust(
+    releasePolicySchema.parse(
+      JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(await readPluginArtifact(path, 1 << 20)),
+      ),
+    ),
+    now,
+  );
 }
 
 export function createPackageCache(

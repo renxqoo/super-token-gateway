@@ -1,0 +1,42 @@
+from pathlib import Path
+import hashlib
+import json
+import shutil
+
+root=Path.cwd()
+base=root/'docs/performance/evidence-implementation-2026-11-17'
+index=base/'rounds.json'
+rounds=json.loads(index.read_text())
+baseline=json.loads((base/'s7-early-lock-300-failed/round.json').read_text())
+for label,log,profile in [('s7-pg-plans-profile','pg-plan-profile-run.log',True),('s7-custom-plans-300-failed','custom-plan-experiment-run.log',False)]:
+    printed=json.loads((root/'.local/performance-implementation'/log).read_text().strip().splitlines()[-1])
+    source=root/printed['directory'];destination=base/label;destination.mkdir(exist_ok=True)
+    audit=json.loads((source/'audit.json').read_text())
+    assert audit['environment']['artifacts']==baseline['artifacts']
+    names=['audit.json','http.json','http.json.identities.tsv','ack.identities.tsv','cleanup.json','load.log','upstream.log','upstream.pem']
+    if profile:
+        names=[name for name in names if not name.endswith('.identities.tsv')]
+    assert set(p.name for p in source.iterdir())==set(names)
+    files={}
+    for name in names:
+        target=destination/(name+'.raw' if name.endswith('.json') else name)
+        if target.exists():
+            assert target.read_bytes()==(source/name).read_bytes()
+        else:
+            shutil.copyfile(source/name,target)
+        digest=hashlib.sha256(target.read_bytes()).hexdigest()
+        assert digest==hashlib.sha256((source/name).read_bytes()).hexdigest()
+        files[name]={'archive':str(target.relative_to(root)),'sha256':digest,'bytes':target.stat().st_size}
+    shutil.copyfile(root/'.local/performance-implementation'/log,destination/'benchmark.log')
+    cpu={name:value['cpu_ms_per_request'] for name,value in audit['processes'].items()}
+    result={'stage':'1809 actual query plans' if profile else '1809 isolated custom-plan experiment','label':label,'diagnostic':True,'excluded_from_stability':True,'profile_only':profile,'runtime_migration':2026111809,'target':0 if profile else 300,'rate':200 if profile else 301,'seconds':audit['seconds'],'pluginRuntime':audit['pluginRuntime'],'requests':audit['accounting']['requests'],'valid':audit['valid'],'failures':audit['failures'],'capacityPassed':audit.get('capacityPassed'),'p99':audit['http']['latency_ms']['p99'],'onlineCapacity':audit.get('onlineCapacity'),'http':{name:audit['http'][name] for name in ['offered','shed','completed','succeeded','invalid','statuses','gateway_errors','transport_errors']},'process_cpu_ms':cpu,'total_cpu_ms':sum(value for name,value in cpu.items() if name not in ['upstream','pg_shared']),'cpu_limitation':'profile is excluded from CPU comparison' if profile else 'admitted denominator including warmup; CPU also includes rejected work','pg':audit['pgStatements']['topLevel'],'pg_valid':audit['pgStatements']['valid'],'pg_errors':audit['pgStatements']['errors'],'cpu_sampling_errors':audit['processCpu']['errors'],'accounting':audit['accounting'],'supplier':audit['supplier'],'artifacts':audit['environment']['artifacts'],'same_artifacts_as_1809_default':True,'exit_code':1,'configuration_difference':{'auto_explain':'owned database only, sample0.1, intended0.5ms actually integer0ms, analyzeon timingoff'} if profile else {'plan_cache_mode':'force_custom_plan, owned database new connections only; original administrator connection retains auto'},'source_directory':str(source.relative_to(root)),'database':audit['database'],'cleanup':json.loads((source/'cleanup.json').read_text()),'archive_manifest':files}
+    if not profile:
+        result['window_complete_rps']=audit['onlineCapacity']['fullyCompletedByWindow']/60
+    (destination/'round.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+    assert not any(item['label']==label for item in rounds)
+    rounds.append(result)
+    print(json.dumps({'label':label,'exit_code':1,'pg_valid':result['pg_valid'],'requests':result['requests'],'profile_only':profile}))
+index.write_text(json.dumps(rounds,ensure_ascii=False,indent=2)+'\n')
+source=root/'docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809/inspect-1809-cleanup.ts.raw'
+text=source.read_text().replace('s7-setwise-300-failed','s7-pg-plans-profile').replace('s7-early-lock-300-failed','s7-custom-plans-300-failed').replace('s7-1809-resources-after.json','query-plan-resources-after.json')
+(root/'.local/performance-implementation/inspect-query-plan-cleanup.ts').write_text(text)

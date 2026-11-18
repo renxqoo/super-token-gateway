@@ -635,6 +635,9 @@ export const attempts = pgTable(
     index("attempts_stale")
       .using("btree", table.startedAt.asc().nullsLast())
       .where(sql`(state = 'DISPATCHING'::text)`),
+    index("attempts_metering_conflict_request_idx")
+      .on(table.requestId)
+      .where(sql`metering_conflict`),
     foreignKey({
       columns: [table.billingPricingId],
       foreignColumns: [billingPrices.id],

@@ -39,7 +39,7 @@ test("lost PostgreSQL COMMIT acknowledgement never emits a begin grant and repla
         expect(replay.transient_send).toBeUndefined();
         expect(
           (
-            await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+            await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
           )[0].reserved_atoms,
         ).toBe("30");
       },

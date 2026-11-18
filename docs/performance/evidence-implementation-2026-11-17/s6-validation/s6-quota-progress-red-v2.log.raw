@@ -1,0 +1,47 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-quota-progress.test.ts:
+142 |     } finally {
+143 |       response.body.fill(0);
+144 |     }
+145 |     if (response.status >= 400) {
+146 |       const error = internalErrorSchema.safeParse(parsed);
+147 |       if (error.success) throw new CoreRpcError(error.data, response.status);
+                                     ^
+CoreRpcError: internal_deadline
+ detail: {
+  code: "internal_deadline",
+  category: "AUTHENTICATION",
+  retryability: "NONE",
+  command_state: "NOT_ATTEMPTED",
+  message: "Internal request rejected",
+},
+ status: 408,
+
+      at parseReply (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:147:32)
+      at request (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:153:12)
+      at async execution (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:382:30)
+      at async sameCommand (/Users/wr/work/super-token-gateway/tests/support/core-settlement.ts:47:20)
+      at async granted (/Users/wr/work/super-token-gateway/tests/support/core-settlement.ts:29:9)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-quota-progress.test.ts:42:24)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:58:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:56:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:50:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:39:9)
+(fail) short retry leases in an ineligible prefix cannot starve a later fully expired request [4337.90ms]
+PostgresError: quota_barrier
+    errno: "P0403",
+ severity: "ERROR",
+    where: "PL/pgSQL function core_quota_recovery_v1(jsonb,jsonb) line 13 at RAISE",
+     file: "pl_exec.c",
+     line: "3911",
+  routine: "exec_stmt_raise",
+     code: "ERR_POSTGRES_SERVER_ERROR"
+
+(fail) a completed Redis release racing with technical expiry stays expired and does not roll back other released projections [4564.34ms]
+
+ 0 pass
+ 2 fail
+ 12 expect() calls
+Ran 2 tests across 1 file. [8.97s]

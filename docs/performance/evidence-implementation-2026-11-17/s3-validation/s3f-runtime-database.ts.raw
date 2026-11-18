@@ -1,0 +1,75 @@
+import type { SQL } from "bun";
+
+export class RuntimeApprovalOutcomeUnknown extends Error {
+  constructor(cause: unknown) {
+    super("RUNTIME_APPROVAL_OUTCOME_UNKNOWN", { cause });
+  }
+}
+
+export async function withRuntimeConnection<T>(
+  db: SQL,
+  signal: AbortSignal,
+  action: (connection: SQL, close: () => Promise<void>) => Promise<T>,
+) {
+  const connection = await db.reserve({ signal });
+  let closing: Promise<void> | undefined;
+  const close = () =>
+    (closing ??= Promise.resolve()
+      .then(() => connection.close({ timeout: 0 }))
+      .catch(() => {}));
+  const cancel = () => void close();
+  signal.addEventListener("abort", cancel, { once: true });
+  if (signal.aborted) cancel();
+  try {
+    signal.throwIfAborted();
+    return await action(connection, close);
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    if (closing) await closing;
+    else await connection.release();
+  }
+}
+
+export async function runRuntimeQuery<T>(query: PromiseLike<T>, signal: AbortSignal) {
+  signal.throwIfAborted();
+  return await query;
+}
+
+export async function runRuntimeTransaction(
+  db: SQL,
+  limits: { signal: AbortSignal; remainingMs(): number },
+  action: (tx: SQL) => Promise<void>,
+) {
+  await withRuntimeConnection(db, limits.signal, async (connection, close) => {
+    let committing = false;
+    try {
+      await runRuntimeQuery(connection`BEGIN`, limits.signal);
+      const remaining = Math.floor(limits.remainingMs());
+      if (remaining < 1) throw new Error("RUNTIME_APPROVAL_DEADLINE");
+      await runRuntimeQuery(
+        connection`SELECT set_config('transaction_timeout',${String(remaining)},true),set_config('statement_timeout',${String(remaining)},true),set_config('lock_timeout',${String(remaining)},true)`,
+        limits.signal,
+      );
+      await action(connection);
+      limits.signal.throwIfAborted();
+      if (!(limits.remainingMs() > 0)) throw new Error("RUNTIME_APPROVAL_DEADLINE");
+      committing = true;
+      await runRuntimeQuery(connection`COMMIT`, limits.signal);
+    } catch (error) {
+      const cleanup = new AbortController();
+      const timer = setTimeout(() => {
+        cleanup.abort();
+        void close();
+      }, 1000);
+      try {
+        await runRuntimeQuery(connection`ROLLBACK`, cleanup.signal);
+      } catch {
+        await close();
+      } finally {
+        clearTimeout(timer);
+      }
+      if (committing) throw new RuntimeApprovalOutcomeUnknown(error);
+      throw error;
+    }
+  });
+}

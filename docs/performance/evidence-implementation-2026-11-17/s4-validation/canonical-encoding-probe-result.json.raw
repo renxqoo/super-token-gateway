@@ -1,0 +1,90 @@
+[
+  {
+    "name": "gateway_canonical_4c4ec5a1a0694e4391569842760540a3",
+    "encoding": "LATIN1",
+    "settings": {
+      "server": "LATIN1",
+      "client": "UTF8"
+    },
+    "vectors": [
+      {
+        "value": "",
+        "bytes": ""
+      },
+      {
+        "value": "credential_ciphertext_sha256",
+        "bytes": "00630072006500640065006e007400690061006c005f0063006900700068006500720074006500780074005f007300680061003200350036"
+      },
+      {
+        "value": "\u0001\t\n\r\\\"",
+        "bytes": "00010009000a000d005c0022007f"
+      },
+      {
+        "value": "é",
+        "bytes": "00e9"
+      },
+      {
+        "value": "ÿ",
+        "bytes": "00ff"
+      },
+      {
+        "value": "£",
+        "bytes": "00a3"
+      },
+      {
+        "value": "aéz",
+        "bytes": "006100e9007a"
+      }
+    ],
+    "canonical": {
+      "canonical": "{\"a\":1,\"z\":[null,false,{},[],\"é\\\\\\t\"],\"é\":\"accent\"}",
+      "digest": "e765c98ad34a1ded5f909c89f6a6f1affa509ac9ef5a7434a4d299819386bc2d"
+    },
+    "passed": true,
+    "cleaned": true
+  },
+  {
+    "name": "gateway_canonical_e3cbbcb284e84c778264641cb478075a",
+    "encoding": "SQL_ASCII",
+    "settings": {
+      "server": "SQL_ASCII",
+      "client": "UTF8"
+    },
+    "vectors": [
+      {
+        "value": "",
+        "bytes": ""
+      },
+      {
+        "value": "credential_ciphertext_sha256",
+        "bytes": "00630072006500640065006e007400690061006c005f0063006900700068006500720074006500780074005f007300680061003200350036"
+      },
+      {
+        "value": "\u0001\t\n\r\\\"",
+        "bytes": "00010009000a000d005c0022007f"
+      },
+      {
+        "value": "é",
+        "bytes": "00c300a9"
+      },
+      {
+        "value": "ÿ",
+        "bytes": "00c300bf"
+      },
+      {
+        "value": "£",
+        "bytes": "00c200a3"
+      },
+      {
+        "value": "aéz",
+        "bytes": "006100c300a9007a"
+      }
+    ],
+    "canonical": {
+      "canonical": "{\"a\":1,\"z\":[null,false,{},[],\"é\\\\\\t\"],\"é\":\"accent\"}",
+      "digest": "e765c98ad34a1ded5f909c89f6a6f1affa509ac9ef5a7434a4d299819386bc2d"
+    },
+    "passed": true,
+    "cleaned": true
+  }
+]

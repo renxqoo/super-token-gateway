@@ -27,7 +27,7 @@ async function initializeFixture() {
 
 async function supplier(db: SQL, account: string) {
   return (
-    await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM upstream_account_balances WHERE account_id=${account}`
+    await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM core_upstream_balances_v1 WHERE account_id=${account}`
   )[0] as { balance: string; reserved: string; spent: string };
 }
 
@@ -138,7 +138,9 @@ async function verify() {
         await client.startup();
         const account = setup.provider.account_id;
         const evidence = async () => {
-          const prepared = await prepareFinancialAdmission(setup, client);
+          const prepared = await prepareFinancialAdmission(setup, client, {
+            routeProjection: true,
+          });
           const admitted = (await prepared.admit()) as ExecutionReply;
           await client.execution("execution_begin_v1", prepared.beginData(admitted.receipt), {
             deadlineAt: prepared.deadline,

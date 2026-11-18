@@ -1,0 +1,83 @@
+# 07 平台适配器的Worker执行路径
+
+2026-11-17。状态：Gateway资金路径已接线并通过真实PG/HTTP边界验证，完整容量已复测，当前连续两轮通过40RPS；不构成3000RPS或生产可用性结论。目标是消除P0/S2中约9ms/请求的插件helper CPU，保留第三方隔离、独立PG资金权威和执行构建可追踪性。当前第三方引擎实际为Go/Extism/wazero；本单元不更换它。
+
+## 1. 实证与选择
+
+主线程原型已对五包152例212步、466次调用比较output/state原始字节，结果相同。它使用probe-only签名，没有生产平台分类、线程抢占或持久执行身份，不能直接接入Gateway。
+
+独立Bun 1.4.4能力探针在5个Worker内实际运行无限JS循环；父线程5ms心跳继续运行，terminate后均观察到close，回收耗时约1.39至4.09ms。原始日志为worker-preemption-probe.log。仍需验证产品池的启动、排队、取消、异常、迟到消息和全部槽位回收。
+
+Worker只执行随构建发布的原适配器源码，完整bundle包含私有同步Host shim、SDK与实际依赖。主线程只读取注册元数据，不导入插件实现。Host scope禁止重入并在finally清理；每次输入、显式state和输出继续经过现有ABI及JSON document边界。
+
+## 2. 信任与来源
+
+选择依据必须是verifiedPackageRuntime中的私有包身份、packageTrust内部byDigest认可的当前平台signer，以及精确构建注册项；publisher admits、包名或可变公开pkg字段不赋予本机执行能力。注册项固定package digest、module hash、manifest/config schema及完整源码输入图摘要、Worker bundle摘要。创建attempt时选定，之后不切换引擎。
+
+现有build-plugins只把packages下的bundle输入写进source-hashes，未覆盖lossless-json等实际依赖。新注册项不据此声称完整同源，也不重写已经发布的包。独立builder记录完整实际输入图与锁文件，用已核摘要的确定性编译器及Binaryen归档，在独立临时目录将当前源码各编译三次，全部必须与现有签名包的Wasm字节摘要相同，才生成Worker注册项。核对不符时构建失败，不能产生可选Worker注册。
+
+来源证明由显式build:builtin-adapters --prove在已核工具链上生成，作为受版本控制的packages/adapters/builtin/proof.json保存完整Worker字节及其来源。普通test/build跨平台核验该证明的全部实际源码、依赖和包字节，再绑定本机Bun生成运行资产，不要求Ubuntu执行Mac编译器，也不跳过任何校验。来源变化必须重新产生证明；该受控仓库资产不是由上传者提供的执行授权。
+
+Wasm与Worker构建共享一次私有字节及模块解析快照，包含五个包文件；元数据来自esbuild实际消费的快照，不在构建后重新读源文件。依赖路径以包名及包内路径规范化，避免把本机缓存布局或绝对工作目录写入可移植证明。证明先写本次staging，再原子rename，发布前后均检查取消；取消不得成功推进外层build。运行时Bun二进制同样要求不可变发布路径。
+
+Worker注册项另有worker_digest（完整bundle原字节）和runtime_digest（实际Bun二进制）。artifact_digest为SHA256(JSON.stringify(["stg.internal.builtin-worker-artifact","1",worker_digest,runtime_digest,"1","1"]))，末两项分别为ABI和显式state版本。发送描述符的artifact_digest固定这整个执行闭包；装载方还需核对本进程Bun二进制。Wasm则以现有helper二进制摘要作为执行闭包。不能只靠可变版本字符串声称执行引擎相同。
+
+运行中的owner持有已经校验并复制的Worker代码字节，通过不可变Blob创建槽位，重建dist不能替换其后续执行内容。关闭全部槽位后撤销Blob URL。包和registry的公开副本不能更改私有执行身份。
+
+Wasm也不能只记录先前对可变helper路径做的hash。build:native和成品构建把同一私有二进制快照发布到executables/<sha256>/plugin-host，已存在的同名内容必须相同，文件不可写，不原地覆盖。运行与审批先解析到真实发布路径并核验摘要，supervisor启动/重启再次核验后执行；Go自身派生worker也沿该固定可执行路径。Gateway和Core服务启动时只读这些构建资产，不创建临时helper。生产滚动发布须保留仍在使用的旧版本目录，不能原地删除当前进程的release目录。
+
+## 3. 生命周期与预算
+
+一个物理Worker槽一次只执行一个任务。父线程的单调绝对期限从入队开始，覆盖启动、排队和执行；Worker内定时器不能承担CPU截止责任。排队取消只移除该任务；活动取消、超时或协议错误终止其Worker，不重放。观察到close后才释放物理槽，迟到结果按槽位代次及任务ID拒绝。
+
+池的槽数、pending数、复制输入字节、input/state/output单项字节及期限均有明确上限。所有timer、abort listener、输入引用和retirement任务在统一完成路径释放。预先取消或超预算请求不创建Worker；close幂等并等待全部真实线程关闭。显式state允许合法attempt在不同槽继续，但必须用跨租户、跨适配器和失败后的金丝雀验证不存在隐式状态依赖。
+
+两类执行器共用同一个createPluginAttempts所有者及其attempt、state和JSON预算，不通过各建一份host把全局配额翻倍。所有者在构造时固定有限执行器集合，create仅可选择该集合内成员并保持到dispose；未注册执行器不能临时注入。关闭需等待全部已拥有执行器，即使一项失败也回收其他项。资源调用默认Wasm，资金调用由私有平台分类选择。
+
+Bun Worker的resourceLimits未实现，smol不是硬内存限额。本单元不声称保留Wasm逐guest的linear-memory隔离；第三方仍在原沙箱。平台代码保留有限输入/输出/state和队列预算，并需测合法最大输入的进程RSS。生产进程内存限制和故障域恢复另行验证，不能从线程隔离推出内存安全。
+
+## 4. 资金发送绑定
+
+新增版本化execution描述符，至少含version、kind和artifact_digest；Worker摘要覆盖实际Worker构建，Wasm记录实际helper构建，不能给历史数据猜测摘要。新DispatchProjectionV2、prepBindingV2和HostAuthorizationPlanV2纳入该描述符，经现有execution_permits.snapshot与不可变guard原子持久化。Gateway在prepare前选择，admit/begin及响应继续使用同一能力；收到的授权必须匹配。
+
+PG需独立核对受控平台registry允许的package→执行构建元组，runtime角色不可改写。当前发布runtime_digest只代表helper，不得把Gateway自报的任意Worker hash当作已授权构建。注册安装和追加迁移须与实际bundle一起校验，旧V1事实只保留必要历史读取，不再生成V1新发送；升级仍停新准入并排空旧发送授权。
+
+私有当前授权表由owner维护，不给API/worker运行角色写权限；登记与可用性变化同事务审计并经现catalog epoch失效栅栏。context根级execution_runtimes只公布候选包当前允许的执行描述符；Gateway须同时匹配该列表、私有平台身份和精确本地注册项。admit及begin在目录栅栏内再次检查，未批准的Gateway自报摘要不授发送。读取新私有表及package关系先ACCESS SHARE NOWAIT，避免TRUNCATE与epoch反向等待。catalog写者公平推进仍是06中的待验收单元，不能称现有行共享锁已保证高负载控制时限。
+
+历史plugin_packages.release_descriptor确实可为NULL，且旧候选计算没有过滤它。不能认为旧包均有可追踪helper，也不能修改immutable package补造旧事实。已有明确发布runtime的Wasm可继续使用；缺失者须由owner用部署trust policy重新验包、在实际指定helper运行全部fixtures并确认回收，才建立从现在生效的独立Wasm授权及审计。此新验证不说明历史执行过哪个helper。无法按当前SDK/trust验证者需重新发布，须在部署前明确列出，不暗中默认摘要。abort/query/recovery和旧账务事实不依赖当前运行时授权。
+
+此次先切换资金attempt的prepare、batch子预处理及响应。resources.ts和后台poller未经过这条prep/permit绑定，继续现有Wasm路径；不以全局按包自动切换扩大范围。后续扩展它们须先迁移各自的权威resolution及持久操作事实。
+
+## 5. 出口证据
+
+必须覆盖真实平台/发布者负向向量、伪造及公开副本变异、完整152例212步差分、跨适配器/租户状态、预取消和队列取消、无限CPU循环强制回收、启动失败和迟到消息、close幂等与零遗留线程。真实PG中篡改执行身份应拒绝，permit不可改写，begin继续绑定原构建。之后运行全仓门禁与同构建固定到达完整容量及并发对照，局部微基准不能代替这些结果。
+
+## 6. 已实现的权威与安装边界
+
+追加迁移为2026111705/0009；不修改先前checksum资产。私有core_execution_runtime.approvals按每包所有kind合计最多16条，另合并原发布Wasm摘要，去重后每包最多17项、context最多128个候选包。Core只返回最终选中至多5个候选包的map。原发布Wasm可被同元组显式禁用覆盖；独立审批的trust_until过期同样不再可选。新admit/next同时检查原context能力集合和当前授权，BEGIN只核permit内固定V2元组的当前授权。旧V1仅保留历史receipt读取、撤销及结算，不能获得新的发送。
+
+私有认证快照现在还包含实际验签SPKI公钥的SHA256，平台分类须与部署policy私有公钥指纹一致。相同key_id由陌生密钥重签原包的两个真实负控先失败，修复后通过；精确包字节条件不能代替签名来源条件。primary与batch sibling通过底层统一dispose通知关联，覆盖主动关闭、失败、取消、deadline和执行器断开；child结束即从所属集合释放，不只依赖调用方finally。
+
+owner工具为scripts/approve-plugin-runtime.ts，成品为dist/tools/approve-plugin-runtime.js。它接受的是owner审阅、经可信buildBuiltinWorker核验且随受控成品交付的目录，不对任意上传目录宣称独立的源码同源证明；有限fixtures只能验证行为。dist/manifest.json另记录实际helper、worker、registry及受控proof字节摘要，发布方需保留CI来源和完整性链。Gateway/API/worker运行角色均无私有审批权限，工具不可放入公开管理API。
+
+批准前重新验包及当前部署trust，在固定实际helper运行全部fixtures，Worker还运行同一完整fixtures并确认线程回收。整套操作共享60秒上限，覆盖文件、两类fixtures、SQL及登记；取消会关闭Worker、取消在途SQL并回滚。登记携带approval_deadline和trust_until，PG在epoch/触发器等待之后再次核时，超期不能留下审批或审计。只读资产按FD先核regular file及大小、限量读取再检查增长；打开使用O_NONBLOCK，拒绝无writer FIFO，避免在fstat前把截止机制阻塞。
+
+独立复审发现原CLI的启动schema查询及disable分支没有复用上述取消查询，捕获SIGTERM后仍会等锁，直到既有8秒SQL/2秒锁等待期限；开始schema查询也没有计入批准函数的60秒。修正范围是整个owner命令：新增--timeout-ms（1至60000，默认60000），从首个DB操作前开始单调预算，启用仅取得剩余时间。schema、disable读取及写入都传播取消；事务使用可取消的reserve覆盖池排队，PG17 transaction_timeout和剩余statement/lock期限覆盖等锁、执行与提交边界，提交前再次检查取消。数据库清理另有有限关闭期限，不能把本地close返回解释为服务端已释放。已确认提交后到达的取消不抹除真实结果；提交回执不明时仍须查权威状态，不承诺逆转已提交撤销。
+
+当前disable只处理已有独立审批行，直接发布的默认Wasm仍可通过原plugin disable/quarantine控制整包。PG有同元组禁用能力，但CLI尚未支持没有独立审批行的默认Wasm逐build撤销，不能为撤销构造虚假的历史验证proof；这是待补的工具边界。
+
+后续全量单测发现并发发布helper的偶发ENOENT：八个publisher通过hard link竞争同一目标、各自删除staging，目标经实际stat/read仍存在且正确时，Bun1.4.4的realpathSync在某些调用中报lstat不存在。独立多轮allSettled回归复现，确保失败前没有测试目录清理；不能把它解释成真实目标丢失。首个改用realpathSync.native的尝试仍失败，未作为修复。发布校验改为只规范化父目录，并对固定plugin-host叶子做lstat，要求真实普通文件而非符号链接；仍逐次核不可写、目标摘要及内容地址，不重试或忽略实际缺失/篡改。此边界避免对正在并发增加/移除别名的hard-link文件做末级realpath；不把这一实测现象进一步冒称已定位Bun/libc内部原因。需以同一并发回归和全量门禁验证，原失败日志保留。
+
+独立复审另发现声明SHA路径的源入口在realpath之后才识别身份，叶子被换成指向可变source的symlink时可重新发布成另一摘要。新真实回归先失败，随后把调用方声明的SHA目录/文件名检查提前到末级解析之前，直接按声明身份核父目录和普通叶子；普通构建source仍可解析其原合法路径。resolve与publish统一采用此规则，不能通过另一入口改写声明身份。
+
+取消收敛由预留连接唯一所有者负责强制关闭，不能仅发Query.cancel后继续等远端错误。显式BEGIN/COMMIT/ROLLBACK均受同一连接生命周期管理，ROLLBACK清理timer直接关连接，避免失联时永远到不了close。COMMIT已经发出但无回执的异常保留RUNTIME_APPROVAL_OUTCOME_UNKNOWN，所有外层必须保留它；确认成功的COMMIT不因迟到取消改写结果。实际回执丢失回归确认数据库行已提交，原子性与操作返回的已知性分开验证。
+
+升级须先停新准入、排空旧发送授权并完成可恢复备份，再用精确库名执行迁移；不要把混合版本滚动升级当作已支持。随后以owner连接执行，例如bun dist/tools/approve-plugin-runtime.js --database <精确库名> --package-digest <摘要> --kind builtin-worker --policy-file <受控policy> --helper-executable <本发布helper> --builtin-directory <本发布builtin-adapters目录> --actor <操作人> --reason <原因>。MIGRATION_DATABASE_URL或DATABASE_URL必须与--database相同，运行账号不提供owner凭证。撤销使用相同库名、包、kind及--artifact-digest，另加--disable；允许撤销已过期审批，重新启用仍须重验。NULL历史release_descriptor走--kind wasm的新当前验证，不回写包或旧permit，也不宣称历史实际执行了该helper。
+
+bench-system明确记录--plugin-runtime wasm|builtin-worker，默认builtin-worker；装置只在自己的库以owner批准对应成品，审计逐permit实际execution元组，不以命令行标签代替真实执行证据。新旧性能对照必须保留这个配置差异。
+
+## 7. 原生宿主完成交接修正
+
+S3c全量集成出现插件验证OVERLOADED。宿主的完成回复在释放任务容量之前已经对客户端可见，零队列时外部每槽仅一个未回复请求也可能误报过载。真实小模块回归在1/8槽、queue=0下顺序调用，十次运行的8槽分支均出现该错误；单槽缺失模块及大模块重复未复现，不冒称所有原验证失败均已逐一归因。
+
+修正把已完成任务移交给唯一输出writer作为容量交接点：取得writeMu后、设置输出期限和输出任何字节之前，清除任务及pending输入计数并释放容量；等待writer的任务继续占容量。进入writer前释放模块、输入和state引用，输出字节仍占独立全局预算直到实际写完，jobs.Wait仍等待writer完成，输出失败也必须执行交接。至多slots+queue个已接纳任务和一个已完成输出writer，不能形成无限完成队列。此时目标执行已结束，cancel可返回COMMAND_MISSING，现有supervisor仍等待目标回复后才收敛取消。关闭、输出背压、过载和race检查均须复核。

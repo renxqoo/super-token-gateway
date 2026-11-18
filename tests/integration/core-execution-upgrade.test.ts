@@ -5,6 +5,7 @@ import {
   createCatalogStore,
   createCustomerFundsStore,
   createDatabase,
+  recordRoute,
 } from "@gateway/storage";
 import manifest from "../../packages/storage/src/migrations/manifest.json";
 import { withDatabase } from "../support/database.ts";
@@ -49,15 +50,17 @@ async function historical(db: SQL) {
     operations: ["chat"],
     max_output_tokens: 100,
   });
-  const route = await store.createRoute("historical-model", {
-      provider_id: provider.id,
-      upstream_model: "old",
-      operations: ["chat"],
-      priority: 0,
-      weight: 1,
-      pricing: { currency: "USD", rates: { requests: { numerator: "1", denominator: "1" } } },
-      ceilings: { requests: "1" },
-    }),
+  const route = await db.begin((tx) =>
+      recordRoute(tx, "historical-model", {
+        provider_id: provider.id,
+        upstream_model: "old",
+        operations: ["chat"],
+        priority: 0,
+        weight: 1,
+        pricing: { currency: "USD", rates: { requests: { numerator: "1", denominator: "1" } } },
+        ceilings: { requests: "1" },
+      }),
+    ),
     tariff = await createCustomerFundsStore(db).setTariff({
       model: "historical-model",
       operation: "chat",
@@ -123,7 +126,9 @@ test("v5 to financial append preserves historical wallets requests and null cata
         ),
       ).toEqual(before.commands);
       expect((await db`SELECT count(*)::integer n FROM upstream_holds`)[0].n).toBe(0);
-      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(29);
+      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(
+        manifest.migrations.length,
+      );
     },
     { max: 4, registry: ".local/T04b2a-resources.jsonl" },
   ));
@@ -176,9 +181,22 @@ test(
         for (const query of [
           () => role`SELECT * FROM wallets`,
           () => role`SELECT * FROM channels`,
+          () => role`SELECT * FROM core_funding.balance_cells`,
+          () => role`SELECT * FROM core_funding.budget_transfers`,
+          () => role`SELECT core_funding_control_v1(NULL::uuid,false)`,
           () => role`SELECT allocate_customer_batch_v1('[]'::jsonb)`,
+          () => role`SELECT allocate_customer_rows_v1('[]'::jsonb,true)`,
           () =>
-            role`SELECT core_execution_item_v2('{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb)`,
+            role`SELECT core_funding.reserve_batch_v1(NULL::uuid,'USD',NULL::uuid,0,'{}'::jsonb)`,
+          () => role`SELECT core_funding.flush_admit_v1('{}'::jsonb)`,
+          () => role`SELECT core_funding.fact_frame_v1('{}'::uuid[])`,
+          () => role`SELECT core_funding.flush_facts_v1('{}'::jsonb)`,
+          () => role`SELECT core_funding.flush_costs_v1('{}'::jsonb)`,
+          () => role`SELECT core_funding.coalesce_groups_v1('[]'::jsonb,'{}'::jsonb)`,
+          () =>
+            role`SELECT core_funding.stage_snapshot_v1('{}'::jsonb,NULL::uuid,'RAW','execution','UNKNOWN','{}'::jsonb,'{}'::text[],NULL::uuid,NULL::uuid,NULL::numeric,false)`,
+          () =>
+            role`SELECT core_funding.execution_item_v1('{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,NULL::jsonb)`,
         ]) {
           const failure = await query().catch((error) => error);
           expect(failure).toMatchObject({ errno: "42501" });
@@ -226,7 +244,9 @@ test("signed settlement append keeps gateway usage visible and its per-source un
         .catch((error) => error);
       expect(duplicate).toMatchObject({ errno: "23505" });
       expect((await db`SELECT count(*)::integer n FROM usage_event_index`)[0].n).toBe(1);
-      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(29);
+      expect((await db`SELECT count(*)::integer n FROM schema_migrations`)[0].n).toBe(
+        manifest.migrations.length,
+      );
     },
     { max: 4, registry: ".local/T04b2b-resources.jsonl" },
   ));
@@ -257,7 +277,7 @@ test("authentication append upgrades an empty signed settlement schema without r
       expect(
         (await db`SELECT version,checksum FROM schema_migrations ORDER BY version`).slice(0, 6),
       ).toEqual(before);
-      expect((await db`SELECT max(version) v FROM schema_migrations`)[0].v).toBe(2026111704);
+      expect((await db`SELECT max(version) v FROM schema_migrations`)[0].v).toBe(2026111817);
       expect(
         (
           await db`SELECT array_agg(column_name::text ORDER BY column_name) c FROM information_schema.columns WHERE table_name='core_evidence_receipts' AND column_name IN ('authentication_disposition','signature','signature_payload_digest')`

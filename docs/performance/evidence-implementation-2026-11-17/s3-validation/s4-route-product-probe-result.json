@@ -1,0 +1,11 @@
+{
+  "scope": "S4 product HTTP PATCH under 16 continuous warm candidate readers; progress only, not request capacity",
+  "mutation": {
+    "status": 200,
+    "elapsed_ms": 40.69566699999996,
+    "new_readers_after_request": 0,
+    "reader_busy": 219
+  },
+  "database": "gateway_test_foundation_36d14bd964914a179e7e85078e6413ef",
+  "exit_code": 0
+}

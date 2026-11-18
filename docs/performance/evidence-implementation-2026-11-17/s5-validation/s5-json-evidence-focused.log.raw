@@ -1,0 +1,31 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/gateway-json-evidence.test.ts:
+(pass) a successful JSON response durably queues both signed facts together and settles customer and supplier exactly once [3115.88ms]
+
+tests/integration/core-first-chain.test.ts:
+(pass) real upstream HTTP JSON through the plugin host is signed, queued and settled for both parties exactly once [2618.63ms]
+(pass) a real upstream SSE stream through the plugin host settles from its final usage frame exactly once [2607.73ms]
+
+packages/plugin-host/src/__test__/evidence.test.ts:
+(pass) a final JSON response becomes one FINAL observation over exactly the reported dimensions [270.18ms]
+(pass) streamed usage is recorded only when the cumulative snapshot changes and stays non-final until the end [25.71ms]
+(pass) an outcome without any usage is recorded as UNKNOWN and the bridge refuses a second finish [0.15ms]
+(pass) a failed record write is surfaced before the plugin output is returned [3.44ms]
+(pass) FINAL reasoning tokens are recorded but never become a final pricing dimension [3.45ms]
+(pass) a reported aggregate cache write is final while unreported TTL partitions stay unknown [0.06ms]
+(pass) an observation whose record failed is recorded again when the same usage is observed next [0.06ms]
+(pass) a send that never left the host is recorded once as NOT_EXECUTED without quantities [0.08ms]
+(pass) an attempt with observed usage can no longer claim it was never executed [0.04ms]
+
+packages/plugin-host/src/__test__/evidence-delivery.test.ts:
+(pass) a complete JSON result and its outcome share one durable group without replacing the already sealed identity [0.13ms]
+(pass) stream FINAL remains immediately durable even when JSON terminal grouping is selected [0.04ms]
+(pass) a later JSON observation flushes its predecessor instead of overwriting a buffered final fact [0.07ms]
+(pass) retrying a failed flush reuses the original fact identity and an unknown terminal write cannot create an opposite outcome [0.07ms]
+(pass) disposing while a plugin result is pending prevents late evidence from being sealed or published [0.03ms]
+
+ 17 pass
+ 0 fail
+ 80 expect() calls
+Ran 17 tests across 4 files. [8.76s]

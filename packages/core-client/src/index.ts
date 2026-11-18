@@ -156,7 +156,12 @@ export function createCoreRpcClient(
     kind: ExecutionKind | "plugin_package_v1",
     normalizedPath: string,
     data: unknown,
-    requestOptions: { commandId?: string; deadlineAt?: string; traceId?: string },
+    requestOptions: {
+      commandId?: string;
+      deadlineAt?: string;
+      traceId?: string;
+      routeTicket?: string;
+    },
   ) {
     const owner = receipt;
     if (!owner) throw new Error("Startup required");
@@ -184,7 +189,13 @@ export function createCoreRpcClient(
       trace_id: trace,
       contract_version: 1,
     };
-    const body = Buffer.from(JSON.stringify({ envelope, data }));
+    const body = Buffer.from(
+      JSON.stringify({
+        envelope,
+        data,
+        ...(requestOptions.routeTicket ? { route_ticket: requestOptions.routeTicket } : {}),
+      }),
+    );
     const proof = {
       session_id: owner.session_id,
       incarnation_id: owner.incarnation_id,
@@ -351,7 +362,12 @@ export function createCoreRpcClient(
     async execution<Kind extends ExecutionKind>(
       kind: Kind,
       data: unknown,
-      requestOptions: { commandId?: string; deadlineAt?: string; traceId?: string } = {},
+      requestOptions: {
+        commandId?: string;
+        deadlineAt?: string;
+        traceId?: string;
+        routeTicket?: string;
+      } = {},
     ) {
       if (requestOptions.commandId && !requestOptions.deadlineAt)
         throw new Error("Stable command deadline required");

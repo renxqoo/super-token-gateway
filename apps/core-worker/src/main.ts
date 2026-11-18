@@ -21,8 +21,10 @@ const counters = {
   reconciled: 0,
   aborted: 0,
   released: 0,
+  quota_expired: 0,
   maintenance_failures: 0,
 };
+let recovery: ReturnType<typeof startPeriodic> | undefined;
 const settlement = createSettlementWorker({
   db,
   url: config.QUEUE_REDIS_URL,
@@ -32,6 +34,7 @@ const settlement = createSettlementWorker({
   concurrency: config.SETTLEMENT_CONCURRENCY,
   onCommitted: (groups) => {
     counters.committed += groups;
+    recovery?.trigger();
   },
   onRejected: (count) => {
     counters.rejected += count;
@@ -69,14 +72,16 @@ const reconciliation = startPeriodic(
   config.RECONCILE_INTERVAL_MS,
   maintenanceFailed,
 );
-const recovery = core
+recovery = core
   ? startPeriodic(
       async () => {
         await core.startup();
         const result = await recoverExecutions(db, core, config.RECOVERY_BATCH);
         counters.aborted += result.aborted;
         counters.released += result.released;
-        return result.candidates === config.RECOVERY_BATCH;
+        counters.quota_expired += result.expired;
+        if (result.blocked) throw new Error("quota_recovery_incomplete");
+        return result.more;
       },
       config.RECOVERY_INTERVAL_MS,
       maintenanceFailed,
@@ -95,7 +100,7 @@ const health = Bun.serve({
         return Response.json({ status: "unavailable" }, { status: 503 });
       try {
         await db`SELECT 1`;
-        return Response.json({ status: "ready", ...counters });
+        return Response.json({ status: "ready", ...counters, persistence: settlement.stats() });
       } catch {
         return Response.json({ status: "unavailable" }, { status: 503 });
       }

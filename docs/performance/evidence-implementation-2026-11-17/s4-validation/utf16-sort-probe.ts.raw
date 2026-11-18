@@ -1,0 +1,38 @@
+import { withDatabase } from "../../tests/support/database.ts";
+import { migrate } from "@gateway/storage";
+
+const result: Record<string, unknown> = { scope: "Isolated UTF-16 sort equivalence and elapsed SQL microbenchmark; not service capacity or CPU attribution" };
+await withDatabase(async (db, name) => {
+  await migrate(db);
+  result.database = name;
+  await db.unsafe(String.raw`CREATE FUNCTION public.sort_probe_v2(value text) RETURNS bytea LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE result text='';point integer;char_index integer;BEGIN
+ IF octet_length(value)=char_length(value) THEN RETURN decode(regexp_replace(encode(convert_to(value,'UTF8'),'hex'),'(..)','00\1','g'),'hex');END IF;
+ FOR char_index IN 1..char_length(value) LOOP
+  point=ascii(substr(value,char_index,1));
+  IF point>65535 THEN point=point-65536;result=result||lpad(to_hex(55296+point/1024),4,'0')||lpad(to_hex(56320+point%1024),4,'0');
+  ELSE result=result||lpad(to_hex(point),4,'0');END IF;
+ END LOOP;RETURN decode(result,'hex');
+END $$;`);
+  const examples = ["", "a", "proposed_request_id", "credential_ciphertext_sha256", "\u0001\t\n\r\"\\\u007f", "é", "中", "😀", "\ue000", "a😀中"];
+  const vectors = [];
+  for (const value of examples) {
+    const [row] = await db`SELECT encode(core_utf16_sort_v1(${value}),'hex') old,encode(sort_probe_v2(${value}),'hex') proposed`;
+    const expected = Buffer.from(value, "utf16le").swap16().toString("hex");
+    if (row.old !== expected || row.proposed !== expected) throw new Error(`Sort mismatch: ${JSON.stringify(value)}`);
+    vectors.push({ value, expected, ...row });
+  }
+  result.vectors = vectors;
+  const keys = ["version", "proposed_request_id", "proposed_attempt_id", "credential_ciphertext_sha256", "billable_manifest_sha256", "authorization_plan_digest", "input_tokens", "config_revision"];
+  const samples = [];
+  for (const variant of ["old", "proposed", "proposed", "old", "old", "proposed"]) {
+    const fn = variant === "old" ? "core_utf16_sort_v1" : "sort_probe_v2";
+    const start = performance.now();
+    const rows = await db.unsafe(`SELECT sum(octet_length(${fn}(key||i::text))) bytes FROM generate_series(1,1000) i CROSS JOIN unnest($1::text[]) key`, [keys]);
+    samples.push({ variant, calls: 8000, elapsed_ms: performance.now() - start, bytes: String(rows[0].bytes) });
+  }
+  result.samples = samples;
+});
+result.cleaned = true;
+await Bun.write(".local/performance-implementation/utf16-sort-probe-result.json", JSON.stringify(result, null, 2) + "\n");
+console.log(JSON.stringify(result));

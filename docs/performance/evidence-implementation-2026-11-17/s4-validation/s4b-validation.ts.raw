@@ -1,0 +1,39 @@
+const directory = ".local/performance-implementation";
+const commands = [
+  ["check", ["run", "check"]],
+  ["lint", ["run", "lint"]],
+  ["fmt", ["run", "fmt:check"]],
+  ["unit", ["run", "test"]],
+  ["build", ["run", "build"]],
+  ["integration", ["--env-file=.env.local", "--env-file=.local/native-gate.env", `${directory}/s4b-integration-isolated.ts`]],
+  ["native", ["run", "test:native"]],
+  ["plugin-artifact", ["run", "test:plugin-artifact"]],
+  ["artifact", ["run", "test:artifact"]],
+  ["durability", ["run", "test:durability"]],
+  ["backup", ["--env-file=.env.local", "--env-file=.local/native-gate.env", `${directory}/s4b-backup-own.ts`]],
+] as const;
+const results: unknown[] = [];
+let child: Bun.Subprocess | undefined, stopping = false;
+const interrupt = () => { stopping = true; child?.kill("SIGTERM"); };
+process.on("SIGTERM", interrupt);
+process.on("SIGINT", interrupt);
+try {
+  for (const [label, args] of commands) {
+    if (stopping) break;
+    const path = `${directory}/s4b-validation-${label}.log`, log = Bun.file(path);
+    await Bun.write(log, "");
+    const started = new Date().toISOString(), time = performance.now();
+    child = Bun.spawn([process.execPath, ...args], { env: process.env, stdin: "ignore", stdout: log, stderr: log });
+    const code = await child.exited;
+    const result = { label, command: [process.execPath, ...args], code, started, elapsed_ms: performance.now() - time, log: path };
+    results.push(result);
+    await Bun.write(`${directory}/s4b-validation-result.json`, JSON.stringify({ stopping, results }, null, 2) + "\n");
+    console.log(JSON.stringify(result));
+  }
+} finally {
+  if (child?.exitCode === null) child.kill("SIGTERM");
+  if (child) await child.exited;
+  process.off("SIGTERM", interrupt);
+  process.off("SIGINT", interrupt);
+}
+process.exitCode = stopping || results.some((r: any) => r.code !== 0) ? 1 : 0;

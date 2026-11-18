@@ -1,0 +1,139 @@
+{
+  "stopping": false,
+  "results": [
+    {
+      "label": "check",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "check"
+      ],
+      "code": 0,
+      "started": "2026-11-17T14:29:36.956Z",
+      "elapsed_ms": 102.520958,
+      "log": ".local/performance-implementation/s4-validation-check.log"
+    },
+    {
+      "label": "lint",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "lint"
+      ],
+      "code": 0,
+      "started": "2026-11-17T14:29:37.059Z",
+      "elapsed_ms": 37.46183300000001,
+      "log": ".local/performance-implementation/s4-validation-lint.log"
+    },
+    {
+      "label": "fmt",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "fmt:check"
+      ],
+      "code": 1,
+      "started": "2026-11-17T14:29:37.097Z",
+      "elapsed_ms": 33.59741600000001,
+      "log": ".local/performance-implementation/s4-validation-fmt.log"
+    },
+    {
+      "label": "unit",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test"
+      ],
+      "code": 1,
+      "started": "2026-11-17T14:29:37.130Z",
+      "elapsed_ms": 57193.33475,
+      "log": ".local/performance-implementation/s4-validation-unit.log"
+    },
+    {
+      "label": "build",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "build"
+      ],
+      "code": 0,
+      "started": "2026-11-17T14:30:34.324Z",
+      "elapsed_ms": 277.601333000006,
+      "log": ".local/performance-implementation/s4-validation-build.log"
+    },
+    {
+      "label": "integration",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "--env-file=.env.local",
+        "--env-file=.local/native-gate.env",
+        ".local/performance-implementation/s4-integration-isolated.ts"
+      ],
+      "code": 1,
+      "started": "2026-11-17T14:30:34.602Z",
+      "elapsed_ms": 1121027.5255409998,
+      "log": ".local/performance-implementation/s4-validation-integration.log"
+    },
+    {
+      "label": "native",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:native"
+      ],
+      "code": 0,
+      "started": "2026-11-17T14:49:15.629Z",
+      "elapsed_ms": 12752.361000000034,
+      "log": ".local/performance-implementation/s4-validation-native.log"
+    },
+    {
+      "label": "plugin-artifact",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:plugin-artifact"
+      ],
+      "code": 0,
+      "started": "2026-11-17T14:49:28.382Z",
+      "elapsed_ms": 2005.535000000149,
+      "log": ".local/performance-implementation/s4-validation-plugin-artifact.log"
+    },
+    {
+      "label": "artifact",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:artifact"
+      ],
+      "code": 0,
+      "started": "2026-11-17T14:49:30.387Z",
+      "elapsed_ms": 14773.976665999973,
+      "log": ".local/performance-implementation/s4-validation-artifact.log"
+    },
+    {
+      "label": "durability",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:durability"
+      ],
+      "code": 0,
+      "started": "2026-11-17T14:49:45.161Z",
+      "elapsed_ms": 5645.888082999969,
+      "log": ".local/performance-implementation/s4-validation-durability.log"
+    },
+    {
+      "label": "backup",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "--env-file=.env.local",
+        "--env-file=.local/native-gate.env",
+        ".local/performance-implementation/s4-backup-own.ts"
+      ],
+      "code": 0,
+      "started": "2026-11-17T14:49:50.807Z",
+      "elapsed_ms": 4148.778292000061,
+      "log": ".local/performance-implementation/s4-validation-backup.log"
+    }
+  ]
+}

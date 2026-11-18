@@ -1,0 +1,2 @@
+docs/performance/evidence-impl1 file needs formatting. Run bun fmt to fix it.
+error: script "fmt:check" exited with code 1

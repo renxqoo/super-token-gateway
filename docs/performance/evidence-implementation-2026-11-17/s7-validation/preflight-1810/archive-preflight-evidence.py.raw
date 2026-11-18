@@ -1,0 +1,33 @@
+from pathlib import Path
+from datetime import datetime,timezone
+import hashlib
+import json
+import shutil
+
+root=Path.cwd();private=root/'.local/performance-implementation'
+destination=root/'docs/performance/evidence-implementation-2026-11-17/s7-validation/preflight-1810'
+destination.mkdir(parents=True,exist_ok=True)
+owned=set(private.glob('preflight-plan-*.log'))|set(private.glob('receipt-plan-*.log'))
+for name in ['receipt-plan-prototype.ts','cleanup-preflight-statements.ts','preflight-plan-statements-cleanup.json','archive-preflight-round.py','inspect-preflight-cleanup.ts','preflight-plan-resources-after.json','preflight-plan-stage.json','receipt-index-candidate-review.json','archive-preflight-evidence.py']:
+    source=private/name;assert source.is_file(),name;owned.add(source)
+manifest={}
+for source in sorted(owned):
+    target=destination/(source.name+'.raw');assert not target.exists(),str(target)
+    shutil.copyfile(source,target);digest=hashlib.sha256(source.read_bytes()).hexdigest()
+    assert hashlib.sha256(target.read_bytes()).hexdigest()==digest
+    manifest[source.name]={'archive':str(target.relative_to(root)),'sha256':digest,'bytes':source.stat().st_size,'temporary_source_removed':False}
+sources={}
+for name in ['packages/storage/src/sql/core-preflight-reads.sql','packages/storage/src/migrations/manifest.json','tests/integration/core-query-plans.test.ts','tests/integration/core-execution-upgrade.test.ts','tests/integration/plugin-catalog-upgrade.test.ts','tests/integration/lifecycle.test.ts']:
+    source=root/name;target=destination/('source-'+name.replace('/','__')+'.raw');assert not target.exists()
+    shutil.copyfile(source,target);digest=hashlib.sha256(source.read_bytes()).hexdigest();assert hashlib.sha256(target.read_bytes()).hexdigest()==digest
+    sources[name]={'archive':str(target.relative_to(root)),'sha256':digest,'bytes':source.stat().st_size}
+state=json.loads((private/'preflight-plan-stage.json').read_text())
+validation={'at':datetime.now(timezone.utc).isoformat(),'state':state,'temporary_files':manifest,'source_snapshots':sources,'source_scope':'1810 preflight only; no receipt product changes; prototypes archived for diagnosis, not delivered as regressions','actual_commands':'Stable Bun1.4.4 with both native env files for all PG tests/benchmark; native55452 and AOFalways+replica1; full milestone gates remain pending','protected_resources':'Original27 database names/OIDs, referenceDB and PIDs40766/40771 retained; main, no commit/push/deploy'}
+for source in sorted(owned):
+    record=manifest[source.name];target=root/record['archive']
+    assert hashlib.sha256(source.read_bytes()).hexdigest()==record['sha256']
+    assert hashlib.sha256(target.read_bytes()).hexdigest()==record['sha256']
+    source.unlink();record['temporary_source_removed']=not source.exists()
+assert all(record['temporary_source_removed'] for record in manifest.values())
+(destination/'validation.json.raw').write_text(json.dumps(validation,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'temporary_files_archived_verified_removed':len(manifest),'source_snapshots':len(sources),'validation':str((destination/'validation.json.raw').relative_to(root))}))

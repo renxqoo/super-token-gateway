@@ -1,0 +1,47 @@
+import { mkdir, readFile, rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { withFinancial, prepareFinancialAdmission } from '../../tests/support/financial-execution.ts';
+import { createSettlementStore } from '@gateway/storage/settlement';
+const directory=resolve('.local/performance-implementation/receipt-plan-probe');
+await mkdir(directory,{recursive:true,mode:0o700});
+await withFinancial(async(f,db)=>{
+ const setup=await f.bootstrap();const client=f.client();await client.startup();
+ const request=await prepareFinancialAdmission(setup,client);const admitted=await request.admit();
+ await client.execution('execution_begin_v1',request.beginData(admitted.receipt),{deadlineAt:request.deadline});
+ const fact=client.signEvidence({event_id:crypto.randomUUID(),attempt_id:request.attemptId,permit_epoch:'1',source:'execution',source_revision:'1',finality:'FINAL',usage:{input_tokens:'30',output_tokens:'15'},final_dimensions:['input_tokens','output_tokens'],attempt_state:'SUCCEEDED',request_state:'SUCCEEDED'});
+ const result=await createSettlementStore(db).persist([{events:[fact]}]);if(result[0]?.status!=='COMMITTED')throw new Error(JSON.stringify(result));
+ const template=(await db`SELECT id FROM core_evidence_receipts WHERE event_id=${fact.event_id}`)[0].id;
+ const probe={attempt_id:request.attemptId,origin_identity:fact.origin_identity,source:'execution',source_revision:'20000'};
+ const tag=`$probe_${crypto.randomUUID().replaceAll('-','')}$`;const literal=`${tag}${JSON.stringify(probe)}${tag}::jsonb`;
+ const script=`\\set ON_ERROR_STOP on
+\\timing on
+LOAD 'auto_explain';
+SET client_min_messages=log;
+SET auto_explain.log_nested_statements=on;
+SET auto_explain.log_format=json;
+SET auto_explain.log_analyze=on;
+SET auto_explain.log_timing=off;
+SET auto_explain.log_min_duration=-1;
+CREATE FUNCTION public.funding_probe_claim(ev jsonb) RETURNS uuid LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$DECLARE prior public.core_evidence_receipts%ROWTYPE;BEGIN
+ SELECT * INTO prior FROM public.core_evidence_receipts r WHERE r.attempt_id=(ev->>'attempt_id')::uuid AND r.origin_identity=ev->>'origin_identity' AND r.source=ev->>'source' AND r.source_revision=(ev->>'source_revision')::numeric AND r.revision_claim;
+ RETURN prior.id;
+END $$;
+DO $$BEGIN FOR i IN 1..7 LOOP PERFORM public.funding_probe_claim(${literal});END LOOP;END $$;
+WITH seed AS MATERIALIZED(SELECT to_jsonb(r) obj FROM public.core_evidence_receipts r WHERE id='${template}'::uuid),payloads AS MATERIALIZED(SELECT obj||jsonb_build_object('id',gen_random_uuid(),'event_id',gen_random_uuid(),'source_revision',(1000+x)::text) obj FROM seed CROSS JOIN generate_series(1,10000) x)
+INSERT INTO public.core_evidence_receipts SELECT r.* FROM payloads p CROSS JOIN LATERAL jsonb_populate_record(NULL::public.core_evidence_receipts,p.obj) r;
+SELECT 'before_analyze';
+SET auto_explain.log_min_duration=0;
+SELECT public.funding_probe_claim(${literal});
+SET auto_explain.log_min_duration=-1;
+ANALYZE public.core_evidence_receipts;
+SELECT 'after_analyze';
+SET auto_explain.log_min_duration=0;
+SELECT public.funding_probe_claim(${literal});
+SET auto_explain.log_min_duration=-1;
+`;
+ const file=resolve(directory,'probe.sql');await Bun.write(file,script);const u=new URL(process.env.DATABASE_URL!);u.pathname=`/${(await db`SELECT current_database() name`)[0].name}`;
+ const child=Bun.spawn([resolve('.local/toolchain/pg17/bin/psql'),'-X','-f',file],{env:{PATH:process.env.PATH,PGHOST:u.hostname,PGPORT:u.port,PGDATABASE:decodeURIComponent(u.pathname.slice(1)),PGUSER:decodeURIComponent(u.username),PGPASSWORD:decodeURIComponent(u.password)},stdin:'ignore',stdout:Bun.file(resolve(directory,'stdout.log')),stderr:Bun.file(resolve(directory,'plans.log'))});
+ const timer=setTimeout(()=>child.kill('SIGKILL'),20000);let code;try{code=await child.exited;}finally{clearTimeout(timer);await rm(file,{force:true});}
+ const plans=await readFile(resolve(directory,'plans.log'),'utf8');const stdout=await readFile(resolve(directory,'stdout.log'),'utf8');await Bun.write(resolve(directory,'result.json'),JSON.stringify({scope:'isolated production-DDL query-plan probe; 10000 cloned receipt rows are synthetic planner data, not valid financial history or capacity evidence',exit_code:code,seq_scans:(plans.match(/"Node Type": "Seq Scan"/g)||[]).length,index_scans:(plans.match(/"Node Type": "Index Scan"/g)||[]).length,stdout},null,2)+'\n');
+ console.log(JSON.stringify({exit_code:code,seq_scans:(plans.match(/"Node Type": "Seq Scan"/g)||[]).length,index_scans:(plans.match(/"Node Type": "Index Scan"/g)||[]).length}));if(code!==0)throw new Error('plan probe failed');
+});

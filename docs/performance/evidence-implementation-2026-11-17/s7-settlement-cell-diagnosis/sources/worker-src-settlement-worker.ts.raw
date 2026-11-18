@@ -1,0 +1,43 @@
+import type { SQL } from "bun";
+import { UsageConsumer, evidenceChannel, type UsageQueueOptions } from "@gateway/runtime";
+import { createSettlementStore } from "@gateway/storage/settlement";
+import { createSettlementProcessor } from "./processor.ts";
+
+export function createSettlementWorker(
+  options: UsageQueueOptions & {
+    db: SQL;
+    concurrency?: number;
+    onRejected?: (count: number) => void;
+    onQuarantined?: (count: number) => void;
+    onCommitted?: (groups: number, lagSeconds: number) => void;
+  },
+) {
+  const store = createSettlementStore(options.db);
+  const processor = createSettlementProcessor({
+    persist: (groups) => store.persist(groups),
+    async fundingKeys(groups) {
+      const attempts = [...new Set(groups.flatMap((g) => g.events.map((e) => e.attempt_id)))];
+      const rows = await options.db<{ attempt_id: string; key: string }[]>`SELECT attempt_id::text,
+        account_id::text||':'||currency||':'||funding_cell::text AS key
+        FROM upstream_holds WHERE attempt_id=ANY(${attempts}::uuid[])`;
+      const keys = new Map(rows.map((row) => [row.attempt_id, row.key]));
+      return new Map(groups.map((g) => [g, [...new Set(g.events.map((e) =>
+        keys.get(e.attempt_id.toLowerCase()) ?? e.attempt_id.toLowerCase()
+      ))]]));
+    },
+    ...(options.onRejected ? { onRejected: options.onRejected } : {}),
+    ...(options.onQuarantined ? { onQuarantined: options.onQuarantined } : {}),
+  });
+  const consumer = new UsageConsumer({
+    ...options,
+    channel: evidenceChannel,
+    process: (groups) => processor.process(groups),
+  });
+  let closing: Promise<void> | undefined;
+  return {
+    ready: () => consumer.ready(),
+    healthy: () => consumer.healthy(),
+    stats: () => processor.stats(),
+    close: () => (closing ??= consumer.close().finally(() => processor.close())),
+  };
+}

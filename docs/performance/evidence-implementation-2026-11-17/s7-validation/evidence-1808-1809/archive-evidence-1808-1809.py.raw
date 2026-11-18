@@ -1,0 +1,46 @@
+from pathlib import Path
+from datetime import datetime, timezone
+import hashlib
+import json
+import shutil
+
+root = Path.cwd()
+private = root / '.local/performance-implementation'
+destination = root / 'docs/performance/evidence-implementation-2026-11-17/s7-validation/evidence-1808-1809'
+destination.mkdir(parents=True, exist_ok=True)
+owned = set()
+for pattern in ['s7-evidence-*.log', 's7-funding-*.log', 's7-1808-*.log', 's7-1809-*.log']:
+    owned.update(private.glob(pattern))
+for name in ['s7-funding-backup.json', 's7-funding-gate-status.json', 's7-funding-manual-cleanup.json', 's7-funding-resources-before-cleanup.json', 's7-1808-statements-cleanup.json', 's7-1809-statements-cleanup.json', 's7-1809-resources-after.json', 'render-evidence-migration.py', 'inspect-funding-resources.ts', 'verify-funded-backup.ts', 'cleanup-1808-statements.ts', 'cleanup-1809-statements.ts', 'archive-1808-diagnostic.py', 'archive-1809-diagnostic.py', 'inspect-1809-cleanup.ts', 'archive-evidence-1808-1809.py']:
+    path = private / name
+    assert path.is_file(), name
+    owned.add(path)
+manifest = {}
+for source in sorted(owned):
+    target = destination / (source.name + '.raw')
+    assert not target.exists(), str(target)
+    shutil.copyfile(source, target)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == digest
+    manifest[str(source.relative_to(root))] = {'archive': str(target.relative_to(root)), 'sha256': digest, 'bytes': source.stat().st_size, 'temporary_source_removed': False}
+snapshots = {}
+for name in ['packages/storage/src/sql/core-evidence-batch.sql', 'packages/storage/src/sql/core-evidence-locks.sql', 'packages/storage/src/migrations/manifest.json', 'tests/integration/core-evidence-batch.test.ts', 'tests/integration/core-execution-upgrade.test.ts', 'tests/integration/core-management.test.ts', 'tests/integration/schema.test.ts', 'tests/integration/plugin-catalog-upgrade.test.ts', 'tests/integration/gateway-lifecycle.test.ts', 'tests/integration/core-routing-health.test.ts', 'tests/integration/gateway-chat.test.ts', 'tests/integration/lifecycle.test.ts', 'scripts/bench-system.ts', 'scripts/benchmark-metrics.ts']:
+    source = root / name
+    target = destination / ('source-' + name.replace('/', '__') + '.raw')
+    assert not target.exists(), str(target)
+    shutil.copyfile(source, target)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == digest
+    snapshots[name] = {'archive': str(target.relative_to(root)), 'sha256': digest, 'bytes': source.stat().st_size, 'state': 'current1809; not a claim that historical1808 full gates ran this test snapshot'}
+status = json.loads((private / 's7-funding-gate-status.json').read_text())
+validation = {'at': datetime.now(timezone.utc).isoformat(), 'status': 'goal active; formal stable60, two300 diagnostics failed; final full gates required', 'gate_status': status, 'temporary_files': manifest, 'current_source_snapshots': snapshots, 'cleanup_refusal': 'First capacity-directory cleanup refused unarchived load.log/upstream.log/public certificate. All six files were subsequently SHA archived before deletion.', 'preserved': 'Original27 database names/OIDs, reference database and PIDs40766/40771; no commit/push/deploy'}
+for source in sorted(owned):
+    record = manifest[str(source.relative_to(root))]
+    target = root / record['archive']
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == record['sha256']
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == record['sha256']
+    source.unlink()
+    record['temporary_source_removed'] = not source.exists()
+assert all(record['temporary_source_removed'] for record in manifest.values())
+(destination / 'validation.json.raw').write_text(json.dumps(validation, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({'temporary_files_archived_verified_removed': len(manifest), 'current_source_snapshots': len(snapshots), 'validation': str((destination / 'validation.json.raw').relative_to(root))}))

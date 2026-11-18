@@ -1,0 +1,4 @@
+$ bun fmt --no-script --check
+tests/integration/schema.test.ts
+1 file needs formatting. Run bun fmt to fix it.
+error: script "fmt:check" exited with code 1

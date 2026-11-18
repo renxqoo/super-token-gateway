@@ -151,3 +151,24 @@ test("JSON metadata cannot carry headers, targets or credential fields into a gu
     expect(host.snapshot().json.bytes).toBe(0);
   }
 });
+
+test("route preparation cannot start work for a slot already reserved by another request", () => {
+  const first = create();
+  const second = create();
+  try {
+    const release = host.reservePreparation();
+    expect(() => host.reservePreparation()).toThrow("ATTEMPT_BUDGET");
+    expect(() => create()).toThrow("ATTEMPT_BUDGET");
+    release();
+    const bound = create();
+    try {
+      release();
+      expect(() => host.reservePreparation()).toThrow("ATTEMPT_BUDGET");
+    } finally {
+      bound.dispose();
+    }
+  } finally {
+    first.dispose();
+    second.dispose();
+  }
+});

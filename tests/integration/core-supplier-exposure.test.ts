@@ -15,8 +15,10 @@ async function exposure(
     risk?: Record<string, string>;
   },
 ) {
+  const price = crypto.randomUUID();
+  await db`INSERT INTO cost_versions(id,currency,rates) VALUES(${price},'USD',${input.rates}::jsonb)`;
   return (
-    await db`SELECT core_supplier_exposure_v1(${input.rates}::jsonb,${input.estimated}::jsonb,${input.usage}::jsonb,${input.finals}::text[],${input.risk ?? {}}::jsonb) value`
+    await db`SELECT core_funding.exposure_v1(${price}::uuid,${input.estimated}::jsonb,${input.usage}::jsonb,${input.finals}::text[],${input.risk ?? {}}::jsonb) value`
   )[0].value as {
     cost_atoms: string;
     reserve_atoms: string;

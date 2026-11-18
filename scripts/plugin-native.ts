@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { publishPluginExecutable } from "../packages/plugin-host/src/executable.ts";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const go = process.env.PLUGIN_GO ?? "go";
 const args = process.argv.slice(2);
@@ -67,3 +68,4 @@ for (const cmd of commands) {
   });
   if ((await child.exited) !== 0) throw new Error("PLUGIN_NATIVE_CHECK");
 }
+if (args[0] === "build") await publishPluginExecutable(`${root}.local/plugin-host`);

@@ -1,0 +1,246 @@
+{
+  "stage": "1812 keyed settlement reads and Worker scheduling comparison",
+  "label": "s7-worker-four-way-100-a",
+  "target": 100,
+  "rate": 101,
+  "runtime_migration": 2026111812,
+  "worker_schedule": "v2",
+  "exit_code": 0,
+  "valid": true,
+  "capacity_passed": true,
+  "failures": [],
+  "online_capacity": {
+    "fullyCompletedByWindow": 6047,
+    "minuteCompletions": [6047],
+    "matchedRequests": 6060,
+    "httpOnly": 0,
+    "ackOnly": 106,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 205,
+    "receiptAckedRequestsByWindow": 6029,
+    "ackedEventsByWindow": 12270,
+    "sampledBeforeWindowEndMs": 151,
+    "httpByWindow": 6047
+  },
+  "window_complete_rps": 100.78333333333333,
+  "http": {
+    "offered": 6060,
+    "shed": 0,
+    "statuses": {
+      "200": 6060
+    },
+    "latency_ms": {
+      "p50": 195.68,
+      "p95": 248.33,
+      "p99": 295.31,
+      "p999": 402.1
+    }
+  },
+  "process_cpu_ms_per_admitted": {
+    "gateway": 2.280246513136555,
+    "core_api": 2.0499513460914693,
+    "core_worker": 0.4832954914044761,
+    "upstream": 0.18488485241647745,
+    "redis_admission": 0.5870904962698685,
+    "redis_evidence": 0.22380797924099977,
+    "redis_evidence_replica": 0.1394745377878695,
+    "pg": 17.864093415504378,
+    "pg_shared": 0.004865390853065092
+  },
+  "service_cpu_ms_per_admitted": 23.627959779435617,
+  "cpu_sampling_errors": 0,
+  "pg_top_level": {
+    "calls": 154429,
+    "exec_ms": 210218.07154100004,
+    "wal_bytes": 370174889,
+    "wal_records": 2413149,
+    "calls_per_request": 25.045248134933505,
+    "exec_ms_per_request": 34.09310274748622,
+    "wal_bytes_per_request": 60034.85063250081,
+    "wal_records_per_request": 391.36376905611417
+  },
+  "pg_valid": true,
+  "near_59s": {
+    "at": 58973,
+    "queue": {
+      "waiting": 0,
+      "active": 2,
+      "delayed": 0,
+      "failed": 0
+    },
+    "persistence": {
+      "calls": 2599,
+      "jobs": 2723,
+      "groups": 7269,
+      "events": 14538,
+      "max_jobs": 4,
+      "max_groups": 14,
+      "lock_conflicts": 1339,
+      "errors": 0,
+      "active_jobs": 1
+    }
+  },
+  "last_persistence_sample": {
+    "calls": 2679,
+    "jobs": 2803,
+    "groups": 7527,
+    "events": 15054,
+    "max_jobs": 4,
+    "max_groups": 14,
+    "lock_conflicts": 1361,
+    "errors": 0,
+    "active_jobs": 1
+  },
+  "accounting": {
+    "requests": 6166,
+    "attempts": 6166,
+    "succeeded_attempts": 6166,
+    "usage_events": 12332,
+    "usage_requests": 6166,
+    "unexpected_receipts": 0,
+    "precise_usage": 12332,
+    "precise_charges": 6166,
+    "settled_holds": 6166,
+    "reserved": "0",
+    "spent": "616600",
+    "debt": "0",
+    "acknowledged": 12332,
+    "settlement_journals": 6166,
+    "unbalanced_journals": 0,
+    "supplier_cost_heads": 6166,
+    "conflicts": 0,
+    "inconsistent_hold_reserves": 0,
+    "inconsistent_funding_budgets": 0,
+    "inconsistent_cell_reserves": 0,
+    "unbalanced_supplier_journals": 0
+  },
+  "supplier": {
+    "balance": "999999999999636206",
+    "reserved": "0",
+    "spent": "363794",
+    "accounts": 1
+  },
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os_release": "27.0.0",
+    "cpu_model": "Apple M6",
+    "cpu_count": 12,
+    "memory_bytes": 25769803776,
+    "bun": "1.4.4",
+    "artifacts": {
+      "dist/core-api/main.js": "11c132ac299ea371bddb143a4acb06539473260cb78760fc4730038dd03c4405",
+      "dist/core-api/platform/management.js": "3179c977fd58b85556a87f8e140717c1d0a47d52c1b6d5a2b54ca0c70ec36c1c",
+      "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+      "dist/core-worker/main.js": "14c4c5ab068fa1634210ef40b51a0e795947db9ce21ad8e9ba3586b0c4369c1b",
+      "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+      "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+      "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+      "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+      "dist/manifest.json": "dbfc279770b0b5ac101edddd140844f3ab1fb946151b371de086d263b2f8b81b"
+    }
+  },
+  "database_settings": [
+    {
+      "name": "checkpoint_timeout",
+      "setting": "300",
+      "unit": "s"
+    },
+    {
+      "name": "effective_cache_size",
+      "setting": "524288",
+      "unit": "8kB"
+    },
+    {
+      "name": "fsync",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "full_page_writes",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "max_connections",
+      "setting": "200",
+      "unit": null
+    },
+    {
+      "name": "max_wal_size",
+      "setting": "1024",
+      "unit": "MB"
+    },
+    {
+      "name": "server_version",
+      "setting": "17.11",
+      "unit": null
+    },
+    {
+      "name": "shared_buffers",
+      "setting": "32768",
+      "unit": "8kB"
+    },
+    {
+      "name": "synchronous_commit",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "wal_compression",
+      "setting": "off",
+      "unit": null
+    },
+    {
+      "name": "work_mem",
+      "setting": "4096",
+      "unit": "kB"
+    }
+  ],
+  "redis_settings": {
+    "admission": {
+      "maxmemory-policy": "noeviction",
+      "aof-load-truncated": "yes",
+      "appendfsync": "everysec",
+      "appendonly": "yes"
+    },
+    "evidence": {
+      "maxmemory-policy": "noeviction",
+      "appendonly": "yes",
+      "aof-load-truncated": "no",
+      "appendfsync": "always"
+    }
+  },
+  "database_bytes": 260563471,
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "files": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-four-way-100-a/audit.json.raw",
+      "sha256": "d21b54599c9257c5a1e09c754a36eea03c593e779362286864f0c5e4d431027c",
+      "bytes": 526162
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-four-way-100-a/http.json.raw",
+      "sha256": "7fc1d708d1b9d66a0e19820557305178158b63e94bb5c6b2322b735e75602eca",
+      "bytes": 8988
+    },
+    "http.json.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-four-way-100-a/http.json.identities.tsv",
+      "sha256": "513dd69127b294f3f162126a2b9d0c8638c86345cd5ef79621d520578e52d03d",
+      "bytes": 309060
+    },
+    "ack.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-four-way-100-a/ack.identities.tsv",
+      "sha256": "861a54b6b28d4d8be49eab1a4a5e79e755a41bb01ddb602030efa476a440e69d",
+      "bytes": 314466
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-four-way-100-a/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    }
+  }
+}

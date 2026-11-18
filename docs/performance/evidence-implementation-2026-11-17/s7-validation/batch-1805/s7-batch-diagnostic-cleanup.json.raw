@@ -1,0 +1,69 @@
+{
+  "at": "2026-11-17T19:11:45.798Z",
+  "databases": [
+    "gateway_test_foundation_df1d2da646c2484d9c979e61f36a6493",
+    "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+    "gateway_test_foundation_6d21e3c99b98462daeae0b5889441906"
+  ],
+  "roles": [
+    "gateway_identity_api_f50ace772eb24b37ad45dfb3edb4f499",
+    "gateway_identity_deployer_f50ace772eb24b37ad45dfb3edb4f499",
+    "gateway_identity_verifier_f50ace772eb24b37ad45dfb3edb4f499",
+    "gateway_t04b1_22610626cbec4e02b146d7a929cc6212",
+    "gateway_identity_api_b812fabaf6544e928707250c59ea3b9d",
+    "gateway_identity_deployer_b812fabaf6544e928707250c59ea3b9d",
+    "gateway_identity_verifier_b812fabaf6544e928707250c59ea3b9d",
+    "gateway_t04b1_37f99834f90f48ffac616f4b6ab47ca7",
+    "gateway_identity_api_f15cec5b15d14d2d97be4ca9622ead2d",
+    "gateway_identity_deployer_f15cec5b15d14d2d97be4ca9622ead2d",
+    "gateway_identity_verifier_f15cec5b15d14d2d97be4ca9622ead2d",
+    "gateway_t04b1_e936959fb34d42d6a3dde8fdb23bce10"
+  ],
+  "directories": [
+    "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-identity-1ASC4W",
+    "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-t04b1-t66ak2",
+    "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-identity-CQ47zE",
+    "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-t04b1-HTR8QD",
+    "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-identity-RSVsIt",
+    "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-t04b1-RA2Peh"
+  ],
+  "redis": [
+    {
+      "namespace": "financial_25ed3c2cdee941d2bfd30246c7e53510",
+      "removed": 1
+    },
+    {
+      "namespace": "financial_30e1ffe086664f0b8bc9e5b9011d163f",
+      "removed": 1
+    },
+    {
+      "namespace": "financial_77072b221f8343eb93f4a45cdd9cb6be",
+      "removed": 1
+    }
+  ],
+  "ownership": [
+    {
+      "database": "gateway_test_foundation_df1d2da646c2484d9c979e61f36a6493",
+      "config_database_equal": true,
+      "process_pids_absent": true,
+      "database_backends": 0,
+      "role_dependencies_only_owned_database": true
+    },
+    {
+      "database": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+      "config_database_equal": true,
+      "process_pids_absent": true,
+      "database_backends": 0,
+      "role_dependencies_only_owned_database": true
+    },
+    {
+      "database": "gateway_test_foundation_6d21e3c99b98462daeae0b5889441906",
+      "config_database_equal": true,
+      "process_pids_absent": true,
+      "database_backends": 0,
+      "role_dependencies_only_owned_database": true
+    }
+  ],
+  "remaining": [],
+  "foundation_count": 27
+}

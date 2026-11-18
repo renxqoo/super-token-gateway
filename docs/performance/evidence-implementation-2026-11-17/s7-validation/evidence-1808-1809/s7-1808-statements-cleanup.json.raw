@@ -1,0 +1,39 @@
+{
+  "at": "2026-11-17T22:00:53.338Z",
+  "scope": "Only absent databases linked to this task's audits through deleted service role OIDs",
+  "before": [
+    {
+      "entries": 4923,
+      "dealloc": "38896",
+      "stats_reset": "2026-11-17 09:56:51.526972+08"
+    }
+  ],
+  "after": [
+    {
+      "entries": 4621,
+      "dealloc": "38896",
+      "stats_reset": "2026-11-17 09:56:51.526972+08"
+    }
+  ],
+  "reset": [
+    {
+      "dbid": "39540930",
+      "users": [
+        "39543171",
+        "39543182"
+      ],
+      "statements": 17,
+      "sources": [
+        {
+          "path": ".local/capacity/bench-c0d3ab42f01c492088f3d9c04759a60d/audit.json",
+          "database": "gateway_test_foundation_8be6d8e258ff4a7aab70a3c66cd654f9",
+          "users": [
+            "39543182",
+            "39543171",
+            "18024"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,198 @@
+{
+  "stage": "S7 worker cross-job batching with 1811 schema diagnostic",
+  "label": "s7-worker-batch-300-failed",
+  "diagnostic": true,
+  "excluded_from_stability": true,
+  "runtime_migration": 2026111811,
+  "target": 300,
+  "rate": 301,
+  "pluginRuntime": "builtin-worker",
+  "requests": 15039,
+  "valid": false,
+  "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+  "capacityPassed": false,
+  "p99": 1253.75,
+  "onlineCapacity": {
+    "fullyCompletedByWindow": 5204,
+    "minuteCompletions": [5204],
+    "matchedRequests": 14947,
+    "httpOnly": 0,
+    "ackOnly": 92,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 41236,
+    "receiptAckedRequestsByWindow": 5201,
+    "ackedEventsByWindow": 10586,
+    "sampledBeforeWindowEndMs": 217,
+    "httpByWindow": 14760
+  },
+  "http": {
+    "offered": 18060,
+    "shed": 111,
+    "completed": 17949,
+    "succeeded": 14947,
+    "invalid": 3002,
+    "statuses": {
+      "200": 14947,
+      "503": 3002
+    },
+    "gateway_errors": {
+      "overloaded": 3002
+    },
+    "transport_errors": {}
+  },
+  "window_complete_rps": 86.73333333333333,
+  "process_cpu_ms": {
+    "gateway": 1.980849790544584,
+    "core_api": 1.6144690471440921,
+    "core_worker": 0.5871401024004257,
+    "upstream": 0.13032781434935833,
+    "redis_admission": 0.526630760023938,
+    "redis_evidence": 0.077132788084312,
+    "redis_evidence_replica": 0.04920539929516462,
+    "pg": 23.967684021543985,
+    "pg_shared": 0.02061307267770446
+  },
+  "total_cpu_ms": 28.803111909036502,
+  "cpu_denominator": "all admitted requests including warmup; CPU also includes rejected HTTP work, so this is not all-success per-request cost",
+  "pg": {
+    "calls": 261942,
+    "exec_ms": 412584.0536010001,
+    "wal_bytes": 971845004,
+    "wal_records": 5691393,
+    "calls_per_request": 17.417514462397765,
+    "exec_ms_per_request": 27.434274459804517,
+    "wal_bytes_per_request": 64621.650641665,
+    "wal_records_per_request": 378.442250149611
+  },
+  "pg_valid": true,
+  "pg_errors": [],
+  "cpu_sampling_errors": 0,
+  "accounting": {
+    "requests": 15039,
+    "attempts": 15039,
+    "succeeded_attempts": 15039,
+    "usage_events": 30078,
+    "usage_requests": 15039,
+    "unexpected_receipts": 0,
+    "precise_usage": 30078,
+    "precise_charges": 15039,
+    "settled_holds": 15039,
+    "reserved": "0",
+    "spent": "1503900",
+    "debt": "0",
+    "acknowledged": 30078,
+    "settlement_journals": 15039,
+    "unbalanced_journals": 0,
+    "supplier_cost_heads": 15039,
+    "conflicts": 0,
+    "inconsistent_hold_reserves": 0,
+    "inconsistent_funding_budgets": 0,
+    "inconsistent_cell_reserves": 0,
+    "unbalanced_supplier_journals": 0
+  },
+  "supplier": {
+    "balance": "999999999999112699",
+    "reserved": "0",
+    "spent": "887301",
+    "accounts": 1
+  },
+  "wallet_mismatches": 982,
+  "artifacts": {
+    "dist/core-api/main.js": "a14c85d4ae5595f0c7a7d4983cd6aff829aa15b6237cecb9ef49053b4f51ecfe",
+    "dist/core-api/platform/management.js": "b6bd7769e2315b0a6bf675effb632ba4510a1d9c7c65aaf39b8f85d87a71df9c",
+    "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+    "dist/core-worker/main.js": "64bc9a0e5e89371c6cb44827c2c4d4a90a66b9c89999de736d85e83a914bfa84",
+    "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+    "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+    "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+    "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+    "dist/manifest.json": "545eb9c1437892e055bbe8809daeedcf51a4f8ff76c2f826611bdd7796af0979"
+  },
+  "command": [
+    "env",
+    "QUEUE_REQUIRED_REPLICAS=1",
+    ".local/toolchain/bun-1.4.4/bun",
+    "--env-file=.env.local",
+    "--env-file=.local/native-gate.env",
+    "scripts/bench-system.ts",
+    "--online-capacity",
+    "--seconds",
+    "60",
+    "--instances",
+    "1",
+    "--wallets",
+    "1000",
+    "--supplier-accounts",
+    "1",
+    "--concurrency",
+    "256",
+    "--warmup-concurrency",
+    "16",
+    "--worker-concurrency",
+    "8",
+    "--gateway-inflight",
+    "10000",
+    "--drain-seconds",
+    "120",
+    "--request-timeout-ms",
+    "30000",
+    "--plugin-runtime",
+    "builtin-worker",
+    "--target-rps",
+    "300",
+    "--rate",
+    "301",
+    "--upstream",
+    "standard"
+  ],
+  "exit_code": 1,
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "source_directory": ".local/capacity/bench-80e2c28135544d28a842248336909cba",
+  "database": "gateway_test_foundation_8e64150800a24733bf40816f2d49ba56",
+  "database_bytes": 617608883,
+  "archive_manifest": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-batch-300-failed/audit.json.raw",
+      "sha256": "a321d54e7ffab097e17cc0ac806e7bdf245cdb3b07a699c1135282fa53e0c73b",
+      "bytes": 815472
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-batch-300-failed/http.json.raw",
+      "sha256": "f277e87e595a99f4b3e1338b24c5e961395b2b6bbd27e23625748fbd606f7d0f",
+      "bytes": 10072
+    },
+    "http.json.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-batch-300-failed/http.json.identities.tsv",
+      "sha256": "eeb6370682ece8d9c58a9b1c247d6864deb26ae4b0fb6f6eec001ef902e5ea06",
+      "bytes": 762297
+    },
+    "ack.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-batch-300-failed/ack.identities.tsv",
+      "sha256": "fc9f35b5287da7920b478d577dff239728b8f94221881d25716a25c7852a3125",
+      "bytes": 766989
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-batch-300-failed/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    },
+    "load.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-batch-300-failed/load.log",
+      "sha256": "f277e87e595a99f4b3e1338b24c5e961395b2b6bbd27e23625748fbd606f7d0f",
+      "bytes": 10072
+    },
+    "upstream.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-batch-300-failed/upstream.log",
+      "sha256": "dff63a8fd20277f85ab6c066d9d6dc0e4467086ae37c52391811670ba09d49ad",
+      "bytes": 48
+    },
+    "upstream.pem": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-batch-300-failed/upstream.pem",
+      "sha256": "2bf23baec1de350da4b758f0e1c2c5f4aacd9abbee82d223df5d5fac710953f4",
+      "bytes": 1013
+    }
+  }
+}

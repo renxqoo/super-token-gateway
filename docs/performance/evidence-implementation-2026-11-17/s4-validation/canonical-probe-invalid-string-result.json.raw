@@ -1,0 +1,145 @@
+{
+  "scope": "Private equivalent canonical SQL prototype, not service capacity or process CPU",
+  "identities": [
+    {
+      "label": "admit-data",
+      "bytes": 2336,
+      "sha256": "7b8323f6af12a0b8e3ed8229f5f96526a90364db89bfd7eff887dbc4b2566329"
+    },
+    {
+      "label": "command-proof",
+      "bytes": 2598,
+      "sha256": "b074733f08b7066ee39600ff103903a2de3cdf47a46b4c1e8c77c62257911923"
+    },
+    {
+      "label": "authorization-plan",
+      "bytes": 1843,
+      "sha256": "9622c46bd3465a8897c871cd7818357b0d4a4f8496051098156f5e039e98fa31"
+    },
+    {
+      "label": "candidate",
+      "bytes": 1405,
+      "sha256": "e135007b869d06a23cb63903df1364e7f5f7792c9633029768301ac590df6c65"
+    },
+    {
+      "label": "unicode-vector",
+      "bytes": 80,
+      "sha256": "ff171a4530d95586819d1a79465f2ff62ee59031fa1159ddf4ade07319816c80"
+    }
+  ],
+  "samples": [
+    {
+      "label": "admit-data",
+      "variant": "old",
+      "calls": 200,
+      "elapsed_ms": 2.9014159999999265,
+      "bytes": "507092"
+    },
+    {
+      "label": "admit-data",
+      "variant": "proposed",
+      "calls": 200,
+      "elapsed_ms": 3.417457999999897,
+      "bytes": "507092"
+    },
+    {
+      "label": "admit-data",
+      "variant": "proposed",
+      "calls": 200,
+      "elapsed_ms": 3.1215830000001006,
+      "bytes": "507092"
+    },
+    {
+      "label": "admit-data",
+      "variant": "old",
+      "calls": 200,
+      "elapsed_ms": 2.8890420000000177,
+      "bytes": "507092"
+    },
+    {
+      "label": "command-proof",
+      "variant": "old",
+      "calls": 200,
+      "elapsed_ms": 3.562125000000151,
+      "bytes": "565492"
+    },
+    {
+      "label": "command-proof",
+      "variant": "proposed",
+      "calls": 200,
+      "elapsed_ms": 3.413332999999966,
+      "bytes": "565492"
+    },
+    {
+      "label": "command-proof",
+      "variant": "proposed",
+      "calls": 200,
+      "elapsed_ms": 3.4986250000001746,
+      "bytes": "565492"
+    },
+    {
+      "label": "command-proof",
+      "variant": "old",
+      "calls": 200,
+      "elapsed_ms": 3.3528329999999187,
+      "bytes": "565492"
+    },
+    {
+      "label": "authorization-plan",
+      "variant": "old",
+      "calls": 200,
+      "elapsed_ms": 3.0457920000001195,
+      "bytes": "400892"
+    },
+    {
+      "label": "authorization-plan",
+      "variant": "proposed",
+      "calls": 200,
+      "elapsed_ms": 2.700417000000016,
+      "bytes": "400892"
+    },
+    {
+      "label": "authorization-plan",
+      "variant": "proposed",
+      "calls": 200,
+      "elapsed_ms": 2.6704999999999472,
+      "bytes": "400892"
+    },
+    {
+      "label": "authorization-plan",
+      "variant": "old",
+      "calls": 200,
+      "elapsed_ms": 2.755292000000054,
+      "bytes": "400892"
+    },
+    {
+      "label": "candidate",
+      "variant": "old",
+      "calls": 200,
+      "elapsed_ms": 2.483208000000104,
+      "bytes": "314492"
+    },
+    {
+      "label": "candidate",
+      "variant": "proposed",
+      "calls": 200,
+      "elapsed_ms": 2.3158750000000055,
+      "bytes": "314492"
+    },
+    {
+      "label": "candidate",
+      "variant": "proposed",
+      "calls": 200,
+      "elapsed_ms": 2.2615410000000793,
+      "bytes": "314492"
+    },
+    {
+      "label": "candidate",
+      "variant": "old",
+      "calls": 200,
+      "elapsed_ms": 2.2997080000000096,
+      "bytes": "314492"
+    }
+  ],
+  "cleaned": true
+}

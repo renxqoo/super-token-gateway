@@ -1,0 +1,28 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-funding-cells.test.ts:
+120 |         ])
+121 |       )[0],
+122 |     );
+123 |     expect((await adjust("-99999999999999999999999999999999999999", "3")).status).toBe(201);
+124 |     const last = await adjust("-1", "4");
+125 |     expect(last.status).toBe(201);
+                              ^
+error: expect(received).toBe(expected)
+
+Expected: 201
+Received: 409
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-funding-cells.test.ts:125:25)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:58:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:56:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:50:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:39:9)
+(fail) a frozen supplier accepts an in-range negative adjustment when the root alone is at its lower bound without releasing unknown reservation [2201.52ms]
+
+ 0 pass
+ 1 filtered out
+ 1 fail
+ 4 expect() calls
+Ran 1 test across 1 file. [2.30s]

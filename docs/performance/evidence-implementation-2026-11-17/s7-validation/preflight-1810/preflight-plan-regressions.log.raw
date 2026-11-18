@@ -1,0 +1,32 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-execution.test.ts:
+(pass) admission captures 60/30 at one third as 30 and begin never reissues transient material [2270.82ms]
+(pass) same project intent and proposed UUID conflicts never create a second customer hold [2310.74ms]
+(pass) retry retains UNKNOWN supplier exposure and shares one customer RPM and concurrency lease [2105.14ms]
+(pass) parallel begin and abort has one winner and never returns two grants [2162.25ms]
+(pass) credential rotation and committed key revocation block old unbegun snapshots without releasing funds [2250.33ms]
+(pass) failed admission audit and deferred supplier journal constraint leave no receipt or monetary effects [2165.66ms]
+(pass) two Core same-command loser has no cleanup authority over the winner active common leases [3391.36ms]
+(pass) per-attempt abort preserves common leases and the customer hold for the next physical attempt [2052.09ms]
+(pass) begin holds authorization through outer commit and sends no transient material before commit [2253.55ms]
+(pass) lost begin response stays committed and a new startup session can only query safe status [2509.48ms]
+(pass) logical CLOSE committed first blocks begin and next while its supplier and customer holds stay intact [2124.35ms]
+(pass) begin locked first forces concurrent CLOSE to retry then closes quota without releasing UNKNOWN money [2102.47ms]
+(pass) a busy wallet group leaves no command result while an independent wallet proceeds in the same Core [3244.89ms]
+(pass) strict projection unknown-field canaries reject at the real authenticated Core and never persist [2025.63ms]
+
+tests/integration/gateway-json-evidence.test.ts:
+(pass) a successful JSON response durably queues both signed facts together and settles customer and supplier exactly once [3421.90ms]
+
+tests/integration/core-first-chain.test.ts:
+(pass) real upstream HTTP JSON through the plugin host is signed, queued and settled for both parties exactly once [2811.49ms]
+(pass) a real upstream SSE stream through the plugin host settles from its final usage frame exactly once [2532.71ms]
+
+tests/integration/core-query-plans.test.ts:
+(pass) preflight does not scan unrelated permits after a cold table grows, including context-only requests [2466.21ms]
+
+ 18 pass
+ 0 fail
+ 175 expect() calls
+Ran 18 tests across 4 files. [44.28s]

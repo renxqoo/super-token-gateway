@@ -1,0 +1,10 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-query-plans.test.ts:
+{"preflightReadProbe":{"before":{"scans":"1","tuples":"1","indexes":"0","inserts":"4097"},"after":{"scans":"1","tuples":"1","indexes":"4"}}}
+(pass) preflight does not scan unrelated permits after a cold table grows, including context-only requests [2567.26ms]
+
+ 1 pass
+ 0 fail
+ 9 expect() calls
+Ran 1 test across 1 file. [2.64s]

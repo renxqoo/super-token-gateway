@@ -1,0 +1,104 @@
+import { expect, test } from "bun:test";
+import type { CoreVerifiedCallerProjection } from "@gateway/contracts";
+import { createInternalIdentityStore } from "@gateway/storage/internal-identity";
+import { sha256 } from "@gateway/runtime/crypto";
+import {
+  financialRpcSession,
+  prepareFinancialAdmission,
+  withFinancial,
+} from "../support/financial-execution.ts";
+
+test("preflight uses keyed permit reads and returns only lease state for an existing attempt", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap("USD", "1000");
+    const rpc = await financialRpcSession(f);
+    const request = await prepareFinancialAdmission(setup, rpc, {
+      deadline: new Date(Date.now() + 30000).toISOString(),
+    });
+    const identities = createInternalIdentityStore(db);
+    const session = (await identities.readStartupSession(rpc.identity.receipt.session_id))!;
+    const peer = (await identities.readPeerDirectory(session.certificate_sha256))!;
+    const projection: CoreVerifiedCallerProjection = {
+      service: session.service,
+      instance_id: session.instance_id,
+      certificate_sha256: session.certificate_sha256,
+      instance_revision: peer.instance_revision,
+      certificate_revision: peer.certificate_revision,
+      session_id: session.session_id,
+      incarnation_id: session.incarnation_id,
+      key_sha256: session.public_key_sha256,
+      session_revision: session.session_revision,
+      command_type: "execution_begin_v1",
+      command_id: crypto.randomUUID(),
+      raw_body_sha256: sha256("cold preflight query regression"),
+      method: "POST",
+      normalized_path: "/_internal/core/v1/begin",
+      deadline_at: request.deadline,
+      trace_id: "cold-preflight",
+    };
+    const connection = await db.reserve();
+    try {
+      await connection.unsafe("SET plan_cache_mode=force_generic_plan");
+      await connection.unsafe("ALTER TABLE execution_permits SET (autovacuum_enabled=false)");
+      await connection`CREATE TEMP TABLE plan_history_ids(id uuid,ordinal integer) ON COMMIT PRESERVE ROWS`;
+      await connection`INSERT INTO plan_history_ids SELECT gen_random_uuid(),x+1 FROM generate_series(1,4096) x`;
+      async function preflight(attempt: string | null) {
+        return (
+          await connection`SELECT core_preflight_v1(${projection}::jsonb,${request.context.context_id}::uuid,${attempt}::uuid) value`
+        )[0].value;
+      }
+      for (let i = 0; i < 8; i++) {
+        await preflight(null);
+      }
+      await request.admit();
+      await f.identity.a.stop();
+      await f.identity.b.stop();
+      await connection`INSERT INTO attempts SELECT t.* FROM attempts original CROSS JOIN plan_history_ids h CROSS JOIN LATERAL jsonb_populate_record(NULL::attempts,to_jsonb(original)||jsonb_build_object('id',h.id,'ordinal',h.ordinal)) t WHERE original.id=${request.attemptId}`;
+      await connection`INSERT INTO execution_permits SELECT p.* FROM execution_permits original CROSS JOIN plan_history_ids h CROSS JOIN LATERAL jsonb_populate_record(NULL::execution_permits,to_jsonb(original)||jsonb_build_object('attempt_id',h.id)) p WHERE original.attempt_id=${request.attemptId}`;
+      await connection`SELECT pg_stat_force_next_flush()`;
+      await db`SELECT pg_stat_clear_snapshot()`;
+      const before = (
+        await db`SELECT seq_scan::text scans,seq_tup_read::text tuples,idx_scan::text indexes,n_tup_ins::text inserts FROM pg_stat_user_tables WHERE relid='execution_permits'::regclass`
+      )[0];
+      expect(Number(before.inserts)).toBe(4097);
+      const context = await preflight(null);
+      expect(context).toMatchObject({
+        leases: [],
+        permit_state: null,
+        permit_epoch: null,
+        execution_closed: null,
+      });
+      const active = await preflight(request.attemptId);
+      expect(Object.keys(active).sort()).toEqual([
+        "execution_closed",
+        "leases",
+        "permit_epoch",
+        "permit_state",
+      ]);
+      expect(active.permit_state).toBe("RESERVED");
+      expect(active.permit_epoch).toBe("1");
+      expect(active.execution_closed).toBe(false);
+      expect(
+        active.leases
+          .map((lease: { descriptor: { scope_kind: string } }) => lease.descriptor.scope_kind)
+          .sort(),
+      ).toEqual(["channel", "key", "project"]);
+      expect(
+        active.leases.every(
+          (lease: { attempt_id: string; permit_epoch: string }) =>
+            lease.attempt_id === request.attemptId && lease.permit_epoch === "1",
+        ),
+      ).toBe(true);
+      await connection`SELECT pg_stat_force_next_flush()`;
+      await db`SELECT pg_stat_clear_snapshot()`;
+      const after = (
+        await db`SELECT seq_scan::text scans,seq_tup_read::text tuples,idx_scan::text indexes FROM pg_stat_user_tables WHERE relid='execution_permits'::regclass`
+      )[0];
+      expect(BigInt(after.scans) + BigInt(after.indexes)).toBeGreaterThan(
+        BigInt(before.scans) + BigInt(before.indexes),
+      );
+      expect(Number(BigInt(after.tuples) - BigInt(before.tuples))).toBeLessThanOrEqual(16);
+    } finally {
+      await connection.release();
+    }
+  }));

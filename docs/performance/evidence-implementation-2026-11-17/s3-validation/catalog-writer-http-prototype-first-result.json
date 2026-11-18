@@ -1,0 +1,9 @@
+{
+  "scope": "private HTTP POST/PATCH prototype with the original route functions and authority; not product code or capacity",
+  "creation": {
+    "status": 503,
+    "elapsed_ms": 41.361917000000176
+  },
+  "error": "Error: CATALOG_CREATE_NO_PROGRESS",
+  "exit_code": 1
+}

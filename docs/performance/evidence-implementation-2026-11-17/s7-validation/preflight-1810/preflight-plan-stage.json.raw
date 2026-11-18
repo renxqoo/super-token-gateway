@@ -1,0 +1,180 @@
+{
+  "at": "2026-11-17T23:02:43.553540+00:00",
+  "goal_status": "active",
+  "previous_goal_turn": "progress: actual scan plans and controlled planning experiment changed next implementation",
+  "runtime_migration": 2026111810,
+  "migrations": 42,
+  "migration_sha256": "7f6bf972d19ce1f76d8b4f06b8d3484a24e04da90266a8c6593eeff04e5b6d88",
+  "old41_manifest_entries_unchanged": true,
+  "source_dist_sql_and_manifest_equal": true,
+  "last_formal_stable_rps": 60,
+  "preflight_preparation_not_reproducing": {
+    "preflight-plan-red.log": {
+      "exit_code": 0,
+      "pass": 1,
+      "fail": 0,
+      "assertions": 9
+    },
+    "preflight-plan-empty-red.log": {
+      "exit_code": 0,
+      "pass": 1,
+      "fail": 0,
+      "assertions": 9
+    },
+    "preflight-plan-generic-red.log": {
+      "exit_code": 0,
+      "pass": 1,
+      "fail": 0,
+      "assertions": 9
+    },
+    "preflight-plan-unanalyzed-red.log": {
+      "exit_code": 0,
+      "pass": 1,
+      "fail": 0,
+      "assertions": 9
+    }
+  },
+  "preflight_red": {
+    "log": "preflight-plan-stable-path-red.log",
+    "exit_code": 1,
+    "pass": 0,
+    "fail": 1,
+    "assertions": 9,
+    "sequential_rows": 4098
+  },
+  "preflight_green": {
+    "log": "preflight-plan-green.log",
+    "exit_code": 0,
+    "pass": 1,
+    "fail": 0,
+    "assertions": 9,
+    "sequential_rows": 0,
+    "index_scan_delta": 4
+  },
+  "regressions": {
+    "exit_code": 0,
+    "pass": 18,
+    "fail": 0,
+    "assertions": 175,
+    "files": 4
+  },
+  "upgrades": {
+    "exit_code": 0,
+    "pass": 3,
+    "fail": 0,
+    "assertions": 54,
+    "files": 3
+  },
+  "check": {
+    "exit_code": 0,
+    "files": 353
+  },
+  "lint": {
+    "exit_code": 0
+  },
+  "format_before_report": {
+    "exit_code": 0,
+    "files": 738
+  },
+  "build": {
+    "exit_code": 0,
+    "migrations": 42,
+    "all_checksums_verified": true,
+    "source_dist_equal": true
+  },
+  "receipt_prototypes": {
+    "scope": "not reproduced, no receipt product code changed; experimental case removed before delivery with source retained",
+    "receipt-plan-red.log": {
+      "exit_code": 0,
+      "pass": 1,
+      "fail": 0,
+      "assertions": 11,
+      "fetched_rows": 30
+    },
+    "receipt-plan-stable-red.log": {
+      "exit_code": 0,
+      "pass": 1,
+      "fail": 0,
+      "assertions": 19,
+      "fetched_rows": 3
+    }
+  },
+  "independent_review": "No new permission/owner/NULL/lease scope/authorization semantics issue found; publicpreflight remains a projection followed by original quota/BEGIN authority recheck",
+  "diagnostic": {
+    "exit_code": 1,
+    "capacityPassed": false,
+    "valid": false,
+    "target": 300,
+    "rate": 301,
+    "window_complete_rps": 95.95,
+    "p99": 1821.73,
+    "shed": 1404,
+    "http200": 11639,
+    "http503": 5017,
+    "requests_including_warmup": 11730,
+    "receipt_and_acks": 23460,
+    "customer_spent": "1173000",
+    "supplier_spent": "692070",
+    "both_reserved": "0",
+    "pg_valid": true,
+    "cpu_sampling_errors": 0,
+    "pg_cpu_ms_per_admitted": 42.337595907928396,
+    "service_cpu_ms_per_admitted": 48.352941176470594,
+    "preflight_calls": 23460,
+    "preflight_exec_ms": 9950.501037999993,
+    "cpu_denominator": "admitted includes warmup; CPU also includes rejected work; not normal all-success cost",
+    "record": "docs/performance/evidence-implementation-2026-11-17/s7-preflight-300-failed/round.json"
+  },
+  "cleanup": {
+    "at": "2026-11-17T22:57:25.267Z",
+    "database": "gateway_native",
+    "original_27_names_and_oids_equal": true,
+    "foundation_count": 27,
+    "remaining_recent_databases": [],
+    "remaining_recent_core_processes": [],
+    "remaining_recent_identity_roles": [],
+    "remaining_recent_temp_directories": [],
+    "protected_reference_present": true,
+    "protected_processes": [
+      {
+        "pid": 40766,
+        "started": "Mon Nov 16 16:27:47 2026",
+        "command": "bun apps/core-api/src/main.ts"
+      },
+      {
+        "pid": 40771,
+        "started": "Mon Nov 16 16:27:47 2026",
+        "command": "bun apps/core-api/src/main.ts"
+      }
+    ],
+    "rounds": [
+      {
+        "label": "s7-preflight-300-failed",
+        "database": "gateway_test_foundation_9874430b3ec6450896544061e1f91abf",
+        "database_absent": true,
+        "live_owned_sampled_pids": [],
+        "namespace_cleanup": {
+          "cleaned": 1,
+          "failed": 0
+        },
+        "archive_hashes_verified": true,
+        "source_directory_removed": true
+      }
+    ]
+  },
+  "residue": "Prior approximately2.22GB sharedPG profiling log tail retained; original and other writers not truncated",
+  "pending": [
+    "Reproduce remaining receipt/cold-plan accesses and address the evidence bottleneck",
+    "Final complete repository gates on final performance candidate",
+    "Strict >3000 and >new-api stable full-chain with CPU<=2ms/request",
+    "Fresh same-day reference and same-concurrency comparison",
+    "Fault, restore and productionHA completion audit"
+  ],
+  "long_test": "60-minute test remains outside user authorization",
+  "no_commit_push_deploy": true,
+  "format_final": {
+    "exit_code": 0,
+    "files": 739
+  },
+  "disk_gib_approx": 31
+}

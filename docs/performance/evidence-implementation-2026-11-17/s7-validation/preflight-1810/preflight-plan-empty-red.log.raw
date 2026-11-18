@@ -1,0 +1,9 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-query-plans.test.ts:
+(pass) preflight does not scan unrelated permits after a cold table grows, including context-only requests [2418.46ms]
+
+ 1 pass
+ 0 fail
+ 9 expect() calls
+Ran 1 test across 1 file. [2.50s]

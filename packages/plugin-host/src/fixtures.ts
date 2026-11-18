@@ -3,9 +3,9 @@ import {
   verifiedPackageSnapshot,
   type VerifiedPackage,
 } from "@gateway/plugin-sdk";
-import { createPluginAttempts } from "./attempts.ts";
-import { PluginHostError, type PluginSupervisor } from "./supervisor.ts";
-export async function runPluginFixtures(supervisor: PluginSupervisor, pkg: VerifiedPackage) {
+import { createPluginAttempts, type PluginExecutor } from "./attempts.ts";
+import { PluginHostError } from "./supervisor.ts";
+export async function runPluginFixtures(supervisor: PluginExecutor, pkg: VerifiedPackage) {
   const trusted = verifiedPackageSnapshot(pkg),
     source = trusted.files.find((file) => file.path === "fixtures/cases.json")!;
   const suite = fixtureSuiteSchema.parse(

@@ -1,0 +1,138 @@
+{
+  "directory": "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH",
+  "cleaned": true,
+  "result": [
+    {
+      "round": 1,
+      "failures": [
+        "Error: ENOENT: no such file or directory, lstat '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/1/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'\n    at realpathSync (unknown)\n    at published (/Users/wr/work/super-token-gateway/packages/plugin-host/src/executable.ts:39:18)\n    at publishPluginExecutable (/Users/wr/work/super-token-gateway/packages/plugin-host/src/executable.ts:88:12)"
+      ],
+      "checks": {
+        "asyncStat": {
+          "dev": 16777229,
+          "ino": 55437006,
+          "mode": 33133,
+          "nlink": 1,
+          "uid": 501,
+          "gid": 20,
+          "rdev": 0,
+          "size": 13,
+          "blksize": 4096,
+          "blocks": 8,
+          "atimeMs": 1794925974195.666,
+          "mtimeMs": 1794925974194.8884,
+          "ctimeMs": 1794925974195.6663,
+          "birthtimeMs": 1794925974194.7588
+        },
+        "syncStat": {
+          "dev": 16777229,
+          "ino": 55437006,
+          "mode": 33133,
+          "nlink": 1,
+          "uid": 501,
+          "gid": 20,
+          "rdev": 0,
+          "size": 13,
+          "blksize": 4096,
+          "blocks": 8,
+          "atimeMs": 1794925974195.666,
+          "mtimeMs": 1794925974194.8884,
+          "ctimeMs": 1794925974195.6663,
+          "birthtimeMs": 1794925974194.7588
+        },
+        "asyncRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/1/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "syncRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/1/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "nativeRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/1/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "bytes": "shared-helper"
+      }
+    },
+    {
+      "round": 17,
+      "failures": [
+        "Error: ENOENT: no such file or directory, lstat '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/17/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'\n    at realpathSync (unknown)\n    at published (/Users/wr/work/super-token-gateway/packages/plugin-host/src/executable.ts:39:18)\n    at publishPluginExecutable (/Users/wr/work/super-token-gateway/packages/plugin-host/src/executable.ts:88:12)"
+      ],
+      "checks": {
+        "asyncStat": {
+          "dev": 16777229,
+          "ino": 55437230,
+          "mode": 33133,
+          "nlink": 1,
+          "uid": 501,
+          "gid": 20,
+          "rdev": 0,
+          "size": 13,
+          "blksize": 4096,
+          "blocks": 8,
+          "atimeMs": 1794925974222.4216,
+          "mtimeMs": 1794925974221.5042,
+          "ctimeMs": 1794925974222.422,
+          "birthtimeMs": 1794925974221.3079
+        },
+        "syncStat": {
+          "dev": 16777229,
+          "ino": 55437230,
+          "mode": 33133,
+          "nlink": 1,
+          "uid": 501,
+          "gid": 20,
+          "rdev": 0,
+          "size": 13,
+          "blksize": 4096,
+          "blocks": 8,
+          "atimeMs": 1794925974222.4216,
+          "mtimeMs": 1794925974221.5042,
+          "ctimeMs": 1794925974222.422,
+          "birthtimeMs": 1794925974221.3079
+        },
+        "asyncRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/17/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "syncRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/17/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "nativeRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/17/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "bytes": "shared-helper"
+      }
+    },
+    {
+      "round": 70,
+      "failures": [
+        "Error: ENOENT: no such file or directory, lstat '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/70/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'\n    at realpathSync (unknown)\n    at published (/Users/wr/work/super-token-gateway/packages/plugin-host/src/executable.ts:39:18)\n    at publishPluginExecutable (/Users/wr/work/super-token-gateway/packages/plugin-host/src/executable.ts:88:12)"
+      ],
+      "checks": {
+        "asyncStat": {
+          "dev": 16777229,
+          "ino": 55437974,
+          "mode": 33133,
+          "nlink": 1,
+          "uid": 501,
+          "gid": 20,
+          "rdev": 0,
+          "size": 13,
+          "blksize": 4096,
+          "blocks": 8,
+          "atimeMs": 1794925974301.8667,
+          "mtimeMs": 1794925974301.2634,
+          "ctimeMs": 1794925974301.867,
+          "birthtimeMs": 1794925974301.1365
+        },
+        "syncStat": {
+          "dev": 16777229,
+          "ino": 55437974,
+          "mode": 33133,
+          "nlink": 1,
+          "uid": 501,
+          "gid": 20,
+          "rdev": 0,
+          "size": 13,
+          "blksize": 4096,
+          "blocks": 8,
+          "atimeMs": 1794925974301.8667,
+          "mtimeMs": 1794925974301.2634,
+          "ctimeMs": 1794925974301.867,
+          "birthtimeMs": 1794925974301.1365
+        },
+        "asyncRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/70/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "syncRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/70/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "nativeRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-BPTLbH/70/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "bytes": "shared-helper"
+      }
+    }
+  ]
+}

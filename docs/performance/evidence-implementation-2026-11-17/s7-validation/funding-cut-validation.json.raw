@@ -1,0 +1,203 @@
+{
+  "at_utc": "2026-11-17T18:26:45.388487+00:00",
+  "stage": "S7/1804 funding-cell integration, not final throughput acceptance",
+  "branch": "main",
+  "schema_version": 2026111804,
+  "migration_manifest": {
+    "version": 2026111804,
+    "files": [
+      {
+        "path": "./migrations/0012_funding-holds.sql",
+        "checksum": "3bb5f8d94d11beab1120799cd508f893f6ce58ee2e514610f96c2cafe94bc248"
+      },
+      {
+        "path": "./sql/core-funding-migration.sql",
+        "checksum": "3eec13df2ed56e313553a653e21f14ba9388a0a7033d5a4e763048390cb57b45"
+      },
+      {
+        "path": "./sql/core-funding-engine.sql",
+        "checksum": "5771350849cd37b1e463c8c3e0d6ee7ee12bd2ef04a583da5247c7b03e6f1c2e"
+      },
+      {
+        "path": "./sql/core-funding-execution.sql",
+        "checksum": "6fbf410afe7e3c5e71c02652131a0043d807e01ef2d1cb357b748798f6fc4cb0"
+      },
+      {
+        "path": "./sql/core-funding-settlement.sql",
+        "checksum": "d2c91e9998f963e146d62b9b490028ad885aa42e244a34e4018e1d7d9cd1b4f6"
+      },
+      {
+        "path": "./sql/core-funding-entry.sql",
+        "checksum": "3b89a717ebba84947707fe3b63b3f30c4b03c3f6a57e72d087ca58e3aaacce3f"
+      }
+    ]
+  },
+  "commands": [
+    {
+      "log": "s7-cut-first-chain-initial.log.raw",
+      "exit_code": 1,
+      "sha256": "3c816bb417d4549bf9ecf0fe1d43ecaf0ac1efbef8b549e7546c9c9051036a2b",
+      "tests_passed": 0,
+      "tests_failed": 2
+    },
+    {
+      "log": "s7-cut-sql-probe.log.raw",
+      "exit_code": 0,
+      "sha256": "12f57bcca608208afe9cd426381374b8fdabd6cc0dd039d13dbab2f6b41f43c4",
+      "kind": "diagnostic; it intentionally caught and recorded the failed admission, not a passing test"
+    },
+    {
+      "log": "s7-cut-first-chain-fixed.log.raw",
+      "exit_code": 0,
+      "sha256": "894d414fe83fddafb15adead38a3f230d3dfe70958f30dd2a6348e9a3852034f",
+      "tests_passed": 2,
+      "tests_failed": 0,
+      "expect_calls": 21
+    },
+    {
+      "log": "s7-cut-funds-targeted.log.raw",
+      "exit_code": 0,
+      "sha256": "3b69adc116f4c55c11941a2db0f1dde5ba92a285e362213e20208b4d861b50d8",
+      "tests_passed": 7,
+      "tests_failed": 0,
+      "expect_calls": 79
+    },
+    {
+      "log": "s7-cut-risk-controls.log.raw",
+      "exit_code": 0,
+      "sha256": "9b08f9e0bd8175cf478e6cbbf7ea3b6fc3afe7b86af84475d5e0afe7791db1d7",
+      "tests_passed": 13,
+      "tests_failed": 0,
+      "expect_calls": 160
+    },
+    {
+      "log": "s7-cut-recovery.log.raw",
+      "exit_code": 0,
+      "sha256": "07326fc08610ce1c832dc346d6e9af2ccb97115af57d684f6b2e26e1eafc644a",
+      "tests_passed": 12,
+      "tests_failed": 0,
+      "expect_calls": 103
+    },
+    {
+      "log": "s7-cut-historical.log.raw",
+      "exit_code": 1,
+      "sha256": "cab39752aeb477eeaae00a1ff4445595a331844b7e50d2c1e099504fdce6e067",
+      "tests_passed": 8,
+      "tests_failed": 1,
+      "expect_calls": 72
+    },
+    {
+      "log": "s7-cut-acl-red.log.raw",
+      "exit_code": 1,
+      "sha256": "2c798816da814c929d4883263f32db6ca974399b5bfa4ee6b922e93ce0e4c63d",
+      "tests_passed": 0,
+      "tests_failed": 1,
+      "expect_calls": 1
+    },
+    {
+      "log": "s7-cut-acl-green.log.raw",
+      "exit_code": 0,
+      "sha256": "4b918b5d89c738fc6950fdc2dae3481f7be3692c146de2808860bdd66c1b9f8d",
+      "tests_passed": 1,
+      "tests_failed": 0,
+      "expect_calls": 5
+    },
+    {
+      "log": "s7-cut-root-bound-red.log.raw",
+      "exit_code": 1,
+      "sha256": "aa0fb89b3de689c75707c1219a4925d10d517130034fe017204d53b6d5d717d3",
+      "tests_passed": 0,
+      "tests_failed": 1,
+      "expect_calls": 4
+    },
+    {
+      "log": "s7-cut-boundary-green.log.raw",
+      "exit_code": 0,
+      "sha256": "f26e4d43a7990e493dff285879989aa6e510b6d8caf073ea88d5f24f55cf1d5b",
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "expect_calls": 34
+    },
+    {
+      "log": "s7-cut-upgrade-final.log.raw",
+      "exit_code": 0,
+      "sha256": "9fdf2f603584ea1a7d41f83934307966a7a5aa88cb7df139fcaa96b3b7effb04",
+      "tests_passed": 13,
+      "tests_failed": 0,
+      "expect_calls": 142
+    },
+    {
+      "log": "s7-cut-recharge-contract.log.raw",
+      "exit_code": 0,
+      "sha256": "803d2d02484cc56974699eab1c0a4b50a856bd389faf6ce38d7dfd89de30a0aa",
+      "tests_passed": 19,
+      "tests_failed": 0,
+      "expect_calls": 148
+    },
+    {
+      "log": "s7-cut-new-price-and-permissions.log.raw",
+      "exit_code": 0,
+      "sha256": "a03087fc1526a413215f4a8bc1089d6c3538c551d21ebb875a465efac93fde94",
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "expect_calls": 24
+    },
+    {
+      "log": "s7-cut-check-final.log.raw",
+      "exit_code": 0,
+      "sha256": "12814316a5dc021fec6ed3a375bc2ee8c4fb3786aaee51c7930eff2d89419fbc"
+    },
+    {
+      "log": "s7-cut-lint-final.log.raw",
+      "exit_code": 0,
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484"
+    },
+    {
+      "log": "s7-cut-fmt-final.log.raw",
+      "exit_code": 1,
+      "sha256": "26a4927ea73465f0de3ed5b9b1e52bd6ea21c419803a497cac01ea57930abfff"
+    },
+    {
+      "log": "s7-cut-fmt-fixed.log.raw",
+      "exit_code": 0,
+      "sha256": "fa788c391326d7645c34c32c1792bf25d64f6e6b8337851317109fb3e40d5938"
+    },
+    {
+      "log": "s7-cut-architecture-final.log.raw",
+      "exit_code": 0,
+      "sha256": "3cd8f4b2f64854701f685515ed5a84e6de8eb2f54985712fee8401dcceba3020",
+      "tests_passed": 7,
+      "tests_failed": 0,
+      "expect_calls": 672
+    }
+  ],
+  "overlapping_test_batches": true,
+  "latest_check": {
+    "files": 348,
+    "exit_code": 0
+  },
+  "earlier_typecheck_failures": [
+    {
+      "tool_chunk_id": "d47eb7",
+      "exit_code": 1,
+      "errors": 3
+    },
+    {
+      "tool_chunk_id": "1c1e7c",
+      "exit_code": 1,
+      "errors": 8
+    }
+  ],
+  "not_executed_for_this_complete_funding_version": [
+    "full unit test",
+    "full integration test",
+    "build",
+    "artifact",
+    "durability",
+    "backup",
+    "capacity",
+    "same-concurrency comparison"
+  ],
+  "last_verified_stable_rps": 60,
+  "goal_achieved": false
+}

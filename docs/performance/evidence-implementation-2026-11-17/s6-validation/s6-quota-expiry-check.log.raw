@@ -1,0 +1,2 @@
+$ bun check --no-script
+✓ No type errors in 341 files [69.41ms]

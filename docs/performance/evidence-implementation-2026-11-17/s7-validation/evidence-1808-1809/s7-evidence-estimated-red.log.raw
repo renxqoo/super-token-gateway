@@ -1,0 +1,21 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-evidence-batch.test.ts:
+ 98 |   const state = (await db`SELECT state FROM upstream_accounts WHERE id=${account}`)[0].state;
+ 99 |   return { ...row, state };
+100 | }
+101 | 
+102 | export function committed(result: CoreEvidenceGroupResult | undefined) {
+103 |   if (result?.status !== "COMMITTED") throw new Error(JSON.stringify(result));
+                                                      ^
+error: {"status":"ERROR","error":"55P03"}
+      at committed (/Users/wr/work/super-token-gateway/tests/support/core-settlement.ts:103:49)
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-evidence-batch.test.ts:249:22)
+      at async run (bun:sql:313:32)
+(fail) an estimated fact remains writable while its supplier cell is busy because it settles no money [2055.43ms]
+
+ 0 pass
+ 7 filtered out
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [2.13s]

@@ -1,14 +1,16 @@
+import type { createTerminalBudget } from "./terminal-budget.ts";
 import { verifiedPackageRuntime } from "@gateway/plugin-sdk";
 import {
   GatewayError,
-  dispatchProjectionV1Schema,
+  dispatchProjectionV2Schema,
   executionRejectionStatus,
-  prepBindingV1,
+  prepBindingV2,
   requestPolicySchema,
   type ExecutionContextResponse,
   type ExecutionReply,
   type TransientSend,
   type SignedCoreEvidenceEventV1,
+  type DispatchProjectionV2,
 } from "@gateway/contracts";
 import { CoreRpcError, type createCoreRpcClient } from "@gateway/core-client";
 import {
@@ -36,6 +38,7 @@ import {
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
 import type { createPackageCache } from "./packages.ts";
+import type { createGatewayPluginRuntime } from "./plugin-runtime.ts";
 import { collectReferences, type Reference } from "./references.ts";
 import { rejectUnmeteredTools } from "./tool-policy.ts";
 import { idleGuard, stallGuard } from "./stream-deadlines.ts";
@@ -53,10 +56,11 @@ export type ChatDependencies = {
   config: GatewayConfig;
   core: ReturnType<typeof createCoreRpcClient>;
   packages: ReturnType<typeof createPackageCache>;
-  host: ReturnType<typeof createPluginAttempts>;
+  host: Awaited<ReturnType<typeof createGatewayPluginRuntime>>;
   transport: ReturnType<typeof createTransport>;
   publish: (events: SignedCoreEvidenceEventV1[]) => Promise<void>;
   grants: ReturnType<typeof createSendRegistry>;
+  terminalBudget: ReturnType<typeof createTerminalBudget>;
 };
 
 export type ChatRequest = {
@@ -100,7 +104,11 @@ type Plan = {
   outbound: Uint8Array;
   url: URL;
   headers: Record<string, string>;
-  dispatch: Record<string, unknown> & { dispatched_digest: string; prep_session_id: string };
+  dispatch: Record<string, unknown> & {
+    dispatched_digest: string;
+    prep_session_id: string;
+    dispatch_projection: DispatchProjectionV2;
+  };
   commit: { batch: BatchRecord } | { input_file_id: string } | undefined;
   files: Map<string, string>;
 };
@@ -108,7 +116,8 @@ type Permit = { attemptId: string; permitEpoch: string };
 type HealthOutcome = "SUCCESS" | "FAILURE" | "NOT_SENT";
 type Admitted = Plan & Permit & { begin: Record<string, string> };
 type CloseReason = "COMPLETED" | "FAILED" | "CANCELLED" | "DRAINED";
-type Ending = { outcome: AttemptOutcome; reason: CloseReason };
+type Ending = { outcome: AttemptOutcome; reason: CloseReason; outputBytes?: number };
+type TerminalReservation = ReturnType<ChatDependencies["terminalBudget"]["reserve"]>;
 type Outcome =
   { response: Response } | { retry: GatewayError; conclude: (last: boolean) => Promise<void> };
 type Deadline = "upstream_header_timeout" | "upstream_idle_timeout" | "downstream_stalled";
@@ -313,6 +322,12 @@ async function openContext(deps: ChatDependencies, request: ChatRequest, facts: 
         "execution_context_v1",
         {
           customer_token: request.token,
+          ...(facts.operation === "chat" &&
+          !facts.stream &&
+          !facts.background &&
+          !facts.references.length
+            ? { route_projection: true }
+            : {}),
           ip: request.ip,
           operation: facts.operation,
           ...(facts.model ? { model: facts.model } : {}),
@@ -360,18 +375,35 @@ async function plan(
   facts: Facts,
   context: ExecutionContextResponse,
   candidate: Candidate,
+  releasePreparation?: () => void,
 ): Promise<Plan> {
   const pkg = await deps.packages.get(candidate.ref.package_digest, facts.deadlineAt).catch(() => {
     throw new GatewayError(503, "plugin_unavailable", "The route's plugin is unavailable");
   });
   const attemptId = crypto.randomUUID();
-  const attempt = deps.host.create(pkg, {
-    tenant: context.project_id,
-    attempt: attemptId,
-    incarnation: context.owner.incarnation_id,
-    config: candidate.config,
-    deadlineAt: Date.parse(facts.deadlineAt),
-  });
+  let bound: ReturnType<ChatDependencies["host"]["bind"]>;
+  try {
+    releasePreparation?.();
+    bound = deps.host.bind(
+      pkg,
+      {
+        tenant: context.project_id,
+        attempt: attemptId,
+        incarnation: context.owner.incarnation_id,
+        config: candidate.config,
+        deadlineAt: Date.parse(facts.deadlineAt),
+      },
+      context.execution_runtimes[candidate.ref.package_digest] ?? [],
+    );
+  } catch (error) {
+    if (!(error instanceof PluginHostError) || error.code !== "EXECUTION_UNAVAILABLE") throw error;
+    throw new GatewayError(
+      503,
+      "plugin_unavailable",
+      "The route's execution runtime is unavailable",
+    );
+  }
+  const attempt = bound.attempt;
   try {
     const source = facts.protocol;
     const converted =
@@ -404,14 +436,7 @@ async function plan(
     if (facts.batch && files && document) {
       const rows = await prepareBatchRows(
         facts.batch,
-        () =>
-          deps.host.create(pkg, {
-            tenant: context.project_id,
-            attempt: crypto.randomUUID(),
-            incarnation: context.owner.incarnation_id,
-            config: candidate.config,
-            deadlineAt: Date.parse(facts.deadlineAt),
-          }),
+        () => bound.createSibling(crypto.randomUUID()),
         request.signal,
         (body) => enforceRoutePolicy(body, candidate.request_policy),
       );
@@ -499,8 +524,9 @@ async function plan(
         ? {}
         : { input_characters: String(facts.inputCharacters) }),
     };
-    const projection = dispatchProjectionV1Schema.parse({
-      version: 1,
+    const projection = dispatchProjectionV2Schema.parse({
+      version: 2,
+      execution: bound.execution,
       proposed_request_id: facts.requestId,
       proposed_attempt_id: attemptId,
       origin: candidate.origin,
@@ -534,14 +560,14 @@ async function plan(
       dispatch: {
         context_id: context.context_id,
         dispatch_projection: projection,
-        dispatched_digest: sha256(canonical(["stg.internal.dispatch-projection", "1", projection])),
+        dispatched_digest: sha256(canonical(["stg.internal.dispatch-projection", "2", projection])),
         manifest,
         prep_session_id: prepSessionId,
         prep_binding_digest: sha256(
           canonical([
             "stg.internal.prep-binding",
-            "1",
-            prepBindingV1({
+            "2",
+            prepBindingV2({
               owner: context.owner,
               project_id: context.project_id,
               projection,
@@ -580,7 +606,11 @@ async function reserve(
               expected_ordinal: previous.ordinal + 1,
               visible_output: false,
             },
-            { commandId, deadlineAt: facts.deadlineAt },
+            {
+              commandId,
+              deadlineAt: facts.deadlineAt,
+              ...(context.route_ticket ? { routeTicket: context.route_ticket } : {}),
+            },
           )
         : deps.core.execution(
             "execution_admit_v1",
@@ -594,7 +624,11 @@ async function reserve(
               fingerprint: facts.fingerprint,
               customer_currency: context.customer_currency,
             },
-            { commandId, deadlineAt: facts.deadlineAt },
+            {
+              commandId,
+              deadlineAt: facts.deadlineAt,
+              ...(context.route_ticket ? { routeTicket: context.route_ticket } : {}),
+            },
           ),
     )) as ExecutionReply;
   } catch (error) {
@@ -633,8 +667,31 @@ async function reserve(
       throw new CandidateRefusal(failure.status, failure.code, failure.message);
     throw failure;
   }
-  if (reply.receipt.state !== "RESERVED" || !reply.receipt.authorization_plan_digest) {
+  const permitEpoch = reply.receipt.permit_epoch ?? "1";
+  const expectedPlan = {
+    version: 2,
+    owner: context.owner,
+    attempt_id: planned.attemptId,
+    permit_epoch: permitEpoch,
+    dispatched_digest: planned.dispatch.dispatched_digest,
+    dispatch_projection: planned.dispatch.dispatch_projection,
+  };
+  if (
+    reply.receipt.state !== "RESERVED" ||
+    reply.receipt.request_id !== facts.requestId ||
+    reply.receipt.attempt_id !== planned.attemptId ||
+    canonical(reply.receipt.authorization_plan ?? null) !== canonical(expectedPlan) ||
+    reply.receipt.authorization_plan_digest !==
+      sha256(canonical(["stg.internal.host-authorization-plan", "2", expectedPlan]))
+  ) {
     planned.attempt.dispose();
+    if (reply.receipt.state === "RESERVED")
+      await abortBeforeSend(
+        deps,
+        { attemptId: planned.attemptId, permitEpoch, channelId: planned.channelId },
+        "PREPARE_DISPOSED",
+        !previous,
+      );
     await reportHealth(
       deps,
       { attemptId: planned.attemptId, permitEpoch: "1", channelId: planned.channelId },
@@ -642,7 +699,6 @@ async function reserve(
     );
     throw new GatewayError(503, "core_unavailable", "Execution authority is unavailable");
   }
-  const permitEpoch = reply.receipt.permit_epoch ?? "1";
   return {
     ...planned,
     permitEpoch,
@@ -923,6 +979,7 @@ async function dispatch(
   facts: Facts,
   admitted: Admitted,
   previous: { conclude: (last: boolean) => Promise<void> } | undefined,
+  reservation: TerminalReservation | undefined,
 ): Promise<Outcome> {
   const notSent = async (reason: "CANCELLED" | "DEADLINE" | "PREPARE_DISPOSED") => {
     await abortBeforeSend(deps, admitted, reason, !previous);
@@ -953,7 +1010,12 @@ async function dispatch(
   const bridge = observeAttempt(admitted.attempt, {
     attemptId: admitted.attemptId,
     permitEpoch: admitted.permitEpoch,
-    record: (evidence) => deps.publish([deps.core.signEvidence(evidence)]),
+    delivery:
+      facts.operation === "chat" && !admitted.prepared.manifest.stream && !facts.background
+        ? "terminal-group"
+        : "progressive",
+    seal: (evidence) => deps.core.signEvidence(evidence),
+    record: (evidence) => deps.publish(evidence),
   });
   const neverSent = async (outcome: Parameters<Bridge["notExecuted"]>[0]) => {
     deps.grants.release(admitted.attemptId);
@@ -1013,8 +1075,17 @@ async function dispatch(
     stopRenewal();
     deps.grants.release(admitted.attemptId);
     const latency = performance.now() - started;
+    let completed = false;
     try {
-      await bridge.finish(ending.outcome);
+      const canRelease =
+        ending.outputBytes !== undefined &&
+        reservation?.retainOutput(
+          request.body.buffer.byteLength + admitted.outbound.buffer.byteLength + ending.outputBytes,
+        );
+      await bridge.finish(ending.outcome, canRelease);
+      completed =
+        ending.outcome.attempt_state === "SUCCEEDED" &&
+        ending.outcome.request_state === "SUCCEEDED";
     } finally {
       bridge.dispose();
       await reportHealth(
@@ -1023,7 +1094,7 @@ async function dispatch(
         healthOutcome(ending.outcome, halt(request).halted),
         latency,
       );
-      await closeRequest(deps, admitted, ending.reason);
+      if (!completed) await closeRequest(deps, admitted, ending.reason);
     }
   };
   const finalFailure = async (
@@ -1055,6 +1126,16 @@ async function dispatch(
   ): Promise<Outcome> => {
     stopRenewal();
     deps.grants.release(admitted.attemptId);
+    try {
+      await bridge.flush();
+    } catch (error) {
+      return finalFailure(
+        { attempt_state: "UNKNOWN", error_code: "evidence_unavailable" },
+        error instanceof GatewayError
+          ? error
+          : new GatewayError(503, "evidence_unavailable", "Usage evidence could not be recorded"),
+      );
+    }
     await reportHealth(
       deps,
       admitted,
@@ -1125,6 +1206,7 @@ async function dispatch(
           error.code === "unsafe_upstream";
       if (!final) {
         deps.grants.release(admitted.attemptId);
+        await bridge.flush();
         await reportHealth(deps, admitted, "NOT_SENT");
         return deferred(unreachable, (requestState) =>
           bridge.notExecuted({
@@ -1178,7 +1260,23 @@ async function dispatch(
 }
 
 export async function executeChat(deps: ChatDependencies, request: ChatRequest) {
-  let facts = await requestFacts(request, deps.config.total_timeout_ms);
+  const facts = await requestFacts(request, deps.config.total_timeout_ms);
+  const reservation =
+    facts.operation === "chat" && !facts.stream && !facts.background
+      ? deps.terminalBudget.reserve()
+      : undefined;
+  try {
+    return await executePreparedChat(deps, request, facts, reservation);
+  } finally {
+    reservation?.release();
+  }
+}
+async function executePreparedChat(
+  deps: ChatDependencies,
+  request: ChatRequest,
+  facts: Facts,
+  reservation: TerminalReservation | undefined,
+) {
   const external = { ...request, signal: AbortSignal.any([request.signal, request.drain]) };
   const tried = new Set<string>();
   let previous:
@@ -1186,9 +1284,11 @@ export async function executeChat(deps: ChatDependencies, request: ChatRequest) 
   let lastError: GatewayError | undefined;
   for (let ordinal = 1; ordinal <= maxOrdinal; ordinal++) {
     let admitted: Admitted;
+    let releasePreparation: (() => void) | undefined;
     try {
       if (external.signal.aborted)
         throw halt(request).error(new GatewayError(499, "cancelled", "Request cancelled"));
+      if (reservation) releasePreparation = deps.host.reservePreparation();
       const context = await openContext(deps, request, facts);
       if (!facts.model) facts = { ...facts, model: context.model };
       const untried = context.candidates.filter((c) => !tried.has(c.ref.channel_id));
@@ -1197,7 +1297,7 @@ export async function executeChat(deps: ChatDependencies, request: ChatRequest) 
       for (const candidate of untried) {
         tried.add(candidate.ref.channel_id);
         try {
-          const planned = await plan(deps, external, facts, context, candidate);
+          const planned = await plan(deps, external, facts, context, candidate, releasePreparation);
           reserved = await reserve(deps, request, facts, context, planned, previous);
           break;
         } catch (error) {
@@ -1211,8 +1311,10 @@ export async function executeChat(deps: ChatDependencies, request: ChatRequest) 
       if (!previous) throw error;
       await previous.conclude(true);
       throw halt(request).error(lastError ?? coreFailure(error));
+    } finally {
+      releasePreparation?.();
     }
-    const outcome = await dispatch(deps, request, facts, admitted, previous);
+    const outcome = await dispatch(deps, request, facts, admitted, previous, reservation);
     if ("response" in outcome) return outcome.response;
     lastError = outcome.retry;
     previous = { permit: admitted, ordinal, conclude: outcome.conclude };
@@ -1304,6 +1406,7 @@ async function relayJSON(
       outcome: pending
         ? { attempt_state: "PARTIAL" }
         : { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
+      outputBytes: transformed.body.buffer.byteLength,
       reason: "COMPLETED",
     });
   } catch (error) {

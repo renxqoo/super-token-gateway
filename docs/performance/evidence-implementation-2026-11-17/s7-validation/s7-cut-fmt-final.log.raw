@@ -1,0 +1,8 @@
+$ bun fmt --no-script --check
+docs/performance/evidence-implementation-2026-11-17/s4b-profile-40/round.json
+docs/performance/evidence-implementation-2026-11-17/s4b-profile-40/sample-summary.json
+docs/performance/evidence-implementation-2026-11-17/s5-json-100-a/round.json
+docs/performance/evidence-implementation-2026-11-17/s5-json-60-a/round.json
+docs/performance/evidence-implementation-2026-11-17/s5-json-60-b/round.json
+5 files need formatting. Run bun fmt to fix them.
+error: script "fmt:check" exited with code 1

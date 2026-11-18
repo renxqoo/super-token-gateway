@@ -1,0 +1,31 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-management.test.ts:
+(pass) funding SHARE holds the exact platform credential through recharge receipt journal audit commit [2053.65ms]
+
+tests/integration/schema.test.ts:
+(pass) Drizzle and Bun.SQL preserve atoms above Number precision in each currency [172.89ms]
+
+tests/integration/plugin-catalog-upgrade.test.ts:
+(pass) actual v3 through financial schema upgrade preserves historical channels audits costs and immutable packages [199.22ms]
+
+tests/integration/gateway-lifecycle.test.ts:
+(pass) a Gateway refuses to start without durable evidence, and evidence lost after start withholds the terminal, tells stream clients that have received nothing yet and JSON clients to query the request instead of claiming it was not recorded, and never re-sends [4137.14ms]
+(pass) a lost admission acknowledgement is resolved by status query: the committed reservation is aborted and both parties' funds are released instead of staying reserved [2797.27ms]
+(pass) a killed local plugin helper preserves the unknown send without poisoning the shared upstream channel [3780.87ms]
+
+tests/integration/core-routing-health.test.ts:
+(pass) begin re-reads authority and denies send after admission when UPDATE upstream_accounts SET state='DISABLED',revision=revision+1 [2097.39ms]
+
+tests/integration/gateway-chat.test.ts:
+(pass) a disabled route or a disabled channel is excluded before any send, and when every candidate is disabled the request answers 503 no_route without a request record, a hold or an upstream call [3227.61ms]
+(pass) a channel whose own concurrency is full is skipped at admission and the request is served by the next channel instead of 429 rate_limited, without the refused admission holding a customer concurrency slot; when every channel is full the request gets 429 and nothing is reserved [3169.25ms]
+
+tests/integration/lifecycle.test.ts:
+(pass) v2 through financial upgrade preserves settled receipts, ACKs and immutable plugin package, and an open baseline hold settles by explicit resolution [267.25ms]
+
+ 10 pass
+ 79 filtered out
+ 0 fail
+ 118 expect() calls
+Ran 10 tests across 7 files. [21.99s]

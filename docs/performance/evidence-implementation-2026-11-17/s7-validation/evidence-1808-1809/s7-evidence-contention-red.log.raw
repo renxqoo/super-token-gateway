@@ -1,0 +1,31 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-evidence-batch.test.ts:
+206 |       const results = await store.persist(groups);
+207 |       committed(results[0]);
+208 |       expect(results[1]).toEqual({ status: "ERROR", error: "55P03" });
+209 |       expect(
+210 |         await db`SELECT CASE WHEN is_called THEN last_value+1 ELSE 0 END::text count FROM evidence_write_attempts`,
+211 |       ).toEqual([{ count: "4" }]);
+              ^
+error: expect(received).toEqual(expected)
+
+  [
+    {
+-     "count": "4",
++     "count": "16",
+    },
+  ]
+
+- Expected  - 1
++ Received  + 1
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-evidence-batch.test.ts:211:9)
+      at async run (bun:sql:313:32)
+(fail) a busy supplier cell does not materialize facts that its coalesced group will roll back [2325.51ms]
+
+ 0 pass
+ 6 filtered out
+ 1 fail
+ 8 expect() calls
+Ran 1 test across 1 file. [2.40s]

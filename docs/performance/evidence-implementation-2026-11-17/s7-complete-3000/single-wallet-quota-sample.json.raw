@@ -1,0 +1,57 @@
+{
+  "fixture": "tests/integration/gateway-chat.test.ts",
+  "test": "requests under steady concurrent load all succeed across repeated Core connection rotations instead of some answering 503 core_unavailable at each rotation",
+  "measurement": "first 429; Redis and PostgreSQL sampled in sequence while 20 clients continued sending",
+  "redis": [
+    {
+      "kind": "key",
+      "limit": 1000,
+      "rpm_limit": 1000000,
+      "tpm_limit": 1000000000,
+      "active": 999,
+      "rpm": 1152,
+      "tokens": "3559680"
+    },
+    {
+      "kind": "project",
+      "limit": 1000,
+      "rpm_limit": 1000000,
+      "tpm_limit": 1000000000,
+      "active": 999,
+      "rpm": 1152,
+      "tokens": "3559680"
+    },
+    {
+      "kind": "channel",
+      "limit": 1000,
+      "rpm_limit": 1000000,
+      "tpm_limit": 9007199254741000,
+      "active": 999,
+      "rpm": 1152,
+      "tokens": "1186560"
+    }
+  ],
+  "pg_leases": [
+    {
+      "state": "RELEASE_PENDING",
+      "count": "3"
+    },
+    {
+      "state": "ACTIVE",
+      "count": "2982"
+    },
+    {
+      "state": "RELEASED",
+      "count": "456"
+    }
+  ],
+  "pg_admitted": [
+    {
+      "count": "1148"
+    }
+  ],
+  "http": {
+    "200": 1242,
+    "429 rate_limited": 767
+  }
+}

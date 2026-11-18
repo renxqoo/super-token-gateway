@@ -1,0 +1,29 @@
+{
+  "at": "2026-11-17T18:53:30.173546+00:00",
+  "owned_databases_remaining": [],
+  "owned_database_names": [
+    "gateway_test_foundation_657b0ec0f9824fe0b7811e4b2fd38392",
+    "gateway_test_foundation_78be312fbc9747c58bf6fb4dbde47f3c"
+  ],
+  "diagnostic_owned_pid_count": 35,
+  "diagnostic_owned_pids_remaining": [],
+  "protected_pids_present": [
+    40766,
+    40771
+  ],
+  "protected_database_present": true,
+  "foundation_database_count": 27,
+  "fixture_cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "removed_after_archive_hash_verification": [
+    ".local/capacity/bench-23b6e27d1d834f8b8183e2a24165a121",
+    ".local/performance-implementation/receipt-plan-probe",
+    ".local/performance-implementation/probe-receipt-plan.ts",
+    ".local/performance-implementation/receipt-plan-probe-launch.log",
+    ".local/performance-implementation/s7-build-for-diagnostic.log",
+    ".local/performance-implementation/s7-diagnostic-60-a.log"
+  ],
+  "verification": "Read-only native PG queries and ps in the same continuation; no service stopped or database dropped by this cleanup step; both fixtures had already cleaned themselves."
+}

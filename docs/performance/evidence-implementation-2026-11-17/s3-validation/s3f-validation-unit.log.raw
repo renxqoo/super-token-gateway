@@ -1,0 +1,580 @@
+{"artifact_digest":"cc2935c0294b6d75b918399379245218173954f47c0272790327c8bd61c61c41","packages":5,"source_proof":"verified","wasm_rebuilds":0}
+bun test v1.4.4 (38afee6c8)
+rker/src/__test__ apps/gateway/src/__test__ packages/storage/src/execution/__test__ packages/kernel/src/__test__ packages/contracts/src/__test__ packages/runtime/src/__test__ packages/adapters/src/protocol/__test__ packages/plugin-sdk/src/__test__ packages/plugin-host/src/__test__ packages/adapters/src/__test__ packages/core-client/src/__test__
+$ bun scripts/plugin-native.ts build
+$ bun scripts/build-builtin-worker.ts
+
+scripts/__test__/plugin-artifacts.test.ts:
+(pass) checked-in WASM cannot silently drift from its TypeScript SDK, adapter and pinned builder [7.03ms]
+
+scripts/__test__/builtin-build-snapshot.test.ts:
+(pass) Wasm and Worker builds share frozen source bytes and dependency resolution across concurrent repository edits [9.82ms]
+
+scripts/__test__/capacity-evidence.test.ts:
+(pass) minute capacity uses the later HTTP and receipt ACK time and excludes tail completions [5.56ms]
+(pass) duplicate or malformed identities cannot inflate capacity even outside the measurement window [3.94ms]
+(pass) a strong aggregate cannot hide an under-capacity minute or a P99 budget breach [0.07ms]
+(pass) slow tail responses cannot pass capacity when window completions meet the throughput target
+(pass) drain beyond 120 seconds after arrivals stop cannot pass despite correct final accounting
+(pass) a looser --max-p99-ms cannot turn a contract latency breach into a capacity pass
+
+scripts/__test__/benchmark-metrics.test.ts:
+(pass) CPU does not become negative or lose sampled work when a PG backend exits mid-run [0.13ms]
+(pass) CPU counter regression and PID reuse cannot subtract CPU or double count recovery [0.02ms]
+(pass) helper descendants are counted separately without duplicating overlapping roots [0.03ms]
+(pass) ps days and fractional seconds preserve process start identity and RSS [0.07ms]
+(pass) PG deltas use a hand calculated request denominator and separate nested execution [0.10ms]
+(pass) PG resets, evictions and regressed counters invalidate audit instead of reporting negative work [0.04ms]
+(pass) PG audit retains only the 25 most expensive statements [0.05ms]
+(pass) CPU discovery retains every Redis replica instead of overwriting earlier PIDs [0.11ms]
+
+scripts/__test__/bench-reference.test.ts:
+(pass) reference CLI accepts disabled trust and rejects malformed or unsafe workload bounds [0.07ms]
+(pass) reference audit includes warmup but capacity counts only completed arrival windows [0.05ms]
+(pass) reference rejects dropped arrivals, incorrect quota, wallet differences, slow tails and late drain [0.03ms]
+(pass) reference reservation multiplier rejects zero and preserves independently configured trust [0.02ms]
+(pass) reference distinguishes a zero rounded estimate from actual positive pre-consumption [0.34ms]
+(pass) positive reservation acceptance fails for a missing positive branch, trusted bypass or zero settlement [0.02ms]
+
+scripts/__test__/build-builtin-worker.test.ts:
+(pass) a changed Wasm declaration invalidates the portable proof before any runtime asset is published [2.64ms]
+(pass) builtin builds are reproducible and bind the complete dependency graph, existing Wasm and actual engine [118.54ms]
+
+scripts/__test__/benchmark-lib.test.ts:
+(pass) benchmark rejects empty/error/malformed Chat successes and invalid SSE completion [0.28ms]
+(pass) bounded histogram quantiles retain millisecond accuracy across many observations [1.18ms]
+(pass) rounded 6000 RPS cannot pass when the unrounded completed rate is below target [0.01ms]
+(pass) the open-loop driver does not drop the planned arrival at the window boundary [2047.87ms]
+
+tests/unit/openapi.test.ts:
+(pass) every route the v2 Gateway and Core serve is documented in the published OpenAPI with its method [4.73ms]
+(pass) every documented OpenAPI operation is served by the v2 Gateway or Core [1.68ms]
+
+tests/unit/architecture.test.ts:
+(pass) workspace dependencies stay acyclic and commercial capabilities stay outside gateway [2.96ms]
+(pass) Core processes and the Gateway never reach into each other's private modules [1.67ms]
+(pass) the v2 Gateway has no database path and reads only its config file from the environment [0.54ms]
+(pass) every schema artifact has one checksummed migration owner and no compatibility outbox [2.23ms]
+(pass) Drizzle declarations and the versioned ordinary schema snapshot cannot drift [44.77ms]
+(pass) deployment units start built entries, keep v2 processes under separate users and route Chat to the v2 Gateway [0.86ms]
+(pass) the shipped Core API, worker and Gateway examples and the Caddyfile agree on how the processes reach each other [0.45ms]
+
+apps/core-worker/src/__test__/maintenance.test.ts:
+(pass) a failing maintenance task is reported once and waits for its interval instead of spinning, and close interrupts the wait [2002.08ms]
+(pass) a task that reports more work is called again immediately until it reports none [6.56ms]
+
+apps/core-worker/src/__test__/config.test.ts:
+(pass) a worker without durable endpoints is refused by field name without echoing secrets [3.50ms]
+(pass) a queue namespace that could escape its key prefix and unbounded settlement concurrency are refused [0.75ms]
+(pass) a partial Core recovery client is refused by the missing field names [0.55ms]
+(pass) production refuses a worker that cannot recover expired reservations through Core [0.25ms]
+(pass) maintenance batches beyond what one settlement or recovery call accepts are refused [0.15ms]
+(pass) the shipped production example loads with a complete Core recovery client over TLS [0.44ms]
+
+apps/core-api/src/__test__/openapi.test.ts:
+(pass) the published OpenAPI document matches the contract generated by Core [7.34ms]
+(pass) the Core public listener serves the published OpenAPI document without credentials [7.34ms]
+
+apps/core-api/src/__test__/config.test.ts:
+(pass) the admin listener is refused without the execution secrets it authenticates with [3.41ms]
+(pass) an unknown admin field and a short bootstrap admin key are refused [0.95ms]
+(pass) a missing config file path is refused before reading anything [0.06ms]
+(pass) the public account listener requires the execution pepper and valid trusted proxy ranges [1.32ms]
+(pass) the shipped example is refused until the operator fills the pepper, encryption key and admin key [1.17ms]
+
+apps/core-api/src/__test__/request-body.test.ts:
+(pass) a body that stops arriving before its time budget fails with 408 body_timeout and releases its source [50.27ms]
+(pass) a body larger than its byte budget fails with 413 body_too_large, not as a timeout [0.05ms]
+(pass) a client that disconnects is not reported as a body timeout [0.04ms]
+(pass) a complete body within both budgets is parsed as JSON [0.05ms]
+
+apps/gateway/src/__test__/tool-policy.test.ts:
+(pass) server-executed tools without a billing dimension are rejected before admission [0.17ms]
+(pass) client-executed tools billed only through tokens remain accepted [0.02ms]
+(pass) client-executed tool variants and null tool lists are not mistaken for unmetered hosted tools [0.02ms]
+
+apps/gateway/src/__test__/form.test.ts:
+(pass) a multipart body becomes a JSON view with text fields and digest-only file descriptors [0.38ms]
+(pass) an edited view is re-encoded with the original file bytes and the edited text fields [0.20ms]
+(pass) a plugin cannot forge, duplicate or drop file parts [0.09ms]
+(pass) singular multipart fields may appear only once [0.03ms]
+(pass) malformed multipart bodies are a client error [0.03ms]
+
+apps/gateway/src/__test__/batches.test.ts:
+(pass) a batch file yields its model, endpoint, rows and the sorted identity digest [0.38ms]
+(pass) batch files violating the request rules are refused with invalid_batch [8.08ms]
+(pass) a batch row carrying a server-executed tool is refused like a direct request instead of reaching the upstream unmetered [0.07ms]
+(pass) embedding inputs and image counts are bounded across the whole batch [13.32ms]
+(pass) decimal quantities are summed exactly without floating point drift [0.07ms]
+(pass) batch output lines report success only for 2xx responses carrying a body [0.07ms]
+(pass) upstream file identities in a batch object are replaced by gateway identities or hidden [0.45ms]
+
+apps/gateway/src/__test__/references.test.ts:
+(pass) client-defined schemas and tool payloads may use resource-like field names [0.01ms]
+(pass) inline file data and explicit nulls are not upstream resource references
+(pass) references nested anywhere outside opaque payloads are refused [0.04ms]
+(pass) a gateway response identity is collected with its pointer only where it may be resolved [0.04ms]
+(pass) a gateway file identity is collected wherever a file_id appears, while upstream file identities stay refused [0.04ms]
+(pass) deeply nested bodies are walked without exhausting the call stack [2.27ms]
+
+apps/gateway/src/__test__/packages.test.ts:
+(pass) concurrent requests for one digest share a single verified download and later hits stay local [21.57ms]
+(pass) a digest outside the deployment trust is refused without downloading [0.06ms]
+(pass) Core serving a different validly signed package for the requested digest is refused and not cached [18.11ms]
+(pass) a validly signed package the deployment does not admit for its signer is refused and not cached [18.22ms]
+(pass) a failed download is retried on the next request instead of being remembered [18.43ms]
+(pass) the cache holds at most its capacity and evicts the least recently used package [54.67ms]
+
+apps/gateway/src/__test__/stream-deadlines.test.ts:
+(pass) the idle deadline only runs while a read waits on the upstream, so a slow reader of ready data never expires it [206.15ms]
+(pass) a silent upstream expires the idle deadline once and cancelling the guarded stream releases the upstream [102.72ms]
+(pass) an upstream answer without a body reads as an ended stream instead of failing the relay [0.29ms]
+(pass) a downstream that keeps reading receives the first chunk then the rest without a stall [102.85ms]
+(pass) a downstream that stops reading is cut at the stall deadline: the source is finished, the stream errors and the stall is reported once [153.07ms]
+(pass) cancelling the delivered stream finishes its source without reporting a stall [102.62ms]
+
+apps/gateway/src/__test__/plugin-runtime.test.ts:
+(pass) only a verified platform package matching both local build and Core approval uses the Worker [137.12ms]
+(pass) missing or unrelated Core approval rejects before any attempt or runtime starts [84.92ms]
+(pass) a private verification made with an unrelated public key cannot impersonate the platform signer [107.33ms]
+(pass) an approved Wasm attempt stays Wasm and the resource default never selects a Worker [356.91ms]
+(pass) public package mutation cannot select a different execution identity and forged objects cannot bind [89.22ms]
+(pass) platform signing alone cannot enable unregistered package bytes [85.01ms]
+(pass) batch siblings preserve the parent's captured configuration and executor and cannot outlive disposal [91.59ms]
+(pass) automatic primary cancellation closes every existing batch sibling before it can execute [81.57ms]
+
+apps/gateway/src/__test__/config.test.ts:
+(pass) a minimal production config loads with bounded defaults [0.93ms]
+(pass) per-attempt deadlines outside 100 ms to the 600 s total ceiling are rejected [1.63ms]
+(pass) production refuses private upstream bypass and evidence without an acknowledged replica [0.48ms]
+(pass) an audience the Core client would refuse at startup is rejected while loading [0.45ms]
+(pass) database settings, unknown keys and malformed CIDRs are rejected [0.46ms]
+(pass) the shipped production example loads and keeps the production safeguards [0.07ms]
+
+packages/core-client/src/__test__/lifecycle.test.ts:
+(pass) unregistered or closed RPC clients cannot issue workload commands [0.23ms]
+(pass) Core RPC refuses to dial without an exact provisioned Core peer pin and SAN [0.01ms]
+
+packages/contracts/src/__test__/internal-identity.test.ts:
+(pass) V2 dispatch requires a bounded execution identity while historical V1 remains independently readable [0.70ms]
+(pass) dispatch rejects body canary carried in extra headers [0.01ms]
+(pass) dispatch rejects body canary carried in extra path
+(pass) dispatch rejects body canary carried in extra query
+(pass) dispatch rejects body canary carried in extra raw_uri
+(pass) dispatch rejects body canary carried in extra body
+(pass) dispatch rejects body canary carried in extra metadata
+(pass) dispatch rejects body canary carried in extra request_target
+(pass) dispatch rejects body canary carried in extra url
+(pass) dispatch preserves all supported SDK auth descriptors and rejects alternate secret channels [0.13ms]
+(pass) dispatch numeric versions and origin cannot smuggle raw request text [0.11ms]
+
+packages/contracts/src/__test__/core-execution.test.ts:
+(pass) billable numeric manifest retains large exact integers and fractional seconds without coercion [0.27ms]
+(pass) billable manifest rejects raw content unknown dimensions lossy numbers and fractional token counters [0.07ms]
+(pass) quota RPC rejects arbitrary token reconciliation URL keys and unbounded recovery batches [0.17ms]
+(pass) retry refuses caller-visible output and excessive global ordinals before financial mutation [0.22ms]
+(pass) typed financial error DTO preserves safe request identity but rejects grant secret and duplicate receipt channels [0.12ms]
+
+packages/contracts/src/__test__/enterprise.test.ts:
+(pass) resource identities reject URLs, signed queries and traversal [0.04ms]
+(pass) resource commits reject model content, arbitrary metadata and music pseudo resources [0.16ms]
+(pass) music evidence carries integer milliseconds and tariffs require matching ceilings [0.23ms]
+(pass) upstream music prices cannot omit their cost ceiling [0.08ms]
+
+packages/contracts/src/__test__/route-ceilings.test.ts:
+(pass) rated zero-cost routes cannot omit their explicit reservation ceiling [0.16ms]
+(pass) supplier price replacement cannot reuse an absent or mismatched previous ceiling [0.15ms]
+(pass) empty supplier rates and unknown reservation dimensions are rejected at the route boundary [0.03ms]
+
+packages/runtime/src/__test__/identity-crypto.test.ts:
+(pass) startup public key aliases cannot obtain different canonical key identities [0.14ms]
+(pass) every signed field including domain and audience binds exact UTF8 bytes [0.37ms]
+
+packages/runtime/src/__test__/bounded-io.test.ts:
+(pass) body budgets cancel chunked overflow and timeout instead of buffering forever [0.06ms]
+(pass) outbound fetch rejects private address before connecting or following redirects [0.13ms]
+(pass) CIDR matching and proxy resolution trust only the verified transport peer [0.25ms]
+
+packages/runtime/src/__test__/network.test.ts:
+(pass) rejects private, mapped, metadata, reserved and ambiguous destinations [0.07ms]
+(pass) repeated upstream bursts reuse sockets instead of exhausting local ports [35.26ms]
+(pass) transport keeps redirects manual and validates addresses before connecting [2.28ms]
+(pass) compressed upstream bodies are decoded before enforcing the response byte limit [3.99ms]
+(pass) closing a saturated pool rejects queued requests and abort frees capacity [89.72ms]
+(pass) a queued upstream abort returns before the active socket frees and proves no dispatch [8.24ms]
+(pass) aborting an upstream body stops the socket and allows the next request [1.84ms]
+(pass) TLS preserves SNI and classifies rejected handshakes as undispatched [9.21ms]
+(pass) an IP-literal HTTPS upstream handshakes without SNI instead of failing before connecting [0.54ms]
+(pass) configured environment proxies cannot intercept pinned upstream requests [1.43ms]
+
+packages/runtime/src/__test__/batcher.test.ts:
+(pass) an idle batch starts without waiting its collection window and still waits for commit [0.19ms]
+(pass) batch acknowledgments wait for commit and preserve request/result association [0.06ms]
+(pass) busy batches retain collection time and queued work starts promptly when the database becomes idle [22.12ms]
+(pass) batch commit failure rejects every caller without manufacturing partial success [0.06ms]
+(pass) bounded batching reports overload while admitted work remains commit-gated [0.08ms]
+
+packages/runtime/src/__test__/cloud-auth.test.ts:
+(pass) Vertex signs service-account assertions and coalesces refresh before token expiry [21.43ms]
+(pass) Vertex rejects expired access tokens and malformed service-account credentials [0.02ms]
+(pass) Bedrock signing binds payload, session, region and encoded model path [0.18ms]
+
+packages/runtime/src/__test__/route-policy.test.ts:
+(pass) a higher priority tier is always offered before a faster or heavier lower tier [0.20ms]
+(pass) channels with an open circuit are left out and no healthy channel is no_route [0.04ms]
+(pass) round robin rotates one equal-priority tier from the shared offset keyed by model and priority [0.24ms]
+(pass) least latency orders a tier by observed latency and breaks ties by weight [0.04ms]
+(pass) weighted routing prefers channels in proportion to their weight [3.31ms]
+
+packages/runtime/src/__test__/crypto.test.ts:
+(pass) secret and outbound boundaries > authenticated encryption binds a provider identity [0.12ms]
+(pass) secret and outbound boundaries > canonical fingerprints preserve array order and explicit zero/false [0.03ms]
+
+packages/plugin-sdk/src/__test__/builtin-artifact.test.ts:
+(pass) builtin artifact parsing binds actual code and engine into the independently calculated versioned identity [0.12ms]
+(pass) builtin artifact parsing rejects unsupported versions, false Wasm proof and source path escapes [0.14ms]
+
+packages/plugin-sdk/src/__test__/module.test.ts:
+(pass) owned module bytes cannot be replaced by mutations to a caller's Buffer or descriptor [0.05ms]
+(pass) execution metadata and module retain the signed package after public views and snapshots are changed [23.45ms]
+
+packages/plugin-sdk/src/__test__/package.test.ts:
+(pass) signed package bytes are immutable identities and unsigned or tampered replacement is refused [70.55ms]
+(pass) package path boundaries, duplicates, missing required files and fixture budgets reject before execution [1.34ms]
+(pass) unknown ABI, manifest fields, operations and dimensions cannot be authenticated into validity [75.68ms]
+(pass) config validation rejects unknown, missing, out of range and secret fields before guest invocation [20.76ms]
+(pass) prepared output cannot choose an origin, traverse paths or inject credentials and headers [0.20ms]
+(pass) duplicate JSON keys cannot give a signed manifest or outer envelope ambiguous meaning [39.00ms]
+
+packages/plugin-sdk/src/__test__/release-policy.test.ts:
+(pass) a listed release's package verifies with its bound key and an unbound signer is refused [52.86ms]
+(pass) platform classification uses authenticated private package identity and cannot be forged by public field mutation [19.98ms]
+(pass) a matching key id cannot impersonate the actual deployment signing key for platform execution [37.97ms]
+(pass) publisher admission never grants platform execution even when its public view impersonates an approved package [20.36ms]
+(pass) platform classification rejects revoked, unbound and naturally expired grants [19.82ms]
+(pass) revoked releases, release-only keys and keys outside their validity window grant no package trust [0.08ms]
+(pass) an expired or revoked policy and a non-Ed25519 package key are refused outright [46.97ms]
+(pass) a trusted publisher admits unlisted digests only for plugins inside its namespace [0.07ms]
+(pass) revoked, expired, not-yet-valid or gateway-namespace publishers grant no trust [0.13ms]
+
+packages/adapters/src/__test__/minimax-music.test.ts:
+(pass) MiniMax music fixtures execute through the production WASM ABI [444.18ms]
+
+packages/adapters/src/__test__/anthropic-messages.test.ts:
+(pass) package synthetic fixtures execute through the production WASM ABI [386.22ms]
+(pass) a long conversation is converted in one inspection pass with every message in order [124.10ms]
+(pass) a malformed tool argument string is a 400 invalid_json rather than a host fault [5.01ms]
+(pass) zero-argument tool calls become an empty input object and strict tools are refused [8.07ms]
+
+packages/adapters/src/__test__/large-json.test.ts:
+(pass) 16 MiB Chat request and response use the same WASM ABI with exact numeric and UTF-8 slices [455.40ms]
+
+packages/adapters/src/__test__/bedrock-anthropic.test.ts:
+(pass) package synthetic fixtures execute through the production WASM ABI with the event stream codec [370.75ms]
+
+packages/adapters/src/__test__/openai-chat.test.ts:
+(pass) the real WASM describes supported Chat and explicitly refuses balance hooks [262.61ms]
+(pass) the real WASM prepare maps models, preserves exact numbers and supplies a final ceiling without credentials [2.33ms]
+(pass) Azure path style sends to the deployment path with api-version and the api-key header [2.17ms]
+(pass) Azure path style without a valid api-version or with an unsafe deployment name is refused [5.72ms]
+(pass) max_tokens output field sends the ceiling as max_tokens and renames a client max_completion_tokens [4.45ms]
+(pass) unrepresentable protocol, multiple choices and conflicting or excessive output limits are 422 [5.99ms]
+(pass) JSON preserves large usage and decimal literals, exposes numeric facts and a withheld terminal candidate [3.52ms]
+(pass) usage-less valid JSON remains UNKNOWN and length is an incomplete candidate [3.28ms]
+(pass) empty or malformed JSON, upstream errors and invalid final usage never produce a success candidate [18.20ms]
+(pass) image responses are billed per delivered image, not per data entry [15.90ms]
+(pass) cached and reasoning usage are exact cumulative dimensions and invalid partitions fail [9.93ms]
+(pass) SSE any single-byte UTF-8 boundary and tool argument increments preserve wire and withhold terminal [56.38ms]
+(pass) SSE comments, CRLF and unspaced data lines flush immediately without waiting to fill a batch [8.97ms]
+(pass) truncated, empty, error, malformed UTF-8 and incomplete tools cannot turn EOF into success [39.36ms]
+(pass) attempts interleave explicit state and final usage snapshots without sharing text or totals [27.51ms]
+(pass) cumulative usage is replaced rather than summed and regressing snapshots fail [18.34ms]
+(pass) package synthetic fixtures execute through the production WASM ABI [273.58ms]
+(pass) already ready SSE frames drain in bounded batches and partial usage never claims FINAL [1011.87ms]
+
+packages/adapters/src/__test__/sse-limits.test.ts:
+(pass) the real helper accepts the 70067-byte regression event and a true one MiB event without a native payload increase [301.93ms]
+(pass) CRLF multiline JSON and exact numbers remain intact while usage belongs to the guest [17.93ms]
+(pass) tool JSON accumulation preserves split UTF16 surrogate pairs and exact numeric text [34.19ms]
+(pass) damaged tool JSON, aggregate overflow, event overflow and bytes after a terminal cannot become successful [67.27ms]
+(pass) cancellation of a partial frame reclaims its owner and an already aborted idle call also closes [2.05ms]
+(pass) one MiB of tool argument fragments and long opaque tool identifiers never enter guest state [40.20ms]
+(pass) finished output leases remain owned only until their finite attempt deadline when a caller omits release [312.14ms]
+(pass) bytes after a terminal cannot promote the last verified PARTIAL usage snapshot to FINAL [30.20ms]
+
+packages/adapters/src/__test__/builtin-worker.test.ts:
+(pass) every bundled fixture runs through the real Worker ABI with separate attempt state and no retained documents [147.13ms]
+(pass) bundled Worker and Wasm produce byte-identical output and explicit state for every fixture call [1979.38ms]
+(pass) parallel builtin tenants preserve their own prepared model, response and state across worker slots [111.52ms]
+(pass) interleaved Worker streams preserve each tenant's text and usage after another tenant fails [117.22ms]
+(pass) a closed alternative executor cannot leave an observer attached when the shared attempt owner fails construction [98.77ms]
+(pass) Worker and Wasm attempts share one global attempt/state budget and close every registered executor [365.31ms]
+
+packages/adapters/src/__test__/gemini-generate.test.ts:
+(pass) package synthetic fixtures execute through the production WASM ABI [315.45ms]
+(pass) chat with system, tools and a tool round trip becomes generateContent with grouped function responses [9.45ms]
+(pass) streaming prepare targets streamGenerateContent with SSE and refuses usage opt-out [6.66ms]
+(pass) Vertex path style targets the project and location publisher model with host google-oauth [20.93ms]
+(pass) unrepresentable chat semantics are refused instead of silently dropped [17.05ms]
+(pass) response text, function calls, cache and thinking usage map to a chat completion [4.05ms]
+(pass) blocked prompts, safety stops, missing usage and multiple candidates are classified [12.84ms]
+
+packages/plugin-host/src/__test__/ipc-regressions.test.ts:
+(pass) held load setup does not reject a legal READY after the loads observation window [2409.06ms]
+(pass) held load setup stops when a helper misses its startup deadline and is reaped [108.30ms]
+(pass) shared cold load joining waiter cancellation does not cancel the other caller [226.26ms]
+(pass) shared cold load creator cancellation does not cancel the other caller [163.60ms]
+(pass) a cancelled shared-load attempt returns its owner and reservation before another attempt compiles [354.21ms]
+(pass) pre-aborted cold loads do not spawn and final waiter cancellation releases the underlying command [236.49ms]
+(pass) incomplete release publication cannot turn a shared compilation failure into helper stderr [304.19ms]
+(pass) two matching JSONL replies below their frame limit survive together transport chunks [202.83ms]
+(pass) two matching JSONL replies below their frame limit survive fragmented transport chunks [140.69ms]
+(pass) two matching JSONL replies below their frame limit survive bytewise transport chunks [161.89ms]
+(pass) JSONL exact enforces each frame and incomplete suffix budget after complete replies [150.23ms]
+(pass) JSONL oversized-line enforces each frame and incomplete suffix budget after complete replies [163.27ms]
+(pass) JSONL oversized-suffix enforces each frame and incomplete suffix budget after complete replies [199.32ms]
+(pass) successful shared and cached loads release every waiter signal listener [291.03ms]
+(pass) a final load waiter cannot leave its helper alive with ack-only cancellation completion [684.15ms]
+(pass) a final load waiter cannot leave its helper alive with target-only cancellation completion [715.17ms]
+(pass) multiple complete JSONL replies settle before an oversized incomplete suffix retires the helper [215.44ms]
+(pass) unknown duplicate and retired connection replies cannot settle a new command [379.91ms]
+
+packages/plugin-host/src/__test__/executable.test.ts:
+(pass) helper publication captures one immutable binary even when the mutable source is replaced [2.10ms]
+(pass) concurrent helper publishers preserve one valid immutable file and no staging files [3.20ms]
+(pass) a declared immutable helper path cannot be reinterpreted as a different executable after corruption [1.62ms]
+(pass) helper restart and new module workers execute the pinned binary after its mutable build source is replaced [909.98ms]
+(pass) a helper with an unexpected digest cannot start or consume the restart budget [29.63ms]
+(pass) a helper FIFO cannot block synchronous executable resolution or publication [8.42ms]
+
+packages/plugin-host/src/__test__/startup.test.ts:
+(pass) a parent starting to read after 2200ms does not spend its frame write budget before READY [2352.69ms]
+(pass) invalid startup budget 0 fails before spawn [0.14ms]
+(pass) invalid startup budget 30001 fails before spawn [0.02ms]
+(pass) invalid startup budget NaN fails before spawn [0.01ms]
+(pass) invalid startup budget 1.5 fails before spawn [0.01ms]
+(pass) a parent without READY fails startup, reports only bounded technical fields and releases every timer [89.28ms]
+(pass) wrong version cannot release startup dispatch [147.23ms]
+(pass) extra READY fields cannot release startup dispatch [146.85ms]
+(pass) unexpected event cannot release startup dispatch [145.86ms]
+(pass) ordinary reply before READY cannot release startup dispatch [190.16ms]
+(pass) heartbeat before READY cannot release startup dispatch [146.88ms]
+(pass) duplicate READY cannot release startup dispatch [146.27ms]
+(pass) stale identified READY cannot release startup dispatch [347.97ms]
+(pass) startup shared waiters have independent aborts, use bounded reservations and load only after READY [759.46ms]
+(pass) last startup waiter abort retires its helper and a future load receives a fresh READY [782.95ms]
+(pass) cancelling one distinct startup load cannot retain the owner process after READY and close [577.69ms]
+(pass) close during startup promptly settles work and reaps the unready parent [2.90ms]
+(pass) drain during startup promptly settles work and reaps the unready parent [1.78ms]
+(pass) crash during startup promptly settles work and reaps the unready parent [7.67ms]
+(pass) READY does not extend the original load deadline and delayed startup timers cannot revive a connection [747.67ms]
+(pass) READY followed by a parent that never reads still enforces the unchanged 2000ms frame write budget [2190.95ms]
+(pass) a retired in-flight write cannot retain timers or poison a replacement after its late callback [2296.41ms]
+(pass) READY and execution together cannot restart a load's absolute compile allowance [1757.15ms]
+(pass) a duplicate READY after a load reply cannot promote a retired connection to a loaded result [207.92ms]
+
+packages/plugin-host/src/__test__/sse-frames.test.ts:
+(pass) standard SSE framing preserves multiline data and Unicode across every CRLF and UTF8 byte boundary [0.33ms]
+(pass) the legacy normalized event budget accepts exactly one MiB even when CRLF doubles the raw wire [119.45ms]
+(pass) a maximum-size data event is accepted and the next normalized byte is rejected without a leaked partial frame [1.36ms]
+(pass) ready frame limits return a consumed prefix and resume without retaining the caller input [0.06ms]
+(pass) truncated UTF8, unfinished events and raw queue overflow are rejected and all reservations are reclaimable [0.08ms]
+
+packages/plugin-host/src/__test__/json-documents.test.ts:
+(pass) JSON inspection preserves exact literals and exposes only bounded immutable node facts [2.52ms]
+(pass) JSON plans change selected original slices and retain all other numeric and UTF-8 bytes [0.10ms]
+(pass) JSON pointer escaping and single removals use the immutable document rather than shifting arrays [0.09ms]
+(pass) cross owner, document, disposal and consumed handles cannot inspect or modify another snapshot [0.03ms]
+(pass) duplicate keys, invalid UTF-8, depth, fields and oversized input fail and return every reservation [18.25ms]
+(pass) duplicate, ancestor overlapping, invalid and oversized plans fail without touching the original [0.09ms]
+(pass) the aggregate JSON budget is reserved before copies and released after validation failure [0.02ms]
+(pass) a non-ASCII token cannot be masked into a valid numeric exponent [0.03ms]
+(pass) flat arrays count every element toward the node ceiling and share the aggregate ownership ledger [18.24ms]
+(pass) opaque string identity uses Unicode code units including escaped and split-surrogate representations [0.06ms]
+(pass) a compose plan builds a new document from source slices, parsed argument strings and stringified values without changing numbers or UTF-8 [0.09ms]
+(pass) compose rejects non-null or missing targets, missing sources, duplicate targets, unparsable argument strings and oversized templates [0.12ms]
+(pass) a wildcard segment expands over array elements into concrete pointer facts within the per-round budget [0.94ms]
+
+packages/plugin-host/src/__test__/artifact-file.test.ts:
+(pass) artifact reads preserve exact bytes at the admitted size and reject sparse oversized files and directories [3.03ms]
+(pass) pre-cancelled artifact reads stop before opening a missing file and invalid budgets cannot allocate [0.06ms]
+(pass) a FIFO without a writer is rejected without waiting for another process to open it [1.54ms]
+
+packages/plugin-host/src/__test__/sse-guest-boundary.test.ts:
+(pass) guest JSON document handles expire at frame consumption and another frame cannot inspect them [265.34ms]
+(pass) a string accumulator handle exported by one guest is inaccessible across tenant and stream owners [7.13ms]
+(pass) repeating a JSON string append in the same frame is rejected rather than double charging or changing content [3.13ms]
+(pass) a trap or cancellation immediately after host append closes all strings and the next guest remains fresh [41.29ms]
+(pass) a failed guest frame cannot introduce usage or FINAL that was not previously validated [2.69ms]
+(pass) idle helper death invalidates every accumulated owner before any later pure transform restarts it [278.93ms]
+
+packages/plugin-host/src/__test__/aws-eventstream.test.ts:
+(pass) chunk messages split at every byte boundary decode to SSE events named by the inner type [2.37ms]
+(pass) CRC corruption, exception messages, malformed envelopes and oversized events are invalid [0.12ms]
+(pass) bytes left after the last complete message at EOF are a truncation [0.02ms]
+
+packages/plugin-host/src/__test__/builtin-worker.test.ts:
+(pass) builtin worker owns verified code and request bytes while preserving each caller's explicit state [155.37ms]
+(pass) builtin queued Buffer input and state retain the bytes captured before caller mutation [156.89ms]
+(pass) builtin worker rejects unverified code and modules and pre-cancelled or over-budget calls without starting a thread [1.03ms]
+(pass) builtin queued cancellation and queue deadlines never execute or cancel the active caller [158.29ms]
+(pass) builtin active CPU cancellation reaps the spinning thread while the main loop stays responsive and fresh work succeeds [88.26ms]
+(pass) builtin CPU timeout and invalid replies cannot replay a failed call or corrupt a fresh worker [38.44ms]
+(pass) builtin close is shared and reentrant and awaits actual shutdown after cancelling active and queued calls [0.70ms]
+(pass) builtin startup CPU stalls are terminated under the original call deadline [33.38ms]
+(pass) builtin cancelling one active slot leaves another tenant's state and response intact [154.89ms]
+(pass) builtin repeated startup failures stop spawning within the rate window and recover after it [34.55ms]
+(pass) builtin oversized or shared-memory replies are rejected before becoming caller-owned output [7.03ms]
+(pass) builtin replies delivered after a blocked main loop passes the deadline cannot become success or contaminate the next call [64.71ms]
+
+packages/plugin-host/src/__test__/evidence.test.ts:
+(pass) a final JSON response becomes one FINAL observation over exactly the reported dimensions [264.92ms]
+(pass) streamed usage is recorded only when the cumulative snapshot changes and stays non-final until the end [24.75ms]
+(pass) an outcome without any usage is recorded as UNKNOWN and the bridge refuses a second finish [0.12ms]
+(pass) a failed record write is surfaced before the plugin output is returned [3.37ms]
+(pass) FINAL reasoning tokens are recorded but never become a final pricing dimension [3.50ms]
+(pass) a reported aggregate cache write is final while unreported TTL partitions stay unknown [0.06ms]
+(pass) an observation whose record failed is recorded again when the same usage is observed next [0.05ms]
+(pass) a send that never left the host is recorded once as NOT_EXECUTED without quantities [0.07ms]
+(pass) an attempt with observed usage can no longer claim it was never executed [0.03ms]
+
+packages/plugin-host/src/__test__/json-guest-boundary.test.ts:
+(pass) a real guest cannot inspect or materialize an invented document handle [268.80ms]
+(pass) a real guest cannot repeat inspections, overlap edits or exceed literal budgets [5.47ms]
+(pass) a guest cannot declare quantities outside its dimensions or reserve a different image count than its ceiling [2.21ms]
+(pass) a guest can defer usage with a pending terminal only when it declares the resource that will carry it [2.05ms]
+(pass) a consumed document cannot be replayed by the same guest into its next JSON epoch [1.99ms]
+(pass) another session or tenant cannot use a document plan issued for an earlier session [2.23ms]
+(pass) guest trap and active cancellation release JSON indexes and explicit state without contaminating future calls [31.56ms]
+(pass) cancellation and disposal invalidate JSON documents before later guest invocation [0.12ms]
+(pass) invalid guest output cannot put guest-chosen text into an outward error message [2.18ms]
+
+packages/plugin-host/src/__test__/attempts.test.ts:
+(pass) attempt session state is owned, sequenced, bounded and discarded on explicit disposal [263.96ms]
+(pass) concurrent and out of order stream calls fail without borrowing another attempt state [1.04ms]
+(pass) attempt count and global state reservations reject before guest work and return all quota [1.01ms]
+(pass) deadline and cancellation clear attempt timers and state, and later hooks cannot reuse them [32.15ms]
+(pass) a state budget failure disposes the session and returns the in-flight reservation [0.90ms]
+(pass) mutable public package views cannot substitute code or manifest after signature verification [23.24ms]
+(pass) JSON metadata cannot carry headers, targets or credential fields into a guest [0.20ms]
+
+packages/plugin-host/src/__test__/supervisor.test.ts:
+(pass) invalid native resource budgets fail before a process or oversized frame can be allocated [0.06ms]
+(pass) same helper, compiled module and slot cannot expose A to B, including after trap and cancellation [287.99ms]
+(pass) opaque state crosses Bun and the SDK guest without rounding large integers or decimal literals [263.13ms]
+(pass) an evicted compiled module can reload for a future transform without replaying an old call [784.88ms]
+(pass) a module worker crash cannot leave a stale Bun load entry that breaks the next transform [556.18ms]
+(pass) SIGSTOP worker followed by helper SIGKILL reclaims the owned process group and leaves unrelated helper intact [555.30ms]
+(pass) helper death settles active work without replay, restart is finite and close settles every queued promise [521.77ms]
+(pass) host pending count and bytes, queue deadline and native call deadline remain bounded [463.35ms]
+(pass) an idle stopped helper loses heartbeat and its stopped worker is forcibly reaped [1527.57ms]
+(pass) restart exhaustion cannot turn old commands into an automatic replay loop [228.57ms]
+(pass) pending and write byte budgets reject large frames and return their reservations [23.37ms]
+(pass) unknown and duplicate replies cannot match new commands and cwd dotenv cannot pollute the helper environment [181.00ms]
+(pass) malformed, oversized, EOF, stderr and stalled stdout fail all promises and are reaped [2652.47ms]
+(pass) fresh native parents complete READY, cold and warm loads with isolated guest state and no remaining lifecycle resources [835.68ms]
+(pass) immutable module handles retain executable bytes across caller mutation, eviction and forged copies [783.75ms]
+
+packages/kernel/src/__test__/money.test.ts:
+(pass) fractional dimensions sum to one atom instead of rounding each third [0.14ms]
+(pass) 125 music milliseconds at eight atoms per second cost exactly one atom [0.01ms]
+(pass) large quantities stay exact and fractional music milliseconds are rejected [0.02ms]
+(pass) music reservations enforce an explicit music ceiling and request rate [0.06ms]
+
+packages/kernel/src/__test__/upstream-cost.test.ts:
+(pass) A nonfinal token observations never become expense before the final quantities arrive [0.18ms]
+(pass) B an over-ceiling final dimension cannot consume another unknown dimension's reservation [0.06ms]
+(pass) C an attempt without a head retains its original one hundred atom exposure [0.02ms]
+(pass) C the other attempt posts cumulative twenty then fifty and releases only its own reserve [0.05ms]
+(pass) D trusted nonfinal overrun reserves forty five without posting twenty five as expense [0.06ms]
+(pass) untrusted or estimated head observations cannot enlarge reserve or turn into expense [0.02ms]
+(pass) fractional dimensions are summed before ceil and the known ceil is subtracted from joint exposure [0.04ms]
+(pass) rounding can leave zero remaining atoms while a priced dimension is still unknown [0.02ms]
+(pass) 125 milliseconds at eight atoms per second reserve and finalize exactly one atom [0.03ms]
+(pass) quantities above the safe integer limit retain exact cost and risk comparison [0.02ms]
+(pass) eighteen decimal place durations compare exactly and nonfinal risk remains reserve [0.04ms]
+(pass) explicit zero rates require an estimate and final facts even when the charge is zero [0.04ms]
+(pass) zero priced dimensions still report actual or trusted partial quantities above the captured bound [0.06ms]
+(pass) a missing priced estimate or empty pricing cannot silently turn unknown liability into free service [0.01ms]
+(pass) a final dimension without an explicit value cannot become a zero-cost final fact [0.01ms]
+(pass) unknown usage and invalid final dimensions are rejected instead of being ignored [0.03ms]
+(pass) invalid exact quantities and rates retain kernel validation at the new public boundary [0.03ms]
+(pass) numeric rate values cannot silently pass through JavaScript integer rounding [0.01ms]
+(pass) larger unresolved disputes enlarge reserve without changing a complete head's posted cost [0.03ms]
+(pass) a smaller unresolved dispute cannot refund the selected head or release unknown exposure [0.03ms]
+(pass) a disputed partial snapshot keeps its other unknown dimensions at the original captured bound [0.02ms]
+(pass) risk and disputed exposures use their maximum rather than adding duplicate liabilities [0.02ms]
+(pass) all thirty eight digit output atoms remain representable at the exact boundary [0.01ms]
+(pass) estimate final partial and disputed overflow fail explicitly instead of capping or returning zero [0.06ms]
+(pass) combined known cost and unknown exposure overflow even when each component fits separately [0.01ms]
+(pass) cost and risk calculations leave captured pricing quantities and evidence inputs unchanged [0.02ms]
+
+apps/core-api/src/identity/__test__/read-cache.test.ts:
+(pass) concurrent identity reads share one load and refresh exactly at the TTL boundary [0.18ms]
+(pass) identity LRU evicts the least recently used entry within its memory bound [0.06ms]
+(pass) cold identity load limit rejects overflow without rejecting a shared-key waiter [0.04ms]
+(pass) failed and missing identity reads do not poison later attempts [0.04ms]
+(pass) invalidation and close prevent in-flight identity reads from repopulating old state [0.06ms]
+(pass) a slow identity read cannot extend its cache lifetime past the original TTL [0.03ms]
+(pass) a cancelled identity waiter releases immediately without cancelling another shared waiter [0.05ms]
+(pass) closing identity reads aborts the owner and releases waiters even if its loader has not finished [0.05ms]
+(pass) identity loading timeout includes queue time and keeps unfinished cancelled loads inside the pending limit [12.10ms]
+
+packages/storage/src/execution/__test__/context.test.ts:
+(pass) a delayed retry timer cannot create a context after the one second budget [0.19ms]
+(pass) cancelling during a context retry cannot start a later context write [0.04ms]
+(pass) a backward wall clock step cannot extend the context retry budget [0.04ms]
+
+packages/storage/src/execution/__test__/quota.test.ts:
+(pass) a rolled back quota lock conflict can complete without replaying an unknown database outcome [1.35ms]
+(pass) quota synchronization never retries an unknown commit or connection error [0.06ms]
+(pass) a late quota retry timer and a backward wall clock cannot extend the one second budget [0.05ms]
+
+packages/adapters/src/protocol/__test__/policy.test.ts:
+(pass) route policy rejects blocked and unlisted native parameters and accepts unconfigured extensions [0.15ms]
+(pass) route policy limits are inclusive and reject out-of-range or non-numeric values [0.07ms]
+(pass) route policy matches nested array controls without scanning user tool arguments [0.02ms]
+(pass) invalid policy paths and reversed or empty ranges fail configuration validation [0.26ms]
+(pass) native extended precision numbers cannot cross a model range through binary rounding [0.09ms]
+
+packages/adapters/src/protocol/__test__/kernel.test.ts:
+(pass) precise cost and usage evidence > uses original numeric literals rather than rounded JSON.parse quantities [0.17ms]
+(pass) precise cost and usage evidence > sums rational dimensions before a single rounding [0.01ms]
+(pass) precise cost and usage evidence > preserves large integers and rejects floats/overflow [0.02ms]
+(pass) precise cost and usage evidence > cache and reasoning are dialect-aware without double counting [0.04ms]
+(pass) bounded SSE parser > handles every byte split, CRLF, Unicode, comments and multiline data [0.43ms]
+(pass) bounded SSE parser > never turns incomplete EOF into a completed event [0.02ms]
+(pass) decimal durations price exactly without binary float drift or duplicate units [0.04ms]
+(pass) JSON structure budgets reject nesting before recursive reviver and classify upstream corruption [0.04ms]
+
+packages/adapters/src/protocol/__test__/conversion.test.ts:
+(pass) cross-protocol conversion rejects effort instead of silently dropping it [0.21ms]
+(pass) cross-protocol conversion rejects audio and video instead of sending them as images [0.09ms]
+(pass) cross-protocol conversion rejects strict output and nested tool controls instead of losing them [0.03ms]
+(pass) cross-protocol conversion rejects versioned Anthropic tools instead of weakening their contracts [0.04ms]
+(pass) cross-protocol requests preserve zero, ordered tools and results [0.24ms]
+(pass) unsupported semantics reject rather than silently vanish [0.03ms]
+(pass) EOF cannot generate a successful converted terminal [0.29ms]
+(pass) length produces incomplete, one terminal and no synthetic success after error [0.09ms]
+(pass) Gemini named tool restrictions and Anthropic error results cannot silently widen [0.07ms]
+(pass) tool-only converted streams use contiguous stable target block identities [0.25ms]
+
+packages/adapters/src/protocol/__test__/metering.test.ts:
+(pass) malformed upstream audio_seconds retains its 502 protocol error [0.03ms]
+(pass) malformed upstream video_seconds retains its 502 protocol error
+(pass) malformed upstream seconds retains its 502 protocol error
+(pass) oversized raw upstream integer usage retains its 502 numeric limit error [0.02ms]
+(pass) exact upstream fractional seconds retain milliseconds without rounding
+(pass) mixed cache TTLs retain separately priced quantities instead of collapsing their costs [0.03ms]
+(pass) new aggregate cache snapshots cannot reuse stale TTL quantities or invent missing quantities [0.02ms]
+(pass) inconsistent cache partitions and duplicate aggregate pricing cannot produce a charge [0.01ms]
+(pass) JSON usage retains exact integers at and above the safe integer boundary [0.03ms]
+(pass) metering precision preserves persisted request fingerprints for exact large client integers
+(pass) duration snapshots replace stale milliseconds and reject inconsistent unit aliases [0.04ms]
+(pass) character quotes count direct Unicode text from each protocol without billing media URLs [0.17ms]
+(pass) Gemini tool-use prompt tokens are billed as input instead of being dropped [0.02ms]
+
+ 434 pass
+ 0 fail
+ 7744 expect() calls
+Ran 434 tests across 68 files. [48.19s]

@@ -1,0 +1,27 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/upstream-funds.test.ts:
+(pass) real recharge credits CNY USD HKD independently and shared channels do not duplicate funding [253.48ms]
+(pass) CNY payment700 and USD credited100 preserve exact microsecond receipt and balanced USD journal [209.12ms]
+(pass) same recharge reference rejects every changed semantic field and cannot spoof actor [208.88ms]
+(pass) strict recharge validation rejects unsafe money currencies calendars and missing facts without money writes [198.02ms]
+(pass) recharge accepts exact 38 digit amounts but overflow rolls back the second operation [187.98ms]
+(pass) same-key concurrent recharges recover one receipt without duplicate journal or audit [188.69ms]
+(pass) same-key different-currency and different-voucher writers produce one winner without lock cycles [188.03ms]
+(pass) audit failure rolls back balance receipt journal and voucher association inside caller transaction [197.54ms]
+(pass) constraint failure after posting rolls back money and receipt before a successful retry [189.83ms]
+(pass) recharge never revives disabled quarantined or reconciliation-required accounts or rewrites reserved and spent [221.86ms]
+(pass) voucher uploads verify bounded allowed bytes digest and immutable content before persistence [213.92ms]
+(pass) expired unreferenced vouchers reject recharge and reupload until explicit cleanup while referenced evidence survives [628.32ms]
+(pass) cleanup racing an in-flight committed recharge cannot delete its referenced evidence [720.30ms]
+(pass) outer rollback or deferred constraint failure cannot turn a returned recharge into committed money [235.10ms]
+(pass) concurrent same digest uploads return one immutable voucher while PNG JPEG and PDF signatures are explicit [204.20ms]
+(pass) second precision completion normalizes to the same microsecond receipt and replay bypasses a locked balance [189.48ms]
+(pass) cleanup that locks an expired voucher first makes a waiting recharge fail without partial funds [457.75ms]
+(pass) voucher expiring while recharge waits for its lock is rejected after locking [694.71ms]
+(pass) voucher expiring while upload waits for its lock is rejected after locking [699.26ms]
+
+ 19 pass
+ 0 fail
+ 148 expect() calls
+Ran 19 tests across 1 file. [6.13s]

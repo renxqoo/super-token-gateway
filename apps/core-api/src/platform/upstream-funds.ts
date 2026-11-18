@@ -1,4 +1,4 @@
-import type { TransactionSQL } from "bun";
+import type { SQL, TransactionSQL } from "bun";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { currencySchema } from "@gateway/contracts";
@@ -18,10 +18,17 @@ export function registerUpstreamFunds(
       permission: PlatformPermission,
       action: (tx: TransactionSQL, actor: string) => Promise<T>,
     ): Promise<T>;
+    runFunding<T>(
+      request: Request,
+      permission: PlatformPermission,
+      account: string,
+      catalog: boolean,
+      action: (tx: SQL, actor: string) => Promise<T>,
+    ): Promise<T>;
     body(request: Request): Promise<unknown>;
   },
 ) {
-  const { run, body } = tools;
+  const { run, runFunding, body } = tools;
   const id = (value: string | undefined) => z.uuid().parse(value);
   const auth = (c: { req: { header(name: string): string | undefined } }) =>
     c.req.header("authorization");
@@ -72,7 +79,7 @@ export function registerUpstreamFunds(
     const account = id(c.req.param("id")),
       input = await body(c.req.raw);
     return c.json(
-      await run(auth(c), "funding:adjust", (tx, actor) =>
+      await runFunding(c.req.raw, "funding:adjust", account, true, (tx, actor) =>
         createUpstreamAccountStore(tx).updateAccount(account, input, actor),
       ),
     );
@@ -89,7 +96,7 @@ export function registerUpstreamFunds(
     const account = id(c.req.param("id")),
       input = await body(c.req.raw);
     return c.json(
-      await run(auth(c), "funding:adjust", (tx, actor) =>
+      await runFunding(c.req.raw, "funding:adjust", account, true, (tx, actor) =>
         recordUpstreamAdjustment(tx, account, input as never, actor),
       ),
       201,
@@ -134,7 +141,7 @@ export function registerUpstreamFunds(
   app.post("/upstream-accounts/:id/reconciliations", async (c) => {
     const account = id(c.req.param("id")),
       input = await body(c.req.raw);
-    const result = await run(auth(c), "funding:adjust", (tx, actor) =>
+    const result = await runFunding(c.req.raw, "funding:adjust", account, true, (tx, actor) =>
       recordUpstreamReconciliation(tx, account, input as never, actor),
     );
     return c.json(result, result.replayed ? 200 : 201);

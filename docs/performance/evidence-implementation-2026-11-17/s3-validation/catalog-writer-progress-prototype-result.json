@@ -1,0 +1,11 @@
+{
+  "scope": "private catalog fence prototype with existing management authorization and route storage function; no product or HTTP-path claim",
+  "mutation": {
+    "status": 200,
+    "elapsed_ms": 41.09241699999984,
+    "new_readers_after_request": 0,
+    "reader_busy": 182
+  },
+  "database": "gateway_test_foundation_9d7c4a099bd5440aa8259336ee553bde",
+  "exit_code": 0
+}

@@ -39,8 +39,10 @@ function observed(attemptId = crypto.randomUUID()) {
   const bridge = observeAttempt(attempt, {
     attemptId,
     permitEpoch: "1",
+    delivery: "progressive",
+    seal: (evidence) => evidence,
     record: async (evidence) => {
-      recorded.push(evidence);
+      recorded.push(...evidence);
     },
   });
   return { bridge, recorded, attemptId };
@@ -166,6 +168,8 @@ test("a failed record write is surfaced before the plugin output is returned", a
   const bridge = observeAttempt(attempt, {
     attemptId,
     permitEpoch: "1",
+    delivery: "progressive",
+    seal: (evidence) => evidence,
     record: async () => {
       throw new Error("queue unavailable");
     },
@@ -230,7 +234,9 @@ test("a reported aggregate cache write is final while unreported TTL partitions 
     {
       attemptId: crypto.randomUUID(),
       permitEpoch: "1",
-      record: async (e) => void recorded.push(e),
+      delivery: "progressive",
+      seal: (evidence) => evidence,
+      record: async (e) => void recorded.push(...e),
     },
   );
   await bridge.invoke("stream_feed");
@@ -245,12 +251,14 @@ test("an observation whose record failed is recorded again when the same usage i
     {
       attemptId: crypto.randomUUID(),
       permitEpoch: "1",
+      delivery: "progressive",
+      seal: (evidence) => evidence,
       record: async (e) => {
         if (fail) {
           fail = false;
           throw new Error("queue unavailable");
         }
-        recorded.push(e);
+        recorded.push(...e);
       },
     },
   );
@@ -286,7 +294,9 @@ test("an attempt with observed usage can no longer claim it was never executed",
   const bridge = observeAttempt(scripted([output({ input_tokens: "3" })]), {
     attemptId: crypto.randomUUID(),
     permitEpoch: "1",
-    record: async (e) => void recorded.push(e),
+    delivery: "progressive",
+    seal: (evidence) => evidence,
+    record: async (e) => void recorded.push(...e),
   });
   await bridge.invoke("stream_feed");
   await expect(bridge.notExecuted({ request_state: "FAILED" })).rejects.toThrow("already observed");

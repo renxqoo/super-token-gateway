@@ -1,0 +1,118 @@
+from pathlib import Path
+import re,json,hashlib
+
+src=Path('packages/storage/src/sql/core-funding-batch.sql').read_text()
+p=Path('packages/storage/src/sql/core-evidence-batch.sql')
+base=p.read_text()
+assert 'CREATE OR REPLACE FUNCTION core_funding.supplier_settle_v1' not in base
+supplier=src[src.index('CREATE FUNCTION core_funding.supplier_settle_v1'):src.index('CREATE FUNCTION core_funding.evidence_group_v1')]
+group=src[src.index('CREATE FUNCTION core_funding.evidence_group_v1'):src.index('CREATE FUNCTION core_funding.persist_v1')]
+persist=src[src.index('CREATE FUNCTION core_funding.persist_v1'):src.index('CREATE OR REPLACE FUNCTION public.persist_core_evidence_groups_v1')]
+def swap(s,a,b,n=1):
+ assert s.count(a)==n,(a[:100],s.count(a),n)
+ return s.replace(a,b)
+def parts(s):
+ out=[];start=0;depth=0;quoted=False;i=0
+ while i<len(s):
+  c=s[i]
+  if c=="'":
+   if quoted and i+1<len(s) and s[i+1]=="'":i+=2;continue
+   quoted=not quoted
+  elif not quoted:
+   if c=='(':depth+=1
+   elif c==')':depth-=1
+   elif c==',' and depth==0:out.append(s[start:i].strip());start=i+1
+  i+=1
+ out.append(s[start:].strip());assert depth==0 and not quoted
+ return out
+def row_object(statement):
+ match=re.search(r'INSERT INTO public\.\w+\((.*?)\)\s*VALUES\((.*)\);',statement,re.S)
+ assert match,statement
+ cols=parts(match[1]);values=parts(match[2]);assert len(cols)==len(values)
+ return 'jsonb_build_object('+','.join("'"+c+"',"+v for c,v in zip(cols,values))+')'
+supplier=swap(supplier,'CREATE FUNCTION core_funding.supplier_settle_v1','CREATE OR REPLACE FUNCTION core_funding.supplier_settle_v1')
+start=supplier.index('  INSERT INTO public.upstream_costs(')
+end=supplier.index('\n END IF;',start)
+old=supplier[start:end]
+cost=old[:old.index('\n  INSERT INTO public.upstream_cost_heads')]
+supplier=supplier[:start]+"  IF pending IS NULL THEN\n"+old+"\n  ELSE pending=jsonb_set(pending,ARRAY['costs'],coalesce(pending->'costs','[]')||jsonb_build_array("+row_object(cost)+"));END IF;"+supplier[end:]
+a=" UPDATE public.upstream_holds SET current_reserved_atoms=new_reserve,state=CASE WHEN (x->>'complete')::boolean AND new_reserve=0 AND NOT disputed AND NOT faulted THEN 'SETTLED' ELSE 'PARTIAL' END,final_cost_atoms=CASE WHEN (x->>'complete')::boolean AND new_reserve=0 AND NOT disputed AND NOT faulted THEN new_cost END WHERE attempt_id=attempt;"
+supplier=swap(supplier,a," IF pending IS NULL THEN\n"+a+"\n ELSE pending=jsonb_set(pending,ARRAY['holds'],coalesce(pending->'holds','{}')||jsonb_build_object(attempt::text,jsonb_build_object('base_reserved_atoms',h.current_reserved_atoms,'current_reserved_atoms',new_reserve,'state',CASE WHEN (x->>'complete')::boolean AND new_reserve=0 AND NOT disputed AND NOT faulted THEN 'SETTLED' ELSE 'PARTIAL' END,'final_cost_atoms',CASE WHEN (x->>'complete')::boolean AND new_reserve=0 AND NOT disputed AND NOT faulted THEN new_cost END)));END IF;")
+group=swap(group,'CREATE FUNCTION core_funding.evidence_group_v1','CREATE OR REPLACE FUNCTION core_funding.evidence_group_v1')
+group=swap(group,'first_copy integer;BEGIN','first_copy integer;frame jsonb;step jsonb;meta jsonb;attempt_row public.attempts%ROWTYPE;request_row public.gateway_requests%ROWTYPE;BEGIN')
+anchor=' FOR pass IN 1..2 LOOP'
+addition=""" IF pending?'partition' THEN
+  IF EXISTS(SELECT 1 FROM public.attempts t JOIN public.billing_holds bh ON bh.request_id=t.request_id JOIN public.wallets w ON w.id=bh.wallet_id WHERE t.id=ANY(attempt_ids) GROUP BY bh.wallet_id HAVING count(DISTINCT pending->'partition'->>t.id::text)>1 OR bool_or(w.has_expiring_lots))
+   OR (SELECT count(*) FROM public.attempts t JOIN public.billing_holds bh ON bh.request_id=t.request_id WHERE t.id=ANY(attempt_ids))<>cardinality(attempt_ids)
+   OR EXISTS(SELECT 1 FROM generate_series(1,n) j WHERE mode[j]<>'NEW' OR contested[j] OR auth[j]<>'NORMAL') THEN RAISE EXCEPTION 'evidence_batch_dependency' USING ERRCODE='P0E01';END IF;
+ END IF;
+ IF pending IS NOT NULL AND NOT EXISTS(SELECT 1 FROM generate_series(1,n) j WHERE mode[j]<>'NEW' OR contested[j] OR auth[j]<>'NORMAL') THEN frame=core_funding.fact_frame_v1(attempt_ids);END IF;
+"""
+group=swap(group,anchor,addition+anchor)
+start=group.index('   SELECT * INTO h FROM public.upstream_holds WHERE attempt_id=a;')
+end=group.index("   merged=coalesce(merged,'{}');",start)
+old=group[start:end]
+group=group[:start]+"   IF frame IS NULL THEN\n"+old+"""   ELSE
+    meta=frame->'attempts'->a::text;h=jsonb_populate_record(NULL::public.upstream_holds,meta->'hold');rates=meta->'rates';basis=meta->>'basis';prices=meta->'prices';
+    cur=jsonb_populate_record(NULL::public.usage_event_index,NULLIF(meta->'canonical','null'::jsonb));merged=meta->'usage';
+   END IF;
+"""+group[end:]
+group=swap(group,"   event_claimed=EXISTS(SELECT 1 FROM public.core_evidence_receipts r WHERE r.origin_identity=ev->>'origin_identity' AND r.event_id=(ev->>'event_id')::uuid AND r.event_claim);","   IF frame IS NULL THEN event_claimed=EXISTS(SELECT 1 FROM public.core_evidence_receipts r WHERE r.origin_identity=ev->>'origin_identity' AND r.event_id=(ev->>'event_id')::uuid AND r.event_claim);ELSE event_claimed=false;END IF;")
+def staged(match):
+ name=match[1];args=match[2]
+ return "IF frame IS NULL THEN "+match[0]+"ELSE step=core_funding.stage_snapshot_v1(frame,"+args+");"+name+"=step->'snapshot';frame=step->'frame';END IF;"
+group,changed=re.subn(r'(raw|snap)=public\.core_evidence_snapshot_v1\((.*?)\);',staged,group,flags=re.S)
+assert changed==4,changed
+group=swap(group,"    stale=EXISTS(SELECT 1 FROM public.core_evidence_receipts r WHERE r.attempt_id=a AND r.origin_identity=ev->>'origin_identity' AND r.source=ev->>'source' AND r.outcome='ACCEPTED' AND r.source_revision>(ev->>'source_revision')::numeric);","    IF frame IS NULL THEN stale=EXISTS(SELECT 1 FROM public.core_evidence_receipts r WHERE r.attempt_id=a AND r.origin_identity=ev->>'origin_identity' AND r.source=ev->>'source' AND r.outcome='ACCEPTED' AND r.source_revision>(ev->>'source_revision')::numeric);ELSE stale=coalesce((frame->'attempts'->a::text->'sources'->>jsonb_build_array(ev->>'origin_identity',ev->>'source')::text)::numeric,0)>(ev->>'source_revision')::numeric;END IF;")
+group=swap(group,"seen_final=finality='FINAL' OR EXISTS(SELECT 1 FROM public.core_evidence_receipts r WHERE r.attempt_id=a AND r.outcome='ACCEPTED' AND r.finality IN ('FINAL','NOT_EXECUTED'));","seen_final=finality='FINAL' OR CASE WHEN frame IS NULL THEN EXISTS(SELECT 1 FROM public.core_evidence_receipts r WHERE r.attempt_id=a AND r.outcome='ACCEPTED' AND r.finality IN ('FINAL','NOT_EXECUTED')) ELSE coalesce((frame->'attempts'->a::text->>'seen_final')::boolean,false) END;")
+start=group.index('      UPDATE public.attempts SET evidence_id=canonical')
+end=group.index('\n     END IF;',start)
+old=group[start:end]
+replacement="""      IF frame IS NULL THEN
+"""+old+"""
+      ELSE
+       attempt_row=jsonb_populate_record(NULL::public.attempts,frame->'attempts'->a::text->'attempt');
+       attempt_row.evidence_id=canonical;
+       IF attempt_row.state NOT IN('SUCCEEDED','FAILED','NOT_EXECUTED') AND ev->>'attempt_state' IS NOT NULL THEN attempt_row.state=ev->>'attempt_state';END IF;
+       IF ev->>'attempt_state' IN('SUCCEEDED','FAILED','NOT_EXECUTED') THEN attempt_row.finished_at=coalesce(attempt_row.finished_at,clock_timestamp());END IF;
+       attempt_row.error_code=coalesce(ev->>'error_code',attempt_row.error_code);attempt_row.provider_request_id=coalesce(ev->>'provider_request_id',attempt_row.provider_request_id);
+       frame=jsonb_set(frame,ARRAY['attempts',a::text,'attempt'],to_jsonb(attempt_row));frame=jsonb_set(frame,ARRAY['dirty_attempts',a::text],'true');
+       frame=jsonb_set(frame,ARRAY['attempts',a::text,'seen_final'],to_jsonb(seen_final));
+       frame=jsonb_set(frame,ARRAY['attempts',a::text,'sources',jsonb_build_array(ev->>'origin_identity',ev->>'source')::text],to_jsonb((ev->>'source_revision')::numeric));
+       request_row=jsonb_populate_record(NULL::public.gateway_requests,frame->'requests'->attempt_row.request_id::text);
+       IF ev->>'request_state' IN('SUCCEEDED','CANCELLED','FAILED') AND request_row.selected_attempt_id IS NULL AND request_row.billing_outcome IN('PENDING','UNKNOWN') THEN
+        request_row.selected_attempt_id=CASE WHEN ev->>'request_state' IN('SUCCEEDED','CANCELLED') THEN a END;request_row.state=ev->>'request_state';request_row.billing_outcome=CASE ev->>'request_state' WHEN 'SUCCEEDED' THEN 'SUCCESS' ELSE ev->>'request_state' END;request_row.updated_at=clock_timestamp();
+        frame=jsonb_set(frame,ARRAY['requests',request_row.id::text],to_jsonb(request_row));frame=jsonb_set(frame,ARRAY['dirty_requests',request_row.id::text],'true');
+       END IF;
+      END IF;"""
+group=group[:start]+replacement+group[end:]
+start=group.index('   INSERT INTO public.core_evidence_receipts(id,origin_identity',group.index("   touched=jsonb_set")-1800)
+end=group.index(';',start)+1
+old=group[start:end]
+assert 'numeric_fault' in old
+group=group[:start]+"   IF frame IS NULL THEN\n"+old+"\n   ELSE frame=jsonb_set(frame,ARRAY['receipts'],(frame->'receipts')||jsonb_build_array("+row_object(old)+"));END IF;"+group[end:]
+group=swap(group,' WITH closed AS (',' PERFORM core_funding.flush_facts_v1(frame);\n WITH closed AS (')
+group=swap(group," request_ids=ARRAY(SELECT q.id FROM public.gateway_requests q WHERE q.id=ANY(request_ids) AND q.billing_outcome", " pending=core_funding.flush_costs_v1(pending);\n request_ids=ARRAY(SELECT q.id FROM public.gateway_requests q WHERE q.id=ANY(request_ids) AND q.billing_outcome")
+persist=swap(persist,'CREATE FUNCTION core_funding.persist_v1','CREATE OR REPLACE FUNCTION core_funding.persist_v1')
+anchor=' BEGIN\n FOR g IN SELECT value FROM jsonb_array_elements(p_groups) LOOP'
+persist=swap(persist,anchor,""" IF bulk AND jsonb_array_length(p_groups)>1 THEN
+  BEGIN
+   applied=core_funding.coalesce_groups_v1(p_groups,pending);
+   IF applied IS NOT NULL THEN
+    PERFORM core_funding.flush_v1(applied->'pending');RETURN applied->'results';
+   END IF;
+  EXCEPTION WHEN OTHERS THEN pending='{"cells":{},"journals":[],"entries":[]}'::jsonb;results='[]';END;
+ END IF;
+"""+anchor)
+grants="""
+DO $$ DECLARE owner name;BEGIN
+ SELECT pg_get_userbyid(proowner) INTO owner FROM pg_proc WHERE oid='core_funding.persist_v1(jsonb,boolean)'::regprocedure;
+ EXECUTE format('GRANT EXECUTE ON FUNCTION core_funding.fact_frame_v1(uuid[]),core_funding.stage_snapshot_v1(jsonb,uuid,text,text,text,jsonb,text[],uuid,uuid,numeric,boolean),core_funding.flush_facts_v1(jsonb),core_funding.flush_costs_v1(jsonb),core_funding.coalesce_groups_v1(jsonb,jsonb) TO %I',owner);
+END $$;
+REVOKE ALL ON FUNCTION core_funding.fact_frame_v1(uuid[]),core_funding.stage_snapshot_v1(jsonb,uuid,text,text,text,jsonb,text[],uuid,uuid,numeric,boolean),core_funding.flush_facts_v1(jsonb),core_funding.flush_costs_v1(jsonb),core_funding.coalesce_groups_v1(jsonb,jsonb) FROM PUBLIC;
+"""
+p.write_text(base+'\n'+supplier+'\n'+group+'\n'+persist+grants)
+manifest=Path('packages/storage/src/migrations/manifest.json');d=json.loads(manifest.read_text());assert d['migrations'][-1]['version']==2026111807
+d['migrations'].append({'version':2026111808,'files':[{'path':'./sql/core-evidence-batch.sql','checksum':hashlib.sha256(p.read_bytes()).hexdigest()}]});manifest.write_text(json.dumps(d,indent=2)+'\n')
+t=Path('tests/integration/core-execution-upgrade.test.ts');s=t.read_text();assert s.count('toBe(2026111807)')==1;t.write_text(s.replace('toBe(2026111807)','toBe(2026111808)'))
+print(json.dumps({'sql_lines':len(p.read_text().splitlines()),'snapshots_staged':changed,'migration':2026111808}))

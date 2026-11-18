@@ -49,6 +49,7 @@ export type VerifiedPackage = {
 export type VerifiedPackageRuntime = Readonly<{
   digest: string;
   signingKeyId: string;
+  signingKeyDigest: string;
   module: PluginModule;
   manifest: PluginManifest;
   configSchema: ConfigSchema;
@@ -168,6 +169,7 @@ export function verifyPackage(
   const runtime = Object.freeze({
     digest: snapshot.digest,
     signingKeyId: snapshot.signingKeyId,
+    signingKeyDigest: sha256(key.export({ format: "der", type: "spki" })),
     module: adoptPluginModule(snapshot.module, snapshot.moduleHash),
     manifest: freezeMetadata(snapshot.manifest),
     configSchema: freezeMetadata(snapshot.configSchema),

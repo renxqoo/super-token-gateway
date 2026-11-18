@@ -1,0 +1,13 @@
+WITH varied AS (
+      SELECT gen_random_uuid() attempt,gen_random_uuid() project,gen_random_uuid() request,gen_random_uuid() parent,gen_random_uuid() input,
+       j::numeric revision,CASE WHEN j%3=0 THEN NULL ELSE (j::numeric/10) END cost,
+       CASE WHEN j%3=1 THEN NULL WHEN j%3=2 THEN ARRAY['output_tokens','😀',chr(9)] ELSE '{}'::text[] END finals,
+       CASE WHEN j%3=1 THEN NULL WHEN j%3=2 THEN jsonb_build_object('b',j,'a',jsonb_build_object('input_tokens',j::text,'e',jsonb_build_array(chr(10),chr(34),null))) ELSE '{}'::jsonb END usage,
+       CASE WHEN j%2=0 THEN 'RAW' ELSE 'CANONICAL' END kind,
+       CASE WHEN j%5=0 THEN NULL ELSE 'execution'||chr(92)||chr(34) END source,
+       CASE WHEN j%7=0 THEN NULL ELSE 'FINAL' END finality
+      FROM generate_series(1,128) j
+    )
+    SELECT count(*)::int matches FROM varied v WHERE
+    ((core_funding.make_evidence_snapshot_v1(v.attempt,v.project,v.request,'USD',v.revision,v.kind,v.source,v.finality,v.usage,v.finals,v.parent,v.input,v.cost,false)).fact).snapshot_digest
+    =public.core_digest_v1(jsonb_build_object('attempt_id',v.attempt,'record_kind',v.kind,'snapshot_revision',v.revision::text,'source',v.source,'finality',v.finality,'usage',v.usage,'final_dimensions',to_jsonb(v.finals),'parent',v.parent,'input',v.input,'cost_atoms',v.cost::text));

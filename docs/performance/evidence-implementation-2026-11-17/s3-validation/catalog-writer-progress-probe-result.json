@@ -1,0 +1,12 @@
+{
+  "scope": "real management route mutation under continuous warm candidate transactions; progress probe, not capacity",
+  "mutation": {
+    "status": 503,
+    "elapsed_ms": 8003.616417,
+    "new_readers_after_request": 3404,
+    "reader_busy": 0
+  },
+  "database": "gateway_test_foundation_0f7391c75f604b20b91a1231e6927e71",
+  "error": "Error: CATALOG_WRITER_NO_PROGRESS",
+  "exit_code": 1
+}

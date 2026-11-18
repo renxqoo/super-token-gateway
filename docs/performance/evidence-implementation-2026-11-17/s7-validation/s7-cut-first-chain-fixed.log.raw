@@ -1,0 +1,10 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-first-chain.test.ts:
+(pass) real upstream HTTP JSON through the plugin host is signed, queued and settled for both parties exactly once [2713.02ms]
+(pass) a real upstream SSE stream through the plugin host settles from its final usage frame exactly once [2558.06ms]
+
+ 2 pass
+ 0 fail
+ 21 expect() calls
+Ran 2 tests across 1 file. [5.38s]

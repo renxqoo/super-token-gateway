@@ -1,0 +1,1319 @@
+{
+  "recorded_at": "2026-11-18T06:58:08.928068+00:00",
+  "runtime_migration": 2026111813,
+  "same_capacity_options": [
+    "--online-capacity",
+    "--seconds",
+    "60",
+    "--instances",
+    "1",
+    "--wallets",
+    "1000",
+    "--supplier-accounts",
+    "1",
+    "--concurrency",
+    "256",
+    "--warmup-concurrency",
+    "16",
+    "--worker-concurrency",
+    "8",
+    "--gateway-inflight",
+    "10000",
+    "--drain-seconds",
+    "120",
+    "--request-timeout-ms",
+    "30000",
+    "--plugin-runtime",
+    "builtin-worker",
+    "--target-rps",
+    "200",
+    "--rate",
+    "201",
+    "--upstream",
+    "standard"
+  ],
+  "deferred_options": {
+    "seconds": 15,
+    "rate": 201,
+    "worker_mode": "deferred",
+    "worker_concurrency": [1, 8],
+    "online_capacity": false
+  },
+  "required_replicas": 1,
+  "rounds": [
+    {
+      "label": "lock-profile-200",
+      "exit_code": 1,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        "dist/core-worker/main.js": "6c72adde7527a8dd39d6d41c8c139712b5468b000117d5438346d97f356d8dcf",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": false,
+      "audit_valid": true,
+      "failures": [],
+      "window_complete_rps": 181.88333333333333,
+      "http_statuses": {
+        "200": 12060
+      },
+      "http_p99_ms": 413.14,
+      "drain_after_window_ms": 4518,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 20.157985682547523,
+      "cpu_ms_per_admitted": 25.489179626429685,
+      "last_worker": {
+        "calls": 7067,
+        "jobs": 9291,
+        "groups": 26382,
+        "events": 52764,
+        "max_jobs": 4,
+        "max_groups": 47,
+        "lock_conflicts": 14229,
+        "errors": 0,
+        "active_jobs": 1
+      },
+      "finished_accounting": {
+        "requests": 12153,
+        "attempts": 12153,
+        "succeeded_attempts": 12153,
+        "usage_events": 24306,
+        "usage_requests": 12153,
+        "unexpected_receipts": 0,
+        "precise_usage": 24306,
+        "precise_charges": 12153,
+        "settled_holds": 12153,
+        "reserved": "0",
+        "spent": "1215300",
+        "debt": "0",
+        "acknowledged": 24306,
+        "settlement_journals": 12153,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 12153,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 566040,
+          "sha256": "68c859a1fc7c07430779267b233eb45fc606019bf6b398ba86a113350a36afc9"
+        },
+        "http.json": {
+          "bytes": 9992,
+          "sha256": "93c91a0faf15680e186304ac4e03a46cfa4ab6c0130987b72f7d4823c83a9e3b"
+        },
+        "http.json.identities.tsv": {
+          "bytes": 615060,
+          "sha256": "2832b852929118ad9df9de5a84cffe1b1e5be2768b9d457ceabc2ac88a08c31e"
+        },
+        "ack.identities.tsv": {
+          "bytes": 619803,
+          "sha256": "ef3dad0fd1a3abd51f055834054266a5c5a4db64c6ece75e7a3f01812f06e505"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "settlementProfile": [
+        {
+          "classification": "capacity_prof_group_success_4",
+          "count": "4"
+        },
+        {
+          "classification": "capacity_prof_group_success_8",
+          "count": "61"
+        },
+        {
+          "classification": "capacity_prof_group_success_16",
+          "count": "626"
+        },
+        {
+          "classification": "capacity_prof_group_success_32",
+          "count": "763"
+        },
+        {
+          "classification": "capacity_prof_group_success_64",
+          "count": "79"
+        },
+        {
+          "classification": "capacity_prof_group_success_128",
+          "count": "3"
+        },
+        {
+          "classification": "capacity_prof_group_success_256",
+          "count": "2"
+        },
+        {
+          "classification": "capacity_prof_group_wallets_2",
+          "count": "9"
+        },
+        {
+          "classification": "capacity_prof_group_wallets_4",
+          "count": "9"
+        },
+        {
+          "classification": "capacity_prof_group_wallets_8",
+          "count": "3"
+        },
+        {
+          "classification": "capacity_prof_group_balance_cells_1",
+          "count": "21"
+        },
+        {
+          "classification": "capacity_prof_group_balance_cells_2",
+          "count": "554"
+        },
+        {
+          "classification": "capacity_prof_group_balance_cells_4",
+          "count": "1607"
+        },
+        {
+          "classification": "capacity_prof_group_balance_cells_8",
+          "count": "2567"
+        },
+        {
+          "classification": "capacity_prof_group_balance_cells_16",
+          "count": "1979"
+        },
+        {
+          "classification": "capacity_prof_group_balance_cells_32",
+          "count": "2752"
+        },
+        {
+          "classification": "capacity_prof_group_balance_cells_64",
+          "count": "3519"
+        },
+        {
+          "classification": "capacity_prof_group_balance_cells_128",
+          "count": "1075"
+        },
+        {
+          "classification": "capacity_prof_group_balance_cells_256",
+          "count": "134"
+        },
+        {
+          "classification": "capacity_prof_merged_success_2",
+          "count": "40"
+        },
+        {
+          "classification": "capacity_prof_merged_success_4",
+          "count": "257"
+        },
+        {
+          "classification": "capacity_prof_merged_success_8",
+          "count": "612"
+        },
+        {
+          "classification": "capacity_prof_merged_success_16",
+          "count": "572"
+        },
+        {
+          "classification": "capacity_prof_merged_success_32",
+          "count": "1312"
+        },
+        {
+          "classification": "capacity_prof_merged_success_64",
+          "count": "1241"
+        },
+        {
+          "classification": "capacity_prof_merged_success_128",
+          "count": "297"
+        },
+        {
+          "classification": "capacity_prof_merged_success_256",
+          "count": "33"
+        },
+        {
+          "classification": "capacity_prof_merged_declined_1",
+          "count": "18"
+        },
+        {
+          "classification": "capacity_prof_merged_wallets_4",
+          "count": "13"
+        },
+        {
+          "classification": "capacity_prof_merged_wallets_8",
+          "count": "8"
+        },
+        {
+          "classification": "capacity_prof_merged_dependency_4",
+          "count": "1"
+        }
+      ],
+      "workerMode": "live",
+      "workerConcurrency": 8
+    },
+    {
+      "label": "advisory-candidate-200",
+      "exit_code": 1,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        "dist/core-worker/main.js": "6c72adde7527a8dd39d6d41c8c139712b5468b000117d5438346d97f356d8dcf",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": false,
+      "audit_valid": true,
+      "failures": [],
+      "window_complete_rps": 162.06666666666666,
+      "http_statuses": {
+        "200": 12060
+      },
+      "http_p99_ms": 364.76,
+      "drain_after_window_ms": 7512,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 19.712005266189415,
+      "cpu_ms_per_admitted": 25.280177733892863,
+      "last_worker": {
+        "calls": 7941,
+        "jobs": 10168,
+        "groups": 29800,
+        "events": 59600,
+        "max_jobs": 4,
+        "max_groups": 52,
+        "lock_conflicts": 17647,
+        "errors": 0,
+        "active_jobs": 0
+      },
+      "finished_accounting": {
+        "requests": 12153,
+        "attempts": 12153,
+        "succeeded_attempts": 12153,
+        "usage_events": 24306,
+        "usage_requests": 12153,
+        "unexpected_receipts": 0,
+        "precise_usage": 24306,
+        "precise_charges": 12153,
+        "settled_holds": 12153,
+        "reserved": "0",
+        "spent": "1215300",
+        "debt": "0",
+        "acknowledged": 24306,
+        "settlement_journals": 12153,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 12153,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 586629,
+          "sha256": "b40c2896a23911e6cc158085038f23f35d6dac618d91ee67e6903321d3cda0b4"
+        },
+        "http.json": {
+          "bytes": 9994,
+          "sha256": "d2ec82434c711315fb81e6b1f1283192fe470ea14f0e2a81e093b0a521875d4b"
+        },
+        "http.json.identities.tsv": {
+          "bytes": 615060,
+          "sha256": "67b2b73c0fa194290c6cc303d863d8a0500ad44463e78b75c566b9a73f7429f0"
+        },
+        "ack.identities.tsv": {
+          "bytes": 619803,
+          "sha256": "4d25342b70ec1ffc485bb6323f8de352e1e6259193df09b72b421c2e9a9903d5"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "workerMode": "live",
+      "workerConcurrency": 8
+    },
+    {
+      "label": "holder-profile-200",
+      "exit_code": 1,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        "dist/core-worker/main.js": "6c72adde7527a8dd39d6d41c8c139712b5468b000117d5438346d97f356d8dcf",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": false,
+      "audit_valid": true,
+      "failures": [],
+      "window_complete_rps": 191.76666666666668,
+      "http_statuses": {
+        "200": 12060
+      },
+      "http_p99_ms": 658.19,
+      "drain_after_window_ms": 2025,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 22.40947992100066,
+      "cpu_ms_per_admitted": 28.22909809084925,
+      "last_worker": {
+        "calls": 7257,
+        "jobs": 9723,
+        "groups": 24065,
+        "events": 48130,
+        "max_jobs": 4,
+        "max_groups": 45,
+        "lock_conflicts": 11900,
+        "errors": 0,
+        "active_jobs": 0
+      },
+      "finished_accounting": {
+        "requests": 12152,
+        "attempts": 12152,
+        "succeeded_attempts": 12152,
+        "usage_events": 24304,
+        "usage_requests": 12152,
+        "unexpected_receipts": 0,
+        "precise_usage": 24304,
+        "precise_charges": 12152,
+        "settled_holds": 12152,
+        "reserved": "0",
+        "spent": "1215200",
+        "debt": "0",
+        "acknowledged": 24304,
+        "settlement_journals": 12152,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 12152,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 547295,
+          "sha256": "c13ab8c22845bdf6e047ee8d722df3f280e7def4354fffa1428bc9276b3f3eba"
+        },
+        "http.json": {
+          "bytes": 9990,
+          "sha256": "7cc9f1db2ae279c3e4a2cc45c089ea49f2b1c65106c5bf0a1795b3e9ac7fae2e"
+        },
+        "http.json.identities.tsv": {
+          "bytes": 615060,
+          "sha256": "b7e3b3b026c8d2e293bd6870482068eeb773d80ada5cfee9f1d32fdfbae97176"
+        },
+        "ack.identities.tsv": {
+          "bytes": 619752,
+          "sha256": "a4716154b1a08c641e83ea3ca2982af3b3ad7041500fbc1fdbc75474543fb708"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "settlementProfile": [
+        {
+          "classification": "blank",
+          "count": "315"
+        }
+      ],
+      "workerMode": "live",
+      "workerConcurrency": 8
+    },
+    {
+      "label": "width-64-candidate-200",
+      "exit_code": 1,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        "dist/core-worker/main.js": "6c72adde7527a8dd39d6d41c8c139712b5468b000117d5438346d97f356d8dcf",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": false,
+      "audit_valid": false,
+      "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+      "window_complete_rps": 162.35,
+      "http_statuses": {
+        "200": 11408,
+        "503": 199
+      },
+      "http_p99_ms": 3182.14,
+      "drain_after_window_ms": 5952,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 21.184817619918167,
+      "cpu_ms_per_admitted": 27.001828153564897,
+      "last_worker": {
+        "calls": 7802,
+        "jobs": 10125,
+        "groups": 23577,
+        "events": 47154,
+        "max_jobs": 4,
+        "max_groups": 54,
+        "lock_conflicts": 11249,
+        "errors": 0,
+        "active_jobs": 7
+      },
+      "finished_accounting": {
+        "requests": 11487,
+        "attempts": 11487,
+        "succeeded_attempts": 11487,
+        "usage_events": 22974,
+        "usage_requests": 11487,
+        "unexpected_receipts": 0,
+        "precise_usage": 22974,
+        "precise_charges": 11487,
+        "settled_holds": 11487,
+        "reserved": "0",
+        "spent": "1148700",
+        "debt": "0",
+        "acknowledged": 22974,
+        "settlement_journals": 11487,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 11487,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 572045,
+          "sha256": "5747eae0fa3243491f0f81c986a0823e893353ca72e05e394d54365fd679e19b"
+        },
+        "http.json": {
+          "bytes": 10069,
+          "sha256": "9f0b9e4ce716ba69f6b1b0d5bfe6e2e67cb1adca7f4dec3673f0502434ae8a62"
+        },
+        "http.json.identities.tsv": {
+          "bytes": 581808,
+          "sha256": "4f6027f3fb1aa355f03f31b73308a0db88fce366d17bb5715de5c5453897ea28"
+        },
+        "ack.identities.tsv": {
+          "bytes": 585837,
+          "sha256": "ef8611b6e7933572fac3b73c098089199dee68da867f1aa3f20fa5f1a801b5b8"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "fundingCellCounts": [
+        {
+          "active_cells": 64,
+          "attempts": 11487
+        }
+      ],
+      "workerMode": "live",
+      "workerConcurrency": 8
+    },
+    {
+      "label": "late-lock-candidate-200",
+      "exit_code": 1,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        "dist/core-worker/main.js": "6c72adde7527a8dd39d6d41c8c139712b5468b000117d5438346d97f356d8dcf",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": false,
+      "audit_valid": true,
+      "failures": [],
+      "window_complete_rps": 98.71666666666667,
+      "http_statuses": {
+        "200": 12060
+      },
+      "http_p99_ms": 443.27,
+      "drain_after_window_ms": 21425,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 31.441990771259064,
+      "cpu_ms_per_admitted": 37.372280817402775,
+      "last_worker": {
+        "calls": 6052,
+        "jobs": 8017,
+        "groups": 23828,
+        "events": 47656,
+        "max_jobs": 4,
+        "max_groups": 50,
+        "lock_conflicts": 11686,
+        "errors": 0,
+        "active_jobs": 5
+      },
+      "finished_accounting": {
+        "requests": 12136,
+        "attempts": 12136,
+        "succeeded_attempts": 12136,
+        "usage_events": 24272,
+        "usage_requests": 12136,
+        "unexpected_receipts": 0,
+        "precise_usage": 24272,
+        "precise_charges": 12136,
+        "settled_holds": 12136,
+        "reserved": "0",
+        "spent": "1213600",
+        "debt": "0",
+        "acknowledged": 24272,
+        "settlement_journals": 12136,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 12136,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 687662,
+          "sha256": "46c35b6b2e5dd687def52138c834dc3c64cd694fcec05c63e95d50d545af441d"
+        },
+        "http.json": {
+          "bytes": 9992,
+          "sha256": "38a2c5eb4bfae64ed56accf3bafd3061a1461a9e5d0bfd83ec300a4b733cfacc"
+        },
+        "http.json.identities.tsv": {
+          "bytes": 615060,
+          "sha256": "bd13ff9601d16cbb47c068eca7b67c41105de2eb861353d1c946ca5d45b39ae6"
+        },
+        "ack.identities.tsv": {
+          "bytes": 618936,
+          "sha256": "757217d13d4def30ed3c797ddcbb58e08cf33ca94506be157050f517c45ef379"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "workerMode": "live",
+      "workerConcurrency": 8
+    },
+    {
+      "label": "scheduler-200",
+      "exit_code": 1,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        ".local/settlement-profile-1814/worker/dist/main.js": "94ea5c51a236bc06d3dc46c7da1447febcc08dbd3076d763378ee6870cd05277",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": false,
+      "audit_valid": false,
+      "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+      "window_complete_rps": 180.9,
+      "http_statuses": {
+        "200": 10974,
+        "503": 1046
+      },
+      "http_p99_ms": 1735.07,
+      "drain_after_window_ms": 338,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 18.077375033896775,
+      "cpu_ms_per_admitted": 23.43306517219561,
+      "last_worker": {
+        "calls": 5469,
+        "jobs": 7532,
+        "groups": 17100,
+        "events": 34200,
+        "max_jobs": 4,
+        "max_groups": 18,
+        "lock_conflicts": 6037,
+        "errors": 0,
+        "active_jobs": 0
+      },
+      "finished_accounting": {
+        "requests": 11063,
+        "attempts": 11063,
+        "succeeded_attempts": 11063,
+        "usage_events": 22126,
+        "usage_requests": 11063,
+        "unexpected_receipts": 0,
+        "precise_usage": 22126,
+        "precise_charges": 11063,
+        "settled_holds": 11063,
+        "reserved": "0",
+        "spent": "1106300",
+        "debt": "0",
+        "acknowledged": 22126,
+        "settlement_journals": 11063,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 11063,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 533193,
+          "sha256": "23439b5197bd65bd999b7884bacacb2d551f75c70dd46918f5ceb9b6ef807afa"
+        },
+        "http.json": {
+          "bytes": 10080,
+          "sha256": "47d3b4c5311c617638446f9c62409f1fd9b94a0450ab7d042560a162de44bd4c"
+        },
+        "http.json.identities.tsv": {
+          "bytes": 559674,
+          "sha256": "b697caf4cc69471d9f0d00fae3281bfb2afafea189c2779583592f28139bdd2f"
+        },
+        "ack.identities.tsv": {
+          "bytes": 564213,
+          "sha256": "9fb479fada1bf9d40a33f78cc77b434eb4a9dde50c4de44547b9469a7ad63f64"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "workerMode": "live",
+      "workerConcurrency": 8
+    },
+    {
+      "label": "reference-control",
+      "exit_code": 1,
+      "diagnostic": false,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        "dist/core-worker/main.js": "6c72adde7527a8dd39d6d41c8c139712b5468b000117d5438346d97f356d8dcf",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": false,
+      "audit_valid": true,
+      "failures": [],
+      "window_complete_rps": 177.2,
+      "http_statuses": {
+        "200": 12060
+      },
+      "http_p99_ms": 473.03,
+      "drain_after_window_ms": 4988,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 20.209755696306658,
+      "cpu_ms_per_admitted": 25.706177510899074,
+      "last_worker": {
+        "calls": 7077,
+        "jobs": 9207,
+        "groups": 26922,
+        "events": 53844,
+        "max_jobs": 4,
+        "max_groups": 49,
+        "lock_conflicts": 14766,
+        "errors": 0,
+        "active_jobs": 1
+      },
+      "finished_accounting": {
+        "requests": 12157,
+        "attempts": 12157,
+        "succeeded_attempts": 12157,
+        "usage_events": 24314,
+        "usage_requests": 12157,
+        "unexpected_receipts": 0,
+        "precise_usage": 24314,
+        "precise_charges": 12157,
+        "settled_holds": 12157,
+        "reserved": "0",
+        "spent": "1215700",
+        "debt": "0",
+        "acknowledged": 24314,
+        "settlement_journals": 12157,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 12157,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 567307,
+          "sha256": "257149da1120f48246886843fbc10db3ab7f807be1ee4830d0f45902627174e4"
+        },
+        "http.json": {
+          "bytes": 9989,
+          "sha256": "1c0a2ba394adaf9c41ae6cdef4a671feaf30bacb8b75a0695c6c29e491f375a8"
+        },
+        "http.json.identities.tsv": {
+          "bytes": 615060,
+          "sha256": "a1845e5de5ae906b552c1103fc82f42b352bd09cf1444ca7b1f8d5c6986c3b44"
+        },
+        "ack.identities.tsv": {
+          "bytes": 620007,
+          "sha256": "bc1ccb1c13232b5b85400a0a47070066704454fe4976fd2e0a19de25ef0fc491"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "workerMode": "live",
+      "workerConcurrency": 8
+    },
+    {
+      "label": "scheduler-split-200",
+      "exit_code": 1,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        ".local/settlement-profile-1814/worker/dist-split/main.js": "28e344bae4b252e91a11ddd5b3626243984540fcf6d89eaa6bf0cd948d3a88fe",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": false,
+      "audit_valid": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "requests_without_usage",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "supplier_cost_heads",
+        "supplier_ledger",
+        "wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks",
+        "identity_intersection"
+      ],
+      "window_complete_rps": 175.56666666666666,
+      "http_statuses": {
+        "200": 10592,
+        "503": 423
+      },
+      "http_p99_ms": 6791.57,
+      "drain_after_window_ms": 120257,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 20.568915504818936,
+      "cpu_ms_per_admitted": 26.443342378590813,
+      "last_worker": {
+        "calls": 6042,
+        "jobs": 7783,
+        "groups": 14417,
+        "events": 28833,
+        "max_jobs": 4,
+        "max_groups": 18,
+        "lock_conflicts": 3742,
+        "errors": 0,
+        "active_jobs": 0
+      },
+      "finished_accounting": {
+        "requests": 10687,
+        "attempts": 10687,
+        "succeeded_attempts": 10674,
+        "usage_events": 21349,
+        "usage_requests": 10675,
+        "unexpected_receipts": 0,
+        "precise_usage": 21348,
+        "precise_charges": 10674,
+        "settled_holds": 10674,
+        "reserved": "0",
+        "spent": "1067400",
+        "debt": "0",
+        "acknowledged": 21348,
+        "settlement_journals": 10674,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 10675,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 1423061,
+          "sha256": "f9416ade984de4cd5f0b7af5df99dae22808950e47e99ef26cff98fb9f7647e5"
+        },
+        "http.json": {
+          "bytes": 10137,
+          "sha256": "fee858e50c77da12531c591b534d47a7028f394e66a486e028cb2fedc187f317"
+        },
+        "http.json.identities.tsv": {
+          "bytes": 540192,
+          "sha256": "66995ed80ca83dbfc75f50d40d685df8c38ce6f11cfa4cc55498715fe3a618c1"
+        },
+        "ack.identities.tsv": {
+          "bytes": 544374,
+          "sha256": "dbe0416ea6f3b625cd4484f578b465039b2e4db05e98282646bfa9119b366dec"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "workerMode": "live",
+      "workerConcurrency": 8
+    },
+    {
+      "label": "width-point-200",
+      "exit_code": 1,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        "dist/core-worker/main.js": "6c72adde7527a8dd39d6d41c8c139712b5468b000117d5438346d97f356d8dcf",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": false,
+      "audit_valid": true,
+      "failures": [],
+      "window_complete_rps": 162.53333333333333,
+      "http_statuses": {
+        "200": 12060
+      },
+      "http_p99_ms": 593.83,
+      "drain_after_window_ms": 7872,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 20.02059477716451,
+      "cpu_ms_per_admitted": 25.466677650547823,
+      "last_worker": {
+        "calls": 7528,
+        "jobs": 9612,
+        "groups": 27061,
+        "events": 54122,
+        "max_jobs": 4,
+        "max_groups": 58,
+        "lock_conflicts": 14175,
+        "errors": 0,
+        "active_jobs": 0
+      },
+      "finished_accounting": {
+        "requests": 12139,
+        "attempts": 12139,
+        "succeeded_attempts": 12139,
+        "usage_events": 24278,
+        "usage_requests": 12139,
+        "unexpected_receipts": 0,
+        "precise_usage": 24278,
+        "precise_charges": 12139,
+        "settled_holds": 12139,
+        "reserved": "0",
+        "spent": "1213900",
+        "debt": "0",
+        "acknowledged": 24278,
+        "settlement_journals": 12139,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 12139,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 588695,
+          "sha256": "be42986866207713eb51d5368860f29b6b4d0a125cb03c8fc6b333913abe4b23"
+        },
+        "http.json": {
+          "bytes": 10001,
+          "sha256": "daf9df1dd393a94a5eeae02ad1d526c25b0fbade1c3d470386a26bcc9480cbd1"
+        },
+        "http.json.identities.tsv": {
+          "bytes": 615060,
+          "sha256": "dbb573c64f0a96ae5da8b0dc0079acaa29abb0ca76a623fffce02e407e403614"
+        },
+        "ack.identities.tsv": {
+          "bytes": 619089,
+          "sha256": "ade3cac717af073494d1333a379cf906c2077252c95286dd97c256710ab3a2ae"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "fundingCellCounts": [
+        {
+          "active_cells": 64,
+          "attempts": 12139
+        }
+      ],
+      "workerMode": "live",
+      "workerConcurrency": 8
+    },
+    {
+      "label": "deferred-1",
+      "exit_code": 0,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        "dist/core-worker/main.js": "6c72adde7527a8dd39d6d41c8c139712b5468b000117d5438346d97f356d8dcf",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": null,
+      "audit_valid": true,
+      "failures": [],
+      "window_complete_rps": null,
+      "http_statuses": {
+        "200": 3015
+      },
+      "http_p99_ms": 362.79,
+      "drain_after_window_ms": 21340,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 13.227142402038865,
+      "cpu_ms_per_admitted": 18.397578846766443,
+      "last_worker": {
+        "calls": 691,
+        "jobs": 691,
+        "groups": 3059,
+        "events": 6118,
+        "max_jobs": 1,
+        "max_groups": 55,
+        "lock_conflicts": 0,
+        "errors": 0,
+        "active_jobs": 1
+      },
+      "finished_accounting": {
+        "requests": 3139,
+        "attempts": 3139,
+        "succeeded_attempts": 3139,
+        "usage_events": 6278,
+        "usage_requests": 3139,
+        "unexpected_receipts": 0,
+        "precise_usage": 6278,
+        "precise_charges": 3139,
+        "settled_holds": 3139,
+        "reserved": "0",
+        "spent": "313900",
+        "debt": "0",
+        "acknowledged": 6278,
+        "settlement_journals": 3139,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 3139,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 224253,
+          "sha256": "e335bb76ed00588274939f99c017554a8f8b35fc5873d5540ca5a394887014a4"
+        },
+        "http.json": {
+          "bytes": 8678,
+          "sha256": "36005a260d7d592739b221e805db8be38d8469b1f9603a97e14b58c3c8ce9c34"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "workerMode": "deferred",
+      "workerConcurrency": 1
+    },
+    {
+      "label": "deferred-8",
+      "exit_code": 0,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        "dist/core-worker/main.js": "6c72adde7527a8dd39d6d41c8c139712b5468b000117d5438346d97f356d8dcf",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": null,
+      "audit_valid": true,
+      "failures": [],
+      "window_complete_rps": null,
+      "http_statuses": {
+        "200": 3015
+      },
+      "http_p99_ms": 248.33,
+      "drain_after_window_ms": 10622,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 12.387871130764374,
+      "cpu_ms_per_admitted": 17.239418825015818,
+      "last_worker": {
+        "calls": 1449,
+        "jobs": 1960,
+        "groups": 5658,
+        "events": 11316,
+        "max_jobs": 4,
+        "max_groups": 41,
+        "lock_conflicts": 2739,
+        "errors": 0,
+        "active_jobs": 8
+      },
+      "finished_accounting": {
+        "requests": 3166,
+        "attempts": 3166,
+        "succeeded_attempts": 3166,
+        "usage_events": 6332,
+        "usage_requests": 3166,
+        "unexpected_receipts": 0,
+        "precise_usage": 6332,
+        "precise_charges": 3166,
+        "settled_holds": 3166,
+        "reserved": "0",
+        "spent": "316600",
+        "debt": "0",
+        "acknowledged": 6332,
+        "settlement_journals": 3166,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 3166,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 175346,
+          "sha256": "428cd963a82e9fbd48721970be80193d8996bd93ac8b1f575a6037dfce12547d"
+        },
+        "http.json": {
+          "bytes": 8659,
+          "sha256": "a4cf218b983fecda1265111566d1436e4bdf9a9fa822c7f4d26ae431d3941c10"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "workerMode": "deferred",
+      "workerConcurrency": 8
+    },
+    {
+      "label": "combined-200",
+      "exit_code": 1,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        ".local/settlement-profile-1814/worker/dist/main.js": "94ea5c51a236bc06d3dc46c7da1447febcc08dbd3076d763378ee6870cd05277",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": false,
+      "audit_valid": false,
+      "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+      "window_complete_rps": 168.48333333333332,
+      "http_statuses": {
+        "200": 11360,
+        "503": 678
+      },
+      "http_p99_ms": 1697.9,
+      "drain_after_window_ms": 3122,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 19.669240217582036,
+      "cpu_ms_per_admitted": 25.623793648008423,
+      "last_worker": {
+        "calls": 5315,
+        "jobs": 8608,
+        "groups": 19370,
+        "events": 38740,
+        "max_jobs": 4,
+        "max_groups": 24,
+        "lock_conflicts": 7490,
+        "errors": 0,
+        "active_jobs": 8
+      },
+      "finished_accounting": {
+        "requests": 11398,
+        "attempts": 11398,
+        "succeeded_attempts": 11398,
+        "usage_events": 22796,
+        "usage_requests": 11398,
+        "unexpected_receipts": 0,
+        "precise_usage": 22796,
+        "precise_charges": 11398,
+        "settled_holds": 11398,
+        "reserved": "0",
+        "spent": "1139800",
+        "debt": "0",
+        "acknowledged": 22796,
+        "settlement_journals": 11398,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 11398,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 552539,
+          "sha256": "8a55859dcd632cd9db8e9da181a5aa1aad4fd3623b17786b78a92aa493105fa4"
+        },
+        "http.json": {
+          "bytes": 10064,
+          "sha256": "e329ee1e8b57520bc94841b75125ec20b599b1bda156a99ae4703c6d5c4eba13"
+        },
+        "http.json.identities.tsv": {
+          "bytes": 579360,
+          "sha256": "85f81b80c0a7f73744ddd1a2f6e9b3ef29420319be72f18ec844c4b352583618"
+        },
+        "ack.identities.tsv": {
+          "bytes": 581298,
+          "sha256": "8021b4cbd7320e0f066bcea11244384b4a6e0dab8bf609f2f6d1b5e6f12223ef"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "fundingCellCounts": [
+        {
+          "active_cells": 40,
+          "attempts": 11398
+        }
+      ],
+      "workerMode": "live",
+      "workerConcurrency": 8
+    },
+    {
+      "label": "folded-close-200",
+      "exit_code": 1,
+      "diagnostic": true,
+      "artifact_sha256": {
+        "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+        "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+        "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+        "dist/core-worker/main.js": "6c72adde7527a8dd39d6d41c8c139712b5468b000117d5438346d97f356d8dcf",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+      },
+      "capacity_passed": false,
+      "audit_valid": false,
+      "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+      "window_complete_rps": 147.46666666666667,
+      "http_statuses": {
+        "200": 11824,
+        "503": 223
+      },
+      "http_p99_ms": 1565.43,
+      "drain_after_window_ms": 10029,
+      "pg_valid": true,
+      "pg_cpu_ms_per_admitted": 24.1282094311126,
+      "cpu_ms_per_admitted": 30.09061923141466,
+      "last_worker": {
+        "calls": 6833,
+        "jobs": 9014,
+        "groups": 26727,
+        "events": 53454,
+        "max_jobs": 4,
+        "max_groups": 48,
+        "lock_conflicts": 14818,
+        "errors": 0,
+        "active_jobs": 7
+      },
+      "finished_accounting": {
+        "requests": 11918,
+        "attempts": 11918,
+        "succeeded_attempts": 11918,
+        "usage_events": 23836,
+        "usage_requests": 11918,
+        "unexpected_receipts": 0,
+        "precise_usage": 23836,
+        "precise_charges": 11918,
+        "settled_holds": 11918,
+        "reserved": "0",
+        "spent": "1191800",
+        "debt": "0",
+        "acknowledged": 23836,
+        "settlement_journals": 11918,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 11918,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "resources": {
+        "audit.json": {
+          "bytes": 604301,
+          "sha256": "24379edd4effc61633b577246fda84cff89acbd969c57924d35b1ba95cf3a2d6"
+        },
+        "http.json": {
+          "bytes": 10071,
+          "sha256": "a3c6d71159fbca3c5899d02cac3885a04dafcc2dd84783aadf1067e984d9e785"
+        },
+        "http.json.identities.tsv": {
+          "bytes": 603024,
+          "sha256": "a08565200ce861f88eab5e1ddc3c94a0d3fd6e606c76d498ac4043aeb9fc5f44"
+        },
+        "ack.identities.tsv": {
+          "bytes": 607818,
+          "sha256": "5361bc1815c4c3c690b0260a8ca1585b99bd576682ecb985b8750b2511021e3d"
+        },
+        "cleanup.json": {
+          "bytes": 25,
+          "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a"
+        }
+      },
+      "workerMode": "live",
+      "workerConcurrency": 8
+    }
+  ]
+}

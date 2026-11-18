@@ -1,0 +1,11 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-query-plans.test.ts:
+{"receiptReadProbe":{"before":{"sequential":"0","indexed":"4","inserts":"4097"},"after":{"sequential":"0","indexed":"7"},"fetched":"3"}}
+(pass) a receipt point lookup does not read another attempt's history under a cached plan [2410.88ms]
+
+ 1 pass
+ 1 filtered out
+ 0 fail
+ 19 expect() calls
+Ran 1 test across 1 file. [2.48s]

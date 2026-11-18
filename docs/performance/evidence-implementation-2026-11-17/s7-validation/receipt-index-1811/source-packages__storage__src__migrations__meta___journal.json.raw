@@ -1,0 +1,104 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1794421014928,
+      "tag": "0000_enterprise",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794434269329,
+      "tag": "0001_upstream_funding",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794441541998,
+      "tag": "0002_plugin_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794459901566,
+      "tag": "0003_internal_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794469302696,
+      "tag": "0004_financial_admission",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794549371450,
+      "tag": "0005_signed_settlement",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794555964904,
+      "tag": "0006_settlement_authentication",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794898683399,
+      "tag": "0007_catalog_cache",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794900737769,
+      "tag": "0008_request_quota_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1794913439723,
+      "tag": "0009_execution_runtime",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1794931979773,
+      "tag": "0010_quota_expiry",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1794935196365,
+      "tag": "0011_funding_engine",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1794938405669,
+      "tag": "0012_funding-holds",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1794956929830,
+      "tag": "0013_receipt-delivery-lookup",
+      "breakpoints": true
+    }
+  ]
+}

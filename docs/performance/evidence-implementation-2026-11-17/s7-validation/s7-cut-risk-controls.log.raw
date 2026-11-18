@@ -1,0 +1,23 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-upstream-funds.test.ts:
+(pass) Core admin manages supplier brands and upstream accounts under catalog and funding permissions with audit [1065.25ms]
+(pass) a negative adjustment below reservations freezes new admissions until a manual reconciliation resumes the account [2160.03ms]
+(pass) financial voucher download returns the exact immutable bytes only to funding readers [2174.20ms]
+(pass) the management role can adjust and reconcile but cannot rewrite upstream history [2052.05ms]
+(pass) a voucher cited only by a reconciliation survives expiry cleanup instead of failing the cleanup batch [3863.40ms]
+
+tests/integration/core-settlement.test.ts:
+(pass) partial then final supplier evidence posts one combined ceiling and settles the selected customer request once [2319.04ms]
+(pass) final cost above the captured ceiling posts in full, goes negative and freezes the supplier account [2103.26ms]
+(pass) trusted partial above the estimate reserves conservatively and the later final releases it without refunding [2332.52ms]
+(pass) contradicting finals are disputed before any charge and a later contradiction keeps the posted head [2401.98ms]
+(pass) a retry delivery is billed once while the earlier unknown attempt keeps and later settles its own supplier cost [2166.88ms]
+(pass) evidence from another owner session is rejected without touching a peer group [2233.38ms]
+(pass) final evidence with an unfinished supplier dimension is a FINAL customer snapshot under request completion pricing [2050.38ms]
+(pass) provider usage pricing keeps the snapshot PARTIAL and the charge waiting until every priced dimension is final [2247.67ms]
+
+ 13 pass
+ 0 fail
+ 160 expect() calls
+Ran 13 tests across 2 files. [29.28s]

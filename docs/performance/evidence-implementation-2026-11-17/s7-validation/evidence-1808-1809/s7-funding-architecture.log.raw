@@ -1,0 +1,21 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/unit/architecture.test.ts:
+(pass) workspace dependencies stay acyclic and commercial capabilities stay outside gateway [4.63ms]
+(pass) Core processes and the Gateway never reach into each other's private modules [2.30ms]
+(pass) the v2 Gateway has no database path and reads only its config file from the environment [0.82ms]
+(pass) every schema artifact has one checksummed migration owner and no compatibility outbox [3.56ms]
+(pass) Drizzle declarations and the versioned ordinary schema snapshot cannot drift [61.49ms]
+(pass) deployment units start built entries, keep v2 processes under separate users and route Chat to the v2 Gateway [0.55ms]
+(pass) the shipped Core API, worker and Gateway examples and the Caddyfile agree on how the processes reach each other [0.33ms]
+
+apps/core-worker/src/__test__/maintenance.test.ts:
+(pass) a failing maintenance task is reported once and waits for its interval instead of spinning, and close interrupts the wait [2009.52ms]
+(pass) a task that reports more work is called again immediately until it reports none [6.60ms]
+(pass) commit notifications coalesce into one follow-up while a recovery is running and wake an idle recovery [9.01ms]
+(pass) a full release batch schedules more work without expired permits while a short or failed batch stops [5.29ms]
+
+ 11 pass
+ 0 fail
+ 666 expect() calls
+Ran 11 tests across 2 files. [2.12s]

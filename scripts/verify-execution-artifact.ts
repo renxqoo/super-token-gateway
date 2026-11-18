@@ -48,7 +48,7 @@ await withFinancial(
     );
     assert.equal(
       (
-        await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+        await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
       )[0].reserved_atoms,
       "30",
     );
@@ -127,7 +127,7 @@ await withFinancial(
       checks++;
       assert.deepEqual(
         (
-          await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+          await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
         )[0],
         { balance: "985", reserved: "0", spent: "15" },
       );

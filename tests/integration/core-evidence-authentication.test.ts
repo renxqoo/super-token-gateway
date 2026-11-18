@@ -7,6 +7,7 @@ import type {
 } from "@gateway/contracts";
 import { createCatalogStore } from "@gateway/storage";
 import { createSettlementStore } from "@gateway/storage/settlement";
+import { CoreRpcError } from "@gateway/core-client";
 import { evidenceProofFields } from "@gateway/contracts";
 import { canonical } from "@gateway/kernel";
 import { sha256 } from "@gateway/runtime/crypto";
@@ -46,7 +47,7 @@ function body(attempt: string, fields: Partial<EventBody>): EventBody {
 
 async function supplier(db: SQL, account: string) {
   return (
-    await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM upstream_account_balances WHERE account_id=${account}`
+    await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM core_upstream_balances_v1 WHERE account_id=${account}`
   )[0];
 }
 
@@ -420,11 +421,20 @@ test("facts signed before a normal rotation settle once after the session is dis
 
     const successor = f.client(f.identity.b.port, "gatewayB");
     await successor.startup();
-    await expect(
-      successor.execution("execution_begin_v1", prepared.beginData(admission.receipt), {
+    let refused: unknown;
+    try {
+      await successor.execution("execution_begin_v1", prepared.beginData(admission.receipt), {
         deadlineAt: prepared.deadline,
-      }),
-    ).rejects.toThrow();
+      });
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toBeInstanceOf(CoreRpcError);
+    expect((refused as CoreRpcError).detail).toMatchObject({
+      code: "internal_owner_mismatch",
+      command_state: "NOT_ATTEMPTED",
+      retryability: "NONE",
+    });
     const takeover = successor.signEvidence(
       body(prepared.attemptId, {
         finality: "NOT_EXECUTED",

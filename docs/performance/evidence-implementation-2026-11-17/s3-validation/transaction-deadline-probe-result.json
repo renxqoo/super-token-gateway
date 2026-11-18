@@ -1,0 +1,32 @@
+{
+  "scope": "native PG17/Bun1.4.4 capabilities for the forthcoming catalog writer deadline; no product change or capacity claim",
+  "results": [
+    {
+      "kind": "pool_reservation_abort",
+      "outcome": "exact abort reason",
+      "elapsed_ms": 51.918583
+    },
+    {
+      "kind": "reserved_connection_abort",
+      "outcome": "ERR_POSTGRES_CONNECTION_CLOSED",
+      "elapsed_ms": 34.057540999999986,
+      "rows": 0,
+      "lock_released": false
+    },
+    {
+      "kind": "reserved_connection_server_cleanup",
+      "elapsed_ms": 49.10487499999999,
+      "lock_released": true
+    },
+    {
+      "kind": "pg17_transaction_timeout",
+      "outcome": "25P04",
+      "elapsed_ms": 65.439875,
+      "rows": 0
+    },
+    {
+      "kind": "pool_reuse",
+      "rows": 1
+    }
+  ]
+}

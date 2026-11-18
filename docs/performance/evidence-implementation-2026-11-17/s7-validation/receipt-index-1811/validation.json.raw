@@ -1,0 +1,240 @@
+{
+  "at": "2026-11-17T23:32:47.035164+00:00",
+  "state": {
+    "migration": 2026111811,
+    "schema_manifest_entries": 43,
+    "previous_42_manifest_entries_unchanged": true,
+    "revision": "event-leading same-triple core_receipt_delivery unique constraint",
+    "red": {
+      "exit_code": 1,
+      "passed": 0,
+      "failed": 1,
+      "assertions": 5,
+      "heap_rows_visited": 10001
+    },
+    "initial_green": {
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "assertions": 9,
+      "heap_rows_visited": 0
+    },
+    "final_targeted": {
+      "exit_code": 0,
+      "passed": 10,
+      "failed": 0,
+      "assertions": 180,
+      "files": 3,
+      "seconds": 24.31
+    },
+    "history_consumers": {
+      "exit_code": 0,
+      "passed": 3,
+      "failed": 0,
+      "assertions": 54,
+      "files": 3,
+      "filtered": 9
+    },
+    "gates": {
+      "check": {
+        "exit_code": 0,
+        "files": 354
+      },
+      "lint": {
+        "exit_code": 0
+      },
+      "fmt_check_before_round_archive": {
+        "exit_code": 0,
+        "files": 741
+      },
+      "build": {
+        "exit_code": 0,
+        "manifest_entries": 43,
+        "source_artifact_binding": true
+      }
+    },
+    "diagnostic": {
+      "label": "s7-receipt-index-300-failed",
+      "exit_code": 1,
+      "window_complete_rps": 115.4,
+      "capacity_passed": false,
+      "excluded_from_stability": true
+    },
+    "review": "Independent read-only financial_batch_audit: no new money, ACL, FK or uniqueness blocker; migration quiescence required; data-bearing current-schema rebuild is not a true 1810-prefix upgrade proof",
+    "limits": [
+      "row-visit statistic is not total index items, buffers or CPU",
+      "one failed diagnostic is not stable capacity or a universal benefit",
+      "final full gates and >3000 full-chain/concurrency/HA acceptance remain pending"
+    ]
+  },
+  "temporary_files": {
+    "archive-receipt-evidence.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/archive-receipt-evidence.py.raw",
+      "sha256": "8d2674767146bed94a3ff10b880110082ada550c12ac935cbb29f4d4dee1cd3b",
+      "bytes": 3372,
+      "temporary_source_removed": true
+    },
+    "archive-receipt-round.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/archive-receipt-round.py.raw",
+      "sha256": "19598cae9fa973473702b08918fb1f1eda3deea13b0b8217decff4a61b5142e7",
+      "bytes": 3973,
+      "temporary_source_removed": true
+    },
+    "cleanup-receipt-statements.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/cleanup-receipt-statements.ts.raw",
+      "sha256": "c49f586e66553780898ed11c562d00899d50baba7544dd78da2976a67cb8c5eb",
+      "bytes": 2951,
+      "temporary_source_removed": true
+    },
+    "inspect-receipt-cleanup.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/inspect-receipt-cleanup.ts.raw",
+      "sha256": "b2cf7292464c4f8b3d6abbbef0f16aff2c2c2e3aac363add4676f9adc45d9d05",
+      "bytes": 4863,
+      "temporary_source_removed": true
+    },
+    "receipt-index-build.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-build.log.raw",
+      "sha256": "e78614cafed479a219187a0e6dd738c39731b553f606e0926d6288f4e2be7dd1",
+      "bytes": 168,
+      "temporary_source_removed": true
+    },
+    "receipt-index-check.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-check.log.raw",
+      "sha256": "f427a349d71be40584b97094bfc42a94ace25b3d62439235561f174339ac40dd",
+      "bytes": 67,
+      "temporary_source_removed": true
+    },
+    "receipt-index-diagnostic-300.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-diagnostic-300.log.raw",
+      "sha256": "b075e62a80a8ea82aed86e65c07077c5ac77ebafeb50726391cc3894c0ded5b1",
+      "bytes": 871,
+      "temporary_source_removed": true
+    },
+    "receipt-index-final-format.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-final-format.log.raw",
+      "sha256": "693848d0610899d7f0a97b049618bd422d2f831a8a93cb0f5a5ff2cb3e9f44e9",
+      "bytes": 59,
+      "temporary_source_removed": true
+    },
+    "receipt-index-format.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-format.log.raw",
+      "sha256": "a3fc9e0f2393dc92ba901f722ffb2b698ef683b0cb2442674c976003714d3f14",
+      "bytes": 59,
+      "temporary_source_removed": true
+    },
+    "receipt-index-generate.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-generate.log.raw",
+      "sha256": "c80188ee27173b06cb8fe971a5493a7b15ab87b04766748841e7b97278b1f65d",
+      "bytes": 3458,
+      "temporary_source_removed": true
+    },
+    "receipt-index-green.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-green.log.raw",
+      "sha256": "4f65194a4f52cd3fba23442c823b53ece928cfd1af58cec442b7e99df93fdf7c",
+      "bytes": 469,
+      "temporary_source_removed": true
+    },
+    "receipt-index-lint.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-lint.log.raw",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25,
+      "temporary_source_removed": true
+    },
+    "receipt-index-red.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-red.log.raw",
+      "sha256": "dfc76200dfda1c9b53700831c4a2b0438fb2800c51e5cf7ddd1800a1df0ac5ea",
+      "bytes": 1922,
+      "temporary_source_removed": true
+    },
+    "receipt-index-regressions.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-regressions.log.raw",
+      "sha256": "120e53e5b0b8b8b3b8df915925663080602e914951abe4bc215cf4309f4f1d77",
+      "bytes": 1459,
+      "temporary_source_removed": true
+    },
+    "receipt-index-resources-after.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-resources-after.json.raw",
+      "sha256": "cc75cb7d042b48213fa0bbdf2ce0de888ed6d13b3f88e7c115a3c8498cb84117",
+      "bytes": 1007,
+      "temporary_source_removed": true
+    },
+    "receipt-index-stage.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-stage.json.raw",
+      "sha256": "2b894cc65124f085e178bab6c08d9faaec03ccbef5e832d98a2ccb4c0616e52b",
+      "bytes": 1696,
+      "temporary_source_removed": true
+    },
+    "receipt-index-statements-cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-statements-cleanup.json.raw",
+      "sha256": "301de56e053ba55f023af7b06ea5f602f09af777bd634d4052d3cb802c653557",
+      "bytes": 869,
+      "temporary_source_removed": true
+    },
+    "receipt-index-upgrade.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/receipt-index-upgrade.log.raw",
+      "sha256": "06574776c79fd617ecf2038b7f29260f2ff3e20bbe26bab927c28f22f70c67fb",
+      "bytes": 666,
+      "temporary_source_removed": true
+    }
+  },
+  "source_snapshots": {
+    "packages/storage/src/schema/enterprise.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/source-packages__storage__src__schema__enterprise.ts.raw",
+      "sha256": "186f70aed0344c6a53e73fc60c5f7b8cc9129ad15841b11a96f6bd5f0b29cdf2",
+      "bytes": 20032
+    },
+    "packages/storage/src/migrations/0013_receipt-delivery-lookup.sql": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/source-packages__storage__src__migrations__0013_receipt-delivery-lookup.sql.raw",
+      "sha256": "33893addbe793934b188c7ded943adfbc77d07a98d84562853ae4f491a3faab6",
+      "bytes": 224
+    },
+    "packages/storage/src/migrations/meta/0013_snapshot.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/source-packages__storage__src__migrations__meta__0013_snapshot.json.raw",
+      "sha256": "ce0151e368faed13383528710d523e5e8e5cd8d23f9aa4c6c5383511bddd9551",
+      "bytes": 260985
+    },
+    "packages/storage/src/migrations/meta/_journal.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/source-packages__storage__src__migrations__meta___journal.json.raw",
+      "sha256": "d6245f71af458600a58b24e1a8980fdb5e58ca3b4dfdd2b9f125087aadee7207",
+      "bytes": 2092
+    },
+    "packages/storage/src/migrations/manifest.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/source-packages__storage__src__migrations__manifest.json.raw",
+      "sha256": "4a3b842db5762ef6845ab85cf5e9f267c3c87e167bb524be20f6c283efc5d794",
+      "bytes": 12962
+    },
+    "tests/integration/core-receipt-index.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/source-tests__integration__core-receipt-index.test.ts.raw",
+      "sha256": "fcaf4f29848369c77e4c0de1e5bd4d2d4b40a1ab1567501f560e56e7134a4c29",
+      "bytes": 6810
+    },
+    "tests/integration/core-execution-upgrade.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/source-tests__integration__core-execution-upgrade.test.ts.raw",
+      "sha256": "7ede5a3e68a7c2c544ad7134d9d90b3d72830351a07126454bd9d45ab79d79e1",
+      "bytes": 14638
+    },
+    "tests/integration/plugin-catalog-upgrade.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/source-tests__integration__plugin-catalog-upgrade.test.ts.raw",
+      "sha256": "d6735193d9475052c875f2853a616e4956b9de19da75f0e02f31d91d3b18c243",
+      "bytes": 4405
+    },
+    "tests/integration/lifecycle.test.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/source-tests__integration__lifecycle.test.ts.raw",
+      "sha256": "cf7794d8de42d1ccf1083ee20f9e911284e0f6be7fc2988fa8dc6158b32be040",
+      "bytes": 22922
+    },
+    "beyond-new-api/10-funding-engine.md": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/source-beyond-new-api__10-funding-engine.md.raw",
+      "sha256": "4918fd892fef607451685bab8aa0bfdbb1cbec3291b67b8f90538b8e7fef4496",
+      "bytes": 48283
+    },
+    "docs/performance/implementation-2026-11-17.md": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/receipt-index-1811/source-docs__performance__implementation-2026-11-17.md.raw",
+      "sha256": "b4bd9febbe4d08dae26c2320e5e843a595afafd7373d303ba7b87937a1e3f3bf",
+      "bytes": 74936
+    }
+  },
+  "source_scope": "1811 event-leading receipt unique constraint; cold-plan red/green and data-bearing current-schema rebuild; failed default300 diagnostic",
+  "actual_commands": "Stable Bun1.4.4 with both native env files for all PG tests/benchmark; native55452 and AOFalways+replica1; full milestone gates remain pending",
+  "protected_resources": "Original27 database names/OIDs, referenceDB and PIDs40766/40771 retained; main, no commit/push/deploy"
+}

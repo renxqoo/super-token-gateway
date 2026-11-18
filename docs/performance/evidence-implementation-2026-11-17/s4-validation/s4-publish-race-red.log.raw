@@ -1,0 +1,31 @@
+bun test v1.4.4 (38afee6c8)
+
+packages/plugin-host/src/__test__/executable.test.ts:
+36 |       await writeFile(source, "shared-helper");
+37 |       const completed = await Promise.allSettled(
+38 |         Array.from({ length: 8 }, () => publishPluginExecutable(source)),
+39 |       );
+40 |       const failures = completed.filter((value) => value.status === "rejected");
+41 |       expect(failures).toEqual([]);
+                            ^
+error: expect(received).toEqual(expected)
+
+- []
++ [
++   {
++     "reason": [Error: ENOENT: no such file or directory, lstat '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-executable-concurrent-Ibe49K/9/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'],
++     "status": "rejected",
++   },
++ ]
+
+- Expected  - 1
++ Received  + 6
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/packages/plugin-host/src/__test__/executable.test.ts:41:24)
+(fail) concurrent helper publishers preserve one valid immutable file and no staging files [21.63ms]
+
+ 0 pass
+ 5 filtered out
+ 1 fail
+ 46 expect() calls
+Ran 1 test across 1 file. [49.00ms]

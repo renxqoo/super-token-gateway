@@ -1,0 +1,2 @@
+{"artifact":"isolated-plugin","cases":84,"steps":112,"digest":"e647b9cc7b79d690621dc187a709ebd24e10129b1757e76e0264e8de54ff3779","pending":0,"diagnostics":{"phase":"idle","frameBytes":0,"startupMs":527,"writeMs":0,"connection":"67ea408b-acfe-44b7-8884-2600733fbe93"}}
+{"artifact":"isolated-builtin-worker","cases":84,"steps":112,"artifact_digest":"cc2935c0294b6d75b918399379245218173954f47c0272790327c8bd61c61c41"}

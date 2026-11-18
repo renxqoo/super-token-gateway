@@ -1,0 +1,22 @@
+{
+  "date": "2026-11-18",
+  "scope": "An isolated fixture connection after keyed batch reads and before adding the conflict index, with real signed settlement of two independent groups.",
+  "query": "SELECT q AS req,h AS hold,a AS attempt,e AS evidence,p AS price,r AS resolution,c AS charge,\n  EXISTS(SELECT 1 FROM attempts conflict WHERE conflict.request_id=q.id AND conflict.metering_conflict) AS conflicted\n  FROM gateway_requests q JOIN billing_holds h ON h.request_id=q.id LEFT JOIN attempts a ON a.id=q.selected_attempt_id\n  LEFT JOIN usage_events e ON e.id=a.evidence_id\n  LEFT JOIN LATERAL(SELECT * FROM billing_resolutions WHERE request_id=q.id ORDER BY seq DESC LIMIT 1) r ON true\n  LEFT JOIN billing_prices p ON p.id=CASE WHEN r.id IS NOT NULL THEN CASE WHEN r.action='SETTLE' THEN r.pricing_id ELSE NULL END ELSE a.billing_pricing_id END\n  LEFT JOIN billing_charges c ON c.request_id=q.id WHERE q.id=ANY(p_requests) ORDER BY h.wallet_id,q.id",
+  "attempt_scan": {
+    "Node Type": "Seq Scan",
+    "Parent Relationship": "SubPlan",
+    "Subplan Name": "SubPlan 2",
+    "Parallel Aware": false,
+    "Async Capable": false,
+    "Relation Name": "attempts",
+    "Alias": "conflict",
+    "Startup Cost": 0.0,
+    "Total Cost": 323.03,
+    "Plan Rows": 1,
+    "Plan Width": 16,
+    "Actual Rows": 0,
+    "Actual Loops": 1,
+    "Filter": "metering_conflict",
+    "Rows Removed by Filter": 10003
+  }
+}

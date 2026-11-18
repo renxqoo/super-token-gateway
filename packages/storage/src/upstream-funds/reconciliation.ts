@@ -1,4 +1,4 @@
-import type { TransactionSQL } from "bun";
+import type { SQL } from "bun";
 import {
   GatewayError,
   upstreamReconciliationSchema,
@@ -6,15 +6,16 @@ import {
 } from "@gateway/contracts";
 import { fundingActor, fundingFailure, fundingId, fundingInput } from "./validation.ts";
 import { lockVoucherReference } from "./vouchers.ts";
+import { withDatabaseSavepoint } from "../transaction.ts";
 
-async function view(tx: TransactionSQL, id: string) {
+async function view(tx: SQL, id: string) {
   return (
     await tx`SELECT r.id,r.account_id,r.currency,r.revision::text AS balance_revision,r.book_atoms::text,r.observed_atoms::text,r.invoice_atoms::text,r.difference_atoms::text,r.voucher_id,r.adjustment_id AS adjustment_operation_id,r.actor,r.reason,r.created_at,a.state AS account_state FROM reconciliations r JOIN upstream_accounts a ON a.id=r.account_id WHERE r.id=${id}`
   )[0] as Record<string, unknown>;
 }
 
 export async function recordUpstreamReconciliation(
-  tx: TransactionSQL,
+  tx: SQL,
   accountId: string,
   input: UpstreamReconciliationInput,
   actor: string,
@@ -23,14 +24,14 @@ export async function recordUpstreamReconciliation(
   const parsed = fundingInput(upstreamReconciliationSchema, input);
   const trustedActor = fundingActor(actor);
   try {
-    return await tx.savepoint(async (tx) => {
+    return await withDatabaseSavepoint(tx, async (tx) => {
       const accounts =
-        await tx`SELECT id,state FROM upstream_accounts WHERE id=${account} FOR NO KEY UPDATE`;
+        await tx`SELECT id,state FROM upstream_accounts WHERE id=${account} FOR NO KEY UPDATE NOWAIT`;
       if (!accounts.length)
         throw new GatewayError(404, "upstream_account_not_found", "Upstream account not found");
       const balances = await tx<
         { currency: string; balance_atoms: string; reserved_atoms: string; revision: string }[]
-      >`SELECT currency,balance_atoms::text,reserved_atoms::text,revision::text FROM upstream_account_balances WHERE account_id=${account} ORDER BY currency FOR NO KEY UPDATE`;
+      >`SELECT currency,balance_atoms::text,reserved_atoms::text,revision::text FROM core_upstream_balances_v1 WHERE account_id=${account} ORDER BY currency`;
       const balance = balances.find((row) => row.currency === parsed.currency);
       if (!balance)
         throw new GatewayError(
@@ -92,8 +93,10 @@ export async function recordUpstreamReconciliation(
       }
       const id = crypto.randomUUID();
       await tx`INSERT INTO reconciliations(id,account_id,currency,revision,book_atoms,observed_atoms,invoice_atoms,difference_atoms,voucher_id,adjustment_id,actor,reason) VALUES(${id},${account},${parsed.currency},${parsed.expected_revision},${book.toString()},${parsed.observed_atoms ?? null},${parsed.invoice_atoms ?? null},${difference.toString()},${voucher},${adjustment},${trustedActor},${parsed.reason})`;
-      if (parsed.resume)
+      if (parsed.resume) {
+        await tx`SELECT core_upstream_normalize_v1(${account}::uuid)`;
         await tx`UPDATE upstream_accounts SET state='ACTIVE',revision=revision+1 WHERE id=${account}`;
+      }
       await tx`INSERT INTO upstream_audit_events(id,account_id,actor,action,revision,reason) VALUES(${crypto.randomUUID()},${account},${trustedActor},${parsed.resume ? "RECONCILED_RESUME" : "RECONCILED"},${parsed.expected_revision},${parsed.reason})`;
       return { ...(await view(tx, id)), replayed: false };
     });

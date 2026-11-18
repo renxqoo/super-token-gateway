@@ -1,0 +1,1 @@
+CREATE INDEX "execution_quota_live_deadline_idx" ON "execution_quota_leases" USING btree ((("descriptor"->>'deadline_ms')::bigint),"request_id","lease_id") WHERE state IN ('ADOPTION_PENDING','ACTIVE','RELEASE_PENDING');

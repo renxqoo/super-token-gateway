@@ -1,0 +1,14 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-quota-progress.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+SyntaxError: Export named 'createInternalIdentityStore' not found in module '/Users/wr/work/super-token-gateway/packages/storage/src/index.ts'.
+-------------------------------
+
+
+ 0 pass
+ 1 fail
+ 1 error
+Ran 1 test across 1 file. [64.00ms]

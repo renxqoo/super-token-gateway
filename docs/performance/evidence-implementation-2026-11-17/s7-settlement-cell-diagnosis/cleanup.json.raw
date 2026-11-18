@@ -1,0 +1,8 @@
+{
+  "databases_absent": 13,
+  "namespace_cleanup_passed": 13,
+  "recorded_at": "2026-11-18T06:59:20.299440+00:00",
+  "process_identities_checked": 456,
+  "scratch_removed": 13,
+  "raw_files_verified": 61
+}

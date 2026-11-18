@@ -70,6 +70,7 @@ test("core-worker re-settles a disputed v2 request after an admin RELEASE resolu
     await withSettlementRole(db, async (databaseUrl) => {
       const worker = await startCoreWorker(f.namespace, {
         databaseUrl,
+        identity: f.identity,
         env: { RECONCILE_INTERVAL_MS: "100" },
       });
       try {
@@ -107,6 +108,7 @@ test("core-worker aborts an expired never-granted reservation through Core and r
     await withSettlementRole(db, async (databaseUrl) => {
       const worker = await startCoreWorker(f.namespace, {
         databaseUrl,
+        identity: f.identity,
         env: recoveryEnvironment(f),
       });
       try {
@@ -134,7 +136,7 @@ test("core-worker aborts an expired never-granted reservation through Core and r
     });
     expect(
       (
-        await db`SELECT balance_atoms::text,reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+        await db`SELECT balance_atoms::text,reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
       )[0],
     ).toEqual({ balance_atoms: "1000", reserved_atoms: "0" });
     expect(
@@ -185,6 +187,7 @@ test("a v2 overrun keeps the full receivable with a DEBT freeze until core-worke
     await withSettlementRole(db, async (databaseUrl) => {
       const worker = await startCoreWorker(f.namespace, {
         databaseUrl,
+        identity: f.identity,
         env: { RECONCILE_INTERVAL_MS: "100" },
       });
       try {

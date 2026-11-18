@@ -1,0 +1,18 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-evidence-batch.test.ts:
+PostgresError: record "h" has no field "request_id"
+    errno: "42703",
+ severity: "ERROR",
+    where: "SQL expression \"EXISTS(SELECT 1 FROM public.attempts t JOIN public.billing_holds h ON h.request_id=t.request_id JOIN public.wallets w ON w.id=h.wallet_id WHERE t.id=ANY(attempt_ids) GROUP BY h.wallet_id HAVING count(DISTINCT pending->'partition'->>t.id::text)>1 OR bool_or(w.has_expiring_lots))\n   OR (SELECT count(*) FROM public.attempts t JOIN public.billing_holds h ON h.request_id=t.request_id WHERE t.id=ANY(attempt_ids))<>cardinality(attempt_ids)\n   OR EXISTS(SELECT 1 FROM generate_series(1,n) j WHERE mode[j]<>'NEW' OR contested[j] OR auth[j]<>'NORMAL')\"\nPL/pgSQL function core_funding.evidence_group_v1(jsonb,jsonb) line 89 at IF\nPL/pgSQL function core_funding.coalesce_groups_v1(jsonb,jsonb) line 10 at assignment\nPL/pgSQL function core_funding.persist_v1(jsonb,boolean) line 6 at assignment\nPL/pgSQL function persist_core_evidence_groups_v1(jsonb) line 2 at RETURN",
+     file: "pl_exec.c",
+     line: "5598",
+  routine: "plpgsql_exec_get_datum_type_info",
+     code: "ERR_POSTGRES_SERVER_ERROR"
+
+(fail) independent signed groups write their facts and costs together while preserving each receipt and charge [2259.58ms]
+
+ 0 pass
+ 1 fail
+ 5 expect() calls
+Ran 1 test across 1 file. [2.33s]

@@ -1,0 +1,152 @@
+{
+  "rounds": [
+    {
+      "label": "s4b-native-60-a",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s4b-native-40-a",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s4b-native-40-b",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s4b-profile-40",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s5-json-60-a",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s5-json-60-b",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s5-json-100-a",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    }
+  ],
+  "statement_resets": [
+    {
+      "label": "s4b-native-60-a",
+      "database": "gateway_test_foundation_63a545a9c29241f9b8b0bed844ce5f82",
+      "dbid": "37435816",
+      "users": [
+        "37437869",
+        "37437880"
+      ],
+      "n": 18
+    },
+    {
+      "label": "s4b-native-40-a",
+      "database": "gateway_test_foundation_6e0284955c3e441b82f1e353dd4a81e7",
+      "dbid": "37452886",
+      "users": [
+        "37454939",
+        "37454950"
+      ],
+      "n": 18
+    },
+    {
+      "label": "s4b-native-40-b",
+      "database": "gateway_test_foundation_ce7b9eb9f2664adda7c6893adc264f52",
+      "dbid": "37465172",
+      "users": [
+        "37467225",
+        "37467236"
+      ],
+      "n": 18
+    },
+    {
+      "label": "s4b-profile-40",
+      "database": "gateway_test_foundation_12ab876451ee457f821abdf87f640790",
+      "dbid": "37477414",
+      "users": [
+        "37479467",
+        "37479478"
+      ],
+      "n": 18
+    },
+    {
+      "label": "s5-json-60-a",
+      "database": "gateway_test_foundation_2ed53e4180d747b7b8b2e720e383eb23",
+      "dbid": "37495914",
+      "users": [
+        "37497967",
+        "37497978"
+      ],
+      "n": 18
+    },
+    {
+      "label": "s5-json-60-b",
+      "database": "gateway_test_foundation_c2bb679213e6432cbcc83558dba41064",
+      "dbid": "37512990",
+      "users": [
+        "37515043",
+        "37515054"
+      ],
+      "n": 18
+    },
+    {
+      "label": "s5-json-100-a",
+      "database": "gateway_test_foundation_eb35b5e972a84889ae7b0518e8a0f935",
+      "dbid": "37530118",
+      "users": [
+        "37532171",
+        "37532182"
+      ],
+      "n": 18
+    }
+  ],
+  "protected": {
+    "40766": "present",
+    "40771": "present",
+    "database": true
+  },
+  "scope": "Only exact seven own archived rounds; no global statistics reset, service/config change, or protected resource removal"
+}

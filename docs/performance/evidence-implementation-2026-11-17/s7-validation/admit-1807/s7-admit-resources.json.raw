@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-17T20:42:55.007Z",
+  "database": "gateway_native",
+  "foundation_count": 27,
+  "original_27_names_and_oids_equal": true,
+  "remaining_recent_databases": [],
+  "recent_fixture_created": 29,
+  "recent_fixture_without_dropped_record": [],
+  "sampled_recent_core_pids": 58,
+  "remaining_recent_core_pids": [],
+  "remaining_recent_identity_roles": [],
+  "protected_reference_present": true
+}

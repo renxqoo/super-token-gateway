@@ -1,0 +1,25 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-evidence-batch.test.ts:
+(pass) independent signed groups write their facts and costs together while preserving each receipt and charge [2184.19ms]
+(pass) a busy supplier cell does not materialize facts that its coalesced group will roll back [2127.05ms]
+(pass) a billing failure after coalesced facts rolls back its whole original two-request group and replays only that group [2270.98ms]
+(pass) shared_wallet groups keep their original customer settlement order instead of coalescing [2097.43ms]
+(pass) expiring_lot groups keep their original customer settlement order instead of coalescing [2199.49ms]
+(pass) two revisions within one signed group preserve final dimensions and round the complete supplier cost once [2224.74ms]
+(pass) evidence upgrade preserves a column-scoped owner without granting extra request reads or timestamp writes [2121.73ms]
+
+tests/integration/core-funding-batch.test.ts:
+(pass) a batch applies one cell transition while rounding each request independently and replaying without extra money [2071.39ms]
+(pass) a cell failure during the batch flush leaves only its group uncommitted and the original facts retry once [2048.67ms]
+(pass) partial and final groups share the actual reserve and a later billing failure discards its cell projection [2238.47ms]
+
+tests/integration/core-funding-cells.test.ts:
+(pass) fragmented supplier budget admits both requests and a locked root or another cell cannot block BEGIN or independent settlement [2362.79ms]
+(pass) a frozen supplier accepts an in-range negative adjustment when the root alone is at its lower bound without releasing unknown reservation [2117.30ms]
+(pass) a large prefunded supplier can admit on another cell while the first still has ample budget but is locked [2191.30ms]
+
+ 13 pass
+ 0 fail
+ 203 expect() calls
+Ran 13 tests across 3 files. [28.33s]

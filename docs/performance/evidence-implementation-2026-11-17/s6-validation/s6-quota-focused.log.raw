@@ -1,0 +1,19 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-success-quota.test.ts:
+(pass) accepted success closes execution and recovery releases its three quotas once while a partial attempt keeps its quota and responsibility [2222.04ms]
+(pass) a customer settlement failure rolls back automatic execution closure and quota release with every evidence and money write [2117.65ms]
+
+tests/integration/gateway-json-evidence.test.ts:
+(pass) a successful JSON response durably queues both signed facts together and settles customer and supplier exactly once [2938.41ms]
+
+tests/integration/core-worker-maintenance.test.ts:
+(pass) core-worker re-settles a disputed v2 request after an admin RELEASE resolution and returns the customer reservation [2237.18ms]
+(pass) core-worker aborts an expired never-granted reservation through Core and releases customer, supplier and quota holds once [2769.16ms]
+(pass) a v2 overrun keeps the full receivable with a DEBT freeze until core-worker collects it from a later cash credit [2391.32ms]
+(pass) the settlement worker role reconciles only through the controlled function and cannot touch customer ledgers directly [1061.38ms]
+
+ 7 pass
+ 0 fail
+ 70 expect() calls
+Ran 7 tests across 3 files. [15.86s]

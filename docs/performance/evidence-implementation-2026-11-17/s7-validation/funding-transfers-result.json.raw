@@ -1,0 +1,42 @@
+{
+  "command": ".local/toolchain/bun-1.4.4/bun --env-file=.env.local --env-file=.local/native-gate.env test tests/integration/core-funding-foundation.test.ts tests/integration/core-pricing-programs.test.ts --timeout 30000",
+  "tool_chunk_id": "4f616d",
+  "exit_code": 0,
+  "tests_passed": 4,
+  "tests_failed": 0,
+  "expect_calls": 35,
+  "files": 2,
+  "elapsed_seconds_reported_by_bun": 0.768,
+  "check": {
+    "tool_chunk_id": "3566ef",
+    "exit_code": 0,
+    "files": 345
+  },
+  "scope": "private price and funding primitives; no hot-path cutover or new capacity result",
+  "final_run": {
+    "tool_chunk_id": "f94772",
+    "exit_code": 0,
+    "tests_passed": 4,
+    "tests_failed": 0,
+    "expect_calls": 36,
+    "files": 2,
+    "elapsed_seconds_reported_by_bun": 0.766
+  },
+  "unmigrated_audit_regression": {
+    "red_chunk_id": "f8398f",
+    "red_exit_code": 1,
+    "red_tests_passed": 0,
+    "red_tests_failed": 1,
+    "symptom": "expected rejection but audit returned amounts for legacy root reservation"
+  },
+  "architecture": {
+    "tool_chunk_id": "cc25ef",
+    "exit_code": 0,
+    "log": "s7-transfers-architecture.log.raw"
+  },
+  "format": {
+    "tool_chunk_id": "9c3f7d",
+    "exit_code": 0,
+    "checked_files": 5
+  }
+}

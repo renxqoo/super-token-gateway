@@ -95,8 +95,17 @@ test(
       { reply: (call) => (call.body.stream ? chatReplies.sse() : chatReplies.json()) },
       async ({ received, namespace, send, startGateway }) => {
         const queue = { url: process.env.QUEUE_REDIS_URL!, namespace, ack_timeout_ms: 300 };
+        const redis = new RedisClient(queue.url);
+        let replicas: number;
+        try {
+          const info = String(await redis.send("INFO", ["replication"]));
+          replicas = Number(/^connected_slaves:(\d+)\r?$/m.exec(info)?.[1] ?? -1);
+          expect(Number.isInteger(replicas) && replicas >= 0 && replicas < 8).toBe(true);
+        } finally {
+          redis.close();
+        }
         await expect(
-          startGateway({ queue: { ...queue, required_replicas: 1 } }, "gatewayB"),
+          startGateway({ queue: { ...queue, required_replicas: replicas + 1 } }, "gatewayB"),
         ).rejects.toThrow("usage_queue_unavailable");
         const proxy = await tcpProxy(new URL(queue.url));
         try {
@@ -141,7 +150,7 @@ test(
         expect((await db`SELECT count(*)::integer n FROM gateway_requests`)[0].n).toBe(0);
         expect(
           (
-            await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+            await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
           )[0].reserved_atoms,
         ).toBe("0");
       },
@@ -234,7 +243,7 @@ test(
         ).toEqual([{ state: "PARTIAL", error_code: "client_cancelled", hold: "PARTIAL" }]);
         expect(
           (
-            await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+            await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
           )[0].reserved_atoms,
         ).toBe("344");
         const next = await send();
@@ -380,7 +389,7 @@ test(
           ).toBe(0);
           expect(
             (
-              await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+              await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
             )[0].reserved_atoms,
           ).toBe("344");
           const next = await send({ via: restarted });
@@ -420,7 +429,7 @@ test(
           ).toEqual([{ state: "NOT_EXECUTED", permit: "SEND_GRANTED" }]);
           expect(
             (
-              await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+              await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
             )[0].reserved_atoms,
           ).toBe("0");
         },
@@ -440,7 +449,7 @@ test(
       await withGatewayStack(
         { reply: () => chatReplies.json(), databasePort: proxy.port },
         async ({ db, setup, received, send }) => {
-          const observed = proxy.arm(["core_execution_batch_v1", "execution_admit_v1"], 30000);
+          const observed = proxy.arm(["core_execution_slow_v1", "execution_admit_v1"], 30000);
           const response = await send();
           await observed;
           expect(response.status).toBe(503);
@@ -456,7 +465,7 @@ test(
           ).toEqual([{ permit: "ABORTED" }]);
           expect(
             (
-              await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+              await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
             )[0].reserved_atoms,
           ).toBe("0");
           expect(
@@ -510,7 +519,7 @@ test(
         });
         const [attempt] = await db`SELECT a.state,a.error_code,h.state AS hold,
           b.reserved_atoms::text AS reserved FROM attempts a JOIN upstream_holds h ON h.attempt_id=a.id
-          JOIN upstream_account_balances b ON b.account_id=h.account_id AND b.currency=h.currency
+          JOIN core_upstream_balances_v1 b ON b.account_id=h.account_id AND b.currency=h.currency
           WHERE a.request_id=${requestId}`;
         expect(attempt).toMatchObject({ state: "UNKNOWN", hold: "PARTIAL" });
         expect(BigInt(attempt.reserved)).toBeGreaterThan(0n);
@@ -776,7 +785,10 @@ test(
   "a supplier account awaiting reconciliation makes the v2 Gateway answer 503 no_route without calling upstream instead of core_unavailable",
   () =>
     withGatewayStack({ reply: () => chatReplies.json() }, async ({ db, setup, received, send }) => {
-      await db`UPDATE upstream_accounts SET state='RECONCILE_REQUIRED',revision=revision+1 WHERE id=${setup.provider.account_id}`;
+      await db.begin(async (tx) => {
+        await tx`SELECT core_funding_control_v1(${setup.provider.account_id}::uuid,true)`;
+        await tx`UPDATE upstream_accounts SET state='RECONCILE_REQUIRED',revision=revision+1 WHERE id=${setup.provider.account_id}`;
+      });
       const response = await send();
       expect(response.status).toBe(503);
       expect((await response.json()).error.code).toBe("no_route");

@@ -1,0 +1,38 @@
+{
+  "at": "2026-11-17T23:15:54.911Z",
+  "scope": "Only absent databases linked to this task's audits through deleted service role OIDs",
+  "before": [
+    {
+      "entries": 4764,
+      "dealloc": "39532",
+      "stats_reset": "2026-11-17 09:56:51.526972+08"
+    }
+  ],
+  "after": [
+    {
+      "entries": 4405,
+      "dealloc": "39532",
+      "stats_reset": "2026-11-17 09:56:51.526972+08"
+    }
+  ],
+  "reset": [
+    {
+      "dbid": "39876837",
+      "users": [
+        "39879079",
+        "39879090"
+      ],
+      "statements": 20,
+      "sources": [
+        {
+          "path": "docs/performance/evidence-implementation-2026-11-17/s7-preflight-300-failed/audit.json.raw",
+          "database": "gateway_test_foundation_9874430b3ec6450896544061e1f91abf",
+          "users": [
+            "39879090",
+            "39879079"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-execution-upgrade.test.ts:
+(pass) authentication append upgrades an empty signed settlement schema without rewriting its version [232.75ms]
+
+tests/integration/plugin-catalog-upgrade.test.ts:
+(pass) actual v3 through financial schema upgrade preserves historical channels audits costs and immutable packages [200.93ms]
+
+tests/integration/lifecycle.test.ts:
+(pass) v2 through financial upgrade preserves settled receipts, ACKs and immutable plugin package, and an open baseline hold settles by explicit resolution [288.62ms]
+
+ 3 pass
+ 9 filtered out
+ 0 fail
+ 54 expect() calls
+Ran 3 tests across 3 files. [803.00ms]

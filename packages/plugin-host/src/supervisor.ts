@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isAbsolute } from "node:path";
+import { pluginExecutableDigest } from "./executable.ts";
 import {
   base64Schema,
   ownPluginModule,
@@ -53,6 +54,7 @@ export type NativeConfig = Partial<
 >;
 export type SupervisorOptions = {
   executable: string;
+  expectedExecutableDigest?: string;
   native?: NativeConfig;
   maxPending?: number;
   maxPendingBytes?: number;
@@ -490,6 +492,17 @@ export function createPluginSupervisor(options: SupervisorOptions) {
   function start(): Connection {
     if (closed) throw new PluginHostError("HOST_CLOSED");
     if (connection && !connection.dead) return connection;
+    if (options.expectedExecutableDigest !== undefined) {
+      try {
+        if (
+          !/^[a-f0-9]{64}$/.test(options.expectedExecutableDigest) ||
+          pluginExecutableDigest(options.executable) !== options.expectedExecutableDigest
+        )
+          throw new Error("PLUGIN_EXECUTABLE_CHANGED");
+      } catch {
+        throw new PluginHostError("EXECUTABLE_CHANGED");
+      }
+    }
     if (starts > limits.maxRestarts) throw new PluginHostError("RESTART_BUDGET");
     starts++;
     const child = spawn(

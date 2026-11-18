@@ -121,6 +121,8 @@ export interface NativeProcess {
   readonly incarnation: string;
   readonly exited: Promise<number | null>;
   readonly running: boolean;
+  readonly exitCode: number | null;
+  readonly signalCode: NodeJS.Signals | null;
   readonly output: string;
   readonly killed: boolean;
   stop(signal?: "SIGTERM" | "SIGKILL"): Promise<void>;
@@ -279,6 +281,12 @@ async function startProcess(
     get running() {
       return !ended && !failure;
     },
+    get exitCode() {
+      return child.exitCode;
+    },
+    get signalCode() {
+      return child.signalCode;
+    },
     get output() {
       return output;
     },
@@ -308,6 +316,17 @@ async function tool(path: string, pattern: RegExp): Promise<{ path: string; vers
     if (failed || code !== 0 || !pattern.test(child.output))
       throw new Error("Native tool version is unsupported; require PostgreSQL 17 and Redis 7.4");
     return { path: resolved, version: child.output.trim() };
+  } catch (error) {
+    let present = true;
+    try {
+      process.kill(child.pid, 0);
+    } catch (failure) {
+      if ((failure as NodeJS.ErrnoException).code === "ESRCH") present = false;
+    }
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}; version probe=${JSON.stringify({ path: resolved, pid: child.pid, present, running: child.running, exitCode: child.exitCode, signalCode: child.signalCode, output: child.output.slice(0, 1024) })}`,
+      { cause: error },
+    );
   } finally {
     await child.stop();
   }

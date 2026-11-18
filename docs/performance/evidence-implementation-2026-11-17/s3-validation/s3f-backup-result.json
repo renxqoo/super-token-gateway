@@ -1,0 +1,67 @@
+{
+  "source_database": "gateway_test_foundation_d250a5cf146047b8b5378a6d3d5bbfe3",
+  "namespace": "gateway-stack_ac6b468af2f247a69a15f1e580b240f0",
+  "quiesced": true,
+  "exit_code": 0,
+  "result": {
+    "backup_restore": "pass",
+    "file": "/Users/wr/work/super-token-gateway/.local/backups/gateway-1794924245726.dump",
+    "bytes": 2285681,
+    "sha256": "196397f927f40303a723318addbdae03d52102dfbc79c6890136257a069acc61",
+    "attempts": "1",
+    "usage": "1",
+    "journals": "3",
+    "holds": "1",
+    "charges": "1",
+    "lots": "1",
+    "credit_policies": "0",
+    "balances": [
+      {
+        "debt": "0",
+        "spent": "100",
+        "expired": "0",
+        "currency": "USD",
+        "reserved": "0",
+        "available": "900",
+        "credit_limit": "0",
+        "credit_reserved": "0",
+        "credit_versions": "0"
+      }
+    ],
+    "inconsistent_credit": 0,
+    "unbalanced": 0,
+    "inconsistent_wallets": 0,
+    "upstream_balances": [
+      {
+        "spent": "15",
+        "balance": "985",
+        "currency": "USD",
+        "reserved": "0"
+      }
+    ],
+    "inconsistent_upstream": 0,
+    "unbalanced_upstream": 0,
+    "evidence_kinds": {
+      "RAW": "2",
+      "CANONICAL": "1"
+    },
+    "deliveries": null,
+    "consumers_digest": "d41d8cd98f00b204e9800998ecf8427e",
+    "deliveries_digest": "d41d8cd98f00b204e9800998ecf8427e",
+    "receipts_digest": "69a90e0e9c1961870af63512e1fc0636",
+    "upstream_entries_digest": "60df415fa22f3311a9d3558424e2b41b",
+    "plugin_packages_digest": "14dcd2968ed04bfe0b99c0abfed9c947",
+    "plugin_versions_digest": "9cc0f4fc7729f51a8fc8dfaf6de40a24",
+    "plugin_bindings_digest": "c2dc30aa0592fe721def78bda99bbc35",
+    "runtime_approvals": "1",
+    "runtime_approvals_digest": "8272d079a92b65e5160171b41b995806",
+    "execution_permits_digest": "3255e2481c3615fe6c4a6e9633fd9b6f",
+    "resources_digest": "d41d8cd98f00b204e9800998ecf8427e",
+    "queue": "quiesced and drained",
+    "immutable_trigger": "verified",
+    "current_roles": "reapplied",
+    "runtime_permissions": "owner-only"
+  },
+  "dump_removed": true,
+  "fixture_cleaned": true
+}

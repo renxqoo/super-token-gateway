@@ -1,0 +1,97 @@
+{
+  "base_benchmark_sha256": "6c52b150f083582ce826579c7a337f4cd2f7dcd1148b8414ac20f41675fce08b",
+  "files": {
+    "setup.sql.raw": {
+      "sha256": "afb7acbd2600d138928c0c868cec3433507d34c8250bb5c5cd69b2470036d9db",
+      "bytes": 28374
+    },
+    "read.sql.raw": {
+      "sha256": "3af73d8f002ba6fca2b2b3a5c0c6b3e86f7d0753cf725c95944761a6611b119a",
+      "bytes": 50405
+    },
+    "candidate.sql.raw": {
+      "sha256": "9e161ee427ca29c0c1e8d3c0354ea991705d5b1bc5c98c0acab44d0707d6fa38",
+      "bytes": 4610
+    },
+    "holder.sql.raw": {
+      "sha256": "68416268f74f525f953b5b7603ee270eda7b2bd19b68f7b48f1a39cc0bd298b9",
+      "bytes": 36353
+    },
+    "holder-read.sql.raw": {
+      "sha256": "195cb8473f89ede8fbcae3f66226fd41e4c6c75eabd54f994b02d4a7cda7ff2c",
+      "bytes": 477
+    },
+    "wide.sql.raw": {
+      "sha256": "a330a24c4f741f992ebd02886508df4cb46eca8880e6ed7875dbcd4c9e1bb888",
+      "bytes": 10853
+    },
+    "late.sql.raw": {
+      "sha256": "2d2c36716be21b8ae81c29e0acc2b85f7f6d09bacecf6125575014af209a2ef0",
+      "bytes": 35365
+    },
+    "point-wide.sql.raw": {
+      "sha256": "7ce9a7341a786b62308f2883dd18c7d7fc6a53de62eaa859217568db1eda59ce",
+      "bytes": 11682
+    },
+    "folded.sql.raw": {
+      "sha256": "9e508eca909d0cc7b2f62b861bc670cfaa08036115acb2f56c71d992f1617dfe",
+      "bytes": 4315
+    },
+    "scheduler-v1.ts.raw": {
+      "sha256": "58efdce1bee42d1c63ec6fb96dfb9ce2219aa4000a37057fe9ce2cba8a5a99c7",
+      "bytes": 3802
+    },
+    "worker-src-settlement-processor.ts.raw": {
+      "sha256": "6500eb6d97be28cd42efa6e3c64844bec191eb8e1520d4ce1620dbcc2f15beb5",
+      "bytes": 3802
+    },
+    "worker-src-settlement-schedule.ts.raw": {
+      "sha256": "d03e498f9ef99312b33bf25b07a7d676eeaf8ef4110156224489e5a4e2bff4e8",
+      "bytes": 2656
+    },
+    "worker-src-settlement-worker.ts.raw": {
+      "sha256": "4aac9b237dc1e3264812836be98a90497c6df3ef59206908eaa1b099263e124e",
+      "bytes": 1840
+    },
+    "bench-settlement-candidate-1814.ts.patch.raw": {
+      "sha256": "682e027a75b71b92b65a568cf1796d5c9573be4db2fabd17199e5fb293fddd58",
+      "bytes": 799
+    },
+    "bench-settlement-combined-1814.ts.patch.raw": {
+      "sha256": "75eddafd2c2e85f0ca17242b510ef0f86449ee935c06627c5ce37fab2360209a",
+      "bytes": 2100
+    },
+    "bench-settlement-folded-1814.ts.patch.raw": {
+      "sha256": "94759c933e2cbdce58b51116425fdd316f3212c4bb490fe1ebd510abc8b3b9fb",
+      "bytes": 793
+    },
+    "bench-settlement-holder-1814.ts.patch.raw": {
+      "sha256": "293853024f2f5a771ae2289f1b781a3f8b34be8800e5c0dd29f802afd21d38e1",
+      "bytes": 1087
+    },
+    "bench-settlement-late-1814.ts.patch.raw": {
+      "sha256": "998374602c0fd627d14495017980398b42891017906406ec2c33581bdb605ec6",
+      "bytes": 789
+    },
+    "bench-settlement-profile-1814.ts.patch.raw": {
+      "sha256": "f0bb0fd0cbdb46dc7e1aba60c2489975509d2d5fc89d0414932ba65938b84c0d",
+      "bytes": 1080
+    },
+    "bench-settlement-scheduler-1814.ts.patch.raw": {
+      "sha256": "b2c3a5b7a81897ed7e4d7f2009f9e31f42cefb72df69775372b1637a6d490db7",
+      "bytes": 1622
+    },
+    "bench-settlement-split-1814.ts.patch.raw": {
+      "sha256": "736337891ddeadcd05565b98d7bc291445a3d60d8596a1d30bb9686d7a6bed53",
+      "bytes": 1630
+    },
+    "bench-settlement-wide-1814.ts.patch.raw": {
+      "sha256": "0cb9a6e6f72bc58c6016b33ea42894382e79bf4edf5e086380ac2009aa8a9f0d",
+      "bytes": 1174
+    },
+    "bench-settlement-wide-point-1814.ts.patch.raw": {
+      "sha256": "8bdc52c42a36c697a7bc58ee7ee008624acfbd9a4bf9ba9df9487057fe4ffda7",
+      "bytes": 1186
+    }
+  }
+}

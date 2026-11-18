@@ -1,0 +1,198 @@
+{
+  "stage": "S7 1809 early cell locks high-load diagnostic",
+  "label": "s7-early-lock-300-failed",
+  "diagnostic": true,
+  "excluded_from_stability": true,
+  "runtime_migration": 2026111809,
+  "target": 300,
+  "rate": 301,
+  "pluginRuntime": "builtin-worker",
+  "requests": 10143,
+  "valid": false,
+  "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+  "capacityPassed": false,
+  "p99": 2190,
+  "onlineCapacity": {
+    "fullyCompletedByWindow": 5603,
+    "minuteCompletions": [5603],
+    "matchedRequests": 10049,
+    "httpOnly": 0,
+    "ackOnly": 94,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 14194,
+    "receiptAckedRequestsByWindow": 5603,
+    "ackedEventsByWindow": 11402,
+    "sampledBeforeWindowEndMs": 1,
+    "httpByWindow": 9848
+  },
+  "http": {
+    "offered": 18060,
+    "shed": 2782,
+    "completed": 15278,
+    "succeeded": 10049,
+    "invalid": 5229,
+    "statuses": {
+      "200": 10049,
+      "503": 5229
+    },
+    "gateway_errors": {
+      "overloaded": 5229
+    },
+    "transport_errors": {}
+  },
+  "window_complete_rps": 93.38333333333334,
+  "process_cpu_ms": {
+    "gateway": 2.5939071280686186,
+    "core_api": 2.225179927043281,
+    "core_worker": 0.7640737454402051,
+    "upstream": 0.14887114265996254,
+    "redis_admission": 0.7137927634822011,
+    "redis_evidence": 0.12225179927043371,
+    "redis_evidence_replica": 0.07492852213349158,
+    "pg": 48.28748890860693,
+    "pg_shared": 0.016760327319333218
+  },
+  "total_cpu_ms": 54.78162279404516,
+  "cpu_denominator": "all admitted requests including warmup; CPU also includes rejected HTTP work, so this is not all-success per-request cost",
+  "pg": {
+    "calls": 228917,
+    "exec_ms": 599826.2140620006,
+    "wal_bytes": 711755740,
+    "wal_records": 4150202,
+    "calls_per_request": 22.56896381741102,
+    "exec_ms_per_request": 59.136962837622065,
+    "wal_bytes_per_request": 70172.11278714384,
+    "wal_records_per_request": 409.1690821256039
+  },
+  "pg_valid": true,
+  "pg_errors": [],
+  "cpu_sampling_errors": 0,
+  "accounting": {
+    "requests": 10143,
+    "attempts": 10143,
+    "succeeded_attempts": 10143,
+    "usage_events": 20286,
+    "usage_requests": 10143,
+    "unexpected_receipts": 0,
+    "precise_usage": 20286,
+    "precise_charges": 10143,
+    "settled_holds": 10143,
+    "reserved": "0",
+    "spent": "1014300",
+    "debt": "0",
+    "acknowledged": 20286,
+    "settlement_journals": 10143,
+    "unbalanced_journals": 0,
+    "supplier_cost_heads": 10143,
+    "conflicts": 0,
+    "inconsistent_hold_reserves": 0,
+    "inconsistent_funding_budgets": 0,
+    "inconsistent_cell_reserves": 0,
+    "unbalanced_supplier_journals": 0
+  },
+  "supplier": {
+    "balance": "999999999999401563",
+    "reserved": "0",
+    "spent": "598437",
+    "accounts": 1
+  },
+  "wallet_mismatches": 998,
+  "artifacts": {
+    "dist/core-api/main.js": "bfbe89ab1535b72df5f2b5a6c2b3b7a4eb5227af1645205be5844ae067e11211",
+    "dist/core-api/platform/management.js": "5626588525ef6b046095aa9fb65cf8d5fe4225e4f15ec587bce5690e91b0ab63",
+    "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+    "dist/core-worker/main.js": "c76dde5081ad3798de82feb166a3f67198c04c2b41ddb5efc37348a9573a78f6",
+    "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+    "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+    "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+    "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+    "dist/manifest.json": "5f4a4b68b015a9a074138dfff0adcd151dc5e8a5d3129eeb0db3c29566b242d6"
+  },
+  "command": [
+    "env",
+    "QUEUE_REQUIRED_REPLICAS=1",
+    ".local/toolchain/bun-1.4.4/bun",
+    "--env-file=.env.local",
+    "--env-file=.local/native-gate.env",
+    "scripts/bench-system.ts",
+    "--online-capacity",
+    "--seconds",
+    "60",
+    "--instances",
+    "1",
+    "--wallets",
+    "1000",
+    "--supplier-accounts",
+    "1",
+    "--concurrency",
+    "256",
+    "--warmup-concurrency",
+    "16",
+    "--worker-concurrency",
+    "8",
+    "--gateway-inflight",
+    "10000",
+    "--drain-seconds",
+    "120",
+    "--request-timeout-ms",
+    "30000",
+    "--plugin-runtime",
+    "builtin-worker",
+    "--target-rps",
+    "300",
+    "--rate",
+    "301",
+    "--upstream",
+    "standard"
+  ],
+  "exit_code": 1,
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "source_directory": ".local/capacity/bench-730282104d55493c922a60cfc966a8ce",
+  "database": "gateway_test_foundation_151870a1e2be44239f91cdfb03ca61c1",
+  "database_bytes": 439968271,
+  "archive_manifest": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-early-lock-300-failed/audit.json.raw",
+      "sha256": "abac0727410c3d77cca7a3d22455045c98a8fd0417680b1f4d9a6e16d2e5933e",
+      "bytes": 551763
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-early-lock-300-failed/http.json.raw",
+      "sha256": "4d31485c144ff49d87c3220df6d75a27dd6501b536f9239c2e7a134e223c5233",
+      "bytes": 10067
+    },
+    "http.json.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-early-lock-300-failed/http.json.identities.tsv",
+      "sha256": "4eb3bf826e51c2e4f81d2791bc1734b57c01b224070dccf12d4500e306aea8d0",
+      "bytes": 512499
+    },
+    "ack.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-early-lock-300-failed/ack.identities.tsv",
+      "sha256": "bb5bca98dc089c95379b849b05f9efb0abd2427a457f89bc1a81b029593a096c",
+      "bytes": 517293
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-early-lock-300-failed/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    },
+    "load.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-early-lock-300-failed/load.log",
+      "sha256": "4d31485c144ff49d87c3220df6d75a27dd6501b536f9239c2e7a134e223c5233",
+      "bytes": 10067
+    },
+    "upstream.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-early-lock-300-failed/upstream.log",
+      "sha256": "dff63a8fd20277f85ab6c066d9d6dc0e4467086ae37c52391811670ba09d49ad",
+      "bytes": 48
+    },
+    "upstream.pem": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-early-lock-300-failed/upstream.pem",
+      "sha256": "cac554bd68f22b10fb5a9254af5c348f143bfefd11d79c749fe48c9ff184163d",
+      "bytes": 1013
+    }
+  }
+}

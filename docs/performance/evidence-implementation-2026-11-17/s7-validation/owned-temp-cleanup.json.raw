@@ -1,0 +1,11 @@
+{
+  "at_utc": "2026-11-17T17:13:37.872231+00:00",
+  "profile_archive_verified_files": [
+    "output/CPU.20261117.232542.8913.0.001.cpuprofile",
+    "output/CPU.20261117.232542.8913.0.002.md",
+    "bin/bun"
+  ],
+  "profile_directory_removed": true,
+  "own_schema_refresh_backups_removed": true,
+  "retained": "Build assets, controlled proofs, active implementation scripts and byte-exact public evidence"
+}

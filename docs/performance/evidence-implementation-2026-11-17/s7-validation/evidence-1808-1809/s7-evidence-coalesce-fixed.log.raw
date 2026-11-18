@@ -1,0 +1,9 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-evidence-batch.test.ts:
+(pass) independent signed groups write their facts and costs together while preserving each receipt and charge [2288.43ms]
+
+ 1 pass
+ 0 fail
+ 27 expect() calls
+Ran 1 test across 1 file. [2.36s]

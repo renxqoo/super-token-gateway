@@ -1,0 +1,87 @@
+{
+  "rounds": [
+    {
+      "label": "s3b-native-40-a",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s3c-native-40-a",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s3c-native-40-b",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s3c-native-60-a",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s3c-native-50-a",
+      "database_absent": true,
+      "pids_absent": 35,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s3c-wasm-40-control",
+      "database_absent": true,
+      "pids_absent": 52,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    },
+    {
+      "label": "s3c-wasm-40-control-b",
+      "database_absent": true,
+      "pids_absent": 45,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "directory_removed": true
+    }
+  ],
+  "warmup_failure": {
+    "directory_removed": true,
+    "namespace_cleanup": {
+      "cleaned": 1,
+      "failed": 0
+    },
+    "limitation": "No full audit was produced; process/database finally cleanup is recorded in fixture journals, not reconstructed as missing telemetry."
+  },
+  "protected": {
+    "40766": "present",
+    "40771": "present",
+    "newapi_database_present": true
+  }
+}

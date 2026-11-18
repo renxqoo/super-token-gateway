@@ -1,0 +1,78 @@
+{
+  "load": {
+    "clients": 20,
+    "seconds": 10,
+    "wallets": 1,
+    "max_active_leases_per_scope": 1000
+  },
+  "outcomes": {
+    "200": 1340,
+    "429 rate_limited": 1412
+  },
+  "at_first_429": {
+    "sources": [
+      {
+        "reason": "could not obtain lock on row in relation \"wallets\"",
+        "ctx": "SQL statement \"SELECT 1 FROM public.wallets WHERE id IN(SELECT wallet_id FROM public.billing_holds WHERE request_id=ANY(request_ids)) ORDER BY id FOR NO KEY UPDATE NOWAIT\"\nPL/pgSQL function core_funding.evidence_group_v1",
+        "count": "770"
+      }
+    ],
+    "worker": {
+      "status": "ready",
+      "committed": 123,
+      "rejected": 0,
+      "quarantined": 0,
+      "failures": 0,
+      "reconciled": 0,
+      "aborted": 0,
+      "released": 369,
+      "quota_expired": 0,
+      "maintenance_failures": 0,
+      "persistence": {
+        "calls": 762,
+        "jobs": 844,
+        "groups": 897,
+        "events": 1794,
+        "max_jobs": 3,
+        "max_groups": 5,
+        "lock_conflicts": 770,
+        "errors": 0,
+        "active_jobs": 8
+      }
+    },
+    "redis": [
+      {
+        "kind": "key",
+        "limit": 1000,
+        "rpm_limit": 1000000,
+        "tpm_limit": 1000000000,
+        "active": 1000,
+        "rpm": 1123,
+        "tokens": "3470070"
+      },
+      {
+        "kind": "channel",
+        "limit": 1000,
+        "rpm_limit": 1000000,
+        "tpm_limit": 9007199254741000,
+        "active": 1000,
+        "rpm": 1123,
+        "tokens": "1156690"
+      },
+      {
+        "kind": "project",
+        "limit": 1000,
+        "rpm_limit": 1000000,
+        "tpm_limit": 1000000000,
+        "active": 1000,
+        "rpm": 1123,
+        "tokens": "3470070"
+      }
+    ]
+  },
+  "after_fix": {
+    "test": "requests under steady concurrent load all succeed across repeated Core connection rotations instead of some answering 503 core_unavailable at each rotation",
+    "file": "tests/integration/gateway-chat.test.ts",
+    "test_log": "(pass) requests under steady concurrent load all succeed across repeated Core connection rotations instead of some answering 503 core_unavailable at each rotation [12803.86ms]"
+  }
+}

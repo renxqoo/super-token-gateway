@@ -1,0 +1,15 @@
+bun test v1.4.4 (38afee6c8)
+
+packages/plugin-host/src/__test__/executable.test.ts:
+(pass) helper publication captures one immutable binary even when the mutable source is replaced [2.18ms]
+(pass) concurrent helper publishers preserve one valid immutable file and no staging files [70.94ms]
+(pass) a declared immutable helper path cannot be reinterpreted as a different executable after corruption [1.56ms]
+(pass) a declared immutable helper replaced by a symlink cannot publish its target under a new identity [1.53ms]
+(pass) helper restart and new module workers execute the pinned binary after its mutable build source is replaced [881.12ms]
+(pass) a helper with an unexpected digest cannot start or consume the restart budget [31.78ms]
+(pass) a helper FIFO cannot block synchronous executable resolution or publication [9.58ms]
+
+ 7 pass
+ 0 fail
+ 177 expect() calls
+Ran 7 tests across 1 file. [1030.00ms]

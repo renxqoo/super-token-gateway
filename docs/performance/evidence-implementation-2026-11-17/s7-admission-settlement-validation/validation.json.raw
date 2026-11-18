@@ -1,0 +1,190 @@
+{
+  "recorded_at": "2026-11-18T03:51:15.079122+00:00",
+  "commands": [
+    "bun --env-file=.env.local --env-file=.local/native-gate.env run verify",
+    "bun --env-file=.env.local --env-file=.local/native-gate.env run test:durability",
+    "bun run test:backup --quiesced, invoked on a stopped and drained isolated HTTP fixture",
+    "bun --env-file=.env.local --env-file=.local/native-gate.env test tests/integration/core-evidence-batch.test.ts --timeout 30000 -t 'separate writes'"
+  ],
+  "typecheck_files": 357,
+  "formatted_files_at_verify": 762,
+  "verify_exit": 0,
+  "go_native_pass": {
+    "top_level": 34,
+    "with_subtests": 48
+  },
+  "bun_test_runs": [
+    {
+      "passed": 450,
+      "failed": 0,
+      "assertions": 8075,
+      "files": 71,
+      "elapsed_seconds": 56.09
+    },
+    {
+      "passed": 579,
+      "failed": 0,
+      "assertions": 13404,
+      "files": 93,
+      "elapsed_seconds": 1330.87
+    }
+  ],
+  "isolation_test": [
+    {
+      "passed": 1,
+      "failed": 0,
+      "assertions": 27,
+      "files": 1,
+      "elapsed_seconds": 2.78
+    }
+  ],
+  "system_artifact_checks": 41,
+  "plugin_artifacts": [
+    {
+      "cases": 84,
+      "steps": 112,
+      "artifact": "isolated-plugin"
+    },
+    {
+      "cases": 84,
+      "steps": 112,
+      "artifact": "isolated-builtin-worker"
+    }
+  ],
+  "artifacts_match_all_final_candidate_rounds": true,
+  "durability": {
+    "durability": "pass",
+    "fixture": "native",
+    "scope": "v2-core-settlement",
+    "checks": [
+      "production topology acknowledges every connected candidate and rejects live persistence drift",
+      "a replica that resumes with a stale fsync acknowledgement confirms evidence without waiting for its periodic ACK",
+      "primary hard restart retains acknowledged v2 evidence from its AOF",
+      "acknowledged replica promotion retains v2 evidence and the settlement worker settles it once",
+      "promoted node without required durable replica rejects admission",
+      "unsafe persistence configuration rejects admission",
+      "strict evidence payload rejects body; charges, receipts and supplier journals remain singular"
+    ],
+    "charges": 1,
+    "supplier": {
+      "balance": "985",
+      "reserved": "30",
+      "spent": "15"
+    },
+    "tools": {
+      "initdb": {
+        "path": "/Users/wr/work/super-token-gateway/.local/toolchain/pg17/bin/initdb",
+        "version": "initdb (PostgreSQL) 17.11"
+      },
+      "postgres": {
+        "path": "/Users/wr/work/super-token-gateway/.local/toolchain/pg17/bin/postgres",
+        "version": "postgres (PostgreSQL) 17.11"
+      },
+      "redis": {
+        "path": "/Users/wr/work/super-token-gateway/.local/toolchain/redis74/bin/redis-server",
+        "version": "Redis server v=7.4.12 sha=3f2e1e0c:0 malloc=libc bits=64 build=87341d32b0c2dfa5"
+      }
+    },
+    "ownedResources": {
+      "processes": [],
+      "directories": [],
+      "ports": [],
+      "timers": 0
+    }
+  },
+  "backup": {
+    "source_database": "gateway_test_foundation_2b9fbe83f1c04d18ba625639e8e22330",
+    "namespace": "gateway-stack_345a191ceb3543f0a82943cefed4c077",
+    "quiesced": true,
+    "exit_code": 0,
+    "result": {
+      "backup_restore": "pass",
+      "file": "/Users/wr/work/super-token-gateway/.local/backups/gateway-1794972409740.dump",
+      "bytes": 2426288,
+      "sha256": "078db68eea80a937086cb510c8b730ce9d504c353130094ec7672a9958ed70f4",
+      "attempts": "1",
+      "usage": "2",
+      "journals": "3",
+      "holds": "1",
+      "charges": "1",
+      "lots": "1",
+      "credit_policies": "0",
+      "balances": [
+        {
+          "debt": "0",
+          "spent": "100",
+          "expired": "0",
+          "currency": "USD",
+          "reserved": "0",
+          "available": "900",
+          "credit_limit": "0",
+          "credit_reserved": "0",
+          "credit_versions": "0"
+        }
+      ],
+      "inconsistent_credit": 0,
+      "unbalanced": 0,
+      "inconsistent_wallets": 0,
+      "upstream_balances": [
+        {
+          "spent": "15",
+          "balance": "985",
+          "currency": "USD",
+          "reserved": "0"
+        }
+      ],
+      "inconsistent_upstream": 0,
+      "inconsistent_funding_cells": 0,
+      "inconsistent_hold_reserves": 0,
+      "unbalanced_upstream": 0,
+      "evidence_kinds": {
+        "RAW": "2",
+        "CANONICAL": "2"
+      },
+      "deliveries": null,
+      "consumers_digest": "d41d8cd98f00b204e9800998ecf8427e",
+      "deliveries_digest": "d41d8cd98f00b204e9800998ecf8427e",
+      "receipts_digest": "9a55ed83fcd6c507282f124c143fbb5f",
+      "upstream_entries_digest": "ec1f867498e1de01a41b59c1a46dbb80",
+      "funding_roots_digest": "0c3ce41a6e68edd77e2472838743ea69",
+      "funding_holds_digest": "28d44b0bd0d5963a6443552a68c5663c",
+      "funding_cells_digest": "9cc4608c6a962d1c8cd180e1e6a47c0b",
+      "funding_transfers_digest": "9dda3081c0fac77aa49207e44ef04dd4",
+      "plugin_packages_digest": "30f609c2dc5a96e85b56a40a1620a2ca",
+      "plugin_versions_digest": "d8496f7a8ac9ed942b1e8f2f98e91167",
+      "plugin_bindings_digest": "41e70498fe04d27e0f917d31ab467f0e",
+      "runtime_approvals": "1",
+      "runtime_approvals_digest": "b7015b661b31e9cdd129b798564aa048",
+      "execution_permits_digest": "38d888ecfd9a36948ec1c687043a26dc",
+      "resources_digest": "d41d8cd98f00b204e9800998ecf8427e",
+      "queue": "quiesced and drained",
+      "immutable_trigger": "verified",
+      "current_roles": "reapplied",
+      "runtime_permissions": "owner-only"
+    },
+    "dump_removed": true,
+    "fixture_cleaned": true
+  },
+  "long_run_budget": {
+    "measured_at": "2026-11-18T03:23:59.578Z",
+    "available": 29941760000,
+    "estimated": 58474967296,
+    "reserve": 4294967296,
+    "sufficient": false,
+    "bytesPerRequest": 5000
+  },
+  "timeout_fixture_cleanup": {
+    "database_absent": true,
+    "roles_absent": 4,
+    "test_directories_removed": 2,
+    "namespace_keys_removed": 1
+  },
+  "capacity_fixture_cleanup": {
+    "databases_absent": 7,
+    "namespace_cleanup_passed": 7,
+    "checked_at": "2026-11-18T03:29:21.204244+00:00",
+    "remaining_sampled_owned_processes": 0,
+    "verified_artifact_digests": 35,
+    "scratch_directories_removed": 7
+  }
+}

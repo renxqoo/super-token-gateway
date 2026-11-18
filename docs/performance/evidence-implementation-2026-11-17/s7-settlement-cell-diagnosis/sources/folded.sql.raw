@@ -1,0 +1,35 @@
+CREATE OR REPLACE FUNCTION core_funding.flush_facts_v1(frame jsonb) RETURNS void LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE updated integer;BEGIN
+ IF frame IS NULL THEN RETURN;END IF;
+ INSERT INTO public.usage_event_index(id,project_id,request_id,attempt_id,source,finality,cost_atoms,currency,cost_complete,record_kind,snapshot_revision,snapshot_digest,final_dimensions,parent_evidence_id,input_fact_id)
+  SELECT i.id,i.project_id,i.request_id,i.attempt_id,i.source,i.finality,i.cost_atoms,i.currency,i.cost_complete,i.record_kind,i.snapshot_revision,i.snapshot_digest,i.final_dimensions,i.parent_evidence_id,i.input_fact_id
+  FROM jsonb_array_elements(frame->'snapshots') s CROSS JOIN LATERAL jsonb_populate_record(NULL::public.usage_event_index,s->'index') i ORDER BY i.attempt_id,i.snapshot_revision;
+ INSERT INTO public.usage_payloads(id,created_at,usage)
+  SELECT (s->'index'->>'id')::uuid,(s->'index'->>'created_at')::timestamptz,s->'usage' FROM jsonb_array_elements(frame->'snapshots') s;
+ INSERT INTO public.event_deliveries(consumer_id,event_id)
+  SELECT c.id,(s->'index'->>'id')::uuid FROM jsonb_array_elements(frame->'snapshots') s CROSS JOIN public.event_consumers c WHERE s->'index'->>'record_kind'<>'RAW';
+ INSERT INTO public.core_evidence_receipts(id,origin_identity,origin_incarnation,origin_session_id,event_id,attempt_id,source,source_revision,body_digest,event_claim,revision_claim,outcome,finality,attempt_state,request_state,error_code,provider_request_id,raw_evidence_id,canonical_evidence_id,disputed_evidence_id,conflict_id,risk_dimensions,numeric_fault,authentication_disposition,authentication_reason,producer_key_sha256,signature_version,signature,signature_payload_digest)
+  SELECT r.id,r.origin_identity,r.origin_incarnation,r.origin_session_id,r.event_id,r.attempt_id,r.source,r.source_revision,r.body_digest,r.event_claim,r.revision_claim,r.outcome,r.finality,r.attempt_state,r.request_state,r.error_code,r.provider_request_id,r.raw_evidence_id,r.canonical_evidence_id,r.disputed_evidence_id,r.conflict_id,r.risk_dimensions,r.numeric_fault,r.authentication_disposition,r.authentication_reason,r.producer_key_sha256,r.signature_version,r.signature,r.signature_payload_digest
+  FROM jsonb_array_elements(frame->'receipts') x CROSS JOIN LATERAL jsonb_populate_record(NULL::public.core_evidence_receipts,x) r;
+ UPDATE public.attempts a SET evidence_id=n.evidence_id,state=n.state,finished_at=n.finished_at,error_code=n.error_code,provider_request_id=n.provider_request_id
+  FROM jsonb_each(frame->'dirty_attempts') d CROSS JOIN LATERAL jsonb_populate_record(NULL::public.attempts,frame->'attempts'->d.key->'attempt') n WHERE a.id=n.id;
+ GET DIAGNOSTICS updated=ROW_COUNT;
+ IF updated<>(SELECT count(*) FROM jsonb_each(frame->'dirty_attempts')) THEN RAISE EXCEPTION 'evidence_attempt_missing' USING ERRCODE='P0500';END IF;
+ WITH candidates AS MATERIALIZED (
+  SELECT n.id,n.selected_attempt_id,n.state,n.billing_outcome,n.updated_at,
+   q.execution_closed_at IS NULL AND n.state='SUCCEEDED' AND n.billing_outcome='SUCCESS'
+   AND EXISTS(SELECT 1 FROM public.attempts t WHERE t.id=n.selected_attempt_id AND t.request_id=q.id AND t.state='SUCCEEDED')
+   AND EXISTS(SELECT 1 FROM public.core_evidence_receipts r WHERE r.attempt_id=n.selected_attempt_id AND r.outcome='ACCEPTED' AND r.attempt_state='SUCCEEDED' AND r.request_state='SUCCEEDED') AS close
+  FROM jsonb_each(frame->'dirty_requests') d CROSS JOIN LATERAL jsonb_populate_record(NULL::public.gateway_requests,frame->'requests'->d.key) n
+  JOIN public.gateway_requests q ON q.id=n.id
+ ), changed AS (
+  UPDATE public.gateway_requests q SET selected_attempt_id=n.selected_attempt_id,state=n.state,billing_outcome=n.billing_outcome,updated_at=n.updated_at,
+   execution_closed_at=CASE WHEN n.close THEN clock_timestamp() ELSE q.execution_closed_at END
+  FROM candidates n WHERE q.id=n.id RETURNING q.id,n.close
+ ), leases AS (
+  UPDATE public.execution_quota_leases l SET state='RELEASE_PENDING'
+  WHERE l.request_id IN(SELECT id FROM changed WHERE close) AND l.state IN('ADOPTION_PENDING','ACTIVE')
+ )
+ SELECT count(*) INTO updated FROM changed;
+ IF updated<>(SELECT count(*) FROM jsonb_each(frame->'dirty_requests')) THEN RAISE EXCEPTION 'evidence_request_missing' USING ERRCODE='P0500';END IF;
+END $$;

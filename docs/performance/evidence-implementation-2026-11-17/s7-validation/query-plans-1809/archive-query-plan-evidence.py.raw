@@ -1,0 +1,28 @@
+from pathlib import Path
+from datetime import datetime,timezone
+import hashlib
+import json
+import shutil
+
+root=Path.cwd();private=root/'.local/performance-implementation'
+destination=root/'docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809'
+destination.mkdir(parents=True,exist_ok=True)
+names=['prepare-pg-plan-profile.py','pg-plan-bench.ts','pg-plan-profile-start.json','pg-plan-profile-settings.json','pg-plan-profile-run.log','pg-plan-profile-stop.json','pg-plan-profile-plans.json','pg-plan-profile-effective-threshold.json','extract-pg-plans.py','prepare-custom-plan-experiment.py','custom-plan-bench.ts','custom-plan-experiment-settings.json','custom-plan-experiment-run.log','archive-query-plan-rounds.py','inspect-query-plan-cleanup.ts','query-plan-resources-after.json','query-plan-stage.json','archive-query-plan-evidence.py']
+manifest={}
+for name in names:
+    source=private/name;target=destination/(name+'.raw')
+    assert source.is_file() and not target.exists(),name
+    shutil.copyfile(source,target)
+    digest=hashlib.sha256(source.read_bytes()).hexdigest()
+    assert hashlib.sha256(target.read_bytes()).hexdigest()==digest
+    manifest[name]={'archive':str(target.relative_to(root)),'sha256':digest,'bytes':source.stat().st_size,'temporary_source_removed':False}
+state=json.loads((private/'query-plan-stage.json').read_text())
+validation={'at':datetime.now(timezone.utc).isoformat(),'state':state,'temporary_files':manifest,'commands':{'profile':'stableBun bothenv derived bench --seconds30 --rate200 without online capacity; exit1','custom_plan':'stableBun bothenv derived bench --online-capacity --seconds60 --rate301 --target-rps300; exit1','format':'selected7 changed docs/metadata files; exit0','diff_check':'git diff --check; exit0'},'product_runtime_unchanged':True,'full_repository_gates':'not repeated for docs/diagnostics-only stage; final gates still required','archive_corrections':'Profiler did not create capacity identity files or capacityPassed; archive refused those assumptions before deletion and now preserves absence as null.'}
+for name in names:
+    source=private/name;record=manifest[name];target=root/record['archive']
+    assert hashlib.sha256(source.read_bytes()).hexdigest()==record['sha256']
+    assert hashlib.sha256(target.read_bytes()).hexdigest()==record['sha256']
+    source.unlink();record['temporary_source_removed']=not source.exists()
+assert all(item['temporary_source_removed'] for item in manifest.values())
+(destination/'validation.json.raw').write_text(json.dumps(validation,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'archived_and_removed':len(names),'validation':str((destination/'validation.json.raw').relative_to(root)),'shared_pg_log_tail_retained':True}))

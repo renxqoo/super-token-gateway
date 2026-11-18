@@ -155,7 +155,7 @@ test(
       expect((await db`SELECT count(*)::integer n FROM upstream_holds`)[0].n).toBe(1);
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${low.provider.account_id}`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${low.provider.account_id}`
         )[0].reserved_atoms,
       ).toBe("0");
       expect(
@@ -209,7 +209,7 @@ test("unknown begin COMMIT tells callers status only and query or replay never g
         }
         expect(
           (
-            await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+            await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
           )[0].reserved_atoms,
         ).toBe("30");
         expect(
@@ -309,7 +309,7 @@ test(
         expect(JSON.stringify(newCommand.detail)).not.toContain(credential);
         expect(
           (
-            await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id} AND currency='USD'`
+            await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id} AND currency='USD'`
           )[0].reserved_atoms,
         ).toBe("30");
         expect(
@@ -396,7 +396,7 @@ for (const mismatch of ["fingerprint", "resources"] as const)
         ).toBe("SEND_GRANTED");
         expect(
           (
-            await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+            await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
           )[0].reserved_atoms,
         ).toBe("30");
         expect(
@@ -447,7 +447,7 @@ for (const mismatch of ["fingerprint", "resources"] as const)
         ).toBe("UNKNOWN");
         expect(
           (
-            await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+            await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
           )[0].reserved_atoms,
         ).toBe("60");
         expect(
@@ -533,7 +533,7 @@ test(
       expect(query.transient_send).toBeUndefined();
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
         )[0].reserved_atoms,
       ).toBe("30");
     }),
@@ -609,7 +609,10 @@ test("a context whose only supplier account awaits reconciliation reports no_rou
     const setup = await f.bootstrap(),
       client = f.client();
     await client.startup();
-    await db`UPDATE upstream_accounts SET state='RECONCILE_REQUIRED',revision=revision+1 WHERE id=${setup.provider.account_id}`;
+    await db.begin(async (tx) => {
+      await tx`SELECT core_funding_control_v1(${setup.provider.account_id}::uuid,true)`;
+      await tx`UPDATE upstream_accounts SET state='RECONCILE_REQUIRED',revision=revision+1 WHERE id=${setup.provider.account_id}`;
+    });
     const failure = await prepareFinancialAdmission(setup, client).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(CoreRpcError);
     expect((failure as CoreRpcError).status).toBe(503);

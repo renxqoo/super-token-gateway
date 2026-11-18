@@ -1,0 +1,10 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-receipt-index.test.ts:
+{"receiptSchemaProbe":{"before":{"scans":"0","indexes":"17","sequential":"0","indexed":"4","inserts":"10001"},"after":{"scans":"0","indexes":"18","sequential":"0","indexed":"4"},"visited":"0"}}
+(pass) receipt revision lookup stays bounded as same-origin history grows and delivery uniqueness keeps all three keys [2668.17ms]
+
+ 1 pass
+ 0 fail
+ 9 expect() calls
+Ran 1 test across 1 file. [2.74s]

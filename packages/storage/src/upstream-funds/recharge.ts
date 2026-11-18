@@ -1,4 +1,4 @@
-import type { TransactionSQL } from "bun";
+import type { SQL } from "bun";
 import {
   GatewayError,
   upstreamRechargeSchema,
@@ -7,6 +7,7 @@ import {
 } from "@gateway/contracts";
 import { fundingActor, fundingFailure, fundingId, fundingInput } from "./validation.ts";
 import { lockVoucherReference } from "./vouchers.ts";
+import { withDatabaseSavepoint } from "../transaction.ts";
 
 function conflict(): never {
   throw new GatewayError(
@@ -16,7 +17,7 @@ function conflict(): never {
   );
 }
 export async function recordUpstreamRecharge(
-  tx: TransactionSQL,
+  tx: SQL,
   accountId: string,
   input: UpstreamRechargeInput,
   actor: string,
@@ -27,8 +28,9 @@ export async function recordUpstreamRecharge(
   const payload = { account_id: account, kind: "RECHARGE" as const, ...parsed };
   const digest = new Bun.CryptoHasher("sha256").update(JSON.stringify(payload)).digest("hex");
   try {
-    return await tx.savepoint(async (tx) => {
-      const accounts = await tx`SELECT id FROM upstream_accounts WHERE id=${account} FOR SHARE`;
+    return await withDatabaseSavepoint(tx, async (tx) => {
+      const accounts =
+        await tx`SELECT id FROM upstream_accounts WHERE id=${account} FOR SHARE NOWAIT`;
       if (!accounts.length)
         throw new GatewayError(404, "upstream_account_not_found", "Upstream account not found");
       const prior = (
@@ -38,10 +40,9 @@ export async function recordUpstreamRecharge(
         if (prior.payload_digest !== digest) conflict();
         return prior.receipt as UpstreamRechargeReceipt;
       }
-      await tx`INSERT INTO upstream_account_balances(account_id,currency) VALUES(${account},${parsed.credited_currency}) ON CONFLICT DO NOTHING`;
       const balance = (
-        await tx`SELECT balance_atoms::text,reserved_atoms::text,spent_atoms::text,revision::text FROM upstream_account_balances WHERE account_id=${account} AND currency=${parsed.credited_currency} FOR NO KEY UPDATE`
-      )[0]!;
+        await tx`SELECT balance_atoms::text,reserved_atoms::text,spent_atoms::text,revision::text FROM core_upstream_balances_v1 WHERE account_id=${account} AND currency=${parsed.credited_currency}`
+      )[0] ?? { balance_atoms: "0", reserved_atoms: "0", spent_atoms: "0", revision: "0" };
       const old = (
         await tx`SELECT payload_digest,receipt FROM upstream_funding_operations WHERE account_id=${account} AND kind='RECHARGE' AND external_ref=${parsed.external_ref}`
       )[0];
@@ -90,7 +91,7 @@ export async function recordUpstreamRecharge(
         if (!existing || existing.payload_digest !== digest) conflict();
         return existing.receipt as UpstreamRechargeReceipt;
       }
-      await tx`UPDATE upstream_account_balances SET balance_atoms=${receipt.balance_atoms},revision=${receipt.balance_revision} WHERE account_id=${account} AND currency=${parsed.credited_currency}`;
+      await tx`SELECT core_upstream_fund_v1(${account}::uuid,${parsed.credited_currency},${parsed.credited_atoms}::numeric,false)`;
       await tx`INSERT INTO upstream_journals(id,account_id,operation_id,currency,kind,reference) VALUES(${journal},${account},${operation},${parsed.credited_currency},'RECHARGE',${`recharge:${operation}`})`;
       await tx`INSERT INTO upstream_entries(journal_id,ordinal,currency,account,atoms) VALUES(${journal},0,${parsed.credited_currency},'upstream:available',${parsed.credited_atoms}),(${journal},1,${parsed.credited_currency},'external:funding',${(-BigInt(parsed.credited_atoms)).toString()})`;
       await tx`INSERT INTO upstream_audit_events(id,account_id,actor,action,operation_id,revision,new_digest,reason) VALUES(${crypto.randomUUID()},${account},${trustedActor},'RECHARGE',${operation},${receipt.balance_revision},${digest},${parsed.reason})`;

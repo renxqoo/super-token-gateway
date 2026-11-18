@@ -1,0 +1,34 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-execution-upgrade.test.ts:
+(pass) v5 to financial append preserves historical wallets requests and null catalog owners without fabricated captures [236.89ms]
+(pass) append refuses unmappable active supplier holds and rolls all new schema back [139.45ms]
+(pass) append rejects cross-key duplicate project intents instead of selecting a historical winner [146.97ms]
+(pass) Core execution runtime role cannot read money or invoke private allocation kernels [1023.11ms]
+(pass) signed settlement append keeps gateway usage visible and its per-source uniqueness [199.71ms]
+(pass) signed settlement append refuses historical supplier costs without evidence links [146.95ms]
+(pass) authentication append upgrades an empty signed settlement schema without rewriting its version [171.43ms]
+(pass) authentication append refuses unsigned receipts from the earlier signed settlement version [140.24ms]
+
+tests/integration/plugin-catalog-upgrade.test.ts:
+(pass) actual v3 through financial schema upgrade preserves historical channels audits costs and immutable packages [180.44ms]
+
+tests/integration/execution-runtime-history.test.ts:
+(pass) actual V1 reserved and granted permits survive the appended migration without new sends or fabricated identities [2242.18ms]
+
+tests/integration/lifecycle.test.ts:
+(pass) v2 through financial upgrade preserves settled receipts, ACKs and immutable plugin package, and an open baseline hold settles by explicit resolution [241.84ms]
+(pass) baseline replay preserves funded wallets and permits concurrent foreign-key readers [171.54ms]
+(pass) evidence written at the v2 baseline survives the upgrade, closes by explicit resolution and archives verified monthly snapshots [278.68ms]
+
+tests/integration/core-canonical.test.ts:
+(pass) database canonical key ordering preserves every ASCII code unit and long protocol field names [156.61ms]
+(pass) database canonical mixed Unicode ordering uses UTF-16 rather than UTF-8, locale or JSONB storage order [149.30ms]
+(pass) database canonical preserves nested structures, empty values, escaped strings and persisted numeric spelling [147.85ms]
+(pass) database canonical preserves SQL NULL and its ASCII fast path is independent of string escape settings [152.84ms]
+(pass) the canonical append preserves historical digests, function identity, ownership, ACL and function attributes [167.90ms]
+
+ 18 pass
+ 0 fail
+ 299 expect() calls
+Ran 18 tests across 5 files. [6.18s]

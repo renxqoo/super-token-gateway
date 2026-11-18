@@ -1,0 +1,165 @@
+{
+  "stage": "1809 isolated custom-plan experiment",
+  "label": "s7-custom-plans-300-failed",
+  "diagnostic": true,
+  "excluded_from_stability": true,
+  "profile_only": false,
+  "runtime_migration": 2026111809,
+  "target": 300,
+  "rate": 301,
+  "seconds": 60,
+  "pluginRuntime": "builtin-worker",
+  "requests": 9460,
+  "valid": false,
+  "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+  "capacityPassed": false,
+  "p99": 1892.11,
+  "onlineCapacity": {
+    "fullyCompletedByWindow": 9153,
+    "minuteCompletions": [9153],
+    "matchedRequests": 9377,
+    "httpOnly": 0,
+    "ackOnly": 83,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 834,
+    "receiptAckedRequestsByWindow": 9154,
+    "ackedEventsByWindow": 18484,
+    "sampledBeforeWindowEndMs": 149,
+    "httpByWindow": 9153
+  },
+  "http": {
+    "offered": 18060,
+    "shed": 3231,
+    "completed": 14829,
+    "succeeded": 9377,
+    "invalid": 5452,
+    "statuses": {
+      "200": 9377,
+      "503": 5452
+    },
+    "gateway_errors": {
+      "overloaded": 5452
+    },
+    "transport_errors": {}
+  },
+  "process_cpu_ms": {
+    "gateway": 2.654334038054968,
+    "core_api": 2.3118393234672303,
+    "core_worker": 0.7103594080338267,
+    "upstream": 0.15750528541226216,
+    "redis_admission": 0.7283298097251484,
+    "redis_evidence": 0.20401691331923963,
+    "redis_evidence_replica": 0.11839323467230492,
+    "pg": 32.3816067653277,
+    "pg_shared": 0.014799154334037692
+  },
+  "total_cpu_ms": 39.10887949260042,
+  "cpu_limitation": "admitted denominator including warmup; CPU also includes rejected work",
+  "pg": {
+    "calls": 215884,
+    "exec_ms": 446844.06380299997,
+    "wal_bytes": 669416195,
+    "wal_records": 3924672,
+    "calls_per_request": 22.820718816067654,
+    "exec_ms_per_request": 47.23510188192389,
+    "wal_bytes_per_request": 70762.81131078224,
+    "wal_records_per_request": 414.87019027484143
+  },
+  "pg_valid": true,
+  "pg_errors": [],
+  "cpu_sampling_errors": 0,
+  "accounting": {
+    "requests": 9460,
+    "attempts": 9460,
+    "succeeded_attempts": 9460,
+    "usage_events": 18920,
+    "usage_requests": 9460,
+    "unexpected_receipts": 0,
+    "precise_usage": 18920,
+    "precise_charges": 9460,
+    "settled_holds": 9460,
+    "reserved": "0",
+    "spent": "946000",
+    "debt": "0",
+    "acknowledged": 18920,
+    "settlement_journals": 9460,
+    "unbalanced_journals": 0,
+    "supplier_cost_heads": 9460,
+    "conflicts": 0,
+    "inconsistent_hold_reserves": 0,
+    "inconsistent_funding_budgets": 0,
+    "inconsistent_cell_reserves": 0,
+    "unbalanced_supplier_journals": 0
+  },
+  "supplier": {
+    "balance": "999999999999441860",
+    "reserved": "0",
+    "spent": "558140",
+    "accounts": 1
+  },
+  "artifacts": {
+    "dist/core-api/main.js": "bfbe89ab1535b72df5f2b5a6c2b3b7a4eb5227af1645205be5844ae067e11211",
+    "dist/core-api/platform/management.js": "5626588525ef6b046095aa9fb65cf8d5fe4225e4f15ec587bce5690e91b0ab63",
+    "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+    "dist/core-worker/main.js": "c76dde5081ad3798de82feb166a3f67198c04c2b41ddb5efc37348a9573a78f6",
+    "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+    "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+    "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+    "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+    "dist/manifest.json": "5f4a4b68b015a9a074138dfff0adcd151dc5e8a5d3129eeb0db3c29566b242d6"
+  },
+  "same_artifacts_as_1809_default": true,
+  "exit_code": 1,
+  "configuration_difference": {
+    "plan_cache_mode": "force_custom_plan, owned database new connections only; original administrator connection retains auto"
+  },
+  "source_directory": ".local/capacity/bench-930689d7a6cc4c5990c6a0d462e2e650",
+  "database": "gateway_test_foundation_8742cb2091564ec384c61033e25f8081",
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "archive_manifest": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-custom-plans-300-failed/audit.json.raw",
+      "sha256": "79e2d2e12fcacf0e55c544caf8e2b63613072a7dd086a552d31133d4dc48ccc0",
+      "bytes": 468503
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-custom-plans-300-failed/http.json.raw",
+      "sha256": "ec144ead1f90ee0ea52ecb8e3e5cff27d4fecb117e00b1d5e6d4366d6d1847ce",
+      "bytes": 10070
+    },
+    "http.json.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-custom-plans-300-failed/http.json.identities.tsv",
+      "sha256": "e35e80f507d3895198e303e5b626a10b13560f1159ffaa479ecc7bdff54af05f",
+      "bytes": 478227
+    },
+    "ack.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-custom-plans-300-failed/ack.identities.tsv",
+      "sha256": "7577829f4564d7600a20aa05f9c0be407db0ed3f49b918ea6fd105e3d565ca76",
+      "bytes": 482460
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-custom-plans-300-failed/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    },
+    "load.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-custom-plans-300-failed/load.log",
+      "sha256": "ec144ead1f90ee0ea52ecb8e3e5cff27d4fecb117e00b1d5e6d4366d6d1847ce",
+      "bytes": 10070
+    },
+    "upstream.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-custom-plans-300-failed/upstream.log",
+      "sha256": "dff63a8fd20277f85ab6c066d9d6dc0e4467086ae37c52391811670ba09d49ad",
+      "bytes": 48
+    },
+    "upstream.pem": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-custom-plans-300-failed/upstream.pem",
+      "sha256": "3764d4bae566a86e8cb8f86ee97d587e5cffd95bca67b1c0d27a72ae6d31a303",
+      "bytes": 1013
+    }
+  },
+  "window_complete_rps": 152.55
+}

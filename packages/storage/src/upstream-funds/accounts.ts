@@ -1,4 +1,4 @@
-import type { TransactionSQL } from "bun";
+import type { SQL } from "bun";
 import {
   GatewayError,
   supplierBrandSchema,
@@ -8,7 +8,7 @@ import {
 } from "@gateway/contracts";
 import { fundingActor, fundingFailure, fundingId, fundingInput } from "./validation.ts";
 
-export function createUpstreamAccountStore(tx: TransactionSQL) {
+export function createUpstreamAccountStore(tx: SQL) {
   async function guard<T>(action: () => Promise<T>): Promise<T> {
     try {
       return await action();
@@ -82,7 +82,7 @@ export function createUpstreamAccountStore(tx: TransactionSQL) {
       guard(async () => {
         const parsed = fundingInput(upstreamAccountPatchSchema, input);
         const current = (
-          await tx`SELECT state FROM upstream_accounts WHERE id=${fundingId(id)} FOR NO KEY UPDATE`
+          await tx`SELECT state FROM upstream_accounts WHERE id=${fundingId(id)} FOR NO KEY UPDATE NOWAIT`
         )[0];
         if (!current)
           throw new GatewayError(404, "upstream_account_not_found", "Upstream account not found");
@@ -93,6 +93,8 @@ export function createUpstreamAccountStore(tx: TransactionSQL) {
               "upstream_account_state_locked",
               "Reconciliation or quarantine must be resolved by its own process",
             );
+          if (parsed.state === "ACTIVE")
+            await tx`SELECT core_upstream_normalize_v1(${fundingId(id)}::uuid)`;
           await tx`UPDATE upstream_accounts SET state=${parsed.state},revision=revision+1 WHERE id=${fundingId(id)}`;
           await tx`INSERT INTO upstream_audit_events(id,account_id,actor,action,reason) VALUES(${crypto.randomUUID()},${fundingId(id)},${fundingActor(actor)},${parsed.state === "ACTIVE" ? "ACCOUNT_ENABLE" : "ACCOUNT_DISABLE"},${parsed.reason})`;
         }

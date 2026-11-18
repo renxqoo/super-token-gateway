@@ -1,13 +1,14 @@
 import { z } from "zod";
 import {
-  prepBindingV1,
-  dispatchProjectionV1Schema,
+  prepBindingV2,
+  dispatchProjectionV2Schema,
   executionContextResponseSchema,
   type ExecutionReceipt,
   type ExecutionReply,
   type UpstreamRechargeReceipt,
 } from "@gateway/contracts";
 import type { SQL } from "bun";
+import type { recordRoute } from "@gateway/storage";
 import { createCoreRpcClient } from "@gateway/core-client";
 import { canonical } from "@gateway/kernel";
 import { sha256 } from "@gateway/runtime/crypto";
@@ -17,13 +18,19 @@ import { createCoreManagementApplication } from "../../apps/core-api/src/platfor
 import { openAIChatReleaseId } from "@gateway/plugin-sdk";
 import { reportCatalogFailure } from "./catalog-diagnostics.ts";
 export const financialKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+type RouteInput = Parameters<typeof recordRoute>[2];
 export async function withFinancial(
   run: (fixture: Awaited<ReturnType<typeof prepareFinancial>>, db: SQL) => Promise<void>,
   options: {
+    initializeDatabase?: (db: SQL) => Promise<void>;
     entry?: string;
     databasePort?: number;
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
     managementFactory?: typeof createCoreManagementApplication;
+    managementRoleFile?: string;
+    executionRoleFile?: string;
+    seedRoute?: (db: SQL, model: string, input: RouteInput) => Promise<string>;
+    seedRecharge?: typeof import("./historical-funding.ts").seedHistoricalRecharge;
     account?: { trustedProxyCidrs: string[] };
     redisUrl?: string;
     gateways?: number;
@@ -38,10 +45,9 @@ export async function withFinancial(
       try {
         const role = String((await catalog.appDb`SELECT current_user AS name`)[0].name);
         await db.unsafe(
-          (await Bun.file("infra/core-management-role.sql").text()).replaceAll(
-            "core_management_api",
-            role,
-          ),
+          (
+            await Bun.file(options.managementRoleFile ?? "infra/core-management-role.sql").text()
+          ).replaceAll("core_management_api", role),
         );
         const management = (options.managementFactory ?? createCoreManagementApplication)({
           db: catalog.appDb,
@@ -49,7 +55,15 @@ export async function withFinancial(
           pepper: syntheticPepper,
           encryptionKey: financialKey,
         });
-        fixture = await prepareFinancial(f, db, catalog, management, namespace);
+        fixture = await prepareFinancial(
+          f,
+          db,
+          catalog,
+          management,
+          namespace,
+          options.seedRoute,
+          options.seedRecharge,
+        );
         try {
           await run(fixture, db);
         } catch (error) {
@@ -65,8 +79,10 @@ export async function withFinancial(
       }
     },
     {
+      ...(options.initializeDatabase ? { initializeDatabase: options.initializeDatabase } : {}),
       ...(options.databasePort ? { databasePort: options.databasePort } : {}),
       ...(options.entry ? { entry: options.entry } : {}),
+      ...(options.executionRoleFile ? { executionRoleFile: options.executionRoleFile } : {}),
       ...(options.limits ? { limits: options.limits } : {}),
       ...(options.account ? { account: options.account } : {}),
       ...(options.gateways ? { gateways: options.gateways } : {}),
@@ -87,6 +103,8 @@ async function prepareFinancial(
   catalog: Awaited<ReturnType<typeof prepareCatalog>>,
   management: ReturnType<typeof createCoreManagementApplication>,
   namespace: string,
+  seedRoute?: (db: SQL, model: string, input: RouteInput) => Promise<string>,
+  seedRecharge?: typeof import("./historical-funding.ts").seedHistoricalRecharge,
 ) {
   const clients: ReturnType<typeof createCoreRpcClient>[] = [];
   function client(port = f.a.port, name = "gateway", options: { timeoutMs?: number } = {}) {
@@ -165,13 +183,18 @@ async function prepareFinancial(
         operations: ["chat"],
         max_output_tokens: modelOutput,
       });
-      const route = await request(`/models/${model}/routes`, {
+      const routeInput: RouteInput = {
         provider_id: provider.value.id,
         upstream_model: "synthetic",
         operations: ["chat"],
+        priority: 0,
+        weight: 1,
         pricing: { currency, rates: supplier.rates },
         ceilings: supplier.ceilings,
-      });
+      };
+      const route = seedRoute
+        ? { status: 201, value: { id: await seedRoute(catalog.appDb, model, routeInput) } }
+        : await request(`/models/${model}/routes`, routeInput);
       if (route.status !== 201) throw new Error(`Route creation: ${JSON.stringify(route)}`);
       const tariff = await request("/tariffs", {
         model,
@@ -266,10 +289,17 @@ async function prepareFinancial(
         completed_at: new Date(Date.now() - 1000).toISOString(),
         reason: "Synthetic completed payment fact",
       };
-      const recharge = await request(
-        `/upstream-accounts/${provider.value.account_id}/recharges`,
-        rechargeInput,
-      );
+      const recharge = seedRecharge
+        ? {
+            status: 201,
+            value: await seedRecharge(
+              db,
+              provider.value.account_id,
+              rechargeInput,
+              "bootstrap:ADMIN_KEY",
+            ),
+          }
+        : await request(`/upstream-accounts/${provider.value.account_id}/recharges`, rechargeInput);
       if (recharge.status !== 201) throw new Error(`Recharge: ${JSON.stringify(recharge)}`);
       return {
         model,
@@ -378,6 +408,7 @@ export async function prepareFinancialAdmission(
     images?: string;
     channelId?: string;
     fingerprint?: string;
+    routeProjection?: boolean;
     resourceIds?: string[];
   } = {},
 ) {
@@ -392,6 +423,7 @@ export async function prepareFinancialAdmission(
         operation: "chat",
         model: setup.model,
         fingerprint,
+        ...(options.routeProjection ? { route_projection: true } : {}),
       },
       { deadlineAt: deadline },
     ),
@@ -414,7 +446,10 @@ export async function prepareFinancialAdmission(
     ceilings: options.ceilings ?? { input_tokens: "60", output_tokens: "30" },
   };
   const projection = {
-    version: 1,
+    version: 2,
+    execution: context.execution_runtimes[candidate.ref.package_digest]!.find(
+      (runtime) => runtime.kind === "wasm",
+    )!,
     proposed_request_id: options.requestId ?? crypto.randomUUID(),
     proposed_attempt_id: options.attemptId ?? crypto.randomUUID(),
     origin: candidate.origin,
@@ -433,17 +468,17 @@ export async function prepareFinancialAdmission(
   const data = {
     context_id: context.context_id,
     dispatch_projection: projection,
-    dispatched_digest: sha256(canonical(["stg.internal.dispatch-projection", "1", projection])),
+    dispatched_digest: sha256(canonical(["stg.internal.dispatch-projection", "2", projection])),
     manifest,
     prep_session_id: prepId,
     prep_binding_digest: sha256(
       canonical([
         "stg.internal.prep-binding",
-        "1",
-        prepBindingV1({
+        "2",
+        prepBindingV2({
           owner: context.owner,
           project_id: context.project_id,
-          projection: dispatchProjectionV1Schema.parse(projection),
+          projection: dispatchProjectionV2Schema.parse(projection),
           prep_session_id: prepId,
           host_config_sha256: sha256(canonical(candidate.config)),
         }),
@@ -457,6 +492,8 @@ export async function prepareFinancialAdmission(
   };
   const command = crypto.randomUUID();
   return {
+    context,
+    candidate,
     data,
     command,
     deadline,
@@ -464,6 +501,7 @@ export async function prepareFinancialAdmission(
     attemptId: projection.proposed_attempt_id,
     async admit() {
       return client.execution("execution_admit_v1", data, {
+        ...(context.route_ticket ? { routeTicket: context.route_ticket } : {}),
         commandId: command,
         deadlineAt: deadline,
       }) as Promise<ExecutionReply>;

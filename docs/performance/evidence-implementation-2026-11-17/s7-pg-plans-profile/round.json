@@ -1,0 +1,142 @@
+{
+  "stage": "1809 actual query plans",
+  "label": "s7-pg-plans-profile",
+  "diagnostic": true,
+  "excluded_from_stability": true,
+  "profile_only": true,
+  "runtime_migration": 2026111809,
+  "target": 0,
+  "rate": 200,
+  "seconds": 30,
+  "pluginRuntime": "builtin-worker",
+  "requests": 4866,
+  "valid": false,
+  "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+  "capacityPassed": null,
+  "p99": 1707.11,
+  "onlineCapacity": null,
+  "http": {
+    "offered": 6000,
+    "shed": 37,
+    "completed": 5963,
+    "succeeded": 4787,
+    "invalid": 1176,
+    "statuses": {
+      "200": 4787,
+      "503": 1176
+    },
+    "gateway_errors": {
+      "overloaded": 1176
+    },
+    "transport_errors": {}
+  },
+  "process_cpu_ms": {
+    "gateway": 2.5421290587751746,
+    "core_api": 2.174270448006576,
+    "core_worker": 0.8261405672009864,
+    "upstream": 0.15207562679819153,
+    "redis_admission": 0.7377722975750187,
+    "redis_evidence": 0.137690094533501,
+    "redis_evidence_replica": 0.08836826962597756,
+    "pg": 35.45622688039457,
+    "pg_shared": 0.0020550760378135378
+  },
+  "total_cpu_ms": 41.9625976161118,
+  "cpu_limitation": "profile is excluded from CPU comparison",
+  "pg": {
+    "calls": 111115,
+    "exec_ms": 287722.82751700043,
+    "wal_bytes": 316631468,
+    "wal_records": 2015462,
+    "calls_per_request": 22.834977394163584,
+    "exec_ms_per_request": 59.12922883621053,
+    "wal_bytes_per_request": 65070.174270448006,
+    "wal_records_per_request": 414.1927661323469
+  },
+  "pg_valid": true,
+  "pg_errors": [],
+  "cpu_sampling_errors": 0,
+  "accounting": {
+    "requests": 4866,
+    "attempts": 4866,
+    "succeeded_attempts": 4866,
+    "usage_events": 9732,
+    "usage_requests": 4866,
+    "unexpected_receipts": 0,
+    "precise_usage": 9732,
+    "precise_charges": 4866,
+    "settled_holds": 4866,
+    "reserved": "0",
+    "spent": "486600",
+    "debt": "0",
+    "acknowledged": 9732,
+    "settlement_journals": 4866,
+    "unbalanced_journals": 0,
+    "supplier_cost_heads": 4866,
+    "conflicts": 0,
+    "inconsistent_hold_reserves": 0,
+    "inconsistent_funding_budgets": 0,
+    "inconsistent_cell_reserves": 0,
+    "unbalanced_supplier_journals": 0
+  },
+  "supplier": {
+    "balance": "999999999999712906",
+    "reserved": "0",
+    "spent": "287094",
+    "accounts": 1
+  },
+  "artifacts": {
+    "dist/core-api/main.js": "bfbe89ab1535b72df5f2b5a6c2b3b7a4eb5227af1645205be5844ae067e11211",
+    "dist/core-api/platform/management.js": "5626588525ef6b046095aa9fb65cf8d5fe4225e4f15ec587bce5690e91b0ab63",
+    "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+    "dist/core-worker/main.js": "c76dde5081ad3798de82feb166a3f67198c04c2b41ddb5efc37348a9573a78f6",
+    "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+    "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+    "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+    "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+    "dist/manifest.json": "5f4a4b68b015a9a074138dfff0adcd151dc5e8a5d3129eeb0db3c29566b242d6"
+  },
+  "same_artifacts_as_1809_default": true,
+  "exit_code": 1,
+  "configuration_difference": {
+    "auto_explain": "owned database only, sample0.1, intended0.5ms actually integer0ms, analyzeon timingoff"
+  },
+  "source_directory": ".local/capacity/bench-ebf8b872d5a745a69841d9b8c26758d4",
+  "database": "gateway_test_foundation_54ba01b0a89e4e60a21a50bc9f092533",
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "archive_manifest": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-pg-plans-profile/audit.json.raw",
+      "sha256": "0aee1d8abb51ce099d08c0601275af487c5653444ab3877c16b511d77cbe6ac5",
+      "bytes": 231579
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-pg-plans-profile/http.json.raw",
+      "sha256": "010d1f154f78b2383ec4c0116b45d414e989d3f07841055286adbd6f3267d1eb",
+      "bytes": 8744
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-pg-plans-profile/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    },
+    "load.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-pg-plans-profile/load.log",
+      "sha256": "010d1f154f78b2383ec4c0116b45d414e989d3f07841055286adbd6f3267d1eb",
+      "bytes": 8744
+    },
+    "upstream.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-pg-plans-profile/upstream.log",
+      "sha256": "dff63a8fd20277f85ab6c066d9d6dc0e4467086ae37c52391811670ba09d49ad",
+      "bytes": 48
+    },
+    "upstream.pem": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-pg-plans-profile/upstream.pem",
+      "sha256": "bd8f9cb4ccbbe54bee10cd41e2532935d7b1e575f63a46b4ca043d35e0c345a7",
+      "bytes": 1013
+    }
+  }
+}

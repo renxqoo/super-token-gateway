@@ -1,0 +1,444 @@
+{
+  "at": "2026-11-17T19:23:36.812139+00:00",
+  "scope": "1805 supplier-cell and journal/entry setwise writes; evidence rows, cost heads, customer billing and admissions not yet setwise",
+  "migration": {
+    "version": 2026111805,
+    "files": [
+      {
+        "path": "./sql/core-funding-batch.sql",
+        "checksum": "269aafa904cb48c3f4ff9130dd81ef9b4fa153f651280bf9f265872b4321d9f7"
+      }
+    ]
+  },
+  "source_sha256": {
+    "packages/storage/src/sql/core-funding-batch.sql": "269aafa904cb48c3f4ff9130dd81ef9b4fa153f651280bf9f265872b4321d9f7",
+    "packages/storage/src/migrations/manifest.json": "f3a2e0587117006d9115b98af6f38567615d20e6c9dd531bb727f16a4fe71388",
+    "tests/integration/core-funding-batch.test.ts": "0c36b35a943fce4c10527929e2cf290114e2368bc356948ab736b2c91f94a15e",
+    "tests/integration/core-funding-upgrade.test.ts": "b45ba675297dffe2c4a69a5979c4933c3b78ca5bfed65f6d34d81dbecaa42a94",
+    "tests/integration/core-evidence-authentication.test.ts": "7f284fe9596d9c67b3a6b74b97bb3fa3aa0529433fe8551c58cbc7c4f352bcf8",
+    "tests/integration/core-execution-upgrade.test.ts": "a89a93c52ec29373c9d281173b60b35c02492f4d4592d06e3c94a50f36dff9c7"
+  },
+  "runs": [
+    {
+      "log": "s7-batch-red.log",
+      "exit_code": 1,
+      "interpretation": "old per-item cell writes; expected feature red",
+      "pass": 0,
+      "fail": 1,
+      "assertions": 9
+    },
+    {
+      "log": "s7-batch-first.log",
+      "exit_code": 0,
+      "interpretation": "initial cell batching and existing exact-money/cell regressions",
+      "pass": 7,
+      "fail": 0,
+      "assertions": 86
+    },
+    {
+      "log": "s7-batch-billing.log",
+      "exit_code": 1,
+      "interpretation": "test expectation error: actual propagated P0F98, not P0500; product unchanged",
+      "pass": 0,
+      "fail": 1,
+      "assertions": 3
+    },
+    {
+      "log": "s7-batch-boundaries.log",
+      "exit_code": 1,
+      "interpretation": "15 pass; incorrect new hold-state expectation and existing normal-rotation matcher timeout",
+      "pass": 15,
+      "fail": 2,
+      "assertions": 140
+    },
+    {
+      "log": "s7-batch-late-and-rotation.log",
+      "exit_code": 1,
+      "interpretation": "late rollback passed; normal-rotation original 5s timeout",
+      "pass": 1,
+      "fail": 1,
+      "assertions": 20
+    },
+    {
+      "log": "s7-batch-rotation-diagnostic.log",
+      "exit_code": 1,
+      "interpretation": "temporary phase diagnostic; original 5s timeout",
+      "pass": 0,
+      "fail": 1,
+      "assertions": 1
+    },
+    {
+      "log": "s7-rotation-observed-test-errors.log",
+      "exit_code": 1,
+      "interpretation": "PG observer wrapper exit0, nested original-timeout test exit1; no PG Lock waits",
+      "pass": 0,
+      "fail": 1,
+      "assertions": 1
+    },
+    {
+      "log": "s7-rotation-reply-diagnostic.log",
+      "exit_code": 1,
+      "interpretation": "temporary response diagnostic; original 5s timeout; product sources restored",
+      "pass": 0,
+      "fail": 1,
+      "assertions": 1
+    },
+    {
+      "log": "s7-rotation-direct-await.log",
+      "exit_code": 0,
+      "interpretation": "same RPC directly awaited, stronger owner-denial assertions, original 5s unchanged",
+      "pass": 1,
+      "fail": 0,
+      "assertions": 10
+    },
+    {
+      "log": "s7-batch-final-targeted.log",
+      "exit_code": 0,
+      "interpretation": "cell batching, late rollback, historical signed-schema upgrade; before journal batching",
+      "pass": 4,
+      "fail": 0,
+      "assertions": 45
+    },
+    {
+      "log": "s7-batch-journals-red.log",
+      "exit_code": 1,
+      "interpretation": "cell batching still inserted supplier journals individually; expected feature red",
+      "pass": 0,
+      "fail": 1,
+      "assertions": 10
+    },
+    {
+      "log": "s7-batch-journals-targeted.log",
+      "exit_code": 0,
+      "interpretation": "20 money/identity/freeze/ACL tests; financial logic matches current but before different-owner fix",
+      "pass": 20,
+      "fail": 0,
+      "assertions": 177
+    },
+    {
+      "log": "s7-batch-owner-red.log",
+      "exit_code": 1,
+      "interpretation": "invalid fixture: 1804 files were installed in separate transactions, lost ON COMMIT DROP history; not product regression proof",
+      "pass": 0,
+      "fail": 1
+    },
+    {
+      "log": "s7-batch-owner-red-actual.log",
+      "exit_code": 1,
+      "interpretation": "valid different-owner regression: old1804 success then new1805 42501 in private persist",
+      "pass": 0,
+      "fail": 1,
+      "assertions": 1
+    },
+    {
+      "log": "s7-batch-owner-green.log",
+      "exit_code": 0,
+      "interpretation": "final different-owner delegation and finite-column ACL regressions",
+      "pass": 2,
+      "fail": 0,
+      "assertions": 12
+    },
+    {
+      "log": "s7-batch-final-money-and-ack.log",
+      "exit_code": 0,
+      "interpretation": "final current migration: three new money paths and real worker commit-before-ACK/redelivery",
+      "pass": 4,
+      "fail": 0,
+      "assertions": 51
+    }
+  ],
+  "checks": [
+    {
+      "log": "s7-batch-post-owner-check.log",
+      "exit_code": 0
+    },
+    {
+      "log": "s7-batch-post-owner-lint.log",
+      "exit_code": 0
+    },
+    {
+      "log": "s7-batch-post-owner-architecture.log",
+      "exit_code": 0
+    },
+    {
+      "log": "s7-batch-post-owner-format.log",
+      "exit_code": 0
+    }
+  ],
+  "test_batches_overlap": true,
+  "current_migration_bound_runs": [
+    "s7-batch-owner-green.log",
+    "s7-batch-final-money-and-ack.log"
+  ],
+  "temporary_product_diagnostics_restored": [
+    {
+      "path": "apps/core-api/src/identity/internal-listener.ts",
+      "original_sha256": "e5ad825c522690e6d40bb7d932cf23c32b9af46f2eb117dcdb42c37dbf7dbeba",
+      "restored_byte_equal": true
+    },
+    {
+      "path": "packages/core-client/src/index.ts",
+      "original_sha256": "f833f0e6bb571ba9f7115acd60ece73caa51622b0b50a3f2d29ba50be5b2b359",
+      "restored_byte_equal": true
+    }
+  ],
+  "cleanup_initial_query_failure": {
+    "exit_code": 1,
+    "sqlstate": "42703",
+    "reason": "pg_stat_database datid was initially queried as oid; first read-only preflight failed before any mutation; corrected then cleanup completed"
+  },
+  "cleanup": {
+    "at": "2026-11-17T19:11:45.798Z",
+    "databases": [
+      "gateway_test_foundation_df1d2da646c2484d9c979e61f36a6493",
+      "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+      "gateway_test_foundation_6d21e3c99b98462daeae0b5889441906"
+    ],
+    "roles": [
+      "gateway_identity_api_f50ace772eb24b37ad45dfb3edb4f499",
+      "gateway_identity_deployer_f50ace772eb24b37ad45dfb3edb4f499",
+      "gateway_identity_verifier_f50ace772eb24b37ad45dfb3edb4f499",
+      "gateway_t04b1_22610626cbec4e02b146d7a929cc6212",
+      "gateway_identity_api_b812fabaf6544e928707250c59ea3b9d",
+      "gateway_identity_deployer_b812fabaf6544e928707250c59ea3b9d",
+      "gateway_identity_verifier_b812fabaf6544e928707250c59ea3b9d",
+      "gateway_t04b1_37f99834f90f48ffac616f4b6ab47ca7",
+      "gateway_identity_api_f15cec5b15d14d2d97be4ca9622ead2d",
+      "gateway_identity_deployer_f15cec5b15d14d2d97be4ca9622ead2d",
+      "gateway_identity_verifier_f15cec5b15d14d2d97be4ca9622ead2d",
+      "gateway_t04b1_e936959fb34d42d6a3dde8fdb23bce10"
+    ],
+    "directories": [
+      "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-identity-1ASC4W",
+      "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-t04b1-t66ak2",
+      "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-identity-CQ47zE",
+      "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-t04b1-HTR8QD",
+      "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-identity-RSVsIt",
+      "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-t04b1-RA2Peh"
+    ],
+    "redis": [
+      {
+        "namespace": "financial_25ed3c2cdee941d2bfd30246c7e53510",
+        "removed": 1
+      },
+      {
+        "namespace": "financial_30e1ffe086664f0b8bc9e5b9011d163f",
+        "removed": 1
+      },
+      {
+        "namespace": "financial_77072b221f8343eb93f4a45cdd9cb6be",
+        "removed": 1
+      }
+    ],
+    "ownership": [
+      {
+        "database": "gateway_test_foundation_df1d2da646c2484d9c979e61f36a6493",
+        "config_database_equal": true,
+        "process_pids_absent": true,
+        "database_backends": 0,
+        "role_dependencies_only_owned_database": true
+      },
+      {
+        "database": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+        "config_database_equal": true,
+        "process_pids_absent": true,
+        "database_backends": 0,
+        "role_dependencies_only_owned_database": true
+      },
+      {
+        "database": "gateway_test_foundation_6d21e3c99b98462daeae0b5889441906",
+        "config_database_equal": true,
+        "process_pids_absent": true,
+        "database_backends": 0,
+        "role_dependencies_only_owned_database": true
+      }
+    ],
+    "remaining": [],
+    "foundation_count": 27
+  },
+  "performance_measurement_added": false,
+  "latest_verified_stable_rps": 60,
+  "full_checks_not_run": [
+    "test",
+    "test:integration full suite",
+    "build current1805",
+    "test:artifact",
+    "test:durability",
+    "test:backup",
+    "new capacity/concurrency"
+  ],
+  "reason_not_full_checks": "Incomplete full funding batch milestone; targeted necessary money/auth/ACK checks completed; retain all prior full-suite failures; user requested no excessive repetition",
+  "archive": {
+    "s7-batch-red.log": {
+      "file": "s7-batch-red.log",
+      "sha256": "74b7fad479ce5914c9c6b55a80856dfd636828f5f407bfc0b7b8e377436c0559",
+      "bytes": 1528
+    },
+    "s7-batch-first.log": {
+      "file": "s7-batch-first.log",
+      "sha256": "b71642cf4b2d5a4f36908f960e0b4b3a7351c106b542c1fa0600ef265c2c59c9",
+      "bytes": 1162
+    },
+    "s7-batch-check.log": {
+      "file": "s7-batch-check.log",
+      "sha256": "de4e4e95e9ebebdb39574236ffa8ca74520715bc7fae552d3f3edd8e57bec76f",
+      "bytes": 66
+    },
+    "s7-batch-billing.log": {
+      "file": "s7-batch-billing.log",
+      "sha256": "2e4808dabac518b9f377c79dffa1a3acb6a839fd4e22e6a028a2a9f76a0e5394",
+      "bytes": 1326
+    },
+    "s7-batch-boundaries.log": {
+      "file": "s7-batch-boundaries.log",
+      "sha256": "cfd6800c9718d1fe18ac9812eca2e50efc61bdc3851b3478437de850485aeeeb",
+      "bytes": 3605
+    },
+    "s7-batch-architecture.log": {
+      "file": "s7-batch-architecture.log",
+      "sha256": "2ee811cd051e38b1995316ffb762f3dab962870cace1b8f196b2a42fcb5a744e",
+      "bytes": 884
+    },
+    "s7-batch-lint.log": {
+      "file": "s7-batch-lint.log",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25
+    },
+    "s7-batch-late-and-rotation.log": {
+      "file": "s7-batch-late-and-rotation.log",
+      "sha256": "f4df99d3058ea512bebe8b8d8cdf8d3c07d38112772cdda8210e9ae13487b28f",
+      "bytes": 616
+    },
+    "s7-batch-rotation-diagnostic.log": {
+      "file": "s7-batch-rotation-diagnostic.log",
+      "sha256": "b10b5e5334c6dce9c2e1cd9945bb7828721495c8d5f34d9dc5fc99d1a1d4caf9",
+      "bytes": 886
+    },
+    "s7-rotation-observed-test.log": {
+      "file": "s7-rotation-observed-test.log",
+      "sha256": "bbe6a94c29cc8d3ff5a1792a5abae1f1122aed0642111b52036ab7e0b2b2ca47",
+      "bytes": 28
+    },
+    "s7-rotation-observed-test-errors.log": {
+      "file": "s7-rotation-observed-test-errors.log",
+      "sha256": "9994a1b07e270d024ba3ea3ab2229e1f8fe865b8ccd929dc7d9a72f1d538b30c",
+      "bytes": 412
+    },
+    "s7-rotation-reply-diagnostic.log": {
+      "file": "s7-rotation-reply-diagnostic.log",
+      "sha256": "dce4abea3be5308e77b92b6b356743a967567a655c95508b0afbfee9fc14ea11",
+      "bytes": 652
+    },
+    "s7-rotation-direct-await.log": {
+      "file": "s7-rotation-direct-await.log",
+      "sha256": "cb0ea72df4e9f8d19e68c7724eeb231af27304527df8c4b8a0965cfe16e1a0d7",
+      "bytes": 375
+    },
+    "s7-batch-final-targeted.log": {
+      "file": "s7-batch-final-targeted.log",
+      "sha256": "38788d8f7dfd3aeb494a2adef5212029dbe4b7de4491c3019531d2a6e68e4e4a",
+      "bytes": 709
+    },
+    "s7-batch-journals-red.log": {
+      "file": "s7-batch-journals-red.log",
+      "sha256": "b6fc97e8ff2dbb6dd1bdc5b12fb1849e89b36f6cf000574df6ed19f43867f2d2",
+      "bytes": 1565
+    },
+    "s7-batch-journals-targeted.log": {
+      "file": "s7-batch-journals-targeted.log",
+      "sha256": "aac2d158087fc556527c005ad044e7624bde2dc5fd2feee56bbf92a4e2f4f35e",
+      "bytes": 2914
+    },
+    "s7-batch-final-check.log": {
+      "file": "s7-batch-final-check.log",
+      "sha256": "25c7c7aa8c5b174c3c9e6936611ca59854057f6e148ef821043f3f2cb618c83e",
+      "bytes": 67
+    },
+    "s7-batch-final-lint.log": {
+      "file": "s7-batch-final-lint.log",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25
+    },
+    "s7-batch-final-architecture.log": {
+      "file": "s7-batch-final-architecture.log",
+      "sha256": "f63d5a182077e61ab435c5e7b1fed8310aac326260ad039c2891ba7cb40cc3ff",
+      "bytes": 887
+    },
+    "s7-batch-final-format.log": {
+      "file": "s7-batch-final-format.log",
+      "sha256": "649ab70a718f378283774192cad7ebe89b347aa5fe5ed017e57690d5e138ca78",
+      "bytes": 59
+    },
+    "s7-batch-owner-red.log": {
+      "file": "s7-batch-owner-red.log",
+      "sha256": "57d257603e4fc0e4c3e8117a73564246911d6ec7c625d544b509164dbf470b59",
+      "bytes": 1165
+    },
+    "s7-batch-owner-red-actual.log": {
+      "file": "s7-batch-owner-red-actual.log",
+      "sha256": "b777b8d7accfef48f666e07628339a2bc773951c47ecfc90b2cd0d8d90b47860",
+      "bytes": 971
+    },
+    "s7-batch-owner-green.log": {
+      "file": "s7-batch-owner-green.log",
+      "sha256": "449881808d08725c122faade461acf27f76ee9201ee9b60c52d54051066864ac",
+      "bytes": 395
+    },
+    "s7-batch-final-money-and-ack.log": {
+      "file": "s7-batch-final-money-and-ack.log",
+      "sha256": "5f5ddec0ee85b06e862dca133430ced740b33270ef6db64de5d2cb54c82fc909",
+      "bytes": 715
+    },
+    "s7-batch-post-owner-check.log": {
+      "file": "s7-batch-post-owner-check.log",
+      "sha256": "215c24dd1f957dba4f0a4f6babf001baeff9a85afa4fe1c71e7813d80fe77f7f",
+      "bytes": 66
+    },
+    "s7-batch-post-owner-lint.log": {
+      "file": "s7-batch-post-owner-lint.log",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25
+    },
+    "s7-batch-post-owner-architecture.log": {
+      "file": "s7-batch-post-owner-architecture.log",
+      "sha256": "9d60f4519f54167cba4f2705049184bd1d64a7bc3114c71194f47439bd306a92",
+      "bytes": 887
+    },
+    "s7-batch-post-owner-format.log": {
+      "file": "s7-batch-post-owner-format.log",
+      "sha256": "649ab70a718f378283774192cad7ebe89b347aa5fe5ed017e57690d5e138ca78",
+      "bytes": 59
+    },
+    "s7-rotation-pg-observation.json": {
+      "file": "s7-rotation-pg-observation.json.raw",
+      "sha256": "2c84d3d3c2dbfd7d08d2d4b886e4699f27d5e29dd610af6c69f1834629776973",
+      "bytes": 122413
+    },
+    "s7-batch-diagnostic-cleanup.json": {
+      "file": "s7-batch-diagnostic-cleanup.json.raw",
+      "sha256": "a325fb07d63b577349c7a2b2462194c71dd24fc41c2076ad729b6eaca95a5fd4",
+      "bytes": 2613
+    },
+    "observe-rotation.ts": {
+      "file": "observe-rotation.ts.raw",
+      "sha256": "684edc65807f59a51b3fcb1a0e2f05038b127f25e7e43fffc4dfa22166fbea78",
+      "bytes": 1359
+    },
+    "cleanup-batch-diagnostics.ts": {
+      "file": "cleanup-batch-diagnostics.ts.raw",
+      "sha256": "194aeb610c464e4fb2168d5fed740afaee98cb5412949aa69e96503eb913b57c",
+      "bytes": 5503
+    }
+  },
+  "independent_review": "financial_batch_audit: journal grouping/rollback review and different-owner defect red/green follow-up; module_ownership_audit: normal rotation matcher wait localization; both read-only",
+  "final_readonly_resource_inspection": {
+    "at": "2026-11-17T19:24:32.362911+00:00",
+    "foundation_count": 27,
+    "protected_database_present": true,
+    "protected_processes_present": [
+      40766,
+      40771
+    ],
+    "remaining_new_owner_roles": []
+  }
+}

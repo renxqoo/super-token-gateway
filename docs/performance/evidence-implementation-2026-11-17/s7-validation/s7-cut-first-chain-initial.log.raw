@@ -1,0 +1,49 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-first-chain.test.ts:
+142 |     } finally {
+143 |       response.body.fill(0);
+144 |     }
+145 |     if (response.status >= 400) {
+146 |       const error = internalErrorSchema.safeParse(parsed);
+147 |       if (error.success) throw new CoreRpcError(error.data, response.status);
+                                     ^
+CoreRpcError: identity_store_unavailable
+ detail: {
+  code: "identity_store_unavailable",
+  category: "DEPENDENCY",
+  retryability: "SAME_COMMAND",
+  command_state: "UNKNOWN",
+  message: "Internal request rejected",
+},
+ status: 503,
+
+      at parseReply (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:147:32)
+      at request (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:153:12)
+      at async execution (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:382:30)
+(fail) real upstream HTTP JSON through the plugin host is signed, queued and settled for both parties exactly once [2324.46ms]
+142 |     } finally {
+143 |       response.body.fill(0);
+144 |     }
+145 |     if (response.status >= 400) {
+146 |       const error = internalErrorSchema.safeParse(parsed);
+147 |       if (error.success) throw new CoreRpcError(error.data, response.status);
+                                     ^
+CoreRpcError: identity_store_unavailable
+ detail: {
+  code: "identity_store_unavailable",
+  category: "DEPENDENCY",
+  retryability: "SAME_COMMAND",
+  command_state: "UNKNOWN",
+  message: "Internal request rejected",
+},
+ status: 503,
+
+      at parseReply (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:147:32)
+      at request (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:153:12)
+      at async execution (/Users/wr/work/super-token-gateway/packages/core-client/src/index.ts:382:30)
+(fail) a real upstream SSE stream through the plugin host settles from its final usage frame exactly once [2190.71ms]
+
+ 0 pass
+ 2 fail
+Ran 2 tests across 1 file. [4.62s]

@@ -1,0 +1,31 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-success-quota.test.ts:
+(pass) accepted success closes execution and recovery releases its three quotas once while a partial attempt keeps its quota and responsibility [2169.25ms]
+(pass) a customer settlement failure rolls back automatic execution closure and quota release with every evidence and money write [2078.47ms]
+
+tests/integration/core-execution-recovery.test.ts:
+(pass) healthy unexpired RESERVED refuses technical abort and Gateway cannot invoke worker recovery [1987.53ms]
+(pass) deadline recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2401.16ms]
+(pass) customer recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2084.84ms]
+(pass) instance recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2056.60ms]
+(pass) certificate recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2146.62ms]
+(pass) session recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2266.60ms]
+(pass) security revocation never lets recovery release SEND_GRANTED money and current owner can close after key revocation [2094.41ms]
+(pass) quota recovery converges when Redis adoption committed but both PG ACTIVE and post-close RELEASED replies failed [2175.52ms]
+(pass) begin locks first and the competing begin or technical abort cannot cross its uncommitted transition [2034.49ms]
+(pass) recovery locks first and the competing begin or technical abort cannot cross its uncommitted transition [3180.08ms]
+(pass) technical abort audit failure rolls back both releases closure and command receipt [2138.64ms]
+(pass) a core-worker identity can neither open, admit nor begin Gateway executions and cannot sign evidence for a Gateway attempt [1938.53ms]
+
+tests/integration/core-quota-progress.test.ts:
+(pass) short retry leases in an ineligible prefix cannot starve a later fully expired request [5818.63ms]
+(pass) a completed Redis release racing with technical expiry stays expired and does not roll back other released projections [4710.03ms]
+
+tests/integration/core-quota-expiry.test.ts:
+(pass) technical quota expiry skips locked requests, clears missing Redis tombstones after the total deadline, preserves unknown money and accepts late real usage [5646.65ms]
+
+ 17 pass
+ 0 fail
+ 186 expect() calls
+Ran 17 tests across 4 files. [47.01s]

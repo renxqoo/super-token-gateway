@@ -1,0 +1,14 @@
+{
+  "directory": "/private/tmp/gateway-entry-assets-ULwTQt",
+  "scope": "isolated clean asset layout with the native helper alone, then the exact ordinary Worker builder; actual adapter tests unchanged",
+  "red": {
+    "code": 1,
+    "log": "/Users/wr/work/super-token-gateway/.local/performance-implementation/s3f-entry-assets-red.log"
+  },
+  "artifact_digest": "cc2935c0294b6d75b918399379245218173954f47c0272790327c8bd61c61c41",
+  "green": {
+    "code": 0,
+    "log": "/Users/wr/work/super-token-gateway/.local/performance-implementation/s3f-entry-assets-green.log"
+  },
+  "cleaned": true
+}

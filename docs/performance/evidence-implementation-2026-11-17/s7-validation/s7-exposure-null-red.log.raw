@@ -1,0 +1,24 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-pricing-programs.test.ts:
+56 |       overrun: false,
+57 |       risk_dimensions: ["input_tokens", "output_tokens"],
+58 |     });
+59 |     await expect(
+60 |       db`SELECT core_funding.exposure_v1(${two}::uuid,'{"input_tokens":"1","output_tokens":"1"}'::jsonb,'{}'::jsonb,NULL::text[],'{}'::jsonb)`,
+61 |     ).rejects.toThrow("supplier_exposure_invalid");
+                   ^
+error: expect(received).rejects.toThrow(expected)
+
+Expected promise that rejects
+Received promise that resolved: Query { executed }
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-pricing-programs.test.ts:61:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+(fail) compiled version prices preserve per-request ceiling, exposure subtraction, decimals, zero dimensions and the 38-digit boundary [213.08ms]
+
+ 0 pass
+ 1 filtered out
+ 1 fail
+ 6 expect() calls
+Ran 1 test across 1 file. [252.00ms]

@@ -1,0 +1,74 @@
+{
+  "at": "2026-11-17T22:52:33.585Z",
+  "scope": "Only absent databases linked to this task's audits through deleted service role OIDs",
+  "before": [
+    {
+      "entries": 4859,
+      "dealloc": "39395",
+      "stats_reset": "2026-11-17 09:56:51.526972+08"
+    }
+  ],
+  "after": [
+    {
+      "entries": 3833,
+      "dealloc": "39395",
+      "stats_reset": "2026-11-17 09:56:51.526972+08"
+    }
+  ],
+  "reset": [
+    {
+      "dbid": "39665807",
+      "users": [
+        "39668049",
+        "39668060"
+      ],
+      "statements": 17,
+      "sources": [
+        {
+          "path": "docs/performance/evidence-implementation-2026-11-17/s7-early-lock-300-failed/audit.json.raw",
+          "database": "gateway_test_foundation_151870a1e2be44239f91cdfb03ca61c1",
+          "users": [
+            "39668060",
+            "39668049"
+          ]
+        }
+      ]
+    },
+    {
+      "dbid": "39713924",
+      "users": [
+        "39716166",
+        "39716177"
+      ],
+      "statements": 17,
+      "sources": [
+        {
+          "path": "docs/performance/evidence-implementation-2026-11-17/s7-pg-plans-profile/audit.json.raw",
+          "database": "gateway_test_foundation_54ba01b0a89e4e60a21a50bc9f092533",
+          "users": [
+            "39716177",
+            "39716166"
+          ]
+        }
+      ]
+    },
+    {
+      "dbid": "39736830",
+      "users": [
+        "39739072",
+        "39739083"
+      ],
+      "statements": 17,
+      "sources": [
+        {
+          "path": "docs/performance/evidence-implementation-2026-11-17/s7-custom-plans-300-failed/audit.json.raw",
+          "database": "gateway_test_foundation_8742cb2091564ec384c61033e25f8081",
+          "users": [
+            "39739083",
+            "39739072"
+          ]
+        }
+      ]
+    }
+  ]
+}

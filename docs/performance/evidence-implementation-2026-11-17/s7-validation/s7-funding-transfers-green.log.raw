@@ -1,0 +1,14 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-pricing-programs.test.ts:
+(pass) compiled version prices preserve per-request ceiling, exposure subtraction, decimals, zero dimensions and the 38-digit boundary [212.12ms]
+(pass) migration compiles the captured historical price and later versions cannot mutate it or leave half-created source prices [181.39ms]
+
+tests/integration/core-funding-foundation.test.ts:
+(pass) a frozen account cannot accumulate more than NUMERIC(38,0) of reservation across otherwise valid cells [157.55ms]
+(pass) budget grants and reclaims conserve money and revisions, replay exactly, and cannot reclaim reserved funds or leave partial writes [177.34ms]
+
+ 4 pass
+ 0 fail
+ 36 expect() calls
+Ran 4 tests across 2 files. [766.00ms]

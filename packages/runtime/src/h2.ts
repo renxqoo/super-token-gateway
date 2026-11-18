@@ -193,6 +193,7 @@ export async function listenBoundedH2(
     hostname: string;
     port: number;
     limits?: Partial<H2Limits>;
+    extraBodyBytesByPath?: Readonly<Record<string, number>>;
     rejections?: { capacity: unknown; headers: unknown; failure: unknown };
   },
   onStream: (
@@ -205,6 +206,8 @@ export async function listenBoundedH2(
   const limits = { ...boundedH2Defaults, ...options.limits };
   for (const value of Object.values(limits))
     if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid transport budget");
+  for (const extra of Object.values(options.extraBodyBytesByPath ?? {}))
+    if (!Number.isSafeInteger(extra) || extra < 0) throw new Error("Invalid transport budget");
   const sockets = new Set<Socket>();
   const firstHeaders = new Map<object, ReturnType<typeof setTimeout>>();
   const sessions = new Set<ServerHttp2Session>(),
@@ -313,10 +316,26 @@ export async function listenBoundedH2(
       );
     const headerBytes = rawHeaders.reduce((n, s) => n + Buffer.byteLength(s), 0),
       names = rawHeaders.filter((_s, i) => i % 2 === 0);
+    const path = headers[":path"];
+    const extra =
+      typeof path === "string" && Object.hasOwn(options.extraBodyBytesByPath ?? {}, path)
+        ? options.extraBodyBytesByPath![path]!
+        : 0;
+    const declared = headers["content-length"];
+    const pathLimit = limits.bodyBytes + extra;
+    const streamLimits = extra
+      ? {
+          ...limits,
+          bodyBytes:
+            typeof declared === "string" && /^(0|[1-9][0-9]*)$/.test(declared)
+              ? Math.min(Number(declared), pathLimit)
+              : pathLimit,
+        }
+      : limits;
     if (
       draining ||
       streams >= limits.streams ||
-      reserved + limits.bodyBytes > limits.receiveBytes
+      reserved + streamLimits.bodyBytes > limits.receiveBytes
     ) {
       fail(429, "capacity");
       stream.resume();
@@ -333,7 +352,7 @@ export async function listenBoundedH2(
     }
     const controller = new AbortController();
     streams++;
-    reserved += limits.bodyBytes;
+    reserved += streamLimits.bodyBytes;
     const timer = setTimeout(() => {
       controller.abort();
       if (!stream.destroyed) stream.close(constants.NGHTTP2_CANCEL);
@@ -343,7 +362,7 @@ export async function listenBoundedH2(
     stream.once("aborted", cancel);
     stream.once("close", cancel);
     const task = Promise.resolve()
-      .then(() => onStream(stream, headers, controller.signal, limits))
+      .then(() => onStream(stream, headers, controller.signal, streamLimits))
       .catch(() => {
         fail(503, "failure");
       })
@@ -353,7 +372,7 @@ export async function listenBoundedH2(
         stream.off("aborted", cancel);
         stream.off("close", cancel);
         streams--;
-        reserved -= limits.bodyBytes;
+        reserved -= streamLimits.bodyBytes;
         work.delete(task);
         if (!stream.readableEnded) stream.resume();
       });

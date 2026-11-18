@@ -1,0 +1,78 @@
+type Input<T, U> = {
+  value: T;
+  keys: readonly string[];
+  job: symbol;
+  resolve: (value: U) => void;
+  reject: (reason: unknown) => void;
+};
+
+export function scheduleSettlement<T, U>(
+  persist: (groups: T[], jobs: number) => Promise<U[]>,
+  options: { parallelism: number; maxCells: number; maxGroups: number },
+) {
+  const waiting: Input<T, U>[] = [];
+  const active = new Set<string>();
+  let batches = 0;
+  let scheduled: ReturnType<typeof setTimeout> | undefined;
+
+  function wake() {
+    if (scheduled !== undefined || waiting.length === 0 || batches >= options.parallelism) return;
+    scheduled = setTimeout(() => {
+      scheduled = undefined;
+      while (batches < options.parallelism && launch()) {}
+    }, 1);
+  }
+
+  function launch() {
+    const selected: Input<T, U>[] = [];
+    const keys = new Set<string>();
+    const jobs = new Set<symbol>();
+    for (let position = 0; position < waiting.length && selected.length < options.maxGroups;) {
+      const entry = waiting[position]!;
+      if (entry.keys.some((key) => active.has(key))) {
+        position++;
+        continue;
+      }
+      const needed = entry.keys.filter((key) => !keys.has(key)).length;
+      if ((selected.length && keys.size + needed > options.maxCells) || (jobs.size === 4 && !jobs.has(entry.job))) {
+        position++;
+        continue;
+      }
+      waiting.splice(position, 1);
+      selected.push(entry);
+      jobs.add(entry.job);
+      for (const key of entry.keys) keys.add(key);
+    }
+    if (!selected.length) return false;
+    for (const key of keys) active.add(key);
+    batches++;
+    void persist(selected.map((entry) => entry.value), jobs.size)
+      .then((results) => {
+        if (results.length !== selected.length) throw new Error("evidence_batch_result_mismatch");
+        for (const [index, entry] of selected.entries()) entry.resolve(results[index]!);
+      })
+      .catch((error: unknown) => {
+        for (const entry of selected) entry.reject(error);
+      })
+      .finally(() => {
+        for (const key of keys) active.delete(key);
+        batches--;
+        wake();
+      });
+    return true;
+  }
+
+  return {
+    add(groups: readonly T[], keys: (group: T) => readonly string[]) {
+      if (waiting.length + groups.length > 4096) return Promise.reject(new Error("evidence_schedule_overloaded"));
+      const job = Symbol();
+      const results = groups.map((value) => {
+        const pending = Promise.withResolvers<U>();
+        waiting.push({ value, keys: keys(value), job, resolve: pending.resolve, reject: pending.reject });
+        return pending.promise;
+      });
+      wake();
+      return Promise.all(results);
+    },
+  };
+}

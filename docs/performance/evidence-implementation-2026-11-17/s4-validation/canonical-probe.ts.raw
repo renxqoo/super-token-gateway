@@ -1,0 +1,50 @@
+import { prepareFinancialAdmission, withFinancial } from "../../tests/support/financial-execution.ts";
+const result: Record<string, unknown> = { scope: "Private equivalent canonical SQL prototype, not service capacity or process CPU" };
+await withFinancial(async (f, db) => {
+  const setup = await f.bootstrap(), client = f.client();
+  await client.startup();
+  const prepared = await prepareFinancialAdmission(setup, client);
+  const sort = String.raw`CREATE FUNCTION public.sort_probe_v2(value text) RETURNS bytea LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE result text='';point integer;char_index integer;BEGIN
+ IF octet_length(value)=char_length(value) THEN RETURN decode(regexp_replace(encode(convert_to(value,'UTF8'),'hex'),'(..)','00\1','g'),'hex');END IF;
+ FOR char_index IN 1..char_length(value) LOOP
+  point=ascii(substr(value,char_index,1));
+  IF point>65535 THEN point=point-65536;result=result||lpad(to_hex(55296+point/1024),4,'0')||lpad(to_hex(56320+point%1024),4,'0');
+  ELSE result=result||lpad(to_hex(point),4,'0');END IF;
+ END LOOP;RETURN decode(result,'hex');
+END $$;`;
+  await db.unsafe(sort);
+  await db.unsafe(`CREATE FUNCTION public.canonical_probe_v2(v jsonb) RETURNS text LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE r text;BEGIN
+ IF jsonb_typeof(v)='object' THEN SELECT '{'||coalesce(string_agg(to_jsonb(key)::text||':'||CASE WHEN jsonb_typeof(value) IN ('object','array') THEN public.canonical_probe_v2(value) ELSE value::text END,',' ORDER BY public.sort_probe_v2(key)),'')||'}' INTO r FROM jsonb_each(v);
+ ELSIF jsonb_typeof(v)='array' THEN SELECT '['||coalesce(string_agg(CASE WHEN jsonb_typeof(value) IN ('object','array') THEN public.canonical_probe_v2(value) ELSE value::text END,',' ORDER BY n),'')||']' INTO r FROM jsonb_array_elements(v) WITH ORDINALITY a(value,n);
+ ELSE r=v::text;END IF;RETURN r;
+END $$;`);
+  const inputs = [
+    { label:"admit-data",value:prepared.data },
+    { label:"command-proof",value:{kind:"execution_admit_v1",contract_version:1,owner:prepared.context.owner,deadline_at:prepared.deadline,data:prepared.data} },
+    { label:"authorization-plan",value:{version:2,owner:prepared.context.owner,attempt_id:prepared.attemptId,permit_epoch:"1",dispatched_digest:prepared.data.dispatched_digest,dispatch_projection:prepared.data.dispatch_projection} },
+    { label:"candidate",value:prepared.candidate },
+    { label:"unicode-vector",value:{"\ue000":"private","😀":"supplementary",a:[null,true,false,0,"\t\n\"\\é中"]} },
+  ];
+  const identities=[];
+  for (const input of inputs) {
+    const [row] = await db`SELECT core_canonical_v1(${input.value}::jsonb) old,canonical_probe_v2(${input.value}::jsonb) proposed`;
+    if(row.old!==row.proposed) throw new Error(`Canonical mismatch ${input.label}`);
+    identities.push({label:input.label,bytes:Buffer.byteLength(row.old),sha256:new Bun.CryptoHasher("sha256").update(row.old).digest("hex")});
+  }
+  result.identities=identities;
+  const samples=[];
+  for(const input of inputs.slice(0,4))
+    for(const variant of ["old","proposed","proposed","old"]) {
+      const fn=variant==="old"?"core_canonical_v1":"canonical_probe_v2";
+      const start=performance.now();
+      const [row]=await db.unsafe(`SELECT min(jsonb_typeof($1::jsonb)) input_type,sum(length(${fn}($1::jsonb||jsonb_build_object('iteration',i)))) bytes FROM generate_series(1,200) i`,[input.value]);
+      if(row.input_type!=="object") throw new Error("Benchmark input was not an object");
+      samples.push({label:input.label,input_type:row.input_type,variant,calls:200,elapsed_ms:performance.now()-start,bytes:String(row.bytes)});
+    }
+  result.samples=samples;
+});
+result.cleaned=true;
+await Bun.write(".local/performance-implementation/canonical-probe-result.json",JSON.stringify(result,null,2)+"\n");
+console.log(JSON.stringify(result));

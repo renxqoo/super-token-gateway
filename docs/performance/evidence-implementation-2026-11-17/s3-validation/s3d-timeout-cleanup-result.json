@@ -1,0 +1,24 @@
+{
+  "database": "gateway_test_foundation_554cb0a67b094d65838890cdec0eef24",
+  "directory": "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-identity-PVxygC",
+  "proof": "exact fixture journal and config after the incorrectly limited 5-second focused test",
+  "database_present_before": true,
+  "database_absent": true,
+  "roles_absent": true,
+  "protected_processes": [40766, 40771],
+  "protected_reference_database_present": true,
+  "namespaces_cleared": [
+    {
+      "namespace": "financial_b41c79e1d22a42719d8e3484cdcc9966",
+      "keys": 0
+    },
+    {
+      "namespace": "gateway-stack_d97430de66634f0486aa301934e86212",
+      "keys": 29
+    }
+  ],
+  "directories_removed": [
+    "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-identity-PVxygC",
+    "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-t04b1-txCvvs"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "dist/core-api/main.js": "d21ca7962958b29a23219aed0845fd47b32931916f1323791435ed78700549ca",
+  "dist/core-api/platform/management.js": "595aed57c8399e3903964766e2d8f0ced13ae7c7c3bd1bc7f47556475423eeab",
+  "dist/gateway/main.js": "19511e5875a497ec0636a2abd1766b70919c878d6a6fcb23e337be1636f4383c",
+  "dist/core-worker/main.js": "3a935c73213ae12d58126c28ccf4c4f8d2df984e7c3c2d5a95d48c55e2ec8798",
+  "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+  "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+  "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+  "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+  "dist/manifest.json": "cdabe21beb4c47f8d4d10a3e7bc2082a76918067d0d8593804862f1015fb464c"
+}

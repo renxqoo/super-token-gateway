@@ -1,0 +1,7 @@
+{
+  "scope": "isolated production-DDL query-plan probe; 10000 cloned receipt rows are synthetic planner data, not valid financial history or capacity evidence",
+  "exit_code": 0,
+  "seq_scans": 0,
+  "index_scans": 2,
+  "stdout": "Timing is on.\nLOAD\nTime: 1088.975 ms (00:01.089)\nSET\nTime: 0.210 ms\nSET\nTime: 0.199 ms\nSET\nTime: 0.157 ms\nSET\nTime: 0.149 ms\nSET\nTime: 0.142 ms\nSET\nTime: 0.155 ms\nCREATE FUNCTION\nTime: 2.852 ms\nDO\nTime: 2.012 ms\nINSERT 0 10000\nTime: 406.503 ms\n    ?column?    \n----------------\n before_analyze\n(1 row)\n\nTime: 0.123 ms\nSET\nTime: 0.156 ms\n funding_probe_claim \n---------------------\n \n(1 row)\n\nTime: 3.014 ms\nSET\nTime: 0.109 ms\nANALYZE\nTime: 10.680 ms\n   ?column?    \n---------------\n after_analyze\n(1 row)\n\nTime: 0.117 ms\nSET\nTime: 0.091 ms\n funding_probe_claim \n---------------------\n \n(1 row)\n\nTime: 0.444 ms\nSET\nTime: 0.095 ms\n"
+}

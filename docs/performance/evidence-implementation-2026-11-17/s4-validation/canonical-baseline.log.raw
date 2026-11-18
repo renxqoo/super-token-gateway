@@ -1,0 +1,11 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-canonical.test.ts:
+(pass) database canonical key ordering preserves every ASCII code unit and long protocol field names [285.39ms]
+(pass) database canonical mixed Unicode ordering uses UTF-16 rather than UTF-8, locale or JSONB storage order [149.59ms]
+(pass) database canonical preserves nested structures, empty values, escaped strings and persisted numeric spelling [151.50ms]
+
+ 3 pass
+ 0 fail
+ 141 expect() calls
+Ran 3 tests across 1 file. [622.00ms]

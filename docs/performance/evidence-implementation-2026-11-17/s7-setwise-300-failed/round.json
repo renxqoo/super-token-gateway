@@ -1,0 +1,198 @@
+{
+  "stage": "S7 1808 setwise high-load diagnostic",
+  "label": "s7-setwise-300-failed",
+  "diagnostic": true,
+  "excluded_from_stability": true,
+  "runtime_migration": 2026111808,
+  "target": 300,
+  "rate": 301,
+  "pluginRuntime": "builtin-worker",
+  "requests": 9458,
+  "valid": false,
+  "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+  "capacityPassed": false,
+  "p99": 2225.87,
+  "onlineCapacity": {
+    "fullyCompletedByWindow": 5540,
+    "minuteCompletions": [5540],
+    "matchedRequests": 9362,
+    "httpOnly": 0,
+    "ackOnly": 96,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 14670,
+    "receiptAckedRequestsByWindow": 5505,
+    "ackedEventsByWindow": 11202,
+    "sampledBeforeWindowEndMs": 233,
+    "httpByWindow": 9144
+  },
+  "http": {
+    "offered": 18060,
+    "shed": 3398,
+    "completed": 14662,
+    "succeeded": 9362,
+    "invalid": 5300,
+    "statuses": {
+      "200": 9362,
+      "503": 5300
+    },
+    "gateway_errors": {
+      "overloaded": 5300
+    },
+    "transport_errors": {}
+  },
+  "window_complete_rps": 92.33333333333333,
+  "process_cpu_ms": {
+    "gateway": 2.824064284203849,
+    "core_api": 2.4550644956650456,
+    "core_worker": 0.7855783463734405,
+    "upstream": 0.1511947557623176,
+    "redis_admission": 0.735884965108903,
+    "redis_evidence": 0.13216324804398394,
+    "redis_evidence_replica": 0.07824064284203945,
+    "pg": 57.618946923239584,
+    "pg_shared": 0.03806301543666703
+  },
+  "total_cpu_ms": 64.62994290547684,
+  "cpu_denominator": "all admitted requests including warmup; CPU also includes rejected HTTP work, so this is not all-success per-request cost",
+  "pg": {
+    "calls": 210908,
+    "exec_ms": 671648.5411679999,
+    "wal_bytes": 985432626,
+    "wal_records": 6026667,
+    "calls_per_request": 22.29942905476845,
+    "exec_ms_per_request": 71.01380219581306,
+    "wal_bytes_per_request": 104190.38126453795,
+    "wal_records_per_request": 637.203108479594
+  },
+  "pg_valid": true,
+  "pg_errors": [],
+  "cpu_sampling_errors": 0,
+  "accounting": {
+    "requests": 9458,
+    "attempts": 9458,
+    "succeeded_attempts": 9458,
+    "usage_events": 18916,
+    "usage_requests": 9458,
+    "unexpected_receipts": 0,
+    "precise_usage": 18916,
+    "precise_charges": 9458,
+    "settled_holds": 9458,
+    "reserved": "0",
+    "spent": "945800",
+    "debt": "0",
+    "acknowledged": 18916,
+    "settlement_journals": 9458,
+    "unbalanced_journals": 0,
+    "supplier_cost_heads": 9458,
+    "conflicts": 0,
+    "inconsistent_hold_reserves": 0,
+    "inconsistent_funding_budgets": 0,
+    "inconsistent_cell_reserves": 0,
+    "unbalanced_supplier_journals": 0
+  },
+  "supplier": {
+    "balance": "999999999999441978",
+    "reserved": "0",
+    "spent": "558022",
+    "accounts": 1
+  },
+  "wallet_mismatches": 999,
+  "artifacts": {
+    "dist/core-api/main.js": "f6e014e94f60984e1315a6f542cab8d8de5e64430f86d0d0228165eff277d76c",
+    "dist/core-api/platform/management.js": "928ce6a8f50dcbd0d2e63bf61846a921073e29dc6ec8b1d51c6786189c476b47",
+    "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+    "dist/core-worker/main.js": "7cd69578e938bd908a8382f9a17b757d7174bf7a05d15fee3cb9169983b15588",
+    "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+    "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+    "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+    "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+    "dist/manifest.json": "1bed6cd85aa9172c9a304ae90ff2af2deb92b61208ae01144b95ad35b49e8c11"
+  },
+  "command": [
+    "env",
+    "QUEUE_REQUIRED_REPLICAS=1",
+    ".local/toolchain/bun-1.4.4/bun",
+    "--env-file=.env.local",
+    "--env-file=.local/native-gate.env",
+    "scripts/bench-system.ts",
+    "--online-capacity",
+    "--seconds",
+    "60",
+    "--instances",
+    "1",
+    "--wallets",
+    "1000",
+    "--supplier-accounts",
+    "1",
+    "--concurrency",
+    "256",
+    "--warmup-concurrency",
+    "16",
+    "--worker-concurrency",
+    "8",
+    "--gateway-inflight",
+    "10000",
+    "--drain-seconds",
+    "120",
+    "--request-timeout-ms",
+    "30000",
+    "--plugin-runtime",
+    "builtin-worker",
+    "--target-rps",
+    "300",
+    "--rate",
+    "301",
+    "--upstream",
+    "standard"
+  ],
+  "exit_code": 1,
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "source_directory": ".local/capacity/bench-1d0970937ef042a2878cff7ef0457f9b",
+  "database": "gateway_test_foundation_9dcdad5298e84835847cc228fba270bd",
+  "database_bytes": 570212879,
+  "archive_manifest": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-setwise-300-failed/audit.json.raw",
+      "sha256": "53a5e24453f81f78e465e2f7089244d358e6e92b02ab41c46189f9cab842efdf",
+      "bytes": 557001
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-setwise-300-failed/http.json.raw",
+      "sha256": "fe28afec953c5d9291e70d08056761afce0aca2ff750162b49f48b4c8c50a7ad",
+      "bytes": 10078
+    },
+    "http.json.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-setwise-300-failed/http.json.identities.tsv",
+      "sha256": "76146e3a217d4d56ecdc816ef6bbcbe3c73f211e78703528d61305e46983bf62",
+      "bytes": 477462
+    },
+    "ack.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-setwise-300-failed/ack.identities.tsv",
+      "sha256": "9e3cf9505196c37c7206ab8607fe0bbaf092a158daca5c3032b8f32c7d4ff90b",
+      "bytes": 482358
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-setwise-300-failed/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    },
+    "load.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-setwise-300-failed/load.log",
+      "sha256": "fe28afec953c5d9291e70d08056761afce0aca2ff750162b49f48b4c8c50a7ad",
+      "bytes": 10078
+    },
+    "upstream.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-setwise-300-failed/upstream.log",
+      "sha256": "dff63a8fd20277f85ab6c066d9d6dc0e4467086ae37c52391811670ba09d49ad",
+      "bytes": 48
+    },
+    "upstream.pem": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-setwise-300-failed/upstream.pem",
+      "sha256": "c2aaf926f67b91c4547e75914b9202675118a38e230274bae411a7f2e08df2f3",
+      "bytes": 1013
+    }
+  }
+}

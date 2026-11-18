@@ -1,0 +1,2 @@
+$ bun fmt --no-script --check
+All 741 files are formatted.

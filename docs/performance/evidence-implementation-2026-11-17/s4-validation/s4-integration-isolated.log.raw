@@ -1,0 +1,716 @@
+bun test v1.4.4 (38afee6c8)
+test tests/integration --timeout 30000
+
+tests/integration/plugin-catalog-lease.test.ts:
+(pass) restricted Core SQL rejects absent null malformed wrong or stale lease identity without partial completion resources or recovery [651.86ms]
+(pass) restricted Core SQL rejects missing null typed or noncanonical expected revisions before any new lifecycle writes [580.26ms]
+(pass) correct owned resources and finish still record actual helper results and exact replay without a credential grant [1311.62ms]
+
+tests/integration/plugin-catalog-roles.test.ts:
+(pass) the catalog role cannot bypass controlled mutations with a caller-set GUC or assume owner [478.29ms]
+
+tests/integration/runtime-database.test.ts:
+(pass) canceling an owner transaction in the pool queue cannot execute a late mutation after a connection is released [74.36ms]
+(pass) several individually short SQL statements cannot exceed the owner's total transaction deadline or commit [272.67ms]
+(pass) cancellation between owner SQL statements rolls back instead of sending COMMIT after the callback returns [84.16ms]
+(pass) a lost owner COMMIT reply reports an unknown outcome while preserving the actual committed mutation [58.77ms]
+
+tests/integration/internal-identity.test.ts:
+(pass) two independent Core processes register and authenticate against shared PG [851.80ms]
+(pass) registration response loss across Core replays one immutable session and concurrent challenge does not refresh TTL [943.91ms]
+(pass) global canonical key and instance boot conflicts never replace original owner [747.09ms]
+(pass) registration wrong signature and cross-instance peer cannot consume challenge [1022.22ms]
+(pass) signed command tampering and forged context never reaches current-session authority [859.05ms]
+(pass) shared PG security revoke session rejects next stream on already connected Core A [793.76ms]
+(pass) shared PG security revoke certificate rejects next stream on already connected Core A [819.60ms]
+(pass) shared PG security revoke instance rejects next stream on already connected Core A [1047.76ms]
+(pass) normal certificate retirement and session disable retain historical public key without granting current authority [939.38ms]
+(pass) workload cannot self-provision or mutate directory and worker verifier cannot register [880.35ms]
+(pass) TLS rejects wrong CA hostname missing certificate and public certificate without matching private key [700.96ms]
+(pass) provisioned exact SAN mismatch rejects every stream without accepting a client-supplied identity [781.16ms]
+(pass) HTTP1 and cleartext h2 cannot enter the internal authority [800.26ms]
+(pass) body privacy and declared byte limits reject canaries without echo or persistence [686.03ms]
+(pass) expired startup sessions replay the original receipt but never renew or authorize [2006.14ms]
+(pass) expired unconsumed challenge fails without consuming a startup key [2194.20ms]
+(pass) all three startup service identities use actual core-client with concurrent initialization and cross-Core reconnect [907.04ms]
+(pass) registration response body discarded after commit recovers same receipt on the other Core [942.30ms]
+(pass) current authorization and session revoke have both PG lock linearization orders [855.91ms]
+(pass) current authorization and certificate revoke have both PG lock linearization orders [815.53ms]
+(pass) current authorization and instance revoke have both PG lock linearization orders [999.44ms]
+(pass) bounded in-flight streams reject excess work and cancellation leaves the same socket usable [898.46ms]
+(pass) identity streams beyond 16 concurrent are refused with internal_capacity while the process stream budget is larger [862.12ms]
+(pass) header count byte and duplicate proof budgets fail safely without blocking later commands [879.68ms]
+(pass) peer connection budget rejects a fifth connection and preserves the four established peers [828.61ms]
+(pass) storage final current-state barrier holds SHARE locks to outer commit and rejects stale scalar revisions [864.01ms]
+(pass) writer-held revocation returns bounded BUSY before commit then rejects security revoked identity [972.53ms]
+(pass) raw whitespace needs a new signature while semantic read-only command identity remains the same [751.65ms]
+(pass) first HEADERS watchdog and partial later header blocks stay within measured idle and lifetime bounds [2857.66ms]
+(pass) native decoder rejects an oversized HPACK value before the full header block [908.88ms]
+(pass) deployment-only CLI provisions and security revokes an actual peer with an audited database actor [888.98ms]
+(pass) slow body progress timeout closes only its stream and preserves later work [916.63ms]
+(pass) native session memory credit refuses a second stream while the first bounded response is flow controlled [770.47ms]
+(pass) global connection budget includes sockets that have not started a TLS handshake [1034.61ms]
+(pass) actual shared receive budget caps reserved bytes before stream count and returns all resources on drain [732.67ms]
+(pass) Core RPC rejects a CA-valid hostname-valid server when the provisioned pin or complete SAN differs [798.71ms]
+(pass) another workload certificate from the same CA and DNS cannot receive even one Core command stream [988.43ms]
+(pass) TLS refuses provisioned certificates from the trusted CA that have expired or are not yet valid [1024.18ms]
+(pass) Core RPC refuses a pinned Core server certificate that has expired or is not yet valid [996.99ms]
+(pass) the internal TLS server issues no session ticket so every reconnect repeats the full certificate handshake [1502.25ms]
+(pass) a CA rotation bundle accepts internal peers from both authorities while single-authority trust refuses the new one [1056.11ms]
+
+tests/integration/gateway-background.test.ts:
+(pass) a background response is settled from its terminal usage by another Gateway session without the client polling [6071.80ms]
+(pass) only the current lease holder of a background response may obtain its credential or sign its terminal usage [2883.39ms]
+(pass) a background response the client deletes before it finishes closes its request as failed instead of holding funds forever [3400.86ms]
+
+tests/integration/internal-identity-cache.test.ts:
+(pass) a cached internal identity still rejects session revocation when invalidation notifications are lost [844.72ms]
+(pass) a cached internal identity still rejects certificate revocation when invalidation notifications are lost [1017.07ms]
+(pass) a cached internal identity still rejects instance revocation when invalidation notifications are lost [940.29ms]
+(pass) cancelling a cold identity stream releases its budget while a shared PG lookup remains blocked for another stream [992.38ms]
+
+tests/integration/core-catalog-control.test.ts:
+(pass) canceling route management during pool wait leaves no late route, cost or audit mutation [2073.64ms]
+(pass) canceling route management during catalog wait leaves no late route, cost or audit mutation [1916.64ms]
+(pass) canceling route management during route wait leaves no late route, cost or audit mutation [1959.59ms]
+(pass) a real HTTP disconnect cancels a blocked route mutation before its source row is unlocked [1956.75ms]
+(pass) route authentication uses its reserved connection instead of deadlocking a one-connection pool [2162.47ms]
+(pass) a credential naturally expiring in the catalog writer queue cannot commit a route update [2760.50ms]
+(pass) a queued route writer stops new candidate readers for every model and releases the fence after commit [1963.26ms]
+(pass) pool and catalog lock waits share the route operation deadline and cannot write after timeout [5938.67ms]
+(pass) only a catalog writer can invoke the control fence while execution readers retain no writer capability [1234.01ms]
+(pass) the catalog control migration preserves writer access for preexisting column-only route permissions [275.74ms]
+(pass) a lost route POST COMMIT reply reports an unknown result and never repeats the committed route, cost or audit [2253.62ms]
+
+tests/integration/core-management.test.ts:
+(pass) platform revocation before funding SHARE denies recharge and money stays unchanged [1988.02ms]
+(pass) funding SHARE holds the exact platform credential through recharge receipt journal audit commit [1931.79ms]
+(pass) NULL permissions project ADMIN and credential mismatch cannot authorize platform funding [2068.93ms]
+(pass) shared supplier account gates two channels in its own currency without borrowing other currency balances [2294.01ms]
+(pass) recharge preserves a reconciliation freeze and failed audit rolls its entire funding group back [1855.98ms]
+(pass) a provider base_url with a path prefix is rejected instead of being silently dropped from upstream requests [1027.72ms]
+(pass) malformed Azure, Bedrock and Vertex credentials are rejected with 422 when a provider is created or its key replaced instead of being stored and failing every request [1051.66ms]
+(pass) a chunked management body without Content-Length is cut at its byte budget with 413 and at its time budget with 408 body_timeout instead of 503 management_unavailable, releasing the body and creating nothing [11095.83ms]
+
+tests/integration/gateway-resources.test.ts:
+(pass) stored responses get a stable gateway identity in JSON and SSE and are retrieved, listed, continued, cancelled and deleted on the original channel without exposing the upstream identity [3236.19ms]
+(pass) a stored response is invisible to other projects and to keys restricted to other models, and only its owning Gateway session may record it [2864.53ms]
+(pass) an upstream identity already recorded for another request is not handed out under a second gateway identity [2797.17ms]
+(pass) VIEWER and BILLING keys of the owning project cannot cancel or delete a stored response, and the upstream resource is never touched [2915.42ms]
+
+tests/integration/schema.test.ts:
+(pass) new v2 baseline initializes once without fabricated upstream funding [150.47ms]
+(pass) nonempty unknown databases are refused without altering their data [37.98ms]
+(pass) historical and incorrect schema versions are refused without an implicit upgrade [34.99ms]
+(pass) changed applied manifest checksums refuse replay without touching funds [148.49ms]
+(pass) interrupted baseline DDL rolls back all tables and can be retried [145.78ms]
+(pass) Drizzle and Bun.SQL preserve atoms above Number precision in each currency [159.13ms]
+(pass) SQL prices thirds, milliseconds and large integer music usage independently [148.59ms]
+(pass) upstream journals reject unbalanced commits and retain immutable balanced entries [157.83ms]
+(pass) package and financial voucher bytes are bounded [168.29ms]
+(pass) resource rows reject URL identities and unknown bindings, and cost ceilings must be objects [160.42ms]
+(pass) public enum or domain-only databases are refused without creating the baseline [76.53ms]
+(pass) an additional extension without public relations is refused while default plpgsql remains allowed [46.66ms]
+(pass) RECHARGE cannot persist NULL payment atoms while adjustments retain optional payment facts [153.41ms]
+(pass) resource manifests reject JSON null and wrong field types instead of CHECK unknown bypass [160.86ms]
+
+tests/integration/gateway-plugin-lifecycle.test.ts:
+(pass) two running Gateways serve a plugin uploaded and published online, stop routing to it once disabled, and recover after rollback without restarts [4946.08ms]
+
+tests/integration/core-quota-scaling.test.ts:
+(pass) request quota reads do bounded work despite unrelated released lease history [2473.84ms]
+
+tests/integration/core-settlement-worker.test.ts:
+(pass) the settlement worker acknowledges a job only after its group commits and redelivery adds no money [4470.34ms]
+(pass) a supplier balance briefly locked by a concurrent settlement (lock conflict) is retried inside the job instead of entering exponential backoff [2901.01ms]
+(pass) rejections in a retried job are alerted once on acknowledgement and an ungranted fact raises a quarantine alert once [4642.32ms]
+
+tests/integration/core-plugin-package.test.ts:
+(pass) a Gateway session downloads the published package that verifies against its own trust anchor as the candidate digest [2224.41ms]
+(pass) unknown and quarantined packages are unavailable and a worker identity cannot download packages [2060.49ms]
+
+tests/integration/gateway-media.test.ts:
+(pass) images are reserved per requested image and settled per delivered image; multipart edits reach the upstream with the original file bytes; image SSE holds the completed event [2983.85ms]
+129 |         start(controller) {
+130 |           controller.enqueue(audio);
+131 |         },
+132 |         async pull(controller) {
+133 |           await Bun.sleep(200);
+134 |           controller.error(new Error("upstream reset"));
+                                     ^
+error: upstream reset
+      at pull (/Users/wr/work/super-token-gateway/tests/integration/gateway-media.test.ts:134:32)
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/gateway-media.test.ts:224:17)
+(pass) speech audio is relayed byte for byte and billed by input characters; transcription bills exact audio milliseconds; text translations are relayed and billed per request [3280.58ms]
+(pass) MiniMax music is generated through gateway.minimax-music with only the model rewritten and settled by music milliseconds; streaming is refused before the upstream [3496.84ms]
+
+tests/integration/core-operations.test.ts:
+(pass) a failed settlement job is visible to operators and is re-run once through an audited retry without new generation [1198.20ms]
+(pass) an event consumer backlog is reported in operations metrics [1177.95ms]
+
+tests/integration/core-execution-recovery.test.ts:
+(pass) healthy unexpired RESERVED refuses technical abort and Gateway cannot invoke worker recovery [2088.45ms]
+(pass) deadline recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2524.59ms]
+(pass) customer recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2175.26ms]
+(pass) instance recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2126.25ms]
+(pass) certificate recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2025.25ms]
+(pass) session recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2208.39ms]
+(pass) security revocation never lets recovery release SEND_GRANTED money and current owner can close after key revocation [2049.23ms]
+(pass) quota recovery converges when Redis adoption committed but both PG ACTIVE and post-close RELEASED replies failed [2156.97ms]
+(pass) begin locks first and the competing begin or technical abort cannot cross its uncommitted transition [2084.22ms]
+(pass) recovery locks first and the competing begin or technical abort cannot cross its uncommitted transition [3177.65ms]
+(pass) technical abort audit failure rolls back both releases closure and command receipt [1991.48ms]
+(pass) a core-worker identity can neither open, admit nor begin Gateway executions and cannot sign evidence for a Gateway attempt [2157.31ms]
+
+tests/integration/internal-identity-upgrade.test.ts:
+(pass) v4 identity append preserves legacy null owners and rejects new unclassified execution commands [162.05ms]
+
+tests/integration/core-execution-batch-identity.test.ts:
+(pass) stale revisions and mismatched authority fields cannot poison valid peers of the same session in one batch [999.24ms]
+(pass) a failed item cannot release cached identity SHARE locks before the outer batch commits [870.63ms]
+(pass) revocation committed before the batch denies every item without writing command receipts [881.97ms]
+(pass) batch identity validation preserves the 128 item boundary and ordered independent results [919.38ms]
+(pass) a later item's deadline expiring during a peer's work is rechecked instead of inherited from the authority representative [1176.31ms]
+(pass) runtime cannot forge cached authority times by calling private batch kernels [940.53ms]
+
+tests/integration/core-catalog-progress.test.ts:
+(pass) route create completes under an unbroken flow of warm candidate readers instead of timing out [2185.38ms]
+(pass) route update completes under an unbroken flow of warm candidate readers instead of timing out [2167.05ms]
+
+tests/integration/gateway-videos.test.ts:
+(pass) a video is created with a gateway identity, settled from its final seconds without client polling, and retrieved, streamed, listed and deleted on its original channel [4227.43ms]
+(pass) a video that fails upstream closes its request as failed and releases the reservation [3084.84ms]
+(pass) a streaming video request is refused before reaching the upstream [2713.49ms]
+
+tests/integration/native-durability.test.ts:
+(pass) native preflight rejects absent tools before default durability can invoke Docker or connect a supplied database [12.45ms]
+(pass) TERM preflight diagnoses early driver exit and reaps the confirmed live probe group [2163.66ms]
+(pass) slow business dependency evaluation cannot prevent native preflight or probe TERM cleanup [2165.38ms]
+(pass) business dependency load failure closes the preflight fixture before any service starts [2300.70ms]
+(pass) TERM during business dependency loading closes the fixture and prevents later services [792.00ms]
+(pass) business load failure accepts a physical temporary root alias after the CLI removes its directory [1115.39ms]
+(pass) native preflight rejects relative executables and the obsolete native argument [82.04ms]
+(pass) native PostgreSQL uses a private SCRAM cluster with durable settings and rejects a wrong password [531.16ms]
+(pass) a native PostgreSQL closed while a client session is open leaves no shared memory segment behind after its fast shutdown [521.37ms]
+(pass) a native PostgreSQL closed while a client session is open leaves no shared memory segment behind when it cannot shut down and is killed at the stop deadline [1252.41ms]
+(pass) native child HTTP readiness excludes ambient secrets and automatic dotenv loading [187.12ms]
+(pass) not-ready children that ignore TERM and their descendants are reaped within a finite deadline [407.22ms]
+(pass) a child bind failure and partial native start preserve a foreign neighbor listener and directory [286.81ms]
+(pass) excess child output fails readiness and releases the other independently owned native service [269.59ms]
+(pass) expected PostgreSQL query errors do not echo statement payloads or exhaust native fixture output [635.83ms]
+(pass) transient file removal during native disk inspection does not interrupt an owned service [1986.56ms]
+(pass) unexpected symlink disk inspection failures still stop owned services and preserve their neighbor target [738.72ms]
+(pass) durability SIGTERM during initialized native services fails visibly after owned resources reach zero and leaves no Core API child or PostgreSQL shared memory segment behind [3134.51ms]
+(pass) durability SIGINT during initialized native services fails visibly after owned resources reach zero and leaves no Core API child or PostgreSQL shared memory segment behind [3081.51ms]
+
+tests/integration/evidence-archive.test.ts:
+(pass) a monthly archive of v2 traffic keeps raw signed evidence, evidence receipts and upstream ledger lines [2815.85ms]
+(pass) a failed monthly partition migration rolls back moved fallback evidence and restores its guards [164.90ms]
+
+tests/integration/billing.test.ts:
+(pass) expected admission rejections leave no request behind and do not disturb funded admissions [1030.38ms]
+(pass) holds that cannot progress without new evidence back off and do not delay debt collection [841.26ms]
+(pass) a gift-funded release does not re-wake cash debt that it cannot collect [291.54ms]
+(pass) concurrent requests reserve existing debt and in-flight credit before admitting more work [203.91ms]
+(pass) unknown credit holds remain committed until an explicit release and duplicate release is harmless [188.92ms]
+(pass) credit settlement and refunds debit once, gifts do not repay old debt, and cash restores credit [184.66ms]
+(pass) actual overrun keeps the full receivable and freezes new promises beyond the credit limit [369.11ms]
+(pass) credit policy retries preserve their original result without overwriting a newer policy [189.38ms]
+(pass) credit atoms above IEEE754 remain exact and cannot fund another currency [179.33ms]
+(pass) concurrent credit reduction and admission cannot commit promises beyond the resulting limit [174.57ms]
+(pass) charge adjustments freeze and reopen the same credit boundary without turning credit into cash [194.22ms]
+(pass) admission and settlement avoid randomly scattered new index keys for an existing request UUID [187.04ms]
+(pass) covered settlement and an over-hold peer on the same wallet preserve exact independent charges [194.00ms]
+(pass) a 128-group evidence batch preserves every receipt and a repeated batch at the boundary is a replay [1970.33ms]
+(pass) a locked wallet does not block evidence for another wallet in the same batch [223.82ms]
+(pass) foreign-key readers do not make a funded wallet appear busy [166.02ms]
+(pass) credit is concurrent-idempotent and currency isolated [151.99ms]
+(pass) gift-first reservation and duplicate settlement charge exactly 56 atoms [173.12ms]
+(pass) concurrent holds never overspend and failures roll back request creation [191.50ms]
+(pass) concurrent admissions observe prior allocations across cash and gift sources [195.23ms]
+(pass) missing final usage stays held until explicit reconciliation [164.00ms]
+(pass) expired reserved gift is consumed but its unused hold and refund cannot revive [1291.56ms]
+(pass) over-hold usage records debt, freezes admission, then cash topup pays debt [455.85ms]
+(pass) refund and adjustment are idempotent and preserve lot sums [182.43ms]
+(pass) gift scopes and configured cash-first priority govern reservation [168.04ms]
+(pass) SQL price rounds the exact sum once including sub-atom fractions [0.30ms]
+(pass) mixed cache TTL charges remain exact and missing TTL evidence retains the hold until enrichment [163.93ms]
+(pass) SQL rejects aggregate plus TTL rates and inconsistent cache write partitions [157.14ms]
+(pass) refund waiting across gift expiry cannot resurrect credit or block later funding [1114.20ms]
+(pass) only the delivered retry is charged while every attempt keeps its own usage record [285.38ms]
+(pass) conflicting FINAL evidence freezes funds even after settlement until explicit resolution [344.52ms]
+(pass) partial debt refund and downward adjustment conserve funded, receivable and waived amounts [165.86ms]
+(pass) terminal rejection arriving before earlier attempt evidence converges to full release [178.72ms]
+(pass) incompatible old database is rejected without modifying its records [84.80ms]
+(pass) explicit RELEASE with a captured pricing reference releases the original hold [178.02ms]
+(pass) a retained failed evidence job is alerted on but does not close admission until failed jobs reach their own bound; teardown leaves no queue metadata [499.34ms]
+(pass) evidence queue backlog blocks new admission while accepting facts for already-admitted calls [329.51ms]
+(pass) every permitted in-flight operation can finish a simultaneous durable evidence burst [845.08ms]
+(pass) indexed recovery handles unknown holds and settled debt without releasing missing evidence [311.71ms]
+(pass) returned cash wakes prior debt collection while returned gifts cannot repay it [550.30ms]
+(pass) journal validation rejects malformed, unbalanced, cross-wallet and wrong-currency entries [150.49ms]
+(pass) debt collection pays known obligations while leaving unresolved disputed charges held [176.27ms]
+(pass) a post-calculation monetary overflow cannot contaminate a valid peer settlement [327.11ms]
+(pass) one batch keeps scoped grants, captured pricing, other currencies and duplicate facts independent [163.88ms]
+(pass) contradictory final facts in the same batch cannot charge before the dispute is known [163.39ms]
+(pass) pre-collection overflow cannot roll back another wallet's valid fact and charge [330.83ms]
+(pass) fully spent refundable buckets retain their slot and refunds do not exceed the source budget [5210.35ms]
+(pass) completed replay cursors skip historical scans without missing later live evidence [18173.01ms]
+(pass) intent arbitration, key permission and funds are decided per admission and only funded intents reserve [242.54ms]
+(pass) expiry overflow on one wallet does not roll back a valid peer admission [15489.59ms]
+(pass) concurrent admissions of one intent reserve exactly once [304.65ms]
+
+tests/integration/jsonb.test.ts:
+(pass) typed JSONB manifest is not double encoded into a string rejected by plugin_manifest [144.50ms]
+(pass) typed JSONB CRUD preserves nested values, scalar types and exact atoms strings [184.70ms]
+(pass) prepared JSONB insert, update and encoded where preserve scalar and structured values [164.20ms]
+(pass) JSON null and SQL NULL retain distinct database semantics through typed writes [155.44ms]
+(pass) JSONB transaction commit and rollback use the explicit business pool [149.29ms]
+(pass) current JSONB object defaults retain their checks and typed default writes [160.56ms]
+(pass) JSONB mapping preserves real plugin manifest and package byte constraints [149.29ms]
+(pass) stored JSON looking scalar strings are not parsed a second time on typed reads [159.91ms]
+
+tests/integration/core-upstream-funds.test.ts:
+(pass) Core admin manages supplier brands and upstream accounts under catalog and funding permissions with audit [1189.97ms]
+(pass) a negative adjustment below reservations freezes new admissions until a manual reconciliation resumes the account [2343.12ms]
+(pass) financial voucher download returns the exact immutable bytes only to funding readers [1865.59ms]
+(pass) the management role can adjust and reconcile but cannot rewrite upstream history [2004.05ms]
+(pass) a voucher cited only by a reconciliation survives expiry cleanup instead of failing the cleanup batch [3603.19ms]
+
+tests/integration/core-settlement.test.ts:
+(pass) partial then final supplier evidence posts one combined ceiling and settles the selected customer request once [2190.63ms]
+(pass) final cost above the captured ceiling posts in full, goes negative and freezes the supplier account [2201.90ms]
+(pass) trusted partial above the estimate reserves conservatively and the later final releases it without refunding [2039.94ms]
+(pass) contradicting finals are disputed before any charge and a later contradiction keeps the posted head [2494.82ms]
+(pass) a retry delivery is billed once while the earlier unknown attempt keeps and later settles its own supplier cost [2008.49ms]
+(pass) evidence from another owner session is rejected without touching a peer group [2062.17ms]
+(pass) final evidence with an unfinished supplier dimension is a FINAL customer snapshot under request completion pricing [2160.32ms]
+(pass) provider usage pricing keeps the snapshot PARTIAL and the charge waiting until every priced dimension is final [2097.39ms]
+
+tests/integration/core-execution-upgrade.test.ts:
+(pass) v5 to financial append preserves historical wallets requests and null catalog owners without fabricated captures [189.34ms]
+(pass) append refuses unmappable active supplier holds and rolls all new schema back [156.53ms]
+(pass) append rejects cross-key duplicate project intents instead of selecting a historical winner [138.81ms]
+(pass) Core execution runtime role cannot read money or invoke private allocation kernels [1308.47ms]
+(pass) signed settlement append keeps gateway usage visible and its per-source uniqueness [199.45ms]
+(pass) signed settlement append refuses historical supplier costs without evidence links [160.82ms]
+(pass) authentication append upgrades an empty signed settlement schema without rewriting its version [175.59ms]
+(pass) authentication append refuses unsigned receipts from the earlier signed settlement version [141.19ms]
+
+tests/integration/core-execution.test.ts:
+(pass) admission captures 60/30 at one third as 30 and begin never reissues transient material [2251.95ms]
+(pass) same project intent and proposed UUID conflicts never create a second customer hold [2220.07ms]
+(pass) retry retains UNKNOWN supplier exposure and shares one customer RPM and concurrency lease [2008.09ms]
+(pass) parallel begin and abort has one winner and never returns two grants [1968.98ms]
+(pass) credential rotation and committed key revocation block old unbegun snapshots without releasing funds [2060.66ms]
+(pass) failed admission audit and deferred supplier journal constraint leave no receipt or monetary effects [2039.46ms]
+(pass) two Core same-command loser has no cleanup authority over the winner active common leases [4383.64ms]
+(pass) per-attempt abort preserves common leases and the customer hold for the next physical attempt [2052.96ms]
+(pass) begin holds authorization through outer commit and sends no transient material before commit [2237.49ms]
+(pass) lost begin response stays committed and a new startup session can only query safe status [2118.21ms]
+(pass) logical CLOSE committed first blocks begin and next while its supplier and customer holds stay intact [1966.69ms]
+(pass) begin locked first forces concurrent CLOSE to retry then closes quota without releasing UNKNOWN money [2169.83ms]
+(pass) a busy wallet group leaves no command result while an independent wallet proceeds in the same Core [3290.92ms]
+(pass) strict projection unknown-field canaries reject at the real authenticated Core and never persist [1948.99ms]
+
+tests/integration/core-financial-regressions.test.ts:
+(pass) wrong permit epochs cannot poison begin adopt renew release or close [2073.69ms]
+(pass) persistent financial rejections expose 503 402 409 typed errors with immutable query receipts and no extra holds [2391.53ms]
+(pass) unknown begin COMMIT tells callers status only and query or replay never grants again [2004.88ms]
+(pass) committed begin response budget failure returns STATUS_ONLY without releasing holds or regranting send authority [2036.10ms]
+(pass) next fingerprint mismatch cannot attach another logical request or alter original money and quota [1934.80ms]
+(pass) next resources mismatch cannot attach another logical request or alter original money and quota [2178.92ms]
+(pass) known precommit begin rollback stays retryable with the same command and grants only after a later commit [2174.39ms]
+(pass) begin client transport timeout exposes UNKNOWN STATUS_ONLY and later query has no transient authority [3233.01ms]
+(pass) an admission beyond channel concurrency reports a channel_capacity refusal instead of identity_store_unavailable [2163.66ms]
+(pass) an admission refused by the key's concurrency reports quota_limited and frees the project slot it had taken instead of holding it until the lease expires [2000.64ms]
+(pass) a context whose only supplier account awaits reconciliation reports no_route instead of identity_store_unavailable [2082.47ms]
+
+tests/integration/core-commit-unknown.test.ts:
+(pass) lost PostgreSQL COMMIT acknowledgement never emits a begin grant and replay only recovers safe status [2165.84ms]
+(pass) lost recovery COMMIT acknowledgement recovers the same abort receipt without a second release journal [2060.84ms]
+
+tests/integration/plugin-catalog.test.ts:
+(pass) signed builtin CLI validates 84 cases and 112 steps before atomic publication and revisioned HTTP binding [1471.10ms]
+(pass) public catalog rejects missing project revoked expired and insufficient platform credentials [441.49ms]
+(pass) external trust denies policy expiry revocation unknown keys tampered detached signatures and changed ABI schema or source [545.07ms]
+(pass) publication audit failure rolls back VALIDATED state and immutable receipt then exact retry publishes once [1378.29ms]
+(pass) binding races allow one expected revision winner and deny foreign references and invalid config without new history [1557.74ms]
+(pass) cancelled actual validation is REJECTED with reaped helper and cannot publish [679.46ms]
+(pass) expired validation recovery advances epoch without adopting unknown result or auto publishing [610.84ms]
+(pass) current trust revocation after successful fixtures blocks publication without changing VALIDATED state [1225.85ms]
+(pass) receipt insertion failure rolls back publication revision and audit before retrying the same command [1312.65ms]
+(pass) cleanup confirmation loss persists CLEANUP_PENDING and blocks publication and overlapping validation [1289.95ms]
+(pass) different publication commands at the same expected revision have one winner and stale retries cannot create receipts [1586.10ms]
+(pass) closing catalog while validation is starting waits for rejection and leaves no active validation lease [667.73ms]
+(pass) package signature is still mandatory under a valid separately signed release descriptor [477.59ms]
+(pass) same immutable name version and content cannot be overwritten by differently encoded valid signed package bytes [689.14ms]
+(pass) expired owned helper registration recovers only after actual reap and replays the original failed recovery receipt [1191.96ms]
+(pass) release policy and signing key expiring while publication waits on a lock cannot commit PUBLISHED [3015.24ms]
+(pass) policy expiry does not block cancelled owned validation from reaping and releasing its active slot [3944.47ms]
+(pass) lost finish transaction cannot rerun the same persisted active validation and owned cleanup remains explicit [1352.96ms]
+(pass) concurrent validation replays share one real run and completed receipt stays queryable after policy expiry [1282.74ms]
+
+tests/integration/gateway-files.test.ts:
+(pass) uploaded files get a gateway identity, are retrieved, streamed, listed, referenced and deleted on their original channel, and malformed batch input is refused before reaching the upstream [3067.62ms]
+
+tests/integration/core-supplier-exposure.test.ts:
+(pass) supplier exposure follows the independent manual examples for known cost and remaining reserve [153.67ms]
+
+tests/integration/execution-runtime.test.ts:
+(pass) PG rejects a Gateway's unapproved execution digest before creating any money or send permit [2071.43ms]
+(pass) a warm runtime reader fails promptly instead of deadlocking with approval TRUNCATE waiting on its epoch [449.47ms]
+(pass) owner-verified Worker approval changes the actual Gateway send identity online and revocation returns future requests to approved Wasm [3791.86ms]
+(pass) approval added after a context was issued cannot widen that context's send capabilities [2895.19ms]
+(pass) begin rejects a revoked exact Worker build while the reserved permit remains abortable and immutable [3056.03ms]
+(pass) runtime catalog roles cannot read, write or approve private execution builds [562.38ms]
+(pass) legacy packages with no release descriptor gain only a new verified Wasm attestation without invented historical metadata [1241.86ms]
+(pass) an approval blocked by the catalog epoch cannot commit after its verified trust interval expires [3029.52ms]
+
+tests/integration/core-wallet-concurrency.test.ts:
+(pass) concurrent v2 admissions spend cash first and never promise more credit than the wallet limit [2059.12ms]
+(pass) a v2 admission for one wallet is not blocked by a transaction holding another wallet [3147.43ms]
+(pass) an admission meeting a briefly held wallet lock is reserved after the lock is released instead of being refused with identity_busy [2751.95ms]
+
+tests/integration/plugin-catalog-upgrade.test.ts:
+(pass) actual v3 through financial schema upgrade preserves historical channels audits costs and immutable packages [173.63ms]
+
+tests/integration/gateway-references.test.ts:
+(pass) upstream resource identities supplied by a client are refused before the shared upstream account sees them [2531.67ms]
+
+tests/integration/gateway-openai-compatible.test.ts:
+(pass) a channel bound with the Azure path style reaches the deployment path with api-version and api-key and settles [3204.71ms]
+
+tests/integration/core-evidence-authentication.test.ts:
+(pass) a tampered signature is rejected without claiming the event and the genuine fact still settles [2153.72ms]
+(pass) a security-revoked session keeps its anchored receipt but quarantines new facts without money [1977.67ms]
+(pass) an uncommitted certificate revocation makes ingestion busy and the retry after commit is quarantined [2178.84ms]
+(pass) usage for a permit that was never granted is quarantined and keeps the reservation [2264.39ms]
+(pass) an in-group duplicate of a contested fact returns the contested receipt instead of a missing one [2218.47ms]
+(pass) an instance revocation waits for ingestion that already holds the identity share lock and only later facts are quarantined [2489.21ms]
+(pass) a group with facts from two producers settles both together and rolls back whole when either identity is busy [2078.16ms]
+(pass) facts signed before a normal rotation settle once after the session is disabled, its certificate retired and the old Gateway gone, while a new owner cannot begin or close the old chain [5216.14ms]
+
+tests/integration/core-customer-funds.test.ts:
+(pass) Core admin refunds and adjusts a settled v2 charge idempotently, rejects a changed payload and audits each write [2087.92ms]
+(pass) Core admin credit, credit policy, wallet freeze and tariffs keep their published contracts under customer permissions [2052.37ms]
+(pass) Core admin resolutions are replay-safe, reject changed identities and uncaptured prices, and schedule hold reconciliation [2066.55ms]
+(pass) customer funds endpoints require a platform credential with the matching permission and leave money and audit untouched when denied [2076.12ms]
+
+tests/integration/backup-restore.test.ts:
+(pass) a quiesced backup of v2 traffic is refused while settlement evidence is queued and restores identical ledgers, acknowledgements, plugin catalog and resources [4344.64ms]
+
+tests/integration/gateway-protocols.test.ts:
+(pass) an Anthropic Messages client is served natively through /v1/messages with only the upstream model rewritten, JSON and SSE, and exact settlement [3834.21ms]
+(pass) a Messages client reaching a channel whose plugin only speaks chat is converted to chat upstream and back to Messages JSON and SSE, billed as messages [3142.68ms]
+(pass) a Gemini client reaching a channel whose plugin only speaks chat is converted with the model and stream from the URL and answered in Gemini format [2782.56ms]
+(pass) a Gemini client is served natively through the generateContent paths with the model and stream taken from the URL, the configured output ceiling filled in, and exact settlement [3664.31ms]
+(pass) an OpenAI Responses client is served through /v1/responses with the model and response identity rewritten, JSON and SSE, and exact settlement; an upstream previous_response_id is refused before reaching the upstream [2853.66ms]
+(pass) embeddings, moderations and completions are served by the v2 Gateway with only the model rewritten; embeddings settle by input characters and streaming is refused before the upstream [3203.40ms]
+(pass) completions on a character tariff are charged for the prompt's characters, for a string and a list of prompts, instead of settling to zero [2969.75ms]
+(pass) server-executed tools without a billing dimension are refused with 422 unmetered_tool before Core or the upstream sees the request, while client-executed tools are served on every protocol (the v2 Gateway forwarded unmetered hosted tools) [3198.24ms]
+(pass) a key's CIDR allow-list is checked against the transport address on the chat and Gemini native paths, so a forged x-forwarded-for neither admits nor refuses it unless the peer is a trusted proxy [3548.90ms]
+
+tests/integration/usage-queue-shutdown.test.ts:
+(pass) graceful evidence shutdown waits for Redis ACK after the funding commit instead of stranding an active job [2304.67ms]
+(pass) an ACK blocked past the shutdown budget remains recoverable and cannot charge twice after restart [12415.10ms]
+(pass) closing evidence consumption during a blackholed Redis startup stays bounded and does not reopen connections [1135.99ms]
+(pass) forced shutdown before the funding commit retains evidence for late completion and replay without a second charge [13405.51ms]
+
+tests/integration/capacity.test.ts:
+(pass) an unavailable cleanup shard cannot leave another shard's fixture keys or delete unrelated data [6.85ms]
+(pass) cleanup keeps neighboring namespaces even when their names contain the fixture identity [2.32ms]
+
+tests/integration/core-settlement-schema.test.ts:
+(pass) core attempts accept only signed snapshot lineage and public usage queries never expose RAW [2027.77ms]
+
+tests/integration/gateway-batches.test.ts:
+(pass) a batch upload is validated and rewritten per row, its batch is admitted against the summed row ceilings and settled from the output file without exposing upstream file identities [4322.51ms]
+(pass) a cancelled batch whose rows are all accounted for is charged only for the rows that finished instead of holding its reservation [3480.81ms]
+(pass) a batch upload whose rows the route request policy refuses is rejected before reaching the upstream, and clearing the policy accepts it (batch rows bypassed route request_policy) [2785.80ms]
+(pass) a batch upload whose rows the preferred channel's request policy refuses is uploaded through the compatible channel instead of being rejected [3022.55ms]
+
+tests/integration/gateway-lifecycle.test.ts:
+(pass) a stream cut before its usage and [DONE] reports a gateway stream error and settles no success charge [2879.42ms]
+(pass) empty JSON choices, missing or empty messages, unfinished choices and terminal-only streams never charge as success [3129.67ms]
+(pass) a Gateway refuses to start without durable evidence, and evidence lost after start withholds the terminal, tells stream clients that have received nothing yet and JSON clients to query the request instead of claiming it was not recorded, and never re-sends [4184.84ms]
+(pass) a private upstream address is refused before admission reserves any funds [2744.32ms]
+(pass) a paused settlement worker leaves durable evidence queued and the restarted worker settles it once [3522.87ms]
+(pass) a client that disconnects mid-stream cancels the upstream, keeps the sent attempt's supplier exposure and never leaves quota leases RELEASE_PENDING when Core is busy [3032.12ms]
+(pass) SIGTERM lets an in-flight request finish within the grace period while refusing new work [3776.64ms]
+(pass) a request still running when the grace period ends is cut, answered as draining and closed without a charge [3140.86ms]
+(pass) two Gateway processes receiving the same idempotency key send upstream once and charge once [3440.39ms]
+(pass) a Gateway killed after sending leaves the attempt's outcome unknown with exposure held, and its restart never re-sends [3977.54ms]
+(pass) a lost begin acknowledgement is resolved by status query: the grant is never used and the request settles as not executed [2936.71ms]
+(pass) a lost admission acknowledgement is resolved by status query: the committed reservation is aborted and both parties' funds are released instead of staying reserved [2678.22ms]
+(pass) a killed local plugin helper preserves the unknown send without poisoning the shared upstream channel [3779.81ms]
+(pass) a killed plugin helper fails the in-flight stream without a terminal or re-send, and the next request uses a restarted helper [3468.86ms]
+(pass) prompt and completion canaries never reach PostgreSQL, Redis, the evidence queue or process logs [2961.82ms]
+(pass) a long attempt renews its quota leases until the request closes [3894.70ms]
+(pass) a quota renewal that fails once on a lock conflict keeps renewing instead of letting the leases lapse for the rest of the attempt [4311.35ms]
+(pass) a supplier account awaiting reconciliation makes the v2 Gateway answer 503 no_route without calling upstream instead of core_unavailable [2294.32ms]
+(pass) three upstream 503 replies open the v2 channel circuit so the next request is refused without an upstream call, and one probe after cooldown closes it [2905.10ms]
+(pass) an admission the Gateway abandons after identity_busy releases its half-open probe instead of refusing the channel with no_route until the deadline [22417.04ms]
+
+tests/integration/gateway-anthropic.test.ts:
+(pass) a channel bound to the bundled Anthropic plugin serves chat JSON and SSE through the Gateway with x-api-key, message bodies and exact settlement [3777.64ms]
+
+tests/integration/core-worker-crash.test.ts:
+(pass) a settlement worker killed with its commit unsent moves no money and the restarted worker settles the evidence exactly once [33228.28ms]
+(pass) a settlement worker killed after its commit but before acknowledging the job charges the redelivered evidence only once [33145.29ms]
+
+tests/integration/gateway-bedrock.test.ts:
+(pass) a Bedrock channel signs the final request in the Gateway with a Core-derived key and decodes the binary event stream into chat SSE with exact settlement [3651.19ms]
+(pass) a Bedrock event stream whose single read decodes into hundreds of small events relays every event and settles SUCCEEDED instead of dropping the events past the 256 ready frames [6987.78ms]
+
+tests/integration/quota-leases.test.ts:
+(pass) shared acquire never double charges RPM or TPM and rejected cleanup cannot delete an adopted winner [10.66ms]
+(pass) DRAFT expires after real 30 seconds and its finite tombstone prevents a second charge [30127.47ms]
+(pass) a quota limit reply is a 429 rate limit and does not drop other commands sharing the Redis connection [27.94ms]
+
+tests/integration/internal-identity-inputs.test.ts:
+(pass) missing null and nonstring command authority cannot bypass the final API-role current barrier [869.79ms]
+(pass) missing peer projection and nullable challenge scalars cannot extend or recover a challenge [846.49ms]
+(pass) nullable registration id digest and TTL cannot consume or replay a registration [1182.96ms]
+(pass) nullable provision replays and malformed change actions reject before directory or audit edits [1046.51ms]
+(pass) legal nullable deployment selectors retain disable retire and security revoke scopes [874.02ms]
+
+tests/integration/core-resources-upgrade.test.ts:
+(pass) the resources append pins legacy resource rows to their channel's current plugin binding and leaves unbound channels unpinned [172.98ms]
+
+tests/integration/gateway-deadlines.test.ts:
+(pass) a streaming attempt whose upstream sends no response headers within the header deadline is abandoned as unknown and the request switches to the other channel [3626.32ms]
+(pass) a non-streaming attempt is not cut by the header deadline because its headers arrive with the finished generation [4610.88ms]
+(pass) a streaming upstream that goes silent before completing its first event is abandoned at the idle deadline and the request switches to the other channel [3448.33ms]
+(pass) a streaming upstream that goes silent after visible output ends the stream with a gateway error at the idle deadline instead of holding it to the total deadline, and is never regenerated [3358.99ms]
+(pass) a JSON upstream that sends headers and part of its body then goes silent is abandoned at the idle deadline and the request switches to the other channel [3742.57ms]
+(pass) a streaming client that stops reading is cut at the downstream stall deadline, closing the upstream and the request instead of holding them until it disconnects [4837.63ms]
+(pass) a request that reaches its total deadline while the upstream is still working answers 504 request_deadline instead of reporting an unreachable upstream [8063.35ms]
+(pass) a 200 JSON answer that is malformed or unusable before anything reaches the client switches to the other channel and charges once [5954.49ms]
+(pass) a 200 stream that is invalid or ends before its first visible event switches to the other channel instead of answering with a stream error [5999.54ms]
+
+tests/integration/execution-runtime-history.test.ts:
+PostgresError: function public.core_catalog_write_v1() does not exist
+    errno: "42883",
+ severity: "ERROR",
+     file: "parse_func.c",
+     line: "2502",
+  routine: "LookupFuncWithArgs",
+     code: "ERR_POSTGRES_SERVER_ERROR"
+
+(fail) actual V1 reserved and granted permits survive the appended migration without new sends or fabricated identities [1101.08ms]
+
+tests/integration/core-public-metadata.test.ts:
+(pass) Core public listener serves models, usage and request metadata to every key role within key scope and never returns request bodies [2106.35ms]
+(pass) Core public listener delegates project keys only within the issuing ADMIN key's authority and revokes only same-project keys [1990.19ms]
+(pass) Core public account role can delegate and revoke keys but cannot read verifiers or rewrite key authority [1113.59ms]
+(pass) Core public listener lists only Gemini-capable models in the key's scope at /v1beta/models and accepts x-goog-api-key [2002.42ms]
+
+tests/integration/plugin-lifecycle.test.ts:
+(pass) a trusted publisher uploads a new plugin online that validates, publishes and binds, and lists with its binding history [1396.74ms]
+(pass) uploads outside the publisher namespace, from unknown, revoked or expired publishers, or with tampered releases are refused without a version [556.90ms]
+(pass) upload requires plugins:upload and the bundled install permission alone cannot register a publisher release [604.88ms]
+(pass) disable and quarantine remove a version from execution and new bindings, keep history, and rollback rebinds an earlier version [2275.56ms]
+(pass) a second upload while one is still streaming and a third concurrent validation are refused with catalog_busy without new versions or runs [1692.14ms]
+
+tests/integration/core-first-chain.test.ts:
+(pass) real upstream HTTP JSON through the plugin host is signed, queued and settled for both parties exactly once [2694.73ms]
+(pass) a real upstream SSE stream through the plugin host settles from its final usage frame exactly once [2519.36ms]
+
+tests/integration/core-worker-maintenance.test.ts:
+(pass) core-worker re-settles a disputed v2 request after an admin RELEASE resolution and returns the customer reservation [2438.99ms]
+(pass) core-worker aborts an expired never-granted reservation through Core and releases customer, supplier and quota holds once [2747.00ms]
+(pass) a v2 overrun keeps the full receivable with a DEBT freeze until core-worker collects it from a later cash credit [2213.49ms]
+(pass) the settlement worker role reconciles only through the controlled function and cannot touch customer ledgers directly [1105.90ms]
+
+tests/integration/core-events.test.ts:
+(pass) a platform consumer replays committed Gateway usage once through Core, keeps unacknowledged events after a stale lease, and receives only digital fields [2922.21ms]
+(pass) event APIs are separated by platform permission and unknown consumers are not found [2721.41ms]
+
+tests/integration/core-management-numeric.test.ts:
+(pass) route PATCH stores a new complete ceiling version and overflow admission records a stable rejection without money [1849.66ms]
+(pass) a manifest over the current model output cap is rejected before either side reserves funds [1994.74ms]
+(pass) character bounds never become exact customer charges and exact preflight quantities narrow the supplier reserve [2140.92ms]
+
+tests/integration/core-routing-health.test.ts:
+(pass) three failed attempts open the channel circuit, stale closed-mode successes cannot close it, and only one half-open probe is admitted until it reports [2268.79ms]
+(pass) LEAST_LATENCY orders channels by the latency the Gateway observed for sent attempts [2255.07ms]
+(pass) losing the admission Redis fails context and admission closed without persisting the command, and both recover without a Core restart [2470.09ms]
+(pass) begin re-reads authority and denies send after admission when UPDATE api_keys SET enabled=false [2025.50ms]
+(pass) begin re-reads authority and denies send after admission when UPDATE projects SET enabled=false [2045.90ms]
+(pass) begin re-reads authority and denies send after admission when UPDATE channels SET enabled=false [2074.85ms]
+(pass) begin re-reads authority and denies send after admission when UPDATE routes SET enabled=false [2062.41ms]
+(pass) begin re-reads authority and denies send after admission when UPDATE models SET enabled=false [2135.56ms]
+(pass) begin re-reads authority and denies send after admission when UPDATE upstream_accounts SET state='DISABLED',revision=revision+1 [2074.13ms]
+(pass) a half-open probe released without an observation cannot report later over its replacement probe, so only the replacement's result moves the circuit [3.02ms]
+(pass) a half-open probe whose lease expired cannot report a success that closes the circuit or removes its replacement probe's exclusivity [1110.28ms]
+(pass) a half-open probe with a lease longer than the health retention keeps the health record and its exclusivity for the whole lease [4.00ms]
+(pass) a closed-mode success admitted before the breaker opened cannot close the circuit while the recovery probe is pending, nor erase failures counted after recovery [5.98ms]
+(pass) route candidates for a model served by eight channels are built without copying plugin package bytes into temporary files instead of spilling every request's sort to disk [2261.60ms]
+
+tests/integration/gateway-gemini.test.ts:
+(pass) a channel bound to the bundled Gemini plugin serves chat JSON and SSE through the Gateway with x-goog-api-key and exact settlement [3600.80ms]
+
+tests/integration/core-account.test.ts:
+(pass) Core public listener serves wallets and request billing to ADMIN and BILLING keys with exact string atoms and denies other roles [2150.49ms]
+(pass) Core public listener hides other projects' and out-of-scope requests and applies revocation, expiry and IP limits on the next call [2167.43ms]
+(pass) Core public account role reads only the billing projection and cannot read credentials or write funds [1268.32ms]
+
+tests/integration/runtime-approval-cancellation.test.ts:
+(pass) SIGTERM cancels owner runtime revocation waiting on schema without changing the approval [1976.81ms]
+(pass) SIGTERM cancels owner runtime revocation waiting on approval read without changing the approval [1962.26ms]
+(pass) SIGTERM cancels owner runtime revocation waiting on epoch update without changing the approval [1955.64ms]
+(pass) deadline cancels owner runtime revocation waiting on schema without changing the approval [2464.50ms]
+(pass) deadline cancels owner runtime revocation waiting on approval read without changing the approval [2501.04ms]
+(pass) deadline cancels owner runtime revocation waiting on epoch update without changing the approval [2480.84ms]
+
+tests/integration/plugin-catalog-authorization.test.ts:
+(pass) revocation committed before authorization lock denies new binding without revision receipt or audit writes [1511.00ms]
+(pass) NULL permission elements cannot authorize a binding after the revoker commits before the authorization lock [1347.75ms]
+(pass) restricted Core SQL denies empty NULL-only and nonmatching NULL permissions while allowing a matching permission with NULL [1254.28ms]
+(pass) authorization shared locks let an admitted mutation commit before a competing revoker [1597.62ms]
+(pass) credential naturally expiring during channel lock wait cannot commit an authenticated binding [2176.97ms]
+(pass) stale authenticated actors cannot register claim validate publish bind or claim recovery after permissions change [789.19ms]
+(pass) credential verifier rotation fences old private authentication context but permits the replacement credential [615.06ms]
+(pass) revoking the validation initiator still permits owned cancellation cleanup reap and a fresh active slot [3400.14ms]
+(pass) each technical action succeeds with only its own current permission and recovery cannot publish unknown work [1300.90ms]
+
+tests/integration/core-settlement-regressions.test.ts:
+(pass) a later unknown outcome cannot downgrade a FINAL snapshot and provider usage pricing is still charged [2056.97ms]
+(pass) a same-content revision replay after an ESTIMATED receipt is a replay instead of a constraint error [2042.12ms]
+(pass) in-group copies of a contested revision are each recorded as conflicts instead of a constraint error [2139.93ms]
+(pass) a third in-group claim equal to the first contested value is also contested and nothing becomes canonical [1992.82ms]
+(pass) a dispute whose exposure is covered by the posted cost leaves the supplier hold unsettled without a final cost [2136.12ms]
+(pass) an evidence group meeting a held wallet lock reports busy at once instead of waiting for the lock timeout [2040.25ms]
+(pass) signature and subject rejections leave a bounded technical audit without claiming the events [2287.69ms]
+(pass) manual example A: a known request fee posts while temporary tokens stay reserved and the final adds only the difference [2127.59ms]
+(pass) manual example B: an overrun with an unknown dimension freezes at once, posts in full below zero and a recharge does not revive the account [2151.31ms]
+(pass) manual example C: a successful retry does not release the earlier unknown attempt and total supplier cost is 80 [2240.37ms]
+(pass) a supplier cost beyond 38 digits is an OVERFLOW dispute that freezes the account instead of a failing group [2174.07ms]
+(pass) a new copy grouped after a duplicate of an unanchored conflict is a conflict instead of a retried busy group [2270.26ms]
+(pass) a revision is accepted from its new event regardless of order when a grouped copy reuses a claimed event id [2220.58ms]
+
+tests/integration/core-catalog-cache.test.ts:
+(pass) cold and warm candidates retain the configured rates, identity and exact snapshot without caching unknown scopes [1999.09ms]
+(pass) a committed model output limit invalidates warm candidates in the same transaction [2016.80ms]
+(pass) a committed model routing strategy invalidates warm candidates in the same transaction [2101.27ms]
+(pass) a committed route priority invalidates warm candidates in the same transaction [1949.61ms]
+(pass) a committed channel name included by the existing digest invalidates warm candidates in the same transaction [2037.74ms]
+(pass) a committed channel origin policy invalidates warm candidates in the same transaction [2057.27ms]
+(pass) a committed channel request limit invalidates warm candidates in the same transaction [1965.52ms]
+(pass) a committed channel concurrency invalidates warm candidates in the same transaction [2023.35ms]
+(pass) a committed brand disable invalidates warm candidates in the same transaction [1948.46ms]
+(pass) a committed account disable invalidates warm candidates in the same transaction [2245.29ms]
+(pass) a committed tariff disable invalidates warm candidates in the same transaction [1896.11ms]
+(pass) a committed plugin quarantine invalidates warm candidates in the same transaction [2109.66ms]
+(pass) label and balance changes preserve the epoch and successful funding traffic does not invalidate the catalog [2024.71ms]
+(pass) warm candidates can pass a nonsemantic account write while cold candidates preserve the original NOWAIT fence [2078.80ms]
+(pass) a candidate reader retains its epoch SHARE until commit and a metadata writer waits before its new values become visible [1808.26ms]
+(pass) writer-first catalog mutation makes a new reader return bounded BUSY before commit then exposes the new state [2170.98ms]
+(pass) a concurrent TRUNCATE cannot make a cold epoch reader wait on a source relation [1831.06ms]
+(pass) a committed TRUNCATE invalidates warm tariff candidates and its byte accounting [2006.56ms]
+(pass) same-scope cold contention uses BUSY while another cold scope can compute without waiting for the cache budget lock [2059.81ms]
+(pass) a valid context waits through brief cold catalog contention without exposing a transient identity_busy [2170.72ms]
+(pass) cold context contention stops at the request deadline or retry budget without creating a late context [3378.04ms]
+(pass) disconnecting a cold context request prevents a late context write after its fill lock is released [2287.73ms]
+(pass) metadata rollback restores the epoch and the previously cached snapshot with its byte accounting [1841.36ms]
+(pass) a missing epoch fails closed and runtime cannot read or populate the private candidate cache [1965.21ms]
+(pass) route insertion and deletion replace the cached candidate set at the 128 route boundary [2062.59ms]
+(pass) provider tariff insertion overrides a warm default and deletion restores that exact default [2025.94ms]
+(pass) a controlled binding replacement invalidates cached config and its captured version identity [1960.79ms]
+(pass) installing an unbound signed release invalidates conservatively without changing an existing candidate [2591.55ms]
+(pass) a full bounded cache still returns a legal uncached candidate without growing its row or byte accounting [2403.20ms]
+(pass) the 64 MiB cache byte budget returns oversized remaining scopes without retaining their candidates [4816.90ms]
+
+tests/integration/gateway-chat.test.ts:
+(pass) a JSON chat through Gateway, Core and the settlement worker processes sends once and settles both parties [2994.13ms]
+(pass) an SSE chat through the three processes streams through [DONE] and settles once [2906.54ms]
+(pass) a retryable upstream 503 moves the same request to the other channel and charges the customer once [2852.48ms]
+(pass) a client that cancels after a retryable upstream refusal, while the next attempt waits for admission, never has that attempt granted or sent to the next channel and the request closes CANCELLED with its leases released and no charge [4589.24ms]
+(pass) a manually frozen wallet is refused with 402 insufficient_funds before any request record, hold or upstream call, and unfreezing restores service [2883.45ms]
+(pass) a customer wallet briefly locked by another transaction (identity_busy at admission) retries the admission instead of failing the request with 503 [3880.51ms]
+(pass) a catalog row briefly locked by another transaction (identity_busy) delays the context instead of failing the request with 503 [3258.80ms]
+(pass) a row briefly locked by another transaction when the Gateway begins the send (identity_busy at begin) retries the begin instead of failing the request with 503 [2765.60ms]
+(pass) a non-retryable upstream 400 fails the request after one send and settles a zero customer charge [2828.91ms]
+(pass) the settlement worker's least-privilege role settles a chat but cannot read customer data, startup secrets or call execution functions [2878.35ms]
+(pass) a route request policy refusing the prepared request skips that channel before admission, and when every route refuses nothing is reserved (route request_policy was ignored by the v2 Gateway) [2936.29ms]
+(pass) a disabled route or a disabled channel is excluded before any send, and when every candidate is disabled the request answers 503 no_route without a request record, a hold or an upstream call [3164.53ms]
+(pass) ROUND_ROBIN alternates real upstream calls between same-priority channels with an offset shared by Gateways on different Core instances [3919.09ms]
+(pass) WEIGHTED routing follows a route weight update on the next request instead of a stale preference [3199.30ms]
+(pass) a channel whose own concurrency is full is skipped at admission and the request is served by the next channel instead of 429 rate_limited, without the refused admission holding a customer concurrency slot; when every channel is full the request gets 429 and nothing is reserved [3236.27ms]
+(pass) transient and authorization upstream failures move to the other channel while 400 and 422 stop after one send [4215.43ms]
+(pass) six failing channels stop at Core's default three-attempt budget and the request is finalized FAILED with a zero charge instead of leaving the customer hold HELD [3138.44ms]
+(pass) Core's attempt budget of 1 bounds the sends across six failing channels, each channel sent at most once, and the request is finalized FAILED with a zero charge [3087.45ms]
+(pass) Core's attempt budget of 5 bounds the sends across six failing channels, each channel sent at most once, and the request is finalized FAILED with a zero charge [3346.14ms]
+(pass) a model whose channel carries a large plugin model map, or that is routed to six channels, still answers instead of 503 core_unavailable (the context reply exceeded the 8 KiB internal budget) [2991.70ms]
+(pass) a retryable upstream failure on the only channel finalizes the request FAILED with a zero charge instead of leaving the customer hold HELD [2857.09ms]
+(pass) when the only remaining route refuses the request by policy after a retryable failure, the failed attempt finalizes the request instead of leaving the customer hold HELD [2721.63ms]
+(pass) a refused upstream connection is never sent or charged, does not count against that channel's health, and the request is served by the next channel [2994.44ms]
+(pass) a send refused because every local upstream connection slot and wait slot is taken is never sent or charged and does not open the channel's breaker [3450.53ms]
+(pass) an upstream SSE read carrying 400 events relays every event and settles SUCCEEDED instead of dropping the events past the plugin's 256 ready frames and ending stream_interrupted [5981.09ms]
+(pass) a Gateway keeps serving after Core closes its internal connection at the connection lifetime instead of answering 503 core_unavailable to every later request [7237.88ms]
+(pass) requests under steady concurrent load all succeed across repeated Core connection rotations instead of some answering 503 core_unavailable at each rotation [12892.36ms]
+(pass) 48 concurrent requests on one Gateway complete instead of being refused by internal stream limits [3608.88ms]
+(pass) requests beyond the Gateway plugin attempt budget are refused as 503 overloaded instead of 500 internal_error [5182.52ms]
+
+tests/integration/plugin-catalog-validator.test.ts:
+(pass) real fixture trap fails validation with confirmed process reap [357.00ms]
+(pass) real fixture loop fails validation with confirmed process reap [1338.01ms]
+(pass) real fixture wrong-expectation fails validation with confirmed process reap [339.04ms]
+(pass) wall timeout closes and reaps the actual helper before reporting failed validation [66.51ms]
+(pass) active cancellation closes and reaps the actual helper without a success result [65.52ms]
+(pass) actual helper crash is a failed validation with confirmed process group reap [43.13ms]
+
+tests/integration/upstream-funds.test.ts:
+(pass) real recharge credits CNY USD HKD independently and shared channels do not duplicate funding [215.88ms]
+(pass) CNY payment700 and USD credited100 preserve exact microsecond receipt and balanced USD journal [175.76ms]
+(pass) same recharge reference rejects every changed semantic field and cannot spoof actor [185.37ms]
+(pass) strict recharge validation rejects unsafe money currencies calendars and missing facts without money writes [176.91ms]
+(pass) recharge accepts exact 38 digit amounts but overflow rolls back the second operation [180.09ms]
+(pass) same-key concurrent recharges recover one receipt without duplicate journal or audit [180.75ms]
+(pass) same-key different-currency and different-voucher writers produce one winner without lock cycles [174.07ms]
+(pass) audit failure rolls back balance receipt journal and voucher association inside caller transaction [183.66ms]
+(pass) constraint failure after posting rolls back money and receipt before a successful retry [181.81ms]
+(pass) recharge never revives disabled quarantined or reconciliation-required accounts or rewrites reserved and spent [190.70ms]
+(pass) voucher uploads verify bounded allowed bytes digest and immutable content before persistence [213.33ms]
+(pass) expired unreferenced vouchers reject recharge and reupload until explicit cleanup while referenced evidence survives [587.76ms]
+(pass) cleanup racing an in-flight committed recharge cannot delete its referenced evidence [688.26ms]
+(pass) outer rollback or deferred constraint failure cannot turn a returned recharge into committed money [204.43ms]
+(pass) concurrent same digest uploads return one immutable voucher while PNG JPEG and PDF signatures are explicit [185.11ms]
+(pass) second precision completion normalizes to the same microsecond receipt and replay bypasses a locked balance [171.38ms]
+(pass) cleanup that locks an expired voucher first makes a waiting recharge fail without partial funds [434.75ms]
+(pass) voucher expiring while recharge waits for its lock is rejected after locking [680.57ms]
+(pass) voucher expiring while upload waits for its lock is rejected after locking [687.17ms]
+
+tests/integration/execution-quota-contention.test.ts:
+(pass) begin survives a brief permit lock during confirmed Redis quota adoption without partial writes or a lost receipt [2283.07ms]
+(pass) begin survives a brief quota-lease lock during confirmed Redis quota adoption without partial writes or a lost receipt [2185.16ms]
+
+tests/integration/core-identity-catalog.test.ts:
+(pass) Core admin manages organizations, principals and key scope with immediate effect on the next context [2021.94ms]
+(pass) Core admin lists and changes projects, keys, models and routes under catalog permissions without exposing key verifiers [1920.90ms]
+
+tests/integration/gateway-vertex.test.ts:
+(pass) a Vertex channel exchanges its google-oauth credential in Core, sends only a bearer token to the regional publisher path and never sends with an expired credential [3677.13ms]
+
+tests/integration/lifecycle.test.ts:
+(pass) v2 through financial upgrade preserves settled receipts, ACKs and immutable plugin package, and an open baseline hold settles by explicit resolution [265.12ms]
+(pass) baseline replay preserves funded wallets and permits concurrent foreign-key readers [183.50ms]
+(pass) evidence written at the v2 baseline survives the upgrade, closes by explicit resolution and archives verified monthly snapshots [241.87ms]
+
+tests/integration/core-canonical.test.ts:
+(pass) database canonical key ordering preserves every ASCII code unit and long protocol field names [248.88ms]
+(pass) database canonical mixed Unicode ordering uses UTF-16 rather than UTF-8, locale or JSONB storage order [153.41ms]
+(pass) database canonical preserves nested structures, empty values, escaped strings and persisted numeric spelling [150.32ms]
+
+tests/integration/runtime-approval-deadline.test.ts:
+(pass) many individually bounded Worker fixture calls cannot exceed the total approval deadline or register a build [3314.19ms]
+
+1 tests failed:
+(fail) actual V1 reserved and granted permits survive the appended migration without new sends or fabricated identities [1101.08ms]
+
+ 530 pass
+ 1 fail
+ 12697 expect() calls
+Ran 531 tests across 78 files. [1120.87s]
+error: script "test:integration" exited with code 1

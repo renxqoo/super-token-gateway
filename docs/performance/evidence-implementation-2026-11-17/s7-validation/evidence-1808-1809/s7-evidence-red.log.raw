@@ -1,0 +1,127 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-evidence-batch.test.ts:
+102 |       ]);
+103 |       expect(Object.keys(result.billing ?? {})).toEqual([[first, second][i]!.prepared.requestId]);
+104 |     }
+105 |     expect(
+106 |       await db`SELECT name,operation,array_agg(rows ORDER BY rows) rows FROM evidence_batch_trace WHERE rows>0 GROUP BY name,operation ORDER BY name,operation`,
+107 |     ).toEqual([
+            ^
+error: expect(received).toEqual(expected)
+
+  [
+    {
+      "name": "attempts",
+      "operation": "UPDATE",
+      "rows": [
+-       2,
++       1,
++       1,
++       1,
++       1,
+      ],
+    },
+    {
+      "name": "billing_charges",
+      "operation": "INSERT",
+      "rows": [
+-       2,
++       1,
++       1,
+      ],
+    },
+    {
+      "name": "core_evidence_receipts",
+      "operation": "INSERT",
+      "rows": [
+-       4,
++       1,
++       1,
++       1,
++       1,
+      ],
+    },
+    {
+      "name": "upstream_cost_heads",
+      "operation": "INSERT",
+      "rows": [
+-       2,
++       1,
++       1,
+      ],
+    },
+    {
+      "name": "upstream_costs",
+      "operation": "INSERT",
+      "rows": [
+-       2,
++       1,
++       1,
+      ],
+    },
+    {
+      "name": "upstream_holds",
+      "operation": "UPDATE",
+      "rows": [
+-       2,
++       1,
++       1,
+      ],
+    },
+    {
+      "name": "usage_event_index",
+      "operation": "INSERT",
+      "rows": [
+-       8,
++       1,
++       1,
++       1,
++       1,
++       1,
++       1,
++       1,
++       1,
+      ],
+    },
+    {
+      "name": "usage_payloads",
+      "operation": "INSERT",
+      "rows": [
+-       8,
++       1,
++       1,
++       1,
++       1,
++       1,
++       1,
++       1,
++       1,
+      ],
+    },
+    {
+      "name": "wallets",
+      "operation": "UPDATE",
+      "rows": [
+-       2,
++       1,
++       1,
+      ],
+    },
+  ]
+
+- Expected  - 9
++ Received  + 34
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-evidence-batch.test.ts:107:7)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:68:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:57:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:51:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:41:9)
+(fail) independent signed groups write their facts and costs together while preserving each receipt and charge [2261.80ms]
+
+ 0 pass
+ 1 fail
+ 12 expect() calls
+Ran 1 test across 1 file. [2.33s]

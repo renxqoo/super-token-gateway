@@ -1,0 +1,22 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-catalog-control.test.ts:
+(pass) canceling route management during pool wait leaves no late route, cost or audit mutation [2034.84ms]
+(pass) canceling route management during catalog wait leaves no late route, cost or audit mutation [2044.72ms]
+(pass) canceling route management during route wait leaves no late route, cost or audit mutation [1810.13ms]
+(pass) a real HTTP disconnect cancels a blocked route mutation before its source row is unlocked [2221.21ms]
+(pass) route authentication uses its reserved connection instead of deadlocking a one-connection pool [2036.67ms]
+(pass) a credential naturally expiring in the catalog writer queue cannot commit a route update [2973.58ms]
+(pass) a queued route writer stops new candidate readers for every model and releases the fence after commit [2099.63ms]
+(pass) pool and catalog lock waits share the route operation deadline and cannot write after timeout [5993.50ms]
+(pass) only a catalog writer can invoke the control fence while execution readers retain no writer capability [1034.67ms]
+(pass) the catalog control migration preserves writer access for preexisting column-only route permissions [257.97ms]
+(pass) a lost route POST COMMIT reply reports an unknown result and never repeats the committed route, cost or audit [1897.44ms]
+
+tests/integration/execution-runtime-history.test.ts:
+(pass) actual V1 reserved and granted permits survive the appended migration without new sends or fabricated identities [2084.76ms]
+
+ 12 pass
+ 0 fail
+ 69 expect() calls
+Ran 12 tests across 2 files. [26.55s]

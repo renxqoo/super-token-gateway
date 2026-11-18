@@ -1,0 +1,34 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/runtime-database.test.ts:
+(pass) canceling an owner transaction in the pool queue cannot execute a late mutation after a connection is released [102.44ms]
+(pass) several individually short SQL statements cannot exceed the owner's total transaction deadline or commit [264.23ms]
+(pass) cancellation between owner SQL statements rolls back instead of sending COMMIT after the callback returns [84.26ms]
+(pass) a lost owner COMMIT reply reports an unknown outcome while preserving the actual committed mutation [56.45ms]
+
+tests/integration/core-catalog-control.test.ts:
+(pass) canceling route management during pool wait leaves no late route, cost or audit mutation [2131.13ms]
+(pass) canceling route management during catalog wait leaves no late route, cost or audit mutation [2139.05ms]
+(pass) canceling route management during route wait leaves no late route, cost or audit mutation [1980.49ms]
+(pass) route authentication uses its reserved connection instead of deadlocking a one-connection pool [2068.64ms]
+(pass) a credential naturally expiring in the catalog writer queue cannot commit a route update [2893.59ms]
+(pass) a queued route writer stops new candidate readers for every model and releases the fence after commit [1925.81ms]
+(pass) pool and catalog lock waits share the route operation deadline and cannot write after timeout [5962.20ms]
+(pass) only a catalog writer can invoke the control fence while execution readers retain no writer capability [1018.21ms]
+(pass) a lost route POST COMMIT reply reports an unknown result and never repeats the committed route, cost or audit [1986.47ms]
+
+tests/integration/runtime-approval-cancellation.test.ts:
+(pass) SIGTERM cancels owner runtime revocation waiting on schema without changing the approval [1927.62ms]
+(pass) SIGTERM cancels owner runtime revocation waiting on approval read without changing the approval [1935.20ms]
+(pass) SIGTERM cancels owner runtime revocation waiting on epoch update without changing the approval [1932.69ms]
+(pass) deadline cancels owner runtime revocation waiting on schema without changing the approval [2538.84ms]
+(pass) deadline cancels owner runtime revocation waiting on approval read without changing the approval [2448.26ms]
+(pass) deadline cancels owner runtime revocation waiting on epoch update without changing the approval [2465.17ms]
+
+tests/integration/runtime-approval-deadline.test.ts:
+(pass) many individually bounded Worker fixture calls cannot exceed the total approval deadline or register a build [3278.97ms]
+
+ 20 pass
+ 0 fail
+ 88 expect() calls
+Ran 20 tests across 4 files. [39.24s]

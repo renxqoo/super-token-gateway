@@ -60,7 +60,8 @@ test("retry refuses caller-visible output and excessive global ordinals before f
       candidate_digest: hash,
     };
   const projection = {
-    version: 1,
+    version: 2,
+    execution: { version: 1, kind: "wasm", artifact_digest: hash },
     proposed_request_id: attempt,
     proposed_attempt_id: attempt,
     origin: "https://synthetic.test",

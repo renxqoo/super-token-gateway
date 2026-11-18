@@ -1,0 +1,243 @@
+{
+  "stage": "1812 keyed settlement reads and Worker scheduling comparison",
+  "label": "s7-keyed-reads-300-failed",
+  "target": 300,
+  "rate": 301,
+  "runtime_migration": 2026111812,
+  "worker_schedule": "v1",
+  "exit_code": 1,
+  "valid": false,
+  "capacity_passed": false,
+  "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+  "online_capacity": {
+    "fullyCompletedByWindow": 5171,
+    "minuteCompletions": [5171],
+    "matchedRequests": 15025,
+    "httpOnly": 0,
+    "ackOnly": 99,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 39482,
+    "receiptAckedRequestsByWindow": 5160,
+    "ackedEventsByWindow": 10536,
+    "sampledBeforeWindowEndMs": 51,
+    "httpByWindow": 14932
+  },
+  "window_complete_rps": 86.18333333333334,
+  "http": {
+    "offered": 18060,
+    "shed": 32,
+    "statuses": {
+      "200": 15025,
+      "503": 3003
+    },
+    "latency_ms": {
+      "p50": 547.5,
+      "p95": 1054.27,
+      "p99": 1181.25,
+      "p999": 1634.74
+    }
+  },
+  "process_cpu_ms_per_admitted": {
+    "gateway": 1.9935202327426607,
+    "core_api": 1.6192806135942872,
+    "core_worker": 0.5640042316847395,
+    "upstream": 0.12959534514678656,
+    "redis_admission": 0.5111081724411543,
+    "redis_evidence": 0.07868288812483455,
+    "redis_evidence_replica": 0.050251256281406434,
+    "pg": 23.716609362602483,
+    "pg_shared": 0.023803226659613673
+  },
+  "service_cpu_ms_per_admitted": 28.533456757471566,
+  "cpu_sampling_errors": 0,
+  "pg_top_level": {
+    "calls": 264916,
+    "exec_ms": 409627.57269599923,
+    "wal_bytes": 978308416,
+    "wal_records": 5734720,
+    "calls_per_request": 17.516265538217404,
+    "exec_ms_per_request": 27.084605441417562,
+    "wal_bytes_per_request": 64685.8249140439,
+    "wal_records_per_request": 379.1801110817244
+  },
+  "pg_valid": true,
+  "near_59s": {
+    "at": 58888,
+    "queue": {
+      "waiting": 1808,
+      "active": 8,
+      "delayed": 0,
+      "failed": 0
+    },
+    "persistence": {
+      "calls": 1273,
+      "groups": 10545,
+      "events": 21090,
+      "max_groups": 66,
+      "lock_conflicts": 5329,
+      "errors": 0,
+      "active_jobs": 8
+    }
+  },
+  "last_persistence_sample": {
+    "calls": 3244,
+    "groups": 26410,
+    "events": 52820,
+    "max_groups": 96,
+    "lock_conflicts": 11112,
+    "errors": 0,
+    "active_jobs": 2
+  },
+  "accounting": {
+    "requests": 15124,
+    "attempts": 15124,
+    "succeeded_attempts": 15124,
+    "usage_events": 30248,
+    "usage_requests": 15124,
+    "unexpected_receipts": 0,
+    "precise_usage": 30248,
+    "precise_charges": 15124,
+    "settled_holds": 15124,
+    "reserved": "0",
+    "spent": "1512400",
+    "debt": "0",
+    "acknowledged": 30248,
+    "settlement_journals": 15124,
+    "unbalanced_journals": 0,
+    "supplier_cost_heads": 15124,
+    "conflicts": 0,
+    "inconsistent_hold_reserves": 0,
+    "inconsistent_funding_budgets": 0,
+    "inconsistent_cell_reserves": 0,
+    "unbalanced_supplier_journals": 0
+  },
+  "supplier": {
+    "balance": "999999999999107684",
+    "reserved": "0",
+    "spent": "892316",
+    "accounts": 1
+  },
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os_release": "27.0.0",
+    "cpu_model": "Apple M6",
+    "cpu_count": 12,
+    "memory_bytes": 25769803776,
+    "bun": "1.4.4",
+    "artifacts": {
+      "dist/core-api/main.js": "11c132ac299ea371bddb143a4acb06539473260cb78760fc4730038dd03c4405",
+      "dist/core-api/platform/management.js": "3179c977fd58b85556a87f8e140717c1d0a47d52c1b6d5a2b54ca0c70ec36c1c",
+      "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+      "dist/core-worker/main.js": "01bd1458e4f8562725b5b2ca1f9e807809188e45ba486dc8b56d8add14e00cf3",
+      "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+      "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+      "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+      "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+      "dist/manifest.json": "9f83edd8d54022dfbf3116f0de38e6411f43d5afef9e4513e11058c20edde6a7"
+    }
+  },
+  "database_settings": [
+    {
+      "name": "checkpoint_timeout",
+      "setting": "300",
+      "unit": "s"
+    },
+    {
+      "name": "effective_cache_size",
+      "setting": "524288",
+      "unit": "8kB"
+    },
+    {
+      "name": "fsync",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "full_page_writes",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "max_connections",
+      "setting": "200",
+      "unit": null
+    },
+    {
+      "name": "max_wal_size",
+      "setting": "1024",
+      "unit": "MB"
+    },
+    {
+      "name": "server_version",
+      "setting": "17.11",
+      "unit": null
+    },
+    {
+      "name": "shared_buffers",
+      "setting": "32768",
+      "unit": "8kB"
+    },
+    {
+      "name": "synchronous_commit",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "wal_compression",
+      "setting": "off",
+      "unit": null
+    },
+    {
+      "name": "work_mem",
+      "setting": "4096",
+      "unit": "kB"
+    }
+  ],
+  "redis_settings": {
+    "admission": {
+      "maxmemory-policy": "noeviction",
+      "aof-load-truncated": "yes",
+      "appendfsync": "everysec",
+      "appendonly": "yes"
+    },
+    "evidence": {
+      "maxmemory-policy": "noeviction",
+      "appendonly": "yes",
+      "aof-load-truncated": "no",
+      "appendfsync": "always"
+    }
+  },
+  "database_bytes": 620680883,
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "files": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-keyed-reads-300-failed/audit.json.raw",
+      "sha256": "551dbfe1f26d448632718d20619f09ed2c8139cf19e505f215036f0e63eb8c0f",
+      "bytes": 803862
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-keyed-reads-300-failed/http.json.raw",
+      "sha256": "fc087ac773573d0721ec5d30eb71db1daf57d66ddc40634d4e8d9f35f3cb9335",
+      "bytes": 10078
+    },
+    "http.json.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-keyed-reads-300-failed/http.json.identities.tsv",
+      "sha256": "146729f04f7f7443e9ad0e8b39ce6a9228a7862cd051676a9799c8828dcafe35",
+      "bytes": 766275
+    },
+    "ack.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-keyed-reads-300-failed/ack.identities.tsv",
+      "sha256": "06a6c1e3facfab049da2642ab512c2b59a52de05c775af7352ee9efa935ec175",
+      "bytes": 771324
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-keyed-reads-300-failed/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    }
+  }
+}

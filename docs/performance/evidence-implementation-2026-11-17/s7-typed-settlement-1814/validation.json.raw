@@ -1,0 +1,208 @@
+{
+  "recorded_at": "2026-11-18T08:03:19.871624+00:00",
+  "commands": [
+    "bun --env-file=.env.local --env-file=.local/native-gate.env run verify",
+    "bun --env-file=.env.local --env-file=.local/native-gate.env run test:durability",
+    "bun --env-file=.env.local --env-file=.local/native-gate.env run test:backup --quiesced (owned fixture)"
+  ],
+  "verify_exit": 0,
+  "initial_verify_stopped_at_typecheck_in_new_test": true,
+  "typecheck_files": 357,
+  "formatted_files_at_verify": 764,
+  "native_tests": {
+    "top_level": 34,
+    "with_subtests": 48
+  },
+  "bun_test_runs": [
+    {
+      "passed": 450,
+      "failed": 0,
+      "assertions": 8078,
+      "total": 450,
+      "files": 71
+    },
+    {
+      "passed": 580,
+      "failed": 0,
+      "assertions": 13417,
+      "total": 580,
+      "files": 93
+    }
+  ],
+  "plugin_artifacts": [
+    {
+      "artifact": "isolated-plugin",
+      "cases": 84,
+      "steps": 112
+    },
+    {
+      "artifact": "isolated-builtin-worker",
+      "cases": 84,
+      "steps": 112
+    }
+  ],
+  "system_artifact_checks": 41,
+  "matching_final_rounds": [
+    "typed-final-200-a",
+    "typed-final-180-a",
+    "typed-final-180-b",
+    "typed-final-300-a",
+    "typed-final-170-a",
+    "typed-final-170-b",
+    "typed-final-160-a",
+    "typed-final-160-b",
+    "typed-final-150-a",
+    "typed-final-150-b"
+  ],
+  "artifact_sha256": {
+    "dist/core-api/main.js": "ddf03ab9faee54de417b9bcbfcca15402ad86fd6a16dba6b021675b177feffea",
+    "dist/core-api/platform/management.js": "86cb902392f9ff2bb58b0f8cf81fdc3b389ee3bf86f1d6bd3461a0325682609f",
+    "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+    "dist/core-worker/main.js": "cada453a65f2a4495f77ef84064a9d25f580ae34bbb8406e45189b20c106ccde",
+    "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+    "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+    "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+    "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+    "dist/manifest.json": "a5cdcc7dc83649f7710e08b990515111f4382bfbefd78d2cb51f22050dfae1bb"
+  },
+  "durability": {
+    "durability": "pass",
+    "fixture": "native",
+    "scope": "v2-core-settlement",
+    "checks": [
+      "production topology acknowledges every connected candidate and rejects live persistence drift",
+      "a replica that resumes with a stale fsync acknowledgement confirms evidence without waiting for its periodic ACK",
+      "primary hard restart retains acknowledged v2 evidence from its AOF",
+      "acknowledged replica promotion retains v2 evidence and the settlement worker settles it once",
+      "promoted node without required durable replica rejects admission",
+      "unsafe persistence configuration rejects admission",
+      "strict evidence payload rejects body; charges, receipts and supplier journals remain singular"
+    ],
+    "charges": 1,
+    "supplier": {
+      "balance": "985",
+      "reserved": "30",
+      "spent": "15"
+    },
+    "tools": {
+      "initdb": {
+        "path": "/Users/wr/work/super-token-gateway/.local/toolchain/pg17/bin/initdb",
+        "version": "initdb (PostgreSQL) 17.11"
+      },
+      "postgres": {
+        "path": "/Users/wr/work/super-token-gateway/.local/toolchain/pg17/bin/postgres",
+        "version": "postgres (PostgreSQL) 17.11"
+      },
+      "redis": {
+        "path": "/Users/wr/work/super-token-gateway/.local/toolchain/redis74/bin/redis-server",
+        "version": "Redis server v=7.4.12 sha=3f2e1e0c:0 malloc=libc bits=64 build=87341d32b0c2dfa5"
+      }
+    },
+    "ownedResources": {
+      "processes": [],
+      "directories": [],
+      "ports": [],
+      "timers": 0
+    }
+  },
+  "backup": {
+    "source_database": "gateway_test_foundation_79b4af7102d845338d1d1e3d389ee6ab",
+    "namespace": "gateway-stack_923a2da2b6914ea78344f8dea26bc503",
+    "quiesced": true,
+    "exit_code": 0,
+    "result": {
+      "backup_restore": "pass",
+      "file": "/Users/wr/work/super-token-gateway/.local/backups/gateway-1794987153520.dump",
+      "bytes": 2429472,
+      "sha256": "d31b96e3ac430866c3f496d2dd9455ec0a4376ed952fa6f8a0f592b3e13230b4",
+      "attempts": "1",
+      "usage": "2",
+      "journals": "3",
+      "holds": "1",
+      "charges": "1",
+      "lots": "1",
+      "credit_policies": "0",
+      "balances": [
+        {
+          "debt": "0",
+          "spent": "100",
+          "expired": "0",
+          "currency": "USD",
+          "reserved": "0",
+          "available": "900",
+          "credit_limit": "0",
+          "credit_reserved": "0",
+          "credit_versions": "0"
+        }
+      ],
+      "inconsistent_credit": 0,
+      "unbalanced": 0,
+      "inconsistent_wallets": 0,
+      "upstream_balances": [
+        {
+          "spent": "15",
+          "balance": "985",
+          "currency": "USD",
+          "reserved": "0"
+        }
+      ],
+      "inconsistent_upstream": 0,
+      "inconsistent_funding_cells": 0,
+      "inconsistent_hold_reserves": 0,
+      "unbalanced_upstream": 0,
+      "evidence_kinds": {
+        "RAW": "2",
+        "CANONICAL": "2"
+      },
+      "deliveries": null,
+      "consumers_digest": "d41d8cd98f00b204e9800998ecf8427e",
+      "deliveries_digest": "d41d8cd98f00b204e9800998ecf8427e",
+      "receipts_digest": "5782c4aa6a8ce0aa5aa4695f684d5fea",
+      "upstream_entries_digest": "68adbd638bbe35130c7cb02ea52aadc1",
+      "funding_roots_digest": "6fb072939829aff4addec7630f374a51",
+      "funding_holds_digest": "0e26fc9d6b5e7b620d9bafe9d28aba7a",
+      "funding_cells_digest": "dbf18cc1de74d496182abb94de6422b1",
+      "funding_transfers_digest": "c73dfe21fea9e9c8266338dc99a1c2cf",
+      "plugin_packages_digest": "9aa92c707afe8b8166335586bf5c107e",
+      "plugin_versions_digest": "f4c990c8792f803ba96c53ba499e70fe",
+      "plugin_bindings_digest": "c13b5d6011589d9652ed5347de584157",
+      "runtime_approvals": "1",
+      "runtime_approvals_digest": "5134731ae6505ca88a2a01e407f39e61",
+      "execution_permits_digest": "1e9c94705cb0a8c8adc948e05b33683c",
+      "resources_digest": "d41d8cd98f00b204e9800998ecf8427e",
+      "queue": "quiesced and drained",
+      "immutable_trigger": "verified",
+      "current_roles": "reapplied",
+      "runtime_permissions": "owner-only"
+    },
+    "dump_removed": true,
+    "fixture_cleaned": true
+  },
+  "long_run_minimum_budget": {
+    "sample": "typed-final-150-a",
+    "available": 25279696896,
+    "rate": 3001,
+    "duration_seconds": 3600,
+    "estimated_and_reserve": 62607934592,
+    "bytes_per_request_assumed": 5000,
+    "sufficient": false
+  },
+  "verify_log_sha256": "623d0cad45e3047ee826ba678fcd218e2fd036d72c68ba706195411c09ced60a",
+  "cleanup": {
+    "databases_absent": 14,
+    "namespace_cleanup_passed": 14,
+    "aborted_digest_fixture": {
+      "database_absent": true,
+      "roles_absent": 3,
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "scratch_removed": true
+    },
+    "recorded_at": "2026-11-18T08:03:19.832891+00:00",
+    "process_identities_checked": 491,
+    "scratch_removed": 14,
+    "raw_files_verified": 70
+  }
+}

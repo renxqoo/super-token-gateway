@@ -1,0 +1,35 @@
+from pathlib import Path
+import hashlib
+import json
+import shutil
+
+root = Path.cwd()
+source = root / '.local/capacity/bench-730282104d55493c922a60cfc966a8ce'
+base = root / 'docs/performance/evidence-implementation-2026-11-17'
+destination = base / 's7-early-lock-300-failed'
+destination.mkdir(exist_ok=True)
+audit = json.loads((source / 'audit.json').read_text())
+files = {}
+for name in ['audit.json', 'http.json', 'http.json.identities.tsv', 'ack.identities.tsv', 'cleanup.json']:
+    original = source / name
+    target = destination / (name + '.raw' if name.endswith('.json') else name)
+    if target.exists():
+        assert target.read_bytes() == original.read_bytes()
+    else:
+        shutil.copyfile(original, target)
+    assert hashlib.sha256(target.read_bytes()).digest() == hashlib.sha256(original.read_bytes()).digest()
+    files[name] = {'archive': str(target.relative_to(root)), 'sha256': hashlib.sha256(target.read_bytes()).hexdigest(), 'bytes': target.stat().st_size}
+log = root / '.local/performance-implementation/s7-1809-diagnostic-300.log'
+shutil.copyfile(log, destination / 'benchmark.log')
+cpu = {name: value['cpu_ms_per_request'] for name, value in audit['processes'].items()}
+command = ['env', 'QUEUE_REQUIRED_REPLICAS=1', '.local/toolchain/bun-1.4.4/bun', '--env-file=.env.local', '--env-file=.local/native-gate.env', 'scripts/bench-system.ts', '--online-capacity', '--seconds', '60', '--instances', '1', '--wallets', '1000', '--supplier-accounts', '1', '--concurrency', '256', '--warmup-concurrency', '16', '--worker-concurrency', '8', '--gateway-inflight', '10000', '--drain-seconds', '120', '--request-timeout-ms', '30000', '--plugin-runtime', 'builtin-worker', '--target-rps', '300', '--rate', '301', '--upstream', 'standard']
+round = {'stage': 'S7 1809 early cell locks high-load diagnostic', 'label': destination.name, 'diagnostic': True, 'excluded_from_stability': True, 'runtime_migration': 2026111809, 'target': 300, 'rate': 301, 'pluginRuntime': audit['pluginRuntime'], 'requests': audit['accounting']['requests'], 'valid': audit['valid'], 'failures': audit['failures'], 'capacityPassed': audit['capacityPassed'], 'p99': audit['http']['latency_ms']['p99'], 'onlineCapacity': audit['onlineCapacity'], 'http': {name: audit['http'][name] for name in ['offered', 'shed', 'completed', 'succeeded', 'invalid', 'statuses', 'gateway_errors', 'transport_errors']}, 'window_complete_rps': audit['onlineCapacity']['fullyCompletedByWindow'] / 60, 'process_cpu_ms': cpu, 'total_cpu_ms': sum(value for name, value in cpu.items() if name not in ['upstream', 'pg_shared']), 'cpu_denominator': 'all admitted requests including warmup; CPU also includes rejected HTTP work, so this is not all-success per-request cost', 'pg': audit['pgStatements']['topLevel'], 'pg_valid': audit['pgStatements']['valid'], 'pg_errors': audit['pgStatements']['errors'], 'cpu_sampling_errors': audit['processCpu']['errors'], 'accounting': audit['accounting'], 'supplier': audit['supplier'], 'wallet_mismatches': audit['walletMismatches'], 'artifacts': audit['environment']['artifacts'], 'command': command, 'exit_code': 1, 'cleanup': json.loads((source / 'cleanup.json').read_text()), 'source_directory': str(source.relative_to(root)), 'database': audit['database'], 'database_bytes': audit['database_bytes'], 'archive_manifest': files}
+assert round['pg_valid'] and not round['pg_errors'] and round['cpu_sampling_errors'] == 0
+(destination / 'round.json').write_text(json.dumps(round, ensure_ascii=False, indent=2) + '\n')
+index = base / 'rounds.json'
+rounds = json.loads(index.read_text())
+assert isinstance(rounds, list)
+assert not any(item['label'] == round['label'] for item in rounds)
+rounds.append(round)
+index.write_text(json.dumps(rounds, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({name: round[name] for name in ['label', 'capacityPassed', 'exit_code', 'window_complete_rps', 'total_cpu_ms', 'pg_valid']}))

@@ -1,0 +1,97 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-management.test.ts:
+{"fundingBarrierProbe":"root_lock","status":503}
+606 |     const rows =
+607 |       await db`SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND ${pid}=ANY(pg_blocking_pids(pid))`;
+608 |     if (rows.length) return Number(rows[0].pid);
+609 |     await Bun.sleep(5);
+610 |   }
+611 |   throw new Error("Expected PostgreSQL blocking edge absent");
+                  ^
+error: Expected PostgreSQL blocking edge absent
+      at financialBlockedBy (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:611:13)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-management.test.ts:91:30)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:68:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:57:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:51:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:41:9)
+(fail) funding SHARE holds the exact platform credential through recharge receipt journal audit commit [4251.39ms]
+
+tests/integration/schema.test.ts:
+(pass) Drizzle and Bun.SQL preserve atoms above Number precision in each currency [200.41ms]
+
+tests/integration/plugin-catalog-upgrade.test.ts:
+(pass) actual v3 through financial schema upgrade preserves historical channels audits costs and immutable packages [191.93ms]
+
+tests/integration/gateway-lifecycle.test.ts:
+(pass) a Gateway refuses to start without durable evidence, and evidence lost after start withholds the terminal, tells stream clients that have received nothing yet and JSON clients to query the request instead of claiming it was not recorded, and never re-sends [4109.83ms]
+{"admissionAckProbe":{"requests":0,"attempts":0,"cells":0}}
+262 | }
+263 | 
+264 | export async function eventually(check: () => Promise<boolean>, label: string, ms = 15000) {
+265 |   const end = Date.now() + ms;
+266 |   while (!(await check())) {
+267 |     if (Date.now() > end) throw new Error(`Timed out waiting for ${label}`);
+                                          ^
+error: Timed out waiting for request outcome
+      at eventually (/Users/wr/work/super-token-gateway/tests/support/gateway-process.ts:267:37)
+      at async requestOutcome (/Users/wr/work/super-token-gateway/tests/support/gateway-process.ts:544:9)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/gateway-lifecycle.test.ts:466:24)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/gateway-process.ts:404:17)
+      at async withSettlementRole (/Users/wr/work/super-token-gateway/tests/support/gateway-process.ts:130:18)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:68:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:57:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:51:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:41:9)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/gateway-lifecycle.test.ts:449:13)
+(fail) a lost admission acknowledgement is resolved by status query: the committed reservation is aborted and both parties' funds are released instead of staying reserved [17654.20ms]
+(pass) a killed local plugin helper preserves the unknown send without poisoning the shared upstream channel [3641.19ms]
+
+tests/integration/core-routing-health.test.ts:
+(pass) begin re-reads authority and denies send after admission when UPDATE upstream_accounts SET state='DISABLED',revision=revision+1 [2139.30ms]
+
+tests/integration/gateway-chat.test.ts:
+(pass) a disabled route or a disabled channel is excluded before any send, and when every candidate is disabled the request answers 503 no_route without a request record, a hold or an upstream call [3222.88ms]
+{"occupyingProbe":{"status":429,"request":"b7bba826-166b-465d-8600-d0c249e643dd","leases":[{"request_id":"b633bb3f-2a33-4973-a88f-75ab4fd94ea8","scope_kind":"channel","state":"ACTIVE"},{"request_id":"b633bb3f-2a33-4973-a88f-75ab4fd94ea8","scope_kind":"key","state":"ACTIVE"},{"request_id":"b633bb3f-2a33-4973-a88f-75ab4fd94ea8","scope_kind":"project","state":"ACTIVE"},{"request_id":"f9229e5c-84e8-42cb-9379-0a7a1e47ac7b","scope_kind":"channel","state":"ACTIVE"},{"request_id":"f9229e5c-84e8-42cb-9379-0a7a1e47ac7b","scope_kind":"key","state":"ACTIVE"},{"request_id":"f9229e5c-84e8-42cb-9379-0a7a1e47ac7b","scope_kind":"project","state":"ACTIVE"}],"requests":[{"id":"b633bb3f-2a33-4973-a88f-75ab4fd94ea8","state":"ADMITTED","billing_outcome":"PENDING","execution_closed_at":null},{"id":"f9229e5c-84e8-42cb-9379-0a7a1e47ac7b","state":"ADMITTED","billing_outcome":"PENDING","execution_closed_at":null}]}}
+warn: Bun.serve() timed out a request after 10 seconds. Pass `idleTimeout` to configure.
+12 |   withGatewayStack,
+13 | } from "../support/gateway-process.ts";
+14 | 
+15 | async function expectStatus(response: Response, status: number) {
+16 |   const text = await response.text();
+17 |   expect({ status: response.status, text: response.status === status ? "" : text }).toEqual({
+                                                                                         ^
+error: expect(received).toEqual(expected)
+
+  {
+-   "status": 200,
+-   "text": "",
++   "status": 429,
++   "text": "{"error":{"type":"rate_limited","code":"rate_limited","message":"Admission capacity is exhausted"},"request_id":"b7bba826-166b-465d-8600-d0c249e643dd"}",
+  }
+
+- Expected  - 2
++ Received  + 2
+
+      at expectStatus (/Users/wr/work/super-token-gateway/tests/integration/gateway-chat.test.ts:17:85)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/gateway-chat.test.ts:561:15)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/gateway-process.ts:404:17)
+      at async withSettlementRole (/Users/wr/work/super-token-gateway/tests/support/gateway-process.ts:130:18)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:68:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:57:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:51:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:41:9)
+(fail) a channel whose own concurrency is full is skipped at admission and the request is served by the next channel instead of 429 rate_limited, without the refused admission holding a customer concurrency slot; when every channel is full the request gets 429 and nothing is reserved [12221.46ms]
+
+tests/integration/lifecycle.test.ts:
+(pass) v2 through financial upgrade preserves settled receipts, ACKs and immutable plugin package, and an open baseline hold settles by explicit resolution [280.51ms]
+
+ 7 pass
+ 79 filtered out
+ 3 fail
+ 107 expect() calls
+Ran 10 tests across 7 files. [48.00s]

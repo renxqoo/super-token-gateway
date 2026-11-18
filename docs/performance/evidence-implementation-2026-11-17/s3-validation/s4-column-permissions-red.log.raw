@@ -1,0 +1,24 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-catalog-control.test.ts:
+273 |           await tx.unsafe(`GRANT ${role.privilege} ON public.routes TO ${role.name}`);
+274 |         }
+275 |         for (const file of manifest.migrations.at(-1)!.files)
+276 |           await tx.unsafe(await Bun.file(new URL(`../../packages/storage/src/${file.path}`, import.meta.url)).text());
+277 |         for (const role of roles) {
+278 |           expect((await tx`SELECT has_function_privilege(${role.name},'core_catalog_write_v1()','EXECUTE') allowed`)[0].allowed).toBe(true);
+                                                                                                                                       ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-catalog-control.test.ts:278:130)
+      at async run (bun:sql:313:32)
+(fail) the catalog control migration preserves writer access for preexisting column-only route permissions [194.16ms]
+
+ 0 pass
+ 9 filtered out
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [270.00ms]

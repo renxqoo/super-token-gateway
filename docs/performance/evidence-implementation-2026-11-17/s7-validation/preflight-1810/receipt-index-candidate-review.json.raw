@@ -1,0 +1,18 @@
+{
+  "scope": "read-only next candidate, no product change",
+  "candidate": "reorder same core_receipt_delivery UNIQUE to(event_id,origin_identity,body_digest)",
+  "observed_facts": [
+    "All three columns NOT NULL; rejected duplicate triples unchanged",
+    "No product origin-only receipt query found; current delivery lookup supplies all3 keys",
+    "No receipt ON CONFLICT, constraint-name invocation, or column-order Drizzle consumer found",
+    "Incoming foreign keys target receipt id, not delivery triple",
+    "Partial event-claim index remains origin-leading but revision query has no event_claim predicate"
+  ],
+  "risks": [
+    "Optimizer could still choose full delivery index scan; index order is not performance proof",
+    "Both red/green DDL must finish before warmup; rebuilding invalidates cached plans",
+    "Need cold low-cardinality-origin schema read regression and unchanged uniqueness tests"
+  ],
+  "agent": "/root/financial_batch_audit",
+  "implemented": false
+}

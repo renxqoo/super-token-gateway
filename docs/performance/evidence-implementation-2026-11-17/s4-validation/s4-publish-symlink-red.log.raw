@@ -1,0 +1,26 @@
+bun test v1.4.4 (38afee6c8)
+
+packages/plugin-host/src/__test__/executable.test.ts:
+80 |     const pinned = await publishPluginExecutable(source);
+81 |     await writeFile(source, "replacement-helper");
+82 |     await unlink(pinned.executable);
+83 |     await symlink(source, pinned.executable);
+84 |     const publication = await publishPluginExecutable(pinned.executable).catch((error: unknown) => error);
+85 |     expect(publication).toBeInstanceOf(Error);
+                             ^
+error: expect(received).toBeInstanceOf(expected)
+
+Expected constructor: [class Error]
+Received value: {
+  executable: "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/gateway-executable-symlink-sACzoX/executables/7e28a3295b9d7abb5a125fa547d9ce70949e5b3f76d5a76c7253879305f5aaa2/plugin-host",
+  digest: "7e28a3295b9d7abb5a125fa547d9ce70949e5b3f76d5a76c7253879305f5aaa2",
+}
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/packages/plugin-host/src/__test__/executable.test.ts:85:25)
+(fail) a declared immutable helper replaced by a symlink cannot publish its target under a new identity [2.59ms]
+
+ 0 pass
+ 6 filtered out
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [26.00ms]

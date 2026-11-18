@@ -1,0 +1,150 @@
+{
+  "stage": "S7 funding-cell cut diagnostic, before setwise SQL",
+  "label": "s7-diagnostic-60-a",
+  "diagnostic": true,
+  "excluded_from_stability": true,
+  "target": 60,
+  "rate": 61,
+  "pluginRuntime": "builtin-worker",
+  "requests": 3755,
+  "valid": true,
+  "failures": [],
+  "capacityPassed": true,
+  "p99": 201.05,
+  "onlineCapacity": {
+    "fullyCompletedByWindow": 3656,
+    "minuteCompletions": [3656],
+    "matchedRequests": 3660,
+    "httpOnly": 0,
+    "ackOnly": 95,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 61,
+    "receiptAckedRequestsByWindow": 3651,
+    "ackedEventsByWindow": 7492,
+    "sampledBeforeWindowEndMs": 97,
+    "httpByWindow": 3657
+  },
+  "process_cpu_ms": {
+    "gateway": 3.262316910785619,
+    "core_api": 2.9826897470039953,
+    "core_worker": 1.081225033288948,
+    "upstream": 0.2583222370173103,
+    "redis_admission": 0.6604527296937333,
+    "redis_evidence": 0.3728362183754933,
+    "redis_evidence_replica": 0.20505992010652735,
+    "pg": 16.455392809587217,
+    "pg_shared": 0.0026631158455392243
+  },
+  "total_cpu_ms": 25.019973368841534,
+  "pg": {
+    "calls": 150334,
+    "exec_ms": 88028.08434800012,
+    "wal_bytes": 227701360,
+    "wal_records": 1516148,
+    "calls_per_request": 40.035685752330224,
+    "exec_ms_per_request": 23.442898627962748,
+    "wal_bytes_per_request": 60639.50998668442,
+    "wal_records_per_request": 403.767776298269
+  },
+  "pg_valid": true,
+  "pg_errors": [],
+  "cpu_sampling_errors": 0,
+  "artifacts_after_run": {
+    "dist/core-api/main.js": "c774a7187c6c4db2ec057b459da54d38b6bcc4c2b6454cc441536a8357e1c89b",
+    "dist/core-api/platform/management.js": "e8ca091eeca1a2261376c06c945a90960e970d48ee84a5ceb7aa4b651aaafd3a",
+    "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+    "dist/core-worker/main.js": "69ecb78079bab6aeccfd8268f3c0c508ee079771f0871e931706b4d8be5677fb",
+    "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+    "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+    "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+    "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+    "dist/manifest.json": "7fd8c094c8021dbdc19e68a3042ebbaa85c6cd99292ef90d9881063c52b8cd6d"
+  },
+  "artifacts_before_after_equal": true,
+  "command": [
+    "QUEUE_REQUIRED_REPLICAS=1",
+    ".local/toolchain/bun-1.4.4/bun",
+    "--env-file=.env.local",
+    "--env-file=.local/native-gate.env",
+    "scripts/bench-system.ts",
+    "--online-capacity",
+    "--seconds",
+    "60",
+    "--instances",
+    "1",
+    "--wallets",
+    "1000",
+    "--supplier-accounts",
+    "1",
+    "--concurrency",
+    "256",
+    "--warmup-concurrency",
+    "16",
+    "--worker-concurrency",
+    "8",
+    "--gateway-inflight",
+    "10000",
+    "--drain-seconds",
+    "120",
+    "--request-timeout-ms",
+    "30000",
+    "--plugin-runtime",
+    "builtin-worker",
+    "--target-rps",
+    "60",
+    "--rate",
+    "61",
+    "--upstream",
+    "standard"
+  ],
+  "exit_code": 0,
+  "original_audit_sha256": "c4758cfb07f946493877c5bb8972d8c1b4dbbf48f1775a49d5261a56de470b16",
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "source_directory": ".local/capacity/bench-23b6e27d1d834f8b8183e2a24165a121",
+  "database": "gateway_test_foundation_657b0ec0f9824fe0b7811e4b2fd38392",
+  "archive_manifest": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-diagnostic-60-a/audit.json.raw",
+      "sha256": "c4758cfb07f946493877c5bb8972d8c1b4dbbf48f1775a49d5261a56de470b16",
+      "bytes": 458359
+    },
+    "upstream.pem": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-diagnostic-60-a/upstream.pem",
+      "sha256": "6a0d7ebaa964597851cc56b99475618b128175b9ba387b856ab296fb19216d4b",
+      "bytes": 1013
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-diagnostic-60-a/http.json.raw",
+      "sha256": "ad7d1d1b8ad602e535b453031a7a24041161836ba70e6918d31f9050469e0e3e",
+      "bytes": 8970
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-diagnostic-60-a/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    },
+    "ack.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-diagnostic-60-a/ack.identities.tsv",
+      "sha256": "78b1cdbb3838ad5cbfac33b13aa6f71a2cdcb2430a432758c5a617586ca0054d",
+      "bytes": 191505
+    },
+    "http.json.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-diagnostic-60-a/http.json.identities.tsv",
+      "sha256": "5333611e69a585798c50761475d72f2df9ded25ddc66bc33bb5902451fb8a8f8",
+      "bytes": 186660
+    },
+    "load.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-diagnostic-60-a/load.log",
+      "sha256": "ad7d1d1b8ad602e535b453031a7a24041161836ba70e6918d31f9050469e0e3e",
+      "bytes": 8970
+    },
+    "upstream.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-diagnostic-60-a/upstream.log",
+      "sha256": "dff63a8fd20277f85ab6c066d9d6dc0e4467086ae37c52391811670ba09d49ad",
+      "bytes": 48
+    }
+  }
+}

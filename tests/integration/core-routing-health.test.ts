@@ -192,7 +192,12 @@ for (const [change, expected] of [
       await client.startup();
       const prepared = await prepareFinancialAdmission(setup, client);
       const reply = (await prepared.admit()) as ExecutionReply;
-      await db.unsafe(change);
+      if (change.startsWith("UPDATE upstream_accounts "))
+        await db.begin(async (tx) => {
+          await tx`SELECT core_funding_control_v1(${setup.provider.account_id}::uuid,true)`;
+          await tx.unsafe(`${change} WHERE id=$1::uuid`, [setup.provider.account_id]);
+        });
+      else await db.unsafe(change);
       expect(
         await outcome(
           client.execution("execution_begin_v1", prepared.beginData(reply.receipt), {

@@ -21,6 +21,9 @@ import {
   recordFinancialVoucher,
   recordUpstreamRecharge,
   createUpstreamFundingStore,
+  DatabaseCommitUnknown,
+  runDatabaseQuery,
+  withDatabaseTransaction,
 } from "@gateway/storage";
 import type { ProviderKind } from "@gateway/kernel";
 import { createKey, encrypt, verifier } from "@gateway/runtime/crypto";
@@ -57,9 +60,84 @@ export function createCoreManagementApplication(options: {
       return result;
     });
   }
+  async function runRoute<T>(request: Request, action: (tx: SQL, actor: string) => Promise<T>) {
+    return withDatabaseTransaction(
+      options.db,
+      { signal: request.signal, deadline: performance.now() + 4000 },
+      async (tx, signal) => {
+        const boundAuth = createPlatformAuthenticator(createPluginCatalogStore(tx), options);
+        const actor = await boundAuth.authenticate(
+          request.headers.get("authorization") ?? undefined,
+        );
+        const proof = boundAuth.authorization(actor, "catalog:manage");
+        await runDatabaseQuery(
+          tx`SELECT core_platform_authorize_v1(${proof}::jsonb,'catalog:manage')`,
+          signal,
+        );
+        await runDatabaseQuery(tx`SELECT core_catalog_write_v1()`, signal);
+        await runDatabaseQuery(
+          tx`SELECT core_platform_authorize_v1(${proof}::jsonb,'catalog:manage')`,
+          signal,
+        );
+        const result = await action(tx, actor.identity);
+        await runDatabaseQuery(
+          tx`SELECT core_platform_authorize_v1(${proof}::jsonb,'catalog:manage')`,
+          signal,
+        );
+        return result;
+      },
+    );
+  }
+  async function runFunding<T>(
+    request: Request,
+    permission: PlatformPermission,
+    account: string,
+    catalog: boolean,
+    action: (tx: SQL, actor: string) => Promise<T>,
+  ) {
+    return withDatabaseTransaction(
+      options.db,
+      { signal: request.signal, deadline: performance.now() + 4000 },
+      async (tx, signal) => {
+        const boundAuth = createPlatformAuthenticator(createPluginCatalogStore(tx), options);
+        const actor = await boundAuth.authenticate(
+          request.headers.get("authorization") ?? undefined,
+        );
+        const proof = boundAuth.authorization(actor, permission);
+        await runDatabaseQuery(
+          tx`SELECT core_platform_authorize_v1(${proof}::jsonb,${permission})`,
+          signal,
+        );
+        await runDatabaseQuery(
+          tx`SELECT core_funding_control_v1(${account}::uuid,${catalog})`,
+          signal,
+        );
+        await runDatabaseQuery(
+          tx`SELECT core_platform_authorize_v1(${proof}::jsonb,${permission})`,
+          signal,
+        );
+        const result = await action(tx, actor.identity);
+        await runDatabaseQuery(
+          tx`SELECT core_platform_authorize_v1(${proof}::jsonb,${permission})`,
+          signal,
+        );
+        return result;
+      },
+    );
+  }
   app.onError((error, c) => {
     if (error instanceof GatewayError)
       return c.json({ error: { code: error.code, message: error.message } }, error.status as 400);
+    if (error instanceof DatabaseCommitUnknown)
+      return c.json(
+        {
+          error: {
+            code: "management_outcome_unknown",
+            message: "Operation result is unknown; inspect the resource before retrying",
+          },
+        },
+        503,
+      );
     if (error instanceof z.ZodError || error instanceof SyntaxError)
       return c.json(
         { error: { code: "invalid_management_input", message: "Invalid management input" } },
@@ -80,7 +158,7 @@ export function createCoreManagementApplication(options: {
       503,
     );
   });
-  const audit = async (tx: TransactionSQL, actor: string, action: string, resource: string) => {
+  const audit = async (tx: SQL, actor: string, action: string, resource: string) => {
     await tx`INSERT INTO audit_events(id,action,resource_id,actor,details) VALUES(${crypto.randomUUID()},${action},${resource},${actor},${{ resource_id: resource }}::jsonb)`;
   };
   app.post("/providers", async (c) => {
@@ -213,7 +291,7 @@ export function createCoreManagementApplication(options: {
     const model = c.req.param("model"),
       input = routeSchema.parse(await body(c.req.raw));
     return c.json(
-      await run(c.req.header("authorization"), "catalog:manage", async (tx, actor) => {
+      await runRoute(c.req.raw, async (tx, actor) => {
         const route = await recordRoute(tx, model, input);
         await audit(tx, actor, "route.create", route);
         return { id: route };
@@ -225,7 +303,7 @@ export function createCoreManagementApplication(options: {
     const route = id(c.req.param("id")),
       input = routePatchSchema.parse(await body(c.req.raw));
     return c.json(
-      await run(c.req.header("authorization"), "catalog:manage", async (tx, actor) => {
+      await runRoute(c.req.raw, async (tx, actor) => {
         await recordRouteUpdate(tx, route, input);
         await audit(tx, actor, "route.update", route);
         return { updated: true };
@@ -259,7 +337,7 @@ export function createCoreManagementApplication(options: {
     const account = id(c.req.param("id")),
       input = upstreamRechargeSchema.parse(await body(c.req.raw));
     return c.json(
-      await run(c.req.header("authorization"), "funding:recharge", (tx, actor) =>
+      await runFunding(c.req.raw, "funding:recharge", account, false, (tx, actor) =>
         recordUpstreamRecharge(tx, account, input, actor),
       ),
       201,
@@ -279,7 +357,7 @@ export function createCoreManagementApplication(options: {
       ),
     ),
   );
-  registerUpstreamFunds(app, { run, body });
+  registerUpstreamFunds(app, { run, runFunding, body });
   registerIdentityCatalog(app, { run, audit, body });
   registerEvents(app, { run, audit, body });
   registerOperations(app, { run, audit, queue: options.queue });

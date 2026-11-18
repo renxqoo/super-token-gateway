@@ -1,0 +1,227 @@
+{
+  "at": "2026-11-17T22:38:54.150485+00:00",
+  "state": {
+    "at": "2026-11-17T22:38:54.033811+00:00",
+    "goal_status": "active",
+    "previous_goal_turn": "progress: 1809 late-lock root cause fixed and measured; goal not narrowed",
+    "this_stage": "actual plans and isolated planning experiment; no product code changes",
+    "runtime_migration": 2026111809,
+    "last_formal_stable_rps": 60,
+    "profile": {
+      "selected_plans": 7831,
+      "parse_errors": 0,
+      "groups": {
+        "preflight_leases": 987,
+        "customer_keys": 208,
+        "evidence_request_locks": 1298,
+        "evidence_permit_locks": 1298,
+        "receipt_revision": 4040
+      },
+      "source_log": 135432482,
+      "end_log": 2355033364,
+      "shared_log_bytes_appended": 2219600882,
+      "intended_log_min_duration_ms": 0.5,
+      "actual_integer_log_min_duration_ms": 0,
+      "no_capacity_or_cpu_claim": true
+    },
+    "custom_plan_experiment": {
+      "product_artifacts_unchanged": true,
+      "only_own_database_new_connections": "force_custom_plan",
+      "initial_administrator_connection": "auto",
+      "exit_code": 1,
+      "capacityPassed": false,
+      "window_rps": 152.55,
+      "p99": 1892.11,
+      "shed": 3231,
+      "http503": 5452,
+      "pg_cpu_ms_per_admitted": 32.3816067653277,
+      "service_cpu_ms_per_admitted": 39.10887949260042,
+      "requests_including_warmup": 9460,
+      "facts_receipts_acks": 18920,
+      "customer_spent": "946000",
+      "supplier_spent": "558140",
+      "both_reserved": "0"
+    },
+    "checks": "docs and source/record integrity only; runtime unchanged, no repeat full gates",
+    "resources": {
+      "at": "2026-11-17T22:36:01.912Z",
+      "database": "gateway_native",
+      "original_27_names_and_oids_equal": true,
+      "foundation_count": 27,
+      "remaining_recent_databases": [],
+      "remaining_recent_core_processes": [],
+      "remaining_recent_identity_roles": [],
+      "remaining_recent_temp_directories": [],
+      "protected_reference_present": true,
+      "protected_processes": [
+        {
+          "pid": 40766,
+          "started": "Mon Nov 16 16:27:47 2026",
+          "command": "bun apps/core-api/src/main.ts"
+        },
+        {
+          "pid": 40771,
+          "started": "Mon Nov 16 16:27:47 2026",
+          "command": "bun apps/core-api/src/main.ts"
+        }
+      ],
+      "rounds": [
+        {
+          "label": "s7-pg-plans-profile",
+          "database": "gateway_test_foundation_54ba01b0a89e4e60a21a50bc9f092533",
+          "database_absent": true,
+          "live_owned_sampled_pids": [],
+          "namespace_cleanup": {
+            "cleaned": 1,
+            "failed": 0
+          },
+          "archive_hashes_verified": true,
+          "source_directory_removed": true
+        },
+        {
+          "label": "s7-custom-plans-300-failed",
+          "database": "gateway_test_foundation_8742cb2091564ec384c61033e25f8081",
+          "database_absent": true,
+          "live_owned_sampled_pids": [],
+          "namespace_cleanup": {
+            "cleaned": 1,
+            "failed": 0
+          },
+          "archive_hashes_verified": true,
+          "source_directory_removed": true
+        }
+      ]
+    },
+    "residue": {
+      "shared_pg_log": ".local/native-services/postgres.log",
+      "new_bytes_during_profile_interval": 2219600882,
+      "action": "retained; original log and other writers not truncated; no shared service restarted",
+      "remaining_disk_gib_approx": 31
+    },
+    "next_actions": [
+      "Implement NULL-attempt preflight short circuit and request/lease-directed permit reads",
+      "Use actual-parameter planning for demonstrated receipt/array-lock access and key-prefetch lookups; preserve pure calculation caching",
+      "Add deterministic cold-statistics/data-growth regressions through public operations",
+      "Re-measure strict capacity without profiling overhead; final complete gates and >3000/same-concurrency/HA/fault evidence remain required"
+    ]
+  },
+  "temporary_files": {
+    "prepare-pg-plan-profile.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/prepare-pg-plan-profile.py.raw",
+      "sha256": "ca1fcfa1e845bbd4cfc37fdc631ac4a1910d7a7bf0e11d514b8e940ceb91b52b",
+      "bytes": 2513,
+      "temporary_source_removed": true
+    },
+    "pg-plan-bench.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/pg-plan-bench.ts.raw",
+      "sha256": "dde9503ee27512a3530d72a97aa39c8cd2616ff8dc5967463e9020ae5a4405e3",
+      "bytes": 45414,
+      "temporary_source_removed": true
+    },
+    "pg-plan-profile-start.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/pg-plan-profile-start.json.raw",
+      "sha256": "5b2d551b2866d2fd98c3677b4604ad990f78890e7982dad069af49826530ab68",
+      "bytes": 191,
+      "temporary_source_removed": true
+    },
+    "pg-plan-profile-settings.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/pg-plan-profile-settings.json.raw",
+      "sha256": "cab827908899915516372f9a1e05efc82fa82ba395d4b84e3d95c1d47a535bca",
+      "bytes": 540,
+      "temporary_source_removed": true
+    },
+    "pg-plan-profile-run.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/pg-plan-profile-run.log.raw",
+      "sha256": "7b105f33d2afe0b51a14777073ebca1d7d6e393b22a0dc5eaf37724765555bdb",
+      "bytes": 832,
+      "temporary_source_removed": true
+    },
+    "pg-plan-profile-stop.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/pg-plan-profile-stop.json.raw",
+      "sha256": "b74ea31c5d48178a96a3c96c6ac319f27394217241f4660f9f7ca2c46e1cc5c1",
+      "bytes": 340,
+      "temporary_source_removed": true
+    },
+    "pg-plan-profile-plans.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/pg-plan-profile-plans.json.raw",
+      "sha256": "947c39e1b254b8322af7354392aa1cea3a6d53845c8085ef34322563da1463a0",
+      "bytes": 540768,
+      "temporary_source_removed": true
+    },
+    "pg-plan-profile-effective-threshold.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/pg-plan-profile-effective-threshold.json.raw",
+      "sha256": "0a9148d20c6610204701c6b019d3dc5c8f759b6505868cd770d971b3761f799c",
+      "bytes": 246,
+      "temporary_source_removed": true
+    },
+    "extract-pg-plans.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/extract-pg-plans.py.raw",
+      "sha256": "3583e6fc8820a0de64e89c639e07e1d802b8ddee4c37812601c0beaf66931935",
+      "bytes": 4538,
+      "temporary_source_removed": true
+    },
+    "prepare-custom-plan-experiment.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/prepare-custom-plan-experiment.py.raw",
+      "sha256": "382110310eec169c78980dbb3be138fb844620fd3acce8269d87b1b6d25541fc",
+      "bytes": 1150,
+      "temporary_source_removed": true
+    },
+    "custom-plan-bench.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/custom-plan-bench.ts.raw",
+      "sha256": "1f3bf4a68af4b46fc811a05654a33d892eccaf8312cf313398efcaba098e78fa",
+      "bytes": 44173,
+      "temporary_source_removed": true
+    },
+    "custom-plan-experiment-settings.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/custom-plan-experiment-settings.json.raw",
+      "sha256": "2ccbe725f01e1bb5b49fc432f518cc615a5ccfec9bb7b1755ab09afa3c4e87c8",
+      "bytes": 230,
+      "temporary_source_removed": true
+    },
+    "custom-plan-experiment-run.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/custom-plan-experiment-run.log.raw",
+      "sha256": "0a6af97aaf11b63e26ff1a7cf80c2122fc247813e8f996dbda89fccbe071d710",
+      "bytes": 859,
+      "temporary_source_removed": true
+    },
+    "archive-query-plan-rounds.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/archive-query-plan-rounds.py.raw",
+      "sha256": "ad6bb99180a0f833c38a0ca3cc839317b6bccc72abd38df9480a5c1ef1fe1f1e",
+      "bytes": 4452,
+      "temporary_source_removed": true
+    },
+    "inspect-query-plan-cleanup.ts": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/inspect-query-plan-cleanup.ts.raw",
+      "sha256": "0dd3a66a890e7067352240715b217d6be5f06462e692c4545b133b24f700732e",
+      "bytes": 4882,
+      "temporary_source_removed": true
+    },
+    "query-plan-resources-after.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/query-plan-resources-after.json.raw",
+      "sha256": "458658b8fc5b97e1caa90297daba0102e48d0ec33a949e93674effe9470c0d9b",
+      "bytes": 1361,
+      "temporary_source_removed": true
+    },
+    "query-plan-stage.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/query-plan-stage.json.raw",
+      "sha256": "6260be4e3e15eb39bee44db87688970a9a37adddc867eb70acf837ba776b888d",
+      "bytes": 3729,
+      "temporary_source_removed": true
+    },
+    "archive-query-plan-evidence.py": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-validation/query-plans-1809/archive-query-plan-evidence.py.raw",
+      "sha256": "593ca45d11e964eadcc8f10692df4f4c336d853fc908fd9ebc2598ffafafce4e",
+      "bytes": 2766,
+      "temporary_source_removed": true
+    }
+  },
+  "commands": {
+    "profile": "stableBun bothenv derived bench --seconds30 --rate200 without online capacity; exit1",
+    "custom_plan": "stableBun bothenv derived bench --online-capacity --seconds60 --rate301 --target-rps300; exit1",
+    "format": "selected7 changed docs/metadata files; exit0",
+    "diff_check": "git diff --check; exit0"
+  },
+  "product_runtime_unchanged": true,
+  "full_repository_gates": "not repeated for docs/diagnostics-only stage; final gates still required",
+  "archive_corrections": "Profiler did not create capacity identity files or capacityPassed; archive refused those assumptions before deletion and now preserves absence as null."
+}

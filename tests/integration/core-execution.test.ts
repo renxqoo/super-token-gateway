@@ -1,5 +1,5 @@
 import { financialRejection } from "../support/financial-rejection.ts";
-import { prepBindingV1, dispatchProjectionV1Schema } from "@gateway/contracts";
+import { prepBindingV2, dispatchProjectionV2Schema } from "@gateway/contracts";
 import type { ExecutionReply, ExecutionContextResponse } from "@gateway/contracts";
 import { expect, test } from "bun:test";
 import { canonical } from "@gateway/kernel";
@@ -41,7 +41,10 @@ test(
         ceilings: { input_tokens: "60", output_tokens: "30" },
       };
       const projection = {
-        version: 1,
+        version: 2,
+        execution: (context as ExecutionContextResponse).execution_runtimes[
+          c.ref.package_digest
+        ]!.find((runtime) => runtime.kind === "wasm")!,
         proposed_request_id: request,
         proposed_attempt_id: attempt,
         origin: c.origin,
@@ -60,16 +63,16 @@ test(
       const data = {
         context_id: (context as ExecutionContextResponse).context_id,
         dispatch_projection: projection,
-        dispatched_digest: digest(["stg.internal.dispatch-projection", "1", projection]),
+        dispatched_digest: digest(["stg.internal.dispatch-projection", "2", projection]),
         manifest,
         prep_session_id: prepId,
         prep_binding_digest: digest([
           "stg.internal.prep-binding",
-          "1",
-          prepBindingV1({
+          "2",
+          prepBindingV2({
             owner: (context as ExecutionContextResponse).owner,
             project_id: setup.project.id,
-            projection: dispatchProjectionV1Schema.parse(projection),
+            projection: dispatchProjectionV2Schema.parse(projection),
             prep_session_id: prepId,
             host_config_sha256: digest(c.config),
           }),
@@ -256,7 +259,7 @@ test(
       expect((await db`SELECT count(*)::integer n FROM billing_holds`)[0].n).toBe(1);
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id} AND currency='USD'`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id} AND currency='USD'`
         )[0].reserved_atoms,
       ).toBe("60");
       const scopes =
@@ -279,7 +282,7 @@ test(
       );
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id} AND currency='USD'`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id} AND currency='USD'`
         )[0].reserved_atoms,
       ).toBe("60");
       expect(
@@ -355,7 +358,7 @@ test(
       )[0].state;
       expect(["SEND_GRANTED", "ABORTED"]).toContain(state);
       const balance = (
-        await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id} AND currency='USD'`
+        await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id} AND currency='USD'`
       )[0];
       expect(balance.reserved_atoms).toBe(state === "ABORTED" ? "0" : "30");
       if (state === "ABORTED") {
@@ -408,7 +411,7 @@ test(
       ).rejects.toThrow("customer_forbidden");
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id} AND currency='USD'`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id} AND currency='USD'`
         )[0].reserved_atoms,
       ).toBe("30");
     }),
@@ -450,7 +453,7 @@ test(
         ).toEqual({ available_atoms: "1000", reserved_atoms: "0" });
         expect(
           (
-            await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id} AND currency='USD'`
+            await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id} AND currency='USD'`
           )[0].reserved_atoms,
         ).toBe("0");
         await db.unsafe(
@@ -478,7 +481,12 @@ test(
       await db.unsafe(
         `CREATE FUNCTION admission_gate() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='execution_admit_v1' THEN PERFORM pg_advisory_xact_lock(${gate.key}::bigint);END IF;RETURN NEW;END $$;CREATE TRIGGER admission_gate BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION admission_gate()`,
       );
-      const winner = prepared.admit().catch((error: unknown) => error);
+      const winner = rpc
+        .send("execution_admit_v1", prepared.data, {
+          commandId: prepared.command,
+          deadlineAt: prepared.deadline,
+        })
+        .catch((error: unknown) => error);
       try {
         await financialBlockedBy(db, gate.pid);
         const loser = await rpc.send(
@@ -498,10 +506,20 @@ test(
         await gate.release();
       }
       const first = await winner;
-      const accepted =
-        first instanceof Error && first.message === "identity_busy"
-          ? await prepared.admit()
-          : (first as ExecutionReply);
+      if (first instanceof Error) throw first;
+      const response = first as Awaited<ReturnType<typeof rpc.send>>;
+      let accepted: ExecutionReply;
+      if (response.status === 503) {
+        expect(response.value).toMatchObject({
+          code: expect.stringMatching(/^(identity_busy|identity_store_unavailable)$/),
+          command_state: "UNKNOWN",
+          retryability: "SAME_COMMAND",
+        });
+        accepted = await prepared.admit();
+      } else {
+        expect(response.status).toBe(200);
+        accepted = response.value as unknown as ExecutionReply;
+      }
       expect(accepted.receipt.state).toBe("RESERVED");
       const begin = (await rpc.execution(
         "execution_begin_v1",
@@ -665,7 +683,7 @@ test(
       expect(forbidden).toContain("internal_owner_mismatch");
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id} AND currency='USD'`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id} AND currency='USD'`
         )[0].reserved_atoms,
       ).toBe("30");
     }),
@@ -728,7 +746,7 @@ test(
       ).toBe("100");
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
         )[0].reserved_atoms,
       ).toBe("30");
     }),
@@ -780,7 +798,7 @@ test(
       ).toBe(3);
       expect(
         (
-          await db`SELECT reserved_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+          await db`SELECT reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
         )[0].reserved_atoms,
       ).toBe("30");
     }),

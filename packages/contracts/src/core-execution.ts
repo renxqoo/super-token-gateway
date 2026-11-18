@@ -7,8 +7,10 @@ import {
   internalInstantSchema,
   internalUuidSchema,
   dispatchProjectionV1Schema,
+  dispatchProjectionV2Schema,
   dispatchAuthSchema,
   candidateRefV1Schema,
+  executionRuntimesSchema,
 } from "./internal-identity.ts";
 export const executionKinds = [
   "execution_context_v1",
@@ -51,6 +53,11 @@ const batchEndpointSchema = z.enum(
 export const publicResourceIdSchema = z
   .string()
   .regex(/^(response|file|batch|video)_[0-9a-f]{32}$/);
+export const routeTicketMaxBytes = 16384;
+export const routeTicketSchema = z
+  .string()
+  .max(routeTicketMaxBytes)
+  .regex(/^[A-Za-z0-9+/]+={0,2}$/);
 const customerCredential = {
   customer_token: z.string().min(1).max(16384),
   ip: z
@@ -95,7 +102,7 @@ export const billableManifestV1Schema = z.strictObject({
 const prep = { prep_session_id: internalUuidSchema, prep_binding_digest: digestSchema };
 const dispatch = {
   context_id: internalUuidSchema,
-  dispatch_projection: dispatchProjectionV1Schema,
+  dispatch_projection: dispatchProjectionV2Schema,
   dispatched_digest: digestSchema,
   manifest: billableManifestV1Schema,
   ...prep,
@@ -106,6 +113,7 @@ export const executionDataSchemas = {
   execution_context_v1: z
     .strictObject({
       ...customerCredential,
+      route_projection: z.literal(true).optional(),
       operation: z.enum(operations),
       model: z.string().min(1).max(150).optional(),
       fingerprint: digestSchema,
@@ -237,6 +245,24 @@ export const hostAuthorizationPlanV1Schema = z.strictObject({
   dispatched_digest: digestSchema,
   dispatch_projection: dispatchProjectionV1Schema,
 });
+export const hostAuthorizationPlanV2Schema = hostAuthorizationPlanV1Schema.extend({
+  version: z.literal(2),
+  dispatch_projection: dispatchProjectionV2Schema,
+});
+export const hostAuthorizationPlanSchema = z.discriminatedUnion("version", [
+  hostAuthorizationPlanV1Schema,
+  hostAuthorizationPlanV2Schema,
+]);
+export const quotaRecoveryResultSchema = z
+  .strictObject({
+    released: z.number().int().min(0).max(100),
+    pending: z.number().int().min(0).max(100),
+    failed: z.number().int().min(0).max(100),
+    expired: z.number().int().min(0).max(100),
+    expiry_more: z.boolean(),
+  })
+  .refine((result) => result.released + result.failed === result.pending);
+
 export const executionReceiptSchema = z.strictObject({
   command_state: z.enum(["COMMITTED", "REJECTED", "NOT_FOUND"]),
   code: z
@@ -254,7 +280,7 @@ export const executionReceiptSchema = z.strictObject({
   supplier_atoms: atomsSchema.optional(),
   supplier_currency: currencySchema.optional(),
   quota_lease_ids: z.array(digestSchema).max(5).optional(),
-  authorization_plan: hostAuthorizationPlanV1Schema.optional(),
+  authorization_plan: hostAuthorizationPlanSchema.optional(),
   authorization_plan_digest: digestSchema.optional(),
 });
 export const transientSendSchema = z.strictObject({
@@ -314,6 +340,7 @@ export type ExecutionReceipt = z.infer<typeof executionReceiptSchema>;
 export type ExecutionEnvelope = z.infer<typeof executionEnvelopeSchema>;
 export const executionContextResponseSchema = z.strictObject({
   owner: hostAuthorizationPlanV1Schema.shape.owner,
+  route_ticket: routeTicketSchema.optional(),
   context_id: internalUuidSchema,
   project_id: internalUuidSchema,
   key_id: internalUuidSchema,
@@ -334,6 +361,7 @@ export const executionContextResponseSchema = z.strictObject({
     }),
   ),
   candidates: z.array(candidateMetadataSchema).max(5),
+  execution_runtimes: executionRuntimesSchema,
   resources: z
     .array(
       z.strictObject({ resource_id: publicResourceIdSchema, remote_id: opaqueResourceIdSchema }),
@@ -355,15 +383,16 @@ export const executionReplySchema = z.strictObject({
 export type ExecutionReply = z.infer<typeof executionReplySchema>;
 export type TransientSend = z.infer<typeof transientSendSchema>;
 export type ExecutionContextResponse = z.infer<typeof executionContextResponseSchema>;
-export function prepBindingV1(input: {
+export function prepBindingV2(input: {
   owner: z.infer<typeof hostAuthorizationPlanV1Schema>["owner"];
   project_id: string;
-  projection: z.infer<typeof dispatchProjectionV1Schema>;
+  projection: z.infer<typeof dispatchProjectionV2Schema>;
   prep_session_id: string;
   host_config_sha256: string;
 }) {
   const { owner, projection, prep_session_id, project_id, host_config_sha256 } = input;
   return {
+    execution: projection.execution,
     session: {
       id: prep_session_id,
       tenant: project_id,

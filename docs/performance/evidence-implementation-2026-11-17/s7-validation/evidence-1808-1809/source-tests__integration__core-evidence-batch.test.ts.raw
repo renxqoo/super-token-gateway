@@ -1,0 +1,535 @@
+import { expect, test } from "bun:test";
+import type { SQL } from "bun";
+import { createSettlementStore } from "@gateway/storage/settlement";
+import { migrate } from "@gateway/storage";
+import manifest from "../../packages/storage/src/migrations/manifest.json";
+import { withFinancial } from "../support/financial-execution.ts";
+import { committed, event, granted, supplier } from "../support/core-settlement.ts";
+
+type Fixture = Parameters<Parameters<typeof withFinancial>[0]>[0];
+type Setup = Awaited<ReturnType<Fixture["bootstrap"]>>;
+
+async function beforeEvidenceBatch(db: SQL) {
+  await db.begin(async (tx) => {
+    for (const entry of manifest.migrations.filter((entry) => entry.version <= 2026111807)) {
+      for (const file of entry.files)
+        await tx.unsafe(
+          await Bun.file(
+            new URL(`../../packages/storage/src/${file.path}`, import.meta.url),
+          ).text(),
+        );
+      const digest = new Bun.CryptoHasher("sha256").update(JSON.stringify(entry)).digest("hex");
+      await tx`INSERT INTO schema_migrations(version,checksum,manifest) VALUES(${entry.version},${digest},${entry}::jsonb)`;
+    }
+  });
+}
+
+async function secondWallet(f: Fixture, setup: Setup) {
+  const project = await f.request("/projects", {
+    name: `independent evidence wallet ${crypto.randomUUID()}`,
+    billing_currency: "USD",
+    rpm: 1000,
+    tpm: 10000000,
+    concurrency: 100,
+  });
+  expect(project.status).toBe(201);
+  const projectId = String(project.value.id);
+  const key = await f.request(`/projects/${projectId}/keys`, {
+    name: "independent evidence key",
+    models: [setup.model],
+    operations: ["chat"],
+  });
+  expect(key.status).toBe(201);
+  const credit = await f.request(`/projects/${projectId}/credits`, {
+    external_ref: crypto.randomUUID(),
+    currency: "USD",
+    amount_atoms: "1000",
+    kind: "CASH",
+  });
+  expect(credit.status).toBe(201);
+  return {
+    ...setup,
+    project: { id: projectId },
+    key: { id: String(key.value.id), key: String(key.value.key) },
+  };
+}
+
+async function traceFacts(db: SQL) {
+  await db.unsafe(`
+    CREATE TABLE public.evidence_batch_trace(name text,operation text,rows integer);
+    CREATE FUNCTION public.evidence_batch_trace() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+    BEGIN INSERT INTO public.evidence_batch_trace SELECT TG_TABLE_NAME,TG_OP,count(*) FROM new_rows;RETURN NULL;END $$;
+  `);
+  for (const [table, operations] of [
+    ["usage_event_index", ["INSERT"]],
+    ["usage_payloads", ["INSERT"]],
+    ["core_evidence_receipts", ["INSERT"]],
+    ["upstream_costs", ["INSERT"]],
+    ["upstream_cost_heads", ["INSERT"]],
+    ["upstream_holds", ["UPDATE"]],
+    ["billing_charges", ["INSERT"]],
+    ["wallets", ["UPDATE"]],
+    ["attempts", ["UPDATE"]],
+  ] as const) {
+    for (const operation of operations)
+      await db.unsafe(
+        `CREATE TRIGGER evidence_batch_${operation} AFTER ${operation} ON public.${table} REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION public.evidence_batch_trace()`,
+      );
+  }
+}
+
+test("independent signed groups write their facts and costs together while preserving each receipt and charge", () =>
+  withFinancial(async (f, db) => {
+    const firstSetup = await f.bootstrap("USD", "100000");
+    const secondSetup = await secondWallet(f, firstSetup);
+    const client = f.client();
+    await client.startup();
+    const first = await granted(db, firstSetup, client, {
+      attemptId: "10000000-0000-4000-8000-000000000000",
+    });
+    const second = await granted(db, secondSetup, client, {
+      attemptId: "20000000-0000-4000-8000-000000000000",
+    });
+    const groups = [first, second].map(({ prepared, owner }) => ({
+      events: [
+        event(owner, prepared.attemptId, {
+          finality: "FINAL",
+          usage: { input_tokens: "1", output_tokens: "0" },
+          final_dimensions: ["input_tokens", "output_tokens"],
+        }),
+        event(owner, prepared.attemptId, {
+          source: "execution_outcome",
+          finality: "UNKNOWN",
+          attempt_state: "SUCCEEDED",
+          request_state: "SUCCEEDED",
+        }),
+      ],
+    }));
+    await traceFacts(db);
+    const store = createSettlementStore(db);
+    const results = await store.persist(groups);
+    for (let i = 0; i < groups.length; i++) {
+      const result = committed(results[i]);
+      expect(result.receipts.map((receipt) => receipt.event_id).sort()).toEqual(
+        groups[i]!.events.map((event) => event.event_id).sort(),
+      );
+      expect(result.receipts.map((receipt) => [receipt.outcome, receipt.duplicate])).toEqual([
+        ["ACCEPTED", false],
+        ["ACCEPTED", false],
+      ]);
+      expect(Object.keys(result.billing ?? {})).toEqual([[first, second][i]!.prepared.requestId]);
+    }
+    expect(
+      await db`SELECT name,operation,array_agg(rows ORDER BY rows) rows FROM evidence_batch_trace WHERE rows>0 GROUP BY name,operation ORDER BY name,operation`,
+    ).toEqual([
+      { name: "attempts", operation: "UPDATE", rows: [2] },
+      { name: "billing_charges", operation: "INSERT", rows: [2] },
+      { name: "core_evidence_receipts", operation: "INSERT", rows: [4] },
+      { name: "upstream_cost_heads", operation: "INSERT", rows: [2] },
+      { name: "upstream_costs", operation: "INSERT", rows: [2] },
+      { name: "upstream_holds", operation: "UPDATE", rows: [2] },
+      { name: "usage_event_index", operation: "INSERT", rows: [8] },
+      { name: "usage_payloads", operation: "INSERT", rows: [8] },
+      { name: "wallets", operation: "UPDATE", rows: [2] },
+    ]);
+    expect(
+      await db`SELECT snapshot_revision::text revision,record_kind,finality FROM usage_event_index WHERE attempt_id=${first.prepared.attemptId} ORDER BY snapshot_revision`,
+    ).toEqual([
+      { revision: "1", record_kind: "RAW", finality: "FINAL" },
+      { revision: "2", record_kind: "CANONICAL", finality: "FINAL" },
+      { revision: "3", record_kind: "RAW", finality: "UNKNOWN" },
+      { revision: "4", record_kind: "CANONICAL", finality: "FINAL" },
+    ]);
+    expect(
+      await db`SELECT available_atoms::text available,reserved_atoms::text reserved,spent_atoms::text spent FROM wallets ORDER BY project_id`,
+    ).toEqual([
+      { available: "900", reserved: "0", spent: "100" },
+      { available: "900", reserved: "0", spent: "100" },
+    ]);
+    expect(await supplier(db, firstSetup.provider.account_id)).toEqual({
+      balance: "99998",
+      reserved: "0",
+      spent: "2",
+      state: "ACTIVE",
+    });
+    const before = await db`SELECT * FROM evidence_batch_trace WHERE rows>0`;
+    for (const result of await store.persist(groups))
+      for (const receipt of committed(result).receipts) expect(receipt.duplicate).toBe(true);
+    expect(await db`SELECT * FROM evidence_batch_trace WHERE rows>0`).toEqual(before);
+    expect(await supplier(db, firstSetup.provider.account_id)).toEqual({
+      balance: "99998",
+      reserved: "0",
+      spent: "2",
+      state: "ACTIVE",
+    });
+  }));
+
+test("a busy supplier cell does not materialize facts that its coalesced group will roll back", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap("USD", "1000");
+    const otherWallet = await secondWallet(f, setup);
+    const client = f.client();
+    await client.startup();
+    const first = await granted(db, setup, client, {
+      attemptId: "10000000-0000-4000-8000-000000000000",
+    });
+    const second = await granted(db, otherWallet, client, {
+      attemptId: "10000000-0000-4000-8000-000000000001",
+    });
+    expect(await db`SELECT funding_cell FROM upstream_holds ORDER BY attempt_id`).toEqual([
+      { funding_cell: 0 },
+      { funding_cell: 1 },
+    ]);
+    const groups = [first, second].map(({ prepared, owner }) => ({
+      events: [
+        event(owner, prepared.attemptId, {
+          finality: "FINAL",
+          usage: { input_tokens: "1", output_tokens: "0" },
+          final_dimensions: ["input_tokens", "output_tokens"],
+        }),
+        event(owner, prepared.attemptId, {
+          source: "execution_outcome",
+          finality: "UNKNOWN",
+          attempt_state: "SUCCEEDED",
+          request_state: "SUCCEEDED",
+        }),
+      ],
+    }));
+    await db.unsafe(`
+      CREATE SEQUENCE public.evidence_write_attempts MINVALUE 0 START 0;
+      CREATE FUNCTION public.evidence_write_attempt() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+      BEGIN PERFORM nextval('public.evidence_write_attempts');RETURN NEW;END $$;
+      CREATE TRIGGER evidence_write_attempt BEFORE INSERT ON public.usage_event_index FOR EACH ROW EXECUTE FUNCTION public.evidence_write_attempt();
+    `);
+    const store = createSettlementStore(db);
+    await db.begin(async (tx) => {
+      await tx`SELECT cell FROM core_funding.balance_cells WHERE account_id=${setup.provider.account_id} AND currency='USD' AND cell=1 FOR NO KEY UPDATE`;
+      const results = await store.persist(groups);
+      committed(results[0]);
+      expect(results[1]).toEqual({ status: "ERROR", error: "55P03" });
+      expect(
+        await db`SELECT CASE WHEN is_called THEN last_value+1 ELSE 0 END::text count FROM evidence_write_attempts`,
+      ).toEqual([{ count: "4" }]);
+      expect(await db`SELECT count(*)::int count FROM usage_event_index`).toEqual([{ count: 4 }]);
+      expect(await db`SELECT request_id FROM billing_charges`).toEqual([
+        { request_id: first.prepared.requestId },
+      ]);
+      expect(await supplier(db, setup.provider.account_id)).toEqual({
+        balance: "999",
+        reserved: "30",
+        spent: "1",
+        state: "ACTIVE",
+      });
+    });
+    const retried = await store.persist(groups);
+    expect(committed(retried[0]).receipts.every((receipt) => receipt.duplicate)).toBe(true);
+    expect(committed(retried[1]).receipts.every((receipt) => !receipt.duplicate)).toBe(true);
+    expect(
+      await db`SELECT CASE WHEN is_called THEN last_value+1 ELSE 0 END::text count FROM evidence_write_attempts`,
+    ).toEqual([{ count: "8" }]);
+    expect(await db`SELECT count(*)::int count FROM billing_charges`).toEqual([{ count: 2 }]);
+    expect(await supplier(db, setup.provider.account_id)).toEqual({
+      balance: "998",
+      reserved: "0",
+      spent: "2",
+      state: "ACTIVE",
+    });
+  }));
+
+test("an estimated fact remains writable while its supplier cell is busy without supplier settlement", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap("USD", "1000");
+    const client = f.client();
+    await client.startup();
+    const { prepared, owner } = await granted(db, setup, client, {
+      attemptId: "10000000-0000-4000-8000-000000000000",
+    });
+    await db.begin(async (tx) => {
+      await tx`SELECT cell FROM core_funding.balance_cells WHERE account_id=${setup.provider.account_id} AND currency='USD' AND cell=0 FOR NO KEY UPDATE`;
+      const result = committed(
+        (
+          await createSettlementStore(db).persist([
+            {
+              events: [
+                event(owner, prepared.attemptId, {
+                  finality: "ESTIMATED",
+                  usage: { input_tokens: "1", output_tokens: "0" },
+                }),
+              ],
+            },
+          ])
+        )[0],
+      );
+      expect(result.receipts.map((receipt) => receipt.outcome)).toEqual(["ESTIMATED"]);
+      expect(await db`SELECT record_kind FROM usage_event_index`).toEqual([{ record_kind: "RAW" }]);
+      expect(await db`SELECT count(*)::int count FROM billing_charges`).toEqual([{ count: 0 }]);
+      expect(await supplier(db, setup.provider.account_id)).toEqual({
+        balance: "1000",
+        reserved: "30",
+        spent: "0",
+        state: "ACTIVE",
+      });
+    });
+  }));
+
+test("a billing failure after coalesced facts rolls back its whole original two-request group and replays only that group", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap("USD", "100000");
+    const second = await secondWallet(f, setup);
+    const third = await secondWallet(f, setup);
+    const client = f.client();
+    await client.startup();
+    const requests = [
+      await granted(db, setup, client),
+      await granted(db, second, client),
+      await granted(db, third, client),
+    ];
+    const facts = requests.map(({ prepared, owner }) =>
+      event(owner, prepared.attemptId, {
+        finality: "FINAL",
+        usage: { input_tokens: "1", output_tokens: "0" },
+        final_dimensions: ["input_tokens", "output_tokens"],
+        attempt_state: "SUCCEEDED",
+        request_state: "SUCCEEDED",
+      }),
+    );
+    const groups = [{ events: [facts[0]!] }, { events: [facts[1]!, facts[2]!] }];
+    await db.unsafe(`
+      CREATE FUNCTION public.evidence_batch_billing_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.request_id='${requests[2]!.prepared.requestId}'::uuid THEN RAISE EXCEPTION 'independent group billing failure' USING ERRCODE='P0E98';END IF;RETURN NEW;END $$;
+      CREATE TRIGGER evidence_batch_billing_failure BEFORE INSERT ON public.billing_charges FOR EACH ROW EXECUTE FUNCTION public.evidence_batch_billing_failure();
+    `);
+    const store = createSettlementStore(db);
+    const results = await store.persist(groups);
+    expect(committed(results[0]).receipts).toHaveLength(1);
+    expect(results[1]).toEqual({ status: "ERROR", error: "P0E98" });
+    expect(await db`SELECT DISTINCT attempt_id FROM usage_event_index`).toEqual([
+      { attempt_id: requests[0]!.prepared.attemptId },
+    ]);
+    expect(await db`SELECT attempt_id FROM core_evidence_receipts`).toEqual([
+      { attempt_id: requests[0]!.prepared.attemptId },
+    ]);
+    expect(await db`SELECT request_id FROM billing_charges`).toEqual([
+      { request_id: requests[0]!.prepared.requestId },
+    ]);
+    for (const request of requests.slice(1)) {
+      expect(
+        await db`SELECT state,current_reserved_atoms::text reserved FROM upstream_holds WHERE attempt_id=${request.prepared.attemptId}`,
+      ).toEqual([{ state: "HELD", reserved: "30" }]);
+      expect(
+        await db`SELECT reserved_atoms::text reserved,spent_atoms::text spent FROM wallets WHERE project_id=(SELECT project_id FROM gateway_requests WHERE id=${request.prepared.requestId})`,
+      ).toEqual([{ reserved: "100", spent: "0" }]);
+    }
+    expect(await supplier(db, setup.provider.account_id)).toEqual({
+      balance: "99999",
+      reserved: "60",
+      spent: "1",
+      state: "ACTIVE",
+    });
+    await db`DROP TRIGGER evidence_batch_billing_failure ON billing_charges`;
+    const replay = await store.persist(groups);
+    expect(committed(replay[0]).receipts[0]?.duplicate).toBe(true);
+    expect(committed(replay[1]).receipts.map((receipt) => receipt.duplicate)).toEqual([
+      false,
+      false,
+    ]);
+    expect(await db`SELECT count(*)::int n FROM billing_charges`).toEqual([{ n: 3 }]);
+    expect(await db`SELECT count(*)::int n FROM core_evidence_receipts`).toEqual([{ n: 3 }]);
+    expect(await supplier(db, setup.provider.account_id)).toEqual({
+      balance: "99997",
+      reserved: "0",
+      spent: "3",
+      state: "ACTIVE",
+    });
+  }));
+
+test.each(["shared_wallet", "expiring_lot"] as const)(
+  "%s groups keep their original customer settlement order instead of coalescing",
+  (mode) =>
+    withFinancial(async (f, db) => {
+      const setup = await f.bootstrap("USD", "100000");
+      const second = mode === "shared_wallet" ? setup : await secondWallet(f, setup);
+      if (mode === "expiring_lot") {
+        const gift = await f.request(`/projects/${setup.project.id}/credits`, {
+          external_ref: crypto.randomUUID(),
+          currency: "USD",
+          amount_atoms: "50",
+          kind: "GIFT",
+          expires_at: new Date(Date.now() + 3600000).toISOString(),
+        });
+        expect(gift.status).toBe(201);
+        expect(
+          await db`SELECT has_expiring_lots FROM wallets WHERE project_id=${setup.project.id}`,
+        ).toEqual([{ has_expiring_lots: true }]);
+      }
+      const client = f.client();
+      await client.startup();
+      const requests = [await granted(db, setup, client), await granted(db, second, client)];
+      const groups = requests.map(({ prepared, owner }) => ({
+        events: [
+          event(owner, prepared.attemptId, {
+            finality: "FINAL",
+            usage: { input_tokens: "1", output_tokens: "0" },
+            final_dimensions: ["input_tokens", "output_tokens"],
+            attempt_state: "SUCCEEDED",
+            request_state: "SUCCEEDED",
+          }),
+        ],
+      }));
+      await traceFacts(db);
+      for (const result of await createSettlementStore(db).persist(groups)) committed(result);
+      expect(
+        await db`SELECT rows FROM evidence_batch_trace WHERE name='billing_charges' AND rows>0`,
+      ).toEqual([{ rows: 1 }, { rows: 1 }]);
+      expect(
+        await db`SELECT rows FROM evidence_batch_trace WHERE name='usage_event_index' AND rows>0`,
+      ).toEqual([{ rows: 2 }, { rows: 2 }]);
+      expect(
+        await db`SELECT sum(spent_atoms)::text spent,sum(reserved_atoms)::text reserved FROM wallets`,
+      ).toEqual([{ spent: "200", reserved: "0" }]);
+      expect(await supplier(db, setup.provider.account_id)).toEqual({
+        balance: "99998",
+        reserved: "0",
+        spent: "2",
+        state: "ACTIVE",
+      });
+    }),
+);
+
+test("two revisions within one signed group preserve final dimensions and round the complete supplier cost once", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap("USD", "100000", 100, "PROVIDER_USAGE");
+    const client = f.client();
+    await client.startup();
+    const { prepared, owner } = await granted(db, setup, client);
+    const facts = [
+      event(owner, prepared.attemptId, {
+        usage: { input_tokens: "1", output_tokens: "0" },
+        final_dimensions: ["input_tokens"],
+      }),
+      event(owner, prepared.attemptId, {
+        source_revision: "2",
+        finality: "FINAL",
+        usage: { input_tokens: "1", output_tokens: "1" },
+        final_dimensions: ["input_tokens", "output_tokens"],
+        attempt_state: "SUCCEEDED",
+        request_state: "SUCCEEDED",
+      }),
+    ];
+    await traceFacts(db);
+    const result = committed((await createSettlementStore(db).persist([{ events: facts }]))[0]);
+    expect(result.receipts.map((receipt) => receipt.outcome)).toEqual(["ACCEPTED", "ACCEPTED"]);
+    expect(
+      await db`SELECT i.snapshot_revision::text revision,i.finality,i.cost_atoms::text cost,i.final_dimensions,p.usage FROM usage_event_index i JOIN usage_payloads p ON p.id=i.id AND p.created_at=i.created_at WHERE i.record_kind='CANONICAL' ORDER BY i.snapshot_revision`,
+    ).toEqual([
+      {
+        revision: "2",
+        finality: "PARTIAL",
+        cost: "1",
+        final_dimensions: ["input_tokens"],
+        usage: { input_tokens: "1", output_tokens: "0" },
+      },
+      {
+        revision: "4",
+        finality: "FINAL",
+        cost: "1",
+        final_dimensions: ["input_tokens", "output_tokens"],
+        usage: { input_tokens: "1", output_tokens: "1" },
+      },
+    ]);
+    expect(await db`SELECT revision::text,cost_atoms::text cost FROM upstream_costs`).toEqual([
+      { revision: "1", cost: "1" },
+    ]);
+    expect(await db`SELECT amount_atoms::text amount FROM billing_charges`).toEqual([
+      { amount: "3" },
+    ]);
+    expect(
+      await db`SELECT available_atoms::text available,reserved_atoms::text reserved,spent_atoms::text spent FROM wallets`,
+    ).toEqual([{ available: "997", reserved: "0", spent: "3" }]);
+    expect(
+      await db`SELECT rows FROM evidence_batch_trace WHERE name='usage_event_index' AND rows>0`,
+    ).toEqual([{ rows: 4 }]);
+    expect(await supplier(db, setup.provider.account_id)).toEqual({
+      balance: "99999",
+      reserved: "0",
+      spent: "1",
+      state: "ACTIVE",
+    });
+  }));
+
+test("evidence upgrade preserves a column-scoped owner without granting extra request reads or timestamp writes", () =>
+  withFinancial(
+    async (f, db) => {
+      const setup = await f.bootstrap("USD", "100000");
+      const second = await secondWallet(f, setup);
+      const client = f.client();
+      await client.startup();
+      const before = await granted(db, setup, client);
+      const owner = `evidence_column_owner_${crypto.randomUUID().replaceAll("-", "")}`;
+      await db.unsafe(`CREATE ROLE ${owner} NOLOGIN`);
+      try {
+        await db.unsafe(`GRANT USAGE,CREATE ON SCHEMA public,core_funding TO ${owner}`);
+        await db.unsafe(
+          `GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA public,core_funding TO ${owner}`,
+        );
+        await db.unsafe(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public,core_funding TO ${owner}`);
+        for (const [table, privilege, omitted] of [
+          ["gateway_requests", "SELECT", "execution_budget"],
+          ["attempts", "SELECT", "binding_id"],
+          ["usage_event_index", "INSERT", "created_at"],
+        ] as const) {
+          const columns = await db<
+            { attname: string }[]
+          >`SELECT attname::text FROM pg_attribute WHERE attrelid=${`public.${table}`}::regclass AND attnum>0 AND NOT attisdropped AND attname<>${omitted} ORDER BY attnum`;
+          await db.unsafe(`REVOKE ${privilege} ON public.${table} FROM ${owner}`);
+          await db.unsafe(
+            `GRANT ${privilege}(${columns.map((column) => `"${column.attname.replaceAll('"', '""')}"`).join(",")}) ON public.${table} TO ${owner}`,
+          );
+        }
+        await db.unsafe(
+          `ALTER FUNCTION public.persist_core_evidence_groups_v1(jsonb) OWNER TO ${owner}`,
+        );
+        await db.unsafe(`ALTER FUNCTION core_funding.persist_v1(jsonb,boolean) OWNER TO ${owner}`);
+        await db.unsafe(`REVOKE CREATE ON SCHEMA public,core_funding FROM ${owner}`);
+        async function permissions() {
+          return (
+            await db`SELECT has_column_privilege(${owner},'public.gateway_requests','execution_budget','SELECT') request_budget,has_column_privilege(${owner},'public.attempts','binding_id','SELECT') attempt_binding,has_column_privilege(${owner},'public.usage_event_index','created_at','INSERT') index_timestamp`
+          )[0];
+        }
+        const forbidden = { request_budget: false, attempt_binding: false, index_timestamp: false };
+        expect(await permissions()).toEqual(forbidden);
+        const fact = (request: typeof before) =>
+          event(request.owner, request.prepared.attemptId, {
+            finality: "FINAL",
+            usage: { input_tokens: "1", output_tokens: "0" },
+            final_dimensions: ["input_tokens", "output_tokens"],
+            attempt_state: "SUCCEEDED",
+            request_state: "SUCCEEDED",
+          });
+        const store = createSettlementStore(db);
+        expect(
+          committed((await store.persist([{ events: [fact(before)] }]))[0]).receipts[0]?.outcome,
+        ).toBe("ACCEPTED");
+        await migrate(db);
+        const after = await granted(db, setup, client);
+        const independent = await granted(db, second, client);
+        for (const result of await store.persist([
+          { events: [fact(after)] },
+          { events: [fact(independent)] },
+        ]))
+          expect(committed(result).receipts[0]?.outcome).toBe("ACCEPTED");
+        expect(await permissions()).toEqual(forbidden);
+        expect(await db`SELECT count(*)::int n FROM billing_charges`).toEqual([{ n: 3 }]);
+        expect(await supplier(db, setup.provider.account_id)).toEqual({
+          balance: "99997",
+          reserved: "0",
+          spent: "3",
+          state: "ACTIVE",
+        });
+      } finally {
+        await db.unsafe(`DROP OWNED BY ${owner}`);
+        await db.unsafe(`DROP ROLE ${owner}`);
+      }
+    },
+    { initializeDatabase: beforeEvidenceBatch },
+  ));

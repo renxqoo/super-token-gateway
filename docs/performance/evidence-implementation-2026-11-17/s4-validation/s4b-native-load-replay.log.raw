@@ -1,0 +1,46 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/native-durability.test.ts: (run #1)
+439 |     failure = failure ? new AggregateError([failure, error], "Business cleanup failed") : error;
+440 |   } finally {
+441 |     await rm(directory, { recursive: true });
+442 |   }
+443 |   if (failure)
+444 |     throw new Error(`Native business load regression: ${JSON.stringify(diagnostic)}`, {
+                    ^
+error: Native business load regression: {"directory":"/tmp/gateway-native-load-S0R2CU","driverPid":88880,"exitCode":1,"stdout":{"status":"fulfilled","value":{"text":"","bytes":0}},"stderr":{"status":"fulfilled","value":{"text":"SYNTHETIC_LOADER_READY\n53 |   let timer: ReturnType<typeof setTimeout> | undefined;\n54 |   try {\n55 |     return await Promise.race([\n56 |       operation,\n57 |       new Promise<never>((_, reject) => {\n58 |         timer = setTimeout(() => reject(new Error(`${label} timed out`)), milliseconds);\n                                                 ^\nerror: Native tool version timed out\n      at <anonymous> (/Users/wr/work/super-token-gateway/tests/support/native-fixture.ts:58:45)\n\nBun v1.4.4 (macOS arm64)\n","bytes":507}}}
+      at businessLoadFailure (/Users/wr/work/super-token-gateway/tests/integration/native-durability.test.ts:444:15)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/native-durability.test.ts:450:9)
+
+397 |         return [];
+398 |       }
+399 |     });
+400 |     fixtureDirectory = events.find((event) => event.durabilityFixture === "started")?.directory as
+401 |       string | undefined;
+402 |     expect(await ownedFixtureDirectory(fixtureDirectory)).toBeDefined();
+                                                                ^
+error: expect(received).toBeDefined()
+
+Received: undefined
+
+      at businessLoadFailure (/Users/wr/work/super-token-gateway/tests/integration/native-durability.test.ts:402:59)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/native-durability.test.ts:450:9)
+(fail) business dependency load failure closes the preflight fixture before any service starts [2092.71ms]
+
+tests/integration/native-durability.test.ts: (run #2)
+(pass) business dependency load failure closes the preflight fixture before any service starts [2180.76ms]
+
+tests/integration/native-durability.test.ts: (run #3)
+(pass) business dependency load failure closes the preflight fixture before any service starts [1423.89ms]
+
+tests/integration/native-durability.test.ts: (run #4)
+(pass) business dependency load failure closes the preflight fixture before any service starts [1314.05ms]
+
+tests/integration/native-durability.test.ts: (run #5)
+(pass) business dependency load failure closes the preflight fixture before any service starts [1298.56ms]
+
+ 4 pass
+ 90 filtered out
+ 1 fail
+ 35 expect() calls
+Ran 5 tests across 1 file. [8.32s]

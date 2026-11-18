@@ -1,0 +1,19 @@
+{
+  "at": "2026-11-17T21:34:21.066Z",
+  "database": "gateway_native",
+  "foundation_count": 28,
+  "original_27_names_and_oids_equal": true,
+  "remaining_recent_databases": [
+    "gateway_test_foundation_82e059787875412da082932c53472d69"
+  ],
+  "recent_fixture_created": 404,
+  "recent_fixture_without_dropped_record": [
+    "gateway_test_foundation_82e059787875412da082932c53472d69",
+    "gateway_test_foundation_8b718c53ea914f018beab187c352dafa",
+    "gateway_test_foundation_335e9506ef11476bae79db029cf3fbb4"
+  ],
+  "sampled_recent_core_pids": 806,
+  "remaining_recent_core_pids": [],
+  "remaining_recent_identity_roles": [],
+  "protected_reference_present": true
+}

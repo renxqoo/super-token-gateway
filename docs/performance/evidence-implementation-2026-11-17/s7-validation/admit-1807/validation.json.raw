@@ -1,0 +1,256 @@
+{
+  "at": "2026-11-17T20:44:44.556257+00:00",
+  "scope": "S7/1807 continuous admission setwise customer allocation, supplier cell reserve, material and journal writes; not complete funding/evidence mainline or final performance acceptance",
+  "migration": 2026111807,
+  "manifest_migrations": 39,
+  "source_sha256": {
+    "packages/storage/src/sql/core-admit-batch.sql": "5ecb23911fb4ba17c061a350bf2d8588b63ab490451b3480c82e7756eccc41fb",
+    "packages/storage/src/migrations/manifest.json": "fb45bcf333eb39f1f278490209deda18a6da5a26c8ad6a460165d230461d1ea1",
+    "tests/integration/core-admit-batch.test.ts": "5dd9e572197b6dbafef29556a7b402a3cd942700abec17f28029eabfb3e9384e",
+    "tests/integration/core-execution-upgrade.test.ts": "677ae9ef45044142c80898dd1e031536a9e2ef7319f2fa5efcb24db2dde19509"
+  },
+  "all_manifest_file_checksums_verified": true,
+  "runs": [
+    {
+      "log": "s7-admit-red.log",
+      "exit_code": 1,
+      "pass": 0,
+      "fail": 1,
+      "assertions": 0,
+      "meaning": "Fixture missing the required abort reason; not the product regression evidence"
+    },
+    {
+      "log": "s7-admit-feature-red.log",
+      "exit_code": 1,
+      "pass": 0,
+      "fail": 1,
+      "assertions": 2,
+      "meaning": "Actual 1806 implementation emits individual wallet/cell/material writes; transition tables show two one-row writes"
+    },
+    {
+      "log": "s7-admit-first.log",
+      "exit_code": 0,
+      "pass": 1,
+      "fail": 0,
+      "assertions": 13,
+      "meaning": "First 1807 setwise writes and replay, before candidate numeric-field optimization"
+    },
+    {
+      "log": "s7-admit-boundaries.log",
+      "exit_code": 1,
+      "pass": 4,
+      "fail": 2,
+      "assertions": 57,
+      "meaning": "Two fixture failures: uppercase proposed UUID rejected by dispatch schema; immutable context UPDATE rejected before batch"
+    },
+    {
+      "log": "s7-admit-final-money.log",
+      "exit_code": 0,
+      "pass": 14,
+      "fail": 0,
+      "assertions": 187,
+      "meaning": "Final runtime SQL: 7 admission cases, 6 BEGIN cases, 1 real HTTP Gateway JSON signed evidence/worker economic settlement; test source before two extra tests and failure trace assertion"
+    },
+    {
+      "log": "s7-admit-contracts.log",
+      "exit_code": 0,
+      "pass": 7,
+      "fail": 0,
+      "assertions": 58,
+      "filtered_out": 12,
+      "meaning": "Final runtime SQL and tests: failed item preserves successful bulk; cell budget coverage; mixed prefix; private runtime denial; historical upgrade; two unknown COMMIT cases"
+    }
+  ],
+  "test_batches_overlap": true,
+  "current_runtime_sql_bound_runs": [
+    "s7-admit-final-money.log",
+    "s7-admit-contracts.log"
+  ],
+  "checks": [
+    {
+      "command": "bun run check",
+      "log": "s7-admit-final-check.log",
+      "exit_code": 0,
+      "files": 351
+    },
+    {
+      "command": "bun run lint",
+      "log": "s7-admit-final-lint.log",
+      "exit_code": 0
+    },
+    {
+      "command": "bun run fmt:check",
+      "log": "s7-admit-final-format.log",
+      "exit_code": 0,
+      "files": 732
+    },
+    {
+      "command": "bun test tests/unit/architecture.test.ts",
+      "log": "s7-admit-final-architecture.log",
+      "exit_code": 0,
+      "pass": 7,
+      "assertions": 681
+    },
+    {
+      "command": "bun run build",
+      "log": "s7-admit-build.log",
+      "exit_code": 0
+    }
+  ],
+  "earlier_typechecks": [
+    {
+      "log": "s7-admit-check.log",
+      "exit_code": 0
+    },
+    {
+      "log": "s7-admit-boundaries-check.log",
+      "exit_code": 0
+    }
+  ],
+  "last_change_after_checks": "Documentation text/format only; final runtime SQL and tests unchanged after recorded checks/build",
+  "artifacts_sha256": {
+    "dist/core-api/main.js": "ea50dd923dda26cf0b644b988d1e10ac0f60a4be56a0f29f5976148981d857e0",
+    "dist/core-api/platform/management.js": "ebdf4a7ea2a0e82dbf7861c4f8e32b311068d963f08a4e4a3edf25c4034a4e27",
+    "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+    "dist/core-worker/main.js": "e4318050837a1d42282764d38ef299b3a7b4ede19d6a95df5b8ab72f5d6c18fe",
+    "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+    "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+    "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+    "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+    "dist/manifest.json": "c252509e8b85491c8f2a53dee740f88ce263a48aa1b187f047b03aa2becc9f52",
+    "dist/tools/sql/core-begin-batch.sql": "2a41a23e5aa2cdfb37dcca7e59afd192ad49d4651e560bbf2ac99915b11ab1d2",
+    "dist/tools/migrations/manifest.json": "fb45bcf333eb39f1f278490209deda18a6da5a26c8ad6a460165d230461d1ea1",
+    "dist/tools/sql/core-admit-batch.sql": "5ecb23911fb4ba17c061a350bf2d8588b63ab490451b3480c82e7756eccc41fb"
+  },
+  "built_migration_sql_and_manifest_byte_equal_source": true,
+  "resources": {
+    "at": "2026-11-17T20:42:55.007Z",
+    "database": "gateway_native",
+    "foundation_count": 27,
+    "original_27_names_and_oids_equal": true,
+    "remaining_recent_databases": [],
+    "recent_fixture_created": 29,
+    "recent_fixture_without_dropped_record": [],
+    "sampled_recent_core_pids": 58,
+    "remaining_recent_core_pids": [],
+    "remaining_recent_identity_roles": [],
+    "protected_reference_present": true
+  },
+  "protected_pids": [
+    {
+      "pid": 40766,
+      "start": "Mon Nov 16 16:27:47 2026",
+      "command": "bun"
+    },
+    {
+      "pid": 40771,
+      "start": "Mon Nov 16 16:27:47 2026",
+      "command": "bun"
+    }
+  ],
+  "archive": {
+    "s7-admit-boundaries-check.log": {
+      "file": "s7-admit-boundaries-check.log",
+      "sha256": "4155a30a93e233506634ba797c9039cbb1f209eedce947092ac853e05eb24dbf",
+      "bytes": 42
+    },
+    "s7-admit-boundaries.log": {
+      "file": "s7-admit-boundaries.log",
+      "sha256": "4bdb216fb67f89af658afccd7e839df264694efb4a35d308241a5b68c2ffafb5",
+      "bytes": 1476
+    },
+    "s7-admit-build.log": {
+      "file": "s7-admit-build.log",
+      "sha256": "e78614cafed479a219187a0e6dd738c39731b553f606e0926d6288f4e2be7dd1",
+      "bytes": 168
+    },
+    "s7-admit-check.log": {
+      "file": "s7-admit-check.log",
+      "sha256": "467e686385474d9265aaf7c6d91d5bede113d89d4aa6c883f02bbbbbf8bf703d",
+      "bytes": 42
+    },
+    "s7-admit-contracts.log": {
+      "file": "s7-admit-contracts.log",
+      "sha256": "2fb90a03e4ed628ad9a1890c6ebdb6cac9581e26e91f7a03f1b9d6392020b109",
+      "bytes": 1093
+    },
+    "s7-admit-feature-red.log": {
+      "file": "s7-admit-feature-red.log",
+      "sha256": "60f221ef89d4c836d28c440f9c3daf7da95e2e58955e200b04b919462572228f",
+      "bytes": 3901
+    },
+    "s7-admit-final-architecture.log": {
+      "file": "s7-admit-final-architecture.log",
+      "sha256": "8ec1b846c6b2b509f005274d1c9e29ca258364ecbb7673d64270af6da22ec4aa",
+      "bytes": 887
+    },
+    "s7-admit-final-check.log": {
+      "file": "s7-admit-final-check.log",
+      "sha256": "0d371bd45d11f705118d7f0dc079dede677dc4049ecdab00a02c4d59b9703a28",
+      "bytes": 67
+    },
+    "s7-admit-final-format.log": {
+      "file": "s7-admit-final-format.log",
+      "sha256": "cf6241f0476bed29b84be72faee7754684dadab9cfe878e91a93455482f376bf",
+      "bytes": 59
+    },
+    "s7-admit-final-lint.log": {
+      "file": "s7-admit-final-lint.log",
+      "sha256": "d4a09b61560776ae8feee6a490738c8d5748a904be5cbbc1d00a2d92a4587484",
+      "bytes": 25
+    },
+    "s7-admit-final-money.log": {
+      "file": "s7-admit-final-money.log",
+      "sha256": "81d00f56ddbd9f0c9b00087fc5f4fed23afe005e15bdbf753dc179568489c0b6",
+      "bytes": 1824
+    },
+    "s7-admit-first.log": {
+      "file": "s7-admit-first.log",
+      "sha256": "64a3be0d8078bffebd0f9bd28d5bfab3cc290124d2dfd099e5fdc9b8430eef25",
+      "bytes": 274
+    },
+    "s7-admit-red.log": {
+      "file": "s7-admit-red.log",
+      "sha256": "dcc6e158d1e2440c7551157124fa52446bfd678214e25f2ce52799b8cac29dd3",
+      "bytes": 565
+    },
+    "s7-admit-resources.json": {
+      "file": "s7-admit-resources.json.raw",
+      "sha256": "d7559d824edcdae77f6875b3f023ed5dfcd289e69bf4cb873b6adfa6e7188b83",
+      "bytes": 406
+    },
+    "render-admit-migration.py": {
+      "file": "render-admit-migration.py.raw",
+      "sha256": "33276ff29aba7077bf1b88da7e39dc9507a8a5ca70f0284dc70422bb71404342",
+      "bytes": 10966
+    },
+    "inspect-admit-resources.ts": {
+      "file": "inspect-admit-resources.ts.raw",
+      "sha256": "cde539fdca8c8eb7e3438724e6a15d556b63bf1bc2b877a69f8c370eded2e883",
+      "bytes": 2219
+    }
+  },
+  "command_prefix": "env PATH=/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4:/Users/wr/work/super-token-gateway/.local/toolchain/go/bin:$PATH .local/toolchain/bun-1.4.4/bun --env-file=.env.local --env-file=.local/native-gate.env",
+  "independent_readonly_review": {
+    "agent": "/root/financial_batch_audit",
+    "product_findings": [],
+    "requested_missing_behavior_evidence": [
+      "same cell free smaller than sum of two reservations",
+      "successful pending survives failed later item and remains bulk"
+    ],
+    "evidence_completion_log": "s7-admit-contracts.log",
+    "reviewer_ran_tests_or_services": false
+  },
+  "new_performance_measurement": false,
+  "latest_verified_stable_rps": 60,
+  "full_checks_not_run": [
+    "full bun run test",
+    "full bun run test:integration",
+    "bun run test:artifact",
+    "bun run test:durability",
+    "bun run test:backup",
+    "capacity and concurrency comparison"
+  ],
+  "reason": "Continue full funding/evidence implementation before the complete milestone gates; no redundant per-helper capacity run; previous full integration failure is not overridden",
+  "commit_push_deploy": false
+}

@@ -1,0 +1,13 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-funding-upgrade.test.ts:
+(pass) funding upgrade cannot turn an account-id reader or revision-only writer into a balance reader or money writer [224.90ms]
+
+tests/integration/core-funding-cells.test.ts:
+(pass) fragmented supplier budget admits both requests and a locked root or another cell cannot block BEGIN or independent settlement [2591.71ms]
+(pass) a frozen supplier accepts an in-range negative adjustment when the root alone is at its lower bound without releasing unknown reservation [2141.89ms]
+
+ 3 pass
+ 0 fail
+ 34 expect() calls
+Ran 3 tests across 2 files. [5.09s]

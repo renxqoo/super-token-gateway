@@ -1,5 +1,7 @@
 import { createPublicKey, type KeyObject } from "node:crypto";
 import { z } from "zod";
+import { verifiedPackageRuntime, type VerifiedPackage } from "./package.ts";
+import { sha256 } from "./abi.ts";
 
 export const openAIChatReleaseId = "gateway.openai-chat-1.9.1" as const;
 export const anthropicMessagesReleaseId = "gateway.anthropic-messages-1.2.0" as const;
@@ -101,10 +103,17 @@ export function packageTrust(policy: ReleasePolicy, now = Date.now()) {
       Date.parse(key.expires_at) > now,
   );
   const publicKeys = new Map<string, KeyObject>();
+  const periods = new Map<string, { from: number; until: number; digest: string }>();
+  const policyUntil = Date.parse(policy.expires_at);
   for (const key of usable) {
     const publicKey = createPublicKey(key.public_key);
     if (publicKey.asymmetricKeyType !== "ed25519") throw new Error("RELEASE_KEY_TYPE");
     publicKeys.set(key.id, publicKey);
+    periods.set(key.id, {
+      from: Date.parse(key.not_before),
+      until: Date.parse(key.expires_at),
+      digest: sha256(publicKey.export({ format: "der", type: "spki" })),
+    });
   }
   const byDigest = new Map<string, Map<string, KeyObject>>();
   for (const release of policy.releases) {
@@ -133,6 +142,17 @@ export function packageTrust(policy: ReleasePolicy, now = Date.now()) {
       return keys;
     },
     {
+      isPlatform(pkg: VerifiedPackage, at = Date.now()): boolean {
+        const original = verifiedPackageRuntime(pkg);
+        const period = periods.get(original.signingKeyId);
+        return (
+          byDigest.get(original.digest)?.has(original.signingKeyId) === true &&
+          period !== undefined &&
+          period.digest === original.signingKeyDigest &&
+          at >= period.from &&
+          at < Math.min(policyUntil, period.until)
+        );
+      },
       admits(pkg: { digest: string; signingKeyId: string; manifest: { id: string } }): boolean {
         if (byDigest.get(pkg.digest)?.has(pkg.signingKeyId)) return true;
         const publisher = publishers.get(pkg.signingKeyId);

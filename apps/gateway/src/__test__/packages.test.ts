@@ -26,6 +26,7 @@ const second = syntheticSignedPackage(
 const keys = new Map([["synthetic-test-only", key.publicKey]]);
 const trustAll = Object.assign((): ReadonlyMap<string, KeyObject> => keys, {
   admits: () => true,
+  isPlatform: () => false,
 });
 const deadline = new Date(Date.now() + 60000).toISOString();
 
@@ -59,7 +60,10 @@ test("a digest outside the deployment trust is refused without downloading", asy
   const source = downloads({ [first.pkg.digest]: first.bytes });
   const cache = createPackageCache(
     source.download,
-    Object.assign(() => new Map<string, KeyObject>(), { admits: () => true }),
+    Object.assign(() => new Map<string, KeyObject>(), {
+      admits: () => true,
+      isPlatform: () => false,
+    }),
   );
   await expect(cache.get(first.pkg.digest, deadline)).rejects.toThrow("not trusted");
   expect(source.calls).toEqual([]);
@@ -76,7 +80,10 @@ test("a validly signed package the deployment does not admit for its signer is r
   const source = downloads({ [first.pkg.digest]: first.bytes });
   const cache = createPackageCache(
     source.download,
-    Object.assign((): ReadonlyMap<string, KeyObject> => keys, { admits: () => false }),
+    Object.assign((): ReadonlyMap<string, KeyObject> => keys, {
+      admits: () => false,
+      isPlatform: () => false,
+    }),
   );
   await expect(cache.get(first.pkg.digest, deadline)).rejects.toThrow("not trusted");
   expect(cache.size()).toBe(0);

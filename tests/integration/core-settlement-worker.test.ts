@@ -15,7 +15,7 @@ async function eventually(check: () => Promise<boolean>, label: string) {
 
 async function supplier(db: SQL, account: string) {
   return (
-    await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM upstream_account_balances WHERE account_id=${account}`
+    await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM core_upstream_balances_v1 WHERE account_id=${account}`
   )[0];
 }
 

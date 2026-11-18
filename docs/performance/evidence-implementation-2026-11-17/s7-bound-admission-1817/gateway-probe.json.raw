@@ -1,0 +1,62 @@
+{
+  "kind": "isolated_gateway_error_attribution",
+  "run": "bench-97026a758e8f40ccb186a767e0c289dd",
+  "argv": [
+    "bun",
+    "--env-file=.local/native-gate.env",
+    ".local/stg-1817-probe.ts",
+    "--online-capacity",
+    "--seconds",
+    "60",
+    "--instances",
+    "1",
+    "--wallets",
+    "1000",
+    "--supplier-accounts",
+    "1",
+    "--concurrency",
+    "4608",
+    "--warmup-concurrency",
+    "16",
+    "--worker-concurrency",
+    "8",
+    "--gateway-inflight",
+    "10000",
+    "--drain-seconds",
+    "120",
+    "--request-timeout-ms",
+    "30000",
+    "--plugin-runtime",
+    "builtin-worker",
+    "--upstream",
+    "standard",
+    "--target-rps",
+    "3000",
+    "--rate",
+    "3001"
+  ],
+  "exit": 1,
+  "planned": 180060,
+  "shed": 0,
+  "statuses": {
+    "200": 13463,
+    "503": 166597
+  },
+  "gateway_errors": {
+    "probe_attempt_budget": 166597
+  },
+  "window_complete": 11579,
+  "requests": 13573,
+  "precise_charges": 13573,
+  "exact_supplier_postings": 13573,
+  "acknowledged": 27146,
+  "artifact": "778145d112b5f892712bdc13a1edf1a844ad474f68f79ccb8fdd91e3cb61512b",
+  "patch_sha256": "0a62a39b1b4931c6e3764e96effe1e6840735d43d12dd44cdd3c708110dc508c",
+  "files": {
+    "audit.json.raw": "25e3c57b5f320a36cc554a8540039cbc87ffa10bc75e557bc34e3f5c10d08d76",
+    "http.json.raw": "11afaffbf4a67fb8703ddcfdaaf7b9b69a1b1bbf21f25ee3742365cb3a886d3c",
+    "cleanup.json.raw": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "http.json.identities.tsv": "86cf10449b83dbdcb8230ca4db079ab564954b7ea18262f670fdafab61d2dce6",
+    "ack.identities.tsv": "a32a756ca99f54b129476582bc00b1ba803ae6f15b0112e99285fdb8d14bc4c9"
+  }
+}

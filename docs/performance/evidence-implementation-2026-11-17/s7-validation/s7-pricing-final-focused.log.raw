@@ -1,0 +1,10 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-pricing-programs.test.ts:
+(pass) compiled version prices preserve per-request ceiling, exposure subtraction, decimals, zero dimensions and the 38-digit boundary [205.21ms]
+(pass) migration compiles the captured historical price and later versions cannot mutate it or leave half-created source prices [183.33ms]
+
+ 2 pass
+ 0 fail
+ 17 expect() calls
+Ran 2 tests across 1 file. [419.00ms]

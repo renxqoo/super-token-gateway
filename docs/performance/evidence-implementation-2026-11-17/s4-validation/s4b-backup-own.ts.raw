@@ -1,0 +1,52 @@
+import { approvePluginRuntime } from "../../scripts/runtime-approval.ts";
+import { catalogHelper } from "../../tests/support/catalog.ts";
+import { rm } from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
+import { UsageProducer, evidenceChannel } from "@gateway/runtime";
+import { chatReplies, eventually, settledCharge, withGatewayStack } from "../../tests/support/gateway-process.ts";
+const record: Record<string, unknown> = {};
+try {
+  await withGatewayStack({ reply: () => chatReplies.json("owned backup fixture") }, async (stack) => {
+    await approvePluginRuntime(stack.db, {packageDigest:String(stack.f.catalog.release.descriptor.package_digest),kind:"builtin-worker",policyFile:stack.f.catalog.policyPath,helperExecutable:catalogHelper,builtinDirectory:resolve(".local/builtin-adapters"),actor:"backup-fixture-owner",reason:"Verify restored execution approval"});
+    const response = await stack.send();
+    await response.text();
+    if (response.status !== 200) throw new Error(`Owned traffic failed: ${response.status}`);
+    await settledCharge(stack.db, response.headers.get("x-request-id")!);
+    await stack.gateway.stop();
+    const queue = new UsageProducer({ channel: evidenceChannel, url: process.env.QUEUE_REDIS_URL!, namespace: stack.namespace, replicas: 0, timeoutMs: 2000 });
+    try {
+      await eventually(async () => Object.values(await queue.stats()).every((n) => n === 0), "owned evidence drained", 15000);
+    } finally { queue.close(); }
+    await stack.worker.stop();
+    await Promise.all([stack.f.identity.a.stop(), stack.f.identity.b.stop()]);
+    const target = new URL(process.env.DATABASE_URL!);
+    target.pathname = `/${String((await stack.db`SELECT current_database() name`)[0].name)}`;
+    record.source_database = target.pathname.slice(1);
+    record.namespace = stack.namespace;
+    record.quiesced = true;
+    const output = Bun.file(".local/performance-implementation/s4b-backup.log");
+    await Bun.write(output, "");
+    const child = Bun.spawn([process.execPath, "run", "test:backup", "--quiesced"], {
+      env: { ...process.env, DATABASE_URL: target.toString(), QUEUE_REDIS_URL: process.env.QUEUE_REDIS_URL!, REDIS_NAMESPACE: stack.namespace, PG_TOOLS_DIRECTORY: resolve(".local/toolchain/pg17/bin") },
+      stdin: "ignore", stdout: output, stderr: output,
+    });
+    record.exit_code = await child.exited;
+    if (record.exit_code !== 0) throw new Error(`Backup verification exited ${record.exit_code}`);
+    const result = JSON.parse((await output.text()).trim().split("\n").at(-1)!) as Record<string, unknown>;
+    record.result = result;
+    if(result.runtime_approvals !== "1" || !/^[a-f0-9]{32}$/.test(String(result.runtime_approvals_digest)) || !/^[a-f0-9]{32}$/.test(String(result.execution_permits_digest)) || result.runtime_permissions !== "owner-only") throw new Error("Runtime backup verification incomplete");
+    const dump = resolve(String(result.file));
+    if (dirname(dump) !== resolve(".local/backups") || !/^gateway-[0-9]+\.dump$/.test(basename(dump))) throw new Error("Unexpected dump ownership");
+    const digest = new Bun.CryptoHasher("sha256").update(await Bun.file(dump).bytes()).digest("hex");
+    if (digest !== result.sha256) throw new Error("Dump changed before cleanup");
+    await rm(dump);
+    record.dump_removed = !(await Bun.file(dump).exists());
+  });
+  record.fixture_cleaned = true;
+} catch (error) {
+  record.error = String(error);
+  process.exitCode = 1;
+} finally {
+  await Bun.write(".local/performance-implementation/s4b-backup-result.json", JSON.stringify(record, null, 2) + "\n");
+}
+console.log(JSON.stringify(record));

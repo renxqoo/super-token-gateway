@@ -4,6 +4,7 @@ import {
   withFinancial,
   prepareFinancialAdmission,
   financialBlockedBy,
+  financialGate,
   financialBalances,
   financialProviderSchema,
 } from "../support/financial-execution.ts";
@@ -68,31 +69,34 @@ test(
   "funding SHARE holds the exact platform credential through recharge receipt journal audit commit",
   () =>
     withFinancial(async (f, db) => {
-      const setup = await f.bootstrap(),
-        identity = await credential(db);
-      let release!: () => void, ready!: (pid: number) => void;
-      const gate = new Promise<void>((r) => (release = r)),
-        locked = new Promise<number>((r) => (ready = r));
-      const blocker = db.begin(async (tx) => {
-        await tx`SELECT account_id FROM upstream_account_balances WHERE account_id=${setup.provider.account_id} AND currency='USD' FOR NO KEY UPDATE`;
-        ready(Number((await tx`SELECT pg_backend_pid() pid`)[0].pid));
-        await gate;
-      });
-      const pid = await locked,
-        body = { ...setup.rechargeInput, external_ref: crypto.randomUUID(), credited_atoms: "17" },
+      const setup = await f.bootstrap();
+      const identity = await credential(db);
+      const gate = await financialGate(db);
+      let pending: ReturnType<typeof f.request> | undefined;
+      let revoke: Promise<unknown> | undefined;
+      try {
+        await db.unsafe(`
+          CREATE FUNCTION public.funding_credential_audit_gate() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+          BEGIN IF NEW.account_id='${setup.provider.account_id}'::uuid THEN PERFORM pg_advisory_xact_lock(${gate.key}::bigint);END IF;RETURN NEW;END $$;
+          CREATE TRIGGER funding_credential_audit_gate BEFORE INSERT ON public.upstream_audit_events FOR EACH ROW EXECUTE FUNCTION public.funding_credential_audit_gate();
+        `);
+        const body = {
+          ...setup.rechargeInput,
+          external_ref: crypto.randomUUID(),
+          credited_atoms: "17",
+        };
         pending = f.request(
           `/upstream-accounts/${setup.provider.account_id}/recharges`,
           body,
           identity.token,
-        ),
-        writer = await financialBlockedBy(db, pid);
-      let revoked = false;
-      const revoke = db
-        .begin(async (tx) => {
-          await tx`UPDATE administrator_credentials SET enabled=false WHERE id=${identity.id}`;
-        })
-        .then(() => (revoked = true));
-      try {
+        );
+        const writer = await financialBlockedBy(db, gate.pid);
+        let revoked = false;
+        revoke = db
+          .begin(async (tx) => {
+            await tx`UPDATE administrator_credentials SET enabled=false WHERE id=${identity.id}`;
+          })
+          .then(() => (revoked = true));
         await financialBlockedBy(db, writer);
         expect(revoked).toBe(false);
         expect(
@@ -100,21 +104,22 @@ test(
             await db`SELECT count(*)::integer n FROM upstream_funding_operations WHERE external_ref=${body.external_ref}`
           )[0].n,
         ).toBe(0);
+        await gate.release();
+        const receipt = await pending;
+        expect(receipt.status).toBe(201);
+        expect(receipt.value.actor).toBe(`technical-admin:${identity.administrator}`);
+        expect(receipt.value.balance_atoms).toBe("1017");
+        await revoke;
+        expect(revoked).toBe(true);
+        expect(
+          (
+            await db`SELECT count(*)::integer n FROM upstream_audit_events WHERE operation_id=${receipt.value.operation_id}`
+          )[0].n,
+        ).toBe(1);
       } finally {
-        release();
-        await blocker;
+        await gate.release();
+        await Promise.allSettled([pending, revoke]);
       }
-      const receipt = await pending;
-      expect(receipt.status).toBe(201);
-      expect(receipt.value.actor).toBe(`technical-admin:${identity.administrator}`);
-      expect(receipt.value.balance_atoms).toBe("1017");
-      await revoke;
-      expect(revoked).toBe(true);
-      expect(
-        (
-          await db`SELECT count(*)::integer n FROM upstream_audit_events WHERE operation_id=${receipt.value.operation_id}`
-        )[0].n,
-      ).toBe(1);
     }),
   30000,
 );
@@ -273,7 +278,10 @@ test(
   () =>
     withFinancial(async (f, db) => {
       const setup = await f.bootstrap();
-      await db`UPDATE upstream_accounts SET state='RECONCILE_REQUIRED' WHERE id=${setup.provider.account_id}`;
+      await db.begin(async (tx) => {
+        await tx`SELECT core_funding_control_v1(${setup.provider.account_id}::uuid,true)`;
+        await tx`UPDATE upstream_accounts SET state='RECONCILE_REQUIRED' WHERE id=${setup.provider.account_id}`;
+      });
       const body = {
         ...setup.rechargeInput,
         external_ref: crypto.randomUUID(),
@@ -295,7 +303,7 @@ test(
       ).toBe(503);
       expect(
         (
-          await db`SELECT balance_atoms::text FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+          await db`SELECT balance_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
         )[0].balance_atoms,
       ).toBe("1009");
       expect(

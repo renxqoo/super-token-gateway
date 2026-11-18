@@ -1,0 +1,3 @@
+$ bun run build:native && bun scripts/build.ts
+$ bun scripts/plugin-native.ts build
+Built Gateway, Core API, Core worker, migration, mock and isolated plugin artifacts

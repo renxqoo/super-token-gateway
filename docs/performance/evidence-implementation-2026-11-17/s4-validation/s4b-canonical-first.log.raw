@@ -1,0 +1,14 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/execution-runtime-history.test.ts:
+(pass) actual V1 reserved and granted permits survive the appended migration without new sends or fabricated identities [2077.57ms]
+
+tests/integration/core-canonical.test.ts:
+(pass) database canonical key ordering preserves every ASCII code unit and long protocol field names [148.22ms]
+(pass) database canonical mixed Unicode ordering uses UTF-16 rather than UTF-8, locale or JSONB storage order [149.56ms]
+(pass) database canonical preserves nested structures, empty values, escaped strings and persisted numeric spelling [147.27ms]
+
+ 4 pass
+ 0 fail
+ 170 expect() calls
+Ran 4 tests across 2 files. [2.60s]

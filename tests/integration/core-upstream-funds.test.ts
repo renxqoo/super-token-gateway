@@ -260,7 +260,7 @@ test("a negative adjustment below reservations freezes new admissions until a ma
     });
     expect(
       (
-        await db`SELECT balance_atoms::text,reserved_atoms::text,revision::text FROM upstream_account_balances WHERE account_id=${account}`
+        await db`SELECT balance_atoms::text,reserved_atoms::text,revision::text FROM core_upstream_balances_v1 WHERE account_id=${account}`
       )[0],
     ).toEqual({ balance_atoms: "20", reserved_atoms: "30", revision: "3" });
     const recharge = await f.request(`/upstream-accounts/${account}/recharges`, {
@@ -289,7 +289,7 @@ test("a negative adjustment below reservations freezes new admissions until a ma
     await (await prepareFinancialAdmission(setup, client)).admit();
     expect(
       (
-        await db`SELECT balance_atoms::text,reserved_atoms::text FROM upstream_account_balances WHERE account_id=${account}`
+        await db`SELECT balance_atoms::text,reserved_atoms::text FROM core_upstream_balances_v1 WHERE account_id=${account}`
       )[0],
     ).toEqual({ balance_atoms: "520", reserved_atoms: "60" });
     const plus = await f.request(

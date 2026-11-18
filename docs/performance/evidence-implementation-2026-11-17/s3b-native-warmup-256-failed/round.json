@@ -1,0 +1,16 @@
+{
+  "stage": "S3b unintended default 256 warmup concurrency",
+  "label": "s3b-native-warmup-256-failed",
+  "exit_code": 1,
+  "formal_window_started": false,
+  "warmup_invalid": 519,
+  "valid": false,
+  "capacityPassed": false,
+  "failures": ["warmup_invalid", "no_http_report"],
+  "unavailable": ["HTTP status breakdown", "per-PID CPU audit", "pgStatements audit"],
+  "limitation": "The load generator threw before the formal window and before writing its report; no capacity value is inferred. Previous stable baseline used explicit warmup concurrency 16.",
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  }
+}

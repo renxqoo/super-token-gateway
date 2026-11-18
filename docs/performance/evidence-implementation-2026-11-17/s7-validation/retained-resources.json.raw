@@ -1,0 +1,9 @@
+{
+  "at_utc": "2026-11-17T18:27:51.391Z",
+  "protected_processes": [
+    "40766 bun",
+    "40771 bun"
+  ],
+  "protected_reference_database_present": true,
+  "foundation_databases": 27
+}

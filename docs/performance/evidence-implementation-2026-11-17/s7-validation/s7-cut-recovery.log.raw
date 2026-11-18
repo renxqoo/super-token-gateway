@@ -1,0 +1,20 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-execution-recovery.test.ts:
+(pass) healthy unexpired RESERVED refuses technical abort and Gateway cannot invoke worker recovery [2298.77ms]
+(pass) deadline recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2461.78ms]
+(pass) customer recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2050.99ms]
+(pass) instance recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2122.28ms]
+(pass) certificate recovery aborts only never-granted RESERVED and closes the last customer hold atomically [2077.14ms]
+(pass) session recovery aborts only never-granted RESERVED and closes the last customer hold atomically [1984.38ms]
+(pass) security revocation never lets recovery release SEND_GRANTED money and current owner can close after key revocation [2075.90ms]
+(pass) quota recovery converges when Redis adoption committed but both PG ACTIVE and post-close RELEASED replies failed [2267.42ms]
+(pass) begin locks first and the competing begin or technical abort cannot cross its uncommitted transition [2071.01ms]
+(pass) recovery locks first and the competing begin or technical abort cannot cross its uncommitted transition [3263.61ms]
+(pass) technical abort audit failure rolls back both releases closure and command receipt [2062.83ms]
+(pass) a core-worker identity can neither open, admit nor begin Gateway executions and cannot sign evidence for a Gateway attempt [2003.00ms]
+
+ 12 pass
+ 0 fail
+ 103 expect() calls
+Ran 12 tests across 1 file. [26.84s]

@@ -8,6 +8,8 @@ import {
   internalProofSchema,
   internalCurrentRequestSchema,
   executionEnvelopeSchema,
+  routeTicketMaxBytes,
+  routeTicketSchema,
   executionReceiptSchema,
   executionRejectionCodeSchema,
   executionRejectionStatus,
@@ -33,6 +35,7 @@ import {
 } from "@gateway/runtime/crypto";
 import {
   listenBoundedH2,
+  boundedH2Defaults,
   readBoundedData,
   readH2Peer,
   h2JsonReply,
@@ -67,6 +70,7 @@ const capacityRejection = {
   message: "Internal request rejected",
 } as const;
 const identityConcurrency = 16;
+const routeTicketOverhead = Buffer.byteLength(',"route_ticket":""');
 function reject(code: string): never {
   throw new Error(code);
 }
@@ -315,6 +319,18 @@ export async function startCoreInternalListener(options: Options) {
       } catch {
         return reject("internal_request_invalid");
       }
+      if (endpoint === "execution_admit_v1" || endpoint === "execution_next_v1") {
+        const ticket =
+          parsed && typeof parsed === "object" && "route_ticket" in parsed
+            ? parsed.route_ticket
+            : undefined;
+        const allowance =
+          typeof ticket === "string" && routeTicketSchema.safeParse(ticket).success
+            ? ticket.length + routeTicketOverhead
+            : 0;
+        if (raw.length - allowance > (options.limits?.bodyBytes ?? boundedH2Defaults.bodyBytes))
+          return reject("internal_body_too_large");
+      }
       if (endpoint === "challenges") {
         if (headers["x-stg-proof"] !== undefined) return reject("internal_request_invalid");
         const request = startupChallengeRequestSchema.safeParse(parsed);
@@ -428,6 +444,9 @@ export async function startCoreInternalListener(options: Options) {
             ? internalCurrentRequestSchema
             : (await import("zod")).z.strictObject({
                 envelope: executionEnvelopeSchema,
+                ...(endpoint === "execution_admit_v1" || endpoint === "execution_next_v1"
+                  ? { route_ticket: routeTicketSchema.optional() }
+                  : {}),
                 data:
                   endpoint === "plugin_package_v1"
                     ? pluginPackageDataSchema
@@ -605,6 +624,10 @@ export async function startCoreInternalListener(options: Options) {
     listener = await listenBoundedH2(
       {
         ...options,
+        extraBodyBytesByPath: {
+          [executionPaths.execution_admit_v1]: routeTicketMaxBytes + routeTicketOverhead,
+          [executionPaths.execution_next_v1]: routeTicketMaxBytes + routeTicketOverhead,
+        },
         rejections: {
           capacity: capacityRejection,
           headers: {

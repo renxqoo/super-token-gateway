@@ -1,0 +1,2 @@
+tests/integration/schema.test.ts(2,21): error TS2307: Cannot find module 'drizzle-orm' or its corresponding type declarations.
+Found 1 error in 1 file, checked 352 files [88.39ms]

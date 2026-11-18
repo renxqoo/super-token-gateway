@@ -1,0 +1,32 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-success-quota.test.ts:
+(pass) accepted success closes execution and recovery releases its three quotas once while a partial attempt keeps its quota and responsibility [2275.79ms]
+(pass) a customer settlement failure rolls back automatic execution closure and quota release with every evidence and money write [2316.73ms]
+
+tests/integration/core-evidence-authentication.test.ts:
+(pass) a tampered signature is rejected without claiming the event and the genuine fact still settles [2054.24ms]
+(pass) a security-revoked session keeps its anchored receipt but quarantines new facts without money [2125.28ms]
+(pass) an uncommitted certificate revocation makes ingestion busy and the retry after commit is quarantined [2119.51ms]
+(pass) usage for a permit that was never granted is quarantined and keeps the reservation [2133.19ms]
+(pass) an in-group duplicate of a contested fact returns the contested receipt instead of a missing one [2136.86ms]
+(pass) an instance revocation waits for ingestion that already holds the identity share lock and only later facts are quarantined [2368.73ms]
+(pass) a group with facts from two producers settles both together and rolls back whole when either identity is busy [2249.30ms]
+(pass) facts signed before a normal rotation settle once after the session is disabled, its certificate retired and the old Gateway gone, while a new owner cannot begin or close the old chain [2240.50ms]
+
+tests/integration/core-evidence-batch.test.ts:
+(pass) independent signed groups write their facts and costs together while preserving each receipt and charge [2182.57ms]
+(pass) a billing failure after coalesced facts rolls back its whole original two-request group and replays only that group [2310.09ms]
+(pass) shared_wallet groups keep their original customer settlement order instead of coalescing [2250.52ms]
+(pass) expiring_lot groups keep their original customer settlement order instead of coalescing [2317.85ms]
+(pass) two revisions within one signed group preserve final dimensions and round the complete supplier cost once [2378.32ms]
+
+tests/integration/core-funding-batch.test.ts:
+(pass) a batch applies one cell transition while rounding each request independently and replaying without extra money [2248.64ms]
+(pass) a cell failure during the batch flush leaves only its group uncommitted and the original facts retry once [2184.29ms]
+(pass) partial and final groups share the actual reserve and a later billing failure discards its cell projection [2131.51ms]
+
+ 18 pass
+ 0 fail
+ 202 expect() calls
+Ran 18 tests across 4 files. [40.11s]

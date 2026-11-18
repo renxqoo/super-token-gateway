@@ -1,0 +1,1 @@
+{"at":"2026-11-17T22:23:43.941Z","log":".local/native-services/postgres.log","offset":135432482,"scope":"profile only; auto_explain adds overhead, excluded from capacity and CPU comparison"}

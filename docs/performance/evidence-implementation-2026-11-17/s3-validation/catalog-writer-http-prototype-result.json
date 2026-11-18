@@ -1,0 +1,15 @@
+{
+  "scope": "private HTTP POST/PATCH prototype with the original route functions and authority; not product code or capacity",
+  "creation": {
+    "status": 201,
+    "elapsed_ms": 42.16841599999998
+  },
+  "mutation": {
+    "status": 200,
+    "elapsed_ms": 2.0465829999998277,
+    "new_readers_after_request": 0,
+    "reader_busy": 223
+  },
+  "database": "gateway_test_foundation_9da2a2e60314412294c3abca29e3a818",
+  "exit_code": 0
+}

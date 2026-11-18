@@ -1,0 +1,25 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-evidence-batch.test.ts:
+ 98 |   const state = (await db`SELECT state FROM upstream_accounts WHERE id=${account}`)[0].state;
+ 99 |   return { ...row, state };
+100 | }
+101 | 
+102 | export function committed(result: CoreEvidenceGroupResult | undefined) {
+103 |   if (result?.status !== "COMMITTED") throw new Error(JSON.stringify(result));
+                                                      ^
+error: {"status":"ERROR","error":"42501"}
+      at committed (/Users/wr/work/super-token-gateway/tests/support/core-settlement.ts:103:49)
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-evidence-batch.test.ts:412:18)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:68:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:57:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:51:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:41:9)
+(fail) evidence upgrade preserves a column-scoped owner without granting extra request reads or timestamp writes [2226.11ms]
+
+ 0 pass
+ 5 filtered out
+ 1 fail
+ 8 expect() calls
+Ran 1 test across 1 file. [2.30s]

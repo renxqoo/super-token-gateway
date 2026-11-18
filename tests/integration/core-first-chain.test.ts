@@ -96,7 +96,9 @@ const chain = (stream: boolean) =>
         {
           attemptId: prepared.attemptId,
           permitEpoch: send.permit_epoch,
-          record: (evidence) => producer.publish({ events: [client.signEvidence(evidence)] }),
+          delivery: "progressive",
+          seal: (evidence) => client.signEvidence(evidence),
+          record: (events) => producer.publish({ events }),
         },
       );
       try {
@@ -174,7 +176,7 @@ const chain = (stream: boolean) =>
     ]);
     expect(
       (
-        await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+        await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
       )[0],
     ).toEqual({ balance: "985", reserved: "0", spent: "15" });
     expect(

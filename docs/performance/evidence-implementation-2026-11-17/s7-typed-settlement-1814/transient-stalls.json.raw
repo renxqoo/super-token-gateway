@@ -1,0 +1,686 @@
+{
+  "seconds_are_relative_to_measurement_start": true,
+  "http_identity_records_are_successes": true,
+  "rounds": [
+    {
+      "label": "typed-final-150-b",
+      "measurement_started_at": "2026-11-18T07:34:38.666Z",
+      "success_counts_near_lowest_second": {
+        "24": 147,
+        "25": 51,
+        "26": 32,
+        "27": 31,
+        "28": 36,
+        "29": 83,
+        "30": 289
+      },
+      "lowest_full_second_after_first": 27,
+      "first_wal_checkpoint_start": "2026-11-18T15:35:37.545000+08:00",
+      "first_wal_checkpoint_start_offset_seconds": 58.879,
+      "queue_samples_near_lowest_second": [
+        {
+          "at": 25562,
+          "queue": {
+            "waiting": 0,
+            "active": 2,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 5
+        },
+        {
+          "at": 25812,
+          "queue": {
+            "waiting": 0,
+            "active": 0,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 1
+        },
+        {
+          "at": 26062,
+          "queue": {
+            "waiting": 0,
+            "active": 2,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 3
+        },
+        {
+          "at": 26337,
+          "queue": {
+            "waiting": 0,
+            "active": 2,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 1,
+          "active_queries": 7
+        },
+        {
+          "at": 26570,
+          "queue": {
+            "waiting": 0,
+            "active": 2,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 1,
+          "active_queries": 6
+        },
+        {
+          "at": 26825,
+          "queue": {
+            "waiting": 1,
+            "active": 4,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 1,
+          "active_queries": 9
+        },
+        {
+          "at": 27069,
+          "queue": {
+            "waiting": 0,
+            "active": 5,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 6
+        },
+        {
+          "at": 27328,
+          "queue": {
+            "waiting": 1,
+            "active": 4,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 5
+        },
+        {
+          "at": 27571,
+          "queue": {
+            "waiting": 0,
+            "active": 6,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 6
+        },
+        {
+          "at": 27926,
+          "queue": {
+            "waiting": 0,
+            "active": 5,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 8
+        },
+        {
+          "at": 28101,
+          "queue": {
+            "waiting": 0,
+            "active": 5,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 8
+        },
+        {
+          "at": 28328,
+          "queue": {
+            "waiting": 0,
+            "active": 5,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 1,
+          "active_queries": 6
+        }
+      ],
+      "load_generator_peak_inflight": 256,
+      "scheduler_gap_ms": {
+        "p99": 2.41,
+        "max": 8.51
+      },
+      "gateway_errors": {
+        "overloaded": 154
+      }
+    },
+    {
+      "label": "typed-final-160-b",
+      "measurement_started_at": "2026-11-18T07:31:18.936Z",
+      "success_counts_near_lowest_second": {
+        "9": 134,
+        "10": 187,
+        "11": 92,
+        "12": 21,
+        "13": 26,
+        "14": 26,
+        "15": 156
+      },
+      "lowest_full_second_after_first": 12,
+      "first_wal_checkpoint_start": "2026-11-18T15:32:15.126000+08:00",
+      "first_wal_checkpoint_start_offset_seconds": 56.19,
+      "queue_samples_near_lowest_second": [
+        {
+          "at": 10539,
+          "queue": {
+            "waiting": 0,
+            "active": 2,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 7
+        },
+        {
+          "at": 10789,
+          "queue": {
+            "waiting": 0,
+            "active": 2,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 4
+        },
+        {
+          "at": 11054,
+          "queue": {
+            "waiting": 0,
+            "active": 1,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 4
+        },
+        {
+          "at": 11292,
+          "queue": {
+            "waiting": 0,
+            "active": 6,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 9
+        },
+        {
+          "at": 11562,
+          "queue": {
+            "waiting": 0,
+            "active": 5,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 6
+        },
+        {
+          "at": 11799,
+          "queue": {
+            "waiting": 0,
+            "active": 6,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 8
+        },
+        {
+          "at": 12057,
+          "queue": {
+            "waiting": 0,
+            "active": 3,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 3
+        },
+        {
+          "at": 12301,
+          "queue": {
+            "waiting": 0,
+            "active": 2,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 1,
+          "active_queries": 6
+        },
+        {
+          "at": 12550,
+          "queue": {
+            "waiting": 0,
+            "active": 2,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 4
+        },
+        {
+          "at": 12828,
+          "queue": {
+            "waiting": 0,
+            "active": 1,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 5
+        },
+        {
+          "at": 13219,
+          "queue": {
+            "waiting": 0,
+            "active": 1,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 2,
+          "active_queries": 8
+        },
+        {
+          "at": 13329,
+          "queue": {
+            "waiting": 0,
+            "active": 2,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 8
+        }
+      ],
+      "load_generator_peak_inflight": 256,
+      "scheduler_gap_ms": {
+        "p99": 2.51,
+        "max": 12.78
+      },
+      "gateway_errors": {
+        "overloaded": 142
+      }
+    },
+    {
+      "label": "typed-final-170-b",
+      "measurement_started_at": "2026-11-18T07:28:43.735Z",
+      "success_counts_near_lowest_second": {
+        "14": 168,
+        "15": 174,
+        "16": 173,
+        "17": 25,
+        "18": 119,
+        "19": 255,
+        "20": 200
+      },
+      "lowest_full_second_after_first": 17,
+      "first_wal_checkpoint_start": "2026-11-18T15:29:33.276000+08:00",
+      "first_wal_checkpoint_start_offset_seconds": 49.541,
+      "queue_samples_near_lowest_second": [
+        {
+          "at": 15549,
+          "queue": {
+            "waiting": 0,
+            "active": 3,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 5
+        },
+        {
+          "at": 15799,
+          "queue": {
+            "waiting": 1,
+            "active": 0,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 1,
+          "active_queries": 5
+        },
+        {
+          "at": 16059,
+          "queue": {
+            "waiting": 0,
+            "active": 7,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 7
+        },
+        {
+          "at": 16307,
+          "queue": {
+            "waiting": 0,
+            "active": 2,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 4
+        },
+        {
+          "at": 16550,
+          "queue": {
+            "waiting": 1,
+            "active": 2,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 7
+        },
+        {
+          "at": 16804,
+          "queue": {
+            "waiting": 0,
+            "active": 1,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 6
+        },
+        {
+          "at": 17052,
+          "queue": {
+            "waiting": 0,
+            "active": 1,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 7
+        },
+        {
+          "at": 17301,
+          "queue": {
+            "waiting": 0,
+            "active": 3,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 3
+        },
+        {
+          "at": 17554,
+          "queue": {
+            "waiting": 0,
+            "active": 4,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 8
+        },
+        {
+          "at": 17801,
+          "queue": {
+            "waiting": 0,
+            "active": 0,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 4
+        },
+        {
+          "at": 18054,
+          "queue": {
+            "waiting": 0,
+            "active": 4,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 7
+        },
+        {
+          "at": 18330,
+          "queue": {
+            "waiting": 0,
+            "active": 1,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 2
+        }
+      ],
+      "load_generator_peak_inflight": 219,
+      "scheduler_gap_ms": {
+        "p99": 2.44,
+        "max": 14.79
+      },
+      "gateway_errors": {
+        "overloaded": 59
+      }
+    },
+    {
+      "label": "typed-final-300-a",
+      "measurement_started_at": "2026-11-18T07:25:31.146Z",
+      "success_counts_near_lowest_second": {
+        "29": 251,
+        "30": 25,
+        "31": 65,
+        "32": 17,
+        "33": 45,
+        "34": 61,
+        "35": 186
+      },
+      "lowest_full_second_after_first": 32,
+      "first_wal_checkpoint_start": "2026-11-18T15:26:07.342000+08:00",
+      "first_wal_checkpoint_start_offset_seconds": 36.196,
+      "queue_samples_near_lowest_second": [
+        {
+          "at": 30586,
+          "queue": {
+            "waiting": 392,
+            "active": 8,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 5
+        },
+        {
+          "at": 30842,
+          "queue": {
+            "waiting": 400,
+            "active": 8,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 9
+        },
+        {
+          "at": 31086,
+          "queue": {
+            "waiting": 403,
+            "active": 8,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 5
+        },
+        {
+          "at": 31336,
+          "queue": {
+            "waiting": 405,
+            "active": 8,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 9
+        },
+        {
+          "at": 31586,
+          "queue": {
+            "waiting": 406,
+            "active": 8,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 6
+        },
+        {
+          "at": 31847,
+          "queue": {
+            "waiting": 406,
+            "active": 8,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 3,
+          "active_queries": 8
+        },
+        {
+          "at": 32119,
+          "queue": {
+            "waiting": 408,
+            "active": 8,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 7
+        },
+        {
+          "at": 32337,
+          "queue": {
+            "waiting": 408,
+            "active": 8,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 6
+        },
+        {
+          "at": 32587,
+          "queue": {
+            "waiting": 409,
+            "active": 8,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 7
+        },
+        {
+          "at": 32837,
+          "queue": {
+            "waiting": 410,
+            "active": 8,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 8
+        },
+        {
+          "at": 33333,
+          "queue": {
+            "waiting": 411,
+            "active": 8,
+            "delayed": 0,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 5
+        },
+        {
+          "at": 33355,
+          "queue": {
+            "waiting": 407,
+            "active": 8,
+            "delayed": 2,
+            "failed": 0
+          },
+          "upstream_active": 0,
+          "lock_waiters": 0,
+          "active_queries": 5
+        }
+      ],
+      "load_generator_peak_inflight": 256,
+      "scheduler_gap_ms": {
+        "p99": 2.84,
+        "max": 8.2
+      },
+      "gateway_errors": {
+        "overloaded": 2145
+      }
+    }
+  ]
+}

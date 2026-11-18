@@ -395,6 +395,35 @@ func TestAdmissionQueueRejectsOverload(t *testing.T) {
 	p.wait(cl)
 }
 
+func TestSequentialCompletedCallsDoNotReportOverload(t *testing.T) {
+	for _, slots := range []int{1, 8} {
+		t.Run(fmt.Sprintf("slots=%d", slots), func(t *testing.T) {
+			c := native.DefaultConfig()
+			c.Slots = slots
+			c.Queue = 0
+			p := launch(t, c)
+			module := binary.EncodeModule(&wasm.Module{})
+			hash := p.load(module)
+			var calls sync.WaitGroup
+			for slot := 0; slot < slots; slot++ {
+				calls.Add(1)
+				go func() {
+					defer calls.Done()
+					for i := 0; i < 1000; i++ {
+						r := p.request(native.Request{Op: "load", Hash: hash, Module: module})
+						if r.Error != "" {
+							t.Errorf("sequential call %d after a completed reply: %s", i, r.Error)
+							return
+						}
+					}
+				}()
+			}
+			calls.Wait()
+			p.close()
+		})
+	}
+}
+
 func TestSafeProtocolErrorsAndInputStateOutputBudgets(t *testing.T) {
 	c := native.DefaultConfig()
 	c.MaxInputBytes = 256

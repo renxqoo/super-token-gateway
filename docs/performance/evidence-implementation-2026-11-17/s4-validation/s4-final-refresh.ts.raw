@@ -1,0 +1,13 @@
+const results = [];
+for (const [label, command] of [["check", "check"], ["lint", "lint"], ["fmt", "fmt:check"], ["unit", "test"], ["build", "build"]]) {
+  const path = `.local/performance-implementation/s4-final-refresh-${label}.log`, output = Bun.file(path);
+  await Bun.write(output, "");
+  const started = new Date().toISOString(), start = performance.now();
+  const child = Bun.spawn([process.execPath, "run", command!], {env:process.env,stdin:"ignore",stdout:output,stderr:output});
+  const code = await child.exited;
+  const result = {label,command:[process.execPath,"run",command],started,code,elapsed_ms:performance.now()-start,log:path};
+  results.push(result);
+  await Bun.write(".local/performance-implementation/s4-final-refresh-result.json",JSON.stringify(results,null,2)+"\n");
+  console.log(JSON.stringify(result));
+}
+process.exitCode = results.some(result=>result.code!==0) ? 1 : 0;

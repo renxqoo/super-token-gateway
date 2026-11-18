@@ -1,0 +1,13 @@
+--- scripts/bench-system.ts
++++ scripts/bench-system.ts
+@@ -110 +110 @@
+-  "dist/gateway/main.js",
++  ".local/stg-1817-gateway.js",
+@@ -481 +481 @@
+-        entry: "dist/gateway/main.js",
++        entry: ".local/stg-1817-gateway.js",
+--- dist/gateway/main.js
++++ .local/stg-1817-gateway.js
+@@ -55994 +55994 @@
+-      return errorResponse(error instanceof GatewayError && error.code === "overloaded" || error instanceof PluginHostError && pluginCapacity.has(error.code) ? new GatewayError(503, deps.lifecycle.accepting ? "overloaded" : "draining", "Gateway admission capacity reached") : error, requestId);
++      return errorResponse(error instanceof GatewayError && error.code === "overloaded" || error instanceof PluginHostError && pluginCapacity.has(error.code) ? new GatewayError(503, error instanceof PluginHostError ? "probe_" + error.code.toLowerCase() : deps.lifecycle.accepting ? "overloaded" : "draining", "Gateway admission capacity reached") : error, requestId);

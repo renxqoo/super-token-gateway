@@ -1,0 +1,550 @@
+{
+  "scope": "Main-thread raw leaf sample counts with nearest-module classification; not wall-time or whole-process CPU attribution",
+  "samples": 3572,
+  "categories": {
+    "HTTP and streams": {
+      "samples": 671,
+      "percent": 18.784994400895858
+    },
+    "other": {
+      "samples": 735,
+      "percent": 20.57670772676372
+    },
+    "schema": {
+      "samples": 874,
+      "percent": 24.46808510638298
+    },
+    "plugin host": {
+      "samples": 449,
+      "percent": 12.569988801791713
+    },
+    "hash": {
+      "samples": 73,
+      "percent": 2.0436730123180293
+    },
+    "JSON codec": {
+      "samples": 171,
+      "percent": 4.787234042553192
+    },
+    "canonical JSON": {
+      "samples": 255,
+      "percent": 7.1388577827547595
+    },
+    "Worker IPC": {
+      "samples": 94,
+      "percent": 2.6315789473684212
+    },
+    "signature": {
+      "samples": 250,
+      "percent": 6.998880179171333
+    }
+  },
+  "bundle_sha256": "4fe79f48a7b6c28a11c6da9e67d049e2ebf271da7a554ba60c913d6f5e0cbe16",
+  "worker_threads_captured": false,
+  "module_ranges": [
+    [1, "@bun"],
+    [
+      50,
+      "node_modules/.bun/node-abort-controller@3.1.1/node_modules/node-abort-controller/index.js"
+    ],
+    [121, "node_modules/.bun/semver@7.8.6/node_modules/semver/internal/constants.js"],
+    [178, "node_modules/.bun/semver@7.8.6/node_modules/semver/internal/debug.js"],
+    [184, "node_modules/.bun/semver@7.8.6/node_modules/semver/internal/re.js"],
+    [269, "node_modules/.bun/semver@7.8.6/node_modules/semver/internal/parse-options.js"],
+    [285, "node_modules/.bun/semver@7.8.6/node_modules/semver/internal/identifiers.js"],
+    [307, "node_modules/.bun/semver@7.8.6/node_modules/semver/classes/semver.js"],
+    [589, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/parse.js"],
+    [608, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/valid.js"],
+    [618, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/clean.js"],
+    [628, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/inc.js"],
+    [646, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/diff.js"],
+    [687, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/major.js"],
+    [694, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/minor.js"],
+    [701, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/patch.js"],
+    [708, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/prerelease.js"],
+    [718, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/compare.js"],
+    [725, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/rcompare.js"],
+    [732, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/compare-loose.js"],
+    [739, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/compare-build.js"],
+    [750, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/sort.js"],
+    [757, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/rsort.js"],
+    [764, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/gt.js"],
+    [771, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/lt.js"],
+    [778, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/eq.js"],
+    [785, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/neq.js"],
+    [792, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/gte.js"],
+    [799, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/lte.js"],
+    [806, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/cmp.js"],
+    [853, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/coerce.js"],
+    [896, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/truncate.js"],
+    [934, "node_modules/.bun/semver@7.8.6/node_modules/semver/internal/lrucache.js"],
+    [
+      969,
+      "node_modules/.bun/semver@7.8.6/node_modules/semver/internal/trim-comparator-whitespace.js"
+    ],
+    [1157, "node_modules/.bun/semver@7.8.6/node_modules/semver/classes/range.js"],
+    [1539, "node_modules/.bun/semver@7.8.6/node_modules/semver/classes/comparator.js"],
+    [1650, "node_modules/.bun/semver@7.8.6/node_modules/semver/functions/satisfies.js"],
+    [1664, "node_modules/.bun/semver@7.8.6/node_modules/semver/ranges/to-comparators.js"],
+    [1671, "node_modules/.bun/semver@7.8.6/node_modules/semver/ranges/max-satisfying.js"],
+    [1697, "node_modules/.bun/semver@7.8.6/node_modules/semver/ranges/min-satisfying.js"],
+    [1723, "node_modules/.bun/semver@7.8.6/node_modules/semver/ranges/min-version.js"],
+    [1777, "node_modules/.bun/semver@7.8.6/node_modules/semver/ranges/valid.js"],
+    [1790, "node_modules/.bun/semver@7.8.6/node_modules/semver/ranges/outside.js"],
+    [1856, "node_modules/.bun/semver@7.8.6/node_modules/semver/ranges/gtr.js"],
+    [1863, "node_modules/.bun/semver@7.8.6/node_modules/semver/ranges/ltr.js"],
+    [1870, "node_modules/.bun/semver@7.8.6/node_modules/semver/ranges/intersects.js"],
+    [1881, "node_modules/.bun/semver@7.8.6/node_modules/semver/ranges/simplify.js"],
+    [1928, "node_modules/.bun/semver@7.8.6/node_modules/semver/ranges/subset.js"],
+    [2088, "node_modules/.bun/semver@7.8.6/node_modules/semver/index.js"],
+    [2182, "node_modules/.bun/detect-libc@2.1.2/node_modules/detect-libc/lib/process.js"],
+    [2202, "node_modules/.bun/detect-libc@2.1.2/node_modules/detect-libc/lib/filesystem.js"],
+    [2236, "node_modules/.bun/detect-libc@2.1.2/node_modules/detect-libc/lib/elf.js"],
+    [2270, "node_modules/.bun/detect-libc@2.1.2/node_modules/detect-libc/lib/detect-libc.js"],
+    [
+      2516,
+      "node_modules/.bun/node-gyp-build-optional-packages@5.2.2/node_modules/node-gyp-build-optional-packages/node-gyp-build.js"
+    ],
+    [
+      2737,
+      "node_modules/.bun/node-gyp-build-optional-packages@5.2.2/node_modules/node-gyp-build-optional-packages/index.js"
+    ],
+    [2747, "node_modules/.bun/msgpackr-extract@3.0.7/node_modules/msgpackr-extract/index.js"],
+    [2753, "node_modules/.bun/tslib@2.9.1/node_modules/tslib/tslib.js"],
+    [3367, "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/fields/types.js"],
+    [
+      3372,
+      "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/fields/CronField.js"
+    ],
+    [3494, "node_modules/.bun/luxon@3.7.2/node_modules/luxon/build/node/luxon.js"],
+    [8362, "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/CronDate.js"],
+    [
+      8655,
+      "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/fields/CronMonth.js"
+    ],
+    [
+      8689,
+      "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/fields/CronDayOfMonth.js"
+    ],
+    [
+      8731,
+      "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/fields/CronDayOfWeek.js"
+    ],
+    [8770, "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/fields/CronHour.js"],
+    [
+      8800,
+      "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/fields/CronMinute.js"
+    ],
+    [
+      8830,
+      "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/fields/CronSecond.js"
+    ],
+    [8860, "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/fields/index.js"],
+    [
+      8893,
+      "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/CronFieldCollection.js"
+    ],
+    [9117, "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/CronExpression.js"],
+    [9416, "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/utils/random.js"],
+    [
+      9442,
+      "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/CronExpressionParser.js"
+    ],
+    [9744, "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/CronFileParser.js"],
+    [9810, "node_modules/.bun/cron-parser@5.10.3/node_modules/cron-parser/dist/index.js"],
+    [9859, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/classic/iso.js"],
+    [9872, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/index.js"],
+    [9941, "packages/core-client/src/index.ts"],
+    [9944, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/util.js"],
+    [10499, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/core.js"],
+    [10620, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/errors.js"],
+    [10735, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/parse.js"],
+    [10882, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/regexes.js"],
+    [10940, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/checks.js"],
+    [11291, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/doc.js"],
+    [11333, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/versions.js"],
+    [11340, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/schemas.js"],
+    [13099, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/memoizer.js"],
+    [13368, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/locales/en.js"],
+    [13490, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/registries.js"],
+    [13537, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/api.js"],
+    [13992, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/to-json-schema.js"],
+    [14515, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/json-schema-processors.js"],
+    [15104, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/classic/errors.js"],
+    [15149, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/classic/parse.js"],
+    [15163, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/classic/schemas.js"],
+    [16148, "node_modules/.bun/zod@4.6.7/node_modules/zod/v4/classic/iso.js"],
+    [16161, "packages/kernel/src/values.ts"],
+    [16204, "packages/kernel/src/errors.ts"],
+    [16213, "packages/kernel/src/numbers.ts"],
+    [16229, "packages/kernel/src/canonical.ts"],
+    [16260, "packages/kernel/src/cost.ts"],
+    [16269, "packages/contracts/src/public.ts"],
+    [16430, "packages/contracts/src/billing.ts"],
+    [16509, "packages/contracts/src/errors.ts"],
+    [16537, "packages/contracts/src/enterprise.ts"],
+    [16586, "packages/contracts/src/upstream-funding.ts"],
+    [16658, "packages/contracts/src/internal-identity.ts"],
+    [16938, "packages/contracts/src/core-execution.ts"],
+    [17389, "packages/runtime/src/crypto.ts"],
+    [17405, "packages/runtime/src/h2.ts"],
+    [17645, "packages/core-client/src/index.ts"],
+    [17990, "packages/runtime/src/network.ts"],
+    [17994, "packages/runtime/src/ip.ts"],
+    [18049, "packages/runtime/src/http-pool.ts"],
+    [18302, "packages/runtime/src/network.ts"],
+    [18449, "packages/runtime/src/lifecycle.ts"],
+    [18491, "packages/runtime/src/usage-queue.ts"],
+    [18493, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/backoffs.js"],
+    [18545, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/enums/child-command.js"],
+    [18558, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/enums/error-code.js"],
+    [18573, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/enums/parent-command.js"],
+    [18592, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/enums/metrics-time.js"],
+    [
+      18604,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/enums/telemetry-attributes.js"
+    ],
+    [
+      18664,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/abort-controller.js"
+    ],
+    [18673, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/utils/index.js"],
+    [
+      18676,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/errors/connection-closed-error.js"
+    ],
+    [18688, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/utils/index.js"],
+    [
+      18849,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/child-processor.js"
+    ],
+    [
+      18857,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/errors/unrecoverable-error.js"
+    ],
+    [
+      18867,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/redis-queue-backend.js"
+    ],
+    [18870, "node_modules/.bun/msgpackr@2.1.4/node_modules/msgpackr/unpack.js"],
+    [20098, "node_modules/.bun/msgpackr@2.1.4/node_modules/msgpackr/pack.js"],
+    [21404, "node_modules/.bun/msgpackr@2.1.4/node_modules/msgpackr/node-index.js"],
+    [21416, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/version.js"],
+    [
+      21419,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/finished-errors.js"
+    ],
+    [21463, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/queue-keys.js"],
+    [
+      21503,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/redis-queue-backend.js"
+    ],
+    [23207, "node_modules/.bun/tslib@2.9.1/node_modules/tslib/modules/index.js"],
+    [
+      23244,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/redis-connection.js"
+    ],
+    [
+      23247,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/addDelayedJob-6.js"
+    ],
+    [
+      23863,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/addJobScheduler-11.js"
+    ],
+    [24465, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/addLog-2.js"],
+    [
+      24495,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/addParentJob-6.js"
+    ],
+    [
+      24995,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/addPrioritizedJob-9.js"
+    ],
+    [
+      25621,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/addStandardJob-9.js"
+    ],
+    [26253, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/changeDelay-4.js"],
+    [
+      26357,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/changePriority-7.js"
+    ],
+    [
+      26481,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/cleanJobsInSet-3.js"
+    ],
+    [26843, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/drain-5.js"],
+    [27111, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/extendLock-2.js"],
+    [27138, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/extendLocks-1.js"],
+    [27185, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/getCounts-1.js"],
+    [
+      27231,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/getCountsPerPriority-2.js"
+    ],
+    [
+      27259,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/getDependencyCounts-4.js"
+    ],
+    [
+      27293,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/getJobScheduler-1.js"
+    ],
+    [27313, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/getJobs-1.js"],
+    [27453, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/getMetrics-2.js"],
+    [27475, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/getRanges-1.js"],
+    [
+      27545,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/getRateLimitTtl-2.js"
+    ],
+    [27586, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/getState-8.js"],
+    [27656, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/getStateV2-8.js"],
+    [27710, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/isFinished-3.js"],
+    [27756, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/isJobInList-1.js"],
+    [27785, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/isMaxed-2.js"],
+    [
+      27816,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/moveJobFromActiveToWait-9.js"
+    ],
+    [
+      27943,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/moveJobsToWait-8.js"
+    ],
+    [
+      28075,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/moveStalledJobsToWait-9.js"
+    ],
+    [
+      28262,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/moveToActive-11.js"
+    ],
+    [
+      28505,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/moveToDelayed-11.js"
+    ],
+    [
+      28901,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/moveToFinished-14.js"
+    ],
+    [
+      29943,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/moveToWaitingChildren-7.js"
+    ],
+    [30047, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/obliterate-2.js"],
+    [30390, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/paginate-1.js"],
+    [30497, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/pause-7.js"],
+    [30587, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/promote-9.js"],
+    [
+      30690,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayAckInbox-1.js"
+    ],
+    [
+      30711,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayDeleteRetained-1.js"
+    ],
+    [30877, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayGet-1.js"],
+    [
+      31198,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayGetNamespaces-1.js"
+    ],
+    [
+      31230,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayHeartbeat-1.js"
+    ],
+    [
+      31309,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayPublish-1.js"
+    ],
+    [
+      31675,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayReadInbox-1.js"
+    ],
+    [
+      31708,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayRegisterNode-1.js"
+    ],
+    [
+      31991,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayRemoveEndpoint-1.js"
+    ],
+    [
+      32193,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relaySubscribe-1.js"
+    ],
+    [32341, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relaySweep-1.js"],
+    [
+      32604,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayTouchNamespace-1.js"
+    ],
+    [
+      32640,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayTrimInbox-1.js"
+    ],
+    [
+      32719,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/relayUnregisterNode-1.js"
+    ],
+    [32972, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/releaseLock-1.js"],
+    [
+      32994,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/releaseParentIfNoPendingDependencies-2.js"
+    ],
+    [
+      33159,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/removeChildDependency-1.js"
+    ],
+    [
+      33317,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/removeDeduplicationKey-1.js"
+    ],
+    [33341, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/removeJob-2.js"],
+    [
+      33686,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/removeJobScheduler-3.js"
+    ],
+    [
+      33732,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/removeOrphanedJobs-1.js"
+    ],
+    [
+      33806,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/removeUnprocessedChildren-2.js"
+    ],
+    [
+      34141,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/reprocessJob-9.js"
+    ],
+    [34284, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/retryJob-11.js"],
+    [
+      34475,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/saveStacktrace-1.js"
+    ],
+    [34499, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/updateData-1.js"],
+    [
+      34522,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/updateJobScheduler-12.js"
+    ],
+    [
+      34858,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/scripts/updateProgress-3.js"
+    ],
+    [
+      34901,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/ioredis-client.js"
+    ],
+    [
+      35134,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/node-redis-client.js"
+    ],
+    [
+      35783,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/bun-redis-client.js"
+    ],
+    [
+      36699,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/redis-connection.js"
+    ],
+    [37176, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/utils/create-backend.js"],
+    [37213, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/job.js"],
+    [37826, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/job-scheduler.js"],
+    [37829, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/queue-base.js"],
+    [37918, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/job-scheduler.js"],
+    [38169, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/queue-getters.js"],
+    [38505, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/queue.js"],
+    [38812, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/classes/relay-errors.js"],
+    [
+      38830,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/interfaces/queue-options.js"
+    ],
+    [38836, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/postgres/sql-scripts.js"],
+    [45309, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/postgres/sql-loader.js"],
+    [
+      45335,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/postgres/migrations/index.js"
+    ],
+    [45406, "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/postgres/migrator.js"],
+    [
+      45409,
+      "node_modules/.bun/bullmq@6.7.2/node_modules/bullmq/dist/esm/postgres/postgres-queue-backend.js"
+    ],
+    [46803, "packages/runtime/src/batcher.ts"],
+    [46890, "packages/runtime/src/usage-queue.ts"],
+    [47130, "packages/runtime/src/cloud-auth.ts"],
+    [47154, "packages/runtime/src/quota-leases.ts"],
+    [47162, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/request/constants.js"],
+    [47165, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/utils/buffer.js"],
+    [47170, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/utils/body.js"],
+    [47249, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/utils/url.js"],
+    [47461, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/request.js"],
+    [47568, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/utils/html.js"],
+    [47605, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/context.js"],
+    [47772, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/compose.js"],
+    [47809, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/router.js"],
+    [47823, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/utils/constants.js"],
+    [47826, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/utils/mount.js"],
+    [47861, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/hono-base.js"],
+    [48071, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/router/utils.js"],
+    [
+      48074,
+      "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/router/reg-exp-router/matcher.js"
+    ],
+    [48093, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/router/reg-exp-router/node.js"],
+    [48194, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/router/reg-exp-router/trie.js"],
+    [
+      48272,
+      "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/router/reg-exp-router/router.js"
+    ],
+    [48365, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/router/smart-router/router.js"],
+    [48418, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/router/trie-router/node.js"],
+    [48557, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/router/trie-router/router.js"],
+    [48570, "node_modules/.bun/hono@4.13.17/node_modules/hono/dist/hono.js"],
+    [48578, "packages/plugin-host/src/supervisor.ts"],
+    [48582, "packages/plugin-host/src/executable.ts"],
+    [48642, "packages/plugin-sdk/src/abi.ts"],
+    [48874, "packages/plugin-sdk/src/config.ts"],
+    [48932, "packages/plugin-sdk/src/package.ts"],
+    [48935, "packages/plugin-sdk/src/fixtures.ts"],
+    [48966, "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/utils.js"],
+    [
+      49061,
+      "node_modules/.bun/lossless-json@4.3.3/node_modules/lossless-json/lib/esm/LosslessNumber.js"
+    ],
+    [49090, "packages/plugin-sdk/src/guest.ts"],
+    [49191, "packages/plugin-sdk/src/module.ts"],
+    [49215, "packages/plugin-sdk/src/package.ts"],
+    [49329, "packages/plugin-sdk/src/release-policy.ts"],
+    [49441, "packages/plugin-sdk/src/builtin-artifact.ts"],
+    [49483, "packages/plugin-host/src/supervisor.ts"],
+    [50118, "packages/plugin-host/src/json-documents.ts"],
+    [50609, "packages/plugin-host/src/sse-frames.ts"],
+    [50797, "packages/plugin-host/src/sse-stream.ts"],
+    [51290, "packages/plugin-host/src/aws-eventstream.ts"],
+    [51383, "packages/plugin-host/src/attempts.ts"],
+    [51741, "packages/plugin-host/src/builtin-worker.ts"],
+    [52017, "packages/plugin-host/src/artifact-file.ts"],
+    [52046, "packages/plugin-host/src/evidence.ts"],
+    [52121, "packages/adapters/src/protocol/json.ts"],
+    [52238, "packages/adapters/src/protocol/request.ts"],
+    [52877, "packages/adapters/src/protocol/usage.ts"],
+    [53007, "packages/adapters/src/protocol/finish.ts"],
+    [53047, "packages/adapters/src/protocol/response.ts"],
+    [53298, "packages/adapters/src/protocol/sse.ts"],
+    [53380, "packages/adapters/src/protocol/stream.ts"],
+    [53936, "packages/adapters/src/protocol/policy.ts"],
+    [53990, "packages/adapters/src/protocol/characters.ts"],
+    [54105, "apps/gateway/src/references.ts"],
+    [54167, "apps/gateway/src/tool-policy.ts"],
+    [54202, "apps/gateway/src/stream-deadlines.ts"],
+    [54246, "apps/gateway/src/form.ts"],
+    [54328, "apps/gateway/src/batches.ts"],
+    [54505, "apps/gateway/src/protocols.ts"],
+    [54526, "apps/gateway/src/chat.ts"],
+    [55586, "apps/gateway/src/resources.ts"],
+    [55735, "apps/gateway/src/app.ts"],
+    [55897, "apps/gateway/src/config.ts"],
+    [55951, "apps/gateway/src/packages.ts"],
+    [55991, "apps/gateway/src/resource-poller.ts"],
+    [56254, "apps/gateway/src/plugin-runtime.ts"],
+    [56344, "apps/gateway/src/main.ts"]
+  ]
+}

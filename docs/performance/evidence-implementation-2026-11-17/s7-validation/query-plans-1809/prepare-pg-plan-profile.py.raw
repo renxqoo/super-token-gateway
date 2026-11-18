@@ -1,0 +1,41 @@
+from pathlib import Path
+
+source=Path('scripts/bench-system.ts').read_text()
+source=source.replace('from "../','from "../../').replace('from "./','from "../../scripts/')
+source='import { migrate } from "@gateway/storage";\nimport { statSync } from "node:fs";\n'+source
+anchor='const args = Bun.argv.slice(2);'
+assert source.count(anchor)==1
+source=source.replace(anchor,'''const pgProfileLog = ".local/native-services/postgres.log";
+const pgProfileOffset = statSync(pgProfileLog).size;
+await Bun.write(".local/performance-implementation/pg-plan-profile-start.json", JSON.stringify({at:new Date().toISOString(),log:pgProfileLog,offset:pgProfileOffset,scope:"profile only; auto_explain adds overhead, excluded from capacity and CPU comparison"})+"\\n");
+'''+anchor)
+anchor='      entry: "dist/core-api/main.js",'
+assert source.count(anchor)==1
+source=source.replace(anchor,'''      initializeDatabase: async (db) => {
+        await migrate(db);
+        const name = String((await db`SELECT current_database() name`)[0].name);
+        if (!/^gateway_test_foundation_[a-f0-9]{32}$/.test(name)) throw new Error("profile fixture database required");
+        await db.unsafe("LOAD 'auto_explain'");
+        const settings: Record<string,string> = {
+          "session_preload_libraries":"auto_explain",
+          "auto_explain.log_min_duration":"0.5ms",
+          "auto_explain.log_nested_statements":"on",
+          "auto_explain.log_analyze":"on",
+          "auto_explain.log_timing":"off",
+          "auto_explain.log_buffers":"on",
+          "auto_explain.log_wal":"on",
+          "auto_explain.log_triggers":"on",
+          "auto_explain.log_format":"json",
+          "auto_explain.log_parameter_max_length":"0",
+          "auto_explain.sample_rate":"0.1"
+        };
+        const available = new Set((await db`SELECT name FROM pg_settings WHERE name LIKE 'auto_explain.%'`).map(row=>String(row.name)));
+        for(const [key,value] of Object.entries(settings)) {
+          if(key!=="session_preload_libraries"&&!available.has(key)) throw new Error(`missing profiler setting ${key}`);
+          await db.unsafe(`ALTER DATABASE "${name}" SET ${key}='${value}'`);
+        }
+        await Bun.write(".local/performance-implementation/pg-plan-profile-settings.json", JSON.stringify({database:name,settings,offset:pgProfileOffset,log:pgProfileLog})+"\\n");
+      },
+'''+anchor)
+Path('.local/performance-implementation/pg-plan-bench.ts').write_text(source)
+print('Created isolated database auto_explain profile runner')

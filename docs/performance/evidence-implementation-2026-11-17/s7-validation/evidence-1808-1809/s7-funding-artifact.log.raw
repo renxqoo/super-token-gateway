@@ -1,0 +1,6 @@
+$ bun --env-file=.env.local scripts/verify-artifact.ts && bun --env-file=.env.local scripts/verify-catalog-artifact.ts && bun --env-file=.env.local scripts/verify-identity-artifact.ts && bun --env-file=.env.local scripts/verify-execution-artifact.ts && bun --env-file=.env.local scripts/verify-gateway-artifact.ts
+{"artifact":"pass","checks":["fresh-schema benchmark initialization, exact settlement, ACK, cleanup and tested artifact digests","compiled migration SQL assets and archive CLI from an empty working directory"]}
+{"catalog_artifact":"pass","checks":["standalone compiled signer resolves immutable builtin assets","compiled Core API loads explicit external policy snapshot","compiled provider API returns real zero-funded IDs","unbound provider is not executable","compiled installer runs 15 cases and 24 steps through native helper","atomic publication and revisioned binding use same public application","SIGTERM closes catalog, admin listener and owned helper before a clean exit"],"publication_revision":"3","binding_revision":"1","cases":84,"steps":112}
+Compiled Core identity artifact passed 7 checks
+Compiled Core admission and settlement worker artifacts passed 14 checks
+Compiled Gateway, Core API and settlement worker artifacts passed 11 checks

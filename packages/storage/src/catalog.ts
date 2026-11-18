@@ -3,6 +3,7 @@ import { createEventStore, type UsageRecord } from "./events.ts";
 import { upstreamCostConfigurationSchema, GatewayError } from "@gateway/contracts";
 import type { Operation, Pricing, Usage } from "@gateway/kernel";
 import type { Credential, Project, RequestPolicy } from "@gateway/contracts";
+import { runDatabaseQuery, withDatabaseTransaction } from "./transaction.ts";
 
 type KeyInput = {
   name: string;
@@ -287,7 +288,14 @@ export function createCatalogStore(db: SQL) {
       if (!rows.length) throw new GatewayError(404, "not_found", "Model not found");
     },
     createRoute(model: string, input: RouteInput): Promise<string> {
-      return db.begin((tx) => recordRoute(tx, model, input));
+      return withDatabaseTransaction(
+        db,
+        { deadline: performance.now() + 4000 },
+        async (tx, signal) => {
+          await runDatabaseQuery(tx`SELECT core_catalog_write_v1()`, signal);
+          return recordRoute(tx, model, input);
+        },
+      );
     },
     async routeDefinitions(model: string): Promise<unknown[]> {
       return db`SELECT r.*,jsonb_build_object('currency',v.currency,'rates',v.rates) AS pricing,v.ceilings FROM routes r JOIN cost_versions v ON v.id=r.pricing_id WHERE model_name=${model} ORDER BY priority DESC,id LIMIT 2000`;

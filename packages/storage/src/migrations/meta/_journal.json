@@ -64,6 +64,48 @@
       "when": 1794900737769,
       "tag": "0008_request_quota_index",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1794913439723,
+      "tag": "0009_execution_runtime",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1794931979773,
+      "tag": "0010_quota_expiry",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1794935196365,
+      "tag": "0011_funding_engine",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1794938405669,
+      "tag": "0012_funding-holds",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1794956929830,
+      "tag": "0013_receipt-delivery-lookup",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1794965193527,
+      "tag": "0014_attempts-metering-conflict",
+      "breakpoints": true
     }
   ]
 }

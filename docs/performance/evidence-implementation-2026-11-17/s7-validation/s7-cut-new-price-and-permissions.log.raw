@@ -1,0 +1,16 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-execution-upgrade.test.ts:
+(pass) Core execution runtime role cannot read money or invoke private allocation kernels [1184.57ms]
+
+tests/integration/core-supplier-exposure.test.ts:
+(pass) supplier exposure follows the independent manual examples for known cost and remaining reserve [176.83ms]
+
+tests/integration/core-funding-cells.test.ts:
+(pass) a large prefunded supplier can admit on another cell while the first still has ample budget but is locked [2113.93ms]
+
+ 3 pass
+ 9 filtered out
+ 0 fail
+ 24 expect() calls
+Ran 3 tests across 3 files. [3.60s]

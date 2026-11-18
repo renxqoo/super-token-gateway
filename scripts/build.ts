@@ -1,5 +1,8 @@
 import { chmod, mkdir, rm } from "node:fs/promises";
+import { buildBuiltinWorker } from "./build-builtin-worker.ts";
+import { publishPluginExecutable } from "../packages/plugin-host/src/executable.ts";
 if (Bun.version !== "1.4.4") throw new Error("Build requires Bun 1.4.4");
+await buildBuiltinWorker(new URL("../.local/builtin-adapters/", import.meta.url).pathname);
 await rm(new URL("../dist/", import.meta.url), { recursive: true, force: true });
 for (const [entries, directory] of [
   [["apps/mock-providers/src/main.ts"], "dist/mock-providers"],
@@ -12,6 +15,7 @@ for (const [entries, directory] of [
       "scripts/archive.ts",
       "scripts/sign-bundled-release.ts",
       "scripts/install-bundled-release.ts",
+      "scripts/approve-plugin-runtime.ts",
       "scripts/identity-provision.ts",
       "scripts/identity-revoke.ts",
     ],
@@ -60,6 +64,26 @@ for (const pattern of [
 await mkdir("dist", { recursive: true });
 await Bun.write("dist/native/plugin-host", Bun.file(".local/plugin-host"));
 await chmod("dist/native/plugin-host", 0o755);
+await publishPluginExecutable("dist/native/plugin-host");
+for (const path of ["worker.js", "registry.json"])
+  await Bun.write(
+    `dist/native/builtin-adapters/${path}`,
+    Bun.file(`.local/builtin-adapters/${path}`),
+  );
+await Bun.write(
+  "dist/native/builtin-adapters/proof.json",
+  Bun.file("packages/adapters/builtin/proof.json"),
+);
+const artifacts: Record<string, string> = {};
+for (const path of [
+  "dist/native/plugin-host",
+  "dist/native/builtin-adapters/worker.js",
+  "dist/native/builtin-adapters/registry.json",
+  "dist/native/builtin-adapters/proof.json",
+])
+  artifacts[path.slice(5)] = new Bun.CryptoHasher("sha256")
+    .update(await Bun.file(path).bytes())
+    .digest("hex");
 for await (const path of new Bun.Glob("**/*").scan({
   cwd: "packages/adapters/openai-chat/package",
   onlyFiles: true,
@@ -73,6 +97,7 @@ await Bun.write(
   JSON.stringify(
     {
       runtime: Bun.version,
+      artifacts,
       files: Object.fromEntries(Object.entries(hashes).sort(([a], [b]) => a.localeCompare(b))),
     },
     null,

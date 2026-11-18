@@ -2,10 +2,11 @@ DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='core_management_api') THEN CREATE ROLE core_management_api NOLOGIN;END IF;
 END $$;
 GRANT USAGE ON SCHEMA public TO core_management_api;
+GRANT EXECUTE ON FUNCTION public.core_catalog_write_v1() TO core_management_api;
 GRANT EXECUTE ON FUNCTION public.verify_platform_credential_v1(text),public.core_platform_authorize_v1(jsonb,text),public.credit_wallet(uuid,text,text,numeric,text,integer,timestamptz,text[],text[]) TO core_management_api;
-GRANT SELECT ON supplier_brands,upstream_accounts,channels,models,routes,cost_versions,billing_prices,billing_tariffs,projects,api_keys,financial_vouchers,upstream_funding_operations,upstream_account_balances TO core_management_api;
-GRANT INSERT ON supplier_brands,upstream_accounts,channels,models,routes,cost_versions,billing_prices,billing_tariffs,projects,api_keys,financial_vouchers,upstream_funding_operations,upstream_account_balances,upstream_journals,upstream_entries,upstream_audit_events,audit_events TO core_management_api;
-GRANT UPDATE ON supplier_brands,channels,routes,billing_tariffs,upstream_account_balances TO core_management_api;
+GRANT SELECT ON supplier_brands,upstream_accounts,channels,models,routes,cost_versions,billing_prices,billing_tariffs,projects,api_keys,financial_vouchers,upstream_funding_operations TO core_management_api;
+GRANT INSERT ON supplier_brands,upstream_accounts,channels,models,routes,cost_versions,billing_prices,billing_tariffs,projects,api_keys,financial_vouchers,upstream_funding_operations,upstream_journals,upstream_entries,upstream_audit_events,audit_events TO core_management_api;
+GRANT UPDATE ON supplier_brands,channels,routes,billing_tariffs TO core_management_api;
 GRANT EXECUTE ON FUNCTION public.exact_billing_price(jsonb,jsonb) TO core_management_api;
 GRANT UPDATE(id) ON financial_vouchers TO core_management_api;
 GRANT UPDATE(id) ON upstream_accounts TO core_management_api;
@@ -34,3 +35,7 @@ GRANT UPDATE(state,lease_token,lease_until,attempts) ON event_deliveries TO core
 GRANT SELECT(state,granted_at,expires_at) ON execution_permits TO core_management_api;
 GRANT SELECT(attempt_id,binding_id) ON resources TO core_management_api;
 GRANT SELECT(id) ON usage_conflicts TO core_management_api;
+
+GRANT SELECT ON public.core_upstream_balances_v1 TO core_management_api;
+GRANT EXECUTE ON FUNCTION public.core_funding_control_v1(uuid,boolean),public.core_upstream_fund_v1(uuid,text,numeric,boolean),public.core_upstream_normalize_v1(uuid) TO core_management_api;
+REVOKE ALL ON public.upstream_account_balances FROM core_management_api;

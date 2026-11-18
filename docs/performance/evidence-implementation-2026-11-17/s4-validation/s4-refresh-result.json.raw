@@ -1,0 +1,62 @@
+[
+  {
+    "label": "check",
+    "command": [
+      "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+      "run",
+      "check"
+    ],
+    "started": "2026-11-17T14:35:54.709Z",
+    "code": 0,
+    "elapsed_ms": 94.85458299999999,
+    "log": ".local/performance-implementation/s4-refresh-check.log"
+  },
+  {
+    "label": "lint",
+    "command": [
+      "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+      "run",
+      "lint"
+    ],
+    "started": "2026-11-17T14:35:54.804Z",
+    "code": 0,
+    "elapsed_ms": 42.759792000000004,
+    "log": ".local/performance-implementation/s4-refresh-lint.log"
+  },
+  {
+    "label": "fmt",
+    "command": [
+      "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+      "run",
+      "fmt:check"
+    ],
+    "started": "2026-11-17T14:35:54.847Z",
+    "code": 0,
+    "elapsed_ms": 27.55612500000001,
+    "log": ".local/performance-implementation/s4-refresh-fmt.log"
+  },
+  {
+    "label": "unit",
+    "command": [
+      "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+      "run",
+      "test"
+    ],
+    "started": "2026-11-17T14:35:54.875Z",
+    "code": 0,
+    "elapsed_ms": 56353.604083,
+    "log": ".local/performance-implementation/s4-refresh-unit.log"
+  },
+  {
+    "label": "build",
+    "command": [
+      "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+      "run",
+      "build"
+    ],
+    "started": "2026-11-17T14:36:51.229Z",
+    "code": 0,
+    "elapsed_ms": 295.4464999999982,
+    "log": ".local/performance-implementation/s4-refresh-build.log"
+  }
+]

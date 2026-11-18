@@ -68,6 +68,7 @@ await withFinancial(
         );
         const worker = await startCoreWorker(namespace, {
           databaseUrl: workerDatabaseUrl,
+          identity: f.identity,
           entry: "dist/core-worker/main.js",
           cwd,
         });
@@ -117,7 +118,7 @@ await withFinancial(
           }
           assert.deepEqual(
             (
-              await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM upstream_account_balances WHERE account_id=${setup.provider.account_id}`
+              await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM core_upstream_balances_v1 WHERE account_id=${setup.provider.account_id}`
             )[0],
             { balance: "970", reserved: "0", spent: "30" },
           );

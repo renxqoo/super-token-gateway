@@ -1,0 +1,114 @@
+{
+  "directory": "/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF",
+  "cleaned": true,
+  "result": [
+    {
+      "events": [
+        {
+          "kind": "link_error",
+          "temporary": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-6f51e9d3-734a-4579-b334-d80be628c75f",
+          "target": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+          "exists": true,
+          "error": "Error: EEXIST: file already exists, link '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-6f51e9d3-734a-4579-b334-d80be628c75f' -> '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'"
+        },
+        {
+          "kind": "link_error",
+          "temporary": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-88900fc0-bbef-4a1f-a484-5139f2cc1797",
+          "target": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+          "exists": true,
+          "error": "Error: EEXIST: file already exists, link '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-88900fc0-bbef-4a1f-a484-5139f2cc1797' -> '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'"
+        },
+        {
+          "kind": "linked",
+          "temporary": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-5b920d9b-53e4-4fe7-8e64-d65d3f250b2c",
+          "target": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+          "exists": true
+        },
+        {
+          "kind": "link_error",
+          "temporary": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-1c12d885-9172-4a30-bda1-8b72c27dcb45",
+          "target": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+          "exists": true,
+          "error": "Error: EEXIST: file already exists, link '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-1c12d885-9172-4a30-bda1-8b72c27dcb45' -> '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'"
+        },
+        {
+          "kind": "verify_error",
+          "temporary": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-1c12d885-9172-4a30-bda1-8b72c27dcb45",
+          "target": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+          "exists": true,
+          "error": "Error: ENOENT: no such file or directory, realpath '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'"
+        },
+        {
+          "kind": "link_error",
+          "temporary": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-3ea828bc-6b49-44a8-9961-017bd1c2d897",
+          "target": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+          "exists": true,
+          "error": "Error: EEXIST: file already exists, link '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-3ea828bc-6b49-44a8-9961-017bd1c2d897' -> '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'"
+        },
+        {
+          "kind": "link_error",
+          "temporary": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-e4a40659-4a3b-4b9a-a359-31f80931e10f",
+          "target": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+          "exists": true,
+          "error": "Error: EEXIST: file already exists, link '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-e4a40659-4a3b-4b9a-a359-31f80931e10f' -> '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'"
+        },
+        {
+          "kind": "link_error",
+          "temporary": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-cfb42c41-0e2e-4536-b280-04531c8a8f8e",
+          "target": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+          "exists": true,
+          "error": "Error: EEXIST: file already exists, link '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-cfb42c41-0e2e-4536-b280-04531c8a8f8e' -> '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'"
+        },
+        {
+          "kind": "link_error",
+          "temporary": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-42c957a4-0db1-4e1e-9047-9c3cc82e4796",
+          "target": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+          "exists": true,
+          "error": "Error: EEXIST: file already exists, link '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/staging-39750-42c957a4-0db1-4e1e-9047-9c3cc82e4796' -> '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'"
+        }
+      ],
+      "round": 0,
+      "failures": [
+        "Error: ENOENT: no such file or directory, realpath '/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host'\n    at realpathNativeSync (unknown)\n    at published (/Users/wr/work/super-token-gateway/.local/performance-implementation/publish-instrumented.ts:41:31)\n    at publishPluginExecutable (/Users/wr/work/super-token-gateway/.local/performance-implementation/publish-instrumented.ts:93:18)"
+      ],
+      "checks": {
+        "asyncStat": {
+          "dev": 16777229,
+          "ino": 55503581,
+          "mode": 33133,
+          "nlink": 1,
+          "uid": 501,
+          "gid": 20,
+          "rdev": 0,
+          "size": 13,
+          "blksize": 4096,
+          "blocks": 8,
+          "atimeMs": 1794926079970.4546,
+          "mtimeMs": 1794926079969.4521,
+          "ctimeMs": 1794926079970.6074,
+          "birthtimeMs": 1794926079969.1711
+        },
+        "syncStat": {
+          "dev": 16777229,
+          "ino": 55503581,
+          "mode": 33133,
+          "nlink": 1,
+          "uid": 501,
+          "gid": 20,
+          "rdev": 0,
+          "size": 13,
+          "blksize": 4096,
+          "blocks": 8,
+          "atimeMs": 1794926079970.4546,
+          "mtimeMs": 1794926079969.4521,
+          "ctimeMs": 1794926079970.6074,
+          "birthtimeMs": 1794926079969.1711
+        },
+        "asyncRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "syncRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "nativeRealpath": "/private/var/folders/49/bv4h4f1s29l1jzxbj_2npyb40000gn/T/s4-publish-race-probe-f9WVXF/0/executables/0fc785564035ea737465b092dcd436fabbed14b10df955165f4409e8b7e6d90c/plugin-host",
+        "bytes": "shared-helper"
+      }
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "databases_absent": 14,
+  "namespace_cleanup_passed": 14,
+  "aborted_digest_fixture": {
+    "database_absent": true,
+    "roles_absent": 3,
+    "namespace_cleanup": {
+      "cleaned": 1,
+      "failed": 0
+    },
+    "scratch_removed": true
+  },
+  "recorded_at": "2026-11-18T08:03:19.832891+00:00",
+  "process_identities_checked": 491,
+  "scratch_removed": 14,
+  "raw_files_verified": 70
+}

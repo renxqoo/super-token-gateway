@@ -1,0 +1,49 @@
+{
+  "at": "2026-11-17T22:36:01.912Z",
+  "database": "gateway_native",
+  "original_27_names_and_oids_equal": true,
+  "foundation_count": 27,
+  "remaining_recent_databases": [],
+  "remaining_recent_core_processes": [],
+  "remaining_recent_identity_roles": [],
+  "remaining_recent_temp_directories": [],
+  "protected_reference_present": true,
+  "protected_processes": [
+    {
+      "pid": 40766,
+      "started": "Mon Nov 16 16:27:47 2026",
+      "command": "bun apps/core-api/src/main.ts"
+    },
+    {
+      "pid": 40771,
+      "started": "Mon Nov 16 16:27:47 2026",
+      "command": "bun apps/core-api/src/main.ts"
+    }
+  ],
+  "rounds": [
+    {
+      "label": "s7-pg-plans-profile",
+      "database": "gateway_test_foundation_54ba01b0a89e4e60a21a50bc9f092533",
+      "database_absent": true,
+      "live_owned_sampled_pids": [],
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "archive_hashes_verified": true,
+      "source_directory_removed": true
+    },
+    {
+      "label": "s7-custom-plans-300-failed",
+      "database": "gateway_test_foundation_8742cb2091564ec384c61033e25f8081",
+      "database_absent": true,
+      "live_owned_sampled_pids": [],
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "archive_hashes_verified": true,
+      "source_directory_removed": true
+    }
+  ]
+}

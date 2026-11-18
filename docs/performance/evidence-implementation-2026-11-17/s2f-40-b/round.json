@@ -10,9 +10,7 @@
   "p99": 457.91,
   "onlineCapacity": {
     "fullyCompletedByWindow": 2455,
-    "minuteCompletions": [
-      2455
-    ],
+    "minuteCompletions": [2455],
     "matchedRequests": 2460,
     "httpOnly": 0,
     "ackOnly": 48,

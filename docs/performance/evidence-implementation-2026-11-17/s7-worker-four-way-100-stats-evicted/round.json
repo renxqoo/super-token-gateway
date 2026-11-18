@@ -1,0 +1,246 @@
+{
+  "stage": "1812 keyed settlement reads and Worker scheduling comparison",
+  "label": "s7-worker-four-way-100-stats-evicted",
+  "target": 100,
+  "rate": 101,
+  "runtime_migration": 2026111812,
+  "worker_schedule": "v2",
+  "exit_code": 1,
+  "valid": false,
+  "capacity_passed": false,
+  "failures": ["pg_statement_statistics"],
+  "online_capacity": {
+    "fullyCompletedByWindow": 6045,
+    "minuteCompletions": [6045],
+    "matchedRequests": 6060,
+    "httpOnly": 0,
+    "ackOnly": 109,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 120,
+    "receiptAckedRequestsByWindow": 6035,
+    "ackedEventsByWindow": 12288,
+    "sampledBeforeWindowEndMs": 51,
+    "httpByWindow": 6045
+  },
+  "window_complete_rps": 100.75,
+  "http": {
+    "offered": 6060,
+    "shed": 0,
+    "statuses": {
+      "200": 6060
+    },
+    "latency_ms": {
+      "p50": 191.49,
+      "p95": 243.01,
+      "p99": 270.81,
+      "p999": 330.88
+    }
+  },
+  "process_cpu_ms_per_admitted": {
+    "gateway": 2.1916031771762037,
+    "core_api": 1.9581779867077322,
+    "core_worker": 0.46685038093694275,
+    "upstream": 0.18479494245420652,
+    "redis_admission": 0.5981520505754527,
+    "redis_evidence": 0.2172151077970564,
+    "redis_evidence_replica": 0.13292267790565768,
+    "pg": 17.181066623439783,
+    "pg_shared": 0.006484033068568799
+  },
+  "service_cpu_ms_per_admitted": 22.745988004538827,
+  "cpu_sampling_errors": 0,
+  "pg_top_level": {
+    "calls": 154444,
+    "exec_ms": 199924.12483500002,
+    "wal_bytes": 369186358,
+    "wal_records": 2406648,
+    "calls_per_request": 25.035500081050415,
+    "exec_ms_per_request": 32.40786591586968,
+    "wal_bytes_per_request": 59845.4138434106,
+    "wal_records_per_request": 390.11963041011506
+  },
+  "pg_valid": false,
+  "near_59s": {
+    "at": 59102,
+    "queue": {
+      "waiting": 0,
+      "active": 1,
+      "delayed": 0,
+      "failed": 0
+    },
+    "persistence": {
+      "calls": 2517,
+      "jobs": 2606,
+      "groups": 7089,
+      "events": 14178,
+      "max_jobs": 4,
+      "max_groups": 15,
+      "lock_conflicts": 1145,
+      "errors": 0,
+      "active_jobs": 0
+    }
+  },
+  "last_persistence_sample": {
+    "calls": 2585,
+    "jobs": 2674,
+    "groups": 7315,
+    "events": 14630,
+    "max_jobs": 4,
+    "max_groups": 15,
+    "lock_conflicts": 1163,
+    "errors": 0,
+    "active_jobs": 1
+  },
+  "accounting": {
+    "requests": 6169,
+    "attempts": 6169,
+    "succeeded_attempts": 6169,
+    "usage_events": 12338,
+    "usage_requests": 6169,
+    "unexpected_receipts": 0,
+    "precise_usage": 12338,
+    "precise_charges": 6169,
+    "settled_holds": 6169,
+    "reserved": "0",
+    "spent": "616900",
+    "debt": "0",
+    "acknowledged": 12338,
+    "settlement_journals": 6169,
+    "unbalanced_journals": 0,
+    "supplier_cost_heads": 6169,
+    "conflicts": 0,
+    "inconsistent_hold_reserves": 0,
+    "inconsistent_funding_budgets": 0,
+    "inconsistent_cell_reserves": 0,
+    "unbalanced_supplier_journals": 0
+  },
+  "supplier": {
+    "balance": "999999999999636029",
+    "reserved": "0",
+    "spent": "363971",
+    "accounts": 1
+  },
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os_release": "27.0.0",
+    "cpu_model": "Apple M6",
+    "cpu_count": 12,
+    "memory_bytes": 25769803776,
+    "bun": "1.4.4",
+    "artifacts": {
+      "dist/core-api/main.js": "11c132ac299ea371bddb143a4acb06539473260cb78760fc4730038dd03c4405",
+      "dist/core-api/platform/management.js": "3179c977fd58b85556a87f8e140717c1d0a47d52c1b6d5a2b54ca0c70ec36c1c",
+      "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+      "dist/core-worker/main.js": "14c4c5ab068fa1634210ef40b51a0e795947db9ce21ad8e9ba3586b0c4369c1b",
+      "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+      "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+      "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+      "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+      "dist/manifest.json": "dbfc279770b0b5ac101edddd140844f3ab1fb946151b371de086d263b2f8b81b"
+    }
+  },
+  "database_settings": [
+    {
+      "name": "checkpoint_timeout",
+      "setting": "300",
+      "unit": "s"
+    },
+    {
+      "name": "effective_cache_size",
+      "setting": "524288",
+      "unit": "8kB"
+    },
+    {
+      "name": "fsync",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "full_page_writes",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "max_connections",
+      "setting": "200",
+      "unit": null
+    },
+    {
+      "name": "max_wal_size",
+      "setting": "1024",
+      "unit": "MB"
+    },
+    {
+      "name": "server_version",
+      "setting": "17.11",
+      "unit": null
+    },
+    {
+      "name": "shared_buffers",
+      "setting": "32768",
+      "unit": "8kB"
+    },
+    {
+      "name": "synchronous_commit",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "wal_compression",
+      "setting": "off",
+      "unit": null
+    },
+    {
+      "name": "work_mem",
+      "setting": "4096",
+      "unit": "kB"
+    }
+  ],
+  "redis_settings": {
+    "admission": {
+      "maxmemory-policy": "noeviction",
+      "aof-load-truncated": "yes",
+      "appendfsync": "everysec",
+      "appendonly": "yes"
+    },
+    "evidence": {
+      "maxmemory-policy": "noeviction",
+      "appendonly": "yes",
+      "aof-load-truncated": "no",
+      "appendfsync": "always"
+    }
+  },
+  "database_bytes": 257688079,
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "files": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-four-way-100-stats-evicted/audit.json.raw",
+      "sha256": "41dc39f8781ff256b9fc59788c1ee93a19b1ce00fd5ca9d1de1da8ba13dd7325",
+      "bytes": 526904
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-four-way-100-stats-evicted/http.json.raw",
+      "sha256": "8be2a4e4afd97b99f03445fe2430ac41491ab529dd31225bb3dc5b2f713497ae",
+      "bytes": 8985
+    },
+    "http.json.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-four-way-100-stats-evicted/http.json.identities.tsv",
+      "sha256": "28e8bb5bc1b98e956e013ed7bdfbe19c89357d9292be79e6ae78d3c8f33b2d85",
+      "bytes": 309060
+    },
+    "ack.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-four-way-100-stats-evicted/ack.identities.tsv",
+      "sha256": "e0b23ea0afeefcfc68bf03a21bcb88211b0e09c744266d2f0e405f14b56d3c38",
+      "bytes": 314619
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-worker-four-way-100-stats-evicted/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    }
+  }
+}

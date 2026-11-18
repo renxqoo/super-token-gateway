@@ -1,0 +1,139 @@
+{
+  "stopping": false,
+  "results": [
+    {
+      "label": "check",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "check"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:51:45.535Z",
+      "elapsed_ms": 117.42262500000001,
+      "log": ".local/performance-implementation/s3d-validation-check.log"
+    },
+    {
+      "label": "lint",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "lint"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:51:45.653Z",
+      "elapsed_ms": 66.84112499999999,
+      "log": ".local/performance-implementation/s3d-validation-lint.log"
+    },
+    {
+      "label": "fmt",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "fmt:check"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:51:45.720Z",
+      "elapsed_ms": 30.63145800000001,
+      "log": ".local/performance-implementation/s3d-validation-fmt.log"
+    },
+    {
+      "label": "unit",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:51:45.751Z",
+      "elapsed_ms": 56288.67275,
+      "log": ".local/performance-implementation/s3d-validation-unit.log"
+    },
+    {
+      "label": "build",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "build"
+      ],
+      "code": 0,
+      "started": "2026-11-17T12:52:42.040Z",
+      "elapsed_ms": 279.9549580000021,
+      "log": ".local/performance-implementation/s3d-validation-build.log"
+    },
+    {
+      "label": "integration",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "--env-file=.env.local",
+        "--env-file=.local/native-gate.env",
+        ".local/performance-implementation/s3d-integration-isolated.ts"
+      ],
+      "code": 1,
+      "started": "2026-11-17T12:52:42.320Z",
+      "elapsed_ms": 1075003.520667,
+      "log": ".local/performance-implementation/s3d-validation-integration.log"
+    },
+    {
+      "label": "native",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:native"
+      ],
+      "code": 0,
+      "started": "2026-11-17T13:10:37.323Z",
+      "elapsed_ms": 12659.87641700008,
+      "log": ".local/performance-implementation/s3d-validation-native.log"
+    },
+    {
+      "label": "plugin-artifact",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:plugin-artifact"
+      ],
+      "code": 0,
+      "started": "2026-11-17T13:10:49.983Z",
+      "elapsed_ms": 1222.812750000041,
+      "log": ".local/performance-implementation/s3d-validation-plugin-artifact.log"
+    },
+    {
+      "label": "artifact",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:artifact"
+      ],
+      "code": 0,
+      "started": "2026-11-17T13:10:51.206Z",
+      "elapsed_ms": 15383.50450000004,
+      "log": ".local/performance-implementation/s3d-validation-artifact.log"
+    },
+    {
+      "label": "durability",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "run",
+        "test:durability"
+      ],
+      "code": 0,
+      "started": "2026-11-17T13:11:06.590Z",
+      "elapsed_ms": 5448.467333999928,
+      "log": ".local/performance-implementation/s3d-validation-durability.log"
+    },
+    {
+      "label": "backup",
+      "command": [
+        "/Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun",
+        "--env-file=.env.local",
+        "--env-file=.local/native-gate.env",
+        ".local/performance-implementation/s3d-backup-own.ts"
+      ],
+      "code": 0,
+      "started": "2026-11-17T13:11:12.038Z",
+      "elapsed_ms": 4329.304834000068,
+      "log": ".local/performance-implementation/s3d-validation-backup.log"
+    }
+  ]
+}

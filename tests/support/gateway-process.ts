@@ -136,8 +136,16 @@ export async function withSettlementRole<T>(db: SQL, run: (databaseUrl: string) 
 
 export async function startCoreWorker(
   namespace: string,
-  options: { databaseUrl: string; entry?: string; cwd?: string; env?: Record<string, string> },
+  options: {
+    databaseUrl: string;
+    identity: Fixture["identity"];
+    entry?: string;
+    cwd?: string;
+    env?: Record<string, string>;
+  },
 ) {
+  const identity = options.identity;
+  const certificate = identity.certificates.get("coreB")!;
   const child = Bun.spawn(["bun", resolve(options.entry ?? "apps/core-worker/src/main.ts")], {
     ...(options.cwd ? { cwd: options.cwd } : {}),
     env: {
@@ -147,6 +155,14 @@ export async function startCoreWorker(
       REDIS_NAMESPACE: namespace,
       WORKER_PORT: "0",
       SHUTDOWN_GRACE_MS: "5000",
+      CORE_ORIGIN: `https://127.0.0.1:${identity.b.port}`,
+      CORE_SERVERNAME: "localhost",
+      CORE_AUDIENCE: identityAudience,
+      CORE_PEER_SHA256: sha256(certificate.x509.raw),
+      CORE_SUBJECT_ALTNAME: certificate.x509.subjectAltName,
+      CORE_KEY_FILE: resolve(identity.directory, "worker.key"),
+      CORE_CERT_FILE: resolve(identity.directory, "worker.pem"),
+      CORE_CA_FILE: resolve(identity.directory, "ca.pem"),
       ...options.env,
     },
     stdin: "ignore",
@@ -361,7 +377,10 @@ export function withGatewayStack(
               ceilings: boundedSupplier.ceilings,
             });
           const startWorker = async () => {
-            const worker = await startCoreWorker(namespace, { databaseUrl: workerDatabaseUrl });
+            const worker = await startCoreWorker(namespace, {
+              databaseUrl: workerDatabaseUrl,
+              identity: f.identity,
+            });
             processes.push(worker);
             return worker;
           };

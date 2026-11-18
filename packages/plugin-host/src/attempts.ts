@@ -31,9 +31,15 @@ export type AttemptOptions = {
   maxBatchInputBytes?: number;
   maxEventBytes?: number;
 };
+export type PluginExecutor = Pick<PluginSupervisor, "load" | "call" | "onDisconnect" | "close">;
 export function createPluginAttempts(
-  supervisor: PluginSupervisor,
-  limits: { maxAttempts?: number; maxStateBytes?: number; maxJSONBytes?: number } = {},
+  supervisor: PluginExecutor,
+  limits: {
+    maxAttempts?: number;
+    maxStateBytes?: number;
+    maxJSONBytes?: number;
+    additionalExecutors?: readonly PluginExecutor[];
+  } = {},
 ) {
   const maxAttempts = limits.maxAttempts ?? 128,
     maxStateBytes = limits.maxStateBytes ?? 16 << 20;
@@ -47,26 +53,52 @@ export function createPluginAttempts(
   )
     throw new PluginHostError("CONFIG_INVALID");
   const live = new Map<string, () => void>();
+  const preparing = new Set<() => void>();
   const connections = new Map<string, string>();
   const documents = createJSONDocuments(limits.maxJSONBytes);
-  const unsubscribe = supervisor.onDisconnect((connection) => {
-    for (const [owner, current] of connections) if (current === connection) live.get(owner)?.();
-  });
+  if ((limits.additionalExecutors?.length ?? 0) > 16) throw new PluginHostError("CONFIG_INVALID");
+  const executors = new Set([supervisor, ...(limits.additionalExecutors ?? [])]);
+  const subscriptions: ReturnType<PluginExecutor["onDisconnect"]>[] = [];
+  try {
+    for (const executor of executors)
+      subscriptions.push(
+        executor.onDisconnect((connection) => {
+          for (const [owner, current] of connections)
+            if (current === connection) live.get(owner)?.();
+        }),
+      );
+  } catch (error) {
+    for (const unsubscribe of subscriptions) unsubscribe();
+    throw error;
+  }
   const modules = new Map<string, { module: PluginModule; byteLength: number; refs: number }>();
   let retained = 0,
     reserved = 0,
     closed = false;
+  function checkCapacity() {
+    if (closed) throw new PluginHostError("HOST_CLOSED");
+    if (live.size + preparing.size >= maxAttempts) throw new PluginHostError("ATTEMPT_BUDGET");
+  }
   function dispose() {
     if (closed) return;
     closed = true;
+    preparing.clear();
     for (const closeAttempt of live.values()) closeAttempt();
-    unsubscribe();
+    for (const unsubscribe of subscriptions) unsubscribe();
   }
   return {
     dispose,
-    create(pkg: VerifiedPackage, options: AttemptOptions) {
-      if (closed) throw new PluginHostError("HOST_CLOSED");
-      if (live.size >= maxAttempts) throw new PluginHostError("ATTEMPT_BUDGET");
+    reservePreparation() {
+      checkCapacity();
+      const release = () => {
+        preparing.delete(release);
+      };
+      preparing.add(release);
+      return release;
+    },
+    create(pkg: VerifiedPackage, options: AttemptOptions, executor: PluginExecutor = supervisor) {
+      checkCapacity();
+      if (!executors.has(executor)) throw new PluginHostError("CONFIG_INVALID");
       const maxState = options.maxStateBytes ?? 256 << 10,
         maxOutput = options.maxOutputBytes ?? 64 << 20,
         batchOutput = options.batchOutputBytes ?? 128 << 10;
@@ -123,6 +155,7 @@ export function createPluginAttempts(
         finished = false;
       let jsonBusy = false,
         operationBusy = false;
+      const observers = new Set<() => void>();
       let sse: ReturnType<typeof createSSEStream> | undefined;
       const controller = new AbortController();
       const deadline = setTimeout(dispose, Math.max(1, options.deadlineAt - Date.now()));
@@ -138,6 +171,14 @@ export function createPluginAttempts(
         sse?.dispose();
         documents.dispose(binding.id);
         if (--code!.refs === 0) modules.delete(moduleHash);
+        const listeners = [...observers];
+        observers.clear();
+        for (const listener of listeners)
+          try {
+            listener();
+          } catch {
+            continue;
+          }
       }
       live.set(binding.id, dispose);
       async function invokeRaw(
@@ -191,13 +232,13 @@ export function createPluginAttempts(
         busy = true;
         reserved += maxState;
         try {
-          const loaded = await supervisor.load(module, combined);
+          const loaded = await executor.load(module, combined);
           if (disposed || combined.aborted) throw new PluginHostError("CALL_CANCELLED");
           const previousConnection = connections.get(binding.id);
           if (previousConnection && previousConnection !== loaded.connection)
             throw new PluginHostError("HELPER_RESTARTED");
           connections.set(binding.id, loaded.connection);
-          const reply = await supervisor.call(
+          const reply = await executor.call(
             loaded.hash,
             new TextEncoder().encode(JSON.stringify(input)),
             state,
@@ -341,6 +382,17 @@ export function createPluginAttempts(
         });
       return {
         id: binding.id,
+        onDispose(listener: () => void) {
+          if (disposed) {
+            listener();
+            return () => {};
+          }
+          if (observers.size >= 16) throw new PluginHostError("OBSERVER_BUDGET");
+          observers.add(listener);
+          return () => {
+            observers.delete(listener);
+          };
+        },
         async invoke(hook: Hook, payload?: Uint8Array, signal?: AbortSignal) {
           if (operationBusy) throw new PluginHostError("BATCH_CONCURRENT");
           operationBusy = true;
@@ -479,7 +531,9 @@ export function createPluginAttempts(
     }),
     async close() {
       dispose();
-      await supervisor.close();
+      const results = await Promise.allSettled([...executors].map((executor) => executor.close()));
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
     },
   };
 }

@@ -65,7 +65,7 @@ test(
         expect(run.lease_epoch).toBe("1");
         expect(run.resource_pid).toBeGreaterThan(1);
         expect(() => process.kill(-run.resource_pid, 0)).toThrow();
-        expect((await db`SELECT count(*)::int AS n FROM upstream_account_balances`)[0].n).toBe(0);
+        expect((await db`SELECT count(*)::int AS n FROM core_upstream_balances_v1`)[0].n).toBe(0);
         expect(
           (await f.request(`/providers/${f.provider.id}/plugin-binding`)).value.executable,
         ).toBe(false);

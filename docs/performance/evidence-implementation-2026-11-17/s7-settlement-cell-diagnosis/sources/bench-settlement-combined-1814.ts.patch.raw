@@ -1,0 +1,42 @@
+--- scripts/bench-system.ts
++++ scripts/.bench-settlement-combined-1814.ts
+@@ -108,7 +108,7 @@
+   "dist/core-api/main.js",
+   "dist/core-api/platform/management.js",
+   "dist/gateway/main.js",
+-  "dist/core-worker/main.js",
++  ".local/settlement-profile-1814/worker/dist/main.js",
+   "dist/native/plugin-host",
+   "dist/native/builtin-adapters/worker.js",
+   "dist/native/builtin-adapters/registry.json",
+@@ -388,6 +388,11 @@
+     timeoutMs: 2000,
+   });
+   try {
++    const fixture = String((await db`SELECT current_database() AS name`)[0].name);
++    const role = new URL(workerDatabaseUrl).username;
++    if (!/^gateway_test_foundation_[a-f0-9]{32}$/.test(fixture) || !/^core_settlement_[a-f0-9]{32}$/.test(role)) throw new Error("Unexpected scheduling fixture");
++    await db.unsafe(`GRANT SELECT(attempt_id,account_id,currency,funding_cell) ON upstream_holds TO "${role}"`);
++    await db.unsafe(await Bun.file(".local/settlement-profile-1814/point-wide.sql").text());
+     const databaseSettings = await db<
+       { name: string; setting: string; unit: string | null }[]
+     >`SELECT name,setting,unit FROM pg_settings WHERE name IN ('server_version','shared_buffers','effective_cache_size','work_mem','max_wal_size','checkpoint_timeout','wal_compression','fsync','full_page_writes','synchronous_commit','max_connections') ORDER BY name`;
+@@ -461,7 +466,7 @@
+       worker = await startCoreWorker(namespace, {
+         databaseUrl: workerDatabaseUrl,
+         identity: f.identity,
+-        entry: "dist/core-worker/main.js",
++        entry: ".local/settlement-profile-1814/worker/dist/main.js",
+         env: { SETTLEMENT_CONCURRENCY: String(workerConcurrency) },
+       });
+       services.push(worker);
+@@ -953,6 +958,9 @@
+       processes: processCpu.processes,
+       processCpu,
+       pgStatements,
++      fundingCellCounts: await db`SELECT count(*)::int active_cells,coalesce(sum(c.n),0)::int attempts FROM (
++       SELECT funding_cell,count(*) n FROM upstream_holds GROUP BY funding_cell
++      ) c`,
+       resources: processCpu.samples,
+       onlineCapacity,
+       queueStats,

@@ -1,0 +1,22 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-funding-foundation.test.ts:
+15 |       await tx`INSERT INTO core_funding.balance_cells(account_id,currency,cell,reserved_atoms,spent_limit,revision_limit) VALUES(${account},'USD',0,'99999999999999999999999999999999999999',0,0)`;
+16 |       await expect(
+17 |         tx.savepoint(async (savepoint) => {
+18 |           await savepoint`INSERT INTO core_funding.balance_cells(account_id,currency,cell,reserved_atoms,spent_limit,revision_limit) VALUES(${account},'USD',1,1,0,0)`;
+19 |         }),
+20 |       ).rejects.toMatchObject({ errno: "22003" });
+                     ^
+error: expect(received).rejects.toMatchObject(expected)
+
+Expected promise that rejects
+Received promise that resolved: Promise { <resolved> }
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-funding-foundation.test.ts:20:17)
+      at async run (bun:sql:313:32)
+(fail) a frozen account cannot accumulate more than NUMERIC(38,0) of reservation across otherwise valid cells [202.66ms]
+
+ 0 pass
+ 1 fail
+Ran 1 test across 1 file. [240.00ms]

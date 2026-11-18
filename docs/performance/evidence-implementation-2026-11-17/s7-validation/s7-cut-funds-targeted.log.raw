@@ -1,0 +1,21 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-success-quota.test.ts:
+(pass) accepted success closes execution and recovery releases its three quotas once while a partial attempt keeps its quota and responsibility [2268.68ms]
+(pass) a customer settlement failure rolls back automatic execution closure and quota release with every evidence and money write [2162.37ms]
+
+tests/integration/core-pricing-programs.test.ts:
+(pass) compiled version prices preserve per-request ceiling, exposure subtraction, decimals, zero dimensions and the 38-digit boundary [171.87ms]
+(pass) migration compiles the captured historical price and later versions cannot mutate it or leave half-created source prices [191.09ms]
+
+tests/integration/core-funding-foundation.test.ts:
+(pass) a frozen account cannot accumulate more than NUMERIC(38,0) of reservation across otherwise valid cells [174.54ms]
+(pass) budget grants and reclaims conserve money and revisions, replay exactly, and cannot reclaim reserved funds or leave partial writes [204.68ms]
+
+tests/integration/core-funding-cells.test.ts:
+(pass) fragmented supplier budget admits both requests and a locked root or another cell cannot block BEGIN or independent settlement [2240.85ms]
+
+ 7 pass
+ 0 fail
+ 79 expect() calls
+Ran 7 tests across 4 files. [7.53s]

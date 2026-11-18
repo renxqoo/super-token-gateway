@@ -1,0 +1,16 @@
+from pathlib import Path
+
+root = Path('.local/settlement-typed-1814')
+artifact = root / 'diagnostic-gateway.js'
+source = Path('dist/gateway/main.js').read_text()
+old = 'deps.lifecycle.accepting ? "overloaded" : "draining", "Gateway admission capacity reached") : error, requestId);'
+new = ('deps.lifecycle.accepting ? (error instanceof PluginHostError ? "overloaded_" + error.code.toLowerCase() : "overloaded_gateway_error") : '
+       '"draining", "Gateway admission capacity reached") : error, requestId);')
+assert source.count(old) == 1
+artifact.write_text(source.replace(old, new))
+runner = Path('scripts/bench-system.ts').read_text()
+for old_import, new_import in (('from "../', 'from "../../'), ('from "./', 'from "../../scripts/')):
+    runner = runner.replace(old_import, new_import)
+runner = runner.replace('"dist/gateway/main.js"', f'"{artifact}"')
+assert runner.count(f'"{artifact}"') == 2
+(root/'bench-503.ts').write_text(runner)

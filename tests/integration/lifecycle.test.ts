@@ -21,6 +21,7 @@ import {
   baselineEvidence,
 } from "../support/baseline-ledger.ts";
 import { pluginVersions } from "@gateway/storage/schema";
+import { seedHistoricalRecharge } from "../support/historical-funding.ts";
 
 test("v2 through financial upgrade preserves settled receipts, ACKs and immutable plugin package, and an open baseline hold settles by explicit resolution", async () => {
   const base = process.env.DATABASE_URL;
@@ -125,7 +126,8 @@ test("v2 through financial upgrade preserves settled receipts, ACKs and immutabl
       completed_at: "2026-01-01T00:00:00.123456Z",
       reason: "Synthetic completed recharge before schema upgrade",
     };
-    const fundingReceipt = await upstream.recharge(
+    const fundingReceipt = await seedHistoricalRecharge(
+      db,
       upstreamAccount,
       rechargeInput,
       "synthetic-upgrade-actor",
@@ -241,6 +243,26 @@ test("v2 through financial upgrade preserves settled receipts, ACKs and immutabl
       { version: 2026111701 },
       { version: 2026111702 },
       { version: 2026111703 },
+      { version: 2026111704 },
+      { version: 2026111705 },
+      { version: 2026111706 },
+      { version: 2026111707 },
+      { version: 2026111801 },
+      { version: 2026111802 },
+      { version: 2026111803 },
+      { version: 2026111804 },
+      { version: 2026111805 },
+      { version: 2026111806 },
+      { version: 2026111807 },
+      { version: 2026111808 },
+      { version: 2026111809 },
+      { version: 2026111810 },
+      { version: 2026111811 },
+      { version: 2026111812 },
+      { version: 2026111813 },
+      { version: 2026111814 },
+      { version: 2026111815 },
+      { version: 2026111816 },
       { version: SCHEMA_VERSION },
     ]);
     expect(

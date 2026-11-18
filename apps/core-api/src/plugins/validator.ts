@@ -1,4 +1,9 @@
-import { createPluginSupervisor, runPluginFixtures, PluginHostError } from "@gateway/plugin-host";
+import {
+  createPluginSupervisor,
+  runPluginFixtures,
+  PluginHostError,
+  resolvePluginExecutable,
+} from "@gateway/plugin-host";
 import type { VerifiedPackage } from "@gateway/plugin-sdk";
 import { validationPolicy } from "./releases.ts";
 export type ValidationResult = {
@@ -23,8 +28,15 @@ export async function validateCatalogPackage(
       options.wallMs > validationPolicy.wall_ms)
   )
     throw new PluginHostError("CONFIG_INVALID");
+  let pinned: ReturnType<typeof resolvePluginExecutable>;
+  try {
+    pinned = resolvePluginExecutable(executable);
+  } catch {
+    return { cases: 0, steps: 0, cleanup_confirmed: true, error_code: "EXECUTABLE_CHANGED" };
+  }
   const supervisor = createPluginSupervisor({
-    executable,
+    executable: pinned.executable,
+    expectedExecutableDigest: pinned.digest,
     native: validationPolicy.native,
     maxRestarts: 0,
   });

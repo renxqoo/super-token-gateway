@@ -1,0 +1,67 @@
+import assert from "node:assert/strict";
+import { readdir, rm } from "node:fs/promises";
+import { resolve } from "node:path";
+import { createEventStore, recordEventConsumer } from "@gateway/storage";
+import { UsageProducer, evidenceChannel } from "@gateway/runtime";
+import { chatReplies, eventually, settledCharge, withGatewayStack } from "../../tests/support/gateway-process.ts";
+
+const backupDirectory = resolve(".local/backups");
+const prior = new Set(await readdir(backupDirectory).catch(() => []));
+await withGatewayStack({ reply: () => chatReplies.json(), supplierCredit: "1000000" }, async (stack) => {
+  const { db, f, namespace } = stack;
+  const consumer = await db.begin((tx) => recordEventConsumer(tx, `funding-backup-${crypto.randomUUID()}`, false));
+  const requests: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    const response = await stack.send();
+    assert.equal(response.status, 200);
+    await response.text();
+    requests.push(response.headers.get("x-request-id")!);
+  }
+  for (const request of requests) assert.equal((await settledCharge(db, request)).amount, "100");
+  const events = createEventStore(db);
+  let acked = 0;
+  await eventually(async () => {
+    const claimed = await events.claim(consumer, 100);
+    if (claimed.events.length) acked += await events.ack(consumer, claimed.lease_token, claimed.events.map((event) => event.id));
+    return acked === 6;
+  }, "six actual external consumer ACKs");
+  const queue = new UsageProducer({ channel: evidenceChannel, url: process.env.QUEUE_REDIS_URL!, namespace, replicas: 0, timeoutMs: 2000 });
+  try {
+    await eventually(async () => Object.values(await queue.stats()).every((count) => count === 0), "drained source queue");
+    await eventually(async () => {
+      const [leases] = await db`SELECT count(*)::int n FROM execution_quota_leases WHERE state<>'RELEASED'`;
+      return leases.n === 0;
+    }, "source quota releases");
+    await stack.gateway.stop();
+    await stack.worker.stop();
+    await f.identity.a.stop();
+    await f.identity.b.stop();
+    assert(Object.values(await queue.stats()).every((count) => count === 0));
+    assert.equal((await db`SELECT count(*)::int n FROM attempts WHERE state='DISPATCHING'`)[0].n, 0);
+    assert.equal((await db`SELECT count(*)::int n FROM core_evidence_receipts`)[0].n, 6);
+    assert.equal((await db`SELECT count(*)::int n FROM event_deliveries WHERE state='ACKED'`)[0].n, 6);
+    const [funds] = await db`SELECT balance_atoms::text balance,reserved_atoms::text reserved,spent_atoms::text spent FROM core_upstream_balances_v1 WHERE account_id=${stack.setup.provider.account_id}`;
+    assert.deepEqual(funds, { balance: "999955", reserved: "0", spent: "45" });
+    const source = (await db`SELECT current_database() name`)[0].name as string;
+    const sourceUrl = new URL(process.env.DATABASE_URL!);
+    sourceUrl.pathname = `/${source}`;
+    const child = Bun.spawn([process.execPath, "run", "test:backup", "--quiesced"], {
+      env: { ...process.env, DATABASE_URL: sourceUrl.toString(), REDIS_NAMESPACE: namespace, NODE_ENV: "test", MINIMAX_API_KEY: "" },
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    assert.equal(code, 0, stderr);
+    const report = JSON.parse(stdout.trim().split("\n").at(-1)!);
+    assert.equal(report.backup_restore, "pass");
+    const file = resolve(report.file);
+    assert(file.startsWith(`${backupDirectory}/gateway-`));
+    assert(!prior.has(file.slice(backupDirectory.length + 1)));
+    assert.equal(new Bun.CryptoHasher("sha256").update(await Bun.file(file).bytes()).digest("hex"), report.sha256);
+    await rm(file);
+    const result = { at: new Date().toISOString(), source, source_requests: 3, receipts: 6, external_acks: acked, source_funds: funds, stopped_owned_pids: [stack.gateway.pid, stack.worker.pid, f.identity.a.pid, f.identity.b.pid], verifier_exit_code: code, verifier: report, dump_removed_after_sha_verification: true };
+    await Bun.write(".local/performance-implementation/s7-funding-backup.json", JSON.stringify(result, null, 2) + "\n");
+    console.log(JSON.stringify(result));
+  } finally {
+    queue.close();
+  }
+});

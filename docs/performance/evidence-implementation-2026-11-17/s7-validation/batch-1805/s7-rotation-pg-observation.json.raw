@@ -1,0 +1,3656 @@
+{
+  "start": "2026-11-17T19:06:17.509Z",
+  "exit": 1,
+  "samples": [
+    {
+      "at": "2026-11-17T19:06:17.523Z",
+      "rows": []
+    },
+    {
+      "at": "2026-11-17T19:06:17.776Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT current_database() AS name"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:18.029Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT current_database() AS name"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:18.282Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_provision_v1($1 ,$2 ,$3 ,$4 ,$5 ,$6 ::timestamptz,$7 ::timestamptz)"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:18.535Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_provision_v1($1 ,$2 ,$3 ,$4 ,$5 ,$6 ::timestamptz,$7 ::timestamptz)"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:18.788Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "DO $$ BEGIN\n IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gateway_t04b1_37f99834f90f48ffac616f4b6ab47ca7') THEN CREATE ROLE gateway_t04b1_37f99834f90f48ffac616f4b6ab47ca7 NOLOGIN;END IF;\nEND $$;\nGRANT USAGE ON SCH"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "active",
+          "wait_event_type": null,
+          "wait_event": null,
+          "blockers": {},
+          "query": "SELECT plugin_catalog_command_v1($1 ,$2 ,$3 ::uuid,$4 ::jsonb,$5 ::uuid,$6 ::timestamptz,$7 ::uuid,$8 ::uuid,$9 ,$10 ) AS receipt"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:19.040Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "DO $$ BEGIN\n IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gateway_t04b1_37f99834f90f48ffac616f4b6ab47ca7') THEN CREATE ROLE gateway_t04b1_37f99834f90f48ffac616f4b6ab47ca7 NOLOGIN;END IF;\nEND $$;\nGRANT USAGE ON SCH"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT plugin_catalog_command_v1($1 ,$2 ,$3 ::uuid,$4 ::jsonb,$5 ::uuid,$6 ::timestamptz,$7 ::uuid,$8 ::uuid,$9 ,$10 ) AS receipt"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:19.291Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "DO $$ BEGIN\n IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gateway_t04b1_37f99834f90f48ffac616f4b6ab47ca7') THEN CREATE ROLE gateway_t04b1_37f99834f90f48ffac616f4b6ab47ca7 NOLOGIN;END IF;\nEND $$;\nGRANT USAGE ON SCH"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT plugin_catalog_command_v1($1 ,$2 ,$3 ::uuid,$4 ::jsonb,$5 ::uuid,$6 ::timestamptz,$7 ::uuid,$8 ::uuid,$9 ,$10 ) AS receipt"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:19.544Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "DO $$ BEGIN\n IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gateway_t04b1_37f99834f90f48ffac616f4b6ab47ca7') THEN CREATE ROLE gateway_t04b1_37f99834f90f48ffac616f4b6ab47ca7 NOLOGIN;END IF;\nEND $$;\nGRANT USAGE ON SCH"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT v.*,p.package_bytes,p.release_descriptor,p.release_signature,p.release_key_id FROM plugin_versions v JOIN plugin_packages p ON p.digest=v.package_digest WHERE v.id=$1 ::uuid"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:19.796Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:20.049Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:20.302Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:20.554Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:20.807Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:21.060Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:21.313Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:21.565Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:21.818Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:22.071Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:22.322Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-17T19:06:22.575Z",
+      "rows": [
+        {
+          "pid": 38027,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38028,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38029,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38030,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38031,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38032,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38033,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_change_v1('gateway',$1 ,$2 ,NULL,'RETIRE')"
+        },
+        {
+          "pid": 38034,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": ""
+        },
+        {
+          "pid": 38049,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38050,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38051,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38052,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38053,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38055,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "LISTEN \"stg_identity\""
+        },
+        {
+          "pid": 38056,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT core_preflight_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid) value"
+        },
+        {
+          "pid": 38057,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38058,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_challenge_v1($1 ::jsonb,$2 ::uuid,$3 ::bytea,$4 ::bytea,$5 ,$6 ,$7 ::bytea,$8 ) AS value"
+        },
+        {
+          "pid": 38059,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "SELECT internal_identity_register_v1($1 ::jsonb,$2 ::uuid,$3 ::uuid,$4 ,$5 ) AS value"
+        },
+        {
+          "pid": 38067,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38068,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38069,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        },
+        {
+          "pid": 38070,
+          "datname": "gateway_test_foundation_498a92cfc0f54b42a8d28b9d56bbd189",
+          "state": "idle",
+          "wait_event_type": "Client",
+          "wait_event": "ClientRead",
+          "blockers": {},
+          "query": "COMMIT"
+        }
+      ]
+    }
+  ]
+}

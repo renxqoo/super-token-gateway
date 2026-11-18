@@ -8,6 +8,7 @@ import {
   numeric,
   timestamp,
   integer,
+  smallint,
   primaryKey,
   index,
   unique,
@@ -35,6 +36,7 @@ import {
 } from "./catalog.ts";
 
 import { internalStartupSessions } from "./internal-identity.ts";
+import { upstreamBalanceCells } from "./funding.ts";
 const signatureBytes = customType<{ data: Buffer }>({ dataType: () => "bytea" });
 
 const atoms = (name: string) => numeric(name, { precision: 38, scale: 0 });
@@ -162,6 +164,8 @@ export const upstreamHolds = pgTable(
       .references((): AnyPgColumn => channels.id),
     currency: text().notNull(),
     estimatedAtoms: atoms("estimated_atoms").notNull(),
+    fundingCell: smallint("funding_cell").notNull(),
+    currentReservedAtoms: atoms("current_reserved_atoms").notNull(),
     estimatedQuantities: jsonb("estimated_quantities"),
     estimatedQuantitiesDigest: text("estimated_quantities_digest"),
     estimateManifestDigest: text("estimate_manifest_digest"),
@@ -178,11 +182,20 @@ export const upstreamHolds = pgTable(
       columns: [t.accountId, t.currency],
       foreignColumns: [upstreamAccountBalances.accountId, upstreamAccountBalances.currency],
     }),
+    foreignKey({
+      columns: [t.accountId, t.currency, t.fundingCell],
+      foreignColumns: [
+        upstreamBalanceCells.accountId,
+        upstreamBalanceCells.currency,
+        upstreamBalanceCells.cell,
+      ],
+    }),
+    index("upstream_hold_funding_idx").on(t.accountId, t.currency, t.fundingCell),
     index("upstream_hold_account_state_idx").on(t.accountId, t.currency, t.state, t.attemptId),
     check("upstream_hold_state", sql`state IN ('HELD','UNKNOWN','PARTIAL','SETTLED','RELEASED')`),
     check(
       "upstream_hold_amounts",
-      sql`estimated_atoms>=0 AND (final_cost_atoms IS NULL OR final_cost_atoms>=0)`,
+      sql`estimated_atoms>=0 AND current_reserved_atoms>=0 AND (final_cost_atoms IS NULL OR final_cost_atoms>=0)`,
     ),
   ],
 );
@@ -257,7 +270,7 @@ export const coreEvidenceReceipts = pgTable(
     createdAt: instant("created_at").defaultNow().notNull(),
   },
   (t) => [
-    unique("core_receipt_delivery").on(t.originIdentity, t.eventId, t.bodyDigest),
+    unique("core_receipt_delivery").on(t.eventId, t.originIdentity, t.bodyDigest),
     uniqueIndex("core_receipt_event_claim")
       .on(t.originIdentity, t.eventId)
       .where(sql`event_claim`),
@@ -482,6 +495,9 @@ export const executionQuotaLeases = pgTable(
   (t) => [
     unique().on(t.attemptId, t.scopeKind, t.scopeId),
     index("execution_quota_request_idx").on(t.requestId),
+    index("execution_quota_live_deadline_idx")
+      .on(sql`((${t.descriptor}->>'deadline_ms')::bigint)`, t.requestId, t.leaseId)
+      .where(sql`state IN ('ADOPTION_PENDING','ACTIVE','RELEASE_PENDING')`),
     uniqueIndex("execution_request_common_quota_unique")
       .on(t.requestId, t.scopeKind, t.scopeId)
       .where(sql`scope_kind<>'channel'`),

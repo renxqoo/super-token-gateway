@@ -1,0 +1,87 @@
+from pathlib import Path
+import json,hashlib
+
+src=Path('packages/storage/src/sql/core-begin-batch.sql').read_text()
+p=Path('packages/storage/src/sql/core-admit-batch.sql')
+base=p.read_text()
+assert 'CREATE OR REPLACE FUNCTION core_funding.run_execution_v1' not in base
+run=src[src.index('CREATE FUNCTION core_funding.run_execution_v1'):src.index('CREATE OR REPLACE FUNCTION public.core_auth_v1')]
+item=src[src.index('CREATE FUNCTION core_funding.execution_item_v1'):src.index('CREATE OR REPLACE FUNCTION public.core_execution_batch_v1')]
+def swap(s,a,b,n=1):
+ assert s.count(a)==n,(a[:100],s.count(a),n)
+ return s.replace(a,b)
+run=swap(run,'CREATE FUNCTION core_funding.run_execution_v1','CREATE OR REPLACE FUNCTION core_funding.run_execution_v1')
+empty='{"grants":{},"admissions":{},"funding":{"cells":{},"journals":[],"entries":[]},"commands":[],"audits":[],"keys":{}}'
+run=swap(run,'{"grants":{},"commands":[],"audits":[],"keys":{}}',empty,2)
+run=swap(run,'key text;attempt_key text;BEGIN','key text;attempt_key text;request_key text;intent_key text;kind text;BEGIN')
+run=swap(run,'   key=NULL;attempt_key=NULL;','   key=NULL;attempt_key=NULL;request_key=NULL;intent_key=NULL;kind=item->\'projection\'->>\'command_type\';')
+run=swap(run,"IF item->'projection'->>'command_type'='execution_begin_v1' THEN attempt_key=((item->'data'->>'attempt_id')::uuid)::text;END IF;","""IF kind='execution_begin_v1' THEN attempt_key=((item->'data'->>'attempt_id')::uuid)::text;
+    ELSIF kind='execution_admit_v1' THEN
+     attempt_key=((item->'data'->'dispatch_projection'->>'proposed_attempt_id')::uuid)::text;
+     request_key='request:'||((item->'data'->'dispatch_projection'->>'proposed_request_id')::uuid)::text;
+     IF item->'data'->>'intent_digest' IS NOT NULL THEN intent_key='intent:'||((item->'data'->>'project_id')::uuid)::text||':'||(item->'data'->>'intent_digest');END IF;
+    END IF;""")
+run=swap(run,'EXCEPTION WHEN invalid_text_representation THEN key=NULL;attempt_key=NULL;END;','EXCEPTION WHEN invalid_text_representation THEN key=NULL;attempt_key=NULL;request_key=NULL;intent_key=NULL;END;')
+anchor='   result=coalesce(item_errors[item_index],group_errors[group_index]);'
+run=swap(run,anchor,"""   IF bulk AND pending->'admissions'<>'{}'::jsonb AND (kind IS DISTINCT FROM 'execution_admit_v1' OR attempt_key IS NULL OR request_key IS NULL OR key IS NULL OR pending->'admissions'?attempt_key OR pending->'keys'?request_key OR pending->'keys'?key OR coalesce(pending->'keys'?intent_key,false)) THEN
+    PERFORM core_funding.flush_admit_v1(pending);pending='"""+empty+"""'::jsonb;
+   END IF;
+"""+anchor)
+run=swap(run,'IF bulk THEN PERFORM core_funding.flush_begin_v1(pending);END IF;','IF bulk THEN PERFORM core_funding.flush_begin_v1(pending);PERFORM core_funding.flush_admit_v1(pending);END IF;')
+item=swap(item,'CREATE FUNCTION core_funding.execution_item_v1','CREATE OR REPLACE FUNCTION core_funding.execution_item_v1')
+item=swap(item,'customer jsonb;catalog jsonb;allowed jsonb;','customer jsonb;catalog jsonb;allowed jsonb;allocation jsonb;funding jsonb;admission jsonb;journal uuid;')
+item=swap(item,"   funding_cell=core_funding.reserve_v1(account,c->>'cost_currency',aid,amount);","""   IF kind='execution_admit_v1' AND pending IS NOT NULL THEN
+    funding=core_funding.reserve_batch_v1(account,c->>'cost_currency',aid,amount,pending->'funding');funding_cell=(funding->>'cell')::smallint;pending=jsonb_set(pending,ARRAY['funding'],funding->'pending');
+   ELSE funding_cell=core_funding.reserve_v1(account,c->>'cost_currency',aid,amount);END IF;""")
+a="    result=public.allocate_customer_batch_v1(jsonb_build_array(jsonb_build_object('id',qid,'attempt_id',aid,'project_id',ctx.project_id,'key_id',ctx.key_id,'operation',ctx.operation,'model',ctx.model,'digest',d->>'intent_digest','fingerprint',ctx.fingerprint,'quote',quote,'route_id',ref->>'route_id','cost_pricing_id',ref->>'cost_version_id')))->'0';"
+item=swap(item,a,"""    allocation=jsonb_build_object('id',qid,'attempt_id',aid,'project_id',ctx.project_id,'key_id',ctx.key_id,'operation',ctx.operation,'model',ctx.model,'digest',d->>'intent_digest','fingerprint',ctx.fingerprint,'quote',quote,'route_id',ref->>'route_id','cost_pricing_id',ref->>'cost_version_id');
+    IF pending IS NULL THEN
+     result=public.allocate_customer_batch_v1(jsonb_build_array(allocation))->'0';""")
+a="    UPDATE public.attempts SET binding_id=(ref->>'binding_id')::uuid WHERE id=aid;"
+item=swap(item,a,a+"""
+    ELSE
+     admission=jsonb_build_object('sequence',(SELECT count(*) FROM jsonb_each(pending->'admissions')),'customer',allocation,'binding_id',ref->>'binding_id','context_id',ctx.id,'owner_session_id',p->>'session_id','authorization',auth,'authority_times',authority_times,'command_deadline',p->>'deadline_at','package_digest',ref->>'package_digest','execution',projection->'execution','execution_budget',jsonb_build_object('max_attempts',(ctx.snapshot->'execution_budget'->>'max_attempts')::integer,'token_budget',((computed->>'token_count')::numeric*(ctx.snapshot->'execution_budget'->>'max_attempts')::integer)::text,'deadline_at',p->>'deadline_at','owner_session_id',p->>'session_id','incarnation_id',p->>'incarnation_id'));
+    END IF;""")
+start=item.index('   INSERT INTO public.execution_commands(id,command_id,kind,caller_identity')
+end=item.index("   IF jsonb_array_length(computed->'leases')",start)
+old=item[start:end]
+permit="jsonb_build_object('attempt_id',aid,'command_id',command_pk,'gateway_instance_id',p->>'instance_id','owner_session_id',p->>'session_id','owner_key_sha256',p->>'key_sha256','owner_service','gateway','certificate_sha256',p->>'certificate_sha256','incarnation_id',p->>'incarnation_id','permit_epoch',1,'binding_id',ref->>'binding_id','dispatched_digest',d->>'dispatched_digest','state','RESERVED','expires_at',p->>'deadline_at','route_id',ref->>'route_id','context_id',ctx.id,'snapshot',plan,'manifest',manifest,'manifest_digest',projection->>'billable_manifest_sha256','candidate_digest',ref->>'candidate_digest','authorization_plan_digest',response->>'authorization_plan_digest','prep_session_id',d->>'prep_session_id','prep_binding_digest',d->>'prep_binding_digest')"
+hold="jsonb_build_object('attempt_id',aid,'account_id',account,'channel_id',ref->>'channel_id','currency',c->>'cost_currency','estimated_atoms',amount,'cost_version_id',ref->>'cost_version_id','state','HELD','estimated_quantities',estimated,'estimated_quantities_digest',public.core_digest_v1(estimated),'estimate_manifest_digest',projection->>'billable_manifest_sha256','estimate_algorithm_version',1,'funding_cell',funding_cell,'current_reserved_atoms',amount)"
+command="jsonb_build_object('id',command_pk,'command_id',e->>'command_id','kind',kind,'caller_identity',caller,'owner_session_id',p->>'session_id','caller_incarnation',p->>'incarnation_id','body_digest',e->>'body_digest','deadline_at',e->>'deadline_at','trace_id',e->>'trace_id','contract_version',1,'state','COMMITTED','request_id',qid,'attempt_id',aid,'context_id',ctx.id,'receipt',response)"
+new="""   IF kind='execution_admit_v1' AND pending IS NOT NULL THEN
+    admission=admission||jsonb_build_object('permit',"""+permit+",'hold',"+hold+""",'leases','[]'::jsonb);
+    pending=jsonb_set(pending,ARRAY['commands'],(pending->'commands')||jsonb_build_array("""+command+"""));
+    pending=jsonb_set(pending,ARRAY['keys','command:'||caller||':'||kind||':'||((e->>'command_id')::uuid)::text],'true'::jsonb);
+    pending=jsonb_set(pending,ARRAY['keys','request:'||qid::text],'true'::jsonb);
+    IF d->>'intent_digest' IS NOT NULL THEN pending=jsonb_set(pending,ARRAY['keys','intent:'||ctx.project_id::text||':'||(d->>'intent_digest')],'true'::jsonb);END IF;
+    journal=gen_random_uuid();funding=pending->'funding';
+    funding=jsonb_set(funding,ARRAY['journals'],(funding->'journals')||jsonb_build_array(jsonb_build_object('id',journal,'account_id',account,'channel_id',ref->>'channel_id','attempt_id',aid,'currency',c->>'cost_currency','kind','RESERVE','reference','reserve:'||aid)));
+    funding=jsonb_set(funding,ARRAY['entries'],(funding->'entries')||jsonb_build_array(jsonb_build_object('journal_id',journal,'ordinal',0,'currency',c->>'cost_currency','account','upstream:available','atoms',-amount),jsonb_build_object('journal_id',journal,'ordinal',1,'currency',c->>'cost_currency','account','upstream:reserved','atoms',amount)));
+    pending=jsonb_set(pending,ARRAY['funding'],funding);
+   ELSE
+"""+old+"   END IF;\n"
+item=item[:start]+new+item[end:]
+a="    INSERT INTO public.execution_quota_leases(lease_id,attempt_id,command_id,scope_kind,scope_id,request_id,state,descriptor) VALUES(descriptor->>'lease_id',aid,command_pk,descriptor->>'scope_kind',descriptor->>'scope_id',qid,'ADOPTION_PENDING',descriptor);"
+item=swap(item,a,"""    IF kind='execution_admit_v1' AND pending IS NOT NULL THEN
+     admission=jsonb_set(admission,ARRAY['leases'],(admission->'leases')||jsonb_build_array(jsonb_build_object('lease_id',descriptor->>'lease_id','attempt_id',aid,'command_id',command_pk,'scope_kind',descriptor->>'scope_kind','scope_id',descriptor->>'scope_id','request_id',qid,'state','ADOPTION_PENDING','descriptor',descriptor)));
+    ELSE
+"""+a+"\n    END IF;")
+item=swap(item,"  ELSIF kind IN ('execution_begin_v1','execution_abort_v1') THEN","   IF kind='execution_admit_v1' AND pending IS NOT NULL THEN pending=jsonb_set(pending,ARRAY['admissions',aid::text],admission);END IF;\n  ELSIF kind IN ('execution_begin_v1','execution_abort_v1') THEN")
+a="  IF kind='execution_begin_v1' AND pending IS NOT NULL THEN"
+assert item.count(a)==2
+pos=item.rindex(a)
+item=item[:pos]+item[pos:].replace(a,"  IF kind IN('execution_begin_v1','execution_admit_v1') AND pending IS NOT NULL THEN",1)
+grants="""
+DO $$ DECLARE item_owner name;BEGIN
+ SELECT pg_get_userbyid(proowner) INTO item_owner FROM pg_proc WHERE oid='core_funding.run_execution_v1(jsonb,jsonb[],integer[],jsonb[],jsonb[],boolean,numeric[])'::regprocedure;
+ EXECUTE format('GRANT EXECUTE ON FUNCTION core_funding.reserve_batch_v1(uuid,text,uuid,numeric,jsonb),core_funding.flush_admit_v1(jsonb),core_funding.flush_v1(jsonb) TO %I',item_owner);
+END $$;
+REVOKE ALL ON FUNCTION core_funding.reserve_batch_v1(uuid,text,uuid,numeric,jsonb),core_funding.flush_admit_v1(jsonb) FROM PUBLIC;
+"""
+p.write_text(base+'\n'+run+'\n'+item+grants)
+manifest=Path('packages/storage/src/migrations/manifest.json')
+d=json.loads(manifest.read_text());assert d['migrations'][-1]['version']==2026111806
+d['migrations'].append({'version':2026111807,'files':[{'path':'./sql/core-admit-batch.sql','checksum':hashlib.sha256(p.read_bytes()).hexdigest()}]})
+manifest.write_text(json.dumps(d,indent=2)+'\n')
+t=Path('tests/integration/core-execution-upgrade.test.ts');s=t.read_text();assert s.count('toBe(2026111806)')==1;t.write_text(s.replace('toBe(2026111806)','toBe(2026111807)'))
+print(json.dumps({'created_sql_lines':len(p.read_text().splitlines()),'latest_migration':d['migrations'][-1]['version']}))

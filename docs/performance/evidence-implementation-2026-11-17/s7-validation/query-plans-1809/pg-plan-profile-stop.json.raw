@@ -1,0 +1,7 @@
+{
+  "at": "2026-11-17T22:25:01.595Z",
+  "database": "gateway_test_foundation_54ba01b0a89e4e60a21a50bc9f092533",
+  "database_present": false,
+  "reason": "bounded profiling log growth; disable only ownDB profiler defaults then reconnect only own non-superuser sessions; this profile is not capacity evidence",
+  "reconnected_sessions": []
+}

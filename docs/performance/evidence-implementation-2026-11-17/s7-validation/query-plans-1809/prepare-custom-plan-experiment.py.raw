@@ -1,0 +1,17 @@
+from pathlib import Path
+
+source=Path('scripts/bench-system.ts').read_text()
+source=source.replace('from "../','from "../../').replace('from "./','from "../../scripts/')
+source='import { migrate } from "@gateway/storage";\n'+source
+anchor='      entry: "dist/core-api/main.js",'
+assert source.count(anchor)==1
+source=source.replace(anchor,'''      initializeDatabase: async (db) => {
+        await migrate(db);
+        const name=String((await db`SELECT current_database() name`)[0].name);
+        if(!/^gateway_test_foundation_[a-f0-9]{32}$/.test(name)) throw new Error("own experiment database required");
+        await db.unsafe(`ALTER DATABASE "${name}" SET plan_cache_mode='force_custom_plan'`);
+        await Bun.write(".local/performance-implementation/custom-plan-experiment-settings.json",JSON.stringify({database:name,plan_cache_mode:"force_custom_plan",scope:"experiment only; production runtime1809 unchanged; initial administrator connection retains its existing mode"})+"\\n");
+      },
+'''+anchor)
+Path('.local/performance-implementation/custom-plan-bench.ts').write_text(source)
+print('Created isolated force_custom_plan experiment')

@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import type { SQL } from "bun";
 import { RedisClient } from "bun";
 import { UsageProducer, evidenceChannel } from "@gateway/runtime";
+import { canonical } from "@gateway/kernel";
 import type { createCoreManagementApplication } from "../apps/core-api/src/platform/management.ts";
 import { withFinancial } from "../tests/support/financial-execution.ts";
 import {
@@ -13,6 +14,7 @@ import {
   withSettlementRole,
 } from "../tests/support/gateway-process.ts";
 import { cleanupCapacityNamespaces } from "./capacity-cleanup.ts";
+import { approvePluginRuntime } from "./runtime-approval.ts";
 import {
   auditCapacityIdentities,
   createIdentityWriter,
@@ -73,6 +75,11 @@ if (!Number.isSafeInteger(drainSeconds) || drainSeconds < 1 || drainSeconds > 60
   throw new Error("Invalid drain budget");
 const hotShare = Number(option("--hot-share", "0"));
 const supplierAccounts = Number(option("--supplier-accounts", "1"));
+const pluginRuntime = (() => {
+  const value = option("--plugin-runtime", "builtin-worker");
+  if (value !== "wasm" && value !== "builtin-worker") throw new Error("Invalid plugin runtime");
+  return value;
+})();
 if (!Number.isSafeInteger(supplierAccounts) || supplierAccounts < 1 || supplierAccounts > 64)
   throw new Error("Invalid supplier account count");
 if (!Number.isFinite(hotShare) || hotShare < 0 || hotShare > 1)
@@ -103,6 +110,8 @@ for (const artifact of [
   "dist/gateway/main.js",
   "dist/core-worker/main.js",
   "dist/native/plugin-host",
+  "dist/native/builtin-adapters/worker.js",
+  "dist/native/builtin-adapters/registry.json",
   "dist/mock-providers/main.js",
   "dist/manifest.json",
 ]) {
@@ -206,6 +215,15 @@ async function provision(f: Fixture) {
     { rates: supplierRates, ceilings: supplierCeilings },
     { baseUrl: `https://127.0.0.1:${upstreamPort}`, maxInputTokens: 4096 },
   );
+  const runtimeApproval = await approvePluginRuntime(f.db, {
+    packageDigest: String(f.catalog.release.descriptor.package_digest),
+    kind: pluginRuntime,
+    policyFile: f.catalog.policyPath,
+    helperExecutable: resolve("dist/native/plugin-host"),
+    builtinDirectory: resolve("dist/native/builtin-adapters"),
+    actor: "capacity-fixture-owner",
+    reason: "Exact measured artifact execution approval",
+  });
   await created(
     f.request(
       `/providers/${setup.provider.id}`,
@@ -330,7 +348,7 @@ async function provision(f: Fixture) {
     );
     accounts.push(provider.account_id);
   }
-  return { setup, projects, keys, credited, accounts };
+  return { setup, projects, keys, credited, accounts, runtimeApproval };
 }
 
 async function confirmedRequests(db: SQL, requests: string[]) {
@@ -426,7 +444,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       await Bun.sleep(25);
     }
     if (Object.keys(scenario).length) await upstreamStats("scenarios");
-    const { setup, projects, keys, credited, accounts } = await provision(f);
+    const { setup, projects, keys, credited, accounts, runtimeApproval } = await provision(f);
     const consumer =
       consumerMode === "live"
         ? (
@@ -442,6 +460,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     const startWorker = async () => {
       worker = await startCoreWorker(namespace, {
         databaseUrl: workerDatabaseUrl,
+        identity: f.identity,
         entry: "dist/core-worker/main.js",
         env: { SETTLEMENT_CONCURRENCY: String(workerConcurrency) },
       });
@@ -727,6 +746,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       await db.begin(async (audit) => {
         await audit`SET LOCAL statement_timeout=120000`;
         return audit`SELECT (SELECT count(*)::int FROM gateway_requests) AS requests,
+          (SELECT count(DISTINCT a.request_id)::int FROM attempts a JOIN execution_permits p ON p.attempt_id=a.id JOIN execution_contexts c ON c.id=p.context_id WHERE c.snapshot?'candidate_digests') AS projected_requests,
           (SELECT count(*)::int FROM attempts) AS attempts,
           (SELECT count(*)::int FROM attempts WHERE state='SUCCEEDED') AS succeeded_attempts,
           (SELECT count(*)::int FROM usage_events) AS usage_events,
@@ -742,7 +762,25 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
           (SELECT count(*)::int FROM money_journal WHERE kind='SETTLE') AS settlement_journals,
           (SELECT count(*)::int FROM money_journal j WHERE (SELECT sum((v->>'atoms')::numeric) FROM jsonb_array_elements(j.lines) v)<>0) AS unbalanced_journals,
           (SELECT count(*)::int FROM upstream_cost_heads) AS supplier_cost_heads,
+          (SELECT count(*)::int FROM gateway_requests q
+            JOIN attempts a ON (a.id,a.request_id)=(q.selected_attempt_id,q.id)
+            JOIN upstream_holds h ON h.attempt_id=a.id
+            JOIN upstream_cost_heads ch ON ch.attempt_id=a.id
+            JOIN upstream_costs c ON (c.attempt_id,c.revision)=(ch.attempt_id,ch.revision)
+            JOIN (SELECT j.attempt_id,sum(e.atoms) AS spent,
+                bool_and(j.account_id=owner.account_id AND j.channel_id IS NOT DISTINCT FROM owner.channel_id AND j.currency=owner.currency AND e.currency=owner.currency) AS owned
+              FROM upstream_journals j JOIN upstream_entries e ON e.journal_id=j.id
+              JOIN upstream_holds owner ON owner.attempt_id=j.attempt_id
+              WHERE e.account='upstream:expense' GROUP BY j.attempt_id) ledger ON ledger.attempt_id=a.id
+            JOIN usage_event_index evidence ON evidence.id=c.evidence_id AND evidence.attempt_id=a.id AND evidence.request_id=q.id
+            WHERE h.state='SETTLED' AND h.currency='USD' AND h.current_reserved_atoms=0 AND h.final_cost_atoms=${expectedCost}::numeric
+              AND c.complete AND NOT c.disputed AND c.cost_version_id=h.cost_version_id AND c.currency=h.currency
+              AND c.cost_atoms=h.final_cost_atoms AND ledger.owned AND ledger.spent=c.cost_atoms
+          ) AS exact_supplier_postings,
           (SELECT count(*)::int FROM usage_conflicts) AS conflicts,
+          (SELECT count(*)::int FROM upstream_holds h WHERE h.current_reserved_atoms<>(SELECT coalesce(sum(e.atoms),0) FROM upstream_journals j JOIN upstream_entries e ON e.journal_id=j.id WHERE j.attempt_id=h.attempt_id AND e.account='upstream:reserved')) AS inconsistent_hold_reserves,
+          (SELECT count(*)::int FROM core_upstream_balances_v1 b WHERE (core_funding.audit_v1(b.account_id,b.currency)->>'cells_conserved')::boolean IS DISTINCT FROM true) AS inconsistent_funding_budgets,
+          (SELECT count(*)::int FROM core_funding.balance_cells c WHERE c.reserved_atoms<>(SELECT coalesce(sum(h.current_reserved_atoms),0) FROM upstream_holds h WHERE (h.account_id,h.currency,h.funding_cell)=(c.account_id,c.currency,c.cell))) AS inconsistent_cell_reserves,
           (SELECT count(*)::int FROM (SELECT journal_id FROM upstream_entries GROUP BY journal_id HAVING sum(atoms)<>0) j) AS unbalanced_supplier_journals`;
       })
     )[0] as Record<string, number | string>;
@@ -750,7 +788,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     const supplier = (
       await db<
         { balance: string; reserved: string; spent: string; accounts: number }[]
-      >`SELECT sum(balance_atoms)::text AS balance,sum(reserved_atoms)::text AS reserved,sum(spent_atoms)::text AS spent,count(*)::int AS accounts FROM upstream_account_balances WHERE account_id=ANY(${accounts}::uuid[]) AND currency='USD'`
+      >`SELECT sum(balance_atoms)::text AS balance,sum(reserved_atoms)::text AS reserved,sum(spent_atoms)::text AS spent,count(*)::int AS accounts FROM core_upstream_balances_v1 WHERE account_id=ANY(${accounts}::uuid[]) AND currency='USD'`
     )[0];
     const supplierSpent = BigInt(requests) * BigInt(expectedCost);
     const supplierExact =
@@ -764,6 +802,9 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     const attemptFailures = [
       ...(await db`SELECT state,error_code,count(*)::int AS count FROM attempts
         WHERE error_code IS NOT NULL GROUP BY state,error_code ORDER BY count DESC,state,error_code LIMIT 25`),
+    ];
+    const executionRuntimes = [
+      ...(await db`SELECT snapshot->'dispatch_projection'->'execution' execution,count(*)::int count FROM execution_permits GROUP BY 1 ORDER BY 1`),
     ];
     const usageShapes = [
       ...(await db`SELECT record_kind,snapshot_revision::text AS revision,finality,usage,cost_atoms::text AS cost,cost_complete,count(*)::int AS count FROM usage_events GROUP BY 1,2,3,4,5,6 ORDER BY 7 DESC LIMIT 20`),
@@ -786,6 +827,17 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       WHERE w.id IS NULL OR w.reserved_atoms<>0 OR w.debt_atoms<>0
       OR w.spent_atoms<>expected.calls*${expectedCharge}::numeric
       OR w.available_atoms<>expected.credited-expected.calls*${expectedCharge}::numeric`
+    )[0]!.mismatches as number;
+    const admittedWalletMismatches = (
+      await db`WITH admitted AS (
+        SELECT project_id,count(*) AS requests FROM gateway_requests GROUP BY project_id
+      ) SELECT count(*)::int AS mismatches
+      FROM unnest(${projects}::uuid[],${projects.map((project) => String(credited.get(project)))}::numeric[]) expected(project_id,credited)
+      LEFT JOIN admitted a USING(project_id)
+      LEFT JOIN wallets w ON w.project_id=expected.project_id AND w.currency='USD'
+      WHERE w.id IS NULL OR w.reserved_atoms<>0 OR w.debt_atoms<>0
+       OR w.spent_atoms<>coalesce(a.requests,0)*${expectedCharge}::numeric
+       OR w.available_atoms<>expected.credited-coalesce(a.requests,0)*${expectedCharge}::numeric`
     )[0]!.mismatches as number;
     const windowStart = Date.parse(http.measurement_started_at);
     const windowEnd = windowStart + seconds * 1000;
@@ -812,11 +864,19 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       BigInt(requests) * BigInt(expectedCharge), "customer_spent");
     require(Number(check.unbalanced_journals) === 0, "unbalanced_customer_journals");
     require(Number(check.supplier_cost_heads) === requests, "supplier_cost_heads");
+    require(Number(check.exact_supplier_postings) === requests, "per_request_supplier_postings");
     require(supplierExact, "supplier_ledger");
+    require(Number(check.inconsistent_hold_reserves) === 0, "supplier_hold_reserves");
+    require(Number(check.inconsistent_funding_budgets) === 0, "supplier_budget_transfers");
+    require(Number(check.inconsistent_cell_reserves) === 0, "supplier_cell_reserves");
     require(Number(check.unbalanced_supplier_journals) === 0, "unbalanced_supplier_journals");
     require(Number(check.conflicts) === 0, "evidence_conflicts");
     require(ownership === 0, "charge_ownership");
+    require(executionRuntimes.length === 1 &&
+      canonical(executionRuntimes[0]!.execution) ===
+        canonical(runtimeApproval.execution), "execution_runtime_binding");
     require(walletMismatches === 0, "wallet_balances");
+    require(admittedWalletMismatches === 0, "admitted_wallet_balances");
     require(http.invalid === 0 &&
       !(http.shed ?? 0) &&
       http.completed === http.succeeded, "http_validity");
@@ -884,6 +944,9 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       wallets,
       hotShare,
       supplierAccounts,
+      pluginRuntime,
+      runtimeApproval,
+      executionRuntimes,
       concurrency,
       stream,
       requestTimeoutMs,
@@ -908,6 +971,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       usageShapes,
       ownershipMismatches: ownership,
       walletMismatches,
+      admittedWalletMismatches,
       delivered,
       receiptConfirmedAcks,
       ackedRequests: ackedRequests.size,

@@ -4,6 +4,11 @@ END $$;
 GRANT USAGE ON SCHEMA public TO core_execution_api;
 GRANT EXECUTE ON FUNCTION public.core_context_v1(jsonb,uuid,jsonb),public.core_preflight_v1(jsonb,uuid,uuid),public.core_quota_v1(jsonb,uuid,text,jsonb) TO core_execution_api;
 REVOKE ALL ON execution_contexts,execution_commands,execution_permits,execution_quota_leases,upstream_holds,upstream_account_balances,channels,api_keys,wallets FROM core_execution_api;
+DO $$ BEGIN
+ IF to_regprocedure('public.core_route_authority_v1(jsonb,text,text,text)') IS NOT NULL THEN
+  GRANT EXECUTE ON FUNCTION public.core_route_authority_v1(jsonb,text,text,text) TO core_execution_api;
+ END IF;
+END $$;
 GRANT EXECUTE ON FUNCTION public.core_lookup_v1(jsonb,jsonb) TO core_execution_api;
 GRANT EXECUTE ON FUNCTION public.core_quota_close_v1(jsonb,jsonb,jsonb) TO core_execution_api;
 GRANT EXECUTE ON FUNCTION public.core_execution_batch_v1(jsonb) TO core_execution_api;
@@ -11,3 +16,5 @@ GRANT EXECUTE ON FUNCTION public.core_quota_recovery_v1(jsonb,jsonb) TO core_exe
 GRANT EXECUTE ON FUNCTION public.core_abort_recovery_v1(jsonb,jsonb,jsonb) TO core_execution_api;
 GRANT EXECUTE ON FUNCTION public.core_plugin_package_v1(jsonb,text) TO core_execution_api;
 GRANT EXECUTE ON FUNCTION public.core_resource_commit_v1(jsonb,jsonb),public.core_resource_permit_v1(jsonb,jsonb),public.core_resource_list_v1(jsonb,jsonb),public.core_resource_claim_v1(jsonb,jsonb),public.core_resource_poll_v1(jsonb,jsonb),public.core_resource_release_v1(jsonb,jsonb) TO core_execution_api;
+
+GRANT EXECUTE ON FUNCTION public.core_execution_slow_v1(jsonb),public.core_abort_recovery_slow_v1(jsonb,jsonb,jsonb) TO core_execution_api;

@@ -1,0 +1,218 @@
+{
+  "schema_version": 2026111817,
+  "full_verify": {
+    "stages": [
+      [
+        453,
+        0,
+        8121
+      ],
+      [
+        538,
+        52,
+        10011
+      ]
+    ],
+    "native": {
+      "cases_without_subtests": 34,
+      "cases_including_subtests": 48
+    },
+    "integration_failures": [
+      "(fail) completed replay cursors skip historical scans without missing later live evidence [30002.04ms]",
+      "(fail) intent arbitration, key permission and funds are decided per admission and only funded intents reserve [164.77ms]",
+      "(fail) expiry overflow on one wallet does not roll back a valid peer admission [463.74ms]",
+      "(fail) concurrent admissions of one intent reserve exactly once [191.28ms]",
+      "(fail) a batch upload is validated and rewritten per row, its batch is admitted against the summed row ceilings and settled from the output file without exposing upstream file identities [2736.40ms]",
+      "(fail) requests under steady concurrent load all succeed across repeated Core connection rotations instead of some answering 503 core_unavailable at each rotation [19426.96ms]",
+      "(fail) 48 concurrent requests on one Gateway complete instead of being refused by internal stream limits [1.15ms]",
+      "(fail) requests beyond the Gateway plugin attempt budget are refused as 503 overloaded instead of 500 internal_error [0.68ms]",
+      "(fail) real recharge credits CNY USD HKD independently and shared channels do not duplicate funding [0.28ms]",
+      "(fail) CNY payment700 and USD credited100 preserve exact microsecond receipt and balanced USD journal [0.10ms]",
+      "(fail) same recharge reference rejects every changed semantic field and cannot spoof actor [0.08ms]",
+      "(fail) strict recharge validation rejects unsafe money currencies calendars and missing facts without money writes [0.08ms]",
+      "(fail) recharge accepts exact 38 digit amounts but overflow rolls back the second operation [0.14ms]",
+      "(fail) same-key concurrent recharges recover one receipt without duplicate journal or audit [0.09ms]",
+      "(fail) same-key different-currency and different-voucher writers produce one winner without lock cycles [0.07ms]",
+      "(fail) audit failure rolls back balance receipt journal and voucher association inside caller transaction [0.07ms]",
+      "(fail) constraint failure after posting rolls back money and receipt before a successful retry [0.07ms]",
+      "(fail) recharge never revives disabled quarantined or reconciliation-required accounts or rewrites reserved and spent [0.07ms]",
+      "(fail) voucher uploads verify bounded allowed bytes digest and immutable content before persistence [0.08ms]",
+      "(fail) expired unreferenced vouchers reject recharge and reupload until explicit cleanup while referenced evidence survives [0.10ms]",
+      "(fail) cleanup racing an in-flight committed recharge cannot delete its referenced evidence [0.08ms]",
+      "(fail) outer rollback or deferred constraint failure cannot turn a returned recharge into committed money [0.08ms]",
+      "(fail) concurrent same digest uploads return one immutable voucher while PNG JPEG and PDF signatures are explicit [0.07ms]",
+      "(fail) second precision completion normalizes to the same microsecond receipt and replay bypasses a locked balance [0.08ms]",
+      "(fail) cleanup that locks an expired voucher first makes a waiting recharge fail without partial funds [0.09ms]",
+      "(fail) voucher expiring while recharge waits for its lock is rejected after locking [0.07ms]",
+      "(fail) voucher expiring while upload waits for its lock is rejected after locking [0.07ms]",
+      "(fail) begin survives a brief permit lock during confirmed Redis quota adoption without partial writes or a lost receipt [0.15ms]",
+      "(fail) begin survives a brief quota-lease lock during confirmed Redis quota adoption without partial writes or a lost receipt [0.10ms]",
+      "(fail) Core admin manages organizations, principals and key scope with immediate effect on the next context [0.10ms]",
+      "(fail) Core admin lists and changes projects, keys, models and routes under catalog permissions without exposing key verifiers [0.10ms]",
+      "(fail) a Vertex channel exchanges its google-oauth credential in Core, sends only a bearer token to the regional publisher path and never sends with an expired credential [0.10ms]",
+      "(fail) v2 through financial upgrade preserves settled receipts, ACKs and immutable plugin package, and an open baseline hold settles by explicit resolution [0.63ms]",
+      "(fail) baseline replay preserves funded wallets and permits concurrent foreign-key readers [0.16ms]",
+      "(fail) evidence written at the v2 baseline survives the upgrade, closes by explicit resolution and archives verified monthly snapshots [0.31ms]",
+      "(fail) admission inserts the complete request and bound attempt once while reserving funds exactly once [0.10ms]",
+      "(fail) admission with a column-limited allocator preserves request ownership and attempt binding [0.10ms]",
+      "(fail) a rejected quota descriptor after staging cannot pollute the next admission's wallet, cell or journal [0.09ms]",
+      "(fail) admission batch moves the second reservation to another cell when their sum exceeds the first cell's budget [0.10ms]",
+      "(fail) mixed admission query and abort items observe the completed prefix before another admission reserves funds [0.09ms]",
+      "(fail) a customer allocation failure rolls back the trial batch without charging or reserving its failed request [0.09ms]",
+      "(fail) an audit failure at admission flush leaves other requests committed and the original failed command can retry without extra money [0.09ms]",
+      "(fail) repeated request and attempt UUIDs and intents flush their admission prefix before a later conflict [0.09ms]",
+      "(fail) admission flush cannot renew a key that expires during a later item [0.09ms]",
+      "(fail) admission flush cannot renew a context that expires during a later item [0.08ms]",
+      "(fail) separate ready evidence jobs share bounded persistence instead of each opening its own batch [0.13ms]",
+      "(fail) database canonical key ordering preserves every ASCII code unit and long protocol field names [0.08ms]",
+      "(fail) database canonical mixed Unicode ordering uses UTF-16 rather than UTF-8, locale or JSONB storage order [0.07ms]",
+      "(fail) database canonical preserves nested structures, empty values, escaped strings and persisted numeric spelling [0.07ms]",
+      "(fail) database canonical preserves SQL NULL and its ASCII fast path is independent of string escape settings [0.07ms]",
+      "(fail) the canonical append preserves historical digests, function identity, ownership, ACL and function attributes [0.07ms]",
+      "(fail) many individually bounded Worker fixture calls cannot exceed the total approval deadline or register a build [0.07ms]"
+    ],
+    "raw_counts": [
+      "453 pass",
+      "0 fail",
+      "8121 expect() calls",
+      "538 pass",
+      "52 fail",
+      "1 error",
+      "10011 expect() calls"
+    ],
+    "backup_restore": true
+  },
+  "targeted": {
+    "demanding_wallet_and_financial_invariants": [
+      [
+        5,
+        0,
+        130
+      ]
+    ],
+    "upstream_batch_file": [
+      [
+        1,
+        0,
+        30
+      ]
+    ],
+    "default_billing_file": [
+      [
+        51,
+        0,
+        6567
+      ]
+    ]
+  },
+  "native_durability": {
+    "durability": "pass",
+    "fixture": "native",
+    "scope": "v2-core-settlement",
+    "checks": [
+      "production topology acknowledges every connected candidate and rejects live persistence drift",
+      "a replica that resumes with a stale fsync acknowledgement confirms evidence without waiting for its periodic ACK",
+      "primary hard restart retains acknowledged v2 evidence from its AOF",
+      "acknowledged replica promotion retains v2 evidence and the settlement worker settles it once",
+      "promoted node without required durable replica rejects admission",
+      "unsafe persistence configuration rejects admission",
+      "strict evidence payload rejects body; charges, receipts and supplier journals remain singular"
+    ],
+    "charges": 1,
+    "supplier": {
+      "balance": "985",
+      "reserved": "30",
+      "spent": "15"
+    },
+    "tools": {
+      "initdb": {
+        "path": "/Users/wr/work/super-token-gateway/.local/toolchain/pg17/bin/initdb",
+        "version": "initdb (PostgreSQL) 17.11"
+      },
+      "postgres": {
+        "path": "/Users/wr/work/super-token-gateway/.local/toolchain/pg17/bin/postgres",
+        "version": "postgres (PostgreSQL) 17.11"
+      },
+      "redis": {
+        "path": "/Users/wr/work/super-token-gateway/.local/toolchain/redis74/bin/redis-server",
+        "version": "Redis server v=7.4.12 sha=3f2e1e0c:0 malloc=libc bits=64 build=87341d32b0c2dfa5"
+      }
+    },
+    "ownedResources": {
+      "processes": [],
+      "directories": [],
+      "ports": [],
+      "timers": 0
+    }
+  },
+  "round_evidence_files": 35,
+  "plugin_artifact": [
+    {
+      "artifact": "isolated-plugin",
+      "cases": 84,
+      "steps": 112,
+      "digest": "e647b9cc7b79d690621dc187a709ebd24e10129b1757e76e0264e8de54ff3779",
+      "pending": 0,
+      "diagnostics": {
+        "phase": "idle",
+        "frameBytes": 0,
+        "startupMs": 1888,
+        "writeMs": 0,
+        "connection": "c89c47b5-9446-4503-8fb8-4b2126378c4d"
+      }
+    },
+    {
+      "artifact": "isolated-builtin-worker",
+      "cases": 84,
+      "steps": 112,
+      "artifact_digest": "cc2935c0294b6d75b918399379245218173954f47c0272790327c8bd61c61c41"
+    }
+  ],
+  "system_artifact": [
+    {
+      "artifact": "pass",
+      "checks": [
+        "fresh-schema benchmark initialization, exact settlement, ACK, cleanup and tested artifact digests",
+        "compiled migration SQL assets and archive CLI from an empty working directory"
+      ]
+    },
+    {
+      "catalog_artifact": "pass",
+      "checks": [
+        "standalone compiled signer resolves immutable builtin assets",
+        "compiled Core API loads explicit external policy snapshot",
+        "compiled provider API returns real zero-funded IDs",
+        "unbound provider is not executable",
+        "compiled installer runs 15 cases and 24 steps through native helper",
+        "atomic publication and revisioned binding use same public application",
+        "SIGTERM closes catalog, admin listener and owned helper before a clean exit"
+      ],
+      "publication_revision": "3",
+      "binding_revision": "1",
+      "cases": 84,
+      "steps": 112
+    },
+    {
+      "cleanup": {
+        "processes": [],
+        "directories": [],
+        "ports": [],
+        "timers": 0
+      }
+    }
+  ],
+  "project_default_integration": [
+    [
+      590,
+      0,
+      13587
+    ]
+  ],
+  "project_default_integration_failures": [],
+  "compiled_system_check_count": 41,
+  "checksums": {
+    "archived_formal_files_verified": 35,
+    "migration_entries": 49,
+    "migration_files_verified": 76
+  }
+}

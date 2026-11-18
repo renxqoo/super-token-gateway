@@ -1,0 +1,21 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/execution-runtime-history.test.ts:
+PostgresError: null value in column "priority" of relation "routes" violates not-null constraint
+    errno: "23502",
+   detail: "Failing row contains (ef5c19f3-d02a-44c3-be81-2ede3c6eb3a5, {}, financial-b39dfd93-dcbd-41cd-b99d-0e51118d22a2, 19b021cc-c222-4c7a-8488-849a334742ae, synthetic, {chat}, null, null, 1b3c65cc-7e35-4b21-b9df-432e1ec4e7fc, t).",
+ severity: "ERROR",
+   schema: "public",
+    table: "routes",
+   column: "priority",
+     file: "execMain.c",
+     line: "2028",
+  routine: "ExecConstraints",
+     code: "ERR_POSTGRES_SERVER_ERROR"
+
+(fail) actual V1 reserved and granted permits survive the appended migration without new sends or fabricated identities [1203.12ms]
+
+ 0 pass
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [1268.00ms]

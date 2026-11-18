@@ -1,0 +1,32 @@
+{
+  "tag": "owned-fence-mode-probe-aaa4eab0-fad3-408d-af85-833edac673ee",
+  "before": [
+    {
+      "mode": "ShareLock",
+      "classid": "782463074",
+      "objid": "3529924831",
+      "objsubid": 1
+    }
+  ],
+  "try_exclusive": true,
+  "after": [
+    {
+      "mode": "ExclusiveLock",
+      "classid": "782463074",
+      "objid": "3529924831",
+      "objsubid": 1
+    },
+    {
+      "mode": "ShareLock",
+      "classid": "782463074",
+      "objid": "3529924831",
+      "objsubid": 1
+    }
+  ],
+  "expected_tag": {
+    "classid": "782463074",
+    "objid": "3529924831",
+    "objsubid": 1
+  },
+  "remaining_after_commit": 0
+}

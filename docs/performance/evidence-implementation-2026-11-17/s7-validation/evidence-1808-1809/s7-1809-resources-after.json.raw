@@ -1,0 +1,49 @@
+{
+  "at": "2026-11-17T22:16:39.445Z",
+  "database": "gateway_native",
+  "original_27_names_and_oids_equal": true,
+  "foundation_count": 27,
+  "remaining_recent_databases": [],
+  "remaining_recent_core_processes": [],
+  "remaining_recent_identity_roles": [],
+  "remaining_recent_temp_directories": [],
+  "protected_reference_present": true,
+  "protected_processes": [
+    {
+      "pid": 40766,
+      "started": "Mon Nov 16 16:27:47 2026",
+      "command": "bun apps/core-api/src/main.ts"
+    },
+    {
+      "pid": 40771,
+      "started": "Mon Nov 16 16:27:47 2026",
+      "command": "bun apps/core-api/src/main.ts"
+    }
+  ],
+  "rounds": [
+    {
+      "label": "s7-setwise-300-failed",
+      "database": "gateway_test_foundation_9dcdad5298e84835847cc228fba270bd",
+      "database_absent": true,
+      "live_owned_sampled_pids": [],
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "archive_hashes_verified": true,
+      "source_directory_removed": true
+    },
+    {
+      "label": "s7-early-lock-300-failed",
+      "database": "gateway_test_foundation_151870a1e2be44239f91cdfb03ca61c1",
+      "database_absent": true,
+      "live_owned_sampled_pids": [],
+      "namespace_cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      },
+      "archive_hashes_verified": true,
+      "source_directory_removed": true
+    }
+  ]
+}

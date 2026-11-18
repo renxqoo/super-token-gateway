@@ -1,4 +1,4 @@
-import type { SQL, TransactionSQL } from "bun";
+import type { SQL } from "bun";
 import { eq, sql } from "drizzle-orm";
 import {
   financialVoucherRegistrationSchema,
@@ -11,7 +11,7 @@ import { fundingActor, fundingFailure, fundingId, fundingInput } from "./validat
 
 const voucherReferenced = sql`(EXISTS(SELECT 1 FROM upstream_funding_operations WHERE voucher_id=financial_vouchers.id) OR EXISTS(SELECT 1 FROM reconciliations WHERE voucher_id=financial_vouchers.id))`;
 export async function lockVoucherReference(
-  tx: TransactionSQL,
+  tx: SQL,
   voucher: { id: string; digest: string },
 ): Promise<void> {
   const found = (

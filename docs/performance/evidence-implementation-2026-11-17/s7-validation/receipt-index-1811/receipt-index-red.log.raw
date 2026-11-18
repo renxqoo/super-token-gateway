@@ -1,0 +1,28 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-receipt-index.test.ts:
+{"receiptSchemaProbe":{"before":{"scans":"0","indexes":"17","sequential":"0","indexed":"6","inserts":"10001"},"after":{"scans":"0","indexes":"18","sequential":"0","indexed":"10007"},"visited":"10001"}}
+42 |       await db`SELECT pg_stat_clear_snapshot()`;
+43 |       const after = (await db`SELECT seq_scan::text scans,idx_scan::text indexes,seq_tup_read::text sequential,idx_tup_fetch::text indexed FROM pg_stat_user_tables WHERE relid='core_evidence_receipts'::regclass`)[0];
+44 |       const visited = BigInt(after.sequential) + BigInt(after.indexed) - BigInt(before.sequential) - BigInt(before.indexed);
+45 |       console.log(JSON.stringify({ receiptSchemaProbe: { before, after, visited: String(visited) } }));
+46 |       expect(BigInt(after.scans) + BigInt(after.indexes)).toBeGreaterThan(BigInt(before.scans) + BigInt(before.indexes));
+47 |       expect(visited).toBeLessThanOrEqual(32n);
+                           ^
+error: expect(received).toBeLessThanOrEqual(expected)
+
+Expected: <= 32n
+Received: 10001n
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-receipt-index.test.ts:47:23)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:68:17)
+      at async <anonymous> (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:57:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+      at async withIdentity (/Users/wr/work/super-token-gateway/tests/support/internal-identity.ts:51:9)
+      at async withFinancial (/Users/wr/work/super-token-gateway/tests/support/financial-execution.ts:41:9)
+(fail) receipt revision lookup stays bounded as same-origin history grows and delivery uniqueness keeps all three keys [2791.70ms]
+
+ 0 pass
+ 1 fail
+ 5 expect() calls
+Ran 1 test across 1 file. [2.91s]

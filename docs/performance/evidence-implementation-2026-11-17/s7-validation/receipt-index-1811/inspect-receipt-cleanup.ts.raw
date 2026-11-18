@@ -1,0 +1,54 @@
+import { SQL } from "bun";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readProcessRows } from "../../scripts/benchmark-metrics.ts";
+
+const baseline = await Bun.file(".local/performance-implementation/foundation-resource-inspection.json").json();
+const recent = (await Bun.file(".local/identity-resources.jsonl").text()).trim().split("\n").map(line => JSON.parse(line)).filter(row => row.at >= "2026-11-17T20:50:55.921126Z");
+const created = [...new Set<string>(recent.filter(row => row.event === "created").map(row => row.name))];
+const roles = [...new Set<string>(recent.filter(row => row.event === "role_created").map(row => row.role))];
+const directories = [...new Set<string>(recent.filter(row => row.event === "temp_created").map(row => row.directory))];
+const processes = readProcessRows();
+const currentByPid = new Map(processes.map(row => [row.pid, row]));
+const corePids = [...new Set<number>(recent.filter(row => row.event === "process_started").map(row => row.pid))];
+const liveRecentCore = corePids.flatMap(pid => {
+  const row = currentByPid.get(pid);
+  return row && /core-api/.test(row.command) ? [{ pid, started: row.started, command: row.command }] : [];
+});
+const db = new SQL(process.env.DATABASE_URL!, { max: 1 });
+try {
+  const current = await db`SELECT datname,oid::int oid FROM pg_database WHERE datname LIKE 'gateway_test_foundation_%' ORDER BY datname`;
+  const originalPreserved = baseline.rows.every((before: { datname: string; oid: number }) => current.some(after => after.datname === before.datname && Number(after.oid) === Number(before.oid)));
+  const remainingDatabases = current.filter(row => created.includes(row.datname)).map(row => row.datname);
+  const remainingRoles = await db`SELECT rolname FROM pg_roles WHERE rolname=ANY(${roles}::text[])`;
+  const protectedPids = [40766, 40771].map(pid => currentByPid.get(pid));
+  if (!originalPreserved || protectedPids.some(row => !row || row.started !== "Mon Nov 16 16:27:47 2026")) throw new Error("protected resources changed");
+  const rounds = [];
+  for (const label of ["s7-receipt-index-300-failed"]) {
+    const base = `docs/performance/evidence-implementation-2026-11-17/${label}`;
+    const round = await Bun.file(`${base}/round.json`).json();
+    const audit = await Bun.file(`${base}/audit.json.raw`).json();
+    const exists = (await db`SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=${round.database}) value`)[0].value;
+    const alive = Object.entries(audit.processes).filter(([role]) => ["gateway", "core_api", "core_worker", "upstream", "pg"].includes(role)).flatMap(([, role]: [string, any]) => role.pids).filter((row: any) => currentByPid.get(row.pid)?.started === row.started).map((row: any) => row.pid);
+    if (exists || alive.length || round.cleanup.cleaned !== 1 || round.cleanup.failed !== 0) throw new Error(`capacity resources remain ${label}`);
+    const source = round.source_directory;
+    for (const [name, artifact] of Object.entries(round.archive_manifest) as [string, { archive: string; sha256: string }][]) {
+      const archived = readFileSync(artifact.archive);
+      if (createHash("sha256").update(archived).digest("hex") !== artifact.sha256) throw new Error(`archive differs ${name}`);
+      if (existsSync(`${source}/${name}`) && !readFileSync(`${source}/${name}`).equals(archived)) throw new Error(`source differs ${name}`);
+    }
+    let removed = false;
+    if (existsSync(source)) {
+      const allowed = new Set(Object.keys(round.archive_manifest));
+      if (readdirSync(source).some(name => !allowed.has(name))) throw new Error(`unexpected capacity file ${source}`);
+      rmSync(source, { recursive: true });
+      removed = true;
+    }
+    rounds.push({ label, database: round.database, database_absent: !exists, live_owned_sampled_pids: alive, namespace_cleanup: round.cleanup, archive_hashes_verified: true, source_directory_removed: removed });
+  }
+  const result = { at: new Date().toISOString(), database: (await db`SELECT current_database() name`)[0].name, original_27_names_and_oids_equal: originalPreserved, foundation_count: current.length, remaining_recent_databases: remainingDatabases, remaining_recent_core_processes: liveRecentCore, remaining_recent_identity_roles: remainingRoles, remaining_recent_temp_directories: directories.filter(path => existsSync(path)), protected_reference_present: (await db`SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname='newapi_bench_1794879563902') value`)[0].value, protected_processes: protectedPids.map(row => ({ pid: row!.pid, started: row!.started, command: row!.command })), rounds };
+  await Bun.write(".local/performance-implementation/receipt-index-resources-after.json", JSON.stringify(result, null, 2) + "\n");
+  console.log(JSON.stringify(result));
+} finally {
+  await db.close();
+}

@@ -1,0 +1,9 @@
+#!/bin/sh
+case "$1" in
+  /Users/wr/work/super-token-gateway/dist/gateway/main.js)
+    exec /Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun --cpu-prof --cpu-prof-md --cpu-prof-dir=/Users/wr/work/super-token-gateway/.local/performance-implementation/profile-s4b/output "$@"
+    ;;
+  *)
+    exec /Users/wr/work/super-token-gateway/.local/toolchain/bun-1.4.4/bun "$@"
+    ;;
+esac

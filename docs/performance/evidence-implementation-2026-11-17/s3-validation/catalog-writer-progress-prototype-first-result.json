@@ -1,0 +1,12 @@
+{
+  "scope": "private catalog fence prototype with existing management authorization and route storage function; no product or HTTP-path claim",
+  "mutation": {
+    "status": 200,
+    "elapsed_ms": 40.8974589999998,
+    "new_readers_after_request": 0,
+    "reader_busy": 202
+  },
+  "database": "gateway_test_foundation_ccc02dc486fc4424bdedb4d6e9539771",
+  "error": "PostgresError: core_busy",
+  "exit_code": 1
+}

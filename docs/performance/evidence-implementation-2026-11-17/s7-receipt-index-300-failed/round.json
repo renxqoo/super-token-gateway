@@ -1,0 +1,198 @@
+{
+  "stage": "S7 1811 receipt delivery index diagnostic",
+  "label": "s7-receipt-index-300-failed",
+  "diagnostic": true,
+  "excluded_from_stability": true,
+  "runtime_migration": 2026111811,
+  "target": 300,
+  "rate": 301,
+  "pluginRuntime": "builtin-worker",
+  "requests": 12103,
+  "valid": false,
+  "failures": ["load_generator_exit", "wallet_balances", "http_validity"],
+  "capacityPassed": false,
+  "p99": 1625.91,
+  "onlineCapacity": {
+    "fullyCompletedByWindow": 6924,
+    "minuteCompletions": [6924],
+    "matchedRequests": 12014,
+    "httpOnly": 0,
+    "ackOnly": 89,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 15692,
+    "receiptAckedRequestsByWindow": 6922,
+    "ackedEventsByWindow": 14026,
+    "sampledBeforeWindowEndMs": 35,
+    "httpByWindow": 11805
+  },
+  "http": {
+    "offered": 18060,
+    "shed": 793,
+    "completed": 17267,
+    "succeeded": 12014,
+    "invalid": 5253,
+    "statuses": {
+      "200": 12014,
+      "503": 5253
+    },
+    "gateway_errors": {
+      "overloaded": 5253
+    },
+    "transport_errors": {}
+  },
+  "window_complete_rps": 115.4,
+  "process_cpu_ms": {
+    "gateway": 2.348178137651822,
+    "core_api": 1.9499297694786413,
+    "core_worker": 0.7180038007105676,
+    "upstream": 0.13550359415021068,
+    "redis_admission": 0.6642981079071327,
+    "redis_evidence": 0.10493266132364196,
+    "redis_evidence_replica": 0.0652730727918703,
+    "pg": 35.90762620837809,
+    "pg_shared": 0.019829794265884694
+  },
+  "total_cpu_ms": 41.758241758241766,
+  "cpu_denominator": "all admitted requests including warmup; CPU also includes rejected HTTP work, so this is not all-success per-request cost",
+  "pg": {
+    "calls": 253753,
+    "exec_ms": 538702.0786389979,
+    "wal_bytes": 840844171,
+    "wal_records": 4983635,
+    "calls_per_request": 20.966124101462448,
+    "exec_ms_per_request": 44.509797458398566,
+    "wal_bytes_per_request": 69474.02883582583,
+    "wal_records_per_request": 411.76856977608855
+  },
+  "pg_valid": true,
+  "pg_errors": [],
+  "cpu_sampling_errors": 0,
+  "accounting": {
+    "requests": 12103,
+    "attempts": 12103,
+    "succeeded_attempts": 12103,
+    "usage_events": 24206,
+    "usage_requests": 12103,
+    "unexpected_receipts": 0,
+    "precise_usage": 24206,
+    "precise_charges": 12103,
+    "settled_holds": 12103,
+    "reserved": "0",
+    "spent": "1210300",
+    "debt": "0",
+    "acknowledged": 24206,
+    "settlement_journals": 12103,
+    "unbalanced_journals": 0,
+    "supplier_cost_heads": 12103,
+    "conflicts": 0,
+    "inconsistent_hold_reserves": 0,
+    "inconsistent_funding_budgets": 0,
+    "inconsistent_cell_reserves": 0,
+    "unbalanced_supplier_journals": 0
+  },
+  "supplier": {
+    "balance": "999999999999285923",
+    "reserved": "0",
+    "spent": "714077",
+    "accounts": 1
+  },
+  "wallet_mismatches": 1000,
+  "artifacts": {
+    "dist/core-api/main.js": "a14c85d4ae5595f0c7a7d4983cd6aff829aa15b6237cecb9ef49053b4f51ecfe",
+    "dist/core-api/platform/management.js": "b6bd7769e2315b0a6bf675effb632ba4510a1d9c7c65aaf39b8f85d87a71df9c",
+    "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+    "dist/core-worker/main.js": "a5eedabd1773bb50f2a090697d6364a59885d9ea8250a9f9134d18af400dfd1e",
+    "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+    "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+    "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+    "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+    "dist/manifest.json": "bd1344a4be56b42af12e6ba980f5f6a587c522812eeb83501634549224b9e9d3"
+  },
+  "command": [
+    "env",
+    "QUEUE_REQUIRED_REPLICAS=1",
+    ".local/toolchain/bun-1.4.4/bun",
+    "--env-file=.env.local",
+    "--env-file=.local/native-gate.env",
+    "scripts/bench-system.ts",
+    "--online-capacity",
+    "--seconds",
+    "60",
+    "--instances",
+    "1",
+    "--wallets",
+    "1000",
+    "--supplier-accounts",
+    "1",
+    "--concurrency",
+    "256",
+    "--warmup-concurrency",
+    "16",
+    "--worker-concurrency",
+    "8",
+    "--gateway-inflight",
+    "10000",
+    "--drain-seconds",
+    "120",
+    "--request-timeout-ms",
+    "30000",
+    "--plugin-runtime",
+    "builtin-worker",
+    "--target-rps",
+    "300",
+    "--rate",
+    "301",
+    "--upstream",
+    "standard"
+  ],
+  "exit_code": 1,
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "source_directory": ".local/capacity/bench-60ca823a44884ddba621cb6e310b5bb5",
+  "database": "gateway_test_foundation_1fe468e005a04cfcb89d794ed21df2de",
+  "database_bytes": 518586895,
+  "archive_manifest": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-receipt-index-300-failed/audit.json.raw",
+      "sha256": "4a8373563572ba45494ce24c8391570fa1eea47f65ca26561e874a91a6c539b4",
+      "bytes": 563120
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-receipt-index-300-failed/http.json.raw",
+      "sha256": "50da04524a309aa78e76c752695ff5ef4c560a867285932aee1e0da0b04a7d92",
+      "bytes": 10078
+    },
+    "http.json.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-receipt-index-300-failed/http.json.identities.tsv",
+      "sha256": "86c7e59857cb7c674ee4fb856ec2835d4a4da31a2543391b74afc7ed49b87798",
+      "bytes": 612714
+    },
+    "ack.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-receipt-index-300-failed/ack.identities.tsv",
+      "sha256": "75ce775e164fc2f8dff6bda2729afe261c85a82e5066b86c3c5c7ef77e3bec3b",
+      "bytes": 617253
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-receipt-index-300-failed/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    },
+    "load.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-receipt-index-300-failed/load.log",
+      "sha256": "50da04524a309aa78e76c752695ff5ef4c560a867285932aee1e0da0b04a7d92",
+      "bytes": 10078
+    },
+    "upstream.log": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-receipt-index-300-failed/upstream.log",
+      "sha256": "dff63a8fd20277f85ab6c066d9d6dc0e4467086ae37c52391811670ba09d49ad",
+      "bytes": 48
+    },
+    "upstream.pem": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-receipt-index-300-failed/upstream.pem",
+      "sha256": "1c1e81eed7e135de6d56b772b2ab8bf170adbbade96c3bb7e8c0a00b7f2b4ff5",
+      "bytes": 1013
+    }
+  }
+}

@@ -1,0 +1,282 @@
+{
+  "stage": "1813 keyed admission and settlement reads",
+  "label": "s7-admission-settlement-cell-isolation-100-a",
+  "target": 100,
+  "rate": 101,
+  "runtime_migration": 2026111813,
+  "worker_schedule": "cell-isolation",
+  "exit_code": 0,
+  "valid": true,
+  "capacity_passed": true,
+  "failures": [],
+  "online_capacity": {
+    "fullyCompletedByWindow": 6052,
+    "minuteCompletions": [6052],
+    "matchedRequests": 6060,
+    "httpOnly": 0,
+    "ackOnly": 87,
+    "maxP99Ms": 1500,
+    "drainAfterWindowMs": 82,
+    "receiptAckedRequestsByWindow": 6044,
+    "ackedEventsByWindow": 12262,
+    "sampledBeforeWindowEndMs": 77,
+    "httpByWindow": 6052
+  },
+  "window_complete_rps": 100.86666666666666,
+  "http": {
+    "offered": 6060,
+    "shed": 0,
+    "statuses": {
+      "200": 6060
+    },
+    "latency_ms": {
+      "p50": 173.71,
+      "p95": 232.71,
+      "p99": 262.15,
+      "p999": 300.15
+    }
+  },
+  "process_cpu_ms_per_admitted": {
+    "gateway": 2.3523670082967296,
+    "core_api": 2.075809337888401,
+    "core_worker": 0.541727672035139,
+    "upstream": 0.18545632015617375,
+    "redis_admission": 0.6214413535057715,
+    "redis_evidence": 0.24890190336749485,
+    "redis_evidence_replica": 0.14803969415975218,
+    "pg": 14.566455181389298,
+    "pg_shared": 0.003253619651862628
+  },
+  "service_cpu_ms_per_admitted": 20.554742150642586,
+  "cpu_sampling_errors": 0,
+  "pg_top_level": {
+    "calls": 156939,
+    "exec_ms": 168178.90281100007,
+    "wal_bytes": 367240123,
+    "wal_records": 2364356,
+    "calls_per_request": 25.53099072718399,
+    "exec_ms_per_request": 27.359509160728823,
+    "wal_bytes_per_request": 59742.984057263704,
+    "wal_records_per_request": 384.635757279974
+  },
+  "pg_valid": true,
+  "near_59s": {
+    "at": 59122,
+    "queue": {
+      "waiting": 1,
+      "active": 0,
+      "delayed": 0,
+      "failed": 0
+    },
+    "persistence": {
+      "calls": 2990,
+      "jobs": 3058,
+      "groups": 7115,
+      "events": 14230,
+      "max_jobs": 4,
+      "max_groups": 14,
+      "lock_conflicts": 1186,
+      "errors": 0,
+      "active_jobs": 0
+    }
+  },
+  "last_persistence_sample": {
+    "calls": 3123,
+    "jobs": 3195,
+    "groups": 7329,
+    "events": 14658,
+    "max_jobs": 4,
+    "max_groups": 14,
+    "lock_conflicts": 1197,
+    "errors": 0,
+    "active_jobs": 1
+  },
+  "accounting": {
+    "requests": 6147,
+    "attempts": 6147,
+    "succeeded_attempts": 6147,
+    "usage_events": 12294,
+    "usage_requests": 6147,
+    "unexpected_receipts": 0,
+    "precise_usage": 12294,
+    "precise_charges": 6147,
+    "settled_holds": 6147,
+    "reserved": "0",
+    "spent": "614700",
+    "debt": "0",
+    "acknowledged": 12294,
+    "settlement_journals": 6147,
+    "unbalanced_journals": 0,
+    "supplier_cost_heads": 6147,
+    "conflicts": 0,
+    "inconsistent_hold_reserves": 0,
+    "inconsistent_funding_budgets": 0,
+    "inconsistent_cell_reserves": 0,
+    "unbalanced_supplier_journals": 0
+  },
+  "supplier": {
+    "balance": "999999999999637327",
+    "reserved": "0",
+    "spent": "362673",
+    "accounts": 1
+  },
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os_release": "27.0.0",
+    "cpu_model": "Apple M6",
+    "cpu_count": 12,
+    "memory_bytes": 25769803776,
+    "bun": "1.4.4",
+    "artifacts": {
+      "dist/core-api/main.js": "b0cc890b1769b5c6bffa556cf8a32891aed96dd3b7efc65c635733e0dc007ba5",
+      "dist/core-api/platform/management.js": "81ce2e1ffc08ba40200362e5bdfafc5de7002e4a2d317b87c1963acf8a26a9e7",
+      "dist/gateway/main.js": "5242f7928643d9b4004d2411c6ce7434a97fc7ce7c7fdb772ce0fb25f3f50b9f",
+      "dist/core-worker/main.js": "6c72adde7527a8dd39d6d41c8c139712b5468b000117d5438346d97f356d8dcf",
+      "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+      "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+      "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+      "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+      "dist/manifest.json": "0b94a610459affcb2aec44546738b1aa0a2ea68618aff90f189c2b7f33f990a0"
+    }
+  },
+  "database_settings": [
+    {
+      "name": "checkpoint_timeout",
+      "setting": "300",
+      "unit": "s"
+    },
+    {
+      "name": "effective_cache_size",
+      "setting": "524288",
+      "unit": "8kB"
+    },
+    {
+      "name": "fsync",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "full_page_writes",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "max_connections",
+      "setting": "200",
+      "unit": null
+    },
+    {
+      "name": "max_wal_size",
+      "setting": "1024",
+      "unit": "MB"
+    },
+    {
+      "name": "server_version",
+      "setting": "17.11",
+      "unit": null
+    },
+    {
+      "name": "shared_buffers",
+      "setting": "32768",
+      "unit": "8kB"
+    },
+    {
+      "name": "synchronous_commit",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "wal_compression",
+      "setting": "off",
+      "unit": null
+    },
+    {
+      "name": "work_mem",
+      "setting": "4096",
+      "unit": "kB"
+    }
+  ],
+  "redis_settings": {
+    "admission": {
+      "maxmemory-policy": "noeviction",
+      "aof-load-truncated": "yes",
+      "appendfsync": "everysec",
+      "appendonly": "yes"
+    },
+    "evidence": {
+      "maxmemory-policy": "noeviction",
+      "appendonly": "yes",
+      "aof-load-truncated": "no",
+      "appendfsync": "always"
+    }
+  },
+  "database_bytes": 252043791,
+  "cleanup": {
+    "cleaned": 1,
+    "failed": 0
+  },
+  "files": {
+    "audit.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-admission-settlement-cell-isolation-100-a/audit.json.raw",
+      "sha256": "1990f1e90e6af6598ae713014cb005009486b79d745dfa2bdfefa16e990d50c1",
+      "bytes": 527920
+    },
+    "http.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-admission-settlement-cell-isolation-100-a/http.json.raw",
+      "sha256": "2a61b0112457a6f666ca0be4bf590706d8ab737d060cd98810c21e9bda4a75d6",
+      "bytes": 8986
+    },
+    "http.json.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-admission-settlement-cell-isolation-100-a/http.json.identities.tsv",
+      "sha256": "ee4c4cf8c13ebc04c6fc81be450990d95a8802e5fb39bc9ae4380afe9fc1a3ea",
+      "bytes": 309060
+    },
+    "ack.identities.tsv": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-admission-settlement-cell-isolation-100-a/ack.identities.tsv",
+      "sha256": "ed0170e7493b1c27cf362e448c1836912bb06b6934355cfdb4b199623893b2f3",
+      "bytes": 313497
+    },
+    "cleanup.json": {
+      "archive": "docs/performance/evidence-implementation-2026-11-17/s7-admission-settlement-cell-isolation-100-a/cleanup.json.raw",
+      "sha256": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "bytes": 25
+    }
+  },
+  "command": [
+    "QUEUE_REQUIRED_REPLICAS=1",
+    ".local/toolchain/bun-1.4.4/bun",
+    "--env-file=.env.local",
+    "--env-file=.local/native-gate.env",
+    "scripts/bench-system.ts",
+    "--online-capacity",
+    "--seconds",
+    "60",
+    "--instances",
+    "1",
+    "--wallets",
+    "1000",
+    "--supplier-accounts",
+    "1",
+    "--concurrency",
+    "256",
+    "--warmup-concurrency",
+    "16",
+    "--worker-concurrency",
+    "8",
+    "--gateway-inflight",
+    "10000",
+    "--drain-seconds",
+    "120",
+    "--request-timeout-ms",
+    "30000",
+    "--plugin-runtime",
+    "builtin-worker",
+    "--target-rps",
+    "100",
+    "--rate",
+    "101",
+    "--upstream",
+    "standard"
+  ]
+}

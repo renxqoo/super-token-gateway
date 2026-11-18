@@ -1,0 +1,60 @@
+import { SQL } from "bun";
+import { withFinancial } from "../../tests/support/financial-execution.ts";
+
+const result: Record<string, unknown> = { scope: "S4 product HTTP PATCH under 16 continuous warm candidate readers; progress only, not request capacity" };
+try {
+  await withFinancial(async (f, db) => {
+    const setup = await f.bootstrap();
+    const name = (await db`SELECT current_database() name`)[0].name;
+    const url = new URL(process.env.DATABASE_URL!);
+    if (url.port !== "55452") throw new Error("NATIVE_DATABASE_REQUIRED");
+    url.pathname = `/${name}`;
+    const readersDb = new SQL(url, { max: 20 });
+    let stopping = false, active = 0, entered = 0, busy = 0;
+    const ready = Promise.withResolvers<void>();
+    const faults: unknown[] = [];
+    let readers: Promise<void>[] = [];
+    try {
+      await readersDb`SELECT core_candidates_v1(${setup.model},'chat','USD')`;
+      readers = Array.from({length:16},(_,i) => (async () => {
+        await Bun.sleep(i*2);
+        try {
+          while (!stopping) {
+            try {
+              await readersDb.begin(async (tx) => {
+                await tx`SELECT core_candidates_v1(${setup.model},'chat','USD')`;
+                entered++; active++;
+                if (active>=12) ready.resolve();
+                try { await Bun.sleep(35+i%4); }
+                finally { active--; }
+              });
+            } catch (error) {
+              if (!['55P03','P0503'].includes(String((error as {errno?:string}).errno))) throw error;
+              busy++; await Bun.sleep(1);
+            }
+          }
+        } catch (error) { faults.push(error); ready.reject(error); }
+      })());
+      await ready.promise;
+      const before = entered, start = performance.now();
+      const response = await f.request(`/routes/${setup.route.id}`, {enabled:false},undefined,'PATCH');
+      result.mutation = { status: response.status, elapsed_ms: performance.now()-start, new_readers_after_request: entered-before, reader_busy:busy };
+      result.database = name;
+      if (response.status !== 200) throw new Error("CATALOG_WRITER_NO_PROGRESS");
+      if ((await readersDb`SELECT jsonb_array_length(core_candidates_v1(${setup.model},'chat','USD')) n`)[0].n !== 0) throw new Error("STALE_CANDIDATE_AFTER_COMMIT");
+    } finally {
+      stopping = true;
+      await Promise.all(readers);
+      await readersDb.close();
+    }
+    if (faults.length) throw faults[0];
+  });
+  result.exit_code = 0;
+} catch (error) {
+  result.error = String(error);
+  result.exit_code = 1;
+  process.exitCode = 1;
+} finally {
+  await Bun.write('.local/performance-implementation/s4-route-product-probe-result.json', JSON.stringify(result,null,2)+'\n');
+  console.log(JSON.stringify(result));
+}

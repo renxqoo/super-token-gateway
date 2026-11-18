@@ -10,6 +10,7 @@ import { createPlatformAuthenticator, type PlatformActor } from "../platform/aut
 import { bundledReleaseIds, releasePolicySchema, type BundledReleaseId } from "@gateway/plugin-sdk";
 import { verifyRelease } from "./releases.ts";
 import { validateCatalogPackage } from "./validator.ts";
+import { resolvePluginExecutable } from "@gateway/plugin-host";
 export const installBundledReleaseSchema = z
   .object({
     command_id: z.uuid(),
@@ -84,7 +85,8 @@ export function createCatalogApplication(options: {
   const pendingValidations = new Set<Promise<CatalogReceipt>>();
   let uploading = false;
   const shutdownControllers = new Set<AbortController>();
-  const helperExecutable = resolve(options.helperExecutable);
+  const pinned = resolvePluginExecutable(resolve(options.helperExecutable));
+  const helperExecutable = pinned.executable;
   const policyFile = resolve(options.policyFile);
   const policyStat = statSync(policyFile);
   if (!policyStat.isFile() || policyStat.size > 1 << 20)
@@ -97,8 +99,7 @@ export function createCatalogApplication(options: {
     if (closed) throw new GatewayError(503, "catalog_closing", "Catalog is shutting down");
   }
   async function trusted(bytes: Uint8Array, signed: unknown) {
-    const runtime = sha256(await boundedFile(helperExecutable, 64 << 20));
-    return verifyRelease(bytes, signed, policySnapshot, runtime);
+    return verifyRelease(bytes, signed, policySnapshot, pinned.digest);
   }
   async function persisted(id: string) {
     const row = await store.version(z.uuid().parse(id));

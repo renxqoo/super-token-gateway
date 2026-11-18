@@ -1,0 +1,23 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration/core-funding-foundation.test.ts:
+32 |     await db`INSERT INTO supplier_brands(id,name) VALUES(${brand},${brand})`;
+33 |     await db`INSERT INTO upstream_accounts(id,brand_id,name) VALUES(${account},${brand},${account})`;
+34 |     await db`INSERT INTO upstream_account_balances(account_id,currency,balance_atoms,reserved_atoms,spent_atoms,revision) VALUES(${account},'USD',100,80,7,11)`;
+35 |     await expect(
+36 |       db`SELECT core_funding.audit_v1(${account}::uuid,'USD')`,
+37 |     ).rejects.toMatchObject({ errno: "P0422" });
+                   ^
+error: expect(received).rejects.toMatchObject(expected)
+
+Expected promise that rejects
+Received promise that resolved: Query { executed }
+
+      at <anonymous> (/Users/wr/work/super-token-gateway/tests/integration/core-funding-foundation.test.ts:37:15)
+      at async withDatabase (/Users/wr/work/super-token-gateway/tests/support/database.ts:32:11)
+(fail) budget grants and reclaims conserve money and revisions, replay exactly, and cannot reclaim reserved funds or leave partial writes [197.81ms]
+
+ 0 pass
+ 1 filtered out
+ 1 fail
+Ran 1 test across 1 file. [238.00ms]
