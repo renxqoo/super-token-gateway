@@ -9,22 +9,32 @@ export class ExecutionOutcomeUnknown extends Error {
   }
 }
 const busyRetryMs = 1000;
+type ExecutionBatchItem = {
+  projection: CoreVerifiedCallerProjection;
+  envelope: ExecutionEnvelope;
+  data: unknown;
+  computed: Record<string, unknown>;
+  proofDeadline: number | undefined;
+};
+function forDispatch({ proofDeadline, computed, ...item }: ExecutionBatchItem) {
+  return {
+    ...item,
+    computed:
+      proofDeadline === undefined
+        ? computed
+        : { ...computed, proof_remaining_ms: Math.floor(proofDeadline - performance.now()) },
+  };
+}
 export function createExecutionStore(db: SQL) {
   let quotaCursor: unknown = null;
   let quotaCursorVersion = 0;
-  const batch = new Batcher<
-    {
-      projection: CoreVerifiedCallerProjection;
-      envelope: ExecutionEnvelope;
-      data: unknown;
-      computed: unknown;
-    },
-    Record<string, unknown>
-  >(
+  const batch = new Batcher<ExecutionBatchItem, Record<string, unknown>>(
     async (items) =>
       db
         .begin(
-          async (tx) => (await tx`SELECT core_execution_batch_v1(${items}::jsonb) value`)[0].value,
+          async (tx) =>
+            (await tx`SELECT core_execution_batch_v1(${items.map(forDispatch)}::jsonb) value`)[0]
+              .value,
         )
         .catch(() => {
           throw new ExecutionOutcomeUnknown();
@@ -128,11 +138,12 @@ export function createExecutionStore(db: SQL) {
       p: CoreVerifiedCallerProjection,
       e: ExecutionEnvelope,
       data: unknown,
-      computed: unknown,
+      computed: Record<string, unknown>,
+      proofDeadline?: number,
     ) {
       const until =
         performance.now() + Math.min(Date.parse(e.deadline_at) - Date.now(), busyRetryMs);
-      const item = { projection: projection(p), envelope: e, data, computed };
+      const item = { projection: projection(p), envelope: e, data, computed, proofDeadline };
       for (let delay = 1; ; delay = Math.min(delay * 2, 16)) {
         let result = await batch.add(item);
         if (result.error === "funding_slow") {
@@ -141,7 +152,8 @@ export function createExecutionStore(db: SQL) {
               db,
               { deadline: until },
               async (tx) =>
-                (await tx`SELECT core_execution_slow_v1(${item}::jsonb) value`)[0].value,
+                (await tx`SELECT core_execution_slow_v1(${forDispatch(item)}::jsonb) value`)[0]
+                  .value,
             );
           } catch (error) {
             if (["55P03", "P0503", "40P01"].includes((error as { errno: string }).errno))

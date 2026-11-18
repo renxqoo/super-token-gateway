@@ -64,6 +64,8 @@ test("the open-loop driver does not drop the planned arrival at the window bound
         "scripts/bench.ts",
         "--url",
         server.url.href,
+        "--model",
+        "fixture-chat",
         "--seconds",
         "1",
         "--rate",

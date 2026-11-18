@@ -6,7 +6,7 @@
 
 ## 结论
 
-- 2026-11-18。1812 的四路结算 Worker 连续两轮通过 **100 RPS**，全链路 CPU 加权 23.270 ms/请求，其中 PG 17.560 ms。相同 300 档的窗口完整吞吐为 122.20 RPS，压测仍失败。下文 60 RPS 的阶段结论属于此前构建。[最新实施证据](../docs/performance/implementation-2026-11-17.md#22-1812-历史访问与-worker-并行对照)
+- 2026-11-18。1817 在 3000 档的两个窗口分别完成 **199.38、196.75 RPS**，均失败，不能视为稳定容量。[1817 实施证据](../docs/performance/implementation-2026-11-17.md#27-1817-准入写入与热点钱包结算)。1812 的两轮 **100 RPS** 同配置通过属于此前构建；其全链路 CPU 为 23.270 ms/请求，其中 PG 17.560 ms。[1812 实施证据](../docs/performance/implementation-2026-11-17.md#22-1812-历史访问与-worker-并行对照)
 - 原测为35 RPS、约41ms CPU；P0重测为35 RPS、约45.46ms。S5完整JSON证据合组构建连续两轮60 RPS、约25.05ms加权CPU，100档窗口交集失败且PG统计无效，尚远未超过3000。new-api默认3000、trust=0但实际零预扣2500、用户追加的真实正额预扣3000三配置分列，详见[P0报告](../docs/performance/p0-2026-11-17.md)与[实施证据](../docs/performance/implementation-2026-11-17.md)。
 - v2实测成本包括5次Core RPC、逐项准入及身份重核、SQL候选摘要、供应余额单行锁和逐调用QuickJS-Wasm实例。历史单体2000–3951 RPS不能代替当前逐ID交集及完整资金契约的证明；改造须通过同一验收装置核对收益。
 - 方案保持三进程、预扣、WAITAOF、上游硬闸与吊销线性化不变，通过集合式批处理、修订号栅栏、额度单元、成功路径收尾合并、内置适配器进程内执行，把每请求 CPU 压到 ≤ 2.0 ms，目标稳定 ≥ 3000 RPS，并在请求性能与并发性能上超越 new-api（持平不算完成）；再用故障对照证明资金正确性更强。
@@ -26,6 +26,7 @@
 | [09-success-quota-close.md](09-success-quota-close.md) | 成功证据事务关闭配额、异步恢复及失败边界                       | backend-design      |
 | [10-funding-engine.md](10-funding-engine.md)           | 精确价格编译、资金分区、结算与BEGIN集合执行及验收边界          | repo-migration      |
 | [11-hot-path.md](11-hot-path.md)                       | 容量差距的量化归因及短 JSON 主链重构顺序                       | architecture-design |
+| [12-capacity-refactor.md](12-capacity-refactor.md)     | 1818 首次 BEGIN 合并、失败恢复、同机对照与 3000 RPS 验收       | backend-design      |
 
 ## 原设计裁决项
 

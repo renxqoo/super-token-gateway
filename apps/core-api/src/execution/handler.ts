@@ -52,6 +52,7 @@ const leaseStateSchema = z.object({
   permit_epoch: z.string(),
   permit_state: z.string(),
   execution_closed: z.boolean(),
+  first_chat: z.boolean().optional(),
   leases: z.array(
     z.object({
       state: z.string(),
@@ -227,7 +228,13 @@ export function createExecutionHandler(
     const current = leaseStateSchema.parse(leaseState ?? (await store.readLeaseState(p, attempt)));
     if (current.permit_epoch !== epoch) throw new Error("internal_owner_mismatch");
     if (!release && current.execution_closed)
-      return { proofs: [], deadline: performance.now(), descriptors: [], closed: true };
+      return {
+        proofs: [],
+        deadline: performance.now(),
+        descriptors: [],
+        closed: true,
+        commitWithBegin: false,
+      };
     const proofs: { lease_id: string; revision: string }[] = [],
       descriptors: QuotaDescriptor[] = [];
     let deadline = Number.POSITIVE_INFINITY;
@@ -236,6 +243,12 @@ export function createExecutionHandler(
         ? ["RELEASE_PENDING", "RELEASED"].includes(lease.state)
         : lease.descriptor.scope_kind !== "channel" || lease.attempt_id === attempt,
     );
+    const commitWithBegin =
+      !release &&
+      p.command_type === "execution_begin_v1" &&
+      current.first_chat === true &&
+      current.permit_state === "RESERVED" &&
+      relevant.every((lease) => lease.state === "ADOPTION_PENDING" && lease.attempt_id === attempt);
     if (
       !release &&
       (!["RESERVED", "SEND_GRANTED", "UNKNOWN"].includes(current.permit_state) ||
@@ -268,13 +281,14 @@ export function createExecutionHandler(
     }
     if (!release && (!descriptors.length || deadline <= performance.now()))
       throw new Error("quota_unavailable");
-    if (descriptors.length)
+    if (descriptors.length && !commitWithBegin)
       await store.quota(p, attempt, release ? "RELEASED" : "ACTIVE", descriptors);
     return {
       proofs,
       deadline,
       descriptors,
       closed: false,
+      commitWithBegin,
       retained: current.leases.filter(
         (lease) => !["RELEASE_PENDING", "RELEASED"].includes(lease.state),
       ).length,
@@ -733,9 +747,9 @@ export function createExecutionHandler(
         proofDeadline = proof.deadline;
         computed = {
           proofs: proof.proofs,
-          proof_remaining_ms: Math.floor(proofDeadline - performance.now()),
+          ...(proof.commitWithBegin ? { adopted_leases: proof.descriptors } : {}),
         };
-        if (!proof.closed && Number(computed.proof_remaining_ms) <= 1000)
+        if (!proof.closed && proofDeadline - performance.now() <= 1000)
           throw new Error("quota_unavailable");
       } else if (kind === "execution_quota_v1") {
         const data = executionDataSchemas.execution_quota_v1.parse(d);
@@ -772,7 +786,13 @@ export function createExecutionHandler(
           released: data.action === "RELEASE" ? synchronized.descriptors.length : 0,
         };
       }
-      const result = await store.execute(p, e, d, computed);
+      const result = await store.execute(
+        p,
+        e,
+        d,
+        computed,
+        kind === "execution_begin_v1" ? proofDeadline : undefined,
+      );
       try {
         const receipt = executionReceiptSchema.parse(result.receipt);
         if (receipt.command_state === "REJECTED") {

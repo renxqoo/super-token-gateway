@@ -277,7 +277,7 @@ test("authentication append upgrades an empty signed settlement schema without r
       expect(
         (await db`SELECT version,checksum FROM schema_migrations ORDER BY version`).slice(0, 6),
       ).toEqual(before);
-      expect((await db`SELECT max(version) v FROM schema_migrations`)[0].v).toBe(2026111817);
+      expect((await db`SELECT max(version) v FROM schema_migrations`)[0].v).toBe(2026111818);
       expect(
         (
           await db`SELECT array_agg(column_name::text ORDER BY column_name) c FROM information_schema.columns WHERE table_name='core_evidence_receipts' AND column_name IN ('authentication_disposition','signature','signature_payload_digest')`

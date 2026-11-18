@@ -548,6 +548,15 @@
           "checksum": "4b72febafcb23d9df5a85e4b75fe1f12fc1767e60142b558004e937bdbeda0f9"
         }
       ]
+    },
+    {
+      "version": 2026111818,
+      "files": [
+        {
+          "path": "./sql/core-begin-quota-commit.sql",
+          "checksum": "fed0974ea02fab4d89abf8a53def201f792cbfe5d4fc3b9fe3e0c2ea6148d449"
+        }
+      ]
     }
   ]
 }

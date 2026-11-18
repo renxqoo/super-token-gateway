@@ -8,7 +8,7 @@ import {
   withFinancial,
 } from "../support/financial-execution.ts";
 
-test("preflight uses keyed permit reads and returns only lease state for an existing attempt", () =>
+test("preflight uses keyed permit reads and returns only lease state and first-Chat eligibility", () =>
   withFinancial(async (f, db) => {
     const setup = await f.bootstrap("USD", "1000");
     const rpc = await financialRpcSession(f);
@@ -71,6 +71,7 @@ test("preflight uses keyed permit reads and returns only lease state for an exis
       const active = await preflight(request.attemptId);
       expect(Object.keys(active).sort()).toEqual([
         "execution_closed",
+        "first_chat",
         "leases",
         "permit_epoch",
         "permit_state",
@@ -78,6 +79,7 @@ test("preflight uses keyed permit reads and returns only lease state for an exis
       expect(active.permit_state).toBe("RESERVED");
       expect(active.permit_epoch).toBe("1");
       expect(active.execution_closed).toBe(false);
+      expect(active.first_chat).toBe(true);
       expect(
         active.leases
           .map((lease: { descriptor: { scope_kind: string } }) => lease.descriptor.scope_kind)
@@ -89,6 +91,8 @@ test("preflight uses keyed permit reads and returns only lease state for an exis
             lease.attempt_id === request.attemptId && lease.permit_epoch === "1",
         ),
       ).toBe(true);
+      const [laterAttempt] = await connection`SELECT id FROM plan_history_ids WHERE ordinal=2`;
+      expect((await preflight(laterAttempt.id)).first_chat).toBe(false);
       await connection`SELECT pg_stat_force_next_flush()`;
       await db`SELECT pg_stat_clear_snapshot()`;
       const after = (

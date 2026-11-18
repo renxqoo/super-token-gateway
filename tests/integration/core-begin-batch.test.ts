@@ -4,6 +4,7 @@ import type { CoreVerifiedCallerProjection, ExecutionKind } from "@gateway/contr
 import { createInternalIdentityStore } from "@gateway/storage/internal-identity";
 import { canonical } from "@gateway/kernel";
 import { sha256 } from "@gateway/runtime/crypto";
+import { createQuotaLeases, type QuotaDescriptor } from "@gateway/runtime/quota-leases";
 import {
   withFinancial,
   financialRpcSession,
@@ -21,18 +22,42 @@ async function batchFixture(f: Fixture, db: SQL) {
   const directory = createInternalIdentityStore(db);
   const session = (await directory.readStartupSession(rpc.identity.receipt.session_id))!;
   const peer = (await directory.readPeerDirectory(session.certificate_sha256))!;
-  async function prepare(setup: Setup, attemptId?: string) {
-    const request = await prepareFinancialAdmission(setup, rpc, attemptId ? { attemptId } : {});
+  async function prepare(
+    setup: Setup,
+    options: { attemptId?: string; adoptInBegin?: boolean } = {},
+  ) {
+    const request = await prepareFinancialAdmission(
+      setup,
+      rpc,
+      options.attemptId ? { attemptId: options.attemptId } : {},
+    );
     const admission = await request.admit();
-    await rpc.execution("execution_quota_v1", {
-      action: "ADOPT",
-      attempt_id: request.attemptId,
-      permit_epoch: "1",
-    });
-    const leases = await db<
-      { lease_id: string; revision: string; descriptor: { remaining_ms: number } }[]
-    >`SELECT lease_id,revision::text revision,descriptor FROM execution_quota_leases WHERE request_id=${request.requestId} ORDER BY lease_id`;
-    const remaining = Math.min(...leases.map((row) => Number(row.descriptor.remaining_ms)));
+    if (!options.adoptInBegin)
+      await rpc.execution("execution_quota_v1", {
+        action: "ADOPT",
+        attempt_id: request.attemptId,
+        permit_epoch: "1",
+      });
+    const rows = await db<{ descriptor: QuotaDescriptor }[]>`
+      SELECT descriptor FROM execution_quota_leases WHERE request_id=${request.requestId} ORDER BY lease_id`;
+    const leases: QuotaDescriptor[] = [];
+    if (options.adoptInBegin) {
+      const quota = createQuotaLeases({
+        urls: [process.env.REDIS_URL!],
+        namespace: f.namespace,
+        generation: "v1",
+      });
+      try {
+        for (const { descriptor } of rows)
+          leases.push(
+            (await quota.adopt(descriptor, request.attemptId, "1", sha256(descriptor.lease_id)))
+              .descriptor,
+          );
+      } finally {
+        quota.close();
+      }
+    } else leases.push(...rows.map(({ descriptor }) => descriptor));
+    const remaining = Math.min(...leases.map((lease) => lease.remaining_ms));
     expect(remaining).toBeGreaterThan(5000);
     function item(
       kind: ExecutionKind = "execution_begin_v1",
@@ -85,6 +110,7 @@ async function batchFixture(f: Fixture, db: SQL) {
         computed: {
           proofs: leases.map(({ lease_id, revision }) => ({ lease_id, revision })),
           proof_remaining_ms: proofRemaining,
+          ...(options.adoptInBegin ? { adopted_leases: leases } : {}),
         },
       };
     }
@@ -239,7 +265,9 @@ test("case variants of an attempt UUID cannot receive two fresh BEGIN grants in 
   withFinancial(async (f, db) => {
     const setup = await f.bootstrap();
     const batch = await batchFixture(f, db);
-    const prepared = await batch.prepare(setup, "abcdefab-cdef-4abc-8def-abcdefabcdef");
+    const prepared = await batch.prepare(setup, {
+      attemptId: "abcdefab-cdef-4abc-8def-abcdefabcdef",
+    });
     const first = prepared.item();
     const second = prepared.item("execution_begin_v1", {
       ...(first.data as Record<string, unknown>),
@@ -316,17 +344,18 @@ test("a late BEGIN command failure preserves mixed-item order and retries only t
     });
   }));
 
-test.each(["key", "proof"] as const)(
+test.each(["key", "proof", "first adoption proof"] as const)(
   "BEGIN flush cannot renew a %s authority that expires during the batch",
   (mode) =>
     withFinancial(async (f, db) => {
       const firstSetup = await f.bootstrap();
       const secondSetup = await f.bootstrap();
       const batch = await batchFixture(f, db);
-      const first = await batch.prepare(firstSetup);
-      const second = await batch.prepare(secondSetup);
+      const adoptInBegin = mode === "first adoption proof";
+      const first = await batch.prepare(firstSetup, { adoptInBegin });
+      const second = await batch.prepare(secondSetup, { adoptInBegin });
       const items = [
-        first.item(undefined, undefined, undefined, mode === "proof" ? 1100 : 5000),
+        first.item(undefined, undefined, undefined, mode === "key" ? 5000 : 1100),
         second.item(),
       ];
       await db`ALTER FUNCTION public.core_digest_v1(jsonb) RENAME TO begin_original_digest_v1`;
@@ -346,6 +375,14 @@ test.each(["key", "proof"] as const)(
       expect(
         await db`SELECT state,granted_at FROM execution_permits WHERE attempt_id=${first.request.attemptId}`,
       ).toEqual([{ state: "RESERVED", granted_at: null }]);
+      if (adoptInBegin) {
+        expect(
+          await db`SELECT DISTINCT state,revision::text revision FROM execution_quota_leases WHERE attempt_id=${first.request.attemptId}`,
+        ).toEqual([{ state: "ADOPTION_PENDING", revision: "0" }]);
+        expect(
+          await db`SELECT DISTINCT state,revision::text revision FROM execution_quota_leases WHERE attempt_id=${second.request.attemptId}`,
+        ).toEqual([{ state: "ACTIVE", revision: "1" }]);
+      }
       expect(await supplier(db, firstSetup.provider.account_id)).toEqual({
         balance: "1000",
         reserved: "30",

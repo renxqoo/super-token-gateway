@@ -22,6 +22,43 @@ async function upstreamAudits(db: SQL, account: string): Promise<[string, string
 
 const denied = { status: 403, value: { error: { code: "platform_scope_denied" } } };
 
+test("supplier write guards require the matching lock and keep the admission snapshot immutable", () =>
+  withFinancial(async (fixture, db) => {
+    const setup = await fixture.bootstrap();
+    const client = fixture.client();
+    await client.startup();
+    const admission = await prepareFinancialAdmission(setup, client);
+    await admission.admit();
+    const account = setup.provider.account_id;
+    const [{ funding_cell: cell }] =
+      await db`SELECT funding_cell FROM upstream_holds WHERE attempt_id=${admission.attemptId}`;
+    const otherAccount = crypto.randomUUID();
+    await expect(
+      db.begin(async (tx) => {
+        await tx`SELECT core_funding.exclusive_v1(ARRAY[${otherAccount}::uuid])`;
+        await tx`UPDATE core_funding.balance_cells SET revision=revision+1 WHERE account_id=${account} AND cell=${cell}`;
+      }),
+    ).rejects.toMatchObject({ errno: "P0403", message: "funding_fence_required" });
+    await expect(
+      db.begin(async (tx) => {
+        await tx`SELECT core_funding.share_v1(ARRAY[${account}::uuid])`;
+        await tx`UPDATE core_funding.balance_cells SET revision_limit=revision_limit-1 WHERE account_id=${account} AND cell=${cell}`;
+      }),
+    ).rejects.toMatchObject({ errno: "P0F01", message: "funding_outer_transaction_required" });
+    await expect(
+      db.begin(async (tx) => {
+        await tx`SELECT core_funding.exclusive_v1(ARRAY[${account}::uuid])`;
+        await tx`UPDATE upstream_holds SET estimated_quantities_digest=NULL WHERE attempt_id=${admission.attemptId}`;
+      }),
+    ).rejects.toMatchObject({ errno: "P0403", message: "hold_snapshot_immutable" });
+    await expect(
+      db`UPDATE upstream_holds SET current_reserved_atoms=current_reserved_atoms-1 WHERE attempt_id=${admission.attemptId}`,
+    ).rejects.toMatchObject({ errno: "P0403", message: "funding_fence_required" });
+    expect(
+      await db`SELECT current_reserved_atoms::text reserved,estimated_atoms::text estimated FROM upstream_holds WHERE attempt_id=${admission.attemptId}`,
+    ).toEqual([{ reserved: "30", estimated: "30" }]);
+  }));
+
 test("Core admin manages supplier brands and upstream accounts under catalog and funding permissions with audit", () =>
   withFinancial(async (f, db) => {
     const reader = await administrator(db, ["funding:read"]),
