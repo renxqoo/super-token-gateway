@@ -1,8 +1,8 @@
-import type { TransactionSQL } from "bun";
+import type { SQL, TransactionSQL } from "bun";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
-import { createEventStore, recordEventConsumer } from "@gateway/storage";
+import { createEventStore, recordEventConsumer, withDatabaseConnection } from "@gateway/storage";
 import type { PlatformPermission } from "./authentication.ts";
 
 const consumerSchema = z
@@ -12,6 +12,8 @@ const claimSchema = z.object({ limit: z.number().int().min(1).max(500).default(1
 const ackSchema = z
   .object({ lease_token: z.uuid(), event_ids: z.array(z.uuid()).min(1).max(500) })
   .strict();
+
+class EventsAwaitingReplay extends Error {}
 
 export function registerEvents(
   app: Hono,
@@ -23,9 +25,10 @@ export function registerEvents(
     ): Promise<T>;
     audit(tx: TransactionSQL, actor: string, action: string, resource: string): Promise<void>;
     body(request: Request): Promise<unknown>;
+    eventStandby?: SQL;
   },
 ) {
-  const { run, audit, body } = tools;
+  const { run, audit, body, eventStandby } = tools;
   const id = (value: string | undefined) => z.uuid().parse(value);
   const consumer = async (tx: TransactionSQL, value: string | undefined) => {
     const consumerId = id(value);
@@ -57,11 +60,37 @@ export function registerEvents(
   });
   app.post("/consumers/:id/claim", async (c) => {
     const input = claimSchema.parse(await body(c.req.raw));
-    return c.json(
-      await run(c.req.header("authorization"), "events:consume", async (tx) =>
-        createEventStore(tx).claim(await consumer(tx, c.req.param("id")), input.limit),
-      ),
-    );
+    try {
+      return c.json(
+        await run(c.req.header("authorization"), "events:consume", async (tx) => {
+          const claim = await createEventStore(tx).claim(
+            await consumer(tx, c.req.param("id")),
+            input.limit,
+          );
+          if (!eventStandby || !claim.events.length) return claim;
+          const expected = claim.events.map((event) => event.id);
+          const [witness] = await withDatabaseConnection(
+            eventStandby,
+            {
+              deadline: performance.now() + 2000,
+              signal: c.req.raw.signal,
+            },
+            (db) => db<{ ready: boolean; confirmed: number }[]>`
+          SELECT pg_is_in_recovery() AND current_setting('fsync')='on'
+            AND current_setting('full_page_writes')='on' AS ready,
+            (SELECT count(*)::int FROM public.usage_event_index WHERE id=ANY(${expected}::uuid[])) AS confirmed
+        `,
+          );
+          if (!witness?.ready)
+            throw new GatewayError(503, "core_unavailable", "Event confirmation is unavailable");
+          if (witness.confirmed !== expected.length) throw new EventsAwaitingReplay();
+          return claim;
+        }),
+      );
+    } catch (error) {
+      if (!(error instanceof EventsAwaitingReplay)) throw error;
+      return c.json({ lease_token: crypto.randomUUID(), events: [] });
+    }
   });
   app.post("/consumers/:id/ack", async (c) => {
     const input = ackSchema.parse(await body(c.req.raw));

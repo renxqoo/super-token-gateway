@@ -12,6 +12,20 @@ const configSchema = z.strictObject({
       maxAttempts: z.number().int().min(1).max(5).optional(),
     })
     .optional(),
+  terminal_settlement: z
+    .strictObject({
+      database_url: z.url({ protocol: /^postgres(ql)?$/ }),
+      standby_url: z.url({ protocol: /^postgres(ql)?$/ }),
+      commit_short_chat_sse: z.boolean().optional(),
+      short_chat_funding_epoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+      recovery_queue: z.strictObject({
+        url: z.url({ protocol: /^rediss?$/ }),
+        namespace: z.string().regex(/^[a-zA-Z0-9:_-]{1,80}$/),
+        required_replicas: z.number().int().min(1).max(5),
+        ack_timeout_ms: z.number().int().min(100).max(1000),
+      }),
+    })
+    .optional(),
   audience: z.string(),
   hostname: z.string(),
   servername: z.string(),
@@ -94,6 +108,8 @@ export async function loadCoreApiConfig(
     throw new Error("Core API admin listener requires the execution configuration");
   if (config.public && !config.execution)
     throw new Error("Core API public listener requires the execution configuration");
+  if (config.terminal_settlement && !config.execution)
+    throw new Error("Core API terminal settlement requires the execution configuration");
   for (const cidr of config.public?.trusted_proxy_cidrs ?? []) validateCidr(cidr);
   return config;
 }

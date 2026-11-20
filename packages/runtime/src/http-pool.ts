@@ -15,6 +15,7 @@ import { GatewayError } from "@gateway/contracts";
 export interface PinnedRequestInit extends RequestInit {
   tls?: { serverName?: string; rejectUnauthorized: true };
   proxy?: false;
+  dispatchDeadline?: number;
 }
 
 export class UpstreamPreDispatchError extends GatewayError {
@@ -49,6 +50,7 @@ export function createHttpPool(maxConnections: number) {
   const secure = new HttpsAgent({ ...options, rejectUnauthorized: true });
   const idle = new Map<Duplex, ReturnType<typeof setTimeout>>();
   const watched = new WeakSet<Duplex>();
+  const sseFraming = new WeakMap<Response, "chunked" | number>();
   const active = new Set<ClientRequest>();
   const httpSlots = { inUse: 0, waiting: new Map<() => void, () => void>() };
   const httpsSlots = { inUse: 0, waiting: new Map<() => void, () => void>() };
@@ -92,10 +94,15 @@ export function createHttpPool(maxConnections: number) {
     };
   }
   return {
+    sseFraming(response: Response) {
+      return sseFraming.get(response);
+    },
     async send(url: URL, init: PinnedRequestInit): Promise<Response> {
       if (closed)
         throw new GatewayError(503, "upstream_transport_closed", "Upstream transport is closed");
-      if (init.signal?.aborted) throw notDispatched();
+      const expired = () =>
+        init.dispatchDeadline !== undefined && !(performance.now() < init.dispatchDeadline);
+      if (init.signal?.aborted || expired()) throw notDispatched();
       const secureRequest = url.protocol === "https:";
       const slots = secureRequest ? httpsSlots : httpSlots;
       const release = () => {
@@ -111,7 +118,9 @@ export function createHttpPool(maxConnections: number) {
             "Upstream connection wait queue is full",
           );
         await new Promise<void>((resolve, reject) => {
+          let deadline: ReturnType<typeof setTimeout> | undefined;
           const remove = () => {
+            clearTimeout(deadline);
             slots.waiting.delete(abort);
             init.signal?.removeEventListener("abort", abort);
           };
@@ -124,12 +133,14 @@ export function createHttpPool(maxConnections: number) {
             resolve();
           });
           init.signal?.addEventListener("abort", abort, { once: true });
-          if (init.signal?.aborted) abort();
+          if (init.dispatchDeadline !== undefined)
+            deadline = setTimeout(abort, Math.max(0, init.dispatchDeadline - performance.now()));
+          if (init.signal?.aborted || expired()) abort();
         });
       }
       let releaseOnClose = false;
       try {
-        if (closed || init.signal?.aborted) throw notDispatched();
+        if (closed || init.signal?.aborted || expired()) throw notDispatched();
         const serialized = new Request(url, init);
         const headers = new Headers(serialized.headers);
         const input = init?.body;
@@ -149,8 +160,16 @@ export function createHttpPool(maxConnections: number) {
           let canHaveDispatched = false;
           let assigned: ClientRequest["socket"] | undefined;
           const readyEvent = secureRequest ? "secureConnect" : "connect";
+          let dispatchTimer: ReturnType<typeof setTimeout> | undefined;
           const markConnected = () => {
+            if (canHaveDispatched) return;
+            clearTimeout(dispatchTimer);
+            if (init.dispatchDeadline !== undefined && (expired() || init.signal?.aborted)) {
+              request.destroy(notDispatched());
+              return;
+            }
             canHaveDispatched = true;
+            if (init.dispatchDeadline !== undefined) sendBody();
           };
           const request = (secureRequest ? httpsRequest : httpRequest)(
             url,
@@ -198,17 +217,32 @@ export function createHttpPool(maxConnections: number) {
                   output.delete("content-encoding");
                   output.delete("content-length");
                 }
-                resolve(
-                  new Response(
-                    Readable.toWeb(body, {
-                      strategy: {
-                        highWaterMark: 16384,
-                        size: (chunk: Uint8Array) => chunk.byteLength,
-                      },
-                    }) as unknown as ReadableStream<Uint8Array>,
-                    { status, headers: output },
-                  ),
+                const result = new Response(
+                  Readable.toWeb(body, {
+                    strategy: {
+                      highWaterMark: 16384,
+                      size: (chunk: Uint8Array) => chunk.byteLength,
+                    },
+                  }) as unknown as ReadableStream<Uint8Array>,
+                  { status, headers: output },
                 );
+                if (
+                  !encodings.length &&
+                  /^text\/event-stream(?:\s*;|$)/i.test(output.get("content-type") ?? "")
+                ) {
+                  const length = output.get("content-length");
+                  const transfer = output.get("transfer-encoding");
+                  if (length === null && transfer?.toLowerCase() === "chunked")
+                    sseFraming.set(result, "chunked");
+                  else if (
+                    transfer === null &&
+                    length !== null &&
+                    /^\d+$/.test(length) &&
+                    Number.isSafeInteger(Number(length))
+                  )
+                    sseFraming.set(result, Number(length));
+                }
+                resolve(result);
               } catch (error) {
                 response.destroy();
                 reject(error);
@@ -226,8 +260,9 @@ export function createHttpPool(maxConnections: number) {
           };
           const preDispatch = () =>
             !canHaveDispatched &&
-            !request.reusedSocket &&
-            !(secureRequest && (request.socket as TLSSocket | undefined)?.authorized);
+            (init.dispatchDeadline !== undefined ||
+              (!request.reusedSocket &&
+                !(secureRequest && (request.socket as TLSSocket | undefined)?.authorized)));
           const abort = () => {
             const error = preDispatch()
               ? notDispatched()
@@ -238,6 +273,7 @@ export function createHttpPool(maxConnections: number) {
           const detachAbort = () => init.signal?.removeEventListener("abort", abort);
           active.add(request);
           request.once("close", () => {
+            clearTimeout(dispatchTimer);
             active.delete(request);
             detachAbort();
             assigned?.removeListener(readyEvent, markConnected);
@@ -271,15 +307,23 @@ export function createHttpPool(maxConnections: number) {
               ),
             );
           });
-          if (bytes !== undefined) request.end(bytes);
-          else if (serialized.body) {
-            const body = Readable.fromWeb(
-              serialized.body as unknown as Parameters<typeof Readable.fromWeb>[0],
+          function sendBody() {
+            if (bytes !== undefined) request.end(bytes);
+            else if (serialized.body) {
+              const body = Readable.fromWeb(
+                serialized.body as unknown as Parameters<typeof Readable.fromWeb>[0],
+              );
+              body.once("error", (error) => request.destroy(error));
+              request.once("error", () => body.destroy());
+              body.pipe(request);
+            } else request.end();
+          }
+          if (init.dispatchDeadline === undefined) sendBody();
+          else
+            dispatchTimer = setTimeout(
+              () => request.destroy(notDispatched()),
+              Math.max(0, init.dispatchDeadline - performance.now()),
             );
-            body.once("error", (error) => request.destroy(error));
-            request.once("error", () => body.destroy());
-            body.pipe(request);
-          } else request.end();
         });
       } finally {
         if (!releaseOnClose) release();

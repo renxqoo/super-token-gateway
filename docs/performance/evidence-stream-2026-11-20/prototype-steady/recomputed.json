@@ -1,0 +1,13 @@
+{
+  "offers": 541800,
+  "httpValidated": 539538,
+  "allEvidence": 1079076,
+  "intersection": 539538,
+  "within": 538281,
+  "rps": 2990.45,
+  "p99Ms": 780.91,
+  "firstContentP99Ms": 711.342,
+  "earlyContent": 0,
+  "minimumEarlyLeadMs": null,
+  "witnessedPartialBeforeContent": 0
+}

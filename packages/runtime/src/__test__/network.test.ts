@@ -215,6 +215,49 @@ test("a queued upstream abort returns before the active socket frees and proves 
   }
 });
 
+test("an expired send grant never writes the queued upstream request", async () => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const received: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      received.push(new URL(request.url).pathname);
+      entered.resolve();
+      await release.promise;
+      return new Response("ok");
+    },
+  });
+  const transport = createTransport(1);
+  const base = new URL(`http://127.0.0.1:${server.port}`);
+  const occupied = transport.fetch(base, {}, true).then((response) => response.text());
+  try {
+    await entered.promise;
+    const delayed = transport
+      .fetch(
+        new URL("/late", base),
+        {
+          method: "POST",
+          body: "authorized only before deadline",
+          dispatchDeadline: performance.now() + 20,
+        },
+        true,
+      )
+      .catch((error: unknown) => error);
+    await Bun.sleep(40);
+    release.resolve();
+    expect(await occupied).toBe("ok");
+    expect(await delayed).toMatchObject({ code: "upstream_not_dispatched" });
+    expect(received).toEqual(["/"]);
+  } finally {
+    release.resolve();
+    await occupied.catch(() => undefined);
+    transport.close();
+    await server.stop(true);
+  }
+});
+
 test("aborting an upstream body stops the socket and allows the next request", async () => {
   let cancelled = false;
   const server = Bun.serve({

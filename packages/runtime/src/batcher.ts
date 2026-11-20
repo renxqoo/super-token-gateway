@@ -11,7 +11,6 @@ export class Batcher<Input, Output> {
   private active = 0;
   private pendingWeight = 0;
   private closed: Error | undefined;
-  private readonly weight: (input: Input) => number;
   private readonly minIdleBatch: number;
   constructor(
     private readonly run: (inputs: Input[]) => Promise<Output[]>,
@@ -19,17 +18,17 @@ export class Batcher<Input, Output> {
     private readonly delayMs = 1,
     private readonly maxActive = 4,
     private readonly maxQueued = 4096,
-    options:
-      | ((input: Input) => number)
-      | { weight?: (input: Input) => number; collectWhenIdle?: boolean | number } = {},
+    private readonly options: {
+      weight?: (input: Input) => number;
+      collectWhenIdle?: boolean | number;
+    } = {},
   ) {
-    this.weight = typeof options === "function" ? options : (options.weight ?? (() => 1));
-    const collectWhenIdle = typeof options !== "function" && options.collectWhenIdle;
+    const collectWhenIdle = options.collectWhenIdle;
     this.minIdleBatch = collectWhenIdle === true ? 1 : collectWhenIdle || Infinity;
   }
   add(input: Input): Promise<Output> {
     if (this.closed) return Promise.reject(this.closed);
-    const weight = this.weight(input);
+    const weight = this.options.weight?.(input) ?? 1;
     if (!Number.isSafeInteger(weight) || weight < 1 || weight > this.capacity)
       return Promise.reject(new RangeError("Batch item weight exceeds capacity"));
     if (this.pendingWeight + weight > this.maxQueued)

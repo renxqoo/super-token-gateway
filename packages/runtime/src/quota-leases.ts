@@ -38,6 +38,13 @@ export type QuotaDescriptor = {
 };
 export type QuotaCleanup =
   | { state: "REJECTED"; command_id: string; body_digest: string }
+  | {
+      state: "REJECTED_ADOPTED";
+      command_id: string;
+      body_digest: string;
+      attempt_id: string;
+      permit_epoch: string;
+    }
   | { state: "RELEASE_PENDING"; attempt_id: string; permit_epoch: string };
 const script = `
 local clock=redis.call('TIME')
@@ -80,6 +87,8 @@ if not record or record.identity~=input.identity then return redis.error_reply('
 if action=='RELEASE' then
  if input.authority=='REJECTED' then
   if record.state=='ADOPTED' or record.attempt_id~=cjson.null then return redis.error_reply('QUOTA_AUTHORITY') end
+ elseif input.authority=='REJECTED_ADOPTED' then
+  if record.attempt_id~=input.attempt_id or record.permit_epoch~=input.permit_epoch or record.revision~='1' then return redis.error_reply('QUOTA_AUTHORITY') end
  elseif input.authority=='RELEASE_PENDING' then
   if record.attempt_id~=cjson.null and (record.attempt_id~=input.attempt_id or record.permit_epoch~=input.permit_epoch) then return redis.error_reply('QUOTA_AUTHORITY') end
  else return redis.error_reply('QUOTA_AUTHORITY') end
@@ -263,7 +272,7 @@ export function createQuotaLeases(options: {
     },
     release(d: QuotaDescriptor, authority: QuotaCleanup) {
       if (
-        authority.state === "REJECTED" &&
+        (authority.state === "REJECTED" || authority.state === "REJECTED_ADOPTED") &&
         (authority.command_id !== d.command_id || authority.body_digest !== d.body_digest)
       )
         throw new Error("Quota cleanup denied");

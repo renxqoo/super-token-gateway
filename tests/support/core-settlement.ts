@@ -3,15 +3,47 @@ import type { SQL } from "bun";
 import type {
   CoreEvidenceEventV1,
   CoreEvidenceGroupResult,
+  CoreVerifiedCallerProjection,
   ExecutionReply,
+  StartupReceipt,
 } from "@gateway/contracts";
 import { CoreRpcError } from "@gateway/core-client";
+import { sha256 } from "@gateway/runtime/crypto";
+import { createInternalIdentityStore } from "@gateway/storage/internal-identity";
 import { createSettlementStore } from "@gateway/storage/settlement";
 import { prepareFinancialAdmission, withFinancial } from "./financial-execution.ts";
 
 export type Fixture = Parameters<Parameters<typeof withFinancial>[0]>[0];
 export type Setup = Awaited<ReturnType<Fixture["bootstrap"]>>;
 export type Client = ReturnType<Fixture["client"]>;
+
+export async function quotaRecoveryProjection(
+  db: SQL,
+  owner: StartupReceipt,
+  traceId: string,
+): Promise<CoreVerifiedCallerProjection> {
+  const identities = createInternalIdentityStore(db);
+  const peer = (await identities.readPeerDirectory(owner.certificate_sha256))!;
+  const session = (await identities.readStartupSession(owner.session_id))!;
+  return {
+    service: session.service,
+    instance_id: session.instance_id,
+    certificate_sha256: session.certificate_sha256,
+    instance_revision: peer.instance_revision,
+    certificate_revision: peer.certificate_revision,
+    raw_body_sha256: sha256(traceId),
+    session_id: session.session_id,
+    incarnation_id: session.incarnation_id,
+    key_sha256: session.public_key_sha256,
+    session_revision: session.session_revision,
+    command_type: "execution_quota_recovery_v1",
+    command_id: crypto.randomUUID(),
+    method: "POST",
+    normalized_path: "/_internal/core/v1/quota-recovery",
+    deadline_at: new Date(Date.now() + 20000).toISOString(),
+    trace_id: traceId,
+  };
+}
 
 export async function granted(
   db: SQL,

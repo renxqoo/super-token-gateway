@@ -22,6 +22,14 @@ export const evidenceChannel: QueueChannel<CoreEvidenceGroupV1> = {
   encode: (groups) => ({ version: 1, groups }),
   decode: (payload) => coreEvidenceBatchV1Schema.parse(payload).groups,
 };
+export const terminalRecoveryChannel: QueueChannel<CoreEvidenceGroupV1> = {
+  ...evidenceChannel,
+  scope: "core-terminal-recovery",
+};
+export const streamTerminalRecoveryChannel: QueueChannel<CoreEvidenceGroupV1> = {
+  ...evidenceChannel,
+  scope: "core-sse-terminal-recovery",
+};
 export interface UsageQueueOptions {
   url: string;
   namespace: string;
@@ -127,20 +135,22 @@ export class UsageProducer<T> {
     g.ready = this.bounded(async () => {
       await queue.waitUntilReady();
       await this.checkDurability(g);
-      const proof = (await raw.send("WAITAOF", [
-        "1",
-        String(this.options.replicas),
-        String(this.options.timeoutMs),
-      ])) as number[];
-      if (
-        g.broken ||
-        !raw.connected ||
-        Number(proof[0]) !== 1 ||
-        Number(proof[1]) < this.options.replicas
-      )
-        throw failure();
+      await this.confirmDurability(g);
     }, g);
     return g;
+  }
+  private async confirmDurability(g: Generation): Promise<void> {
+    const deadline = performance.now() + this.options.timeoutMs;
+    for (let left = this.options.timeoutMs; left > 0; left = deadline - performance.now()) {
+      const proof = (await g.raw.send("WAITAOF", [
+        "1",
+        String(this.options.replicas),
+        String(Math.min(waitSliceMs, Math.ceil(left))),
+      ])) as number[];
+      if (g.broken || !g.raw.connected) throw failure();
+      if (Number(proof[0]) === 1 && Number(proof[1]) >= this.options.replicas) return;
+    }
+    throw failure();
   }
   private async checkDurability(g: Generation): Promise<void> {
     const settings = (await g.raw.send("CONFIG", [
@@ -230,13 +240,7 @@ export class UsageProducer<T> {
       if ((await job.getState()) !== "failed")
         throw new GatewayError(409, "job_not_failed", "Only failed usage jobs can be retried");
       await job.retry();
-      const proof = (await g.raw.send("WAITAOF", [
-        "1",
-        String(this.options.replicas),
-        String(this.options.timeoutMs),
-      ])) as number[];
-      if (g.broken || Number(proof[0]) !== 1 || Number(proof[1]) < this.options.replicas)
-        throw failure();
+      await this.confirmDurability(g);
     }, g);
   }
   async publish(value: T): Promise<void> {
@@ -263,18 +267,7 @@ export class UsageProducer<T> {
         await this.bounded(async () => {
           await g.queue.add("evidence", payload, { jobId });
           this.backlog++;
-          const until = Date.now() + this.options.timeoutMs;
-          for (;;) {
-            const slice = Math.max(1, Math.min(waitSliceMs, until - Date.now()));
-            const proof = (await g.raw.send("WAITAOF", [
-              "1",
-              String(this.options.replicas),
-              String(slice),
-            ])) as number[];
-            if (g.broken || !g.raw.connected) throw failure();
-            if (Number(proof[0]) === 1 && Number(proof[1]) >= this.options.replicas) break;
-            if (Date.now() >= until) throw failure();
-          }
+          await this.confirmDurability(g);
         }, g);
         return events.map(() => undefined);
       } catch {

@@ -89,6 +89,12 @@ test("actual v3 through financial schema upgrade preserves historical channels a
         { version: 2026111816 },
         { version: 2026111817 },
         { version: 2026111818 },
+        { version: 2026111901 },
+        { version: 2026111902 },
+        { version: 2026111903 },
+        { version: 2026111904 },
+        { version: 2026111905 },
+        { version: 2026111906 },
       ]);
       expect(
         (await db`SELECT id,brand_id,account_id,secret,config_revision::text FROM channels`)[0],

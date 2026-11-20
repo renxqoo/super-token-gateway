@@ -71,7 +71,10 @@ export function createSettlementProcessor(options: {
     1,
     maxConcurrentBatches,
     4096,
-    (groups) => (groups.length ? Math.max(groups.length, batchGroupLimit / maxJobsPerBatch) : 0),
+    {
+      weight: (groups) =>
+        groups.length ? Math.max(groups.length, batchGroupLimit / maxJobsPerBatch) : 0,
+    },
   );
   const active = new Set<Promise<CoreEvidenceGroupResult[]>>();
   let closing: Promise<void> | undefined;

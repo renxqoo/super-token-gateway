@@ -39,7 +39,11 @@ import {
   type QuotaDescriptor,
   type QuotaScope,
 } from "@gateway/runtime/quota-leases";
-import { createExecutionStore, ExecutionOutcomeUnknown } from "@gateway/storage/execution";
+import {
+  createExecutionStore,
+  createShortChatAdmissionStore,
+  ExecutionOutcomeUnknown,
+} from "@gateway/storage/execution";
 export type ExecutionOptions = {
   pepper: string;
   encryptionKey: string;
@@ -126,6 +130,8 @@ export function createExecutionHandler(
   db: SQL,
   options: ExecutionOptions,
   requireCaller: (context: object) => CoreVerifiedCallerProjection,
+  shortChat?: ReturnType<typeof createShortChatAdmissionStore>,
+  preflightDb = db,
 ) {
   if (!/^[0-9a-f]{64}$/.test(options.encryptionKey) || !options.pepper)
     throw new Error("Execution secrets required");
@@ -202,7 +208,7 @@ export function createExecutionHandler(
       .catch(() => undefined);
     return token ? { type: "bearer", value: token } : undefined;
   }
-  const store = createExecutionStore(db),
+  const store = createExecutionStore(db, preflightDb),
     routingLimits = new Limits(options.redisUrls, options.quotaNamespace),
     quota = createQuotaLeases({
       urls: options.redisUrls,
@@ -279,7 +285,8 @@ export function createExecutionHandler(
         deadline = Math.min(deadline, result.proofDeadline);
       }
     }
-    if (!release && (!descriptors.length || deadline <= performance.now()))
+    const minimumProofMs = p.command_type === "execution_begin_v1" ? 1000 : 0;
+    if (!release && (!descriptors.length || deadline - performance.now() <= minimumProofMs))
       throw new Error("quota_unavailable");
     if (descriptors.length && !commitWithBegin)
       await store.quota(p, attempt, release ? "RELEASED" : "ACTIVE", descriptors);
@@ -303,6 +310,7 @@ export function createExecutionHandler(
       return store.pluginPackage(requireCaller(context), digest);
     },
     async handle(context: object, kind: ExecutionKind, input: unknown, signal?: AbortSignal) {
+      const receivedAt = performance.now();
       const p = requireCaller(context);
       if (p.command_type !== kind) throw new Error("internal_proof_invalid");
       const wire = z
@@ -490,10 +498,16 @@ export function createExecutionHandler(
         };
       }
       const admitting = kind === "execution_admit_v1" || kind === "execution_next_v1";
+      const admission =
+        kind === "execution_admit_v1"
+          ? executionDataSchemas.execution_admit_v1.parse(d)
+          : undefined;
+      const combined = admission?.commit_send === true ? admission : undefined;
+      if (combined && !shortChat) throw new Error("internal_request_invalid");
       let beginLeaseState: unknown;
       if (kind === "execution_begin_v1") {
         const data = executionDataSchemas.execution_begin_v1.parse(d);
-        const prepared = await store.prepareBegin(p, e, data.attempt_id);
+        const prepared = await store.prepareBegin(p, e, data.attempt_id, signal);
         if (prepared.receipt) return { receipt: executionReceiptSchema.parse(prepared.receipt) };
         beginLeaseState = prepared.leases;
       } else if (!admitting && kind !== "execution_query_v1" && kind !== "execution_quota_v1") {
@@ -508,6 +522,7 @@ export function createExecutionHandler(
       });
       let computed: Record<string, unknown> = {},
         drafts: QuotaDescriptor[] = [],
+        adopted: QuotaDescriptor[] = [],
         proofDeadline = Number.POSITIVE_INFINITY,
         health: { channel: string; attempt: string } | undefined;
       const releaseHealth = async () => {
@@ -517,10 +532,14 @@ export function createExecutionHandler(
             .catch(() => {});
       };
       if (admitting) {
-        const data =
-          kind === "execution_admit_v1"
-            ? executionDataSchemas.execution_admit_v1.parse(d)
-            : executionDataSchemas.execution_next_v1.parse(d);
+        const data = admission ?? executionDataSchemas.execution_next_v1.parse(d);
+        if (
+          combined &&
+          (data.manifest.operation !== "chat" ||
+            data.manifest.resource_ids.length ||
+            !wire.route_ticket)
+        )
+          throw new Error("internal_request_invalid");
         let claims: z.infer<typeof routeClaimsSchema> | undefined;
         if (typeof wire.route_ticket === "string") {
           try {
@@ -538,6 +557,7 @@ export function createExecutionHandler(
           e,
           data.context_id,
           claims,
+          signal,
         );
         if (receipt !== null) return { receipt: executionReceiptSchema.parse(receipt) };
         if (!claims && snapshot && typeof snapshot === "object" && "candidate_digests" in snapshot)
@@ -698,8 +718,8 @@ export function createExecutionHandler(
           throw new Error("no_route");
         health = { channel, attempt };
         try {
-          for (const scope of scopes) {
-            const result = await quota
+          const acquire = (scope: QuotaScope) =>
+            quota
               .acquire({
                 scope,
                 caller: `${p.service}:${p.instance_id}`,
@@ -717,12 +737,42 @@ export function createExecutionHandler(
                   throw new Error(scope.kind === "channel" ? "channel_capacity" : "quota_limited");
                 throw error;
               });
-            drafts.push(result.descriptor);
+          if (combined) {
+            const acquired = await Promise.allSettled(scopes.map(acquire));
+            for (const result of acquired)
+              if (result.status === "fulfilled") drafts.push(result.value.descriptor);
+            const rejected = acquired.find((result) => result.status === "rejected");
+            if (rejected) throw rejected.reason;
+            if (signal?.aborted) throw new Error("quota_unavailable");
+            for (const { descriptor, proofDeadline: deadline } of await Promise.all(
+              drafts.map((draft) =>
+                quota.adopt(
+                  draft,
+                  attempt,
+                  "1",
+                  sha256(JSON.stringify([e.command_id, draft.lease_id])),
+                ),
+              ),
+            )) {
+              if (descriptor.revision !== "1" || deadline <= performance.now() + 1000)
+                throw new Error("quota_unavailable");
+              drafts[adopted.length] = {
+                ...descriptor,
+                revision: "0",
+                state: "DRAFT",
+                attempt_id: null,
+                permit_epoch: null,
+              };
+              adopted.push(descriptor);
+              proofDeadline = Math.min(proofDeadline, deadline);
+            }
+          } else {
+            for (const scope of scopes) drafts.push((await acquire(scope)).descriptor);
           }
         } catch (error) {
           await releaseHealth();
           const message = error instanceof Error ? error.message : "";
-          if (message === "channel_capacity" || message === "quota_limited")
+          if (combined || message === "channel_capacity" || message === "quota_limited")
             for (const draft of drafts)
               await quota
                 .release(draft, {
@@ -786,17 +836,49 @@ export function createExecutionHandler(
           released: data.action === "RELEASE" ? synchronized.descriptors.length : 0,
         };
       }
-      const result = await store.execute(
-        p,
-        e,
-        d,
-        computed,
-        kind === "execution_begin_v1" ? proofDeadline : undefined,
-      );
+      const result = combined
+        ? await shortChat!
+            .add({
+              projection: p,
+              envelope: e,
+              data: combined,
+              computed,
+              proofDeadline,
+              adopted,
+              signal,
+            })
+            .catch(() => {
+              throw new ExecutionOutcomeUnknown();
+            })
+        : await store.execute(
+            p,
+            e,
+            d,
+            computed,
+            kind === "execution_begin_v1" ? proofDeadline : undefined,
+          );
+      if (result.error === "outcome_unknown") throw new ExecutionOutcomeUnknown();
+      if (result.error) throw new Error(String(result.error));
       try {
         const receipt = executionReceiptSchema.parse(result.receipt);
         if (receipt.command_state === "REJECTED") {
           await releaseHealth();
+          if (combined && result.witnessed_rejection === true) {
+            await Promise.all(
+              adopted.map((descriptor) =>
+                quota
+                  .release(descriptor, {
+                    state: "REJECTED_ADOPTED",
+                    command_id: e.command_id,
+                    body_digest: e.body_digest,
+                    attempt_id: combined.dispatch_projection.proposed_attempt_id,
+                    permit_epoch: "1",
+                  })
+                  .catch(() => {}),
+              ),
+            );
+            return { receipt };
+          }
           for (const draft of drafts)
             await quota
               .release(draft, {
@@ -808,8 +890,8 @@ export function createExecutionHandler(
         }
         if (kind === "execution_abort_v1" && receipt.state === "ABORTED")
           await synchronize(p, receipt.attempt_id!, receipt.permit_epoch!, true).catch(() => {});
-        if (kind !== "execution_begin_v1" || result.fresh_transition !== true) return { receipt };
-        const data = executionDataSchemas.execution_begin_v1.parse(d);
+        if ((!combined && kind !== "execution_begin_v1") || result.fresh_transition !== true)
+          return { receipt };
         const plan = hostAuthorizationPlanV2Schema.parse(result.snapshot);
         const remaining = Math.floor(
           Math.min(
@@ -839,22 +921,21 @@ export function createExecutionHandler(
           if (secret.length > 4096 || [...secret].some((byte) => byte < 33 || byte > 126))
             throw new Error("credential_invalid");
           const authMaterial = await material(auth, secret, AbortSignal.timeout(remaining));
+          const issuedAt = performance.now();
           const left = Math.floor(
-            Math.min(
-              proofDeadline - performance.now(),
-              Date.parse(receipt.deadline_at!) - Date.now(),
-            ),
+            Math.min(proofDeadline - issuedAt, Date.parse(receipt.deadline_at!) - Date.now()),
           );
           if (!authMaterial || left <= 1000) return { receipt };
           const transient = transientSendSchema.parse({
             grant_id: crypto.randomUUID(),
             owner_session_id: p.session_id,
             incarnation_id: p.incarnation_id,
-            attempt_id: data.attempt_id,
-            permit_epoch: data.permit_epoch,
-            authorization_plan_digest: data.authorization_plan_digest,
+            attempt_id: receipt.attempt_id,
+            permit_epoch: receipt.permit_epoch,
+            authorization_plan_digest: receipt.authorization_plan_digest,
             deadline_at: receipt.deadline_at,
             remaining_ms: left,
+            processing_ms: Math.floor(issuedAt - receivedAt),
             auth_material: authMaterial,
           });
           if (proofDeadline <= performance.now() + 1000) return { receipt };
@@ -864,7 +945,7 @@ export function createExecutionHandler(
           delete result.credential_ciphertext;
         }
       } catch (error) {
-        if (kind === "execution_begin_v1") throw new ExecutionOutcomeUnknown();
+        if (combined || kind === "execution_begin_v1") throw new ExecutionOutcomeUnknown();
         throw error;
       }
     },

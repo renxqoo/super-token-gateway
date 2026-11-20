@@ -20,6 +20,8 @@ export interface NativeFixtureOptions {
   redisServer: string;
   readyTimeoutMs?: number;
   stopTimeoutMs?: number;
+  diskBudgetBytes?: number;
+  truncateProcessOutput?: boolean;
 }
 
 export function nativeFixtureOptions(): NativeFixtureOptions {
@@ -179,6 +181,7 @@ async function startProcess(
   stopTimeoutMs: number,
   onFailure: (error: Error) => void,
   shutdown: Shutdown = { signal: "SIGTERM", leaderOnly: false },
+  truncateOutput = false,
 ): Promise<NativeProcess> {
   const previousMask = process.umask(0o077);
   const child = (() => {
@@ -208,9 +211,10 @@ async function startProcess(
     });
   });
   const capture = (data: Buffer) => {
+    const remaining = Math.max(0, 262144 - bytes);
     bytes += data.length;
-    if (bytes <= 262144) output += data.toString();
-    else if (!failure) {
+    if (remaining) output += data.subarray(0, remaining).toString();
+    if (bytes > 262144 && !truncateOutput && !failure) {
       failure = new Error(`${name} output exceeded 256 KiB`);
       onFailure(failure);
     }
@@ -348,6 +352,7 @@ async function directoryBytes(path: string): Promise<number> {
 }
 
 export async function createNativeFixture(options: NativeFixtureOptions = nativeFixtureOptions()) {
+  const diskBudgetBytes = options.diskBudgetBytes ?? 402653184;
   const readyTimeoutMs = options.readyTimeoutMs ?? 15000;
   const stopTimeoutMs = options.stopTimeoutMs ?? 750;
   if (
@@ -356,7 +361,9 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
     readyTimeoutMs > 30000 ||
     !Number.isInteger(stopTimeoutMs) ||
     stopTimeoutMs < 0 ||
-    stopTimeoutMs > 2000
+    stopTimeoutMs > 2000 ||
+    !Number.isSafeInteger(diskBudgetBytes) ||
+    diskBudgetBytes < 402653184
   )
     throw new Error("Native fixture deadlines must be finite and within the supported bounds");
   const initdb = await tool(join(options.postgresToolsDirectory, "initdb"), /\(PostgreSQL\) 17\./);
@@ -367,14 +374,15 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
   const redis = await tool(options.redisServer, /v=7\.4\./);
   const temp = await realpath("/tmp");
   const disk = await statfs(temp);
-  if (disk.bavail * disk.bsize < 1073741824)
-    throw new Error("Native fixture requires 1 GiB free disk including cleanup reserve");
+  if (disk.bavail * disk.bsize < 1073741824 + diskBudgetBytes)
+    throw new Error(`Native fixture requires ${diskBudgetBytes} bytes plus 1 GiB cleanup reserve`);
   const directory = await mkdtemp(join(temp, "gateway-native-"));
   await chmod(directory, 0o700);
   const processes: NativeProcess[] = [];
   const launches = new Set<Promise<NativeProcess>>();
   const ports: number[] = [];
   const clusters: { child: NativeProcess; data: string }[] = [];
+  const postgresPrimaries = new WeakSet<object>();
   let failure: Error | undefined;
   let closing: Promise<void> | undefined;
   let removed = false;
@@ -389,7 +397,8 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
     if (budgetWork || closing) return;
     budgetWork = directoryBytes(directory)
       .then((bytes) => {
-        if (bytes > 402653184) fail(new Error("Native fixture exceeded 384 MiB disk budget"));
+        if (bytes > diskBudgetBytes)
+          fail(new Error(`Native fixture exceeded its ${diskBudgetBytes} byte disk budget`));
       })
       .catch((error: unknown) =>
         fail(new Error("Native fixture disk inspection failed", { cause: error })),
@@ -425,12 +434,18 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
     shutdown?: Shutdown,
   ): Promise<NativeProcess> {
     healthy();
-    const pending = startProcess(command, env, name, stopTimeoutMs, fail, shutdown).then(
-      (child) => {
-        processes.push(child);
-        return child;
-      },
-    );
+    const pending = startProcess(
+      command,
+      env,
+      name,
+      stopTimeoutMs,
+      fail,
+      shutdown,
+      options.truncateProcessOutput,
+    ).then((child) => {
+      processes.push(child);
+      return child;
+    });
     launches.add(pending);
     try {
       const child = await pending;
@@ -463,7 +478,7 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
   ) {
     return launch(name, [process.execPath, "--no-env-file", script, ...args], env);
   }
-  async function startPostgres() {
+  async function startPostgres(capacity = false) {
     healthy();
     const data = ownedPath("postgres");
     const socket = ownedPath("socket");
@@ -496,7 +511,7 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
     const name = `native_${crypto.randomUUID().replaceAll("-", "")}`;
     await writeFile(
       join(data, "postgresql.conf"),
-      `listen_addresses = '127.0.0.1'\nport = ${port}\nunix_socket_directories = '${socket}'\ncluster_name = '${name}'\nshared_buffers = '32MB'\nwork_mem = '2MB'\nmax_connections = 64\nmax_wal_size = '64MB'\nmin_wal_size = '32MB'\nfsync = on\nsynchronous_commit = on\nfull_page_writes = on\nlog_min_messages = warning\nlog_min_error_statement = panic\nlog_error_verbosity = terse\n`,
+      `listen_addresses = '127.0.0.1'\nport = ${port}\nunix_socket_directories = '${socket}'\ncluster_name = '${name}'\nshared_buffers = '${capacity ? "512MB" : "32MB"}'\nwork_mem = '2MB'\nmax_connections = ${capacity ? 96 : 64}\nmax_wal_size = '${capacity ? "4GB" : "64MB"}'\nmin_wal_size = '${capacity ? "512MB" : "32MB"}'\nfsync = on\nsynchronous_commit = on\nfull_page_writes = on\nlog_min_messages = warning\nlog_min_error_statement = panic\nlog_error_verbosity = terse\n${capacity ? "shared_preload_libraries = 'pg_stat_statements'\n" : ""}`,
       { mode: 0o600 },
     );
     const child = await launch(
@@ -539,7 +554,7 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
     } finally {
       await within(db.close({ timeout: 1 }), 2000, "PostgreSQL probe close");
     }
-    return {
+    const primary = Object.freeze({
       url,
       port,
       pid: child.pid,
@@ -547,9 +562,92 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
       get output() {
         return child.output;
       },
-    };
+    });
+    postgresPrimaries.add(primary);
+    return primary;
   }
-  async function startRedis(name: string, replicaOf?: { port: number; password: string }) {
+  async function startPostgresStandby(primary: Awaited<ReturnType<typeof startPostgres>>) {
+    healthy();
+    if (
+      !postgresPrimaries.has(primary) ||
+      !clusters.some(({ child }) => child.pid === primary.pid && child.running)
+    )
+      throw new Error("PostgreSQL primary is not owned by this native fixture");
+    const basebackup = await tool(
+      join(options.postgresToolsDirectory, "pg_basebackup"),
+      /\(PostgreSQL\) 17\./,
+    );
+    const data = ownedPath("postgres-standby");
+    const socket = ownedPath("socket-standby");
+    await mkdir(socket, { mode: 0o700 });
+    const upstream = new URL(primary.url);
+    const passfile = await write(
+      "pg-standby-password",
+      `127.0.0.1:${primary.port}:*:${upstream.username}:${upstream.password}\n`,
+    );
+    const application = "native_gateway_standby";
+    const connection = `host=127.0.0.1 port=${primary.port} user=${upstream.username} dbname=postgres application_name=${application} passfile='${passfile}'`;
+    const backup = await launch("pg_basebackup", [
+      basebackup.path,
+      "-D",
+      data,
+      "-d",
+      connection,
+      "-X",
+      "stream",
+      "-R",
+      "--no-password",
+    ]);
+    if ((await within(backup.exited, readyTimeoutMs, "pg_basebackup")) !== 0)
+      throw new Error(`Native pg_basebackup failed: ${backup.output}`);
+    await backup.stop();
+    const port = await unusedPort();
+    ports.push(port);
+    const child = await launch(
+      "postgres-standby",
+      [postgres.path, "-D", data, "-p", String(port), "-k", socket],
+      {},
+      { signal: "SIGINT", leaderOnly: true },
+    );
+    clusters.push({ child, data });
+    upstream.port = String(port);
+    const url = upstream.toString();
+    const standby = new SQL(url, { max: 1, connectionTimeout: 1 });
+    const leader = new SQL(primary.url, { max: 1, connectionTimeout: 1 });
+    try {
+      await waitFor(async () => {
+        if (!child.running) throw new Error("Native PostgreSQL standby exited before readiness");
+        const rows = await standby`SELECT pg_is_in_recovery() AS recovery,
+          current_setting('data_directory') AS directory`.catch(() => []);
+        if (!rows.length) return false;
+        if (!rows[0].recovery || rows[0].directory !== data)
+          throw new Error("Native PostgreSQL standby ownership mismatch");
+        return (
+          (
+            await leader`SELECT 1 FROM pg_stat_replication
+            WHERE application_name=${application} AND state='streaming'`
+          ).length === 1
+        );
+      });
+      await leader`ALTER SYSTEM SET synchronous_standby_names = 'FIRST 1 (native_gateway_standby)'`;
+      await leader`SELECT pg_reload_conf()`;
+      await waitFor(
+        async () =>
+          (
+            await leader`SELECT 1 FROM pg_stat_replication
+            WHERE application_name=${application} AND sync_state='sync'`
+          ).length === 1,
+      );
+    } finally {
+      await Promise.all([standby.close({ timeout: 1 }), leader.close({ timeout: 1 })]);
+    }
+    return { url, port, pid: child.pid, directory: data };
+  }
+  async function startRedis(
+    name: string,
+    replicaOf?: { port: number; password: string },
+    capacity = false,
+  ) {
     healthy();
     const data = ownedPath(name);
     await mkdir(data, { mode: 0o700 });
@@ -558,7 +656,7 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
     ports.push(port);
     const config = await write(
       `${name}.conf`,
-      `bind 127.0.0.1\nport ${port}\ndir ${data}\nprotected-mode yes\nrequirepass ${password}\nmasterauth ${password}\nsave ""\nappendonly yes\nappendfsync always\naof-load-truncated no\nno-appendfsync-on-rewrite no\nmaxmemory 64mb\nmaxclients 128\nmaxmemory-policy noeviction\nrepl-diskless-sync-delay 0\nauto-aof-rewrite-percentage 0\n${replicaOf ? `replicaof 127.0.0.1 ${replicaOf.port}\n` : ""}`,
+      `bind 127.0.0.1\nport ${port}\ndir ${data}\nprotected-mode yes\nrequirepass ${password}\nmasterauth ${password}\nsave ""\nappendonly yes\nappendfsync always\naof-load-truncated no\nno-appendfsync-on-rewrite no\nmaxmemory ${capacity ? "1024mb" : "64mb"}\nmaxclients 128\nmaxmemory-policy noeviction\nrepl-diskless-sync-delay 0\nauto-aof-rewrite-percentage 0\n${replicaOf ? `replicaof 127.0.0.1 ${replicaOf.port}\n` : ""}`,
     );
     const url = `redis://:${password}@127.0.0.1:${port}`;
     let child: NativeProcess;
@@ -671,6 +769,7 @@ export async function createNativeFixture(options: NativeFixtureOptions = native
     directory,
     tools: { initdb, postgres, redis },
     startPostgres,
+    startPostgresStandby,
     startRedis,
     startBun,
     write,

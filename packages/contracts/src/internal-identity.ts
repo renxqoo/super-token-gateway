@@ -72,6 +72,7 @@ export const internalProofSchema = z.strictObject({
     "execution_resource_claim_v1",
     "execution_resource_poll_v1",
     "execution_resource_release_v1",
+    "terminal_settlement_v1",
     "plugin_package_v1",
   ]),
   command_id: internalUuidSchema,
@@ -164,6 +165,7 @@ export const internalErrorSchema = z.strictObject({
       "internal_owner_mismatch",
       "internal_identity_revoked",
       "internal_request_invalid",
+      "internal_stream_terminal_disabled",
       "registration_conflict",
       "startup_key_reused",
       "startup_boot_conflict",
@@ -293,6 +295,7 @@ export type CoreVerifiedCallerProjection = Omit<CoreVerifiedPeerProjection, "end
     | "execution_resource_claim_v1"
     | "execution_resource_poll_v1"
     | "execution_resource_release_v1"
+    | "terminal_settlement_v1"
     | "plugin_package_v1";
   command_id: string;
   method: "POST";

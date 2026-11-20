@@ -15,6 +15,9 @@ import {
   executionRejectionStatus,
   internalErrorSchema,
   executionDataSchemas,
+  terminalSettlementPath,
+  terminalSettlementRequestSchema,
+  type CoreEvidenceGroupV1,
   pluginPackageDataSchema,
   pluginPackageMaxBytes,
   executionContextResponseMaxBytes,
@@ -25,8 +28,23 @@ import {
   type CoreVerifiedCallerProjection,
 } from "@gateway/contracts";
 import { canonical } from "@gateway/kernel";
-import { ExecutionOutcomeUnknown } from "@gateway/storage/execution";
+import {
+  createShortChatAdmissionStore,
+  createShortChatFundingScheduler,
+  ExecutionOutcomeUnknown,
+} from "@gateway/storage/execution";
 import { createInternalIdentityStore } from "@gateway/storage/internal-identity";
+import {
+  createReplicatedTerminalSettlementStore,
+  TerminalSettlementRejected,
+  StreamTerminalDisabled,
+} from "@gateway/storage/settlement";
+import {
+  UsageConsumer,
+  UsageProducer,
+  streamTerminalRecoveryChannel,
+  terminalRecoveryChannel,
+} from "@gateway/runtime";
 import {
   canonicalEd25519Spki,
   decodeCanonicalBase64url,
@@ -45,9 +63,11 @@ import {
 import { createCoreRpcClient } from "@gateway/core-client";
 
 import { createExecutionHandler, type ExecutionOptions } from "../execution/handler.ts";
+import type { CoreApiConfig } from "../config.ts";
 
 type Options = {
   execution?: ExecutionOptions;
+  terminalSettlement?: NonNullable<CoreApiConfig["terminal_settlement"]>;
   databaseUrl: string;
   audience: string;
   hostname: string;
@@ -88,17 +108,67 @@ export async function startCoreInternalListener(options: Options) {
     sessionTtl > 86400
   )
     throw new Error("Invalid identity TTL");
-  const db = new SQL(options.databaseUrl, {
-    max: 4,
+  const databaseOptions = {
     connectionTimeout: 3,
     idleTimeout: 30,
     connection: {
       statement_timeout: 4000,
       lock_timeout: 1000,
-      application_name: "core-internal-identity",
     },
+  };
+  const db = new SQL(options.databaseUrl, {
+    ...databaseOptions,
+    max: options.terminalSettlement?.short_chat_funding_epoch ? 10 : 4,
+    connection: { ...databaseOptions.connection, application_name: "core-internal-identity" },
   });
   const store = createInternalIdentityStore(db);
+  const terminalConnections = options.terminalSettlement && {
+    primary: new SQL(options.terminalSettlement.database_url, {
+      max: options.terminalSettlement.short_chat_funding_epoch ? 8 : 4,
+      connectionTimeout: 3,
+      idleTimeout: 30,
+      connection: { application_name: "core-terminal-writer" },
+    }),
+    standby: new SQL(options.terminalSettlement.standby_url, {
+      max: 4,
+      connectionTimeout: 3,
+      idleTimeout: 30,
+    }),
+  };
+  const fundingSchedule = createShortChatFundingScheduler();
+  const terminalSettlement =
+    terminalConnections &&
+    createReplicatedTerminalSettlementStore(
+      terminalConnections.primary,
+      terminalConnections.standby,
+      options.terminalSettlement?.short_chat_funding_epoch,
+      fundingSchedule,
+      options.terminalSettlement?.commit_short_chat_sse,
+    );
+  const epoch = options.terminalSettlement?.short_chat_funding_epoch;
+  const shortChat =
+    terminalConnections && epoch !== undefined
+      ? createShortChatAdmissionStore(db, terminalConnections.standby, epoch, fundingSchedule)
+      : undefined;
+  const recovery = options.terminalSettlement?.recovery_queue;
+  const recoveryOptions = recovery && {
+    channel: terminalRecoveryChannel,
+    url: recovery.url,
+    namespace: recovery.namespace,
+    replicas: recovery.required_replicas,
+    timeoutMs: recovery.ack_timeout_ms,
+    requireAllReplicas: true,
+  };
+  const terminalRecovery =
+    recoveryOptions && new UsageProducer({ ...recoveryOptions, batchSize: 1 });
+  const streamRecoveryOptions =
+    recoveryOptions && options.terminalSettlement?.commit_short_chat_sse !== undefined
+      ? { ...recoveryOptions, channel: streamTerminalRecoveryChannel }
+      : undefined;
+  const streamRecovery =
+    streamRecoveryOptions && new UsageProducer({ ...streamRecoveryOptions, batchSize: 1 });
+  let streamConsumer: UsageConsumer<CoreEvidenceGroupV1> | undefined;
+  let recoveryConsumer: { ready: () => Promise<void>; close: () => Promise<void> } | undefined;
   type Peer = NonNullable<Awaited<ReturnType<typeof store.readPeerDirectory>>>;
   type Session = NonNullable<Awaited<ReturnType<typeof store.readStartupSession>>>;
   type Snapshot =
@@ -109,7 +179,8 @@ export async function startCoreInternalListener(options: Options) {
         session: Session;
         proof: ReturnType<typeof internalProofSchema.parse>;
         rawDigest: string;
-        endpoint: "current-session" | "plugin_package_v1" | ExecutionKind;
+        endpoint:
+          "current-session" | "plugin_package_v1" | "terminal_settlement_v1" | ExecutionKind;
       };
   const peerReads = createIdentityReadCache({
     capacity: 4096,
@@ -175,7 +246,9 @@ export async function startCoreInternalListener(options: Options) {
           ? "/_internal/core/v1/identity/current-session"
           : s.endpoint === "plugin_package_v1"
             ? "/_internal/core/v1/plugin-package"
-            : executionPaths[s.endpoint],
+            : s.endpoint === "terminal_settlement_v1"
+              ? terminalSettlementPath
+              : executionPaths[s.endpoint],
       raw_body_sha256: s.rawDigest,
       deadline_at: s.proof.deadline_at,
       trace_id: s.proof.trace_id,
@@ -198,8 +271,15 @@ export async function startCoreInternalListener(options: Options) {
     execution_resource_poll_v1: "/_internal/core/v1/resources/poll-permits",
     execution_resource_release_v1: "/_internal/core/v1/resources/release",
   };
+  const preflightDb = options.execution
+    ? new SQL(options.databaseUrl, {
+        ...databaseOptions,
+        max: 2,
+        connection: { ...databaseOptions.connection, application_name: "core-execution-preflight" },
+      })
+    : undefined;
   const execution = options.execution
-    ? createExecutionHandler(db, options.execution, requireCaller)
+    ? createExecutionHandler(db, options.execution, requireCaller, shortChat, preflightDb)
     : undefined;
   async function authenticatePeer(
     stream: ServerHttp2Stream,
@@ -239,13 +319,19 @@ export async function startCoreInternalListener(options: Options) {
   ) {
     let context: object | undefined,
       committedBeginResponse = false,
+      combinedGrant = false,
       identityCounted = false,
       raw: Buffer | undefined,
       reserved: Awaited<ReturnType<typeof db.reserve>> | undefined;
     try {
       const routes: Record<
         string,
-        "challenges" | "registrations" | "current-session" | "plugin_package_v1" | ExecutionKind
+        | "challenges"
+        | "registrations"
+        | "current-session"
+        | "plugin_package_v1"
+        | "terminal_settlement_v1"
+        | ExecutionKind
       > = {
         ...(execution
           ? {
@@ -258,6 +344,9 @@ export async function startCoreInternalListener(options: Options) {
         "/_internal/core/v1/identity/challenges": "challenges",
         "/_internal/core/v1/identity/registrations": "registrations",
         "/_internal/core/v1/identity/current-session": "current-session",
+        ...(terminalSettlement
+          ? { [terminalSettlementPath]: "terminal_settlement_v1" as const }
+          : {}),
       };
       const endpoint = routes[String(headers[":path"])];
       const authority =
@@ -450,10 +539,15 @@ export async function startCoreInternalListener(options: Options) {
                 data:
                   endpoint === "plugin_package_v1"
                     ? pluginPackageDataSchema
-                    : executionDataSchemas[endpoint],
+                    : endpoint === "terminal_settlement_v1"
+                      ? terminalSettlementRequestSchema
+                      : executionDataSchemas[endpoint],
               })
         ).safeParse(parsed);
         if (!request.success) return reject("internal_request_invalid");
+        combinedGrant =
+          endpoint === "execution_admit_v1" &&
+          (request.data.data as { commit_send?: boolean }).commit_send === true;
         const e = request.data.envelope;
         if (
           e.command_id !== proof.command_id ||
@@ -478,6 +572,47 @@ export async function startCoreInternalListener(options: Options) {
           }),
         );
         if (expected !== e.body_digest) return reject("internal_proof_invalid");
+        if (endpoint === "terminal_settlement_v1") {
+          if (session.security_revoked_at) return reject("internal_identity_revoked");
+          if (session.disabled_at || Date.parse(session.expires_at) <= Date.now())
+            return reject("internal_session_invalid");
+          const { stream_terminal_v1: streamTerminal, ...group } =
+            terminalSettlementRequestSchema.parse(request.data.data);
+          if (
+            peer.service !== "gateway" ||
+            group.events.some(
+              (event) =>
+                event.origin_identity !== `${peer.service}:${peer.instance_id}` ||
+                event.origin_session_id !== session.session_id ||
+                event.origin_incarnation !== session.incarnation_id,
+            )
+          )
+            return reject("internal_owner_mismatch");
+          try {
+            const result = await terminalSettlement!.settle(
+              group,
+              {
+                signal,
+                deadline:
+                  performance.now() + Math.min(3000, Date.parse(proof.deadline_at) - Date.now()),
+              },
+              streamTerminal ? "online" : undefined,
+            );
+            if (!signal.aborted) h2JsonReply(stream, 200, result, limits.responseBytes);
+          } catch (error) {
+            if (error instanceof StreamTerminalDisabled)
+              return reject("internal_stream_terminal_disabled");
+            if (error instanceof TerminalSettlementRejected)
+              return reject("internal_request_invalid");
+            const writer = streamTerminal ? streamRecovery : terminalRecovery;
+            if (writer) {
+              await writer.ready();
+              await writer.publish(group);
+            }
+            throw error;
+          }
+          return;
+        }
         context = mint({ scope: "command", peer, session, proof, rawDigest, endpoint });
         if (endpoint === "plugin_package_v1") {
           const bytes = await execution!.pluginPackage(
@@ -496,7 +631,7 @@ export async function startCoreInternalListener(options: Options) {
             (result as { receipt?: unknown }).receipt,
           );
           committedBeginResponse =
-            endpoint === "execution_begin_v1" &&
+            (endpoint === "execution_begin_v1" || combinedGrant) &&
             receipt.success &&
             receipt.data.command_state === "COMMITTED";
           if (
@@ -524,7 +659,15 @@ export async function startCoreInternalListener(options: Options) {
             h2JsonReply(
               stream,
               200,
-              result,
+              combinedGrant &&
+                (request.data.data as { manifest?: { stream?: boolean } }).manifest?.stream ===
+                  true &&
+                options.terminalSettlement?.commit_short_chat_sse &&
+                receipt.success &&
+                receipt.data.state === "SEND_GRANTED" &&
+                "transient_send" in result
+                ? { ...result, stream_terminal_v1: true }
+                : result,
               endpoint === "execution_context_v1"
                 ? executionContextResponseMaxBytes
                 : limits.responseBytes,
@@ -541,6 +684,7 @@ export async function startCoreInternalListener(options: Options) {
         internal_owner_mismatch: 403,
         internal_identity_revoked: 403,
         internal_request_invalid: 400,
+        internal_stream_terminal_disabled: 409,
         registration_conflict: 409,
         startup_key_reused: 409,
         startup_boot_conflict: 409,
@@ -577,7 +721,10 @@ export async function startCoreInternalListener(options: Options) {
         {
           code,
           category:
-            code.includes("busy") || code.includes("unavailable") || code === "no_route"
+            code.includes("busy") ||
+            code.includes("unavailable") ||
+            code === "no_route" ||
+            code === "internal_stream_terminal_disabled"
               ? "DEPENDENCY"
               : code.includes("invalid") || code.includes("large")
                 ? "VALIDATION"
@@ -586,7 +733,7 @@ export async function startCoreInternalListener(options: Options) {
             code.includes("busy") || code.includes("unavailable")
               ? error instanceof ExecutionOutcomeUnknown &&
                 context &&
-                requireCaller(context).command_type === "execution_begin_v1"
+                (requireCaller(context).command_type === "execution_begin_v1" || combinedGrant)
                 ? "STATUS_ONLY"
                 : "SAME_COMMAND"
               : "NONE",
@@ -612,7 +759,18 @@ export async function startCoreInternalListener(options: Options) {
       await invalidation?.unlisten();
     } finally {
       execution?.close();
-      await db.close({ timeout: 5 });
+      terminalRecovery?.close();
+      streamRecovery?.close();
+      try {
+        await Promise.all([recoveryConsumer?.close(), streamConsumer?.close()]);
+      } finally {
+        await Promise.all([
+          db.close({ timeout: 5 }),
+          preflightDb?.close({ timeout: 5 }),
+          terminalConnections?.primary.close({ timeout: 1 }),
+          terminalConnections?.standby.close({ timeout: 1 }),
+        ]);
+      }
     }
   }
   try {
@@ -674,6 +832,32 @@ export async function startCoreInternalListener(options: Options) {
   try {
     const self = await startup.startup();
     if (self.service !== "core-api") throw new Error("Core startup role mismatch");
+    if (terminalSettlement && recoveryOptions) {
+      recoveryConsumer = new UsageConsumer({
+        ...recoveryOptions,
+        concurrency: 1,
+        process: async (groups) => {
+          if (groups.length !== 1) throw new Error("TERMINAL_RECOVERY_BATCH_INVALID");
+          await terminalSettlement.settle(groups[0]!, { deadline: performance.now() + 3000 });
+        },
+      });
+      await recoveryConsumer.ready();
+      if (streamRecoveryOptions) {
+        streamConsumer = new UsageConsumer({
+          ...streamRecoveryOptions,
+          concurrency: 1,
+          process: async (groups) => {
+            if (groups.length !== 1) throw new Error("TERMINAL_RECOVERY_BATCH_INVALID");
+            await terminalSettlement.settle(
+              groups[0]!,
+              { deadline: performance.now() + 3000 },
+              "recovery",
+            );
+          },
+        });
+        await Promise.all([streamConsumer.ready(), streamRecovery!.ready()]);
+      }
+    }
     return {
       port: listener.port,
       session: self,

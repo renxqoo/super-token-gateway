@@ -41,6 +41,7 @@ export function createCoreManagementApplication(options: {
   pepper: string;
   encryptionKey: string;
   queue?: SettlementQueue;
+  eventStandby?: SQL;
 }) {
   const auth = createPlatformAuthenticator(createPluginCatalogStore(options.db), options);
   const app = new Hono();
@@ -359,7 +360,12 @@ export function createCoreManagementApplication(options: {
   );
   registerUpstreamFunds(app, { run, runFunding, body });
   registerIdentityCatalog(app, { run, audit, body });
-  registerEvents(app, { run, audit, body });
+  registerEvents(app, {
+    run,
+    audit,
+    body,
+    ...(options.eventStandby ? { eventStandby: options.eventStandby } : {}),
+  });
   registerOperations(app, { run, audit, queue: options.queue });
   return app;
 }

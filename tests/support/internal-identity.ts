@@ -17,6 +17,13 @@ import {
   type InternalService,
 } from "@gateway/contracts";
 import { withDatabase } from "./database.ts";
+import type { CoreApiConfig } from "../../apps/core-api/src/config.ts";
+
+type TerminalConfig = NonNullable<CoreApiConfig["terminal_settlement"]>;
+type TerminalSettlementFixture = (
+  db: SQL,
+) => Promise<TerminalConfig | Record<"coreA" | "coreB", TerminalConfig>>;
+
 export const identityRegistry = ".local/identity-resources.jsonl";
 export const identityAudience = "synthetic-identity/core-api";
 async function record(event: string, details: Record<string, unknown>) {
@@ -39,6 +46,7 @@ export async function withIdentity(
     gateways?: number;
     initializeDatabase?: (db: SQL) => Promise<void>;
     executionRoleFile?: string;
+    terminalSettlement?: TerminalSettlementFixture;
   } = {},
 ) {
   await record("before", {
@@ -75,6 +83,7 @@ export async function prepareIdentity(
     account?: { trustedProxyCidrs: string[] };
     gateways?: number;
     executionRoleFile?: string;
+    terminalSettlement?: TerminalSettlementFixture;
   },
 ) {
   const gateways = options.gateways ?? 2;
@@ -215,6 +224,7 @@ export async function prepareIdentity(
       if (name === "extra") continue;
       await db`SELECT internal_identity_provision_v1(${c.service},${c.instance},${sha256(c.x509.raw)},${`spiffe://synthetic/${c.service}/${c.instance}`},${c.x509.subjectAltName},${new Date(c.x509.validFrom).toISOString()}::timestamptz,${new Date(c.x509.validTo).toISOString()}::timestamptz)`;
     }
+    const terminalSettlement = await options.terminalSettlement?.(db);
     async function start(name: "coreA" | "coreB") {
       const config = resolve(directory, `${name}.json`);
       await writeFile(
@@ -222,6 +232,12 @@ export async function prepareIdentity(
         JSON.stringify({
           database_url: roleUrl(api),
           ...(options.execution ? { execution: options.execution } : {}),
+          ...(terminalSettlement
+            ? {
+                terminal_settlement:
+                  "coreA" in terminalSettlement ? terminalSettlement[name] : terminalSettlement,
+              }
+            : {}),
           ...(options.admin ? { admin: options.admin } : {}),
           ...(options.account
             ? {
@@ -388,8 +404,8 @@ export async function identityRequest(
   raw?: Buffer,
 ) {
   const bytes = raw ?? Buffer.from(JSON.stringify(body));
-  const response = await client.request(
-    {
+  const response = await client.request(() => ({
+    headers: {
       ":authority": `localhost:${port}`,
       ":method": "POST",
       ":path": path,
@@ -397,8 +413,8 @@ export async function identityRequest(
       "content-length": String(bytes.length),
       ...(proof ? { "x-stg-proof": proof } : {}),
     },
-    bytes,
-  );
+    body: bytes,
+  }));
   return {
     status: response.status,
     value: JSON.parse(response.body.toString()) as Record<string, unknown>,

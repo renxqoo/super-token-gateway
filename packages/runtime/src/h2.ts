@@ -430,6 +430,19 @@ export class InternalTransportRefused extends Error {
     this.name = "InternalTransportRefused";
   }
 }
+export class InternalTransportCancelled extends Error {
+  constructor() {
+    super("Internal request cancelled before dispatch");
+    this.name = "InternalTransportCancelled";
+  }
+}
+export class InternalTransportDeadline extends Error {
+  constructor() {
+    super("Internal dispatch deadline elapsed");
+    this.name = "InternalTransportDeadline";
+  }
+}
+export const h2ClientBudget = Object.freeze({ streams: 32, requests: 256 });
 export async function createBoundedH2Client(options: {
   origin: string;
   servername: string;
@@ -494,30 +507,45 @@ export async function createBoundedH2Client(options: {
     active = 0;
   const pending = new Set<Promise<{ status: number; body: Buffer }>>();
   const waiting: { resume: () => void; fail: (error: Error) => void }[] = [];
-  async function slot(signal?: AbortSignal) {
-    if (active < 32) {
+  async function slot(signal?: AbortSignal, dispatchDeadlineMs?: number) {
+    if (dispatchDeadlineMs !== undefined && Date.now() >= dispatchDeadlineMs)
+      throw new InternalTransportDeadline();
+    if (active < h2ClientBudget.streams) {
       active++;
       return;
     }
-    if (waiting.length >= 224) throw new InternalTransportBusy();
+    if (waiting.length + active >= h2ClientBudget.requests) throw new InternalTransportBusy();
     await new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+      };
       const waiter = {
         resume() {
-          signal?.removeEventListener("abort", abort);
+          cleanup();
           resolve();
         },
         fail(error: Error) {
-          signal?.removeEventListener("abort", abort);
+          cleanup();
           reject(error);
         },
       };
-      function abort() {
+      function remove(error: Error) {
         waiting.splice(waiting.indexOf(waiter), 1);
-        waiter.fail(new Error("Internal transport unavailable"));
+        waiter.fail(error);
+      }
+      function abort() {
+        remove(new Error("Internal transport unavailable"));
       }
       if (signal?.aborted) return reject(new Error("Internal transport unavailable"));
       signal?.addEventListener("abort", abort, { once: true });
       waiting.push(waiter);
+      if (dispatchDeadlineMs !== undefined)
+        timer = setTimeout(
+          () => remove(new InternalTransportDeadline()),
+          Math.max(0, dispatchDeadlineMs - Date.now()),
+        );
     });
   }
   function release() {
@@ -534,32 +562,55 @@ export async function createBoundedH2Client(options: {
   });
   return {
     async request(
-      headers: OutgoingHttpHeaders,
-      body: Uint8Array,
+      prepare: () => { headers: OutgoingHttpHeaders; body: Uint8Array },
       signal?: AbortSignal,
-      reply?: { maxBytes: number; timeoutMs?: number; binary?: boolean },
+      reply?: {
+        maxBytes?: number;
+        timeoutMs?: number;
+        binary?: boolean;
+        dispatchDeadlineMs?: number;
+        dispatchSignal?: AbortSignal;
+      },
     ): Promise<{ status: number; body: Buffer }> {
       if (closed || session.closed || session.destroyed) throw new InternalTransportRefused();
-      await slot(signal);
-      if (closed || session.closed || session.destroyed) {
-        release();
-        throw new InternalTransportRefused();
-      }
-      const task = sendH2(
-        session,
-        headers,
-        body,
-        reply?.maxBytes ?? options.responseBytes ?? 8192,
-        reply?.timeoutMs ?? timeout,
-        signal,
-        reply?.binary === true,
-      );
-      pending.add(task);
+      const dispatchSignal = reply?.dispatchSignal;
+      if (dispatchSignal?.aborted) throw new InternalTransportCancelled();
+      const waitingSignal =
+        signal && dispatchSignal
+          ? AbortSignal.any([signal, dispatchSignal])
+          : (signal ?? dispatchSignal);
       try {
-        return await task;
+        await slot(waitingSignal, reply?.dispatchDeadlineMs);
+      } catch (error) {
+        if (dispatchSignal?.aborted) throw new InternalTransportCancelled();
+        throw error;
+      }
+      try {
+        if (closed || session.closed || session.destroyed) throw new InternalTransportRefused();
+        if (reply?.dispatchDeadlineMs !== undefined && Date.now() >= reply.dispatchDeadlineMs)
+          throw new InternalTransportDeadline();
+        if (dispatchSignal?.aborted) throw new InternalTransportCancelled();
+        const { headers, body } = prepare();
+        if (dispatchSignal?.aborted) throw new InternalTransportCancelled();
+        if (reply?.dispatchDeadlineMs !== undefined && Date.now() >= reply.dispatchDeadlineMs)
+          throw new InternalTransportDeadline();
+        const task = sendH2(
+          session,
+          headers,
+          body,
+          reply?.maxBytes ?? options.responseBytes ?? 8192,
+          reply?.timeoutMs ?? timeout,
+          signal,
+          reply?.binary === true,
+        );
+        pending.add(task);
+        try {
+          return await task;
+        } finally {
+          pending.delete(task);
+        }
       } finally {
         release();
-        pending.delete(task);
       }
     },
     async retire() {

@@ -2,7 +2,7 @@
 
 独立的 LLM Gateway 后端，使用 **Hono + Bun 1.4.4**，原生 `bun check`、`bun fmt` 和 oxlint。业务系统不在此仓库的运行依赖中。
 
-容量验收目标为本机最大稳定负载（历史目标 6000 RPS 已由用户裁决替代）。正式验收要求窗口内有效响应、精确结算与外部ACK共同完成，见[容量契约](docs/performance/capacity-contract.md)，当前实测见[T17 报告](docs/performance/capacity-2026-11-16.md)；长期高可用仍需独立基础设施验证。功能、测试和容量证据持续更新于[验收记录](validation.md)。
+正式 Gateway 的短 Chat JSON、短 SSE 和 5、30、120 秒 SSE 各自以稳定完成 3000 RPS 为验收目标。每个测量窗口核对同一请求的有效响应、精确结算和外部 ACK。各档位实测和持续验收条件见[容量契约](docs/performance/capacity-contract.md)，其他功能和测试证据见[验收记录](validation.md)。
 
 Gateway 管理技术组织/主体、项目、API Key/IP、模型别名、供应商连接、路由与限流，以及多币种钱包、赠送额度、预扣、有界正常授信、精确计费、退款冲正和 BullMQ 结算 worker。独立业务系统负责登录账号、商业组织关系、支付渠道、套餐和营销；通过幂等内部 API 入账，不直接访问 Gateway 数据库。见 [系统边界](architecture.md) 和 [计量契约](funds-and-billing.md)。
 

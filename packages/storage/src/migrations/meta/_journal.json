@@ -106,6 +106,20 @@
       "when": 1794965193527,
       "tag": "0014_attempts-metering-conflict",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1795020366828,
+      "tag": "0015_quota-live-deadline",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1795020375468,
+      "tag": "0016_quota-pending-release",
+      "breakpoints": true
     }
   ]
 }

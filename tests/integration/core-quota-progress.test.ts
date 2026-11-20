@@ -1,12 +1,15 @@
 import { expect, test } from "bun:test";
-import type { CoreVerifiedCallerProjection } from "@gateway/contracts";
-import { createInternalIdentityStore } from "@gateway/storage/internal-identity";
 import { createExecutionStore } from "@gateway/storage/execution";
 import { createSettlementStore } from "@gateway/storage/settlement";
 import { createQuotaLeases } from "@gateway/runtime/quota-leases";
-import { sha256 } from "@gateway/runtime/crypto";
 import { prepareFinancialAdmission, withFinancial } from "../support/financial-execution.ts";
-import { committed, event, granted, supplier } from "../support/core-settlement.ts";
+import {
+  committed,
+  event,
+  granted,
+  quotaRecoveryProjection,
+  supplier,
+} from "../support/core-settlement.ts";
 
 test(
   "short retry leases in an ineligible prefix cannot starve a later fully expired request",
@@ -134,27 +137,7 @@ test(
       }
       await Bun.sleep(Math.max(0, Date.parse(deadline) - Date.now() + 20));
       await db`UPDATE execution_quota_leases SET state='EXPIRED' WHERE request_id=${expiring.prepared.requestId}`;
-      const identities = createInternalIdentityStore(db);
-      const peer = (await identities.readPeerDirectory(owner.certificate_sha256))!;
-      const session = (await identities.readStartupSession(owner.session_id))!;
-      const projection: CoreVerifiedCallerProjection = {
-        service: session.service,
-        instance_id: session.instance_id,
-        certificate_sha256: session.certificate_sha256,
-        instance_revision: peer.instance_revision,
-        certificate_revision: peer.certificate_revision,
-        raw_body_sha256: sha256("completed-quota-release"),
-        session_id: session.session_id,
-        incarnation_id: session.incarnation_id,
-        key_sha256: session.public_key_sha256,
-        session_revision: session.session_revision,
-        command_type: "execution_quota_recovery_v1",
-        command_id: crypto.randomUUID(),
-        method: "POST",
-        normalized_path: "/_internal/core/v1/quota-recovery",
-        deadline_at: new Date(Date.now() + 20000).toISOString(),
-        trace_id: "quota-expiry-race",
-      };
+      const projection = await quotaRecoveryProjection(db, owner, "quota-expiry-race");
       const store = createExecutionStore(db);
       expect(await store.recoverQuota(projection, completed)).toEqual({ released: 6 });
       expect(

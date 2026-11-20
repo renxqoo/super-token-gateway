@@ -2,6 +2,7 @@ import type { SQL } from "bun";
 import type { CoreVerifiedCallerProjection, ExecutionEnvelope } from "@gateway/contracts";
 import { Batcher } from "@gateway/runtime/batcher";
 import { withDatabaseTransaction } from "../transaction.ts";
+export { createShortChatAdmissionStore, createShortChatFundingScheduler } from "./short-chat.ts";
 export class ExecutionOutcomeUnknown extends Error {
   constructor() {
     super("identity_store_unavailable");
@@ -25,7 +26,29 @@ function forDispatch({ proofDeadline, computed, ...item }: ExecutionBatchItem) {
         : { ...computed, proof_remaining_ms: Math.floor(proofDeadline - performance.now()) },
   };
 }
-export function createExecutionStore(db: SQL) {
+
+async function runPreflight<T>(
+  query: PromiseLike<T> & { cancel(): unknown },
+  signal?: AbortSignal,
+) {
+  signal?.throwIfAborted();
+  const cancel = () => {
+    query.cancel();
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    const result = await query;
+    signal?.throwIfAborted();
+    return result;
+  } catch (error) {
+    signal?.throwIfAborted();
+    throw error;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+  }
+}
+
+export function createExecutionStore(db: SQL, preflightDb = db) {
   let quotaCursor: unknown = null;
   let quotaCursorVersion = 0;
   const batch = new Batcher<ExecutionBatchItem, Record<string, unknown>>(
@@ -58,24 +81,14 @@ export function createExecutionStore(db: SQL) {
       for (let delay = 1; ; delay = Math.min(delay * 2, 16)) {
         signal?.throwIfAborted();
         if (lastBusyError !== undefined && !(performance.now() < until)) throw lastBusyError;
-        const query = db`SELECT core_context_v1(${projection(p)}::jsonb,${id}::uuid,${input}::jsonb) value`;
-        const cancel = () => {
-          query.cancel();
-        };
-        signal?.addEventListener("abort", cancel, { once: true });
-        if (signal?.aborted) cancel();
+        const query = preflightDb`SELECT core_context_v1(${projection(p)}::jsonb,${id}::uuid,${input}::jsonb) value`;
         try {
-          const rows = await query;
-          signal?.throwIfAborted();
-          return rows[0].value;
+          return (await runPreflight(query, signal))[0].value;
         } catch (error) {
-          signal?.throwIfAborted();
           const code = (error as { errno?: string } | null)?.errno;
           if ((code !== "55P03" && code !== "P0503") || !(performance.now() + delay < until))
             throw error;
           lastBusyError = error;
-        } finally {
-          signal?.removeEventListener("abort", cancel);
         }
         await Bun.sleep(delay);
       }
@@ -85,24 +98,34 @@ export function createExecutionStore(db: SQL) {
       e: ExecutionEnvelope,
       contextId: string,
       route?: { verifier: string; ip: string; model: string },
+      signal?: AbortSignal,
     ) {
       const caller = projection(p);
       const preflight = route
-        ? db`core_route_authority_v1(${caller}::jsonb,${route.verifier},${route.ip},${route.model})`
-        : db`core_preflight_v1(${caller}::jsonb,${contextId}::uuid,NULL)`;
-      return (
-        await db<{ receipt: unknown; context: unknown }[]>`
+        ? preflightDb`core_route_authority_v1(${caller}::jsonb,${route.verifier},${route.ip},${route.model})`
+        : preflightDb`core_preflight_v1(${caller}::jsonb,${contextId}::uuid,NULL)`;
+      const rows = await runPreflight(
+        preflightDb<{ receipt: unknown; context: unknown }[]>`
           WITH existing AS MATERIALIZED (SELECT core_lookup_v1(${caller}::jsonb,${e}::jsonb) receipt)
-          SELECT receipt,CASE WHEN receipt IS NULL THEN ${preflight} END context FROM existing`
-      )[0]!;
+          SELECT receipt,CASE WHEN receipt IS NULL THEN ${preflight} END context FROM existing`,
+        signal,
+      );
+      return rows[0]!;
     },
-    async prepareBegin(p: CoreVerifiedCallerProjection, e: ExecutionEnvelope, attemptId: string) {
+    async prepareBegin(
+      p: CoreVerifiedCallerProjection,
+      e: ExecutionEnvelope,
+      attemptId: string,
+      signal?: AbortSignal,
+    ) {
       const caller = projection(p);
-      return (
-        await db<{ receipt: unknown; leases: unknown }[]>`
+      const rows = await runPreflight(
+        preflightDb<{ receipt: unknown; leases: unknown }[]>`
           WITH existing AS MATERIALIZED (SELECT core_lookup_v1(${caller}::jsonb,${e}::jsonb) receipt)
-          SELECT receipt,CASE WHEN receipt IS NULL THEN core_preflight_v1(${caller}::jsonb,NULL,${attemptId}::uuid) END leases FROM existing`
-      )[0]!;
+          SELECT receipt,CASE WHEN receipt IS NULL THEN core_preflight_v1(${caller}::jsonb,NULL,${attemptId}::uuid) END leases FROM existing`,
+        signal,
+      );
+      return rows[0]!;
     },
     async readLeaseState(p: CoreVerifiedCallerProjection, attemptId: string) {
       return (

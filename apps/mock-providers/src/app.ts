@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { setTimeout as sleep } from "node:timers/promises";
 
 export interface Scenario {
   status?: number;
@@ -9,6 +10,7 @@ export interface Scenario {
   firstEventDelayMs?: number;
   chunkDelayMs?: number;
   chunkBytes?: number;
+  streamDurationMs?: number;
   jsonChunkDelayMs?: number;
   jsonChunkBytes?: number;
   truncate?: boolean;
@@ -16,6 +18,7 @@ export interface Scenario {
   malformed?: boolean;
   tools?: boolean;
   output?: string;
+  echoRequestChallenge?: boolean;
   repeat?: number;
   omitUsage?: boolean;
   pollUsage?: boolean;
@@ -556,6 +559,16 @@ export function createMockApp(controlToken: string): {
           choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
         }),
       );
+      const challenge = scenario.echoRequestChallenge && !tool ? body.user : undefined;
+      if (
+        scenario.echoRequestChallenge &&
+        !tool &&
+        (typeof challenge !== "string" || !/^[0-9a-f-]{36}[0-9a-f]{8}$/.test(challenge))
+      )
+        return Response.json({ error: "missing request challenge" }, { status: 400 });
+      const textDeltas = tool ? [] : Array(scenario.repeat ?? 1).fill({ content: output });
+      if (typeof challenge === "string" && textDeltas.length)
+        textDeltas[textDeltas.length - 1] = { content: output + " " + challenge };
       for (const delta of tool
         ? [
             {
@@ -570,7 +583,7 @@ export function createMockApp(controlToken: string): {
             },
             { tool_calls: [{ index: 0, function: { arguments: '"北京"}' } }] },
           ]
-        : Array(scenario.repeat ?? 1).fill({ content: output }))
+        : textDeltas)
         events.push(sse({ id, model, choices: [{ index: 0, delta, finish_reason: null }] }));
       if (!scenario.truncate) {
         events.push(
@@ -590,28 +603,39 @@ export function createMockApp(controlToken: string): {
         events.length,
         sse({ error: { type: "mock_error", message: output } }, "error"),
       );
-    const all = new TextEncoder().encode(
-      scenario.whitespace
-        ? events.join("").replaceAll('"finish_reason":null', '"finish_reason" :  null')
-        : events.join(""),
-    );
+    const encoder = new TextEncoder();
+    const encode = (text: string) =>
+      encoder.encode(
+        scenario.whitespace
+          ? text.replaceAll('"finish_reason":null', '"finish_reason" :  null')
+          : text,
+      );
+    const duration = scenario.streamDurationMs;
+    if (
+      duration !== undefined &&
+      (!Number.isSafeInteger(duration) || duration < 1 || duration > 120000)
+    )
+      return Response.json({ error: "invalid stream duration" }, { status: 400 });
+    const paced = duration === undefined ? undefined : events.map(encode);
+    const all = paced ? undefined : encode(events.join(""));
+    const started = performance.now();
+    const delay = new AbortController();
+    let frame = 0;
     let position = 0;
     let closed = false;
     stats.active++;
-    const close = () => {
+    const close = (cancelled = false) => {
       if (!closed) {
         closed = true;
         stats.active--;
+        if (cancelled) stats.cancellations++;
+        request.signal.removeEventListener("abort", abort);
+        delay.abort();
       }
     };
-    request.signal.addEventListener(
-      "abort",
-      () => {
-        if (!closed) stats.cancellations++;
-        close();
-      },
-      { once: true },
-    );
+    const abort = () => close(true);
+    if (request.signal.aborted) abort();
+    else request.signal.addEventListener("abort", abort, { once: true });
     return new Response(
       new ReadableStream<Uint8Array>(
         {
@@ -620,23 +644,44 @@ export function createMockApp(controlToken: string): {
               writer.close();
               return;
             }
-            if (position === 0 && scenario.firstEventDelayMs)
-              await Bun.sleep(scenario.firstEventDelayMs);
-            if (scenario.chunkDelayMs) await Bun.sleep(scenario.chunkDelayMs);
-            if (position >= all.length) {
+            try {
+              if (paced) {
+                const sendAt =
+                  started + duration! * (Math.max(0, frame - 1) / Math.max(1, paced.length - 2));
+                for (
+                  let wait = sendAt - performance.now();
+                  wait > 0;
+                  wait = sendAt - performance.now()
+                )
+                  await sleep(Math.ceil(wait), undefined, { signal: delay.signal });
+                const chunk = paced[frame++]!;
+                stats.bytes += chunk.byteLength;
+                writer.enqueue(chunk);
+                if (frame < paced.length) return;
+              } else {
+                if (position === 0 && scenario.firstEventDelayMs)
+                  await sleep(scenario.firstEventDelayMs, undefined, { signal: delay.signal });
+                if (scenario.chunkDelayMs)
+                  await sleep(scenario.chunkDelayMs, undefined, { signal: delay.signal });
+                if (position < all!.length) {
+                  const size = scenario.chunkBytes ?? 16384;
+                  const chunk = all!.slice(position, position + size);
+                  position += chunk.byteLength;
+                  stats.bytes += chunk.byteLength;
+                  writer.enqueue(chunk);
+                  return;
+                }
+              }
+            } catch (error) {
+              if (closed) return;
               close();
-              writer.close();
-              return;
+              throw error;
             }
-            const size = scenario.chunkBytes ?? 16384;
-            const chunk = all.slice(position, position + size);
-            position += chunk.length;
-            stats.bytes += chunk.length;
-            writer.enqueue(chunk);
+            close();
+            writer.close();
           },
           cancel() {
-            if (!closed) stats.cancellations++;
-            close();
+            abort();
           },
         },
         { highWaterMark: 16384, size: (chunk) => chunk?.byteLength ?? 0 },

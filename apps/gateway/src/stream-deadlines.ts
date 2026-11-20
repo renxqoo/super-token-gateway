@@ -24,28 +24,59 @@ export function stallGuard(
   first: Uint8Array | undefined,
   stallMs: number,
   stalled: () => void,
+  signal?: AbortSignal,
 ): ReadableStream<Uint8Array> {
   let held = first,
-    timer: ReturnType<typeof setTimeout> | undefined;
+    timer: ReturnType<typeof setTimeout> | undefined,
+    onAbort: (() => void) | undefined,
+    closed = false;
+  function finish() {
+    closed = true;
+    held = undefined;
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+  }
   return new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (!signal) return;
+      onAbort = () => {
+        if (closed) return;
+        finish();
+        controller.error(signal.reason);
+        void chunks.return(undefined).catch(() => undefined);
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    },
     async pull(controller) {
       clearTimeout(timer);
       let value = held;
       held = undefined;
       if (!value) {
-        const next = await chunks.next();
-        if (next.done) return controller.close();
-        value = next.value;
+        try {
+          const next = await chunks.next();
+          if (closed) return;
+          if (next.done) {
+            finish();
+            return controller.close();
+          }
+          value = next.value;
+        } catch (error) {
+          finish();
+          throw error;
+        }
       }
       controller.enqueue(value);
       timer = setTimeout(() => {
+        if (closed) return;
+        finish();
         stalled();
         controller.error(new Error("Downstream stalled"));
-        void chunks.return(undefined);
+        void chunks.return(undefined).catch(() => undefined);
       }, stallMs);
     },
     async cancel() {
-      clearTimeout(timer);
+      finish();
       await chunks.return(undefined);
     },
   });

@@ -1,4 +1,4 @@
-import { LatencyHistogram, validChat } from "./benchmark-lib.ts";
+import { createChatStreamReader, LatencyHistogram, validChat } from "./benchmark-lib.ts";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createIdentityWriter } from "./capacity-evidence.ts";
@@ -40,6 +40,7 @@ if (!token) throw new Error("BENCH_API_KEY or .local/client.env is required");
 const duration = Number(option("--seconds", "15"));
 const concurrency = Number(option("--concurrency", "32"));
 const rate = Number(option("--rate", "0"));
+const fillSeconds = Number(option("--fill-seconds", "0"));
 const warmupConcurrency = Number(
   option("--warmup-concurrency", String(Math.min(256, concurrency))),
 );
@@ -64,22 +65,59 @@ if (
   duration > 3600 ||
   !Number.isSafeInteger(concurrency) ||
   concurrency < 1 ||
-  concurrency > 8192
+  concurrency > 10000
 )
   throw new Error("Invalid benchmark bounds");
 const output = option("--output", `reports/gateway-${Date.now()}.json`);
-await mkdir(dirname(output), { recursive: true });
-const identityPath = `${output}.identities.tsv`;
-const identityWriter = recordIds ? await createIdentityWriter(identityPath) : undefined;
 const model = option("--model", client.GATEWAY_MODEL ?? "");
 if (!model) throw new Error("--model or .local/client.env is required");
 const stream = options.includes("--stream");
-const payload = JSON.stringify({
+if (
+  !Number.isSafeInteger(fillSeconds) ||
+  fillSeconds < 0 ||
+  fillSeconds > 122 ||
+  (fillSeconds > 0 && (!stream || !rate || !recordIds))
+)
+  throw new Error("A stream fill phase requires bounded open-loop arrivals and identity evidence");
+const chatRequest = {
   model,
   messages: [{ role: "user", content: "benchmark input" }],
   max_completion_tokens: 32,
   stream,
-});
+};
+const fixedPayload = JSON.stringify(chatRequest);
+const upstreamChallenge = options.includes("--upstream-challenge");
+const challengePrefix = upstreamChallenge ? crypto.randomUUID() : "";
+let challengeSequence = 0;
+const expectedText = option("--expected-text", "") || undefined;
+const repetitions = options.includes("--expected-text-repetitions")
+  ? Number(option("--expected-text-repetitions", ""))
+  : undefined;
+if (upstreamChallenge && (!stream || repetitions === undefined))
+  throw new Error("An upstream challenge requires deterministic stream text");
+const challengeBytes = upstreamChallenge ? 1 + challengePrefix.length + 8 : 0;
+if (
+  repetitions !== undefined &&
+  (!stream ||
+    !expectedText ||
+    !Number.isSafeInteger(repetitions) ||
+    repetitions < 1 ||
+    repetitions * Buffer.byteLength(expectedText) + challengeBytes > 1048576)
+)
+  throw new Error("Invalid repeated stream text for the 1 MiB response budget");
+const streamText =
+  repetitions === undefined ? expectedText : { exact: expectedText!.repeat(repetitions) };
+await mkdir(dirname(output), { recursive: true });
+const identityPath = `${output}.identities.tsv`;
+const identityWriter = recordIds ? await createIdentityWriter(identityPath) : undefined;
+const dispatchPath = `${output}.dispatch.tsv`;
+const dispatchWriter = stream && recordIds ? await createIdentityWriter(dispatchPath) : undefined;
+const firstFrameLatency = new LatencyHistogram();
+const firstContentLatency = new LatencyHistogram();
+const contentGaps = new LatencyHistogram();
+let sseHeaders = 0;
+let sseDone = 0;
+let sseErrorFrames = 0;
 const poolOptions = {
   keepAlive: true,
   maxSockets: concurrency,
@@ -91,9 +129,36 @@ const httpsAgent = new HttpsAgent(poolOptions);
 const call = (
   target: string,
   apiKey: string,
-): Promise<{ status: number; body: string; requestId?: string; firstByteMs?: number }> =>
+): Promise<{
+  status: number;
+  body: string;
+  valid: boolean;
+  requestId?: string;
+  firstByteMs?: number;
+}> =>
   new Promise((resolve, reject) => {
+    const challenge = upstreamChallenge
+      ? challengePrefix + (++challengeSequence).toString(16).padStart(8, "0")
+      : undefined;
+    const payload = challenge ? JSON.stringify({ ...chatRequest, user: challenge }) : fixedPayload;
+    const expectedStream =
+      challenge && typeof streamText === "object"
+        ? { exact: streamText.exact + " " + challenge }
+        : streamText;
     const began = performance.now();
+    const expiresAt = began + requestTimeoutMs;
+    function expire() {
+      const error = Object.assign(new Error("Benchmark request deadline"), {
+        code: "REQUEST_DEADLINE",
+      });
+      reject(error);
+      request.destroy(error);
+    }
+    function expiredStream(observedAt: number) {
+      if (!stream || observedAt < expiresAt) return false;
+      expire();
+      return true;
+    }
     const secure = new URL(target).protocol === "https:";
     const request = (secure ? httpsRequest : httpRequest)(
       `${target.replace(/\/$/, "")}/v1/chat/completions`,
@@ -107,11 +172,35 @@ const call = (
         },
       },
       (response) => {
+        let observedAt = performance.now();
+        response.once("error", reject);
+        if (expiredStream(observedAt)) return;
+        const isSse =
+          stream &&
+          response.statusCode === 200 &&
+          response.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() ===
+            "text/event-stream";
+        if (isSse && measuring) sseHeaders++;
+        let lastContentAt = began;
+        const reader = isSse
+          ? createChatStreamReader(expectedStream, (event) => {
+              if (!measuring) return;
+              if (event === "firstFrame") firstFrameLatency.add(observedAt - began);
+              else if (event === "firstContent" || event === "nextContent") {
+                if (event === "firstContent") firstContentLatency.add(observedAt - began);
+                else contentGaps.add(observedAt - lastContentAt);
+                lastContentAt = observedAt;
+              } else if (event === "done") sseDone++;
+              else sseErrorFrames++;
+            })
+          : undefined;
         const chunks: Buffer[] = [];
         let size = 0;
         let firstByteMs: number | undefined;
         response.on("data", (chunk: Buffer) => {
-          firstByteMs ??= performance.now() - began;
+          observedAt = performance.now();
+          if (expiredStream(observedAt)) return;
+          firstByteMs ??= observedAt - began;
           size += chunk.byteLength;
           if (size > 1048576)
             request.destroy(
@@ -119,34 +208,36 @@ const call = (
                 code: "RESPONSE_BUDGET",
               }),
             );
+          else if (reader) reader.feed(chunk);
           else chunks.push(chunk);
         });
-        response.once("error", reject);
-        response.once("end", () =>
+        response.once("end", () => {
+          observedAt = performance.now();
+          if (expiredStream(observedAt)) return;
+          const body = reader ? "" : Buffer.concat(chunks).toString("utf8");
           resolve({
             status: response.statusCode ?? 0,
-            body: Buffer.concat(chunks).toString("utf8"),
+            body,
+            valid: reader
+              ? reader.finish()
+              : !stream && response.statusCode === 200 && validChat(body, false, expectedText),
             ...(typeof response.headers["x-request-id"] === "string"
               ? { requestId: response.headers["x-request-id"] }
               : {}),
             ...(firstByteMs === undefined ? {} : { firstByteMs }),
-          }),
-        );
+          });
+        });
       },
     );
     const deadline = setTimeout(
-      () =>
-        request.destroy(
-          Object.assign(new Error("Benchmark request deadline"), { code: "REQUEST_DEADLINE" }),
-        ),
-      requestTimeoutMs,
+      expire,
+      stream ? Math.max(0, Math.ceil(expiresAt - performance.now())) : requestTimeoutMs,
     );
     request.once("error", reject);
     request.once("close", () => clearTimeout(deadline));
     request.end(payload);
   });
 const latencies = new LatencyHistogram();
-const expectedText = option("--expected-text", "") || undefined;
 const windows = new Map<
   number,
   { completed: number; succeeded: number; invalid: number; latency: LatencyHistogram }
@@ -171,10 +262,12 @@ let measuring = false;
 let measuredStart = 0;
 let deadline = performance.now() + 1000;
 let warmupFailures = 0;
+const warmupErrors = new Map<string, number>();
 let offered = 0;
 let shed = 0;
 const invoke = async (arrivalWindow?: number) => {
   const started = performance.now();
+  const issuedAt = dispatchWriter ? Date.now() : undefined;
   const issuedWindow = arrivalWindow ?? Math.floor((started - measuredStart) / 60000);
   let status = 0;
   let valid = false;
@@ -194,10 +287,11 @@ const invoke = async (arrivalWindow?: number) => {
     status = response.status;
     requestId = response.requestId;
     const body = response.body;
-    valid = status === 200 && validChat(body, stream, expectedText);
+    valid = response.valid;
     if (measuring && valid && response.firstByteMs !== undefined)
       firstByteLatency.add(response.firstByteMs);
-    if (measuring && status >= 400) {
+    if (status >= 400) {
+      const errors = measuring ? gatewayErrors : warmupErrors;
       let code = "other";
       try {
         const value: unknown = JSON.parse(body);
@@ -207,13 +301,13 @@ const invoke = async (arrivalWindow?: number) => {
             if (
               typeof error.code === "string" &&
               /^[a-z][a-z0-9_]{0,63}$/.test(error.code) &&
-              (gatewayErrors.has(error.code) || gatewayErrors.size < 32)
+              (errors.has(error.code) || errors.size < 32)
             )
               code = error.code;
           }
         }
       } catch {}
-      gatewayErrors.set(code, (gatewayErrors.get(code) ?? 0) + 1);
+      errors.set(code, (errors.get(code) ?? 0) + 1);
     }
   } catch (error) {
     const fault = error as { code?: unknown; name?: unknown };
@@ -250,7 +344,11 @@ const invoke = async (arrivalWindow?: number) => {
       }
       issuedLatency.add(latencyMs);
       if (identityWriter && valid) {
-        await identityWriter.write([requestId ?? ""], completedAt);
+        const ids = [requestId ?? ""];
+        await Promise.all([
+          identityWriter.write(ids, completedAt),
+          issuedAt === undefined ? undefined : dispatchWriter?.write(ids, issuedAt),
+        ]);
       }
     }
   }
@@ -260,19 +358,23 @@ await Promise.all(
     while (performance.now() < deadline) await invoke();
   }),
 );
-if (warmupFailures) throw new Error(`Warmup produced ${warmupFailures} invalid responses`);
+if (warmupFailures)
+  throw new Error(
+    `Warmup produced ${warmupFailures} invalid responses out of ${warmupRequests}: ${JSON.stringify({ gateway: Object.fromEntries(warmupErrors), transport: Object.fromEntries(transportErrors) })}`,
+  );
 measuring = true;
-const measurementStartedAt = new Date().toISOString();
+const arrivalsStartedAt = Date.now();
+const measurementStartedAt = new Date(arrivalsStartedAt + fillSeconds * 1000).toISOString();
 const started = performance.now();
 const cpuStart = process.cpuUsage();
-measuredStart = started;
-deadline = started + duration * 1000;
+measuredStart = started + fillSeconds * 1000;
+deadline = measuredStart + duration * 1000;
 const sampler = setInterval(() => {
   peakRSS = Math.max(peakRSS, process.memoryUsage().rss);
 }, 100);
 if (rate > 0) {
   const pending = new Set<Promise<void>>();
-  const planned = duration * rate;
+  const planned = (duration + fillSeconds) * rate;
   let previousTick = started;
   while (offered < planned) {
     const now = performance.now();
@@ -283,7 +385,7 @@ if (rate > 0) {
     const admitted = Math.min(due, concurrency - pending.size);
     inflightShed += due - admitted;
     for (let i = 0; i < admitted; i++) {
-      const task = invoke(Math.floor((offered - due + i) / (rate * 60)));
+      const task = invoke(Math.floor((offered - due + i - fillSeconds * rate) / (rate * 60)));
       pending.add(task);
       void task.finally(() => pending.delete(task));
     }
@@ -308,7 +410,7 @@ httpAgent.destroy();
 httpsAgent.destroy();
 const elapsed = (performance.now() - started) / 1000;
 const cpu = process.cpuUsage(cpuStart);
-await identityWriter?.close();
+await Promise.all([identityWriter?.close(), dispatchWriter?.close()]);
 const quantile = (value: number) => latencies.quantile(value);
 const report = {
   label: option("--label", "gateway"),
@@ -326,6 +428,7 @@ const report = {
   duration_seconds: elapsed,
   concurrency,
   measurement_started_at: measurementStartedAt,
+  ...(fillSeconds ? { arrivals_started_at: new Date(arrivalsStartedAt).toISOString() } : {}),
   hot_wallet_share: hotShare,
   wallet_calls: Array.from(walletCalls),
   load_model: rate > 0 ? "open-loop" : "closed-loop",
@@ -338,12 +441,29 @@ const report = {
   scheduler_gap_ms:
     rate > 0 ? { p99: schedulingGaps.quantile(0.99), max: schedulingGaps.quantile(1) } : undefined,
   load_generator_cpu_seconds: (cpu.user + cpu.system) / 1e6,
+  ...(stream
+    ? {
+        sse: {
+          response_headers: sseHeaders,
+          ...(upstreamChallenge ? { upstream_challenge: true } : {}),
+          first_frame: firstFrameLatency.count,
+          first_content: firstContentLatency.count,
+          done: sseDone,
+          error_frames: sseErrorFrames,
+          first_frame_p99_ms: firstFrameLatency.quantile(0.99),
+          first_content_p99_ms: firstContentLatency.quantile(0.99),
+          content_gap_samples: contentGaps.count,
+          content_gap_p99_ms: contentGaps.count ? contentGaps.quantile(0.99) : null,
+        },
+      }
+    : {}),
   first_body_byte_ms: {
     p50: firstByteLatency.quantile(0.5),
     p95: firstByteLatency.quantile(0.95),
     p99: firstByteLatency.quantile(0.99),
   },
   ...(recordIds ? { identity_log: identityPath } : {}),
+  ...(dispatchWriter ? { dispatch_log: dispatchPath } : {}),
   completed,
   succeeded,
   invalid,

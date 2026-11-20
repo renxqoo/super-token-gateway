@@ -1,7 +1,9 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type { createTerminalBudget } from "./terminal-budget.ts";
 import { verifiedPackageRuntime } from "@gateway/plugin-sdk";
 import {
   GatewayError,
+  isInitialStreamTerminalGroup,
   dispatchProjectionV2Schema,
   executionRejectionStatus,
   prepBindingV2,
@@ -12,7 +14,11 @@ import {
   type SignedCoreEvidenceEventV1,
   type DispatchProjectionV2,
 } from "@gateway/contracts";
-import { CoreRpcError, type createCoreRpcClient } from "@gateway/core-client";
+import {
+  CoreRpcDispatchCancelled,
+  CoreRpcError,
+  type createCoreRpcClient,
+} from "@gateway/core-client";
 import {
   parseClientJson,
   requestCharacters,
@@ -59,6 +65,8 @@ export type ChatDependencies = {
   host: Awaited<ReturnType<typeof createGatewayPluginRuntime>>;
   transport: ReturnType<typeof createTransport>;
   publish: (events: SignedCoreEvidenceEventV1[]) => Promise<void>;
+  recoverTerminal?: (events: SignedCoreEvidenceEventV1[]) => Promise<void>;
+  recoverStreamTerminal?: (events: SignedCoreEvidenceEventV1[]) => Promise<void>;
   grants: ReturnType<typeof createSendRegistry>;
   terminalBudget: ReturnType<typeof createTerminalBudget>;
 };
@@ -96,6 +104,7 @@ type Facts = {
 };
 type Candidate = ExecutionContextResponse["candidates"][number];
 type Plan = {
+  streamTerminalDimensions?: string[];
   converted: Protocol | undefined;
   attempt: Attempt;
   attemptId: string;
@@ -114,9 +123,17 @@ type Plan = {
 };
 type Permit = { attemptId: string; permitEpoch: string };
 type HealthOutcome = "SUCCESS" | "FAILURE" | "NOT_SENT";
-type Admitted = Plan & Permit & { begin: Record<string, string> };
+type Admitted = Plan &
+  Permit & {
+    begin: Record<string, string>;
+    committedGrant?: { reply: ExecutionReply; beganAt: number };
+  };
 type CloseReason = "COMPLETED" | "FAILED" | "CANCELLED" | "DRAINED";
-type Ending = { outcome: AttemptOutcome; reason: CloseReason; outputBytes?: number };
+type Ending = {
+  outcome: AttemptOutcome;
+  reason: CloseReason;
+  outputBytes?: number;
+};
 type TerminalReservation = ReturnType<ChatDependencies["terminalBudget"]["reserve"]>;
 type Outcome =
   { response: Response } | { retry: GatewayError; conclude: (last: boolean) => Promise<void> };
@@ -165,6 +182,8 @@ export function coreFailure(error: unknown): GatewayError {
   if (error instanceof GatewayError) return error;
   if (error instanceof CoreRpcError) {
     const code = error.detail.code;
+    if (code === "internal_capacity" && error.status === undefined)
+      return new GatewayError(503, "overloaded", "The gateway is at capacity");
     if (code === "resource_not_found")
       return new GatewayError(404, "not_found", "Resource not found");
     if (code === "resource_provider_mismatch")
@@ -298,34 +317,52 @@ async function requestFacts(request: ChatRequest, totalTimeoutMs: number): Promi
   };
 }
 
+function locallyUnattempted(error: unknown) {
+  return (
+    error instanceof CoreRpcDispatchCancelled ||
+    (error instanceof CoreRpcError &&
+      error.status === undefined &&
+      error.detail.command_state === "NOT_ATTEMPTED")
+  );
+}
+
 async function whileBusy<T>(request: ChatRequest, facts: Facts, run: () => Promise<T>) {
+  let uncertain: CoreRpcError | undefined;
   for (let delay = 25; ; delay = Math.min(delay * 2, 200)) {
+    if (request.signal.aborted) throw uncertain ?? new CoreRpcDispatchCancelled();
     try {
       return await run();
     } catch (error) {
-      if (
-        !(error instanceof CoreRpcError) ||
-        (error.detail.code !== "identity_busy" && error.detail.code !== "internal_capacity") ||
-        request.signal.aborted ||
-        Date.now() + delay >= Date.parse(facts.deadlineAt)
-      )
+      if (!(error instanceof CoreRpcError) || !error.retryableAdmissionBusy) {
+        if (
+          uncertain &&
+          (error instanceof CoreRpcDispatchCancelled ||
+            (error instanceof CoreRpcError && error.detail.command_state === "NOT_ATTEMPTED"))
+        )
+          throw uncertain;
         throw error;
-      await Bun.sleep(delay);
+      }
+      if (error.detail.command_state === "UNKNOWN") uncertain = error;
+      if (request.signal.aborted || Date.now() + delay >= Date.parse(facts.deadlineAt))
+        throw uncertain ?? error;
+      try {
+        await sleep(delay, undefined, { signal: request.signal });
+      } catch {
+        throw uncertain ?? error;
+      }
     }
   }
 }
 
 async function openContext(deps: ChatDependencies, request: ChatRequest, facts: Facts) {
+  const commandId = crypto.randomUUID();
   try {
     return (await whileBusy(request, facts, () =>
       deps.core.execution(
         "execution_context_v1",
         {
           customer_token: request.token,
-          ...(facts.operation === "chat" &&
-          !facts.stream &&
-          !facts.background &&
-          !facts.references.length
+          ...(facts.operation === "chat" && !facts.background && !facts.references.length
             ? { route_projection: true }
             : {}),
           ip: request.ip,
@@ -336,11 +373,11 @@ async function openContext(deps: ChatDependencies, request: ChatRequest, facts: 
             ? { resource_ids: [...new Set(facts.references.map((r) => r.resourceId))] }
             : {}),
         },
-        { deadlineAt: facts.deadlineAt },
+        { commandId, deadlineAt: facts.deadlineAt, dispatchSignal: request.signal },
       ),
     )) as ExecutionContextResponse;
   } catch (error) {
-    throw coreFailure(error);
+    throw halt(request).error(coreFailure(error));
   }
 }
 
@@ -545,6 +582,13 @@ async function plan(
     });
     const prepSessionId = crypto.randomUUID();
     return {
+      ...(deps.config.commit_short_chat_sse &&
+      facts.stream &&
+      facts.operation === "chat" &&
+      candidate.customer_basis === "REQUEST_COMPLETION" &&
+      !converted
+        ? { streamTerminalDimensions: Object.keys(candidate.cost_rates) }
+        : {}),
       commit,
       files: new Map(
         (context.resources ?? []).map((resource) => [resource.remote_id, resource.resource_id]),
@@ -594,9 +638,17 @@ async function reserve(
 ): Promise<Admitted> {
   let reply: ExecutionReply;
   const commandId = crypto.randomUUID();
+  let beganAt = performance.now();
+  const combined =
+    deps.config.commit_short_chat &&
+    !previous &&
+    facts.operation === "chat" &&
+    facts.references.length === 0 &&
+    Boolean(context.route_ticket);
   try {
-    reply = (await whileBusy(request, facts, () =>
-      previous
+    reply = (await whileBusy(request, facts, () => {
+      beganAt = performance.now();
+      return previous
         ? deps.core.execution(
             "execution_next_v1",
             {
@@ -609,6 +661,7 @@ async function reserve(
             {
               commandId,
               deadlineAt: facts.deadlineAt,
+              dispatchSignal: request.signal,
               ...(context.route_ticket ? { routeTicket: context.route_ticket } : {}),
             },
           )
@@ -623,16 +676,19 @@ async function reserve(
                 : null,
               fingerprint: facts.fingerprint,
               customer_currency: context.customer_currency,
+              ...(combined ? { commit_send: true } : {}),
             },
             {
               commandId,
               deadlineAt: facts.deadlineAt,
+              dispatchSignal: request.signal,
               ...(context.route_ticket ? { routeTicket: context.route_ticket } : {}),
             },
-          ),
-    )) as ExecutionReply;
+          );
+    })) as ExecutionReply;
   } catch (error) {
     planned.attempt.dispose();
+    if (locallyUnattempted(error)) throw halt(request).error(coreFailure(error));
     const abandoned = {
       attemptId: planned.attemptId,
       permitEpoch: "1",
@@ -646,7 +702,19 @@ async function reserve(
         deps,
         previous ? "execution_next_v1" : "execution_admit_v1",
         commandId,
+        combined &&
+          (!(error instanceof CoreRpcError) || error.detail.retryability === "STATUS_ONLY")
+          ? Date.now() + 3200
+          : undefined,
       );
+      if (
+        combined &&
+        receipt?.state === "SEND_GRANTED" &&
+        receipt.request_id === facts.requestId &&
+        receipt.attempt_id === planned.attemptId &&
+        receipt.permit_epoch === "1"
+      )
+        await recordUnsentGrant(deps, abandoned, request).catch(() => undefined);
       if (receipt?.command_state === "COMMITTED" && receipt.state === "RESERVED") {
         await abortBeforeSend(
           deps,
@@ -654,11 +722,11 @@ async function reserve(
           "PREPARE_DISPOSED",
           !previous,
         );
-        throw coreFailure(error);
+        throw halt(request).error(coreFailure(error));
       }
     }
     await reportHealth(deps, abandoned, "NOT_SENT");
-    const failure = coreFailure(error);
+    const failure = halt(request).error(coreFailure(error));
     if (
       error instanceof CoreRpcError &&
       error.detail.command_state === "NOT_ATTEMPTED" &&
@@ -677,7 +745,8 @@ async function reserve(
     dispatch_projection: planned.dispatch.dispatch_projection,
   };
   if (
-    reply.receipt.state !== "RESERVED" ||
+    reply.receipt.state !== (combined ? "SEND_GRANTED" : "RESERVED") ||
+    (combined && !reply.transient_send) ||
     reply.receipt.request_id !== facts.requestId ||
     reply.receipt.attempt_id !== planned.attemptId ||
     canonical(reply.receipt.authorization_plan ?? null) !== canonical(expectedPlan) ||
@@ -685,6 +754,16 @@ async function reserve(
       sha256(canonical(["stg.internal.host-authorization-plan", "2", expectedPlan]))
   ) {
     planned.attempt.dispose();
+    if (
+      combined &&
+      reply.receipt.state === "SEND_GRANTED" &&
+      reply.receipt.request_id === facts.requestId &&
+      reply.receipt.attempt_id === planned.attemptId &&
+      permitEpoch === "1"
+    )
+      await recordUnsentGrant(deps, { attemptId: planned.attemptId, permitEpoch }, request).catch(
+        () => undefined,
+      );
     if (reply.receipt.state === "RESERVED")
       await abortBeforeSend(
         deps,
@@ -702,6 +781,7 @@ async function reserve(
   return {
     ...planned,
     permitEpoch,
+    ...(combined ? { committedGrant: { reply, beganAt } } : {}),
     begin: {
       attempt_id: planned.attemptId,
       permit_epoch: permitEpoch,
@@ -711,6 +791,29 @@ async function reserve(
       prep_binding_digest: planned.dispatch.prep_binding_digest as string,
     },
   };
+}
+
+async function recordUnsentGrant(deps: ChatDependencies, permit: Permit, request: ChatRequest) {
+  const stop = halt(request);
+  try {
+    await deps.publish([
+      deps.core.signEvidence({
+        event_id: crypto.randomUUID(),
+        attempt_id: permit.attemptId,
+        permit_epoch: permit.permitEpoch,
+        source: "execution",
+        source_revision: "1",
+        finality: "NOT_EXECUTED",
+        usage: {},
+        final_dimensions: [],
+        attempt_state: "NOT_EXECUTED",
+        request_state: "FAILED",
+        error_code: "send_not_authorized",
+      }),
+    ]);
+  } finally {
+    await closeRequest(deps, permit, stop.reason);
+  }
 }
 
 function resolvedDocument(facts: Facts, context: ExecutionContextResponse) {
@@ -903,6 +1006,11 @@ function upstreamRejection(status: number) {
   );
 }
 
+function requireLiveRequest(request: ChatRequest) {
+  if (request.signal.aborted)
+    throw halt(request).error(new GatewayError(499, "cancelled", "Request cancelled"));
+}
+
 function halt(request: ChatRequest) {
   const drained = request.drain.aborted,
     cancelled = !drained && request.signal.aborted;
@@ -926,21 +1034,24 @@ async function queryCommand(
   deps: ChatDependencies,
   kind: "execution_admit_v1" | "execution_next_v1" | "execution_begin_v1",
   commandId: string,
+  absenceUntil?: number,
 ) {
-  for (let attempt = 0; attempt < 5; attempt++) {
+  let lastAbsent: ExecutionReply["receipt"] | undefined;
+  for (let attempt = 0; absenceUntil ? Date.now() < absenceUntil : attempt < 5; attempt++) {
     try {
-      return (
+      const receipt = (
         (await deps.core.execution(
           "execution_query_v1",
           { kind, command_id: commandId },
           shortDeadline(),
         )) as ExecutionReply
       ).receipt;
-    } catch {
-      await Bun.sleep(200 * (attempt + 1));
-    }
+      if (!absenceUntil || receipt.command_state !== "NOT_FOUND") return receipt;
+      lastAbsent = receipt;
+    } catch {}
+    await Bun.sleep(absenceUntil ? Math.min(250, 25 * (attempt + 1)) : 200 * (attempt + 1));
   }
-  return undefined;
+  return lastAbsent;
 }
 
 async function resolveUnknownBegin(deps: ChatDependencies, commandId: string) {
@@ -999,7 +1110,12 @@ async function dispatch(
     deps.grants.open(admitted.attemptId, local);
   } catch (error) {
     admitted.attempt.dispose();
-    await notSent("PREPARE_DISPOSED");
+    if (admitted.committedGrant)
+      await Promise.all([
+        recordUnsentGrant(deps, admitted, request).catch(() => undefined),
+        reportHealth(deps, admitted, "NOT_SENT"),
+      ]);
+    else await notSent("PREPARE_DISPOSED");
     throw error;
   }
   const unavailable = new GatewayError(
@@ -1015,31 +1131,66 @@ async function dispatch(
         ? "terminal-group"
         : "progressive",
     seal: (evidence) => deps.core.signEvidence(evidence),
-    record: (evidence) => deps.publish(evidence),
+    record: async (evidence) => {
+      if (
+        !admitted.committedGrant ||
+        (admitted.prepared.manifest.stream &&
+          !(
+            deps.config.commit_short_chat_sse &&
+            admitted.streamTerminalDimensions?.every((dimension) =>
+              evidence[0]?.final_dimensions.some((priced) => priced === dimension),
+            ) &&
+            isInitialStreamTerminalGroup(evidence)
+          )) ||
+        evidence.at(-1)?.request_state !== "SUCCEEDED" ||
+        evidence.at(-1)?.attempt_state !== "SUCCEEDED"
+      )
+        return deps.publish(evidence);
+      return publishTerminalEvidence(
+        deps,
+        evidence,
+        facts.requestId,
+        facts.deadlineAt,
+        admitted.prepared.manifest.stream,
+      );
+    },
   });
-  const neverSent = async (outcome: Parameters<Bridge["notExecuted"]>[0]) => {
+  const neverSent = async (errorCode: string) => {
     deps.grants.release(admitted.attemptId);
-    await bridge.notExecuted(outcome).catch(() => undefined);
+    await bridge
+      .notExecuted({ request_state: "FAILED", error_code: errorCode })
+      .catch(() => undefined);
     bridge.dispose();
     await reportHealth(deps, admitted, "NOT_SENT");
   };
   const beginCommand = crypto.randomUUID();
+  let beganAt = admitted.committedGrant?.beganAt ?? performance.now();
   let reply: ExecutionReply;
+  if (signal.aborted && admitted.committedGrant) {
+    const stop = halt(request);
+    await neverSent("send_not_authorized");
+    await closeRequest(deps, admitted, stop.reason);
+    throw stop.error(unavailable);
+  }
   try {
     if (signal.aborted) throw halt(request).error(unavailable);
-    reply = (await whileBusy(request, facts, () =>
-      deps.core.execution("execution_begin_v1", admitted.begin, {
-        commandId: beginCommand,
-        deadlineAt: facts.deadlineAt,
-      }),
-    )) as ExecutionReply;
+    reply =
+      admitted.committedGrant?.reply ??
+      ((await whileBusy(request, facts, () => {
+        beganAt = performance.now();
+        return deps.core.execution("execution_begin_v1", admitted.begin, {
+          commandId: beginCommand,
+          deadlineAt: facts.deadlineAt,
+          dispatchSignal: signal,
+        });
+      })) as ExecutionReply);
   } catch (error) {
     if (error instanceof CoreRpcError && error.detail.command_state === "UNKNOWN") {
       const resolved = await resolveUnknownBegin(deps, beginCommand);
       if (resolved === "granted") {
         await previous?.conclude(false);
-        await neverSent({ request_state: "FAILED", error_code: "begin_outcome_unknown" });
-        await closeRequest(deps, admitted, "FAILED");
+        await neverSent("begin_outcome_unknown");
+        await closeRequest(deps, admitted, halt(request).reason);
       } else {
         deps.grants.release(admitted.attemptId);
         bridge.dispose();
@@ -1049,7 +1200,7 @@ async function dispatch(
           await reportHealth(deps, admitted, "NOT_SENT");
         }
       }
-      throw unavailable;
+      throw halt(request).error(unavailable);
     }
     deps.grants.release(admitted.attemptId);
     bridge.dispose();
@@ -1061,13 +1212,26 @@ async function dispatch(
           ? "DEADLINE"
           : "PREPARE_DISPOSED",
     );
-    throw error instanceof GatewayError ? error : coreFailure(error);
+    throw stop.error(coreFailure(error));
   }
   await previous?.conclude(false);
-  if (!reply.transient_send || !deps.grants.consume(admitted.attemptId)) {
-    await neverSent({ request_state: "FAILED", error_code: "send_not_authorized" });
-    await closeRequest(deps, admitted, halt(request).reason);
-    throw halt(request).error(unavailable);
+  const grant = reply.transient_send;
+  const dispatchDeadline = grant
+    ? Math.min(
+        beganAt + (grant.processing_ms ?? 0) + grant.remaining_ms,
+        performance.now() + Date.parse(grant.deadline_at) - Date.now(),
+      )
+    : 0;
+  if (
+    signal.aborted ||
+    !grant ||
+    dispatchDeadline <= performance.now() ||
+    !deps.grants.consume(admitted.attemptId)
+  ) {
+    const stop = halt(request);
+    await neverSent("send_not_authorized");
+    await closeRequest(deps, admitted, stop.reason);
+    throw stop.error(unavailable);
   }
   const stopRenewal = renewQuota(deps, admitted);
   let started = performance.now();
@@ -1178,14 +1342,10 @@ async function dispatch(
       admitted.url,
       {
         method: admitted.prepared.method,
-        headers: authorize(
-          admitted.headers,
-          reply.transient_send!.auth_material,
-          admitted.url,
-          admitted.outbound,
-        ),
+        headers: authorize(admitted.headers, grant.auth_material, admitted.url, admitted.outbound),
         body: admitted.outbound.slice(),
         signal,
+        dispatchDeadline,
       },
       deps.config.allow_private_upstream,
       deps.config.private_upstream_cidrs,
@@ -1203,6 +1363,7 @@ async function dispatch(
           stop.halted ||
           local.signal.aborted ||
           deadlineReached() ||
+          dispatchDeadline <= performance.now() ||
           error.code === "unsafe_upstream";
       if (!final) {
         deps.grants.release(admitted.attemptId);
@@ -1210,16 +1371,14 @@ async function dispatch(
         await reportHealth(deps, admitted, "NOT_SENT");
         return deferred(unreachable, (requestState) =>
           bridge.notExecuted({
-            ...(requestState ? { request_state: requestState } : {}),
+            ...(requestState ? { request_state: "FAILED" } : {}),
             error_code: "upstream_not_dispatched",
           }),
         );
       }
-      await neverSent({
-        request_state: stop.requestState,
-        error_code:
-          error.code === "unsafe_upstream" ? "unsafe_upstream" : "upstream_not_dispatched",
-      });
+      await neverSent(
+        error.code === "unsafe_upstream" ? "unsafe_upstream" : "upstream_not_dispatched",
+      );
       await closeRequest(deps, admitted, stop.reason);
       throw stop.error(
         error.code === "unsafe_upstream"
@@ -1255,7 +1414,18 @@ async function dispatch(
       response: relayBinary(deps, facts, admitted, bridge, upstream, type, request, control),
     };
   if (admitted.prepared.manifest.stream)
-    return relaySSE(deps, facts, admitted, bridge, upstream, request, control);
+    return relaySSE(
+      deps,
+      facts,
+      admitted,
+      bridge,
+      upstream,
+      request,
+      control,
+      facts.operation === "chat" && /^text\/event-stream(?:\s*;|$)/i.test(type)
+        ? deps.transport.sseFraming(response)
+        : undefined,
+    );
   return relayJSON(deps, facts, admitted, bridge, upstream, control);
 }
 
@@ -1266,18 +1436,36 @@ export async function executeChat(deps: ChatDependencies, request: ChatRequest) 
       ? deps.terminalBudget.reserve()
       : undefined;
   try {
-    return await executePreparedChat(deps, request, facts, reservation);
+    return await executePreparedChat(
+      deps,
+      { ...request, signal: AbortSignal.any([request.signal, request.drain]) },
+      facts,
+      reservation,
+    );
   } finally {
     reservation?.release();
   }
 }
+function routeShortChatProject(deps: ChatDependencies, project: string): ChatDependencies {
+  const core = deps.core;
+  return {
+    ...deps,
+    core: {
+      ...core,
+      execution: (kind, data, options) =>
+        core.execution(kind, data, { ...options, shortChatProject: project }),
+      settleTerminal: (group, deadlineAt, _project, stream) =>
+        core.settleTerminal(group, deadlineAt, project, stream),
+    },
+  };
+}
+
 async function executePreparedChat(
   deps: ChatDependencies,
   request: ChatRequest,
   facts: Facts,
   reservation: TerminalReservation | undefined,
 ) {
-  const external = { ...request, signal: AbortSignal.any([request.signal, request.drain]) };
   const tried = new Set<string>();
   let previous:
     { permit: Permit; ordinal: number; conclude: (last: boolean) => Promise<void> } | undefined;
@@ -1286,10 +1474,21 @@ async function executePreparedChat(
     let admitted: Admitted;
     let releasePreparation: (() => void) | undefined;
     try {
-      if (external.signal.aborted)
-        throw halt(request).error(new GatewayError(499, "cancelled", "Request cancelled"));
-      if (reservation) releasePreparation = deps.host.reservePreparation();
+      requireLiveRequest(request);
+      if (facts.operation === "chat") releasePreparation = deps.host.reservePreparation();
       const context = await openContext(deps, request, facts);
+      requireLiveRequest(request);
+      if (
+        ordinal === 1 &&
+        deps.config.commit_short_chat &&
+        deps.config.core.short_chat_peer &&
+        facts.operation === "chat" &&
+        (!facts.stream || deps.config.commit_short_chat_sse) &&
+        !facts.background &&
+        !facts.references.length &&
+        context.route_ticket
+      )
+        deps = routeShortChatProject(deps, context.project_id);
       if (!facts.model) facts = { ...facts, model: context.model };
       const untried = context.candidates.filter((c) => !tried.has(c.ref.channel_id));
       if (!untried.length) break;
@@ -1297,11 +1496,12 @@ async function executePreparedChat(
       for (const candidate of untried) {
         tried.add(candidate.ref.channel_id);
         try {
-          const planned = await plan(deps, external, facts, context, candidate, releasePreparation);
+          const planned = await plan(deps, request, facts, context, candidate, releasePreparation);
           reserved = await reserve(deps, request, facts, context, planned, previous);
           break;
         } catch (error) {
           if (!(error instanceof CandidateRefusal)) throw error;
+          requireLiveRequest(request);
           refused ??= error;
         }
       }
@@ -1426,7 +1626,33 @@ async function relayJSON(
   };
 }
 
-async function relaySSE(
+export async function publishTerminalEvidence(
+  deps: Pick<ChatDependencies, "core" | "publish" | "recoverTerminal" | "recoverStreamTerminal">,
+  evidence: SignedCoreEvidenceEventV1[],
+  requestId: string,
+  deadlineAt: string,
+  stream: boolean,
+) {
+  try {
+    const result = await deps.core.settleTerminal(
+      { events: evidence },
+      deadlineAt,
+      undefined,
+      stream,
+    );
+    if (result.requestId !== requestId)
+      throw new GatewayError(503, "core_unavailable", "Execution authority is unavailable");
+  } catch (error) {
+    if (stream && error instanceof CoreRpcError && error.detail.command_state === "NOT_ATTEMPTED") {
+      await deps.publish(evidence);
+      if (error.status === 409 && error.detail.code === "internal_stream_terminal_disabled") return;
+    } else if (stream) await deps.recoverStreamTerminal!(evidence);
+    else await deps.recoverTerminal!(evidence);
+    throw error;
+  }
+}
+
+export async function relaySSE(
   deps: ChatDependencies,
   facts: Facts,
   admitted: Admitted,
@@ -1434,7 +1660,9 @@ async function relaySSE(
   upstream: ReadableStream<Uint8Array>,
   request: ChatRequest,
   control: Control,
+  framing: "chunked" | number | undefined,
 ): Promise<Outcome> {
+  const canStopAtTerminal = framing === "chunked";
   const encoder = new TextEncoder();
   const translated = admitted.converted
     ? streamFromChat(admitted.converted, facts.model)
@@ -1443,9 +1671,18 @@ async function relaySSE(
     if (translated) yield* translated.feed(bytes);
     else yield bytes;
   };
-  let undelivered: { outcome: Failed; fault: unknown } | undefined;
+  const groupTerminal =
+    framing !== undefined &&
+    deps.config.commit_short_chat_sse &&
+    admitted.committedGrant?.reply.stream_terminal_v1 === true &&
+    !!admitted.streamTerminalDimensions?.length &&
+    !admitted.converted &&
+    facts.operation === "chat" &&
+    !facts.background &&
+    !facts.references.length;
+  let undelivered: { outcome: Failed; fault: unknown; metered: boolean } | undefined;
   async function* frames(): AsyncGenerator<Uint8Array> {
-    let terminal: { bytes: string } | undefined;
+    let terminal: NonNullable<Extract<AbiResult, { kind: "output" }>["terminal"]> | undefined;
     let ended = false,
       delivered = false,
       failed = false,
@@ -1455,27 +1692,60 @@ async function relaySSE(
     const reader = upstream.getReader();
     const cancel = () => void reader.cancel().catch(() => undefined);
     control.signal.addEventListener("abort", cancel, { once: true });
+    let retained: TerminalReservation | undefined;
+    let terminalBatch: Extract<AbiResult, { kind: "output" }> | undefined;
+    let metered = false;
+    const fixedLength = groupTerminal && typeof framing === "number" ? framing : undefined;
+    let receivedBytes = 0;
     const record = async (result: AbiResult) => {
-      if (result.kind !== "output" || !result.resource) return result;
-      if (recorded) throw new Error("resource_redeclared");
-      await commitResource(deps, admitted, expected, result.resource);
-      recorded = true;
+      if (groupTerminal && (result.kind === "output" || result.kind === "failure") && result.usage)
+        metered = true;
+      if (result.kind !== "output") return result;
+      if (result.resource) {
+        if (recorded) throw new Error("resource_redeclared");
+        await commitResource(deps, admitted, expected, result.resource);
+        recorded = true;
+      }
+      if (terminalBatch && (result.chunks.length || result.terminal))
+        throw new Error("data_after_terminal");
+      if (result.terminal && bridge.hasDeferredFinal()) {
+        const heldBytes =
+          request.body.buffer.byteLength +
+          admitted.outbound.buffer.byteLength +
+          3 *
+            (result.terminal.bytes.length +
+              result.chunks.reduce((n, chunk) => n + chunk.length, 0));
+        retained = deps.terminalBudget.tryReserve();
+        if (retained?.retainOutput(heldBytes)) terminalBatch = result;
+        else {
+          retained?.release();
+          retained = undefined;
+          await bridge.flush();
+        }
+      }
       return result;
     };
-    const settle = function* (result: AbiResult) {
-      if (result.kind === "failure") throw new Error(result.code);
-      if (result.kind !== "output") throw new Error("plugin_output");
-      if (expected && !recorded && (result.chunks.length || result.terminal))
-        throw new Error("resource_unrecorded");
+    const chunks = function* (result: Extract<AbiResult, { kind: "output" }>) {
       for (const chunk of result.chunks) {
+        if (groupTerminal) control.signal.throwIfAborted();
         const bytes = Buffer.from(chunk, "base64");
         if (bytes.length) {
           delivered = true;
           yield* emit(bytes);
         }
       }
-      const id = (result as { output_id?: string }).output_id;
-      if (id) admitted.attempt.releaseOutput(id);
+    };
+    const settle = function* (result: AbiResult) {
+      if (result.kind === "failure") throw new Error(result.code);
+      if (result.kind !== "output") throw new Error("plugin_output");
+      if (expected && !recorded && (result.chunks.length || result.terminal))
+        throw new Error("resource_unrecorded");
+      if (groupTerminal) control.signal.throwIfAborted();
+      if (terminalBatch !== result) {
+        yield* chunks(result);
+        const id = (result as { output_id?: string }).output_id;
+        if (id) admitted.attempt.releaseOutput(id);
+      }
       if (result.terminal) terminal = result.terminal;
       return result.needs_input || Boolean(result.terminal);
     };
@@ -1495,36 +1765,74 @@ async function relaySSE(
         ),
       );
       if (opened.kind !== "output") throw new Error("stream_open");
-      for (;;) {
+      while (!canStopAtTerminal || terminal?.kind !== "complete") {
         const next = await reader.read();
-        if (next.done) break;
+        if (next.done) {
+          control.signal.throwIfAborted();
+          if (fixedLength !== undefined && receivedBytes !== fixedLength)
+            throw new Error("stream_truncated");
+          break;
+        }
+        if (fixedLength !== undefined) {
+          if (terminalBatch && next.value.length) throw new Error("data_after_terminal");
+          receivedBytes += next.value.length;
+        }
         for (let offset = 0; offset < next.value.length && !terminal;) {
           const fed = await record(
-            await bridge.invoke("stream_feed", next.value.subarray(offset, offset + (64 << 10))),
+            await bridge.invoke(
+              "stream_feed",
+              next.value.subarray(offset, offset + (64 << 10)),
+              groupTerminal ? control.signal : undefined,
+              groupTerminal,
+            ),
           );
           let waiting = yield* settle(fed);
           while (!waiting)
-            waiting = yield* settle(await record(await bridge.invoke("stream_drain")));
+            waiting = yield* settle(
+              await record(
+                await bridge.invoke(
+                  "stream_drain",
+                  undefined,
+                  groupTerminal ? control.signal : undefined,
+                  groupTerminal,
+                ),
+              ),
+            );
           if (fed.kind !== "output" || fed.consumed < 1) throw new Error("stream_feed_stalled");
           offset += fed.consumed;
+          if (terminalBatch && offset < next.value.length) throw new Error("data_after_terminal");
         }
       }
-      await bridge.invoke("stream_finish");
+      if (canStopAtTerminal && terminal?.kind === "complete") cancel();
+      yield* settle(
+        await record(
+          await bridge.invoke(
+            "stream_finish",
+            undefined,
+            groupTerminal ? control.signal : undefined,
+          ),
+        ),
+      );
       if (!terminal) throw new Error("stream_truncated");
       ended = true;
       await control.end({
         outcome: { attempt_state: "SUCCEEDED", request_state: "SUCCEEDED" },
         reason: "COMPLETED",
       });
+      if (groupTerminal) control.signal.throwIfAborted();
+      if (terminalBatch) yield* chunks(terminalBatch);
+      if (groupTerminal) control.signal.throwIfAborted();
       const held = Buffer.from(terminal.bytes, "base64");
       if (held.length) yield* emit(held);
       if (translated) yield* translated.finish();
     } catch (error) {
+      if (ended && terminalBatch && !delivered) throw halt(request).error(coreFailure(error));
       failed = true;
       fault = error;
     } finally {
       control.signal.removeEventListener("abort", cancel);
       cancel();
+      retained?.release();
       if (!ended) {
         const stop = halt(request);
         const outcome: Failed = {
@@ -1536,7 +1844,8 @@ async function relaySSE(
                 ? "gateway_draining"
                 : (control.cause() ?? responseFailureCode(fault, "stream_interrupted")),
         };
-        if (!delivered && !recorded) undelivered = { outcome, fault };
+        if (!delivered && !recorded)
+          undelivered = { outcome, fault, metered: metered || bridge.hasDeferredFinal() };
         else
           await control
             .end({ outcome: { ...outcome, request_state: stop.requestState }, reason: stop.reason })
@@ -1562,12 +1871,10 @@ async function relaySSE(
       return control.fail({ ...outcome, error_code: "evidence_unavailable" }, fault);
     if (fault instanceof GatewayError || fault instanceof CoreRpcError)
       return control.fail(outcome, coreFailure(fault));
-    return control.abandon(
-      outcome,
-      control.timeoutError(
-        new GatewayError(502, "upstream_invalid_response", "The upstream response was invalid"),
-      ),
+    const invalid = control.timeoutError(
+      new GatewayError(502, "upstream_invalid_response", "The upstream response was invalid"),
     );
+    return undelivered.metered ? control.fail(outcome, invalid) : control.abandon(outcome, invalid);
   }
   return {
     response: new Response(
@@ -1576,6 +1883,7 @@ async function relaySSE(
         first.done ? undefined : first.value,
         deps.config.downstream_stall_timeout_ms,
         () => control.expire("downstream_stalled"),
+        groupTerminal ? control.signal : undefined,
       ),
       {
         status: 200,

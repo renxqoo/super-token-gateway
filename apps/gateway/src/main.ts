@@ -1,6 +1,14 @@
+import type { SignedCoreEvidenceEventV1 } from "@gateway/contracts";
 import { createTerminalBudget } from "./terminal-budget.ts";
 import { createCoreRpcClient } from "@gateway/core-client";
-import { Lifecycle, UsageProducer, createTransport, evidenceChannel } from "@gateway/runtime";
+import {
+  Lifecycle,
+  UsageProducer,
+  createTransport,
+  evidenceChannel,
+  terminalRecoveryChannel,
+  streamTerminalRecoveryChannel,
+} from "@gateway/runtime";
 import { createGatewayApp } from "./app.ts";
 import { createSendRegistry, type ChatDependencies } from "./chat.ts";
 import { loadGatewayConfig } from "./config.ts";
@@ -13,11 +21,24 @@ const trust = await loadPackageTrust(config.plugins.trust_policy);
 const host = await createGatewayPluginRuntime({
   executable: config.plugins.helper_executable,
   trust,
+  maxAttempts: config.plugins.max_concurrent_attempts,
 });
 const core = createCoreRpcClient({
   origin: config.core.origin,
   servername: config.core.servername,
   audience: config.core.audience,
+  connections: config.core.connections,
+  ...(config.core.short_chat_peer
+    ? {
+        shortChatPeer: {
+          origin: config.core.short_chat_peer.origin,
+          servername: config.core.short_chat_peer.servername,
+          expectedPeerSha256: config.core.short_chat_peer.peer_sha256,
+          expectedSubjectAltname: config.core.short_chat_peer.subject_altname,
+          fundingGroupParity: config.core.short_chat_peer.funding_group_parity,
+        },
+      }
+    : {}),
   expectedPeerSha256: config.core.peer_sha256,
   expectedSubjectAltname: config.core.subject_altname,
   key: await Bun.file(config.core.key_file).text(),
@@ -33,18 +54,40 @@ const producer = new UsageProducer({
   maxInFlight: config.max_inflight,
   requireAllReplicas: config.production,
 });
+const recoveryQueue = config.terminal_recovery_queue;
+const recoveryOptions =
+  config.commit_short_chat && recoveryQueue
+    ? {
+        url: recoveryQueue.url,
+        namespace: recoveryQueue.namespace,
+        replicas: recoveryQueue.required_replicas,
+        timeoutMs: recoveryQueue.ack_timeout_ms,
+        maxInFlight: config.max_inflight,
+        requireAllReplicas: true,
+        batchSize: 1,
+      }
+    : undefined;
+const recovery =
+  recoveryOptions && new UsageProducer({ ...recoveryOptions, channel: terminalRecoveryChannel });
+const streamRecovery =
+  recoveryOptions && config.commit_short_chat_sse
+    ? new UsageProducer({ ...recoveryOptions, channel: streamTerminalRecoveryChannel })
+    : undefined;
 const transport = createTransport(config.upstream_pool_size);
 const grants = createSendRegistry();
 const lifecycle = new Lifecycle(config.max_inflight);
 async function release() {
   transport.close();
   producer.close();
+  recovery?.close();
+  streamRecovery?.close();
   await host.close();
   await core.close();
 }
 try {
   await core.startup();
   await producer.ready();
+  await Promise.all([recovery?.ready(), streamRecovery?.ready()]);
 } catch (error) {
   await release();
   throw error;
@@ -61,6 +104,13 @@ const deps: ChatDependencies = {
   grants,
   terminalBudget: createTerminalBudget(config.max_inflight),
   publish: (events) => producer.publish({ events }),
+  ...(streamRecovery
+    ? {
+        recoverStreamTerminal: (events: SignedCoreEvidenceEventV1[]) =>
+          streamRecovery.publish({ events }),
+      }
+    : {}),
+  ...(recovery ? { recoverTerminal: (events) => recovery.publish({ events }) } : {}),
 };
 const poller = startResourcePolling(deps, config.resource_poll_ms, () =>
   console.log(JSON.stringify({ service: "gateway", event: "resource_poll_failed" })),
@@ -71,6 +121,7 @@ const app = createGatewayApp({
   ready: async () => {
     await core.current();
     await producer.ready();
+    await Promise.all([recovery?.ready(), streamRecovery?.ready()]);
   },
 });
 const server = Bun.serve({

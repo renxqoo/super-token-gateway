@@ -138,11 +138,28 @@ export function observeAttempt<Sealed>(
     await emit(defer);
     last = key;
   }
+  const progress =
+    binding.delivery === "progressive" ? (result: AbiResult) => observe(result, false) : undefined;
   return {
-    async invoke(hook: Hook, payload?: Uint8Array, signal?: AbortSignal) {
+    async invoke(
+      hook: Hook,
+      payload?: Uint8Array,
+      signal?: AbortSignal,
+      deferFirstStreamFinal = false,
+    ) {
       return operation(async () => {
-        const result = await attempt.invoke(hook, payload, signal);
-        await observe(result, hook === "response" && binding.delivery === "terminal-group");
+        const result = await attempt.invoke(hook, payload, signal, progress);
+        const groupStream =
+          deferFirstStreamFinal &&
+          binding.delivery === "progressive" &&
+          revision === 0n &&
+          (hook === "stream_feed" || hook === "stream_drain") &&
+          result.kind === "output" &&
+          result.terminal?.kind === "complete";
+        await observe(
+          result,
+          groupStream || (hook === "response" && binding.delivery === "terminal-group"),
+        );
         return result;
       });
     },
@@ -174,6 +191,7 @@ export function observeAttempt<Sealed>(
         await terminal({ ...outcome, attempt_state: "NOT_EXECUTED" });
       });
     },
+    hasDeferredFinal: () => pending !== undefined,
     flush: () => operation(flush),
     dispose() {
       if (disposed) return;

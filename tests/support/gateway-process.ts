@@ -188,14 +188,25 @@ export async function startGateway(
     entry?: string;
     instance?: string;
     overrides?: Record<string, unknown>;
+    coreConnections?: number;
+    shortChatPeerParity?: 0 | 1;
+    pluginConcurrentAttempts?: number;
     cwd?: string;
   },
 ) {
   const name = options.instance ?? "gateway",
     core = options.core ?? "coreA",
-    identity = f.identity,
-    certificate = identity.certificates.get(core)!,
-    port = core === "coreA" ? identity.a.port : identity.b.port;
+    identity = f.identity;
+  function target(name: "coreA" | "coreB") {
+    const certificate = identity.certificates.get(name)!;
+    const port = name === "coreA" ? identity.a.port : identity.b.port;
+    return {
+      origin: `https://127.0.0.1:${port}`,
+      servername: "localhost",
+      peer_sha256: sha256(certificate.x509.raw),
+      subject_altname: certificate.x509.subjectAltName,
+    };
+  }
   const configFile = resolve(identity.directory, `${name}-${crypto.randomUUID()}.json`);
   await writeFile(
     configFile,
@@ -207,14 +218,20 @@ export async function startGateway(
       resource_poll_ms: 200,
       allow_private_upstream: true,
       core: {
-        origin: `https://127.0.0.1:${port}`,
-        servername: "localhost",
+        ...target(core),
         audience: identityAudience,
-        peer_sha256: sha256(certificate.x509.raw),
-        subject_altname: certificate.x509.subjectAltName,
+        ...(options.shortChatPeerParity === undefined
+          ? {}
+          : {
+              short_chat_peer: {
+                ...target(core === "coreA" ? "coreB" : "coreA"),
+                funding_group_parity: options.shortChatPeerParity,
+              },
+            }),
         key_file: resolve(identity.directory, `${name}.key`),
         cert_file: resolve(identity.directory, `${name}.pem`),
         ca_file: resolve(identity.directory, "ca.pem"),
+        ...(options.coreConnections ? { connections: options.coreConnections } : {}),
       },
       queue: {
         url: process.env.QUEUE_REDIS_URL,
@@ -224,6 +241,9 @@ export async function startGateway(
       plugins: {
         helper_executable: resolve(".local/plugin-host"),
         trust_policy: f.catalog.policyPath,
+        ...(options.pluginConcurrentAttempts
+          ? { max_concurrent_attempts: options.pluginConcurrentAttempts }
+          : {}),
       },
       ...options.overrides,
     }),
@@ -301,6 +321,7 @@ export function withGatewayStack(
     gateway?: Record<string, unknown>;
     databasePort?: number;
     supplierCredit?: string;
+    pluginConcurrentAttempts?: number;
     maxAttempts?: number;
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
   },
@@ -394,6 +415,9 @@ export function withGatewayStack(
               upstreamCertificate: upstream.certificate,
               instance,
               core,
+              ...(options.pluginConcurrentAttempts === undefined
+                ? {}
+                : { pluginConcurrentAttempts: options.pluginConcurrentAttempts }),
               overrides: { ...options.gateway, ...overrides },
             });
             processes.push(gateway);

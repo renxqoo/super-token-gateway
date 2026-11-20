@@ -356,10 +356,14 @@ test("a route request policy refusing the prepared request skips that channel be
         request_policy: { blocked_parameters: ["max_completion_tokens"] },
       });
       const holds = (await db`SELECT count(*)::integer n FROM billing_holds`)[0].n;
-      const refused = await send();
-      expect(JSON.parse(await expectStatus(refused, 422)).error.code).toBe(
-        "unsupported_capability",
-      );
+      const contexts = await db`SELECT id FROM execution_contexts ORDER BY id`;
+      for (const stream of [false, true]) {
+        const refused = await send({ stream });
+        expect(JSON.parse(await expectStatus(refused, 422)).error.code).toBe(
+          "unsupported_capability",
+        );
+        expect(await db`SELECT id FROM execution_contexts ORDER BY id`).toEqual(contexts);
+      }
       expect(received).toHaveLength(1);
       expect((await db`SELECT count(*)::integer n FROM gateway_requests`)[0].n).toBe(1);
       expect((await db`SELECT count(*)::integer n FROM billing_holds`)[0].n).toBe(holds);
@@ -845,6 +849,57 @@ test(
   60000,
 );
 
+test("a disconnected client whose separate BEGIN already granted a blocked upstream send releases both holds without sending or retrying", () => {
+  const gate = stall();
+  return withGatewayStack(
+    {
+      reply: async () => {
+        await gate.released;
+        return chatReplies.json();
+      },
+      gateway: { upstream_pool_size: 1, commit_short_chat: false },
+      supplierCredit: "1000000",
+    },
+    async ({ db, received, send }) => {
+      const holding = send();
+      try {
+        await eventually(async () => received.length === 1, "first send holds the socket");
+        const [first] = await db`SELECT id FROM gateway_requests`;
+        const cancelled = new AbortController();
+        const pending = send({ signal: cancelled.signal }).catch((error: unknown) => error);
+        let id: string | undefined;
+        await eventually(async () => {
+          const [row] =
+            await db`SELECT a.request_id FROM execution_permits p JOIN attempts a ON a.id=p.attempt_id WHERE a.request_id<>${first.id} AND p.state='SEND_GRANTED'`;
+          id = row?.request_id;
+          return id !== undefined;
+        }, "second request has send authority");
+        cancelled.abort();
+        expect(await pending).toBeInstanceOf(Error);
+        await requestOutcome(db, id!);
+        expect(
+          await db`SELECT a.state AS attempt, h.state AS customer, u.current_reserved_atoms::text AS supplier, c.amount_atoms::text AS charged
+          FROM attempts a JOIN billing_holds h ON h.request_id=a.request_id JOIN upstream_holds u ON u.attempt_id=a.id
+          LEFT JOIN billing_charges c ON c.request_id=a.request_id WHERE a.request_id=${id!}`,
+        ).toEqual([{ attempt: "NOT_EXECUTED", customer: "RELEASED", supplier: "0", charged: "0" }]);
+        expect(
+          await db`SELECT c.body_digest = public.core_digest_v1(jsonb_build_object(
+            'kind', c.kind, 'contract_version', 1,
+            'owner', jsonb_build_object('service', split_part(c.caller_identity, ':', 1), 'instance_id', split_part(c.caller_identity, ':', 2), 'session_id', c.owner_session_id, 'incarnation_id', c.caller_incarnation),
+            'deadline_at', to_char(c.deadline_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'data', jsonb_build_object('attempt_id', c.attempt_id, 'permit_epoch', p.permit_epoch::text, 'action', 'CLOSE', 'reason', 'CANCELLED')
+          )) AS cancelled FROM execution_commands c JOIN execution_permits p ON p.attempt_id=c.attempt_id
+          WHERE c.request_id=${id!} AND c.receipt->>'code'='execution_closed'`,
+        ).toEqual([{ cancelled: true }]);
+        expect(received).toHaveLength(1);
+      } finally {
+        gate.release();
+        await (await holding).text();
+      }
+    },
+  );
+}, 30000);
+
 test("a send refused because every local upstream connection slot and wait slot is taken is never sent or charged and does not open the channel's breaker", () => {
   const gate = stall();
   return withGatewayStack(
@@ -1086,5 +1141,40 @@ test("requests beyond the Gateway plugin attempt budget are refused as 503 overl
         }),
       );
       expect([...new Set(outcomes)].sort()).toEqual(["200", "503 overloaded"]);
+    },
+  ));
+
+test("an overloaded Chat SSE request waited on a locked Core catalog before being refused", () =>
+  withGatewayStack(
+    {
+      pluginConcurrentAttempts: 1,
+      reply: () => chatReplies.sse(),
+    },
+    async ({ db, received, send }) => {
+      const cancel = new AbortController();
+      await db.begin(async (tx) => {
+        await tx`LOCK TABLE api_keys IN ACCESS EXCLUSIVE MODE`;
+        const first = send({ stream: true, signal: cancel.signal }).then(
+          (response) => response.body?.cancel(),
+          () => undefined,
+        );
+        try {
+          await eventually(async () => {
+            const [row] = await db`
+              SELECT EXISTS (
+                SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid
+                WHERE a.datname=current_database() AND l.relation='api_keys'::regclass AND NOT l.granted
+              ) AS waiting
+            `;
+            return row.waiting === true;
+          }, "first SSE request waiting on the Core catalog");
+          const refused = await send({ stream: true, signal: AbortSignal.timeout(2000) });
+          expect(JSON.parse(await expectStatus(refused, 503)).error.code).toBe("overloaded");
+          expect(received).toHaveLength(0);
+        } finally {
+          cancel.abort();
+          await first;
+        }
+      });
     },
   ));

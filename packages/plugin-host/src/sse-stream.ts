@@ -1,9 +1,11 @@
+import { canonical } from "@gateway/kernel";
 import type { AbiResult, Hook, JSONDocumentDescriptor, OutputResult } from "@gateway/plugin-sdk";
 import type { createJSONDocuments } from "./json-documents.ts";
 import { createSSEFrames, type SSEFrame } from "./sse-frames.ts";
 import { PluginHostError } from "./supervisor.ts";
 type Documents = ReturnType<typeof createJSONDocuments>;
 type Accumulator = { parts: string[]; metered: number; charge: number; sealed: boolean };
+export type ObserveStreamUsage = (result: OutputResult) => Promise<void>;
 export type StreamResult = AbiResult & { output_id?: string };
 export function createSSEStream(options: {
   owner: string;
@@ -221,6 +223,7 @@ export function createSSEStream(options: {
     hook: Hook,
     payload: Uint8Array,
     signal?: AbortSignal,
+    observeUsage?: ObserveStreamUsage,
   ): Promise<StreamResult> {
     if (closed || options.disposed()) throw new PluginHostError("ATTEMPT_CLOSED");
     if (running) throw new PluginHostError("BATCH_CONCURRENT");
@@ -232,6 +235,24 @@ export function createSSEStream(options: {
     if (hook === "stream_open" && opened) {
       running = false;
       throw new PluginHostError("STREAM_ALREADY_OPEN");
+    }
+    let pendingHeld: OutputResult | undefined,
+      publicationFailed = false;
+    async function recordHeld() {
+      const result = pendingHeld;
+      pendingHeld = undefined;
+      if (!result || !observeUsage) return;
+      try {
+        await observeUsage(result);
+      } catch (error) {
+        publicationFailed = true;
+        throw error;
+      }
+    }
+    async function recordBeforeContinuing() {
+      await recordHeld();
+      if (signal?.aborted) throw new PluginHostError("CALL_CANCELLED");
+      if (options.disposed()) throw new PluginHostError("ATTEMPT_CLOSED");
     }
     let declared: OutputResult["resource"],
       chunks: string[] = [],
@@ -274,6 +295,7 @@ export function createSSEStream(options: {
         framer.finish();
         ended = true;
       }
+      const entry = latest;
       let steps = 0,
         queries = 0,
         frames = 0;
@@ -309,6 +331,7 @@ export function createSSEStream(options: {
         );
         operation = undefined;
         if (result.kind === "failure") {
+          if (pendingHeld) await recordHeld();
           const enriched = {
             abi_version: result.abi_version,
             kind: result.kind,
@@ -404,6 +427,11 @@ export function createSSEStream(options: {
         frames++;
         queries = 0;
         latest = result;
+        if (
+          pendingHeld &&
+          (!result.usage || canonical(pendingHeld.usage) !== canonical(result.usage))
+        )
+          await recordBeforeContinuing();
         if (result.terminal) {
           if (result.terminal.bytes || framer.snapshot().ready || framer.snapshot().incomplete)
             throw new PluginHostError("SSE_AFTER_TERMINAL");
@@ -414,6 +442,17 @@ export function createSSEStream(options: {
           heldBytes = 0;
           heldCharge = 0;
           break;
+        }
+        if (
+          observeUsage &&
+          result.usage &&
+          (framer.snapshot().ready || backlog.length) &&
+          (!entry?.usage ||
+            result.finality !== entry.finality ||
+            canonical(result.usage) !== canonical(entry.usage))
+        ) {
+          if (result.frame.disposition !== "hold") break;
+          pendingHeld = result;
         }
       }
       if (current) inspection = {};
@@ -426,6 +465,7 @@ export function createSSEStream(options: {
           true,
         );
         if (result.kind === "failure") {
+          if (pendingHeld) await recordHeld();
           options.dispose();
           return {
             abi_version: result.abi_version,
@@ -447,6 +487,11 @@ export function createSSEStream(options: {
         }
         bufferMetered = 0;
       }
+      if (
+        pendingHeld &&
+        (!latest?.usage || canonical(pendingHeld.usage) !== canonical(latest.usage))
+      )
+        await recordBeforeContinuing();
       const result: StreamResult = {
         ...output(),
         consumed,
@@ -472,6 +517,8 @@ export function createSSEStream(options: {
       return result;
     } catch (error) {
       options.dispose();
+      if (publicationFailed) throw error;
+      if (pendingHeld) await recordHeld();
       if (error instanceof TypeError)
         return { abi_version: 1, kind: "failure", status: 502, code: "invalid_utf8" };
       if (error instanceof PluginHostError) {

@@ -1,5 +1,10 @@
 import { connect as netConnect } from "node:net";
-import { listenBoundedH2, h2JsonReply, readBoundedData } from "@gateway/runtime/h2";
+import {
+  createBoundedH2Client,
+  listenBoundedH2,
+  h2JsonReply,
+  readBoundedData,
+} from "@gateway/runtime/h2";
 import { appendFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -1586,6 +1591,165 @@ test("actual shared receive budget caps reserved bytes before stream count and r
         identityRegistry,
         JSON.stringify({ event: "measured_receive_budget_stopped", resources: after }) + "\n",
       );
+    }
+  }));
+
+test("Core RPC rejects overflow before a shared TLS handshake finishes and serves commands after rotation", () =>
+  withIdentity(async (f) => {
+    const gateway = f.certificates.get("gateway")!;
+    const core = f.certificates.get("coreA")!;
+    const target = {
+      origin: `https://127.0.0.1:${f.a.port}`,
+      expectedPeerSha256: sha256(core.x509.raw),
+      expectedSubjectAltname: core.x509.subjectAltName!,
+    };
+    const rpc = createCoreRpcClient({
+      ...target,
+      servername: "localhost",
+      key: gateway.key,
+      cert: gateway.cert,
+      ca: f.ca,
+      audience: identityAudience,
+    });
+    const silent = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { data() {} },
+    });
+    const commands: Promise<unknown>[] = [];
+    try {
+      const owner = await rpc.startup();
+      await rpc.reconnect({ ...target, origin: `https://127.0.0.1:${silent.port}` });
+      const query = () =>
+        rpc
+          .execution(
+            "execution_quota_recovery_v1",
+            { limit: 1 },
+            {
+              deadlineAt: new Date(Date.now() + 1800).toISOString(),
+            },
+          )
+          .catch((error: unknown) => error);
+      for (let i = 0; i < 256; i++) commands.push(query());
+      const overflow = query();
+      commands.push(overflow);
+      expect(
+        await Promise.race([overflow, Bun.sleep(400).then(() => "still waiting")]),
+      ).toMatchObject({
+        detail: { code: "internal_capacity", command_state: "NOT_ATTEMPTED" },
+        retryableAdmissionBusy: false,
+      });
+      silent.stop(true);
+      await Promise.all(commands);
+      await rpc.reconnect(target);
+      expect((await rpc.current()).receipt.session_id).toBe(owner.session_id);
+    } finally {
+      silent.stop(true);
+      await Promise.allSettled(commands);
+      await rpc.close();
+    }
+  }));
+
+test("an expired Core RPC queue entry never opens a stream and releases its queue position", () =>
+  withIdentity(async (f) => {
+    const gateway = f.certificates.get("gateway")!;
+    const core = f.certificates.get("coreA")!;
+    const held = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const seen = new Set<string>();
+    const prepared = new Set<string>();
+    let blocking = 0;
+    const server = await listenBoundedH2(
+      {
+        hostname: "127.0.0.1",
+        port: 0,
+        key: core.key,
+        cert: core.cert,
+        ca: f.ca,
+      },
+      async (stream, headers) => {
+        const path = String(headers[":path"]);
+        seen.add(path);
+        if (path === "/blocking") {
+          if (++blocking === 32) held.resolve();
+          await release.promise;
+        }
+        stream.resume();
+        h2JsonReply(stream, 200, { ok: true });
+      },
+    );
+    try {
+      const client = await createBoundedH2Client({
+        origin: `https://127.0.0.1:${server.port}`,
+        servername: "localhost",
+        key: gateway.key,
+        cert: gateway.cert,
+        ca: f.ca,
+      });
+      const send = (path: string, dispatchDeadlineMs?: number) =>
+        client.request(
+          () => {
+            prepared.add(path);
+            return {
+              headers: { ":method": "POST", ":path": path, "content-length": "2" },
+              body: Buffer.from("{}"),
+            };
+          },
+          undefined,
+          dispatchDeadlineMs === undefined ? undefined : { maxBytes: 8192, dispatchDeadlineMs },
+        );
+      const inFlight = Promise.all(Array.from({ length: 32 }, () => send("/blocking")));
+      try {
+        await Promise.race([held.promise, inFlight]);
+        const expired = send("/expired", Date.now() + 40).catch((error: unknown) => error);
+        const beforeRelease = await Promise.race([expired, Bun.sleep(500).then(() => "queued")]);
+        expect(beforeRelease instanceof Error ? beforeRelease.name : beforeRelease).toBe(
+          "InternalTransportDeadline",
+        );
+        release.resolve();
+        expect((await send("/valid", Date.now() + 2000)).status).toBe(200);
+        await inFlight;
+        expect(client.stats().streams).toBe(0);
+        expect(seen.has("/expired")).toBe(false);
+        expect(prepared.has("/expired")).toBe(false);
+      } finally {
+        release.resolve();
+        await Promise.allSettled([inFlight]);
+        await client.close();
+      }
+    } finally {
+      await server.stop();
+    }
+    const rpc = createCoreRpcClient({
+      origin: `https://127.0.0.1:${f.a.port}`,
+      servername: "localhost",
+      key: gateway.key,
+      cert: gateway.cert,
+      ca: f.ca,
+      expectedPeerSha256: sha256(core.x509.raw),
+      expectedSubjectAltname: core.x509.subjectAltName!,
+      audience: identityAudience,
+      connections: 4,
+    });
+    try {
+      await rpc.startup();
+      await expect(
+        rpc.execution(
+          "execution_context_v1",
+          {
+            customer_token: "synthetic",
+            ip: "127.0.0.1",
+            operation: "chat",
+            model: "synthetic",
+            fingerprint: sha256("synthetic"),
+          },
+          { deadlineAt: new Date(Date.now() - 100).toISOString() },
+        ),
+      ).rejects.toMatchObject({
+        detail: { code: "internal_deadline", command_state: "NOT_ATTEMPTED", retryability: "NONE" },
+      });
+    } finally {
+      await rpc.close();
     }
   }));
 

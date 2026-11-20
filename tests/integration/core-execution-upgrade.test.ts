@@ -8,6 +8,7 @@ import {
   recordRoute,
 } from "@gateway/storage";
 import manifest from "../../packages/storage/src/migrations/manifest.json";
+import { granted, settledCharge } from "../support/core-settlement.ts";
 import { withDatabase } from "../support/database.ts";
 import { withFinancial } from "../support/financial-execution.ts";
 async function install(db: SQL, versions: number) {
@@ -277,7 +278,7 @@ test("authentication append upgrades an empty signed settlement schema without r
       expect(
         (await db`SELECT version,checksum FROM schema_migrations ORDER BY version`).slice(0, 6),
       ).toEqual(before);
-      expect((await db`SELECT max(version) v FROM schema_migrations`)[0].v).toBe(2026111818);
+      expect((await db`SELECT max(version) v FROM schema_migrations`)[0].v).toBe(2026111906);
       expect(
         (
           await db`SELECT array_agg(column_name::text ORDER BY column_name) c FROM information_schema.columns WHERE table_name='core_evidence_receipts' AND column_name IN ('authentication_disposition','signature','signature_payload_digest')`
@@ -288,6 +289,64 @@ test("authentication append upgrades an empty signed settlement schema without r
       );
     },
     { max: 4, registry: ".local/T04b2b-resources.jsonl" },
+  ));
+
+test("quota index upgrade retains released and pending history and expires active leases without releasing money", () =>
+  withFinancial(
+    async (f, db) => {
+      const setup = await f.bootstrap();
+      const client = f.client();
+      const worker = f.client(f.identity.b.port, "worker");
+      await client.startup();
+      await worker.startup();
+      const completed = await settledCharge(db, setup, client);
+      expect(await worker.execution("execution_quota_recovery_v1", { limit: 100 })).toMatchObject({
+        released: 3,
+        failed: 0,
+      });
+
+      const pending = await settledCharge(db, setup, client);
+      const deadline = new Date(Date.now() + 3500).toISOString();
+      const active = await granted(db, setup, client, { deadline });
+      const leases = () =>
+        db`SELECT lease_id,request_id,state,revision,descriptor FROM execution_quota_leases ORDER BY lease_id`;
+      const before = await leases();
+      expect(
+        await db`SELECT state,count(*)::int AS count FROM execution_quota_leases GROUP BY state ORDER BY state`,
+      ).toEqual([
+        { state: "ACTIVE", count: 3 },
+        { state: "RELEASED", count: 3 },
+        { state: "RELEASE_PENDING", count: 3 },
+      ]);
+      await migrate(db);
+      expect(await leases()).toEqual(before);
+
+      await Bun.sleep(Math.max(0, Date.parse(deadline) - Date.now() + 20));
+      expect(await worker.execution("execution_quota_recovery_v1", { limit: 100 })).toMatchObject({
+        released: 3,
+        pending: 3,
+        failed: 0,
+        expired: 1,
+      });
+      expect(
+        await db`SELECT state,count(*)::int AS count FROM execution_quota_leases
+          WHERE request_id=${active.prepared.requestId} GROUP BY state`,
+      ).toEqual([{ state: "EXPIRED", count: 3 }]);
+      expect(
+        await db`SELECT state,count(*)::int AS count FROM execution_quota_leases
+          WHERE request_id=ANY(${[completed.request, pending.request]}::uuid[]) GROUP BY state`,
+      ).toEqual([{ state: "RELEASED", count: 6 }]);
+      expect(
+        await db`SELECT reserved_atoms::text,spent_atoms::text FROM wallets
+          WHERE project_id=${setup.project.id}`,
+      ).toEqual([{ reserved_atoms: "100", spent_atoms: "200" }]);
+    },
+    {
+      initializeDatabase: (db) =>
+        db.begin((tx) =>
+          install(tx, manifest.migrations.findIndex(({ version }) => version === 2026111818) + 1),
+        ),
+    },
   ));
 
 test("authentication append refuses unsigned receipts from the earlier signed settlement version", () =>

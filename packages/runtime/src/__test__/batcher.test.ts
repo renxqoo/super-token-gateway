@@ -58,6 +58,27 @@ test("batch acknowledgments wait for commit and preserve request/result associat
   }
   expect(await Promise.all([one, two])).toEqual([100, 200]);
 });
+
+test("an idle writer can collect pending work across microtask turns before submitting", async () => {
+  const submitted: number[][] = [];
+  const batch = new Batcher<number, number>(
+    async (values) => {
+      submitted.push(values);
+      return values.map((value) => value * 10);
+    },
+    8,
+    20,
+    1,
+    4096,
+    { collectWhenIdle: true },
+  );
+  const first = batch.add(1);
+  await Promise.resolve();
+  const second = batch.add(2);
+  expect(await Promise.all([first, second])).toEqual([10, 20]);
+  expect(submitted).toEqual([[1, 2]]);
+});
+
 test("busy batches retain collection time and queued work starts promptly when the database becomes idle", async () => {
   const commits = [Promise.withResolvers<number[]>(), Promise.withResolvers<number[]>()];
   const submissions = [Promise.withResolvers<number[]>(), Promise.withResolvers<number[]>()];

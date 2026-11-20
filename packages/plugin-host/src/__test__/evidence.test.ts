@@ -6,7 +6,11 @@ import {
   type AbiResult,
   type ObservedEvidence,
 } from "../index.ts";
-import { syntheticChatPackage } from "../../../../tests/support/plugin-package.ts";
+import { anthropicMessagesPackageFiles } from "@gateway/adapters";
+import {
+  syntheticChatPackage,
+  syntheticSignedPackage,
+} from "../../../../tests/support/plugin-package.ts";
 
 const supervisor = createPluginSupervisor({
   executable: new URL("../../../../.local/plugin-host", import.meta.url).pathname,
@@ -22,9 +26,13 @@ afterAll(async () => {
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 const wire = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
 
-function observed(attemptId = crypto.randomUUID()) {
+function observed(
+  attemptId = crypto.randomUUID(),
+  pkg = signed.pkg,
+  beforeRecord?: (e: ObservedEvidence[]) => Promise<void>,
+) {
   const recorded: ObservedEvidence[] = [];
-  const attempt = host.create(signed.pkg, {
+  const attempt = host.create(pkg, {
     tenant: "synthetic",
     attempt: attemptId,
     incarnation: crypto.randomUUID(),
@@ -42,12 +50,178 @@ function observed(attemptId = crypto.randomUUID()) {
     delivery: "progressive",
     seal: (evidence) => evidence,
     record: async (evidence) => {
+      await beforeRecord?.(evidence);
       recorded.push(...evidence);
     },
   });
   return { bridge, recorded, attemptId };
 }
 
+test("a shared upstream read preserves every distinct cumulative checkpoint before success, errors or cancellation", async () => {
+  const delta = (output: number) =>
+    wire({
+      choices: [{ delta: { content: String(output) } }],
+      usage: { prompt_tokens: 7, completion_tokens: output },
+    });
+  const hold = (output: number) =>
+    wire({ choices: [], usage: { prompt_tokens: 7, completion_tokens: output } });
+  const stop = wire({ choices: [{ delta: {}, finish_reason: "stop" }] });
+  const error = wire({ error: { message: "synthetic" }, usage: { completion_tokens: 4 } });
+  for (const outcome of ["success", "error", "cancel"]) {
+    const { bridge, recorded } = observed();
+    try {
+      await bridge.invoke("stream_open", encode({ model: "logical" }));
+      const suffix = outcome === "error" ? error : "data: [DONE]\n\n";
+      const input = new TextEncoder().encode(delta(1) + stop + hold(2) + hold(3) + suffix);
+      let reply = await bridge.invoke("stream_feed", input);
+      expect(recorded.map((e) => [e.finality, e.usage.output_tokens])).toEqual([["PARTIAL", "1"]]);
+      if (outcome === "cancel") {
+        await expect(
+          bridge.invoke("stream_drain", undefined, AbortSignal.abort()),
+        ).rejects.toMatchObject({
+          code: "CALL_CANCELLED",
+        });
+        expect(recorded).toHaveLength(1);
+        continue;
+      }
+      while (reply.kind === "output" && !reply.terminal && !reply.needs_input)
+        reply = await bridge.invoke("stream_drain");
+      if (outcome === "error") {
+        expect(reply).toMatchObject({ kind: "failure", code: "upstream_error" });
+        expect(recorded.map((e) => [e.finality, e.usage.output_tokens])).toEqual([
+          ["PARTIAL", "1"],
+          ["PARTIAL", "2"],
+          ["PARTIAL", "3"],
+          ["UNKNOWN", "4"],
+        ]);
+      } else {
+        expect(reply).toMatchObject({ kind: "output", terminal: { kind: "complete" } });
+        expect(recorded.map((e) => [e.finality, e.usage.output_tokens])).toEqual([
+          ["PARTIAL", "1"],
+          ["PARTIAL", "2"],
+          ["FINAL", "3"],
+        ]);
+      }
+    } finally {
+      bridge.dispose();
+    }
+  }
+});
+
+test("a failed publication between held usage updates blocks terminal delivery with its original error", async () => {
+  const unavailable = new TypeError("synthetic external settlement unavailable");
+  const { bridge, recorded } = observed(crypto.randomUUID(), signed.pkg, async () => {
+    throw unavailable;
+  });
+  try {
+    await bridge.invoke("stream_open", encode({ model: "logical" }));
+    const input =
+      wire({ choices: [{ delta: { content: "x" } }] }) +
+      wire({ choices: [{ delta: {}, finish_reason: "stop" }] }) +
+      wire({ choices: [], usage: { prompt_tokens: 7, completion_tokens: 1 } }) +
+      wire({ choices: [], usage: { prompt_tokens: 7, completion_tokens: 3 } }) +
+      "data: [DONE]\n\n";
+    await expect(bridge.invoke("stream_feed", new TextEncoder().encode(input))).rejects.toBe(
+      unavailable,
+    );
+    expect(recorded).toHaveLength(0);
+  } finally {
+    bridge.dispose();
+  }
+});
+
+test("cancellation during a held usage publication keeps the subsequent terminal private", async () => {
+  const controller = new AbortController();
+  const { bridge, recorded } = observed(crypto.randomUUID(), signed.pkg, async () => {
+    controller.abort();
+  });
+  try {
+    await bridge.invoke("stream_open", encode({ model: "logical" }));
+    const input =
+      wire({ choices: [{ delta: { content: "x" } }] }) +
+      wire({ choices: [{ delta: {}, finish_reason: "stop" }] }) +
+      wire({ choices: [], usage: { prompt_tokens: 7, completion_tokens: 1 } }) +
+      wire({ choices: [], usage: { prompt_tokens: 7, completion_tokens: 3 } }) +
+      "data: [DONE]\n\n";
+    await expect(
+      bridge.invoke("stream_feed", new TextEncoder().encode(input), controller.signal),
+    ).rejects.toMatchObject({ code: "CALL_CANCELLED" });
+    expect(recorded.map((event) => [event.finality, event.usage.output_tokens])).toEqual([
+      ["PARTIAL", "1"],
+    ]);
+  } finally {
+    bridge.dispose();
+  }
+});
+
+test("a malformed frame after valid held usage preserves the original provider error and observed quantities", async () => {
+  const { bridge, recorded } = observed();
+  try {
+    await bridge.invoke("stream_open", encode({ model: "logical" }));
+    const source =
+      wire({ choices: [{ delta: { content: "x" } }] }) +
+      wire({ choices: [{ delta: {}, finish_reason: "stop" }] }) +
+      wire({ choices: [], usage: { prompt_tokens: 7, completion_tokens: 1 } }) +
+      "data: {broken}\n\n";
+    let reply = await bridge.invoke("stream_feed", new TextEncoder().encode(source));
+    while (reply.kind === "output" && !reply.terminal && !reply.needs_input)
+      reply = await bridge.invoke("stream_drain");
+    expect(reply).toMatchObject({
+      kind: "failure",
+      status: 502,
+      code: "invalid_json",
+      usage: { input_tokens: "7", output_tokens: "1" },
+    });
+    expect(recorded.map((e) => [e.finality, e.usage.output_tokens])).toEqual([
+      ["PARTIAL", "1"],
+      ["UNKNOWN", "1"],
+    ]);
+  } finally {
+    bridge.dispose();
+  }
+});
+test("an Anthropic shared read observes initial usage before exposing the terminal usage", async () => {
+  const pkg = syntheticSignedPackage(await anthropicMessagesPackageFiles()).pkg;
+  const { bridge, recorded } = observed(crypto.randomUUID(), pkg);
+  const event = (type: string, fields: object) =>
+    `event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`;
+  try {
+    await bridge.invoke("stream_open", encode({ model: "logical", protocol: "messages" }));
+    const input = new TextEncoder().encode(
+      [
+        event("message_start", {
+          message: {
+            id: "message",
+            type: "message",
+            role: "assistant",
+            model: "upstream",
+            content: [],
+            usage: { input_tokens: 7, output_tokens: 1 },
+          },
+        }),
+        event("content_block_start", { index: 0, content_block: { type: "text", text: "" } }),
+        event("content_block_delta", { index: 0, delta: { type: "text_delta", text: "ok" } }),
+        event("content_block_stop", { index: 0 }),
+        event("message_delta", {
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: 2 },
+        }),
+        event("message_stop", {}),
+      ].join(""),
+    );
+    let reply = await bridge.invoke("stream_feed", input);
+    expect(recorded.map((e) => [e.finality, e.usage.output_tokens])).toEqual([["PARTIAL", "1"]]);
+    while (reply.kind === "output" && !reply.terminal && !reply.needs_input)
+      reply = await bridge.invoke("stream_drain");
+    expect(reply).toMatchObject({ kind: "output", terminal: { kind: "complete" } });
+    expect(recorded.map((e) => [e.finality, e.usage.output_tokens])).toEqual([
+      ["PARTIAL", "1"],
+      ["FINAL", "2"],
+    ]);
+  } finally {
+    bridge.dispose();
+  }
+});
 test("a final JSON response becomes one FINAL observation over exactly the reported dimensions", async () => {
   const { bridge, recorded, attemptId } = observed();
   try {

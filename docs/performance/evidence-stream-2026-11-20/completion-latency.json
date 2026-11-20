@@ -1,0 +1,50 @@
+{
+  "public-host-target": {
+    "fullyCompletedByWindow": 1069,
+    "minuteCompletions": [1069],
+    "matchedRequests": 1080,
+    "httpOnly": 0,
+    "ackOnly": 222,
+    "completionLatencyMs": {
+      "samples": 1080,
+      "maxP99Ms": 1500,
+      "issuedMinutes": [
+        {
+          "samples": 1080,
+          "aboveBudget": 1076
+        }
+      ],
+      "dispatchesPastDrain": 0,
+      "p50": 4149.13,
+      "p95": 6646.04,
+      "p99": 7130.77,
+      "p999": 7326.48
+    }
+  },
+  "public-paced": {
+    "fullyCompletedByWindow": 654,
+    "minuteCompletions": [654],
+    "matchedRequests": 660,
+    "httpOnly": 0,
+    "ackOnly": 3,
+    "completionLatencyMs": {
+      "samples": 660,
+      "maxP99Ms": 1500,
+      "issuedMinutes": [
+        {
+          "samples": 659,
+          "aboveBudget": 0
+        },
+        {
+          "samples": 1,
+          "aboveBudget": 0
+        }
+      ],
+      "dispatchesPastDrain": 0,
+      "p50": 532.88,
+      "p95": 603.56,
+      "p99": 644.08,
+      "p999": 698.58
+    }
+  }
+}

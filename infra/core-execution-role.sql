@@ -12,6 +12,11 @@ END $$;
 GRANT EXECUTE ON FUNCTION public.core_lookup_v1(jsonb,jsonb) TO core_execution_api;
 GRANT EXECUTE ON FUNCTION public.core_quota_close_v1(jsonb,jsonb,jsonb) TO core_execution_api;
 GRANT EXECUTE ON FUNCTION public.core_execution_batch_v1(jsonb) TO core_execution_api;
+DO $$ BEGIN
+ IF to_regprocedure('public.core_short_chat_funding_v1(smallint,bigint)') IS NOT NULL THEN
+  GRANT EXECUTE ON FUNCTION public.core_short_chat_funding_v1(smallint,bigint) TO core_execution_api;
+ END IF;
+END $$;
 GRANT EXECUTE ON FUNCTION public.core_quota_recovery_v1(jsonb,jsonb) TO core_execution_api;
 GRANT EXECUTE ON FUNCTION public.core_abort_recovery_v1(jsonb,jsonb,jsonb) TO core_execution_api;
 GRANT EXECUTE ON FUNCTION public.core_plugin_package_v1(jsonb,text) TO core_execution_api;

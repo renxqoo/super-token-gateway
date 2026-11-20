@@ -1,6 +1,41 @@
 import { createServer, connect, type Socket } from "node:net";
 import { appendFile } from "node:fs/promises";
-export async function createCommitAckProxy() {
+import type { SQL } from "bun";
+
+function relayUntilMarkedCommit(client: Socket, notice: string, dropCommit: () => boolean) {
+  const message = Buffer.from("M" + notice + "\0"),
+    commit = Buffer.from("COMMIT\0");
+  let pending = Buffer.alloc(0),
+    marked = false,
+    startup = true;
+  return (chunk: Buffer) => {
+    if (startup && chunk.length === 1 && chunk[0] === 78) {
+      client.write(chunk);
+      return;
+    }
+    startup = false;
+    const bytes = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+    let offset = 0;
+    while (bytes.length - offset >= 5) {
+      const length = bytes.readUInt32BE(offset + 1);
+      if (length < 4) {
+        client.destroy();
+        return;
+      }
+      if (bytes.length - offset < length + 1) break;
+      const tag = bytes[offset],
+        body = bytes.subarray(offset + 5, offset + length + 1);
+      if (tag === 78 && body.includes(message)) marked = true;
+      if (marked && tag === 67 && body.equals(commit) && dropCommit()) return;
+      if (tag === 69 || tag === 90) marked = false;
+      client.write(bytes.subarray(offset, offset + length + 1));
+      offset += length + 1;
+    }
+    pending = Buffer.from(bytes.subarray(offset));
+  };
+}
+
+async function createProxy(notice?: string) {
   const target = new URL(process.env.DATABASE_URL!),
     sockets = new Set<Socket>();
   let armed = false,
@@ -32,6 +67,18 @@ export async function createCommitAckProxy() {
       sockets.delete(upstream);
       client.destroy();
     });
+    if (notice) {
+      client.on("data", (chunk) => upstream.write(chunk));
+      const relay = relayUntilMarkedCommit(client, notice, () => {
+        if (!armed) return false;
+        armed = false;
+        close();
+        settle();
+        return true;
+      });
+      upstream.on("data", (chunk) => relay(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      return;
+    }
     client.on("data", (chunk) => {
       const part = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
       const bytes = Buffer.concat([tail, part]);
@@ -118,6 +165,34 @@ export async function createCommitAckProxy() {
         { mode: 0o600 },
       );
       if (sockets.size) throw new Error("Proxy sockets retained");
+    },
+  };
+}
+
+export function createCommitAckProxy() {
+  return createProxy();
+}
+
+export async function createPermitCommitAckProxy(state: "RESERVED" | "SEND_GRANTED") {
+  const notice = "permit_commit_" + crypto.randomUUID().replaceAll("-", "");
+  const proxy = await createProxy(notice);
+  return {
+    port: proxy.port,
+    close: proxy.close,
+    async arm(db: SQL, timeoutMs: number) {
+      const event = state === "RESERVED" ? "INSERT" : "UPDATE";
+      const condition =
+        state === "RESERVED"
+          ? "NEW.state='RESERVED'"
+          : "OLD.state='RESERVED' AND NEW.state='SEND_GRANTED'";
+      await db.unsafe(`
+        CREATE FUNCTION test_permit_commit_notice() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN RAISE NOTICE '${notice}'; RETURN NULL; END $$;
+        CREATE CONSTRAINT TRIGGER test_permit_commit_notice AFTER ${event} ON execution_permits
+          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (${condition})
+          EXECUTE FUNCTION test_permit_commit_notice()
+      `);
+      return { observed: proxy.arm([], timeoutMs) };
     },
   };
 }

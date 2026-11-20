@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { RedisClient, type SQL } from "bun";
-import { createCommitAckProxy } from "../support/commit-ack-proxy.ts";
+import { createPermitCommitAckProxy } from "../support/commit-ack-proxy.ts";
 import {
   chatFrames,
   chatReplies,
@@ -408,14 +408,13 @@ test(
 test(
   "a lost begin acknowledgement is resolved by status query: the grant is never used and the request settles as not executed",
   async () => {
-    const proxy = await createCommitAckProxy();
+    const proxy = await createPermitCommitAckProxy("SEND_GRANTED");
     try {
       await withGatewayStack(
         { reply: () => chatReplies.json(), databasePort: proxy.port },
         async ({ db, setup, received, send }) => {
-          const observed = proxy.arm(["core_execution_batch_v1", "execution_begin_v1"], 30000);
-          const response = await send();
-          await observed;
+          const { observed } = await proxy.arm(db, 30000);
+          const [response] = await Promise.all([send(), observed]);
           expect(response.status).toBe(503);
           expect((await response.json()).error.code).toBe("core_unavailable");
           expect(received).toHaveLength(0);
@@ -444,14 +443,13 @@ test(
 test(
   "a lost admission acknowledgement is resolved by status query: the committed reservation is aborted and both parties' funds are released instead of staying reserved",
   async () => {
-    const proxy = await createCommitAckProxy();
+    const proxy = await createPermitCommitAckProxy("RESERVED");
     try {
       await withGatewayStack(
         { reply: () => chatReplies.json(), databasePort: proxy.port },
         async ({ db, setup, received, send }) => {
-          const observed = proxy.arm(["core_execution_slow_v1", "execution_admit_v1"], 30000);
-          const response = await send();
-          await observed;
+          const { observed } = await proxy.arm(db, 30000);
+          const [response] = await Promise.all([send(), observed]);
           expect(response.status).toBe(503);
           await response.text();
           expect(received).toHaveLength(0);

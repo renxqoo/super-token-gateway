@@ -104,7 +104,7 @@ function startPublicListener(config: PublicConfig, execution: Execution) {
   });
 }
 
-function startAdminListener(admin: AdminConfig, execution: Execution) {
+function startAdminListener(admin: AdminConfig, execution: Execution, eventStandbyUrl?: string) {
   const db = createDatabase(admin.database_url, 8);
   let catalog: CatalogApplication | undefined;
   try {
@@ -132,6 +132,7 @@ function startAdminListener(admin: AdminConfig, execution: Execution) {
       })
     : undefined;
   let stopping = false;
+  const eventStandby = eventStandbyUrl ? createDatabase(eventStandbyUrl, 4) : undefined;
   const app = new Hono<{ Bindings: { peerAddress?: string } }>();
   health(app, db, () => stopping);
   if (catalog) app.route("/admin", catalogRoutes(catalog));
@@ -143,6 +144,7 @@ function startAdminListener(admin: AdminConfig, execution: Execution) {
       pepper: execution.pepper,
       encryptionKey: execution.encryptionKey,
       ...(queue ? { queue } : {}),
+      ...(eventStandby ? { eventStandby } : {}),
     }),
   );
   return serveHttp({
@@ -159,7 +161,7 @@ function startAdminListener(admin: AdminConfig, execution: Execution) {
       try {
         await catalog?.close();
       } finally {
-        await db.close({ timeout: 1 });
+        await Promise.all([db.close({ timeout: 1 }), eventStandby?.close({ timeout: 1 })]);
       }
     },
   });
@@ -169,6 +171,7 @@ const c = await loadCoreApiConfig();
 const listener = await startCoreInternalListener({
   databaseUrl: c.database_url,
   ...(c.execution ? { execution: c.execution } : {}),
+  ...(c.terminal_settlement ? { terminalSettlement: c.terminal_settlement } : {}),
   audience: c.audience,
   hostname: c.hostname,
   servername: c.servername,
@@ -185,7 +188,10 @@ const listener = await startCoreInternalListener({
 let admin: ReturnType<typeof startAdminListener> | undefined;
 let account: ReturnType<typeof startPublicListener> | undefined;
 try {
-  admin = c.admin && c.execution ? startAdminListener(c.admin, c.execution) : undefined;
+  admin =
+    c.admin && c.execution
+      ? startAdminListener(c.admin, c.execution, c.terminal_settlement?.standby_url)
+      : undefined;
   account = c.public && c.execution ? startPublicListener(c.public, c.execution) : undefined;
 } catch (error) {
   try {

@@ -1,5 +1,9 @@
 import { RedisClient } from "bun";
-import { evidenceChannel } from "@gateway/runtime";
+import {
+  evidenceChannel,
+  streamTerminalRecoveryChannel,
+  terminalRecoveryChannel,
+} from "@gateway/runtime";
 
 export async function cleanupCapacityNamespaces(urls: string[], namespace: string) {
   if (!/^bench:[a-f0-9]{32}$/.test(namespace)) throw new Error("Invalid capacity namespace");
@@ -19,7 +23,12 @@ export async function cleanupCapacityNamespaces(urls: string[], namespace: strin
       await Promise.race([
         (async () => {
           await client.connect();
-          for (const pattern of [`${namespace}:*`, `{${namespace}:${evidenceChannel.scope}}:*`]) {
+          for (const pattern of [
+            `${namespace}:*`,
+            ...[evidenceChannel, streamTerminalRecoveryChannel, terminalRecoveryChannel].map(
+              ({ scope }) => `{${namespace}:${scope}}:*`,
+            ),
+          ]) {
             let cursor = "0";
             do {
               const result = (await client.send("SCAN", [

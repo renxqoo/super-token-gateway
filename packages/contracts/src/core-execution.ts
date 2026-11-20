@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { operations } from "@gateway/kernel";
+import { canonical, operations } from "@gateway/kernel";
 import { atomsSchema, currencySchema } from "./billing.ts";
 import { usageSchema } from "./public.ts";
 import { digestSchema, opaqueResourceIdSchema } from "./enterprise.ts";
@@ -12,6 +12,10 @@ import {
   candidateRefV1Schema,
   executionRuntimesSchema,
 } from "./internal-identity.ts";
+export function shortChatFundingGroup(projectId: string) {
+  return Number.parseInt(projectId.at(-1)!, 16);
+}
+
 export const executionKinds = [
   "execution_context_v1",
   "execution_admit_v1",
@@ -135,6 +139,7 @@ export const executionDataSchemas = {
     intent_digest: digestSchema.nullable(),
     fingerprint: digestSchema,
     customer_currency: currencySchema,
+    commit_send: z.literal(true).optional(),
   }),
   execution_next_v1: z.strictObject({
     ...dispatch,
@@ -292,6 +297,7 @@ export const transientSendSchema = z.strictObject({
   authorization_plan_digest: digestSchema,
   deadline_at: internalInstantSchema,
   remaining_ms: z.number().int().positive().max(30000),
+  processing_ms: z.number().int().min(0).max(600000).optional(),
   auth_material: z.discriminatedUnion("type", [
     z.strictObject({ type: z.literal("none") }),
     z.strictObject({ type: z.literal("bearer"), value: z.string().max(4096) }),
@@ -379,6 +385,7 @@ export const executionContextResponseSchema = z.strictObject({
 export const executionReplySchema = z.strictObject({
   receipt: executionReceiptSchema,
   transient_send: transientSendSchema.optional(),
+  stream_terminal_v1: z.literal(true).optional(),
 });
 export type ExecutionReply = z.infer<typeof executionReplySchema>;
 export type TransientSend = z.infer<typeof transientSendSchema>;
@@ -473,6 +480,39 @@ export const signedCoreEvidenceEventV1Schema = z
 export const coreEvidenceGroupV1Schema = z.strictObject({
   events: z.array(signedCoreEvidenceEventV1Schema).min(1).max(64),
 });
+export function isInitialStreamTerminalGroup(events: readonly SignedCoreEvidenceEventV1[]) {
+  const [first, last] = events;
+  return (
+    events.length === 2 &&
+    first !== undefined &&
+    last !== undefined &&
+    first.source === "execution" &&
+    last.source === "execution" &&
+    first.finality === "FINAL" &&
+    last.finality === "FINAL" &&
+    first.source_revision === "1" &&
+    last.source_revision === "2" &&
+    !first.attempt_state &&
+    !first.request_state &&
+    !first.error_code &&
+    !last.error_code &&
+    last.attempt_state === "SUCCEEDED" &&
+    last.request_state === "SUCCEEDED" &&
+    first.attempt_id === last.attempt_id &&
+    first.permit_epoch === last.permit_epoch &&
+    first.origin_identity === last.origin_identity &&
+    first.origin_session_id === last.origin_session_id &&
+    first.origin_incarnation === last.origin_incarnation &&
+    first.event_id !== last.event_id &&
+    canonical(first.usage) === canonical(last.usage) &&
+    canonical(first.final_dimensions) === canonical(last.final_dimensions)
+  );
+}
+export const terminalSettlementRequestSchema = coreEvidenceGroupV1Schema.extend({
+  stream_terminal_v1: z.literal(true).optional(),
+});
+export const terminalSettlementPath = "/_internal/core/v1/terminal-settlement";
+export const terminalSettlementResponseSchema = z.strictObject({ requestId: internalUuidSchema });
 export const coreEvidenceBatchV1Schema = z.strictObject({
   version: z.literal(1),
   groups: z.array(coreEvidenceGroupV1Schema).min(1).max(128),

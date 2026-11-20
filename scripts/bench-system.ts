@@ -2,17 +2,25 @@ import { execFileSync } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
 import { cpus, release, totalmem } from "node:os";
 import { resolve } from "node:path";
-import type { SQL } from "bun";
-import { RedisClient } from "bun";
-import { UsageProducer, evidenceChannel } from "@gateway/runtime";
+import { SQL, RedisClient } from "bun";
+import {
+  UsageProducer,
+  evidenceChannel,
+  streamTerminalRecoveryChannel,
+  terminalRecoveryChannel,
+} from "@gateway/runtime";
 import { canonical } from "@gateway/kernel";
 import type { createCoreManagementApplication } from "../apps/core-api/src/platform/management.ts";
 import { withFinancial } from "../tests/support/financial-execution.ts";
+import { syntheticAdminKey } from "../tests/support/catalog.ts";
+import { createNativeFixture, nativeFixtureOptions } from "../tests/support/native-fixture.ts";
 import {
   startCoreWorker,
   startGateway,
   withSettlementRole,
 } from "../tests/support/gateway-process.ts";
+import { confirmedStreamRequests, verifiedStreamProgress } from "./capacity-stream-completion.ts";
+import { createCapacityAckIndex } from "./capacity-ack-index.ts";
 import { cleanupCapacityNamespaces } from "./capacity-cleanup.ts";
 import { approvePluginRuntime } from "./runtime-approval.ts";
 import {
@@ -23,6 +31,7 @@ import {
 import {
   CONTRACT_MAX_P99_MS,
   passesCapacityTarget,
+  passesLongStreamCapacity,
   passesOnlineCapacity,
 } from "./benchmark-lib.ts";
 
@@ -45,9 +54,19 @@ const seconds = Number(option("--seconds", "10"));
 const instances = Number(option("--instances", "1"));
 const wallets = Number(option("--wallets", "1"));
 const concurrency = Number(option("--concurrency", "8"));
+const offeredRps = Number(option("--rate", "0"));
 const workerConcurrency = Number(option("--worker-concurrency", "8"));
 const gatewayInflight = Number(option("--gateway-inflight", "10000"));
 const stream = args.includes("--stream");
+const streamDurationSeconds = Number(option("--stream-duration-seconds", "0"));
+const fillSeconds = streamDurationSeconds ? streamDurationSeconds + 2 : 0;
+const replicatedShortChat = args.includes("--replicated-short-chat");
+const replicatedStreamTerminal = args.includes("--replicated-stream-terminal");
+if (replicatedStreamTerminal && (!replicatedShortChat || !stream))
+  throw new Error("Replicated stream terminal requires --replicated-short-chat --stream");
+const projectCoreRouting = args.includes("--project-core-routing");
+if (projectCoreRouting && (!replicatedShortChat || (stream && !replicatedStreamTerminal)))
+  throw new Error("Project Core routing benchmark requires replicated Chat terminal settlement");
 const requestTimeoutMs = Number(option("--request-timeout-ms", "30000"));
 if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTimeoutMs > 600000)
   throw new Error("Invalid request timeout");
@@ -59,6 +78,30 @@ const maxP99Ms = Number(option("--max-p99-ms", String(CONTRACT_MAX_P99_MS)));
 if (!Number.isFinite(maxP99Ms) || maxP99Ms <= 0 || maxP99Ms > CONTRACT_MAX_P99_MS)
   throw new Error(`P99 budget must be within the ${CONTRACT_MAX_P99_MS} ms capacity contract`);
 const scenario = JSON.parse(option("--scenario", "{}")) as Record<string, unknown>;
+if ("streamDurationMs" in scenario)
+  throw new Error("Use --stream-duration-seconds for a paced stream workload");
+if (args.includes("--stream-duration-seconds")) {
+  if (
+    !stream ||
+    !replicatedStreamTerminal ||
+    !requireOnlineCapacity ||
+    !targetRps ||
+    !Number.isSafeInteger(offeredRps) ||
+    offeredRps < targetRps ||
+    offeredRps > 100000 ||
+    ![5, 30, 120].includes(streamDurationSeconds) ||
+    requestTimeoutMs <= streamDurationSeconds * 1000 ||
+    Object.keys(scenario).length
+  )
+    throw new Error(
+      "Long stream capacity requires fixed arrivals, replicated stream terminal, and a request timeout above a 5, 30, or 120 second stream",
+    );
+  scenario.streamDurationMs = streamDurationSeconds * 1000;
+  scenario.repeat = 5;
+}
+const fixedStreamText = stream && scenario.tools !== true;
+const upstreamChallenge = fixedStreamText && requireOnlineCapacity;
+if (upstreamChallenge) scenario.echoRequestChallenge = true;
 const upstreamMode = option("--upstream", "standard");
 if (!["standard", "precomputed"].includes(upstreamMode))
   throw new Error("Invalid benchmark upstream");
@@ -75,6 +118,9 @@ if (!Number.isSafeInteger(drainSeconds) || drainSeconds < 1 || drainSeconds > 60
   throw new Error("Invalid drain budget");
 const hotShare = Number(option("--hot-share", "0"));
 const supplierAccounts = Number(option("--supplier-accounts", "1"));
+const supplierConcurrency = 100000;
+const upstreamConnectionsPerGateway = 1024;
+const pluginConcurrentAttempts = replicatedShortChat ? 512 : 128;
 const pluginRuntime = (() => {
   const value = option("--plugin-runtime", "builtin-worker");
   if (value !== "wasm" && value !== "builtin-worker") throw new Error("Invalid plugin runtime");
@@ -91,14 +137,33 @@ if (
   seconds > 3600 ||
   instances > 8 ||
   wallets > 1000 ||
-  concurrency > 8192 ||
+  concurrency > 10000 ||
   workerConcurrency > 64 ||
   gatewayInflight > 100000
 )
   throw new Error("Invalid capacity bounds");
-if (!process.env.DATABASE_URL || !process.env.REDIS_URL || !process.env.QUEUE_REDIS_URL)
+if (streamDurationSeconds) {
+  const inFlight = offeredRps * streamDurationSeconds;
+  const limits = {
+    driver: concurrency,
+    gateway: instances * gatewayInflight,
+    plugin: instances * pluginConcurrentAttempts,
+    upstreamConnections: instances * upstreamConnectionsPerGateway,
+    supplier: supplierAccounts * supplierConcurrency,
+  };
+  if (Object.values(limits).some((limit) => limit < inFlight))
+    throw new Error(
+      `Long stream requires at least ${inFlight} in-flight requests: ${JSON.stringify(limits)}; no fixture created`,
+    );
+}
+if (
+  !replicatedShortChat &&
+  (!process.env.DATABASE_URL || !process.env.REDIS_URL || !process.env.QUEUE_REDIS_URL)
+)
   throw new Error("Local PG, admission Redis and durable queue Redis URLs are required");
-const requiredReplicas = Number(process.env.QUEUE_REQUIRED_REPLICAS ?? "0");
+const requiredReplicas = replicatedShortChat
+  ? 1
+  : Number(process.env.QUEUE_REQUIRED_REPLICAS ?? "0");
 if (!Number.isSafeInteger(requiredReplicas) || requiredReplicas < 0 || requiredReplicas > 5)
   throw new Error("Invalid QUEUE_REQUIRED_REPLICAS");
 if (requireOnlineCapacity && requiredReplicas < 1)
@@ -131,7 +196,8 @@ const environment = {
 };
 const storageBudget = await capacityStorageBudget(
   process.cwd(),
-  seconds * Number(option("--rate", String(targetRps || 6000))),
+  (seconds + fillSeconds) * (args.includes("--rate") ? offeredRps : targetRps || 6000),
+  replicatedShortChat ? 80000 : undefined,
 );
 if (requireOnlineCapacity && !storageBudget.sufficient)
   throw new Error(
@@ -164,6 +230,7 @@ const compiled = (await import(resolve("dist/core-api/platform/management.js")))
 type Fixture = Parameters<Parameters<typeof withFinancial>[0]>[0];
 type UsageEvent = {
   id: string;
+  attempt_id: string;
   request_id: string;
   finality: string;
   currency: string;
@@ -181,7 +248,7 @@ async function upstreamStats(action = "stats") {
     signal: AbortSignal.timeout(2000),
   });
   if (!response.ok) throw new Error("Mock telemetry unavailable");
-  return (await response.json()) as { active?: number; requests?: number };
+  return (await response.json()) as { active?: number; requests?: number; cancellations?: number };
 }
 
 async function created(
@@ -227,7 +294,7 @@ async function provision(f: Fixture) {
   await created(
     f.request(
       `/providers/${setup.provider.id}`,
-      { concurrency: 100000, rpm: 10000000 },
+      { concurrency: supplierConcurrency, rpm: 10000000 },
       undefined,
       "PATCH",
     ),
@@ -288,7 +355,7 @@ async function provision(f: Fixture) {
         kind: "openai",
         base_url: `https://127.0.0.1:${upstreamPort}`,
         api_key: `capacity-upstream-${index}`,
-        concurrency: 100000,
+        concurrency: supplierConcurrency,
         rpm: 10000000,
       }),
       "Supplier provider",
@@ -376,10 +443,12 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
   let sampling: Promise<void> | undefined;
   let consuming = false;
   let consume: Promise<void> | undefined;
+  let ackIndex: Awaited<ReturnType<typeof createCapacityAckIndex>> | undefined;
   let ackWriter: Awaited<ReturnType<typeof createIdentityWriter>> | undefined;
   let loadProcess: Bun.Subprocess | undefined;
   let databaseMetrics: Awaited<ReturnType<typeof createDatabaseMetrics>> | undefined;
   let processSampler: ReturnType<typeof startProcessSampler> | undefined;
+  let consumerServer: ReturnType<typeof Bun.serve> | undefined;
   const queue = new UsageProducer({
     channel: evidenceChannel,
     url: process.env.QUEUE_REDIS_URL!,
@@ -387,10 +456,28 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     replicas: 0,
     timeoutMs: 2000,
   });
+  const recoveryQueue = replicatedShortChat
+    ? new UsageProducer({
+        channel: terminalRecoveryChannel,
+        url: process.env.QUEUE_REDIS_URL!,
+        namespace,
+        replicas: 0,
+        timeoutMs: 1000,
+      })
+    : undefined;
+  const streamRecoveryQueue = replicatedStreamTerminal
+    ? new UsageProducer({
+        channel: streamTerminalRecoveryChannel,
+        url: process.env.QUEUE_REDIS_URL!,
+        namespace,
+        replicas: 0,
+        timeoutMs: 1000,
+      })
+    : undefined;
   try {
     const databaseSettings = await db<
       { name: string; setting: string; unit: string | null }[]
-    >`SELECT name,setting,unit FROM pg_settings WHERE name IN ('server_version','shared_buffers','effective_cache_size','work_mem','max_wal_size','checkpoint_timeout','wal_compression','fsync','full_page_writes','synchronous_commit','max_connections') ORDER BY name`;
+    >`SELECT name,setting,unit FROM pg_settings WHERE name IN ('server_version','shared_buffers','effective_cache_size','work_mem','max_wal_size','checkpoint_timeout','wal_compression','fsync','full_page_writes','synchronous_commit','synchronous_standby_names','max_connections') ORDER BY name`;
     for (const name of ["fsync", "full_page_writes", "synchronous_commit"])
       if (!databaseSettings.some((row) => row.name === name && row.setting === "on"))
         throw new Error(`Financial capacity measurement requires ${name}=on`);
@@ -445,11 +532,29 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     }
     if (Object.keys(scenario).length) await upstreamStats("scenarios");
     const { setup, projects, keys, credited, accounts, runtimeApproval } = await provision(f);
+    if (consumerMode === "live")
+      consumerServer = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: (request) => f.management.fetch(request),
+      });
+    async function consumerRequest(path: string, body: unknown) {
+      const response = await fetch(`http://127.0.0.1:${consumerServer!.port}${path}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${syntheticAdminKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(4000),
+      });
+      return { status: response.status, value: (await response.json()) as Record<string, unknown> };
+    }
     const consumer =
       consumerMode === "live"
         ? (
             (await created(
-              f.request("/consumers", { name: `bench-${id}`, replay: false }),
+              consumerRequest("/consumers", { name: `bench-${id}`, replay: false }),
               "Consumer",
             )) as {
               id: string;
@@ -478,12 +583,29 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
         namespace,
         upstreamCertificate,
         instance,
+        ...(replicatedShortChat && gateways.length % 2 === 1 ? { core: "coreB" } : {}),
+        ...(replicatedShortChat ? { coreConnections: 4, pluginConcurrentAttempts } : {}),
+        ...(projectCoreRouting
+          ? ({ shortChatPeerParity: gateways.length % 2 === 0 ? 1 : 0 } as const)
+          : {}),
         entry: "dist/gateway/main.js",
         overrides: {
           total_timeout_ms: requestTimeoutMs,
           shutdown_grace_ms: 20000,
           resource_poll_ms: 5000,
           max_inflight: gatewayInflight,
+          ...(streamDurationSeconds ? { upstream_pool_size: upstreamConnectionsPerGateway } : {}),
+          commit_short_chat: replicatedShortChat,
+          ...(replicatedStreamTerminal ? { commit_short_chat_sse: true } : {}),
+          ...(replicatedShortChat
+            ? {
+                terminal_recovery_queue: {
+                  url: process.env.QUEUE_REDIS_URL,
+                  namespace,
+                  required_replicas: requiredReplicas,
+                },
+              }
+            : {}),
           queue: {
             url: process.env.QUEUE_REDIS_URL,
             namespace,
@@ -507,7 +629,10 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       await db.unsafe(`ANALYZE ${table}`);
     const roots = {
       gateway: gateways.map((gateway) => gateway.pid),
-      core_api: [f.identity.a.pid],
+      core_api:
+        replicatedShortChat && instances > 1
+          ? [f.identity.a.pid, f.identity.b.pid]
+          : [f.identity.a.pid],
       core_worker: worker ? [worker.pid] : [],
       upstream: [upstream.pid],
     };
@@ -528,7 +653,8 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     await processSampler.start();
     const timeline: Record<string, unknown>[] = [];
     const samplingStart = Date.now();
-    const ackedRequests = new Set<string>();
+    ackIndex = consumer ? await createCapacityAckIndex(directory) : undefined;
+    const ackedRequests = ackIndex;
     let delivered = 0,
       receiptConfirmedAcks = 0,
       imprecise = 0,
@@ -584,7 +710,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
             active_queries: activity[0]!.active,
             external_acked: delivered,
             receipt_confirmed_acks: receiptConfirmedAcks,
-            acked_requests: ackedRequests.size,
+            acked_requests: ackedRequests?.size ?? 0,
             ...(waits ? { waits: [...waits] } : {}),
           });
         })()
@@ -597,35 +723,58 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       },
       requireOnlineCapacity ? 250 : 1000,
     );
+    const strictStream = stream && requireOnlineCapacity;
+    const expectation = { charge: expectedCharge, cost: expectedCost, usage: expectedUsage };
+    let acknowledgedProgress = 0;
     consuming = true;
     consume = (async () => {
-      let leases: { token: string; at: number; events: UsageEvent[] }[] = [];
-      while (consuming && consumer) {
+      let leases: { token: string; at: number; checkAfter: number; events: UsageEvent[] }[] = [];
+      while (consuming && consumer && ackedRequests) {
         try {
           const page = (await created(
-            f.request(`/consumers/${consumer}/claim`, { limit: 500 }),
+            consumerRequest(`/consumers/${consumer}/claim`, { limit: 500 }),
             "Event claim",
             200,
           )) as { lease_token: string; events: UsageEvent[] };
           if (page.events.length)
-            leases.push({ token: page.lease_token, at: Date.now(), events: page.events });
+            leases.push({
+              token: page.lease_token,
+              at: Date.now(),
+              checkAfter: 0,
+              events: page.events,
+            });
           let progressed = false;
           const kept: typeof leases = [];
           for (const lease of leases) {
-            const confirmed = await confirmedRequests(
-              db,
-              lease.events.map((event) => event.request_id),
-            );
+            if (lease.checkAfter > Date.now()) {
+              kept.push(lease);
+              continue;
+            }
+            const progress = strictStream
+              ? await verifiedStreamProgress(db, lease.events)
+              : new Set<string>();
+            const terminalEvents = lease.events.filter((event) => !progress.has(event.id));
+            const requestIds = terminalEvents.map((event) => event.request_id);
+            const confirmed =
+              strictStream && requestIds.length
+                ? new Set(
+                    (
+                      await confirmedStreamRequests(db, requestIds, consumer, false, expectation)
+                    ).map((row) => row.request_id),
+                  )
+                : await confirmedRequests(db, requestIds);
             const ready = lease.events.filter(
-              (event) => confirmed.has(event.request_id) && preciseEvidence(event),
+              (event) =>
+                progress.has(event.id) ||
+                (confirmed.has(event.request_id) && preciseEvidence(event)),
             );
-            imprecise += lease.events.filter(
+            imprecise += terminalEvents.filter(
               (event) => confirmed.has(event.request_id) && !preciseEvidence(event),
             ).length;
-            const remaining = lease.events.filter((event) => !confirmed.has(event.request_id));
+            const remaining = terminalEvents.filter((event) => !confirmed.has(event.request_id));
             if (ready.length) {
               const { acknowledged } = (await created(
-                f.request(`/consumers/${consumer}/ack`, {
+                consumerRequest(`/consumers/${consumer}/ack`, {
                   lease_token: lease.token,
                   event_ids: ready.map((event) => event.id),
                 }),
@@ -634,29 +783,34 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
               )) as { acknowledged: number };
               delivered += acknowledged;
               if (acknowledged === ready.length) {
+                acknowledgedProgress += progress.size;
                 receiptConfirmedAcks += acknowledged;
-                const touched = [...new Set(ready.map((event) => event.request_id))].filter(
-                  (request) => !ackedRequests.has(request),
-                );
-                const completed = touched.length
-                  ? await db<{ request_id: string }[]>`SELECT a.request_id FROM attempts a
+                const touched = ackedRequests.unseen(ready.map((event) => event.request_id));
+                const completed = !touched.length
+                  ? []
+                  : strictStream
+                    ? await confirmedStreamRequests(db, touched, consumer, true, expectation)
+                    : await db<{ request_id: string }[]>`SELECT a.request_id FROM attempts a
                       JOIN usage_event_index i ON i.attempt_id=a.id AND i.record_kind<>'RAW'
                       LEFT JOIN event_deliveries d ON d.consumer_id=${consumer} AND d.event_id=i.id
                       WHERE a.request_id=ANY(${touched}::uuid[]) GROUP BY a.request_id
-                      HAVING bool_and(d.state IS NOT DISTINCT FROM 'ACKED')`
-                  : [];
-                for (const row of completed) ackedRequests.add(row.request_id);
-                if (completed.length)
-                  await ackWriter?.write(
+                      HAVING bool_and(d.state IS NOT DISTINCT FROM 'ACKED')`;
+                if (completed.length) {
+                  const at = Date.now();
+                  const fresh = ackedRequests.add(
                     completed.map((row) => row.request_id),
-                    Date.now(),
+                    at,
                   );
+                  if (fresh.length) await ackWriter?.write(fresh, at);
+                }
               } else ackShortfall += ready.length - acknowledged;
               progressed = true;
             }
             lease.events = remaining;
-            if (remaining.length && Date.now() - lease.at <= 25000) kept.push(lease);
-            else expiredLeases += remaining.length;
+            if (remaining.length && Date.now() - lease.at <= 25000) {
+              lease.checkAfter = Date.now() + 50;
+              kept.push(lease);
+            } else expiredLeases += remaining.length;
           }
           leases = kept;
           if (!page.events.length && !progressed) await Bun.sleep(10);
@@ -678,6 +832,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
         setup.model,
         "--seconds",
         String(seconds),
+        ...(fillSeconds ? ["--fill-seconds", String(fillSeconds)] : []),
         "--concurrency",
         String(concurrency),
         "--warmup-concurrency",
@@ -688,6 +843,15 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
         "--hot-share",
         String(hotShare),
         ...(stream ? ["--stream"] : []),
+        ...(upstreamChallenge ? ["--upstream-challenge"] : []),
+        ...(fixedStreamText
+          ? [
+              "--expected-text",
+              String(scenario.output ?? "Hello, 世界 🌍"),
+              "--expected-text-repetitions",
+              String(scenario.repeat ?? 1),
+            ]
+          : []),
         "--request-timeout-ms",
         String(requestTimeoutMs),
         ...(args.includes("--rate") ? ["--rate", option("--rate", "0")] : []),
@@ -723,9 +887,20 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       await Bun.sleep(25);
     }
     let queueStats: Record<string, number> = {};
+    let recoveryStats: Record<string, number> = {};
+    let streamRecoveryStats: Record<string, number> = {};
     do {
       queueStats = await queue.stats();
-      if (Object.values(queueStats).every((n) => n === 0)) break;
+      recoveryStats = (await recoveryQueue?.stats()) ?? {};
+      streamRecoveryStats = (await streamRecoveryQueue?.stats()) ?? {};
+      if (
+        [
+          ...Object.values(queueStats),
+          ...Object.values(recoveryStats),
+          ...Object.values(streamRecoveryStats),
+        ].every((n) => n === 0)
+      )
+        break;
       await Bun.sleep(25);
     } while (withinDrain());
     const serviceDrainedAt = Date.now();
@@ -841,10 +1016,29 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     )[0]!.mismatches as number;
     const windowStart = Date.parse(http.measurement_started_at);
     const windowEnd = windowStart + seconds * 1000;
+    const fillSample = streamDurationSeconds
+      ? timeline.findLast((sample) => Number(sample.completed_at) <= windowStart)
+      : undefined;
+    const upstreamAtWindowStart = Number(fillSample?.upstream_active ?? 0);
+    const fillSampleAgeMs = windowStart - Number(fillSample?.completed_at ?? 0);
     const identityAudit = requireOnlineCapacity
-      ? await auditCapacityIdentities(http.identity_log, ackPath, windowStart, seconds)
+      ? await auditCapacityIdentities(
+          http.identity_log,
+          ackPath,
+          windowStart,
+          seconds,
+          stream ? http.dispatch_log : undefined,
+          maxP99Ms,
+          streamDurationSeconds
+            ? {
+                arrivalsStartedAt: Date.parse(http.arrivals_started_at),
+                minimumStreamMs: streamDurationSeconds * 1000,
+              }
+            : undefined,
+        )
       : undefined;
     const expectedAcks = consumerMode === "live" ? Number(check.usage_events) : 0;
+    const upstreamResult = await upstreamStats();
     const failures: string[] = [];
     const require = (condition: boolean, label: string) => {
       if (!condition) failures.push(label);
@@ -853,7 +1047,8 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     require(Number(check.attempts) === requests, "extra_or_missing_attempts");
     require(Number(check.succeeded_attempts) === requests, "unsuccessful_attempts");
     require(Number(check.usage_requests) === requests, "requests_without_usage");
-    require(Number(check.precise_usage) === Number(check.usage_events), "imprecise_usage");
+    require(Number(check.precise_usage) + acknowledgedProgress ===
+      Number(check.usage_events), "imprecise_usage");
     require(Number(check.unexpected_receipts) === 0, "unexpected_evidence_receipts");
     require(Number(check.precise_charges) === requests, "imprecise_customer_charges");
     require(Number(check.settled_holds) === requests, "unsettled_holds");
@@ -880,13 +1075,37 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     require(http.invalid === 0 &&
       !(http.shed ?? 0) &&
       http.completed === http.succeeded, "http_validity");
+    if (stream) {
+      if (requireOnlineCapacity)
+        require(!!identityAudit?.completionLatencyMs, "stream_dispatch_evidence");
+      require(upstreamResult.requests ===
+        http.succeeded + http.warmup_requests, "upstream_request_count");
+      require((!upstreamChallenge || http.sse.upstream_challenge === true) &&
+        http.sse.response_headers === http.offered &&
+        http.sse.first_frame === http.offered &&
+        http.sse.done === http.offered &&
+        http.sse.error_frames === 0 &&
+        (!fixedStreamText || http.sse.first_content === http.offered), "sse_completion");
+    }
+    if (streamDurationSeconds) {
+      require(fillSampleAgeMs <= 1000 &&
+        upstreamAtWindowStart >= targetRps * streamDurationSeconds, "stream_fill_upstream");
+      require(identityAudit?.longStream?.shortStreams === 0, "shortened_streams");
+      require(upstreamResult.active === 0 &&
+        upstreamResult.cancellations === 0, "upstream_stream_cleanup");
+    }
     if (args.includes("--rate")) {
-      const planned = seconds * Number(option("--rate", "0"));
+      const planned = (seconds + fillSeconds) * offeredRps;
       require(http.offered === planned &&
         http.completed + (http.shed ?? 0) === planned, "planned_arrivals");
     }
     require(requests === http.succeeded + http.warmup_requests, "request_count");
     require(Object.values(queueStats).every((n) => n === 0), "evidence_queue_backlog");
+    if (replicatedStreamTerminal)
+      require(Object.values(streamRecoveryStats).every(
+        (n) => n === 0,
+      ), "stream_terminal_recovery_backlog");
+    require(Object.values(recoveryStats).every((n) => n === 0), "terminal_recovery_backlog");
     require(telemetryErrors === 0 &&
       timeline.length >= Math.max(1, Math.floor(seconds / 2)), "telemetry");
     require(consumerErrors === 0 &&
@@ -894,7 +1113,8 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       expiredLeases === 0 &&
       ackShortfall === 0 &&
       receiptConfirmedAcks === expectedAcks &&
-      ackedRequests.size === (consumerMode === "live" ? requests : 0), "receipt_confirmed_acks");
+      (ackedRequests?.size ?? 0) ===
+        (consumerMode === "live" ? requests : 0), "receipt_confirmed_acks");
     if (identityAudit)
       require(identityAudit.matchedRequests === http.succeeded &&
         identityAudit.httpOnly === 0 &&
@@ -902,35 +1122,50 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
     require(processCpu.errors === 0, "process_cpu_sampling");
     require(pgStatements.valid, "pg_statement_statistics");
     const valid = failures.length === 0;
-    const withinWindow = timeline
-      .filter((sample) => Number(sample.completed_at ?? Infinity) <= windowEnd)
-      .at(-1);
+    const withinWindow = timeline.findLast(
+      (sample) => Number(sample.completed_at ?? Infinity) <= windowEnd,
+    );
     const onlineCapacity = identityAudit
       ? {
           ...identityAudit,
           maxP99Ms,
+          ...(streamDurationSeconds ? { upstreamAtWindowStart, fillSampleAgeMs } : {}),
           drainAfterWindowMs: Math.max(0, serviceDrainedAt - windowEnd),
           receiptAckedRequestsByWindow:
-            Number(withinWindow?.acked_requests ?? 0) - http.warmup_requests,
-          ackedEventsByWindow: Number(withinWindow?.external_acked ?? 0),
+            Number(withinWindow?.acked_requests ?? 0) -
+            Number(fillSample?.acked_requests ?? http.warmup_requests),
+          ackedEventsByWindow:
+            Number(withinWindow?.external_acked ?? 0) - Number(fillSample?.external_acked ?? 0),
           sampledBeforeWindowEndMs: windowEnd - Number(withinWindow?.completed_at ?? 0),
           httpByWindow: http.minute_windows?.["0"]?.succeeded ?? 0,
         }
       : undefined;
-    const capacityPassed =
-      targetRps > 0
-        ? passesCapacityTarget(valid, http, targetRps) &&
-          (!onlineCapacity ||
-            passesOnlineCapacity(
-              valid,
-              http,
-              targetRps,
-              seconds,
-              onlineCapacity.minuteCompletions,
-              maxP99Ms,
-              onlineCapacity.drainAfterWindowMs,
-            ))
-        : undefined;
+    let capacityPassed: boolean | undefined;
+    if (streamDurationSeconds) {
+      capacityPassed =
+        !!onlineCapacity &&
+        passesLongStreamCapacity(
+          valid,
+          targetRps,
+          seconds,
+          streamDurationSeconds,
+          onlineCapacity,
+          onlineCapacity.drainAfterWindowMs,
+        );
+    } else if (targetRps > 0) {
+      capacityPassed = onlineCapacity
+        ? passesOnlineCapacity(
+            valid,
+            http,
+            targetRps,
+            seconds,
+            onlineCapacity.minuteCompletions,
+            maxP99Ms,
+            onlineCapacity.drainAfterWindowMs,
+            onlineCapacity.completionLatencyMs,
+          )
+        : passesCapacityTarget(valid, http, targetRps);
+    }
     const result = {
       id,
       scope: "v2-three-process",
@@ -949,6 +1184,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       executionRuntimes,
       concurrency,
       stream,
+      ...(streamDurationSeconds ? { streamDurationSeconds, fillSeconds } : {}),
       requestTimeoutMs,
       upstreamMode,
       scenario,
@@ -957,6 +1193,13 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       consumerMode,
       gatewayInflight,
       requiredReplicas,
+      replicatedShortChat,
+      replicatedStreamTerminal,
+      projectCoreRouting,
+      coreConnectionsPerGateway: replicatedShortChat ? 4 : 1,
+      pluginConcurrentAttempts,
+      recoveryStats,
+      ...(replicatedStreamTerminal ? { streamRecoveryStats } : {}),
       drainSeconds,
       expectedChargeAtoms: expectedCharge,
       expectedSupplierCostAtoms: expectedCost,
@@ -974,8 +1217,9 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       admittedWalletMismatches,
       delivered,
       receiptConfirmedAcks,
-      ackedRequests: ackedRequests.size,
+      ackedRequests: ackedRequests?.size ?? 0,
       imprecise,
+      ...(strictStream ? { verified_progress_acks: acknowledgedProgress } : {}),
       expiredLeases,
       ackShortfall,
       consumerErrors,
@@ -987,7 +1231,7 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
       onlineCapacity,
       queueStats,
       timeline,
-      upstream: await upstreamStats(),
+      upstream: upstreamResult,
       http,
       drain_ms: serviceDrainedAt - drainStart,
       financial_duration_seconds: (serviceDrainedAt - samplingStart) / 1000,
@@ -1003,19 +1247,54 @@ async function measure(f: Fixture, db: SQL, workerDatabaseUrl: string) {
   } finally {
     consuming = false;
     clearInterval(telemetryTimer);
-    await processSampler?.close();
-    await databaseMetrics?.close();
-    for (const child of spawned) if (child.exitCode === null) child.kill("SIGTERM");
-    for (const service of services) service.kill();
-    await Promise.allSettled(spawned.map((child) => child.exited));
-    await Promise.allSettled([consume, sampling]);
-    await ackWriter?.close().catch(() => undefined);
-    queue.close();
+    try {
+      await processSampler?.close();
+      await databaseMetrics?.close();
+      for (const child of spawned) if (child.exitCode === null) child.kill("SIGTERM");
+      for (const service of services) service.kill();
+      await Promise.allSettled(spawned.map((child) => child.exited));
+      await Promise.allSettled([consume, sampling]);
+      await consumerServer?.stop(true);
+      await ackWriter?.close().catch(() => undefined);
+      queue.close();
+      recoveryQueue?.close();
+      streamRecoveryQueue?.close();
+    } finally {
+      await ackIndex?.close();
+    }
   }
 }
 
 let result: Awaited<ReturnType<typeof measure>> | undefined;
+const native = replicatedShortChat
+  ? await createNativeFixture({
+      ...nativeFixtureOptions(),
+      diskBudgetBytes: Math.max(8 * 1024 ** 3, storageBudget.estimated),
+      truncateProcessOutput: true,
+    })
+  : undefined;
 try {
+  let standbyUrl: string | undefined;
+  let witnessUrl: string | undefined;
+  if (native) {
+    const primary = await native.startPostgres(true);
+    standbyUrl = (await native.startPostgresStandby(primary)).url;
+    const admission = await native.startRedis("capacity-admission", undefined, true);
+    const evidence = await native.startRedis("capacity-evidence", undefined, true);
+    const replica = await native.startRedis("capacity-evidence-replica", evidence, true);
+    await native.waitFor(async () =>
+      (await replica.command("INFO", "replication")).includes("master_link_status:up"),
+    );
+    process.env.DATABASE_URL = primary.url;
+    process.env.REDIS_URL = admission.url;
+    process.env.QUEUE_REDIS_URL = evidence.url;
+    const metrics = new SQL(primary.url, { max: 1 });
+    try {
+      await metrics`CREATE EXTENSION pg_stat_statements`;
+    } finally {
+      await metrics.close({ timeout: 1 });
+    }
+  }
   execFileSync(
     "openssl",
     [
@@ -1047,11 +1326,54 @@ try {
       entry: "dist/core-api/main.js",
       managementFactory: compiled.createCoreManagementApplication,
       gateways: Math.max(2, instances),
+      ...(standbyUrl
+        ? {
+            managementStandby: () => new SQL(witnessUrl!, { max: 4, connectionTimeout: 2 }),
+            async terminalSettlement(db: SQL) {
+              const [{ name }] = await db`SELECT current_database() AS name`;
+              await db.unsafe(await Bun.file("infra/core-terminal-settlement-roles.sql").text());
+              const password = crypto.randomUUID().replaceAll("-", "");
+              await db.unsafe(
+                `CREATE ROLE capacity_terminal_write LOGIN PASSWORD '${password}' IN ROLE core_terminal_writer`,
+              );
+              await db.unsafe(
+                `CREATE ROLE capacity_terminal_read LOGIN PASSWORD '${password}' IN ROLE core_terminal_confirmation`,
+              );
+              const writer = new URL(process.env.DATABASE_URL!);
+              writer.pathname = `/${name}`;
+              writer.username = "capacity_terminal_write";
+              writer.password = password;
+              const reader = new URL(standbyUrl);
+              reader.pathname = writer.pathname;
+              reader.username = "capacity_terminal_read";
+              reader.password = password;
+              witnessUrl = reader.toString();
+              return {
+                database_url: writer.toString(),
+                standby_url: witnessUrl,
+                short_chat_funding_epoch: 1,
+                ...(replicatedStreamTerminal ? { commit_short_chat_sse: true } : {}),
+                recovery_queue: {
+                  url: process.env.QUEUE_REDIS_URL!,
+                  namespace,
+                  required_replicas: 1,
+                  ack_timeout_ms: 1000,
+                },
+              };
+            },
+          }
+        : {}),
     },
   );
+} catch (error) {
+  native?.assertHealthy();
+  throw error;
 } finally {
   await rm(upstreamKey, { force: true });
-  const cleanup = await cleanupCapacityNamespaces([process.env.QUEUE_REDIS_URL!], namespace);
+  const cleanup = await cleanupCapacityNamespaces(
+    process.env.QUEUE_REDIS_URL ? [process.env.QUEUE_REDIS_URL] : [],
+    namespace,
+  ).finally(() => native?.close());
   await Bun.write(`${directory}/cleanup.json`, JSON.stringify(cleanup) + "\n");
   if (cleanup.failed) {
     process.exitCode = 1;

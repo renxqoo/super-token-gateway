@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
-import type { SQL } from "bun";
-import type { CoreVerifiedCallerProjection } from "@gateway/contracts";
+import { SQL } from "bun";
+import type { CoreVerifiedCallerProjection, ExecutionEnvelope } from "@gateway/contracts";
 import { createInternalIdentityStore } from "@gateway/storage/internal-identity";
+import { createExecutionStore } from "@gateway/storage/execution";
 import { canonical, quoteReservation, type Pricing } from "@gateway/kernel";
 import { sha256 } from "@gateway/runtime/crypto";
 import { createQuotaLeases } from "@gateway/runtime/quota-leases";
@@ -11,6 +12,61 @@ import {
   prepareFinancialAdmission,
 } from "../support/financial-execution.ts";
 import { supplier } from "../support/core-settlement.ts";
+import { eventually } from "../support/gateway-process.ts";
+
+test("route preflight starved while all admission writers waited on a database lock", () =>
+  withFinancial(async (f, db) => {
+    const client = f.client();
+    await client.startup();
+    const setups: Setup[] = [];
+    for (let i = 0; i < 4; i++) setups.push(await f.bootstrap());
+    const admissions: Awaited<ReturnType<typeof prepareFinancialAdmission>>[] = [];
+    for (const setup of setups)
+      admissions.push(await prepareFinancialAdmission(setup, client, { routeProjection: true }));
+    const [batch] = await db<{ definition: string }[]>`
+      SELECT pg_get_functiondef('public.core_execution_batch_v1(jsonb)'::regprocedure) AS definition
+    `;
+    const entry = "BEGIN\n IF jsonb_typeof(items)";
+    expect(batch!.definition).toContain(entry);
+    await db.unsafe(
+      batch!.definition.replace(
+        entry,
+        "BEGIN\n PERFORM set_config('lock_timeout','2500',true);\n PERFORM pg_advisory_xact_lock(1731362844::bigint);\n IF jsonb_typeof(items)",
+      ),
+    );
+    const writes: Promise<unknown>[] = [];
+    try {
+      await db.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(1731362844::bigint)`;
+        const waitingWriters = async () =>
+          (
+            await tx`SELECT count(*)::int AS n
+              FROM pg_locks WHERE locktype='advisory' AND classid=0 AND objid=1731362844
+                AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                AND mode='ExclusiveLock' AND NOT granted`
+          )[0].n;
+        for (const admission of admissions) {
+          writes.push(admission.admit().catch((error: unknown) => error));
+          await eventually(
+            async () => (await waitingWriters()) === writes.length,
+            `admission ${writes.length} reached its locked command write`,
+            400,
+          );
+        }
+        expect(
+          await prepareFinancialAdmission(setups[0]!, client, {
+            routeProjection: true,
+            deadline: new Date(Date.now() + 450).toISOString(),
+          }),
+        ).toMatchObject({ context: { model: setups[0]!.model, route_ticket: expect.any(String) } });
+        expect(await waitingWriters()).toBe(4);
+      });
+    } finally {
+      await Promise.all(writes);
+    }
+    for (const write of writes)
+      expect(await write).toMatchObject({ receipt: { state: "RESERVED" } });
+  }));
 
 type Fixture = Parameters<Parameters<typeof withFinancial>[0]>[0];
 type Setup = Awaited<ReturnType<Fixture["bootstrap"]>>;
@@ -60,7 +116,7 @@ async function admissionBatch(f: Fixture, db: SQL, setup: Setup) {
         deadline_at: request.deadline,
         trace_id: "admission-batch",
       };
-      const envelope = {
+      const envelope: ExecutionEnvelope = {
         command_id: command,
         caller_incarnation: projection.incarnation_id,
         deadline_at: projection.deadline_at,
@@ -134,6 +190,44 @@ async function admissionBatch(f: Fixture, db: SQL, setup: Setup) {
   }
   return { prepare, close: () => quota.close() };
 }
+
+test("a cancelled admission preflight stayed queued until a PostgreSQL connection became available", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap();
+    const batch = await admissionBatch(f, db, setup);
+    const url = new URL(process.env.DATABASE_URL!);
+    url.pathname = `/${(await db`SELECT current_database() AS name`)[0].name}`;
+    const preflightDb = new SQL(url.toString(), { max: 1 });
+    try {
+      const { request, item } = await batch.prepare();
+      const { projection, envelope } = await item();
+      const connection = await preflightDb.reserve();
+      const cancellation = new AbortController();
+      const reason = new Error("test preflight cancellation");
+      const result = createExecutionStore(db, preflightDb)
+        .prepareAdmission(
+          projection,
+          envelope,
+          request.context.context_id,
+          undefined,
+          cancellation.signal,
+        )
+        .catch((error: unknown) => error);
+      try {
+        await Bun.sleep(20);
+        cancellation.abort(reason);
+        expect(await Promise.race([result, Bun.sleep(500).then(() => "still waiting")])).toBe(
+          reason,
+        );
+      } finally {
+        await connection.release();
+        await result;
+      }
+    } finally {
+      batch.close();
+      await preflightDb.close({ timeout: 1 });
+    }
+  }));
 
 test("admission inserts the complete request and bound attempt once while reserving funds exactly once", () =>
   withFinancial(async (f, db) => {

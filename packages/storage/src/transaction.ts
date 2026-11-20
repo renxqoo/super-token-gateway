@@ -89,7 +89,7 @@ export async function withDatabaseSavepoint<T>(tx: SQL, action: (tx: SQL) => Pro
 
 export async function withDatabaseTransaction<T>(
   db: SQL,
-  limits: DatabaseLimits,
+  limits: DatabaseLimits & { synchronousCommit?: "remote_apply" },
   action: (tx: SQL, signal: AbortSignal) => Promise<T>,
 ) {
   return withDatabaseConnection(db, limits, async (connection, signal, close) => {
@@ -98,10 +98,20 @@ export async function withDatabaseTransaction<T>(
       await runDatabaseQuery(connection`BEGIN`, signal);
       const remaining = Math.floor(limits.deadline - performance.now());
       if (remaining < 1) throw new DatabaseDeadlineExceeded();
-      await runDatabaseQuery(
-        connection`SELECT set_config('transaction_timeout',${String(remaining)},true),set_config('statement_timeout',${String(remaining)},true),set_config('lock_timeout',${String(remaining)},true)`,
+      const requestedCommit = limits.synchronousCommit;
+      const [setup] = await runDatabaseQuery(
+        connection<{ ready: boolean }[]>`SELECT
+          set_config('transaction_timeout',${String(remaining)},true),
+          set_config('statement_timeout',${String(remaining)},true),
+          set_config('lock_timeout',${String(remaining)},true),
+          CASE WHEN ${requestedCommit ?? null}::text IS NOT NULL
+            THEN set_config('synchronous_commit',${requestedCommit ?? null},true) END,
+          CASE WHEN ${requestedCommit ?? null}::text IS NULL THEN true ELSE NOT pg_is_in_recovery()
+            AND current_setting('fsync')='on' AND current_setting('full_page_writes')='on'
+            AND current_setting('synchronous_standby_names')<>'' END AS ready`,
         signal,
       );
+      if (!setup?.ready) throw new Error("DATABASE_REPLICATION_UNAVAILABLE");
       const result = await action(connection, signal);
       signal.throwIfAborted();
       if (!(limits.deadline > performance.now())) throw new DatabaseDeadlineExceeded();

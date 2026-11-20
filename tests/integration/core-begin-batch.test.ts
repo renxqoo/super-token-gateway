@@ -192,6 +192,45 @@ test("BEGIN activates all three provisional leases together before returning its
     ]);
   }));
 
+test("an SSE begin with too little proof time wrote ACTIVE leases before refusing the send", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap();
+    const client = f.client();
+    await client.startup();
+    const expires = Date.now() + 4000;
+    const prepared = await prepareFinancialAdmission(setup, client, {
+      stream: true,
+      routeProjection: true,
+      deadline: new Date(expires).toISOString(),
+    });
+    const admission = await prepared.admit();
+    await Bun.sleep(Math.max(0, expires - Date.now() - 1650));
+    await expect(
+      client.execution("execution_begin_v1", prepared.beginData(admission.receipt), {
+        deadlineAt: prepared.deadline,
+      }),
+    ).rejects.toMatchObject({ detail: { code: "quota_unavailable" } });
+    expect(
+      await db`SELECT state FROM execution_permits WHERE attempt_id=${prepared.attemptId}`,
+    ).toEqual([{ state: "RESERVED" }]);
+    expect(
+      await db`SELECT state,revision::int FROM execution_quota_leases WHERE attempt_id=${prepared.attemptId} ORDER BY scope_kind`,
+    ).toEqual(Array.from({ length: 3 }, () => ({ state: "ADOPTION_PENDING", revision: 0 })));
+    const aborted = await client.execution("execution_abort_v1", {
+      attempt_id: prepared.attemptId,
+      permit_epoch: "1",
+      close_request: true,
+      reason: "DEADLINE",
+    });
+    expect(aborted).toMatchObject({ receipt: { state: "ABORTED" } });
+    expect(
+      await db`SELECT DISTINCT state FROM execution_quota_leases WHERE attempt_id=${prepared.attemptId}`,
+    ).toEqual([{ state: "RELEASED" }]);
+    expect(
+      await db`SELECT reserved_atoms::text FROM wallets WHERE project_id=${setup.project.id}`,
+    ).toEqual([{ reserved_atoms: "0" }]);
+  }));
+
 test("an invalid proof lifetime or lease revision cannot activate or corrupt any quota lease", () =>
   withFinancial(async (f, db) => {
     const setup = await f.bootstrap();

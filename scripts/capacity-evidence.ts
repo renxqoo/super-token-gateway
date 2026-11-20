@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { once } from "node:events";
 import { finished } from "node:stream/promises";
 import { createInterface } from "node:readline";
+import { CONTRACT_MAX_DRAIN_MS, CONTRACT_MAX_P99_MS, LatencyHistogram } from "./benchmark-lib.ts";
 
 export async function createIdentityWriter(path: string) {
   await mkdir(dirname(path), { recursive: true });
@@ -61,28 +62,53 @@ async function* identities(path: string) {
   }
 }
 
+async function* httpIdentities(path: string, dispatchPath?: string) {
+  const dispatches = dispatchPath ? identities(dispatchPath) : undefined;
+  try {
+    for await (const http of identities(path)) {
+      const start = await dispatches?.next();
+      if (start && (start.done || start.value.id !== http.id || start.value.at > http.at))
+        throw new Error("Invalid stream dispatch evidence for HTTP identity");
+      yield { ...http, issuedAt: start?.value?.at };
+    }
+    if (dispatches && !(await dispatches.next()).done)
+      throw new Error("Extra stream dispatch evidence");
+  } finally {
+    await dispatches?.return();
+  }
+}
+
 export async function auditCapacityIdentities(
   httpPath: string,
   ackPath: string,
   startedAt: number,
   seconds: number,
-): Promise<{
-  fullyCompletedByWindow: number;
-  minuteCompletions: number[];
-  matchedRequests: number;
-  httpOnly: number;
-  ackOnly: number;
-}> {
+  dispatchPath?: string,
+  maxP99Ms = CONTRACT_MAX_P99_MS,
+  streamFill?: { arrivalsStartedAt: number; minimumStreamMs: number },
+) {
+  const arrivalsStartedAt = streamFill?.arrivalsStartedAt ?? startedAt;
+  const minimumStreamMs = streamFill?.minimumStreamMs ?? 0;
   if (
     !Number.isSafeInteger(startedAt) ||
     !Number.isSafeInteger(seconds) ||
     seconds < 1 ||
-    seconds > 3600
+    seconds > 3600 ||
+    !Number.isFinite(maxP99Ms) ||
+    maxP99Ms <= 0 ||
+    maxP99Ms > CONTRACT_MAX_P99_MS ||
+    (streamFill &&
+      (!dispatchPath ||
+        !Number.isSafeInteger(arrivalsStartedAt) ||
+        !Number.isSafeInteger(minimumStreamMs) ||
+        minimumStreamMs <= 0 ||
+        startedAt - arrivalsStartedAt < minimumStreamMs))
   )
     throw new Error("Invalid capacity audit window");
-  const sorted = [httpPath, ackPath].map((path) => `${path}.${crypto.randomUUID()}.sorted`);
+  const paths = dispatchPath ? [httpPath, ackPath, dispatchPath] : [httpPath, ackPath];
+  const sorted = paths.map((path) => `${path}.${crypto.randomUUID()}.sorted`);
   try {
-    for (const [index, path] of [httpPath, ackPath].entries()) {
+    for (const [index, path] of paths.entries()) {
       const process = Bun.spawn(
         ["sort", "-S", "64M", "-T", dirname(path), "-o", sorted[index]!, path],
         {
@@ -95,9 +121,15 @@ export async function auditCapacityIdentities(
       if ((await process.exited) !== 0)
         throw new Error(`Identity sort failed: ${error.slice(0, 300)}`);
     }
-    const http = identities(sorted[0]!);
+    const http = httpIdentities(sorted[0]!, sorted[2]);
     const ack = identities(sorted[1]!);
+    const latency = new LatencyHistogram();
     const minuteCompletions = Array.from({ length: Math.ceil(seconds / 60) }, () => 0);
+    const issuedMinutes = minuteCompletions.map(() => ({ samples: 0, aboveBudget: 0 }));
+    const longStream = streamFill
+      ? { minuteStarts: minuteCompletions.map(() => 0), inflightAtWindowStart: 0, shortStreams: 0 }
+      : undefined;
+    let dispatchesPastDrain = 0;
     let matchedRequests = 0,
       httpOnly = 0,
       ackOnly = 0;
@@ -113,7 +145,33 @@ export async function auditCapacityIdentities(
           right = await ack.next();
         } else {
           matchedRequests++;
-          const at = Math.max(left.value.at, right.value.at) - startedAt;
+          const finishedAt = Math.max(left.value.at, right.value.at);
+          if (left.value.issuedAt !== undefined) {
+            const issuedAt = left.value.issuedAt;
+            if (right.value.at < issuedAt) throw new Error("ACK predates stream dispatch");
+            if (issuedAt < arrivalsStartedAt) throw new Error("Stream dispatch predates arrivals");
+            const elapsed = finishedAt - issuedAt;
+            latency.add(elapsed);
+            const sinceWindowStart = issuedAt - startedAt;
+            const index = Math.floor(sinceWindowStart / 60000);
+            if (longStream) {
+              if (left.value.at - issuedAt < minimumStreamMs) longStream.shortStreams++;
+              if (issuedAt < startedAt && left.value.at >= startedAt)
+                longStream.inflightAtWindowStart++;
+              if (sinceWindowStart >= 0 && sinceWindowStart < seconds * 1000)
+                longStream.minuteStarts[index]!++;
+            }
+            if (sinceWindowStart > seconds * 1000 + CONTRACT_MAX_DRAIN_MS) {
+              dispatchesPastDrain++;
+            } else if (index >= 0) {
+              while (issuedMinutes.length <= index)
+                issuedMinutes.push({ samples: 0, aboveBudget: 0 });
+              const minute = issuedMinutes[index]!;
+              minute.samples++;
+              if (elapsed > maxP99Ms) minute.aboveBudget++;
+            }
+          }
+          const at = finishedAt - startedAt;
           if (at >= 0 && at < seconds * 1000) {
             const index = Math.floor(at / 60000);
             minuteCompletions[index] = (minuteCompletions[index] ?? 0) + 1;
@@ -132,6 +190,21 @@ export async function auditCapacityIdentities(
       matchedRequests,
       httpOnly,
       ackOnly,
+      ...(longStream ? { longStream } : {}),
+      ...(dispatchPath
+        ? {
+            completionLatencyMs: {
+              samples: latency.count,
+              maxP99Ms,
+              issuedMinutes,
+              dispatchesPastDrain,
+              p50: latency.count ? latency.quantile(0.5) : null,
+              p95: latency.count ? latency.quantile(0.95) : null,
+              p99: latency.count ? latency.quantile(0.99) : null,
+              p999: latency.count ? latency.quantile(0.999) : null,
+            },
+          }
+        : {}),
     };
   } finally {
     await Promise.all(sorted.map((path) => rm(path, { force: true })));

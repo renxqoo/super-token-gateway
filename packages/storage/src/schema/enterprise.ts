@@ -8,6 +8,7 @@ import {
   numeric,
   timestamp,
   integer,
+  bigint,
   smallint,
   primaryKey,
   index,
@@ -491,13 +492,18 @@ export const executionQuotaLeases = pgTable(
     state: text().notNull(),
     revision: atoms("revision").default("0").notNull(),
     descriptor: jsonb().notNull(),
+    liveDeadlineMs: bigint("live_deadline_ms", { mode: "bigint" }),
+    releasePending: boolean("release_pending").default(false).notNull(),
   },
   (t) => [
     unique().on(t.attemptId, t.scopeKind, t.scopeId),
     index("execution_quota_request_idx").on(t.requestId),
     index("execution_quota_live_deadline_idx")
-      .on(sql`((${t.descriptor}->>'deadline_ms')::bigint)`, t.requestId, t.leaseId)
-      .where(sql`state IN ('ADOPTION_PENDING','ACTIVE','RELEASE_PENDING')`),
+      .on(t.liveDeadlineMs, t.requestId, t.leaseId)
+      .where(sql`live_deadline_ms IS NOT NULL`),
+    index("execution_quota_pending_release_idx")
+      .on(t.leaseId)
+      .where(sql`release_pending`),
     uniqueIndex("execution_request_common_quota_unique")
       .on(t.requestId, t.scopeKind, t.scopeId)
       .where(sql`scope_kind<>'channel'`),

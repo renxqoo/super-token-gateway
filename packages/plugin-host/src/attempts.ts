@@ -16,7 +16,7 @@ import {
 } from "@gateway/plugin-sdk";
 import { PluginHostError, type PluginSupervisor } from "./supervisor.ts";
 import { createJSONDocuments, type JSONDocument, type JSONFact } from "./json-documents.ts";
-import { createSSEStream } from "./sse-stream.ts";
+import { createSSEStream, type ObserveStreamUsage } from "./sse-stream.ts";
 import { createAwsEventStreamDecoder } from "./aws-eventstream.ts";
 
 export type AttemptOptions = {
@@ -393,12 +393,17 @@ export function createPluginAttempts(
             observers.delete(listener);
           };
         },
-        async invoke(hook: Hook, payload?: Uint8Array, signal?: AbortSignal) {
+        async invoke(
+          hook: Hook,
+          payload?: Uint8Array,
+          signal?: AbortSignal,
+          observeUsage?: ObserveStreamUsage,
+        ) {
           if (operationBusy) throw new PluginHostError("BATCH_CONCURRENT");
           operationBusy = true;
           try {
             return await (sse && hook.startsWith("stream_")
-              ? sse.invoke(hook, payload ?? new Uint8Array(), signal)
+              ? sse.invoke(hook, payload ?? new Uint8Array(), signal, observeUsage)
               : invokeRaw(hook, payload, signal));
           } finally {
             operationBusy = false;

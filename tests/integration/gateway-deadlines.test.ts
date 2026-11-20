@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { connect } from "node:net";
+import { gzipSync } from "node:zlib";
 import type { SQL } from "bun";
 import {
   chatFrames,
@@ -180,6 +181,96 @@ test(
         expect(await attempts(db, requestId, 1)).toEqual([
           { ordinal: 1, error_code: "upstream_idle_timeout" },
         ]);
+      },
+    ),
+  timeout,
+);
+
+test(
+  "a complete SSE response stalled until the upstream closed after DONE",
+  () =>
+    withGatewayStack(
+      {
+        reply: async (call) =>
+          openStream("text/event-stream", await chatReplies.sse().text(), call),
+        gateway: { upstream_idle_timeout_ms: 10000 },
+      },
+      async ({ db, received, send }) => {
+        const response = await send({ stream: true, signal: AbortSignal.timeout(3000) });
+        expect(response.status).toBe(200);
+        expect((await response.text()).trimEnd().endsWith("data: [DONE]")).toBe(true);
+        expect(received).toHaveLength(1);
+        await upstreamClosed(() => closedCalls.has(received[0]!));
+        const requestId = response.headers.get("x-request-id")!;
+        expect(await settledCharge(db, requestId)).toMatchObject({
+          amount: "100",
+          state: "SUCCEEDED",
+        });
+      },
+    ),
+  timeout,
+);
+
+test.each(["corrupt", "missing"])(
+  "SSE DONE does not bypass a %s gzip trailer",
+  (trailer) =>
+    withGatewayStack(
+      {
+        reply: async () => {
+          const gzip = gzipSync(await chatReplies.sse().text());
+          gzip[gzip.length - 8]! ^= 1;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(gzip.subarray(0, gzip.length - 8));
+                if (trailer === "corrupt")
+                  timer = setTimeout(() => {
+                    controller.enqueue(gzip.subarray(gzip.length - 8));
+                    controller.close();
+                  }, 500);
+              },
+              cancel() {
+                clearTimeout(timer);
+              },
+            }),
+            { headers: { "content-type": "text/event-stream", "content-encoding": "gzip" } },
+          );
+        },
+        gateway: { upstream_idle_timeout_ms: 1500 },
+      },
+      async ({ db, send }) => {
+        const response = await send({ stream: true });
+        expect(response.status).toBe(200);
+        const text = await response.text();
+        expect(text).toContain("gateway_stream_error");
+        expect(text).not.toContain("[DONE]");
+        expect(await requestOutcome(db, response.headers.get("x-request-id")!)).toMatchObject({
+          state: "FAILED",
+        });
+      },
+    ),
+  timeout,
+);
+
+test(
+  "an SSE terminator delimited by CR at EOF was lost during plugin finish",
+  () =>
+    withGatewayStack(
+      {
+        reply: async () =>
+          new Response((await chatReplies.sse().text()).replaceAll("\n", "\r"), {
+            headers: { "content-type": "text/event-stream" },
+          }),
+      },
+      async ({ db, send }) => {
+        const response = await send({ stream: true });
+        expect(response.status).toBe(200);
+        expect((await response.text()).trimEnd().endsWith("data: [DONE]")).toBe(true);
+        expect(await settledCharge(db, response.headers.get("x-request-id")!)).toMatchObject({
+          amount: "100",
+          state: "SUCCEEDED",
+        });
       },
     ),
   timeout,

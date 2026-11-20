@@ -557,6 +557,60 @@
           "checksum": "fed0974ea02fab4d89abf8a53def201f792cbfe5d4fc3b9fe3e0c2ea6148d449"
         }
       ]
+    },
+    {
+      "version": 2026111901,
+      "files": [
+        {
+          "path": "./migrations/0015_quota-live-deadline.sql",
+          "checksum": "3fda3f869e9f5d8ef13f0167b3035fcf9d484cdd59b5af759e7e6982cdab582e"
+        }
+      ]
+    },
+    {
+      "version": 2026111902,
+      "files": [
+        {
+          "path": "./migrations/0016_quota-pending-release.sql",
+          "checksum": "66af85e537d12311645634072cfc4d2cb188ae02d86892c449c62b48b61ae890"
+        }
+      ]
+    },
+    {
+      "version": 2026111903,
+      "files": [
+        {
+          "path": "./sql/core-short-chat-funding.sql",
+          "checksum": "5a0183cf31125b9939b70b74175a452b19203020c14a2a80ee534dea08c180d1"
+        }
+      ]
+    },
+    {
+      "version": 2026111904,
+      "files": [
+        {
+          "path": "./sql/core-short-chat-commit.sql",
+          "checksum": "327d0e1d8375fa1291c03bd252d8d51e07289cf50e52948a084cd25a96c1945d"
+        }
+      ]
+    },
+    {
+      "version": 2026111905,
+      "files": [
+        {
+          "path": "./sql/core-sse-route-projection.sql",
+          "checksum": "17230ba8121dc902e2f5ac8e1930eefda9ee9c413aad1a6adb0345762ad576a4"
+        }
+      ]
+    },
+    {
+      "version": 2026111906,
+      "files": [
+        {
+          "path": "./sql/core-chat-stream-grant.sql",
+          "checksum": "b26200e828cf9f283062343e8bd743913d63cba5d9a9b6ce2954831ce17197e0"
+        }
+      ]
     }
   ]
 }

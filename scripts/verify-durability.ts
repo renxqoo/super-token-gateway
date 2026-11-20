@@ -81,6 +81,30 @@ async function verify() {
     await until(async () =>
       (await replica.command("INFO", "replication")).includes("master_link_status:up"),
     );
+    checkpoint =
+      "producer startup times out after a paused replica resumes with a stale fsync acknowledgement";
+    for (let round = 0; round < 3; round++) {
+      producer = new UsageProducer({
+        channel: evidenceChannel,
+        url: primaryURL,
+        namespace: `${label}:startup-${round}`,
+        replicas: 1,
+        timeoutMs: 1000,
+        requireAllReplicas: true,
+      });
+      process.kill(replica.pid, "SIGSTOP");
+      const ready = producer.ready();
+      void ready.catch(() => undefined);
+      try {
+        await Bun.sleep(200);
+      } finally {
+        process.kill(replica.pid, "SIGCONT");
+      }
+      await within(ready, 500, "producer readiness after replica resume");
+      producer.close();
+      producer = undefined;
+    }
+    checks.push("producer startup confirms replica fsync after a paused replica resumes");
     producer = new UsageProducer({
       channel: evidenceChannel,
       url: primaryURL,

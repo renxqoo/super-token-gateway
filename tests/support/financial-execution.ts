@@ -27,8 +27,10 @@ export async function withFinancial(
     databasePort?: number;
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
     managementFactory?: typeof createCoreManagementApplication;
+    managementStandby?: () => SQL;
     managementRoleFile?: string;
     executionRoleFile?: string;
+    terminalSettlement?: NonNullable<Parameters<typeof withIdentity>[1]>["terminalSettlement"];
     seedRoute?: (db: SQL, model: string, input: RouteInput) => Promise<string>;
     seedRecharge?: typeof import("./historical-funding.ts").seedHistoricalRecharge;
     account?: { trustedProxyCidrs: string[] };
@@ -41,6 +43,7 @@ export async function withFinancial(
   await withIdentity(
     async (f, db) => {
       const catalog = await prepareCatalog(db);
+      const eventStandby = options.managementStandby?.();
       let fixture: Awaited<ReturnType<typeof prepareFinancial>> | undefined;
       try {
         const role = String((await catalog.appDb`SELECT current_user AS name`)[0].name);
@@ -54,6 +57,7 @@ export async function withFinancial(
           adminKey: syntheticAdminKey,
           pepper: syntheticPepper,
           encryptionKey: financialKey,
+          ...(eventStandby ? { eventStandby } : {}),
         });
         fixture = await prepareFinancial(
           f,
@@ -74,7 +78,7 @@ export async function withFinancial(
         try {
           await fixture?.close();
         } finally {
-          await catalog.close();
+          await Promise.all([catalog.close(), eventStandby?.close({ timeout: 1 })]);
         }
       }
     },
@@ -83,6 +87,7 @@ export async function withFinancial(
       ...(options.databasePort ? { databasePort: options.databasePort } : {}),
       ...(options.entry ? { entry: options.entry } : {}),
       ...(options.executionRoleFile ? { executionRoleFile: options.executionRoleFile } : {}),
+      ...(options.terminalSettlement ? { terminalSettlement: options.terminalSettlement } : {}),
       ...(options.limits ? { limits: options.limits } : {}),
       ...(options.account ? { account: options.account } : {}),
       ...(options.gateways ? { gateways: options.gateways } : {}),
@@ -398,6 +403,7 @@ export async function prepareFinancialAdmission(
   setup: Awaited<ReturnType<Awaited<ReturnType<typeof prepareFinancial>>["bootstrap"]>>,
   client: Pick<ReturnType<typeof createCoreRpcClient>, "execution">,
   options: {
+    contextCommandId?: string;
     deadline?: string;
     intent?: string | null;
     requestId?: string;
@@ -410,6 +416,7 @@ export async function prepareFinancialAdmission(
     fingerprint?: string;
     routeProjection?: boolean;
     resourceIds?: string[];
+    stream?: boolean;
   } = {},
 ) {
   const deadline = options.deadline ?? new Date(Date.now() + 25000).toISOString(),
@@ -425,7 +432,10 @@ export async function prepareFinancialAdmission(
         fingerprint,
         ...(options.routeProjection ? { route_projection: true } : {}),
       },
-      { deadlineAt: deadline },
+      {
+        deadlineAt: deadline,
+        ...(options.contextCommandId ? { commandId: options.contextCommandId } : {}),
+      },
     ),
   );
   const candidate = options.channelId
@@ -437,7 +447,7 @@ export async function prepareFinancialAdmission(
     operation: "chat",
     model: setup.model,
     upstream_model: "synthetic",
-    stream: false,
+    stream: options.stream ?? false,
     input_bytes: 100,
     quantities: options.quantities ?? {},
     ...(options.inputCharacters === undefined ? {} : { input_characters: options.inputCharacters }),

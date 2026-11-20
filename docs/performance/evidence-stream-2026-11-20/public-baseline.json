@@ -1,0 +1,376 @@
+{
+  "calibration-11": {
+    "id": "6b980844987b43249ba4aca8985d220c",
+    "originalDirectory": "bench-6b980844987b43249ba4aca8985d220c",
+    "valid": true,
+    "capacityPassed": true,
+    "failures": [],
+    "runtime": "1.4.4",
+    "artifacts": {
+      "dist/core-api/main.js": "0a893b4ad8845640dd6433838a0e3ebbf95e2cfa3bad635f597f46be0b646df8",
+      "dist/core-api/platform/management.js": "bf2a91a1845de71f583787234cd269021241122068a5edf565112cbe102f0c4f",
+      "dist/gateway/main.js": "750fb1e12d86a70b20153d884860d42d98c0cc20164e608652070465c82c42a9",
+      "dist/core-worker/main.js": "7a460ba958ee7934f0cada38a5b38225ece083cf57f5907212b306a0b734d26a",
+      "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+      "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+      "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+      "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+      "dist/manifest.json": "4e184cd23a4131974d02e2931e2d260bbd7246d2ee95a42d0f6d2236773bf8de"
+    },
+    "config": {
+      "seconds": 60,
+      "targetRps": 10,
+      "instances": 4,
+      "wallets": 1000,
+      "hotShare": 0,
+      "concurrency": 10000,
+      "workerConcurrency": 8,
+      "workerMode": "live",
+      "consumerMode": "live",
+      "drainSeconds": 60,
+      "supplierAccounts": 1,
+      "gatewayInflight": 10000,
+      "coreConnectionsPerGateway": 4,
+      "pluginConcurrentAttempts": 512,
+      "pluginRuntime": "builtin-worker",
+      "upstreamMode": "standard",
+      "replicatedShortChat": true,
+      "projectCoreRouting": false,
+      "stream": true,
+      "requestTimeoutMs": 5000,
+      "requiredReplicas": 1
+    },
+    "http": {
+      "offered_rps": 11,
+      "offered": 660,
+      "completed": 660,
+      "succeeded": 660,
+      "invalid": 0,
+      "shed": 0,
+      "warmup_requests": 7,
+      "measurement_started_at": "2026-11-19T16:13:48.412Z",
+      "sse": {
+        "response_headers": 660,
+        "first_frame": 660,
+        "first_content": 660,
+        "done": 660,
+        "error_frames": 0,
+        "first_frame_p99_ms": 146.07,
+        "first_content_p99_ms": 146.07
+      },
+      "latency_ms": {
+        "p50": 144.5,
+        "p95": 211.09,
+        "p99": 224.05,
+        "p999": 241.7
+      },
+      "minute_windows": {
+        "0": {
+          "completed": 658,
+          "succeeded": 658,
+          "invalid": 0,
+          "latency_ms": {
+            "p50": 144.5,
+            "p95": 211.09,
+            "p99": 224.05,
+            "p999": 241.7
+          }
+        },
+        "1": {
+          "completed": 2,
+          "succeeded": 2,
+          "invalid": 0,
+          "latency_ms": {
+            "p50": 152.54,
+            "p95": 154.2,
+            "p99": 154.2,
+            "p999": 154.2
+          }
+        }
+      },
+      "statuses": {
+        "200": 660
+      },
+      "gateway_errors": {},
+      "transport_errors": {},
+      "load_generator_peak_inflight": 3,
+      "last_dispatch_overrun_ms": 0.0002500000045984052
+    },
+    "identityJoin": {
+      "httpIds": 660,
+      "chargeAndAllObservedAcksIds": 667,
+      "allMatched": 660,
+      "inWindow": 658,
+      "inWindowRps": 10.966666666666667,
+      "httpOnly": 0,
+      "ackOnlyIncludingWarmup": 7,
+      "afterWindowMs": 164
+    },
+    "database": {
+      "requests": 667,
+      "projected_requests": 667,
+      "attempts": 667,
+      "succeeded_attempts": 667,
+      "usage_events": 1334,
+      "usage_requests": 667,
+      "unexpected_receipts": 0,
+      "precise_usage": 1334,
+      "precise_charges": 667,
+      "settled_holds": 667,
+      "reserved": "0",
+      "spent": "66700",
+      "debt": "0",
+      "acknowledged": 1334,
+      "settlement_journals": 667,
+      "unbalanced_journals": 0,
+      "supplier_cost_heads": 667,
+      "exact_supplier_postings": 667,
+      "conflicts": 0,
+      "inconsistent_hold_reserves": 0,
+      "inconsistent_funding_budgets": 0,
+      "inconsistent_cell_reserves": 0,
+      "unbalanced_supplier_journals": 0
+    },
+    "upstream": {
+      "requests": 667,
+      "active": 0,
+      "cancellations": 0,
+      "bytes": 497582,
+      "attempts": {
+        "synthetic": 667
+      },
+      "resources": 0
+    },
+    "supplier": {
+      "balance": "999999999999960647",
+      "reserved": "0",
+      "spent": "39353",
+      "accounts": 1
+    },
+    "consumerErrors": 0,
+    "queueStats": {
+      "waiting": 0,
+      "active": 0,
+      "delayed": 0,
+      "failed": 0
+    },
+    "recoveryStats": {
+      "waiting": 0,
+      "active": 0,
+      "delayed": 0,
+      "failed": 0
+    },
+    "drainAfterHttpMs": 7,
+    "cleanup": {
+      "cleaned": 1,
+      "failed": 0
+    },
+    "sourceSha256": {
+      "audit.json": "db561cb0c3e739f63d29575970347e79cb11e55d772d9dd12423dabbabfdf4e2",
+      "http.json": "3a98f091da914ba0fd54319af756e80177cc0d9e5c6825362f4dc144ae982ef8",
+      "cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "http.json.identities.tsv": "fe68b72094cabcc66e70878b0822cee61859b8fb2ccd2c55876814591ee7c478",
+      "ack.identities.tsv": "18d770d1f73078fe37f6b0045b578d109feb24e21d407b3b132a963fe0cf3a9e"
+    }
+  },
+  "target-3001": {
+    "id": "806a8520ed0947528d4ec25b6ab386b7",
+    "originalDirectory": "bench-806a8520ed0947528d4ec25b6ab386b7",
+    "valid": false,
+    "capacityPassed": false,
+    "failures": [
+      "load_generator_exit",
+      "unsuccessful_attempts",
+      "imprecise_usage",
+      "imprecise_customer_charges",
+      "unsettled_holds",
+      "customer_settlement_journals",
+      "external_acks",
+      "customer_spent",
+      "per_request_supplier_postings",
+      "supplier_ledger",
+      "wallet_balances",
+      "admitted_wallet_balances",
+      "http_validity",
+      "request_count",
+      "receipt_confirmed_acks",
+      "identity_intersection"
+    ],
+    "runtime": "1.4.4",
+    "artifacts": {
+      "dist/core-api/main.js": "0a893b4ad8845640dd6433838a0e3ebbf95e2cfa3bad635f597f46be0b646df8",
+      "dist/core-api/platform/management.js": "bf2a91a1845de71f583787234cd269021241122068a5edf565112cbe102f0c4f",
+      "dist/gateway/main.js": "750fb1e12d86a70b20153d884860d42d98c0cc20164e608652070465c82c42a9",
+      "dist/core-worker/main.js": "7a460ba958ee7934f0cada38a5b38225ece083cf57f5907212b306a0b734d26a",
+      "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+      "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+      "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+      "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+      "dist/manifest.json": "4e184cd23a4131974d02e2931e2d260bbd7246d2ee95a42d0f6d2236773bf8de"
+    },
+    "config": {
+      "seconds": 60,
+      "targetRps": 3000,
+      "instances": 4,
+      "wallets": 1000,
+      "hotShare": 0,
+      "concurrency": 10000,
+      "workerConcurrency": 8,
+      "workerMode": "live",
+      "consumerMode": "live",
+      "drainSeconds": 60,
+      "supplierAccounts": 1,
+      "gatewayInflight": 10000,
+      "coreConnectionsPerGateway": 4,
+      "pluginConcurrentAttempts": 512,
+      "pluginRuntime": "builtin-worker",
+      "upstreamMode": "standard",
+      "replicatedShortChat": true,
+      "projectCoreRouting": false,
+      "stream": true,
+      "requestTimeoutMs": 5000,
+      "requiredReplicas": 1
+    },
+    "http": {
+      "offered_rps": 3001,
+      "offered": 180060,
+      "completed": 180060,
+      "succeeded": 1132,
+      "invalid": 178928,
+      "shed": 0,
+      "warmup_requests": 7,
+      "measurement_started_at": "2026-11-19T16:15:23.007Z",
+      "sse": {
+        "response_headers": 1344,
+        "first_frame": 1344,
+        "first_content": 1344,
+        "done": 1132,
+        "error_frames": 0,
+        "first_frame_p99_ms": 2902.27,
+        "first_content_p99_ms": 2902.27
+      },
+      "latency_ms": {
+        "p50": 0.31,
+        "p95": 5014.98,
+        "p99": 5014.98,
+        "p999": 5014.98
+      },
+      "minute_windows": {
+        "0": {
+          "completed": 177934,
+          "succeeded": 1114,
+          "invalid": 176820,
+          "latency_ms": {
+            "p50": 0.31,
+            "p95": 5014.98,
+            "p99": 5014.98,
+            "p999": 5014.98
+          }
+        },
+        "1": {
+          "completed": 2126,
+          "succeeded": 18,
+          "invalid": 2108,
+          "latency_ms": {
+            "p50": 5014.98,
+            "p95": 5014.98,
+            "p99": 5014.98,
+            "p999": 5014.98
+          }
+        }
+      },
+      "statuses": {
+        "0": 24364,
+        "200": 1132,
+        "429": 682,
+        "503": 153882
+      },
+      "gateway_errors": {
+        "overloaded": 153796,
+        "core_unavailable": 86,
+        "rate_limited": 682
+      },
+      "transport_errors": {
+        "REQUEST_DEADLINE": 24364
+      },
+      "load_generator_peak_inflight": 3079,
+      "last_dispatch_overrun_ms": 0.973959000002651
+    },
+    "identityJoin": {
+      "httpIds": 1132,
+      "chargeAndAllObservedAcksIds": 1351,
+      "allMatched": 1132,
+      "inWindow": 1114,
+      "inWindowRps": 18.566666666666666,
+      "httpOnly": 0,
+      "ackOnlyIncludingWarmup": 219,
+      "afterWindowMs": 64112
+    },
+    "database": {
+      "requests": 1875,
+      "projected_requests": 1875,
+      "attempts": 1875,
+      "succeeded_attempts": 1351,
+      "usage_events": 3195,
+      "usage_requests": 1875,
+      "unexpected_receipts": 0,
+      "precise_usage": 2671,
+      "precise_charges": 1351,
+      "settled_holds": 1351,
+      "reserved": "0",
+      "spent": "135100",
+      "debt": "0",
+      "acknowledged": 2671,
+      "settlement_journals": 1351,
+      "unbalanced_journals": 0,
+      "supplier_cost_heads": 1875,
+      "exact_supplier_postings": 1351,
+      "conflicts": 0,
+      "inconsistent_hold_reserves": 0,
+      "inconsistent_funding_budgets": 0,
+      "inconsistent_cell_reserves": 0,
+      "unbalanced_supplier_journals": 0
+    },
+    "upstream": {
+      "requests": 1351,
+      "active": 0,
+      "cancellations": 0,
+      "bytes": 1007846,
+      "attempts": {
+        "synthetic": 1351
+      },
+      "resources": 0
+    },
+    "supplier": {
+      "balance": "999999999999920291",
+      "reserved": "0",
+      "spent": "79709",
+      "accounts": 1
+    },
+    "consumerErrors": 0,
+    "queueStats": {
+      "waiting": 0,
+      "active": 0,
+      "delayed": 0,
+      "failed": 0
+    },
+    "recoveryStats": {
+      "waiting": 0,
+      "active": 0,
+      "delayed": 0,
+      "failed": 0
+    },
+    "drainAfterHttpMs": 60014,
+    "cleanup": {
+      "cleaned": 1,
+      "failed": 0
+    },
+    "sourceSha256": {
+      "audit.json": "2c22f2520914a8acb32ecfed5fbfb2b227b920df47bf3e682fb24ac08321961b",
+      "http.json": "2e4c13d62cc01cc71550bd148913e77c1d757892600f14ab01537752032621eb",
+      "cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+      "http.json.identities.tsv": "26c3afd943d30c7af7180b308e4d3e3ff034897561a449813541d83bd9f910f3",
+      "ack.identities.tsv": "45bdc979ad772d77ed49168f94ab0ae5095ec23d3ed828c031d940595a72a03c"
+    }
+  }
+}

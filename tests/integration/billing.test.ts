@@ -1719,6 +1719,7 @@ test("completed replay cursors skip historical scans without missing later live 
   const s = await scope();
   const p = await project(s);
   await credit(p.id, "1000000");
+  await tariff(s, 100n);
   const consumer = (name: string, replay: boolean) =>
     db.begin((tx) => recordEventConsumer(tx, `${name}-${crypto.randomUUID()}`, replay));
   const events = createEventStore(db);
@@ -1726,7 +1727,15 @@ test("completed replay cursors skip historical scans without missing later live 
   expect((await events.claim(live, 500)).events).toHaveLength(0);
   const settled = async (count: number) => {
     const admitted: Admitted[] = [];
-    for (let index = 0; index < count; index++) admitted.push(await admit(s, p));
+    for (let offset = 0; offset < count; offset += 8) {
+      const batch = await Promise.allSettled(
+        Array.from({ length: Math.min(8, count - offset) }, () => admit(s, p)),
+      );
+      for (const item of batch) {
+        if (item.status === "rejected") throw item.reason;
+        admitted.push(item.value);
+      }
+    }
     for (let offset = 0; offset < count; offset += 128)
       for (const result of await settlement.persist(
         admitted

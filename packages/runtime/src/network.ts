@@ -12,12 +12,13 @@ export function createTransport(maxConnections = 1024) {
   return {
     fetch(
       url: URL,
-      init: RequestInit,
+      init: RequestInit & Pick<PinnedRequestInit, "dispatchDeadline">,
       allowPrivate: boolean,
       privateCidrs: readonly string[] = [],
     ) {
       return safeFetch(url, init, allowPrivate, privateCidrs, pool.send);
     },
+    sseFraming: pool.sseFraming,
     close: pool.close,
   };
 }
@@ -94,7 +95,7 @@ export function validateBaseUrl(
 
 export async function safeFetch(
   url: URL,
-  init: RequestInit,
+  init: RequestInit & Pick<PinnedRequestInit, "dispatchDeadline">,
   allowPrivate: boolean,
   privateCidrs: readonly string[] = [],
   send: (url: URL, init: PinnedRequestInit) => Promise<Response> = fetch,
@@ -107,7 +108,9 @@ export async function safeFetch(
       "upstream_not_dispatched",
       "Upstream request cancelled before dispatch",
     );
-  if (signal?.aborted) throw cancelled();
+  const expired = () =>
+    init.dispatchDeadline !== undefined && !(performance.now() < init.dispatchDeadline);
+  if (signal?.aborted || expired()) throw cancelled();
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   const addresses = isIP(hostname)
     ? [{ address: hostname, family: isIP(hostname) }]
@@ -121,7 +124,7 @@ export async function safeFetch(
           .finally(() => signal?.removeEventListener("abort", abort));
         if (signal?.aborted) abort();
       });
-  if (signal?.aborted) throw cancelled();
+  if (signal?.aborted || expired()) throw cancelled();
   const chosen = addresses.find((entry) => entry.family === 4) ?? addresses[0];
   if (!chosen) throw new UpstreamPreDispatchError("upstream_dns", "Upstream address lookup failed");
   if (

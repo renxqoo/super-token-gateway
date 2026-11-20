@@ -1,0 +1,3587 @@
+{
+  "archive": "audits.tar.gz",
+  "archive_sha256": "64b9802edafb25b4b21af8bceb3690415ee34f89eb4a9ddfbabc9557ba19b4be",
+  "archive_files": 89,
+  "member_sha256": {
+    "direct/direct-200-round-robin/222f6d75-200.json": "205278e03284f37993a217c8e8d18567cdea7631ef3338bc257dec1bc2b64355",
+    "direct/direct-3000-cell-affinity/52458402-3000.json": "f533846043b282ece7de5eda0fb0ceb14920c84edf8be20fa0d49fdf82ac3460",
+    "direct/direct-3000-priority/f9d3257c-3000.json": "407a70bcd74d46e20eb717a3fb05fc0c4ae7e7b1c51d27dee2e8d568ea7f862f",
+    "direct/direct-3000-round-robin/222f6d75-3000.json": "dc164d595fe1a22ed79973402ac6df3e2248e6173776065f91c386a87e55bec0",
+    "experiments/.local/capacity-affinity-study/public-project-owner.ts": "c913c717602d0411ddff4d9ebe75168c0f8a6b7d20c72b97ebd20db7480fcd7c",
+    "experiments/priority.patch": "7acca6c62053f543df4899fe2550223e1acb641192cc5a549a61e7b4a25dcdee",
+    "experiments/quota-storage/impact.md": "8109d19a7739f6ef51c1eb605c5256ea94575434126bcd3a8080d28dabb7a69a",
+    "experiments/quota-storage/probe.mjs": "9cbc1ae1c7245fd528ce68ff92e8a9c25d33cdeb12030c42f8d32334017bc3fc",
+    "experiments/quota-storage/result.json": "cc51f33ad7841eab63cc282b3d765640834c8672cb48979b07ae4e51e8e3cd88",
+    "public/json-150-fifo-first/ack.identities.tsv": "1a35ab76e0f020da0b2a35fa804ccd3e590c7643d4bc6ddec50cb2508bb48f6f",
+    "public/json-150-fifo-first/audit.json": "251f970ea46072fc7248cc9a41801ac6d07f8f7ff04f5e29e840c5a1020189da",
+    "public/json-150-fifo-first/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-150-fifo-first/http.json": "9210f999d15c9ef333d32140f83a8e917fe724c2d594063e0fbbac9e6d89c64f",
+    "public/json-150-fifo-first/http.json.identities.tsv": "32c4fcd894a0c7f92d4b4fa4297d421e55942d3c1d2ab384100e60ec1a530f6d",
+    "public/json-150-fifo-second/ack.identities.tsv": "4f9a0f0ddfcdf0ce9970b4a841ee43198b1fdb7c77075d808c5432db4e5a9b63",
+    "public/json-150-fifo-second/audit.json": "548474a2768f77a57552679efd4863d66322bb64325e7357ac38fb7975fb5c98",
+    "public/json-150-fifo-second/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-150-fifo-second/http.json": "5363649c420e52d57278a54e58b7172b0057e098eeda441518df3bc1609adf1e",
+    "public/json-150-fifo-second/http.json.identities.tsv": "51cb9923d500be079932928c0ac76691d8fadb214b87bc1a0a42f3dc26e2f93e",
+    "public/json-175-fixed-core-first/ack.identities.tsv": "95c6984b5aabf8ce7553e42f99892976f6c4c61fbcd1655d63ae95b5ddebeff3",
+    "public/json-175-fixed-core-first/audit.json": "354046be38e8f995d07cf4fe89d21ab52bdff268db31ad1537fb8f7f271213a2",
+    "public/json-175-fixed-core-first/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-175-fixed-core-first/http.json": "ba448a7c53726b81c070f95b31c6106780538873035750c59d92fc1efd71f1d9",
+    "public/json-175-fixed-core-first/http.json.identities.tsv": "848ffae690512ce2f75c9fead1da8700012d231c2f59a9165bf9acd840365352",
+    "public/json-175-fixed-core-second/ack.identities.tsv": "6ae184793514aab69266871f6661a41cca12a532279b4d494cdec0c3ed773bca",
+    "public/json-175-fixed-core-second/audit.json": "942f7062b3e073b17f1948e4b2f8ef045052292a5f412c568602b4aaa9d9785a",
+    "public/json-175-fixed-core-second/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-175-fixed-core-second/http.json": "c8770903edf621d604080a9f934ca401e2ef38eeb948d15bb5c8fd900f60c396",
+    "public/json-175-fixed-core-second/http.json.identities.tsv": "60f0ab45a05f450e61a4695f62c1c21915a26d86cf8f7ded18a59c227849ba00",
+    "public/json-200-fixed-core-first/ack.identities.tsv": "accd32baaba927c3822218ff2cedf607152c8cd00dda8a00c3db0fec865d75ee",
+    "public/json-200-fixed-core-first/audit.json": "ab67697fb42918948c3d6ec57b1d531f323fb2a38abc8223be216a9c77df04bb",
+    "public/json-200-fixed-core-first/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-200-fixed-core-first/http.json": "5dc2cf45770c1bae4b5116524cb0007acb71fb4e272cfb57a50f8581e29608e1",
+    "public/json-200-fixed-core-first/http.json.identities.tsv": "446ded49fd03ef66a9e8d19d08668693376bd77623d15a783bb053b2b9a11ab6",
+    "public/json-200-fixed-core-second/ack.identities.tsv": "94ee14ca3efc5c8aaea1bb519bae69f6e3352e82d306c51675ff0ea9121e9c6b",
+    "public/json-200-fixed-core-second/audit.json": "4d8e8bf68468014b6cec84f7d15e8ec9f07d06885cf0ad6b2c551ad29f5e83b0",
+    "public/json-200-fixed-core-second/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-200-fixed-core-second/http.json": "02e9536564d2602f61efb3ccba0d30d73d64680bc3f1f10c0e37457234c7e146",
+    "public/json-200-fixed-core-second/http.json.identities.tsv": "ee51e40ba9d401d760ae8da6f57d48da5291522e7e1d0d65c79386279ebd71c3",
+    "public/json-200-priority/ack.identities.tsv": "7d50212cb90ffcb0ac60f0789d51c23b18bddc834846250d3cab8bbbe1b20908",
+    "public/json-200-priority/audit.json": "d3115d00bdb2e8f8e4584e36f1c7ca25ed6e9b5c25e35f6a1c45aa7db2f1abd6",
+    "public/json-200-priority/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-200-priority/http.json": "c9e342b115f0f505dafc9668a46b51c6a35de44a4ce4f60807d5a016999ebb08",
+    "public/json-200-priority/http.json.identities.tsv": "c32343aced2a8abf30d6bf60a60762865cad78c7f8124ba7f00a919fffe4db11",
+    "public/json-300-admission/ack.identities.tsv": "7c0c11fccc44dfc9d5de4672dfac23e3c3f11c53837eae736a67468b915c0cdf",
+    "public/json-300-admission/audit.json": "e50bd19d18e0976f67f1e79cd345408ee7169b6b1d367f1cb9e1e85b3b5c4431",
+    "public/json-300-admission/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-300-admission/http.json": "b66d6d9a591bcaf56c78ca252cce9c1445f738542e2febc752d5b7f492c49240",
+    "public/json-300-admission/http.json.identities.tsv": "225186f596bc8d73b6622b8e2b588ef40babcc22a46c0ccb171b534cba3b202f",
+    "public/json-300-baseline/ack.identities.tsv": "4b90d7ce18169bd132e0a141ef9e654336dc53101fc8c7b8675bd51ba0ab4fe7",
+    "public/json-300-baseline/audit.json": "42f399d7bcabb75b17fb035b779097ed1cae6349feedd6f96cbe0b1f2aa82988",
+    "public/json-300-baseline/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-300-baseline/http.json": "598dfde2d4074b6efa349e250759a5ccf6860f15ee03364028f5731daee9595b",
+    "public/json-300-baseline/http.json.identities.tsv": "49998125600f3b8d36de94b0cfc8b29b2d3cb55dbfbb5e590c99a556bf5fb5d9",
+    "public/json-300-default-core/ack.identities.tsv": "638567a3fb8b33589a9813aa7fa909984bc7bf0cd278efaad15e900819c205d8",
+    "public/json-300-default-core/audit.json": "1f7bf43e1d78fda7293dec8b1a7038891e4005fb82ae73b0e03a77760a9ed265",
+    "public/json-300-default-core/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-300-default-core/http.json": "cbfa6bf7f1aae49493c2cdd5bd3921a020f37d7706bb32b88151c0488ab3efa9",
+    "public/json-300-default-core/http.json.identities.tsv": "6f3cab638a2c5e58aee15795dfd4580888395369b1b1ec1cc333b1bf13c6cebd",
+    "public/json-300-driver-affinity/ack.identities.tsv": "8aa1fd610dc0df57e8256ef9563be35a60fc75e801e57b1e785e28e7c730d0f3",
+    "public/json-300-driver-affinity/audit.json": "f961abe38ad0bd4a9acab519562e8bc3f5c877a09f4876aa5f310856718a105e",
+    "public/json-300-driver-affinity/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-300-driver-affinity/http.json": "c10ba10bd73a3600a4b099dc68c017616011518ddf490c91b2b44198508d73d5",
+    "public/json-300-driver-affinity/http.json.identities.tsv": "0a70b2c279aaa8adb965e1fc70925e799162dc02039ebe0452ec75788b5bfd2d",
+    "public/json-300-fixed-core/ack.identities.tsv": "5cc0da78ec84b6b9ec27c403f6bb585515b970376b0d85b545920999c138951c",
+    "public/json-300-fixed-core/audit.json": "d2e6066b434a91638642d38eb15a88cb5c7d35310985473cf59dde047f503516",
+    "public/json-300-fixed-core/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-300-fixed-core/http.json": "c064b9a1022fb9cb721ea0bc07757f96418deabeead9785139d87a534901e016",
+    "public/json-300-fixed-core/http.json.identities.tsv": "cf4afcb321d3917b251941f7b94be1aa3adce24714cb8b68217881542016ac54",
+    "public/json-300-priority/ack.identities.tsv": "c317850ec1ec403ea67485852fd3c614dc0572dbd718370b5645631f2cb5e661",
+    "public/json-300-priority/audit.json": "b91e3656db9273f3f3f830521ba798b1da26901babae9770e0c9c4ac0e25478f",
+    "public/json-300-priority/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/json-300-priority/http.json": "4ddd4a680e254a1cd25ac7de7c40ccc1b1c6eb1dea0550175c56c184efad9ee1",
+    "public/json-300-priority/http.json.identities.tsv": "0f5e70788bc8fc9688cb3e0669a52156a5576f805b476caf1bc02ed92534da27",
+    "public/sse-3000-fast-initial/audit.json": "666cbcaa769df44657fa4de924723130329b3dbf4f92212c33d03146fd0e877c",
+    "public/sse-3000-fast-initial/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/sse-3000-fast-initial/http.json": "320e3d60bc2e29ec0b1c68f88ed266d12d61f53576c2511cf61b36824a3fc602",
+    "public/sse-3000-paced-initial/audit.json": "d173819d3a03b0e6e0a5a1fb5018b83b7207bba836318b3df69fb11f04a66005",
+    "public/sse-3000-paced-initial/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/sse-3000-paced-initial/http.json": "7267cd7de00ad6635bfa14b9764337ff49e91b0dcfc0419277f95588928f523c",
+    "public/sse-fast-fifo/audit.json": "ec5962b6619f9f37924d64aae303fea5ab3705c3209db7d556d4456cf738f901",
+    "public/sse-fast-fifo/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/sse-fast-fifo/http.json": "71c293f4b49662601ad09b1ca67a43f2b044feab5050892d9065fd1e02dd3afa",
+    "public/sse-fast-priority/audit.json": "60aba537bab79c7787bbfb6510181c83c85b90584924f7e97c2b154df52e1e2e",
+    "public/sse-fast-priority/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/sse-fast-priority/http.json": "fce7b59992eeea09a212dd8d1715c697bca1b482b10bed463ee968908bbdad94",
+    "public/sse-paced-priority/audit.json": "8dbcd99adbacad0d1a235e57c6143ceac1919d83367501f91c16261374f89689",
+    "public/sse-paced-priority/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+    "public/sse-paced-priority/http.json": "1ae54cbbe8aad574a02b671f6e9263bf98770925d5f0306fd03331c5c7ecde8d"
+  },
+  "experimental_public_driver": "experiments/.local/capacity-affinity-study/public-project-owner.ts",
+  "interpretation": {
+    "public": "HTTP metrics exclude warm-up. Financial, supplier and ACK totals include warm-up and drain. An empty queue alone does not establish valid settlement. The window intersection is checked independently using matching HTTP and confirmed ACK identities.",
+    "direct": "No public HTTP, provider, plugin, or external ACK is measured. Timely grant and durable publication are counted by request deadline. Exact customer and supplier settlement is checked after drain.",
+    "sse": "The short diagnostic does not compute the minute intersection. DONE counts a parsed terminal frame; validated HTTP completion also requires a valid body and transport completion. Compare artifacts by hash before attributing fast/paced differences."
+  },
+  "rounds": [
+    {
+      "round": "json-300-baseline",
+      "kind": "public",
+      "fixture": "bench-d7bd0186f0cd42819412839ec48d5612",
+      "source_path": "public/json-300-baseline/",
+      "measurement_started_at": "2026-11-19T08:13:09.190Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "e878b378a702c9344ab13abf5fd6d4e4b264565755de719173b2063c04df5e3f",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "f6d1129e95a5a337e0ff9bda672343aa0b6165c6e00e4a39e74a48ac602ef178",
+        "dist/core-worker/main.js": "d358bc2027cea3f9edcc709bab95aa7a67a4d0b2b5fe7decedba082c0e87b4ef",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "20770a0622bd1c56c63119ef44b3dc429bfdd81ca57fefb822b58d32f56ba5d2"
+      },
+      "manifest_sha256": "20770a0622bd1c56c63119ef44b3dc429bfdd81ca57fefb822b58d32f56ba5d2",
+      "configuration": {
+        "targetRps": 300,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 301,
+        "offered": 18060,
+        "shed": 0,
+        "completed": 18060,
+        "succeeded": 12856,
+        "invalid": 5204,
+        "load_generator_peak_inflight": 1511,
+        "warmup_requests": 10,
+        "successful_rps": 197.78,
+        "latency_ms": {
+          "p50": 1009.58,
+          "p95": 5014.98,
+          "p99": 5014.98,
+          "p999": 5014.98
+        },
+        "first_body_byte_ms": {
+          "p50": 600.3,
+          "p95": 3359.21,
+          "p99": 4380.01
+        },
+        "statuses": {
+          "0": 4905,
+          "200": 12856,
+          "429": 11,
+          "503": 288
+        },
+        "gateway_errors": {
+          "evidence_unavailable": 255,
+          "core_unavailable": 33,
+          "rate_limited": 11
+        },
+        "transport_errors": {
+          "REQUEST_DEADLINE": 4905
+        }
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 12856,
+        "minuteCompletions": [12856],
+        "matchedRequests": 12856,
+        "httpOnly": 0,
+        "ackOnly": 2052,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 125034,
+        "receiptAckedRequestsByWindow": 13164,
+        "ackedEventsByWindow": 26348,
+        "sampledBeforeWindowEndMs": 79,
+        "httpByWindow": 12856
+      },
+      "complete_rps_in_window": 214.26666666666668,
+      "drain_after_http_ms": 120018,
+      "accounting_including_warmup": {
+        "requests": 15204,
+        "projected_requests": 15204,
+        "attempts": 15204,
+        "succeeded_attempts": 14908,
+        "usage_events": 30112,
+        "usage_requests": 15204,
+        "unexpected_receipts": 0,
+        "precise_usage": 29816,
+        "precise_charges": 14908,
+        "settled_holds": 14908,
+        "reserved": "0",
+        "spent": "1490800",
+        "debt": "0",
+        "acknowledged": 29816,
+        "settlement_journals": 14908,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 15204,
+        "exact_supplier_postings": 14908,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999120428",
+        "reserved": "0",
+        "spent": "879572",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 1000,
+        "admittedWalletMismatches": 276,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 29816,
+        "ackedRequests": 14908,
+        "imprecise": 0,
+        "expiredLeases": 1184,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": false,
+      "capacity_passed": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "per_request_supplier_postings",
+        "supplier_ledger",
+        "wallet_balances",
+        "admitted_wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks",
+        "identity_intersection"
+      ],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-300-admission",
+      "kind": "public",
+      "fixture": "bench-8e52ad6a331c4b4c94562c735c06f0eb",
+      "source_path": "public/json-300-admission/",
+      "measurement_started_at": "2026-11-19T08:21:53.289Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "9163921fe5c324d99206bc0baac0eda523f42d4669fbd871c2801c85335112a4",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "b6295427ea572d45e9d679c9165d06100a3365e79365e821aac3147c0fa61c4b",
+        "dist/core-worker/main.js": "d801e35d9584a9fe7fa5a7b72786d054203a808fca24a5f5c6b91ee2842025d6",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "ed1e6f453f62cef94bf0680675d4f26995632db8ca4cd215b870b5c3b00771df"
+      },
+      "manifest_sha256": "ed1e6f453f62cef94bf0680675d4f26995632db8ca4cd215b870b5c3b00771df",
+      "configuration": {
+        "targetRps": 300,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 301,
+        "offered": 18060,
+        "shed": 0,
+        "completed": 18060,
+        "succeeded": 13304,
+        "invalid": 4756,
+        "load_generator_peak_inflight": 1499,
+        "warmup_requests": 9,
+        "successful_rps": 207.3,
+        "latency_ms": {
+          "p50": 1540.21,
+          "p95": 5014.98,
+          "p99": 5014.98,
+          "p999": 5014.98
+        },
+        "first_body_byte_ms": {
+          "p50": 848.95,
+          "p95": 3867.08,
+          "p99": 4648.84
+        },
+        "statuses": {
+          "0": 4059,
+          "200": 13304,
+          "429": 277,
+          "503": 420
+        },
+        "gateway_errors": {
+          "evidence_unavailable": 326,
+          "core_unavailable": 94,
+          "rate_limited": 277
+        },
+        "transport_errors": {
+          "REQUEST_DEADLINE": 4059
+        }
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 12906,
+        "minuteCompletions": [12906],
+        "matchedRequests": 13304,
+        "httpOnly": 0,
+        "ackOnly": 2195,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 124201,
+        "receiptAckedRequestsByWindow": 13254,
+        "ackedEventsByWindow": 26526,
+        "sampledBeforeWindowEndMs": 45,
+        "httpByWindow": 12906
+      },
+      "complete_rps_in_window": 215.1,
+      "drain_after_http_ms": 120017,
+      "accounting_including_warmup": {
+        "requests": 15835,
+        "projected_requests": 15835,
+        "attempts": 15835,
+        "succeeded_attempts": 15499,
+        "usage_events": 31334,
+        "usage_requests": 15835,
+        "unexpected_receipts": 0,
+        "precise_usage": 30998,
+        "precise_charges": 15499,
+        "settled_holds": 15499,
+        "reserved": "0",
+        "spent": "1549900",
+        "debt": "0",
+        "acknowledged": 30998,
+        "settlement_journals": 15499,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 15835,
+        "exact_supplier_postings": 15499,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999085559",
+        "reserved": "0",
+        "spent": "914441",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 945,
+        "admittedWalletMismatches": 310,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 30998,
+        "ackedRequests": 15499,
+        "imprecise": 0,
+        "expiredLeases": 1344,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": false,
+      "capacity_passed": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "per_request_supplier_postings",
+        "supplier_ledger",
+        "wallet_balances",
+        "admitted_wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks",
+        "identity_intersection"
+      ],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-300-driver-affinity",
+      "kind": "public",
+      "fixture": "bench-4527e7a55fb34fd4883439a6a4fe3517",
+      "source_path": "public/json-300-driver-affinity/",
+      "measurement_started_at": "2026-11-19T08:32:16.401Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "9163921fe5c324d99206bc0baac0eda523f42d4669fbd871c2801c85335112a4",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "b6295427ea572d45e9d679c9165d06100a3365e79365e821aac3147c0fa61c4b",
+        "dist/core-worker/main.js": "d801e35d9584a9fe7fa5a7b72786d054203a808fca24a5f5c6b91ee2842025d6",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "ed1e6f453f62cef94bf0680675d4f26995632db8ca4cd215b870b5c3b00771df"
+      },
+      "manifest_sha256": "ed1e6f453f62cef94bf0680675d4f26995632db8ca4cd215b870b5c3b00771df",
+      "configuration": {
+        "targetRps": 300,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "diagnostic_project_affinity": true,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 301,
+        "offered": 18060,
+        "shed": 0,
+        "completed": 18060,
+        "succeeded": 15507,
+        "invalid": 2553,
+        "load_generator_peak_inflight": 1472,
+        "warmup_requests": 8,
+        "successful_rps": 238.71,
+        "latency_ms": {
+          "p50": 753.6,
+          "p95": 5014.98,
+          "p99": 5014.98,
+          "p999": 5014.98
+        },
+        "first_body_byte_ms": {
+          "p50": 679.92,
+          "p95": 2324.42,
+          "p99": 3763.78
+        },
+        "statuses": {
+          "0": 2168,
+          "200": 15507,
+          "429": 199,
+          "503": 186
+        },
+        "gateway_errors": {
+          "evidence_unavailable": 115,
+          "core_unavailable": 71,
+          "rate_limited": 199
+        },
+        "transport_errors": {
+          "REQUEST_DEADLINE": 2168
+        }
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 15506,
+        "minuteCompletions": [15506],
+        "matchedRequests": 15507,
+        "httpOnly": 0,
+        "ackOnly": 1385,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 125006,
+        "receiptAckedRequestsByWindow": 15602,
+        "ackedEventsByWindow": 31220,
+        "sampledBeforeWindowEndMs": 31,
+        "httpByWindow": 15506
+      },
+      "complete_rps_in_window": 258.43333333333334,
+      "drain_after_http_ms": 120017,
+      "accounting_including_warmup": {
+        "requests": 17466,
+        "projected_requests": 17466,
+        "attempts": 17466,
+        "succeeded_attempts": 16892,
+        "usage_events": 34358,
+        "usage_requests": 17466,
+        "unexpected_receipts": 0,
+        "precise_usage": 33784,
+        "precise_charges": 16892,
+        "settled_holds": 16892,
+        "reserved": "0",
+        "spent": "1689200",
+        "debt": "0",
+        "acknowledged": 33784,
+        "settlement_journals": 16892,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 17466,
+        "exact_supplier_postings": 16892,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999003372",
+        "reserved": "0",
+        "spent": "996628",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 991,
+        "admittedWalletMismatches": 531,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 33784,
+        "ackedRequests": 16892,
+        "imprecise": 0,
+        "expiredLeases": 2296,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": false,
+      "capacity_passed": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "per_request_supplier_postings",
+        "supplier_ledger",
+        "wallet_balances",
+        "admitted_wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks",
+        "identity_intersection"
+      ],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "sse-3000-fast-initial",
+      "kind": "public",
+      "fixture": "bench-c59f5dfc0b4d42c996f9a3f2f0443639",
+      "source_path": "public/sse-3000-fast-initial/",
+      "measurement_started_at": "2026-11-19T08:30:32.395Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "9163921fe5c324d99206bc0baac0eda523f42d4669fbd871c2801c85335112a4",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "b6295427ea572d45e9d679c9165d06100a3365e79365e821aac3147c0fa61c4b",
+        "dist/core-worker/main.js": "d801e35d9584a9fe7fa5a7b72786d054203a808fca24a5f5c6b91ee2842025d6",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "ed1e6f453f62cef94bf0680675d4f26995632db8ca4cd215b870b5c3b00771df"
+      },
+      "manifest_sha256": "ed1e6f453f62cef94bf0680675d4f26995632db8ca4cd215b870b5c3b00771df",
+      "configuration": {
+        "targetRps": 3000,
+        "seconds": 3,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 10000,
+        "stream": true,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 15,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-sse",
+        "offered_rps": 3000,
+        "offered": 9000,
+        "shed": 0,
+        "completed": 9000,
+        "succeeded": 439,
+        "invalid": 8561,
+        "load_generator_peak_inflight": 2652,
+        "warmup_requests": 6,
+        "successful_rps": 59.43,
+        "latency_ms": {
+          "p50": 6.29,
+          "p95": 5014.98,
+          "p99": 5014.98,
+          "p999": 5014.98
+        },
+        "first_body_byte_ms": {
+          "p50": 1499.06,
+          "p95": 2388.22,
+          "p99": 2534.8
+        },
+        "statuses": {
+          "0": 1872,
+          "200": 439,
+          "429": 505,
+          "503": 6184
+        },
+        "gateway_errors": {
+          "overloaded": 6184,
+          "rate_limited": 505
+        },
+        "transport_errors": {
+          "REQUEST_DEADLINE": 1872
+        },
+        "sse": {
+          "response_headers": 712,
+          "first_frame": 712,
+          "first_content": 712,
+          "done": 439,
+          "error_frames": 0,
+          "first_frame_p99_ms": 2590.3,
+          "first_content_p99_ms": 2590.3
+        }
+      },
+      "online_intersection": null,
+      "complete_rps_in_window": null,
+      "drain_after_http_ms": 15012,
+      "accounting_including_warmup": {
+        "requests": 831,
+        "projected_requests": 831,
+        "attempts": 831,
+        "succeeded_attempts": 718,
+        "usage_events": 1517,
+        "usage_requests": 831,
+        "unexpected_receipts": 0,
+        "precise_usage": 1404,
+        "precise_charges": 718,
+        "settled_holds": 718,
+        "reserved": "0",
+        "spent": "71800",
+        "debt": "0",
+        "acknowledged": 1404,
+        "settlement_journals": 718,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 831,
+        "exact_supplier_postings": 718,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999957638",
+        "reserved": "0",
+        "spent": "42362",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 1000,
+        "admittedWalletMismatches": 113,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 1404,
+        "ackedRequests": 718,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": false,
+      "capacity_passed": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "per_request_supplier_postings",
+        "supplier_ledger",
+        "wallet_balances",
+        "admitted_wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks"
+      ],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "sse-3000-paced-initial",
+      "kind": "public",
+      "fixture": "bench-bcfe1c4718a549aab766d6bbb35a0bba",
+      "source_path": "public/sse-3000-paced-initial/",
+      "measurement_started_at": "2026-11-19T08:36:04.697Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "81ecbfcadcdc7a17e3fe06445f9b2515b6c69d045ca1580e9b4d16b608c1238f",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "436c5bd7cc095ca6a32233a90b5741deb70caa71918f9d73135cd45b1b5b574c",
+        "dist/core-worker/main.js": "7d6cf1e0a7c1b4126c6a50dc182b9217b17cc76f55ea8b2bbcf75e2027351e68",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "d8405d2a59d1f29d3cf723d720d42a4be11e640cb626e6473d64b335449d6091"
+      },
+      "manifest_sha256": "d8405d2a59d1f29d3cf723d720d42a4be11e640cb626e6473d64b335449d6091",
+      "configuration": {
+        "targetRps": 3000,
+        "seconds": 3,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 10000,
+        "stream": true,
+        "scenario": {
+          "repeat": 8,
+          "chunkBytes": 192,
+          "chunkDelayMs": 150
+        },
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 15,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-sse",
+        "offered_rps": 3000,
+        "offered": 9000,
+        "shed": 0,
+        "completed": 9000,
+        "succeeded": 1350,
+        "invalid": 7650,
+        "load_generator_peak_inflight": 2271,
+        "warmup_requests": 1,
+        "successful_rps": 180.11,
+        "latency_ms": {
+          "p50": 11.46,
+          "p95": 4854.66,
+          "p99": 5014.98,
+          "p999": 5014.98
+        },
+        "first_body_byte_ms": {
+          "p50": 2201.9,
+          "p95": 2779.23,
+          "p99": 2855.51
+        },
+        "statuses": {
+          "0": 96,
+          "200": 1350,
+          "429": 586,
+          "503": 6968
+        },
+        "gateway_errors": {
+          "overloaded": 6931,
+          "rate_limited": 586,
+          "core_unavailable": 37
+        },
+        "transport_errors": {
+          "REQUEST_DEADLINE": 96
+        },
+        "sse": {
+          "response_headers": 1439,
+          "first_frame": 1439,
+          "first_content": 1439,
+          "done": 1351,
+          "error_frames": 0,
+          "first_frame_p99_ms": 2855.51,
+          "first_content_p99_ms": 3047.22
+        }
+      },
+      "online_intersection": null,
+      "complete_rps_in_window": null,
+      "drain_after_http_ms": 15008,
+      "accounting_including_warmup": {
+        "requests": 1477,
+        "projected_requests": 1477,
+        "attempts": 1477,
+        "succeeded_attempts": 1440,
+        "usage_events": 2867,
+        "usage_requests": 1477,
+        "unexpected_receipts": 0,
+        "precise_usage": 2830,
+        "precise_charges": 1440,
+        "settled_holds": 1440,
+        "reserved": "0",
+        "spent": "144000",
+        "debt": "0",
+        "acknowledged": 2830,
+        "settlement_journals": 1440,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 1477,
+        "exact_supplier_postings": 1440,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999915040",
+        "reserved": "0",
+        "spent": "84960",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 1000,
+        "admittedWalletMismatches": 37,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 2830,
+        "ackedRequests": 1440,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": false,
+      "capacity_passed": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "per_request_supplier_postings",
+        "supplier_ledger",
+        "wallet_balances",
+        "admitted_wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks"
+      ],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-300-priority",
+      "kind": "public",
+      "fixture": "bench-ce354fe02604430593f983a09887b206",
+      "source_path": "public/json-300-priority/",
+      "measurement_started_at": "2026-11-19T08:41:18.896Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "ff5fa35577f19ab5b892a0f7c6d098b9fef2734313fcc8e87e10a143f7d66790",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "2c8ca2068b902fe4147e4f0d4437a3741b984d3dd95ee52b2dc90826eb62ba50",
+        "dist/core-worker/main.js": "a46b087e2c4eceaf2fdd059dbd265651d13baa0478ab943836388c1acb53afc9",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "f9addb818cc2185e191f684f0e5b8211fa83bcebc535f54e48c29e429df20258"
+      },
+      "manifest_sha256": "f9addb818cc2185e191f684f0e5b8211fa83bcebc535f54e48c29e429df20258",
+      "configuration": {
+        "targetRps": 300,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 301,
+        "offered": 18060,
+        "shed": 0,
+        "completed": 18060,
+        "succeeded": 13159,
+        "invalid": 4901,
+        "load_generator_peak_inflight": 1506,
+        "warmup_requests": 9,
+        "successful_rps": 202.45,
+        "latency_ms": {
+          "p50": 1031.68,
+          "p95": 5014.98,
+          "p99": 5014.98,
+          "p999": 5014.98
+        },
+        "first_body_byte_ms": {
+          "p50": 672.6,
+          "p95": 3182.14,
+          "p99": 4427.7
+        },
+        "statuses": {
+          "0": 4541,
+          "200": 13159,
+          "429": 1,
+          "503": 359
+        },
+        "gateway_errors": {
+          "evidence_unavailable": 203,
+          "core_unavailable": 17,
+          "overloaded": 139,
+          "rate_limited": 1
+        },
+        "transport_errors": {
+          "REQUEST_DEADLINE": 4541
+        }
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 13159,
+        "minuteCompletions": [13159],
+        "matchedRequests": 13159,
+        "httpOnly": 0,
+        "ackOnly": 1864,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 125048,
+        "receiptAckedRequestsByWindow": 13487,
+        "ackedEventsByWindow": 26992,
+        "sampledBeforeWindowEndMs": 82,
+        "httpByWindow": 13159
+      },
+      "complete_rps_in_window": 219.31666666666666,
+      "drain_after_http_ms": 120028,
+      "accounting_including_warmup": {
+        "requests": 15266,
+        "projected_requests": 15266,
+        "attempts": 15266,
+        "succeeded_attempts": 15023,
+        "usage_events": 30289,
+        "usage_requests": 15266,
+        "unexpected_receipts": 0,
+        "precise_usage": 30046,
+        "precise_charges": 15023,
+        "settled_holds": 15023,
+        "reserved": "0",
+        "spent": "1502300",
+        "debt": "0",
+        "acknowledged": 30046,
+        "settlement_journals": 15023,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 15266,
+        "exact_supplier_postings": 15023,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999113643",
+        "reserved": "0",
+        "spent": "886357",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 1000,
+        "admittedWalletMismatches": 225,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 30046,
+        "ackedRequests": 15023,
+        "imprecise": 0,
+        "expiredLeases": 972,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": false,
+      "capacity_passed": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "per_request_supplier_postings",
+        "supplier_ledger",
+        "wallet_balances",
+        "admitted_wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks",
+        "identity_intersection"
+      ],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "sse-fast-priority",
+      "kind": "public",
+      "fixture": "bench-6cbc7c1eead3456eae2a95f7b8acfd79",
+      "source_path": "public/sse-fast-priority/",
+      "measurement_started_at": "2026-11-19T08:45:08.136Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "303d3aa19c068bc784d9655306b70f4701a37ffed125e20948e3cf3db2e97ed5",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "37e5670d488c27250b15dcf58e21e5ce8c8f39b2686e1bd0b4ba11168b05630a",
+        "dist/core-worker/main.js": "218b6e7243f7c766a4dfaa92ba50cebfbd177b5e0cc3c1c1145524db912a259c",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "f62d0e8e9007d0231cdddfaaf211c2181a61d652c46ff87a1583239a53be84a7"
+      },
+      "manifest_sha256": "f62d0e8e9007d0231cdddfaaf211c2181a61d652c46ff87a1583239a53be84a7",
+      "configuration": {
+        "targetRps": 3000,
+        "seconds": 3,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 10000,
+        "stream": true,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 15,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-sse",
+        "offered_rps": 3000,
+        "offered": 9000,
+        "shed": 0,
+        "completed": 9000,
+        "succeeded": 49,
+        "invalid": 8951,
+        "load_generator_peak_inflight": 2857,
+        "warmup_requests": 7,
+        "successful_rps": 6.79,
+        "latency_ms": {
+          "p50": 2.03,
+          "p95": 5014.98,
+          "p99": 5014.98,
+          "p999": 5014.98
+        },
+        "first_body_byte_ms": {
+          "p50": 502.06,
+          "p95": 812.96,
+          "p99": 1089.09
+        },
+        "statuses": {
+          "0": 2418,
+          "200": 49,
+          "429": 300,
+          "503": 6233
+        },
+        "gateway_errors": {
+          "overloaded": 6233,
+          "rate_limited": 300
+        },
+        "transport_errors": {
+          "REQUEST_DEADLINE": 2418
+        },
+        "sse": {
+          "response_headers": 1022,
+          "first_frame": 1022,
+          "first_content": 1022,
+          "done": 49,
+          "error_frames": 0,
+          "first_frame_p99_ms": 2998.12,
+          "first_content_p99_ms": 2998.12
+        }
+      },
+      "online_intersection": null,
+      "complete_rps_in_window": null,
+      "drain_after_http_ms": 15012,
+      "accounting_including_warmup": {
+        "requests": 1042,
+        "projected_requests": 1042,
+        "attempts": 1042,
+        "succeeded_attempts": 1029,
+        "usage_events": 2020,
+        "usage_requests": 1042,
+        "unexpected_receipts": 0,
+        "precise_usage": 2007,
+        "precise_charges": 1029,
+        "settled_holds": 1029,
+        "reserved": "0",
+        "spent": "102900",
+        "debt": "0",
+        "acknowledged": 2007,
+        "settlement_journals": 1029,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 1042,
+        "exact_supplier_postings": 1029,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999939289",
+        "reserved": "0",
+        "spent": "60711",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 1000,
+        "admittedWalletMismatches": 13,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 2007,
+        "ackedRequests": 1029,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": false,
+      "capacity_passed": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "per_request_supplier_postings",
+        "supplier_ledger",
+        "wallet_balances",
+        "admitted_wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks"
+      ],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "sse-paced-priority",
+      "kind": "public",
+      "fixture": "bench-f75e4f3ff9ec4525957da0f40c62f7ee",
+      "source_path": "public/sse-paced-priority/",
+      "measurement_started_at": "2026-11-19T08:46:03.715Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "303d3aa19c068bc784d9655306b70f4701a37ffed125e20948e3cf3db2e97ed5",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "37e5670d488c27250b15dcf58e21e5ce8c8f39b2686e1bd0b4ba11168b05630a",
+        "dist/core-worker/main.js": "218b6e7243f7c766a4dfaa92ba50cebfbd177b5e0cc3c1c1145524db912a259c",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "f62d0e8e9007d0231cdddfaaf211c2181a61d652c46ff87a1583239a53be84a7"
+      },
+      "manifest_sha256": "f62d0e8e9007d0231cdddfaaf211c2181a61d652c46ff87a1583239a53be84a7",
+      "configuration": {
+        "targetRps": 3000,
+        "seconds": 3,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 10000,
+        "stream": true,
+        "scenario": {
+          "repeat": 8,
+          "chunkBytes": 192,
+          "chunkDelayMs": 150
+        },
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 15,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-sse",
+        "offered_rps": 3000,
+        "offered": 9000,
+        "shed": 0,
+        "completed": 9000,
+        "succeeded": 1549,
+        "invalid": 7451,
+        "load_generator_peak_inflight": 2179,
+        "warmup_requests": 1,
+        "successful_rps": 257.56,
+        "latency_ms": {
+          "p50": 9.28,
+          "p95": 4828.44,
+          "p99": 4960.96,
+          "p999": 5014.98
+        },
+        "first_body_byte_ms": {
+          "p50": 2166.41,
+          "p95": 2902.27,
+          "p99": 3164.95
+        },
+        "statuses": {
+          "0": 52,
+          "200": 1549,
+          "429": 420,
+          "503": 6979
+        },
+        "gateway_errors": {
+          "overloaded": 6941,
+          "rate_limited": 420,
+          "core_unavailable": 38
+        },
+        "transport_errors": {
+          "REQUEST_DEADLINE": 52
+        },
+        "sse": {
+          "response_headers": 1551,
+          "first_frame": 1551,
+          "first_content": 1551,
+          "done": 1549,
+          "error_frames": 0,
+          "first_frame_p99_ms": 3164.95,
+          "first_content_p99_ms": 3395.79
+        }
+      },
+      "online_intersection": null,
+      "complete_rps_in_window": null,
+      "drain_after_http_ms": 15018,
+      "accounting_including_warmup": {
+        "requests": 1590,
+        "projected_requests": 1590,
+        "attempts": 1590,
+        "succeeded_attempts": 1552,
+        "usage_events": 3097,
+        "usage_requests": 1590,
+        "unexpected_receipts": 0,
+        "precise_usage": 3059,
+        "precise_charges": 1552,
+        "settled_holds": 1552,
+        "reserved": "0",
+        "spent": "155200",
+        "debt": "0",
+        "acknowledged": 3059,
+        "settlement_journals": 1552,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 1590,
+        "exact_supplier_postings": 1552,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999908432",
+        "reserved": "0",
+        "spent": "91568",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 1000,
+        "admittedWalletMismatches": 38,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 3059,
+        "ackedRequests": 1552,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": false,
+      "capacity_passed": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "per_request_supplier_postings",
+        "supplier_ledger",
+        "wallet_balances",
+        "admitted_wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks"
+      ],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-200-priority",
+      "kind": "public",
+      "fixture": "bench-03179a91a1214bf09a05cad6b123282e",
+      "source_path": "public/json-200-priority/",
+      "measurement_started_at": "2026-11-19T08:46:59.528Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "303d3aa19c068bc784d9655306b70f4701a37ffed125e20948e3cf3db2e97ed5",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "37e5670d488c27250b15dcf58e21e5ce8c8f39b2686e1bd0b4ba11168b05630a",
+        "dist/core-worker/main.js": "218b6e7243f7c766a4dfaa92ba50cebfbd177b5e0cc3c1c1145524db912a259c",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "f62d0e8e9007d0231cdddfaaf211c2181a61d652c46ff87a1583239a53be84a7"
+      },
+      "manifest_sha256": "f62d0e8e9007d0231cdddfaaf211c2181a61d652c46ff87a1583239a53be84a7",
+      "configuration": {
+        "targetRps": 200,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 201,
+        "offered": 12060,
+        "shed": 0,
+        "completed": 12060,
+        "succeeded": 12060,
+        "invalid": 0,
+        "load_generator_peak_inflight": 321,
+        "warmup_requests": 10,
+        "successful_rps": 200.64,
+        "latency_ms": {
+          "p50": 610.13,
+          "p95": 1352.49,
+          "p99": 1591.07,
+          "p999": 1802.11
+        },
+        "first_body_byte_ms": {
+          "p50": 610.13,
+          "p95": 1352.49,
+          "p99": 1591.07
+        },
+        "statuses": {
+          "200": 12060
+        },
+        "gateway_errors": {},
+        "transport_errors": {}
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 12035,
+        "minuteCompletions": [12035],
+        "matchedRequests": 12060,
+        "httpOnly": 0,
+        "ackOnly": 10,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 127,
+        "receiptAckedRequestsByWindow": 12011,
+        "ackedEventsByWindow": 24042,
+        "sampledBeforeWindowEndMs": 147,
+        "httpByWindow": 12035
+      },
+      "complete_rps_in_window": 200.58333333333334,
+      "drain_after_http_ms": 14,
+      "accounting_including_warmup": {
+        "requests": 12070,
+        "projected_requests": 12070,
+        "attempts": 12070,
+        "succeeded_attempts": 12070,
+        "usage_events": 24140,
+        "usage_requests": 12070,
+        "unexpected_receipts": 0,
+        "precise_usage": 24140,
+        "precise_charges": 12070,
+        "settled_holds": 12070,
+        "reserved": "0",
+        "spent": "1207000",
+        "debt": "0",
+        "acknowledged": 24140,
+        "settlement_journals": 12070,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 12070,
+        "exact_supplier_postings": 12070,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999287870",
+        "reserved": "0",
+        "spent": "712130",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 0,
+        "admittedWalletMismatches": 0,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 24140,
+        "ackedRequests": 12070,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": true,
+      "capacity_passed": false,
+      "failures": [],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "sse-fast-fifo",
+      "kind": "public",
+      "fixture": "bench-ba62780b0c9a4565aefae1b4e8eda47e",
+      "source_path": "public/sse-fast-fifo/",
+      "measurement_started_at": "2026-11-19T08:49:12.588Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "81ecbfcadcdc7a17e3fe06445f9b2515b6c69d045ca1580e9b4d16b608c1238f",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "436c5bd7cc095ca6a32233a90b5741deb70caa71918f9d73135cd45b1b5b574c",
+        "dist/core-worker/main.js": "7d6cf1e0a7c1b4126c6a50dc182b9217b17cc76f55ea8b2bbcf75e2027351e68",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "d8405d2a59d1f29d3cf723d720d42a4be11e640cb626e6473d64b335449d6091"
+      },
+      "manifest_sha256": "d8405d2a59d1f29d3cf723d720d42a4be11e640cb626e6473d64b335449d6091",
+      "configuration": {
+        "targetRps": 3000,
+        "seconds": 3,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 10000,
+        "stream": true,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 15,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-sse",
+        "offered_rps": 3000,
+        "offered": 9000,
+        "shed": 0,
+        "completed": 9000,
+        "succeeded": 395,
+        "invalid": 8605,
+        "load_generator_peak_inflight": 2653,
+        "warmup_requests": 7,
+        "successful_rps": 52.13,
+        "latency_ms": {
+          "p50": 2.02,
+          "p95": 5014.98,
+          "p99": 5014.98,
+          "p999": 5014.98
+        },
+        "first_body_byte_ms": {
+          "p50": 1089.09,
+          "p95": 1763.49,
+          "p99": 1871.73
+        },
+        "statuses": {
+          "0": 2285,
+          "200": 395,
+          "429": 218,
+          "503": 6102
+        },
+        "gateway_errors": {
+          "overloaded": 6102,
+          "rate_limited": 218
+        },
+        "transport_errors": {
+          "REQUEST_DEADLINE": 2285
+        },
+        "sse": {
+          "response_headers": 763,
+          "first_frame": 763,
+          "first_content": 763,
+          "done": 395,
+          "error_frames": 0,
+          "first_frame_p99_ms": 2690.38,
+          "first_content_p99_ms": 2690.38
+        }
+      },
+      "online_intersection": null,
+      "complete_rps_in_window": null,
+      "drain_after_http_ms": 15007,
+      "accounting_including_warmup": {
+        "requests": 897,
+        "projected_requests": 897,
+        "attempts": 897,
+        "succeeded_attempts": 770,
+        "usage_events": 1624,
+        "usage_requests": 897,
+        "unexpected_receipts": 0,
+        "precise_usage": 1497,
+        "precise_charges": 770,
+        "settled_holds": 770,
+        "reserved": "0",
+        "spent": "77000",
+        "debt": "0",
+        "acknowledged": 1497,
+        "settlement_journals": 770,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 897,
+        "exact_supplier_postings": 770,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999954570",
+        "reserved": "0",
+        "spent": "45430",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 1000,
+        "admittedWalletMismatches": 126,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 1497,
+        "ackedRequests": 770,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": false,
+      "capacity_passed": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "per_request_supplier_postings",
+        "supplier_ledger",
+        "wallet_balances",
+        "admitted_wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks"
+      ],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-150-fifo-first",
+      "kind": "public",
+      "fixture": "bench-afaa08533b47498bad7fb01f2be7bb05",
+      "source_path": "public/json-150-fifo-first/",
+      "measurement_started_at": "2026-11-19T08:50:57.540Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "81ecbfcadcdc7a17e3fe06445f9b2515b6c69d045ca1580e9b4d16b608c1238f",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "436c5bd7cc095ca6a32233a90b5741deb70caa71918f9d73135cd45b1b5b574c",
+        "dist/core-worker/main.js": "7d6cf1e0a7c1b4126c6a50dc182b9217b17cc76f55ea8b2bbcf75e2027351e68",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "d8405d2a59d1f29d3cf723d720d42a4be11e640cb626e6473d64b335449d6091"
+      },
+      "manifest_sha256": "d8405d2a59d1f29d3cf723d720d42a4be11e640cb626e6473d64b335449d6091",
+      "configuration": {
+        "targetRps": 150,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 151,
+        "offered": 9060,
+        "shed": 0,
+        "completed": 9060,
+        "succeeded": 9060,
+        "invalid": 0,
+        "load_generator_peak_inflight": 97,
+        "warmup_requests": 10,
+        "successful_rps": 150.81,
+        "latency_ms": {
+          "p50": 109.03,
+          "p95": 470.48,
+          "p99": 683.61,
+          "p999": 844.36
+        },
+        "first_body_byte_ms": {
+          "p50": 109.03,
+          "p95": 470.48,
+          "p99": 683.61
+        },
+        "statuses": {
+          "200": 9060
+        },
+        "gateway_errors": {},
+        "transport_errors": {}
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 9044,
+        "minuteCompletions": [9044],
+        "matchedRequests": 9060,
+        "httpOnly": 0,
+        "ackOnly": 10,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 101,
+        "receiptAckedRequestsByWindow": 9018,
+        "ackedEventsByWindow": 18056,
+        "sampledBeforeWindowEndMs": 207,
+        "httpByWindow": 9045
+      },
+      "complete_rps_in_window": 150.73333333333332,
+      "drain_after_http_ms": 11,
+      "accounting_including_warmup": {
+        "requests": 9070,
+        "projected_requests": 9070,
+        "attempts": 9070,
+        "succeeded_attempts": 9070,
+        "usage_events": 18140,
+        "usage_requests": 9070,
+        "unexpected_receipts": 0,
+        "precise_usage": 18140,
+        "precise_charges": 9070,
+        "settled_holds": 9070,
+        "reserved": "0",
+        "spent": "907000",
+        "debt": "0",
+        "acknowledged": 18140,
+        "settlement_journals": 9070,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 9070,
+        "exact_supplier_postings": 9070,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999464870",
+        "reserved": "0",
+        "spent": "535130",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 0,
+        "admittedWalletMismatches": 0,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 18140,
+        "ackedRequests": 9070,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": true,
+      "capacity_passed": true,
+      "failures": [],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-150-fifo-second",
+      "kind": "public",
+      "fixture": "bench-8df30908e7ac4908894e25808126b800",
+      "source_path": "public/json-150-fifo-second/",
+      "measurement_started_at": "2026-11-19T08:52:43.816Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "81ecbfcadcdc7a17e3fe06445f9b2515b6c69d045ca1580e9b4d16b608c1238f",
+        "dist/core-api/platform/management.js": "a898a35e14af29102c62cbeabaa840be6625d0b11bf2004e4fddfc1a75c900db",
+        "dist/gateway/main.js": "436c5bd7cc095ca6a32233a90b5741deb70caa71918f9d73135cd45b1b5b574c",
+        "dist/core-worker/main.js": "7d6cf1e0a7c1b4126c6a50dc182b9217b17cc76f55ea8b2bbcf75e2027351e68",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "d8405d2a59d1f29d3cf723d720d42a4be11e640cb626e6473d64b335449d6091"
+      },
+      "manifest_sha256": "d8405d2a59d1f29d3cf723d720d42a4be11e640cb626e6473d64b335449d6091",
+      "configuration": {
+        "targetRps": 150,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 151,
+        "offered": 9060,
+        "shed": 0,
+        "completed": 9060,
+        "succeeded": 9060,
+        "invalid": 0,
+        "load_generator_peak_inflight": 230,
+        "warmup_requests": 10,
+        "successful_rps": 150.87,
+        "latency_ms": {
+          "p50": 86.85,
+          "p95": 886.54,
+          "p99": 1420.04,
+          "p999": 1763.49
+        },
+        "first_body_byte_ms": {
+          "p50": 86.85,
+          "p95": 886.54,
+          "p99": 1420.04
+        },
+        "statuses": {
+          "200": 9060
+        },
+        "gateway_errors": {},
+        "transport_errors": {}
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 9051,
+        "minuteCompletions": [9051],
+        "matchedRequests": 9060,
+        "httpOnly": 0,
+        "ackOnly": 10,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 67,
+        "receiptAckedRequestsByWindow": 9051,
+        "ackedEventsByWindow": 18122,
+        "sampledBeforeWindowEndMs": 12,
+        "httpByWindow": 9051
+      },
+      "complete_rps_in_window": 150.85,
+      "drain_after_http_ms": 11,
+      "accounting_including_warmup": {
+        "requests": 9070,
+        "projected_requests": 9070,
+        "attempts": 9070,
+        "succeeded_attempts": 9070,
+        "usage_events": 18140,
+        "usage_requests": 9070,
+        "unexpected_receipts": 0,
+        "precise_usage": 18140,
+        "precise_charges": 9070,
+        "settled_holds": 9070,
+        "reserved": "0",
+        "spent": "907000",
+        "debt": "0",
+        "acknowledged": 18140,
+        "settlement_journals": 9070,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 9070,
+        "exact_supplier_postings": 9070,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999464870",
+        "reserved": "0",
+        "spent": "535130",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 0,
+        "admittedWalletMismatches": 0,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 18140,
+        "ackedRequests": 9070,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": true,
+      "capacity_passed": true,
+      "failures": [],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-300-fixed-core",
+      "kind": "public",
+      "fixture": "bench-6ff431e2cb15476dbb8edcab0d6d378c",
+      "source_path": "public/json-300-fixed-core/",
+      "measurement_started_at": "2026-11-19T09:04:16.400Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "0a893b4ad8845640dd6433838a0e3ebbf95e2cfa3bad635f597f46be0b646df8",
+        "dist/core-api/platform/management.js": "bf2a91a1845de71f583787234cd269021241122068a5edf565112cbe102f0c4f",
+        "dist/gateway/main.js": "23e3f8c7054f9cd696bc0cca01e44ce724043af098919460ddd20eeb233f8839",
+        "dist/core-worker/main.js": "7a460ba958ee7934f0cada38a5b38225ece083cf57f5907212b306a0b734d26a",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "7059b617dda5d04a3e182a8aee3a70c583927b6786ce9fa752dac442a49970f4"
+      },
+      "manifest_sha256": "7059b617dda5d04a3e182a8aee3a70c583927b6786ce9fa752dac442a49970f4",
+      "configuration": {
+        "targetRps": 300,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "projectCoreRouting": true,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 301,
+        "offered": 18060,
+        "shed": 0,
+        "completed": 18060,
+        "succeeded": 16062,
+        "invalid": 1998,
+        "load_generator_peak_inflight": 1339,
+        "warmup_requests": 9,
+        "successful_rps": 247.11,
+        "latency_ms": {
+          "p50": 559.49,
+          "p95": 5014.98,
+          "p99": 5014.98,
+          "p999": 5014.98
+        },
+        "first_body_byte_ms": {
+          "p50": 502.06,
+          "p95": 3234.25,
+          "p99": 4286.15
+        },
+        "statuses": {
+          "0": 1246,
+          "200": 16062,
+          "429": 63,
+          "503": 689
+        },
+        "gateway_errors": {
+          "core_unavailable": 407,
+          "overloaded": 215,
+          "evidence_unavailable": 67,
+          "rate_limited": 63
+        },
+        "transport_errors": {
+          "REQUEST_DEADLINE": 1246
+        }
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 15776,
+        "minuteCompletions": [15776],
+        "matchedRequests": 16062,
+        "httpOnly": 0,
+        "ackOnly": 246,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 125038,
+        "receiptAckedRequestsByWindow": 15937,
+        "ackedEventsByWindow": 31892,
+        "sampledBeforeWindowEndMs": 163,
+        "httpByWindow": 15778
+      },
+      "complete_rps_in_window": 262.93333333333334,
+      "drain_after_http_ms": 120030,
+      "accounting_including_warmup": {
+        "requests": 16842,
+        "projected_requests": 16842,
+        "attempts": 16842,
+        "succeeded_attempts": 16308,
+        "usage_events": 33150,
+        "usage_requests": 16842,
+        "unexpected_receipts": 0,
+        "precise_usage": 32616,
+        "precise_charges": 16308,
+        "settled_holds": 16308,
+        "reserved": "0",
+        "spent": "1630800",
+        "debt": "0",
+        "acknowledged": 32616,
+        "settlement_journals": 16308,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 16842,
+        "exact_supplier_postings": 16308,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999037828",
+        "reserved": "0",
+        "spent": "962172",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 971,
+        "admittedWalletMismatches": 455,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 32616,
+        "ackedRequests": 16308,
+        "imprecise": 0,
+        "expiredLeases": 2136,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": false,
+      "capacity_passed": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "per_request_supplier_postings",
+        "supplier_ledger",
+        "wallet_balances",
+        "admitted_wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks",
+        "identity_intersection"
+      ],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-300-default-core",
+      "kind": "public",
+      "fixture": "bench-d2bfaccb3af948e6bd6cd3bf8095c222",
+      "source_path": "public/json-300-default-core/",
+      "measurement_started_at": "2026-11-19T09:07:39.878Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "0a893b4ad8845640dd6433838a0e3ebbf95e2cfa3bad635f597f46be0b646df8",
+        "dist/core-api/platform/management.js": "bf2a91a1845de71f583787234cd269021241122068a5edf565112cbe102f0c4f",
+        "dist/gateway/main.js": "23e3f8c7054f9cd696bc0cca01e44ce724043af098919460ddd20eeb233f8839",
+        "dist/core-worker/main.js": "7a460ba958ee7934f0cada38a5b38225ece083cf57f5907212b306a0b734d26a",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "7059b617dda5d04a3e182a8aee3a70c583927b6786ce9fa752dac442a49970f4"
+      },
+      "manifest_sha256": "7059b617dda5d04a3e182a8aee3a70c583927b6786ce9fa752dac442a49970f4",
+      "configuration": {
+        "targetRps": 300,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "projectCoreRouting": false,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 301,
+        "offered": 18060,
+        "shed": 0,
+        "completed": 18060,
+        "succeeded": 12637,
+        "invalid": 5423,
+        "load_generator_peak_inflight": 1506,
+        "warmup_requests": 10,
+        "successful_rps": 194.98,
+        "latency_ms": {
+          "p50": 1933.54,
+          "p95": 5014.98,
+          "p99": 5014.98,
+          "p999": 5014.98
+        },
+        "first_body_byte_ms": {
+          "p50": 848.95,
+          "p95": 3930.42,
+          "p99": 4674.08
+        },
+        "statuses": {
+          "0": 4765,
+          "200": 12637,
+          "429": 152,
+          "503": 506
+        },
+        "gateway_errors": {
+          "evidence_unavailable": 421,
+          "core_unavailable": 85,
+          "rate_limited": 152
+        },
+        "transport_errors": {
+          "REQUEST_DEADLINE": 4765
+        }
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 12003,
+        "minuteCompletions": [12003],
+        "matchedRequests": 12637,
+        "httpOnly": 0,
+        "ackOnly": 2563,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 124849,
+        "receiptAckedRequestsByWindow": 12548,
+        "ackedEventsByWindow": 25116,
+        "sampledBeforeWindowEndMs": 116,
+        "httpByWindow": 12003
+      },
+      "complete_rps_in_window": 200.05,
+      "drain_after_http_ms": 120028,
+      "accounting_including_warmup": {
+        "requests": 15829,
+        "projected_requests": 15829,
+        "attempts": 15829,
+        "succeeded_attempts": 15200,
+        "usage_events": 31029,
+        "usage_requests": 15829,
+        "unexpected_receipts": 0,
+        "precise_usage": 30400,
+        "precise_charges": 15200,
+        "settled_holds": 15200,
+        "reserved": "0",
+        "spent": "1520000",
+        "debt": "0",
+        "acknowledged": 30400,
+        "settlement_journals": 15200,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 15829,
+        "exact_supplier_postings": 15200,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999103200",
+        "reserved": "0",
+        "spent": "896800",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 993,
+        "admittedWalletMismatches": 516,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 30400,
+        "ackedRequests": 15200,
+        "imprecise": 0,
+        "expiredLeases": 2516,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": false,
+      "capacity_passed": false,
+      "failures": [
+        "load_generator_exit",
+        "unsuccessful_attempts",
+        "imprecise_usage",
+        "imprecise_customer_charges",
+        "unsettled_holds",
+        "customer_settlement_journals",
+        "external_acks",
+        "customer_spent",
+        "per_request_supplier_postings",
+        "supplier_ledger",
+        "wallet_balances",
+        "admitted_wallet_balances",
+        "http_validity",
+        "request_count",
+        "receipt_confirmed_acks",
+        "identity_intersection"
+      ],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-200-fixed-core-first",
+      "kind": "public",
+      "fixture": "bench-d1b5317465994a92a832e0cbddd797b5",
+      "source_path": "public/json-200-fixed-core-first/",
+      "measurement_started_at": "2026-11-19T09:11:22.771Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "0a893b4ad8845640dd6433838a0e3ebbf95e2cfa3bad635f597f46be0b646df8",
+        "dist/core-api/platform/management.js": "bf2a91a1845de71f583787234cd269021241122068a5edf565112cbe102f0c4f",
+        "dist/gateway/main.js": "750fb1e12d86a70b20153d884860d42d98c0cc20164e608652070465c82c42a9",
+        "dist/core-worker/main.js": "7a460ba958ee7934f0cada38a5b38225ece083cf57f5907212b306a0b734d26a",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "4e184cd23a4131974d02e2931e2d260bbd7246d2ee95a42d0f6d2236773bf8de"
+      },
+      "manifest_sha256": "4e184cd23a4131974d02e2931e2d260bbd7246d2ee95a42d0f6d2236773bf8de",
+      "configuration": {
+        "targetRps": 200,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "projectCoreRouting": true,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 201,
+        "offered": 12060,
+        "shed": 0,
+        "completed": 12060,
+        "succeeded": 12060,
+        "invalid": 0,
+        "load_generator_peak_inflight": 140,
+        "warmup_requests": 9,
+        "successful_rps": 200.57,
+        "latency_ms": {
+          "p50": 154.2,
+          "p95": 581.11,
+          "p99": 698.58,
+          "p999": 830.76
+        },
+        "first_body_byte_ms": {
+          "p50": 154.2,
+          "p95": 581.11,
+          "p99": 698.58
+        },
+        "statuses": {
+          "200": 12060
+        },
+        "gateway_errors": {},
+        "transport_errors": {}
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 12025,
+        "minuteCompletions": [12025],
+        "matchedRequests": 12060,
+        "httpOnly": 0,
+        "ackOnly": 9,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 149,
+        "receiptAckedRequestsByWindow": 12009,
+        "ackedEventsByWindow": 24036,
+        "sampledBeforeWindowEndMs": 153,
+        "httpByWindow": 12025
+      },
+      "complete_rps_in_window": 200.41666666666666,
+      "drain_after_http_ms": 11,
+      "accounting_including_warmup": {
+        "requests": 12069,
+        "projected_requests": 12069,
+        "attempts": 12069,
+        "succeeded_attempts": 12069,
+        "usage_events": 24138,
+        "usage_requests": 12069,
+        "unexpected_receipts": 0,
+        "precise_usage": 24138,
+        "precise_charges": 12069,
+        "settled_holds": 12069,
+        "reserved": "0",
+        "spent": "1206900",
+        "debt": "0",
+        "acknowledged": 24138,
+        "settlement_journals": 12069,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 12069,
+        "exact_supplier_postings": 12069,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999287929",
+        "reserved": "0",
+        "spent": "712071",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 0,
+        "admittedWalletMismatches": 0,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 24138,
+        "ackedRequests": 12069,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": true,
+      "capacity_passed": true,
+      "failures": [],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-200-fixed-core-second",
+      "kind": "public",
+      "fixture": "bench-5454bb77ec234123bd4a30c4cba51927",
+      "source_path": "public/json-200-fixed-core-second/",
+      "measurement_started_at": "2026-11-19T09:13:15.381Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "0a893b4ad8845640dd6433838a0e3ebbf95e2cfa3bad635f597f46be0b646df8",
+        "dist/core-api/platform/management.js": "bf2a91a1845de71f583787234cd269021241122068a5edf565112cbe102f0c4f",
+        "dist/gateway/main.js": "750fb1e12d86a70b20153d884860d42d98c0cc20164e608652070465c82c42a9",
+        "dist/core-worker/main.js": "7a460ba958ee7934f0cada38a5b38225ece083cf57f5907212b306a0b734d26a",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "4e184cd23a4131974d02e2931e2d260bbd7246d2ee95a42d0f6d2236773bf8de"
+      },
+      "manifest_sha256": "4e184cd23a4131974d02e2931e2d260bbd7246d2ee95a42d0f6d2236773bf8de",
+      "configuration": {
+        "targetRps": 200,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "projectCoreRouting": true,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 201,
+        "offered": 12060,
+        "shed": 0,
+        "completed": 12060,
+        "succeeded": 12060,
+        "invalid": 0,
+        "load_generator_peak_inflight": 398,
+        "warmup_requests": 10,
+        "successful_rps": 197.24,
+        "latency_ms": {
+          "p50": 110.22,
+          "p95": 1382.11,
+          "p99": 1986.61,
+          "p999": 2388.22
+        },
+        "first_body_byte_ms": {
+          "p50": 110.22,
+          "p95": 1382.11,
+          "p99": 1986.61
+        },
+        "statuses": {
+          "200": 12060
+        },
+        "gateway_errors": {},
+        "transport_errors": {}
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 11670,
+        "minuteCompletions": [11670],
+        "matchedRequests": 12060,
+        "httpOnly": 0,
+        "ackOnly": 10,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 1153,
+        "receiptAckedRequestsByWindow": 11673,
+        "ackedEventsByWindow": 23366,
+        "sampledBeforeWindowEndMs": 184,
+        "httpByWindow": 11670
+      },
+      "complete_rps_in_window": 194.5,
+      "drain_after_http_ms": 4,
+      "accounting_including_warmup": {
+        "requests": 12070,
+        "projected_requests": 12070,
+        "attempts": 12070,
+        "succeeded_attempts": 12070,
+        "usage_events": 24140,
+        "usage_requests": 12070,
+        "unexpected_receipts": 0,
+        "precise_usage": 24140,
+        "precise_charges": 12070,
+        "settled_holds": 12070,
+        "reserved": "0",
+        "spent": "1207000",
+        "debt": "0",
+        "acknowledged": 24140,
+        "settlement_journals": 12070,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 12070,
+        "exact_supplier_postings": 12070,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999287870",
+        "reserved": "0",
+        "spent": "712130",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 0,
+        "admittedWalletMismatches": 0,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 24140,
+        "ackedRequests": 12070,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": true,
+      "capacity_passed": false,
+      "failures": [],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-175-fixed-core-first",
+      "kind": "public",
+      "fixture": "bench-20908259d8c9457997fc26931e211ff1",
+      "source_path": "public/json-175-fixed-core-first/",
+      "measurement_started_at": "2026-11-19T09:39:20.802Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "0a893b4ad8845640dd6433838a0e3ebbf95e2cfa3bad635f597f46be0b646df8",
+        "dist/core-api/platform/management.js": "bf2a91a1845de71f583787234cd269021241122068a5edf565112cbe102f0c4f",
+        "dist/gateway/main.js": "750fb1e12d86a70b20153d884860d42d98c0cc20164e608652070465c82c42a9",
+        "dist/core-worker/main.js": "7a460ba958ee7934f0cada38a5b38225ece083cf57f5907212b306a0b734d26a",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "4e184cd23a4131974d02e2931e2d260bbd7246d2ee95a42d0f6d2236773bf8de"
+      },
+      "manifest_sha256": "4e184cd23a4131974d02e2931e2d260bbd7246d2ee95a42d0f6d2236773bf8de",
+      "configuration": {
+        "targetRps": 175,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "projectCoreRouting": true,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 176,
+        "offered": 10560,
+        "shed": 0,
+        "completed": 10560,
+        "succeeded": 10560,
+        "invalid": 0,
+        "load_generator_peak_inflight": 96,
+        "warmup_requests": 10,
+        "successful_rps": 175.79,
+        "latency_ms": {
+          "p50": 129.66,
+          "p95": 488.65,
+          "p99": 584.26,
+          "p999": 658.19
+        },
+        "first_body_byte_ms": {
+          "p50": 129.66,
+          "p95": 488.65,
+          "p99": 584.26
+        },
+        "statuses": {
+          "200": 10560
+        },
+        "gateway_errors": {},
+        "transport_errors": {}
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 10540,
+        "minuteCompletions": [10540],
+        "matchedRequests": 10560,
+        "httpOnly": 0,
+        "ackOnly": 10,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 98,
+        "receiptAckedRequestsByWindow": 10504,
+        "ackedEventsByWindow": 21028,
+        "sampledBeforeWindowEndMs": 217,
+        "httpByWindow": 10541
+      },
+      "complete_rps_in_window": 175.66666666666666,
+      "drain_after_http_ms": 14,
+      "accounting_including_warmup": {
+        "requests": 10570,
+        "projected_requests": 10570,
+        "attempts": 10570,
+        "succeeded_attempts": 10570,
+        "usage_events": 21140,
+        "usage_requests": 10570,
+        "unexpected_receipts": 0,
+        "precise_usage": 21140,
+        "precise_charges": 10570,
+        "settled_holds": 10570,
+        "reserved": "0",
+        "spent": "1057000",
+        "debt": "0",
+        "acknowledged": 21140,
+        "settlement_journals": 10570,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 10570,
+        "exact_supplier_postings": 10570,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999376370",
+        "reserved": "0",
+        "spent": "623630",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 0,
+        "admittedWalletMismatches": 0,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 21140,
+        "ackedRequests": 10570,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": true,
+      "capacity_passed": true,
+      "failures": [],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "json-175-fixed-core-second",
+      "kind": "public",
+      "fixture": "bench-23f1d7589a934a0282655e707ecc42e1",
+      "source_path": "public/json-175-fixed-core-second/",
+      "measurement_started_at": "2026-11-19T09:41:12.966Z",
+      "environment": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "os_release": "27.0.0",
+        "cpu_model": "Apple M6",
+        "cpu_count": 12,
+        "memory_bytes": 25769803776,
+        "bun": "1.4.4"
+      },
+      "artifact_sha256": {
+        "dist/core-api/main.js": "0a893b4ad8845640dd6433838a0e3ebbf95e2cfa3bad635f597f46be0b646df8",
+        "dist/core-api/platform/management.js": "bf2a91a1845de71f583787234cd269021241122068a5edf565112cbe102f0c4f",
+        "dist/gateway/main.js": "750fb1e12d86a70b20153d884860d42d98c0cc20164e608652070465c82c42a9",
+        "dist/core-worker/main.js": "7a460ba958ee7934f0cada38a5b38225ece083cf57f5907212b306a0b734d26a",
+        "dist/native/plugin-host": "721aa4996f851df8d93603ff8cf2aa8c5dcb96081fc93961e8a70200c0092e39",
+        "dist/native/builtin-adapters/worker.js": "5e632faf3773a74ee92ec4a300aeb57e8ac66e1a285d9fc20718a22d0ff6a68a",
+        "dist/native/builtin-adapters/registry.json": "3ad02f0d831455c0a314e8c03523fea54c80619e23334c7c3f1fbe927804e2f1",
+        "dist/mock-providers/main.js": "78bf1287a2931e56fcaa334908b0c7b24624e073aee947f1f5aa6604cbee654b",
+        "dist/manifest.json": "4e184cd23a4131974d02e2931e2d260bbd7246d2ee95a42d0f6d2236773bf8de"
+      },
+      "manifest_sha256": "4e184cd23a4131974d02e2931e2d260bbd7246d2ee95a42d0f6d2236773bf8de",
+      "configuration": {
+        "targetRps": 175,
+        "seconds": 60,
+        "wallets": 1000,
+        "hotShare": 0,
+        "instances": 4,
+        "supplierAccounts": 1,
+        "concurrency": 2048,
+        "stream": false,
+        "scenario": {},
+        "pluginRuntime": "builtin-worker",
+        "requiredReplicas": 1,
+        "replicatedShortChat": true,
+        "requestTimeoutMs": 5000,
+        "drainSeconds": 120,
+        "coreConnectionsPerGateway": 4,
+        "pluginConcurrentAttempts": 512,
+        "projectCoreRouting": true,
+        "workerConcurrency": 8,
+        "workerMode": "live",
+        "consumerMode": "live"
+      },
+      "http": {
+        "workload": "chat-json",
+        "offered_rps": 176,
+        "offered": 10560,
+        "shed": 0,
+        "completed": 10560,
+        "succeeded": 10560,
+        "invalid": 0,
+        "load_generator_peak_inflight": 121,
+        "warmup_requests": 10,
+        "successful_rps": 175.59,
+        "latency_ms": {
+          "p50": 122.17,
+          "p95": 584.26,
+          "p99": 694.81,
+          "p999": 858.19
+        },
+        "first_body_byte_ms": {
+          "p50": 122.17,
+          "p95": 584.26,
+          "p99": 694.81
+        },
+        "statuses": {
+          "200": 10560
+        },
+        "gateway_errors": {},
+        "transport_errors": {}
+      },
+      "online_intersection": {
+        "fullyCompletedByWindow": 10531,
+        "minuteCompletions": [10531],
+        "matchedRequests": 10560,
+        "httpOnly": 0,
+        "ackOnly": 10,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 188,
+        "receiptAckedRequestsByWindow": 10511,
+        "ackedEventsByWindow": 21042,
+        "sampledBeforeWindowEndMs": 179,
+        "httpByWindow": 10531
+      },
+      "complete_rps_in_window": 175.51666666666668,
+      "drain_after_http_ms": 35,
+      "accounting_including_warmup": {
+        "requests": 10570,
+        "projected_requests": 10570,
+        "attempts": 10570,
+        "succeeded_attempts": 10570,
+        "usage_events": 21140,
+        "usage_requests": 10570,
+        "unexpected_receipts": 0,
+        "precise_usage": 21140,
+        "precise_charges": 10570,
+        "settled_holds": 10570,
+        "reserved": "0",
+        "spent": "1057000",
+        "debt": "0",
+        "acknowledged": 21140,
+        "settlement_journals": 10570,
+        "unbalanced_journals": 0,
+        "supplier_cost_heads": 10570,
+        "exact_supplier_postings": 10570,
+        "conflicts": 0,
+        "inconsistent_hold_reserves": 0,
+        "inconsistent_funding_budgets": 0,
+        "inconsistent_cell_reserves": 0,
+        "unbalanced_supplier_journals": 0
+      },
+      "supplier_including_warmup": {
+        "balance": "999999999999376370",
+        "reserved": "0",
+        "spent": "623630",
+        "accounts": 1
+      },
+      "audit_counts": {
+        "walletMismatches": 0,
+        "admittedWalletMismatches": 0,
+        "ownershipMismatches": 0,
+        "expectedChargeAtoms": "100",
+        "expectedSupplierCostAtoms": "59",
+        "receiptConfirmedAcks": 21140,
+        "ackedRequests": 10570,
+        "imprecise": 0,
+        "expiredLeases": 0,
+        "ackShortfall": 0,
+        "consumerErrors": 0,
+        "queueStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        },
+        "recoveryStats": {
+          "waiting": 0,
+          "active": 0,
+          "delayed": 0,
+          "failed": 0
+        }
+      },
+      "valid": true,
+      "capacity_passed": true,
+      "failures": [],
+      "cleanup": {
+        "cleaned": 1,
+        "failed": 0
+      }
+    },
+    {
+      "round": "direct-200-round-robin",
+      "kind": "direct",
+      "source_path": "direct/direct-200-round-robin/222f6d75-200.json",
+      "source_artifacts": {},
+      "configuration": {
+        "mode": "direct_core_streaming_chat_no_plugin_or_upstream",
+        "entry": "apps/core-api/src/main.ts",
+        "bun": "1.4.4",
+        "rate": 200,
+        "seconds": 3,
+        "deadlineMs": 5000,
+        "wallets": 1000
+      },
+      "result": {
+        "requested": 600,
+        "shed": 0,
+        "peak": 146,
+        "dispatchMs": 3001.044000000001,
+        "dispatchLagP99Ms": 21.95,
+        "stages": {
+          "context": {
+            "count": 600,
+            "p99_ms": 150.08
+          },
+          "grant": {
+            "count": 600,
+            "p99_ms": 966.77
+          },
+          "publish": {
+            "count": 600,
+            "p99_ms": 203.24
+          },
+          "observe": {
+            "count": 600,
+            "p99_ms": 207.69
+          }
+        },
+        "stage_retries": {
+          "context": {
+            "attempts": 600,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          },
+          "grant": {
+            "attempts": 678,
+            "retries": 78,
+            "failed_attempt_ms": 14508.885668999998,
+            "backoff_ms": 3142.219789999999
+          },
+          "publish": {
+            "attempts": 600,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          },
+          "observe": {
+            "attempts": 600,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          }
+        },
+        "grants": 600,
+        "grantsByDeadline": 600,
+        "durableEvidence": 600,
+        "durableByDeadline": 600,
+        "exact": {
+          "settled": 600,
+          "timely_evidence_settled": 600
+        },
+        "beforeAccounting": {
+          "charged": 4,
+          "costed": 4,
+          "granted": 4,
+          "aborted": 0
+        },
+        "endAccounting": {
+          "charged": 604,
+          "costed": 604,
+          "granted": 604,
+          "aborted": 0
+        },
+        "dispatchAndResponseMs": 3600.2423329999992,
+        "elapsed": 4906.513333,
+        "metTarget": true,
+        "failures": {}
+      },
+      "routing": {
+        "mode": "round_robin",
+        "requests_by_core": {
+          "coreA": 300,
+          "coreB": 300
+        }
+      },
+      "process_sequence": "200, then 3000 in the same benchmark invocation"
+    },
+    {
+      "round": "direct-3000-round-robin",
+      "kind": "direct",
+      "source_path": "direct/direct-3000-round-robin/222f6d75-3000.json",
+      "source_artifacts": {},
+      "configuration": {
+        "mode": "direct_core_streaming_chat_no_plugin_or_upstream",
+        "entry": "apps/core-api/src/main.ts",
+        "bun": "1.4.4",
+        "rate": 3000,
+        "seconds": 3,
+        "deadlineMs": 5000,
+        "wallets": 1000
+      },
+      "result": {
+        "requested": 9000,
+        "shed": 0,
+        "peak": 3215,
+        "dispatchMs": 3000.676124999998,
+        "dispatchLagP99Ms": 34.04,
+        "stages": {
+          "context": {
+            "count": 4117,
+            "p99_ms": 4309.42
+          },
+          "grant": {
+            "count": 1028,
+            "p99_ms": 2590.3
+          },
+          "publish": {
+            "count": 1028,
+            "p99_ms": 146.86
+          },
+          "observe": {
+            "count": 274,
+            "p99_ms": 2965.82
+          }
+        },
+        "stage_retries": {
+          "context": {
+            "attempts": 9000,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          },
+          "grant": {
+            "attempts": 4270,
+            "retries": 153,
+            "failed_attempt_ms": 164580.51979100014,
+            "backoff_ms": 4115.9138739999835
+          },
+          "publish": {
+            "attempts": 1028,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          },
+          "observe": {
+            "attempts": 1028,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          }
+        },
+        "grants": 1028,
+        "grantsByDeadline": 1028,
+        "durableEvidence": 1028,
+        "durableByDeadline": 1028,
+        "exact": {
+          "settled": 1028,
+          "timely_evidence_settled": 1028
+        },
+        "beforeAccounting": {
+          "charged": 4,
+          "costed": 4,
+          "granted": 4,
+          "aborted": 0
+        },
+        "endAccounting": {
+          "charged": 1032,
+          "costed": 1032,
+          "granted": 1079,
+          "aborted": 0
+        },
+        "dispatchAndResponseMs": 7382.287000000004,
+        "elapsed": 7386.627041,
+        "metTarget": false,
+        "failures": {
+          "context:local:internal_capacity": 4883,
+          "observe:local:internal_capacity": 663,
+          "grant:local:internal_capacity": 71,
+          "grant:identity_store_unavailable": 650,
+          "grant:quota_unavailable": 1660,
+          "observe:internal_deadline": 91,
+          "grant:internal_deadline": 708
+        }
+      },
+      "routing": {
+        "mode": "round_robin",
+        "requests_by_core": {
+          "coreA": 4500,
+          "coreB": 4500
+        }
+      },
+      "process_sequence": "200, then 3000 in the same benchmark invocation"
+    },
+    {
+      "round": "direct-3000-cell-affinity",
+      "kind": "direct",
+      "source_path": "direct/direct-3000-cell-affinity/52458402-3000.json",
+      "source_artifacts": {},
+      "configuration": {
+        "mode": "direct_core_streaming_chat_no_plugin_or_upstream",
+        "entry": "apps/core-api/src/main.ts",
+        "bun": "1.4.4",
+        "rate": 3000,
+        "seconds": 3,
+        "deadlineMs": 5000,
+        "wallets": 1000
+      },
+      "result": {
+        "requested": 9000,
+        "shed": 0,
+        "peak": 3185,
+        "dispatchMs": 3000.0341660000004,
+        "dispatchLagP99Ms": 23.55,
+        "stages": {
+          "context": {
+            "count": 3994,
+            "p99_ms": 3359.21
+          },
+          "grant": {
+            "count": 816,
+            "p99_ms": 2427.33
+          },
+          "publish": {
+            "count": 816,
+            "p99_ms": 147.66
+          },
+          "observe": {
+            "count": 332,
+            "p99_ms": 3377.45
+          }
+        },
+        "stage_retries": {
+          "context": {
+            "attempts": 9000,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          },
+          "grant": {
+            "attempts": 4292,
+            "retries": 298,
+            "failed_attempt_ms": 213744.76145499983,
+            "backoff_ms": 9079.124487000001
+          },
+          "publish": {
+            "attempts": 816,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          },
+          "observe": {
+            "attempts": 816,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          }
+        },
+        "grants": 816,
+        "grantsByDeadline": 816,
+        "durableEvidence": 816,
+        "durableByDeadline": 816,
+        "exact": {
+          "settled": 816,
+          "timely_evidence_settled": 816
+        },
+        "beforeAccounting": {
+          "charged": 4,
+          "costed": 4,
+          "granted": 4,
+          "aborted": 0
+        },
+        "endAccounting": {
+          "charged": 820,
+          "costed": 820,
+          "granted": 909,
+          "aborted": 0
+        },
+        "dispatchAndResponseMs": 6982.118291,
+        "elapsed": 6985.217250000001,
+        "metTarget": false,
+        "failures": {
+          "context:local:internal_capacity": 5006,
+          "observe:local:internal_capacity": 484,
+          "grant:local:internal_capacity": 69,
+          "grant:identity_store_unavailable": 422,
+          "grant:quota_unavailable": 2613,
+          "grant:internal_deadline": 74
+        }
+      },
+      "routing": {
+        "mode": "project_cell_affinity",
+        "requests_by_core": {
+          "coreA": 4527,
+          "coreB": 4473
+        }
+      }
+    },
+    {
+      "round": "direct-3000-priority",
+      "kind": "direct",
+      "source_path": "direct/direct-3000-priority/f9d3257c-3000.json",
+      "source_artifacts": {},
+      "configuration": {
+        "mode": "direct_core_streaming_chat_no_plugin_or_upstream",
+        "entry": "apps/core-api/src/main.ts",
+        "bun": "1.4.4",
+        "rate": 3000,
+        "seconds": 3,
+        "deadlineMs": 5000,
+        "wallets": 1000
+      },
+      "result": {
+        "requested": 9000,
+        "shed": 0,
+        "peak": 3353,
+        "dispatchMs": 3015.1085829999993,
+        "dispatchLagP99Ms": 66.61,
+        "stages": {
+          "context": {
+            "count": 5432,
+            "p99_ms": 2618.51
+          },
+          "grant": {
+            "count": 4698,
+            "p99_ms": 886.54
+          },
+          "publish": {
+            "count": 4697,
+            "p99_ms": 165.44
+          },
+          "observe": {
+            "count": 3171,
+            "p99_ms": 2604.37
+          }
+        },
+        "stage_retries": {
+          "context": {
+            "attempts": 9000,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          },
+          "grant": {
+            "attempts": 6266,
+            "retries": 834,
+            "failed_attempt_ms": 259308.76220400006,
+            "backoff_ms": 26642.196285999988
+          },
+          "publish": {
+            "attempts": 4697,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          },
+          "observe": {
+            "attempts": 4697,
+            "retries": 0,
+            "failed_attempt_ms": 0,
+            "backoff_ms": 0
+          }
+        },
+        "grants": 4697,
+        "grantsByDeadline": 4697,
+        "durableEvidence": 4697,
+        "durableByDeadline": 4697,
+        "exact": {
+          "settled": 4697,
+          "timely_evidence_settled": 4697
+        },
+        "beforeAccounting": {
+          "charged": 4,
+          "costed": 4,
+          "granted": 4,
+          "aborted": 0
+        },
+        "endAccounting": {
+          "charged": 4701,
+          "costed": 4701,
+          "granted": 4748,
+          "aborted": 0
+        },
+        "dispatchAndResponseMs": 6012.7865409999995,
+        "elapsed": 14076.533415999998,
+        "metTarget": false,
+        "failures": {
+          "context:local:internal_capacity": 3568,
+          "grant:local:internal_capacity": 234,
+          "observe:local:internal_capacity": 1526,
+          "grant:identity_store_unavailable": 425,
+          "grant:quota_unavailable": 75,
+          "grant:missing_send_grant": 1
+        }
+      },
+      "routing": {
+        "mode": "round_robin",
+        "requests_by_core": {
+          "coreA": 4500,
+          "coreB": 4500
+        }
+      },
+      "process_sequence": "standalone 3000 invocation"
+    }
+  ]
+}

@@ -1,0 +1,1100 @@
+{
+  "scope": "Full release A/B and isolated feasibility probes. Their throughput and latency have different boundaries.",
+  "cpu_budget_ms_per_request": 4,
+  "reference": "../evidence-core-admission-2026-11-19/rounds.json",
+  "public": [
+    {
+      "label": "2ms",
+      "fixture": "dd73348f5d8d4ac4a5d5e25029d79e1d",
+      "manifest_sha256": "4e184cd23a4131974d02e2931e2d260bbd7246d2ee95a42d0f6d2236773bf8de",
+      "started": "2026-11-19T10:15:28.912Z",
+      "offered": 18060,
+      "http_successes": 18060,
+      "target_rps": 300,
+      "window_rps": 300.1666666666667,
+      "window": {
+        "fullyCompletedByWindow": 18010,
+        "minuteCompletions": [18010],
+        "matchedRequests": 18060,
+        "httpOnly": 0,
+        "ackOnly": 11,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 157,
+        "receiptAckedRequestsByWindow": 17955,
+        "ackedEventsByWindow": 35932,
+        "sampledBeforeWindowEndMs": 171,
+        "httpByWindow": 18010
+      },
+      "http_latency_ms": {
+        "p50": 413.14,
+        "p95": 1374.65,
+        "p99": 1725.7,
+        "p999": 2008.24
+      },
+      "passed": false,
+      "with_warmup": {
+        "requests": 18071,
+        "exact_customer": 18071,
+        "exact_supplier": 18071,
+        "acked_events": 36142
+      },
+      "sampled_cpu_ms_per_admitted": {
+        "gateway": 3.4259,
+        "core_api": 2.8388,
+        "core_worker": 0.0144,
+        "upstream": 0.1107,
+        "redis_admission": 0.3752,
+        "redis_evidence": 0.0028,
+        "redis_evidence_replica": 0.0011,
+        "pg": 18.4483,
+        "pg_shared": 0.0028
+      },
+      "top_level_sql_wal_bytes_per_admitted": 43876.606662608596
+    },
+    {
+      "label": "32ms",
+      "fixture": "76e144542f814b2cab4a76841c133ba8",
+      "manifest_sha256": "7476c92088752bf5fa4a5aeaa4d165f0e281e0430d1f97eed7d39ccabcf52038",
+      "started": "2026-11-19T10:17:26.471Z",
+      "offered": 18060,
+      "http_successes": 18060,
+      "target_rps": 300,
+      "window_rps": 299.8333333333333,
+      "window": {
+        "fullyCompletedByWindow": 17990,
+        "minuteCompletions": [17990],
+        "matchedRequests": 18060,
+        "httpOnly": 0,
+        "ackOnly": 6,
+        "maxP99Ms": 1500,
+        "drainAfterWindowMs": 207,
+        "receiptAckedRequestsByWindow": 17990,
+        "ackedEventsByWindow": 35992,
+        "sampledBeforeWindowEndMs": 19,
+        "httpByWindow": 17990
+      },
+      "http_latency_ms": {
+        "p50": 325.55,
+        "p95": 1337.93,
+        "p99": 1679.61,
+        "p999": 2008.24
+      },
+      "passed": false,
+      "with_warmup": {
+        "requests": 18066,
+        "exact_customer": 18066,
+        "exact_supplier": 18066,
+        "acked_events": 36132
+      },
+      "sampled_cpu_ms_per_admitted": {
+        "gateway": 3.3239,
+        "core_api": 2.7007,
+        "core_worker": 0.0144,
+        "upstream": 0.1079,
+        "redis_admission": 0.3775,
+        "redis_evidence": 0.0028,
+        "redis_evidence_replica": 0.0011,
+        "pg": 15.4052,
+        "pg_shared": 0.0028
+      },
+      "top_level_sql_wal_bytes_per_admitted": 43631.250027676295
+    }
+  ],
+  "experiments": [
+    {
+      "name": "funding-before",
+      "scope": "compact two-stage funding and settlement feasibility with independent HTTP event observer",
+      "rate": 3000,
+      "seconds": 60,
+      "offered": 180000,
+      "completed": 134721,
+      "by_window": 134625,
+      "window_rps": 2243.75,
+      "shed": 45279,
+      "postings": 538884,
+      "acked": 269442,
+      "p99_ledger_and_ack_ms": 10242.406,
+      "wal_bytes_per_completed": 4211.104371256151,
+      "model_growth_per_completed": 1457.6081828371227,
+      "sampled_cpu_ms_per_completed": {
+        "primary": 0.25408,
+        "standby": 0.31688,
+        "consumer": 0.00579,
+        "driver": 0.03489
+      },
+      "financial_verification": {
+        "grantReplayNoFresh": true,
+        "grantConflictRefused": true,
+        "insufficientFundsRefused": true,
+        "concurrentLastFundsExactlyOne": true,
+        "terminalReplayNoCharge": true,
+        "terminalConflictRefused": true
+      },
+      "all_offered_accounted": false,
+      "limits": [
+        "No public Gateway, plugin, provider call or mTLS identity, per-request signatures, multidimensional production pricing, Redis quota lifecycle or transition recovery worker.",
+        "One immutable tariff with integer input/cached/output unit rates and a fixed synthetic token mix and four double-entry ledger lines. Two event revisions are synthetic and emitted together. No cancellation, disputes, corrections, rate limits, mixed approvals or rejection isolation in mixed batches.",
+        "Single configured writer per shard in this driver. No multi-writer fencing, crash/failover, API idempotency after promotion or consumer fault-injection validation. Data model is a feasibility probe, not production."
+      ]
+    },
+    {
+      "name": "funding-profile",
+      "scope": "compact two-stage funding and settlement feasibility with independent HTTP event observer",
+      "rate": 3000,
+      "seconds": 60,
+      "offered": 180000,
+      "completed": 125632,
+      "by_window": 125520,
+      "window_rps": 2092,
+      "shed": 54368,
+      "postings": 502528,
+      "acked": 251264,
+      "p99_ledger_and_ack_ms": 12740.389,
+      "wal_bytes_per_completed": 4173.715486500255,
+      "model_growth_per_completed": 1464.9903209373408,
+      "sampled_cpu_ms_per_completed": {
+        "primary": 0.25638,
+        "standby": 0.27803,
+        "consumer": 0.00613,
+        "driver": 0.03606
+      },
+      "financial_verification": {
+        "grantReplayNoFresh": true,
+        "grantConflictRefused": true,
+        "insufficientFundsRefused": true,
+        "concurrentLastFundsExactlyOne": true,
+        "terminalReplayNoCharge": true,
+        "terminalConflictRefused": true
+      },
+      "all_offered_accounted": false,
+      "limits": [
+        "No public Gateway, plugin, provider call or mTLS identity, per-request signatures, multidimensional production pricing, Redis quota lifecycle or transition recovery worker.",
+        "One immutable tariff with integer input/cached/output unit rates and a fixed synthetic token mix and four double-entry ledger lines. Two event revisions are synthetic and emitted together. No cancellation, disputes, corrections, rate limits, mixed approvals or rejection isolation in mixed batches.",
+        "Single configured writer per shard in this driver. No multi-writer fencing, crash/failover, API idempotency after promotion or consumer fault-injection validation. Data model is a feasibility probe, not production."
+      ]
+    },
+    {
+      "name": "funding-indexed",
+      "scope": "compact two-stage funding and settlement feasibility with independent HTTP event observer",
+      "rate": 3000,
+      "seconds": 60,
+      "offered": 180000,
+      "completed": 180000,
+      "by_window": 179974,
+      "window_rps": 2999.5666666666666,
+      "shed": 0,
+      "postings": 720000,
+      "acked": 360000,
+      "p99_ledger_and_ack_ms": 100.344,
+      "wal_bytes_per_completed": 4221.373466666667,
+      "model_growth_per_completed": 1401.8787555555555,
+      "sampled_cpu_ms_per_completed": {
+        "primary": 0.34761,
+        "standby": 0.03928,
+        "consumer": 0.00739,
+        "driver": 0.03667
+      },
+      "financial_verification": {
+        "grantReplayNoFresh": true,
+        "grantConflictRefused": true,
+        "insufficientFundsRefused": true,
+        "concurrentLastFundsExactlyOne": true,
+        "terminalReplayNoCharge": true,
+        "terminalConflictRefused": true
+      },
+      "all_offered_accounted": true,
+      "limits": [
+        "No public Gateway, plugin, provider call or mTLS identity, per-request signatures, multidimensional production pricing, Redis quota lifecycle or transition recovery worker.",
+        "One immutable tariff with integer input/cached/output unit rates and a fixed synthetic token mix and four double-entry ledger lines. Two event revisions are synthetic and emitted together. No cancellation, disputes, corrections, rate limits, mixed approvals or rejection isolation in mixed batches.",
+        "Single configured writer per shard in this driver. No multi-writer fencing, crash/failover, API idempotency after promotion or consumer fault-injection validation. Data model is a feasibility probe, not production."
+      ]
+    },
+    {
+      "name": "component",
+      "scope": "isolated hot bundled OpenAI Chat plugin host and evidence cryptography",
+      "windowMs": 5003.738292,
+      "measured": {
+        "requests": 25225,
+        "prepareCalls": 25225,
+        "responseCalls": 25225,
+        "prepareWorkerMessages": 50450,
+        "responseWorkerMessages": 75675,
+        "signedEvents": 50450,
+        "verifiedEvents": 50450,
+        "groups": 25225
+      },
+      "cpuMicros": {
+        "user": 8062695,
+        "system": 1190585
+      },
+      "processCpuMsPerCompleted": 0.3668297324083251,
+      "componentCompletionsPerSecond": 5041.230881385193,
+      "excludes": [
+        "mTLS/H2/command proofs and identity registration",
+        "public gateway HTTP, Core, funding, primary and standby PG, Redis",
+        "upstream send and output generation during measurement",
+        "external consumer and ACK",
+        "cold package, worker and key creation"
+      ]
+    },
+    {
+      "name": "funding-strict-a",
+      "scope": "compact two-stage funding and settlement feasibility with independent HTTP event observer",
+      "rate": 3010,
+      "seconds": 60,
+      "offered": 180600,
+      "completed": 180600,
+      "by_window": 180572,
+      "window_rps": 3009.5333333333333,
+      "shed": 0,
+      "postings": 722400,
+      "acked": 361200,
+      "p99_ledger_and_ack_ms": 103.452,
+      "wal_bytes_per_completed": 4221.918006644518,
+      "model_growth_per_completed": 1400.487264673311,
+      "sampled_cpu_ms_per_completed": {
+        "primary": 0.35266,
+        "standby": 0.03926,
+        "consumer": 0.00748,
+        "driver": 0.03649
+      },
+      "financial_verification": {
+        "secondTariffCase": {
+          "customer": 100,
+          "supplier": 26,
+          "uncached": 1,
+          "cached": 9,
+          "output": 2,
+          "reasoning": 1,
+          "customer_posted": 100,
+          "supplier_posted": 26,
+          "events": 2
+        },
+        "grantReplayNoFresh": true,
+        "grantConflictRefused": true,
+        "insufficientFundsRefused": true,
+        "concurrentLastFundsExactlyOne": true,
+        "terminalReplayNoCharge": true,
+        "terminalConflictRefused": true
+      },
+      "all_offered_accounted": true,
+      "limits": [
+        "No public Gateway, plugin, provider call or mTLS identity, per-request signatures, multidimensional production pricing, Redis quota lifecycle or transition recovery worker.",
+        "Benchmark tariff: fixed 100 customer atoms per completed request; supplier uncached/cached/output unit rates 3/1/7. One fixed load mix, one separate varied-usage preflight, synthetic 100/100 reservations, and four double-entry ledger lines. Two event revisions are synthetic and emitted together. No cancellation, disputes, corrections, rate limits, mixed approvals or rejection isolation in mixed batches.",
+        "Single configured writer per shard in this driver. No multi-writer fencing, crash/failover, API idempotency after promotion or consumer fault-injection validation. Data model is a feasibility probe, not production."
+      ]
+    },
+    {
+      "name": "joint-strict-1001-a",
+      "source": "joint-source-a",
+      "scope": "isolated loopback short Chat HTTP prototype; distinct from the deployed gateway",
+      "rate": 1001,
+      "seconds": 60,
+      "accounting": {
+        "startEpochMs": 1795084159936,
+        "endEpochMs": 1795084219936,
+        "offers": 60060,
+        "arrived": 60060,
+        "httpValid": 60060,
+        "provider": {
+          "requests": 60060,
+          "duplicates": 0
+        },
+        "dbRows": 60060,
+        "dbMatched": 60060,
+        "doubleAck": 60060,
+        "ackRows": 120120,
+        "complete": 60060,
+        "inWindow": 60039,
+        "completeRps": 1000.65,
+        "includingDrainRps": 1000.3331112591605,
+        "deadlineMissesVs5s": 0,
+        "targetRps": 1000,
+        "withinTarget": true,
+        "loadShed": 0,
+        "loadPeak": 58,
+        "serverPeak": 57,
+        "drainMs": 40,
+        "badWallets": 0,
+        "badCells": 0,
+        "orderFailures": 0,
+        "duplicateObs": 0,
+        "invalidAuth": 0,
+        "accounted": true
+      },
+      "http_p99_ms": 39.786,
+      "complete_p99_ms": 48.288,
+      "status_counts": {
+        "200": 60060
+      },
+      "wal_bytes": 372092992,
+      "wal_per_offered": 6195.354512154512,
+      "plugin": {
+        "prepare": 60060,
+        "response": 60060,
+        "prepareMessages": 120120,
+        "responseMessages": 180180,
+        "signed": 120120,
+        "verified": 120120,
+        "independentConsumerVerified": 120120,
+        "snapshot": {
+          "worker": {
+            "started": 4,
+            "workers": 4,
+            "retiring": 0,
+            "active": 0,
+            "queued": 0,
+            "pending": 0,
+            "pendingBytes": 0,
+            "timers": 0,
+            "closed": false
+          },
+          "attempts": {
+            "attempts": 0,
+            "stateBytes": 0,
+            "reservedStateBytes": 0,
+            "moduleBytes": 0,
+            "json": {
+              "documents": 0,
+              "outputs": 0,
+              "bytes": 0,
+              "peakBytes": 3995872,
+              "maxBytes": 268435456
+            },
+            "closed": false
+          }
+        }
+      },
+      "cleanup": {
+        "processes": [],
+        "directories": [],
+        "ports": [],
+        "timers": 0
+      },
+      "limits": [
+        "Single loopback HTTP prototype. No production Gateway auth, tenant isolation, mTLS, internal RPC command proof or distributed rate-limit and Redis quota lifecycle. Upstream is the repository HTTP mock, with one fixed route and synthetic credentials.",
+        "Single fixed request-completion customer tariff and intrinsic uncached/cached/output supplier prices, single currency, 100-atom synthetic grant hold and 16 pre-funded supplier cells. No production ceiling reservation, cancellation/refund, retry, dispute, multidimensional prices or writer fencing.",
+        "Two schema-validated Ed25519 events and source key persist in the same transaction as the terminal, four postings and two outbox rows. External consumer independently verifies both signatures against its pinned source SPKI and matches signed usage to the committed amount inputs; source public key is pinned for this process. No source-key rotation or failover/recovery tested."
+      ]
+    },
+    {
+      "name": "joint-strict-3001-a",
+      "source": "joint-source-a",
+      "scope": "isolated loopback short Chat HTTP prototype; distinct from the deployed gateway",
+      "rate": 3001,
+      "seconds": 60,
+      "accounting": {
+        "startEpochMs": 1795084236281,
+        "endEpochMs": 1795084296281,
+        "offers": 180060,
+        "arrived": 179747,
+        "httpValid": 179747,
+        "provider": {
+          "requests": 179747,
+          "duplicates": 0
+        },
+        "dbRows": 179747,
+        "dbMatched": 179747,
+        "doubleAck": 179747,
+        "ackRows": 359494,
+        "complete": 179747,
+        "inWindow": 179572,
+        "completeRps": 2992.866666666667,
+        "includingDrainRps": 2992.8403736325945,
+        "deadlineMissesVs5s": 11184,
+        "targetRps": 3000,
+        "withinTarget": false,
+        "loadShed": 313,
+        "loadPeak": 2048,
+        "serverPeak": 256,
+        "drainMs": 59,
+        "badWallets": 0,
+        "badCells": 0,
+        "orderFailures": 313,
+        "duplicateObs": 0,
+        "invalidAuth": 0,
+        "accounted": false
+      },
+      "http_p99_ms": 717.034,
+      "complete_p99_ms": 6254.559,
+      "status_counts": {
+        "0": 313,
+        "200": 179747
+      },
+      "wal_bytes": 1145178176,
+      "wal_per_offered": 6359.980984116406,
+      "plugin": {
+        "prepare": 179747,
+        "response": 179747,
+        "prepareMessages": 359494,
+        "responseMessages": 539241,
+        "signed": 359494,
+        "verified": 359494,
+        "independentConsumerVerified": 359494,
+        "snapshot": {
+          "worker": {
+            "started": 4,
+            "workers": 4,
+            "retiring": 0,
+            "active": 0,
+            "queued": 0,
+            "pending": 0,
+            "pendingBytes": 0,
+            "timers": 0,
+            "closed": false
+          },
+          "attempts": {
+            "attempts": 0,
+            "stateBytes": 0,
+            "reservedStateBytes": 0,
+            "moduleBytes": 0,
+            "json": {
+              "documents": 0,
+              "outputs": 0,
+              "bytes": 0,
+              "peakBytes": 39334912,
+              "maxBytes": 268435456
+            },
+            "closed": false
+          }
+        }
+      },
+      "cleanup": {
+        "processes": [],
+        "directories": [],
+        "ports": [],
+        "timers": 0
+      },
+      "limits": [
+        "Single loopback HTTP prototype. No production Gateway auth, tenant isolation, mTLS, internal RPC command proof or distributed rate-limit and Redis quota lifecycle. Upstream is the repository HTTP mock, with one fixed route and synthetic credentials.",
+        "Single fixed request-completion customer tariff and intrinsic uncached/cached/output supplier prices, single currency, 100-atom synthetic grant hold and 16 pre-funded supplier cells. No production ceiling reservation, cancellation/refund, retry, dispute, multidimensional prices or writer fencing.",
+        "Two schema-validated Ed25519 events and source key persist in the same transaction as the terminal, four postings and two outbox rows. External consumer independently verifies both signatures against its pinned source SPKI and matches signed usage to the committed amount inputs; source public key is pinned for this process. No source-key rotation or failover/recovery tested."
+      ]
+    },
+    {
+      "name": "joint-diag-3001-a",
+      "source": "joint-source-diag",
+      "scope": "isolated loopback short Chat HTTP prototype; distinct from the deployed gateway",
+      "rate": 3001,
+      "seconds": 21,
+      "accounting": {
+        "startEpochMs": 1795084417741,
+        "endEpochMs": 1795084438741,
+        "offers": 63021,
+        "arrived": 63021,
+        "httpValid": 63021,
+        "provider": {
+          "requests": 63021,
+          "duplicates": 0
+        },
+        "dbRows": 63021,
+        "dbMatched": 63021,
+        "doubleAck": 63021,
+        "ackRows": 126042,
+        "complete": 63021,
+        "inWindow": 61695,
+        "completeRps": 2937.8571428571427,
+        "includingDrainRps": 2891.136801541426,
+        "deadlineMissesVs5s": 0,
+        "targetRps": 3000,
+        "withinTarget": false,
+        "loadShed": 0,
+        "loadPeak": 333,
+        "serverPeak": 256,
+        "drainMs": 798,
+        "badWallets": 0,
+        "badCells": 0,
+        "orderFailures": 0,
+        "duplicateObs": 0,
+        "invalidAuth": 0,
+        "accounted": true
+      },
+      "http_p99_ms": 97.299,
+      "complete_p99_ms": 653.621,
+      "status_counts": {
+        "200": 63021
+      },
+      "wal_bytes": 400353712,
+      "wal_per_offered": 6352.703257644277,
+      "plugin": {
+        "prepare": 63021,
+        "response": 63021,
+        "prepareMessages": 126042,
+        "responseMessages": 189063,
+        "signed": 126042,
+        "verified": 126042,
+        "independentConsumerVerified": 126042,
+        "snapshot": {
+          "worker": {
+            "started": 4,
+            "workers": 4,
+            "retiring": 0,
+            "active": 0,
+            "queued": 0,
+            "pending": 0,
+            "pendingBytes": 0,
+            "timers": 0,
+            "closed": false
+          },
+          "attempts": {
+            "attempts": 0,
+            "stateBytes": 0,
+            "reservedStateBytes": 0,
+            "moduleBytes": 0,
+            "json": {
+              "documents": 0,
+              "outputs": 0,
+              "bytes": 0,
+              "peakBytes": 19308415,
+              "maxBytes": 268435456
+            },
+            "closed": false
+          }
+        }
+      },
+      "cleanup": {
+        "processes": [],
+        "directories": [],
+        "ports": [],
+        "timers": 0
+      },
+      "limits": [
+        "Single loopback HTTP prototype. No production Gateway auth, tenant isolation, mTLS, internal RPC command proof or distributed rate-limit and Redis quota lifecycle. Upstream is the repository HTTP mock, with one fixed route and synthetic credentials.",
+        "Single fixed request-completion customer tariff and intrinsic uncached/cached/output supplier prices, single currency, 100-atom synthetic grant hold and 16 pre-funded supplier cells. No production ceiling reservation, cancellation/refund, retry, dispute, multidimensional prices or writer fencing.",
+        "Two schema-validated Ed25519 events and source key persist in the same transaction as the terminal, four postings and two outbox rows. External consumer independently verifies both signatures against its pinned source SPKI and matches signed usage to the committed amount inputs; source public key is pinned for this process. No source-key rotation or failover/recovery tested."
+      ]
+    },
+    {
+      "name": "joint-strict-3001-b",
+      "source": "joint-source-b",
+      "scope": "isolated loopback short Chat HTTP prototype; distinct from the deployed gateway",
+      "rate": 3001,
+      "seconds": 60,
+      "accounting": {
+        "startEpochMs": 1795084464504,
+        "endEpochMs": 1795084524504,
+        "offers": 180060,
+        "arrived": 180060,
+        "httpValid": 180060,
+        "provider": {
+          "requests": 180060,
+          "duplicates": 0
+        },
+        "dbRows": 180060,
+        "dbMatched": 180060,
+        "doubleAck": 180060,
+        "ackRows": 360120,
+        "complete": 180060,
+        "inWindow": 179913,
+        "completeRps": 2998.55,
+        "includingDrainRps": 2997.952082049916,
+        "deadlineMissesVs5s": 0,
+        "targetRps": 3000,
+        "withinTarget": false,
+        "loadShed": 0,
+        "loadPeak": 878,
+        "serverPeak": 256,
+        "drainMs": 61,
+        "badWallets": 0,
+        "badCells": 0,
+        "orderFailures": 0,
+        "duplicateObs": 0,
+        "invalidAuth": 0,
+        "accounted": true
+      },
+      "http_p99_ms": 218.782,
+      "complete_p99_ms": 273.217,
+      "status_counts": {
+        "200": 180060
+      },
+      "wal_bytes": 1135023504,
+      "wal_per_offered": 6303.584938353882,
+      "plugin": {
+        "prepare": 180060,
+        "response": 180060,
+        "prepareMessages": 360120,
+        "responseMessages": 540180,
+        "signed": 360120,
+        "verified": 360120,
+        "independentConsumerVerified": 360120,
+        "snapshot": {
+          "worker": {
+            "started": 4,
+            "workers": 4,
+            "retiring": 0,
+            "active": 0,
+            "queued": 0,
+            "pending": 0,
+            "pendingBytes": 0,
+            "timers": 0,
+            "closed": false
+          },
+          "attempts": {
+            "attempts": 0,
+            "stateBytes": 0,
+            "reservedStateBytes": 0,
+            "moduleBytes": 0,
+            "json": {
+              "documents": 0,
+              "outputs": 0,
+              "bytes": 0,
+              "peakBytes": 39334912,
+              "maxBytes": 268435456
+            },
+            "closed": false
+          }
+        }
+      },
+      "cleanup": {
+        "processes": [],
+        "directories": [],
+        "ports": [],
+        "timers": 0
+      },
+      "limits": [
+        "Single loopback HTTP prototype. No production Gateway auth, tenant isolation, mTLS, internal RPC command proof or distributed rate-limit and Redis quota lifecycle. Upstream is the repository HTTP mock, with one fixed route and synthetic credentials.",
+        "Single fixed request-completion customer tariff and intrinsic uncached/cached/output supplier prices, single currency, 100-atom synthetic grant hold and 16 pre-funded supplier cells. No production ceiling reservation, cancellation/refund, retry, dispute, multidimensional prices or writer fencing.",
+        "Two schema-validated Ed25519 events and source key persist in the same transaction as the terminal, four postings and two outbox rows. External consumer independently verifies both signatures against its pinned source SPKI and matches signed usage to the committed amount inputs; source public key is pinned for this process. No source-key rotation or failover/recovery tested."
+      ]
+    },
+    {
+      "name": "joint-strict-3010-b1",
+      "source": "joint-source-b",
+      "scope": "isolated loopback short Chat HTTP prototype; distinct from the deployed gateway",
+      "rate": 3010,
+      "seconds": 60,
+      "accounting": {
+        "startEpochMs": 1795084536034,
+        "endEpochMs": 1795084596034,
+        "offers": 180600,
+        "arrived": 180600,
+        "httpValid": 180600,
+        "provider": {
+          "requests": 180600,
+          "duplicates": 0
+        },
+        "dbRows": 180600,
+        "dbMatched": 180600,
+        "doubleAck": 180600,
+        "ackRows": 361200,
+        "complete": 180600,
+        "inWindow": 180456,
+        "completeRps": 3007.6,
+        "includingDrainRps": 3006.2922395711958,
+        "deadlineMissesVs5s": 0,
+        "targetRps": 3000,
+        "withinTarget": true,
+        "loadShed": 0,
+        "loadPeak": 1078,
+        "serverPeak": 256,
+        "drainMs": 74,
+        "badWallets": 0,
+        "badCells": 0,
+        "orderFailures": 0,
+        "duplicateObs": 0,
+        "invalidAuth": 0,
+        "accounted": true
+      },
+      "http_p99_ms": 318.847,
+      "complete_p99_ms": 372.824,
+      "status_counts": {
+        "200": 180600
+      },
+      "wal_bytes": 1138470728,
+      "wal_per_offered": 6303.824629014396,
+      "plugin": {
+        "prepare": 180600,
+        "response": 180600,
+        "prepareMessages": 361200,
+        "responseMessages": 541800,
+        "signed": 361200,
+        "verified": 361200,
+        "independentConsumerVerified": 361200,
+        "snapshot": {
+          "worker": {
+            "started": 4,
+            "workers": 4,
+            "retiring": 0,
+            "active": 0,
+            "queued": 0,
+            "pending": 0,
+            "pendingBytes": 0,
+            "timers": 0,
+            "closed": false
+          },
+          "attempts": {
+            "attempts": 0,
+            "stateBytes": 0,
+            "reservedStateBytes": 0,
+            "moduleBytes": 0,
+            "json": {
+              "documents": 0,
+              "outputs": 0,
+              "bytes": 0,
+              "peakBytes": 39334912,
+              "maxBytes": 268435456
+            },
+            "closed": false
+          }
+        }
+      },
+      "cleanup": {
+        "processes": [],
+        "directories": [],
+        "ports": [],
+        "timers": 0
+      },
+      "limits": [
+        "Single loopback HTTP prototype. No production Gateway auth, tenant isolation, mTLS, internal RPC command proof or distributed rate-limit and Redis quota lifecycle. Upstream is the repository HTTP mock, with one fixed route and synthetic credentials.",
+        "Single fixed request-completion customer tariff and intrinsic uncached/cached/output supplier prices, single currency, 100-atom synthetic grant hold and 16 pre-funded supplier cells. No production ceiling reservation, cancellation/refund, retry, dispute, multidimensional prices or writer fencing.",
+        "Two schema-validated Ed25519 events and source key persist in the same transaction as the terminal, four postings and two outbox rows. External consumer independently verifies both signatures against its pinned source SPKI and matches signed usage to the committed amount inputs; source public key is pinned for this process. No source-key rotation or failover/recovery tested."
+      ]
+    },
+    {
+      "name": "joint-strict-3010-b2",
+      "source": "joint-source-b",
+      "scope": "isolated loopback short Chat HTTP prototype; distinct from the deployed gateway",
+      "rate": 3010,
+      "seconds": 60,
+      "accounting": {
+        "startEpochMs": 1795084615446,
+        "endEpochMs": 1795084675446,
+        "offers": 180600,
+        "arrived": 180600,
+        "httpValid": 180600,
+        "provider": {
+          "requests": 180600,
+          "duplicates": 0
+        },
+        "dbRows": 180600,
+        "dbMatched": 180600,
+        "doubleAck": 180600,
+        "ackRows": 361200,
+        "complete": 180600,
+        "inWindow": 180450,
+        "completeRps": 3007.5,
+        "includingDrainRps": 3006.392329204954,
+        "deadlineMissesVs5s": 0,
+        "targetRps": 3000,
+        "withinTarget": true,
+        "loadShed": 0,
+        "loadPeak": 1572,
+        "serverPeak": 256,
+        "drainMs": 72,
+        "badWallets": 0,
+        "badCells": 0,
+        "orderFailures": 0,
+        "duplicateObs": 0,
+        "invalidAuth": 0,
+        "accounted": true
+      },
+      "http_p99_ms": 463.831,
+      "complete_p99_ms": 519.701,
+      "status_counts": {
+        "200": 180600
+      },
+      "wal_bytes": 1142108016,
+      "wal_per_offered": 6323.964651162791,
+      "plugin": {
+        "prepare": 180600,
+        "response": 180600,
+        "prepareMessages": 361200,
+        "responseMessages": 541800,
+        "signed": 361200,
+        "verified": 361200,
+        "independentConsumerVerified": 361200,
+        "snapshot": {
+          "worker": {
+            "started": 4,
+            "workers": 4,
+            "retiring": 0,
+            "active": 0,
+            "queued": 0,
+            "pending": 0,
+            "pendingBytes": 0,
+            "timers": 0,
+            "closed": false
+          },
+          "attempts": {
+            "attempts": 0,
+            "stateBytes": 0,
+            "reservedStateBytes": 0,
+            "moduleBytes": 0,
+            "json": {
+              "documents": 0,
+              "outputs": 0,
+              "bytes": 0,
+              "peakBytes": 39334912,
+              "maxBytes": 268435456
+            },
+            "closed": false
+          }
+        }
+      },
+      "cleanup": {
+        "processes": [],
+        "directories": [],
+        "ports": [],
+        "timers": 0
+      },
+      "limits": [
+        "Single loopback HTTP prototype. No production Gateway auth, tenant isolation, mTLS, internal RPC command proof or distributed rate-limit and Redis quota lifecycle. Upstream is the repository HTTP mock, with one fixed route and synthetic credentials.",
+        "Single fixed request-completion customer tariff and intrinsic uncached/cached/output supplier prices, single currency, 100-atom synthetic grant hold and 16 pre-funded supplier cells. No production ceiling reservation, cancellation/refund, retry, dispute, multidimensional prices or writer fencing.",
+        "Two schema-validated Ed25519 events and source key persist in the same transaction as the terminal, four postings and two outbox rows. External consumer independently verifies both signatures against its pinned source SPKI and matches signed usage to the committed amount inputs; source public key is pinned for this process. No source-key rotation or failover/recovery tested."
+      ]
+    }
+  ],
+  "archives": [
+    {
+      "file": "public-batch.tar.gz",
+      "bytes": 1890780,
+      "sha256": "6ed0dec79947439b2f941943bb6857af2dab8f1408a20923db455e193b31d903",
+      "members": {
+        "2ms/ack.identities.tsv": "d1a6370dbf03b850fbb1b0ab4197cab3d11318b3c3d1175bb129c499bcf70553",
+        "2ms/audit.json": "c23e6df0e753d9219ff2f8a2b81ef9dcf42ec72f8f189f3924935423ac054bd5",
+        "2ms/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+        "2ms/http.json": "7a040b32e8465ad9094bea70c3b9e1812c0214c77234f067457a4917c549f8a4",
+        "2ms/http.json.identities.tsv": "28087de765721fabb5e62d8b06d86c2cceb1058f1fb9fb030da3f628018fb1dd",
+        "32ms.patch": "aa7f5520ae001e9d90236fc94c678e97ba9e5583695824f3edd290a689e9063c",
+        "32ms/ack.identities.tsv": "f27a22caaea330c9575e358825dc08905082ea2fc28686f158f6400cd4d4b7ef",
+        "32ms/audit.json": "37c61f7f7579b8112eb3a40769a4eaf950802cfc15debf146cedb45e386bdf69",
+        "32ms/cleanup.json": "cf767ccf39527d4b2917879dc0043c598132f59f7bcfb16baac012e6f8501a9a",
+        "32ms/http.json": "054da1615e6095de6bfa74fd7b40f8ac6421a76973e78d438960bbccf9c4e505",
+        "32ms/http.json.identities.tsv": "becb266af6f2adeff71681c3f7abc0915079c61bfecf0a8fe2c99401245fe108"
+      }
+    },
+    {
+      "file": "funding-before.tar.gz",
+      "bytes": 22008787,
+      "sha256": "f162222ba74bb96796052be5a1b43daf20527f8063c9ad1da512f73a0bf85ce0",
+      "members": {
+        "funding-before/identity-verification.json": "a1c43f06e8f16cc35349269077efad366525ef53b7d249f92b625372e32240d2",
+        "funding-before/model.sql": "b678c5c433757e2e2b06262d39dc86018fd9dac74c18d4aaee1565d6aba33f44",
+        "funding-before/probe.mjs": "f007b0a71f4133997d05fcf1fdb792ef607c57038fb9302ba690c73dedc42cb6",
+        "funding-before/result.identities.tsv": "2b6dd6f3ef5dd90bb6b7f55c86db0057afc6658c9adfee5dc921ab97c8e0fee4",
+        "funding-before/result.json": "29941fbca95fed03210b4ea6f02d3cdd852424a4ceb46f2574235de45a9f95f8",
+        "funding-before/verify.py": "560e4340dc514b06a9bf56f87be5868e7a7a04b955f77bc3f606188644111dee"
+      }
+    },
+    {
+      "file": "funding-profile.tar.gz",
+      "bytes": 22290289,
+      "sha256": "97fa46a3af5a3fea625b94b7f57ff365c18f14f91989d1519c74f81c61751063",
+      "members": {
+        "funding-profile/analysis.txt": "e0e03bf23cf2e64359932b16a5cd8fc58ef103009d83e5c588be85b4e269e120",
+        "funding-profile/analyze.py": "966cb56a10ef14ac5b165d8d0e245ae8b48fe917f3c76b1dd3d7978f28a2d44b",
+        "funding-profile/diagnostic.identities.tsv": "ceab18171c39e6587e2c90cf11a97c43eb3915434db9622242185af9efd7167b",
+        "funding-profile/diagnostic.json": "e880c276c93bf2a9b134d514c1c33597dfe70610bf69ebcd67afc0a6b18967fc",
+        "funding-profile/diagnostic.plans.json": "c8ba089580953f47f97a27da792aed60b6ac84075c8e4f180e16c48320c05753",
+        "funding-profile/diagnostic.timings.tsv": "4c6d6a15af78925f57246dc287426f4a2772924f4ad67b7d10adcce8f63ad97a",
+        "funding-profile/model.sql": "b678c5c433757e2e2b06262d39dc86018fd9dac74c18d4aaee1565d6aba33f44",
+        "funding-profile/probe.mjs": "e3acad68e7025bacd1a0d8964271e517913c7d10e491bc25fe8ed3bfabff5423",
+        "funding-profile/verify.py": "560e4340dc514b06a9bf56f87be5868e7a7a04b955f77bc3f606188644111dee"
+      }
+    },
+    {
+      "file": "funding-indexed.tar.gz",
+      "bytes": 22830553,
+      "sha256": "140def5eb60d241aec854c74fb8e2006468145b21f5484f37fa05df9a3095188",
+      "members": {
+        "funding-indexed/analysis.txt": "d21f5ad4ee30a1761e4ae8ebdbc2003e24b5d505d361fc037249cc2a337bd3d7",
+        "funding-indexed/model.sql": "b678c5c433757e2e2b06262d39dc86018fd9dac74c18d4aaee1565d6aba33f44",
+        "funding-indexed/probe.mjs": "05d68f35ffcf0a66ef3d9676f52aeacaf4e92762f65cd2e5c2dc263628c6329e",
+        "funding-indexed/target.identities.tsv": "51290e74ac4b95b3a9748c3afaac3b78a226ab58e00c6f05cd456eb27905985b",
+        "funding-indexed/target.json": "ee05e062a5161401098dd272263c489b7a752271d646b67bfdcaf9db6e7c75a6",
+        "funding-indexed/target.plans.json": "cf606e5716f6a0b1c735feb346d8fc98f021fc8711e3ab905d274e4ce84b46a3",
+        "funding-indexed/target.timings.tsv": "fc8ae38bcda52e4adcec22b9d9b9e2d1425a89520f3b057354e75575ef7b6a55",
+        "funding-indexed/verify.py": "560e4340dc514b06a9bf56f87be5868e7a7a04b955f77bc3f606188644111dee"
+      }
+    },
+    {
+      "file": "component.tar.gz",
+      "bytes": 1497714,
+      "sha256": "c29fd7b0f9db3673f7ab6b7e0e64519b70b9da0658acaa6cefcfe607fedc6c6f",
+      "members": {
+        "short-chat-abi/README.md": "91b6b4f4836428a9aa08927cabe4474216fac6bf0e2624dec03744922cb57e71",
+        "short-chat-abi/SHA256SUMS": "a264f25829b911cd18e8576edaffb3a000149f91636044e7fd52326fce74aa38",
+        "short-chat-abi/probe.ts": "bc11a1f6a2a3cccbdcd89c2ef3651082fff2bdf4a1bfc1b6acc110f9ec333910",
+        "short-chat-abi/public-fixture-policy.json": "8b648e08b7c0029d5030dda7f7299b8e6c9b0632355a584f44a737cc57a40366",
+        "short-chat-abi/request.json": "3000c42c01f7b87ea8a808603fbdb7b79dc3445ae6c26c99761d7ac7e426a8f4",
+        "short-chat-abi/result.json": "23ad00e70eef1d819523c410560c65b254512af6112b9db3c5333f92a1ceae11",
+        "short-chat-abi/runtime-approval.json": "c9ce4107d51bde17af976bbee76c833ea299a123ffa953833ccf3f8a72e73a50",
+        "short-chat-abi/signed-package.json": "e17d4fa2ad2181c25fc49bd6e43b7ead1d1b4962726c27cbe89cba8c1f4eac5e",
+        "short-chat-abi/upstream.json": "4d0f097fd0ea6cee5ac41be8ee1af7153f284d262048ec6016cc477a83fa5ab5"
+      }
+    },
+    {
+      "file": "funding-strict-a.tar.gz",
+      "bytes": 23212220,
+      "sha256": "42931f09f62b4a19242afa08bdf5153a9794c2c8b4de486a53ae0cb0155f7f55",
+      "members": {
+        "funding-strict-a/README.zh.md": "a82f1c80cb58eb89bf9d4b9314ceb0a0de09793690e567c3ba5571a03926a472",
+        "funding-strict-a/analysis.txt": "9dae6054d81b6f3f6b99f9a89baba39200cdc999343d8409f9027be7a11ecf50",
+        "funding-strict-a/analyze.py": "966cb56a10ef14ac5b165d8d0e245ae8b48fe917f3c76b1dd3d7978f28a2d44b",
+        "funding-strict-a/model.sql": "a50cf97455635cdd12d274a53e26504f4b6fa356dfaae3499b7715d99c48695c",
+        "funding-strict-a/probe.mjs": "6b2fc395a3e93ebfc8ae460afd047fa011723ce16c708159cad3483ebd560362",
+        "funding-strict-a/strict-a.identities.tsv": "66e4a5c2e93242b8970bd9f511106c5901762489e3a52981d0a6a0c4ec39fd6e",
+        "funding-strict-a/strict-a.json": "2e15ec87c2a2b84a50381c9c1f70a7e7d7999fad6e9e461c164c918622e2d271",
+        "funding-strict-a/strict-a.plans.json": "31c07e324c75f808beeb23f8cb9c9e16aca31a1107ee5d51cc4ab6bfec7948e5",
+        "funding-strict-a/strict-a.timings.tsv": "746351a5b947f6b51d4f5542648f0fca1ecea79dd08cf6887ef7985c85973fd4",
+        "funding-strict-a/verify.json": "797e5dcb96339db53b08176b0bdea9c219753ba1ca38c6dcfa9a7a2121aed68b",
+        "funding-strict-a/verify.py": "560e4340dc514b06a9bf56f87be5868e7a7a04b955f77bc3f606188644111dee"
+      }
+    },
+    {
+      "file": "joint-source-a.tar.gz",
+      "bytes": 1507600,
+      "sha256": "c35b501e96e46e6e06187de9c69d58fa759ad63761717b1fbf20f90f676172e7",
+      "members": {
+        "joint-source-a/README.zh.md": "21d9ea64ea5b53fe124d5b225252b63842218e38a6ba1efb9fd325dad072b34d",
+        "joint-source-a/actors.mjs": "04d0bf9c1c39eac18acb68d1fc9ebf835e867710f2f6bb99983aa24512a55ba0",
+        "joint-source-a/adapter.mjs": "497eac0e37964d93d2a10ecbbdc52ab7ccaa737858803087100f6ac1e83d81f6",
+        "joint-source-a/artifact-identity.json": "1907fcd5024d0751b635dcfe1d216d1ae56af55a8a88ad7aeb3d71a1e8715540",
+        "joint-source-a/common.mjs": "9ab52d5eb0d8a2cbfa8d86bcebef321fd0673134f1b301803814fee658aa87ed",
+        "joint-source-a/evidence.sql": "f798b46d93a4b9d39dbb42d29fcf2803d1b66c2e4c512981c2f8db6904e0d636",
+        "joint-source-a/model.sql": "a50cf97455635cdd12d274a53e26504f4b6fa356dfaae3499b7715d99c48695c",
+        "joint-source-a/public-fixture-policy.json": "8b648e08b7c0029d5030dda7f7299b8e6c9b0632355a584f44a737cc57a40366",
+        "joint-source-a/public.mjs": "1a2319e6925c27cf5576fe7ce62a0457e2696551bcdfa54526b21b995a03b940",
+        "joint-source-a/signed-package.json": "e17d4fa2ad2181c25fc49bd6e43b7ead1d1b4962726c27cbe89cba8c1f4eac5e"
+      }
+    },
+    {
+      "file": "joint-strict-1001-a.tar.gz",
+      "bytes": 19352378,
+      "sha256": "a6e2e0199d750db71428e56bca6c33a31627561a16dd42f7841862cceb05ae84",
+      "members": {
+        "joint-strict-1001-a/identity-verification.json": "cdef445b68c92cf275edc03edf0b0b2c0bc8f449071b393d8a9f60dd80839593",
+        "joint-strict-1001-a/recompute.py": "657ba8d2144fba0d9d374bbe315be789e243f665891f4d2cae285f4e89f46d6b",
+        "joint-strict-1001-a/strict-1001-a.ack.tsv": "4638e62b755637609df97807ed5f687804445b961ffd2a8fbf469e17374d1c4d",
+        "joint-strict-1001-a/strict-1001-a.cleanup.json": "40723820f9e288cf9875258a3d0d6b41fa0f242f9ab941daf496de2dfa1d0382",
+        "joint-strict-1001-a/strict-1001-a.consumer.json": "486aa1730601bc2b5c0ae4ace0e070b69ba3b26cce0667fec556bb57467ec6b6",
+        "joint-strict-1001-a/strict-1001-a.http.tsv": "cd383b737ccb0abcca8ba0daaf6b875768cb735f293d1dffd8c1e09811a6b6da",
+        "joint-strict-1001-a/strict-1001-a.identities.tsv": "d33c52b5bbb03aa3baab483d0356f119ba9c97adc255e39fcde6cef560ae3790",
+        "joint-strict-1001-a/strict-1001-a.json": "eaa36950ab94db67cb05e9736c8a4d023fe6c7c7a32c907b2c68fdb1abf00d0e",
+        "joint-strict-1001-a/strict-1001-a.load.json": "22292cb44ef037ae5ce250d3eb447b58e7d143cd78236f495b0cdd3ed930d233",
+        "joint-strict-1001-a/strict-1001-a.upstream.tsv": "74b809a3a28939b8019bf1068660a4b6d7d6b917ecdf711cd780b0f98d9bddb1"
+      }
+    },
+    {
+      "file": "joint-strict-3001-a.tar.gz",
+      "bytes": 56896485,
+      "sha256": "2ae609af4c6b47e4c4862f662384a195c19aedeb573dac28d6614c21a4fe979a",
+      "members": {
+        "joint-strict-3001-a/identity-verification.json": "2b70df3895e148dd9517735b1073de4100e1ffc71cfc19ba407ba92f944de36e",
+        "joint-strict-3001-a/recompute.py": "657ba8d2144fba0d9d374bbe315be789e243f665891f4d2cae285f4e89f46d6b",
+        "joint-strict-3001-a/strict-3001-a.ack.tsv": "41c4b19211cc935edc38633b2268efd42c2214115eba6b0b7a5a9e99d27a7f49",
+        "joint-strict-3001-a/strict-3001-a.cleanup.json": "40723820f9e288cf9875258a3d0d6b41fa0f242f9ab941daf496de2dfa1d0382",
+        "joint-strict-3001-a/strict-3001-a.consumer.json": "ba48bb8794309423b10e8d2f90ff2dbaa9b777c2cf36d4649763d4cb2db4e825",
+        "joint-strict-3001-a/strict-3001-a.http.tsv": "72cd7282cd5248bcac418397f72cc23e00d4e3f08be7fcf32e49881344238d37",
+        "joint-strict-3001-a/strict-3001-a.identities.tsv": "f4114f4c88ec2706168c85da1835976b5504be39875e8ee8f11de084ab276a78",
+        "joint-strict-3001-a/strict-3001-a.json": "926cec7342975d79129c3b486938a19dd6cf23c2595e4b75150e068ced4feb23",
+        "joint-strict-3001-a/strict-3001-a.load.json": "fb2455b01b9f70896e8afe5860cdab6917b9aa73931ce39ee0b324b3e45a5dba",
+        "joint-strict-3001-a/strict-3001-a.upstream.tsv": "d82cfaffb471cb859a1eb0ba1618eb77ba73a4b70cd41302feadb7905f79ebc7"
+      }
+    },
+    {
+      "file": "joint-source-diag.tar.gz",
+      "bytes": 1507971,
+      "sha256": "3cbca6792baf58814f268eb17f60d64f00c828a130a0f52aedd2d0ad10bfd18c",
+      "members": {
+        "joint-source-diag/README.zh.md": "21d9ea64ea5b53fe124d5b225252b63842218e38a6ba1efb9fd325dad072b34d",
+        "joint-source-diag/actors.mjs": "afcff47dd70b738686db03bde57f693d6e4fcbcdc285ae9d3acab3bc46d2f3b1",
+        "joint-source-diag/adapter.mjs": "497eac0e37964d93d2a10ecbbdc52ab7ccaa737858803087100f6ac1e83d81f6",
+        "joint-source-diag/artifact-identity.json": "1907fcd5024d0751b635dcfe1d216d1ae56af55a8a88ad7aeb3d71a1e8715540",
+        "joint-source-diag/common.mjs": "9ab52d5eb0d8a2cbfa8d86bcebef321fd0673134f1b301803814fee658aa87ed",
+        "joint-source-diag/evidence.sql": "f798b46d93a4b9d39dbb42d29fcf2803d1b66c2e4c512981c2f8db6904e0d636",
+        "joint-source-diag/model.sql": "a50cf97455635cdd12d274a53e26504f4b6fa356dfaae3499b7715d99c48695c",
+        "joint-source-diag/public-fixture-policy.json": "8b648e08b7c0029d5030dda7f7299b8e6c9b0632355a584f44a737cc57a40366",
+        "joint-source-diag/public.mjs": "5b9b1ac32e0872d5d7ffc7b0ef22603268dbae7b0d4328124754509154eac3a0",
+        "joint-source-diag/signed-package.json": "e17d4fa2ad2181c25fc49bd6e43b7ead1d1b4962726c27cbe89cba8c1f4eac5e"
+      }
+    },
+    {
+      "file": "joint-diag-3001-a.tar.gz",
+      "bytes": 20065529,
+      "sha256": "3ac481f33c8c34d30c2777fbf32164586fe42c0bcadc2d68334467dbfab3b441",
+      "members": {
+        "joint-diag-3001-a/diag-3001-a.ack.tsv": "b7d15d1849ce6e19619f991693e1c5e7a3870de01de31cb4b6a4b298362c4d73",
+        "joint-diag-3001-a/diag-3001-a.cleanup.json": "40723820f9e288cf9875258a3d0d6b41fa0f242f9ab941daf496de2dfa1d0382",
+        "joint-diag-3001-a/diag-3001-a.consumer.json": "bd73afdf26666d5de126467c38ad1a5228fc262d5737fb27a90681f185e47755",
+        "joint-diag-3001-a/diag-3001-a.http.tsv": "ef92422c77992ad3468b17f5ca531a8a7185acfc710a8a1cf2d13b3fbc42b330",
+        "joint-diag-3001-a/diag-3001-a.identities.tsv": "ebbf7704a65cf966ca0f46095b9a03e09b92c324efa0807723784d67e137d84a",
+        "joint-diag-3001-a/diag-3001-a.json": "20462054f2f1bb6f12acfea39cc35cac040e735ac75f8fd2d5bf34c22f1a243a",
+        "joint-diag-3001-a/diag-3001-a.load.json": "ee4e0b77047713ba062ef67dd4c520c6b978db2e81784de68cb3524476da21fa",
+        "joint-diag-3001-a/diag-3001-a.plans.json": "5e676159ac47ba5a1d5b858fd464593feac236a83774f3a7b18c8b3a40e0fac0",
+        "joint-diag-3001-a/diag-3001-a.stages.json": "3feb56e40287e9c152f24999ff29b878edaad012059b938ec3a427456660e49b",
+        "joint-diag-3001-a/diag-3001-a.upstream.tsv": "70f167cb8a8f2079cfd989a3829775aeb4f22b0be8398213d0d11a126fc52483",
+        "joint-diag-3001-a/identity-verification.json": "f2e432122f14d7d62aba896dd856e994965796dd987bc2e41f603d4667cc3e90",
+        "joint-diag-3001-a/recompute.py": "657ba8d2144fba0d9d374bbe315be789e243f665891f4d2cae285f4e89f46d6b"
+      }
+    },
+    {
+      "file": "joint-source-b.tar.gz",
+      "bytes": 1507662,
+      "sha256": "cb6c6c223c008838f4909d19ba07775953a16fc5eb7ec425d966f555e748ba70",
+      "members": {
+        "joint-source-b/README.zh.md": "21d9ea64ea5b53fe124d5b225252b63842218e38a6ba1efb9fd325dad072b34d",
+        "joint-source-b/actors.mjs": "04d0bf9c1c39eac18acb68d1fc9ebf835e867710f2f6bb99983aa24512a55ba0",
+        "joint-source-b/adapter.mjs": "497eac0e37964d93d2a10ecbbdc52ab7ccaa737858803087100f6ac1e83d81f6",
+        "joint-source-b/artifact-identity.json": "1907fcd5024d0751b635dcfe1d216d1ae56af55a8a88ad7aeb3d71a1e8715540",
+        "joint-source-b/common.mjs": "9ab52d5eb0d8a2cbfa8d86bcebef321fd0673134f1b301803814fee658aa87ed",
+        "joint-source-b/evidence.sql": "f798b46d93a4b9d39dbb42d29fcf2803d1b66c2e4c512981c2f8db6904e0d636",
+        "joint-source-b/model.sql": "a50cf97455635cdd12d274a53e26504f4b6fa356dfaae3499b7715d99c48695c",
+        "joint-source-b/public-fixture-policy.json": "8b648e08b7c0029d5030dda7f7299b8e6c9b0632355a584f44a737cc57a40366",
+        "joint-source-b/public.mjs": "accdcd174bf4933e5d2f2ffaa5f8317628da9a048bc047b2f384540b010e0bd2",
+        "joint-source-b/signed-package.json": "e17d4fa2ad2181c25fc49bd6e43b7ead1d1b4962726c27cbe89cba8c1f4eac5e"
+      }
+    },
+    {
+      "file": "joint-strict-3001-b.tar.gz",
+      "bytes": 56839803,
+      "sha256": "476bf864b2e385c56041c1b6ed636a7f330541ab08d1d75256b93ba96f281692",
+      "members": {
+        "joint-strict-3001-b/identity-verification.json": "f8aa547884f3b7c95339829dc20508e5483a6a9a0d6defc046061350bc78f849",
+        "joint-strict-3001-b/recompute.py": "657ba8d2144fba0d9d374bbe315be789e243f665891f4d2cae285f4e89f46d6b",
+        "joint-strict-3001-b/strict-3001-b.ack.tsv": "2e1c738f2c96dcac8eab322030857d0c7d97815e20556463e925d639f08a54d1",
+        "joint-strict-3001-b/strict-3001-b.cleanup.json": "40723820f9e288cf9875258a3d0d6b41fa0f242f9ab941daf496de2dfa1d0382",
+        "joint-strict-3001-b/strict-3001-b.consumer.json": "e520208483c873860f9c9838ab36e751c7970779094581a2ad73f90b4682a14d",
+        "joint-strict-3001-b/strict-3001-b.http.tsv": "ba30b0ea1f95e0ac98874064e63243068b928c4a1d771743a45559468ba7e4de",
+        "joint-strict-3001-b/strict-3001-b.identities.tsv": "e74826cb53d8ae7339256b867e9b76f7f5a53b1fa302709eb0ebeffcf564dc43",
+        "joint-strict-3001-b/strict-3001-b.json": "a8e4b06adf1481ba3a8757a8683aa635f97325b2ed7fda273375aeb79c1356a4",
+        "joint-strict-3001-b/strict-3001-b.load.json": "802f1197b30c533d5fd4488841da9d18401bbcb90b53d05b502070093c9f9ed7",
+        "joint-strict-3001-b/strict-3001-b.upstream.tsv": "81eb66cad5f3ed22f9e4dc5f0c04752bc0600f990cdafb49d54d1fe2de7c2b5c"
+      }
+    },
+    {
+      "file": "joint-strict-3010-b1.tar.gz",
+      "bytes": 56911987,
+      "sha256": "20bb8462462eda2099b7e0810fed97af0ea7c69e20d28261b621394f2f32fde8",
+      "members": {
+        "joint-strict-3010-b1/identity-verification.json": "3ce0b60e7a46c72f7079787f2634c37500e538d909c5538422be04e84f86341c",
+        "joint-strict-3010-b1/recompute.py": "657ba8d2144fba0d9d374bbe315be789e243f665891f4d2cae285f4e89f46d6b",
+        "joint-strict-3010-b1/strict-3010-b1.ack.tsv": "e6295afb27aba659559962e5f75986f47bd3cf79cc83cc8f46fedeb24318f702",
+        "joint-strict-3010-b1/strict-3010-b1.cleanup.json": "40723820f9e288cf9875258a3d0d6b41fa0f242f9ab941daf496de2dfa1d0382",
+        "joint-strict-3010-b1/strict-3010-b1.consumer.json": "e7cbac604101c2e6a7f587e60e33a045634505233d8ad7d16445f7e271fe1867",
+        "joint-strict-3010-b1/strict-3010-b1.http.tsv": "8fa5bc438367fde135d2525c4a87a4869774b10802c9b9ce6dade6715fab9c24",
+        "joint-strict-3010-b1/strict-3010-b1.identities.tsv": "8af729c073c1a996b4e22c72f868d8efd42e15238c276575de301ab9652b293e",
+        "joint-strict-3010-b1/strict-3010-b1.json": "7bf84b055b1a6f4612de99c1061563c3b6f926932061fb11cead86cdbd2b6cc2",
+        "joint-strict-3010-b1/strict-3010-b1.load.json": "ff59fdbef34879553846c344f951e7066e3d8b6d264b9bff152cf36c2c1f0023",
+        "joint-strict-3010-b1/strict-3010-b1.upstream.tsv": "f5cb04da95ff543893c4eb131efb089dc4cb94183a9d95769f776c423918f562"
+      }
+    },
+    {
+      "file": "joint-strict-3010-b2.tar.gz",
+      "bytes": 56912100,
+      "sha256": "36788185c51881109d98fd1ef8207fe777d2207aa664ec3fa50934a2f7d5c6f6",
+      "members": {
+        "joint-strict-3010-b2/identity-verification.json": "96fb8aef8c6d485425dbcaabeb2aef881d6f92279b8d07d7d112171678653984",
+        "joint-strict-3010-b2/recompute.py": "657ba8d2144fba0d9d374bbe315be789e243f665891f4d2cae285f4e89f46d6b",
+        "joint-strict-3010-b2/strict-3010-b2.ack.tsv": "cc625fcdf6a8bed3fe8c12d0d266e63686ffb19a6dec6e4ed1a9b02c166427e7",
+        "joint-strict-3010-b2/strict-3010-b2.cleanup.json": "40723820f9e288cf9875258a3d0d6b41fa0f242f9ab941daf496de2dfa1d0382",
+        "joint-strict-3010-b2/strict-3010-b2.consumer.json": "e7cbac604101c2e6a7f587e60e33a045634505233d8ad7d16445f7e271fe1867",
+        "joint-strict-3010-b2/strict-3010-b2.http.tsv": "76c36361227b6560f22158e2fb9e64c164720fc2d07e2ae6041a6e3e919563ab",
+        "joint-strict-3010-b2/strict-3010-b2.identities.tsv": "f0ff2afa1c8384487356d8913e7aaab8aa625da4f685c7d51f8afb3b1db2e6f8",
+        "joint-strict-3010-b2/strict-3010-b2.json": "e81d1ce91d2eb2edaca108230092add1881c4a3d34be12902c3570f1357b0304",
+        "joint-strict-3010-b2/strict-3010-b2.load.json": "a46612fd346f3f0601f5b8f8a3274dc928a6b09edd16817b662ca52b50d97014",
+        "joint-strict-3010-b2/strict-3010-b2.upstream.tsv": "ba1d4fd657eeb5ccb418d8505fa8a060100ce717a9750a7fb6c36290adb32d04"
+      }
+    }
+  ]
+}

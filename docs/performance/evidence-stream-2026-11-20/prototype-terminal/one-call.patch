@@ -1,0 +1,118 @@
+--- a/evidence.sql
++++ b/evidence.sql
+@@ -10,3 +10,27 @@
+  ), UNIQUE(attempt_id,revision)
+ );
+ ALTER TABLE compact.outbox ADD FOREIGN KEY(event_id) REFERENCES compact.evidence(event_id);
++
++CREATE FUNCTION compact.settle_with_evidence(
++  rs uuid[], ats uuid[], firsts uuid[], finals uuid[], ins int[], cached int[], outs int[], reasoning int[],
++  signer_key text, final_revisions smallint[], final_bodies text[], event_ids uuid[], event_requests uuid[], event_revisions smallint[]
++) RETURNS int LANGUAGE plpgsql SET search_path=pg_catalog,compact AS $fn$
++DECLARE n integer;
++BEGIN
++  IF cardinality(rs) IS DISTINCT FROM cardinality(final_revisions) OR cardinality(rs) IS DISTINCT FROM cardinality(final_bodies)
++    OR cardinality(event_ids) IS DISTINCT FROM cardinality(event_requests)
++    OR cardinality(event_ids) IS DISTINCT FROM cardinality(event_revisions)
++    THEN RAISE EXCEPTION 'invalid evidence batch'; END IF;
++  n := cardinality(compact.settle_batch(rs,ats,firsts,finals,ins,cached,outs,reasoning));
++  IF n IS DISTINCT FROM cardinality(rs) THEN RAISE EXCEPTION 'terminal identity already applied'; END IF;
++  INSERT INTO compact.evidence(event_id,attempt_id,revision,signer,signed_body)
++    SELECT i.id,i.attempt,i.rev,signer_key,i.body::jsonb
++      FROM unnest(finals,ats,final_revisions,final_bodies) i(id,attempt,rev,body);
++  GET DIAGNOSTICS n = ROW_COUNT;
++  IF n IS DISTINCT FROM cardinality(rs) THEN RAISE EXCEPTION 'incomplete terminal evidence'; END IF;
++  INSERT INTO compact.outbox(event_id,request_id,revision)
++    SELECT i.id,i.request,i.rev FROM unnest(event_ids,event_requests,event_revisions) i(id,request,rev);
++  GET DIAGNOSTICS n = ROW_COUNT;
++  IF n IS DISTINCT FROM cardinality(event_ids) THEN RAISE EXCEPTION 'incomplete terminal outbox'; END IF;
++  RETURN cardinality(rs);
++END $fn$;
+--- a/public.mjs
++++ b/public.mjs
+@@ -65,14 +65,14 @@
+  assert.equal(seen.length,es.length);
+ }
+ async function settle(batch){
+- return db.begin(async tx=>{
+-  const fresh=await settleMoney(tx,batch);assert.equal(fresh.length,batch.length);
+-  await insertFacts(tx,batch.map(x=>x.events.at(-1)));
+-  const es=batch.flatMap(x=>x.events.map(e=>[x.id,e]));
+-  const written=await tx`INSERT INTO compact.outbox(event_id,request_id,revision)
+-   SELECT i.event,i.id,i.rev FROM unnest(${es.map(([,e])=>e.event_id)}::uuid[],${es.map(([id])=>id)}::uuid[],${es.map(([,e])=>Number(e.source_revision))}::smallint[]) i(event,id,rev) RETURNING event_id`;
+-  assert.equal(written.length,es.length);
+- });
++ const es=batch.flatMap(x=>x.events.map(e=>[x.id,e]));
++ const [written]=await db`SELECT compact.settle_with_evidence(
++   ${batch.map(x=>x.id)}::uuid[],${batch.map(x=>x.attempt)}::uuid[],${batch.map(x=>x.first)}::uuid[],${batch.map(x=>x.final)}::uuid[],
++   ${batch.map(x=>x.input)}::int[],${batch.map(x=>x.cached)}::int[],${batch.map(x=>x.output)}::int[],${batch.map(x=>x.reasoning)}::int[],
++   ${adapter.publicKey}::text,${batch.map(x=>Number(x.events.at(-1).source_revision))}::smallint[],${batch.map(x=>JSON.stringify(x.events.at(-1)))}::text[],
++   ${es.map(([,e])=>e.event_id)}::uuid[],${es.map(([id])=>id)}::uuid[],${es.map(([,e])=>Number(e.source_revision))}::smallint[]
++ ) AS requests`;
++ assert.equal(written.requests,batch.length);
+ }
+ const batchMax=128,collectionMs=8,stages=2;
+ function shard(){
+@@ -112,6 +112,11 @@
+     await db.unsafe(await Bun.file(join(dir,"model.sql")).text());
+     await db.unsafe(await Bun.file(join(dir,"evidence.sql")).text());
+     await db`INSERT INTO compact.signer VALUES (${adapter.publicKey})`;
++    if(mode==="paced"){
++      const connection=await db.reserve();
++      try{await connection.unsafe(await Bun.file(join(dir,"check-settle-atomic.sql")).text());}
++      finally{await connection.release();}
++    }
+     const settings=async conn=>(await conn`SELECT version(),current_setting('synchronous_commit') commit,
+       current_setting('fsync') fsync,current_setting('full_page_writes') fpw,pg_is_in_recovery() recovery`)[0];
+     const primarySettings=await settings(db),standbySettings=await settings(rd);
+@@ -252,7 +257,7 @@
+  const hash=async f=>new Bun.CryptoHasher("sha256").update(await Bun.file(f).bytes()).digest("hex");
+  const files=[".stages.tsv",".identities.tsv",".events.tsv",".http.tsv",".upstream.tsv",".ack.tsv"];
+  const target=rate===301?300:rate===1001?1000:(rate===3001||rate===3010)?3000:null;
+- const sourceFiles=["pool.mjs","lane.mjs","model.sql","evidence.sql","public.mjs","adapter.mjs","common.mjs","actors.mjs","artifact-identity.json","signed-release.json","public-fixture-policy.json","provenance/host-progress-complete.patch","provenance/adapter-1.9.2-source.patch"];
++ const sourceFiles=["pool.mjs","lane.mjs","model.sql","evidence.sql","public.mjs","adapter.mjs","common.mjs","actors.mjs","artifact-identity.json","signed-release.json","public-fixture-policy.json","provenance/host-progress-complete.patch","provenance/adapter-1.9.2-source.patch","check-settle-atomic.sql"];
+  result={scope:"isolated loopback progressive Chat SSE prototype; distinct from the deployed gateway",createdAt:new Date().toISOString(),hardware:{cpus:cpus().length,model:cpus()[0]?.model,bun:Bun.version},configuration:{poolSize,transportLimit,mode,rate,seconds,count,driverLimit:load.driverLimit,inflightLimit:8192,executionLimit,pluginMaxAttempts:512,collectionMs,batchMax,stages,wallets:1000,supplierCells:16,clientClock:"same-host Date.now() in milliseconds",primarySettings,standbySettings,replication},artifacts:adapter.artifacts,
+   accounting:{partialWitnessBeforeFirstContent:barriers,earlyFirstContentBeforeProviderDone:early,minPositiveLeadMs:minLead,eventCount,startEpochMs:start,endEpochMs:end,offers:count,arrived:index.size,httpValid:load.valid,provider,dbRows:financial.length,dbMatched,doubleAck,ackRows,complete:complete.length,inWindow:byWindow,completeRps:byWindow/seconds,includingDrainRps:complete.length*1000/Math.max(drained-start,seconds*1000),deadlineMissesVs5s:complete.filter(x=>x.complete-x.sched>5000).length,targetRps:target,withinTarget:target!==null&&honest&&byWindow>=seconds*target&&segment("sched","complete")[0.99]<=1500,loadShed:load.shed,loadPeak:load.peak,serverPeak:peak,drainMs:Math.max(0,drained-end),badWallets,badCells,orderFailures,duplicateObs,invalidAuth,accounted:honest},
+   plugin:{...adapter.counts,independentConsumerVerified:consumer.verified,snapshot:adapter.snapshot()},pricingCalibration:{uncached:1,cached:4,output:2,customer:100,supplier:21,rolledBack:true},
+--- /dev/null
++++ b/check-settle-atomic.sql
+@@ -0,0 +1,39 @@
++BEGIN;
++DO $$
++<<probe>>
++DECLARE
++  request_id uuid:=gen_random_uuid();
++  attempt uuid:=gen_random_uuid();
++  first_event uuid:=gen_random_uuid();
++  final_event uuid:=gen_random_uuid();
++  missing_event uuid:=gen_random_uuid();
++  signer_key text:='isolated-transaction-check';
++  body jsonb;
++  common jsonb;
++  done int;
++BEGIN
++  INSERT INTO compact.signer VALUES(signer_key);
++  PERFORM compact.grant_batch(ARRAY[request_id],ARRAY[attempt],ARRAY[gen_random_uuid()],ARRAY[1002]);
++  common:=jsonb_build_object('attempt_id',attempt,'signature','transaction-test-only','usage',jsonb_build_object(),'origin_identity','transaction-test','origin_incarnation',gen_random_uuid(),'origin_session_id',gen_random_uuid());
++  INSERT INTO compact.evidence VALUES(first_event,attempt,1,signer_key,common||jsonb_build_object('event_id',first_event,'source_revision','1'));
++  body:=common||jsonb_build_object('event_id',final_event,'source_revision','2');
++  BEGIN
++    PERFORM compact.settle_with_evidence(ARRAY[request_id],ARRAY[attempt],ARRAY[first_event],ARRAY[final_event],ARRAY[7],ARRAY[3],ARRAY[5],ARRAY[2],signer_key,ARRAY[2]::smallint[],ARRAY[body::text],ARRAY[missing_event,final_event],ARRAY[request_id,request_id],ARRAY[1,2]::smallint[]);
++    RAISE EXCEPTION 'expected missing evidence to reject the whole terminal statement';
++  EXCEPTION WHEN foreign_key_violation THEN NULL;
++  END;
++  IF EXISTS(SELECT FROM compact.terminal t WHERE t.first_event=probe.first_event)
++    OR EXISTS(SELECT FROM compact.evidence v WHERE v.event_id=final_event)
++    OR EXISTS(SELECT FROM compact.outbox o WHERE o.event_id IN (first_event,final_event))
++    OR NOT EXISTS(SELECT FROM compact.wallet w WHERE w.id=1002 AND (w.spent,w.reserved)=(0,100))
++    OR NOT EXISTS(SELECT FROM compact.evidence v WHERE v.event_id=first_event) THEN
++      RAISE EXCEPTION 'rollback changed previous grant/evidence or leaked a terminal mutation';
++  END IF;
++  done:=compact.settle_with_evidence(ARRAY[request_id],ARRAY[attempt],ARRAY[first_event],ARRAY[final_event],ARRAY[7],ARRAY[3],ARRAY[5],ARRAY[2],signer_key,ARRAY[2]::smallint[],ARRAY[body::text],ARRAY[first_event,final_event],ARRAY[request_id,request_id],ARRAY[1,2]::smallint[]);
++  IF done<>1 OR NOT EXISTS(SELECT FROM compact.terminal t WHERE t.first_event=probe.first_event AND t.final_event=probe.final_event AND t.customer_atoms=100 AND t.supplier_atoms=59)
++    OR (SELECT count(*) FROM compact.posting pp WHERE pp.request_id=probe.request_id)<>4
++    OR (SELECT count(*) FROM compact.outbox o WHERE o.event_id IN (first_event,final_event))<>2 THEN
++      RAISE EXCEPTION 'unexpected successful terminal effects';
++  END IF;
++END $$;
++ROLLBACK;
