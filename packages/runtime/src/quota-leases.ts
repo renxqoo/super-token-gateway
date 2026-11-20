@@ -1,6 +1,5 @@
-import { GatewayError } from "@gateway/contracts";
-import { Limits } from "./limits.ts";
 import { sha256 } from "./crypto.ts";
+import { createQuotaBatch } from "./quota-batches.ts";
 export const quotaLeaseTiming = Object.freeze({
   draftMs: 30000,
   liveMs: 30000,
@@ -50,6 +49,7 @@ local record=raw and cjson.decode(raw) or nil
 local function save() redis.call('SET',KEYS[1],cjson.encode(record),'PXAT',record.deadline_ms+30000) end
 local function reply()
  record.remaining_ms=math.max(0,(record.live_until or 0)-now)
+ record.operations=nil
  return cjson.encode(record)
 end
 redis.call('ZREMRANGEBYSCORE',KEYS[2],'-inf',now)
@@ -122,8 +122,8 @@ export function createQuotaLeases(options: {
     !/^[A-Za-z0-9_-]{1,80}$/.test(options.generation)
   )
     throw new Error("Invalid quota generation");
-  const shards = options.urls.map(
-    (url) => new Limits(url, options.namespace, options.timeoutMs ?? 1000),
+  const shards = options.urls.map((url) =>
+    createQuotaBatch(url, options.namespace, options.timeoutMs ?? 1000, script),
   );
   if (shards.length < 1 || shards.length > 8) throw new Error("Invalid quota shards");
   function keys(
@@ -170,22 +170,13 @@ export function createQuotaLeases(options: {
     );
   async function call(action: string, d: QuotaDescriptor, input: Record<string, unknown> = {}) {
     const started = performance.now();
-    const result = await shards[d.shard]!.command("EVAL", [
-      script,
-      "4",
-      ...keys(d),
+    const result = await shards[d.shard]!.call(
+      keys(d),
       action,
       JSON.stringify({ ...d, identity: identity(d), ...input }),
-    ]).catch((error: unknown) => {
-      if (error instanceof GatewayError && (error.cause as Error)?.message === "ERR QUOTA_LIMIT")
-        throw new GatewayError(
-          429,
-          "rate_limited",
-          "Request rate, token budget or concurrency limit reached",
-        );
-      throw error;
-    });
-    const r = JSON.parse(String(result)) as QuotaDescriptor;
+      started,
+    );
+    const r = JSON.parse(result) as QuotaDescriptor;
     const elapsed = performance.now() - started;
     const proofDeadline =
       performance.now() + Math.max(0, r.remaining_ms - elapsed - quotaLeaseTiming.safetyMs);

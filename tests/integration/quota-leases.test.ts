@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import { RedisClient } from "bun";
+import { Limits } from "@gateway/runtime";
 import { createQuotaLeases } from "@gateway/runtime/quota-leases";
 import { sha256 } from "@gateway/runtime/crypto";
 import { appendFile } from "node:fs/promises";
+import { createNativeFixture } from "../support/native-fixture.ts";
 async function withQuota(
   run: (
     quota: ReturnType<typeof createQuotaLeases>,
@@ -150,3 +152,77 @@ test("a quota limit reply is a 429 rate limit and does not drop other commands s
       });
     }
   }));
+
+test("concurrent quota acquisition amortizes Redis script submissions while preserving lease accounting", async () => {
+  const fixture = await createNativeFixture();
+  try {
+    const redis = await fixture.startRedis("quota-batch");
+    const quota = createQuotaLeases({
+      urls: [redis.url],
+      namespace: "quota-batch",
+      generation: "g1",
+    });
+    try {
+      const command = input();
+      const scope = { ...command.scope, rpm: 128, tpm: 20000, concurrency: 128 };
+      const leases = await Promise.all(
+        Array.from({ length: 80 }, () =>
+          quota.acquire({ ...command, scope, command_id: crypto.randomUUID() }),
+        ),
+      );
+      expect(new Set(leases.map(({ descriptor }) => descriptor.lease_id)).size).toBe(80);
+      const stats = await redis.command("INFO", "commandstats");
+      const scripts = Array.from(
+        stats.matchAll(/^cmdstat_eval(?:sha)?:calls=(\d+)/gm),
+        ([, count]) => Number(count),
+      ).reduce((total, count) => total + count, 0);
+      expect(scripts).toBeGreaterThan(0);
+      expect(scripts).toBeLessThanOrEqual(8);
+      const keys = (await redis.command("KEYS", "quota-batch:*:rpm")).split(",");
+      expect(keys).toHaveLength(1);
+      expect(await redis.command("ZCARD", keys[0]!)).toBe("80");
+      const pending = quota.acquire({ ...command, scope, command_id: crypto.randomUUID() });
+      quota.close();
+      await expect(pending).rejects.toMatchObject({ status: 503, code: "rate_limit_unavailable" });
+      expect(await redis.command("ZCARD", keys[0]!)).toBe("80");
+    } finally {
+      quota.close();
+    }
+    const shortDeadline = createQuotaLeases({
+      urls: [redis.url],
+      namespace: "quota-deadline",
+      generation: "g1",
+      timeoutMs: 1,
+    });
+    try {
+      const expired = await Promise.allSettled([
+        shortDeadline.acquire(input()),
+        shortDeadline.acquire(input()),
+      ]);
+      for (const item of expired)
+        expect(item).toMatchObject({
+          status: "rejected",
+          reason: { status: 503, code: "rate_limit_unavailable" },
+        });
+      await Bun.sleep(15);
+      expect(await redis.command("KEYS", "quota-deadline:*")).toBe("");
+    } finally {
+      shortDeadline.close();
+    }
+    const transport = new Limits(redis.url, "quota-deadline");
+    try {
+      let prepared = 0;
+      const reply = await transport.command("EVAL", () => {
+        if (++prepared !== 1) return;
+        return ["return redis.call('SET', KEYS[1], 'late')", "1", "quota-deadline:script"];
+      });
+      expect(prepared).toBe(2);
+      expect(reply).toBeUndefined();
+      expect(await redis.command("EXISTS", "quota-deadline:script")).toBe("0");
+    } finally {
+      transport.close();
+    }
+  } finally {
+    await fixture.close();
+  }
+}, 10000);

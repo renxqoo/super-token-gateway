@@ -84,7 +84,10 @@ export class Limits {
       enableOfflineQueue: false,
     });
   }
-  async command(command: string, args: string[] = []): Promise<unknown> {
+  async command(
+    command: string,
+    args: string[] | (() => string[] | undefined) = [],
+  ): Promise<unknown> {
     if (this.closed)
       throw new GatewayError(503, "rate_limit_unavailable", "Admission is shutting down");
     const client = this.redis;
@@ -97,13 +100,16 @@ export class Limits {
               this.connecting = { client, promise: client.connect() };
             await this.connecting.promise;
           }
-          if (command !== "EVAL") return client.send(command, args);
-          const digest = new Bun.CryptoHasher("sha1").update(args[0]!).digest("hex");
+          const initial = typeof args === "function" ? args() : args;
+          if (!initial) return;
+          if (command !== "EVAL") return client.send(command, initial);
+          const digest = new Bun.CryptoHasher("sha1").update(initial[0]!).digest("hex");
           try {
-            return await client.send("EVALSHA", [digest, ...args.slice(1)]);
+            return await client.send("EVALSHA", [digest, ...initial.slice(1)]);
           } catch (error) {
             if (!(error instanceof Error) || !/^NOSCRIPT\b/.test(error.message)) throw error;
-            return client.send(command, args);
+            const fallback = typeof args === "function" ? args() : initial;
+            if (fallback) return client.send(command, fallback);
           }
         })(),
         new Promise<never>((_, reject) => {
