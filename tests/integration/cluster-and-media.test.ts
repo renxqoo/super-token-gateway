@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SQL } from "bun";
+import { ClusterCoordinator } from "@gateway/runtime";
 import { createDatabase, migrate } from "@gateway/ledger";
 import type { WasmRuntimeExecutor } from "@gateway/plugin-engine";
 import { createGatewayRuntime, type GatewayConfig } from "@gateway/gateway";
@@ -41,12 +43,12 @@ async function findFreePort(): Promise<number> {
   });
 }
 
-async function startEphemeralRedis(): Promise<string> {
+async function startEphemeralRedis(port?: number): Promise<string> {
   const redisBin =
     process.env.DURABILITY_REDIS_SERVER ??
     new URL("../../.local/toolchain/redis74/bin/redis-server", import.meta.url).pathname;
-  const port = await findFreePort();
-  redisDir = await mkdtemp(join(tmpdir(), "stg-redis-test-"));
+  port ??= await findFreePort();
+  redisDir ??= await mkdtemp(join(tmpdir(), "stg-redis-test-"));
   redisProc = spawn(
     redisBin,
     [
@@ -66,16 +68,28 @@ async function startEphemeralRedis(): Promise<string> {
   const url = `redis://127.0.0.1:${port}`;
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
+    const client = new Bun.RedisClient(url, { connectionTimeout: 300, autoReconnect: false });
     try {
-      const client = new Bun.RedisClient(url, { connectionTimeout: 300, autoReconnect: false });
       const pong = await client.send("PING", []);
-      client.close();
       if (pong === "PONG") return url;
     } catch {
       await Bun.sleep(50);
+    } finally {
+      client.close();
     }
   }
   throw new Error("Ephemeral Redis did not start in time");
+}
+
+async function waitForRedisState(
+  expected: boolean,
+  ...coordinators: ClusterCoordinator[]
+): Promise<void> {
+  const deadline = performance.now() + 5000;
+  while (coordinators.some((node) => node.isRedisConnected() !== expected)) {
+    if (performance.now() >= deadline) throw new Error("Nodes did not reach expected Redis state");
+    await Bun.sleep(25);
+  }
 }
 
 beforeAll(async () => {
@@ -355,6 +369,31 @@ test("Redis cluster syncs rate limits, circuit breaker OPEN state, and config ep
     expect(r6.status).toBe(429);
     const r6Json = (await r6.json()) as { error: { code: string } };
     expect(r6Json.error.code).toBe("rate_limit_rpm");
+
+    const active = await nodeA.cluster.acquireRateLimit(
+      "outage",
+      {
+        rpm: 100,
+        tpm: 100,
+        concurrency: 1,
+      },
+      1,
+    );
+    if (!active.ok) throw new Error("Could not acquire the permit before testing the outage");
+    const redisExited = once(redisProc!, "exit");
+    redisProc!.kill("SIGTERM");
+    await redisExited;
+    await waitForRedisState(false, nodeA.cluster, nodeB.cluster);
+    expect(active.signal?.aborted).toBe(true);
+    expect((await nodeA.publicApp.request("/readyz")).status).toBe(503);
+    const unavailable = await callNode(nodeB);
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toMatchObject({ error: { code: "rate_limit_unavailable" } });
+
+    await startEphemeralRedis(Number(new URL(redisUrl).port));
+    await waitForRedisState(true, nodeA.cluster, nodeB.cluster);
+    expect((await nodeB.publicApp.request("/readyz")).status).toBe(200);
+    expect((await callNode(nodeA)).status).toBe(200);
   } finally {
     await nodeA.close();
     await nodeB.close();
@@ -363,7 +402,7 @@ test("Redis cluster syncs rate limits, circuit breaker OPEN state, and config ep
   }
 });
 
-test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcriptions, images/edits), traceparent, metrics histograms, Zod validation, and paginated internal queries", async () => {
+test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcriptions, images/edits), traceparent, paginated internal queries, and bounded multipart fingerprints", async () => {
   let lastUpstreamTraceparent: string | null = null;
   let lastUpstreamPrompt = "";
   const mock = createMockApp("media-ctrl");
@@ -670,6 +709,18 @@ test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcrip
       }),
     );
     expect(editResp.status).toBe(200);
+    const large = new FormData();
+    large.append("model", "whisper-1");
+    large.append("file", new File(["short"], "voice.wav", { type: "audio/wav" }));
+    large.append("prompt", "x".repeat(2 * 1024 * 1024));
+    const tooLarge = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}` },
+        body: large,
+      }),
+    );
+    expect(tooLarge.status).toBe(413);
 
     const metricsRes = await runtime.publicApp.fetch(new Request("http://gw.local/metrics"));
     const metricsTxt = await metricsRes.text();
@@ -685,6 +736,22 @@ test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcrip
     );
     expect(chargesList.total).toBe(5);
     expect((chargesList.items as unknown[]).length).toBe(5);
+    const transcribeWithKey = (bytes: string) => {
+      const fileForm = new FormData();
+      fileForm.append("model", "whisper-1");
+      fileForm.append("file", new File([bytes], "voice.wav", { type: "audio/wav" }));
+      return runtime.publicApp.fetch(
+        new Request("http://gw.local/v1/audio/transcriptions", {
+          method: "POST",
+          headers: { authorization: `Bearer ${apiKey}`, "idempotency-key": "same-file-name" },
+          body: fileForm,
+        }),
+      );
+    };
+    expect((await transcribeWithKey("voice A")).status).toBe(200);
+    const differentFile = await transcribeWithKey("voice B");
+    expect(differentFile.status).toBe(409);
+    expect(await differentFile.json()).toMatchObject({ error: { code: "idempotency_conflict" } });
 
     const { data: reqDetail } = await internalCall(
       runtime.internalApp,
@@ -715,3 +782,31 @@ test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcrip
     await mockServer.stop(true);
   }
 });
+
+test.each([60_000, 90])(
+  "a live Redis concurrency permit with %i ms TTL remains visible to another Gateway",
+  async (leaseMs) => {
+    const namespace = `concurrency-${crypto.randomUUID()}`;
+    const nodeA = new ClusterCoordinator({ redisUrl, namespace });
+    const nodeB = new ClusterCoordinator({ redisUrl, namespace });
+    const limits = { rpm: 100, tpm: 100, concurrency: 1 };
+    try {
+      await nodeA.start();
+      await nodeB.start();
+      const first = await nodeA.acquireRateLimit("active-project", limits, 1, leaseMs);
+      if (!first.ok) throw new Error("First concurrency permit rejected");
+      try {
+        await Bun.sleep(150);
+        expect(await nodeB.acquireRateLimit("active-project", limits, 1, leaseMs)).toEqual({
+          ok: false,
+          reason: "concurrency",
+        });
+      } finally {
+        first.release();
+      }
+    } finally {
+      await nodeB.close();
+      await nodeA.close();
+    }
+  },
+);

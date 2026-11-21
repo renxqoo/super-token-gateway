@@ -1,0 +1,123 @@
+groups:
+  - name: stg-production
+    rules:
+      - alert: STGInstanceScrapeFailed
+        expr: up{job=~"stg-gateway|stg-worker"} == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Gateway or Worker metrics endpoint is unreachable
+      - alert: STGGatewayUnavailable
+        expr: max by (stg_cluster) (gateway_ready{job="stg-gateway"}) == 0 or (max by (stg_cluster) (up{job="stg-gateway"}) * 0 unless max by (stg_cluster) (gateway_ready{job="stg-gateway"}))
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: No ready Gateway for the ledger cluster
+      - alert: STGRedisUnavailable
+        expr: gateway_cluster_redis_connected == 0 and gateway_cluster_redis_required == 1
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: Shared quota service unavailable
+      - alert: STGSnapshotsStale
+        expr: time() - gateway_snapshot_verified_timestamp_seconds > 30
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: Gateway configuration snapshot has not been verified
+      - alert: STGLedgerCommitFailure
+        expr: increase(gateway_ledger_commit_failures_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Gateway could not confirm one or more settlements
+      - alert: STGLeaseRenewalFailure
+        expr: increase(gateway_lease_renewal_failures_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: PostgreSQL lease renewal failed
+      - alert: STGAdminAuditFailure
+        expr: increase(gateway_admin_audit_failures_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A management audit event could not be persisted
+      - alert: STGAdminAuditIncomplete
+        expr: time() - (stg_worker_admin_audit_pending_timestamp_seconds > 0) > 120 and stg_worker_leader == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: A management operation has no audit outcome
+      - alert: STGGatewayErrors
+        expr: |
+          (
+            sum by (stg_cluster) (rate(gateway_http_requests_total{status_class="5xx"}[5m]))
+            / sum by (stg_cluster) (rate(gateway_http_requests_total[5m]))
+          ) > 0.02
+          and on (stg_cluster) sum by (stg_cluster) (increase(gateway_http_requests_total[5m])) >= 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Gateway completion error ratio exceeds 2 percent
+      - alert: STGGatewayLatency
+        expr: histogram_quantile(0.99, sum by (stg_cluster, le) (rate(gateway_request_duration_ms_bucket[5m]))) > 2000 and on (stg_cluster) sum by (stg_cluster) (increase(gateway_request_duration_ms_count[5m])) >= 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Gateway request P99 exceeds 2 seconds
+      - alert: STGWorkerLeaderCount
+        expr: (sum by (stg_cluster) (stg_worker_leader{job="stg-worker"}) or max by (stg_cluster) (up{job="stg-worker"}) * 0) != 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Ledger cluster should have exactly one Worker leader
+      - alert: STGWorkerSweepStale
+        expr: time() - stg_worker_last_successful_sweep_timestamp_seconds > 30 and stg_worker_leader == 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker leader has no recent successful ledger sweep
+      - alert: STGOperationsSampleStale
+        expr: (time() - stg_worker_operations_sample_timestamp_seconds > 60 or stg_worker_leader unless stg_worker_operations_sample_timestamp_seconds) and stg_worker_leader == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker has no recent operations sample
+      - alert: STGExpiredFundsPending
+        expr: time() - min by (job, instance, stg_cluster) ({__name__=~"stg_worker_expired_(hold|wallet_lease|supplier_lease)_timestamp_seconds"} > 0) > 60 and on (job, instance, stg_cluster) stg_worker_leader == 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Expired ledger hold or lease still awaits recovery
+      - alert: STGUnknownFundsOverdue
+        expr: time() - min by (job, instance, stg_cluster) ({__name__=~"stg_worker_(customer|supplier)_unknown_timestamp_seconds"} > 0) > 900 and on (job, instance, stg_cluster) stg_worker_leader == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Unresolved customer or supplier hold exceeds 15 minutes since hold expiry
+      - alert: STGOutboxBacklog
+        expr: time() - (stg_worker_outbox_head_timestamp_seconds > 0) > 120 and stg_worker_outbox_enabled == 1 and stg_worker_leader == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Business webhook outbox consumer has an overdue event
+      - alert: STGOutboxDeliveryFailure
+        expr: increase(stg_worker_outbox_delivery_failures_total[5m]) > 0 and stg_worker_outbox_enabled == 1
+        labels:
+          severity: warning
+        annotations:
+          summary: Business webhook delivery or acknowledgement failed

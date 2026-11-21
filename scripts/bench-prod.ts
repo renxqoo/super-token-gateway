@@ -1,15 +1,23 @@
 import { spawn, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
+import { Agent } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { createDatabase } from "@gateway/ledger";
+import { postJsonKeepAlive } from "./bench-http.ts";
+import { runSseBurst } from "./bench-sse-burst.ts";
 
 const baseDbUrl = process.env.DATABASE_URL;
 if (!baseDbUrl) throw new Error("DATABASE_URL is required");
 
 const isStress = process.argv.includes("--stress");
+const isSseBurstFresh = process.argv.includes("--sse-burst-fresh");
+const isSseBurst = isSseBurstFresh || process.argv.includes("--sse-burst");
 const withRedis = !process.argv.includes("--no-redis");
+if (isSseBurst && !withRedis) throw new Error("--sse-burst requires Redis");
 const durationSec = isStress ? 15 : 5;
 const hotWalletSec = isStress ? 10 : 3;
 const longStreamCount = isStress ? 1000 : 500;
@@ -52,9 +60,33 @@ function runSync(cwd: string, args: string[], env: Record<string, string>): Prom
 }
 
 function getRssMb(pid: number): number {
+  if (process.platform === "linux") {
+    const status = readFileSync(`/proc/${pid}/status`, "utf8");
+    const kb = Number(/^VmRSS:\s+(\d+) kB$/m.exec(status)?.[1]);
+    if (!Number.isFinite(kb)) throw new Error(`RSS unavailable for Gateway PID ${pid}`);
+    return Number((kb / 1024).toFixed(1));
+  }
   const out = spawnSync("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" });
-  const kb = Number(out.stdout.trim());
-  return Number.isFinite(kb) ? Number((kb / 1024).toFixed(1)) : 0;
+  const kb = Number(out.stdout?.trim());
+  if (out.status !== 0 || !Number.isFinite(kb) || kb <= 0) {
+    throw new Error(`RSS unavailable for Gateway PID ${pid}`);
+  }
+  return Number((kb / 1024).toFixed(1));
+}
+
+async function stopProcesses(procs: ReturnType<typeof spawn>[]): Promise<void> {
+  const running = procs.filter(
+    (proc) => proc.pid && proc.exitCode === null && proc.signalCode === null,
+  );
+  const exits = Promise.all(
+    running.map((proc) => new Promise<void>((resolve) => proc.once("exit", () => resolve()))),
+  );
+  for (const proc of running) proc.kill("SIGTERM");
+  await Promise.race([exits, sleep(12_000, undefined, { ref: false })]);
+  for (const proc of running) {
+    if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+  }
+  await exits;
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -72,6 +104,8 @@ targetUrl.pathname = `/${dbName}`;
 
 const adminDb = createDatabase(adminUrl.toString(), 2);
 const procs: ReturnType<typeof spawn>[] = [];
+const agentOptions = { keepAlive: true, maxSockets: 2048, maxFreeSockets: 1024 };
+const agent = new Agent(agentOptions);
 
 try {
   await cp(resolve("dist"), join(tempDir, "dist"), { recursive: true });
@@ -349,10 +383,7 @@ try {
       await db`SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')::bigint::text AS bytes`;
     return BigInt(String(rows[0]!.bytes));
   };
-  const endpoints = [
-    `http://127.0.0.1:${gwPort1}/v1/chat/completions`,
-    `http://127.0.0.1:${gwPort2}/v1/chat/completions`,
-  ];
+  const ports = [gwPort1, gwPort2];
 
   async function runTimedLoad(
     label: string,
@@ -364,6 +395,15 @@ try {
   ) {
     let completed = 0;
     let errors = 0;
+    const sampleErrors: string[] = [];
+    const payload = Buffer.from(
+      JSON.stringify({
+        model,
+        stream,
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 32,
+      }),
+    );
     const latencies: number[] = [];
     const walBefore = await walLsnBytes();
     const rssBefore = getRssMb(gw1.pid!) + getRssMb(gw2.pid!);
@@ -374,25 +414,15 @@ try {
     async function worker() {
       while (performance.now() < stopAt) {
         const idx = cursor++;
-        const url = endpoints[idx % endpoints.length]!;
+        const port = ports[idx % ports.length]!;
         const key = keyPool[idx % keyPool.length]!;
         const t0 = performance.now();
-        try {
-          const res = await fetch(url, {
-            method: "POST",
-            headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-            body: JSON.stringify({
-              model,
-              stream,
-              messages: [{ role: "user", content: "hi" }],
-              max_tokens: 32,
-            }),
-          });
-          const bodyText = await res.text();
-          if (res.status === 200 && (!stream || bodyText.includes("[DONE]"))) completed++;
-          else errors++;
-        } catch {
+        const result = await postJsonKeepAlive(agent, port, key, payload, stream);
+        if (result.ok) completed++;
+        else {
           errors++;
+          if (sampleErrors.length < 5)
+            sampleErrors.push(`${result.status} ${result.errText ?? ""}`);
         }
         latencies.push(performance.now() - t0);
       }
@@ -410,6 +440,7 @@ try {
       concurrency,
       completed,
       errors,
+      ...(sampleErrors.length ? { sample_errors: sampleErrors } : {}),
       elapsed_sec: Number(elapsedSec.toFixed(3)),
       rps: Number((completed / elapsedSec).toFixed(1)),
       p50_ms: percentile(latencies, 0.5),
@@ -431,6 +462,15 @@ try {
   ) {
     let completed = 0;
     let errors = 0;
+    const sampleErrors: string[] = [];
+    const payload = Buffer.from(
+      JSON.stringify({
+        model,
+        stream,
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 32,
+      }),
+    );
     const latencies: number[] = [];
     const walBefore = await walLsnBytes();
     const rssBefore = getRssMb(gw1.pid!) + getRssMb(gw2.pid!);
@@ -441,25 +481,15 @@ try {
       while (true) {
         const idx = cursor++;
         if (idx >= totalRequests) break;
-        const url = endpoints[idx % endpoints.length]!;
+        const port = ports[idx % ports.length]!;
         const key = keyPool[idx % keyPool.length]!;
         const t0 = performance.now();
-        try {
-          const res = await fetch(url, {
-            method: "POST",
-            headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-            body: JSON.stringify({
-              model,
-              stream,
-              messages: [{ role: "user", content: "hi" }],
-              max_tokens: 32,
-            }),
-          });
-          const bodyText = await res.text();
-          if (res.status === 200 && (!stream || bodyText.includes("[DONE]"))) completed++;
-          else errors++;
-        } catch {
+        const result = await postJsonKeepAlive(agent, port, key, payload, stream);
+        if (result.ok) completed++;
+        else {
           errors++;
+          if (sampleErrors.length < 5)
+            sampleErrors.push(`${result.status} ${result.errText ?? ""}`);
         }
         latencies.push(performance.now() - t0);
       }
@@ -477,6 +507,7 @@ try {
       concurrency,
       completed,
       errors,
+      ...(sampleErrors.length ? { sample_errors: sampleErrors } : {}),
       elapsed_sec: Number(elapsedSec.toFixed(3)),
       rps: Number((completed / elapsedSec).toFixed(1)),
       p50_ms: percentile(latencies, 0.5),
@@ -489,58 +520,78 @@ try {
   }
 
   try {
-    await runFixedCountLoad("warmup", "bprod-fast", keys, 32, 200, false);
+    const warmup = await runFixedCountLoad("warmup", "bprod-fast", keys, 32, 200, false);
 
-    const results = [
-      await runTimedLoad(
-        `2node_sustained_${durationSec}s_json_128c`,
-        "bprod-fast",
-        keys,
-        128,
-        durationSec,
-        false,
-      ),
-      await runTimedLoad(
-        `2node_sustained_${durationSec}s_json_256c`,
-        "bprod-fast",
-        keys,
-        256,
-        durationSec,
-        false,
-      ),
-      await runTimedLoad(
-        `2node_sustained_${durationSec}s_sse_128c`,
-        "bprod-fast",
-        keys,
-        128,
-        durationSec,
-        true,
-      ),
-      await runTimedLoad(
-        `2node_hot_wallet_${hotWalletSec}s_128c`,
-        "bprod-fast",
-        [keys[0]!],
-        128,
-        hotWalletSec,
-        false,
-      ),
-      await runFixedCountLoad(
-        `2node_${longStreamCount}_concurrent_${longStreamMs / 1000}s_sse_streams`,
-        "bprod-long",
-        keys,
-        longStreamCount,
-        longStreamCount,
-        true,
-      ),
-      await runFixedCountLoad(
-        "2node_live_failover_503_to_backup_64c",
-        "bprod-failover",
-        keys,
-        64,
-        1000,
-        false,
-      ),
-    ];
+    const redis = isSseBurst
+      ? new Bun.RedisClient(redisUrl!, { connectionTimeout: 300, autoReconnect: false })
+      : undefined;
+    const burstAgent = isSseBurstFresh ? new Agent(agentOptions) : agent;
+    const results = redis
+      ? await runSseBurst({
+          agent: burstAgent,
+          freshOnly: isSseBurstFresh,
+          ports: [gwPort1, gwPort2],
+          keys,
+          db,
+          redis,
+          quotaPattern: "stg_bench:rl:conc:*",
+          mockPort,
+          mockToken: baseEnv.MOCK_CONTROL_TOKEN!,
+          readGatewayRss: () => getRssMb(gw1.pid!) + getRssMb(gw2.pid!),
+        }).finally(() => {
+          redis.close();
+          if (burstAgent !== agent) burstAgent.destroy();
+        })
+      : [
+          await runTimedLoad(
+            `2node_sustained_${durationSec}s_json_128c`,
+            "bprod-fast",
+            keys,
+            128,
+            durationSec,
+            false,
+          ),
+          await runTimedLoad(
+            `2node_sustained_${durationSec}s_json_256c`,
+            "bprod-fast",
+            keys,
+            256,
+            durationSec,
+            false,
+          ),
+          await runTimedLoad(
+            `2node_sustained_${durationSec}s_sse_128c`,
+            "bprod-fast",
+            keys,
+            128,
+            durationSec,
+            true,
+          ),
+          await runTimedLoad(
+            `2node_hot_wallet_${hotWalletSec}s_128c`,
+            "bprod-fast",
+            [keys[0]!],
+            128,
+            hotWalletSec,
+            false,
+          ),
+          await runFixedCountLoad(
+            `2node_${longStreamCount}_concurrent_${longStreamMs / 1000}s_sse_streams`,
+            "bprod-long",
+            keys,
+            longStreamCount,
+            longStreamCount,
+            true,
+          ),
+          await runFixedCountLoad(
+            "2node_live_failover_503_to_backup_64c",
+            "bprod-failover",
+            keys,
+            64,
+            1000,
+            false,
+          ),
+        ];
 
     await Bun.sleep(600);
     const m1 = await (await fetch(`http://127.0.0.1:${gwPort1}/metrics`)).text();
@@ -564,22 +615,37 @@ try {
       WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes')
       ORDER BY name
     `;
-    const totalCharges = Number(
-      (await db`SELECT count(*)::int AS n FROM public.billing_charges`)[0]!.n,
-    );
+    const [charges] = await db`SELECT count(*) AS total, count(DISTINCT request_id) AS unique,
+        count(*) FILTER (WHERE outcome = 'SETTLED') AS settled
+      FROM public.billing_charges`;
+    const totalCharges = Number(charges!.total);
+    const uniqueCharges = Number(charges!.unique);
+    const totalSettledCharges = Number(charges!.settled);
     const audit = await callInternal("GET", "/internal/v1/audit/conservation");
+    const allPhases = [warmup, ...results];
+    const successfulResponses = allPhases.reduce((count, phase) => count + phase.completed, 0);
+    const totalErrors = allPhases.reduce((count, phase) => count + phase.errors, 0);
 
     console.log(
       JSON.stringify(
         {
           bun_version: Bun.version,
-          mode: isStress ? "stress" : "standard",
+          mode: isSseBurstFresh
+            ? "sse-burst-fresh"
+            : isSseBurst
+              ? "sse-burst"
+              : isStress
+                ? "stress"
+                : "standard",
           topology:
             "2x standalone dist/gateway + 1x standalone dist/worker + 1x Redis 7.4 + 1x standalone dist/mock-providers + separate load client + PG 17",
           pg_durability: Object.fromEntries(
             pgSettings.map((r: Record<string, unknown>) => [String(r.name), String(r.setting)]),
           ),
-          total_settled_charges: totalCharges,
+          successful_responses: successfulResponses,
+          total_errors: totalErrors,
+          total_settled_charges: totalSettledCharges,
+          duplicate_request_charges: totalCharges - uniqueCharges,
           active_leases_after_idle: activeLeases,
           results,
           failovers_executed: { node1: failovers1, node2: failovers2 },
@@ -591,8 +657,14 @@ try {
       ),
     );
     if (
+      totalErrors !== 0 ||
+      (isSseBurst && results.some((result) => "passed" in result && !result.passed)) ||
+      totalSettledCharges !== successfulResponses ||
+      totalSettledCharges !== totalCharges ||
+      totalCharges !== uniqueCharges ||
       !audit.ok ||
       audit.open_holds !== 0 ||
+      audit.unknown_holds !== 0 ||
       inFlight1 !== 0 ||
       inFlight2 !== 0 ||
       activeLeases !== 0
@@ -603,14 +675,8 @@ try {
     await db.close();
   }
 } finally {
-  for (const p of procs) {
-    try {
-      p.kill("SIGTERM");
-    } catch {
-      void 0;
-    }
-  }
-  await Bun.sleep(300);
+  agent.destroy();
+  await stopProcesses(procs);
   await adminDb.unsafe(
     `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${dbName}' AND pid <> pg_backend_pid()`,
   );

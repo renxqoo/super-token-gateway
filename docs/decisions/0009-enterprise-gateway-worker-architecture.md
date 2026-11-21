@@ -145,7 +145,7 @@ flowchart LR
 5. **`wallet_leases` + `supplier_leases`**（PG 持久化节点分片租约，打破热点单行锁并保持 `SIGKILL` 零丢账）：
    - `wallet_leases (id PK, node_id, wallet_id FK, currency, lot_allocations jsonb, remaining_atoms NUMERIC(38,0), earliest_lot_expires_at, state CHECK('ACTIVE','CLOSED'), expires_at, created_at, updated_at)`
    - `supplier_leases (id PK, node_id, account_id FK, currency, cell SMALLINT, remaining_atoms NUMERIC(38,0), state CHECK('ACTIVE','CLOSED'), expires_at, created_at, updated_at)`
-   - 自适应激活：同批次达到热度阈值（`count >= 4` 或 2 秒内 `>= 16` 命中）且钱包无冻结/欠款/受限 lot 时，按需从 `wallets`/`wallet_lots` 与 `supplier_cells` 预留 `<= 50%` 可用余量作为 PG 持久化租约；空闲 `250 ms` 或进程优雅 `drain()` 自动归还，节点被 `SIGKILL` 后由 Worker `sweepExpiredLeases` 原子分离未闭 `billing_holds` 并将剩余资金退回 `available_atoms`（已过期 lot 严格计入 `expired_atoms` 永不复活）。
+   - 自适应激活：同批次达到热度阈值（`count >= 4` 或 2 秒内 `>= 16` 命中）且钱包无冻结/欠款/受限 lot 时，按需从 `wallets`/`wallet_lots` 与 `supplier_cells` 预留 `<= 50%` 可用余量作为 PG 持久化租约；空闲 `250 ms` 或进程优雅 `drain()` 自动归还，节点被 `SIGKILL` 后由 Worker `sweepExpiredLeases` 原子分离未闭 `billing_holds` 并将剩余资金退回 `available_atoms`（已过期 lot 严格计入 `expired_atoms` 永不复活）。续约以 PG 返回的有效期为准。回收持有排他租约锁后重新核验到期和开放预扣，遇到已被结算事务锁定的预扣则留到下一轮。
 6. **`billing_charges`** + **`ledger_entries`**（按月分区不可变终态凭证与统一双式分录）：
    - `billing_charges (id PK, request_id UNIQUE, project_id, wallet_id, selected_attempt_id, channel_id, model, operation, currency, billing_price_id, cost_version_id, usage jsonb, usage_digest, customer_atoms, funded_atoms, debt_atoms, refunded_atoms, supplier_cost_atoms, supplier_currency, lot_allocations jsonb, plugin_audit jsonb, charge_policy, outcome, customer_journal_id uuid, supplier_journal_id uuid, created_at)`
    - `ledger_entries (journal_id, ordinal, created_at, side CHECK('CUSTOMER','SUPPLIER'), entity_id, request_id, reference, kind, currency, account, atoms)` — **按 `created_at` 月分区**，不可变触发器 + 事务级 `SUM(atoms)=0` 约束；微批聚合结算时按 `(wallet_id, currency)` 与 `(account_id, currency)` 生成平衡批量凭证并把 `customer_journal_id`/`supplier_journal_id` 双向绑定至每笔 `billing_charges`，保持 100% 审计可追溯性。
@@ -154,13 +154,13 @@ flowchart LR
 
 - `funding_operations (id PK, side, entity_id, kind CHECK('CREDIT','REFUND','ADJUST','SUPPLIER_RECHARGE','SUPPLIER_ADJUST'), external_ref, fingerprint, amount_atoms, currency, payload jsonb, receipt jsonb, created_at)` — `UNIQUE(side, entity_id, kind, external_ref)`
 - `billing_resolutions (id PK, request_id UNIQUE, action CHECK('SETTLE','RELEASE'), billing_price_id, usage jsonb, reason, actor, created_at)`
-- `outbox_events (seq BIGSERIAL PK, event_id UNIQUE, kind, request_id, project_id, payload jsonb, delivered_at, created_at)` + `outbox_consumers (name PK, acked_seq, updated_at)`
+- `outbox_events` 保留单调序号和稳定的 event ID。发布语句在分配序号前持有事务级锁，使可见顺序与序号一致。消费者只能确认本次有效认领的范围，失败后允许重投。升级前已经跳过的事件可用新消费者从保留的事件中重放，并按 event ID 幂等处理。
 
 ### 4.3 自适应分片租约 + 2 ms 微批 9 表 CTE 聚合事务协议（强类型 Bun/TS）
 
 1. **双轨自适应快慢路径（同一账本引擎内，无旧代码）**：
    - **冷钱包 / 授信 / 限模型 Lot / 幂等键请求**：走 2 ms 同钱包微批聚合器（`acquireQueue`），按全局升序 `FOR NO KEY UPDATE` 锁序批量完成 lot 预扣与 `billing_holds` 写入；达到热度条件后在同一事务内无缝签发 `wallet_leases` + `supplier_leases`。
-   - **热钱包租赁快路径（`fastHoldQueue`，并发度 4、单批上限 512）**：先在内存中从活跃租约划拨预扣额度，随后仅执行 **1 条 `INSERT INTO billing_holds`**（零 `wallets`/`wallet_lots`/`supplier_cells` 行锁），且必须落盘确认后才派发上游请求。
+   - **热钱包租赁快路径（`fastHoldQueue`，并发度 4、单批上限 512）**：先在内存中从活跃租约划拨预扣额度，随后在一条集合 SQL 内锁定并校验当前节点持有的活跃租约，再持久化预扣。快路径只锁租约行，失效项回落到普通预扣。收到持久化确认后才派发。
 2. **9 表单一 Data-Modifying CTE 微批结算（`commitQueue`，并发度 2、单批上限 512）**：
    - 严格遵循全局锁序：`1. billing_holds → 2. wallet_leases → 3. supplier_leases → 4. wallets → 5. wallet_lots → 6. upstream_accounts → 7. supplier_cells`，全线使用 **`FOR NO KEY UPDATE`** 避免与并发 `INSERT INTO billing_holds` 外键 `FOR KEY SHARE` 产生锁冲突或死锁。
    - 单条 SQL 9 表 CTE 原子完成 `wallet_leases`、`supplier_leases`、`wallets`、`wallet_lots`、`supplier_cells`、`billing_holds` 更新与 `billing_charges`、`ledger_entries`（受 PG 平衡/不可变触发器硬守卫）、`outbox_events` 批量插入，单笔 PG WAL 降至 **3.4–3.7 KB**。
@@ -179,6 +179,12 @@ flowchart LR
 - **保留原生 `Bun.SQL` 的场景**：
   1. **微批集合热路径**：`fastHoldQueue` / `acquireQueue` / 9 表单 CTE `commitQueue` 批量 `UPDATE/INSERT ... FROM unnest(...)`、显式升序 `FOR NO KEY UPDATE` 行锁与资金事务（支撑单机 12,930+ RPS 热路径）。
   2. **DDL 与 PG 专有控制**：基线 SQL 迁移（含 `PARTITION BY RANGE`、`DEFERRABLE` 复式记账触发器、`immutable_record` 触发器与 `pg_advisory_lock`）。
+
+### 4.5 账本实现边界
+
+`createLedgerEngine` 统一装配请求预扣、终态结算、钱包、供应商、核账、事件和守恒检查。预扣和结算各自拥有微批队列。租约管理模块拥有节点内注册表和续租、回收、停机生命周期。按持久化预扣类型选择对应的结算事务，事务模块负责锁序、分录、余额与 Outbox 的原子写入。新租约和结算结果在 PostgreSQL 提交后更新本地注册表。钱包退款、调账和收债使用钱包优先的锁序。后台清扫按资金归属使用同一实现。
+
+人工核账对同一预扣先锁定再读取决议。释放或结算复用同一账本事务实现，将资金终态及核账凭证在同一事务中提交。写入凭证失败时保留原预扣供重试。账本确认提交后更新本地租约状态。
 
 ---
 
@@ -294,3 +300,15 @@ flowchart LR
 ## 9. 实施前唯一环境前置项
 
 - **本机 Rust 工具链**：已核查当前环境 `PATH` 与 `.local/toolchain/` 中尚未安装 `rustc` / `cargo`。**阶段 1–3（纯 Bun + PG）可立即启动不受任何阻塞**；阶段 4 编译 `native/plugin-wasmtime` 前需安装固定版本 Rust 工具链（如 `rustup`）或指定本机已有 Rust 路径。
+
+### 已终结客户请求的供应商核账
+
+客户结算可以保留先前派发结果未明的供应商预扣。运营在拿到供应商账单或明确的未消费证据后，使用 `POST /internal/v1/requests/:requestId/attempts/:attemptId/resolve` 处理该次尝试。请求必须提供 `action`、`evidence_ref`、`reason` 和 `actor`。`SETTLE` 还要求实际 `supplier_cost_atoms`。`RELEASE` 使用明确的未消费证据。供应商余额、分录、尝试状态与证据记录在同一事务内落账。相同结论重试返回重放标志，已记录的结论发生冲突时返回 409。
+
+客户人工结算要求明确的供应商金额。新预扣记录该次尝试的供应商价目版本。历史预扣缺少该字段时，操作员提供 `supplier_cost_version_id`，并按实际账单确认价格。Worker 将未取得证据的超时请求置为 `UNKNOWN`。资金清扫和业务 Webhook 使用独立的执行队列，任务运行或排队时合并重复定时触发。逻辑恢复中以已有证据进行人工处置，供应商外部账单接入由各供应商契约决定。
+
+### 跨节点准入与流式排空
+
+配置 Redis 时，所有节点使用 Redis 的时间维护共享配额。活跃请求周期续期，取消或完成时主动提交释放，节点退出后由原租期回收。Redis 暂不可用时，已配置共享配额的 Gateway 退出就绪并拒绝新增调用，启动连接失败后台重试。仅在未配置 Redis 的独立节点使用本地配额。
+
+长流持有 Gateway 并发许可直至结算和资源释放。流交接后适用应用层背压、帧间空闲超时和总时长上限。环境变量 `STREAM_IDLE_TIMEOUT_MS` 默认沿用当前 Attempt 的超时，`STREAM_MAX_DURATION_MS` 默认 300000。停机停止新准入，等待在途流结束，达到排空截止时间后取消并尝试持久化未明状态。

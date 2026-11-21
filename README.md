@@ -4,6 +4,8 @@
 
 完整架构决策、核心账本分片租约设计与渠道插件化架构验收标准见 [ADR 0009](docs/decisions/0009-enterprise-gateway-worker-architecture.md) 与 [ADR 0010](docs/decisions/0010-provider-plugin-architecture.md)。
 
+[OpenAPI](docs/openapi.json) 从当前公开和内部监听路由以及内部请求校验生成。推理响应格式由协议和所选渠道决定。接口变更后运行 `bun run openapi` 更新文件。
+
 ## 目录结构
 
 | 路径                           | 职责                                                                                                                                                                                                                                          |
@@ -38,7 +40,7 @@
    - WASM 插件内置 Bun 隔离 Worker `WebAssembly` 沙箱开箱即用，并自动切换已编译的 Rust `wasmtime` FFI 加速（零 Host Import、单次调用独立零化线性内存防跨租户泄漏、按插件内存硬上限、死循环精准 Fuel/超时强杀、Ed25519 签名校验与 UTF-16 代理对安全流式滑动窗口）。
    - **内置完整可用插件 `pii-guard` v1.0.0**（`native/builtin-pii-guard` 编译为 26 KB 零导入 `.wasm`）：覆盖 `on_request` / `on_response` / `on_stream_chunk` / `on_stream_end` 全生命周期，支持阻断 PEM 私钥泄露与 Prompt 注入，原位脱敏 API Key（`sk-*`）、AWS Key（`AKIA*`）、GitHub Token（`ghp_`/`gho_`/`ghu_`/`ghs_`）、邮箱、中国 18 位身份证（GB 11643-1999 校验码）、中国 11 位手机号、美国 SSN 与 Luhn 有效银行卡号；支持 `/internal/v1/plugins/builtins` 发现、`POST /internal/v1/plugins/builtins/pii-guard/install` 一键安装、`GET /internal/v1/plugins` 列表及 `POST /internal/v1/plugins/:id/test` 沙箱试跑。
    - 外部 HTTP Webhook 风控支持 `HOLD_UNTIL_APPROVED`（零违规字节泄漏）与 `STREAM_AND_CUTOFF`（边推边检异步截断上游并精确按策略结算），支持 `manifest.hooks` 精准过滤、独立熔断与冷却恢复、注册与调用全链路 SSRF/DNS-Pinning 校验及 `FAIL_CLOSED` / `FAIL_OPEN` 降级策略。
-   - 拦截计费策略支持按路由/插件配置 `CHARGE_CUSTOMER`（默认客户承担）或 `PLATFORM_ABSORB`（平台兜底并记入 `system:moderation_loss` 复式凭证），流式与非流式审计明细完整持久化至 `billing_charges.plugin_audit`。
+   - 拦截计费策略支持按路由和插件配置 `CHARGE_CUSTOMER`（默认客户承担）或 `PLATFORM_ABSORB`（平台兜底并记入 `system:moderation_loss` 复式凭证）。流式审计按插件、阶段和结果聚合，包含调用次数及累计延迟。流式和非流式审计都写入 `billing_charges.plugin_audit`。
 
 4. **全动态上游渠道插件化架构（`ADR 0010` — 零厂商硬编码）**：
    - 全仓移除 `channels.kind` 厂商枚举与 `switch (channel.kind)`，统一由 `capability: "PROVIDER"` 插件驱动，按 **渠道锁版本 (`provider_plugin_id`) > DB 同名在线热覆盖 > 内置预设** 3 级 O(1) 内存解析，变更经 `config_epoch` + Redis Pub/Sub 毫秒级同步全集群。
@@ -46,18 +48,18 @@
    - **双形态扩展**：`DECLARATIVE` 声明式插件原生预编译执行（零 WASM 开销，支持路径模板、参数重命名/裁剪/默认/钳位、伪 HTTP 200 错误识别转 SmartRouter 切换、`usage_aliases` 映射与渠道/路由级 `adapter_overrides` 隔离叠加）；`WASM` 可编程渠道插件复用隔离沙箱，覆盖 `adapt_request` / `adapt_response` / 无状态逐帧 `adapt_stream_event`（有界 4 KB `state`）。
    - **安全与试跑边界**：渠道秘钥永不进入 WASM 沙箱，鉴权与动态签名由宿主统一注入（支持 `none`/`bearer`/`header`/`query`/`azure_key`/`aws_sigv4`/`gcp_vertex_oauth`/`hmac_sha256`）；`usage` 产出受 `grants: ["extract_usage"]` 与宿主 `BigInt` 强校验约束；提供 `POST /internal/v1/providers/preview` 在线干跑预览（鉴权头自动脱敏 `<REDACTED>`，零外网调用）。
 
-## 实测性能（Bun 1.4.4 + 真实 PG 17 `fsync=on / synchronous_commit=on / full_page_writes=on`）
+## 本机性能复测
 
-- **单独立 Gateway 进程（`BENCH_SECONDS=8 bun run bench:single`，560,043 笔实结，0 错误，守恒 `ok=true`，空闲退租 `active_leases=0`）**：
-  - 短 Chat JSON（512c / 768c / 1024c）：**9,982 RPS**（P99 69.6 ms） / **11,599 RPS**（P99 92.5 ms） / **13,205 RPS**（P99 107.1 ms，GW CPU 96.4%，RSS 318.9 MB）
-  - 单热点钱包 512 并发打同一钱包：**11,317 RPS**（P99 63.7 ms，0 错误，WAL 3,335 B/笔）
-  - 短流式 SSE（512c，`[DONE]` 前原子落库）：**9,038 RPS**（P99 93.0 ms，0 错误）
-- **双独立 Gateway + Worker + Redis 7.4 生产拓扑（`bun run bench:prod --stress`，385,752 笔实结，0 错误，守恒 `ok=true`）**：
-  - 15s 持续 JSON（256c）：**9,034 RPS**（P99 50.0 ms）；1,000 并发 5s 长 SSE 活流：**1,000/1,000 成功**（RSS 仅增 1.7 MB）；实时 503 故障切换：**1,000/1,000 成功**（64 次跨节点切换）。
+Bun 1.4.4、PostgreSQL 17.11 和 mock 上游。PostgreSQL 启用 `fsync`、`synchronous_commit` 和 `full_page_writes`。两次基准均通过逐请求唯一结算及资金守恒检查。
+
+- 单 Gateway 完成 **618,076 笔**结算，零请求错误。8 秒短 JSON 在 1,024 并发时为 **11,900 RPS**，P99 为 115 ms。短 SSE 在 512 并发时为 **8,473 RPS**，P99 为 83 ms。
+- 双 Gateway、Worker 和 Redis 完成 **622,267 笔**结算，零请求错误。15 秒短 JSON 在 256 并发时为 **14,030 RPS**，P99 为 30 ms。1,000 条 5 秒 SSE 全部完成，渠道 503 切换用例也全部成功。
+
+上述结果来自单主机和合成负载。实测条件与生产验收边界见 [审查报告与重构验收](docs/reviews/2026-11-21-production-readiness-ffdcbc6.md#8-重构后的实现与验收)。
 
 ## 快速开始与部署
 
-需要 Bun **1.4.4** 与 PostgreSQL 17（本地验证支持 `scripts/native-services.ts` 或 `infra/docker-compose.yml`）。
+需要 Bun **1.4.4**、PostgreSQL 17 与 Redis 7.4 的本地工具。没有使用仓库的本地工具目录时，先设置 `PG_TOOLS_DIRECTORY`、`DURABILITY_REDIS_SERVER`，再生成配置。
 
 ```sh
 bun run setup:local
@@ -66,25 +68,29 @@ bun run db:migrate
 bun run dev
 ```
 
-单机一体化启动或集群高可用部署：
+单机和多副本运行方式：
 
 ```sh
-# 构建无需 node_modules 的生产产物
-bun run build
-
 # 可选：构建 Rust wasmtime 沙箱与内置 WASM 插件（需要本地安装 rustc/cargo 与 wasm32-unknown-unknown）
 bun run build:wasmtime
 bun run build:plugins
 
+# 构建无需 node_modules 的发布产物
+bun run build
+
 # 单机模式（Gateway + 内置 Worker）
 bun dist/gateway/main.js --mode=all-in-one
 
-# 集群高可用模式（多无状态 Gateway + 主备 Worker Advisory Lease 选主）
+# 多副本模式（无状态 Gateway 与 Worker Advisory Lock 选主）
 bun dist/gateway/main.js --mode=gateway
 bun dist/worker/main.js
 ```
 
-Docker Compose / Systemd / Caddy 部署模板见 [`infra/`](infra/)。
+Docker Compose 提供单主机验证环境，要求显式设置数据库密码及 Gateway 密钥。Systemd 和 Caddy 是主机内运行模板。生产拓扑需要独立故障域的入口与 Gateway、可写 PostgreSQL 主备切换地址、独立数据库角色及容灾演练。配置共享 Redis 时，Redis 不可用会影响准入和就绪检查。
+
+旧 v4 账本先备份并停写，再运行 `bun run db:migrate` 或独立迁移产物。升级保留历史迁移记录，应用启动检查已应用的校验和。运行时只读副本无法通过就绪探测。跨 schema 版本的发布使用停写窗口。
+
+生产身份与角色配置、监控和主备恢复流程见 [ADR 0011](docs/decisions/0011-production-operations.md)。本机生产演练覆盖实际 PostgreSQL 主备提升、Redis Sentinel 选举与 WAL 指定时间点恢复。
 
 ## 验证与基准
 
@@ -92,11 +98,14 @@ Docker Compose / Systemd / Caddy 部署模板见 [`infra/`](infra/)。
 bun run check            # Bun TypeScript 类型检查
 bun run lint             # oxlint（零告警零错误）
 bun run fmt:check        # 代码格式检查
+bun run openapi:check    # 确认 OpenAPI 与当前路由和内部请求 schema 一致
 bun run test             # 单元测试与跨模块架构约束
 bun run test:integration # 真实 PG 17 / HTTP 集成测试（账本 + 智能路由 + 插件风控 + Worker）
 bun run build            # 打包 dist/ 独立产物
 bun run test:artifact    # 隔离目录端到端产物验收与归档校验
 bun run test:durability  # SIGKILL 强杀预扣回收 + pg_dump/psql 备份恢复耐久校验
+bun run test:production  # 本机隔离的角色、PostgreSQL、Redis Sentinel 和 PITR 演练
+bun run test:alerts      # 本机验证 Prometheus 到 Alertmanager 和 HTTP 接收器
 bun run bench            # 单进程真实 PG 17 (fsync=on) 基准
 bun run bench:single     # 单独立 Gateway 进程极限并发基准（128c-1024c JSON / 512c SSE / 512c 单热点钱包）
 bun run bench:prod       # 双独立 Gateway 进程 + Worker + Redis 7.4 生产拓扑基准（支持 --stress）

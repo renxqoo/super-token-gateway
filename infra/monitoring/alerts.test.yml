@@ -1,0 +1,90 @@
+rule_files:
+  - alerts.yml
+evaluation_interval: 15s
+tests:
+  - name: Gateway outage follows cluster readiness, including missing samples
+    interval: 15s
+    input_series:
+      - series: 'gateway_ready{job="stg-gateway",stg_cluster="degraded",instance="a"}'
+        values: "0+0x8"
+      - series: 'gateway_ready{job="stg-gateway",stg_cluster="degraded",instance="b"}'
+        values: "1+0x8"
+      - series: 'gateway_ready{job="stg-gateway",stg_cluster="outage",instance="a"}'
+        values: "0+0x8"
+      - series: 'up{job="stg-gateway",stg_cluster="missing",instance="a"}'
+        values: "0+0x8"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: STGGatewayUnavailable
+        exp_alerts:
+          - exp_labels: { stg_cluster: outage, severity: critical }
+            exp_annotations: { summary: No ready Gateway for the ledger cluster }
+          - exp_labels: { stg_cluster: missing, severity: critical }
+            exp_annotations: { summary: No ready Gateway for the ledger cluster }
+  - name: Leader count detects missing leaders and split brain
+    interval: 15s
+    input_series:
+      - series: 'stg_worker_leader{job="stg-worker",stg_cluster="healthy",instance="a"}'
+        values: "1+0x8"
+      - series: 'stg_worker_leader{job="stg-worker",stg_cluster="healthy",instance="b"}'
+        values: "0+0x8"
+      - series: 'stg_worker_leader{job="stg-worker",stg_cluster="split",instance="a"}'
+        values: "1+0x8"
+      - series: 'stg_worker_leader{job="stg-worker",stg_cluster="split",instance="b"}'
+        values: "1+0x8"
+      - series: 'up{job="stg-worker",stg_cluster="missing",instance="a"}'
+        values: "0+0x8"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: STGWorkerLeaderCount
+        exp_alerts:
+          - exp_labels: { stg_cluster: missing, severity: critical }
+            exp_annotations: { summary: Ledger cluster should have exactly one Worker leader }
+          - exp_labels: { stg_cluster: split, severity: critical }
+            exp_annotations: { summary: Ledger cluster should have exactly one Worker leader }
+  - name: Old holds aggregate by instance and standby does not duplicate alarms
+    interval: 15s
+    input_series:
+      - series: 'stg_worker_leader{job="stg-worker",stg_cluster="ledger",instance="a"}'
+        values: "1+0x12"
+      - series: 'stg_worker_leader{job="stg-worker",stg_cluster="ledger",instance="b"}'
+        values: "0+0x12"
+      - series: 'stg_worker_expired_hold_timestamp_seconds{job="stg-worker",stg_cluster="ledger",instance="a"}'
+        values: "1+0x12"
+      - series: 'stg_worker_expired_supplier_lease_timestamp_seconds{job="stg-worker",stg_cluster="ledger",instance="a"}'
+        values: "2+0x12"
+      - series: 'stg_worker_expired_hold_timestamp_seconds{job="stg-worker",stg_cluster="ledger",instance="b"}'
+        values: "1+0x12"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: STGExpiredFundsPending
+        exp_alerts:
+          - exp_labels: { job: stg-worker, instance: a, stg_cluster: ledger, severity: critical }
+            exp_annotations: { summary: Expired ledger hold or lease still awaits recovery }
+  - name: Disabled and empty outboxes do not alarm
+    interval: 15s
+    input_series:
+      - series: 'stg_worker_leader{instance="active"}'
+        values: "1+0x16"
+      - series: 'stg_worker_leader{instance="disabled"}'
+        values: "1+0x16"
+      - series: 'stg_worker_leader{instance="empty"}'
+        values: "1+0x16"
+      - series: 'stg_worker_outbox_enabled{instance="active"}'
+        values: "1+0x16"
+      - series: 'stg_worker_outbox_enabled{instance="disabled"}'
+        values: "0+0x16"
+      - series: 'stg_worker_outbox_enabled{instance="empty"}'
+        values: "1+0x16"
+      - series: 'stg_worker_outbox_head_timestamp_seconds{instance="active"}'
+        values: "1+0x16"
+      - series: 'stg_worker_outbox_head_timestamp_seconds{instance="disabled"}'
+        values: "1+0x16"
+      - series: 'stg_worker_outbox_head_timestamp_seconds{instance="empty"}'
+        values: "0+0x16"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: STGOutboxBacklog
+        exp_alerts:
+          - exp_labels: { instance: active, severity: warning }
+            exp_annotations: { summary: Business webhook outbox consumer has an overdue event }

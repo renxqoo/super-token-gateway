@@ -301,13 +301,36 @@ export type ChargeLotAllocation = {
 
 export type SupplierHoldEntry = {
   attempt_id: string;
+  cost_version_id?: string;
   account_id: string;
   channel_id: string;
   currency: string;
   cell: number;
   held_atoms: string;
   state: "HELD" | "RELEASED" | "UNKNOWN" | "SETTLED";
+  resolution?: {
+    action: "RELEASE" | "SETTLE";
+    supplier_cost_atoms: string;
+    evidence_ref: string;
+    reason: string;
+    actor: string;
+  };
 };
+
+export type ResolveSupplierAttemptInput = {
+  request_id: string;
+  attempt_id: string;
+  evidence_ref: string;
+  reason: string;
+  actor: string;
+} & ({ action: "RELEASE" } | { action: "SETTLE"; supplier_cost_atoms: string });
+
+export type ResolveSupplierAttemptResult =
+  | { ok: true; replayed: boolean; state: "RELEASED" | "SETTLED" }
+  | {
+      ok: false;
+      code: "supplier_attempt_not_found" | "supplier_attempt_conflict" | "invalid_supplier_cost";
+    };
 
 export type PluginAuditEntry = {
   plugin_id: string;
@@ -316,6 +339,7 @@ export type PluginAuditEntry = {
   action: PluginAction;
   rule_code?: string;
   latency_us: number;
+  executions?: number;
 };
 
 export type AcquireHoldInput = {
@@ -329,6 +353,7 @@ export type AcquireHoldInput = {
   fingerprint: string;
   customer_atoms: string;
   supplier_account_id: string;
+  supplier_cost_version_id?: string;
   supplier_channel_id: string;
   supplier_currency: string;
   supplier_atoms: string;
@@ -368,6 +393,7 @@ export type SwitchSupplierInput = {
   next_channel_id: string;
   next_currency: string;
   next_supplier_atoms: string;
+  next_supplier_cost_version_id?: string;
   required_customer_atoms?: string;
 };
 
@@ -399,6 +425,7 @@ export type CommitTerminalInput = {
   billing_basis: PriceBasis;
   input_characters?: string;
   supplier_pricing: Pricing;
+  supplier_basis?: PriceBasis;
   supplier_currency: string;
   supplier_cost_atoms_override?: string;
   plugin_audit?: PluginAuditEntry[];
@@ -464,6 +491,7 @@ export type ResolveRequestInput = {
   billing_price_id?: string;
   usage?: Usage;
   supplier_cost_atoms?: string;
+  supplier_cost_version_id?: string;
   reason: string;
   actor: string;
 };
@@ -501,6 +529,7 @@ export type ConservationAudit = {
   unbalanced_journals: number;
   broken_lots: number;
   wallet_mismatches: number;
+  reservation_mismatches: number;
   open_holds: number;
   unknown_holds: number;
 };

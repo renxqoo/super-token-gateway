@@ -1,5 +1,16 @@
 import type { SQL } from "bun";
-import type { HoldLotAllocation, LeaseLotAllocation } from "./types.ts";
+import type { HoldLotAllocation, LeaseLotAllocation, SupplierHoldEntry } from "./types.ts";
+import {
+  computeFreezeReason,
+  flushDirtyLots,
+  flushDirtyWallets,
+  insertJournalLines,
+  postgresState,
+  toLotRow,
+  toWalletRow,
+  type JournalLine,
+  type LotRow,
+} from "./funds.ts";
 
 export type ActiveWalletLease = {
   leaseId: string;
@@ -180,4 +191,190 @@ export async function detachHoldFromLeaseTx(
     detachedSupplierLeaseId,
     detachedSupplierAtoms,
   };
+}
+
+export async function closeWalletLease(
+  db: SQL,
+  leaseId: string,
+  expiredOnly: boolean,
+): Promise<boolean | null> {
+  return db
+    .begin(async (tx) => {
+      const wlRows = await tx`
+          SELECT id, wallet_id, currency, lot_allocations, remaining_atoms::text, state
+          FROM public.wallet_leases
+          WHERE id = ${leaseId}
+            AND state = 'ACTIVE'
+            AND (NOT ${expiredOnly}::boolean OR expires_at <= clock_timestamp())
+          FOR NO KEY UPDATE
+        `;
+      if (!wlRows.length) return false;
+      const wl = wlRows[0]!;
+      const openHolds = await tx`
+          SELECT request_id, held_atoms::text
+          FROM public.billing_holds
+          WHERE wallet_lease_id = ${leaseId} AND state IN ('HELD', 'UNKNOWN')
+          ORDER BY request_id
+          FOR NO KEY UPDATE NOWAIT
+        `;
+      let leaseLots = (wl.lot_allocations ?? []) as LeaseLotAllocation[];
+      let remainingAtoms = BigInt(String(wl.remaining_atoms));
+
+      for (const oh of openHolds) {
+        const amt = BigInt(String(oh.held_atoms));
+        const { carved, remaining, taken } = carveFromLeaseLots(leaseLots, amt);
+        leaseLots = remaining;
+        remainingAtoms -= taken;
+        await tx`
+            UPDATE public.billing_holds
+            SET lot_allocations = ${carved}::jsonb, wallet_lease_id = NULL
+            WHERE request_id = ${oh.request_id}
+          `;
+      }
+
+      const nowMs = Date.now();
+      const wRows = await tx`
+          SELECT id, project_id, currency, policy,
+            available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
+            debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
+            credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
+          FROM public.wallets WHERE id = ${wl.wallet_id} FOR NO KEY UPDATE
+        `;
+      const wallet = toWalletRow(wRows[0]!);
+      const lotIds = [...new Set(leaseLots.map((l) => l.lot_id))].sort();
+      const lotRowsRaw = lotIds.length
+        ? await tx`
+              SELECT id, wallet_id, kind, priority, models, operations, expires_at, created_at,
+                issued_atoms::text, available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text
+              FROM public.wallet_lots WHERE id = ANY(${lotIds}::uuid[]) ORDER BY id FOR NO KEY UPDATE
+            `
+        : [];
+      const lotsById = new Map<string, LotRow>();
+      for (const r of lotRowsRaw) {
+        const l = toLotRow(r);
+        lotsById.set(l.id, l);
+      }
+
+      const journals: JournalLine[] = [];
+      let returnedAvail = 0n;
+      let expiredAmt = 0n;
+      for (const entry of leaseLots) {
+        const amt = BigInt(entry.amount_atoms);
+        if (amt <= 0n) continue;
+        const lot = lotsById.get(entry.lot_id);
+        if (!lot) continue;
+        lot.reserved_atoms -= amt;
+        if (lot.expires_at_ms !== null && lot.expires_at_ms <= nowMs) {
+          lot.expired_atoms += amt;
+          expiredAmt += amt;
+          const jid = crypto.randomUUID();
+          journals.push(
+            {
+              journal_id: jid,
+              ordinal: 0,
+              side: "CUSTOMER",
+              entity_id: wallet.id,
+              request_id: null,
+              reference: `lease_expire:${leaseId}:${lot.id}`,
+              kind: "EXPIRE",
+              currency: wallet.currency,
+              account: `lot:${lot.id}:available`,
+              atoms: -amt,
+            },
+            {
+              journal_id: jid,
+              ordinal: 1,
+              side: "CUSTOMER",
+              entity_id: wallet.id,
+              request_id: null,
+              reference: `lease_expire:${leaseId}:${lot.id}`,
+              kind: "EXPIRE",
+              currency: wallet.currency,
+              account: `lot:${lot.id}:expired`,
+              atoms: amt,
+            },
+          );
+        } else {
+          lot.available_atoms += amt;
+          returnedAvail += amt;
+        }
+        lot.dirty = true;
+      }
+
+      if (remainingAtoms > 0n) {
+        wallet.reserved_atoms -= remainingAtoms;
+        wallet.available_atoms += returnedAvail;
+        wallet.expired_atoms += expiredAmt;
+        wallet.freeze_reason = computeFreezeReason(wallet);
+        wallet.dirty = true;
+      }
+
+      await flushDirtyWallets(tx, [wallet]);
+      await flushDirtyLots(tx, lotsById.values());
+      await insertJournalLines(tx, journals);
+      await tx`
+          UPDATE public.wallet_leases
+          SET state = 'CLOSED', remaining_atoms = 0, lot_allocations = '[]'::jsonb, updated_at = now()
+          WHERE id = ${leaseId}
+        `;
+      return true;
+    })
+    .catch((error: unknown) => {
+      if (postgresState(error) === "55P03") return null;
+      throw error;
+    });
+}
+
+export async function closeSupplierLease(
+  db: SQL,
+  leaseId: string,
+  expiredOnly: boolean,
+): Promise<boolean | null> {
+  return db
+    .begin(async (tx) => {
+      const slRows = await tx`
+          SELECT id, account_id, currency, cell, remaining_atoms::text, state
+          FROM public.supplier_leases
+          WHERE id = ${leaseId}
+            AND state = 'ACTIVE'
+            AND (NOT ${expiredOnly}::boolean OR expires_at <= clock_timestamp())
+          FOR NO KEY UPDATE
+        `;
+      if (!slRows.length) return false;
+      const sl = slRows[0]!;
+      const openHolds = await tx`
+          SELECT request_id, supplier_holds
+          FROM public.billing_holds
+          WHERE supplier_lease_id = ${leaseId} AND state IN ('HELD', 'UNKNOWN')
+          ORDER BY request_id
+          FOR NO KEY UPDATE NOWAIT
+        `;
+      let remainingAtoms = BigInt(String(sl.remaining_atoms));
+      for (const oh of openHolds) {
+        const holds = (oh.supplier_holds ?? []) as SupplierHoldEntry[];
+        const heldSum = holds.reduce((acc, s) => acc + BigInt(s.held_atoms), 0n);
+        remainingAtoms = remainingAtoms >= heldSum ? remainingAtoms - heldSum : 0n;
+        await tx`
+            UPDATE public.billing_holds SET supplier_lease_id = NULL WHERE request_id = ${oh.request_id}
+          `;
+      }
+      if (remainingAtoms > 0n) {
+        await tx`
+            UPDATE public.supplier_cells
+            SET reserved_atoms = reserved_atoms - ${remainingAtoms.toString()}::numeric,
+                revision = revision + 1
+            WHERE account_id = ${sl.account_id} AND currency = ${sl.currency} AND cell = ${Number(sl.cell)}
+          `;
+      }
+      await tx`
+          UPDATE public.supplier_leases
+          SET state = 'CLOSED', remaining_atoms = 0, updated_at = now()
+          WHERE id = ${leaseId}
+        `;
+      return true;
+    })
+    .catch((error: unknown) => {
+      if (postgresState(error) === "55P03") return null;
+      throw error;
+    });
 }

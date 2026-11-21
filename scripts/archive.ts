@@ -1,4 +1,9 @@
-import { createDatabase, exportLedgerArchive, verifyLedgerArchive } from "@gateway/ledger";
+import {
+  assertServiceRole,
+  createDatabase,
+  exportLedgerArchive,
+  verifyLedgerArchive,
+} from "@gateway/ledger";
 
 const command = Bun.argv[2];
 const url = process.env.DATABASE_URL;
@@ -19,6 +24,7 @@ if (command === "export") {
   }
   const db = createDatabase(url, 2);
   try {
+    if (process.env.NODE_ENV === "production") await assertServiceRole(db, "stg_audit");
     const manifestPath = await exportLedgerArchive(db, month, directory);
     console.log(JSON.stringify({ exported: true, manifest: manifestPath }));
   } finally {

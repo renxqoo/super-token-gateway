@@ -18,6 +18,7 @@ export type WorkerRunnerOptions = {
   maintenanceIntervalMs?: number;
   outboxIntervalMs?: number;
   partitionIntervalMs?: number;
+  monitorIntervalMs?: number;
   businessWebhookUrl?: string;
   businessWebhookToken?: string;
   outboxConsumerName?: string;
@@ -34,7 +35,7 @@ function currentAndNextMonths(now = new Date()): [string, string] {
 
 export function createWorkerRunner(options: WorkerRunnerOptions) {
   const db = options.db;
-  const ledger = createLedgerEngine(db, { batchWindowMs: 5, maxBatchSize: 16 });
+  const ledger = createLedgerEngine(db, { enableLeases: false });
   const leaseKey = options.leaseKey ?? 81442599;
   const consumerName = options.outboxConsumerName ?? "business_webhook";
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -44,17 +45,35 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
   let running = false;
   let stopped = false;
   const timers: ReturnType<typeof setInterval>[] = [];
-  let inFlight: Promise<unknown> = Promise.resolve();
+  const lanes = {
+    ledger: Promise.resolve(),
+    outbox: Promise.resolve(),
+    monitoring: Promise.resolve(),
+  };
+  let leadershipCheck: Promise<boolean> | null = null;
+  let lastSuccessfulSweep: string | null = null;
+  let lastSuccessfulDelivery: string | null = null;
+  let lastOperationsSample = 0;
+  let operationsSample: Record<string, number> = {};
+  let deliveryFailures = 0;
 
-  async function ensureLeadership(): Promise<boolean> {
-    if (leaseKey === 0) {
-      hasLeadership = true;
-      return true;
-    }
+  function ensureLeadership(): Promise<boolean> {
+    leadershipCheck ??= checkLeadership().finally(() => {
+      leadershipCheck = null;
+    });
+    return leadershipCheck;
+  }
+
+  async function checkLeadership(): Promise<boolean> {
     if (hasLeadership && reservedConn) {
       try {
-        await reservedConn`SELECT 1`;
-        return true;
+        const [lock] = await reservedConn`SELECT NOT pg_is_in_recovery() AND EXISTS (
+          SELECT FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+            AND objsubid = 1 AND ((classid::bigint << 32) | objid::bigint) = ${leaseKey}
+            AND mode = 'ExclusiveLock' AND granted
+        ) AS held`;
+        if (lock?.held) return true;
+        throw new Error("Worker session no longer owns the ledger lock");
       } catch {
         hasLeadership = false;
         try {
@@ -69,7 +88,9 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
       if (!reservedConn) {
         reservedConn = await db.reserve();
       }
-      const rows = await reservedConn`SELECT pg_try_advisory_lock(${leaseKey}) AS locked`;
+      const rows = await reservedConn`SELECT CASE WHEN NOT pg_is_in_recovery()
+        AND current_setting('transaction_read_only') = 'off'
+        THEN pg_try_advisory_lock(${leaseKey}) ELSE false END AS locked`;
       hasLeadership = Boolean(rows[0]?.locked);
       if (!hasLeadership) {
         reservedConn.release();
@@ -100,7 +121,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
     const wasLeader = hasLeadership;
     hasLeadership = false;
     try {
-      if (wasLeader && leaseKey !== 0) {
+      if (wasLeader) {
         await conn`SELECT pg_advisory_unlock(${leaseKey})`;
       }
     } catch {
@@ -131,9 +152,9 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
     return count;
   }
 
-  async function deliverOutboxBatch(): Promise<number> {
+  async function deliverOutboxBatch(limit = 500): Promise<number> {
     if (!options.businessWebhookUrl) return 0;
-    const batch = await ledger.claimOutboxEvents(consumerName, 100);
+    const batch = await ledger.claimOutboxEvents(consumerName, limit);
     if (batch.events.length === 0) return 0;
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (options.businessWebhookToken) {
@@ -148,9 +169,13 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
       }),
       signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) return 0;
+    await res.body?.cancel().catch(() => undefined);
+    if (!res.ok) throw new Error(`Outbox HTTP delivery failed with status ${res.status}`);
     const lastSeq = batch.events.at(-1)!.seq;
-    await ledger.ackOutboxEvents(consumerName, batch.lease_token, lastSeq);
+    if (!(await ledger.ackOutboxEvents(consumerName, batch.lease_token, lastSeq))) {
+      throw new Error("Outbox acknowledgement no longer owns the claimed batch");
+    }
+    lastSuccessfulDelivery = new Date().toISOString();
     return batch.events.length;
   }
 
@@ -178,6 +203,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
     }
     const swept_holds = await ledger.sweepTimedOutHolds(200);
     const swept_leases = await ledger.sweepExpiredLeases(100);
+    lastSuccessfulSweep = new Date().toISOString();
     const expired_wallets = await ledger.expireAllLots(100);
     const collected_debts = await ledger.collectAllDebts(100);
     const rebalanced_accounts = await rebalanceImbalancedSuppliers();
@@ -195,14 +221,21 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
     };
   }
 
-  function scheduleTask(fn: () => Promise<unknown>, intervalMs: number): void {
+  function scheduleTask(
+    fn: () => Promise<unknown>,
+    intervalMs: number,
+    lane: keyof typeof lanes = "ledger",
+  ): void {
+    let pending = false;
     const timer = setInterval(() => {
-      if (stopped) return;
-      inFlight = inFlight.then(async () => {
-        if (stopped) return;
-        try {
+      if (stopped || pending) return;
+      pending = true;
+      lanes[lane] = lanes[lane]
+        .then(async () => {
+          if (stopped) return;
           await fn();
-        } catch (err) {
+        })
+        .catch((err: unknown) => {
           console.error(
             JSON.stringify({
               service: "worker",
@@ -210,8 +243,10 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
               error: err instanceof Error ? err.message : String(err),
             }),
           );
-        }
-      });
+        })
+        .finally(() => {
+          pending = false;
+        });
     }, intervalMs);
     timers.push(timer);
   }
@@ -219,6 +254,33 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
   return {
     isLeader(): boolean {
       return hasLeadership;
+    },
+
+    status() {
+      return {
+        leader: hasLeadership,
+        last_successful_sweep: lastSuccessfulSweep,
+        last_successful_delivery: lastSuccessfulDelivery,
+      };
+    },
+
+    metrics(): string {
+      const values = {
+        leader: Number(hasLeadership),
+        last_successful_sweep_timestamp_seconds: lastSuccessfulSweep
+          ? Date.parse(lastSuccessfulSweep) / 1000
+          : 0,
+        last_successful_delivery_timestamp_seconds: lastSuccessfulDelivery
+          ? Date.parse(lastSuccessfulDelivery) / 1000
+          : 0,
+        outbox_enabled: Number(Boolean(options.businessWebhookUrl)),
+        outbox_delivery_failures_total: deliveryFailures,
+        operations_sample_timestamp_seconds: lastOperationsSample,
+        ...operationsSample,
+      };
+      return Object.entries(values)
+        .map(([key, value]) => `stg_worker_${key} ${value}\n`)
+        .join("");
     },
 
     runOnce,
@@ -231,12 +293,30 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
       if (leader) {
         await ensurePartitions().catch(() => undefined);
       }
+      if (stopped) return;
       scheduleTask(async () => {
         if (await ensureLeadership()) {
           await ledger.sweepTimedOutHolds(200);
           await ledger.sweepExpiredLeases(100);
+          lastSuccessfulSweep = new Date().toISOString();
         }
       }, options.sweepIntervalMs ?? 2000);
+      scheduleTask(
+        async () => {
+          if (!hasLeadership) return;
+          const monitorConsumer = options.businessWebhookUrl ? consumerName : null;
+          const [row] = await db`SELECT * FROM public.operations_health(${monitorConsumer}::text)`;
+          operationsSample = Object.fromEntries(
+            Object.entries(row ?? {}).map(([key, value]) => [
+              `${key}_timestamp_seconds`,
+              Number(value),
+            ]),
+          );
+          lastOperationsSample = Date.now() / 1000;
+        },
+        options.monitorIntervalMs ?? 15_000,
+        "monitoring",
+      );
       scheduleTask(async () => {
         if (await ensureLeadership()) {
           await ledger.expireAllLots(100);
@@ -245,11 +325,23 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
         }
       }, options.maintenanceIntervalMs ?? 15_000);
       if (options.businessWebhookUrl) {
-        scheduleTask(async () => {
-          if (await ensureLeadership()) {
-            await deliverOutboxBatch();
-          }
-        }, options.outboxIntervalMs ?? 1000);
+        scheduleTask(
+          async () => {
+            if (!(await ensureLeadership())) return;
+            const until = performance.now() + (options.outboxIntervalMs ?? 1000);
+            const batchSize = 500;
+            try {
+              do {
+                if ((await deliverOutboxBatch(batchSize)) < batchSize) break;
+              } while (!stopped && performance.now() < until);
+            } catch (error) {
+              deliveryFailures++;
+              throw error;
+            }
+          },
+          options.outboxIntervalMs ?? 1000,
+          "outbox",
+        );
       }
       scheduleTask(async () => {
         if (await ensureLeadership()) {
@@ -263,7 +355,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
       running = false;
       for (const t of timers) clearInterval(t);
       timers.length = 0;
-      await inFlight;
+      await Promise.all(Object.values(lanes));
       await ledger.drain();
       await releaseLeadership();
     },

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { SQL } from "bun";
 import {
   assertSchemaVersion,
+  assertServiceRole,
   createCatalogRepository,
   createDatabase,
   createLedgerEngine,
@@ -9,7 +10,6 @@ import {
 } from "@gateway/ledger";
 import {
   createBunWasmExecutor,
-  createFfiWasmtimeExecutor,
   PluginPipelineEngine,
   resolveWasmtimeLibraryPath,
   WebhookPluginExecutor,
@@ -39,8 +39,14 @@ export type GatewayRuntimeOptions = {
 
 export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   const { config } = options;
+  if (config.mode === "all-in-one" && config.dbMaxConnections < 2) {
+    throw new Error("All-in-one mode requires at least two database connections");
+  }
   const ownsDb = !options.db;
   const db = options.db ?? createDatabase(config.databaseUrl, config.dbMaxConnections);
+  const controlDb = config.internalDatabaseUrl
+    ? createDatabase(config.internalDatabaseUrl, config.internalDbMaxConnections ?? 4)
+    : db;
   const catalog = createCatalogRepository(db);
   const queries = createLedgerQueries(db);
   const snapshot = new SnapshotManager(catalog, config.encryptionKey, config.snapshotPollMs);
@@ -63,6 +69,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   const cluster = new ClusterCoordinator({
     ...(config.redisUrl ? { redisUrl: config.redisUrl } : {}),
     ...(config.redisNamespace ? { namespace: config.redisNamespace } : {}),
+    ...(config.redisSentinel ? { sentinel: config.redisSentinel } : {}),
     onCircuitEvent(event) {
       router.applyRemoteEvent({
         channel_id: event.channel_id,
@@ -72,18 +79,28 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       });
     },
     onConfigEpoch(event) {
-      if (!snapshot.isLoaded() || event.epoch > snapshot.get().epoch) {
-        void snapshot.load();
-      }
+      void snapshot.refreshTo(event.epoch).catch(() => {
+        console.error(
+          JSON.stringify({
+            service: "gateway",
+            event: "snapshot_refresh_failed",
+            epoch: event.epoch,
+          }),
+        );
+      });
     },
   });
   clusterRef = cluster;
 
+  const metrics = new GatewayMetrics(config.accessLog ?? false);
   const ledger = createLedgerEngine(db, {
     batchWindowMs: config.microBatchWindowMs,
     maxBatchSize: config.microBatchMaxSize,
     maxBatchConcurrency: 4,
     nodeId: cluster.nodeId,
+    onLeaseRenewalFailure() {
+      metrics.leaseRenewalFailures++;
+    },
   });
 
   const transport = createTransport(Math.max(1024, Math.min(16384, config.maxInFlight)));
@@ -95,9 +112,9 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     wasmExecutor = options.wasmExecutor;
   } else {
     const resolvedLib = resolveWasmtimeLibraryPath(config.wasmLibPath);
-    wasmExecutor = resolvedLib
-      ? createFfiWasmtimeExecutor({ libraryPath: resolvedLib })
-      : createBunWasmExecutor();
+    wasmExecutor = createBunWasmExecutor(
+      resolvedLib ? { wasmtimeLibraryPath: resolvedLib } : undefined,
+    );
   }
   const pluginEngine = new PluginPipelineEngine({
     wasmExecutor,
@@ -117,7 +134,6 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       : {}),
   });
   const lifecycle = new Lifecycle(config.maxInFlight);
-  const metrics = new GatewayMetrics(config.accessLog ?? false);
 
   const proxyDeps: ProxyDependencies = {
     config,
@@ -137,23 +153,33 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
 
   publicApp.get("/livez", (c) => c.json({ status: "ok" }));
 
-  publicApp.get("/readyz", async (c) => {
-    if (!lifecycle.accepting || !snapshot.isLoaded()) {
-      return c.json({ status: "not_ready" }, 503);
+  async function readiness(): Promise<string> {
+    if (!lifecycle.accepting || !snapshot.isFresh()) {
+      return "not_ready";
+    }
+    if (config.redisUrl && !cluster.isRedisConnected()) {
+      return "rate_limit_unavailable";
     }
     try {
-      await db`SELECT 1`;
-      return c.json({
-        status: "ready",
-        epoch: snapshot.get().epoch,
-        redis_connected: cluster.isRedisConnected(),
-      });
+      const [database] = await db`SELECT NOT pg_is_in_recovery()
+        AND current_setting('transaction_read_only') = 'off' AS writable`;
+      return database?.writable ? "ready" : "db_read_only";
     } catch {
-      return c.json({ status: "db_unavailable" }, 503);
+      return "db_unavailable";
     }
+  }
+
+  publicApp.get("/readyz", async (c) => {
+    const status = await readiness();
+    if (status !== "ready") return c.json({ status }, 503);
+    return c.json({
+      status,
+      epoch: snapshot.get().epoch,
+      redis_connected: cluster.isRedisConnected(),
+    });
   });
 
-  publicApp.get("/metrics", () => {
+  async function metricsResponse() {
     const channels = router.snapshot();
     const openCircuits = channels.filter((ch) => ch.state === "OPEN").length;
     const text = metrics.renderPrometheus({
@@ -161,11 +187,15 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       configEpoch: snapshot.isLoaded() ? snapshot.get().epoch : 0,
       openCircuits,
       redisConnected: cluster.isRedisConnected(),
+      redisRequired: Boolean(config.redisUrl),
+      ready: (await readiness()) === "ready",
+      snapshotVerifiedAt: snapshot.verifiedAtSeconds(),
     });
     return new Response(text, {
       headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
     });
-  });
+  }
+  publicApp.get("/metrics", (c) => (config.privateMetrics ? c.notFound() : metricsResponse()));
 
   const peerOf = (c: { env?: unknown }): string | undefined => {
     const env = c.env as { peerAddress?: string } | undefined;
@@ -247,11 +277,27 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     return handleInferenceRequest(c, proxyDeps, "gemini", { model, stream }, peerOf(c));
   });
 
-  const internalApp = createInternalApi({
+  const controlLedger =
+    controlDb === db
+      ? ledger
+      : createLedgerEngine(controlDb, {
+          enableLeases: false,
+          batchWindowMs: config.microBatchWindowMs,
+          maxBatchSize: config.microBatchMaxSize,
+        });
+  const {
+    app: internalApp,
+    requestBodies: internalRequestBodies,
+    routeRoles: internalRouteRoles,
+  } = createInternalApi({
+    db: controlDb,
+    onAuditFailure() {
+      metrics.adminAuditFailures++;
+    },
     config,
-    catalog,
-    ledger,
-    queries,
+    catalog: controlDb === db ? catalog : createCatalogRepository(controlDb),
+    ledger: controlLedger,
+    queries: controlDb === db ? queries : createLedgerQueries(controlDb),
     snapshot,
     router,
     cluster,
@@ -267,7 +313,6 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
           ...(config.businessWebhookToken
             ? { businessWebhookToken: config.businessWebhookToken }
             : {}),
-          leaseKey: 0,
         })
       : null;
 
@@ -281,12 +326,22 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     cluster,
     lifecycle,
     metrics,
+    metricsResponse,
     publicApp,
     internalApp,
+    internalRequestBodies,
+    internalRouteRoles,
     worker,
 
     async start(): Promise<void> {
       await assertSchemaVersion(db);
+      if (controlDb !== db) await assertSchemaVersion(controlDb);
+      if (config.requireDbRoles) {
+        await Promise.all([
+          assertServiceRole(db, "stg_data"),
+          assertServiceRole(controlDb, "stg_control"),
+        ]);
+      }
       await snapshot.load();
       await cluster.start();
       snapshot.start();
@@ -294,9 +349,14 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     },
 
     async close(drainMs = 5000): Promise<void> {
-      snapshot.stop();
-      await lifecycle.drain(drainMs);
+      const draining = lifecycle.drain(drainMs);
+      await snapshot.stop();
+      await draining;
       await ledger.drain();
+      if (controlDb !== db) {
+        await controlLedger.drain();
+        await controlDb.close();
+      }
       if (worker) await worker.stop();
       await cluster.close();
       await transport.close();

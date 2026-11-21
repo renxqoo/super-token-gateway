@@ -235,6 +235,7 @@ export class PluginPipelineEngine {
   ) {
     const resolved = this.resolveSteps(steps, plugins);
     const audit: PluginAuditEntry[] = [];
+    const auditByAction = new Map<string, PluginAuditEntry>();
     let blockedState: {
       rule_code: string;
       http_status: number;
@@ -246,7 +247,7 @@ export class PluginPipelineEngine {
     let lastHoldAt = performance.now();
     let cutoffBuffer = "";
     let lastCutoffAt = performance.now();
-    const pendingAsyncChecks: Promise<void>[] = [];
+    let pendingCutoff: Promise<string | null> | undefined;
 
     const hasHoldWebhook = resolved.some(
       (s) =>
@@ -303,14 +304,24 @@ export class PluginPipelineEngine {
           },
           signal,
         );
-        audit.push({
-          plugin_id: step.plugin.id,
-          version: step.plugin.version,
-          hook,
-          action: decision.action,
-          ...(decision.action === "BLOCK" ? { rule_code: decision.rule_code } : {}),
-          latency_us: latencyUs,
-        });
+        const auditKey = JSON.stringify([step.plugin.id, hook, decision.action]);
+        const previous = auditByAction.get(auditKey);
+        if (previous) {
+          previous.executions = (previous.executions ?? 1) + 1;
+          previous.latency_us += latencyUs;
+        } else {
+          const entry: PluginAuditEntry = {
+            plugin_id: step.plugin.id,
+            version: step.plugin.version,
+            hook,
+            action: decision.action,
+            ...(decision.action === "BLOCK" ? { rule_code: decision.rule_code } : {}),
+            latency_us: latencyUs,
+            executions: 1,
+          };
+          auditByAction.set(auditKey, entry);
+          audit.push(entry);
+        }
         if (decision.action === "TRANSFORM") {
           current = decision.text;
         } else if (decision.action === "BLOCK") {
@@ -397,10 +408,12 @@ export class PluginPipelineEngine {
             const sample = cutoffBuffer;
             cutoffBuffer = "";
             lastCutoffAt = now;
-            const check = runStepList(cutoffWebhookSteps, "on_stream_chunk", sample, false).then(
-              () => undefined,
-            );
-            pendingAsyncChecks.push(check);
+            if (pendingCutoff) {
+              await pendingCutoff;
+              if (blockedState) return { emit: "", blocked: true };
+            }
+            pendingCutoff = runStepList(cutoffWebhookSteps, "on_stream_chunk", sample, false);
+            void pendingCutoff.catch(() => undefined);
           }
           if (!hasHoldWebhook) {
             return { emit: textAfterWasm, blocked: blockedState !== null };
@@ -438,9 +451,7 @@ export class PluginPipelineEngine {
         charge_policy: ChargePolicy;
         audit: PluginAuditEntry[];
       }> {
-        if (pendingAsyncChecks.length > 0) {
-          await Promise.allSettled(pendingAsyncChecks);
-        }
+        if (pendingCutoff) await pendingCutoff;
         if (blockedState) {
           return {
             emit: "",

@@ -1,4 +1,5 @@
 import { chmod, mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 if (Bun.version !== "1.4.4") throw new Error("Use Bun 1.4.4");
 const file = new URL("../.env.local", import.meta.url);
 const random = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
@@ -9,22 +10,33 @@ if (!(await Bun.file(file).exists())) {
     [
       `DATABASE_URL=postgres://gateway:${password}@127.0.0.1:55442/gateway_current`,
       "REDIS_URL=redis://127.0.0.1:56382",
-      "QUEUE_REDIS_URL=redis://127.0.0.1:56383",
-      "QUEUE_REQUIRED_REPLICAS=0",
-      `ADMIN_KEY=${random()}`,
+      `PG_TOOLS_DIRECTORY=${process.env.PG_TOOLS_DIRECTORY ?? fileURLToPath(new URL("../.local/toolchain/pg17/bin", import.meta.url))}`,
+      `DURABILITY_REDIS_SERVER=${process.env.DURABILITY_REDIS_SERVER ?? fileURLToPath(new URL("../.local/toolchain/redis74/bin/redis-server", import.meta.url))}`,
+      `ADMIN_TOKEN=${random()}`,
       `ENCRYPTION_KEY=${random()}`,
       `KEY_PEPPER=${random()}`,
       `MOCK_CONTROL_TOKEN=${random()}`,
       "NODE_ENV=development",
-      "ALLOW_PRIVATE_UPSTREAM=true",
-      "PORT=8088",
+      "ALLOW_PRIVATE_UPSTREAMS=true",
+      "PRIVATE_UPSTREAM_CIDRS=127.0.0.0/8",
+      "GATEWAY_HOST=127.0.0.1",
+      "GATEWAY_PORT=8088",
       "MOCK_PORT=9088",
       "",
     ].join("\n"),
   );
 } else {
   const content = await Bun.file(file).text();
-  const required = ["DATABASE_URL", "REDIS_URL", "QUEUE_REDIS_URL", "MOCK_CONTROL_TOKEN"];
+  const required = [
+    "DATABASE_URL",
+    "REDIS_URL",
+    "ADMIN_TOKEN",
+    "KEY_PEPPER",
+    "ENCRYPTION_KEY",
+    "MOCK_CONTROL_TOKEN",
+    "PG_TOOLS_DIRECTORY",
+    "DURABILITY_REDIS_SERVER",
+  ];
   const missing = required.filter((key) => !new RegExp(`^${key}=`, "m").test(content));
   if (missing.length)
     throw new Error(

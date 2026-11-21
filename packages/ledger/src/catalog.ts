@@ -626,25 +626,32 @@ export function createCatalogRepository(db: SQL) {
         priceRows,
         routeRows,
         pluginRows,
-      ] = await Promise.all([
-        orm.select({ version: configEpoch.version }).from(configEpoch).where(eq(configEpoch.id, 1)),
-        orm.select().from(projects),
-        orm.select().from(apiKeys),
-        orm.select().from(upstreamAccounts),
-        orm.select().from(channels),
-        orm.select().from(models),
-        orm.select().from(priceVersions),
-        orm
-          .select()
-          .from(routes)
-          .where(eq(routes.enabled, true))
-          .orderBy(asc(routes.modelName), desc(routes.priority), asc(routes.id)),
-        orm
-          .select()
-          .from(plugins)
-          .where(eq(plugins.enabled, true))
-          .orderBy(desc(plugins.createdAt), asc(plugins.id)),
-      ]);
+      ] = await orm.transaction(
+        (tx) =>
+          Promise.all([
+            tx
+              .select({ version: configEpoch.version })
+              .from(configEpoch)
+              .where(eq(configEpoch.id, 1)),
+            tx.select().from(projects),
+            tx.select().from(apiKeys),
+            tx.select().from(upstreamAccounts),
+            tx.select().from(channels),
+            tx.select().from(models),
+            tx.select().from(priceVersions),
+            tx
+              .select()
+              .from(routes)
+              .where(eq(routes.enabled, true))
+              .orderBy(asc(routes.modelName), desc(routes.priority), asc(routes.id)),
+            tx
+              .select()
+              .from(plugins)
+              .where(eq(plugins.enabled, true))
+              .orderBy(desc(plugins.createdAt), asc(plugins.id)),
+          ]),
+        { isolationLevel: "repeatable read", accessMode: "read only" },
+      );
 
       const projectMap = new Map<string, ProjectRecord>();
       for (const r of projectRows) {

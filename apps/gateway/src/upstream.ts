@@ -147,6 +147,31 @@ async function encodeMultipartWithModel(
   return { contentType, bytes };
 }
 
+function capKnownOutput(body: Record<string, unknown>, protocol: Protocol, bound: number): void {
+  const cap = (value: unknown) =>
+    typeof value === "number" && Number.isSafeInteger(value) && value > 0
+      ? Math.min(value, bound)
+      : bound;
+  if (protocol === "chat") {
+    const name =
+      "max_tokens" in body && !("max_completion_tokens" in body)
+        ? "max_tokens"
+        : "max_completion_tokens";
+    body[name] = cap(body[name]);
+    if (name === "max_completion_tokens") delete body.max_tokens;
+  } else if (protocol === "responses") {
+    body.max_output_tokens = cap(body.max_output_tokens);
+  } else if (protocol === "messages") {
+    body.max_tokens = cap(body.max_tokens);
+  } else {
+    const config = optionalObject(body.generationConfig);
+    body.generationConfig = copyExact(config, {
+      ...config,
+      maxOutputTokens: cap(config.maxOutputTokens),
+    });
+  }
+}
+
 function buildPreparedPayload(options: {
   resolved: ResolvedProvider;
   merged: MergedProviderOverrides;
@@ -155,6 +180,7 @@ function buildPreparedPayload(options: {
   upstreamModel: string;
   clientBody: Record<string, unknown>;
   isStream: boolean;
+  outputBound?: number;
 }): Record<string, unknown> {
   const { resolved, merged, operation, upstreamProtocol, upstreamModel, clientBody, isStream } =
     options;
@@ -170,6 +196,10 @@ function buildPreparedPayload(options: {
     payload = copyExact(clientBody, { ...clientBody });
   }
 
+  const protocol = upstreamProtocol ?? (isConversationalOperation(operation) ? operation : null);
+  if (options.outputBound !== undefined && protocol) {
+    capKnownOutput(payload, protocol, options.outputBound);
+  }
   if (resolved.kind === "DECLARATIVE") {
     const cfg = resolved.config;
     if (cfg.model_field === null) {
@@ -195,7 +225,52 @@ function buildPreparedPayload(options: {
     payload = copyExact(payload, applyBodyTransforms(payload, merged.request_transforms));
   }
 
+  if (options.outputBound !== undefined && upstreamProtocol) {
+    capKnownOutput(payload, upstreamProtocol, options.outputBound);
+  }
+  if (options.outputBound !== undefined && operation === "completions") {
+    const requested = payload.max_tokens;
+    payload.max_tokens =
+      typeof requested === "number" && Number.isSafeInteger(requested) && requested > 0
+        ? Math.min(requested, options.outputBound)
+        : options.outputBound;
+  }
   return payload;
+}
+
+const providerPlans = new WeakMap<
+  RouteRecord,
+  {
+    snapshot: Pick<ConfigSnapshot, "plugins" | "providerPluginsByName">;
+    channel: ChannelRecord;
+    resolved: ResolvedProvider;
+    overrides: MergedProviderOverrides;
+  }
+>();
+
+function getProviderPlan(
+  snapshot: Pick<ConfigSnapshot, "plugins" | "providerPluginsByName">,
+  channel: ChannelRecord,
+  route: RouteRecord,
+) {
+  const cached = providerPlans.get(route);
+  if (cached && cached.channel === channel && cached.snapshot === snapshot) return cached;
+  const resolved = resolveProviderPlugin(channel.kind, channel.provider_plugin_id, snapshot);
+  if (!resolved) {
+    throw new GatewayError(
+      503,
+      "provider_plugin_unavailable",
+      `Provider plugin unavailable for channel ${channel.kind}`,
+    );
+  }
+  const plan = {
+    snapshot,
+    channel,
+    resolved,
+    overrides: mergeOverridesForResolved(resolved, channel.adapter_config, route.adapter_overrides),
+  };
+  providerPlans.set(route, plan);
+  return plan;
 }
 
 export async function prepareUpstreamRequest(options: {
@@ -205,6 +280,7 @@ export async function prepareUpstreamRequest(options: {
   secret: string;
   operation: Operation;
   clientBody: Record<string, unknown>;
+  outputBound?: number;
   multipartEntries?: readonly [string, string | File][];
   isStream: boolean;
   vertexTokens: VertexTokens;
@@ -233,20 +309,7 @@ export async function prepareUpstreamRequest(options: {
     validateRequestPolicy(clientBody, route.request_policy);
   }
 
-  const resolved = resolveProviderPlugin(channel.kind, channel.provider_plugin_id, snapshot);
-  if (!resolved) {
-    throw new GatewayError(
-      503,
-      "provider_plugin_unavailable",
-      `Provider plugin unavailable for channel ${channel.kind}`,
-    );
-  }
-
-  const mergedOverrides = mergeOverridesForResolved(
-    resolved,
-    channel.adapter_config,
-    route.adapter_overrides,
-  );
+  const { resolved, overrides: mergedOverrides } = getProviderPlan(snapshot, channel, route);
   const upstreamProtocol = upstreamProtocolFor(resolved, operation);
   const usageDialect = resolved.config.usage_dialect;
   const isBedrockStream = isStream && resolved.config.stream_framing === "bedrock_eventstream";
@@ -315,6 +378,7 @@ export async function prepareUpstreamRequest(options: {
     upstreamModel: route.upstream_model,
     clientBody,
     isStream,
+    ...(options.outputBound === undefined ? {} : { outputBound: options.outputBound }),
   });
 
   let url: URL;
@@ -372,6 +436,13 @@ export async function prepareUpstreamRequest(options: {
     }
     for (const [k, v] of Object.entries(wasmOut.headers ?? {})) {
       headers.set(k, v);
+    }
+    if (
+      options.outputBound !== undefined &&
+      upstreamProtocol &&
+      resolved.config.base_dialect !== "passthrough"
+    ) {
+      capKnownOutput(wasmOut.body, upstreamProtocol, options.outputBound);
     }
     bodyBytes = encoder.encode(stringifyExact(wasmOut.body));
   }

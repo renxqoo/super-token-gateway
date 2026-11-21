@@ -813,7 +813,7 @@ test("Worker advisory lease leader election, timed-out hold sweep, and Outbox we
   }
 });
 
-test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, concurrent Idempotency-Key HELD guard, retry_on_ambiguous UNKNOWN preservation, and client SSE abort", async () => {
+test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, concurrent Idempotency-Key HELD guard, supplier UNKNOWN reconciliation after customer settlement, active SSE remains counted stalled SSE times out and draining emits an error, and flat customer prices preserve supplier usage", async () => {
   const strictRuntime = createGatewayRuntime({
     config: makeConfig({
       allowPrivateUpstreams: false,
@@ -1226,6 +1226,41 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
       `/internal/v1/upstream-accounts/${accPrimary.id}/balance?currency=USD`,
     );
     expect(BigInt(String(primarySupAfterAmbig.reserved_atoms))).toBeGreaterThan(0n);
+    const ambigRequestId = ambigResp.headers.get("x-request-id")!;
+    const [attempts] = await db`
+      SELECT supplier_holds FROM public.billing_holds WHERE request_id = ${ambigRequestId}
+    `;
+    const supplierAttempt = (
+      attempts!.supplier_holds as { attempt_id: string; state: string }[]
+    ).find((attempt) => attempt.state === "UNKNOWN")!;
+    const resolveSupplier = () =>
+      runtime.internalApp.fetch(
+        new Request(
+          `http://internal.local/internal/v1/requests/${ambigRequestId}/attempts/${supplierAttempt.attempt_id}/resolve`,
+          {
+            method: "POST",
+            headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" },
+            body: JSON.stringify({
+              action: "SETTLE",
+              supplier_cost_atoms: "17",
+              evidence_ref: "provider-invoice-item-17",
+              reason: "supplier confirmed usage after failover",
+              actor: "ops",
+            }),
+          },
+        ),
+      );
+    const supplierResolution = await resolveSupplier();
+    expect(supplierResolution.status).toBe(200);
+    expect(await supplierResolution.json()).toMatchObject({ state: "SETTLED", replayed: false });
+    expect(await (await resolveSupplier()).json()).toMatchObject({
+      state: "SETTLED",
+      replayed: true,
+    });
+    expect(await runtime.ledger.getSupplierBalance(String(accPrimary.id), "USD")).toMatchObject({
+      reserved_atoms: "0",
+      spent_atoms: "57",
+    });
 
     const { data: backupSupAfterAmbig } = await internalCall(
       runtime.internalApp,
@@ -1264,6 +1299,8 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
     const firstChunk = await reader.read();
     expect(firstChunk.done).toBe(false);
     expect(new TextDecoder().decode(firstChunk.value)).toContain("partial");
+    const liveMetrics = await runtime.publicApp.fetch(new Request("http://gateway.local/metrics"));
+    expect(await liveMetrics.text()).toMatch(/^gateway_in_flight 1$/m);
     abortController.abort();
     await reader.cancel();
 
@@ -1295,6 +1332,85 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
       actor: "ops",
     });
 
+    const stalled = await runtime.publicApp.fetch(
+      new Request("http://gateway.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "hardening-sse-only",
+          stream: true,
+          messages: [{ role: "user", content: "stalled upstream" }],
+          max_tokens: 50,
+        }),
+      }),
+    );
+    const stalledReader = stalled.body!.getReader();
+    try {
+      expect(new TextDecoder().decode((await stalledReader.read()).value)).toContain("partial");
+      const outcome = await Promise.race([
+        stalledReader.read().then((step) => new TextDecoder().decode(step.value)),
+        Bun.sleep(1000).then(() => "read timed out"),
+      ]);
+      expect(outcome).toContain("stream_interrupted");
+    } finally {
+      await stalledReader.cancel();
+    }
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/requests/${stalled.headers.get("x-request-id")}/resolve`,
+      {
+        action: "RELEASE",
+        reason: "stalled_upstream_sse",
+        actor: "ops",
+      },
+    );
+
+    primaryMode = "slow_idem";
+    const { data: flatPrice } = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/prices",
+      {
+        side: "CUSTOMER",
+        currency: "USD",
+        basis: "REQUEST_COMPLETION",
+        rates: { requests: { numerator: "7", denominator: "1" } },
+        ceilings: { requests: "1" },
+      },
+    );
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "hardening-mixed-price",
+      operations: ["chat"],
+      max_output_tokens: 100,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "hardening-mixed-price",
+      channel_id: chPrimary.id,
+      upstream_model: "gpt-sec-primary",
+      operations: ["chat"],
+      billing_price_id: flatPrice.id,
+      cost_version_id: supPrice.id,
+    });
+    const mixedPriceResponse = await runtime.publicApp.fetch(
+      new Request("http://gateway.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "hardening-mixed-price",
+          messages: [{ role: "user", content: "mixed tariff" }],
+          max_tokens: 50,
+        }),
+      }),
+    );
+    expect(mixedPriceResponse.status).toBe(200);
+    const mixedPriceRequest = mixedPriceResponse.headers.get("x-request-id")!;
+    const [mixedPriceCharge] = await db`
+      SELECT customer_atoms::text, supplier_cost_atoms::text
+      FROM public.billing_charges WHERE request_id = ${mixedPriceRequest}
+    `;
+    expect(mixedPriceCharge).toMatchObject({ customer_atoms: "7", supplier_cost_atoms: "40" });
+
     const { data: audit } = await internalCall(
       runtime.internalApp,
       "GET",
@@ -1303,6 +1419,39 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
     expect(audit.ok).toBe(true);
     expect(audit.open_holds).toBe(0);
     expect(audit.unknown_holds).toBe(0);
+
+    primaryMode = "sse_hang";
+    const drainingStream = await runtime.publicApp.fetch(
+      new Request("http://gateway.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "hardening-sse-only",
+          stream: true,
+          messages: [{ role: "user", content: "in flight at shutdown" }],
+          max_tokens: 50,
+        }),
+      }),
+    );
+    const drainingReader = drainingStream.body!.getReader();
+    expect(new TextDecoder().decode((await drainingReader.read()).value)).toContain("partial");
+    const draining = runtime.lifecycle.drain(0);
+    expect(new TextDecoder().decode((await drainingReader.read()).value)).toContain("event: error");
+    expect((await drainingReader.read()).done).toBe(true);
+    expect(await draining).toBe(true);
+    const stateAfterDrain = await db`SELECT state FROM public.billing_holds
+      WHERE request_id = ${drainingStream.headers.get("x-request-id")}`;
+    expect(stateAfterDrain[0]?.state).toBe("UNKNOWN");
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/requests/${drainingStream.headers.get("x-request-id")}/resolve`,
+      {
+        action: "RELEASE",
+        reason: "shutdown_recovery",
+        actor: "ops",
+      },
+    );
   } finally {
     for (const t of openTimers) clearTimeout(t);
     openTimers.clear();
@@ -2110,9 +2259,9 @@ test("G3.3 Full E2E real plugin mechanism (zero mocks): real Bun WASM Worker on_
   }
 });
 
-test("G3.4 Built-in pii-guard plugin full lifecycle: discovery, 1-click install, dry-run test, multi-turn request redaction, Anthropic tool_use preservation, split-chunk SSE redaction, and PEM block", async () => {
+test("G3.4 Built-in pii-guard plugin full lifecycle: discovery, 1-click install, dry-run test, multi-turn request redaction, Anthropic tool_use preservation, split-chunk SSE redaction, native Responses snapshots preserve redaction, and PEM block", async () => {
   const receivedBodies: Record<string, unknown>[] = [];
-  let upstreamMode: "echo" | "anthropic_tool" | "sse_pii" | "sse_pem" = "echo";
+  let upstreamMode: "echo" | "anthropic_tool" | "sse_pii" | "responses_pii" | "sse_pem" = "echo";
 
   const upstreamServer = Bun.serve({
     hostname: "127.0.0.1",
@@ -2141,6 +2290,47 @@ test("G3.4 Built-in pii-guard plugin full lifecycle: discovery, 1-click install,
           stop_reason: "tool_use",
           usage: { input_tokens: 12, output_tokens: 8 },
         });
+      }
+      if (upstreamMode === "responses_pii") {
+        const text = "Contact alice@example.com";
+        const item = {
+          id: "msg_native",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text, annotations: [] }],
+        };
+        const frames = [
+          {
+            type: "response.output_text.delta",
+            delta: text,
+            item_id: "msg_native",
+            output_index: 1,
+            content_index: 0,
+          },
+          { type: "response.output_text.done", text, output_index: 1, content_index: 0 },
+          { type: "response.output_item.done", item, output_index: 1 },
+          {
+            type: "response.completed",
+            response: {
+              id: "resp_native",
+              object: "response",
+              status: "completed",
+              output: [{ id: "reasoning", type: "reasoning", summary: [] }, item],
+              usage: { input_tokens: 10, output_tokens: 5 },
+            },
+          },
+        ];
+        return new Response(
+          frames
+            .map(
+              ({ type, ...frame }) =>
+                `event: ${type}\ndata: ${JSON.stringify(type === "response.output_text.delta" ? frame : { ...frame, type })}\n\n`,
+            )
+            .join(""),
+          {
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
       }
       if (upstreamMode === "sse_pii") {
         const enc = new TextEncoder();
@@ -2483,6 +2673,40 @@ test("G3.4 Built-in pii-guard plugin full lifecycle: discovery, 1-click install,
       true,
     );
 
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "pii-responses",
+      operations: ["responses"],
+      max_output_tokens: 100,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "pii-responses",
+      channel_id: chOpenai.id,
+      upstream_model: "pii-native",
+      operations: ["responses"],
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+      plugin_pipeline: [{ plugin_id: pluginId, priority: 1 }],
+    });
+    upstreamMode = "responses_pii";
+    const native = await runtime.publicApp.fetch(
+      new Request("http://gateway.local/v1/responses", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "pii-responses", input: "check contact", stream: true }),
+      }),
+    );
+    expect(native.status).toBe(200);
+    const nativeWire = await native.text();
+    expect(nativeWire).toContain("response.completed");
+    expect(nativeWire).not.toContain("alice@example.com");
+    const completed = nativeWire
+      .split("\n")
+      .filter((line) => line.startsWith("data: {"))
+      .map((line) => JSON.parse(line.slice(6)))
+      .find((event) => event.type === "response.completed");
+    expect(completed.response.output[1].content[0].text).toBe("Contact [REDACTED_EMAIL]");
+    expect(nativeWire).toContain('"item_id":"msg_native"');
+
     upstreamMode = "sse_pem";
     const ssePemResp = await runtime.publicApp.fetch(
       new Request("http://gateway.local/v1/chat/completions", {
@@ -2522,7 +2746,7 @@ test("G3.4 Built-in pii-guard plugin full lifecycle: discovery, 1-click install,
   }
 });
 
-test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor, hot-override, model failover isolation, fake-200 failover, real WASM proprietary provider, HMAC auth, and dry-run preview", async () => {
+test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor, hot-override, fallback enforces its own input policy and output ceiling, fake-200 and SSE first-frame failover, real WASM proprietary provider, HMAC auth, and dry-run preview", async () => {
   const { createHmac } = await import("node:crypto");
   const { resolve } = await import("node:path");
   const wasmFixturePath = resolve(import.meta.dir, "../fixtures/example-provider.wasm");
@@ -2616,6 +2840,14 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
 
       if (url.pathname === "/v1/text/chatcompletion_v2") {
         if (minimaxFake200Mode === "rate_limit") {
+          if (body.stream === true) {
+            return new Response(
+              'data: {"base_resp":{"status_code":1002,"status_msg":"temporary vendor throttle"}}\n\n',
+              {
+                headers: { "content-type": "text/event-stream" },
+              },
+            );
+          }
           return Response.json(
             { base_resp: { status_code: 1002, status_msg: "minimax fake 200 rate limit" } },
             { status: 200 },
@@ -2673,6 +2905,33 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
           status: 200,
           headers: { "content-type": "text/event-stream; charset=utf-8" },
         });
+      }
+
+      if (body.stream === true && body.model === "bak-mm-sse") {
+        const frames = [
+          {
+            id: "bak-sse",
+            object: "chat.completion.chunk",
+            choices: [{ index: 0, delta: { content: "backup stream" }, finish_reason: null }],
+          },
+          {
+            id: "bak-sse",
+            object: "chat.completion.chunk",
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          },
+          {
+            id: "bak-sse",
+            object: "chat.completion.chunk",
+            choices: [],
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+          },
+        ];
+        return new Response(
+          frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n",
+          {
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
       }
 
       return Response.json({
@@ -3017,6 +3276,11 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
         .message.content,
     ).toBe("hmac-verified");
 
+    const { data: backupContentPolicy } = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/plugins/builtins/pii-guard/install",
+    );
     const { data: chPri } = await internalCall(
       runtime.internalApp,
       "PUT",
@@ -3070,6 +3334,7 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       priority: 1,
       billing_price_id: custPrice.id,
       cost_version_id: supPrice.id,
+      plugin_pipeline: [{ plugin_id: backupContentPolicy.id, priority: 10 }],
       adapter_overrides: {
         request_transforms: [
           { op: "rename", from: "max_completion_tokens", to: "max_tokens", overwrite: false },
@@ -3085,9 +3350,9 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
         headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
         body: JSON.stringify({
           model: "o3-failover",
-          messages: [{ role: "user", content: "isolate me" }],
+          messages: [{ role: "user", content: "isolate alice@example.com" }],
           temperature: 0.7,
-          max_completion_tokens: 64,
+          max_completion_tokens: 500,
         }),
       }),
     );
@@ -3097,11 +3362,12 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
     const bakCap = captures[capIdxBeforeFo + 1]!;
     expect(priCap.body.temperature).toBeUndefined();
     expect(priCap.body.a_flag).toBe(true);
-    expect(priCap.body.max_completion_tokens).toBe(64);
+    expect(priCap.body.max_completion_tokens).toBe(200);
     expect(bakCap.body.temperature).toBe(0.7);
     expect(bakCap.body.a_flag).toBeUndefined();
     expect(bakCap.body.b_flag).toBe(true);
-    expect(bakCap.body.max_tokens).toBe(64);
+    expect(bakCap.body.max_tokens).toBe(200);
+    expect(JSON.stringify(bakCap.body.messages)).not.toContain("alice@example.com");
     expect(bakCap.body.max_completion_tokens).toBeUndefined();
     failoverPrimaryDown = false;
 
@@ -3153,6 +3419,54 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       await internalCall(runtime.internalApp, "GET", "/internal/v1/health/channels")
     ).data.channels as { channel_id: string; state: string; cooldown_until_ms: number }[];
     expect(mmHealth.find((c) => c.channel_id === chMm.id)?.cooldown_until_ms).toBeGreaterThan(0);
+
+    const { data: chMmSse } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/channels",
+      {
+        account_id: acc.id,
+        name: "minimax-sse-pri",
+        kind: "minimax",
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: "sk-mm-sse",
+      },
+    );
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "mm-stream-failover",
+      operations: ["chat"],
+      max_output_tokens: 200,
+    });
+    for (const [channel, name, priority] of [
+      [chMmSse, "MiniMax-Text-01", 10],
+      [chBak, "bak-mm-sse", 1],
+    ] as const) {
+      await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+        model_name: "mm-stream-failover",
+        channel_id: channel.id,
+        upstream_model: name,
+        operations: ["chat"],
+        priority,
+        billing_price_id: custPrice.id,
+        cost_version_id: supPrice.id,
+      });
+    }
+    const streamFailover = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "mm-stream-failover",
+          stream: true,
+          messages: [{ role: "user", content: "stream prelude" }],
+        }),
+      }),
+    );
+    const streamBody = await streamFailover.text();
+    expect(streamFailover.headers.get("x-gateway-channel")).toBe("failover-bak");
+    expect(streamBody).toContain("backup stream");
+    expect(streamBody.trimEnd()).toEndWith("data: [DONE]");
+    expect(streamBody).not.toContain("temporary vendor throttle");
 
     const wasiBadBytes = new Uint8Array([
       0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 1, 4, 1, 0x60, 0, 0, 2, 36, 1, 21, 0x77, 0x61, 0x73, 0x69,

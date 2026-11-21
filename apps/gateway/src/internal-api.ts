@@ -1,4 +1,6 @@
-import { Hono } from "hono";
+import { Hono, type Context, type Handler, type MiddlewareHandler } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import type { SQL } from "bun";
 import { z } from "zod";
 import { GatewayError, pricingSchema, usageSchema } from "@gateway/contracts";
 import { operations, type Operation, type Pricing, type Usage } from "@gateway/kernel";
@@ -36,7 +38,6 @@ import {
 import {
   createKey,
   encrypt,
-  secureEqual,
   validateAuthCredentials,
   validateBaseUrl,
   validateCidr,
@@ -45,6 +46,11 @@ import {
   type SmartRouter,
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
+import {
+  authenticateInternal,
+  type InternalPrincipal,
+  type InternalRole,
+} from "./internal-auth.ts";
 import type { SnapshotManager } from "./snapshot.ts";
 import { previewProviderRequest } from "./upstream.ts";
 
@@ -574,10 +580,28 @@ const resolveRequestSchema = z
     billing_price_id: z.uuid().optional(),
     usage: usageSchema.optional(),
     supplier_cost_atoms: nonNegativeAtomsSchema.optional(),
+    supplier_cost_version_id: z.uuid().optional(),
     reason: z.string().min(1).max(500),
-    actor: z.string().min(1).max(120),
+    actor: z.string().min(1).max(120).optional(),
   })
   .strict();
+
+const supplierResolutionFields = {
+  reason: resolveRequestSchema.shape.reason,
+  actor: resolveRequestSchema.shape.actor,
+  evidence_ref: z.string().trim().min(1).max(512),
+};
+
+const resolveSupplierAttemptSchema = z.discriminatedUnion("action", [
+  z.object({ ...supplierResolutionFields, action: z.literal("RELEASE") }).strict(),
+  z
+    .object({
+      ...supplierResolutionFields,
+      action: z.literal("SETTLE"),
+      supplier_cost_atoms: nonNegativeAtomsSchema,
+    })
+    .strict(),
+]);
 
 const claimEventsSchema = z
   .object({
@@ -609,13 +633,33 @@ function parseBody<T>(schema: z.ZodType<T>, raw: unknown): T {
   return res.data;
 }
 
-function parseUuid(value: string, label: string): string {
+function parseUuid(value: string | undefined, label: string): string {
   const res = uuidParam.safeParse(value);
   if (!res.success) throw new GatewayError(400, "validation_error", `Invalid UUID for ${label}`);
   return res.data;
 }
 
+type AdminEnv = { Variables: { principal: InternalPrincipal } };
+type AdminContext = Context<AdminEnv>;
+
+function resolutionActor(c: AdminContext, value?: string): string {
+  const principal = c.get("principal");
+  if (!principal.legacy) return principal.id;
+  if (!value)
+    throw new GatewayError(400, "validation_error", "actor is required for legacy credentials");
+  return value;
+}
+
+function requireConsumer(c: AdminContext, consumer: string): void {
+  const principal = c.get("principal");
+  if (!principal.legacy && !principal.consumers.includes(consumer)) {
+    throw new GatewayError(403, "forbidden", "Consumer is outside the credential scope");
+  }
+}
+
 export function createInternalApi(deps: {
+  db: SQL;
+  onAuditFailure: () => void;
   config: GatewayConfig;
   catalog: CatalogRepo;
   ledger: LedgerEngine;
@@ -625,30 +669,140 @@ export function createInternalApi(deps: {
   cluster: ClusterCoordinator;
   pluginEngine: PluginPipelineEngine;
   wasmExecutor: WasmRuntimeExecutor | null;
-}): Hono {
-  const app = new Hono();
+}) {
+  const app = new Hono<AdminEnv>();
+  const requestBodies = new Map<string, { schema: z.ZodType; required: boolean }>();
+  const routeRoles = new Map<string, InternalRole>();
+
+  const checkBodySize = bodyLimit({
+    maxSize: deps.config.maxBodyBytes,
+    onError: (c) =>
+      c.json(
+        { error: { code: "body_too_large", message: "Payload exceeds the configured limit" } },
+        413,
+      ),
+  });
+
+  function authorize(
+    method: string,
+    path: string,
+    role: InternalRole,
+  ): MiddlewareHandler<AdminEnv> {
+    const action = `${method} ${path}`;
+    routeRoles.set(action, role);
+    return async (c, next) => {
+      const principal = authenticateInternal(
+        c.req.header("authorization"),
+        deps.config.internalCredentials,
+        deps.config.adminToken,
+      );
+      if (!principal)
+        return c.json(
+          { error: { code: "unauthorized", message: "Invalid internal credential" } },
+          401,
+        );
+      if (!principal.roles.includes(role))
+        return c.json({ error: { code: "forbidden", message: "Insufficient internal role" } }, 403);
+      c.set("principal", principal);
+      if (method === "GET") return next();
+      const requestId = crypto.randomUUID();
+      const target = path.replace(/:([A-Za-z0-9]+)/g, (parameter, name: string) => {
+        const value = c.req.param(name);
+        return value && /^[A-Za-z0-9_.-]{1,120}$/.test(value) ? value : parameter;
+      });
+      try {
+        await deps.db`WITH started AS (
+          INSERT INTO public.admin_audit_events (request_id, phase, actor, action, target)
+          VALUES (${requestId}, 'STARTED', ${principal.id}, ${action}, ${target})
+        ) INSERT INTO public.admin_audit_pending (request_id) VALUES (${requestId})`;
+      } catch {
+        deps.onAuditFailure();
+        return c.json(
+          { error: { code: "audit_unavailable", message: "Administrative audit is unavailable" } },
+          503,
+        );
+      }
+      c.header("x-admin-request-id", requestId);
+      await next();
+      try {
+        await deps.db`WITH completed AS (
+          INSERT INTO public.admin_audit_events (request_id, phase, actor, action, target, status)
+          VALUES (${requestId}, 'COMPLETED', ${principal.id}, ${action}, ${target}, ${c.res.status})
+        ) DELETE FROM public.admin_audit_pending WHERE request_id = ${requestId}`;
+      } catch {
+        deps.onAuditFailure();
+        console.error(
+          JSON.stringify({
+            service: "gateway",
+            event: "admin_audit_completion_failed",
+            request_id: requestId,
+          }),
+        );
+      }
+    };
+  }
+
+  function route(
+    method: "GET" | "POST",
+    path: string,
+    role: InternalRole,
+    handle: Handler<AdminEnv>,
+  ): void {
+    app.on(method, path, authorize(method, path, role), handle);
+  }
+
+  function jsonRoute<T>(
+    method: "POST" | "PUT",
+    path: string,
+    role: InternalRole,
+    schema: z.ZodType<T>,
+    handle: (c: AdminContext, body: T) => ReturnType<Handler<AdminEnv>>,
+  ): void {
+    requestBodies.set(`${method} ${path}`, { schema, required: true });
+    app.on(method, path, authorize(method, path, role), checkBodySize, async (c) =>
+      handle(c, parseBody(schema, await c.req.json())),
+    );
+  }
 
   const onConfigUpdated = async (epoch: number) => {
-    await deps.snapshot.load();
     deps.cluster.publishConfigEpoch(epoch);
+    await deps.snapshot.refreshTo(epoch).catch(() => {
+      console.error(
+        JSON.stringify({ service: "gateway", event: "snapshot_refresh_after_write_failed", epoch }),
+      );
+    });
   };
 
   app.onError((err, c) => {
+    if ("errno" in err && typeof err.errno === "string") {
+      if (err.errno === "23505") {
+        return c.json(
+          { error: { code: "conflict", message: "A conflicting record already exists" } },
+          409,
+        );
+      }
+      if (err.errno.startsWith("08") || ["40P01", "40001", "55P03", "57014"].includes(err.errno)) {
+        return c.json(
+          {
+            error: {
+              code: "ledger_unavailable",
+              message: "The ledger operation could not complete",
+            },
+          },
+          503,
+        );
+      }
+      return c.json(
+        { error: { code: "ledger_error", message: "The ledger operation failed" } },
+        500,
+      );
+    }
     const status = err instanceof GatewayError ? err.status : 400;
     const code = err instanceof GatewayError ? err.code : "internal_api_error";
     return c.json({ error: { code, message: err.message } }, status as 400);
   });
 
-  app.use("/internal/v1/*", async (c, next) => {
-    const auth = c.req.header("authorization") ?? "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-    if (!token || !secureEqual(token, deps.config.adminToken)) {
-      return c.json({ error: { code: "unauthorized", message: "Invalid admin token" } }, 401);
-    }
-    await next();
-  });
-
-  app.get("/internal/v1/health", (c) =>
+  route("GET", "/internal/v1/health", "ops", (c) =>
     c.json({
       ok: true,
       epoch: deps.snapshot.isLoaded() ? deps.snapshot.get().epoch : 0,
@@ -657,10 +811,11 @@ export function createInternalApi(deps: {
     }),
   );
 
-  app.get("/internal/v1/health/channels", (c) => c.json({ channels: deps.router.snapshot() }));
+  route("GET", "/internal/v1/health/channels", "ops", (c) =>
+    c.json({ channels: deps.router.snapshot() }),
+  );
 
-  app.put("/internal/v1/projects", async (c) => {
-    const body = parseBody(upsertProjectSchema, await c.req.json());
+  jsonRoute("PUT", "/internal/v1/projects", "catalog", upsertProjectSchema, async (c, body) => {
     const rec = await deps.catalog.upsertProject({
       ...(body.id ? { id: body.id } : {}),
       external_ref: body.external_ref ?? null,
@@ -675,8 +830,7 @@ export function createInternalApi(deps: {
     return c.json(rec);
   });
 
-  app.put("/internal/v1/api-keys", async (c) => {
-    const body = parseBody(upsertApiKeySchema, await c.req.json());
+  jsonRoute("PUT", "/internal/v1/api-keys", "security", upsertApiKeySchema, async (c, body) => {
     const validatedCidrs = body.allowed_cidrs.map((cidr) => validateCidr(cidr));
     const rawKey = body.raw_key ?? createKey();
     const rec = await deps.catalog.upsertApiKey({
@@ -696,19 +850,23 @@ export function createInternalApi(deps: {
     return c.json({ ...rec, key: rawKey });
   });
 
-  app.put("/internal/v1/upstream-accounts", async (c) => {
-    const body = parseBody(upsertAccountSchema, await c.req.json());
-    const rec = await deps.catalog.upsertUpstreamAccount({
-      ...(body.id ? { id: body.id } : {}),
-      name: body.name,
-      state: body.state,
-    });
-    await onConfigUpdated(rec.config_epoch);
-    return c.json(rec);
-  });
+  jsonRoute(
+    "PUT",
+    "/internal/v1/upstream-accounts",
+    "catalog",
+    upsertAccountSchema,
+    async (c, body) => {
+      const rec = await deps.catalog.upsertUpstreamAccount({
+        ...(body.id ? { id: body.id } : {}),
+        name: body.name,
+        state: body.state,
+      });
+      await onConfigUpdated(rec.config_epoch);
+      return c.json(rec);
+    },
+  );
 
-  app.put("/internal/v1/channels", async (c) => {
-    const body = parseBody(upsertChannelSchema, await c.req.json());
+  jsonRoute("PUT", "/internal/v1/channels", "catalog", upsertChannelSchema, async (c, body) => {
     const id = body.id ?? crypto.randomUUID();
     const kind = body.kind as ChannelKind;
     validateBaseUrl(
@@ -741,8 +899,7 @@ export function createInternalApi(deps: {
     return c.json({ ...rec, secret_ciphertext: undefined });
   });
 
-  app.put("/internal/v1/models", async (c) => {
-    const body = parseBody(upsertModelSchema, await c.req.json());
+  jsonRoute("PUT", "/internal/v1/models", "catalog", upsertModelSchema, async (c, body) => {
     const rec = await deps.catalog.upsertModel({
       name: body.name,
       operations: body.operations as Operation[],
@@ -754,8 +911,7 @@ export function createInternalApi(deps: {
     return c.json(rec);
   });
 
-  app.post("/internal/v1/prices", async (c) => {
-    const body = parseBody(createPriceSchema, await c.req.json());
+  jsonRoute("POST", "/internal/v1/prices", "finance", createPriceSchema, async (c, body) => {
     const rec = await deps.catalog.createPriceVersion({
       ...(body.id ? { id: body.id } : {}),
       side: body.side as PriceSide,
@@ -768,8 +924,7 @@ export function createInternalApi(deps: {
     return c.json(rec, 201);
   });
 
-  app.put("/internal/v1/routes", async (c) => {
-    const body = parseBody(upsertRouteSchema, await c.req.json());
+  jsonRoute("PUT", "/internal/v1/routes", "catalog", upsertRouteSchema, async (c, body) => {
     const rec = await deps.catalog.upsertRoute({
       ...(body.id ? { id: body.id } : {}),
       model_name: body.model_name,
@@ -790,8 +945,7 @@ export function createInternalApi(deps: {
     return c.json(rec);
   });
 
-  app.put("/internal/v1/plugins", async (c) => {
-    const body = parseBody(upsertPluginSchema, await c.req.json());
+  jsonRoute("PUT", "/internal/v1/plugins", "security", upsertPluginSchema, async (c, body) => {
     const capability = body.capability as PluginCapability;
     let validatedProviderConfig: ProviderPluginConfig | null = null;
 
@@ -915,7 +1069,7 @@ export function createInternalApi(deps: {
     return c.json({ ...rec, wasm_bytes: undefined });
   });
 
-  app.get("/internal/v1/plugins", async (c) => {
+  route("GET", "/internal/v1/plugins", "security", async (c) => {
     const rawCap = c.req.query("capability");
     const cap = rawCap
       ? (parseBody(z.enum(["CONTENT", "PROVIDER"]), rawCap) as PluginCapability)
@@ -924,7 +1078,7 @@ export function createInternalApi(deps: {
     return c.json({ items });
   });
 
-  app.get("/internal/v1/plugins/builtins", (c) => {
+  route("GET", "/internal/v1/plugins/builtins", "security", (c) => {
     const rawCap = c.req.query("capability");
     const cap = rawCap
       ? (parseBody(z.enum(["CONTENT", "PROVIDER"]), rawCap) as PluginCapability)
@@ -932,135 +1086,167 @@ export function createInternalApi(deps: {
     return c.json({ items: listBuiltinPlugins(cap) });
   });
 
-  app.post("/internal/v1/plugins/builtins/:name/install", async (c) => {
-    const builtin = getBuiltinPlugin(c.req.param("name"));
-    if (!builtin) {
-      return c.json({ error: { code: "not_found", message: "Built-in plugin not found" } }, 404);
-    }
-    const rawBody = await c.req.text();
-    const parsedBody = rawBody.trim()
-      ? parseBody(installBuiltinPluginSchema, JSON.parse(rawBody))
-      : { enabled: true };
-    const manifest = parsedBody.manifest
-      ? { ...builtin.manifest, ...parsedBody.manifest }
-      : { ...builtin.manifest };
-    let providerConfig: ProviderPluginConfig | null = null;
-    if (builtin.capability === "PROVIDER") {
-      const mergedCfg = parsedBody.provider_config
-        ? { ...builtin.provider_config, ...parsedBody.provider_config }
-        : builtin.provider_config;
-      providerConfig = parseBody(
-        declarativeProviderConfigSchema,
-        mergedCfg,
-      ) as DeclarativeProviderConfig;
-    }
-    const rec = await deps.catalog.upsertPlugin({
-      name: builtin.name,
-      version: builtin.version,
-      capability: builtin.capability,
-      kind: builtin.kind,
-      wasm_bytes: builtin.capability === "CONTENT" ? builtin.wasm_bytes : null,
-      webhook_config: null,
-      provider_config: providerConfig,
-      signature: parsedBody.signature ?? null,
-      signing_key_id: parsedBody.signing_key_id ?? null,
-      manifest,
-      enabled: parsedBody.enabled,
-    });
-    await onConfigUpdated(rec.config_epoch);
-    return c.json({ ...rec, wasm_bytes: undefined });
+  requestBodies.set("POST /internal/v1/plugins/builtins/:name/install", {
+    schema: installBuiltinPluginSchema,
+    required: false,
   });
+  app.on(
+    "POST",
+    "/internal/v1/plugins/builtins/:name/install",
+    authorize("POST", "/internal/v1/plugins/builtins/:name/install", "security"),
+    checkBodySize,
+    async (c) => {
+      const builtin = getBuiltinPlugin(c.req.param("name"));
+      if (!builtin) {
+        return c.json({ error: { code: "not_found", message: "Built-in plugin not found" } }, 404);
+      }
+      const rawBody = await c.req.text();
+      const parsedBody = rawBody.trim()
+        ? parseBody(installBuiltinPluginSchema, JSON.parse(rawBody))
+        : { enabled: true };
+      const manifest = parsedBody.manifest
+        ? { ...builtin.manifest, ...parsedBody.manifest }
+        : { ...builtin.manifest };
+      let providerConfig: ProviderPluginConfig | null = null;
+      if (builtin.capability === "PROVIDER") {
+        const mergedCfg = parsedBody.provider_config
+          ? { ...builtin.provider_config, ...parsedBody.provider_config }
+          : builtin.provider_config;
+        providerConfig = parseBody(
+          declarativeProviderConfigSchema,
+          mergedCfg,
+        ) as DeclarativeProviderConfig;
+      }
+      const rec = await deps.catalog.upsertPlugin({
+        name: builtin.name,
+        version: builtin.version,
+        capability: builtin.capability,
+        kind: builtin.kind,
+        wasm_bytes: builtin.capability === "CONTENT" ? builtin.wasm_bytes : null,
+        webhook_config: null,
+        provider_config: providerConfig,
+        signature: parsedBody.signature ?? null,
+        signing_key_id: parsedBody.signing_key_id ?? null,
+        manifest,
+        enabled: parsedBody.enabled,
+      });
+      await onConfigUpdated(rec.config_epoch);
+      return c.json({ ...rec, wasm_bytes: undefined });
+    },
+  );
 
-  app.post("/internal/v1/providers/preview", async (c) => {
-    const body = parseBody(previewProviderSchema, await c.req.json());
-    const snap = deps.snapshot.isLoaded()
-      ? deps.snapshot.get()
-      : { plugins: new Map(), providerPluginsByName: new Map() };
-    const preview = await previewProviderRequest({
-      provider: body.provider,
-      ...(body.provider_plugin_id !== undefined
-        ? { providerPluginId: body.provider_plugin_id }
-        : {}),
-      baseUrl: body.base_url,
-      operation: body.operation as Operation,
-      upstreamModel: body.upstream_model,
-      stream: body.stream,
-      clientBody: body.client_body,
-      ...(body.channel_adapter_config
-        ? { channelAdapterConfig: body.channel_adapter_config as AdapterOverrides }
-        : {}),
-      ...(body.adapter_overrides
-        ? { routeAdapterOverrides: body.adapter_overrides as AdapterOverrides }
-        : {}),
-      ...(body.mock_upstream_response ? { mockUpstreamResponse: body.mock_upstream_response } : {}),
-      snapshot: snap,
-      wasmExecutor: deps.wasmExecutor,
-      ...(deps.config.pluginSigningPublicKeyPem
-        ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
-        : {}),
-    });
-    return c.json(preview);
-  });
+  jsonRoute(
+    "POST",
+    "/internal/v1/providers/preview",
+    "catalog",
+    previewProviderSchema,
+    async (c, body) => {
+      const snap = deps.snapshot.isLoaded()
+        ? deps.snapshot.get()
+        : { plugins: new Map(), providerPluginsByName: new Map() };
+      const preview = await previewProviderRequest({
+        provider: body.provider,
+        ...(body.provider_plugin_id !== undefined
+          ? { providerPluginId: body.provider_plugin_id }
+          : {}),
+        baseUrl: body.base_url,
+        operation: body.operation as Operation,
+        upstreamModel: body.upstream_model,
+        stream: body.stream,
+        clientBody: body.client_body,
+        ...(body.channel_adapter_config
+          ? { channelAdapterConfig: body.channel_adapter_config as AdapterOverrides }
+          : {}),
+        ...(body.adapter_overrides
+          ? { routeAdapterOverrides: body.adapter_overrides as AdapterOverrides }
+          : {}),
+        ...(body.mock_upstream_response
+          ? { mockUpstreamResponse: body.mock_upstream_response }
+          : {}),
+        snapshot: snap,
+        wasmExecutor: deps.wasmExecutor,
+        ...(deps.config.pluginSigningPublicKeyPem
+          ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
+          : {}),
+      });
+      return c.json(preview);
+    },
+  );
 
-  app.post("/internal/v1/plugins/:pluginId/test", async (c) => {
-    const pluginId = parseUuid(c.req.param("pluginId"), "pluginId");
-    const body = parseBody(testPluginSchema, await c.req.json());
-    const snap = deps.snapshot.get();
-    const plugin = snap.plugins.get(pluginId);
-    if (!plugin) {
-      return c.json(
-        { error: { code: "not_found", message: "Enabled plugin not found in active snapshot" } },
-        404,
+  jsonRoute(
+    "POST",
+    "/internal/v1/plugins/:pluginId/test",
+    "security",
+    testPluginSchema,
+    async (c, body) => {
+      const pluginId = parseUuid(c.req.param("pluginId"), "pluginId");
+      const snap = deps.snapshot.get();
+      const plugin = snap.plugins.get(pluginId);
+      if (!plugin) {
+        return c.json(
+          { error: { code: "not_found", message: "Enabled plugin not found in active snapshot" } },
+          404,
+        );
+      }
+      const res = await deps.pluginEngine.runUnary(
+        body.hook as PluginHook,
+        [{ plugin_id: plugin.id, priority: 1 }],
+        snap.plugins,
+        {
+          request_id: crypto.randomUUID(),
+          project_id: "dry-run",
+          model: body.model,
+          operation: body.operation,
+        },
+        body.text,
+        c.req.raw.signal,
       );
-    }
-    const res = await deps.pluginEngine.runUnary(
-      body.hook as PluginHook,
-      [{ plugin_id: plugin.id, priority: 1 }],
-      snap.plugins,
-      {
-        request_id: crypto.randomUUID(),
-        project_id: "dry-run",
-        model: body.model,
-        operation: body.operation,
-      },
-      body.text,
-      c.req.raw.signal,
-    );
-    return c.json(res);
-  });
+      return c.json(res);
+    },
+  );
 
-  app.post("/internal/v1/wallets/:projectId/credits", async (c) => {
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const body = parseBody(creditWalletSchema, await c.req.json());
-    const res = await deps.ledger.creditWallet({
-      project_id: projectId,
-      currency: body.currency,
-      external_ref: body.external_ref,
-      amount_atoms: body.amount_atoms,
-      kind: body.kind as LotKind,
-      ...(body.priority !== undefined ? { priority: body.priority } : {}),
-      expires_at: body.expires_at ?? null,
-      ...(body.models ? { models: body.models } : {}),
-      ...(body.operations ? { operations: body.operations } : {}),
-      ...(body.reason ? { reason: body.reason } : {}),
-    });
-    return c.json(res);
-  });
+  jsonRoute(
+    "POST",
+    "/internal/v1/wallets/:projectId/credits",
+    "finance",
+    creditWalletSchema,
+    async (c, body) => {
+      const projectId = parseUuid(c.req.param("projectId"), "projectId");
+      const res = await deps.ledger.creditWallet({
+        project_id: projectId,
+        currency: body.currency,
+        external_ref: body.external_ref,
+        amount_atoms: body.amount_atoms,
+        kind: body.kind as LotKind,
+        ...(body.priority !== undefined ? { priority: body.priority } : {}),
+        expires_at: body.expires_at ?? null,
+        ...(body.models ? { models: body.models } : {}),
+        ...(body.operations ? { operations: body.operations } : {}),
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return c.json(res);
+    },
+  );
 
-  app.post("/internal/v1/wallets/:projectId/credit-policy", async (c) => {
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const body = parseBody(creditPolicySchema, await c.req.json());
-    const res = await deps.ledger.configureWalletCredit({
-      project_id: projectId,
-      currency: body.currency,
-      expected_version: body.expected_version,
-      credit_limit_atoms: body.credit_limit_atoms,
-      ...(body.policy ? { policy: body.policy as WalletPolicy } : {}),
-    });
-    return c.json(res);
-  });
+  jsonRoute(
+    "POST",
+    "/internal/v1/wallets/:projectId/credit-policy",
+    "finance",
+    creditPolicySchema,
+    async (c, body) => {
+      const projectId = parseUuid(c.req.param("projectId"), "projectId");
+      const res = await deps.ledger.configureWalletCredit({
+        project_id: projectId,
+        currency: body.currency,
+        expected_version: body.expected_version,
+        credit_limit_atoms: body.credit_limit_atoms,
+        ...(body.policy ? { policy: body.policy as WalletPolicy } : {}),
+      });
+      return c.json(res);
+    },
+  );
 
-  app.get("/internal/v1/wallets/:projectId", async (c) => {
+  route("GET", "/internal/v1/wallets/:projectId", "auditor", async (c) => {
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
     const currency = parseBody(currencySchema, c.req.query("currency") ?? "USD");
     const wallet = await deps.ledger.getWallet(projectId, currency);
@@ -1068,66 +1254,117 @@ export function createInternalApi(deps: {
     return c.json(wallet);
   });
 
-  app.post("/internal/v1/charges/:chargeId/refunds", async (c) => {
-    const chargeId = parseUuid(c.req.param("chargeId"), "chargeId");
-    const body = parseBody(refundChargeSchema, await c.req.json());
-    const res = await deps.ledger.refundCharge({
-      charge_id: chargeId,
-      external_ref: body.external_ref,
-      amount_atoms: body.amount_atoms,
-      reason: body.reason,
-    });
-    return c.json(res);
-  });
+  jsonRoute(
+    "POST",
+    "/internal/v1/charges/:chargeId/refunds",
+    "finance",
+    refundChargeSchema,
+    async (c, body) => {
+      const chargeId = parseUuid(c.req.param("chargeId"), "chargeId");
+      const res = await deps.ledger.refundCharge({
+        charge_id: chargeId,
+        external_ref: body.external_ref,
+        amount_atoms: body.amount_atoms,
+        reason: body.reason,
+      });
+      return c.json(res);
+    },
+  );
 
-  app.post("/internal/v1/charges/:chargeId/adjustments", async (c) => {
-    const chargeId = parseUuid(c.req.param("chargeId"), "chargeId");
-    const body = parseBody(adjustChargeSchema, await c.req.json());
-    const res = await deps.ledger.adjustCharge({
-      charge_id: chargeId,
-      external_ref: body.external_ref,
-      delta_atoms: body.delta_atoms,
-      reason: body.reason,
-    });
-    return c.json(res);
-  });
+  jsonRoute(
+    "POST",
+    "/internal/v1/charges/:chargeId/adjustments",
+    "finance",
+    adjustChargeSchema,
+    async (c, body) => {
+      const chargeId = parseUuid(c.req.param("chargeId"), "chargeId");
+      const res = await deps.ledger.adjustCharge({
+        charge_id: chargeId,
+        external_ref: body.external_ref,
+        delta_atoms: body.delta_atoms,
+        reason: body.reason,
+      });
+      return c.json(res);
+    },
+  );
 
-  app.post("/internal/v1/upstream-accounts/:accountId/recharges", async (c) => {
-    const accountId = parseUuid(c.req.param("accountId"), "accountId");
-    const body = parseBody(rechargeSupplierSchema, await c.req.json());
-    const res = await deps.ledger.rechargeSupplier({
-      account_id: accountId,
-      currency: body.currency,
-      external_ref: body.external_ref,
-      amount_atoms: body.amount_atoms,
-      ...(body.reason ? { reason: body.reason } : {}),
-    });
-    return c.json(res);
-  });
+  jsonRoute(
+    "POST",
+    "/internal/v1/upstream-accounts/:accountId/recharges",
+    "finance",
+    rechargeSupplierSchema,
+    async (c, body) => {
+      const accountId = parseUuid(c.req.param("accountId"), "accountId");
+      const res = await deps.ledger.rechargeSupplier({
+        account_id: accountId,
+        currency: body.currency,
+        external_ref: body.external_ref,
+        amount_atoms: body.amount_atoms,
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return c.json(res);
+    },
+  );
 
-  app.get("/internal/v1/upstream-accounts/:accountId/balance", async (c) => {
+  route("GET", "/internal/v1/upstream-accounts/:accountId/balance", "auditor", async (c) => {
     const accountId = parseUuid(c.req.param("accountId"), "accountId");
     const currency = parseBody(currencySchema, c.req.query("currency") ?? "USD");
     const bal = await deps.ledger.getSupplierBalance(accountId, currency);
     return c.json(bal);
   });
 
-  app.post("/internal/v1/requests/:requestId/resolve", async (c) => {
-    const requestId = parseUuid(c.req.param("requestId"), "requestId");
-    const body = parseBody(resolveRequestSchema, await c.req.json());
-    const res = await deps.ledger.resolveRequest({
-      request_id: requestId,
-      action: body.action,
-      ...(body.billing_price_id ? { billing_price_id: body.billing_price_id } : {}),
-      ...(body.usage ? { usage: body.usage as Usage } : {}),
-      ...(body.supplier_cost_atoms ? { supplier_cost_atoms: body.supplier_cost_atoms } : {}),
-      reason: body.reason,
-      actor: body.actor,
-    });
-    return c.json(res);
-  });
+  jsonRoute(
+    "POST",
+    "/internal/v1/requests/:requestId/resolve",
+    "finance",
+    resolveRequestSchema,
+    async (c, body) => {
+      const requestId = parseUuid(c.req.param("requestId"), "requestId");
+      const res = await deps.ledger.resolveRequest({
+        request_id: requestId,
+        action: body.action,
+        ...(body.billing_price_id ? { billing_price_id: body.billing_price_id } : {}),
+        ...(body.usage ? { usage: body.usage as Usage } : {}),
+        ...(body.supplier_cost_atoms ? { supplier_cost_atoms: body.supplier_cost_atoms } : {}),
+        ...(body.supplier_cost_version_id
+          ? { supplier_cost_version_id: body.supplier_cost_version_id }
+          : {}),
+        reason: body.reason,
+        actor: resolutionActor(c, body.actor),
+      });
+      return c.json(res);
+    },
+  );
 
-  app.get("/internal/v1/charges", async (c) => {
+  jsonRoute(
+    "POST",
+    "/internal/v1/requests/:requestId/attempts/:attemptId/resolve",
+    "finance",
+    resolveSupplierAttemptSchema,
+    async (c, body) => {
+      const requestId = parseUuid(c.req.param("requestId"), "requestId");
+      const attemptId = parseUuid(c.req.param("attemptId"), "attemptId");
+      const result = await deps.ledger.resolveSupplierAttempt({
+        ...body,
+        actor: resolutionActor(c, body.actor),
+        request_id: requestId,
+        attempt_id: attemptId,
+      });
+      if (result.ok) return c.json({ replayed: result.replayed, state: result.state });
+      const status =
+        result.code === "supplier_attempt_not_found"
+          ? 404
+          : result.code === "supplier_attempt_conflict"
+            ? 409
+            : 422;
+      return c.json(
+        { error: { code: result.code, message: "Supplier attempt resolution failed" } },
+        status,
+      );
+    },
+  );
+
+  route("GET", "/internal/v1/charges", "auditor", async (c) => {
     const projectId = c.req.query("project_id");
     const outcome = c.req.query("outcome");
     const from = c.req.query("from");
@@ -1152,7 +1389,7 @@ export function createInternalApi(deps: {
     return c.json(res);
   });
 
-  app.get("/internal/v1/ledger-entries", async (c) => {
+  route("GET", "/internal/v1/ledger-entries", "auditor", async (c) => {
     const side = c.req.query("side");
     const entityId = c.req.query("entity_id");
     const requestId = c.req.query("request_id");
@@ -1174,7 +1411,7 @@ export function createInternalApi(deps: {
     return c.json(res);
   });
 
-  app.get("/internal/v1/holds", async (c) => {
+  route("GET", "/internal/v1/holds", "auditor", async (c) => {
     const state = c.req.query("state");
     const projectId = c.req.query("project_id");
     const limit = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
@@ -1192,7 +1429,7 @@ export function createInternalApi(deps: {
     return c.json(res);
   });
 
-  app.get("/internal/v1/requests/:requestId", async (c) => {
+  route("GET", "/internal/v1/requests/:requestId", "auditor", async (c) => {
     const requestId = parseUuid(c.req.param("requestId"), "requestId");
     const res = await deps.queries.getRequestBilling(requestId);
     if (!res.hold && !res.charge) {
@@ -1201,24 +1438,24 @@ export function createInternalApi(deps: {
     return c.json(res);
   });
 
-  app.post("/internal/v1/events/claim", async (c) => {
-    const body = parseBody(claimEventsSchema, await c.req.json());
+  jsonRoute("POST", "/internal/v1/events/claim", "events", claimEventsSchema, async (c, body) => {
+    requireConsumer(c, body.consumer);
     const res = await deps.ledger.claimOutboxEvents(body.consumer, body.limit);
     return c.json(res);
   });
 
-  app.post("/internal/v1/events/ack", async (c) => {
-    const body = parseBody(ackEventsSchema, await c.req.json());
+  jsonRoute("POST", "/internal/v1/events/ack", "events", ackEventsSchema, async (c, body) => {
+    requireConsumer(c, body.consumer);
     const ok = await deps.ledger.ackOutboxEvents(body.consumer, body.lease_token, body.through_seq);
     return c.json({ ok });
   });
 
-  app.get("/internal/v1/audit/conservation", async (c) => {
+  route("GET", "/internal/v1/audit/conservation", "auditor", async (c) => {
     const audit = await deps.ledger.auditConservation();
     return c.json(audit, audit.ok ? 200 : 500);
   });
 
-  return app;
+  return { app, requestBodies, routeRoles };
 }
 
 export type InternalChargePolicy = ChargePolicy;

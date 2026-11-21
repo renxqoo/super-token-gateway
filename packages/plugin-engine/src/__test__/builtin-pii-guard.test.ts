@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import type { PluginRecord } from "@gateway/ledger";
 import {
   createBunWasmExecutor,
-  createFfiWasmtimeExecutor,
   getBuiltinPlugin,
   listBuiltinPlugins,
   PluginPipelineEngine,
@@ -120,7 +119,7 @@ test("Built-in pii-guard WASM plugin passes full DLP/PII/streaming matrix on bot
 
   const libPath = resolveWasmtimeLibraryPath();
   if (libPath) {
-    const ffiExec = createFfiWasmtimeExecutor({ libraryPath: libPath });
+    const ffiExec = createBunWasmExecutor({ wasmtimeLibraryPath: libPath });
     try {
       await runPiiGuardMatrix(ffiExec);
     } finally {

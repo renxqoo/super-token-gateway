@@ -2,10 +2,10 @@
 
 ## 项目目录结构
 
-- `apps/gateway`：v2 公开网关（无 PG，经 Core RPC 执行推理与资源请求）；`apps/core-api`：Core 内部 RPC 与 `/admin` 管理、插件目录；`apps/core-worker`：签名证据结算 worker；`apps/mock-providers`：测试用上游替身。
-- `packages/kernel`：契约、计量与金额计算；`packages/adapters`：内置插件包源码，`src/protocol` 为宿主侧协议转换与流解析；`packages/runtime`：网络、限流、队列与进程生命周期；`packages/storage`：PostgreSQL schema、迁移与资金存储。
+- `apps/gateway`：公开推理与内网管理 API，经账本包直连 PostgreSQL，支持独立网关和内置 Worker 模式。`apps/worker`：选主、资金清扫、维护和业务事件投递。`apps/mock-providers`：本地及测试上游。
+- `packages/kernel`：精确计量与金额计算。`packages/contracts`：输入校验和 HTTP 契约。`packages/protocol`：协议转换与流解析。`packages/plugin-engine`：内容策略和渠道适配。`packages/runtime`：网络、路由、限流与生命周期。`packages/ledger`：PostgreSQL 迁移、目录、账本及事件存储。
 - `scripts`：迁移、构建、基准与验收脚本；`tests/integration`：真实 PG/Redis/HTTP 集成测试；`tests/unit`：只放跨模块架构约束；`tests/fixtures`：历史 schema 升级夹具。
-- `infra`：部署配置与最小权限角色；`docs`：ADR、OpenAPI 与性能证据。
+- `infra`：部署与服务配置；`docs`：ADR、OpenAPI 与性能证据。
 
 ## 事实来源
 
@@ -45,7 +45,7 @@
 
 ## 验证
 
-代码变更提交前必须通过以下检查，具体执行内容以 `package.json` 和工具配置为准；CI 执行 `bun run verify` 与 `bun run test:durability`：
+代码变更提交前必须通过以下检查，具体执行内容以 `package.json` 和工具配置为准；CI 执行 `bun run verify`，其中包含 `bun run test:durability`：
 
 | 命令                       | 验证内容                                                                         |
 | -------------------------- | -------------------------------------------------------------------------------- |
@@ -62,7 +62,7 @@
 - 纯文档修改和只读审阅按实际影响核对内容、引用和格式；未影响运行时代码、测试或配置时无需运行上述检查，须说明未执行项。
 - 仓库没有配置覆盖率门禁；需要覆盖率时运行 `bun run test --coverage` 并如实报告 functions、lines 数字及统计范围（仅单测加载的文件），不以此声称全仓覆盖率达标。
 - 汇报已执行检查的真实结果，包括用例数；未运行的检查明确说明，不编造数字。
-- 耐久与备份检查分别通过 `test:durability`、`test:backup` 原生执行；所需本机工具或停机条件不满足时说明未执行。
+- `bun run test:durability` 在隔离数据库内验证强杀恢复及逻辑备份恢复。生产备份和按时间点恢复按部署环境单独验证。
 
 ## 提交与交付规范
 

@@ -88,6 +88,10 @@ export class GatewayMetrics {
   requestsTotal = 0;
   failoversTotal = 0;
   moderationBlocksTotal = 0;
+  ledgerCommitFailures = 0;
+  leaseRenewalFailures = 0;
+  adminAuditFailures = 0;
+  activeStreams = 0;
   private readonly httpCounters = new Map<string, number>();
   private readonly upstreamErrorCounters = new Map<string, number>();
   private readonly requestDuration = new Histogram();
@@ -97,7 +101,7 @@ export class GatewayMetrics {
 
   observeRequest(record: AccessLogRecord): void {
     const statusClass = `${Math.floor(record.status / 100)}xx`;
-    const key = `${record.operation}|${statusClass}|${record.channel ?? "none"}`;
+    const key = JSON.stringify([record.operation, statusClass, record.channel ?? "none"]);
     this.httpCounters.set(key, (this.httpCounters.get(key) ?? 0) + 1);
     this.requestDuration.observe(record.duration_ms);
     if (record.ttft_ms !== null) {
@@ -118,7 +122,7 @@ export class GatewayMetrics {
   }
 
   recordUpstreamError(channel: string, kind: string): void {
-    const key = `${channel}|${kind}`;
+    const key = JSON.stringify([channel, kind]);
     this.upstreamErrorCounters.set(key, (this.upstreamErrorCounters.get(key) ?? 0) + 1);
   }
 
@@ -127,6 +131,9 @@ export class GatewayMetrics {
     configEpoch: number;
     openCircuits: number;
     redisConnected: boolean;
+    redisRequired: boolean;
+    ready: boolean;
+    snapshotVerifiedAt: number;
   }): string {
     const lines = [
       "# TYPE gateway_requests_total counter",
@@ -135,6 +142,20 @@ export class GatewayMetrics {
       `gateway_failovers_total ${this.failoversTotal}`,
       "# TYPE gateway_moderation_blocks_total counter",
       `gateway_moderation_blocks_total ${this.moderationBlocksTotal}`,
+      "# TYPE gateway_ledger_commit_failures_total counter",
+      `gateway_ledger_commit_failures_total ${this.ledgerCommitFailures}`,
+      "# TYPE gateway_lease_renewal_failures_total counter",
+      `gateway_lease_renewal_failures_total ${this.leaseRenewalFailures}`,
+      "# TYPE gateway_admin_audit_failures_total counter",
+      `gateway_admin_audit_failures_total ${this.adminAuditFailures}`,
+      "# TYPE gateway_active_streams gauge",
+      `gateway_active_streams ${this.activeStreams}`,
+      "# TYPE gateway_ready gauge",
+      `gateway_ready ${gauges.ready ? 1 : 0}`,
+      "# TYPE gateway_snapshot_verified_timestamp_seconds gauge",
+      `gateway_snapshot_verified_timestamp_seconds ${gauges.snapshotVerifiedAt}`,
+      "# TYPE gateway_cluster_redis_required gauge",
+      `gateway_cluster_redis_required ${gauges.redisRequired ? 1 : 0}`,
       "# TYPE gateway_in_flight gauge",
       `gateway_in_flight ${gauges.inFlight}`,
       "# TYPE gateway_config_epoch gauge",
@@ -146,14 +167,14 @@ export class GatewayMetrics {
       "# TYPE gateway_http_requests_total counter",
     ];
     for (const [key, val] of this.httpCounters) {
-      const [op, statusClass, channel] = key.split("|");
+      const [op, statusClass, channel] = JSON.parse(key) as [string, string, string];
       lines.push(
         `gateway_http_requests_total{operation="${escapeLabel(op!)}",status_class="${escapeLabel(statusClass!)}",channel="${escapeLabel(channel!)}"} ${val}`,
       );
     }
     lines.push("# TYPE gateway_upstream_errors_total counter");
     for (const [key, val] of this.upstreamErrorCounters) {
-      const [channel, kind] = key.split("|");
+      const [channel, kind] = JSON.parse(key) as [string, string];
       lines.push(
         `gateway_upstream_errors_total{channel="${escapeLabel(channel!)}",kind="${escapeLabel(kind!)}"} ${val}`,
       );

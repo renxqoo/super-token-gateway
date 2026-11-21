@@ -623,6 +623,33 @@ test("G3.2 external HTTP Webhook HOLD_UNTIL_APPROVED leaks zero banned bytes and
   expect(cutoffEnd.charge_policy).toBe("CHARGE_CUSTOMER");
   expect(cutoffAborted).toBe(true);
   expect(seen.length).toBeGreaterThanOrEqual(2);
+
+  const firstVerdict = Promise.withResolvers<Response>();
+  let checks = 0;
+  const slowEngine = new PluginPipelineEngine({
+    webhookExecutor: new WebhookPluginExecutor({
+      fetchImpl: (async () => {
+        checks++;
+        return checks === 1 ? firstVerdict.promise : Response.json({ action: "PASS" });
+      }) as unknown as typeof fetch,
+    }),
+  });
+  const slowSession = slowEngine.createStreamSession(
+    [{ plugin_id: cutoffPlugin.id, priority: 1 }],
+    new Map([[cutoffPlugin.id, cutoffPlugin]]),
+    { request_id: "slow-webhook", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    () => undefined,
+  );
+  expect((await slowSession.push("Safe first sentence.")).emit).toBe("Safe first sentence.");
+  const second = slowSession.push("Safe second sentence.");
+  const overlappingChecks = checks;
+  firstVerdict.resolve(Response.json({ action: "PASS" }));
+  expect((await second).emit).toBe("Safe second sentence.");
+  const audit = (await slowSession.finalize()).audit;
+  expect(overlappingChecks).toBe(1);
+  expect(checks).toBe(2);
+  expect(audit).toHaveLength(1);
+  expect(audit[0]).toMatchObject({ hook: "on_stream_chunk", action: "PASS", executions: 2 });
 });
 
 test("G3.2 webhook FAIL_CLOSED blocks and trips circuit while FAIL_OPEN passes through on outage", async () => {
@@ -699,6 +726,33 @@ test("G3.2 webhook FAIL_CLOSED blocks and trips circuit while FAIL_OPEN passes t
     "hello",
   );
   expect(r4).toMatchObject({ blocked: false, text: "hello" });
+});
+
+test("WASM invocations expire while waiting behind a busy worker", async () => {
+  const maxMemoryBytes = 4 * 1024 * 1024;
+  const executor = createBunWasmExecutor({
+    maxMemoryBytes,
+    poolSize: 1,
+    minTimeoutMs: 25,
+    maxTimeoutMs: 150,
+  });
+  executor.compile("loop", "loop", buildInfiniteLoopWasm("on_response"));
+  executor.compile("fast", "fast", buildCrossTenantProbeWasm());
+  const input = new Uint8Array();
+  try {
+    const busy = executor
+      .invoke("loop", "on_response", input, { maxMemoryBytes, fuelBudget: 1_500_000 })
+      .catch((error: unknown) => error);
+    await expect(
+      executor.invoke("fast", "on_response", input, { maxMemoryBytes, fuelBudget: 250_000 }),
+    ).rejects.toThrow("WASM execution timed out");
+    expect(await busy).toBeInstanceOf(Error);
+    await expect(
+      executor.invoke("fast", "on_response", input, { maxMemoryBytes, fuelBudget: 1_500_000 }),
+    ).resolves.toBeInstanceOf(Uint8Array);
+  } finally {
+    executor.close?.();
+  }
 });
 
 test("G3.1 Real Bun WebAssembly Worker sandbox executes signed WASM, isolates cross-tenant memory, and kills infinite loops / memory bombs / WASI escapes", async () => {

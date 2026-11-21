@@ -18,11 +18,17 @@ function shutdown(): void {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-await Promise.all(
-  children.map(
-    (child) =>
-      new Promise<void>((resolve) => {
-        child.on("exit", () => resolve());
-      }),
-  ),
+const exits = children.map(
+  (child) =>
+    new Promise<number>((resolve) => {
+      child.once("exit", (code) => resolve(code ?? 0));
+      child.once("error", (error) => {
+        console.error(error.message);
+        resolve(1);
+      });
+    }),
 );
+const firstExit = await Promise.race(exits);
+shutdown();
+await Promise.all(exits);
+process.exitCode = firstExit;

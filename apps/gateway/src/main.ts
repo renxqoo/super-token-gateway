@@ -19,7 +19,18 @@ const internalServer = Bun.serve({
   hostname: config.internalHost,
   port: config.internalPort,
   idleTimeout: 60,
-  fetch: runtime.internalApp.fetch,
+  fetch(req) {
+    if (req.method === "GET" && new URL(req.url).pathname === "/metrics") {
+      return runtime.metricsResponse();
+    }
+    if (!runtime.lifecycle.accepting) {
+      return Response.json(
+        { error: { code: "overloaded", message: "Gateway is draining" } },
+        { status: 503 },
+      );
+    }
+    return runtime.lifecycle.track(Promise.resolve(runtime.internalApp.fetch(req)));
+  },
 });
 
 console.log(
@@ -36,9 +47,10 @@ let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  runtime.lifecycle.accepting = false;
+  const listeners = [publicServer.stop(), internalServer.stop()];
   await runtime.close(10_000);
-  await publicServer.stop();
-  await internalServer.stop();
+  await Promise.all(listeners);
   process.exit(0);
 }
 

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { appendFile, rm } from "node:fs/promises";
 import type { SQL } from "bun";
 import { getTableConfig } from "drizzle-orm/pg-core";
+import { createWorkerRunner } from "@gateway/worker";
 import {
   assertSchemaVersion,
   createCatalogRepository,
@@ -16,7 +17,10 @@ import {
   verifyLedgerArchive,
 } from "@gateway/ledger";
 
-async function withLedgerDb(run: (db: SQL) => Promise<void>): Promise<void> {
+async function withLedgerDb(
+  run: (db: SQL) => Promise<void>,
+  initialize: (db: SQL) => Promise<void> = migrate,
+): Promise<void> {
   const base = process.env.DATABASE_URL;
   if (!base) throw new Error("DATABASE_URL required");
   const name = `gateway_v4_ledger_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -26,7 +30,7 @@ async function withLedgerDb(run: (db: SQL) => Promise<void>): Promise<void> {
   url.pathname = `/${name}`;
   const db = createDatabase(url.toString(), 16);
   try {
-    await migrate(db);
+    await initialize(db);
     await run(db);
   } finally {
     await db.close({ timeout: 1 });
@@ -266,12 +270,13 @@ test("G1.1 exact rational pricing, multi-lot priority, and expired hold surplus 
       unbalanced_journals: 0,
       broken_lots: 0,
       wallet_mismatches: 0,
+      reservation_mismatches: 0,
       open_holds: 0,
       unknown_holds: 0,
     });
   }));
 
-test("G1.2 reverse-order lot refund, debt waiver, auto debt collection, and NUMERIC(38,0) precision", () =>
+test("G1.2 refund and debt collection share wallet-first lock order and preserve exact balances", () =>
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     await f.ledger.configureWalletCredit({
@@ -355,12 +360,26 @@ test("G1.2 reverse-order lot refund, debt waiver, auto debt collection, and NUME
     const frozenWallet = await f.ledger.getWallet(proj2.id, "PTS");
     expect(frozenWallet?.freeze_reason).toBe("DEBT_EXCEEDS_CREDIT_LIMIT");
 
-    const refunded = await f.ledger.refundCharge({
+    const refundInput = {
       charge_id: settled.charge_id,
       external_ref: "ref-1",
       amount_atoms: "50",
       reason: "CUSTOMER_REFUND",
-    });
+    };
+    let pendingRefund:
+      Promise<Awaited<ReturnType<typeof f.ledger.refundCharge>> | Error> | undefined;
+    const walletLock = await db
+      .begin(async (tx) => {
+        await tx`SELECT id FROM public.wallets WHERE project_id = ${proj2.id} FOR NO KEY UPDATE`;
+        pendingRefund = f.ledger.refundCharge(refundInput).catch((error: Error) => error);
+        await Bun.sleep(50);
+        await tx`SELECT id FROM public.billing_charges
+        WHERE id = ${settled.charge_id} FOR NO KEY UPDATE`;
+        return true;
+      })
+      .catch(() => false);
+    const refunded = await pendingRefund;
+    expect(walletLock).toBe(true);
     expect(refunded).toMatchObject({
       replayed: false,
       refunded_atoms: "50",
@@ -483,12 +502,13 @@ test("G1.3 100 concurrent micro-batched holds on one single hot wallet have zero
       unbalanced_journals: 0,
       broken_lots: 0,
       wallet_mismatches: 0,
+      reservation_mismatches: 0,
       open_holds: 0,
       unknown_holds: 0,
     });
   }));
 
-test("G1.4 dynamic failover supplier switch, customer hold top-up, and UNKNOWN supplier preservation", () =>
+test("G1.4 failed fallback cannot strand a customer top-up, and successful failover preserves UNKNOWN supplier funds", () =>
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     await f.ledger.creditWallet({
@@ -521,6 +541,24 @@ test("G1.4 dynamic failover supplier switch, customer hold top-up, and UNKNOWN s
       expires_at: new Date(Date.now() + 30000).toISOString(),
     });
     expect(hold.ok).toBe(true);
+
+    const rejected = await f.ledger.switchSupplierAttempt({
+      request_id: reqId,
+      failed_attempt_id: attA,
+      failed_outcome: "FAILED",
+      next_attempt_id: crypto.randomUUID(),
+      next_account_id: f.accountB.id,
+      next_channel_id: f.channelB.id,
+      next_currency: "USD",
+      next_supplier_atoms: "1000001",
+      required_customer_atoms: "150",
+    });
+    expect(rejected).toMatchObject({ ok: false, code: "supplier_insufficient_balance" });
+    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+      available_atoms: "400",
+      reserved_atoms: "100",
+    });
+    expect((await f.ledger.getSupplierBalance(f.accountA.id, "USD")).reserved_atoms).toBe("50");
 
     const sw1 = await f.ledger.switchSupplierAttempt({
       request_id: reqId,
@@ -590,6 +628,15 @@ test("G1.4 dynamic failover supplier switch, customer hold top-up, and UNKNOWN s
       spent_atoms: "60",
     });
     expect((await f.ledger.auditConservation()).ok).toBe(true);
+
+    await db.begin(async (tx) => {
+      await tx`UPDATE public.wallets SET available_atoms = available_atoms - 1,
+        reserved_atoms = reserved_atoms + 1 WHERE project_id = ${f.project.id}`;
+      await tx`UPDATE public.wallet_lots SET available_atoms = available_atoms - 1,
+        reserved_atoms = reserved_atoms + 1
+        WHERE wallet_id = (SELECT id FROM public.wallets WHERE project_id = ${f.project.id})`;
+    });
+    expect((await f.ledger.auditConservation()).ok).toBe(false);
   }));
 
 test("G1.5 moderation PLATFORM_ABSORB, DB immutability/balance triggers, and monthly archive verification", () =>
@@ -684,7 +731,8 @@ test("G1.5 moderation PLATFORM_ABSORB, DB immutability/balance triggers, and mon
       const verified = await verifyLedgerArchive(manifestPath);
       expect(verified.files.find((x) => x.kind === "charges")?.rows).toBe(1);
       expect(verified.files.find((x) => x.kind === "entries")?.rows).toBeGreaterThanOrEqual(4);
-      await appendFile(`${archiveDir}/entries.ndjson.gz`, "tampered");
+      const entriesFile = verified.files.find((file) => file.kind === "entries")!.file;
+      await appendFile(`${archiveDir}/${entriesFile}`, "tampered");
       await expect(verifyLedgerArchive(manifestPath)).rejects.toThrow("checksum");
     } finally {
       await rm(archiveDir, { recursive: true, force: true });
@@ -873,12 +921,92 @@ test("G1.7 sharded wallet & supplier leases settle 200 concurrent requests via f
       unbalanced_journals: 0,
       broken_lots: 0,
       wallet_mismatches: 0,
+      reservation_mismatches: 0,
       open_holds: 0,
       unknown_holds: 0,
     });
   }));
 
-test("G1.8 expired lot inside lease never resurrects and Worker sweepExpiredLeases recovers dead node leases after SIGKILL", () =>
+for (const action of ["RELEASE", "SETTLE"] as const) {
+  test(`manual ${action} keeps the hold and balances when writing the resolution fails`, () =>
+    withLedgerDb(async (db) => {
+      const f = await seedFixture(db);
+      try {
+        await f.ledger.creditWallet({
+          project_id: f.project.id,
+          currency: "PTS",
+          external_ref: "manual-resolution-credit",
+          amount_atoms: "100",
+          kind: "CASH",
+        });
+        const requestId = crypto.randomUUID();
+        expect(
+          await f.ledger.acquireHold({
+            request_id: requestId,
+            attempt_id: crypto.randomUUID(),
+            project_id: f.project.id,
+            currency: "PTS",
+            operation: "chat",
+            model: "gpt-4o",
+            idempotency_key: "manual-resolution",
+            fingerprint: "manual-resolution",
+            customer_atoms: "100",
+            supplier_account_id: f.accountA.id,
+            supplier_channel_id: f.channelA.id,
+            supplier_cost_version_id: f.costPrice.id,
+            supplier_currency: "USD",
+            supplier_atoms: "50",
+            expires_at: new Date(Date.now() + 30_000).toISOString(),
+          }),
+        ).toMatchObject({ ok: true });
+        expect(await f.ledger.markUnknown(requestId)).toBe(true);
+        await db`ALTER TABLE public.billing_resolutions
+          ADD CONSTRAINT reject_resolution_actor CHECK (actor <> 'reject-write')`;
+        const input = {
+          request_id: requestId,
+          action,
+          billing_price_id: f.flatBillingPrice.id,
+          usage: { input_tokens: "30" },
+          supplier_cost_atoms: "10",
+          reason: "verified from supplier",
+          actor: "reject-write",
+        };
+        await expect(f.ledger.resolveRequest(input)).rejects.toThrow("reject_resolution_actor");
+        const afterFailure = await createLedgerQueries(db).getRequestBilling(requestId);
+        expect(afterFailure.hold?.state).toBe("UNKNOWN");
+        expect(afterFailure.charge).toBeNull();
+        expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+          available_atoms: "0",
+          reserved_atoms: "100",
+          spent_atoms: "0",
+        });
+        expect((await f.ledger.getSupplierBalance(f.accountA.id, "USD")).reserved_atoms).toBe("50");
+        expect(
+          await db`SELECT seq FROM public.outbox_events WHERE request_id = ${requestId}`,
+        ).toHaveLength(0);
+
+        const repaired = { ...input, actor: "finance" };
+        const results = await Promise.all([
+          f.ledger.resolveRequest(repaired),
+          f.ledger.resolveRequest(repaired),
+        ]);
+        expect(results.filter((result) => result.replayed)).toHaveLength(1);
+        expect(
+          await db`SELECT action, actor FROM public.billing_resolutions WHERE request_id = ${requestId}`,
+        ).toEqual([{ action, actor: "finance" }]);
+        expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+          available_atoms: action === "SETTLE" ? "70" : "100",
+          reserved_atoms: "0",
+          spent_atoms: action === "SETTLE" ? "30" : "0",
+        });
+        expect((await f.ledger.auditConservation()).ok).toBe(true);
+      } finally {
+        await f.ledger.drain();
+      }
+    }));
+}
+
+test("G1.8 expired lot inside lease never resurrects and Worker recovers dead node leases and retains the actual supplier tariff", () =>
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     const shortGrant = await f.ledger.creditWallet({
@@ -983,17 +1111,28 @@ test("G1.8 expired lot inside lease never resurrects and Worker sweepExpiredLeas
           actor: "ops",
         });
       } else {
-        await workerLedger.resolveRequest({
+        const resolution = {
           request_id: crashReqs[i]!.reqId,
-          action: "SETTLE",
+          action: "SETTLE" as const,
           billing_price_id: f.flatBillingPrice.id,
           usage: { input_tokens: "50", output_tokens: "50" },
           supplier_cost_atoms: "50",
+          supplier_cost_version_id: f.costPrice.id,
           reason: "verified_sent",
           actor: "ops",
-        });
+        };
+        await workerLedger.resolveRequest(resolution);
       }
     }
+
+    const recovered = await db<{ cost_version_id: string }[]>`
+      SELECT cost_version_id FROM public.billing_charges
+      WHERE request_id = ANY(${crashReqs.slice(2).map((request) => request.reqId)}::uuid[])
+    `;
+    expect(recovered.map((charge) => charge.cost_version_id)).toEqual([
+      f.costPrice.id,
+      f.costPrice.id,
+    ]);
 
     const endWallet = await workerLedger.getWallet(f.project.id, "PTS");
     expect(endWallet?.reserved_atoms).toBe("0");
@@ -1009,8 +1148,395 @@ test("G1.8 expired lot inside lease never resurrects and Worker sweepExpiredLeas
       unbalanced_journals: 0,
       broken_lots: 0,
       wallet_mismatches: 0,
+      reservation_mismatches: 0,
       open_holds: 0,
       unknown_holds: 0,
     });
     await f.ledger.drain();
+  }));
+
+test.each([
+  ["v4-before-fund-leases.sql", 2026112101],
+  ["v4-before-provider-plugins.sql", 1],
+] as const)(
+  "migrates existing %s without changing wallet balances or channel identities",
+  (file, version) =>
+    withLedgerDb(
+      async (db) => {
+        const accountId = crypto.randomUUID();
+        const channelId = crypto.randomUUID();
+        const projectId = crypto.randomUUID();
+        const walletId = crypto.randomUUID();
+        await db`INSERT INTO public.upstream_accounts(id, name) VALUES(${accountId}, 'old account')`;
+        await db`INSERT INTO public.channels(id, account_id, name, kind, base_url, secret_ciphertext, rpm, concurrency)
+        VALUES (${channelId}, ${accountId}, 'old channel', 'openai', 'https://old.invalid', 'cipher', 50, 5)`;
+        await db`INSERT INTO public.projects(id, name, currency, rpm, tpm, concurrency)
+        VALUES (${projectId}, 'old project', 'USD', 10, 1000, 5)`;
+        await db`INSERT INTO public.wallets(id, project_id, currency, available_atoms)
+        VALUES (${walletId}, ${projectId}, 'USD', 123)`;
+        await expect(assertSchemaVersion(db)).rejects.toThrow(/Schema/);
+        await migrate(db);
+        await migrate(db);
+        expect(await assertSchemaVersion(db)).toBe(SCHEMA_VERSION);
+        const snapshot = await createCatalogRepository(db).loadSnapshot();
+        expect(snapshot.channels.get(channelId)).toMatchObject({
+          account_id: accountId,
+          kind: "openai",
+          provider_plugin_id: null,
+          adapter_config: {},
+        });
+        expect(
+          await createLedgerEngine(db, { enableLeases: false }).getWallet(projectId, "USD"),
+        ).toMatchObject({ id: walletId, available_atoms: "123" });
+        const versions = await db<
+          { version: number }[]
+        >`SELECT version FROM public.schema_migrations ORDER BY version`;
+        expect(versions.map((r) => Number(r.version))).toEqual([
+          version,
+          2026112102,
+          SCHEMA_VERSION,
+        ]);
+      },
+      async (db) => {
+        const sql = await Bun.file(new URL(`../fixtures/${file}`, import.meta.url)).text();
+        const spec = {
+          version,
+          files: [
+            {
+              path: "./migrations/0000_v4_baseline.sql",
+              checksum: new Bun.CryptoHasher("sha256").update(sql).digest("hex"),
+            },
+          ],
+        };
+        await db.begin(async (tx) => {
+          await tx.unsafe(sql);
+          const checksum = new Bun.CryptoHasher("sha256")
+            .update(JSON.stringify(spec))
+            .digest("hex");
+          await tx`INSERT INTO public.schema_migrations(version,checksum,manifest)
+          VALUES(${version},${checksum},${spec}::jsonb)`;
+        });
+      },
+    ),
+);
+
+test("a live node cannot admit new holds against wallet and supplier leases reaped by a Worker", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const node = createLedgerEngine(db, { leaseTtlMs: 60_000, leaseIdleReleaseMs: 60_000 });
+    const worker = createLedgerEngine(db, { enableLeases: false });
+    try {
+      await f.ledger.creditWallet({
+        project_id: f.project.id,
+        currency: "PTS",
+        external_ref: "fencing-seed",
+        amount_atoms: "100000000",
+        kind: "CASH",
+      });
+      const acquire = () =>
+        node.acquireHold({
+          request_id: crypto.randomUUID(),
+          attempt_id: crypto.randomUUID(),
+          project_id: f.project.id,
+          currency: "PTS",
+          operation: "chat",
+          model: "gpt-4o",
+          idempotency_key: null,
+          fingerprint: "",
+          customer_atoms: "200",
+          supplier_account_id: f.accountA.id,
+          supplier_channel_id: f.channelA.id,
+          supplier_currency: "USD",
+          supplier_atoms: "100",
+          expires_at: new Date(Date.now() + 30_000).toISOString(),
+        });
+      const existing = await Promise.all(Array.from({ length: 16 }, acquire));
+      expect(existing.every((hold) => hold.ok)).toBe(true);
+      await db`UPDATE public.wallet_leases SET expires_at = now() WHERE state = 'ACTIVE'`;
+      await db`UPDATE public.supplier_leases SET expires_at = now() WHERE state = 'ACTIVE'`;
+      expect(await worker.sweepExpiredLeases()).toBe(2);
+      const admitted = await Promise.all(Array.from({ length: 4 }, acquire));
+      expect(admitted.every((hold) => hold.ok)).toBe(true);
+      const [invalid] = await db`
+        SELECT count(*)::int AS n
+        FROM public.billing_holds h
+        LEFT JOIN public.wallet_leases w ON w.id = h.wallet_lease_id
+        LEFT JOIN public.supplier_leases s ON s.id = h.supplier_lease_id
+        WHERE h.state = 'HELD' AND (w.state = 'CLOSED' OR s.state = 'CLOSED')
+      `;
+      expect(invalid!.n).toBe(0);
+      for (const result of [...existing, ...admitted]) {
+        if (!result.ok) throw new Error(result.message);
+        expect(await node.releaseHold(result.request_id)).toBe(true);
+      }
+      await node.releaseIdleLeases();
+      expect(await node.getWallet(f.project.id, "PTS")).toMatchObject({
+        available_atoms: "100000000",
+        reserved_atoms: "0",
+      });
+    } finally {
+      await node.drain();
+      await f.ledger.drain();
+      await worker.drain();
+    }
+  }));
+
+test("outbox acknowledgement cannot skip a late commit or advance beyond a claimed batch", () =>
+  withLedgerDb(async (db) => {
+    const ledger = createLedgerEngine(db, { enableLeases: false });
+    const firstId = crypto.randomUUID();
+    const secondId = crypto.randomUUID();
+    const inserted = Promise.withResolvers<void>();
+    const commit = Promise.withResolvers<void>();
+    const first = db.begin(async (tx) => {
+      await tx`INSERT INTO public.outbox_events(event_id, kind, payload)
+        VALUES (${firstId}, 'billing.settled', '{}'::jsonb)`;
+      inserted.resolve();
+      await commit.promise;
+    });
+    await inserted.promise;
+    const second = db`INSERT INTO public.outbox_events(event_id, kind, payload)
+      VALUES (${secondId}, 'billing.settled', '{}'::jsonb)`.then(() => true);
+    const consumer = "ordered-test";
+    const delivered: string[] = [];
+    try {
+      const early = await Promise.race([second, Bun.sleep(150).then(() => false)]);
+      if (early) {
+        const batch = await ledger.claimOutboxEvents(consumer);
+        delivered.push(...batch.events.map((event) => event.event_id));
+        await ledger.ackOutboxEvents(consumer, batch.lease_token, batch.events.at(-1)!.seq);
+      }
+    } finally {
+      commit.resolve();
+      await Promise.all([first, second]);
+    }
+    const batch = await ledger.claimOutboxEvents(consumer);
+    delivered.push(...batch.events.map((event) => event.event_id));
+    expect(delivered.sort()).toEqual([firstId, secondId].sort());
+    expect((await ledger.claimOutboxEvents(consumer)).events).toEqual([]);
+    const last = batch.events.at(-1)!.seq;
+    expect(
+      await ledger.ackOutboxEvents(consumer, batch.lease_token, String(BigInt(last) + 1n)),
+    ).toBe(false);
+    expect(await ledger.ackOutboxEvents(consumer, batch.lease_token, last)).toBe(true);
+  }));
+
+test("configuration snapshots cannot label stale project state with the new epoch", () =>
+  withLedgerDb(async (db) => {
+    const catalog = createCatalogRepository(db);
+    const project = await catalog.upsertProject({
+      name: "snapshot-project",
+      currency: "USD",
+      rpm: 10,
+      tpm: 1000,
+      concurrency: 1,
+    });
+    const lock = Promise.withResolvers<void>();
+    const update = Promise.withResolvers<void>();
+    const writer = db.begin(async (tx) => {
+      await tx`LOCK TABLE public.config_epoch IN ACCESS EXCLUSIVE MODE`;
+      lock.resolve();
+      await update.promise;
+      await tx`UPDATE public.projects SET enabled = false WHERE id = ${project.id}`;
+      await tx`UPDATE public.config_epoch SET version = version + 1`;
+    });
+    await lock.promise;
+    const reading = catalog.loadSnapshot();
+    try {
+      await Bun.sleep(80);
+    } finally {
+      update.resolve();
+      await writer;
+    }
+    const snapshot = await reading;
+    const current = await catalog.loadSnapshot();
+    expect(current.projects.get(project.id)?.enabled).toBe(false);
+    expect(snapshot.projects.get(project.id)?.enabled).toBe(snapshot.epoch < current.epoch);
+  }));
+
+test("the timeout sweep leaves an expired hold alone when it was released concurrently", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const requestId = crypto.randomUUID();
+    await f.ledger.creditWallet({
+      project_id: f.project.id,
+      currency: "PTS",
+      external_ref: "sweep-race-fund",
+      amount_atoms: "500",
+      kind: "CASH",
+    });
+    const hold = await f.ledger.acquireHold({
+      request_id: requestId,
+      attempt_id: crypto.randomUUID(),
+      project_id: f.project.id,
+      currency: "PTS",
+      operation: "chat",
+      model: "gpt-4o",
+      idempotency_key: null,
+      fingerprint: "",
+      customer_atoms: "100",
+      supplier_account_id: f.accountA.id,
+      supplier_channel_id: f.channelA.id,
+      supplier_currency: "USD",
+      supplier_atoms: "50",
+      expires_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    expect(hold.ok).toBe(true);
+    const locked = Promise.withResolvers<void>();
+    const unlock = Promise.withResolvers<void>();
+    const barrier = db.begin(async (tx) => {
+      await tx`SELECT request_id FROM public.billing_holds
+        WHERE request_id = ${requestId} FOR NO KEY UPDATE`;
+      locked.resolve();
+      await unlock.promise;
+    });
+    await locked.promise;
+    const release = f.ledger.releaseHold(requestId);
+    await Bun.sleep(40);
+    const sweep = f.ledger.sweepTimedOutHolds();
+    try {
+      await Bun.sleep(50);
+    } finally {
+      unlock.resolve();
+      await barrier;
+    }
+    expect(await release).toBe(true);
+    expect(await sweep).toBe(0);
+    expect((await createLedgerQueries(db).getRequestBilling(requestId)).hold?.state).toBe(
+      "RELEASED",
+    );
+    await f.ledger.drain();
+  }));
+
+test("a settlement constraint error does not roll back another request in the same microbatch", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const badRequest = "00000000-0000-4000-8000-000000000012";
+    await db`ALTER TABLE public.billing_charges
+      ADD CONSTRAINT test_bad_charge CHECK (request_id <> '00000000-0000-4000-8000-000000000012')`;
+    await f.ledger.creditWallet({
+      project_id: f.project.id,
+      currency: "PTS",
+      external_ref: "batch-isolation-fund",
+      amount_atoms: "500",
+      kind: "CASH",
+    });
+    const items = [badRequest, crypto.randomUUID()].map((request_id) => ({
+      request_id,
+      attempt_id: crypto.randomUUID(),
+    }));
+    for (const item of items) {
+      const hold = await f.ledger.acquireHold({
+        ...item,
+        project_id: f.project.id,
+        currency: "PTS",
+        operation: "chat",
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: "",
+        customer_atoms: "100",
+        supplier_account_id: f.accountA.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "50",
+        expires_at: new Date(Date.now() + 1000).toISOString(),
+      });
+      expect(hold.ok).toBe(true);
+    }
+    const [bad, good] = await Promise.allSettled(
+      items.map((item) =>
+        f.ledger.commitTerminal({
+          request_id: item.request_id,
+          selected_attempt_id: item.attempt_id,
+          channel_id: f.channelA.id,
+          billing_price_id: f.flatBillingPrice.id,
+          cost_version_id: f.costPrice.id,
+          usage: { input_tokens: "60", output_tokens: "20" },
+          billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+          billing_basis: "PROVIDER_USAGE",
+          supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+          supplier_currency: "USD",
+        }),
+      ),
+    );
+    expect(bad).toMatchObject({ status: "rejected" });
+    expect(good).toMatchObject({
+      status: "fulfilled",
+      value: { ok: true, customer_atoms: "80", supplier_cost_atoms: "40" },
+    });
+    expect(await f.ledger.releaseHold(badRequest)).toBe(true);
+    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+      available_atoms: "420",
+      reserved_atoms: "0",
+      spent_atoms: "80",
+    });
+    await f.ledger.drain();
+  }));
+
+test("funds recovery continues while the business webhook is waiting for a response", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const entered = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const webhook = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch() {
+        entered.resolve();
+        await resume.promise;
+        return new Response(null, { status: 204 });
+      },
+    });
+    const worker = createWorkerRunner({
+      db,
+      businessWebhookUrl: `http://127.0.0.1:${webhook.port}`,
+      outboxIntervalMs: 10,
+      sweepIntervalMs: 100,
+    });
+    try {
+      await db`INSERT INTO public.outbox_events(event_id, kind, payload)
+        VALUES(${crypto.randomUUID()}, 'billing.settled', '{}'::jsonb)`;
+      await worker.start();
+      await entered.promise;
+      await f.ledger.creditWallet({
+        project_id: f.project.id,
+        currency: "PTS",
+        external_ref: "sweep-independent-fund",
+        amount_atoms: "500",
+        kind: "CASH",
+      });
+      const requestId = crypto.randomUUID();
+      const hold = await f.ledger.acquireHold({
+        request_id: requestId,
+        attempt_id: crypto.randomUUID(),
+        project_id: f.project.id,
+        currency: "PTS",
+        operation: "chat",
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: "",
+        customer_atoms: "100",
+        supplier_account_id: f.accountA.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "50",
+        expires_at: new Date(Date.now() - 100).toISOString(),
+      });
+      expect(hold.ok).toBe(true);
+      const queries = createLedgerQueries(db);
+      const until = performance.now() + 1000;
+      let state: string | undefined;
+      while (performance.now() < until) {
+        state = (await queries.getRequestBilling(requestId)).hold?.state;
+        if (state === "UNKNOWN") break;
+        await Bun.sleep(30);
+      }
+      expect(state).toBe("UNKNOWN");
+      expect(await f.ledger.releaseHold(requestId)).toBe(true);
+    } finally {
+      resume.resolve();
+      await worker.stop();
+      await f.ledger.drain();
+      await webhook.stop(true);
+    }
   }));

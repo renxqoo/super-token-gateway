@@ -1,6 +1,7 @@
 import { dlopen, FFIType, ptr, toArrayBuffer } from "bun:ffi";
 import { createPublicKey, verify } from "node:crypto";
 import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { WasmCallableHook, WasmRuntimeExecutor } from "./types.ts";
 
 const DEFAULT_MAX_MEMORY = 32 * 1024 * 1024;
@@ -131,7 +132,6 @@ type WorkerReply = {
 
 type PoolSlot = {
   worker: Worker;
-  busy: boolean;
   compiledDigests: Map<string, string>;
   onReply: ((data: WorkerReply) => void) | null;
   onFault: ((message: string) => void) | null;
@@ -142,16 +142,28 @@ export function createBunWasmExecutor(options?: {
   poolSize?: number;
   minTimeoutMs?: number;
   maxTimeoutMs?: number;
+  wasmtimeLibraryPath?: string;
 }): WasmRuntimeExecutor {
   const defaultMaxMemory = options?.maxMemoryBytes ?? DEFAULT_MAX_MEMORY;
   const poolSize = Math.max(1, Math.min(16, options?.poolSize ?? 4));
+  const maxPending = poolSize * 64;
   const minTimeoutMs = options?.minTimeoutMs ?? 25;
   const maxTimeoutMs = options?.maxTimeoutMs ?? 2000;
+  const nativeLibrary = options?.wasmtimeLibraryPath ? resolve(options.wasmtimeLibraryPath) : null;
+  const nativeWorkerFile = nativeLibrary
+    ? [
+        new URL("./wasmtime-worker.js", import.meta.url),
+        new URL("./wasmtime-worker.ts", import.meta.url),
+      ].find((file) => existsSync(file))
+    : undefined;
+  if (nativeLibrary && !nativeWorkerFile) {
+    throw new Error("Native Wasmtime worker file is missing from this build");
+  }
 
   const modules = new Map<string, { digest: string; bytes: Uint8Array; initialMemBytes: number }>();
   const slots = new Set<PoolSlot>();
   const idleSlots: PoolSlot[] = [];
-  const waiters: ((slot: PoolSlot | null) => void)[] = [];
+  const waiters = new Set<(slot: PoolSlot | Error) => void>();
   let workerBlobUrl: string | null = null;
   let closed = false;
   let nextSeq = 1;
@@ -163,16 +175,20 @@ export function createBunWasmExecutor(options?: {
   }
 
   function spawnSlot(): PoolSlot {
-    if (!workerBlobUrl) {
+    if (!nativeWorkerFile && !workerBlobUrl) {
       workerBlobUrl = URL.createObjectURL(
         new Blob([BUN_WASM_WORKER_SOURCE], { type: "application/javascript" }),
       );
     }
-    const worker = new Worker(workerBlobUrl);
+    const worker = nativeWorkerFile
+      ? new Worker(nativeWorkerFile, {
+          argv: [nativeLibrary!, String(defaultMaxMemory)],
+          env: {},
+        })
+      : new Worker(workerBlobUrl!);
     setWorkerRef(worker, false);
     const slot: PoolSlot = {
       worker,
-      busy: false,
       compiledDigests: new Map(),
       onReply: null,
       onFault: null,
@@ -187,66 +203,73 @@ export function createBunWasmExecutor(options?: {
     return slot;
   }
 
-  function acquireSlot(): Promise<PoolSlot> {
-    if (closed) return Promise.reject(new Error("WASM executor is closed"));
-    const idle = idleSlots.pop();
-    if (idle) {
-      idle.busy = true;
-      setWorkerRef(idle.worker, true);
-      return Promise.resolve(idle);
+  async function acquireSlot(timeoutMs: number, timeoutError: Error): Promise<PoolSlot> {
+    if (closed) throw new Error("WASM executor is closed");
+    const slot = idleSlots.pop() ?? (slots.size < poolSize ? spawnSlot() : undefined);
+    if (slot) {
+      setWorkerRef(slot.worker, true);
+      return slot;
     }
-    if (slots.size < poolSize) {
-      const created = spawnSlot();
-      created.busy = true;
-      setWorkerRef(created.worker, true);
-      return Promise.resolve(created);
-    }
+    if (waiters.size >= maxPending) throw new Error("WASM executor queue is full");
     return new Promise((resolve, reject) => {
-      waiters.push((slot) => {
-        if (!slot) reject(new Error("WASM executor is closed"));
+      const serve = (slot: PoolSlot | Error) => {
+        clearTimeout(timer);
+        waiters.delete(serve);
+        if (slot instanceof Error) reject(slot);
         else {
           setWorkerRef(slot.worker, true);
           resolve(slot);
         }
-      });
+      };
+      const timer = setTimeout(() => serve(timeoutError), timeoutMs);
+      waiters.add(serve);
     });
   }
 
   function releaseSlot(slot: PoolSlot, healthy: boolean): void {
     slot.onReply = null;
     slot.onFault = null;
-    if (!healthy) {
+    if (closed || !healthy) {
       slots.delete(slot);
       try {
         slot.worker.terminate();
       } catch {
         void 0;
       }
-      if (!closed && waiters.length > 0) {
-        const nextWaiter = waiters.shift()!;
-        const replacement = spawnSlot();
-        replacement.busy = true;
-        nextWaiter(replacement);
+      while (!closed && waiters.size) {
+        const nextWaiter = waiters.values().next().value!;
+        try {
+          nextWaiter(spawnSlot());
+          break;
+        } catch (error) {
+          nextWaiter(error instanceof Error ? error : new Error(String(error)));
+        }
       }
       return;
     }
-    if (closed) {
-      slots.delete(slot);
-      try {
-        slot.worker.terminate();
-      } catch {
-        void 0;
-      }
-      return;
-    }
-    if (waiters.length > 0) {
-      const nextWaiter = waiters.shift()!;
+    const nextWaiter = waiters.values().next().value;
+    if (nextWaiter) {
       nextWaiter(slot);
       return;
     }
-    slot.busy = false;
     setWorkerRef(slot.worker, false);
     idleSlots.push(slot);
+  }
+
+  function closeSlot(slot: PoolSlot): void {
+    if (!nativeWorkerFile) {
+      releaseSlot(slot, false);
+      return;
+    }
+    slot.onReply = (data) => {
+      if (data.seq === 0) releaseSlot(slot, false);
+    };
+    slot.onFault = () => releaseSlot(slot, false);
+    try {
+      slot.worker.postMessage({ seq: 0 });
+    } catch {
+      releaseSlot(slot, false);
+    }
   }
 
   return {
@@ -258,16 +281,18 @@ export function createBunWasmExecutor(options?: {
       if (initialMemBytes > defaultMaxMemory) {
         throw new Error(`WASM initial memory ${initialMemBytes} exceeds limit ${defaultMaxMemory}`);
       }
-      const mod = new WebAssembly.Module(wasmBytes as BufferSource);
-      if (WebAssembly.Module.imports(mod).length > 0) {
-        throw new Error("WASM plugin cannot declare host imports");
-      }
-      const exportsList = WebAssembly.Module.exports(mod);
-      if (!exportsList.some((e) => e.name === "memory" && e.kind === "memory")) {
-        throw new Error("WASM plugin missing exported memory");
-      }
-      if (!exportsList.some((e) => e.name === "stg_alloc" && e.kind === "function")) {
-        throw new Error("WASM plugin missing stg_alloc export");
+      if (!nativeWorkerFile) {
+        const mod = new WebAssembly.Module(wasmBytes as BufferSource);
+        if (WebAssembly.Module.imports(mod).length > 0) {
+          throw new Error("WASM plugin cannot declare host imports");
+        }
+        const exportsList = WebAssembly.Module.exports(mod);
+        if (!exportsList.some((e) => e.name === "memory" && e.kind === "memory")) {
+          throw new Error("WASM plugin missing exported memory");
+        }
+        if (!exportsList.some((e) => e.name === "stg_alloc" && e.kind === "function")) {
+          throw new Error("WASM plugin missing stg_alloc export");
+        }
       }
       modules.set(pluginId, {
         digest,
@@ -288,12 +313,20 @@ export function createBunWasmExecutor(options?: {
       if (entry.initialMemBytes > effectiveMaxMem) {
         throw new Error(`WASM initial memory ${entry.initialMemBytes} exceeds limit`);
       }
-      const slot = await acquireSlot();
-      const seq = nextSeq++;
       const timeoutMs = Math.max(
         minTimeoutMs,
         Math.min(maxTimeoutMs, Math.ceil(invokeOptions.fuelBudget / 10_000)),
       );
+      const timeoutError = new Error(`WASM execution timed out after ${timeoutMs}ms`);
+      const deadline = performance.now() + timeoutMs;
+      const slot = await acquireSlot(timeoutMs, timeoutError);
+      const remainingMs = Math.ceil(deadline - performance.now());
+      if (closed || remainingMs <= 0) {
+        if (!closed) releaseSlot(slot, true);
+        if (closed) throw new Error("WASM executor is closed");
+        throw timeoutError;
+      }
+      const seq = nextSeq++;
       const needsBytes = slot.compiledDigests.get(pluginId) !== entry.digest;
 
       return new Promise<Uint8Array>((resolve, reject) => {
@@ -306,19 +339,27 @@ export function createBunWasmExecutor(options?: {
         const timer = setTimeout(() => {
           if (settled) return;
           settled = true;
-          cleanupHandlers();
-          releaseSlot(slot, false);
-          reject(new Error(`WASM execution timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
+          reject(timeoutError);
+          if (!nativeWorkerFile) {
+            cleanupHandlers();
+            releaseSlot(slot, false);
+          }
+        }, remainingMs);
 
         slot.onReply = (data) => {
-          if (settled || data.seq !== seq) return;
+          if (data.seq !== seq) return;
+          if (settled) {
+            if (data.ok) slot.compiledDigests.set(pluginId, entry.digest);
+            releaseSlot(slot, true);
+            return;
+          }
           settled = true;
           cleanupHandlers();
           if (data.ok) {
             slot.compiledDigests.set(pluginId, entry.digest);
             releaseSlot(slot, true);
-            resolve(data.out ? new Uint8Array(data.out) : new Uint8Array(0));
+            if (performance.now() >= deadline) reject(timeoutError);
+            else resolve(data.out ? new Uint8Array(data.out) : new Uint8Array(0));
           } else {
             releaseSlot(slot, true);
             reject(new Error(data.error ?? "WASM invoke failed"));
@@ -326,39 +367,38 @@ export function createBunWasmExecutor(options?: {
         };
 
         slot.onFault = (message) => {
-          if (settled) return;
           settled = true;
           cleanupHandlers();
-          releaseSlot(slot, false);
           reject(new Error(message));
+          if (!closed) releaseSlot(slot, false);
         };
 
-        slot.worker.postMessage({
-          seq,
-          id: pluginId,
-          digest: entry.digest,
-          bytes: needsBytes ? entry.bytes : null,
-          hook,
-          input,
-          maxMemoryBytes: effectiveMaxMem,
-        });
+        try {
+          slot.worker.postMessage({
+            seq,
+            id: pluginId,
+            digest: entry.digest,
+            bytes: needsBytes ? entry.bytes : null,
+            hook,
+            input,
+            fuelBudget: invokeOptions.fuelBudget,
+            maxMemoryBytes: effectiveMaxMem,
+          });
+        } catch (error) {
+          slot.onFault(error instanceof Error ? error.message : String(error));
+        }
       });
     },
 
     close(): void {
       closed = true;
-      while (waiters.length > 0) {
-        waiters.shift()!(null);
-      }
+      const error = new Error("WASM executor is closed");
+      for (const waiter of waiters) waiter(error);
       idleSlots.length = 0;
       for (const slot of slots) {
-        try {
-          slot.worker.terminate();
-        } catch {
-          void 0;
-        }
+        slot.onFault?.(error.message);
+        closeSlot(slot);
       }
-      slots.clear();
       modules.clear();
       if (workerBlobUrl) {
         URL.revokeObjectURL(workerBlobUrl);

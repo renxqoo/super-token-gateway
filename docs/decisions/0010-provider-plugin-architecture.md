@@ -49,9 +49,9 @@
 | **INV-1 零密钥入沙箱**          | 任何 `WASM` 插件（无论 `CONTENT` 或 `PROVIDER`）均永远无法读取明文 `secret_ciphertext`、API Key、云凭证或宿主环境变量                                                                                                           | 宿主在 `adapt_request` 返回后才按声明式 `auth` 模板注入凭证；WASM 零 Host Import（拒绝 WASI/Env/FS/Net）；预览接口自动脱敏敏感头为 `<REDACTED>`                               |
 | **INV-2 零 SSRF / 主机逃逸**    | `PROVIDER` 插件（声明式或 WASM）只能控制相对 `path`、`query`、`headers`、`body`，永远无法篡改 `channel.base_url` 的协议/主机/端口，也不能覆盖 `Host` 头或发出外部连接                                                           | 宿主强制校验相对路径（必须以 `/` 开头、禁止 `://` / `..` / `\r\n`）、剥离受保护头（`host`/`content-length`/`transfer-encoding`），统一经 DNS-Pinning `transport.fetch` 发包   |
 | **INV-3 计费主权在内核**        | `CONTENT` 插件绝对无权产出或修改 `usage`；`PROVIDER` 插件产出的 `usage`（声明式 `usage_aliases` 或带 `grants: ["extract_usage"]` 的签名 WASM）必须经过宿主 `packages/protocol` + `packages/kernel` 精确非负整数与分区一致性校验 | 权限分离 + `exactInteger`/`BigInt` 强校验；字段缺失、负数、浮点、溢出或别名冲突直接返回 `502 invalid_upstream_usage` / `usage_alias_conflict` 并挂 `UNKNOWN`，绝不静默 0 扣费 |
-| **INV-4 Failover 隔离与无污染** | `SmartRouter` 执行多渠道故障切换时，每次 Attempt 必须基于原始 `clientBody`（已经过 `on_request` 内容插件）的干净副本独立执行目标渠道+路由适配，前一次 Attempt 的 `drop`/`rename`/`force_set` 绝不污染下一次 Attempt             | 每次 Attempt 循环内独立调用 `prepareProviderRequest`，绝不原地修改共享 `clientBody`                                                                                           |
+| **INV-4 Failover 隔离与无污染** | `SmartRouter` 执行多渠道故障切换时，每次 Attempt 必须基于原始 `clientBody` 经目标路由独立执行 `on_request` 后的结果独立执行目标渠道+路由适配，前一次 Attempt 的 `drop`/`rename`/`force_set` 绝不污染下一次 Attempt              | 对目标路由的处理结果独立报价和适配，宿主对已知出站协议应用报价时使用的 Token 上限                                                                                             |
 | **INV-5 零双轨代码与零硬编码**  | 实施完成后，数据库 `channels.kind` 枚举约束、`upstream.ts` 中的 `switch (channel.kind)` 与硬编码 `deepseek`/`ollama` 特判彻底删除，全部厂商统一经 Provider Executor 执行                                                        | 架构单测（`tests/unit/architecture.test.ts`）与代码审计强制断言                                                                                                               |
-| **INV-6 性能与长流不回退**      | 标准 `DECLARATIVE` 渠道（含 OpenAI/Anthropic/Gemini/DeepSeek/Qwen 等）热路径不进入 WASM、不额外分配正则或大对象；`WASM` 渠道流式适配采用无状态单帧调用 + 有界状态（≤ 4 KB），等待吐字期间占用 0 个插件实例                      | `SnapshotManager` 预编译声明式计划；单机 `bench:single` 回归门槛 ≥ 12,000 RPS（0 错误，`conservation.ok=true`）                                                               |
+| **INV-6 性能与长流不回退**      | 标准 `DECLARATIVE` 渠道（含 OpenAI/Anthropic/Gemini/DeepSeek/Qwen 等）热路径不进入 WASM、不额外分配正则或大对象；`WASM` 渠道流式适配采用无状态单帧调用 + 有界状态（≤ 4 KB），等待吐字期间占用 0 个插件实例                      | 按配置快照及路由缓存声明式计划；单机 `bench:single` 回归门槛 ≥ 12,000 RPS（0 错误，`conservation.ok=true`）                                                                   |
 
 ---
 
@@ -100,9 +100,9 @@ flowchart TB
 
 ## 4. 数据结构与存储设计
 
-### 4.1 PostgreSQL DDL 变更（单一基线 `0000_v4_baseline.sql` + `manifest.json` 校验和同步）
+### 4.1 PostgreSQL DDL 变更与存量升级
 
-> 说明：项目采用 v4 单一基线迁移 + Drizzle 1:1 零漂移校验（`G1.6`），本变更直接更新 [0000_v4_baseline.sql](../../packages/ledger/src/migrations/0000_v4_baseline.sql)、[manifest.json](../../packages/ledger/src/migrations/manifest.json) 与 [schema.ts](../../packages/ledger/src/schema.ts)；对于已有测试库或存量库，同时提供幂等增量升级 SQL 片段（见第 9 节）。
+已发布的 v4 基线由其迁移记录的版本与校验和识别。新增迁移将已发布的账本、资金租约及渠道插件布局升级为统一结构，保留原迁移记录和业务数据。升级前应停止旧版 Gateway 与 Worker 的写入并备份。新进程启动根据新版本及迁移校验和检查数据库。
 
 #### 1. `public.plugins` 表扩展
 
@@ -401,13 +401,13 @@ sequenceDiagram
 
 ### 6.3 关键失败窗口与一致性保证
 
-| 失败窗口                                                                                | 行为与恢复机制                                                                                                                                                                                                                                          |
-| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **节点 A 在线热更新 `PROVIDER` 插件后，节点 B 尚未收到 Redis Pub/Sub（或 Redis 断开）** | 写入 PG 事务内原子递增 `config_epoch`；节点 A 立即重载并广播；节点 B 在 Redis 断连时通过现有 `snapshotPollMs` 周期轮询 PG 追平；每次请求全程绑定同一次 `snap = snapshot.get()` 快照，单笔请求内部绝不会出现半旧半新规则                                 |
-| **`WASM` 渠道插件执行超时（死循环）、超内存或返回非法 JSON**                            | `adapt_request` 阶段失败（尚未发包）：标记当前 Attempt 失败、释放供应商预扣、交 `SmartRouter` 切下一渠道或返回 `502 provider_adapter_failed`；`adapt_response`/`adapt_stream_event` 阶段失败（上游已执行）：标 `UNKNOWN` 交 Worker 对账，不静默释放预扣 |
-| **运营误删/禁用某渠道正在引用的 `provider_plugin_id`**                                  | 禁用操作允许生效（用于紧急止血），下次请求该渠道解析失败返回 `503 provider_plugin_unavailable` 并由 `SmartRouter` 自动切走至健康备渠道；若无备渠道，预扣原子释放（0 扣费）                                                                              |
-| **HTTP 200 伪错误发生在流式 SSE 首帧 vs 吐字中段**                                      | **首字节送出给客户端前**命中 `error_rules` / `retry_kind`：允许 `SmartRouter` 无感切换备渠道；**已向客户端输出首字节后**命中错误：严禁切换拼接另一模型，按既有流式错误契约发送 `event: error`（不发 `[DONE]`）并正确落账或挂 `UNKNOWN`                  |
-| **`usage_aliases` 映射出非整数/负数/冲突值**                                            | 宿主 `packages/protocol` 立即抛出 `502 invalid_upstream_usage` / `usage_alias_conflict`，预扣挂 `UNKNOWN` 待人工/Worker 核账，绝不静默跳过扣费                                                                                                          |
+| 失败窗口                                                                                | 行为与恢复机制                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **节点 A 在线热更新 `PROVIDER` 插件后，节点 B 尚未收到 Redis Pub/Sub（或 Redis 断开）** | 写入 PG 事务内原子递增 `config_epoch`；节点 A 立即重载并广播；节点 B 在 Redis 断连时通过现有 `snapshotPollMs` 周期轮询 PG 追平；每次请求全程绑定同一次 `snap = snapshot.get()` 快照，目录表与 epoch 在同一只读可重复读事务中加载，刷新失败保留上一致快照并重试，超过新鲜度阈值时实例退出就绪 |
+| **`WASM` 渠道插件执行超时（死循环）、超内存或返回非法 JSON**                            | `adapt_request` 阶段失败（尚未发包）：标记当前 Attempt 失败、释放供应商预扣、交 `SmartRouter` 切下一渠道或返回 `502 provider_adapter_failed`；`adapt_response`/`adapt_stream_event` 阶段失败（上游已执行）：标 `UNKNOWN` 交 Worker 对账，不静默释放预扣                                      |
+| **运营误删/禁用某渠道正在引用的 `provider_plugin_id`**                                  | 禁用操作允许生效（用于紧急止血），下次请求该渠道解析失败返回 `503 provider_plugin_unavailable` 并由 `SmartRouter` 自动切走至健康备渠道；若无备渠道，预扣原子释放（0 扣费）                                                                                                                   |
+| **HTTP 200 伪错误发生在流式 SSE 首帧 vs 吐字中段**                                      | **首字节送出给客户端前**命中 `error_rules` / `retry_kind`：允许 `SmartRouter` 无感切换备渠道；**已向客户端输出首字节后**命中错误：严禁切换拼接另一模型，按既有流式错误契约发送 `event: error`（不发 `[DONE]`）并正确落账或挂 `UNKNOWN`                                                       |
+| **`usage_aliases` 映射出非整数/负数/冲突值**                                            | 宿主 `packages/protocol` 立即抛出 `502 invalid_upstream_usage` / `usage_alias_conflict`，预扣挂 `UNKNOWN` 待人工/Worker 核账，绝不静默跳过扣费                                                                                                                                               |
 
 ---
 
@@ -586,7 +586,7 @@ sequenceDiagram
 4. **切片 4 — 示例 WASM 私有协议插件 + 全套验收与性能回归**：
    - 编写真实 Rust → `wasm32-unknown-unknown` 私有协议渠道插件测试用例（覆盖 `adapt_request` / `adapt_response` / `adapt_stream_event` + `usage` 提取），跑通全部 **G7** 验收用例、`bun run verify`、`bun run test:durability` 与 `bun run bench:single`。
 5. **存量库演进与回退说明**：
-   - 开发/新部署环境直接跑最新 `0000_v4_baseline.sql`；若已有运行中 v4 PG 库，可在停写升级窗口执行幂等 `ALTER TABLE`（删除 `channels_kind_check` 与 `plugins_kind_check` 旧约束，新增列带默认值后追加新约束）；由于移除枚举属于放宽约束，代码回退前需先停用新注册的 `DECLARATIVE`/`PROVIDER` 插件记录。
+   - 使用同一迁移命令初始化新库或升级已发布 v4 基线。跨 schema 版本发布使用停写窗口。确认存量渠道、价格、插件和资金记录，再启动新版本。回退需按发布前备份和既定数据恢复流程执行。
 
 ---
 

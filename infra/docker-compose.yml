@@ -3,7 +3,7 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: gateway
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gateway_dev_pass}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       POSTGRES_DB: gateway_prod
     command:
       - postgres
@@ -27,6 +27,8 @@ services:
 
   gateway:
     image: oven/bun:1.4.4-alpine
+    sysctls:
+      net.core.somaxconn: "4096"
     working_dir: /app
     volumes:
       - ..:/app:ro
@@ -39,13 +41,13 @@ services:
       GATEWAY_PORT: 8080
       INTERNAL_HOST: 0.0.0.0
       INTERNAL_PORT: 8081
-      DATABASE_URL: postgres://gateway:${POSTGRES_PASSWORD:-gateway_dev_pass}@postgres:5432/gateway_prod
-      KEY_PEPPER: ${KEY_PEPPER:-0123456789abcdef0123456789abcdef}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
-      ADMIN_TOKEN: ${ADMIN_TOKEN:-0123456789abcdef0123456789abcdef}
+      DATABASE_URL: postgres://gateway:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/gateway_prod
+      KEY_PEPPER: ${KEY_PEPPER:?Set KEY_PEPPER}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN}
     command: ["sh", "-c", "bun dist/tools/migrate.js && bun dist/gateway/main.js --mode=all-in-one"]
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
       - "127.0.0.1:8081:8081"
 
 volumes:

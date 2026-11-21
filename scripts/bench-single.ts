@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import { cp, mkdtemp, rm } from "node:fs/promises";
-import { Agent, request as httpRequest } from "node:http";
+import { Agent } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDatabase } from "@gateway/ledger";
+import { postJsonKeepAlive } from "./bench-http.ts";
 
 const baseDbUrl = process.env.DATABASE_URL;
 if (!baseDbUrl) throw new Error("DATABASE_URL is required");
@@ -62,52 +63,6 @@ function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
   const idx = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p));
   return Number(sorted[idx]!.toFixed(2));
-}
-
-function postJsonKeepAlive(
-  agent: Agent,
-  port: number,
-  apiKey: string,
-  payload: Buffer,
-  expectDone: boolean,
-): Promise<{ ok: boolean; status: number; errText?: string }> {
-  return new Promise((resolveDone) => {
-    const req = httpRequest(
-      {
-        hostname: "127.0.0.1",
-        port,
-        path: "/v1/chat/completions",
-        method: "POST",
-        agent,
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json",
-          "content-length": payload.byteLength,
-        },
-      },
-      (res) => {
-        const status = res.statusCode ?? 0;
-        let sawDone = !expectDone;
-        const errChunks: Buffer[] = [];
-        res.on("data", (chunk: Buffer) => {
-          if (status !== 200 && errChunks.length < 4) errChunks.push(chunk);
-          if (!sawDone && chunk.includes("[DONE]")) sawDone = true;
-        });
-        res.on("end", () =>
-          resolveDone({
-            ok: status === 200 && sawDone,
-            status,
-            ...(status !== 200
-              ? { errText: Buffer.concat(errChunks).toString("utf8").slice(0, 160) }
-              : {}),
-          }),
-        );
-        res.on("error", (e) => resolveDone({ ok: false, status, errText: e.message }));
-      },
-    );
-    req.on("error", (e) => resolveDone({ ok: false, status: 0, errText: e.message }));
-    req.end(payload);
-  });
 }
 
 const tempDir = await mkdtemp(join(tmpdir(), "stg-bench-single-"));
@@ -370,7 +325,7 @@ try {
   }
 
   try {
-    await runPhase("warmup", keys, 128, 2, false);
+    const warmup = await runPhase("warmup", keys, 128, 2, false);
 
     const results = [
       await runPhase(`1node_json_128c_${durationSec}s`, keys, 128, durationSec, false),
@@ -385,9 +340,11 @@ try {
     await Bun.sleep(600);
     const metricsTxt = await (await fetch(`http://127.0.0.1:${gwPort}/metrics`)).text();
     const inFlight = Number(/gateway_in_flight (\d+)/.exec(metricsTxt)?.[1] ?? -1);
-    const totalCharges = Number(
-      (await db`SELECT count(*)::int AS n FROM public.billing_charges`)[0]!.n,
-    );
+    const [charges] = await db`SELECT count(*) AS total, count(DISTINCT request_id) AS unique,
+        count(*) FILTER (WHERE outcome = 'SETTLED') AS settled
+      FROM public.billing_charges`;
+    const totalCharges = Number(charges!.total);
+    const totalSettledCharges = Number(charges!.settled);
     const activeLeases = Number(
       (
         await db`
@@ -405,6 +362,9 @@ try {
     `;
     const audit = await callInternal("GET", "/internal/v1/audit/conservation");
 
+    const allPhases = [warmup, ...results];
+    const successfulResponses = allPhases.reduce((count, phase) => count + phase.completed, 0);
+    const totalErrors = allPhases.reduce((count, phase) => count + phase.errors, 0);
     console.log(
       JSON.stringify(
         {
@@ -418,7 +378,10 @@ try {
           pg_durability: Object.fromEntries(
             pgSettings.map((r: Record<string, unknown>) => [String(r.name), String(r.setting)]),
           ),
-          total_settled_charges: totalCharges,
+          successful_responses: successfulResponses,
+          total_errors: totalErrors,
+          total_settled_charges: totalSettledCharges,
+          duplicate_request_charges: totalCharges - Number(charges!.unique),
           active_leases_after_idle: activeLeases,
           results,
           post_drain_in_flight: inFlight,
@@ -428,7 +391,17 @@ try {
         2,
       ),
     );
-    if (!audit.ok || audit.open_holds !== 0 || inFlight !== 0 || activeLeases !== 0) {
+    if (
+      totalErrors !== 0 ||
+      totalSettledCharges !== successfulResponses ||
+      totalSettledCharges !== totalCharges ||
+      totalCharges !== Number(charges!.unique) ||
+      !audit.ok ||
+      audit.open_holds !== 0 ||
+      audit.unknown_holds !== 0 ||
+      inFlight !== 0 ||
+      activeLeases !== 0
+    ) {
       throw new Error("Single-node benchmark invariant check failed");
     }
   } finally {

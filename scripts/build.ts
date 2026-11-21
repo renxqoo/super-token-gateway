@@ -9,6 +9,11 @@ await mkdir(distDir, { recursive: true });
 
 const targets = [
   { entry: "apps/gateway/src/main.ts", outdir: "dist/gateway", name: "gateway" },
+  {
+    entry: "packages/plugin-engine/src/wasmtime-worker.ts",
+    outdir: "dist/gateway",
+    name: "wasmtime-worker",
+  },
   { entry: "apps/worker/src/main.ts", outdir: "dist/worker", name: "worker" },
   {
     entry: "apps/mock-providers/src/main.ts",

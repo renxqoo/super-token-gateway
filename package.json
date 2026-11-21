@@ -32,10 +32,14 @@
     "build:plugins": "bun scripts/build-builtin-plugins.ts",
     "test:artifact": "bun --env-file=.env.local scripts/verify-artifact.ts",
     "test:durability": "bun --env-file=.env.local scripts/verify-durability.ts",
+    "test:production": "bun --no-env-file scripts/verify-production.ts",
+    "test:alerts": "bun --no-env-file scripts/verify-alert-delivery.ts",
+    "openapi": "bun --no-env-file scripts/openapi.ts",
+    "openapi:check": "bun --no-env-file scripts/openapi.ts --check",
     "bench": "bun --env-file=.env.local scripts/bench.ts",
     "bench:single": "bun --env-file=.env.local scripts/bench-single.ts",
     "bench:prod": "bun --env-file=.env.local scripts/bench-prod.ts",
-    "verify": "bun run check && bun run lint && bun run fmt:check && bun run test && bun run test:integration && bun run build && bun run test:artifact && bun run test:durability"
+    "verify": "bun run check && bun run lint && bun run fmt:check && bun run openapi:check && bun run test && bun run test:integration && bun run build && bun run test:artifact && bun run test:durability"
   },
   "devDependencies": {
     "@gateway/contracts": "workspace:*",

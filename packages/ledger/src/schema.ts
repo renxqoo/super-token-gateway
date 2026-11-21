@@ -629,11 +629,41 @@ export const outboxConsumers = pgTable("outbox_consumers", {
     .notNull()
     .default(sql`0`),
   leaseToken: uuid("lease_token"),
+  leasedThroughSeq: bigint("leased_through_seq", { mode: "bigint" }),
   leasedUntil: timestamp("leased_until", { withTimezone: true, mode: "string" }),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
 
+export const adminAuditEvents = pgTable(
+  "admin_audit_events",
+  {
+    requestId: uuid("request_id").notNull(),
+    phase: text("phase").notNull(),
+    actor: text("actor").notNull(),
+    action: text("action").notNull(),
+    target: text("target").notNull(),
+    status: smallint("status"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+  (t) => [primaryKey({ columns: [t.requestId, t.phase] })],
+);
+
+export const adminAuditPending = pgTable(
+  "admin_audit_pending",
+  {
+    requestId: uuid("request_id").primaryKey(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+  (t) => [index("admin_audit_pending_created_idx").on(t.createdAt)],
+);
+
 export const ledgerSchema = {
+  adminAuditEvents,
+  adminAuditPending,
   schemaMigrations,
   configEpoch,
   projects,
