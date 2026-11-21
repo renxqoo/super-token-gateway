@@ -32,6 +32,7 @@
     "test:artifact": "bun --env-file=.env.local scripts/verify-artifact.ts",
     "test:durability": "bun --env-file=.env.local scripts/verify-durability.ts",
     "bench": "bun --env-file=.env.local scripts/bench.ts",
+    "bench:single": "bun --env-file=.env.local scripts/bench-single.ts",
     "bench:prod": "bun --env-file=.env.local scripts/bench-prod.ts",
     "verify": "bun run check && bun run lint && bun run fmt:check && bun run test && bun run test:integration && bun run build && bun run test:artifact && bun run test:durability"
   },
