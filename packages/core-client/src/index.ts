@@ -26,7 +26,6 @@ import {
   terminalSettlementPath,
   terminalSettlementResponseSchema,
   evidenceProofFields,
-  signedCoreEvidenceEventV1Schema,
   type CoreEvidenceEventV1,
   type CoreEvidenceGroupV1,
   type SignedCoreEvidenceEventV1,
@@ -298,7 +297,7 @@ export function createCoreRpcClient(
     return parseReply(await send(path, () => ({ body, proof }), reply));
   }
   function signed(
-    kind: ExecutionKind | "plugin_package_v1" | "terminal_settlement_v1",
+    kind: ExecutionKind | "identity_current_v1" | "plugin_package_v1" | "terminal_settlement_v1",
     normalizedPath: string,
     data: unknown,
     requestOptions: {
@@ -430,70 +429,16 @@ export function createCoreRpcClient(
     async current(
       requestOptions: { commandId?: string; deadlineAt?: string; traceId?: string } = {},
     ) {
-      const owner = receipt;
-      if (!owner) throw new Error("Startup required");
-      const commandId = requestOptions.commandId ?? randomUUID(),
-        deadline = requestOptions.deadlineAt ?? new Date(Date.now() + 5000).toISOString(),
-        trace = requestOptions.traceId ?? randomUUID();
-      const data = {},
-        bodyDigest = sha256(
-          canonical({
-            kind: "identity_current_v1",
-            contract_version: 1,
-            owner: {
-              service: owner.service,
-              instance_id: owner.instance_id,
-              session_id: owner.session_id,
-              incarnation_id: owner.incarnation_id,
-            },
-            deadline_at: deadline,
-            data,
-          }),
-        );
-      const body = Buffer.from(
-        JSON.stringify({
-          envelope: {
-            command_id: commandId,
-            body_digest: bodyDigest,
-            caller_incarnation: owner.incarnation_id,
-            deadline_at: deadline,
-            trace_id: trace,
-            contract_version: 1,
-          },
-          data,
-        }),
+      const commandId = requestOptions.commandId ?? randomUUID();
+      const deadlineAt = requestOptions.deadlineAt ?? new Date(Date.now() + 5000).toISOString();
+      const { owner, body, proof } = signed(
+        "identity_current_v1",
+        "/_internal/core/v1/identity/current-session",
+        {},
+        { ...requestOptions, commandId, deadlineAt },
       );
-      const proof = {
-        session_id: owner.session_id,
-        incarnation_id: owner.incarnation_id,
-        command_type: "identity_current_v1" as const,
-        command_id: commandId,
-        deadline_at: deadline,
-        trace_id: trace,
-        contract_version: 1 as const,
-        raw_body_sha256: sha256(body),
-      };
-      const signature = sign(
-        null,
-        Buffer.from(
-          JSON.stringify(
-            commandProofFields(
-              options.audience,
-              owner,
-              proof,
-              "POST",
-              "/_internal/core/v1/identity/current-session",
-            ),
-          ),
-        ),
-        key.privateKey,
-      ).toString("base64url");
       const reply = internalCurrentResponseSchema.parse(
-        await request(
-          "/_internal/core/v1/identity/current-session",
-          body,
-          Buffer.from(JSON.stringify({ ...proof, signature })).toString("base64url"),
-        ),
+        await request("/_internal/core/v1/identity/current-session", body, proof),
       );
       if (
         reply.command_id !== commandId ||
@@ -692,7 +637,7 @@ export function createCoreRpcClient(
         Buffer.from(JSON.stringify(evidenceProofFields(event, sha256(canonical(event))))),
         key.privateKey,
       ).toString("base64url");
-      return signedCoreEvidenceEventV1Schema.parse({ ...event, signature });
+      return { ...event, signature };
     },
     async reconnect(target: CoreTarget) {
       if (peer) throw new Error("Project Core targets are static");

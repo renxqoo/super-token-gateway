@@ -111,6 +111,31 @@ const routeClaimsSchema = z.object({
   execution_runtimes: executionRuntimesSchema,
   captured: admissionContextSchema,
 });
+const routeAuthSchema = z.object({
+  project_id: z.string(),
+  key_id: z.string(),
+  customer_currency: z.string(),
+  scopes: contextSchema.shape.scopes,
+});
+const wireSchemas = Object.fromEntries(
+  (Object.keys(executionDataSchemas) as ExecutionKind[]).map((kind) => [
+    kind,
+    z.strictObject({
+      envelope: executionEnvelopeSchema,
+      data: executionDataSchemas[kind],
+      ...(kind === "execution_admit_v1" || kind === "execution_next_v1"
+        ? { route_ticket: routeTicketSchema.optional() }
+        : {}),
+    }),
+  ]),
+) as unknown as Record<
+  ExecutionKind,
+  z.ZodType<{
+    envelope: z.infer<typeof executionEnvelopeSchema>;
+    data: unknown;
+    route_ticket?: string | undefined;
+  }>
+>;
 function routeBinding(p: CoreVerifiedCallerProjection, id: string) {
   return JSON.stringify([
     "stg.chat.route.v1",
@@ -313,40 +338,30 @@ export function createExecutionHandler(
       const receivedAt = performance.now();
       const p = requireCaller(context);
       if (p.command_type !== kind) throw new Error("internal_proof_invalid");
-      const wire = z
-        .strictObject({
-          envelope: executionEnvelopeSchema,
-          data: executionDataSchemas[kind],
-          ...(kind === "execution_admit_v1" || kind === "execution_next_v1"
-            ? { route_ticket: routeTicketSchema.optional() }
-            : {}),
-        })
-        .parse(input);
+      const wire = wireSchemas[kind].parse(input);
       const e = wire.envelope,
         d = wire.data;
       if (kind === "execution_abort_recovery_v1") {
         return { receipt: executionReceiptSchema.parse(await store.recoverAbort(p, e, d)) };
       }
       if (kind === "execution_quota_recovery_v1") {
-        const { limit } = executionDataSchemas.execution_quota_recovery_v1.parse(d),
+        const { limit } = d as z.infer<typeof executionDataSchemas.execution_quota_recovery_v1>,
           items = (await store.recoverQuota(p, limit)) as {
             attempt_id: string;
             descriptor: QuotaDescriptor;
-          }[],
-          completed = [];
-        for (const item of items) {
-          try {
-            completed.push(
-              (
-                await quota.release(item.descriptor, {
-                  state: "RELEASE_PENDING",
-                  attempt_id: item.attempt_id,
-                  permit_epoch: "1",
-                })
-              ).descriptor,
-            );
-          } catch {}
-        }
+          }[];
+        const settled = await Promise.allSettled(
+          items.map((item) =>
+            quota.release(item.descriptor, {
+              state: "RELEASE_PENDING",
+              attempt_id: item.attempt_id,
+              permit_epoch: "1",
+            }),
+          ),
+        );
+        const completed = settled.flatMap((entry) =>
+          entry.status === "fulfilled" ? [entry.value.descriptor] : [],
+        );
         const result = await store.recoverQuota(p, completed);
         const recovery = await store.expireQuota(p, limit);
         return quotaRecoveryResultSchema.parse({
@@ -360,8 +375,9 @@ export function createExecutionHandler(
       if (kind === "execution_resource_commit_v1")
         return store.resource(p, "core_resource_commit_v1", d as Record<string, unknown>);
       if (kind === "execution_resource_list_v1") {
-        const { customer_token, ...data } =
-          executionDataSchemas.execution_resource_list_v1.parse(d);
+        const { customer_token, ...data } = d as z.infer<
+          typeof executionDataSchemas.execution_resource_list_v1
+        >;
         const result = await store.resource(p, "core_resource_list_v1", {
           ...data,
           verifier: verifier(customer_token, options.pepper),
@@ -370,7 +386,9 @@ export function createExecutionHandler(
         return { data: result.data };
       }
       if (kind === "execution_resource_v1") {
-        const { customer_token, ...data } = executionDataSchemas.execution_resource_v1.parse(d);
+        const { customer_token, ...data } = d as z.infer<
+          typeof executionDataSchemas.execution_resource_v1
+        >;
         const result = await store.resource(p, "core_resource_permit_v1", {
           ...data,
           verifier: verifier(customer_token, options.pepper),
@@ -391,19 +409,11 @@ export function createExecutionHandler(
         };
       }
       if (kind === "execution_resource_claim_v1")
-        return store.resource(
-          p,
-          "core_resource_claim_v1",
-          executionDataSchemas.execution_resource_claim_v1.parse(d),
-        );
+        return store.resource(p, "core_resource_claim_v1", d as Record<string, unknown>);
       if (kind === "execution_resource_release_v1")
-        return store.resource(
-          p,
-          "core_resource_release_v1",
-          executionDataSchemas.execution_resource_release_v1.parse(d),
-        );
+        return store.resource(p, "core_resource_release_v1", d as Record<string, unknown>);
       if (kind === "execution_resource_poll_v1") {
-        const data = executionDataSchemas.execution_resource_poll_v1.parse(d);
+        const data = d as z.infer<typeof executionDataSchemas.execution_resource_poll_v1>;
         const result = await store.resource(p, "core_resource_poll_v1", data);
         await limitResource(`channel:${String(result.channel_id)}`, Number(result.rpm));
         return {
@@ -411,7 +421,7 @@ export function createExecutionHandler(
         };
       }
       if (kind === "execution_context_v1") {
-        const data = executionDataSchemas.execution_context_v1.parse(d);
+        const data = d as z.infer<typeof executionDataSchemas.execution_context_v1>;
         const id = crypto.randomUUID();
         const project =
           data.route_projection === true && data.operation === "chat" && !data.resource_ids;
@@ -426,6 +436,7 @@ export function createExecutionHandler(
         };
         let snapshot = await store.context(p, project ? null : id, input, signal);
         let parsed = contextSchema.parse(snapshot);
+        let runtimes = executionRuntimesSchema.parse(snapshot.execution_runtimes);
         let ticket: string | undefined;
         if (project) {
           const claims = JSON.stringify({
@@ -441,7 +452,6 @@ export function createExecutionHandler(
           if (4 * Math.ceil((Buffer.byteLength(claims) + 28) / 3) <= routeTicketMaxBytes) {
             ticket = encrypt(claims, options.encryptionKey, routeBinding(p, id));
           }
-          const allowed = executionRuntimesSchema.parse(snapshot.execution_runtimes);
           if (
             ticket &&
             Buffer.byteLength(
@@ -452,7 +462,7 @@ export function createExecutionHandler(
                 execution_runtimes: Object.fromEntries(
                   parsed.candidates.map((candidate) => [
                     candidate.ref.package_digest,
-                    allowed[candidate.ref.package_digest] ?? [],
+                    runtimes[candidate.ref.package_digest] ?? [],
                   ]),
                 ),
               }),
@@ -462,6 +472,7 @@ export function createExecutionHandler(
           if (!ticket) {
             snapshot = await store.context(p, id, input, signal);
             parsed = contextSchema.parse(snapshot);
+            runtimes = executionRuntimesSchema.parse(snapshot.execution_runtimes);
           }
         }
         delete snapshot.candidate_digests;
@@ -483,7 +494,6 @@ export function createExecutionHandler(
         const candidates = ordered
           .slice(0, parsed.execution_budget.max_attempts)
           .map((row) => row.candidate);
-        const runtimes = executionRuntimesSchema.parse(snapshot.execution_runtimes);
         return {
           ...snapshot,
           context_id: id,
@@ -500,13 +510,13 @@ export function createExecutionHandler(
       const admitting = kind === "execution_admit_v1" || kind === "execution_next_v1";
       const admission =
         kind === "execution_admit_v1"
-          ? executionDataSchemas.execution_admit_v1.parse(d)
+          ? (d as z.infer<typeof executionDataSchemas.execution_admit_v1>)
           : undefined;
       const combined = admission?.commit_send === true ? admission : undefined;
       if (combined && !shortChat) throw new Error("internal_request_invalid");
       let beginLeaseState: unknown;
       if (kind === "execution_begin_v1") {
-        const data = executionDataSchemas.execution_begin_v1.parse(d);
+        const data = d as z.infer<typeof executionDataSchemas.execution_begin_v1>;
         const prepared = await store.prepareBegin(p, e, data.attempt_id, signal);
         if (prepared.receipt) return { receipt: executionReceiptSchema.parse(prepared.receipt) };
         beginLeaseState = prepared.leases;
@@ -532,7 +542,7 @@ export function createExecutionHandler(
             .catch(() => {});
       };
       if (admitting) {
-        const data = admission ?? executionDataSchemas.execution_next_v1.parse(d);
+        const data = admission ?? (d as z.infer<typeof executionDataSchemas.execution_next_v1>);
         if (
           combined &&
           (data.manifest.operation !== "chat" ||
@@ -587,14 +597,7 @@ export function createExecutionHandler(
               customer_currency: captured.customer_currency,
             },
           };
-          const auth = z
-            .object({
-              project_id: z.string(),
-              key_id: z.string(),
-              customer_currency: z.string(),
-              scopes: contextSchema.shape.scopes,
-            })
-            .parse(snapshot);
+          const auth = routeAuthSchema.parse(snapshot);
           if (
             auth.project_id !== captured.project_id ||
             auth.key_id !== captured.key_id ||
@@ -605,9 +608,8 @@ export function createExecutionHandler(
             return rejected("context_stale");
         }
         const projection = data.dispatch_projection;
-        const selected = captured.candidates.find(
-          (c) => canonical(c.ref) === canonical(projection.candidate_ref),
-        );
+        const targetCandidateRef = canonical(projection.candidate_ref);
+        const selected = captured.candidates.find((c) => canonical(c.ref) === targetCandidateRef);
         if (!selected) return rejected("candidate_stale");
         if (
           sha256(canonical(["stg.internal.billable-manifest", "1", data.manifest])) !==
@@ -802,7 +804,7 @@ export function createExecutionHandler(
         if (!proof.closed && proofDeadline - performance.now() <= 1000)
           throw new Error("quota_unavailable");
       } else if (kind === "execution_quota_v1") {
-        const data = executionDataSchemas.execution_quota_v1.parse(d);
+        const data = d as z.infer<typeof executionDataSchemas.execution_quota_v1>;
         if (data.action === "OBSERVE") {
           const observation = data.observation!;
           await routingLimits.settleHealth(

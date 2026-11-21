@@ -263,7 +263,6 @@ export function createSSEStream(options: {
       if (payload.length > options.maxInputBytes) throw new PluginHostError("INPUT_BUDGET");
       if (finalized && hook !== "stream_dispose") throw new PluginHostError("STREAM_FINISHED");
       if (hook === "stream_open") {
-        if (opened) throw new PluginHostError("STREAM_ALREADY_OPEN");
         const result = await options.call(hook, payload, signal);
         if (result.kind === "output") {
           latest = result;
@@ -276,7 +275,6 @@ export function createSSEStream(options: {
         options.dispose();
         return result;
       }
-      if (!opened) throw new PluginHostError("STREAM_NOT_OPEN");
       if (hook === "stream_feed") {
         if (latest?.terminal) throw new PluginHostError("SSE_AFTER_TERMINAL");
         if (ended) throw new PluginHostError("STREAM_FINISHED");

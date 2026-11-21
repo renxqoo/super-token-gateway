@@ -188,13 +188,18 @@ export function createBuiltinWorkerExecutor(options: {
       return;
     }
     try {
-      slot.worker.postMessage({
-        version: 1,
-        id: job.id,
-        module: job.hash,
-        input: job.input,
-        state: job.state,
-      });
+      const transfer: ArrayBuffer[] = [job.input.buffer as ArrayBuffer];
+      if (job.state) transfer.push(job.state.buffer as ArrayBuffer);
+      slot.worker.postMessage(
+        {
+          version: 1,
+          id: job.id,
+          module: job.hash,
+          input: job.input,
+          state: job.state,
+        },
+        transfer,
+      );
     } catch {
       retire(slot, new PluginHostError("WORKER_FAILED"));
     }

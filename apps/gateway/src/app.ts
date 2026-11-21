@@ -31,7 +31,8 @@ function errorResponse(error: unknown, requestId: string) {
 }
 
 function released(response: Response, release: () => void) {
-  if (!response.body) {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!response.body || contentType.startsWith("application/json")) {
     release();
     return response;
   }

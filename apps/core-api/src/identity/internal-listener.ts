@@ -226,8 +226,7 @@ export async function startCoreInternalListener(options: Options) {
   }
   function requireCaller(context: object): CoreVerifiedCallerProjection {
     const s = contexts.get(context);
-    if (!s || s.scope !== "command" || s.scope !== "command")
-      return reject("internal_peer_forbidden");
+    if (!s || s.scope !== "command") return reject("internal_peer_forbidden");
     return {
       service: s.peer.service,
       instance_id: s.peer.instance_id,

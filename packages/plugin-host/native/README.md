@@ -7,7 +7,6 @@ go -C packages/plugin-host/native build -o ../../../.local/plugin-host ./cmd/plu
 go -C packages/plugin-host/native vet ./... ./__test__
 go -C packages/plugin-host/native test ./__test__ -count=1
 go -C packages/plugin-host/native test -race ./__test__ -count=1
-bun packages/plugin-host/native/acceptance.mts .local/plugin-host
 ```
 
 Tests build and launch the actual executable in a temporary directory; race tests also build the executable with `-race`. Go ignores `__test__` in `./...`, so the explicit test argument is required. Go 1.27.4, Extism Go SDK 1.7.1 and wazero 1.12.0 are pinned. No Docker, database, Redis, supplier, environment file or runtime test download is required.

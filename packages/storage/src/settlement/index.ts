@@ -25,6 +25,24 @@ import {
 } from "../transaction.ts";
 
 const resultsSchema = z.array(coreEvidenceGroupResultSchema);
+const groupsSchema = z.array(coreEvidenceGroupV1Schema).min(1).max(128);
+const sessionKeyCache = new Map<string, { key: KeyObject; digest: string }>();
+
+function cachedSessionKey(sessionId: string, spki: Buffer, digest: string) {
+  const existing = sessionKeyCache.get(sessionId);
+  if (existing && existing.digest === digest) return existing;
+  const entry = {
+    key: createPublicKey({
+      key: Buffer.from(spki),
+      format: "der",
+      type: "spki",
+    }),
+    digest,
+  };
+  if (sessionKeyCache.size >= 4096) sessionKeyCache.clear();
+  sessionKeyCache.set(sessionId, entry);
+  return entry;
+}
 
 export class TerminalSettlementRejected extends Error {
   constructor() {
@@ -61,28 +79,32 @@ function settlementStore(db: SQL, replicatedTerminal = false) {
       const transactionLimits = replicatedTerminal
         ? { ...limits, synchronousCommit: "remote_apply" as const }
         : limits;
-      const parsed = z.array(coreEvidenceGroupV1Schema).min(1).max(128).parse(groups);
+      const parsed = groupsSchema.parse(groups);
       const sessions = [
         ...new Set(parsed.flatMap((g) => g.events.map((e) => e.origin_session_id))),
       ];
       const keys = new Map<string, { key: KeyObject; digest: string }>();
-      const sessionRows = await withDatabaseConnection(
-        db,
-        limits,
-        (connection) =>
-          connection<
-            { session_id: string; public_key_spki: Buffer; public_key_sha256: string }[]
-          >`SELECT session_id::text,public_key_spki,public_key_sha256 FROM internal_startup_sessions WHERE session_id=ANY(${sessions}::uuid[])`,
-      );
-      for (const row of sessionRows)
-        keys.set(row.session_id, {
-          key: createPublicKey({
-            key: Buffer.from(row.public_key_spki),
-            format: "der",
-            type: "spki",
-          }),
-          digest: row.public_key_sha256,
-        });
+      const missing: string[] = [];
+      for (const id of sessions) {
+        const cached = sessionKeyCache.get(id);
+        if (cached) keys.set(id, cached);
+        else missing.push(id);
+      }
+      if (missing.length) {
+        const sessionRows = await withDatabaseConnection(
+          db,
+          limits,
+          (connection) =>
+            connection<
+              { session_id: string; public_key_spki: Buffer; public_key_sha256: string }[]
+            >`SELECT session_id::text,public_key_spki,public_key_sha256 FROM internal_startup_sessions WHERE session_id=ANY(${missing}::uuid[])`,
+        );
+        for (const row of sessionRows)
+          keys.set(
+            row.session_id,
+            cachedSessionKey(row.session_id, row.public_key_spki, row.public_key_sha256),
+          );
+      }
       const verified = parsed.map((group) => {
         const events = group.events.map((event) => {
           const session = keys.get(event.origin_session_id);

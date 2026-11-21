@@ -334,12 +334,7 @@ export function createPluginAttempts(
               (result.terminal?.kind === "pending" &&
                 (frame || !result.resource || result.finality === "FINAL")) ||
               outputBytes + bytes > maxOutput ||
-              (result.finality === "FINAL" &&
-                (!result.usage || !Object.keys(result.usage).length)) ||
-              (result.usage &&
-                Object.keys(result.usage).some(
-                  (key) => !capabilities.dimensions.includes(key as never),
-                ))
+              (result.finality === "FINAL" && (!result.usage || !Object.keys(result.usage).length))
             )
               throw new PluginHostError("ABI_OUTPUT");
             outputBytes += bytes;

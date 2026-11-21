@@ -21,13 +21,71 @@ if not tokenValue or tonumber(ARGV[5])~=0 then redis.call('INCRBY',tokenKey,ARGV
 if not tokenValue then redis.call('PEXPIREAT',tokenKey,(math.floor(now/60000)+2)*60000) end
 return tokenKey`;
 
-type RatePermit = (() => Promise<void>) & {
-  adjustTokens: (actual: number) => Promise<void>;
-};
+type RatePermit = () => Promise<void>;
 
-type ProbePermit = (() => Promise<void>) & {
-  observe: (failed: boolean, latency: number) => Promise<void>;
-};
+const scriptDigests = new Map<string, string>();
+function scriptDigest(script: string): string {
+  let digest = scriptDigests.get(script);
+  if (!digest) {
+    digest = new Bun.CryptoHasher("sha1").update(script).digest("hex");
+    if (scriptDigests.size >= 256) scriptDigests.clear();
+    scriptDigests.set(script, digest);
+  }
+  return digest;
+}
+
+const roundRobinScript =
+  "local n=redis.call('INCR',KEYS[1]);redis.call('EXPIRE',KEYS[1],86400);return (n-1)%tonumber(ARGV[1])";
+const healthScript = `local t=redis.call('TIME')
+local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
+local h=redis.call('HMGET',KEYS[1],'open_until','latency','probe_until')
+local opened=tonumber(h[1] or '0')
+local open=opened>now or (opened~=0 and tonumber(h[3] or '0')>now)
+return {open and 1 or 0,h[2] or ''}`;
+const grantHealthScript = `local existing=redis.call('GET',KEYS[2])
+if existing then return string.sub(existing,1,string.len(ARGV[3])+1)==ARGV[3]..'|' and 1 or 0 end
+local t=redis.call('TIME')
+local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
+local health=redis.call('HMGET',KEYS[1],'open_until','epoch','probe_until')
+local opened=tonumber(health[1] or '0')
+local epoch=health[2]
+if not epoch then epoch=ARGV[1] redis.call('HSET',KEYS[1],'epoch',epoch) redis.call('EXPIRE',KEYS[1],600) end
+local mode='closed'
+if opened~=0 then
+  if opened>now or tonumber(health[3] or '0')>now then return 0 end
+  redis.call('HSET',KEYS[1],'probe_until',now+tonumber(ARGV[2]),'probe_token',ARGV[1])
+  local retention=tonumber(ARGV[2])+600000
+  if redis.call('PTTL',KEYS[1])<retention then redis.call('PEXPIRE',KEYS[1],retention) end
+  mode='probe'
+end
+redis.call('SET',KEYS[2],ARGV[3]..'|'..mode..'|'..epoch,'PX',tonumber(ARGV[2]))
+return 1`;
+const settleHealthScript = `local value=redis.call('GET',KEYS[2])
+if not value or string.sub(value,1,string.len(ARGV[2])+1)~=ARGV[2]..'|' then return false end
+redis.call('DEL',KEYS[2])
+if redis.call('HGET',KEYS[1],'probe_token')==ARGV[1] and ARGV[3]=='1' then redis.call('HDEL',KEYS[1],'probe_until','probe_token') end
+return value`;
+const observeScript = `local t=redis.call('TIME')
+local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
+local health=redis.call('HMGET',KEYS[1],'epoch','open_until','fails','latency')
+if ARGV[5]~='' and health[1]~=ARGV[6] then return 0 end
+if ARGV[5]=='probe' then
+  local probe=redis.call('HMGET',KEYS[1],'probe_token','probe_until')
+  if probe[1]~=ARGV[4] or tonumber(probe[2] or '0')<=now then return 0 end
+elseif ARGV[5]=='closed' and tonumber(health[2] or '0')~=0 then return 0 end
+local fails=tonumber(health[3] or '0')
+local prior=tonumber(health[4] or ARGV[2])
+if ARGV[1]=='1' then
+  fails=fails+1
+  redis.call('HSET',KEYS[1],'fails',fails,'latency',prior*0.8+tonumber(ARGV[2])*0.2)
+else
+  fails=0
+  redis.call('HSET',KEYS[1],'fails',0,'latency',prior*0.8+tonumber(ARGV[2])*0.2,'open_until',0)
+end
+if fails>=3 then redis.call('HSET',KEYS[1],'open_until',now+tonumber(ARGV[3])) end
+if fails>=3 or ARGV[5]=='' then redis.call('HSET',KEYS[1],'epoch',ARGV[4]) end
+if ARGV[5]=='probe' then redis.call('HDEL',KEYS[1],'probe_until','probe_token') end
+redis.call('EXPIRE',KEYS[1],600) return 1`;
 
 export class Limits {
   redis: RedisClient;
@@ -73,9 +131,6 @@ export class Limits {
     this.shardCache.set(scope, shard);
     return shard;
   }
-  async ping(): Promise<void> {
-    await Promise.all((this.shards ?? [this]).map((shard) => shard.command("PING")));
-  }
   private client(): RedisClient {
     return new RedisClient(this.url, {
       connectionTimeout: 1000,
@@ -103,7 +158,7 @@ export class Limits {
           const initial = typeof args === "function" ? args() : args;
           if (!initial) return;
           if (command !== "EVAL") return client.send(command, initial);
-          const digest = new Bun.CryptoHasher("sha1").update(initial[0]!).digest("hex");
+          const digest = scriptDigest(initial[0]!);
           try {
             return await client.send("EVALSHA", [digest, ...initial.slice(1)]);
           } catch (error) {
@@ -150,7 +205,7 @@ export class Limits {
     const shard = this.shard(`routing:${scope}`);
     if (shard !== this) return shard.roundRobin(scope, size);
     const value = await this.command("EVAL", [
-      "local n=redis.call('INCR',KEYS[1]);redis.call('EXPIRE',KEYS[1],86400);return (n-1)%tonumber(ARGV[1])",
+      roundRobinScript,
       "1",
       `${this.namespace}:{routing:${scope}}:rr`,
       String(size),
@@ -162,55 +217,6 @@ export class Limits {
     this.shardCache.clear();
     this.redis.close();
     for (const shard of this.shards?.slice(1) ?? []) shard.close();
-  }
-  async probe(
-    providerId: string,
-    leaseMs: number,
-    identity: string,
-  ): Promise<ProbePermit | undefined> {
-    const shard = this.shard(`provider:${providerId}`);
-    if (shard !== this) return shard.probe(providerId, leaseMs, identity);
-    const key = `${this.namespace}:health:${providerId}`;
-    const outcome = (await this.command("EVAL", [
-      `local t=redis.call('TIME')
-local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
-local health=redis.call('HMGET',KEYS[1],'open_until','epoch')
-local opened=tonumber(health[1] or '0')
-local epoch=health[2]
-if not epoch then epoch=ARGV[2] redis.call('HSET',KEYS[1],'epoch',epoch) redis.call('EXPIRE',KEYS[1],600) end
-if opened==0 then return {1,epoch} end
-if opened>now or tonumber(redis.call('HGET',KEYS[1],'probe_until') or '0')>now then return {0,epoch} end
-redis.call('HSET',KEYS[1],'probe_until',now+tonumber(ARGV[1]),'probe_token',ARGV[2])
-local retention=tonumber(ARGV[1])+600000
-if redis.call('PTTL',KEYS[1])<retention then redis.call('PEXPIRE',KEYS[1],retention) end
-return {2,epoch}`,
-      "1",
-      key,
-      String(leaseMs),
-      identity,
-    ])) as [number, string];
-    const result = Number(outcome[0]);
-    const epoch = outcome[1];
-    if (result === 0) return undefined;
-    return Object.assign(
-      async () => {
-        if (result === 2)
-          await this.command("EVAL", [
-            "if redis.call('HGET',KEYS[1],'probe_token')==ARGV[1] then redis.call('HDEL',KEYS[1],'probe_until','probe_token') end return 1",
-            "1",
-            key,
-            identity,
-          ]);
-      },
-      {
-        observe: (failed: boolean, latency: number) =>
-          this.observe(providerId, failed, latency, 10000, {
-            identity,
-            halfOpen: result === 2,
-            epoch,
-          }),
-      },
-    );
   }
   async enter(
     scope: string,
@@ -249,34 +255,19 @@ return {2,epoch}`,
         "Request rate, token budget or concurrency limit reached",
       );
     let released = false;
-    const release = async () => {
+    return async () => {
       if (released) return;
       released = true;
       try {
         await this.command("ZREM", [`${prefix}:active`, id]);
       } catch {}
     };
-    let reconciled = false;
-    return Object.assign(release, {
-      adjustTokens: async (actual: number) => {
-        if (reconciled || !Number.isSafeInteger(actual) || actual < 0) return;
-        reconciled = true;
-        const script =
-          "if redis.call('EXISTS',KEYS[1])==1 then return redis.call('INCRBY',KEYS[1],ARGV[1]) else return 0 end";
-        await this.command("EVAL", [script, "1", String(result), String(actual - tokens)]);
-      },
-    });
   }
   async health(providerId: string): Promise<{ open: boolean; latency: number }> {
     const shard = this.shard(`provider:${providerId}`);
     if (shard !== this) return shard.health(providerId);
     const values = (await this.command("EVAL", [
-      `local t=redis.call('TIME')
-local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
-local h=redis.call('HMGET',KEYS[1],'open_until','latency','probe_until')
-local opened=tonumber(h[1] or '0')
-local open=opened>now or (opened~=0 and tonumber(h[3] or '0')>now)
-return {open and 1 or 0,h[2] or ''}`,
+      healthScript,
       "1",
       `${this.namespace}:health:${providerId}`,
     ])) as [number, string];
@@ -291,24 +282,7 @@ return {open and 1 or 0,h[2] or ''}`,
     const shard = this.shard(`provider:${providerId}`);
     if (shard !== this) return shard.grantHealth(providerId, attemptId, owner, leaseMs);
     const granted = await this.command("EVAL", [
-      `local existing=redis.call('GET',KEYS[2])
-if existing then return string.sub(existing,1,string.len(ARGV[3])+1)==ARGV[3]..'|' and 1 or 0 end
-local t=redis.call('TIME')
-local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
-local health=redis.call('HMGET',KEYS[1],'open_until','epoch','probe_until')
-local opened=tonumber(health[1] or '0')
-local epoch=health[2]
-if not epoch then epoch=ARGV[1] redis.call('HSET',KEYS[1],'epoch',epoch) redis.call('EXPIRE',KEYS[1],600) end
-local mode='closed'
-if opened~=0 then
-  if opened>now or tonumber(health[3] or '0')>now then return 0 end
-  redis.call('HSET',KEYS[1],'probe_until',now+tonumber(ARGV[2]),'probe_token',ARGV[1])
-  local retention=tonumber(ARGV[2])+600000
-  if redis.call('PTTL',KEYS[1])<retention then redis.call('PEXPIRE',KEYS[1],retention) end
-  mode='probe'
-end
-redis.call('SET',KEYS[2],ARGV[3]..'|'..mode..'|'..epoch,'PX',tonumber(ARGV[2]))
-return 1`,
+      grantHealthScript,
       "2",
       `${this.namespace}:health:${providerId}`,
       `${this.namespace}:health:${providerId}:attempt:${attemptId}`,
@@ -327,11 +301,7 @@ return 1`,
     const shard = this.shard(`provider:${providerId}`);
     if (shard !== this) return shard.settleHealth(providerId, attemptId, owner, observation);
     const record = (await this.command("EVAL", [
-      `local value=redis.call('GET',KEYS[2])
-if not value or string.sub(value,1,string.len(ARGV[2])+1)~=ARGV[2]..'|' then return false end
-redis.call('DEL',KEYS[2])
-if redis.call('HGET',KEYS[1],'probe_token')==ARGV[1] and ARGV[3]=='1' then redis.call('HDEL',KEYS[1],'probe_until','probe_token') end
-return value`,
+      settleHealthScript,
       "2",
       `${this.namespace}:health:${providerId}`,
       `${this.namespace}:health:${providerId}:attempt:${attemptId}`,
@@ -359,34 +329,12 @@ return value`,
     const shard = this.shard(`provider:${providerId}`);
     if (shard !== this) return shard.observe(providerId, failed, latency, cooldownMs, permit);
     const key = `${this.namespace}:health:${providerId}`;
-    const script = `local health=redis.call('HMGET',KEYS[1],'epoch','open_until','fails','latency')
-if ARGV[6]~='' and health[1]~=ARGV[7] then return 0 end
-if ARGV[6]=='probe' then
-  local t=redis.call('TIME')
-  local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
-  local probe=redis.call('HMGET',KEYS[1],'probe_token','probe_until')
-  if probe[1]~=ARGV[5] or tonumber(probe[2] or '0')<=now then return 0 end
-elseif ARGV[6]=='closed' and tonumber(health[2] or '0')~=0 then return 0 end
-local fails=tonumber(health[3] or '0')
-local prior=tonumber(health[4] or ARGV[2])
-if ARGV[1]=='1' then
-  fails=fails+1
-  redis.call('HSET',KEYS[1],'fails',fails,'latency',prior*0.8+tonumber(ARGV[2])*0.2)
-else
-  fails=0
-  redis.call('HSET',KEYS[1],'fails',0,'latency',prior*0.8+tonumber(ARGV[2])*0.2,'open_until',0)
-end
-if fails>=3 then redis.call('HSET',KEYS[1],'open_until',tonumber(ARGV[3])+tonumber(ARGV[4])) end
-if fails>=3 or ARGV[6]=='' then redis.call('HSET',KEYS[1],'epoch',ARGV[5]) end
-if ARGV[6]=='probe' then redis.call('HDEL',KEYS[1],'probe_until','probe_token') end
-redis.call('EXPIRE',KEYS[1],600) return 1`;
     await this.command("EVAL", [
-      script,
+      observeScript,
       "1",
       key,
       failed ? "1" : "0",
       String(latency),
-      String(Date.now()),
       String(cooldownMs),
       permit?.identity ?? crypto.randomUUID(),
       permit ? (permit.halfOpen ? "probe" : "closed") : "",
