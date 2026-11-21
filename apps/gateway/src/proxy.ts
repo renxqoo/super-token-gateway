@@ -1332,16 +1332,18 @@ export async function handleInferenceRequest(
             toProviderKind(cand.channel.kind),
             model.name,
           );
+          const pluginSignal = AbortSignal.any([c.req.raw.signal, guard.controller.signal]);
           const session = hasPlugins
             ? deps.pluginEngine.createStreamSession(
                 cand.route.plugin_pipeline,
                 snap.plugins,
                 { request_id: requestId, project_id: project.id, model: model.name, operation },
                 () => attemptAbort.abort(new Error("moderation_blocked")),
-                attemptAbort.signal,
+                pluginSignal,
               )
             : null;
           const heldTerminalChunks: Uint8Array[] = [];
+          const streamPluginAudit: PluginAuditEntry[] = [];
           let observedOutputChars = 0;
           let streamFailed = false;
           let blockedEarly = false;
@@ -1351,7 +1353,16 @@ export async function handleInferenceRequest(
               throw new GatewayError(502, "empty_stream", "Upstream returned empty body");
             }
             while (true) {
-              const step = await reader.read();
+              let step: Awaited<ReturnType<typeof reader.read>>;
+              try {
+                step = await reader.read();
+              } catch (readErr) {
+                if (session?.isBlocked()) {
+                  blockedEarly = true;
+                  break;
+                }
+                throw readErr;
+              }
               if (step.done) break;
               const events = bedrockDecoder
                 ? bedrockDecoder.feed(step.value)
@@ -1410,6 +1421,7 @@ export async function handleInferenceRequest(
 
             if (session) {
               const finalMod = await session.finalize();
+              streamPluginAudit.push(...finalMod.audit);
               if (finalMod.blocked) {
                 deps.metrics.moderationBlocksTotal++;
                 logModBlocked = true;
@@ -1436,7 +1448,7 @@ export async function handleInferenceRequest(
                     rates: cand.costPrice.rates,
                   },
                   supplier_currency: cand.costPrice.currency,
-                  plugin_audit: [...preRequestAudit, ...finalMod.audit],
+                  plugin_audit: [...preRequestAudit, ...streamPluginAudit],
                   charge_policy: finalMod.charge_policy,
                   moderation_blocked: true,
                 });
@@ -1521,7 +1533,7 @@ export async function handleInferenceRequest(
                 rates: cand.costPrice.rates,
               },
               supplier_currency: cand.costPrice.currency,
-              plugin_audit: preRequestAudit,
+              plugin_audit: [...preRequestAudit, ...streamPluginAudit],
               charge_policy: "CHARGE_CUSTOMER",
               moderation_blocked: false,
             });

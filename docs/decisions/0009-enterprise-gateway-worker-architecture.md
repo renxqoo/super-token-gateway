@@ -1,6 +1,6 @@
 # ADR 0009: 企业级 Bun 主力架构（Gateway + Worker、精简微批 PG 核心账本、智能路由与插件管道）
 
-- **状态**：已实施并验收通过（单机实测 12,930 RPS / 0 错误 / 全量守恒；可选 Rust `wasmtime` cdylib 源码已就绪，需本机 `rustc`/`cargo` 编译）
+- **状态**：已实施并验收通过（单机实测 12,930 RPS / 0 错误 / 全量守恒；WASM 插件内置 Bun 隔离 Worker 沙箱开箱即用，可选 Rust `wasmtime` FFI 源码就绪）
 - **日期**：2026-11-21
 - **适用范围**：`apps/gateway`、`apps/worker`、`native/plugin-wasmtime`、`packages/{kernel,contracts,protocol,plugin-engine,ledger,runtime}`（后续同仓扩展 `apps/business` 业务系统）
 
@@ -195,14 +195,16 @@ flowchart LR
   - `BLOCK { rule_code, http_status, safe_message }`：立即短路后续插件并向 LLM 上游发出 `Abort` 止损。
 - **权限铁律**：内容处理插件**无权写入或篡改 `usage` 计量维度**；仅带显式授权的协议适配器/计量插件可产出 usage。
 
-### 5.2 极薄 Rust `wasmtime` 沙箱（`native/plugin-wasmtime`）
+### 5.2 WASM 沙箱执行器（内置 Bun 隔离 Worker + 可选 Rust `wasmtime` FFI）
 
-- **核心能力（~600 行 Rust，编译为 `libstg_plugin_wasmtime.{dylib,so}` 经 `bun:ffi` 调用）**：
-  - AOT 预编译 `CompiledModule` 跨请求共享；
-  - 每次执行借用池化实例，归还前强制执行线性内存页清零/重置，杜绝跨租户对话残留；
-  - 硬约束：内存上限（默认 16–32 MiB）、**Fuel 指令步数抢占熔断**、零文件系统/零网络/零环境变量、加载前校验 Ed25519 签名与 SHA-256 摘要；
-  - **双调度通道**：轻插件（Fuel 硬限 ≤ 200 µs）同步 FFI 直调；重插件（1–10 ms）提交 Rust 内部线程池异步执行，绝不卡死 Bun 事件循环；
-  - **零长流占槽**：流式插件状态以受限字节（≤ 8 KB）寄存在 Gateway 连接上下文中，SSE 等待吐字期间占用 **0 个插件实例**。
+- **统一 Guest ABI（零 Host Import）**：导出 `memory`、`stg_alloc(i32) -> i32` 及 `<hook>(ptr, len) -> i64`（高 32 位指针、低 32 位长度），同一 `.wasm` 插件产物无需修改即可在两种执行器上一致运行。
+- **开箱即用 Bun 隔离 Worker 沙箱（`createBunWasmExecutor`）**：
+  - 编译期严格校验零 Host Import（拒绝 WASI/FS/网络/Env 导入）并解析 WASM Memory 段校验初始内存上限；
+  - 每次调用在池化隔离 `Worker` 线程内创建全新 `WebAssembly.Instance`，确保线性内存天然零化、杜绝跨租户残留，并在调用前后强制校验 `memory.buffer.byteLength <= maxMemoryBytes` 拦截 `memory.grow` 内存炸弹；
+  - 恶意死循环到达 `fuelBudget` 对应超时立即执行 `worker.terminate()` 强杀线程（实测释放后 0 CPU 残留）并自动补充新 Worker，宿主零中断；
+  - 采用内联 `Blob` Worker，独立打包产物 `dist/gateway/main.js` 零外部文件依赖直接可用。
+- **可选 Rust `wasmtime` FFI 沙箱（`native/plugin-wasmtime`）**：编译出 `libstg_plugin_wasmtime.{dylib,so}` 时由 `resolveWasmtimeLibraryPath` 自动切换启用，提供 Cranelift AOT 与精确指令级 Fuel 计量。
+- **零长流占槽**：流式插件滑窗状态以受限字节（≤ 4 KB）寄存在 Gateway 连接上下文中，SSE 等待吐字期间占用 **0 个插件实例**。
 
 ### 5.3 外部 HTTP Webhook 风控插件
 

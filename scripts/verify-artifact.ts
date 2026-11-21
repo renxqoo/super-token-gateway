@@ -148,6 +148,65 @@ try {
     },
     ceilings: { input_tokens: "1000", cached_input_tokens: "1000", output_tokens: "100" },
   });
+  const wasmReply = [
+    ...new TextEncoder().encode(JSON.stringify({ action: "TRANSFORM", text: "ARTIFACT_WASM_OK" })),
+  ];
+  const wasmPacked = (BigInt(512) << 32n) | BigInt(wasmReply.length);
+  const lebU = (n: number) => {
+    const out: number[] = [];
+    let v = n >>> 0;
+    do {
+      let b = v & 0x7f;
+      v >>>= 7;
+      if (v) b |= 0x80;
+      out.push(b);
+    } while (v);
+    return out;
+  };
+  const lebS = (v: bigint) => {
+    const out: number[] = [];
+    let cur = v;
+    let more = true;
+    while (more) {
+      let b = Number(cur & 0x7fn);
+      cur >>= 7n;
+      if ((cur === 0n && (b & 0x40) === 0) || (cur === -1n && (b & 0x40) !== 0)) more = false;
+      else b |= 0x80;
+      out.push(b);
+    }
+    return out;
+  };
+  const sec = (id: number, body: number[]) => [id, ...lebU(body.length), ...body];
+  const str = (s: string) => {
+    const b = [...new TextEncoder().encode(s)];
+    return [...lebU(b.length), ...b];
+  };
+  const b0 = [0, 0x41, ...lebS(2048n), 0x0b];
+  const b1 = [0, 0x42, ...lebS(wasmPacked), 0x0b];
+  const artWasm = new Uint8Array([
+    0x00,
+    0x61,
+    0x73,
+    0x6d,
+    1,
+    0,
+    0,
+    0,
+    ...sec(1, [2, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 2, 0x7f, 0x7f, 1, 0x7e]),
+    ...sec(3, [2, 0, 1]),
+    ...sec(5, [1, 0x00, 1]),
+    ...sec(7, [3, ...str("memory"), 2, 0, ...str("stg_alloc"), 0, 0, ...str("on_response"), 0, 1]),
+    ...sec(10, [2, ...lebU(b0.length), ...b0, ...lebU(b1.length), ...b1]),
+    ...sec(11, [1, 0, 0x41, ...lebS(512n), 0x0b, ...lebU(wasmReply.length), ...wasmReply]),
+  ]);
+  const artPlugin = await postInternal("PUT", "/internal/v1/plugins", {
+    name: "artifact-wasm",
+    version: "1.0.0",
+    kind: "WASM",
+    wasm_bytes_base64: Buffer.from(artWasm).toString("base64"),
+    manifest: { hooks: ["on_response"] },
+  });
+
   await postInternal("PUT", "/internal/v1/routes", {
     model_name: "art-gpt",
     channel_id: ch.id,
@@ -155,6 +214,7 @@ try {
     operations: ["chat"],
     billing_price_id: custPrice.id,
     cost_version_id: supPrice.id,
+    plugin_pipeline: [{ plugin_id: String(artPlugin.id), priority: 1 }],
   });
 
   const chatRes = await fetch("http://127.0.0.1:18080/v1/chat/completions", {
@@ -168,7 +228,11 @@ try {
   });
   if (chatRes.status !== 200) throw new Error(`Artifact chat failed: ${chatRes.status}`);
   const chatJson = (await chatRes.json()) as { choices: { message: { content: string } }[] };
-  if (!chatJson.choices[0]?.message?.content) throw new Error("Empty artifact completion");
+  if (chatJson.choices[0]?.message?.content !== "ARTIFACT_WASM_OK") {
+    throw new Error(
+      `Expected WASM-transformed artifact completion, got: ${JSON.stringify(chatJson)}`,
+    );
+  }
 
   const audit = await postInternal("GET", "/internal/v1/audit/conservation");
   if (!audit.ok || audit.open_holds !== 0) {

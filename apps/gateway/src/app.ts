@@ -8,6 +8,7 @@ import {
   createLedgerQueries,
 } from "@gateway/ledger";
 import {
+  createBunWasmExecutor,
   createFfiWasmtimeExecutor,
   PluginPipelineEngine,
   resolveWasmtimeLibraryPath,
@@ -94,9 +95,9 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     wasmExecutor = options.wasmExecutor;
   } else {
     const resolvedLib = resolveWasmtimeLibraryPath(config.wasmLibPath);
-    if (resolvedLib) {
-      wasmExecutor = createFfiWasmtimeExecutor({ libraryPath: resolvedLib });
-    }
+    wasmExecutor = resolvedLib
+      ? createFfiWasmtimeExecutor({ libraryPath: resolvedLib })
+      : createBunWasmExecutor();
   }
   const pluginEngine = new PluginPipelineEngine({
     wasmExecutor,

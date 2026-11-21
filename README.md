@@ -13,7 +13,7 @@
 | `apps/mock-providers`    | 独立测试用上游替身（OpenAI / Anthropic / Gemini / Azure / Bedrock / Vertex / DeepSeek / Ollama）                                                                                                                                              |
 | `packages/ledger`        | 精简 PG 核心账本：`drizzle-orm/bun-sql` 强类型 Schema（23 张表 1:1 零漂移）/目录 CRUD/Outbox/归档/分页对账查询 + 原生 `Bun.SQL` 自适应 PG 分片资金租约（`wallet_leases`/`supplier_leases`）、2 ms 微批与 9 表单 CTE 原子结算热路径            |
 | `packages/protocol`      | 多协议无损透传、跨协议转换、有界 SSE 流解析、精确 JSON 快速路径与精确计量                                                                                                                                                                     |
-| `packages/plugin-engine` | 内容处理插件管道（极薄 Rust `wasmtime` FFI 沙箱 + 复用 SSRF/DNS-Pinning 传输层的外部 HTTP Webhook 风控、流式滑窗、请求/响应改写与熔断）                                                                                                       |
+| `packages/plugin-engine` | 内容处理插件管道（内置 Bun 隔离 Worker `WebAssembly` 沙箱开箱即用 + 可选 Rust `wasmtime` FFI 加速、复用 SSRF/DNS-Pinning 传输层的外部 HTTP Webhook 风控、流式滑窗、请求/响应改写与熔断）                                                      |
 | `packages/runtime`       | SmartRouter 智能路由熔断器（含 `probeTimeoutMs` 防死锁自愈）、Redis 集群协同（跨节点限流/熔断与配置纪元 Pub/Sub 毫秒同步 + 单机降级）、SSRF/DNS-Pinning 高复用 keep-alive 连接池                                                              |
 | `packages/kernel`        | 纯函数精确 `BigInt` 有理数计价与预扣上界计算                                                                                                                                                                                                  |
 | `packages/contracts`     | 公共 Schema 校验与错误类型                                                                                                                                                                                                                    |
@@ -33,9 +33,9 @@
    - 通道级单调时钟熔断器（`CLOSED` / `OPEN` / `HALF_OPEN` 单探针 + `probeTimeoutMs` 防死锁自动释放 + 指数退避）、429 `Retry-After` 冷却与 401/403 故障隔离。
    - 首字节前自动无感故障切换：原子释放失败通道供应商预扣、为更贵备选路由补足客户预扣、`retry_on_ambiguous` 超时切换保留旧渠道 `UNKNOWN` 风险占位；绝不重复向客户扣款；首字节后流式中断永不拼接其他模型输出，客户端主动断流不误伤上游健康度。
 3. **企业级内容处理与风控插件（`packages/plugin-engine`）**：
-   - 极薄 Rust `wasmtime` 沙箱执行微秒级 PII 脱敏/规则重写（Ed25519 签名校验 + 流式滑动窗口跨 chunk 捕获）。
-   - 外部 HTTP Webhook 风控支持 `HOLD_UNTIL_APPROVED`（零违规字节泄漏）与 `STREAM_AND_CUTOFF`（边推边检即时截断上游），注册与调用全链路执行 SSRF/DNS-Pinning 校验，具备独立熔断器与 `FAIL_CLOSED` / `FAIL_OPEN` 降级策略。
-   - 拦截计费策略支持按路由/插件配置 `CHARGE_CUSTOMER`（默认客户承担）或 `PLATFORM_ABSORB`（平台兜底并记入 `system:moderation_loss` 复式凭证）。
+   - WASM 插件内置 Bun 隔离 Worker `WebAssembly` 沙箱开箱即用（零外部工具链依赖，同样 ABI 无缝兼容可选 Rust `wasmtime` FFI 加速）：强制零 Host Import、单次调用独立零化线性内存防跨租户泄漏、内存硬上限校验、死循环超时硬终止、Ed25519 签名校验与流式滑动窗口跨 chunk 捕获。
+   - 外部 HTTP Webhook 风控支持 `HOLD_UNTIL_APPROVED`（零违规字节泄漏）与 `STREAM_AND_CUTOFF`（边推边检异步截断上游并精确按策略结算），支持 `manifest.hooks` 精准过滤、独立熔断与冷却恢复、注册与调用全链路 SSRF/DNS-Pinning 校验及 `FAIL_CLOSED` / `FAIL_OPEN` 降级策略。
+   - 拦截计费策略支持按路由/插件配置 `CHARGE_CUSTOMER`（默认客户承担）或 `PLATFORM_ABSORB`（平台兜底并记入 `system:moderation_loss` 复式凭证），流式与非流式审计明细完整持久化至 `billing_charges.plugin_audit`。
 
 ## 实测性能（Bun 1.4.4 + 真实 PG 17 `fsync=on / synchronous_commit=on / full_page_writes=on`）
 

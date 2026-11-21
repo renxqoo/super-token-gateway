@@ -72,6 +72,17 @@ export class PluginPipelineEngine {
     const started = performance.now();
     const { plugin } = step;
     if (plugin.kind === "WEBHOOK") {
+      const whManifest = plugin.manifest as Partial<WasmPluginManifest>;
+      if (
+        Array.isArray(whManifest.hooks) &&
+        whManifest.hooks.length > 0 &&
+        !whManifest.hooks.includes(input.hook)
+      ) {
+        return {
+          decision: { action: "PASS" },
+          latencyUs: Math.round((performance.now() - started) * 1000),
+        };
+      }
       if (!plugin.webhook_config) {
         return {
           decision: { action: "PASS" },
@@ -232,7 +243,9 @@ export class PluginPipelineEngine {
     } | null = null;
 
     let holdBuffer = "";
-    let lastWebhookAt = performance.now();
+    let lastHoldAt = performance.now();
+    let cutoffBuffer = "";
+    let lastCutoffAt = performance.now();
     const pendingAsyncChecks: Promise<void>[] = [];
 
     const hasHoldWebhook = resolved.some(
@@ -368,16 +381,16 @@ export class PluginPipelineEngine {
         if (!textAfterWasm) return { emit: "", blocked: false };
 
         if (hasCutoffWebhook) {
-          holdBuffer += textAfterWasm;
+          cutoffBuffer += textAfterWasm;
           const now = performance.now();
           if (
-            holdBuffer.length >= webhookWindowChars ||
-            now - lastWebhookAt >= webhookWindowMs ||
-            /[.!?\n。！？]$/.test(holdBuffer)
+            cutoffBuffer.length >= webhookWindowChars ||
+            now - lastCutoffAt >= webhookWindowMs ||
+            /[.!?\n。！？]$/.test(cutoffBuffer)
           ) {
-            const sample = holdBuffer;
-            holdBuffer = "";
-            lastWebhookAt = now;
+            const sample = cutoffBuffer;
+            cutoffBuffer = "";
+            lastCutoffAt = now;
             const check = runStepList(cutoffWebhookSteps, "on_stream_chunk", sample, false).then(
               () => undefined,
             );
@@ -394,14 +407,14 @@ export class PluginPipelineEngine {
           const shouldFlush =
             holdBuffer.length >= webhookWindowChars ||
             holdBuffer.length >= (maxWindowBytes || 4096) ||
-            now - lastWebhookAt >= webhookWindowMs ||
+            now - lastHoldAt >= webhookWindowMs ||
             /[.!?\n。！？]$/.test(holdBuffer);
           if (!shouldFlush) {
             return { emit: "", blocked: false };
           }
           const batch = holdBuffer;
           holdBuffer = "";
-          lastWebhookAt = now;
+          lastHoldAt = now;
           const approved = await runStepList(holdWebhookSteps, "on_stream_chunk", batch, false);
           if (approved === null) return { emit: "", blocked: true };
           return { emit: approved, blocked: false };
@@ -452,6 +465,7 @@ export class PluginPipelineEngine {
           tail = processed;
         }
 
+        let emitOut = tail;
         if (hasHoldWebhook) {
           const finalText = holdBuffer + tail;
           holdBuffer = "";
@@ -468,18 +482,15 @@ export class PluginPipelineEngine {
                 audit,
               };
             }
-            return {
-              emit: approved,
-              blocked: false,
-              charge_policy: "CHARGE_CUSTOMER",
-              audit,
-            };
+            emitOut = approved;
+          } else {
+            emitOut = "";
           }
         }
 
-        if (hasCutoffWebhook && (holdBuffer.length > 0 || tail.length > 0)) {
-          const finalSample = holdBuffer + tail;
-          holdBuffer = "";
+        if (hasCutoffWebhook && (cutoffBuffer.length > 0 || tail.length > 0)) {
+          const finalSample = cutoffBuffer + tail;
+          cutoffBuffer = "";
           const approved = await runStepList(
             cutoffWebhookSteps,
             "on_stream_end",
@@ -497,16 +508,10 @@ export class PluginPipelineEngine {
               audit,
             };
           }
-          return {
-            emit: tail,
-            blocked: false,
-            charge_policy: "CHARGE_CUSTOMER",
-            audit,
-          };
         }
 
         return {
-          emit: tail,
+          emit: emitOut,
           blocked: false,
           charge_policy: "CHARGE_CUSTOMER",
           audit,
