@@ -1,96 +1,98 @@
-import { z } from "zod";
-import { coreAudiencePattern } from "@gateway/core-client";
 import { validateCidr } from "@gateway/runtime";
 
-const cidrs = z.array(z.string().max(64)).max(64).default([]);
-const queueSchema = z.strictObject({
-  url: z.string().startsWith("redis"),
-  namespace: z.string().regex(/^[a-zA-Z0-9:_-]{1,80}$/),
-  required_replicas: z.number().int().min(0).max(5),
-  ack_timeout_ms: z.number().int().min(100).max(10000).default(2000),
-});
-const coreTargetSchema = z.strictObject({
-  origin: z.string().url(),
-  servername: z.string().min(1),
-  peer_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-  subject_altname: z.string().min(1).max(2000),
-});
-const configSchema = z.strictObject({
-  hostname: z.string().min(1),
-  port: z.number().int().min(0).max(65535),
-  max_body_bytes: z
-    .number()
-    .int()
-    .positive()
-    .max(16 << 20)
-    .default(16 << 20),
-  max_response_bytes: z
-    .number()
-    .int()
-    .positive()
-    .max(64 << 20)
-    .default(32 << 20),
-  total_timeout_ms: z.number().int().min(1000).max(600000).default(180000),
-  upstream_header_timeout_ms: z.number().int().min(100).max(600000).default(30000),
-  upstream_idle_timeout_ms: z.number().int().min(100).max(600000).default(30000),
-  downstream_stall_timeout_ms: z.number().int().min(100).max(600000).default(30000),
-  max_inflight: z.number().int().positive().max(100000).default(1024),
-  quota_renew_ms: z.number().int().min(100).max(20000).default(10000),
-  resource_poll_ms: z.number().int().min(100).max(600000).default(5000),
-  shutdown_grace_ms: z.number().int().min(100).max(120000).default(20000),
-  trusted_proxy_cidrs: cidrs,
-  allow_private_upstream: z.boolean().default(false),
-  private_upstream_cidrs: cidrs,
-  upstream_pool_size: z.number().int().positive().max(65536).default(1024),
-  commit_short_chat: z.boolean().default(false),
-  commit_short_chat_sse: z.boolean().optional(),
-  core: coreTargetSchema.extend({
-    audience: z.string().regex(coreAudiencePattern),
-    short_chat_peer: coreTargetSchema
-      .extend({
-        funding_group_parity: z.union([z.literal(0), z.literal(1)]),
-      })
-      .optional(),
-    key_file: z.string().min(1),
-    cert_file: z.string().min(1),
-    ca_file: z.string().min(1),
-    connections: z.number().int().min(1).max(4).default(1),
-  }),
-  queue: queueSchema,
-  terminal_recovery_queue: queueSchema
-    .extend({
-      required_replicas: z.number().int().min(1).max(5),
-      ack_timeout_ms: z.number().int().min(100).max(1000).default(1000),
-    })
-    .optional(),
-  plugins: z.strictObject({
-    helper_executable: z.string().min(1),
-    trust_policy: z.string().min(1),
-    max_concurrent_attempts: z.number().int().min(1).max(1024).default(128),
-  }),
-  production: z.boolean().default(false),
-});
+export type GatewayConfig = {
+  mode: "all-in-one" | "gateway";
+  host: string;
+  port: number;
+  internalHost: string;
+  internalPort: number;
+  databaseUrl: string;
+  dbMaxConnections: number;
+  redisUrl?: string;
+  keyPepper: string;
+  encryptionKey: string;
+  adminToken: string;
+  allowPrivateUpstreams: boolean;
+  privateUpstreamCidrs: string[];
+  trustedProxyCidrs: string[];
+  maxInFlight: number;
+  maxBodyBytes: number;
+  holdTtlMs: number;
+  attemptTimeoutMs: number;
+  snapshotPollMs: number;
+  microBatchWindowMs: number;
+  microBatchMaxSize: number;
+  wasmLibPath?: string;
+  pluginSigningPublicKeyPem?: string;
+  businessWebhookUrl?: string;
+  businessWebhookToken?: string;
+};
 
-export type GatewayConfig = z.infer<typeof configSchema>;
+function parseCsv(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .map((v) => validateCidr(v));
+}
 
-export async function loadGatewayConfig(
-  path = process.env.GATEWAY_CONFIG_FILE,
-): Promise<GatewayConfig> {
-  if (!path) throw new Error("GATEWAY_CONFIG_FILE required");
-  const config = configSchema.parse(await Bun.file(path).json());
-  if (config.core.short_chat_peer && (!config.commit_short_chat || config.core.connections !== 4))
-    throw new Error("Project Core routing requires short Chat and four connections");
-  if (config.commit_short_chat_sse && !config.commit_short_chat)
-    throw new Error("SSE terminal settlement requires committed short Chat");
-  if (config.commit_short_chat && !config.terminal_recovery_queue)
-    throw new Error("Short Chat requires terminal_recovery_queue");
-  if (config.commit_short_chat && config.queue.required_replicas < 1)
-    throw new Error("Short Chat requires an acknowledged evidence queue replica");
-  for (const cidr of [...config.trusted_proxy_cidrs, ...config.private_upstream_cidrs])
-    validateCidr(cidr);
-  if (config.production && config.allow_private_upstream)
-    throw new Error("Production forbids private upstream bypass");
-  if (config.production && config.queue.required_replicas < 1)
-    throw new Error("Production requires an acknowledged AOF replica for evidence");
-  return config;
+function parseMode(
+  env: Record<string, string | undefined>,
+  argv: readonly string[],
+): "all-in-one" | "gateway" {
+  const flag = argv.find((a) => a.startsWith("--mode="));
+  const raw = flag ? flag.slice("--mode=".length) : (env.GATEWAY_MODE ?? "all-in-one");
+  if (raw === "all-in-one" || raw === "gateway") return raw;
+  throw new Error(`Invalid GATEWAY_MODE: ${raw}`);
+}
+
+export function loadConfigFromEnv(
+  env: Record<string, string | undefined> = process.env,
+  argv: readonly string[] = process.argv.slice(2),
+): GatewayConfig {
+  const databaseUrl = env.DATABASE_URL;
+  if (!databaseUrl) throw new Error("DATABASE_URL is required");
+  const keyPepper = env.KEY_PEPPER;
+  if (!keyPepper || keyPepper.length < 16) {
+    throw new Error("KEY_PEPPER must be at least 16 characters");
+  }
+  const encryptionKey = env.ENCRYPTION_KEY;
+  if (!encryptionKey || !/^[0-9a-fA-F]{64}$/.test(encryptionKey)) {
+    throw new Error("ENCRYPTION_KEY must be a 64-character hex string");
+  }
+  const adminToken = env.ADMIN_TOKEN;
+  if (!adminToken || adminToken.length < 16) {
+    throw new Error("ADMIN_TOKEN must be at least 16 characters");
+  }
+  const mode = parseMode(env, argv);
+  return {
+    mode,
+    host: env.GATEWAY_HOST ?? "0.0.0.0",
+    port: Number(env.GATEWAY_PORT ?? 8080),
+    internalHost: env.INTERNAL_HOST ?? "127.0.0.1",
+    internalPort: Number(env.INTERNAL_PORT ?? 8081),
+    databaseUrl,
+    dbMaxConnections: Number(env.DB_MAX_CONNECTIONS ?? 32),
+    ...(env.REDIS_URL ? { redisUrl: env.REDIS_URL } : {}),
+    keyPepper,
+    encryptionKey,
+    adminToken,
+    allowPrivateUpstreams: env.ALLOW_PRIVATE_UPSTREAMS === "true",
+    privateUpstreamCidrs: parseCsv(env.PRIVATE_UPSTREAM_CIDRS),
+    trustedProxyCidrs: parseCsv(env.TRUSTED_PROXY_CIDRS),
+    maxInFlight: Number(env.MAX_IN_FLIGHT ?? 2000),
+    maxBodyBytes: Number(env.MAX_BODY_BYTES ?? 10 * 1024 * 1024),
+    holdTtlMs: Number(env.HOLD_TTL_MS ?? 60_000),
+    attemptTimeoutMs: Number(env.ATTEMPT_TIMEOUT_MS ?? 30_000),
+    snapshotPollMs: Number(env.SNAPSHOT_POLL_MS ?? 2000),
+    microBatchWindowMs: Number(env.MICRO_BATCH_WINDOW_MS ?? 3),
+    microBatchMaxSize: Number(env.MICRO_BATCH_MAX_SIZE ?? 64),
+    ...(env.STG_WASMTIME_LIB ? { wasmLibPath: env.STG_WASMTIME_LIB } : {}),
+    ...(env.PLUGIN_SIGNING_PUBLIC_KEY_PEM
+      ? { pluginSigningPublicKeyPem: env.PLUGIN_SIGNING_PUBLIC_KEY_PEM }
+      : {}),
+    ...(env.BUSINESS_WEBHOOK_URL ? { businessWebhookUrl: env.BUSINESS_WEBHOOK_URL } : {}),
+    ...(env.BUSINESS_WEBHOOK_TOKEN ? { businessWebhookToken: env.BUSINESS_WEBHOOK_TOKEN } : {}),
+  };
 }

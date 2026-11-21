@@ -2,14 +2,17 @@
   "name": "@gateway/gateway",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "dependencies": {
-    "@gateway/adapters": "workspace:*",
     "@gateway/contracts": "workspace:*",
-    "@gateway/core-client": "workspace:*",
     "@gateway/kernel": "workspace:*",
-    "@gateway/plugin-host": "workspace:*",
-    "@gateway/plugin-sdk": "workspace:*",
+    "@gateway/ledger": "workspace:*",
+    "@gateway/plugin-engine": "workspace:*",
+    "@gateway/protocol": "workspace:*",
     "@gateway/runtime": "workspace:*",
+    "@gateway/worker": "workspace:*",
     "hono": "4.13.17",
     "zod": "4.6.7"
   }

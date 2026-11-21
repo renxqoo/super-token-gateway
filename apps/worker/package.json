@@ -1,0 +1,12 @@
+{
+  "name": "@gateway/worker",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@gateway/ledger": "workspace:*",
+    "@gateway/runtime": "workspace:*"
+  }
+}

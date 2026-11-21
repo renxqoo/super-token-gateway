@@ -1,39 +1,21 @@
 [Unit]
-Description=LLM Gateway v2 instance %i (Chat, no database access)
-After=network-online.target core-api.service
+Description=Super Token Gateway Node %i
+After=network-online.target postgresql.service
 Wants=network-online.target
+
 [Service]
 Type=simple
 User=llm-gateway
 Group=llm-gateway
-WorkingDirectory=/opt/llm-gateway/current
-Environment=GATEWAY_CONFIG_FILE=/etc/llm-gateway/gateway-%i.json
-ExecStart=/usr/local/bin/bun dist/gateway/main.js
-Restart=on-failure
+WorkingDirectory=/opt/super-token-gateway
+EnvironmentFile=/etc/super-token-gateway/gateway-%i.env
+ExecStart=/usr/local/bin/bun dist/gateway/main.js --mode=gateway
+Restart=always
 RestartSec=2
-TimeoutStopSec=60
-KillSignal=SIGTERM
-KillMode=control-group
-LimitNOFILE=131072
-LimitCORE=0
+LimitNOFILE=65536
 NoNewPrivileges=true
-PrivateTmp=true
-PrivateDevices=true
 ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
-ProtectControlGroups=true
-ProtectClock=true
-ProtectHostname=true
-RestrictSUIDSGID=true
-RestrictNamespaces=true
-RestrictRealtime=true
-LockPersonality=true
-CapabilityBoundingSet=
-AmbientCapabilities=
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-UMask=0077
+PrivateTmp=true
+
 [Install]
 WantedBy=multi-user.target

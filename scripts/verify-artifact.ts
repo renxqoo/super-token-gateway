@@ -1,157 +1,197 @@
-import assert from "node:assert/strict";
-import { mkdir, rm } from "node:fs/promises";
-import { createDatabase } from "@gateway/storage";
-import { RedisClient } from "bun";
+import { spawn } from "node:child_process";
+import { cp, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { createDatabase } from "@gateway/ledger";
 
-const base = process.env.DATABASE_URL;
-const redisURL = process.env.REDIS_URL;
-const queueURL = process.env.QUEUE_REDIS_URL;
-if (!base || !redisURL || !queueURL)
-  throw new Error("Artifact verification requires PG, admission Redis and durable queue Redis");
-const suffix = crypto.randomUUID().replaceAll("-", "");
-const name = `gateway_artifact_${suffix}`;
-const root = new URL("../", import.meta.url);
-const cwd = new URL(`../.local/artifact-${suffix}/`, import.meta.url);
-await mkdir(cwd, { recursive: true });
-const owner = createDatabase(base);
-await owner.unsafe(`CREATE DATABASE ${name}`);
-const url = new URL(base);
-url.pathname = `/${name}`;
-const env = { ...process.env, DATABASE_URL: url.toString(), NODE_ENV: "test" };
-const children = new Set<ReturnType<typeof Bun.spawn>>();
-const start = (path: string, args: string[] = []) => {
-  const process = Bun.spawn(["bun", new URL(path, root).pathname, ...args], {
-    cwd: cwd.pathname,
-    env,
-    stdout: "ignore",
-    stderr: "inherit",
-  });
-  children.add(process);
-  return process;
-};
-try {
-  const benchmark = Bun.spawn(
-    [
-      process.execPath,
-      "scripts/bench-system.ts",
-      "--seconds",
-      "1",
-      "--rate",
-      "1",
-      "--concurrency",
-      "1",
-      "--warmup-concurrency",
-      "1",
-      "--instances",
-      "1",
-      "--wallets",
-      "1",
-      "--worker-concurrency",
-      "1",
-      "--drain-seconds",
-      "10",
-      "--scenario",
-      JSON.stringify({ headerDelayMs: 50 }),
-    ],
-    { cwd: root.pathname, env, stdout: "pipe", stderr: "pipe" },
-  );
-  children.add(benchmark);
-  const [benchmarkOutput, benchmarkErrors, benchmarkExit] = await Promise.all([
-    new Response(benchmark.stdout).text(),
-    new Response(benchmark.stderr).text(),
-    benchmark.exited,
-  ]);
-  assert.equal(
-    benchmarkExit,
-    0,
-    `Fresh-schema benchmark must initialize, settle and clean up: ${benchmarkOutput}${benchmarkErrors}`,
-  );
-  const benchmarkResult = JSON.parse(benchmarkOutput.trim()) as {
-    directory: string;
-    valid: boolean;
-  };
-  assert.equal(benchmarkResult.valid, true);
-  const benchmarkDirectory = new URL(benchmarkResult.directory + "/", root);
-  const audit = await Bun.file(new URL("audit.json", benchmarkDirectory)).json();
-  for (const [path, digest] of Object.entries(audit.environment.artifacts))
-    assert.equal(
-      digest,
-      new Bun.CryptoHasher("sha256")
-        .update(await Bun.file(new URL(path, root)).bytes())
-        .digest("hex"),
-    );
-  assert.deepEqual(Object.keys(audit.environment.artifacts).sort(), [
-    "dist/core-api/main.js",
-    "dist/core-api/platform/management.js",
-    "dist/core-worker/main.js",
-    "dist/gateway/main.js",
-    "dist/manifest.json",
-    "dist/mock-providers/main.js",
-    "dist/native/builtin-adapters/registry.json",
-    "dist/native/builtin-adapters/worker.js",
-    "dist/native/plugin-host",
-  ]);
-  assert.equal(audit.http.offered, 1);
-  assert.equal(audit.http.succeeded, 1);
-  assert.equal(audit.http.invalid, 0);
-  assert(audit.accounting.requests > 1);
-  assert.equal(audit.accounting.precise_charges, audit.accounting.requests);
-  assert.equal(audit.accounting.acknowledged, audit.accounting.usage_events);
-  assert.equal(audit.ackedRequests, audit.accounting.requests);
-  assert.equal(audit.supplier.spent, String(audit.accounting.requests * 59));
-  assert(Object.values(audit.queueStats).every((count) => count === 0));
-  assert.equal((await Bun.file(new URL("cleanup.json", benchmarkDirectory)).json()).failed, 0);
-  assert.equal(
-    (await owner`SELECT count(*)::int AS n FROM pg_database WHERE datname=${audit.database}`)[0].n,
-    0,
-  );
-  for (const endpoint of [redisURL, queueURL]) {
-    const redis = new RedisClient(endpoint);
+const baseDbUrl = process.env.DATABASE_URL;
+if (!baseDbUrl) throw new Error("DATABASE_URL is required");
+
+const distSource = resolve("dist");
+const tempDir = await mkdtemp(join(tmpdir(), "stg-artifact-"));
+const dbName = `gateway_v4_art_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+const adminUrl = new URL(baseDbUrl);
+adminUrl.pathname = "/postgres";
+const targetUrl = new URL(baseDbUrl);
+targetUrl.pathname = `/${dbName}`;
+
+const adminDb = createDatabase(adminUrl.toString(), 2);
+const children: ReturnType<typeof spawn>[] = [];
+
+async function waitForJson(
+  url: string,
+  headers?: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
     try {
-      await redis.connect();
-      let cursor = "0";
-      do {
-        const page = (await redis.send("SCAN", [
-          cursor,
-          "MATCH",
-          `*bench:${audit.id}*`,
-          "COUNT",
-          "1000",
-        ])) as [string, string[]];
-        cursor = page[0];
-        assert.equal(page[1].length, 0, "Benchmark must remove its own Redis namespace");
-      } while (cursor !== "0");
-    } finally {
-      redis.close();
+      const res = await fetch(url, headers ? { headers } : undefined);
+      if (res.ok) return (await res.json()) as Record<string, unknown>;
+    } catch {
+      void 0;
     }
+    await Bun.sleep(100);
   }
-  assert.equal(
-    await start("dist/tools/migrate.js", ["--database", name]).exited,
-    0,
-    "Compiled migrator must find versioned SQL assets from an empty working directory",
-  );
-  const archivePath = new URL("numeric-archive/", cwd).pathname;
-  assert.equal(
-    await start("dist/tools/archive.js", ["--month", "2025-01", "--output", archivePath]).exited,
-    0,
-  );
-  assert.equal(
-    await start("dist/tools/archive.js", ["--verify", archivePath + "/manifest.json"]).exited,
-    0,
-  );
-  console.log(
-    JSON.stringify({
-      artifact: "pass",
-      checks: [
-        "fresh-schema benchmark initialization, exact settlement, ACK, cleanup and tested artifact digests",
-        "compiled migration SQL assets and archive CLI from an empty working directory",
-      ],
+  throw new Error(`Timed out waiting for ${url}`);
+}
+
+function runSync(cwd: string, args: string[], env: Record<string, string>): Promise<void> {
+  return new Promise((resolveDone, rejectDone) => {
+    const proc = spawn(process.execPath, args, { cwd, env, stdio: "inherit" });
+    proc.on("exit", (code) => {
+      if (code === 0) resolveDone();
+      else rejectDone(new Error(`Process exited with code ${code}: ${args.join(" ")}`));
+    });
+  });
+}
+
+try {
+  await cp(distSource, join(tempDir, "dist"), { recursive: true });
+  await adminDb.unsafe(`CREATE DATABASE ${dbName}`);
+
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    DATABASE_URL: targetUrl.toString(),
+    KEY_PEPPER: "artifact-pepper-0123456789abcdef",
+    ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    ADMIN_TOKEN: "artifact-admin-token-0123456789ab",
+    ALLOW_PRIVATE_UPSTREAMS: "true",
+    GATEWAY_HOST: "127.0.0.1",
+    GATEWAY_PORT: "18080",
+    INTERNAL_HOST: "127.0.0.1",
+    INTERNAL_PORT: "18081",
+    MOCK_HOST: "127.0.0.1",
+    MOCK_PORT: "19088",
+    MOCK_CONTROL_TOKEN: "artifact-mock-ctrl",
+    WORKER_HEALTH_HOST: "127.0.0.1",
+    WORKER_HEALTH_PORT: "18090",
+  };
+
+  await runSync(tempDir, ["dist/tools/migrate.js"], env);
+
+  for (const script of [
+    ["dist/mock-providers/main.js"],
+    ["dist/gateway/main.js", "--mode=gateway"],
+    ["dist/worker/main.js"],
+  ]) {
+    const child = spawn(process.execPath, script, { cwd: tempDir, env, stdio: "inherit" });
+    children.push(child);
+  }
+
+  await waitForJson("http://127.0.0.1:19088/healthz");
+  await waitForJson("http://127.0.0.1:18080/readyz");
+  await waitForJson("http://127.0.0.1:18090/readyz");
+
+  const adminHeaders = {
+    authorization: `Bearer ${env.ADMIN_TOKEN}`,
+    "content-type": "application/json",
+  };
+  const postInternal = async (method: string, path: string, body?: unknown) => {
+    const res = await fetch(`http://127.0.0.1:18081${path}`, {
+      method,
+      headers: adminHeaders,
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    if (!res.ok) throw new Error(`Internal ${path} failed: ${res.status} ${await res.text()}`);
+    return (await res.json()) as Record<string, unknown>;
+  };
+
+  const project = await postInternal("PUT", "/internal/v1/projects", {
+    name: "artifact-proj",
+    currency: "USD",
+  });
+  const key = await postInternal("PUT", "/internal/v1/api-keys", {
+    project_id: project.id,
+    name: "artifact-key",
+  });
+  await postInternal("POST", `/internal/v1/wallets/${project.id}/credits`, {
+    currency: "USD",
+    external_ref: "art-credit-1",
+    amount_atoms: "100000",
+    kind: "CASH",
+  });
+  const acc = await postInternal("PUT", "/internal/v1/upstream-accounts", { name: "art-acc" });
+  await postInternal("POST", `/internal/v1/upstream-accounts/${acc.id}/recharges`, {
+    currency: "USD",
+    external_ref: "art-sup-1",
+    amount_atoms: "100000",
+  });
+  const ch = await postInternal("PUT", "/internal/v1/channels", {
+    account_id: acc.id,
+    name: "art-ch",
+    kind: "openai",
+    base_url: "http://127.0.0.1:19088/openai",
+    api_key: "sk-art",
+  });
+  await postInternal("PUT", "/internal/v1/models", {
+    name: "art-gpt",
+    operations: ["chat"],
+    max_output_tokens: 100,
+  });
+  const custPrice = await postInternal("POST", "/internal/v1/prices", {
+    side: "CUSTOMER",
+    currency: "USD",
+    rates: {
+      input_tokens: { numerator: "10", denominator: "1" },
+      cached_input_tokens: { numerator: "5", denominator: "1" },
+      output_tokens: { numerator: "20", denominator: "1" },
+    },
+    ceilings: { input_tokens: "1000", cached_input_tokens: "1000", output_tokens: "100" },
+  });
+  const supPrice = await postInternal("POST", "/internal/v1/prices", {
+    side: "SUPPLIER",
+    currency: "USD",
+    rates: {
+      input_tokens: { numerator: "2", denominator: "1" },
+      cached_input_tokens: { numerator: "1", denominator: "1" },
+      output_tokens: { numerator: "4", denominator: "1" },
+    },
+    ceilings: { input_tokens: "1000", cached_input_tokens: "1000", output_tokens: "100" },
+  });
+  await postInternal("PUT", "/internal/v1/routes", {
+    model_name: "art-gpt",
+    channel_id: ch.id,
+    upstream_model: "art-gpt-up",
+    operations: ["chat"],
+    billing_price_id: custPrice.id,
+    cost_version_id: supPrice.id,
+  });
+
+  const chatRes = await fetch("http://127.0.0.1:18080/v1/chat/completions", {
+    method: "POST",
+    headers: { authorization: `Bearer ${key.key}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "art-gpt",
+      messages: [{ role: "user", content: "artifact check" }],
+      max_tokens: 50,
     }),
+  });
+  if (chatRes.status !== 200) throw new Error(`Artifact chat failed: ${chatRes.status}`);
+  const chatJson = (await chatRes.json()) as { choices: { message: { content: string } }[] };
+  if (!chatJson.choices[0]?.message?.content) throw new Error("Empty artifact completion");
+
+  const audit = await postInternal("GET", "/internal/v1/audit/conservation");
+  if (!audit.ok || audit.open_holds !== 0) {
+    throw new Error(`Conservation check failed: ${JSON.stringify(audit)}`);
+  }
+
+  const archiveDir = join(tempDir, "archive");
+  const month = new Date().toISOString().slice(0, 7);
+  await runSync(tempDir, ["dist/tools/archive.js", "export", month, archiveDir], env);
+  await runSync(
+    tempDir,
+    ["dist/tools/archive.js", "verify", join(archiveDir, "manifest.json")],
+    env,
   );
+
+  console.log(JSON.stringify({ artifact_verified: true, conservation: audit }));
 } finally {
-  for (const child of children) if (child.exitCode === null) child.kill("SIGKILL");
-  await Promise.allSettled([...children].map((child) => child.exited));
-  await owner.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-  await owner.close();
-  await rm(cwd, { recursive: true, force: true });
+  for (const child of children) child.kill("SIGTERM");
+  await Bun.sleep(300);
+  await adminDb.unsafe(
+    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${dbName}' AND pid <> pg_backend_pid()`,
+  );
+  await adminDb.unsafe(`DROP DATABASE IF EXISTS ${dbName}`);
+  await adminDb.close();
+  await rm(tempDir, { recursive: true, force: true });
 }

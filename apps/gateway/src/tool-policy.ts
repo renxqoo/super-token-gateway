@@ -23,8 +23,9 @@ function clientExecuted(value: unknown, operation: Operation): boolean {
   if (operation === "gemini") return Object.keys(tool).every((key) => clientGeminiTools.has(key));
   if (operation === "chat") return tool.type === "function" || tool.type === "custom";
   if (operation === "responses") return clientResponseTools.has(String(tool.type));
-  if (operation === "messages")
+  if (operation === "messages") {
     return tool.type === undefined || clientMessageTools.test(String(tool.type));
+  }
   return false;
 }
 
@@ -34,10 +35,11 @@ export function rejectUnmeteredTools(body: Record<string, unknown>, operation: O
     (body.tools !== undefined &&
       body.tools !== null &&
       (!Array.isArray(body.tools) || !body.tools.every((tool) => clientExecuted(tool, operation))))
-  )
+  ) {
     throw new GatewayError(
       422,
       "unmetered_tool",
       "Server-executed tools without a billing dimension are not supported",
     );
+  }
 }

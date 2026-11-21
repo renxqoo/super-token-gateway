@@ -4,14 +4,10 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./batcher": "./src/batcher.ts",
-    "./crypto": "./src/crypto.ts",
-    "./h2": "./src/h2.ts",
-    "./quota-leases": "./src/quota-leases.ts"
+    "./crypto": "./src/crypto.ts"
   },
   "dependencies": {
-    "@gateway/kernel": "workspace:*",
-    "bullmq": "6.7.2",
-    "@gateway/contracts": "workspace:*"
+    "@gateway/contracts": "workspace:*",
+    "@gateway/kernel": "workspace:*"
   }
 }

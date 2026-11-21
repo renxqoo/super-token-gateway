@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gateway_dev_pass}
+      POSTGRES_DB: gateway_prod
+    command:
+      - postgres
+      - -c
+      - fsync=on
+      - -c
+      - synchronous_commit=on
+      - -c
+      - full_page_writes=on
+      - -c
+      - max_connections=200
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway_prod"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gateway:
+    image: oven/bun:1.4.4-alpine
+    working_dir: /app
+    volumes:
+      - ..:/app:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GATEWAY_MODE: all-in-one
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: 8080
+      INTERNAL_HOST: 0.0.0.0
+      INTERNAL_PORT: 8081
+      DATABASE_URL: postgres://gateway:${POSTGRES_PASSWORD:-gateway_dev_pass}@postgres:5432/gateway_prod
+      KEY_PEPPER: ${KEY_PEPPER:-0123456789abcdef0123456789abcdef}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-0123456789abcdef0123456789abcdef}
+    command: ["sh", "-c", "bun dist/tools/migrate.js && bun dist/gateway/main.js --mode=all-in-one"]
+    ports:
+      - "8080:8080"
+      - "127.0.0.1:8081:8081"
+
+volumes:
+  pgdata:

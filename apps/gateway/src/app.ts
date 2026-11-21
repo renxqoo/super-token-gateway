@@ -1,256 +1,235 @@
-import { Hono, type Context } from "hono";
-import type { Operation } from "@gateway/kernel";
-import { GatewayError } from "@gateway/contracts";
-import { PluginHostError } from "@gateway/plugin-host";
-import { clientAddress, readBounded, type Lifecycle } from "@gateway/runtime";
-import { executeChat, type ChatDependencies } from "./chat.ts";
-import { executeResource, listResources, type ResourceRequest } from "./resources.ts";
+import { Hono } from "hono";
+import type { SQL } from "bun";
+import {
+  createCatalogRepository,
+  createDatabase,
+  createLedgerEngine,
+  SCHEMA_VERSION,
+} from "@gateway/ledger";
+import {
+  createFfiWasmtimeExecutor,
+  PluginPipelineEngine,
+  resolveWasmtimeLibraryPath,
+  WebhookPluginExecutor,
+  type WasmRuntimeExecutor,
+} from "@gateway/plugin-engine";
+import {
+  createTransport,
+  Lifecycle,
+  LocalRateLimiter,
+  SmartRouter,
+  VertexTokens,
+} from "@gateway/runtime";
+import { createWorkerRunner } from "@gateway/worker";
+import type { GatewayConfig } from "./config.ts";
+import { createInternalApi } from "./internal-api.ts";
+import { authenticateRequest, handleInferenceRequest, type ProxyDependencies } from "./proxy.ts";
+import { SnapshotManager } from "./snapshot.ts";
 
-export type GatewayEnv = { Bindings: { peerAddress?: string } };
+export type GatewayRuntimeOptions = {
+  config: GatewayConfig;
+  db?: SQL;
+  wasmExecutor?: WasmRuntimeExecutor | null;
+  webhookExecutor?: WebhookPluginExecutor;
+  routerOptions?: ConstructorParameters<typeof SmartRouter>[0];
+};
 
-const pluginCapacity = new Set([
-  "ATTEMPT_BUDGET",
-  "PENDING_BUDGET",
-  "QUEUE_TIMEOUT",
-  "STATE_BUDGET",
-]);
-
-function errorResponse(error: unknown, requestId: string) {
-  const known = error instanceof GatewayError;
-  return Response.json(
-    {
-      error: {
-        type: known ? error.code : "internal_error",
-        code: known ? error.code : "internal_error",
-        message: known ? error.message : "The gateway could not complete this request",
-      },
-      request_id: requestId,
-    },
-    { status: known ? error.status : 500, headers: { "x-request-id": requestId } },
+export function createGatewayRuntime(options: GatewayRuntimeOptions) {
+  const { config } = options;
+  const ownsDb = !options.db;
+  const db = options.db ?? createDatabase(config.databaseUrl, config.dbMaxConnections);
+  const catalog = createCatalogRepository(db);
+  const ledger = createLedgerEngine(db, {
+    batchWindowMs: config.microBatchWindowMs,
+    maxBatchSize: config.microBatchMaxSize,
+  });
+  const snapshot = new SnapshotManager(catalog, config.encryptionKey, config.snapshotPollMs);
+  const router = new SmartRouter(options.routerOptions);
+  const rateLimiter = new LocalRateLimiter();
+  const transport = createTransport(1024);
+  const vertexTokens = new VertexTokens((url, init) =>
+    transport.fetch(url, init, config.allowPrivateUpstreams, config.privateUpstreamCidrs),
   );
-}
-
-function released(response: Response, release: () => void) {
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!response.body || contentType.startsWith("application/json")) {
-    release();
-    return response;
-  }
-  const reader = response.body.getReader();
-  let done = false;
-  const finish = () => {
-    if (!done) {
-      done = true;
-      release();
+  let wasmExecutor: WasmRuntimeExecutor | null = null;
+  if (options.wasmExecutor !== undefined) {
+    wasmExecutor = options.wasmExecutor;
+  } else {
+    const resolvedLib = resolveWasmtimeLibraryPath(config.wasmLibPath);
+    if (resolvedLib) {
+      wasmExecutor = createFfiWasmtimeExecutor({ libraryPath: resolvedLib });
     }
+  }
+  const pluginEngine = new PluginPipelineEngine({
+    wasmExecutor,
+    webhookExecutor: options.webhookExecutor ?? new WebhookPluginExecutor(),
+    ...(config.pluginSigningPublicKeyPem
+      ? { signingPublicKeyPem: config.pluginSigningPublicKeyPem }
+      : {}),
+  });
+  const lifecycle = new Lifecycle(config.maxInFlight);
+  const metrics = {
+    requestsTotal: 0,
+    failoversTotal: 0,
+    moderationBlocksTotal: 0,
   };
-  return new Response(
-    new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        try {
-          const next = await reader.read();
-          if (next.done) {
-            finish();
-            controller.close();
-          } else controller.enqueue(next.value);
-        } catch (error) {
-          finish();
-          controller.error(error);
-        }
-      },
-      async cancel(reason) {
-        try {
-          await reader.cancel(reason);
-        } finally {
-          finish();
-        }
-      },
-    }),
-    { status: response.status, headers: response.headers },
-  );
-}
 
-export function createGatewayApp(
-  deps: ChatDependencies & { lifecycle: Lifecycle; ready: () => Promise<void> },
-) {
-  const app = new Hono<GatewayEnv>();
-  app.get("/livez", (c) => c.json({ status: "alive" }));
-  app.get("/readyz", async (c) => {
-    if (!deps.lifecycle.accepting) return c.json({ status: "draining" }, 503);
+  const proxyDeps: ProxyDependencies = {
+    config,
+    snapshot,
+    ledger,
+    router,
+    rateLimiter,
+    transport,
+    vertexTokens,
+    pluginEngine,
+    lifecycle,
+    metrics,
+  };
+
+  const publicApp = new Hono();
+
+  publicApp.get("/livez", (c) => c.json({ status: "ok" }));
+
+  publicApp.get("/readyz", async (c) => {
+    if (!lifecycle.accepting || !snapshot.isLoaded()) {
+      return c.json({ status: "not_ready" }, 503);
+    }
     try {
-      await deps.ready();
-      return c.json({ status: "ready" });
+      await db`SELECT 1`;
+      return c.json({ status: "ready", epoch: snapshot.get().epoch });
     } catch {
-      return c.json({ status: "unavailable" }, 503);
+      return c.json({ status: "db_unavailable" }, 503);
     }
   });
-  type Inbound = ResourceRequest & {
-    body: Uint8Array;
-    contentType: string | undefined;
-    idempotencyKey: string | undefined;
-    drain: AbortSignal;
-  };
-  function serve(
-    c: Context<GatewayEnv>,
-    operation: Operation,
-    path?: { model: string; stream: boolean },
-  ) {
-    return handle(c, (inbound) =>
-      executeChat(deps, { ...inbound, operation, ...(path ? { path } : {}) }),
-    );
-  }
-  async function handle(c: Context<GatewayEnv>, run: (inbound: Inbound) => Promise<Response>) {
-    const requestId = crypto.randomUUID();
-    let release: (() => void) | undefined;
-    try {
-      const authorization = c.req.header("authorization");
-      const token = authorization?.startsWith("Bearer ")
-        ? authorization.slice(7)
-        : (c.req.header("x-api-key") ?? c.req.header("x-goog-api-key") ?? "");
-      if (!/^gw_[A-Za-z0-9_-]{43}$/.test(token))
-        throw new GatewayError(401, "unauthenticated", "A valid project API key is required");
-      const declared = Number(c.req.header("content-length") ?? 0);
-      if (declared > deps.config.max_body_bytes)
-        throw new GatewayError(413, "body_too_large", "Request body exceeds limit");
-      const ip = clientAddress(
-        c.env.peerAddress,
-        c.req.header("x-forwarded-for") ?? null,
-        deps.config.trusted_proxy_cidrs,
-      );
-      if (!ip) throw new GatewayError(400, "invalid_client_address", "Client address unavailable");
-      const entered = deps.lifecycle.enter();
-      release = entered.release;
-      const signal = AbortSignal.any([c.req.raw.signal, entered.controller.signal]);
-      const body = await readBounded(c.req.raw.body, deps.config.max_body_bytes, signal);
-      const response = await deps.lifecycle.track(
-        run({
-          requestId,
-          body,
-          contentType: c.req.header("content-type"),
-          token,
-          ip,
-          idempotencyKey: c.req.header("idempotency-key"),
-          signal: c.req.raw.signal,
-          drain: entered.controller.signal,
-        }),
-      );
-      const settled = release;
-      release = undefined;
-      return released(response, settled);
-    } catch (error) {
-      release?.();
-      return errorResponse(
-        (error instanceof GatewayError && error.code === "overloaded") ||
-          (error instanceof PluginHostError && pluginCapacity.has(error.code))
-          ? new GatewayError(
-              503,
-              deps.lifecycle.accepting ? "overloaded" : "draining",
-              "Gateway admission capacity reached",
-            )
-          : error,
-        requestId,
-      );
-    }
-  }
-  app.post("/v1/chat/completions", (c) => serve(c, "chat"));
-  app.post("/v1/messages", (c) => serve(c, "messages"));
-  app.post("/v1/responses", (c) => serve(c, "responses"));
-  app.post("/v1/files", (c) => serve(c, "files"));
-  app.post("/v1/batches", (c) => serve(c, "batches"));
-  app.post("/v1/videos", (c) => serve(c, "videos"));
-  app.get("/v1/videos", (c) =>
-    handle(c, (inbound) =>
-      listResources(deps, inbound, "video", {
-        limit: c.req.query("limit"),
-        after: c.req.query("after"),
-      }),
-    ),
-  );
-  app.get("/v1/videos/:id", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "get")),
-  );
-  app.delete("/v1/videos/:id", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "delete")),
-  );
-  app.get("/v1/videos/:id/content", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "content")),
-  );
-  app.get("/v1/batches", (c) =>
-    handle(c, (inbound) =>
-      listResources(deps, inbound, "batch", {
-        limit: c.req.query("limit"),
-        after: c.req.query("after"),
-      }),
-    ),
-  );
-  app.get("/v1/batches/:id", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "get")),
-  );
-  app.post("/v1/batches/:id/cancel", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "cancel")),
-  );
-  app.get("/v1/files", (c) =>
-    handle(c, (inbound) =>
-      listResources(deps, inbound, "file", {
-        limit: c.req.query("limit"),
-        after: c.req.query("after"),
-      }),
-    ),
-  );
-  app.get("/v1/files/:id", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "get")),
-  );
-  app.delete("/v1/files/:id", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "delete")),
-  );
-  app.get("/v1/files/:id/content", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "content")),
-  );
-  app.get("/v1/responses", (c) =>
-    handle(c, (inbound) =>
-      listResources(deps, inbound, "response", {
-        limit: c.req.query("limit"),
-        after: c.req.query("after"),
-      }),
-    ),
-  );
-  app.get("/v1/responses/:id", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "get")),
-  );
-  app.delete("/v1/responses/:id", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "delete")),
-  );
-  app.post("/v1/responses/:id/cancel", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "cancel")),
-  );
-  app.get("/v1/responses/:id/input_items", (c) =>
-    handle(c, (inbound) => executeResource(deps, inbound, c.req.param("id"), "input_items")),
-  );
-  app.post("/v1/embeddings", (c) => serve(c, "embeddings"));
-  app.post("/v1/moderations", (c) => serve(c, "moderations"));
-  app.post("/v1/completions", (c) => serve(c, "completions"));
-  app.post("/v1/images/generations", (c) => serve(c, "images"));
-  app.post("/v1/images/edits", (c) => serve(c, "image_edits"));
-  app.post("/v1/audio/speech", (c) => serve(c, "speech"));
-  app.post("/v1/audio/transcriptions", (c) => serve(c, "transcription"));
-  app.post("/v1/audio/translations", (c) => serve(c, "translation"));
-  app.post("/v1/music/generations", (c) => serve(c, "music"));
-  app.post("/v1beta/models/:action", (c) => {
-    const match = /^([A-Za-z0-9._-]{1,200}):(generateContent|streamGenerateContent)$/.exec(
-      c.req.param("action"),
-    );
-    if (!match)
-      return errorResponse(
-        new GatewayError(404, "not_found", "Unknown Gemini operation"),
-        crypto.randomUUID(),
-      );
-    return serve(c, "gemini", {
-      model: match[1]!,
-      stream: match[2] === "streamGenerateContent",
+
+  publicApp.get("/metrics", () => {
+    const channels = router.snapshot();
+    const openCircuits = channels.filter((ch) => ch.state === "OPEN").length;
+    const lines = [
+      "# TYPE gateway_requests_total counter",
+      `gateway_requests_total ${metrics.requestsTotal}`,
+      "# TYPE gateway_failovers_total counter",
+      `gateway_failovers_total ${metrics.failoversTotal}`,
+      "# TYPE gateway_moderation_blocks_total counter",
+      `gateway_moderation_blocks_total ${metrics.moderationBlocksTotal}`,
+      "# TYPE gateway_in_flight gauge",
+      `gateway_in_flight ${lifecycle.size}`,
+      "# TYPE gateway_config_epoch gauge",
+      `gateway_config_epoch ${snapshot.isLoaded() ? snapshot.get().epoch : 0}`,
+      "# TYPE gateway_open_circuits gauge",
+      `gateway_open_circuits ${openCircuits}`,
+    ];
+    return new Response(`${lines.join("\n")}\n`, {
+      headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
     });
   });
-  app.notFound(() =>
-    errorResponse(new GatewayError(404, "not_found", "Unknown endpoint"), crypto.randomUUID()),
+
+  publicApp.get("/v1/models", (c) => {
+    try {
+      const snap = snapshot.get();
+      const { key } = authenticateRequest(c, snap, config, "chat");
+      const data = [...snap.models.values()]
+        .filter((m) => m.enabled && (key.models.length === 0 || key.models.includes(m.name)))
+        .map((m) => ({ id: m.name, object: "model", owned_by: "gateway" }));
+      return c.json({ object: "list", data });
+    } catch (err) {
+      const status =
+        err instanceof Error && "status" in err ? Number((err as { status: number }).status) : 401;
+      return c.json(
+        {
+          error: {
+            code: "unauthorized",
+            message: err instanceof Error ? err.message : "Unauthorized",
+          },
+        },
+        status as 401,
+      );
+    }
+  });
+
+  const peerOf = (c: { env?: unknown }): string | undefined => {
+    const env = c.env as { peerAddress?: string } | undefined;
+    return env?.peerAddress;
+  };
+
+  publicApp.post("/v1/chat/completions", (c) =>
+    handleInferenceRequest(c, proxyDeps, "chat", undefined, peerOf(c)),
   );
-  return app;
+  publicApp.post("/v1/responses", (c) =>
+    handleInferenceRequest(c, proxyDeps, "responses", undefined, peerOf(c)),
+  );
+  publicApp.post("/v1/messages", (c) =>
+    handleInferenceRequest(c, proxyDeps, "messages", undefined, peerOf(c)),
+  );
+  publicApp.post("/v1/embeddings", (c) =>
+    handleInferenceRequest(c, proxyDeps, "embeddings", undefined, peerOf(c)),
+  );
+  publicApp.post("/v1/completions", (c) =>
+    handleInferenceRequest(c, proxyDeps, "completions", undefined, peerOf(c)),
+  );
+  publicApp.post("/v1/images/generations", (c) =>
+    handleInferenceRequest(c, proxyDeps, "images", undefined, peerOf(c)),
+  );
+  publicApp.post("/v1beta/models/:action", async (c) => {
+    const action = c.req.param("action");
+    const colon = action.lastIndexOf(":");
+    if (colon <= 0) {
+      return c.json(
+        { error: { code: "invalid_request", message: "Invalid Gemini action path" } },
+        400,
+      );
+    }
+    const model = decodeURIComponent(action.slice(0, colon));
+    const method = action.slice(colon + 1);
+    const stream = method === "streamGenerateContent";
+    return handleInferenceRequest(c, proxyDeps, "gemini", { model, stream }, peerOf(c));
+  });
+
+  const internalApp = createInternalApi({ config, catalog, ledger, snapshot, router });
+
+  const worker =
+    config.mode === "all-in-one"
+      ? createWorkerRunner({
+          db,
+          ...(config.businessWebhookUrl ? { businessWebhookUrl: config.businessWebhookUrl } : {}),
+          ...(config.businessWebhookToken
+            ? { businessWebhookToken: config.businessWebhookToken }
+            : {}),
+          leaseKey: 0,
+        })
+      : null;
+
+  return {
+    db,
+    catalog,
+    ledger,
+    snapshot,
+    router,
+    lifecycle,
+    publicApp,
+    internalApp,
+    worker,
+
+    async start(): Promise<void> {
+      const vRows = await db`SELECT max(version) AS version FROM public.schema_migrations`;
+      const currentVersion = Number(vRows[0]?.version ?? 0);
+      if (currentVersion !== SCHEMA_VERSION) {
+        throw new Error(
+          `Schema version mismatch: expected ${SCHEMA_VERSION}, got ${currentVersion}`,
+        );
+      }
+      await snapshot.load();
+      snapshot.start();
+      if (worker) await worker.start();
+    },
+
+    async close(drainMs = 5000): Promise<void> {
+      snapshot.stop();
+      await lifecycle.drain(drainMs);
+      if (worker) await worker.stop();
+      await transport.close();
+      wasmExecutor?.close();
+      if (ownsDb) await db.close();
+    },
+  };
 }

@@ -1,107 +1,59 @@
-import { chmod, mkdir, rm } from "node:fs/promises";
-import { buildBuiltinWorker } from "./build-builtin-worker.ts";
-import { publishPluginExecutable } from "../packages/plugin-host/src/executable.ts";
-if (Bun.version !== "1.4.4") throw new Error("Build requires Bun 1.4.4");
-await buildBuiltinWorker(new URL("../.local/builtin-adapters/", import.meta.url).pathname);
-await rm(new URL("../dist/", import.meta.url), { recursive: true, force: true });
-for (const [entries, directory] of [
-  [["apps/mock-providers/src/main.ts"], "dist/mock-providers"],
-  [["apps/core-api/src/main.ts", "apps/core-api/src/platform/management.ts"], "dist/core-api"],
-  [["apps/core-worker/src/main.ts"], "dist/core-worker"],
-  [["apps/gateway/src/main.ts"], "dist/gateway"],
-  [
-    [
-      "scripts/migrate.ts",
-      "scripts/archive.ts",
-      "scripts/sign-bundled-release.ts",
-      "scripts/install-bundled-release.ts",
-      "scripts/approve-plugin-runtime.ts",
-      "scripts/identity-provision.ts",
-      "scripts/identity-revoke.ts",
-    ],
-    "dist/tools",
-  ],
-  [["packages/plugin-host/src/index.ts"], "dist/plugin-host"],
-  [["packages/adapters/src/index.ts"], "dist/adapters"],
-] as const) {
-  const result = await Bun.build({
-    entrypoints: [...entries],
-    outdir: directory,
+import { cp, mkdir, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { SCHEMA_VERSION } from "@gateway/ledger";
+
+const distDir = "dist";
+await rm(distDir, { recursive: true, force: true });
+await mkdir(distDir, { recursive: true });
+
+const targets = [
+  { entry: "apps/gateway/src/main.ts", outdir: "dist/gateway", name: "gateway" },
+  { entry: "apps/worker/src/main.ts", outdir: "dist/worker", name: "worker" },
+  {
+    entry: "apps/mock-providers/src/main.ts",
+    outdir: "dist/mock-providers",
+    name: "mock-providers",
+  },
+  { entry: "scripts/migrate.ts", outdir: "dist/tools", name: "migrate" },
+  { entry: "scripts/archive.ts", outdir: "dist/tools", name: "archive" },
+];
+
+const outputs: { name: string; file: string; sha256: string; bytes: number }[] = [];
+
+for (const target of targets) {
+  const res = await Bun.build({
+    entrypoints: [target.entry],
+    outdir: target.outdir,
     target: "bun",
+    format: "esm",
     minify: false,
+    sourcemap: "none",
   });
-  if (!result.success)
-    throw new Error(`Build failed: ${result.logs.map((log) => log.message).join(", ")}`);
-}
-for (const pattern of ["migrations/*.sql", "migrations/manifest.json", "sql/*.sql"])
-  for await (const file of new Bun.Glob(pattern).scan("packages/storage/src"))
-    await Bun.write(`dist/tools/${file}`, Bun.file(`packages/storage/src/${file}`));
-const hashes: Record<string, string> = {};
-for (const pattern of [
-  "apps/**/*.ts",
-  "packages/**/*.ts",
-  "packages/**/*.sql",
-  "packages/storage/src/migrations/**/*.json",
-  "packages/plugin-host/native/**/*.go",
-  "packages/plugin-host/native/go.mod",
-  "packages/plugin-host/native/go.sum",
-  "packages/adapters/openai-chat/package/**/*",
-  "scripts/plugin-tools.json",
-  "scripts/plugin-builder/*",
-  "scripts/setup-plugin-tools.py",
-  "scripts/**/*.ts",
-  "**/package.json",
-  "bun.lock",
-]) {
-  for await (const file of new Bun.Glob(pattern).scan({ cwd: process.cwd(), onlyFiles: true })) {
-    if (file.startsWith("node_modules/") || file.startsWith(".local/") || file.startsWith("dist/"))
-      continue;
-    hashes[file] = new Bun.CryptoHasher("sha256")
-      .update(await Bun.file(file).arrayBuffer())
-      .digest("hex");
+  if (!res.success) {
+    for (const log of res.logs) console.error(log);
+    throw new Error(`Build failed for ${target.entry}`);
+  }
+  for (const artifact of res.outputs) {
+    const bytes = new Uint8Array(await artifact.arrayBuffer());
+    const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    outputs.push({
+      name: target.name,
+      file: artifact.path.replace(`${process.cwd()}/`, ""),
+      sha256,
+      bytes: bytes.byteLength,
+    });
   }
 }
-await mkdir("dist", { recursive: true });
-await Bun.write("dist/native/plugin-host", Bun.file(".local/plugin-host"));
-await chmod("dist/native/plugin-host", 0o755);
-await publishPluginExecutable("dist/native/plugin-host");
-for (const path of ["worker.js", "registry.json"])
-  await Bun.write(
-    `dist/native/builtin-adapters/${path}`,
-    Bun.file(`.local/builtin-adapters/${path}`),
-  );
-await Bun.write(
-  "dist/native/builtin-adapters/proof.json",
-  Bun.file("packages/adapters/builtin/proof.json"),
+
+await cp("packages/ledger/src/migrations", join(distDir, "tools/migrations"), { recursive: true });
+
+const manifest = {
+  bun_version: Bun.version,
+  schema_version: SCHEMA_VERSION,
+  built_at: new Date().toISOString(),
+  outputs,
+};
+await Bun.write(join(distDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+console.log(
+  JSON.stringify({ built: true, artifacts: outputs.length, schema_version: SCHEMA_VERSION }),
 );
-const artifacts: Record<string, string> = {};
-for (const path of [
-  "dist/native/plugin-host",
-  "dist/native/builtin-adapters/worker.js",
-  "dist/native/builtin-adapters/registry.json",
-  "dist/native/builtin-adapters/proof.json",
-])
-  artifacts[path.slice(5)] = new Bun.CryptoHasher("sha256")
-    .update(await Bun.file(path).bytes())
-    .digest("hex");
-for await (const path of new Bun.Glob("**/*").scan({
-  cwd: "packages/adapters/openai-chat/package",
-  onlyFiles: true,
-}))
-  await Bun.write(
-    `dist/openai-chat/package/${path}`,
-    Bun.file(`packages/adapters/openai-chat/package/${path}`),
-  );
-await Bun.write(
-  "dist/manifest.json",
-  JSON.stringify(
-    {
-      runtime: Bun.version,
-      artifacts,
-      files: Object.fromEntries(Object.entries(hashes).sort(([a], [b]) => a.localeCompare(b))),
-    },
-    null,
-    2,
-  ) + "\n",
-);
-console.log("Built Gateway, Core API, Core worker, migration, mock and isolated plugin artifacts");

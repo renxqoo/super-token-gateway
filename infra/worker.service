@@ -1,0 +1,21 @@
+[Unit]
+Description=Super Token Gateway Ledger Worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=llm-worker
+Group=llm-worker
+WorkingDirectory=/opt/super-token-gateway
+EnvironmentFile=/etc/super-token-gateway/worker.env
+ExecStart=/usr/local/bin/bun dist/worker/main.js
+Restart=always
+RestartSec=2
+LimitNOFILE=16384
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

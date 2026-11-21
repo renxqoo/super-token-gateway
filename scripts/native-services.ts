@@ -4,7 +4,7 @@ import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
 import { RedisClient } from "bun";
-import { createDatabase } from "@gateway/storage";
+import { createDatabase } from "@gateway/ledger";
 
 const root = resolve(import.meta.dir, "../.local/native-services");
 const command = Bun.argv[2];
