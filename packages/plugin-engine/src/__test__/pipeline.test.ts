@@ -3,7 +3,9 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import type { PluginRecord } from "@gateway/ledger";
 import {
   createBunWasmExecutor,
+  createFfiWasmtimeExecutor,
   PluginPipelineEngine,
+  resolveWasmtimeLibraryPath,
   WebhookPluginExecutor,
   type PluginHook,
   type WasmRuntimeExecutor,
@@ -1037,4 +1039,192 @@ test("G3.2 combined HOLD + CUTOFF webhooks keep separate buffers, respect manife
     "recovered",
   );
   expect(f4).toMatchObject({ blocked: false, text: "recovered" });
+});
+
+test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross-tenant memory, enforces exact fuel & memory limits, and blocks WASI imports", async () => {
+  const libPath = resolveWasmtimeLibraryPath();
+  if (!libPath) return;
+
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const pubPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+  const signBytes = (bytes: Uint8Array) => {
+    const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    const signature = sign(null, Buffer.from(digest, "utf8"), privateKey).toString("base64");
+    return { digest, signature };
+  };
+
+  const executor = createFfiWasmtimeExecutor({
+    libraryPath: libPath,
+    maxMemoryBytes: 4 * 1024 * 1024,
+    defaultFuel: 2_000_000,
+  });
+  const engine = new PluginPipelineEngine({
+    wasmExecutor: executor,
+    signingPublicKeyPem: pubPem,
+  });
+
+  try {
+    const filterBytes = buildSubstringWasm({
+      hooks: ["on_request", "on_response", "on_stream_chunk", "on_stream_end"],
+      needle: "SECRET_42",
+      matchReply: { action: "TRANSFORM", text: "[CLEANSED_BY_WASMTIME]" },
+    });
+    const filterSig = signBytes(filterBytes);
+    const filterPlugin: PluginRecord = {
+      id: "ffi-real-filter",
+      name: "ffi-filter",
+      version: "1.0.0",
+      kind: "WASM",
+      digest: filterSig.digest,
+      wasm_bytes: filterBytes,
+      webhook_config: null,
+      signature: filterSig.signature,
+      signing_key_id: "k1",
+      manifest: {
+        hooks: ["on_request", "on_response", "on_stream_chunk", "on_stream_end"],
+        window_bytes: 12,
+      },
+      enabled: true,
+    };
+
+    const passRes = await engine.runUnary(
+      "on_response",
+      [{ plugin_id: filterPlugin.id, priority: 1 }],
+      new Map([[filterPlugin.id, filterPlugin]]),
+      { request_id: "ffi-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      "clean text",
+    );
+    expect(passRes).toMatchObject({ blocked: false, text: "clean text" });
+
+    const transformRes = await engine.runUnary(
+      "on_response",
+      [{ plugin_id: filterPlugin.id, priority: 1 }],
+      new Map([[filterPlugin.id, filterPlugin]]),
+      { request_id: "ffi-2", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      "payload SECRET_42 here",
+    );
+    expect(transformRes).toMatchObject({ blocked: false, text: "[CLEANSED_BY_WASMTIME]" });
+
+    const streamSession = engine.createStreamSession(
+      [{ plugin_id: filterPlugin.id, priority: 1 }],
+      new Map([[filterPlugin.id, filterPlugin]]),
+      { request_id: "ffi-3", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      () => undefined,
+    );
+    let streamOut = "";
+    streamOut += (await streamSession.push("split SEC")).emit;
+    streamOut += (await streamSession.push("RET_42 tail")).emit;
+    const streamEnd = await streamSession.finalize();
+    expect(streamEnd.blocked).toBe(false);
+    streamOut += streamEnd.emit;
+    expect(streamOut).toContain("[CLEANSED_BY_WASMTIME]");
+    expect(streamOut).not.toContain("SECRET_42");
+
+    const probeBytes = buildCrossTenantProbeWasm();
+    const probeSig = signBytes(probeBytes);
+    const probePlugin: PluginRecord = {
+      id: "ffi-tenant-probe",
+      name: "ffi-tenant-probe",
+      version: "1.0.0",
+      kind: "WASM",
+      digest: probeSig.digest,
+      wasm_bytes: probeBytes,
+      webhook_config: null,
+      signature: probeSig.signature,
+      signing_key_id: "k1",
+      manifest: { hooks: ["on_response"] },
+      enabled: true,
+    };
+    const probeMap = new Map([[probePlugin.id, probePlugin]]);
+    expect(
+      (
+        await engine.runUnary(
+          "on_response",
+          [{ plugin_id: probePlugin.id, priority: 1 }],
+          probeMap,
+          { request_id: "fp-1", project_id: "t1", model: "gpt-4o", operation: "chat" },
+          "t1",
+        )
+      ).blocked,
+    ).toBe(false);
+    expect(
+      (
+        await engine.runUnary(
+          "on_response",
+          [{ plugin_id: probePlugin.id, priority: 1 }],
+          probeMap,
+          { request_id: "fp-2", project_id: "t2", model: "gpt-4o", operation: "chat" },
+          "t2",
+        )
+      ).blocked,
+    ).toBe(false);
+
+    const loopBytes = buildInfiniteLoopWasm("on_response");
+    const loopSig = signBytes(loopBytes);
+    const loopPlugin: PluginRecord = {
+      id: "ffi-inf-loop",
+      name: "ffi-inf-loop",
+      version: "1.0.0",
+      kind: "WASM",
+      digest: loopSig.digest,
+      wasm_bytes: loopBytes,
+      webhook_config: null,
+      signature: loopSig.signature,
+      signing_key_id: "k1",
+      manifest: { hooks: ["on_response"], fuel_budget: 50_000, failure_policy: "FAIL_CLOSED" },
+      enabled: true,
+    };
+    const t0 = performance.now();
+    const loopRes = await engine.runUnary(
+      "on_response",
+      [{ plugin_id: loopPlugin.id, priority: 1 }],
+      new Map([[loopPlugin.id, loopPlugin]]),
+      { request_id: "floop-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      "hang",
+    );
+    expect(loopRes).toMatchObject({ blocked: true, rule_code: "wasm_execution_failed" });
+    expect(performance.now() - t0).toBeLessThan(100);
+
+    const bigInitBytes = buildMemoryBombWasm(128, 0);
+    const bigInitSig = signBytes(bigInitBytes);
+    const bigInitPlugin: PluginRecord = {
+      ...loopPlugin,
+      id: "ffi-mem-bomb",
+      digest: bigInitSig.digest,
+      wasm_bytes: bigInitBytes,
+      signature: bigInitSig.signature,
+      manifest: { hooks: ["on_response"], max_memory_bytes: 2 * 1024 * 1024 },
+    };
+    expect(
+      await engine.runUnary(
+        "on_response",
+        [{ plugin_id: bigInitPlugin.id, priority: 1 }],
+        new Map([[bigInitPlugin.id, bigInitPlugin]]),
+        { request_id: "fmem-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+        "mem",
+      ),
+    ).toMatchObject({ blocked: true, rule_code: "wasm_execution_failed" });
+
+    const wasiBytes = buildWasiImportWasm();
+    const wasiSig = signBytes(wasiBytes);
+    const wasiPlugin: PluginRecord = {
+      ...loopPlugin,
+      id: "ffi-wasi-escape",
+      digest: wasiSig.digest,
+      wasm_bytes: wasiBytes,
+      signature: wasiSig.signature,
+      manifest: { hooks: ["on_response"] },
+    };
+    expect(
+      await engine.runUnary(
+        "on_response",
+        [{ plugin_id: wasiPlugin.id, priority: 1 }],
+        new Map([[wasiPlugin.id, wasiPlugin]]),
+        { request_id: "fwasi-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+        "escape",
+      ),
+    ).toMatchObject({ blocked: true, rule_code: "wasm_execution_failed" });
+  } finally {
+    executor.close();
+  }
 });

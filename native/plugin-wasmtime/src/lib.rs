@@ -96,6 +96,7 @@ pub extern "C" fn stg_wasm_invoke(
     input_ptr: *const u8,
     input_len: usize,
     fuel_limit: u64,
+    max_memory_bytes: u64,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
     err_buf: *mut u8,
@@ -118,8 +119,13 @@ pub extern "C" fn stg_wasm_invoke(
         unsafe { slice::from_raw_parts(input_ptr, input_len) }
     };
 
+    let mem_limit = if max_memory_bytes > 0 {
+        (max_memory_bytes as usize).min(eng.max_memory_bytes)
+    } else {
+        eng.max_memory_bytes
+    };
     let limits = StoreLimitsBuilder::new()
-        .memory_size(eng.max_memory_bytes)
+        .memory_size(mem_limit)
         .instances(1)
         .tables(4)
         .build();
@@ -172,7 +178,7 @@ pub extern "C" fn stg_wasm_invoke(
     };
     let res_ptr = (packed >> 32) as usize;
     let res_len = (packed & 0xffff_ffff) as usize;
-    if res_len > eng.max_memory_bytes {
+    if res_len > mem_limit {
         write_error(err_buf, err_cap, "output exceeds memory limit");
         return -7;
     }

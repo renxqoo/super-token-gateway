@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { cp, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { SCHEMA_VERSION } from "@gateway/ledger";
@@ -46,6 +47,24 @@ for (const target of targets) {
 }
 
 await cp("packages/ledger/src/migrations", join(distDir, "tools/migrations"), { recursive: true });
+
+for (const nativeName of ["libstg_plugin_wasmtime.dylib", "libstg_plugin_wasmtime.so"]) {
+  const srcPath = join("native/plugin-wasmtime/target/release", nativeName);
+  if (existsSync(srcPath)) {
+    const nativeDir = join(distDir, "native");
+    await mkdir(nativeDir, { recursive: true });
+    const destPath = join(nativeDir, nativeName);
+    await cp(srcPath, destPath);
+    const bytes = new Uint8Array(await Bun.file(destPath).arrayBuffer());
+    const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    outputs.push({
+      name: "plugin-wasmtime",
+      file: destPath,
+      sha256,
+      bytes: bytes.byteLength,
+    });
+  }
+}
 
 const manifest = {
   bun_version: Bun.version,

@@ -1,4 +1,4 @@
-import { dlopen, FFIType, ptr, read, toArrayBuffer } from "bun:ffi";
+import { dlopen, FFIType, ptr, toArrayBuffer } from "bun:ffi";
 import { createPublicKey, verify } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { PluginHook, WasmRuntimeExecutor } from "./types.ts";
@@ -358,6 +358,8 @@ export function resolveWasmtimeLibraryPath(explicitPath?: string): string | null
   const candidates = [
     explicitPath,
     process.env.STG_WASMTIME_LIB,
+    new URL("../native/libstg_plugin_wasmtime.dylib", import.meta.url).pathname,
+    new URL("../native/libstg_plugin_wasmtime.so", import.meta.url).pathname,
     new URL("../../../dist/native/libstg_plugin_wasmtime.dylib", import.meta.url).pathname,
     new URL("../../../dist/native/libstg_plugin_wasmtime.so", import.meta.url).pathname,
     new URL(
@@ -395,6 +397,7 @@ export function createFfiWasmtimeExecutor(options: {
         FFIType.ptr,
         FFIType.u64,
         FFIType.ptr,
+        FFIType.u64,
         FFIType.u64,
         FFIType.u64,
         FFIType.ptr,
@@ -463,6 +466,7 @@ export function createFfiWasmtimeExecutor(options: {
         input.byteLength > 0 ? ptr(input) : null,
         BigInt(input.byteLength),
         BigInt(invokeOptions.fuelBudget),
+        BigInt(invokeOptions.maxMemoryBytes),
         ptr(outPtrHolder),
         ptr(outLenHolder),
         ptr(errBuf),
@@ -483,7 +487,6 @@ export function createFfiWasmtimeExecutor(options: {
         copy.set(view);
         return copy;
       } finally {
-        void read;
         lib.symbols.stg_wasm_buf_free(rawPtr as never, BigInt(rawLen));
       }
     },
