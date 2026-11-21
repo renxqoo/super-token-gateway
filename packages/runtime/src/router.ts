@@ -33,6 +33,7 @@ export type SmartRouterOptions = {
   maxOpenMs?: number;
   defaultCooldownMs?: number;
   maxCooldownMs?: number;
+  probeTimeoutMs?: number;
   now?: () => number;
   random?: () => number;
   onStateChange?: (event: {
@@ -54,6 +55,7 @@ type InternalChannelState = {
   openUntilMs: number;
   cooldownUntilMs: number;
   probeInFlight: boolean;
+  probeStartedAtMs: number;
   backoffLevel: number;
 };
 
@@ -67,6 +69,7 @@ export class SmartRouter {
   private readonly maxOpenMs: number;
   private readonly defaultCooldownMs: number;
   private readonly maxCooldownMs: number;
+  private readonly probeTimeoutMs: number;
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly onStateChange: SmartRouterOptions["onStateChange"];
@@ -79,6 +82,7 @@ export class SmartRouter {
     this.maxOpenMs = options.maxOpenMs ?? 120_000;
     this.defaultCooldownMs = options.defaultCooldownMs ?? 5_000;
     this.maxCooldownMs = options.maxCooldownMs ?? 60_000;
+    this.probeTimeoutMs = options.probeTimeoutMs ?? 30_000;
     this.now = options.now ?? (() => performance.now());
     this.random = options.random ?? Math.random;
     this.onStateChange = options.onStateChange;
@@ -96,6 +100,7 @@ export class SmartRouter {
         openUntilMs: 0,
         cooldownUntilMs: 0,
         probeInFlight: false,
+        probeStartedAtMs: 0,
         backoffLevel: 0,
       };
       this.channels.set(channelId, st);
@@ -124,16 +129,22 @@ export class SmartRouter {
     if (!st) return { available: true, isProbe: false };
     const t = this.now();
     if (st.cooldownUntilMs > t) return { available: false, isProbe: false };
+    if (st.probeInFlight && t - st.probeStartedAtMs >= this.probeTimeoutMs) {
+      st.probeInFlight = false;
+      st.probeStartedAtMs = 0;
+    }
     if (st.state === "OPEN") {
       if (st.openUntilMs > t) return { available: false, isProbe: false };
       if (st.probeInFlight) return { available: false, isProbe: false };
       st.state = "HALF_OPEN";
       st.probeInFlight = true;
+      st.probeStartedAtMs = t;
       return { available: true, isProbe: true };
     }
     if (st.state === "HALF_OPEN") {
       if (st.probeInFlight) return { available: false, isProbe: false };
       st.probeInFlight = true;
+      st.probeStartedAtMs = t;
       return { available: true, isProbe: true };
     }
     return { available: true, isProbe: false };
@@ -141,7 +152,10 @@ export class SmartRouter {
 
   releaseProbe(channelId: string): void {
     const st = this.channels.get(channelId);
-    if (st && st.probeInFlight) st.probeInFlight = false;
+    if (st && st.probeInFlight) {
+      st.probeInFlight = false;
+      st.probeStartedAtMs = 0;
+    }
   }
 
   recordSuccess(channelId: string, latencyMs: number): void {
@@ -152,6 +166,7 @@ export class SmartRouter {
     st.backoffLevel = 0;
     st.openUntilMs = 0;
     st.probeInFlight = false;
+    st.probeStartedAtMs = 0;
     st.ewmaLatencyMs = st.ewmaLatencyMs * 0.8 + Math.max(1, latencyMs) * 0.2;
     this.pushWindow(st, true);
     if (prevState !== "CLOSED") {
@@ -260,10 +275,14 @@ export class SmartRouter {
       st.state = "OPEN";
       st.openUntilMs = targetOpen;
       st.probeInFlight = false;
+      st.probeStartedAtMs = 0;
     } else if (event.state === "CLOSED") {
       st.state = "CLOSED";
       st.openUntilMs = 0;
       st.consecutiveFailures = 0;
+      st.backoffLevel = 0;
+      st.probeInFlight = false;
+      st.probeStartedAtMs = 0;
     }
     if (targetCooldown > st.cooldownUntilMs) {
       st.cooldownUntilMs = targetCooldown;

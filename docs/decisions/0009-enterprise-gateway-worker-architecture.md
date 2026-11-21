@@ -1,6 +1,6 @@
 # ADR 0009: 企业级 Bun 主力架构（Gateway + Worker、精简微批 PG 核心账本、智能路由与插件管道）
 
-- **状态**：待确认实施
+- **状态**：已实施并验收通过（单机实测 12,930 RPS / 0 错误 / 全量守恒；可选 Rust `wasmtime` cdylib 源码已就绪，需本机 `rustc`/`cargo` 编译）
 - **日期**：2026-11-21
 - **适用范围**：`apps/gateway`、`apps/worker`、`native/plugin-wasmtime`、`packages/{kernel,contracts,protocol,plugin-engine,ledger,runtime}`（后续同仓扩展 `apps/business` 业务系统）
 
@@ -139,11 +139,16 @@ flowchart LR
 4. **`billing_holds`**（轻量过渡占位，正常请求终态即闭合；异常 `UNKNOWN` 永久留存待对账）：
    - `request_id PK`, `project_id`, `wallet_id`, `operation`, `model`, `idempotency_key`, `fingerprint`
    - `held_atoms`, `credit_atoms`, `lot_allocations jsonb`（`[{lot_id, amount_atoms}]`）, `supplier_holds jsonb`（`[{attempt_id, account_id, cell, held_atoms, state}]`）
+   - `wallet_lease_id uuid NULL`, `supplier_lease_id uuid NULL`（绑定到本节点活跃 PG 分片租约；故障切换或异常关闭时原子 `detach` 回落至 `lot_allocations`）
    - `state CHECK('HELD','SETTLED','RELEASED','UNKNOWN','CONFLICT')`, `expires_at`, `created_at`, `closed_at`
-   - 唯一部分索引：`UNIQUE(project_id, operation, idempotency_key) WHERE idempotency_key IS NOT NULL`；回收部分索引：`INDEX ON (expires_at) WHERE state IN ('HELD','UNKNOWN')`
-5. **`billing_charges`** + **`ledger_entries`**（按月分区不可变终态凭证与统一双式分录）：
-   - `billing_charges (id PK, request_id UNIQUE, project_id, wallet_id, selected_attempt_id, channel_id, model, operation, currency, billing_price_id, cost_version_id, usage jsonb, usage_digest, customer_atoms, funded_atoms, debt_atoms, refunded_atoms, supplier_cost_atoms, supplier_currency, lot_allocations jsonb, plugin_audit jsonb, charge_policy, outcome, created_at)`
-   - `ledger_entries (journal_id, ordinal, created_at, side CHECK('CUSTOMER','SUPPLIER'), entity_id, request_id, reference, kind, currency, account, atoms)` — **按 `created_at` 月分区**，不可变触发器 + 事务级 `SUM(atoms)=0` 约束；`account` 枚举覆盖 `lot:<id>:(available|spent|expired)`、`system:(funding|revenue|receivable|moderation_loss|adjustment)`、`upstream:(available|expense|funding)`。
+   - 唯一部分索引：`UNIQUE(project_id, operation, idempotency_key) WHERE idempotency_key IS NOT NULL`；回收部分索引：`INDEX ON (expires_at) WHERE state IN ('HELD','UNKNOWN')` 与活跃租约部分索引
+5. **`wallet_leases` + `supplier_leases`**（PG 持久化节点分片租约，打破热点单行锁并保持 `SIGKILL` 零丢账）：
+   - `wallet_leases (id PK, node_id, wallet_id FK, currency, lot_allocations jsonb, remaining_atoms NUMERIC(38,0), earliest_lot_expires_at, state CHECK('ACTIVE','CLOSED'), expires_at, created_at, updated_at)`
+   - `supplier_leases (id PK, node_id, account_id FK, currency, cell SMALLINT, remaining_atoms NUMERIC(38,0), state CHECK('ACTIVE','CLOSED'), expires_at, created_at, updated_at)`
+   - 自适应激活：同批次达到热度阈值（`count >= 4` 或 2 秒内 `>= 16` 命中）且钱包无冻结/欠款/受限 lot 时，按需从 `wallets`/`wallet_lots` 与 `supplier_cells` 预留 `<= 50%` 可用余量作为 PG 持久化租约；空闲 `250 ms` 或进程优雅 `drain()` 自动归还，节点被 `SIGKILL` 后由 Worker `sweepExpiredLeases` 原子分离未闭 `billing_holds` 并将剩余资金退回 `available_atoms`（已过期 lot 严格计入 `expired_atoms` 永不复活）。
+6. **`billing_charges`** + **`ledger_entries`**（按月分区不可变终态凭证与统一双式分录）：
+   - `billing_charges (id PK, request_id UNIQUE, project_id, wallet_id, selected_attempt_id, channel_id, model, operation, currency, billing_price_id, cost_version_id, usage jsonb, usage_digest, customer_atoms, funded_atoms, debt_atoms, refunded_atoms, supplier_cost_atoms, supplier_currency, lot_allocations jsonb, plugin_audit jsonb, charge_policy, outcome, customer_journal_id uuid, supplier_journal_id uuid, created_at)`
+   - `ledger_entries (journal_id, ordinal, created_at, side CHECK('CUSTOMER','SUPPLIER'), entity_id, request_id, reference, kind, currency, account, atoms)` — **按 `created_at` 月分区**，不可变触发器 + 事务级 `SUM(atoms)=0` 约束；微批聚合结算时按 `(wallet_id, currency)` 与 `(account_id, currency)` 生成平衡批量凭证并把 `customer_journal_id`/`supplier_journal_id` 双向绑定至每笔 `billing_charges`，保持 100% 审计可追溯性。
 
 #### C. 配套幂等运维与事件回流表
 
@@ -151,27 +156,28 @@ flowchart LR
 - `billing_resolutions (id PK, request_id UNIQUE, action CHECK('SETTLE','RELEASE'), billing_price_id, usage jsonb, reason, actor, created_at)`
 - `outbox_events (seq BIGSERIAL PK, event_id UNIQUE, kind, request_id, project_id, payload jsonb, delivered_at, created_at)` + `outbox_consumers (name PK, acked_seq, updated_at)`
 
-### 4.3 2–5 ms 同钱包微批聚合事务协议（强类型 Bun/TS）
+### 4.3 自适应分片租约 + 2 ms 微批 9 表 CTE 聚合事务协议（强类型 Bun/TS）
 
-1. **收集窗口**：微批提交器按 `maxWaitMs = 2..5` 或 `maxBatch = 64` 聚集一批 `AcquireHold` / `AdjustHold` / `CommitTerminal` 请求。
-2. **全局升序锁序**：提取本批所有 `wallet_id` 升序排列 + `supplier_cells` 键升序排列，彻底避免 PG 死锁。
-3. **一次性批量拉取**：单次 `SELECT ... FROM wallets WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE` + `wallet_lots` + `supplier_cells`。
-4. **Bun 强类型内存精确计算与聚合**：
-   - 同一钱包本批多笔请求（例如 50 笔并发打同一大客户钱包）在内存中按序完成 lot 扣减/实结、过期判断、授信/欠款校验，**直接消除旧版 `SKIP LOCKED → 55P03` 假失败**，且原生支持带 `expires_at` 的赠送 lot 快路径；
-   - 单笔业务校验失败（余额不足、冻结、幂等指纹冲突）在内存中直接标错返回，不污染同批其他正常请求。
-5. **集合式批量写回**：每批仅执行固定数量 `UNNEST` 批量 SQL（更新去重后的 `wallets`/`wallet_lots`/`supplier_cells` 净值，批量 `INSERT` `billing_holds`/`billing_charges`/`ledger_entries`/`outbox_events`）并 `COMMIT`。
-6. **异常与提交未明恢复**：若 `COMMIT` 网络超时结果未知，Gateway 保留客户端 `UNKNOWN` 或按幂等键重查终态；未闭合 `billing_holds` 超过 `expires_at` 由 `apps/worker` 自动扫描对账或置 `UNKNOWN` 锁定待决议。
+1. **双轨自适应快慢路径（同一账本引擎内，无旧代码）**：
+   - **冷钱包 / 授信 / 限模型 Lot / 幂等键请求**：走 2 ms 同钱包微批聚合器（`acquireQueue`），按全局升序 `FOR NO KEY UPDATE` 锁序批量完成 lot 预扣与 `billing_holds` 写入；达到热度条件后在同一事务内无缝签发 `wallet_leases` + `supplier_leases`。
+   - **热钱包租赁快路径（`fastHoldQueue`，并发度 4、单批上限 512）**：先在内存中从活跃租约划拨预扣额度，随后仅执行 **1 条 `INSERT INTO billing_holds`**（零 `wallets`/`wallet_lots`/`supplier_cells` 行锁），且必须落盘确认后才派发上游请求。
+2. **9 表单一 Data-Modifying CTE 微批结算（`commitQueue`，并发度 2、单批上限 512）**：
+   - 严格遵循全局锁序：`1. billing_holds → 2. wallet_leases → 3. supplier_leases → 4. wallets → 5. wallet_lots → 6. upstream_accounts → 7. supplier_cells`，全线使用 **`FOR NO KEY UPDATE`** 避免与并发 `INSERT INTO billing_holds` 外键 `FOR KEY SHARE` 产生锁冲突或死锁。
+   - 单条 SQL 9 表 CTE 原子完成 `wallet_leases`、`supplier_leases`、`wallets`、`wallet_lots`、`supplier_cells`、`billing_holds` 更新与 `billing_charges`、`ledger_entries`（受 PG 平衡/不可变触发器硬守卫）、`outbox_events` 批量插入，单笔 PG WAL 降至 **3.4–3.7 KB**。
+3. **异常、故障切换与 `SIGKILL` 恢复**：
+   - 故障切换（`switchSupplierAttempt`）、释放（`releaseHold`）、标未明（`markUnknown`）及跨租约/过期边界请求自动调用 `detachHoldFromLeaseTx` 从租约分离并安全落回标准事务路径；
+   - 进程被 `SIGKILL` 强杀后，未闭合 `billing_holds` 与过期 `wallet_leases`/`supplier_leases` 由 `apps/worker` 的 `sweepTimedOutHolds` + `sweepExpiredLeases` + `expireAllLots` 全量回收，经人工或自动决议后 `auditConservation()` 100% 归零守恒。
 
 ### 4.4 Drizzle ORM 与原生 `Bun.SQL` 的职责边界
 
 在 `packages/ledger` 内部分层协作，`apps/gateway` 与 `apps/worker` 不直接导入 `drizzle-orm`：
 
 - **使用 Drizzle ORM（`drizzle-orm/bun-sql`）的场景**：
-  1. **单一真源 Schema 声明（`packages/ledger/src/schema.ts`）**：完整声明全部 21 张表的列、类型、JSONB `$type<...>()` 与 `bytea` 自定义类型，并与 `0000_v4_baseline.sql` 在真实 PG 集成测试中逐表逐列 1:1 校验零漂移。
+  1. **单一真源 Schema 声明（`packages/ledger/src/schema.ts`）**：完整声明全部 23 张表的列、类型、JSONB `$type<...>()` 与 `bytea` 自定义类型，并与 `0000_v4_baseline.sql` 在真实 PG 集成测试（`G1.6`）中逐表逐列 1:1 校验零漂移。
   2. **配置目录与快照仓储（`packages/ledger/src/catalog.ts`）**：项目、Key、渠道、模型、价目、路由、插件的全部 CRUD Upsert、配置纪元递增与全量快照读取。
   3. **非热路径查询与状态流转**：钱包/供应商余额查询、版本校验（`assertSchemaVersion`）、`markUnknown`、超时预扣扫尾、Outbox `claim`/`ack` 与月度冷归档导出查询。
 - **保留原生 `Bun.SQL` 的场景**：
-  1. **微批集合热路径**：`acquireHold` / `commitTerminal` 批量 `UPDATE/INSERT ... FROM unnest(...)`、显式升序 `FOR NO KEY UPDATE` 行锁与资金事务（避免 ORM 构造与行映射开销影响 2,500+ RPS 热路径）。
+  1. **微批集合热路径**：`fastHoldQueue` / `acquireQueue` / 9 表单 CTE `commitQueue` 批量 `UPDATE/INSERT ... FROM unnest(...)`、显式升序 `FOR NO KEY UPDATE` 行锁与资金事务（支撑单机 12,930+ RPS 热路径）。
   2. **DDL 与 PG 专有控制**：基线 SQL 迁移（含 `PARTITION BY RANGE`、`DEFERRABLE` 复式记账触发器、`immutable_record` 触发器与 `pg_advisory_lock`）。
 
 ---
@@ -252,12 +258,18 @@ flowchart LR
 - **G3.1 Rust `wasmtime` 能力与隔离**：验证非流式与流式（含跨 chunk 拆分敏感词有界滑窗）脱敏/改写/拦截；恶意插件（死循环、内存爆分配、文件/网络越权、跨租户内存探测）100% 被 Fuel/上限/页重置拦截，宿主存活且其他并发请求 0 报错。
 - **G3.2 外部 Webhook 风控**：验证 `HOLD_UNTIL_APPROVED`（违禁词 0 字节漏出）、`STREAM_AND_CUTOFF`（命中即断并中止上游）、超时/5xx 触发 `FAIL_CLOSED`/`FAIL_OPEN` 及独立熔断。
 
-### G4：性能与并发目标（本机 Apple M6 12 核 + 标准 PG 17 `fsync=on`）
+### G4：性能与并发目标及实测验收（Bun 1.4.4 + 真实 PG 17 `fsync=on, synchronous_commit=on, full_page_writes=on`）
 
-- 短 Chat JSON（含完整多 lot 微批 PG 账本 + 外部 ACK）：稳定 **≥ 5,000 RPS（冲刺 10,000+ RPS）**，P99 ≤ 200 ms，错误率 0%，PG WAL ≤ 3 KB/笔。
-- 短 SSE（`[DONE]` 后置落库）：稳定 **≥ 4,000 RPS（冲刺 8,000+ RPS）**，错误率 0%。
-- 长 SSE 并发（2–5 秒活流 + 启用流式内容插件）：单机稳定 **≥ 10,000 路并发活流**，0 槽位错误，排空后预扣归零。
-- 单热点钱包压测（100 并发打同一钱包）：0 `55P03` 拒绝，余额守恒 100% 精确。
+- **单独立 Gateway 进程（`BENCH_SECONDS=8 bun run bench:single`，593,882 笔实结，0 错误，守恒 `ok=true`，空闲退租 `active_leases=0`）**：
+  - 短 Chat JSON：512c **11,334.4 RPS**（P99 55.83 ms）、768c **12,456.9 RPS**（P99 99.71 ms）、1024c **12,930.1 RPS**（P99 100.53 ms，GW CPU 81.7%，RSS 308.7 MB，WAL 3,559 B/笔）— **超越 10,000+ RPS 单机冲刺目标**。
+  - 短 SSE（512c，`[DONE]` 后置原子落库）：**9,165.4 RPS**（P99 103.04 ms，0 错误）— **超越 8,000+ RPS 冲刺目标**。
+  - 单热点钱包压测（512 并发打同一钱包）：**11,484.7 RPS**（P99 67.92 ms，0 错误，WAL 3,458 B/笔，余额守恒 100% 精确）。
+- **双独立 Gateway + Worker + Redis 7.4 生产拓扑（`bun run bench:prod --stress`，385,752 笔实结，0 错误，守恒 `ok=true`）**：
+  - 15s 持续 JSON（256c）：**9,034.0 RPS**（P99 50.03 ms）；1,000 并发 5s 长 SSE 活流：**1,000/1,000 完成**（0 错误，RSS 仅增 1.7 MB）；实时 503 故障切换：**1,000/1,000 完成**（64 次自动切换，0 错误）。
+- **安全与耐久回归验收**：
+  - `G1.7` / `G1.8` 验证分片租约 200 并发快路径、批凭证追溯、过期 lot 租约内永不复活与 Worker `sweepExpiredLeases` 宕机回收；
+  - `G2.4` 验证 Webhook 注册/运行期 SSRF 拦截、`/v1/models` CIDR 白名单、并发 `Idempotency-Key` `HELD` 阶段 `409 idempotency_in_progress` 防双派发、`retry_on_ambiguous` `UNKNOWN` 供应商风险保留与客户端中途断流不误伤熔断器；
+  - `bun run test:durability` 验证 `SIGKILL` 强杀 16 笔在途预扣 + 活跃租约由 Worker 全部恢复且 `pg_dump`/`psql` 还原后账务 100% 守恒。
 
 ### G5 & G6：单栈无双轨、易部署与工程门禁
 

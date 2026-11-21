@@ -188,6 +188,38 @@ CREATE TABLE public.supplier_cells (
   FOREIGN KEY (account_id, currency) REFERENCES public.supplier_root_balances(account_id, currency)
 );
 
+CREATE TABLE public.wallet_leases (
+  id UUID PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  wallet_id UUID NOT NULL REFERENCES public.wallets(id),
+  currency TEXT NOT NULL CHECK (currency ~ '^[A-Z]{3,8}$'),
+  lot_allocations JSONB NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(lot_allocations) = 'array'),
+  remaining_atoms NUMERIC(38,0) NOT NULL CHECK (remaining_atoms >= 0),
+  earliest_lot_expires_at TIMESTAMPTZ,
+  state TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (state IN ('ACTIVE', 'CLOSED')),
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX wallet_leases_active_idx ON public.wallet_leases (expires_at) WHERE state = 'ACTIVE';
+CREATE INDEX wallet_leases_wallet_idx ON public.wallet_leases (wallet_id) WHERE state = 'ACTIVE';
+
+CREATE TABLE public.supplier_leases (
+  id UUID PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  account_id UUID NOT NULL REFERENCES public.upstream_accounts(id),
+  currency TEXT NOT NULL CHECK (currency ~ '^[A-Z]{3,8}$'),
+  cell SMALLINT NOT NULL CHECK (cell BETWEEN 0 AND 15),
+  remaining_atoms NUMERIC(38,0) NOT NULL CHECK (remaining_atoms >= 0),
+  state TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (state IN ('ACTIVE', 'CLOSED')),
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX supplier_leases_active_idx ON public.supplier_leases (expires_at) WHERE state = 'ACTIVE';
+
 CREATE TABLE public.billing_holds (
   request_id UUID PRIMARY KEY,
   project_id UUID NOT NULL REFERENCES public.projects(id),
@@ -200,6 +232,8 @@ CREATE TABLE public.billing_holds (
   credit_atoms NUMERIC(38,0) NOT NULL DEFAULT 0 CHECK (credit_atoms >= 0),
   lot_allocations JSONB NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(lot_allocations) = 'array'),
   supplier_holds JSONB NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(supplier_holds) = 'array'),
+  wallet_lease_id UUID REFERENCES public.wallet_leases(id),
+  supplier_lease_id UUID REFERENCES public.supplier_leases(id),
   state TEXT NOT NULL DEFAULT 'HELD' CHECK (state IN ('HELD', 'SETTLED', 'RELEASED', 'UNKNOWN', 'CONFLICT')),
   expires_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -208,6 +242,8 @@ CREATE TABLE public.billing_holds (
 
 CREATE UNIQUE INDEX billing_holds_idempotency_idx ON public.billing_holds (project_id, operation, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX billing_holds_open_idx ON public.billing_holds (expires_at) WHERE state IN ('HELD', 'UNKNOWN');
+CREATE INDEX billing_holds_wallet_lease_idx ON public.billing_holds (wallet_lease_id) WHERE state IN ('HELD', 'UNKNOWN') AND wallet_lease_id IS NOT NULL;
+CREATE INDEX billing_holds_supplier_lease_idx ON public.billing_holds (supplier_lease_id) WHERE state IN ('HELD', 'UNKNOWN') AND supplier_lease_id IS NOT NULL;
 
 CREATE TABLE public.billing_charges (
   id UUID PRIMARY KEY,
@@ -234,6 +270,8 @@ CREATE TABLE public.billing_charges (
   plugin_audit JSONB NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(plugin_audit) = 'array'),
   charge_policy TEXT NOT NULL DEFAULT 'CHARGE_CUSTOMER' CHECK (charge_policy IN ('CHARGE_CUSTOMER', 'PLATFORM_ABSORB')),
   outcome TEXT NOT NULL CHECK (outcome IN ('SETTLED', 'RELEASED', 'DEBT', 'MODERATION_BLOCKED', 'UNKNOWN_RESOLVED')),
+  customer_journal_id UUID,
+  supplier_journal_id UUID,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

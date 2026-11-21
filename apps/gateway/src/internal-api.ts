@@ -457,9 +457,22 @@ export function createInternalApi(deps: {
 
   app.put("/internal/v1/plugins", async (c) => {
     const body = parseBody(upsertPluginSchema, await c.req.json());
+    if (body.kind === "WEBHOOK") {
+      if (!body.webhook_config) {
+        throw new GatewayError(400, "validation_error", "webhook_config is required for WEBHOOK");
+      }
+      validateBaseUrl(
+        body.webhook_config.url,
+        deps.config.allowPrivateUpstreams,
+        deps.config.privateUpstreamCidrs,
+      );
+    }
     const wasmBytes = body.wasm_bytes_base64
       ? new Uint8Array(Buffer.from(body.wasm_bytes_base64, "base64"))
       : null;
+    if (body.kind === "WASM" && (!wasmBytes || wasmBytes.byteLength === 0)) {
+      throw new GatewayError(400, "validation_error", "wasm_bytes_base64 is required for WASM");
+    }
     const rec = await deps.catalog.upsertPlugin({
       ...(body.id ? { id: body.id } : {}),
       name: body.name,

@@ -6,13 +6,15 @@ type WebhookCircuitState = {
   openUntilMs: number;
 };
 
+export type WebhookFetchFn = (url: string, init: RequestInit) => Promise<Response>;
+
 export class WebhookPluginExecutor {
   private readonly circuits = new Map<string, WebhookCircuitState>();
-  private readonly fetchImpl: typeof fetch;
+  private readonly fetchImpl: WebhookFetchFn;
   private readonly now: () => number;
 
-  constructor(options: { fetchImpl?: typeof fetch; now?: () => number } = {}) {
-    this.fetchImpl = options.fetchImpl ?? fetch;
+  constructor(options: { fetchImpl?: WebhookFetchFn; now?: () => number } = {}) {
+    this.fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init));
     this.now = options.now ?? (() => performance.now());
   }
 
@@ -76,6 +78,7 @@ export class WebhookPluginExecutor {
         signal: controller.signal,
       });
       if (!response.ok) {
+        void response.body?.cancel().catch(() => undefined);
         return this.handleFailure(pluginId, cfg, `webhook_http_${response.status}`);
       }
       const body = (await response.json()) as Record<string, unknown>;

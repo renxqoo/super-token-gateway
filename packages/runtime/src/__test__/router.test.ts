@@ -77,6 +77,36 @@ test("SmartRouter trips OPEN after failure threshold, isolates 429 cooldown and 
   expect(router.isAvailable("ch1")).toEqual({ available: false, isProbe: false });
 });
 
+test("SmartRouter auto-releases abandoned HALF_OPEN probe after probeTimeoutMs and resets backoff on remote CLOSED", () => {
+  let clock = 1000;
+  const router = new SmartRouter({
+    now: () => clock,
+    failureThreshold: 2,
+    baseOpenMs: 5_000,
+    probeTimeoutMs: 10_000,
+  });
+
+  router.recordFailure("ch1", "retryable");
+  router.recordFailure("ch1", "retryable");
+  expect(router.isAvailable("ch1")).toEqual({ available: false, isProbe: false });
+
+  clock += 5_001;
+  expect(router.isAvailable("ch1")).toEqual({ available: true, isProbe: true });
+  expect(router.isAvailable("ch1")).toEqual({ available: false, isProbe: false });
+
+  clock += 10_001;
+  expect(router.isAvailable("ch1")).toEqual({ available: true, isProbe: true });
+
+  router.applyRemoteEvent({ channel_id: "ch1", state: "CLOSED" });
+  const snap = router.snapshot().find((c) => c.channel_id === "ch1");
+  expect(snap).toMatchObject({
+    state: "CLOSED",
+    backoff_level: 0,
+    probe_in_flight: false,
+    consecutive_failures: 0,
+  });
+});
+
 test("LocalRateLimiter enforces RPM, TPM, and active concurrency accurately", () => {
   let clock = 0;
   const limiter = new LocalRateLimiter(() => clock);

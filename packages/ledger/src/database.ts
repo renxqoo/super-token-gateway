@@ -22,7 +22,7 @@ export function createDatabase(url: string, max = 32): SQL {
     maxLifetime: 1800,
     connection: {
       statement_timeout: 8000,
-      lock_timeout: 2000,
+      lock_timeout: 5000,
       application_name: "super-token-gateway",
     },
   });

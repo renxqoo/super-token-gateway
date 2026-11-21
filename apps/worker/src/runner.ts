@@ -4,6 +4,7 @@ import { createLedgerEngine, prepareLedgerMonth } from "@gateway/ledger";
 export type WorkerTickStats = {
   is_leader: boolean;
   swept_holds: number;
+  swept_leases: number;
   expired_wallets: number;
   collected_debts: number;
   rebalanced_accounts: number;
@@ -167,6 +168,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
       return {
         is_leader: false,
         swept_holds: 0,
+        swept_leases: 0,
         expired_wallets: 0,
         collected_debts: 0,
         rebalanced_accounts: 0,
@@ -175,6 +177,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
       };
     }
     const swept_holds = await ledger.sweepTimedOutHolds(200);
+    const swept_leases = await ledger.sweepExpiredLeases(100);
     const expired_wallets = await ledger.expireAllLots(100);
     const collected_debts = await ledger.collectAllDebts(100);
     const rebalanced_accounts = await rebalanceImbalancedSuppliers();
@@ -183,6 +186,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
     return {
       is_leader: true,
       swept_holds,
+      swept_leases,
       expired_wallets,
       collected_debts,
       rebalanced_accounts,
@@ -230,6 +234,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
       scheduleTask(async () => {
         if (await ensureLeadership()) {
           await ledger.sweepTimedOutHolds(200);
+          await ledger.sweepExpiredLeases(100);
         }
       }, options.sweepIntervalMs ?? 2000);
       scheduleTask(async () => {
@@ -259,6 +264,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
       for (const t of timers) clearInterval(t);
       timers.length = 0;
       await inFlight;
+      await ledger.drain();
       await releaseLeadership();
     },
   };

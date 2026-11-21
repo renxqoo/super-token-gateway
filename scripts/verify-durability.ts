@@ -144,14 +144,14 @@ try {
   await callInternal("POST", `/internal/v1/wallets/${project.id}/credits`, {
     currency: "USD",
     external_ref: "dur-credit-1",
-    amount_atoms: "1000000",
+    amount_atoms: "100000000",
     kind: "CASH",
   });
   const acc = await callInternal("PUT", "/internal/v1/upstream-accounts", { name: "dur-acc" });
   await callInternal("POST", `/internal/v1/upstream-accounts/${acc.id}/recharges`, {
     currency: "USD",
     external_ref: "dur-sup-1",
-    amount_atoms: "1000000",
+    amount_atoms: "100000000",
   });
   const ch = await callInternal("PUT", "/internal/v1/channels", {
     account_id: acc.id,
@@ -236,11 +236,18 @@ try {
     gwProc.kill("SIGKILL");
     await Promise.allSettled(inflightPromises);
 
-    const sweepDeadline = Date.now() + 8000;
+    const sweepDeadline = Date.now() + 20_000;
     while (Date.now() < sweepDeadline) {
-      const rows =
-        await checkDb`SELECT count(*)::int AS n FROM public.billing_holds WHERE state = 'UNKNOWN'`;
-      if (Number(rows[0]!.n) === IN_FLIGHT) break;
+      const [hRows, lRows] = await Promise.all([
+        checkDb`SELECT count(*)::int AS n FROM public.billing_holds WHERE state = 'UNKNOWN'`,
+        checkDb`
+          SELECT (
+            (SELECT count(*) FROM public.wallet_leases WHERE state = 'ACTIVE') +
+            (SELECT count(*) FROM public.supplier_leases WHERE state = 'ACTIVE')
+          )::int AS n
+        `,
+      ]);
+      if (Number(hRows[0]!.n) === IN_FLIGHT && Number(lRows[0]!.n) === 0) break;
       await Bun.sleep(100);
     }
     const unknownCount = Number(

@@ -42,10 +42,6 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   const db = options.db ?? createDatabase(config.databaseUrl, config.dbMaxConnections);
   const catalog = createCatalogRepository(db);
   const queries = createLedgerQueries(db);
-  const ledger = createLedgerEngine(db, {
-    batchWindowMs: config.microBatchWindowMs,
-    maxBatchSize: config.microBatchMaxSize,
-  });
   const snapshot = new SnapshotManager(catalog, config.encryptionKey, config.snapshotPollMs);
 
   let clusterRef: ClusterCoordinator | null = null;
@@ -82,7 +78,14 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   });
   clusterRef = cluster;
 
-  const transport = createTransport(1024);
+  const ledger = createLedgerEngine(db, {
+    batchWindowMs: config.microBatchWindowMs,
+    maxBatchSize: config.microBatchMaxSize,
+    maxBatchConcurrency: 4,
+    nodeId: cluster.nodeId,
+  });
+
+  const transport = createTransport(Math.max(1024, Math.min(16384, config.maxInFlight)));
   const vertexTokens = new VertexTokens((url, init) =>
     transport.fetch(url, init, config.allowPrivateUpstreams, config.privateUpstreamCidrs),
   );
@@ -97,7 +100,17 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   }
   const pluginEngine = new PluginPipelineEngine({
     wasmExecutor,
-    webhookExecutor: options.webhookExecutor ?? new WebhookPluginExecutor(),
+    webhookExecutor:
+      options.webhookExecutor ??
+      new WebhookPluginExecutor({
+        fetchImpl: (rawUrl, init) =>
+          transport.fetch(
+            new URL(rawUrl),
+            init,
+            config.allowPrivateUpstreams,
+            config.privateUpstreamCidrs,
+          ),
+      }),
     ...(config.pluginSigningPublicKeyPem
       ? { signingPublicKeyPem: config.pluginSigningPublicKeyPem }
       : {}),
@@ -152,10 +165,15 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     });
   });
 
+  const peerOf = (c: { env?: unknown }): string | undefined => {
+    const env = c.env as { peerAddress?: string } | undefined;
+    return env?.peerAddress;
+  };
+
   publicApp.get("/v1/models", (c) => {
     try {
       const snap = snapshot.get();
-      const { key } = authenticateRequest(c, snap, config, "chat");
+      const { key } = authenticateRequest(c, snap, config, undefined, peerOf(c));
       const data = [...snap.models.values()]
         .filter((m) => m.enabled && (key.models.length === 0 || key.models.includes(m.name)))
         .map((m) => ({ id: m.name, object: "model", owned_by: "gateway" }));
@@ -163,10 +181,14 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     } catch (err) {
       const status =
         err instanceof Error && "status" in err ? Number((err as { status: number }).status) : 401;
+      const code =
+        err instanceof Error && "code" in err
+          ? String((err as { code: string }).code)
+          : "unauthorized";
       return c.json(
         {
           error: {
-            code: "unauthorized",
+            code,
             message: err instanceof Error ? err.message : "Unauthorized",
           },
         },
@@ -174,11 +196,6 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       );
     }
   });
-
-  const peerOf = (c: { env?: unknown }): string | undefined => {
-    const env = c.env as { peerAddress?: string } | undefined;
-    return env?.peerAddress;
-  };
 
   publicApp.post("/v1/chat/completions", (c) =>
     handleInferenceRequest(c, proxyDeps, "chat", undefined, peerOf(c)),
@@ -275,6 +292,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     async close(drainMs = 5000): Promise<void> {
       snapshot.stop();
       await lifecycle.drain(drainMs);
+      await ledger.drain();
       if (worker) await worker.stop();
       await cluster.close();
       await transport.close();

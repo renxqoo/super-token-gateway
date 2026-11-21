@@ -1,5 +1,3 @@
-import { randomBytes } from "node:crypto";
-
 export type TraceContext = {
   traceId: string;
   spanId: string;
@@ -8,13 +6,23 @@ export type TraceContext = {
 };
 
 const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
+const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, "0"));
+const randBuf = new Uint8Array(24);
+
+function randomHex(byteLength: number): string {
+  const slice = randBuf.subarray(0, byteLength);
+  crypto.getRandomValues(slice);
+  let out = "";
+  for (let i = 0; i < byteLength; i++) out += HEX[slice[i]!]!;
+  return out;
+}
 
 export function parseOrCreateTrace(headerValue: string | undefined): TraceContext {
   const match = headerValue ? TRACEPARENT_RE.exec(headerValue.trim().toLowerCase()) : null;
   const traceId =
-    match && match[1] !== "0".repeat(32) ? match[1]! : randomBytes(16).toString("hex");
+    match && match[1] !== "00000000000000000000000000000000" ? match[1]! : randomHex(16);
   const flags = match ? match[3]! : "01";
-  const spanId = randomBytes(8).toString("hex");
+  const spanId = randomHex(8);
   return {
     traceId,
     spanId,

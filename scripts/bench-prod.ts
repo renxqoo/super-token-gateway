@@ -129,6 +129,7 @@ try {
 
   const baseEnv: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
+    BUN_CONFIG_MAX_HTTP_REQUESTS: "4096",
     DATABASE_URL: targetUrl.toString(),
     ...(redisUrl ? { REDIS_URL: redisUrl, REDIS_NAMESPACE: "stg_bench" } : {}),
     KEY_PEPPER: "bprod-pepper-0123456789abcdef0123",
@@ -139,8 +140,8 @@ try {
     SNAPSHOT_POLL_MS: "2000",
     MAX_IN_FLIGHT: "5000",
     DB_MAX_CONNECTIONS: "32",
-    MICRO_BATCH_WINDOW_MS: "3",
-    MICRO_BATCH_MAX_SIZE: "64",
+    MICRO_BATCH_WINDOW_MS: "2",
+    MICRO_BATCH_MAX_SIZE: "256",
     MOCK_HOST: "127.0.0.1",
     MOCK_PORT: String(mockPort),
     MOCK_CONTROL_TOKEN: "bprod-mock-ctrl",
@@ -541,12 +542,23 @@ try {
       ),
     ];
 
+    await Bun.sleep(600);
     const m1 = await (await fetch(`http://127.0.0.1:${gwPort1}/metrics`)).text();
     const m2 = await (await fetch(`http://127.0.0.1:${gwPort2}/metrics`)).text();
     const inFlight1 = Number(/gateway_in_flight (\d+)/.exec(m1)?.[1] ?? -1);
     const inFlight2 = Number(/gateway_in_flight (\d+)/.exec(m2)?.[1] ?? -1);
     const failovers1 = Number(/gateway_failovers_total (\d+)/.exec(m1)?.[1] ?? 0);
     const failovers2 = Number(/gateway_failovers_total (\d+)/.exec(m2)?.[1] ?? 0);
+    const activeLeases = Number(
+      (
+        await db`
+          SELECT (
+            (SELECT count(*) FROM public.wallet_leases WHERE state = 'ACTIVE') +
+            (SELECT count(*) FROM public.supplier_leases WHERE state = 'ACTIVE')
+          )::int AS n
+        `
+      )[0]!.n,
+    );
     const pgSettings = await db`
       SELECT name, setting FROM pg_settings
       WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes')
@@ -568,6 +580,7 @@ try {
             pgSettings.map((r: Record<string, unknown>) => [String(r.name), String(r.setting)]),
           ),
           total_settled_charges: totalCharges,
+          active_leases_after_idle: activeLeases,
           results,
           failovers_executed: { node1: failovers1, node2: failovers2 },
           post_drain_in_flight: { node1: inFlight1, node2: inFlight2 },
@@ -577,7 +590,13 @@ try {
         2,
       ),
     );
-    if (!audit.ok || audit.open_holds !== 0 || inFlight1 !== 0 || inFlight2 !== 0) {
+    if (
+      !audit.ok ||
+      audit.open_holds !== 0 ||
+      inFlight1 !== 0 ||
+      inFlight2 !== 0 ||
+      activeLeases !== 0
+    ) {
       throw new Error("Production stress benchmark invariant check failed");
     }
   } finally {

@@ -98,17 +98,91 @@ export type ProxyDependencies = {
   metrics: GatewayMetrics;
 };
 
-function extractApiKey(c: Context, operation: Operation): string | null {
+const utf8FatalDecoder = new TextDecoder("utf-8", { fatal: true });
+const utf8Encoder = new TextEncoder();
+
+let authCacheEpoch = -1;
+let authCachePepper = "";
+const verifiedKeyCache = new Map<string, ApiKeyRecord>();
+const quoteCache = new Map<string, string>();
+
+function cachedVerifierLookup(
+  rawKey: string,
+  snap: ConfigSnapshot,
+  keyPepper: string,
+): ApiKeyRecord | undefined {
+  if (authCacheEpoch !== snap.epoch || authCachePepper !== keyPepper) {
+    authCacheEpoch = snap.epoch;
+    authCachePepper = keyPepper;
+    verifiedKeyCache.clear();
+  }
+  const hit = verifiedKeyCache.get(rawKey);
+  if (hit !== undefined) return hit;
+  const digest = verifier(rawKey, keyPepper);
+  const key = snap.keysByVerifier.get(digest);
+  if (key) {
+    if (verifiedKeyCache.size >= 4096) verifiedKeyCache.clear();
+    verifiedKeyCache.set(rawKey, key);
+  }
+  return key;
+}
+
+async function readRequestBytesFast(
+  req: Request,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  const clHeader = req.headers.get("content-length");
+  if (clHeader !== null && /^\d+$/.test(clHeader)) {
+    const cl = Number(clHeader);
+    if (cl > maxBytes) {
+      throw new GatewayError(413, "body_too_large", "Payload exceeds the configured size limit");
+    }
+    if (!signal.aborted && cl <= 262_144) {
+      const bytes = await req.bytes();
+      if (bytes.byteLength > maxBytes) {
+        throw new GatewayError(413, "body_too_large", "Payload exceeds the configured size limit");
+      }
+      return bytes;
+    }
+  }
+  return readBounded(req.body, maxBytes, signal);
+}
+
+async function readResponseBytesFast(
+  resp: Response,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  const clHeader = resp.headers.get("content-length");
+  if (clHeader !== null && /^\d+$/.test(clHeader)) {
+    const cl = Number(clHeader);
+    if (cl > maxBytes) {
+      void resp.body?.cancel().catch(() => undefined);
+      throw new GatewayError(413, "body_too_large", "Payload exceeds the configured size limit");
+    }
+    if (!signal.aborted && !resp.headers.has("content-encoding") && cl <= 262_144) {
+      const bytes = await resp.bytes();
+      if (bytes.byteLength > maxBytes) {
+        throw new GatewayError(413, "body_too_large", "Payload exceeds the configured size limit");
+      }
+      return bytes;
+    }
+  }
+  return readBounded(resp.body, maxBytes, signal);
+}
+
+function extractApiKey(c: Context, operation?: Operation): string | null {
   const auth = c.req.header("authorization");
   if (auth && auth.toLowerCase().startsWith("bearer ")) {
     const token = auth.slice(7).trim();
     if (token) return token;
   }
-  if (operation === "messages") {
+  if (operation === "messages" || operation === undefined) {
     const xKey = c.req.header("x-api-key")?.trim();
     if (xKey) return xKey;
   }
-  if (operation === "gemini") {
+  if (operation === "gemini" || operation === undefined) {
     const gKey = c.req.header("x-goog-api-key")?.trim() || c.req.query("key")?.trim();
     if (gKey) return gKey;
   }
@@ -119,18 +193,17 @@ export function authenticateRequest(
   c: Context,
   snap: ConfigSnapshot,
   config: GatewayConfig,
-  operation: Operation,
+  operation?: Operation,
   peerAddress?: string,
 ): { key: ApiKeyRecord; project: ProjectRecord } {
   const rawKey = extractApiKey(c, operation);
   if (!rawKey) throw new GatewayError(401, "unauthorized", "Missing API key");
-  const digest = verifier(rawKey, config.keyPepper);
-  const key = snap.keysByVerifier.get(digest);
+  const key = cachedVerifierLookup(rawKey, snap, config.keyPepper);
   if (!key || !key.enabled) throw new GatewayError(401, "unauthorized", "Invalid API key");
   if (key.expires_at && Date.parse(key.expires_at) <= Date.now()) {
     throw new GatewayError(401, "key_expired", "API key has expired");
   }
-  if (key.role === "VIEWER") {
+  if (operation !== undefined && key.role === "VIEWER") {
     throw new GatewayError(403, "forbidden", "API key role cannot invoke models");
   }
   if (key.allowed_cidrs.length > 0) {
@@ -143,7 +216,7 @@ export function authenticateRequest(
       throw new GatewayError(403, "ip_not_allowed", "Client IP address is not permitted");
     }
   }
-  if (key.operations.length > 0 && !key.operations.includes(operation)) {
+  if (operation !== undefined && key.operations.length > 0 && !key.operations.includes(operation)) {
     throw new GatewayError(403, "operation_not_allowed", "API key cannot invoke this operation");
   }
   const project = snap.projects.get(key.project_id);
@@ -172,6 +245,30 @@ function quoteForPrice(
   measurement: { inputCharacters?: string | undefined; images?: unknown },
   outputBound: number,
 ): string {
+  const cacheable = price.basis === "PROVIDER_USAGE" && measurement.images === undefined;
+  if (cacheable) {
+    const ck = `${price.id}:${outputBound}`;
+    const hit = quoteCache.get(ck);
+    if (hit !== undefined) return hit;
+    const quote = quoteReservation(
+      [
+        {
+          provider_id: price.id,
+          id: price.id,
+          currency: price.currency,
+          rates: price.rates,
+          ceilings: price.ceilings as Usage,
+          basis: price.basis,
+        },
+      ],
+      price.currency,
+      measurement,
+      outputBound,
+    );
+    if (quoteCache.size >= 4096) quoteCache.clear();
+    quoteCache.set(ck, quote.amount_atoms);
+    return quote.amount_atoms;
+  }
   const quote = quoteReservation(
     [
       {
@@ -302,6 +399,27 @@ export async function handleInferenceRequest(
   let logModBlocked = false;
   let logTtftMs: number | null = null;
   let logged = false;
+  const acquiredProbes = new Set<string>();
+  let holdAcquired = false;
+  let holdFinalized = false;
+  let anyUnknownAttempt = false;
+
+  const releaseAllPendingProbes = () => {
+    for (const chId of acquiredProbes) {
+      deps.router.releaseProbe(chId);
+    }
+    acquiredProbes.clear();
+  };
+
+  const releaseProbeFor = (channelId: string) => {
+    if (acquiredProbes.delete(channelId)) {
+      deps.router.releaseProbe(channelId);
+    }
+  };
+
+  const markProbeCompleted = (channelId: string) => {
+    acquiredProbes.delete(channelId);
+  };
 
   const emitAccessLog = (status: number, errorCode: string | null) => {
     if (logged) return;
@@ -364,14 +482,12 @@ export async function handleInferenceRequest(
         stream: meta.stream === "true" || meta.stream === true,
       };
     } else {
-      const rawBytes = await readBounded(
-        c.req.raw.body,
+      const rawBytes = await readRequestBytesFast(
+        c.req.raw,
         deps.config.maxBodyBytes,
         c.req.raw.signal,
       );
-      const parsedRaw = object(
-        parseClientJson(new TextDecoder("utf-8", { fatal: true }).decode(rawBytes)),
-      );
+      const parsedRaw = object(parseClientJson(utf8FatalDecoder.decode(rawBytes)));
       clientBody = pathOverride
         ? copyExact(parsedRaw, {
             ...parsedRaw,
@@ -453,11 +569,14 @@ export async function handleInferenceRequest(
     if (selected.length === 0) {
       throw new GatewayError(503, "no_route", "No healthy channel available for this model");
     }
+    for (const entry of selected) {
+      if (entry.isProbe) acquiredProbes.add(entry.route.channel_id);
+    }
 
     const releaseUnusedProbes = (fromIndex: number) => {
       for (let i = fromIndex; i < selected.length; i++) {
         if (selected[i]!.isProbe) {
-          deps.router.releaseProbe(selected[i]!.route.channel_id);
+          releaseProbeFor(selected[i]!.route.channel_id);
         }
       }
     };
@@ -509,9 +628,12 @@ export async function handleInferenceRequest(
     };
 
     const idempotencyKey = c.req.header("idempotency-key")?.trim() || null;
-    const fingerprint = sha256(
-      canonical({ project_id: project.id, operation, model: model.name, body: clientBody }),
-    );
+    const fingerprint =
+      idempotencyKey !== null
+        ? sha256(
+            canonical({ project_id: project.id, operation, model: model.name, body: clientBody }),
+          )
+        : "";
     const expiresAt = new Date(Date.now() + deps.config.holdTtlMs).toISOString();
 
     let activeIndex = -1;
@@ -535,7 +657,7 @@ export async function handleInferenceRequest(
                 "billing_ceiling",
                 err instanceof Error ? err.message : "Quote error",
               );
-        if (selected[idx]!.isProbe) deps.router.releaseProbe(cand.channel_id);
+        releaseProbeFor(cand.channel_id);
         continue;
       }
       const attemptId = crypto.randomUUID();
@@ -556,14 +678,19 @@ export async function handleInferenceRequest(
         expires_at: expiresAt,
       });
       if (holdRes.ok) {
-        if (holdRes.replayed && holdRes.existing_state && holdRes.existing_state !== "HELD") {
+        if (holdRes.replayed) {
           releaseUnusedProbes(idx);
-          emitAccessLog(409, "idempotency_replayed");
+          const inProgress = holdRes.existing_state === "HELD";
+          const code = inProgress ? "idempotency_in_progress" : "idempotency_replayed";
+          const msg = inProgress
+            ? "Request with this Idempotency-Key is already in progress"
+            : `Request already finalized with state ${holdRes.existing_state ?? "UNKNOWN"}`;
+          emitAccessLog(409, code);
           return c.json(
             {
               error: {
-                code: "idempotency_replayed",
-                message: `Request already finalized with state ${holdRes.existing_state}`,
+                code,
+                message: msg,
                 request_id: holdRes.request_id,
               },
             },
@@ -571,12 +698,13 @@ export async function handleInferenceRequest(
             responseHeaders(holdRes.request_id, trace),
           );
         }
+        holdAcquired = true;
         activeIndex = idx;
         activeAttemptId = attemptId;
         holdCustomerAtoms = holdRes.held_atoms;
         break;
       }
-      if (selected[idx]!.isProbe) deps.router.releaseProbe(cand.channel_id);
+      releaseProbeFor(cand.channel_id);
       if (
         holdRes.code === "supplier_unavailable" ||
         holdRes.code === "supplier_insufficient_balance"
@@ -596,7 +724,6 @@ export async function handleInferenceRequest(
       selected.length - activeIndex,
       Math.max(1, selected[activeIndex]!.route.route.retry_policy.max_attempts ?? 3),
     );
-    let anyUnknownAttempt = false;
     let attemptsMade = 0;
     let lastErrorStatus = 502;
     let lastErrorCode = "upstream_failed";
@@ -613,8 +740,18 @@ export async function handleInferenceRequest(
       logChannel = cand.channel.name;
 
       if (pendingSwitchFrom) {
-        const nextCustomerAtoms = quoteForPrice(cand.billingPrice, measurement, outputBound);
-        const nextSupplierAtoms = quoteForPrice(cand.costPrice, measurement, outputBound);
+        let nextCustomerAtoms: string;
+        let nextSupplierAtoms: string;
+        try {
+          nextCustomerAtoms = quoteForPrice(cand.billingPrice, measurement, outputBound);
+          nextSupplierAtoms = quoteForPrice(cand.costPrice, measurement, outputBound);
+        } catch (err) {
+          releaseProbeFor(cand.channel_id);
+          lastErrorStatus = 422;
+          lastErrorCode = "billing_ceiling";
+          lastErrorMessage = err instanceof Error ? err.message : "Fallback quote error";
+          continue;
+        }
         const nextAttemptId = crypto.randomUUID();
         const sw = await deps.ledger.switchSupplierAttempt({
           request_id: requestId,
@@ -630,11 +767,12 @@ export async function handleInferenceRequest(
             : {}),
         });
         if (!sw.ok) {
-          if (entry.isProbe) deps.router.releaseProbe(cand.channel_id);
+          releaseProbeFor(cand.channel_id);
           if (sw.code === "supplier_unavailable" || sw.code === "supplier_insufficient_balance") {
             continue;
           }
           releaseUnusedProbes(cursor + 1);
+          holdFinalized = true;
           if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
           else await deps.ledger.releaseHold(requestId);
           throw mapHoldError(sw.code, sw.message);
@@ -657,7 +795,7 @@ export async function handleInferenceRequest(
         deps.config.holdTtlMs,
       );
       if (!chLimit.ok) {
-        if (entry.isProbe) deps.router.releaseProbe(cand.channel_id);
+        releaseProbeFor(cand.channel_id);
         pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
         lastErrorStatus = 429;
         lastErrorCode = "channel_saturated";
@@ -703,8 +841,9 @@ export async function handleInferenceRequest(
         guard.controller.signal.removeEventListener("abort", onShutdownAbort);
         releaseChannelLimit();
         releaseChannelLimit = null;
-        if (entry.isProbe) deps.router.releaseProbe(cand.channel_id);
+        releaseProbeFor(cand.channel_id);
         releaseUnusedProbes(cursor + 1);
+        holdFinalized = true;
         if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
         else await deps.ledger.releaseHold(requestId);
         throw err;
@@ -716,7 +855,7 @@ export async function handleInferenceRequest(
           {
             method: "POST",
             headers: prepared.headers,
-            body: Buffer.from(prepared.body),
+            body: prepared.body as BodyInit,
             signal: attemptAbort.signal,
             dispatchDeadline: performance.now() + attemptTimeoutMs,
           },
@@ -733,11 +872,11 @@ export async function handleInferenceRequest(
         const isPreDispatch =
           err instanceof UpstreamPreDispatchError ||
           (err instanceof Error &&
-            /ECONNREFUSED|ENOTFOUND|ECONNRESET|Unable to connect|ConnectionRefused/i.test(
-              err.message,
-            ));
+            /ECONNREFUSED|ENOTFOUND|Unable to connect|ConnectionRefused/i.test(err.message));
         if (c.req.raw.signal.aborted) {
+          releaseProbeFor(cand.channel_id);
           releaseUnusedProbes(cursor + 1);
+          holdFinalized = true;
           if (isPreDispatch && !anyUnknownAttempt) await deps.ledger.releaseHold(requestId);
           else await deps.ledger.markUnknown(requestId);
           emitAccessLog(499, "client_aborted");
@@ -752,6 +891,7 @@ export async function handleInferenceRequest(
           isPreDispatch ? "connect_error" : "timeout",
         );
         deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
+        markProbeCompleted(cand.channel.id);
         const failedOutcome: "FAILED" | "UNKNOWN" = isPreDispatch ? "FAILED" : "UNKNOWN";
         if (failedOutcome === "UNKNOWN") anyUnknownAttempt = true;
         const allowAmbiguousRetry = Boolean(cand.route.retry_policy.retry_on_ambiguous);
@@ -763,6 +903,7 @@ export async function handleInferenceRequest(
           continue;
         }
         releaseUnusedProbes(cursor + 1);
+        holdFinalized = true;
         await deps.ledger.markUnknown(requestId);
         throw new GatewayError(lastErrorStatus, lastErrorCode, lastErrorMessage);
       }
@@ -781,6 +922,7 @@ export async function handleInferenceRequest(
           const retryAfterMs = parseRetryAfterMs(upstreamResp.headers.get("retry-after"));
           deps.metrics.recordUpstreamError(cand.channel.name, `http_${upstreamResp.status}`);
           deps.router.recordFailure(cand.channel.id, retryKind, retryAfterMs, latencyMs);
+          markProbeCompleted(cand.channel.id);
           pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
           lastErrorStatus = upstreamResp.status === 429 ? 429 : 502;
           lastErrorCode =
@@ -792,8 +934,9 @@ export async function handleInferenceRequest(
           lastErrorMessage = `Upstream returned HTTP ${upstreamResp.status}`;
           continue;
         }
-        if (entry.isProbe) deps.router.releaseProbe(cand.channel_id);
+        releaseProbeFor(cand.channel_id);
         releaseUnusedProbes(cursor + 1);
+        holdFinalized = true;
         if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
         else await deps.ledger.releaseHold(requestId);
         emitAccessLog(upstreamResp.status, "upstream_client_error");
@@ -818,8 +961,8 @@ export async function handleInferenceRequest(
 
       if (!isStream && !isUpstreamSse) {
         try {
-          const respBytes = await readBounded(
-            upstreamResp.body,
+          const respBytes = await readResponseBytesFast(
+            upstreamResp,
             deps.config.maxBodyBytes,
             attemptAbort.signal,
           );
@@ -833,6 +976,7 @@ export async function handleInferenceRequest(
               chars,
             );
             if (!usage) {
+              holdFinalized = true;
               await deps.ledger.markUnknown(requestId);
               throw new GatewayError(
                 502,
@@ -865,9 +1009,11 @@ export async function handleInferenceRequest(
             if (!commitRes.ok) {
               throw new GatewayError(500, "ledger_commit_failed", commitRes.message);
             }
+            holdFinalized = true;
             deps.router.recordSuccess(cand.channel.id, latencyMs);
+            markProbeCompleted(cand.channel.id);
             emitAccessLog(200, null);
-            return new Response(Buffer.from(respBytes), {
+            return new Response(respBytes as BodyInit, {
               status: 200,
               headers: responseHeaders(requestId, trace, {
                 "content-type": upstreamContentType,
@@ -876,14 +1022,14 @@ export async function handleInferenceRequest(
             });
           }
 
-          const rawJson = object(
-            parseProviderJson(new TextDecoder("utf-8", { fatal: true }).decode(respBytes)),
-          );
+          const rawJson = object(parseProviderJson(utf8FatalDecoder.decode(respBytes)));
           const rawUsage = extractUsage(rawJson, providerKind);
           const usage = buildUsageForOperation(operation, cand.billingPrice.basis, rawUsage, chars);
           if (!usage) {
+            holdFinalized = true;
             await deps.ledger.markUnknown(requestId);
             deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
+            markProbeCompleted(cand.channel.id);
             throw new GatewayError(
               502,
               "invalid_upstream_usage",
@@ -961,7 +1107,9 @@ export async function handleInferenceRequest(
             throw new GatewayError(500, "ledger_commit_failed", commitRes.message);
           }
 
+          holdFinalized = true;
           deps.router.recordSuccess(cand.channel.id, latencyMs);
+          markProbeCompleted(cand.channel.id);
           if (moderationBlocked) {
             emitAccessLog(blockStatus, blockRule);
             return c.json(
@@ -993,6 +1141,8 @@ export async function handleInferenceRequest(
       }
 
       clearTimeout(timeoutTimer);
+      holdFinalized = true;
+      const streamProbeChannel = acquiredProbes.delete(cand.channel.id) ? cand.channel.id : null;
       const upstreamBody = upstreamResp.body;
       const capturedProjectLimit = releaseProjectLimit;
       const capturedChannelLimit = releaseChannelLimit;
@@ -1000,9 +1150,17 @@ export async function handleInferenceRequest(
       releaseChannelLimit = null;
 
       let streamCleanupDone = false;
+      let streamProbeDone = false;
+      const finishStreamProbe = () => {
+        if (!streamProbeDone && streamProbeChannel) {
+          streamProbeDone = true;
+          deps.router.releaseProbe(streamProbeChannel);
+        }
+      };
       const cleanupStream = () => {
         if (streamCleanupDone) return;
         streamCleanupDone = true;
+        finishStreamProbe();
         c.req.raw.signal.removeEventListener("abort", onClientAbort);
         guard.controller.signal.removeEventListener("abort", onShutdownAbort);
         capturedChannelLimit?.();
@@ -1012,6 +1170,7 @@ export async function handleInferenceRequest(
 
       if (!isConversationalOperation(operation) || !prepared.upstreamProtocol) {
         const providerKind = toProviderKind(cand.channel.kind);
+        let clientCancelled = false;
         const mediaStream = new ReadableStream<Uint8Array>({
           async start(controller) {
             const reader = upstreamBody?.getReader();
@@ -1019,8 +1178,9 @@ export async function handleInferenceRequest(
             let observedUsage: Usage | undefined;
             const heldChunks: Uint8Array[] = [];
             try {
-              if (!reader)
+              if (!reader) {
                 throw new GatewayError(502, "empty_stream", "Upstream returned empty body");
+              }
               while (true) {
                 const step = await reader.read();
                 if (step.done) break;
@@ -1034,13 +1194,18 @@ export async function handleInferenceRequest(
                     const t = String(parsed.type ?? ev.event);
                     if (t.endsWith(".done") || t.endsWith(".completed")) isDoneEvent = true;
                   }
-                  const bytes = new TextEncoder().encode(ev.wire);
+                  const bytes = utf8Encoder.encode(ev.wire);
                   if (isDoneEvent) heldChunks.push(bytes);
                   else controller.enqueue(bytes);
                 }
               }
+              if (clientCancelled || c.req.raw.signal.aborted) {
+                await deps.ledger.markUnknown(requestId).catch(() => undefined);
+                emitAccessLog(499, "client_aborted");
+                return;
+              }
               for (const ev of parser.feed(new Uint8Array(), true)) {
-                heldChunks.push(new TextEncoder().encode(ev.wire));
+                heldChunks.push(utf8Encoder.encode(ev.wire));
               }
               const usage = buildUsageForOperation(
                 operation,
@@ -1091,19 +1256,26 @@ export async function handleInferenceRequest(
               if (!commitRes.ok) {
                 throw new GatewayError(500, "ledger_commit_failed", commitRes.message);
               }
+              streamProbeDone = true;
               deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
               for (const ch of heldChunks) controller.enqueue(ch);
               emitAccessLog(200, null);
               controller.close();
             } catch (err) {
+              const abortedByClient = clientCancelled || c.req.raw.signal.aborted;
+              await deps.ledger.markUnknown(requestId).catch(() => undefined);
+              if (abortedByClient) {
+                emitAccessLog(499, "client_aborted");
+                return;
+              }
               deps.metrics.recordUpstreamError(cand.channel.name, "media_stream_error");
+              streamProbeDone = true;
               deps.router.recordFailure(
                 cand.channel.id,
                 "retryable",
                 undefined,
                 performance.now() - startedAt,
               );
-              await deps.ledger.markUnknown(requestId).catch(() => undefined);
               emitAccessLog(502, "stream_interrupted");
               try {
                 controller.enqueue(
@@ -1128,9 +1300,9 @@ export async function handleInferenceRequest(
             }
           },
           cancel() {
+            clientCancelled = true;
             attemptAbort.abort(new Error("client_cancelled"));
             void upstreamBody?.cancel().catch(() => undefined);
-            cleanupStream();
           },
         });
         return new Response(mediaStream, {
@@ -1147,6 +1319,7 @@ export async function handleInferenceRequest(
       const upstreamProtocol: Protocol = prepared.upstreamProtocol;
       const streamId = `gen_${requestId.replaceAll("-", "")}`;
       const hasPlugins = cand.route.plugin_pipeline.length > 0;
+      let clientCancelled = false;
 
       const bodyStream = new ReadableStream<Uint8Array>({
         async start(controller) {
@@ -1174,8 +1347,9 @@ export async function handleInferenceRequest(
           let blockedEarly = false;
 
           try {
-            if (!reader)
+            if (!reader) {
               throw new GatewayError(502, "empty_stream", "Upstream returned empty body");
+            }
             while (true) {
               const step = await reader.read();
               if (step.done) break;
@@ -1216,6 +1390,12 @@ export async function handleInferenceRequest(
                 await reader.cancel().catch(() => undefined);
                 break;
               }
+            }
+
+            if (clientCancelled || c.req.raw.signal.aborted) {
+              await deps.ledger.markUnknown(requestId).catch(() => undefined);
+              emitAccessLog(499, "client_aborted");
+              return;
             }
 
             if (!blockedEarly && !bedrockDecoder) {
@@ -1260,6 +1440,7 @@ export async function handleInferenceRequest(
                   charge_policy: finalMod.charge_policy,
                   moderation_blocked: true,
                 });
+                streamProbeDone = true;
                 deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
                 emitAccessLog(400, finalMod.rule_code ?? "content_blocked");
                 controller.enqueue(
@@ -1297,6 +1478,7 @@ export async function handleInferenceRequest(
             if (!usage) {
               streamFailed = true;
               deps.metrics.recordUpstreamError(cand.channel.name, "missing_usage");
+              streamProbeDone = true;
               deps.router.recordFailure(
                 cand.channel.id,
                 "retryable",
@@ -1347,6 +1529,7 @@ export async function handleInferenceRequest(
               throw new GatewayError(500, "ledger_commit_failed", commitRes.message);
             }
 
+            streamProbeDone = true;
             deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
             for (const chunk of heldTerminalChunks) {
               controller.enqueue(chunk);
@@ -1354,16 +1537,24 @@ export async function handleInferenceRequest(
             emitAccessLog(200, null);
             controller.close();
           } catch (err) {
+            const abortedByClient = clientCancelled || c.req.raw.signal.aborted;
             if (!streamFailed) {
               streamFailed = true;
-              deps.metrics.recordUpstreamError(cand.channel.name, "stream_interrupted");
-              deps.router.recordFailure(
-                cand.channel.id,
-                "retryable",
-                undefined,
-                performance.now() - startedAt,
-              );
               await deps.ledger.markUnknown(requestId).catch(() => undefined);
+              if (!abortedByClient) {
+                deps.metrics.recordUpstreamError(cand.channel.name, "stream_interrupted");
+                streamProbeDone = true;
+                deps.router.recordFailure(
+                  cand.channel.id,
+                  "retryable",
+                  undefined,
+                  performance.now() - startedAt,
+                );
+              }
+            }
+            if (abortedByClient) {
+              emitAccessLog(499, "client_aborted");
+              return;
             }
             const code = err instanceof GatewayError ? err.code : "stream_interrupted";
             emitAccessLog(502, code);
@@ -1382,9 +1573,9 @@ export async function handleInferenceRequest(
           }
         },
         cancel() {
+          clientCancelled = true;
           attemptAbort.abort(new Error("client_cancelled"));
           void upstreamBody?.cancel().catch(() => undefined);
-          cleanupStream();
         },
       });
 
@@ -1398,16 +1589,23 @@ export async function handleInferenceRequest(
       });
     }
 
-    releaseUnusedProbes(activeIndex + attemptsMade);
+    releaseAllPendingProbes();
+    holdFinalized = true;
     if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
     else await deps.ledger.releaseHold(requestId);
     throw new GatewayError(lastErrorStatus, lastErrorCode, lastErrorMessage);
   } catch (err) {
+    releaseAllPendingProbes();
+    if (holdAcquired && !holdFinalized) {
+      holdFinalized = true;
+      await deps.ledger.markUnknown(requestId).catch(() => undefined);
+    }
     const status = err instanceof GatewayError ? err.status : 500;
     const code = err instanceof GatewayError ? err.code : "internal_error";
     emitAccessLog(status, code);
     return errorJson(c, err, requestId, trace);
   } finally {
+    releaseAllPendingProbes();
     releaseLimiters();
     releaseGuard();
   }

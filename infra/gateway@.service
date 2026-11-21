@@ -8,6 +8,7 @@ Type=simple
 User=llm-gateway
 Group=llm-gateway
 WorkingDirectory=/opt/super-token-gateway
+Environment=BUN_CONFIG_MAX_HTTP_REQUESTS=4096
 EnvironmentFile=/etc/super-token-gateway/gateway-%i.env
 ExecStart=/usr/local/bin/bun dist/gateway/main.js --mode=gateway
 Restart=always

@@ -1,11 +1,11 @@
 {
   "migrations": [
     {
-      "version": 2026112101,
+      "version": 1,
       "files": [
         {
           "path": "./migrations/0000_v4_baseline.sql",
-          "checksum": "de27ed7dbde9586867a3264a9a8da938dea547e77f2b07ea6e71b7c1bc5e225a"
+          "checksum": "34729c3905b81d3503da78ed2559b090e0fdd715ea177cb3eab742f9214c01a8"
         }
       ]
     }

@@ -112,8 +112,9 @@ export async function safeFetch(
     init.dispatchDeadline !== undefined && !(performance.now() < init.dispatchDeadline);
   if (signal?.aborted || expired()) throw cancelled();
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
-  const addresses = isIP(hostname)
-    ? [{ address: hostname, family: isIP(hostname) }]
+  const ipFamily = isIP(hostname);
+  const addresses = ipFamily
+    ? [{ address: hostname, family: ipFamily }]
     : await new Promise<{ address: string; family: number }[]>((resolve, reject) => {
         const abort = () => reject(cancelled());
         signal?.addEventListener("abort", abort, { once: true });
@@ -137,10 +138,12 @@ export async function safeFetch(
   ) {
     throw new UpstreamPreDispatchError("unsafe_upstream", "Upstream address is not permitted");
   }
-  const pinned = new URL(url);
-  pinned.hostname = chosen.family === 6 ? `[${chosen.address}]` : chosen.address;
-  const headers = new Headers(init.headers);
-  headers.set("host", url.host);
+  const pinnedHost = chosen.family === 6 ? `[${chosen.address}]` : chosen.address;
+  const pinned = pinnedHost === url.hostname ? url : new URL(url);
+  if (pinned !== url) pinned.hostname = pinnedHost;
+  const headers =
+    init.headers instanceof Headers ? new Headers(init.headers) : new Headers(init.headers);
+  if (pinned !== url || !headers.has("host")) headers.set("host", url.host);
   headers.set("accept-encoding", "identity");
   return send(pinned, {
     ...init,
@@ -149,7 +152,7 @@ export async function safeFetch(
     proxy: false,
     ...(url.protocol === "https:"
       ? {
-          tls: isIP(hostname)
+          tls: ipFamily
             ? { rejectUnauthorized: true }
             : { serverName: hostname, rejectUnauthorized: true },
         }

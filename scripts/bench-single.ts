@@ -70,7 +70,7 @@ function postJsonKeepAlive(
   apiKey: string,
   payload: Buffer,
   expectDone: boolean,
-): Promise<{ ok: boolean; status: number }> {
+): Promise<{ ok: boolean; status: number; errText?: string }> {
   return new Promise((resolveDone) => {
     const req = httpRequest(
       {
@@ -88,14 +88,24 @@ function postJsonKeepAlive(
       (res) => {
         const status = res.statusCode ?? 0;
         let sawDone = !expectDone;
+        const errChunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => {
+          if (status !== 200 && errChunks.length < 4) errChunks.push(chunk);
           if (!sawDone && chunk.includes("[DONE]")) sawDone = true;
         });
-        res.on("end", () => resolveDone({ ok: status === 200 && sawDone, status }));
-        res.on("error", () => resolveDone({ ok: false, status }));
+        res.on("end", () =>
+          resolveDone({
+            ok: status === 200 && sawDone,
+            status,
+            ...(status !== 200
+              ? { errText: Buffer.concat(errChunks).toString("utf8").slice(0, 160) }
+              : {}),
+          }),
+        );
+        res.on("error", (e) => resolveDone({ ok: false, status, errText: e.message }));
       },
     );
-    req.on("error", () => resolveDone({ ok: false, status: 0 }));
+    req.on("error", (e) => resolveDone({ ok: false, status: 0, errText: e.message }));
     req.end(payload);
   });
 }
@@ -109,13 +119,14 @@ targetUrl.pathname = `/${dbName}`;
 
 const adminDb = createDatabase(adminUrl.toString(), 2);
 const procs: ReturnType<typeof spawn>[] = [];
-const agent = new Agent({ keepAlive: true, maxSockets: 1024, maxFreeSockets: 512 });
+const agent = new Agent({ keepAlive: true, maxSockets: 2048, maxFreeSockets: 1024 });
 
 try {
   await cp(resolve("dist"), join(tempDir, "dist"), { recursive: true });
   await adminDb.unsafe(`CREATE DATABASE ${dbName}`);
 
-  const [mockPort, gwPort, intPort] = await Promise.all([
+  const [mockPort1, mockPort2, gwPort, intPort] = await Promise.all([
+    findFreePort(),
     findFreePort(),
     findFreePort(),
     findFreePort(),
@@ -123,6 +134,7 @@ try {
 
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
+    BUN_CONFIG_MAX_HTTP_REQUESTS: "4096",
     DATABASE_URL: targetUrl.toString(),
     KEY_PEPPER: "bsingle-pepper-0123456789abcdef01",
     ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -132,22 +144,27 @@ try {
     SNAPSHOT_POLL_MS: "0",
     MAX_IN_FLIGHT: "4000",
     DB_MAX_CONNECTIONS: "32",
-    MICRO_BATCH_WINDOW_MS: "3",
-    MICRO_BATCH_MAX_SIZE: "128",
+    MICRO_BATCH_WINDOW_MS: "2",
+    MICRO_BATCH_MAX_SIZE: "512",
     GATEWAY_HOST: "127.0.0.1",
     GATEWAY_PORT: String(gwPort),
     INTERNAL_HOST: "127.0.0.1",
     INTERNAL_PORT: String(intPort),
     MOCK_HOST: "127.0.0.1",
-    MOCK_PORT: String(mockPort),
+    MOCK_PORT: String(mockPort1),
     MOCK_CONTROL_TOKEN: "bsingle-mock-ctrl",
   };
 
   await runSync(tempDir, ["dist/tools/migrate.js"], env);
 
-  const mockProc = spawn(process.execPath, ["dist/mock-providers/main.js"], {
+  const mockProc1 = spawn(process.execPath, ["dist/mock-providers/main.js"], {
     cwd: tempDir,
-    env,
+    env: { ...env, MOCK_PORT: String(mockPort1) },
+    stdio: "ignore",
+  });
+  const mockProc2 = spawn(process.execPath, ["dist/mock-providers/main.js"], {
+    cwd: tempDir,
+    env: { ...env, MOCK_PORT: String(mockPort2) },
     stdio: "ignore",
   });
   const gwProc = spawn(process.execPath, ["dist/gateway/main.js", "--mode=gateway"], {
@@ -155,10 +172,11 @@ try {
     env,
     stdio: "ignore",
   });
-  procs.push(mockProc, gwProc);
+  procs.push(mockProc1, mockProc2, gwProc);
 
   await Promise.all([
-    waitForJson(`http://127.0.0.1:${mockPort}/healthz`),
+    waitForJson(`http://127.0.0.1:${mockPort1}/healthz`),
+    waitForJson(`http://127.0.0.1:${mockPort2}/healthz`),
     waitForJson(`http://127.0.0.1:${gwPort}/readyz`),
   ]);
 
@@ -182,18 +200,28 @@ try {
     external_ref: "bsingle-sup-1",
     amount_atoms: "100000000000000",
   });
-  const ch = await callInternal("PUT", "/internal/v1/channels", {
+  const ch1 = await callInternal("PUT", "/internal/v1/channels", {
     account_id: acc.id,
-    name: "bsingle-ch",
+    name: "bsingle-ch-1",
     kind: "openai",
-    base_url: `http://127.0.0.1:${mockPort}/openai`,
-    api_key: "sk-bsingle",
+    base_url: `http://127.0.0.1:${mockPort1}/openai`,
+    api_key: "sk-bsingle-1",
+    rpm: 10_000_000,
+    concurrency: 10_000,
+  });
+  const ch2 = await callInternal("PUT", "/internal/v1/channels", {
+    account_id: acc.id,
+    name: "bsingle-ch-2",
+    kind: "openai",
+    base_url: `http://127.0.0.1:${mockPort2}/openai`,
+    api_key: "sk-bsingle-2",
     rpm: 10_000_000,
     concurrency: 10_000,
   });
   await callInternal("PUT", "/internal/v1/models", {
     name: "bsingle-gpt",
     operations: ["chat"],
+    routing_strategy: "ROUND_ROBIN",
     max_output_tokens: 64,
   });
   const custPrice = await callInternal("POST", "/internal/v1/prices", {
@@ -218,7 +246,15 @@ try {
   });
   await callInternal("PUT", "/internal/v1/routes", {
     model_name: "bsingle-gpt",
-    channel_id: ch.id,
+    channel_id: ch1.id,
+    upstream_model: "bsingle-up",
+    operations: ["chat"],
+    billing_price_id: custPrice.id,
+    cost_version_id: supPrice.id,
+  });
+  await callInternal("PUT", "/internal/v1/routes", {
+    model_name: "bsingle-gpt",
+    channel_id: ch2.id,
     upstream_model: "bsingle-up",
     operations: ["chat"],
     billing_price_id: custPrice.id,
@@ -280,6 +316,7 @@ try {
   ) {
     let completed = 0;
     let errors = 0;
+    const sampleErrors: string[] = [];
     const latencies: number[] = [];
     const payload = stream ? ssePayload : jsonPayload;
     const walBefore = await walLsnBytes();
@@ -287,28 +324,38 @@ try {
     const stopAt = started + seconds * 1000;
     let cursor = 0;
 
-    async function worker() {
+    async function worker(workerIdx: number) {
+      const rampDelay = Math.floor(workerIdx / 48) * 15;
+      if (rampDelay > 0) await Bun.sleep(rampDelay);
       while (performance.now() < stopAt) {
         const idx = cursor++;
         const key = keyPool[idx % keyPool.length]!;
         const t0 = performance.now();
         const res = await postJsonKeepAlive(agent, gwPort, key, payload, stream);
         if (res.ok) completed++;
-        else errors++;
+        else {
+          errors++;
+          if (sampleErrors.length < 5) {
+            sampleErrors.push(`status=${res.status} ${res.errText ?? ""}`);
+          }
+        }
         latencies.push(performance.now() - t0);
       }
     }
 
-    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)));
     const elapsedSec = (performance.now() - started) / 1000;
     const walAfter = await walLsnBytes();
     const stats = getProcStats(gwProc.pid!);
+    const mock1Stats = getProcStats(mockProc1.pid!);
+    const clientStats = getProcStats(process.pid);
     latencies.sort((a, b) => a - b);
     return {
       phase: label,
       concurrency,
       completed,
       errors,
+      ...(sampleErrors.length > 0 ? { sample_errors: sampleErrors } : {}),
       elapsed_sec: Number(elapsedSec.toFixed(3)),
       rps: Number((completed / elapsedSec).toFixed(1)),
       p50_ms: percentile(latencies, 0.5),
@@ -317,25 +364,39 @@ try {
       wal_bytes_per_req: completed > 0 ? Number((walAfter - walBefore) / BigInt(completed)) : 0,
       gw_rss_mb: stats.rssMb,
       gw_cpu_pct: stats.cpuPct,
+      mock1_cpu_pct: mock1Stats.cpuPct,
+      client_cpu_pct: clientStats.cpuPct,
     };
   }
 
   try {
-    await runPhase("warmup", keys, 32, 2, false);
+    await runPhase("warmup", keys, 128, 2, false);
 
     const results = [
-      await runPhase(`1node_json_64c_${durationSec}s`, keys, 64, durationSec, false),
       await runPhase(`1node_json_128c_${durationSec}s`, keys, 128, durationSec, false),
       await runPhase(`1node_json_256c_${durationSec}s`, keys, 256, durationSec, false),
       await runPhase(`1node_json_512c_${durationSec}s`, keys, 512, durationSec, false),
-      await runPhase(`1node_sse_256c_${durationSec}s`, keys, 256, durationSec, true),
-      await runPhase(`1node_hot_wallet_256c_${durationSec}s`, [keys[0]!], 256, durationSec, false),
+      await runPhase(`1node_json_768c_${durationSec}s`, keys, 768, durationSec, false),
+      await runPhase(`1node_json_1024c_${durationSec}s`, keys, 1024, durationSec, false),
+      await runPhase(`1node_sse_512c_${durationSec}s`, keys, 512, durationSec, true),
+      await runPhase(`1node_hot_wallet_512c_${durationSec}s`, [keys[0]!], 512, durationSec, false),
     ];
 
+    await Bun.sleep(600);
     const metricsTxt = await (await fetch(`http://127.0.0.1:${gwPort}/metrics`)).text();
     const inFlight = Number(/gateway_in_flight (\d+)/.exec(metricsTxt)?.[1] ?? -1);
     const totalCharges = Number(
       (await db`SELECT count(*)::int AS n FROM public.billing_charges`)[0]!.n,
+    );
+    const activeLeases = Number(
+      (
+        await db`
+          SELECT (
+            (SELECT count(*) FROM public.wallet_leases WHERE state = 'ACTIVE') +
+            (SELECT count(*) FROM public.supplier_leases WHERE state = 'ACTIVE')
+          )::int AS n
+        `
+      )[0]!.n,
     );
     const pgSettings = await db`
       SELECT name, setting FROM pg_settings
@@ -349,12 +410,16 @@ try {
         {
           bun_version: Bun.version,
           topology:
-            "1x standalone dist/gateway + 1x standalone dist/mock-providers + separate keep-alive load client (maxSockets=1024) + PG 17",
-          micro_batch: { window_ms: 3, max_size: 128 },
+            "1x standalone dist/gateway + 2x standalone dist/mock-providers (ROUND_ROBIN) + keep-alive load client (maxSockets=2048) + PG 17",
+          micro_batch: {
+            window_ms: Number(env.MICRO_BATCH_WINDOW_MS),
+            max_size: Number(env.MICRO_BATCH_MAX_SIZE),
+          },
           pg_durability: Object.fromEntries(
             pgSettings.map((r: Record<string, unknown>) => [String(r.name), String(r.setting)]),
           ),
           total_settled_charges: totalCharges,
+          active_leases_after_idle: activeLeases,
           results,
           post_drain_in_flight: inFlight,
           conservation: audit,
@@ -363,7 +428,7 @@ try {
         2,
       ),
     );
-    if (!audit.ok || audit.open_holds !== 0 || inFlight !== 0) {
+    if (!audit.ok || audit.open_holds !== 0 || inFlight !== 0 || activeLeases !== 0) {
       throw new Error("Single-node benchmark invariant check failed");
     }
   } finally {

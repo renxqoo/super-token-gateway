@@ -1,5 +1,5 @@
 import type { SQL } from "bun";
-import { and, asc, desc, eq, gte, lt, sql, type SQL as DrizzleSQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lt, or, sql, type SQL as DrizzleSQL } from "drizzle-orm";
 import { billingCharges, billingHolds, createDrizzle, ledgerEntries } from "./schema.ts";
 
 export function createLedgerQueries(db: SQL) {
@@ -54,7 +54,29 @@ export function createLedgerQueries(db: SQL) {
       const conds: DrizzleSQL[] = [];
       if (input.side) conds.push(eq(ledgerEntries.side, input.side));
       if (input.entity_id) conds.push(eq(ledgerEntries.entityId, input.entity_id));
-      if (input.request_id) conds.push(eq(ledgerEntries.requestId, input.request_id));
+      if (input.request_id) {
+        const chRows = await orm
+          .select({
+            customerJournalId: billingCharges.customerJournalId,
+            supplierJournalId: billingCharges.supplierJournalId,
+          })
+          .from(billingCharges)
+          .where(eq(billingCharges.requestId, input.request_id));
+        const jids: string[] = [];
+        const ch = chRows[0];
+        if (ch?.customerJournalId) jids.push(ch.customerJournalId);
+        if (ch?.supplierJournalId) jids.push(ch.supplierJournalId);
+        if (jids.length > 0) {
+          conds.push(
+            or(
+              eq(ledgerEntries.requestId, input.request_id),
+              inArray(ledgerEntries.journalId, jids),
+            )!,
+          );
+        } else {
+          conds.push(eq(ledgerEntries.requestId, input.request_id));
+        }
+      }
       if (input.kind) conds.push(eq(ledgerEntries.kind, input.kind));
       if (input.from) conds.push(gte(ledgerEntries.createdAt, input.from));
       if (input.to) conds.push(lt(ledgerEntries.createdAt, input.to));
@@ -110,22 +132,30 @@ export function createLedgerQueries(db: SQL) {
     },
 
     async getRequestBilling(requestId: string) {
-      const [holds, charges, entries] = await Promise.all([
+      const [holds, charges] = await Promise.all([
         orm.select().from(billingHolds).where(eq(billingHolds.requestId, requestId)),
         orm.select().from(billingCharges).where(eq(billingCharges.requestId, requestId)),
-        orm
-          .select()
-          .from(ledgerEntries)
-          .where(eq(ledgerEntries.requestId, requestId))
-          .orderBy(
-            asc(ledgerEntries.createdAt),
-            asc(ledgerEntries.journalId),
-            asc(ledgerEntries.ordinal),
-          ),
       ]);
+      const ch = charges[0] ?? null;
+      const jids: string[] = [];
+      if (ch?.customerJournalId) jids.push(ch.customerJournalId);
+      if (ch?.supplierJournalId) jids.push(ch.supplierJournalId);
+      const entryWhere =
+        jids.length > 0
+          ? or(eq(ledgerEntries.requestId, requestId), inArray(ledgerEntries.journalId, jids))
+          : eq(ledgerEntries.requestId, requestId);
+      const entries = await orm
+        .select()
+        .from(ledgerEntries)
+        .where(entryWhere)
+        .orderBy(
+          asc(ledgerEntries.createdAt),
+          asc(ledgerEntries.journalId),
+          asc(ledgerEntries.ordinal),
+        );
       return {
         hold: holds[0] ?? null,
-        charge: charges[0] ?? null,
+        charge: ch,
         entries,
       };
     },

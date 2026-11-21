@@ -167,6 +167,12 @@ export type HoldLotAllocation = {
   amount_atoms: string;
 };
 
+export type LeaseLotAllocation = {
+  lot_id: string;
+  amount_atoms: string;
+  expires_at_ms: number | null;
+};
+
 export type ChargeLotAllocation = {
   lot_id: string;
   amount_atoms: string;
@@ -274,6 +280,7 @@ export type CommitTerminalInput = {
   input_characters?: string;
   supplier_pricing: Pricing;
   supplier_currency: string;
+  supplier_cost_atoms_override?: string;
   plugin_audit?: PluginAuditEntry[];
   charge_policy?: ChargePolicy;
   moderation_blocked?: boolean;

@@ -26,6 +26,7 @@ import type {
   ChargePolicy,
   ChannelKind,
   HoldLotAllocation,
+  LeaseLotAllocation,
   LotKind,
   PluginAuditEntry,
   PluginKind,
@@ -365,6 +366,61 @@ export const supplierCells = pgTable(
   ],
 );
 
+export const walletLeases = pgTable(
+  "wallet_leases",
+  {
+    id: uuid("id").primaryKey(),
+    nodeId: text("node_id").notNull(),
+    walletId: uuid("wallet_id")
+      .notNull()
+      .references(() => wallets.id),
+    currency: text("currency").notNull(),
+    lotAllocations: pgJsonb<LeaseLotAllocation[]>("lot_allocations")
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    remainingAtoms: numeric("remaining_atoms", { precision: 38, scale: 0 }).notNull(),
+    earliestLotExpiresAt: timestamp("earliest_lot_expires_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    state: text("state").$type<"ACTIVE" | "CLOSED">().notNull().default("ACTIVE"),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("wallet_leases_active_idx").on(t.expiresAt),
+    index("wallet_leases_wallet_idx").on(t.walletId),
+  ],
+);
+
+export const supplierLeases = pgTable(
+  "supplier_leases",
+  {
+    id: uuid("id").primaryKey(),
+    nodeId: text("node_id").notNull(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => upstreamAccounts.id),
+    currency: text("currency").notNull(),
+    cell: smallint("cell").notNull(),
+    remainingAtoms: numeric("remaining_atoms", { precision: 38, scale: 0 }).notNull(),
+    state: text("state").$type<"ACTIVE" | "CLOSED">().notNull().default("ACTIVE"),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("supplier_leases_active_idx").on(t.expiresAt)],
+);
+
 export const billingHolds = pgTable(
   "billing_holds",
   {
@@ -387,6 +443,8 @@ export const billingHolds = pgTable(
     supplierHolds: pgJsonb<SupplierHoldEntry[]>("supplier_holds")
       .notNull()
       .default(sql`'[]'::jsonb`),
+    walletLeaseId: uuid("wallet_lease_id").references(() => walletLeases.id),
+    supplierLeaseId: uuid("supplier_lease_id").references(() => supplierLeases.id),
     state: text("state")
       .$type<"HELD" | "SETTLED" | "RELEASED" | "UNKNOWN" | "CONFLICT">()
       .notNull()
@@ -402,6 +460,8 @@ export const billingHolds = pgTable(
       .on(t.projectId, t.operation, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} IS NOT NULL`),
     index("billing_holds_open_idx").on(t.expiresAt),
+    index("billing_holds_wallet_lease_idx").on(t.walletLeaseId),
+    index("billing_holds_supplier_lease_idx").on(t.supplierLeaseId),
   ],
 );
 
@@ -451,6 +511,8 @@ export const billingCharges = pgTable(
     outcome: text("outcome")
       .$type<"SETTLED" | "RELEASED" | "DEBT" | "MODERATION_BLOCKED" | "UNKNOWN_RESOLVED">()
       .notNull(),
+    customerJournalId: uuid("customer_journal_id"),
+    supplierJournalId: uuid("supplier_journal_id"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .notNull()
       .defaultNow(),
@@ -574,6 +636,8 @@ export const ledgerSchema = {
   walletLots,
   supplierRootBalances,
   supplierCells,
+  walletLeases,
+  supplierLeases,
   billingHolds,
   billingCharges,
   ledgerEntries,
