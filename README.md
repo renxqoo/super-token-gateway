@@ -99,4 +99,14 @@ bun run build:plugins
 
 Vertex 也接受有明确 `expires_at` 的 `{"access_token":"...","expires_at":"...Z"}`，用于已受控轮换的短时令牌；过期不发送推理、不保留预扣。服务账号仅向官方 OAuth 端点换取令牌。JSON 凭证允许多行，继续用 AES-GCM 保存；Azure/Bedrock/Vertex 的其他模型族与端点不被默认宣称支持。真实云账号联调需要对应账号与预算，本地合同测试不替代它。
 
-schema06 / schema07 到当前版本的停机升级、月分区准备、DEFAULT 修复、归档校验和冷存储移动见 [数据库与生命周期](database.md)。运行时仍只接受当前契约，财务幂等身份与未结责任持续保留。
+schema06 / schema07 到当前版本的停机升级、月分区准备、DEFAULT 修复、归档校验和冷存储移动见 [数据库与生命周期](database.md)。在 `v3-high-perf` 重构分支中，83 个历史 SQL 迁移/补丁文件已压缩为单一基线迁移 `packages/storage/src/migrations/0000_v3_baseline.sql`（版本 `2026112100`），仅支持空库初始化与当前契约运行，不再保留跨 68 个历史版本的在线增量升级路径。
+
+## V3 原生 Go 高并发引擎
+
+`apps/v3-engine` 提供零第三方依赖的 Go 1.27.4 数据面与 64 分片确定性内存 WAL/Quorum（`2-of-3` `fsync` + Epoch Fencing）账本引擎，面向突破单机吞吐瓶颈的部署与验收场景，详情与本机实测基线见 [apps/v3-engine/README.md](apps/v3-engine/README.md)：
+
+```sh
+bun run build:v3
+bun run test:v3:race
+bun run bench:v3 -- -mode=json -concurrency=2048 -duration=6s -kill-replica-at=3s
+```
