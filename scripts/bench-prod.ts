@@ -8,6 +8,13 @@ import { createDatabase } from "@gateway/ledger";
 const baseDbUrl = process.env.DATABASE_URL;
 if (!baseDbUrl) throw new Error("DATABASE_URL is required");
 
+const isStress = process.argv.includes("--stress");
+const withRedis = !process.argv.includes("--no-redis");
+const durationSec = isStress ? 15 : 5;
+const hotWalletSec = isStress ? 10 : 3;
+const longStreamCount = isStress ? 1000 : 500;
+const longStreamMs = isStress ? 5000 : 2500;
+
 async function findFreePort(): Promise<number> {
   return new Promise((resolvePort, rejectPort) => {
     const srv = createServer();
@@ -70,35 +77,85 @@ try {
   await cp(resolve("dist"), join(tempDir, "dist"), { recursive: true });
   await adminDb.unsafe(`CREATE DATABASE ${dbName}`);
 
-  const [mockPort, gwPort1, intPort1, gwPort2, intPort2] = await Promise.all([
-    findFreePort(),
-    findFreePort(),
-    findFreePort(),
-    findFreePort(),
-    findFreePort(),
-  ]);
+  const [mockPort, gwPort1, intPort1, gwPort2, intPort2, workerPort, redisPort] = await Promise.all(
+    [
+      findFreePort(),
+      findFreePort(),
+      findFreePort(),
+      findFreePort(),
+      findFreePort(),
+      findFreePort(),
+      findFreePort(),
+    ],
+  );
+
+  let redisUrl: string | undefined;
+  if (withRedis) {
+    const redisBin =
+      process.env.DURABILITY_REDIS_SERVER ??
+      new URL("../.local/toolchain/redis74/bin/redis-server", import.meta.url).pathname;
+    const redisData = join(tempDir, "redis");
+    await cp(resolve("infra"), redisData, { recursive: true }).catch(() => undefined);
+    const rProc = spawn(
+      redisBin,
+      [
+        "--bind",
+        "127.0.0.1",
+        "--port",
+        String(redisPort),
+        "--dir",
+        tempDir,
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+      ],
+      { stdio: "ignore" },
+    );
+    procs.push(rProc);
+    redisUrl = `redis://127.0.0.1:${redisPort}`;
+    const rDeadline = Date.now() + 5000;
+    while (Date.now() < rDeadline) {
+      try {
+        const cli = new Bun.RedisClient(redisUrl, { connectionTimeout: 300, autoReconnect: false });
+        const pong = await cli.send("PING", []);
+        cli.close();
+        if (pong === "PONG") break;
+      } catch {
+        await Bun.sleep(50);
+      }
+    }
+  }
 
   const baseEnv: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     DATABASE_URL: targetUrl.toString(),
+    ...(redisUrl ? { REDIS_URL: redisUrl, REDIS_NAMESPACE: "stg_bench" } : {}),
     KEY_PEPPER: "bprod-pepper-0123456789abcdef0123",
     ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     ADMIN_TOKEN: "bprod-admin-token-0123456789abcdef",
     ALLOW_PRIVATE_UPSTREAMS: "true",
     ACCESS_LOG: "false",
-    SNAPSHOT_POLL_MS: "200",
-    MAX_IN_FLIGHT: "4000",
+    SNAPSHOT_POLL_MS: "2000",
+    MAX_IN_FLIGHT: "5000",
     DB_MAX_CONNECTIONS: "32",
     MICRO_BATCH_WINDOW_MS: "3",
     MICRO_BATCH_MAX_SIZE: "64",
     MOCK_HOST: "127.0.0.1",
     MOCK_PORT: String(mockPort),
     MOCK_CONTROL_TOKEN: "bprod-mock-ctrl",
+    WORKER_HEALTH_HOST: "127.0.0.1",
+    WORKER_HEALTH_PORT: String(workerPort),
   };
 
   await runSync(tempDir, ["dist/tools/migrate.js"], baseEnv);
 
   const mockProc = spawn(process.execPath, ["dist/mock-providers/main.js"], {
+    cwd: tempDir,
+    env: baseEnv,
+    stdio: "ignore",
+  });
+  const workerProc = spawn(process.execPath, ["dist/worker/main.js"], {
     cwd: tempDir,
     env: baseEnv,
     stdio: "ignore",
@@ -125,12 +182,13 @@ try {
     },
     stdio: "ignore",
   });
-  procs.push(mockProc, gw1, gw2);
+  procs.push(mockProc, workerProc, gw1, gw2);
 
   await Promise.all([
     waitForJson(`http://127.0.0.1:${mockPort}/healthz`),
     waitForJson(`http://127.0.0.1:${gwPort1}/readyz`),
     waitForJson(`http://127.0.0.1:${gwPort2}/readyz`),
+    waitForJson(`http://127.0.0.1:${workerPort}/readyz`),
   ]);
 
   const adminHeaders = {
@@ -151,27 +209,34 @@ try {
   await callInternal("POST", `/internal/v1/upstream-accounts/${acc.id}/recharges`, {
     currency: "USD",
     external_ref: "bprod-sup-1",
-    amount_atoms: "10000000000000",
+    amount_atoms: "100000000000000",
   });
-  const ch = await callInternal("PUT", "/internal/v1/channels", {
+  const chPrimary = await callInternal("PUT", "/internal/v1/channels", {
     account_id: acc.id,
-    name: "bprod-ch",
+    name: "bprod-primary",
     kind: "openai",
     base_url: `http://127.0.0.1:${mockPort}/openai`,
-    api_key: "sk-bprod",
+    api_key: "sk-bprod-p",
     rpm: 10_000_000,
     concurrency: 10_000,
   });
-  await callInternal("PUT", "/internal/v1/models", {
-    name: "bprod-fast",
-    operations: ["chat"],
-    max_output_tokens: 64,
+  const chBackup = await callInternal("PUT", "/internal/v1/channels", {
+    account_id: acc.id,
+    name: "bprod-backup",
+    kind: "openai",
+    base_url: `http://127.0.0.1:${mockPort}/openai`,
+    api_key: "sk-bprod-b",
+    rpm: 10_000_000,
+    concurrency: 10_000,
   });
-  await callInternal("PUT", "/internal/v1/models", {
-    name: "bprod-long",
-    operations: ["chat"],
-    max_output_tokens: 64,
-  });
+
+  for (const name of ["bprod-fast", "bprod-long", "bprod-failover"]) {
+    await callInternal("PUT", "/internal/v1/models", {
+      name,
+      operations: ["chat"],
+      max_output_tokens: 64,
+    });
+  }
   const custPrice = await callInternal("POST", "/internal/v1/prices", {
     side: "CUSTOMER",
     currency: "USD",
@@ -192,9 +257,10 @@ try {
     },
     ceilings: { input_tokens: "1000", cached_input_tokens: "1000", output_tokens: "64" },
   });
+
   await callInternal("PUT", "/internal/v1/routes", {
     model_name: "bprod-fast",
-    channel_id: ch.id,
+    channel_id: chPrimary.id,
     upstream_model: "bprod-fast-up",
     operations: ["chat"],
     billing_price_id: custPrice.id,
@@ -202,11 +268,31 @@ try {
   });
   await callInternal("PUT", "/internal/v1/routes", {
     model_name: "bprod-long",
-    channel_id: ch.id,
+    channel_id: chPrimary.id,
     upstream_model: "bprod-long-up",
     operations: ["chat"],
     billing_price_id: custPrice.id,
     cost_version_id: supPrice.id,
+  });
+  await callInternal("PUT", "/internal/v1/routes", {
+    model_name: "bprod-failover",
+    channel_id: chPrimary.id,
+    upstream_model: "bprod-broken-up",
+    operations: ["chat"],
+    priority: 10,
+    billing_price_id: custPrice.id,
+    cost_version_id: supPrice.id,
+    retry_policy: { max_attempts: 2 },
+  });
+  await callInternal("PUT", "/internal/v1/routes", {
+    model_name: "bprod-failover",
+    channel_id: chBackup.id,
+    upstream_model: "bprod-fast-up",
+    operations: ["chat"],
+    priority: 5,
+    billing_price_id: custPrice.id,
+    cost_version_id: supPrice.id,
+    retry_policy: { max_attempts: 2 },
   });
 
   await fetch(`http://127.0.0.1:${mockPort}/__control/scenarios`, {
@@ -217,7 +303,18 @@ try {
     },
     body: JSON.stringify({
       model: "bprod-long-up",
-      scenario: { repeat: 6, streamDurationMs: 2500 },
+      scenario: { repeat: 8, streamDurationMs: longStreamMs },
+    }),
+  });
+  await fetch(`http://127.0.0.1:${mockPort}/__control/scenarios`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${baseEnv.MOCK_CONTROL_TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "bprod-broken-up",
+      scenario: { status: 503 },
     }),
   });
 
@@ -228,7 +325,7 @@ try {
       currency: "USD",
       rpm: 10_000_000,
       tpm: 1_000_000_000,
-      concurrency: 1000,
+      concurrency: 5000,
     });
     const k = await callInternal("PUT", "/internal/v1/api-keys", {
       project_id: p.id,
@@ -237,13 +334,13 @@ try {
     await callInternal("POST", `/internal/v1/wallets/${p.id}/credits`, {
       currency: "USD",
       external_ref: `bprod-c-${i}`,
-      amount_atoms: "100000000000",
+      amount_atoms: "1000000000000",
       kind: "CASH",
     });
     keys.push(String(k.key));
   }
 
-  await Bun.sleep(400);
+  await Bun.sleep(250);
 
   const db = createDatabase(targetUrl.toString(), 4);
   const walLsnBytes = async (): Promise<bigint> => {
@@ -256,11 +353,12 @@ try {
     `http://127.0.0.1:${gwPort2}/v1/chat/completions`,
   ];
 
-  async function runLoad(
+  async function runTimedLoad(
     label: string,
     model: string,
+    keyPool: string[],
     concurrency: number,
-    totalRequests: number,
+    seconds: number,
     stream: boolean,
   ) {
     let completed = 0;
@@ -269,14 +367,14 @@ try {
     const walBefore = await walLsnBytes();
     const rssBefore = getRssMb(gw1.pid!) + getRssMb(gw2.pid!);
     const started = performance.now();
+    const stopAt = started + seconds * 1000;
     let cursor = 0;
 
     async function worker() {
-      while (true) {
+      while (performance.now() < stopAt) {
         const idx = cursor++;
-        if (idx >= totalRequests) break;
         const url = endpoints[idx % endpoints.length]!;
-        const key = keys[idx % keys.length]!;
+        const key = keyPool[idx % keyPool.length]!;
         const t0 = performance.now();
         try {
           const res = await fetch(url, {
@@ -307,8 +405,75 @@ try {
     return {
       phase: label,
       gateway_nodes: 2,
+      redis_enabled: Boolean(redisUrl),
       concurrency,
-      total_requests: totalRequests,
+      completed,
+      errors,
+      elapsed_sec: Number(elapsedSec.toFixed(3)),
+      rps: Number((completed / elapsedSec).toFixed(1)),
+      p50_ms: percentile(latencies, 0.5),
+      p95_ms: percentile(latencies, 0.95),
+      p99_ms: percentile(latencies, 0.99),
+      wal_bytes_per_req: completed > 0 ? Number((walAfter - walBefore) / BigInt(completed)) : 0,
+      combined_gw_rss_mb_before: Number(rssBefore.toFixed(1)),
+      combined_gw_rss_mb_after: Number(rssAfter.toFixed(1)),
+    };
+  }
+
+  async function runFixedCountLoad(
+    label: string,
+    model: string,
+    keyPool: string[],
+    concurrency: number,
+    totalRequests: number,
+    stream: boolean,
+  ) {
+    let completed = 0;
+    let errors = 0;
+    const latencies: number[] = [];
+    const walBefore = await walLsnBytes();
+    const rssBefore = getRssMb(gw1.pid!) + getRssMb(gw2.pid!);
+    const started = performance.now();
+    let cursor = 0;
+
+    async function worker() {
+      while (true) {
+        const idx = cursor++;
+        if (idx >= totalRequests) break;
+        const url = endpoints[idx % endpoints.length]!;
+        const key = keyPool[idx % keyPool.length]!;
+        const t0 = performance.now();
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+            body: JSON.stringify({
+              model,
+              stream,
+              messages: [{ role: "user", content: "hi" }],
+              max_tokens: 32,
+            }),
+          });
+          const bodyText = await res.text();
+          if (res.status === 200 && (!stream || bodyText.includes("[DONE]"))) completed++;
+          else errors++;
+        } catch {
+          errors++;
+        }
+        latencies.push(performance.now() - t0);
+      }
+    }
+
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    const elapsedSec = (performance.now() - started) / 1000;
+    const walAfter = await walLsnBytes();
+    const rssAfter = getRssMb(gw1.pid!) + getRssMb(gw2.pid!);
+    latencies.sort((a, b) => a - b);
+    return {
+      phase: label,
+      gateway_nodes: 2,
+      redis_enabled: Boolean(redisUrl),
+      concurrency,
       completed,
       errors,
       elapsed_sec: Number(elapsedSec.toFixed(3)),
@@ -323,35 +488,88 @@ try {
   }
 
   try {
-    await runLoad("warmup", "bprod-fast", 32, 200, false);
+    await runFixedCountLoad("warmup", "bprod-fast", keys, 32, 200, false);
 
     const results = [
-      await runLoad("2node_short_chat_json", "bprod-fast", 128, 5000, false),
-      await runLoad("2node_short_chat_sse", "bprod-fast", 128, 5000, true),
-      await runLoad("2node_500_concurrent_2.5s_sse_streams", "bprod-long", 500, 500, true),
+      await runTimedLoad(
+        `2node_sustained_${durationSec}s_json_128c`,
+        "bprod-fast",
+        keys,
+        128,
+        durationSec,
+        false,
+      ),
+      await runTimedLoad(
+        `2node_sustained_${durationSec}s_json_256c`,
+        "bprod-fast",
+        keys,
+        256,
+        durationSec,
+        false,
+      ),
+      await runTimedLoad(
+        `2node_sustained_${durationSec}s_sse_128c`,
+        "bprod-fast",
+        keys,
+        128,
+        durationSec,
+        true,
+      ),
+      await runTimedLoad(
+        `2node_hot_wallet_${hotWalletSec}s_128c`,
+        "bprod-fast",
+        [keys[0]!],
+        128,
+        hotWalletSec,
+        false,
+      ),
+      await runFixedCountLoad(
+        `2node_${longStreamCount}_concurrent_${longStreamMs / 1000}s_sse_streams`,
+        "bprod-long",
+        keys,
+        longStreamCount,
+        longStreamCount,
+        true,
+      ),
+      await runFixedCountLoad(
+        "2node_live_failover_503_to_backup_64c",
+        "bprod-failover",
+        keys,
+        64,
+        1000,
+        false,
+      ),
     ];
 
     const m1 = await (await fetch(`http://127.0.0.1:${gwPort1}/metrics`)).text();
     const m2 = await (await fetch(`http://127.0.0.1:${gwPort2}/metrics`)).text();
     const inFlight1 = Number(/gateway_in_flight (\d+)/.exec(m1)?.[1] ?? -1);
     const inFlight2 = Number(/gateway_in_flight (\d+)/.exec(m2)?.[1] ?? -1);
+    const failovers1 = Number(/gateway_failovers_total (\d+)/.exec(m1)?.[1] ?? 0);
+    const failovers2 = Number(/gateway_failovers_total (\d+)/.exec(m2)?.[1] ?? 0);
     const pgSettings = await db`
       SELECT name, setting FROM pg_settings
       WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes')
       ORDER BY name
     `;
+    const totalCharges = Number(
+      (await db`SELECT count(*)::int AS n FROM public.billing_charges`)[0]!.n,
+    );
     const audit = await callInternal("GET", "/internal/v1/audit/conservation");
 
     console.log(
       JSON.stringify(
         {
           bun_version: Bun.version,
+          mode: isStress ? "stress" : "standard",
           topology:
-            "2x standalone dist/gateway + 1x standalone dist/mock-providers + separate load client + PG 17",
+            "2x standalone dist/gateway + 1x standalone dist/worker + 1x Redis 7.4 + 1x standalone dist/mock-providers + separate load client + PG 17",
           pg_durability: Object.fromEntries(
             pgSettings.map((r: Record<string, unknown>) => [String(r.name), String(r.setting)]),
           ),
+          total_settled_charges: totalCharges,
           results,
+          failovers_executed: { node1: failovers1, node2: failovers2 },
           post_drain_in_flight: { node1: inFlight1, node2: inFlight2 },
           conservation: audit,
         },
@@ -360,7 +578,7 @@ try {
       ),
     );
     if (!audit.ok || audit.open_holds !== 0 || inFlight1 !== 0 || inFlight2 !== 0) {
-      throw new Error("Multi-process benchmark invariant check failed");
+      throw new Error("Production stress benchmark invariant check failed");
     }
   } finally {
     await db.close();
