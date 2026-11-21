@@ -545,6 +545,36 @@ export function createCatalogRepository(db: SQL) {
       });
     },
 
+    async listPlugins(): Promise<Omit<PluginRecord, "wasm_bytes">[]> {
+      const rows = await orm
+        .select({
+          id: plugins.id,
+          name: plugins.name,
+          version: plugins.version,
+          kind: plugins.kind,
+          digest: plugins.digest,
+          webhookConfig: plugins.webhookConfig,
+          signature: plugins.signature,
+          signingKeyId: plugins.signingKeyId,
+          manifest: plugins.manifest,
+          enabled: plugins.enabled,
+        })
+        .from(plugins)
+        .orderBy(asc(plugins.name), asc(plugins.version));
+      return rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        version: r.version,
+        kind: r.kind,
+        digest: r.digest,
+        webhook_config: r.webhookConfig,
+        signature: r.signature,
+        signing_key_id: r.signingKeyId,
+        manifest: r.manifest,
+        enabled: r.enabled,
+      }));
+    },
+
     async loadSnapshot(): Promise<ConfigSnapshot> {
       const [
         epochRows,

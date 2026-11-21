@@ -56,13 +56,12 @@ import {
   BedrockEventStreamDecoder,
   buildTextDeltaSse,
   extractChunkTextFromEncodedSse,
-  extractRequestText,
   extractResponseText,
   isConversationalOperation,
   parseRetryAfterMs,
   prepareUpstreamRequest,
-  replaceRequestText,
   replaceResponseText,
+  transformRequestTexts,
 } from "./upstream.ts";
 
 type LedgerEngine = ReturnType<typeof createLedgerEngine>;
@@ -584,28 +583,48 @@ export async function handleInferenceRequest(
     const preRequestAudit: PluginAuditEntry[] = [];
     const primarySteps = selected[0]!.route.route.plugin_pipeline;
     if (primarySteps.length > 0 && !isMultipartOp) {
-      const reqText = extractRequestText(clientBody, operation);
-      const preRes = await deps.pluginEngine.runUnary(
-        "on_request",
-        primarySteps,
-        snap.plugins,
-        { request_id: requestId, project_id: project.id, model: model.name, operation },
-        reqText,
-        c.req.raw.signal,
-      );
-      preRequestAudit.push(...preRes.audit);
-      if (preRes.blocked) {
+      let preBlocked: {
+        rule_code?: string;
+        http_status?: number;
+        safe_message?: string;
+      } | null = null;
+      const transformed = await transformRequestTexts(clientBody, operation, async (partText) => {
+        const preRes = await deps.pluginEngine.runUnary(
+          "on_request",
+          primarySteps,
+          snap.plugins,
+          { request_id: requestId, project_id: project.id, model: model.name, operation },
+          partText,
+          c.req.raw.signal,
+        );
+        preRequestAudit.push(...preRes.audit);
+        if (preRes.blocked) {
+          preBlocked = {
+            ...(preRes.rule_code !== undefined ? { rule_code: preRes.rule_code } : {}),
+            ...(preRes.http_status !== undefined ? { http_status: preRes.http_status } : {}),
+            ...(preRes.safe_message !== undefined ? { safe_message: preRes.safe_message } : {}),
+          };
+          return { blocked: true, text: "" };
+        }
+        return { blocked: false, text: preRes.text };
+      });
+      if (transformed.blocked && preBlocked) {
+        const blk = preBlocked as {
+          rule_code?: string;
+          http_status?: number;
+          safe_message?: string;
+        };
         releaseUnusedProbes(0);
         deps.metrics.moderationBlocksTotal++;
         logModBlocked = true;
-        const blockStatus = preRes.http_status ?? 400;
-        emitAccessLog(blockStatus, preRes.rule_code ?? "content_blocked");
+        const blockStatus = blk.http_status ?? 400;
+        emitAccessLog(blockStatus, blk.rule_code ?? "content_blocked");
         return c.json(
           {
             error: {
               code: "content_blocked",
-              rule_code: preRes.rule_code,
-              message: preRes.safe_message,
+              rule_code: blk.rule_code,
+              message: blk.safe_message,
               request_id: requestId,
             },
           },
@@ -613,9 +632,7 @@ export async function handleInferenceRequest(
           responseHeaders(requestId, trace),
         );
       }
-      if (preRes.text !== reqText) {
-        clientBody = replaceRequestText(clientBody, operation, preRes.text);
-      }
+      clientBody = transformed.body;
     }
 
     const chars = requestCharacters(operation, clientBody);

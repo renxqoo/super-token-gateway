@@ -19,6 +19,12 @@ import type {
   WebhookPluginConfig,
 } from "@gateway/ledger";
 import {
+  getBuiltinPlugin,
+  listBuiltinPlugins,
+  type PluginHook,
+  type PluginPipelineEngine,
+} from "@gateway/plugin-engine";
+import {
   createKey,
   encrypt,
   secureEqual,
@@ -193,6 +199,24 @@ const upsertPluginSchema = z
   })
   .strict();
 
+const installBuiltinPluginSchema = z
+  .object({
+    signature: z.string().max(1024).nullable().optional(),
+    signing_key_id: z.string().max(120).nullable().optional(),
+    manifest: z.record(z.string(), z.unknown()).optional(),
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+
+const testPluginSchema = z
+  .object({
+    hook: z.enum(["on_request", "on_response", "on_stream_chunk", "on_stream_end"]),
+    text: z.string().max(65_536),
+    model: z.string().min(1).max(150).default("test-model"),
+    operation: operationEnum.default("chat"),
+  })
+  .strict();
+
 const creditWalletSchema = z
   .object({
     currency: currencySchema.default("USD"),
@@ -296,6 +320,7 @@ export function createInternalApi(deps: {
   snapshot: SnapshotManager;
   router: SmartRouter;
   cluster: ClusterCoordinator;
+  pluginEngine: PluginPipelineEngine;
 }): Hono {
   const app = new Hono();
 
@@ -487,6 +512,69 @@ export function createInternalApi(deps: {
     });
     await onConfigUpdated(rec.config_epoch);
     return c.json({ ...rec, wasm_bytes: undefined });
+  });
+
+  app.get("/internal/v1/plugins", async (c) => {
+    const items = await deps.catalog.listPlugins();
+    return c.json({ items });
+  });
+
+  app.get("/internal/v1/plugins/builtins", (c) => {
+    return c.json({ items: listBuiltinPlugins() });
+  });
+
+  app.post("/internal/v1/plugins/builtins/:name/install", async (c) => {
+    const builtin = getBuiltinPlugin(c.req.param("name"));
+    if (!builtin) {
+      return c.json({ error: { code: "not_found", message: "Built-in plugin not found" } }, 404);
+    }
+    const rawBody = await c.req.text();
+    const parsedBody = rawBody.trim()
+      ? parseBody(installBuiltinPluginSchema, JSON.parse(rawBody))
+      : { enabled: true };
+    const manifest = parsedBody.manifest
+      ? { ...builtin.manifest, ...parsedBody.manifest }
+      : { ...builtin.manifest };
+    const rec = await deps.catalog.upsertPlugin({
+      name: builtin.name,
+      version: builtin.version,
+      kind: builtin.kind,
+      wasm_bytes: builtin.wasm_bytes,
+      webhook_config: null,
+      signature: parsedBody.signature ?? null,
+      signing_key_id: parsedBody.signing_key_id ?? null,
+      manifest,
+      enabled: parsedBody.enabled,
+    });
+    await onConfigUpdated(rec.config_epoch);
+    return c.json({ ...rec, wasm_bytes: undefined });
+  });
+
+  app.post("/internal/v1/plugins/:pluginId/test", async (c) => {
+    const pluginId = parseUuid(c.req.param("pluginId"), "pluginId");
+    const body = parseBody(testPluginSchema, await c.req.json());
+    const snap = deps.snapshot.get();
+    const plugin = snap.plugins.get(pluginId);
+    if (!plugin) {
+      return c.json(
+        { error: { code: "not_found", message: "Enabled plugin not found in active snapshot" } },
+        404,
+      );
+    }
+    const res = await deps.pluginEngine.runUnary(
+      body.hook as PluginHook,
+      [{ plugin_id: plugin.id, priority: 1 }],
+      snap.plugins,
+      {
+        request_id: crypto.randomUUID(),
+        project_id: "dry-run",
+        model: body.model,
+        operation: body.operation,
+      },
+      body.text,
+      c.req.raw.signal,
+    );
+    return c.json(res);
   });
 
   app.post("/internal/v1/wallets/:projectId/credits", async (c) => {

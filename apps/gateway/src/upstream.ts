@@ -463,6 +463,197 @@ export function replaceRequestText(
   return body;
 }
 
+export async function transformRequestTexts(
+  body: Record<string, unknown>,
+  operation: Operation,
+  transform: (text: string) => Promise<{ blocked: boolean; text: string }>,
+): Promise<{ blocked: boolean; body: Record<string, unknown> }> {
+  if (operation === "chat" && Array.isArray(body.messages)) {
+    let changed = false;
+    const messages = body.messages.map((m) => ({ ...optionalObject(m) }));
+    for (const msg of messages) {
+      if (typeof msg.content === "string" && msg.content.length > 0) {
+        const res = await transform(msg.content);
+        if (res.blocked) return { blocked: true, body };
+        if (res.text !== msg.content) {
+          msg.content = res.text;
+          changed = true;
+        }
+      } else if (Array.isArray(msg.content)) {
+        const parts = msg.content.map((p) => ({ ...optionalObject(p) }));
+        let partChanged = false;
+        for (const part of parts) {
+          if (typeof part.text === "string" && part.text.length > 0) {
+            const res = await transform(part.text);
+            if (res.blocked) return { blocked: true, body };
+            if (res.text !== part.text) {
+              part.text = res.text;
+              partChanged = true;
+            }
+          }
+        }
+        if (partChanged) {
+          msg.content = parts;
+          changed = true;
+        }
+      }
+    }
+    return { blocked: false, body: changed ? copyExact(body, { ...body, messages }) : body };
+  }
+
+  if (operation === "messages") {
+    let changed = false;
+    let nextSystem = body.system;
+    if (typeof body.system === "string" && body.system.length > 0) {
+      const res = await transform(body.system);
+      if (res.blocked) return { blocked: true, body };
+      if (res.text !== body.system) {
+        nextSystem = res.text;
+        changed = true;
+      }
+    }
+    const messages = Array.isArray(body.messages)
+      ? body.messages.map((m) => ({ ...optionalObject(m) }))
+      : null;
+    if (messages) {
+      for (const msg of messages) {
+        if (typeof msg.content === "string" && msg.content.length > 0) {
+          const res = await transform(msg.content);
+          if (res.blocked) return { blocked: true, body };
+          if (res.text !== msg.content) {
+            msg.content = res.text;
+            changed = true;
+          }
+        } else if (Array.isArray(msg.content)) {
+          const parts = msg.content.map((p) => ({ ...optionalObject(p) }));
+          let partChanged = false;
+          for (const part of parts) {
+            if (typeof part.text === "string" && part.text.length > 0) {
+              const res = await transform(part.text);
+              if (res.blocked) return { blocked: true, body };
+              if (res.text !== part.text) {
+                part.text = res.text;
+                partChanged = true;
+              }
+            }
+          }
+          if (partChanged) {
+            msg.content = parts;
+            changed = true;
+          }
+        }
+      }
+    }
+    if (!changed) return { blocked: false, body };
+    return {
+      blocked: false,
+      body: copyExact(body, {
+        ...body,
+        ...(nextSystem !== body.system ? { system: nextSystem } : {}),
+        ...(messages ? { messages } : {}),
+      }),
+    };
+  }
+
+  if (operation === "responses") {
+    let changed = false;
+    let nextInstructions = body.instructions;
+    if (typeof body.instructions === "string" && body.instructions.length > 0) {
+      const res = await transform(body.instructions);
+      if (res.blocked) return { blocked: true, body };
+      if (res.text !== body.instructions) {
+        nextInstructions = res.text;
+        changed = true;
+      }
+    }
+    let nextInput = body.input;
+    if (typeof body.input === "string" && body.input.length > 0) {
+      const res = await transform(body.input);
+      if (res.blocked) return { blocked: true, body };
+      if (res.text !== body.input) {
+        nextInput = res.text;
+        changed = true;
+      }
+    } else if (Array.isArray(body.input)) {
+      const items = body.input.map((it) => ({ ...optionalObject(it) }));
+      let inputChanged = false;
+      for (const item of items) {
+        if (typeof item.content === "string" && item.content.length > 0) {
+          const res = await transform(item.content);
+          if (res.blocked) return { blocked: true, body };
+          if (res.text !== item.content) {
+            item.content = res.text;
+            inputChanged = true;
+          }
+        } else if (Array.isArray(item.content)) {
+          const parts = item.content.map((p) => ({ ...optionalObject(p) }));
+          let partChanged = false;
+          for (const part of parts) {
+            if (typeof part.text === "string" && part.text.length > 0) {
+              const res = await transform(part.text);
+              if (res.blocked) return { blocked: true, body };
+              if (res.text !== part.text) {
+                part.text = res.text;
+                partChanged = true;
+              }
+            }
+          }
+          if (partChanged) {
+            item.content = parts;
+            inputChanged = true;
+          }
+        }
+      }
+      if (inputChanged) {
+        nextInput = items;
+        changed = true;
+      }
+    }
+    if (!changed) return { blocked: false, body };
+    return {
+      blocked: false,
+      body: copyExact(body, {
+        ...body,
+        ...(nextInstructions !== body.instructions ? { instructions: nextInstructions } : {}),
+        ...(nextInput !== body.input ? { input: nextInput } : {}),
+      }),
+    };
+  }
+
+  if (operation === "gemini" && Array.isArray(body.contents)) {
+    let changed = false;
+    const contents = body.contents.map((c) => ({ ...optionalObject(c) }));
+    for (const c of contents) {
+      if (Array.isArray(c.parts)) {
+        const parts = c.parts.map((p) => ({ ...optionalObject(p) }));
+        let partChanged = false;
+        for (const part of parts) {
+          if (typeof part.text === "string" && part.text.length > 0) {
+            const res = await transform(part.text);
+            if (res.blocked) return { blocked: true, body };
+            if (res.text !== part.text) {
+              part.text = res.text;
+              partChanged = true;
+            }
+          }
+        }
+        if (partChanged) {
+          c.parts = parts;
+          changed = true;
+        }
+      }
+    }
+    return { blocked: false, body: changed ? copyExact(body, { ...body, contents }) : body };
+  }
+
+  const singleText = extractRequestText(body, operation);
+  if (!singleText) return { blocked: false, body };
+  const res = await transform(singleText);
+  if (res.blocked) return { blocked: true, body };
+  if (res.text === singleText) return { blocked: false, body };
+  return { blocked: false, body: replaceRequestText(body, operation, res.text) };
+}
+
 export function extractResponseText(body: Record<string, unknown>, protocol: Protocol): string {
   if (protocol === "chat") {
     const choices = Array.isArray(body.choices) ? body.choices : [];
@@ -516,9 +707,13 @@ export function replaceResponseText(
     return { ...body, choices: [choice, ...body.choices.slice(1)] };
   }
   if (protocol === "messages") {
-    return { ...body, content: [{ type: "text", text: nextText }] };
+    const existing = Array.isArray(body.content) ? body.content : [];
+    const nonText = existing.filter((b) => optionalObject(b).type !== "text");
+    return { ...body, content: [{ type: "text", text: nextText }, ...nonText] };
   }
   if (protocol === "responses") {
+    const existing = Array.isArray(body.output) ? body.output : [];
+    const nonMsg = existing.filter((it) => optionalObject(it).type !== "message");
     return {
       ...body,
       output: [
@@ -529,12 +724,17 @@ export function replaceResponseText(
           status: "completed",
           content: [{ type: "output_text", text: nextText, annotations: [] }],
         },
+        ...nonMsg,
       ],
     };
   }
   if (protocol === "gemini" && Array.isArray(body.candidates) && body.candidates.length > 0) {
     const cand = { ...optionalObject(body.candidates[0]) };
-    cand.content = { role: "model", parts: [{ text: nextText }] };
+    const existingParts = Array.isArray(optionalObject(cand.content).parts)
+      ? (optionalObject(cand.content).parts as unknown[])
+      : [];
+    const nonTextParts = existingParts.filter((p) => typeof optionalObject(p).text !== "string");
+    cand.content = { role: "model", parts: [{ text: nextText }, ...nonTextParts] };
     return { ...body, candidates: [cand, ...body.candidates.slice(1)] };
   }
   return body;

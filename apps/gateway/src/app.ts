@@ -254,6 +254,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     snapshot,
     router,
     cluster,
+    pluginEngine,
   });
 
   const worker =

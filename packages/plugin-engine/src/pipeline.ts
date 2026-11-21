@@ -364,7 +364,13 @@ export class PluginPipelineEngine {
             const processed = await runStepList(wasmSteps, "on_stream_chunk", combined, false);
             if (processed === null) return { emit: "", blocked: true };
             if (processed.length > wasmLookahead) {
-              const safeLen = processed.length - wasmLookahead;
+              let safeLen = processed.length - wasmLookahead;
+              if (safeLen > 0) {
+                const boundaryCode = processed.charCodeAt(safeLen - 1);
+                if (boundaryCode >= 0xd800 && boundaryCode <= 0xdbff) {
+                  safeLen--;
+                }
+              }
               textAfterWasm = processed.slice(0, safeLen);
               wasmTail = processed.slice(safeLen);
             } else {

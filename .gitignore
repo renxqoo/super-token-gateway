@@ -3,6 +3,7 @@ node_modules/
 !.env.example
 dist/
 native/plugin-wasmtime/target/
+native/builtin-pii-guard/target/
 coverage/
 .local/
 reports/*.json
