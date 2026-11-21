@@ -2,29 +2,13 @@ import { expect, test } from "bun:test";
 import type { SQL } from "bun";
 import type { CoreEvidenceGroupV1 } from "@gateway/contracts";
 import { createSettlementStore } from "@gateway/storage/settlement";
-import { createDatabase, migrate } from "@gateway/storage";
-import manifest from "../../packages/storage/src/migrations/manifest.json";
+import { createDatabase } from "@gateway/storage";
 import { financialRejection } from "../support/financial-rejection.ts";
 import { withFinancial, prepareFinancialAdmission } from "../support/financial-execution.ts";
 import { committed, event, granted, supplier } from "../support/core-settlement.ts";
 
 type Fixture = Parameters<Parameters<typeof withFinancial>[0]>[0];
 type Setup = Awaited<ReturnType<Fixture["bootstrap"]>>;
-
-async function migrateThrough(db: SQL, version: number) {
-  await db.begin(async (tx) => {
-    for (const entry of manifest.migrations.filter((entry) => entry.version <= version)) {
-      for (const file of entry.files)
-        await tx.unsafe(
-          await Bun.file(
-            new URL(`../../packages/storage/src/${file.path}`, import.meta.url),
-          ).text(),
-        );
-      const digest = new Bun.CryptoHasher("sha256").update(JSON.stringify(entry)).digest("hex");
-      await tx`INSERT INTO schema_migrations(version,checksum,manifest) VALUES(${entry.version},${digest},${entry}::jsonb)`;
-    }
-  });
-}
 
 async function secondWallet(f: Fixture, setup: Setup) {
   const project = await f.request("/projects", {
@@ -363,67 +347,60 @@ test("a contended supplier cell no longer forces independent evidence groups int
     });
   }));
 
-test.each(["live", "upgrade"] as const)(
-  "%s late disputed evidence on a charged request freezes subsequent reserved sends",
-  (mode) =>
-    withFinancial(
-      async (f, db) => {
-        const setup = await f.bootstrap("USD", "100000");
-        const client = f.client();
-        await client.startup();
-        const first = await granted(db, setup, client);
-        const independent = await f.bootstrap("USD", "100000");
-        const secondKey = await f.request(`/projects/${setup.project.id}/keys`, {
-          name: "unrelated supplier",
-          models: [independent.model],
-          operations: ["chat"],
-        });
-        expect(secondKey.status).toBe(201);
-        const pending = await prepareFinancialAdmission(
-          {
-            ...independent,
-            project: setup.project,
-            key: { id: String(secondKey.value.id), key: String(secondKey.value.key) },
-          },
-          client,
-        );
-        const admission = await pending.admit();
-        const store = createSettlementStore(db);
-        const signed = (tokens: string) =>
-          event(first.owner, first.prepared.attemptId, {
-            usage: { input_tokens: tokens, output_tokens: "0" },
-            final_dimensions: ["input_tokens", "output_tokens"],
-            finality: "FINAL",
-            attempt_state: "SUCCEEDED",
-            request_state: "SUCCEEDED",
-          });
-        expect(
-          committed((await store.persist([{ events: [signed("1")] }]))[0]).receipts[0]?.outcome,
-        ).toBe("ACCEPTED");
-        expect(
-          await db`SELECT amount_atoms::text amount FROM billing_charges WHERE request_id=${first.prepared.requestId}`,
-        ).toEqual([{ amount: "100" }]);
-        expect(
-          committed((await store.persist([{ events: [signed("2")] }]))[0]).receipts[0]?.outcome,
-        ).toBe("CONFLICT");
-        if (mode === "upgrade") await migrate(db);
-        expect(
-          await db`SELECT evidence_disputed FROM wallets WHERE project_id=${setup.project.id}`,
-        ).toEqual([{ evidence_disputed: true }]);
-        const result = await financialRejection(
-          client.execution("execution_begin_v1", pending.beginData(admission.receipt), {
-            deadlineAt: pending.deadline,
-          }),
-          422,
-        );
-        expect(result.receipt.command_state).toBe("REJECTED");
-        expect(
-          await db`SELECT state FROM execution_permits WHERE attempt_id=${pending.attemptId}`,
-        ).toEqual([{ state: "RESERVED" }]);
+test("late disputed evidence on a charged request freezes subsequent reserved sends", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap("USD", "100000");
+    const client = f.client();
+    await client.startup();
+    const first = await granted(db, setup, client);
+    const independent = await f.bootstrap("USD", "100000");
+    const secondKey = await f.request(`/projects/${setup.project.id}/keys`, {
+      name: "unrelated supplier",
+      models: [independent.model],
+      operations: ["chat"],
+    });
+    expect(secondKey.status).toBe(201);
+    const pending = await prepareFinancialAdmission(
+      {
+        ...independent,
+        project: setup.project,
+        key: { id: String(secondKey.value.id), key: String(secondKey.value.key) },
       },
-      mode === "upgrade" ? { initializeDatabase: (db) => migrateThrough(db, 2026111816) } : {},
-    ),
-);
+      client,
+    );
+    const admission = await pending.admit();
+    const store = createSettlementStore(db);
+    const signed = (tokens: string) =>
+      event(first.owner, first.prepared.attemptId, {
+        usage: { input_tokens: tokens, output_tokens: "0" },
+        final_dimensions: ["input_tokens", "output_tokens"],
+        finality: "FINAL",
+        attempt_state: "SUCCEEDED",
+        request_state: "SUCCEEDED",
+      });
+    expect(
+      committed((await store.persist([{ events: [signed("1")] }]))[0]).receipts[0]?.outcome,
+    ).toBe("ACCEPTED");
+    expect(
+      await db`SELECT amount_atoms::text amount FROM billing_charges WHERE request_id=${first.prepared.requestId}`,
+    ).toEqual([{ amount: "100" }]);
+    expect(
+      committed((await store.persist([{ events: [signed("2")] }]))[0]).receipts[0]?.outcome,
+    ).toBe("CONFLICT");
+    expect(
+      await db`SELECT evidence_disputed FROM wallets WHERE project_id=${setup.project.id}`,
+    ).toEqual([{ evidence_disputed: true }]);
+    const result = await financialRejection(
+      client.execution("execution_begin_v1", pending.beginData(admission.receipt), {
+        deadlineAt: pending.deadline,
+      }),
+      422,
+    );
+    expect(result.receipt.command_state).toBe("REJECTED");
+    expect(
+      await db`SELECT state FROM execution_permits WHERE attempt_id=${pending.attemptId}`,
+    ).toEqual([{ state: "RESERVED" }]);
+  }));
 
 test("an estimated fact remains writable while its supplier cell is busy without supplier settlement", () =>
   withFinancial(async (f, db) => {
@@ -737,153 +714,72 @@ test("two revisions within one signed group preserve final dimensions and round 
     });
   }));
 
-test("evidence upgrade preserves a column-scoped owner without granting extra request reads or timestamp writes", () =>
-  withFinancial(
-    async (f, db) => {
-      const setup = await f.bootstrap("USD", "100000");
-      const second = await secondWallet(f, setup);
-      const client = f.client();
-      await client.startup();
-      const before = await granted(db, setup, client);
-      const owner = `evidence_column_owner_${crypto.randomUUID().replaceAll("-", "")}`;
-      await db.unsafe(`CREATE ROLE ${owner} NOLOGIN`);
-      try {
-        await db.unsafe(`GRANT USAGE,CREATE ON SCHEMA public,core_funding TO ${owner}`);
-        await db.unsafe(
-          `GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA public,core_funding TO ${owner}`,
-        );
-        await db.unsafe(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public,core_funding TO ${owner}`);
-        for (const [table, privilege, omitted] of [
-          ["gateway_requests", "SELECT", "execution_budget"],
-          ["attempts", "SELECT", "binding_id"],
-          ["usage_event_index", "INSERT", "created_at"],
-        ] as const) {
-          const columns = await db<
-            { attname: string }[]
-          >`SELECT attname::text FROM pg_attribute WHERE attrelid=${`public.${table}`}::regclass AND attnum>0 AND NOT attisdropped AND attname<>${omitted} ORDER BY attnum`;
-          await db.unsafe(`REVOKE ${privilege} ON public.${table} FROM ${owner}`);
-          await db.unsafe(
-            `GRANT ${privilege}(${columns.map((column) => `"${column.attname.replaceAll('"', '""')}"`).join(",")}) ON public.${table} TO ${owner}`,
-          );
-        }
-        await db.unsafe(
-          `ALTER FUNCTION public.persist_core_evidence_groups_v1(jsonb) OWNER TO ${owner}`,
-        );
-        await db.unsafe(`ALTER FUNCTION core_funding.persist_v1(jsonb,boolean) OWNER TO ${owner}`);
-        await db.unsafe(`REVOKE CREATE ON SCHEMA public,core_funding FROM ${owner}`);
-        async function permissions() {
-          return (
-            await db`SELECT has_column_privilege(${owner},'public.gateway_requests','execution_budget','SELECT') request_budget,has_column_privilege(${owner},'public.attempts','binding_id','SELECT') attempt_binding,has_column_privilege(${owner},'public.usage_event_index','created_at','INSERT') index_timestamp`
-          )[0];
-        }
-        const forbidden = { request_budget: false, attempt_binding: false, index_timestamp: false };
-        expect(await permissions()).toEqual(forbidden);
-        const fact = (request: typeof before) =>
-          event(request.owner, request.prepared.attemptId, {
-            finality: "FINAL",
-            usage: { input_tokens: "1", output_tokens: "0" },
-            final_dimensions: ["input_tokens", "output_tokens"],
-            attempt_state: "SUCCEEDED",
-            request_state: "SUCCEEDED",
-          });
-        const store = createSettlementStore(db);
-        expect(
-          committed((await store.persist([{ events: [fact(before)] }]))[0]).receipts[0]?.outcome,
-        ).toBe("ACCEPTED");
-        await migrate(db);
-        const after = await granted(db, setup, client);
-        const independent = await granted(db, second, client);
-        for (const result of await store.persist([
-          { events: [fact(after)] },
-          { events: [fact(independent)] },
-        ]))
-          expect(committed(result).receipts[0]?.outcome).toBe("ACCEPTED");
-        expect(await permissions()).toEqual(forbidden);
-        expect(await db`SELECT count(*)::int n FROM billing_charges`).toEqual([{ n: 3 }]);
-        expect(await supplier(db, setup.provider.account_id)).toEqual({
-          balance: "99997",
-          reserved: "0",
-          spent: "3",
-          state: "ACTIVE",
-        });
-      } finally {
-        await db.unsafe(`DROP OWNED BY ${owner}`);
-        await db.unsafe(`DROP ROLE ${owner}`);
-      }
-    },
-    { initializeDatabase: (db) => migrateThrough(db, 2026111807) },
-  ));
-
-test("typed settlement continues a historical partial snapshot without repricing final dimensions or duplicating receipts", () =>
-  withFinancial(
-    async (f, db) => {
-      const setup = await f.bootstrap("USD", "1000");
-      const client = f.client();
-      await client.startup();
-      const { prepared, owner } = await granted(db, setup, client);
-      const attempt = prepared.attemptId;
-      const partial = {
-        events: [
-          event(owner, attempt, {
-            finality: "PARTIAL",
-            usage: { input_tokens: "1", output_tokens: "0" },
-            final_dimensions: ["input_tokens"],
-          }),
-        ],
-      };
-      const store = createSettlementStore(db);
-      const [oldReceipt] = committed((await store.persist([partial]))[0]).receipts;
-      expect(oldReceipt?.outcome).toBe("ACCEPTED");
-      const historical = await db<
-        { id: string; snapshot_digest: string; revision: string }[]
-      >`SELECT id,snapshot_digest,snapshot_revision::text revision
-        FROM usage_event_index WHERE attempt_id=${attempt} ORDER BY snapshot_revision`;
-      expect(historical.map((row) => row.revision)).toEqual(["1", "2"]);
-
-      await migrate(db);
-      const [replayed] = committed((await store.persist([partial]))[0]).receipts;
-      expect(replayed).toEqual({ ...oldReceipt!, duplicate: true });
-      const final = {
-        events: [
-          event(owner, attempt, {
-            source_revision: "2",
-            finality: "FINAL",
-            usage: { output_tokens: "0" },
-            final_dimensions: ["output_tokens"],
-            attempt_state: "SUCCEEDED",
-            request_state: "SUCCEEDED",
-          }),
-        ],
-      };
-      expect(committed((await store.persist([final]))[0]).receipts[0]?.outcome).toBe("ACCEPTED");
-      expect(
-        await db`SELECT id,snapshot_digest,snapshot_revision::text revision
-        FROM usage_event_index WHERE attempt_id=${attempt} AND snapshot_revision<3 ORDER BY snapshot_revision`,
-      ).toEqual(historical);
-      expect(
-        await db`SELECT i.snapshot_revision::text revision,i.parent_evidence_id parent,i.cost_atoms::text cost,p.usage
-        FROM usage_event_index i JOIN usage_payloads p ON p.id=i.id AND p.created_at=i.created_at
-        WHERE i.attempt_id=${attempt} AND i.record_kind='CANONICAL' ORDER BY i.snapshot_revision DESC LIMIT 1`,
-      ).toEqual([
-        {
-          revision: "4",
-          parent: historical[1]!.id,
-          cost: "1",
+test("typed settlement continues a partial snapshot without repricing final dimensions or duplicating receipts", () =>
+  withFinancial(async (f, db) => {
+    const setup = await f.bootstrap("USD", "1000");
+    const client = f.client();
+    await client.startup();
+    const { prepared, owner } = await granted(db, setup, client);
+    const attempt = prepared.attemptId;
+    const partial = {
+      events: [
+        event(owner, attempt, {
+          finality: "PARTIAL",
           usage: { input_tokens: "1", output_tokens: "0" },
-        },
-      ]);
-      expect(await db`SELECT amount_atoms::text amount FROM billing_charges`).toEqual([
-        { amount: "100" },
-      ]);
-      expect(
-        await db`SELECT count(*)::int n FROM core_evidence_receipts WHERE attempt_id=${attempt}`,
-      ).toEqual([{ n: 2 }]);
-      expect(await supplier(db, setup.provider.account_id)).toEqual({
-        balance: "999",
-        reserved: "0",
-        spent: "1",
-        state: "ACTIVE",
-      });
-    },
-    { initializeDatabase: (db) => migrateThrough(db, 2026111813) },
-  ));
+          final_dimensions: ["input_tokens"],
+        }),
+      ],
+    };
+    const store = createSettlementStore(db);
+    const [oldReceipt] = committed((await store.persist([partial]))[0]).receipts;
+    expect(oldReceipt?.outcome).toBe("ACCEPTED");
+    const historical = await db<
+      { id: string; snapshot_digest: string; revision: string }[]
+    >`SELECT id,snapshot_digest,snapshot_revision::text revision
+      FROM usage_event_index WHERE attempt_id=${attempt} ORDER BY snapshot_revision`;
+    expect(historical.map((row) => row.revision)).toEqual(["1", "2"]);
+
+    const [replayed] = committed((await store.persist([partial]))[0]).receipts;
+    expect(replayed).toEqual({ ...oldReceipt!, duplicate: true });
+    const final = {
+      events: [
+        event(owner, attempt, {
+          source_revision: "2",
+          finality: "FINAL",
+          usage: { output_tokens: "0" },
+          final_dimensions: ["output_tokens"],
+          attempt_state: "SUCCEEDED",
+          request_state: "SUCCEEDED",
+        }),
+      ],
+    };
+    expect(committed((await store.persist([final]))[0]).receipts[0]?.outcome).toBe("ACCEPTED");
+    expect(
+      await db`SELECT id,snapshot_digest,snapshot_revision::text revision
+      FROM usage_event_index WHERE attempt_id=${attempt} AND snapshot_revision<3 ORDER BY snapshot_revision`,
+    ).toEqual(historical);
+    expect(
+      await db`SELECT i.snapshot_revision::text revision,i.parent_evidence_id parent,i.cost_atoms::text cost,p.usage
+      FROM usage_event_index i JOIN usage_payloads p ON p.id=i.id AND p.created_at=i.created_at
+      WHERE i.attempt_id=${attempt} AND i.record_kind='CANONICAL' ORDER BY i.snapshot_revision DESC LIMIT 1`,
+    ).toEqual([
+      {
+        revision: "4",
+        parent: historical[1]!.id,
+        cost: "1",
+        usage: { input_tokens: "1", output_tokens: "0" },
+      },
+    ]);
+    expect(await db`SELECT amount_atoms::text amount FROM billing_charges`).toEqual([
+      { amount: "100" },
+    ]);
+    expect(
+      await db`SELECT count(*)::int n FROM core_evidence_receipts WHERE attempt_id=${attempt}`,
+    ).toEqual([{ n: 2 }]);
+    expect(await supplier(db, setup.provider.account_id)).toEqual({
+      balance: "999",
+      reserved: "0",
+      spent: "1",
+      state: "ACTIVE",
+    });
+  }));

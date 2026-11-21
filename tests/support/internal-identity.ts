@@ -45,7 +45,6 @@ export async function withIdentity(
     account?: { trustedProxyCidrs: string[] };
     gateways?: number;
     initializeDatabase?: (db: SQL) => Promise<void>;
-    executionRoleFile?: string;
     terminalSettlement?: TerminalSettlementFixture;
   } = {},
 ) {
@@ -82,7 +81,6 @@ export async function prepareIdentity(
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
     account?: { trustedProxyCidrs: string[] };
     gateways?: number;
-    executionRoleFile?: string;
     terminalSettlement?: TerminalSettlementFixture;
   },
 ) {
@@ -199,9 +197,10 @@ export async function prepareIdentity(
     );
     if (options.execution)
       await db.unsafe(
-        (
-          await Bun.file(options.executionRoleFile ?? "infra/core-execution-role.sql").text()
-        ).replaceAll("core_execution_api", api),
+        (await Bun.file("infra/core-execution-role.sql").text()).replaceAll(
+          "core_execution_api",
+          api,
+        ),
       );
     if (options.account)
       await db.unsafe(

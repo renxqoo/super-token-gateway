@@ -89,14 +89,8 @@ test("receipt revision lookup stays bounded as same-origin history grows and del
         await db`SELECT * FROM core_evidence_receipts WHERE id=${receipt.receipt_id}`
       )[0];
       await db.begin(async (tx) => {
-        await tx.unsafe(
-          await Bun.file(
-            new URL(
-              "../../packages/storage/src/migrations/0013_receipt-delivery-lookup.sql",
-              import.meta.url,
-            ),
-          ).text(),
-        );
+        await tx`ALTER TABLE public.core_evidence_receipts DROP CONSTRAINT core_receipt_delivery`;
+        await tx`ALTER TABLE public.core_evidence_receipts ADD CONSTRAINT core_receipt_delivery UNIQUE(event_id,origin_identity,body_digest)`;
       });
       expect(
         (await db`SELECT * FROM core_evidence_receipts WHERE id=${receipt.receipt_id}`)[0],

@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import type { SQL } from "bun";
 import { migrate } from "@gateway/storage";
-import manifest from "../../packages/storage/src/migrations/manifest.json";
 import { withDatabase } from "../support/database.ts";
 
 async function costPrice(
@@ -111,27 +110,17 @@ test("compiled version prices preserve per-request ceiling, exposure subtraction
     ).toEqual([{ amount: "2" }]);
   }));
 
-test("migration compiles the captured historical price and later versions cannot mutate it or leave half-created source prices", () =>
+test("compiled prices are immutable and invalid source prices cannot leave partial rows", () =>
   withDatabase(async (db) => {
-    for (const entry of manifest.migrations.filter((m) => m.version < 2026111803)) {
-      for (const file of entry.files)
-        await db.unsafe(
-          await Bun.file(
-            new URL(`../../packages/storage/src/${file.path}`, import.meta.url),
-          ).text(),
-        );
-      const digest = new Bun.CryptoHasher("sha256").update(JSON.stringify(entry)).digest("hex");
-      await db`INSERT INTO schema_migrations(version,checksum,manifest) VALUES(${entry.version},${digest},${entry}::jsonb)`;
-    }
-    const old = await costPrice(db, { input_tokens: { numerator: "1", denominator: "3" } });
     await migrate(db);
+    const first = await costPrice(db, { input_tokens: { numerator: "1", denominator: "3" } });
     const current = await costPrice(db, { input_tokens: { numerator: "5", denominator: "3" } });
-    expect(await price(db, old, { input_tokens: "1" })).toBe("1");
+    expect(await price(db, first, { input_tokens: "1" })).toBe("1");
     expect(await price(db, current, { input_tokens: "1" })).toBe("2");
     await expect(
-      db`UPDATE core_funding.cost_prices SET weights=ARRAY[999::numeric] WHERE price_id=${old}`,
+      db`UPDATE core_funding.cost_prices SET weights=ARRAY[999::numeric] WHERE price_id=${first}`,
     ).rejects.toThrow("immutable record");
-    expect(await price(db, old, { input_tokens: "1" })).toBe("1");
+    expect(await price(db, first, { input_tokens: "1" })).toBe("1");
     const invalid = crypto.randomUUID();
     const failure =
       await db`INSERT INTO cost_versions(id,currency,rates) VALUES(${invalid},'USD','{"input_tokens":{"numerator":"1","denominator":"0"}}'::jsonb)`.catch(

@@ -5,8 +5,6 @@ import { createCoreManagementApplication } from "../../apps/core-api/src/platfor
 import { financialBlockedBy, financialKey, withFinancial } from "../support/financial-execution.ts";
 import { syntheticAdminKey, syntheticPepper } from "../support/catalog.ts";
 import { createCommitAckProxy } from "../support/commit-ack-proxy.ts";
-import { withDatabase } from "../support/database.ts";
-import manifest from "../../packages/storage/src/migrations/manifest.json";
 
 async function hold(db: SQL, lock: (tx: TransactionSQL) => Promise<unknown>) {
   const entered = Promise.withResolvers<number>(),
@@ -308,50 +306,6 @@ test(
       } finally {
         await api.close({ timeout: 1 });
       }
-    }),
-  30000,
-);
-
-test(
-  "the catalog control migration preserves writer access for preexisting column-only route permissions",
-  () =>
-    withDatabase(async (db) => {
-      await db.begin(async (tx) => {
-        const append = manifest.migrations.findIndex(
-          (migration) => migration.version === 2026111706,
-        );
-        expect(append).toBeGreaterThan(0);
-        for (const migration of manifest.migrations.slice(0, append))
-          for (const file of migration.files)
-            await tx.unsafe(
-              await Bun.file(
-                new URL(`../../packages/storage/src/${file.path}`, import.meta.url),
-              ).text(),
-            );
-        const roles = ["INSERT(id)", "UPDATE(enabled)"].map((privilege) => ({
-          name: `gateway_control_${crypto.randomUUID().replaceAll("-", "")}`,
-          privilege,
-        }));
-        for (const role of roles) {
-          await tx.unsafe(`CREATE ROLE ${role.name} NOLOGIN`);
-          await tx.unsafe(`GRANT ${role.privilege} ON public.routes TO ${role.name}`);
-        }
-        for (const file of manifest.migrations[append]!.files)
-          await tx.unsafe(
-            await Bun.file(
-              new URL(`../../packages/storage/src/${file.path}`, import.meta.url),
-            ).text(),
-          );
-        for (const role of roles) {
-          expect(
-            (
-              await tx`SELECT has_function_privilege(${role.name},'core_catalog_write_v1()','EXECUTE') allowed`
-            )[0].allowed,
-          ).toBe(true);
-          await tx.unsafe(`DROP OWNED BY ${role.name}`);
-          await tx.unsafe(`DROP ROLE ${role.name}`);
-        }
-      });
     }),
   30000,
 );

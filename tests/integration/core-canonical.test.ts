@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { migrate } from "@gateway/storage";
 import { withDatabase } from "../support/database.ts";
-import manifest from "../../packages/storage/src/migrations/manifest.json";
 
 test("database canonical key ordering preserves every ASCII code unit and long protocol field names", () =>
   withDatabase(async (db) => {
@@ -66,11 +65,17 @@ test("database canonical preserves nested structures, empty values, escaped stri
 test("database canonical preserves SQL NULL and its ASCII fast path is independent of string escape settings", () =>
   withDatabase(async (db) => {
     await migrate(db);
-    const source = await Bun.file("packages/storage/src/sql/core-canonical-fast.sql").text();
+    const definitions = (
+      await db<
+        { def: string }[]
+      >`SELECT pg_get_functiondef(oid) AS def FROM pg_proc WHERE oid IN ('public.core_utf16_sort_v1(text)'::regprocedure,'public.core_canonical_v1(jsonb)'::regprocedure) ORDER BY proname`
+    )
+      .map((row) => `${row.def};`)
+      .join("\n");
     for (const setting of ["off", "on"]) {
       await db.begin(async (tx) => {
         await tx`SELECT set_config('standard_conforming_strings',${setting},true)`;
-        await tx.unsafe(source);
+        await tx.unsafe(definitions);
         const input = { z: "a\\b\t\n", a: [null, false, {}, []], é: 1, "😀": 2 },
           expected = '{"a":[null,false,{},[]],"z":"a\\\\b\\t\\n","é":1,"😀":2}';
         const [row] =
@@ -86,35 +91,4 @@ test("database canonical preserves SQL NULL and its ASCII fast path is independe
     await expect(db`SELECT core_utf16_sort_v1(NULL::text)`).rejects.toMatchObject({
       errno: "22004",
     });
-  }));
-
-test("the canonical append preserves historical digests, function identity, ownership, ACL and function attributes", () =>
-  withDatabase(async (db) => {
-    const prefix = manifest.migrations.findIndex((migration) => migration.version === 2026111706);
-    expect(prefix).toBeGreaterThan(0);
-    for (const migration of manifest.migrations.slice(0, prefix + 1)) {
-      for (const file of migration.files)
-        await db.unsafe(
-          await Bun.file(
-            new URL(`../../packages/storage/src/${file.path}`, import.meta.url),
-          ).text(),
-        );
-      await db`INSERT INTO schema_migrations(version,checksum,manifest) VALUES(${migration.version},${createHash("sha256").update(JSON.stringify(migration)).digest("hex")},${migration}::jsonb)`;
-    }
-    await db`REVOKE EXECUTE ON FUNCTION core_utf16_sort_v1(text),core_canonical_v1(jsonb) FROM PUBLIC`;
-    await db`GRANT EXECUTE ON FUNCTION core_utf16_sort_v1(text),core_canonical_v1(jsonb) TO pg_monitor`;
-    async function functions() {
-      return await db`SELECT oid::text,proowner::text,proacl::text,provolatile,prosecdef,proconfig,proisstrict,proparallel FROM pg_proc WHERE oid IN ('core_utf16_sort_v1(text)'::regprocedure,'core_canonical_v1(jsonb)'::regprocedure) ORDER BY proname`;
-    }
-    const before = await functions(),
-      input = { "\ue000": "private", "😀": "supplementary", a: [null, true, { z: 2, a: 1 }] },
-      expected = '{"a":[null,true,{"a":1,"z":2}],"😀":"supplementary","\ue000":"private"}',
-      digest = createHash("sha256").update(expected).digest("hex");
-    expect((await db`SELECT core_digest_v1(${input}::jsonb) digest`)[0].digest).toBe(digest);
-    await migrate(db);
-    expect(await functions()).toEqual(before);
-    const [after] =
-      await db`SELECT core_digest_v1(${input}::jsonb) digest,core_canonical_v1(${input}::jsonb) canonical`;
-    expect(after.digest).toBe(digest);
-    expect(after.canonical).toBe(expected);
   }));

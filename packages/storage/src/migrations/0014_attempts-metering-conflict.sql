@@ -1,1 +1,0 @@
-CREATE INDEX "attempts_metering_conflict_request_idx" ON "attempts" USING btree ("request_id") WHERE metering_conflict;

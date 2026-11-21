@@ -28,11 +28,8 @@ export async function withFinancial(
     limits?: Partial<import("@gateway/runtime/h2").H2Limits>;
     managementFactory?: typeof createCoreManagementApplication;
     managementStandby?: () => SQL;
-    managementRoleFile?: string;
-    executionRoleFile?: string;
     terminalSettlement?: NonNullable<Parameters<typeof withIdentity>[1]>["terminalSettlement"];
     seedRoute?: (db: SQL, model: string, input: RouteInput) => Promise<string>;
-    seedRecharge?: typeof import("./historical-funding.ts").seedHistoricalRecharge;
     account?: { trustedProxyCidrs: string[] };
     redisUrl?: string;
     gateways?: number;
@@ -48,9 +45,10 @@ export async function withFinancial(
       try {
         const role = String((await catalog.appDb`SELECT current_user AS name`)[0].name);
         await db.unsafe(
-          (
-            await Bun.file(options.managementRoleFile ?? "infra/core-management-role.sql").text()
-          ).replaceAll("core_management_api", role),
+          (await Bun.file("infra/core-management-role.sql").text()).replaceAll(
+            "core_management_api",
+            role,
+          ),
         );
         const management = (options.managementFactory ?? createCoreManagementApplication)({
           db: catalog.appDb,
@@ -59,15 +57,7 @@ export async function withFinancial(
           encryptionKey: financialKey,
           ...(eventStandby ? { eventStandby } : {}),
         });
-        fixture = await prepareFinancial(
-          f,
-          db,
-          catalog,
-          management,
-          namespace,
-          options.seedRoute,
-          options.seedRecharge,
-        );
+        fixture = await prepareFinancial(f, db, catalog, management, namespace, options.seedRoute);
         try {
           await run(fixture, db);
         } catch (error) {
@@ -86,7 +76,6 @@ export async function withFinancial(
       ...(options.initializeDatabase ? { initializeDatabase: options.initializeDatabase } : {}),
       ...(options.databasePort ? { databasePort: options.databasePort } : {}),
       ...(options.entry ? { entry: options.entry } : {}),
-      ...(options.executionRoleFile ? { executionRoleFile: options.executionRoleFile } : {}),
       ...(options.terminalSettlement ? { terminalSettlement: options.terminalSettlement } : {}),
       ...(options.limits ? { limits: options.limits } : {}),
       ...(options.account ? { account: options.account } : {}),
@@ -109,7 +98,6 @@ async function prepareFinancial(
   management: ReturnType<typeof createCoreManagementApplication>,
   namespace: string,
   seedRoute?: (db: SQL, model: string, input: RouteInput) => Promise<string>,
-  seedRecharge?: typeof import("./historical-funding.ts").seedHistoricalRecharge,
 ) {
   const clients: ReturnType<typeof createCoreRpcClient>[] = [];
   function client(port = f.a.port, name = "gateway", options: { timeoutMs?: number } = {}) {
@@ -294,17 +282,10 @@ async function prepareFinancial(
         completed_at: new Date(Date.now() - 1000).toISOString(),
         reason: "Synthetic completed payment fact",
       };
-      const recharge = seedRecharge
-        ? {
-            status: 201,
-            value: await seedRecharge(
-              db,
-              provider.value.account_id,
-              rechargeInput,
-              "bootstrap:ADMIN_KEY",
-            ),
-          }
-        : await request(`/upstream-accounts/${provider.value.account_id}/recharges`, rechargeInput);
+      const recharge = await request(
+        `/upstream-accounts/${provider.value.account_id}/recharges`,
+        rechargeInput,
+      );
       if (recharge.status !== 201) throw new Error(`Recharge: ${JSON.stringify(recharge)}`);
       return {
         model,

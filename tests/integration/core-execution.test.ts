@@ -4,6 +4,7 @@ import type { ExecutionReply, ExecutionContextResponse } from "@gateway/contract
 import { expect, test } from "bun:test";
 import { canonical } from "@gateway/kernel";
 import { sha256 } from "@gateway/runtime/crypto";
+import { createDatabase } from "@gateway/storage";
 import { withFinancial } from "../support/financial-execution.ts";
 const digest = (value: unknown) => sha256(canonical(value));
 test(
@@ -879,6 +880,42 @@ test(
       expect(
         JSON.stringify(await db`SELECT to_jsonb(c) value FROM execution_contexts c`),
       ).not.toContain(canary);
+    }),
+  30000,
+);
+
+test(
+  "Core execution runtime role cannot read money or invoke private allocation kernels",
+  () =>
+    withFinancial(async (f) => {
+      const role = createDatabase(f.identity.apiUrl);
+      try {
+        for (const query of [
+          () => role`SELECT * FROM wallets`,
+          () => role`SELECT * FROM channels`,
+          () => role`SELECT * FROM core_funding.balance_cells`,
+          () => role`SELECT * FROM core_funding.budget_transfers`,
+          () => role`SELECT core_funding_control_v1(NULL::uuid,false)`,
+          () => role`SELECT allocate_customer_batch_v1('[]'::jsonb)`,
+          () => role`SELECT allocate_customer_rows_v1('[]'::jsonb,true)`,
+          () =>
+            role`SELECT core_funding.reserve_batch_v1(NULL::uuid,'USD',NULL::uuid,0,'{}'::jsonb)`,
+          () => role`SELECT core_funding.flush_admit_v1('{}'::jsonb)`,
+          () => role`SELECT core_funding.fact_frame_v1('{}'::uuid[])`,
+          () => role`SELECT core_funding.flush_facts_v1('{}'::jsonb)`,
+          () => role`SELECT core_funding.flush_costs_v1('{}'::jsonb)`,
+          () => role`SELECT core_funding.coalesce_groups_v1('[]'::jsonb,'{}'::jsonb)`,
+          () =>
+            role`SELECT core_funding.stage_snapshot_v1('{}'::jsonb,NULL::uuid,'RAW','execution','UNKNOWN','{}'::jsonb,'{}'::text[],NULL::uuid,NULL::uuid,NULL::numeric,false)`,
+          () =>
+            role`SELECT core_funding.execution_item_v1('{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,NULL::jsonb)`,
+        ]) {
+          const failure = await query().catch((error) => error);
+          expect(failure).toMatchObject({ errno: "42501" });
+        }
+      } finally {
+        await role.close();
+      }
     }),
   30000,
 );

@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import { migrate } from "@gateway/storage";
-import manifest from "../../packages/storage/src/migrations/manifest.json";
 import { withDatabase } from "../support/database.ts";
 
 test("a frozen account cannot accumulate more than NUMERIC(38,0) of reservation across otherwise valid cells", () =>
@@ -27,26 +26,18 @@ test("a frozen account cannot accumulate more than NUMERIC(38,0) of reservation 
 
 test("budget grants and reclaims conserve money and revisions, replay exactly, and cannot reclaim reserved funds or leave partial writes", () =>
   withDatabase(async (db) => {
-    for (const entry of manifest.migrations.filter((m) => m.version <= 2026111803)) {
-      for (const file of entry.files)
-        await db.unsafe(
-          await Bun.file(
-            new URL(`../../packages/storage/src/${file.path}`, import.meta.url),
-          ).text(),
-        );
-      const digest = new Bun.CryptoHasher("sha256").update(JSON.stringify(entry)).digest("hex");
-      await db`INSERT INTO schema_migrations(version,checksum,manifest) VALUES(${entry.version},${digest},${entry}::jsonb)`;
-    }
+    await migrate(db);
     const brand = crypto.randomUUID();
     const account = crypto.randomUUID();
     await db`INSERT INTO supplier_brands(id,name) VALUES(${brand},${brand})`;
     await db`INSERT INTO upstream_accounts(id,brand_id,name) VALUES(${account},${brand},${account})`;
-    await db`INSERT INTO upstream_account_balances(account_id,currency,balance_atoms,reserved_atoms,spent_atoms,revision) VALUES(${account},'USD',100,80,7,11)`;
-    await expect(db`SELECT core_funding.audit_v1(${account}::uuid,'USD')`).rejects.toMatchObject({
-      errno: "P0422",
+    await expect(
+      db`INSERT INTO upstream_account_balances(account_id,currency,balance_atoms,reserved_atoms,spent_atoms,revision) VALUES(${account},'USD',100,80,7,11)`,
+    ).rejects.toMatchObject({ errno: "P0403" });
+    await db.begin(async (tx) => {
+      await tx`SELECT core_funding.exclusive_v1(ARRAY[${account}::uuid])`;
+      await tx`INSERT INTO upstream_account_balances(account_id,currency,balance_atoms,reserved_atoms,spent_atoms,revision) VALUES(${account},'USD',100,0,7,11)`;
     });
-    await db`UPDATE upstream_account_balances SET reserved_atoms=0 WHERE account_id=${account} AND currency='USD'`;
-    await migrate(db);
     await expect(
       db`SELECT core_funding.transfer_v1(${account}::uuid,'USD',0,60,100,10,'grant-0')`,
     ).rejects.toMatchObject({ errno: "P0F01" });
