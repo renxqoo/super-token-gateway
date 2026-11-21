@@ -40,6 +40,8 @@ export type SmartRouterOptions = {
     state: CircuitState;
     open_until_ms: number;
     cooldown_until_ms: number;
+    open_duration_ms: number;
+    cooldown_duration_ms: number;
   }) => void;
 };
 
@@ -153,11 +155,14 @@ export class SmartRouter {
     st.ewmaLatencyMs = st.ewmaLatencyMs * 0.8 + Math.max(1, latencyMs) * 0.2;
     this.pushWindow(st, true);
     if (prevState !== "CLOSED") {
+      const t = this.now();
       this.onStateChange?.({
         channel_id: channelId,
         state: "CLOSED",
         open_until_ms: 0,
         cooldown_until_ms: st.cooldownUntilMs,
+        open_duration_ms: 0,
+        cooldown_duration_ms: Math.max(0, st.cooldownUntilMs - t),
       });
     }
   }
@@ -185,18 +190,23 @@ export class SmartRouter {
         state: st.state,
         open_until_ms: st.openUntilMs,
         cooldown_until_ms: st.cooldownUntilMs,
+        open_duration_ms: Math.max(0, st.openUntilMs - t),
+        cooldown_duration_ms: cd,
       });
       return;
     }
     if (kind === "auth_error") {
+      const dur = Math.min(this.maxOpenMs, 60_000);
       st.state = "OPEN";
       st.consecutiveFailures = this.failureThreshold;
-      st.openUntilMs = t + Math.min(this.maxOpenMs, 60_000);
+      st.openUntilMs = t + dur;
       this.onStateChange?.({
         channel_id: channelId,
         state: "OPEN",
         open_until_ms: st.openUntilMs,
         cooldown_until_ms: st.cooldownUntilMs,
+        open_duration_ms: dur,
+        cooldown_duration_ms: Math.max(0, st.cooldownUntilMs - t),
       });
       return;
     }
@@ -222,6 +232,8 @@ export class SmartRouter {
         state: "OPEN",
         open_until_ms: st.openUntilMs,
         cooldown_until_ms: st.cooldownUntilMs,
+        open_duration_ms: duration,
+        cooldown_duration_ms: Math.max(0, st.cooldownUntilMs - t),
       });
     }
   }
@@ -229,21 +241,32 @@ export class SmartRouter {
   applyRemoteEvent(event: {
     channel_id: string;
     state: CircuitState;
-    open_until_ms: number;
-    cooldown_until_ms: number;
+    open_until_ms?: number;
+    cooldown_until_ms?: number;
+    open_duration_ms?: number;
+    cooldown_duration_ms?: number;
   }): void {
     const st = this.getOrCreate(event.channel_id);
-    if (event.state === "OPEN" && event.open_until_ms > st.openUntilMs) {
+    const t = this.now();
+    const targetOpen =
+      event.open_duration_ms !== undefined
+        ? t + event.open_duration_ms
+        : (event.open_until_ms ?? 0);
+    const targetCooldown =
+      event.cooldown_duration_ms !== undefined
+        ? t + event.cooldown_duration_ms
+        : (event.cooldown_until_ms ?? 0);
+    if (event.state === "OPEN" && targetOpen > st.openUntilMs) {
       st.state = "OPEN";
-      st.openUntilMs = event.open_until_ms;
+      st.openUntilMs = targetOpen;
       st.probeInFlight = false;
     } else if (event.state === "CLOSED") {
       st.state = "CLOSED";
       st.openUntilMs = 0;
       st.consecutiveFailures = 0;
     }
-    if (event.cooldown_until_ms > st.cooldownUntilMs) {
-      st.cooldownUntilMs = event.cooldown_until_ms;
+    if (targetCooldown > st.cooldownUntilMs) {
+      st.cooldownUntilMs = targetCooldown;
     }
   }
 

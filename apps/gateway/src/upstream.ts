@@ -59,21 +59,80 @@ export type PreparedUpstreamRequest = {
   isBedrockStream: boolean;
 };
 
+async function encodeMultipartWithModel(
+  sourceEntries: readonly [string, string | File][],
+  upstreamModel: string,
+): Promise<{ contentType: string; bytes: Uint8Array }> {
+  const form = new FormData();
+  let replaced = false;
+  for (const [k, v] of sourceEntries) {
+    if (k === "model") {
+      form.append("model", upstreamModel);
+      replaced = true;
+    } else {
+      form.append(k, v);
+    }
+  }
+  if (!replaced) form.append("model", upstreamModel);
+  const tmp = new Response(form);
+  const contentType = tmp.headers.get("content-type") ?? "multipart/form-data";
+  const bytes = new Uint8Array(await tmp.arrayBuffer());
+  return { contentType, bytes };
+}
+
 export async function prepareUpstreamRequest(options: {
   channel: ChannelRecord;
   route: RouteRecord;
   secret: string;
   operation: Operation;
   clientBody: Record<string, unknown>;
+  multipartEntries?: readonly [string, string | File][];
   isStream: boolean;
   vertexTokens: VertexTokens;
+  traceparent?: string;
   signal: AbortSignal;
 }): Promise<PreparedUpstreamRequest> {
-  const { channel, route, secret, operation, clientBody, isStream, vertexTokens, signal } = options;
+  const {
+    channel,
+    route,
+    secret,
+    operation,
+    clientBody,
+    multipartEntries,
+    isStream,
+    vertexTokens,
+    traceparent,
+    signal,
+  } = options;
   if (route.request_policy && Object.keys(route.request_policy).length > 0) {
     validateRequestPolicy(clientBody, route.request_policy);
   }
 
+  const headers = new Headers();
+  if (traceparent) headers.set("traceparent", traceparent);
+  if (isStream) headers.set("accept", "text/event-stream");
+
+  if (multipartEntries) {
+    const path =
+      operation === "transcription"
+        ? "/v1/audio/transcriptions"
+        : operation === "translation"
+          ? "/v1/audio/translations"
+          : "/v1/images/edits";
+    const url = joinBase(channel.base_url, path);
+    if (secret) headers.set("authorization", `Bearer ${secret}`);
+    const encoded = await encodeMultipartWithModel(multipartEntries, route.upstream_model);
+    headers.set("content-type", encoded.contentType);
+    return {
+      url,
+      headers,
+      body: encoded.bytes,
+      upstreamProtocol: null,
+      isBedrockStream: false,
+    };
+  }
+
+  headers.set("content-type", "application/json");
   const upstreamProtocol = upstreamProtocolFor(channel.kind, operation);
   let payload: Record<string, unknown>;
   if (isConversationalOperation(operation) && upstreamProtocol) {
@@ -111,8 +170,6 @@ export async function prepareUpstreamRequest(options: {
     payload = copyExact(clientBody, { ...clientBody, model: route.upstream_model });
   }
 
-  const headers = new Headers({ "content-type": "application/json" });
-  if (isStream) headers.set("accept", "text/event-stream");
   let url: URL;
   let isBedrockStream = false;
 
@@ -124,13 +181,19 @@ export async function prepareUpstreamRequest(options: {
       const path =
         operation === "embeddings"
           ? "/v1/embeddings"
-          : operation === "completions"
-            ? "/v1/completions"
-            : operation === "images"
-              ? "/v1/images/generations"
-              : upstreamProtocol === "responses"
-                ? "/v1/responses"
-                : "/v1/chat/completions";
+          : operation === "moderations"
+            ? "/v1/moderations"
+            : operation === "completions"
+              ? "/v1/completions"
+              : operation === "images"
+                ? "/v1/images/generations"
+                : operation === "image_edits"
+                  ? "/v1/images/edits"
+                  : operation === "speech"
+                    ? "/v1/audio/speech"
+                    : upstreamProtocol === "responses"
+                      ? "/v1/responses"
+                      : "/v1/chat/completions";
       url = joinBase(channel.base_url, path);
       if (secret) headers.set("authorization", `Bearer ${secret}`);
       break;
@@ -341,6 +404,63 @@ export function extractRequestText(body: Record<string, unknown>, operation: Ope
     parts.push(body.input);
   }
   return parts.join("\n");
+}
+
+export function replaceRequestText(
+  body: Record<string, unknown>,
+  operation: Operation,
+  nextText: string,
+): Record<string, unknown> {
+  if ((operation === "chat" || operation === "messages") && Array.isArray(body.messages)) {
+    const messages = body.messages.map((m) => ({ ...optionalObject(m) }));
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]!;
+      if (msg.role === "user") {
+        if (typeof msg.content === "string") {
+          msg.content = nextText;
+          return copyExact(body, { ...body, messages });
+        }
+        if (Array.isArray(msg.content)) {
+          const parts = msg.content.map((p) => ({ ...optionalObject(p) }));
+          const idx = parts.findIndex((p) => typeof p.text === "string");
+          if (idx >= 0) {
+            parts[idx]!.text = nextText;
+            msg.content = parts;
+            return copyExact(body, { ...body, messages });
+          }
+        }
+      }
+    }
+    return copyExact(body, { ...body, messages });
+  }
+  if (operation === "responses") {
+    if (typeof body.input === "string") {
+      return copyExact(body, { ...body, input: nextText });
+    }
+    if (Array.isArray(body.input) && body.input.length > 0) {
+      const items = body.input.map((it) => ({ ...optionalObject(it) }));
+      for (let i = items.length - 1; i >= 0; i--) {
+        if (typeof items[i]!.content === "string") {
+          items[i]!.content = nextText;
+          return copyExact(body, { ...body, input: items });
+        }
+      }
+    }
+    return body;
+  }
+  if (operation === "gemini" && Array.isArray(body.contents) && body.contents.length > 0) {
+    const contents = body.contents.map((c) => ({ ...optionalObject(c) }));
+    const last = contents[contents.length - 1]!;
+    last.parts = [{ text: nextText }];
+    return copyExact(body, { ...body, contents });
+  }
+  if (typeof body.prompt === "string") {
+    return copyExact(body, { ...body, prompt: nextText });
+  }
+  if (typeof body.input === "string") {
+    return copyExact(body, { ...body, input: nextText });
+  }
+  return body;
 }
 
 export function extractResponseText(body: Record<string, unknown>, protocol: Protocol): string {

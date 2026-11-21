@@ -5,6 +5,7 @@ import {
   createCatalogRepository,
   createDatabase,
   createLedgerEngine,
+  createLedgerQueries,
 } from "@gateway/ledger";
 import {
   createFfiWasmtimeExecutor,
@@ -14,15 +15,16 @@ import {
   type WasmRuntimeExecutor,
 } from "@gateway/plugin-engine";
 import {
+  ClusterCoordinator,
   createTransport,
   Lifecycle,
-  LocalRateLimiter,
   SmartRouter,
   VertexTokens,
 } from "@gateway/runtime";
 import { createWorkerRunner } from "@gateway/worker";
 import type { GatewayConfig } from "./config.ts";
 import { createInternalApi } from "./internal-api.ts";
+import { GatewayMetrics } from "./observability.ts";
 import { authenticateRequest, handleInferenceRequest, type ProxyDependencies } from "./proxy.ts";
 import { SnapshotManager } from "./snapshot.ts";
 
@@ -39,13 +41,47 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   const ownsDb = !options.db;
   const db = options.db ?? createDatabase(config.databaseUrl, config.dbMaxConnections);
   const catalog = createCatalogRepository(db);
+  const queries = createLedgerQueries(db);
   const ledger = createLedgerEngine(db, {
     batchWindowMs: config.microBatchWindowMs,
     maxBatchSize: config.microBatchMaxSize,
   });
   const snapshot = new SnapshotManager(catalog, config.encryptionKey, config.snapshotPollMs);
-  const router = new SmartRouter(options.routerOptions);
-  const rateLimiter = new LocalRateLimiter();
+
+  let clusterRef: ClusterCoordinator | null = null;
+  const externalOnStateChange = options.routerOptions?.onStateChange;
+  const router = new SmartRouter({
+    ...options.routerOptions,
+    onStateChange(event) {
+      externalOnStateChange?.(event);
+      clusterRef?.publishCircuitEvent({
+        channel_id: event.channel_id,
+        state: event.state,
+        open_duration_ms: event.open_duration_ms,
+        cooldown_duration_ms: event.cooldown_duration_ms,
+      });
+    },
+  });
+
+  const cluster = new ClusterCoordinator({
+    ...(config.redisUrl ? { redisUrl: config.redisUrl } : {}),
+    ...(config.redisNamespace ? { namespace: config.redisNamespace } : {}),
+    onCircuitEvent(event) {
+      router.applyRemoteEvent({
+        channel_id: event.channel_id,
+        state: event.state,
+        open_duration_ms: event.open_duration_ms,
+        cooldown_duration_ms: event.cooldown_duration_ms,
+      });
+    },
+    onConfigEpoch(event) {
+      if (!snapshot.isLoaded() || event.epoch > snapshot.get().epoch) {
+        void snapshot.load();
+      }
+    },
+  });
+  clusterRef = cluster;
+
   const transport = createTransport(1024);
   const vertexTokens = new VertexTokens((url, init) =>
     transport.fetch(url, init, config.allowPrivateUpstreams, config.privateUpstreamCidrs),
@@ -67,18 +103,14 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       : {}),
   });
   const lifecycle = new Lifecycle(config.maxInFlight);
-  const metrics = {
-    requestsTotal: 0,
-    failoversTotal: 0,
-    moderationBlocksTotal: 0,
-  };
+  const metrics = new GatewayMetrics(config.accessLog ?? false);
 
   const proxyDeps: ProxyDependencies = {
     config,
     snapshot,
     ledger,
     router,
-    rateLimiter,
+    cluster,
     transport,
     vertexTokens,
     pluginEngine,
@@ -96,7 +128,11 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     }
     try {
       await db`SELECT 1`;
-      return c.json({ status: "ready", epoch: snapshot.get().epoch });
+      return c.json({
+        status: "ready",
+        epoch: snapshot.get().epoch,
+        redis_connected: cluster.isRedisConnected(),
+      });
     } catch {
       return c.json({ status: "db_unavailable" }, 503);
     }
@@ -105,21 +141,13 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   publicApp.get("/metrics", () => {
     const channels = router.snapshot();
     const openCircuits = channels.filter((ch) => ch.state === "OPEN").length;
-    const lines = [
-      "# TYPE gateway_requests_total counter",
-      `gateway_requests_total ${metrics.requestsTotal}`,
-      "# TYPE gateway_failovers_total counter",
-      `gateway_failovers_total ${metrics.failoversTotal}`,
-      "# TYPE gateway_moderation_blocks_total counter",
-      `gateway_moderation_blocks_total ${metrics.moderationBlocksTotal}`,
-      "# TYPE gateway_in_flight gauge",
-      `gateway_in_flight ${lifecycle.size}`,
-      "# TYPE gateway_config_epoch gauge",
-      `gateway_config_epoch ${snapshot.isLoaded() ? snapshot.get().epoch : 0}`,
-      "# TYPE gateway_open_circuits gauge",
-      `gateway_open_circuits ${openCircuits}`,
-    ];
-    return new Response(`${lines.join("\n")}\n`, {
+    const text = metrics.renderPrometheus({
+      inFlight: lifecycle.size,
+      configEpoch: snapshot.isLoaded() ? snapshot.get().epoch : 0,
+      openCircuits,
+      redisConnected: cluster.isRedisConnected(),
+    });
+    return new Response(text, {
       headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
     });
   });
@@ -164,11 +192,26 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   publicApp.post("/v1/embeddings", (c) =>
     handleInferenceRequest(c, proxyDeps, "embeddings", undefined, peerOf(c)),
   );
+  publicApp.post("/v1/moderations", (c) =>
+    handleInferenceRequest(c, proxyDeps, "moderations", undefined, peerOf(c)),
+  );
   publicApp.post("/v1/completions", (c) =>
     handleInferenceRequest(c, proxyDeps, "completions", undefined, peerOf(c)),
   );
   publicApp.post("/v1/images/generations", (c) =>
     handleInferenceRequest(c, proxyDeps, "images", undefined, peerOf(c)),
+  );
+  publicApp.post("/v1/images/edits", (c) =>
+    handleInferenceRequest(c, proxyDeps, "image_edits", undefined, peerOf(c)),
+  );
+  publicApp.post("/v1/audio/speech", (c) =>
+    handleInferenceRequest(c, proxyDeps, "speech", undefined, peerOf(c)),
+  );
+  publicApp.post("/v1/audio/transcriptions", (c) =>
+    handleInferenceRequest(c, proxyDeps, "transcription", undefined, peerOf(c)),
+  );
+  publicApp.post("/v1/audio/translations", (c) =>
+    handleInferenceRequest(c, proxyDeps, "translation", undefined, peerOf(c)),
   );
   publicApp.post("/v1beta/models/:action", async (c) => {
     const action = c.req.param("action");
@@ -185,7 +228,15 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     return handleInferenceRequest(c, proxyDeps, "gemini", { model, stream }, peerOf(c));
   });
 
-  const internalApp = createInternalApi({ config, catalog, ledger, snapshot, router });
+  const internalApp = createInternalApi({
+    config,
+    catalog,
+    ledger,
+    queries,
+    snapshot,
+    router,
+    cluster,
+  });
 
   const worker =
     config.mode === "all-in-one"
@@ -202,10 +253,13 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   return {
     db,
     catalog,
+    queries,
     ledger,
     snapshot,
     router,
+    cluster,
     lifecycle,
+    metrics,
     publicApp,
     internalApp,
     worker,
@@ -213,6 +267,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     async start(): Promise<void> {
       await assertSchemaVersion(db);
       await snapshot.load();
+      await cluster.start();
       snapshot.start();
       if (worker) await worker.start();
     },
@@ -221,6 +276,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       snapshot.stop();
       await lifecycle.drain(drainMs);
       if (worker) await worker.stop();
+      await cluster.close();
       await transport.close();
       wasmExecutor?.close();
       if (ownsDb) await db.close();

@@ -1,7 +1,7 @@
 :443 {
 	@public_api {
 		method GET POST
-		path /v1/models /v1/chat/completions /v1/responses /v1/messages /v1/embeddings /v1/completions /v1/images/generations /v1beta/models/*
+		path /v1/models /v1/chat/completions /v1/responses /v1/messages /v1/embeddings /v1/moderations /v1/completions /v1/images/generations /v1/images/edits /v1/audio/speech /v1/audio/transcriptions /v1/audio/translations /v1beta/models/*
 	}
 
 	@health {

@@ -30,8 +30,10 @@
     "build": "bun scripts/build.ts",
     "build:wasmtime": "cargo build --release --manifest-path native/plugin-wasmtime/Cargo.toml",
     "test:artifact": "bun --env-file=.env.local scripts/verify-artifact.ts",
+    "test:durability": "bun --env-file=.env.local scripts/verify-durability.ts",
     "bench": "bun --env-file=.env.local scripts/bench.ts",
-    "verify": "bun run check && bun run lint && bun run fmt:check && bun run test && bun run test:integration && bun run build && bun run test:artifact"
+    "bench:prod": "bun --env-file=.env.local scripts/bench-prod.ts",
+    "verify": "bun run check && bun run lint && bun run fmt:check && bun run test && bun run test:integration && bun run build && bun run test:artifact && bun run test:durability"
   },
   "devDependencies": {
     "@gateway/contracts": "workspace:*",

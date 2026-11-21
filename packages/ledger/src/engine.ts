@@ -442,7 +442,8 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
   const orm = createDrizzle(db);
   const batchWindowMs = options.batchWindowMs ?? 2;
   const maxBatchSize = options.maxBatchSize ?? 64;
-  const maxBatchConcurrency = options.maxBatchConcurrency ?? 8;
+  const maxBatchConcurrency = options.maxBatchConcurrency ?? 2;
+  let batchCellCursor = Math.floor(Math.random() * CELL_COUNT);
 
   async function runAcquireBatch(items: AcquireHoldInput[]): Promise<AcquireHoldResult[]> {
     const results = Array.from<AcquireHoldResult>({ length: items.length });
@@ -516,17 +517,19 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
         if (r.state === "ACTIVE") activeAccounts.add(String(r.id));
       }
 
+      const targetCell = batchCellCursor++ % CELL_COUNT;
       const cellRowsRaw = supplierAccounts.length
         ? await tx`
             SELECT account_id, currency, cell, balance_atoms::text, reserved_atoms::text, spent_atoms::text, revision::text
             FROM public.supplier_cells
-            WHERE account_id = ANY(${supplierAccounts}::uuid[])
+            WHERE account_id = ANY(${supplierAccounts}::uuid[]) AND cell = ${targetCell}
             ORDER BY account_id, currency, cell
             FOR NO KEY UPDATE
           `
         : [];
       const cellsByAcctCur = new Map<string, SupplierCellRow[]>();
       const allCells: SupplierCellRow[] = [];
+      const expandedAcctCur = new Set<string>();
       for (const r of cellRowsRaw) {
         const c = toCellRow(r);
         allCells.push(c);
@@ -642,18 +645,39 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
           continue;
         }
 
-        const acctCells =
-          cellsByAcctCur.get(`${item.supplier_account_id}:${item.supplier_currency}`) ?? [];
-        let chosenCell: SupplierCellRow | undefined;
-        if (acctCells.length > 0) {
+        const acctCurKey = `${item.supplier_account_id}:${item.supplier_currency}`;
+        let acctCells = cellsByAcctCur.get(acctCurKey) ?? [];
+        const pickCell = (list: SupplierCellRow[]): SupplierCellRow | undefined => {
+          if (list.length === 0) return undefined;
           const start = preferredCell(item.attempt_id);
-          for (let offset = 0; offset < acctCells.length; offset++) {
-            const idx = (start + offset) % acctCells.length;
-            const candidate = acctCells[idx]!;
+          for (let offset = 0; offset < list.length; offset++) {
+            const candidate = list[(start + offset) % list.length]!;
             if (candidate.balance_atoms - candidate.reserved_atoms >= supplierAtoms) {
-              chosenCell = candidate;
-              break;
+              return candidate;
             }
+          }
+          return undefined;
+        };
+        let chosenCell = pickCell(acctCells);
+        if (!chosenCell && !expandedAcctCur.has(acctCurKey)) {
+          expandedAcctCur.add(acctCurKey);
+          const extraRows = await tx`
+            SELECT account_id, currency, cell, balance_atoms::text, reserved_atoms::text, spent_atoms::text, revision::text
+            FROM public.supplier_cells
+            WHERE account_id = ${item.supplier_account_id} AND currency = ${item.supplier_currency} AND cell <> ${targetCell}
+            ORDER BY cell
+            FOR NO KEY UPDATE SKIP LOCKED
+          `;
+          if (extraRows.length > 0) {
+            const nextList = [...acctCells];
+            for (const r of extraRows) {
+              const c = toCellRow(r);
+              allCells.push(c);
+              nextList.push(c);
+            }
+            cellsByAcctCur.set(acctCurKey, nextList);
+            acctCells = nextList;
+            chosenCell = pickCell(acctCells);
           }
         }
         if (!chosenCell) {
@@ -917,17 +941,40 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
         lotsByWallet.set(wid, sortLots(arr, w.policy));
       }
 
-      const supplierAccountIds = [
-        ...new Set(
-          [...holdsByReq.values()].flatMap((h) => h.supplier_holds.map((s) => s.account_id)),
-        ),
-      ].sort();
-      const cellRowsRaw = supplierAccountIds.length
+      const neededCellMap = new Map<
+        string,
+        { account_id: string; currency: string; cell: number }
+      >();
+      for (const h of holdsByReq.values()) {
+        for (const s of h.supplier_holds) {
+          const k = cellKey(s.account_id, s.currency, s.cell);
+          if (!neededCellMap.has(k)) {
+            neededCellMap.set(k, {
+              account_id: s.account_id,
+              currency: s.currency,
+              cell: s.cell,
+            });
+          }
+        }
+      }
+      const neededCells = [...neededCellMap.values()].sort((a, b) =>
+        a.account_id !== b.account_id
+          ? a.account_id.localeCompare(b.account_id)
+          : a.currency !== b.currency
+            ? a.currency.localeCompare(b.currency)
+            : a.cell - b.cell,
+      );
+      const cellRowsRaw = neededCells.length
         ? await tx`
-            SELECT account_id, currency, cell, balance_atoms::text, reserved_atoms::text, spent_atoms::text, revision::text
-            FROM public.supplier_cells
-            WHERE account_id = ANY(${supplierAccountIds}::uuid[])
-            ORDER BY account_id, currency, cell
+            SELECT c.account_id, c.currency, c.cell, c.balance_atoms::text, c.reserved_atoms::text, c.spent_atoms::text, c.revision::text
+            FROM public.supplier_cells c
+            JOIN unnest(
+              ${neededCells.map((x) => x.account_id)}::uuid[],
+              ${neededCells.map((x) => x.currency)}::text[],
+              ${neededCells.map((x) => x.cell)}::smallint[]
+            ) AS k(account_id, currency, cell)
+              ON c.account_id = k.account_id AND c.currency = k.currency AND c.cell = k.cell
+            ORDER BY c.account_id, c.currency, c.cell
             FOR NO KEY UPDATE
           `
         : [];

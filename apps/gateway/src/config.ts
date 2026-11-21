@@ -9,6 +9,8 @@ export type GatewayConfig = {
   databaseUrl: string;
   dbMaxConnections: number;
   redisUrl?: string;
+  redisNamespace?: string;
+  accessLog?: boolean;
   keyPepper: string;
   encryptionKey: string;
   adminToken: string;
@@ -75,6 +77,8 @@ export function loadConfigFromEnv(
     databaseUrl,
     dbMaxConnections: Number(env.DB_MAX_CONNECTIONS ?? 32),
     ...(env.REDIS_URL ? { redisUrl: env.REDIS_URL } : {}),
+    ...(env.REDIS_NAMESPACE ? { redisNamespace: env.REDIS_NAMESPACE } : {}),
+    accessLog: env.ACCESS_LOG !== "false",
     keyPepper,
     encryptionKey,
     adminToken,

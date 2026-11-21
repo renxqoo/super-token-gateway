@@ -39,16 +39,17 @@ import {
   clientAddress,
   inCidrs,
   Lifecycle,
-  LocalRateLimiter,
   readBounded,
   sha256,
   SmartRouter,
   UpstreamPreDispatchError,
   verifier,
   VertexTokens,
+  type ClusterCoordinator,
   type createTransport,
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
+import { parseOrCreateTrace, type GatewayMetrics, type TraceContext } from "./observability.ts";
 import type { SnapshotManager } from "./snapshot.ts";
 import { rejectUnmeteredTools } from "./tool-policy.ts";
 import {
@@ -60,6 +61,7 @@ import {
   isConversationalOperation,
   parseRetryAfterMs,
   prepareUpstreamRequest,
+  replaceRequestText,
   replaceResponseText,
 } from "./upstream.ts";
 
@@ -88,16 +90,12 @@ export type ProxyDependencies = {
   snapshot: SnapshotManager;
   ledger: LedgerEngine;
   router: SmartRouter;
-  rateLimiter: LocalRateLimiter;
+  cluster: ClusterCoordinator;
   transport: Transport;
   vertexTokens: VertexTokens;
   pluginEngine: PluginPipelineEngine;
   lifecycle: Lifecycle;
-  metrics: {
-    requestsTotal: number;
-    failoversTotal: number;
-    moderationBlocksTotal: number;
-  };
+  metrics: GatewayMetrics;
 };
 
 function extractApiKey(c: Context, operation: Operation): string | null {
@@ -224,7 +222,7 @@ function buildUsageForOperation(
     return { characters: String(inputCharacters ?? 0), requests: "1" };
   }
   if (rawUsage) return rawUsage;
-  if (operation === "images") return { images: "1" };
+  if (operation === "images" || operation === "image_edits") return { images: "1" };
   return null;
 }
 
@@ -240,23 +238,28 @@ function buildModerationUsageFallback(
   };
 }
 
-function errorJson(c: Context, err: unknown, requestId?: string): Response {
+function responseHeaders(
+  requestId: string,
+  trace: TraceContext,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  return {
+    "x-request-id": requestId,
+    "x-trace-id": trace.traceId,
+    traceparent: trace.traceparent,
+    ...extra,
+  };
+}
+
+function errorJson(c: Context, err: unknown, requestId: string, trace: TraceContext): Response {
   const gw =
     err instanceof GatewayError
       ? err
       : new GatewayError(500, "internal_error", err instanceof Error ? err.message : "Error");
-  const headers: Record<string, string> = {};
-  if (requestId) headers["x-request-id"] = requestId;
   return c.json(
-    {
-      error: {
-        code: gw.code,
-        message: gw.message,
-        ...(requestId ? { request_id: requestId } : {}),
-      },
-    },
+    { error: { code: gw.code, message: gw.message, request_id: requestId } },
     gw.status as 400,
-    headers,
+    responseHeaders(requestId, trace),
   );
 }
 
@@ -268,6 +271,8 @@ export async function handleInferenceRequest(
   peerAddress?: string,
 ): Promise<Response> {
   const requestId = crypto.randomUUID();
+  const trace = parseOrCreateTrace(c.req.header("traceparent"));
+  const requestStart = performance.now();
   deps.metrics.requestsTotal++;
 
   const guard = deps.lifecycle.enter();
@@ -288,24 +293,97 @@ export async function handleInferenceRequest(
     releaseProjectLimit = null;
   };
 
+  let logProjectId: string | null = null;
+  let logModel: string | null = null;
+  let logStream = false;
+  let logChannel: string | null = null;
+  let logAttempts = 0;
+  let logFailover = false;
+  let logModBlocked = false;
+  let logTtftMs: number | null = null;
+  let logged = false;
+
+  const emitAccessLog = (status: number, errorCode: string | null) => {
+    if (logged) return;
+    logged = true;
+    deps.metrics.observeRequest({
+      trace_id: trace.traceId,
+      request_id: requestId,
+      project_id: logProjectId,
+      model: logModel,
+      operation,
+      stream: logStream,
+      channel: logChannel,
+      status,
+      attempts: logAttempts,
+      failover: logFailover,
+      moderation_blocked: logModBlocked,
+      duration_ms: performance.now() - requestStart,
+      ttft_ms: logTtftMs,
+      error_code: errorCode,
+    });
+  };
+
   try {
     const snap = deps.snapshot.get();
     const { key, project } = authenticateRequest(c, snap, deps.config, operation, peerAddress);
+    logProjectId = project.id;
 
-    const rawBytes = await readBounded(c.req.raw.body, deps.config.maxBodyBytes, c.req.raw.signal);
-    const parsedRaw = object(
-      parseClientJson(new TextDecoder("utf-8", { fatal: true }).decode(rawBytes)),
-    );
-    const clientBody: Record<string, unknown> = pathOverride
-      ? copyExact(parsedRaw, {
-          ...parsedRaw,
-          model: pathOverride.model,
-          stream: pathOverride.stream,
-        })
-      : parsedRaw;
+    const contentType = c.req.header("content-type") ?? "";
+    const isMultipartOp =
+      (operation === "transcription" ||
+        operation === "translation" ||
+        operation === "image_edits") &&
+      contentType.toLowerCase().includes("multipart/form-data");
+
+    let clientBody: Record<string, unknown>;
+    let multipartEntries: [string, string | File][] | undefined;
+
+    if (isMultipartOp) {
+      const form = await c.req.raw.formData();
+      const entries: [string, string | File][] = [];
+      const meta: Record<string, unknown> = {};
+      let totalFileBytes = 0;
+      for (const [k, v] of form.entries()) {
+        if (typeof v === "string") {
+          entries.push([k, v]);
+          meta[k] = v;
+        } else {
+          const file = v as File;
+          totalFileBytes += file.size;
+          if (totalFileBytes > deps.config.maxBodyBytes) {
+            throw new GatewayError(413, "body_too_large", "Multipart upload exceeds limit");
+          }
+          entries.push([k, file]);
+          meta[k] = { filename: file.name, size: file.size, type: file.type };
+        }
+      }
+      multipartEntries = entries;
+      clientBody = {
+        ...meta,
+        stream: meta.stream === "true" || meta.stream === true,
+      };
+    } else {
+      const rawBytes = await readBounded(
+        c.req.raw.body,
+        deps.config.maxBodyBytes,
+        c.req.raw.signal,
+      );
+      const parsedRaw = object(
+        parseClientJson(new TextDecoder("utf-8", { fatal: true }).decode(rawBytes)),
+      );
+      clientBody = pathOverride
+        ? copyExact(parsedRaw, {
+            ...parsedRaw,
+            model: pathOverride.model,
+            stream: pathOverride.stream,
+          })
+        : parsedRaw;
+    }
 
     const modelName = typeof clientBody.model === "string" ? clientBody.model.trim() : "";
     if (!modelName) throw new GatewayError(400, "invalid_request", "Missing model");
+    logModel = modelName;
     if (key.models.length > 0 && !key.models.includes(modelName)) {
       throw new GatewayError(403, "model_not_allowed", "API key cannot access this model");
     }
@@ -316,22 +394,21 @@ export async function handleInferenceRequest(
 
     rejectUnmeteredTools(clientBody, operation);
 
-    const isStream = Boolean(clientBody.stream === true);
+    const isStream =
+      clientBody.stream === true || (operation === "speech" && clientBody.stream_format === "sse");
+    logStream = isStream;
     const outputBound = resolveOutputBound(clientBody, model);
-    const chars = requestCharacters(operation, clientBody);
-    const measurement = {
-      inputCharacters: chars === undefined ? undefined : String(chars),
-      images: operation === "images" ? (clientBody.n ?? 1) : undefined,
-    };
 
     const estimatedTokens = Math.max(
       1,
-      Math.ceil((chars ?? 200) / 4) + Math.min(outputBound, 4096),
+      Math.ceil((requestCharacters(operation, clientBody) ?? 200) / 4) +
+        Math.min(outputBound, 4096),
     );
-    const projAcq = deps.rateLimiter.acquire(
+    const projAcq = await deps.cluster.acquireRateLimit(
       `project:${project.id}`,
       { rpm: project.rpm, tpm: project.tpm, concurrency: project.concurrency },
       estimatedTokens,
+      deps.config.holdTtlMs,
     );
     if (!projAcq.ok) {
       throw new GatewayError(429, `rate_limit_${projAcq.reason}`, "Project rate limit exceeded");
@@ -387,7 +464,7 @@ export async function handleInferenceRequest(
 
     const preRequestAudit: PluginAuditEntry[] = [];
     const primarySteps = selected[0]!.route.route.plugin_pipeline;
-    if (primarySteps.length > 0) {
+    if (primarySteps.length > 0 && !isMultipartOp) {
       const reqText = extractRequestText(clientBody, operation);
       const preRes = await deps.pluginEngine.runUnary(
         "on_request",
@@ -401,6 +478,9 @@ export async function handleInferenceRequest(
       if (preRes.blocked) {
         releaseUnusedProbes(0);
         deps.metrics.moderationBlocksTotal++;
+        logModBlocked = true;
+        const blockStatus = preRes.http_status ?? 400;
+        emitAccessLog(blockStatus, preRes.rule_code ?? "content_blocked");
         return c.json(
           {
             error: {
@@ -410,11 +490,23 @@ export async function handleInferenceRequest(
               request_id: requestId,
             },
           },
-          (preRes.http_status ?? 400) as 400,
-          { "x-request-id": requestId },
+          blockStatus as 400,
+          responseHeaders(requestId, trace),
         );
       }
+      if (preRes.text !== reqText) {
+        clientBody = replaceRequestText(clientBody, operation, preRes.text);
+      }
     }
+
+    const chars = requestCharacters(operation, clientBody);
+    const measurement = {
+      inputCharacters: chars === undefined ? undefined : String(chars),
+      images:
+        operation === "images" || operation === "image_edits"
+          ? Number(clientBody.n ?? 1)
+          : undefined,
+    };
 
     const idempotencyKey = c.req.header("idempotency-key")?.trim() || null;
     const fingerprint = sha256(
@@ -466,6 +558,7 @@ export async function handleInferenceRequest(
       if (holdRes.ok) {
         if (holdRes.replayed && holdRes.existing_state && holdRes.existing_state !== "HELD") {
           releaseUnusedProbes(idx);
+          emitAccessLog(409, "idempotency_replayed");
           return c.json(
             {
               error: {
@@ -475,7 +568,7 @@ export async function handleInferenceRequest(
               },
             },
             409,
-            { "x-request-id": holdRes.request_id },
+            responseHeaders(holdRes.request_id, trace),
           );
         }
         activeIndex = idx;
@@ -517,6 +610,7 @@ export async function handleInferenceRequest(
     ) {
       const entry = selected[cursor]!;
       const cand = entry.route;
+      logChannel = cand.channel.name;
 
       if (pendingSwitchFrom) {
         const nextCustomerAtoms = quoteForPrice(cand.billingPrice, measurement, outputBound);
@@ -548,10 +642,11 @@ export async function handleInferenceRequest(
         activeAttemptId = nextAttemptId;
         holdCustomerAtoms = sw.held_atoms;
         pendingSwitchFrom = null;
+        logFailover = true;
         deps.metrics.failoversTotal++;
       }
 
-      const chLimit = deps.rateLimiter.acquire(
+      const chLimit = await deps.cluster.acquireRateLimit(
         `channel:${cand.channel.id}`,
         {
           rpm: cand.channel.rpm,
@@ -559,6 +654,7 @@ export async function handleInferenceRequest(
           concurrency: cand.channel.concurrency,
         },
         1,
+        deps.config.holdTtlMs,
       );
       if (!chLimit.ok) {
         if (entry.isProbe) deps.router.releaseProbe(cand.channel_id);
@@ -570,6 +666,7 @@ export async function handleInferenceRequest(
       }
       releaseChannelLimit = chLimit.release;
       attemptsMade++;
+      logAttempts = attemptsMade;
 
       const attemptTimeoutMs =
         cand.route.retry_policy.attempt_timeout_ms ?? deps.config.attemptTimeoutMs;
@@ -594,8 +691,10 @@ export async function handleInferenceRequest(
           secret,
           operation,
           clientBody,
+          ...(multipartEntries ? { multipartEntries } : {}),
           isStream,
           vertexTokens: deps.vertexTokens,
+          traceparent: trace.traceparent,
           signal: attemptAbort.signal,
         });
       } catch (err) {
@@ -641,11 +740,17 @@ export async function handleInferenceRequest(
           releaseUnusedProbes(cursor + 1);
           if (isPreDispatch && !anyUnknownAttempt) await deps.ledger.releaseHold(requestId);
           else await deps.ledger.markUnknown(requestId);
+          emitAccessLog(499, "client_aborted");
           return c.json(
             { error: { code: "client_aborted", message: "Client disconnected" } },
             499 as 400,
+            responseHeaders(requestId, trace),
           );
         }
+        deps.metrics.recordUpstreamError(
+          cand.channel.name,
+          isPreDispatch ? "connect_error" : "timeout",
+        );
         deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
         const failedOutcome: "FAILED" | "UNKNOWN" = isPreDispatch ? "FAILED" : "UNKNOWN";
         if (failedOutcome === "UNKNOWN") anyUnknownAttempt = true;
@@ -663,6 +768,7 @@ export async function handleInferenceRequest(
       }
 
       const latencyMs = performance.now() - startedAt;
+      logTtftMs = latencyMs;
       if (!upstreamResp.ok) {
         clearTimeout(timeoutTimer);
         c.req.raw.signal.removeEventListener("abort", onClientAbort);
@@ -673,6 +779,7 @@ export async function handleInferenceRequest(
         const retryKind = isRetryableStatus(upstreamResp.status);
         if (retryKind) {
           const retryAfterMs = parseRetryAfterMs(upstreamResp.headers.get("retry-after"));
+          deps.metrics.recordUpstreamError(cand.channel.name, `http_${upstreamResp.status}`);
           deps.router.recordFailure(cand.channel.id, retryKind, retryAfterMs, latencyMs);
           pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
           lastErrorStatus = upstreamResp.status === 429 ? 429 : 502;
@@ -689,6 +796,7 @@ export async function handleInferenceRequest(
         releaseUnusedProbes(cursor + 1);
         if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
         else await deps.ledger.releaseHold(requestId);
+        emitAccessLog(upstreamResp.status, "upstream_client_error");
         return c.json(
           {
             error: {
@@ -698,23 +806,79 @@ export async function handleInferenceRequest(
             },
           },
           upstreamResp.status as 400,
-          { "x-request-id": requestId },
+          responseHeaders(requestId, trace),
         );
       }
 
       releaseUnusedProbes(cursor + 1);
 
-      if (!isStream) {
+      const upstreamContentType = upstreamResp.headers.get("content-type") ?? "application/json";
+      const isUpstreamSse = upstreamContentType.toLowerCase().includes("text/event-stream");
+      const isUpstreamJson = upstreamContentType.toLowerCase().includes("application/json");
+
+      if (!isStream && !isUpstreamSse) {
         try {
           const respBytes = await readBounded(
             upstreamResp.body,
             deps.config.maxBodyBytes,
             attemptAbort.signal,
           );
+          const providerKind = toProviderKind(cand.channel.kind);
+
+          if (!isUpstreamJson) {
+            const usage = buildUsageForOperation(
+              operation,
+              cand.billingPrice.basis,
+              undefined,
+              chars,
+            );
+            if (!usage) {
+              await deps.ledger.markUnknown(requestId);
+              throw new GatewayError(
+                502,
+                "invalid_upstream_usage",
+                "Non-JSON response requires character or request pricing basis",
+              );
+            }
+            const commitRes = await deps.ledger.commitTerminal({
+              request_id: requestId,
+              selected_attempt_id: activeAttemptId,
+              channel_id: cand.channel.id,
+              billing_price_id: cand.billingPrice.id,
+              cost_version_id: cand.costPrice.id,
+              usage,
+              billing_pricing: {
+                currency: cand.billingPrice.currency,
+                rates: cand.billingPrice.rates,
+              },
+              billing_basis: cand.billingPrice.basis,
+              ...(chars !== undefined ? { input_characters: String(chars) } : {}),
+              supplier_pricing: {
+                currency: cand.costPrice.currency,
+                rates: cand.costPrice.rates,
+              },
+              supplier_currency: cand.costPrice.currency,
+              plugin_audit: preRequestAudit,
+              charge_policy: "CHARGE_CUSTOMER",
+              moderation_blocked: false,
+            });
+            if (!commitRes.ok) {
+              throw new GatewayError(500, "ledger_commit_failed", commitRes.message);
+            }
+            deps.router.recordSuccess(cand.channel.id, latencyMs);
+            emitAccessLog(200, null);
+            return new Response(Buffer.from(respBytes), {
+              status: 200,
+              headers: responseHeaders(requestId, trace, {
+                "content-type": upstreamContentType,
+                "x-gateway-channel": cand.channel.name,
+              }),
+            });
+          }
+
           const rawJson = object(
             parseProviderJson(new TextDecoder("utf-8", { fatal: true }).decode(respBytes)),
           );
-          const providerKind = toProviderKind(cand.channel.kind);
           const rawUsage = extractUsage(rawJson, providerKind);
           const usage = buildUsageForOperation(operation, cand.billingPrice.basis, rawUsage, chars);
           if (!usage) {
@@ -760,6 +924,7 @@ export async function handleInferenceRequest(
             allAudit.push(...postRes.audit);
             if (postRes.blocked) {
               moderationBlocked = true;
+              logModBlocked = true;
               chargePolicy = postRes.charge_policy;
               blockRule = postRes.rule_code ?? "moderation_blocked";
               blockStatus = postRes.http_status ?? 400;
@@ -798,6 +963,7 @@ export async function handleInferenceRequest(
 
           deps.router.recordSuccess(cand.channel.id, latencyMs);
           if (moderationBlocked) {
+            emitAccessLog(blockStatus, blockRule);
             return c.json(
               {
                 error: {
@@ -808,16 +974,16 @@ export async function handleInferenceRequest(
                 },
               },
               blockStatus as 400,
-              { "x-request-id": requestId, "x-gateway-channel": cand.channel.name },
+              responseHeaders(requestId, trace, { "x-gateway-channel": cand.channel.name }),
             );
           }
+          emitAccessLog(200, null);
           return new Response(stringifyExact(clientJson), {
             status: 200,
-            headers: {
+            headers: responseHeaders(requestId, trace, {
               "content-type": "application/json",
-              "x-request-id": requestId,
               "x-gateway-channel": cand.channel.name,
-            },
+            }),
           });
         } finally {
           clearTimeout(timeoutTimer);
@@ -827,20 +993,6 @@ export async function handleInferenceRequest(
       }
 
       clearTimeout(timeoutTimer);
-      if (!isConversationalOperation(operation) || !prepared.upstreamProtocol) {
-        void upstreamResp.body?.cancel().catch(() => undefined);
-        await deps.ledger.releaseHold(requestId);
-        throw new GatewayError(
-          422,
-          "unsupported_stream",
-          "Streaming not supported for this operation",
-        );
-      }
-
-      const clientProtocol: Protocol = operation;
-      const upstreamProtocol: Protocol = prepared.upstreamProtocol;
-      const streamId = `gen_${requestId.replaceAll("-", "")}`;
-      const hasPlugins = cand.route.plugin_pipeline.length > 0;
       const upstreamBody = upstreamResp.body;
       const capturedProjectLimit = releaseProjectLimit;
       const capturedChannelLimit = releaseChannelLimit;
@@ -857,6 +1009,144 @@ export async function handleInferenceRequest(
         capturedProjectLimit?.();
         releaseGuard();
       };
+
+      if (!isConversationalOperation(operation) || !prepared.upstreamProtocol) {
+        const providerKind = toProviderKind(cand.channel.kind);
+        const mediaStream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            const reader = upstreamBody?.getReader();
+            const parser = new SSEParser();
+            let observedUsage: Usage | undefined;
+            const heldChunks: Uint8Array[] = [];
+            try {
+              if (!reader)
+                throw new GatewayError(502, "empty_stream", "Upstream returned empty body");
+              while (true) {
+                const step = await reader.read();
+                if (step.done) break;
+                const events = parser.feed(step.value, false);
+                for (const ev of events) {
+                  let isDoneEvent = false;
+                  if (ev.data && ev.data !== "[DONE]") {
+                    const parsed = object(parseProviderJson(ev.data));
+                    observedUsage =
+                      extractUsage(parsed, providerKind, observedUsage) ?? observedUsage;
+                    const t = String(parsed.type ?? ev.event);
+                    if (t.endsWith(".done") || t.endsWith(".completed")) isDoneEvent = true;
+                  }
+                  const bytes = new TextEncoder().encode(ev.wire);
+                  if (isDoneEvent) heldChunks.push(bytes);
+                  else controller.enqueue(bytes);
+                }
+              }
+              for (const ev of parser.feed(new Uint8Array(), true)) {
+                heldChunks.push(new TextEncoder().encode(ev.wire));
+              }
+              const usage = buildUsageForOperation(
+                operation,
+                cand.billingPrice.basis,
+                observedUsage,
+                chars,
+              );
+              if (!usage) {
+                await deps.ledger.markUnknown(requestId);
+                emitAccessLog(502, "invalid_upstream_usage");
+                controller.enqueue(
+                  encodeSSE(
+                    {
+                      error: {
+                        code: "invalid_upstream_usage",
+                        message: "Media stream completed without usage",
+                        request_id: requestId,
+                      },
+                    },
+                    "error",
+                  ),
+                );
+                controller.close();
+                return;
+              }
+              const commitRes = await deps.ledger.commitTerminal({
+                request_id: requestId,
+                selected_attempt_id: activeAttemptId,
+                channel_id: cand.channel.id,
+                billing_price_id: cand.billingPrice.id,
+                cost_version_id: cand.costPrice.id,
+                usage,
+                billing_pricing: {
+                  currency: cand.billingPrice.currency,
+                  rates: cand.billingPrice.rates,
+                },
+                billing_basis: cand.billingPrice.basis,
+                ...(chars !== undefined ? { input_characters: String(chars) } : {}),
+                supplier_pricing: {
+                  currency: cand.costPrice.currency,
+                  rates: cand.costPrice.rates,
+                },
+                supplier_currency: cand.costPrice.currency,
+                plugin_audit: preRequestAudit,
+                charge_policy: "CHARGE_CUSTOMER",
+                moderation_blocked: false,
+              });
+              if (!commitRes.ok) {
+                throw new GatewayError(500, "ledger_commit_failed", commitRes.message);
+              }
+              deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
+              for (const ch of heldChunks) controller.enqueue(ch);
+              emitAccessLog(200, null);
+              controller.close();
+            } catch (err) {
+              deps.metrics.recordUpstreamError(cand.channel.name, "media_stream_error");
+              deps.router.recordFailure(
+                cand.channel.id,
+                "retryable",
+                undefined,
+                performance.now() - startedAt,
+              );
+              await deps.ledger.markUnknown(requestId).catch(() => undefined);
+              emitAccessLog(502, "stream_interrupted");
+              try {
+                controller.enqueue(
+                  encodeSSE(
+                    {
+                      error: {
+                        code: "stream_interrupted",
+                        message: err instanceof Error ? err.message : "Media stream failed",
+                        request_id: requestId,
+                      },
+                    },
+                    "error",
+                  ),
+                );
+                controller.close();
+              } catch {
+                void 0;
+              }
+            } finally {
+              reader?.releaseLock();
+              cleanupStream();
+            }
+          },
+          cancel() {
+            attemptAbort.abort(new Error("client_cancelled"));
+            void upstreamBody?.cancel().catch(() => undefined);
+            cleanupStream();
+          },
+        });
+        return new Response(mediaStream, {
+          status: 200,
+          headers: responseHeaders(requestId, trace, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+            "x-gateway-channel": cand.channel.name,
+          }),
+        });
+      }
+
+      const clientProtocol: Protocol = operation;
+      const upstreamProtocol: Protocol = prepared.upstreamProtocol;
+      const streamId = `gen_${requestId.replaceAll("-", "")}`;
+      const hasPlugins = cand.route.plugin_pipeline.length > 0;
 
       const bodyStream = new ReadableStream<Uint8Array>({
         async start(controller) {
@@ -942,6 +1232,7 @@ export async function handleInferenceRequest(
               const finalMod = await session.finalize();
               if (finalMod.blocked) {
                 deps.metrics.moderationBlocksTotal++;
+                logModBlocked = true;
                 const modUsage = buildModerationUsageFallback(
                   translator.usage,
                   chars ?? 0,
@@ -970,6 +1261,7 @@ export async function handleInferenceRequest(
                   moderation_blocked: true,
                 });
                 deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
+                emitAccessLog(400, finalMod.rule_code ?? "content_blocked");
                 controller.enqueue(
                   encodeSSE(
                     {
@@ -1004,6 +1296,7 @@ export async function handleInferenceRequest(
             );
             if (!usage) {
               streamFailed = true;
+              deps.metrics.recordUpstreamError(cand.channel.name, "missing_usage");
               deps.router.recordFailure(
                 cand.channel.id,
                 "retryable",
@@ -1011,6 +1304,7 @@ export async function handleInferenceRequest(
                 performance.now() - startedAt,
               );
               await deps.ledger.markUnknown(requestId);
+              emitAccessLog(502, "invalid_upstream_usage");
               controller.enqueue(
                 encodeSSE(
                   {
@@ -1057,10 +1351,12 @@ export async function handleInferenceRequest(
             for (const chunk of heldTerminalChunks) {
               controller.enqueue(chunk);
             }
+            emitAccessLog(200, null);
             controller.close();
           } catch (err) {
             if (!streamFailed) {
               streamFailed = true;
+              deps.metrics.recordUpstreamError(cand.channel.name, "stream_interrupted");
               deps.router.recordFailure(
                 cand.channel.id,
                 "retryable",
@@ -1069,8 +1365,9 @@ export async function handleInferenceRequest(
               );
               await deps.ledger.markUnknown(requestId).catch(() => undefined);
             }
+            const code = err instanceof GatewayError ? err.code : "stream_interrupted";
+            emitAccessLog(502, code);
             try {
-              const code = err instanceof GatewayError ? err.code : "stream_interrupted";
               const msg = err instanceof Error ? err.message : "Stream failed";
               controller.enqueue(
                 encodeSSE({ error: { code, message: msg, request_id: requestId } }, "error"),
@@ -1093,12 +1390,11 @@ export async function handleInferenceRequest(
 
       return new Response(bodyStream, {
         status: 200,
-        headers: {
+        headers: responseHeaders(requestId, trace, {
           "content-type": "text/event-stream; charset=utf-8",
           "cache-control": "no-cache",
-          "x-request-id": requestId,
           "x-gateway-channel": cand.channel.name,
-        },
+        }),
       });
     }
 
@@ -1107,7 +1403,10 @@ export async function handleInferenceRequest(
     else await deps.ledger.releaseHold(requestId);
     throw new GatewayError(lastErrorStatus, lastErrorCode, lastErrorMessage);
   } catch (err) {
-    return errorJson(c, err, requestId);
+    const status = err instanceof GatewayError ? err.status : 500;
+    const code = err instanceof GatewayError ? err.code : "internal_error";
+    emitAccessLog(status, code);
+    return errorJson(c, err, requestId, trace);
   } finally {
     releaseLimiters();
     releaseGuard();

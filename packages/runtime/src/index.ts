@@ -4,3 +4,4 @@ export * from "./ip.ts";
 export * from "./cloud-auth.ts";
 export * from "./crypto.ts";
 export * from "./router.ts";
+export * from "./cluster.ts";
