@@ -128,6 +128,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     transport,
     vertexTokens,
     pluginEngine,
+    wasmExecutor,
     lifecycle,
     metrics,
   };
@@ -255,6 +256,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     router,
     cluster,
     pluginEngine,
+    wasmExecutor,
   });
 
   const worker =

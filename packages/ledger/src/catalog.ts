@@ -16,11 +16,13 @@ import {
   type LedgerDrizzle,
 } from "./schema.ts";
 import type {
+  AdapterOverrides,
   ApiKeyRecord,
   ChannelKind,
   ChannelRecord,
   ConfigSnapshot,
   ModelRecord,
+  PluginCapability,
   PluginKind,
   PluginPipelineStep,
   PluginRecord,
@@ -28,6 +30,7 @@ import type {
   PriceSide,
   PriceVersionRecord,
   ProjectRecord,
+  ProviderPluginConfig,
   RouteRecord,
   RouteRetryPolicy,
   RoutingStrategy,
@@ -237,16 +240,20 @@ export function createCatalogRepository(db: SQL) {
       account_id: string;
       name: string;
       kind: ChannelKind;
+      provider_plugin_id?: string | null;
       base_url: string;
       secret_ciphertext: string;
       rpm: number;
       concurrency: number;
       enabled?: boolean;
       routing_policy?: Record<string, unknown>;
+      adapter_config?: AdapterOverrides;
     }): Promise<ChannelRecord & { config_epoch: number }> {
       const id = input.id ?? crypto.randomUUID();
       const enabled = input.enabled ?? true;
       const routingPolicy = input.routing_policy ?? {};
+      const adapterConfig = input.adapter_config ?? {};
+      const providerPluginId = input.provider_plugin_id ?? null;
       return orm.transaction(async (tx) => {
         const rows = await tx
           .insert(channels)
@@ -255,12 +262,14 @@ export function createCatalogRepository(db: SQL) {
             accountId: input.account_id,
             name: input.name,
             kind: input.kind,
+            providerPluginId,
             baseUrl: input.base_url,
             secretCiphertext: input.secret_ciphertext,
             rpm: input.rpm,
             concurrency: input.concurrency,
             enabled,
             routingPolicy,
+            adapterConfig,
           })
           .onConflictDoUpdate({
             target: channels.id,
@@ -268,12 +277,14 @@ export function createCatalogRepository(db: SQL) {
               accountId: input.account_id,
               name: input.name,
               kind: input.kind,
+              providerPluginId,
               baseUrl: input.base_url,
               secretCiphertext: input.secret_ciphertext,
               rpm: input.rpm,
               concurrency: input.concurrency,
               enabled,
               routingPolicy,
+              adapterConfig,
               configRevision: sql`${channels.configRevision} + 1`,
               updatedAt: sql`now()`,
             },
@@ -286,12 +297,14 @@ export function createCatalogRepository(db: SQL) {
           account_id: r.accountId,
           name: r.name,
           kind: r.kind,
+          provider_plugin_id: r.providerPluginId,
           base_url: r.baseUrl,
           secret_ciphertext: r.secretCiphertext,
           rpm: r.rpm,
           concurrency: r.concurrency,
           enabled: r.enabled,
           routing_policy: r.routingPolicy,
+          adapter_config: r.adapterConfig,
           config_revision: r.configRevision,
           config_epoch: epoch,
         };
@@ -400,6 +413,7 @@ export function createCatalogRepository(db: SQL) {
       billing_price_id: string;
       cost_version_id: string;
       request_policy?: Record<string, unknown>;
+      adapter_overrides?: AdapterOverrides;
       plugin_pipeline?: PluginPipelineStep[];
       retry_policy?: RouteRetryPolicy;
       enabled?: boolean;
@@ -408,6 +422,7 @@ export function createCatalogRepository(db: SQL) {
       const priority = input.priority ?? 0;
       const weight = input.weight ?? 1;
       const requestPolicy = input.request_policy ?? {};
+      const adapterOverrides = input.adapter_overrides ?? {};
       const pluginPipeline = input.plugin_pipeline ?? [];
       const retryPolicy = input.retry_policy ?? {};
       const enabled = input.enabled ?? true;
@@ -425,6 +440,7 @@ export function createCatalogRepository(db: SQL) {
             billingPriceId: input.billing_price_id,
             costVersionId: input.cost_version_id,
             requestPolicy,
+            adapterOverrides,
             pluginPipeline,
             retryPolicy,
             enabled,
@@ -440,6 +456,7 @@ export function createCatalogRepository(db: SQL) {
               billingPriceId: input.billing_price_id,
               costVersionId: input.cost_version_id,
               requestPolicy,
+              adapterOverrides,
               pluginPipeline,
               retryPolicy,
               enabled,
@@ -459,6 +476,7 @@ export function createCatalogRepository(db: SQL) {
           billing_price_id: r.billingPriceId,
           cost_version_id: r.costVersionId,
           request_policy: r.requestPolicy,
+          adapter_overrides: r.adapterOverrides,
           plugin_pipeline: r.pluginPipeline,
           retry_policy: r.retryPolicy,
           enabled: r.enabled,
@@ -471,17 +489,21 @@ export function createCatalogRepository(db: SQL) {
       id?: string;
       name: string;
       version: string;
+      capability?: PluginCapability;
       kind: PluginKind;
       wasm_bytes?: Uint8Array | null;
       webhook_config?: WebhookPluginConfig | null;
+      provider_config?: ProviderPluginConfig | null;
       signature?: string | null;
       signing_key_id?: string | null;
       manifest?: WasmPluginManifest | Record<string, unknown>;
       enabled?: boolean;
     }): Promise<PluginRecord & { config_epoch: number }> {
       const id = input.id ?? crypto.randomUUID();
+      const capability: PluginCapability = input.capability ?? "CONTENT";
       const wasmBytes = input.wasm_bytes ?? null;
       const webhookConfig = input.webhook_config ?? null;
+      const providerConfig = input.provider_config ?? null;
       const manifest = (input.manifest ?? {}) as Record<string, unknown>;
       const enabled = input.enabled ?? true;
       const signature = input.signature ?? null;
@@ -492,8 +514,10 @@ export function createCatalogRepository(db: SQL) {
             canonical({
               name: input.name,
               version: input.version,
+              capability,
               kind: input.kind,
               webhook_config: webhookConfig,
+              provider_config: providerConfig,
               manifest,
             }),
           );
@@ -504,10 +528,12 @@ export function createCatalogRepository(db: SQL) {
             id,
             name: input.name,
             version: input.version,
+            capability,
             kind: input.kind,
             digest,
             wasmBytes,
             webhookConfig,
+            providerConfig,
             signature,
             signingKeyId,
             manifest,
@@ -516,9 +542,12 @@ export function createCatalogRepository(db: SQL) {
           .onConflictDoUpdate({
             target: [plugins.name, plugins.version],
             set: {
+              capability,
+              kind: input.kind,
               digest,
               wasmBytes,
               webhookConfig,
+              providerConfig,
               signature,
               signingKeyId,
               manifest,
@@ -532,46 +561,57 @@ export function createCatalogRepository(db: SQL) {
           id: r.id,
           name: r.name,
           version: r.version,
+          capability: r.capability,
           kind: r.kind,
           digest: r.digest,
           wasm_bytes: r.wasmBytes ? new Uint8Array(r.wasmBytes) : null,
           webhook_config: r.webhookConfig,
+          provider_config: r.providerConfig,
           signature: r.signature,
           signing_key_id: r.signingKeyId,
           manifest: r.manifest,
           enabled: r.enabled,
+          created_at: r.createdAt,
           config_epoch: epoch,
         };
       });
     },
 
-    async listPlugins(): Promise<Omit<PluginRecord, "wasm_bytes">[]> {
-      const rows = await orm
+    async listPlugins(capability?: PluginCapability): Promise<Omit<PluginRecord, "wasm_bytes">[]> {
+      const base = orm
         .select({
           id: plugins.id,
           name: plugins.name,
           version: plugins.version,
+          capability: plugins.capability,
           kind: plugins.kind,
           digest: plugins.digest,
           webhookConfig: plugins.webhookConfig,
+          providerConfig: plugins.providerConfig,
           signature: plugins.signature,
           signingKeyId: plugins.signingKeyId,
           manifest: plugins.manifest,
           enabled: plugins.enabled,
+          createdAt: plugins.createdAt,
         })
-        .from(plugins)
-        .orderBy(asc(plugins.name), asc(plugins.version));
+        .from(plugins);
+      const rows = await (
+        capability ? base.where(eq(plugins.capability, capability)) : base
+      ).orderBy(asc(plugins.name), asc(plugins.version));
       return rows.map((r) => ({
         id: r.id,
         name: r.name,
         version: r.version,
+        capability: r.capability,
         kind: r.kind,
         digest: r.digest,
         webhook_config: r.webhookConfig,
+        provider_config: r.providerConfig,
         signature: r.signature,
         signing_key_id: r.signingKeyId,
         manifest: r.manifest,
         enabled: r.enabled,
+        created_at: r.createdAt,
       }));
     },
 
@@ -599,7 +639,11 @@ export function createCatalogRepository(db: SQL) {
           .from(routes)
           .where(eq(routes.enabled, true))
           .orderBy(asc(routes.modelName), desc(routes.priority), asc(routes.id)),
-        orm.select().from(plugins).where(eq(plugins.enabled, true)),
+        orm
+          .select()
+          .from(plugins)
+          .where(eq(plugins.enabled, true))
+          .orderBy(desc(plugins.createdAt), asc(plugins.id)),
       ]);
 
       const projectMap = new Map<string, ProjectRecord>();
@@ -650,12 +694,14 @@ export function createCatalogRepository(db: SQL) {
           account_id: r.accountId,
           name: r.name,
           kind: r.kind,
+          provider_plugin_id: r.providerPluginId,
           base_url: r.baseUrl,
           secret_ciphertext: r.secretCiphertext,
           rpm: r.rpm,
           concurrency: r.concurrency,
           enabled: r.enabled,
           routing_policy: r.routingPolicy,
+          adapter_config: r.adapterConfig,
           config_revision: r.configRevision,
         });
       }
@@ -697,6 +743,7 @@ export function createCatalogRepository(db: SQL) {
           billing_price_id: r.billingPriceId,
           cost_version_id: r.costVersionId,
           request_policy: r.requestPolicy,
+          adapter_overrides: r.adapterOverrides,
           plugin_pipeline: r.pluginPipeline,
           retry_policy: r.retryPolicy,
           enabled: r.enabled,
@@ -707,20 +754,28 @@ export function createCatalogRepository(db: SQL) {
       }
 
       const pluginMap = new Map<string, PluginRecord>();
+      const providerPluginsByName = new Map<string, PluginRecord>();
       for (const r of pluginRows) {
-        pluginMap.set(r.id, {
+        const rec: PluginRecord = {
           id: r.id,
           name: r.name,
           version: r.version,
+          capability: r.capability,
           kind: r.kind,
           digest: r.digest,
           wasm_bytes: r.wasmBytes ? new Uint8Array(r.wasmBytes) : null,
           webhook_config: r.webhookConfig,
+          provider_config: r.providerConfig,
           signature: r.signature,
           signing_key_id: r.signingKeyId,
           manifest: r.manifest,
           enabled: r.enabled,
-        });
+          created_at: r.createdAt,
+        };
+        pluginMap.set(rec.id, rec);
+        if (rec.capability === "PROVIDER" && !providerPluginsByName.has(rec.name)) {
+          providerPluginsByName.set(rec.name, rec);
+        }
       }
 
       return {
@@ -733,6 +788,7 @@ export function createCatalogRepository(db: SQL) {
         prices: priceMap,
         routesByModel,
         plugins: pluginMap,
+        providerPluginsByName,
       };
     },
   };

@@ -35,14 +35,138 @@ export function awsCredentials(secret: string): AwsCredentials {
     ...(value.sessionToken ? { sessionToken: text(value.sessionToken) } : {}),
   };
 }
-function azureCredentials(secret: string): { key: string; version: string } {
+export type HostAuthScheme =
+  | { scheme: "none" }
+  | { scheme: "bearer" }
+  | { scheme: "header"; header_name: string; prefix?: string }
+  | { scheme: "query"; param_name: string }
+  | { scheme: "azure_key"; default_api_version?: string }
+  | { scheme: "aws_sigv4"; service: string }
+  | { scheme: "gcp_vertex_oauth" }
+  | {
+      scheme: "hmac_sha256";
+      signature_header: string;
+      timestamp_header: string;
+      key_id_header?: string;
+      signature_prefix?: string;
+      encoding?: "hex" | "base64";
+    };
+
+export function azureCredentials(
+  secret: string,
+  defaultApiVersion = "2024-10-21",
+): { key: string; version: string } {
   const value = secret.startsWith("{") ? cloudCredentials(secret) : { apiKey: secret };
   const key = text(value.apiKey);
-  const version = text(value.apiVersion, "2024-10-21");
+  const version = text(value.apiVersion, defaultApiVersion);
   if (!/^[\x21-\x7e]{1,4096}$/.test(key) || !/^\d{4}-\d{2}-\d{2}(?:-preview)?$/.test(version))
     throw invalid();
   return { key, version };
 }
+
+export function hmacCredentials(secret: string): { keyId?: string; secretKey: string } {
+  if (secret.startsWith("{")) {
+    const value = cloudCredentials(secret);
+    const secretKey = text(value.secretKey);
+    const keyId = value.keyId !== undefined ? text(value.keyId) : undefined;
+    if (!secretKey) throw invalid();
+    return { ...(keyId ? { keyId } : {}), secretKey };
+  }
+  if (!secret) throw invalid();
+  return { secretKey: secret };
+}
+
+export function validateAuthCredentials(auth: HostAuthScheme, secret: string): void {
+  if (auth.scheme === "azure_key") {
+    azureCredentials(secret, auth.default_api_version);
+    return;
+  }
+  if (auth.scheme === "aws_sigv4") {
+    awsCredentials(secret);
+    return;
+  }
+  if (auth.scheme === "hmac_sha256") {
+    hmacCredentials(secret);
+    return;
+  }
+  if (auth.scheme === "gcp_vertex_oauth") {
+    validateCloudCredentials("vertex", secret);
+  }
+}
+
+export async function applyAuthToRequest(options: {
+  auth: HostAuthScheme;
+  secret: string;
+  method?: string;
+  url: URL;
+  headers: Headers;
+  body: Uint8Array;
+  vertexTokens: VertexTokens;
+  signal: AbortSignal;
+}): Promise<void> {
+  const { auth, secret, url, headers, body, vertexTokens, signal } = options;
+  switch (auth.scheme) {
+    case "none":
+      return;
+    case "bearer":
+      if (secret) headers.set("authorization", `Bearer ${secret}`);
+      return;
+    case "header":
+      if (secret) headers.set(auth.header_name, `${auth.prefix ?? ""}${secret}`);
+      return;
+    case "query":
+      if (secret) url.searchParams.set(auth.param_name, secret);
+      return;
+    case "azure_key": {
+      const az = azureCredentials(secret, auth.default_api_version);
+      if (!url.searchParams.has("api-version")) {
+        url.searchParams.set("api-version", az.version);
+      }
+      headers.set("api-key", az.key);
+      return;
+    }
+    case "aws_sigv4": {
+      const creds = awsCredentials(secret);
+      const amzDate = awsAmzDate();
+      const signingKey = awsSigningKey(
+        creds.secretAccessKey,
+        amzDate.slice(0, 8),
+        creds.region,
+        auth.service,
+      );
+      signAwsRequest(url, body, headers, {
+        accessKeyId: creds.accessKeyId,
+        sessionToken: creds.sessionToken,
+        region: creds.region,
+        service: auth.service,
+        amzDate,
+        signingKey,
+      });
+      return;
+    }
+    case "gcp_vertex_oauth": {
+      const token = await vertexTokens.get(secret, signal);
+      headers.set("authorization", `Bearer ${token}`);
+      return;
+    }
+    case "hmac_sha256": {
+      const creds = hmacCredentials(secret);
+      const ts = String(Math.floor(Date.now() / 1000));
+      const method = (options.method ?? "POST").toUpperCase();
+      const canonical = `${method}\n${url.pathname}${url.search}\n${ts}\n${sha256(body)}`;
+      const digest = createHmac("sha256", creds.secretKey)
+        .update(canonical)
+        .digest(auth.encoding ?? "hex");
+      headers.set(auth.timestamp_header, ts);
+      headers.set(auth.signature_header, `${auth.signature_prefix ?? ""}${digest}`);
+      if (auth.key_id_header && creds.keyId) {
+        headers.set(auth.key_id_header, creds.keyId);
+      }
+      return;
+    }
+  }
+}
+
 export function validateCloudCredentials(kind: ProviderKind, secret: string): void {
   if (kind === "azure") azureCredentials(secret);
   if (kind === "bedrock") awsCredentials(secret);

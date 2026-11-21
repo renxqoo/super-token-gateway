@@ -2,23 +2,24 @@
 
 企业级高性能 LLM Gateway 与微批核心账本系统，基于 **Bun 1.4.4 / TypeScript + Hono + PostgreSQL 17 + 极薄 Rust `wasmtime` 插件沙箱**，单一架构无双轨遗留。业务系统（未来 `apps/business`）与网关/账本物理分离，仅通过幂等内部 HTTP API 与异步 Outbox 协作。
 
-完整架构决策、核心账本分片租约设计与验收标准见 [ADR 0009](docs/decisions/0009-enterprise-gateway-worker-architecture.md)。
+完整架构决策、核心账本分片租约设计与渠道插件化架构验收标准见 [ADR 0009](docs/decisions/0009-enterprise-gateway-worker-architecture.md) 与 [ADR 0010](docs/decisions/0010-provider-plugin-architecture.md)。
 
 ## 目录结构
 
-| 路径                       | 职责                                                                                                                                                                                                                                          |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apps/gateway`             | 高性能无状态公开网关（Chat/Responses/Messages/Gemini/Embeddings/Moderations/Images/Audio、`/livez`、`/readyz`、Prometheus 直方图 `/metrics`、`traceparent` 链路追踪、零明文 JSON 访问日志）+ Zod 严格校验 `/internal/v1/*` 管理与分页对账 API |
-| `apps/worker`              | 后台账务与调度 Worker（PG Advisory Lease 选主、超时预扣与过期节点租约扫尾 `sweepExpiredLeases`、批次过期、自动收债、供应商分片再平衡、Outbox 推送）                                                                                           |
-| `apps/mock-providers`      | 独立测试用上游替身（OpenAI / Anthropic / Gemini / Azure / Bedrock / Vertex / DeepSeek / Ollama）                                                                                                                                              |
-| `packages/ledger`          | 精简 PG 核心账本：`drizzle-orm/bun-sql` 强类型 Schema（23 张表 1:1 零漂移）/目录 CRUD/Outbox/归档/分页对账查询 + 原生 `Bun.SQL` 自适应 PG 分片资金租约（`wallet_leases`/`supplier_leases`）、2 ms 微批与 9 表单 CTE 原子结算热路径            |
-| `packages/protocol`        | 多协议无损透传、跨协议转换、有界 SSE 流解析、精确 JSON 快速路径与精确计量                                                                                                                                                                     |
-| `packages/plugin-engine`   | 内容处理插件管道（内置 Bun 隔离 Worker `WebAssembly` 沙箱开箱即用 + 可选 Rust `wasmtime` FFI 加速、复用 SSRF/DNS-Pinning 传输层的外部 HTTP Webhook 风控、流式滑窗、请求/响应改写与熔断）                                                      |
-| `packages/runtime`         | SmartRouter 智能路由熔断器（含 `probeTimeoutMs` 防死锁自愈）、Redis 集群协同（跨节点限流/熔断与配置纪元 Pub/Sub 毫秒同步 + 单机降级）、SSRF/DNS-Pinning 高复用 keep-alive 连接池                                                              |
-| `packages/kernel`          | 纯函数精确 `BigInt` 有理数计价与预扣上界计算                                                                                                                                                                                                  |
-| `packages/contracts`       | 公共 Schema 校验与错误类型                                                                                                                                                                                                                    |
-| `native/plugin-wasmtime`   | 极薄 Rust `wasmtime` cdylib 沙箱（~200 行，零 WASI/网络/FS，按插件硬内存与 Fuel 上限）                                                                                                                                                        |
-| `native/builtin-pii-guard` | 内置开箱即用 Rust → `wasm32-unknown-unknown` DLP/PII 脱敏与防注入插件（~26 KB 零导入 WASM，支持一键安装与沙箱试跑）                                                                                                                           |
+| 路径                           | 职责                                                                                                                                                                                                                                          |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/gateway`                 | 高性能无状态公开网关（Chat/Responses/Messages/Gemini/Embeddings/Moderations/Images/Audio、`/livez`、`/readyz`、Prometheus 直方图 `/metrics`、`traceparent` 链路追踪、零明文 JSON 访问日志）+ Zod 严格校验 `/internal/v1/*` 管理与分页对账 API |
+| `apps/worker`                  | 后台账务与调度 Worker（PG Advisory Lease 选主、超时预扣与过期节点租约扫尾 `sweepExpiredLeases`、批次过期、自动收债、供应商分片再平衡、Outbox 推送）                                                                                           |
+| `apps/mock-providers`          | 独立测试用上游替身（OpenAI / Anthropic / Gemini / Azure / Bedrock / Vertex / DeepSeek / Ollama）                                                                                                                                              |
+| `packages/ledger`              | 精简 PG 核心账本：`drizzle-orm/bun-sql` 强类型 Schema（23 张表 1:1 零漂移）/目录 CRUD/Outbox/归档/分页对账查询 + 原生 `Bun.SQL` 自适应 PG 分片资金租约（`wallet_leases`/`supplier_leases`）、2 ms 微批与 9 表单 CTE 原子结算热路径            |
+| `packages/protocol`            | 多协议无损透传、跨协议转换、有界 SSE 流解析、精确 JSON 快速路径与精确计量                                                                                                                                                                     |
+| `packages/plugin-engine`       | 统一插件引擎（`CONTENT` 内容风控 + `PROVIDER` 渠道插件）：内置 15 个厂商声明式预设、预编译转换器（参数改名/裁剪/钳位/伪 200 错误匹配/Usage 映射）、Bun 隔离 Worker `WebAssembly` 沙箱与原生 Rust `wasmtime` FFI 加速、外部 HTTP Webhook 风控  |
+| `packages/runtime`             | SmartRouter 智能路由熔断器（含 `probeTimeoutMs` 防死锁自愈）、8 种宿主鉴权/签名器（含 `aws_sigv4`/`gcp_vertex_oauth`/`hmac_sha256`）、Redis 集群协同与 SSRF/DNS-Pinning 高复用连接池                                                          |
+| `packages/kernel`              | 纯函数精确 `BigInt` 有理数计价与预扣上界计算                                                                                                                                                                                                  |
+| `packages/contracts`           | 公共 Schema 校验与错误类型                                                                                                                                                                                                                    |
+| `native/plugin-wasmtime`       | 极薄 Rust `wasmtime` cdylib 沙箱（~200 行，零 WASI/网络/FS，按插件硬内存与 Fuel 上限）                                                                                                                                                        |
+| `native/builtin-pii-guard`     | 内置开箱即用 Rust → `wasm32-unknown-unknown` DLP/PII 脱敏与防注入插件（~26 KB 零导入 WASM，支持一键安装与沙箱试跑）                                                                                                                           |
+| `native/example-provider-wasm` | 示例 Rust → `wasm32-unknown-unknown` 私有协议 `PROVIDER` WASM 插件（覆盖 `adapt_request` / `adapt_response` / `adapt_stream_event` + 有界跨帧 `state` + `usage` 提取）                                                                        |
 
 ## 核心特性
 
@@ -39,12 +40,18 @@
    - 外部 HTTP Webhook 风控支持 `HOLD_UNTIL_APPROVED`（零违规字节泄漏）与 `STREAM_AND_CUTOFF`（边推边检异步截断上游并精确按策略结算），支持 `manifest.hooks` 精准过滤、独立熔断与冷却恢复、注册与调用全链路 SSRF/DNS-Pinning 校验及 `FAIL_CLOSED` / `FAIL_OPEN` 降级策略。
    - 拦截计费策略支持按路由/插件配置 `CHARGE_CUSTOMER`（默认客户承担）或 `PLATFORM_ABSORB`（平台兜底并记入 `system:moderation_loss` 复式凭证），流式与非流式审计明细完整持久化至 `billing_charges.plugin_audit`。
 
+4. **全动态上游渠道插件化架构（`ADR 0010` — 零厂商硬编码）**：
+   - 全仓移除 `channels.kind` 厂商枚举与 `switch (channel.kind)`，统一由 `capability: "PROVIDER"` 插件驱动，按 **渠道锁版本 (`provider_plugin_id`) > DB 同名在线热覆盖 > 内置预设** 3 级 O(1) 内存解析，变更经 `config_epoch` + Redis Pub/Sub 毫秒级同步全集群。
+   - **内置 15 个开箱即用厂商预设**：`openai`、`openai_compatible`、`anthropic`、`gemini`、`azure`、`bedrock`、`vertex`、`deepseek`、`ollama`、`qwen`、`volcengine`、`zhipu`、`moonshot`、`minimax`、`openrouter`，支持通过 `GET /internal/v1/plugins/builtins?capability=PROVIDER` 发现与一键持久化覆盖。
+   - **双形态扩展**：`DECLARATIVE` 声明式插件原生预编译执行（零 WASM 开销，支持路径模板、参数重命名/裁剪/默认/钳位、伪 HTTP 200 错误识别转 SmartRouter 切换、`usage_aliases` 映射与渠道/路由级 `adapter_overrides` 隔离叠加）；`WASM` 可编程渠道插件复用隔离沙箱，覆盖 `adapt_request` / `adapt_response` / 无状态逐帧 `adapt_stream_event`（有界 4 KB `state`）。
+   - **安全与试跑边界**：渠道秘钥永不进入 WASM 沙箱，鉴权与动态签名由宿主统一注入（支持 `none`/`bearer`/`header`/`query`/`azure_key`/`aws_sigv4`/`gcp_vertex_oauth`/`hmac_sha256`）；`usage` 产出受 `grants: ["extract_usage"]` 与宿主 `BigInt` 强校验约束；提供 `POST /internal/v1/providers/preview` 在线干跑预览（鉴权头自动脱敏 `<REDACTED>`，零外网调用）。
+
 ## 实测性能（Bun 1.4.4 + 真实 PG 17 `fsync=on / synchronous_commit=on / full_page_writes=on`）
 
-- **单独立 Gateway 进程（`BENCH_SECONDS=8 bun run bench:single`，593,882 笔实结，0 错误，守恒 `ok=true`，空闲退租 `active_leases=0`）**：
-  - 短 Chat JSON（512c / 768c / 1024c）：**11,334 RPS**（P99 55.8 ms） / **12,457 RPS**（P99 99.7 ms） / **12,930 RPS**（P99 100.5 ms，GW CPU 81.7%，RSS 308.7 MB）
-  - 单热点钱包 512 并发打同一钱包：**11,485 RPS**（P99 67.9 ms，0 错误，WAL 3,458 B/笔）
-  - 短流式 SSE（512c，`[DONE]` 前原子落库）：**9,165 RPS**（P99 103.0 ms，0 错误）
+- **单独立 Gateway 进程（`BENCH_SECONDS=8 bun run bench:single`，560,043 笔实结，0 错误，守恒 `ok=true`，空闲退租 `active_leases=0`）**：
+  - 短 Chat JSON（512c / 768c / 1024c）：**9,982 RPS**（P99 69.6 ms） / **11,599 RPS**（P99 92.5 ms） / **13,205 RPS**（P99 107.1 ms，GW CPU 96.4%，RSS 318.9 MB）
+  - 单热点钱包 512 并发打同一钱包：**11,317 RPS**（P99 63.7 ms，0 错误，WAL 3,335 B/笔）
+  - 短流式 SSE（512c，`[DONE]` 前原子落库）：**9,038 RPS**（P99 93.0 ms，0 错误）
 - **双独立 Gateway + Worker + Redis 7.4 生产拓扑（`bun run bench:prod --stress`，385,752 笔实结，0 错误，守恒 `ok=true`）**：
   - 15s 持续 JSON（256c）：**9,034 RPS**（P99 50.0 ms）；1,000 并发 5s 长 SSE 活流：**1,000/1,000 成功**（RSS 仅增 1.7 MB）；实时 503 故障切换：**1,000/1,000 成功**（64 次跨节点切换）。
 

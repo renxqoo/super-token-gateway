@@ -1,8 +1,60 @@
 import { numberLiteral, normalizedProviderNumber } from "./json.ts";
-import type { ProviderKind, Usage } from "@gateway/kernel";
+import { dimensions, type Dimension, type ProviderKind, type Usage } from "@gateway/kernel";
 import { GatewayError, optionalObject } from "@gateway/contracts";
 import { count } from "@gateway/kernel";
 import { exactInteger } from "./json.ts";
+
+const allowedUsageKeys = new Set<string>([...dimensions, "reasoning_tokens"]);
+const decimalDurationKeys = new Set<string>(["audio_seconds", "video_seconds"]);
+
+export function validateUsageObject(raw: unknown): Usage {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new GatewayError(502, "invalid_upstream_usage", "Usage payload must be an object");
+  }
+  const obj = raw as Record<string, unknown>;
+  const out: Usage = {};
+  let hasAny = false;
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined || v === null) continue;
+    if (!allowedUsageKeys.has(k)) {
+      throw new GatewayError(502, "invalid_upstream_usage", `Unsupported usage dimension ${k}`);
+    }
+    if (decimalDurationKeys.has(k)) {
+      if (typeof v !== "number" && typeof v !== "string") {
+        throw new GatewayError(
+          502,
+          "invalid_upstream_usage",
+          "Duration must be an exact nonnegative quantity",
+        );
+      }
+      const lit = numberLiteral(obj, k) ?? String(v);
+      out[k as "audio_seconds" | "video_seconds"] = decimalDuration(lit);
+      hasAny = true;
+    } else {
+      const q = exactInteger(obj, k) ?? count(v);
+      if (q === undefined) {
+        throw new GatewayError(
+          502,
+          "invalid_upstream_usage",
+          `Invalid nonnegative integer for usage.${k}`,
+        );
+      }
+      out[k as Dimension | "reasoning_tokens"] = q;
+      hasAny = true;
+    }
+  }
+  if (!hasAny) {
+    throw new GatewayError(502, "invalid_upstream_usage", "Usage payload contains no dimensions");
+  }
+  if (
+    out.reasoning_tokens !== undefined &&
+    out.output_tokens !== undefined &&
+    BigInt(out.reasoning_tokens) > BigInt(out.output_tokens)
+  ) {
+    throw new GatewayError(502, "invalid_upstream_usage", "Reasoning usage exceeds total output");
+  }
+  return out;
+}
 
 function seconds(source: Record<string, unknown>, key: string): string | undefined {
   const raw = source[key];
@@ -79,11 +131,12 @@ function measureDuration(
 
 export function extractUsage(
   body: unknown,
-  kind: ProviderKind,
+  kind: ProviderKind | "custom",
   previous?: Usage,
 ): Usage | undefined {
   if (kind === "bedrock") kind = "anthropic";
   if (kind === "vertex") kind = "gemini";
+  if (kind === "custom") kind = "openai";
   const value = optionalObject(body);
   const response = optionalObject(value.response);
   const raw = optionalObject(

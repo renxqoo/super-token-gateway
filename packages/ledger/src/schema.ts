@@ -22,6 +22,7 @@ import {
 import { sql } from "drizzle-orm";
 import type { Operation, Pricing, Usage } from "@gateway/kernel";
 import type {
+  AdapterOverrides,
   ChargeLotAllocation,
   ChargePolicy,
   ChannelKind,
@@ -29,10 +30,12 @@ import type {
   LeaseLotAllocation,
   LotKind,
   PluginAuditEntry,
+  PluginCapability,
   PluginKind,
   PluginPipelineStep,
   PriceBasis,
   PriceSide,
+  ProviderPluginConfig,
   RouteRetryPolicy,
   RoutingStrategy,
   SupplierHoldEntry,
@@ -150,6 +153,31 @@ export const upstreamAccounts = pgTable("upstream_accounts", {
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
 
+export const plugins = pgTable(
+  "plugins",
+  {
+    id: uuid("id").primaryKey(),
+    name: text("name").notNull(),
+    version: text("version").notNull(),
+    capability: text("capability").$type<PluginCapability>().notNull().default("CONTENT"),
+    kind: text("kind").$type<PluginKind>().notNull(),
+    digest: text("digest").notNull(),
+    wasmBytes: bytea("wasm_bytes"),
+    webhookConfig: pgJsonb<WebhookPluginConfig | null>("webhook_config"),
+    providerConfig: pgJsonb<ProviderPluginConfig | null>("provider_config"),
+    signature: text("signature"),
+    signingKeyId: text("signing_key_id"),
+    manifest: pgJsonb<Record<string, unknown>>("manifest")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [unique("plugins_name_version_key").on(t.name, t.version)],
+);
+
 export const channels = pgTable(
   "channels",
   {
@@ -159,12 +187,16 @@ export const channels = pgTable(
       .references(() => upstreamAccounts.id),
     name: text("name").notNull(),
     kind: text("kind").$type<ChannelKind>().notNull(),
+    providerPluginId: uuid("provider_plugin_id").references(() => plugins.id),
     baseUrl: text("base_url").notNull(),
     secretCiphertext: text("secret_ciphertext").notNull(),
     rpm: integer("rpm").notNull(),
     concurrency: integer("concurrency").notNull(),
     enabled: boolean("enabled").notNull().default(true),
     routingPolicy: pgJsonb<Record<string, unknown>>("routing_policy")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    adapterConfig: pgJsonb<AdapterOverrides>("adapter_config")
       .notNull()
       .default(sql`'{}'::jsonb`),
     configRevision: bigint("config_revision", { mode: "number" }).notNull().default(1),
@@ -200,29 +232,6 @@ export const priceVersions = pgTable("price_versions", {
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
 
-export const plugins = pgTable(
-  "plugins",
-  {
-    id: uuid("id").primaryKey(),
-    name: text("name").notNull(),
-    version: text("version").notNull(),
-    kind: text("kind").$type<PluginKind>().notNull(),
-    digest: text("digest").notNull(),
-    wasmBytes: bytea("wasm_bytes"),
-    webhookConfig: pgJsonb<WebhookPluginConfig | null>("webhook_config"),
-    signature: text("signature"),
-    signingKeyId: text("signing_key_id"),
-    manifest: pgJsonb<Record<string, unknown>>("manifest")
-      .notNull()
-      .default(sql`'{}'::jsonb`),
-    enabled: boolean("enabled").notNull().default(true),
-    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
-      .notNull()
-      .defaultNow(),
-  },
-  (t) => [unique("plugins_name_version_key").on(t.name, t.version)],
-);
-
 export const routes = pgTable(
   "routes",
   {
@@ -244,6 +253,9 @@ export const routes = pgTable(
       .notNull()
       .references(() => priceVersions.id),
     requestPolicy: pgJsonb<Record<string, unknown>>("request_policy")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    adapterOverrides: pgJsonb<AdapterOverrides>("adapter_overrides")
       .notNull()
       .default(sql`'{}'::jsonb`),
     pluginPipeline: pgJsonb<PluginPipelineStep[]>("plugin_pipeline")

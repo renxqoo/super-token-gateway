@@ -5,7 +5,7 @@
       "files": [
         {
           "path": "./migrations/0000_v4_baseline.sql",
-          "checksum": "34729c3905b81d3503da78ed2559b090e0fdd715ea177cb3eab742f9214c01a8"
+          "checksum": "2e454784430499ba7b74bc59190d5b167b419c0fc9a4be56234a3a97a912df3c"
         }
       ]
     }

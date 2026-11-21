@@ -110,3 +110,23 @@ test("deployment units match build script targets and expose zero internal admin
   expect(caddy).toContain("/v1/chat/completions");
   expect(caddy).toContain("flush_interval -1");
 });
+
+test("G7.1 provider plugin architecture eliminates hardcoded vendor enums and channel.kind switches", async () => {
+  const baselineSql = await Bun.file("packages/ledger/src/migrations/0000_v4_baseline.sql").text();
+  expect(baselineSql).not.toMatch(
+    /kind\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*kind\s+IN\s*\(\s*'openai'/,
+  );
+  expect(baselineSql).toContain("provider_plugin_id UUID REFERENCES public.plugins(id)");
+  expect(baselineSql).toContain("adapter_config JSONB NOT NULL DEFAULT '{}'");
+  expect(baselineSql).toContain("adapter_overrides JSONB NOT NULL DEFAULT '{}'");
+
+  const upstreamSrc = await Bun.file("apps/gateway/src/upstream.ts").text();
+  expect(upstreamSrc).not.toMatch(/switch\s*\(\s*channel\.kind\s*\)/);
+  expect(upstreamSrc).not.toMatch(
+    /channel\.kind\s*===\s*["'](?:deepseek|ollama|openai|anthropic|gemini|azure|bedrock|vertex)["']/,
+  );
+
+  const internalApiSrc = await Bun.file("apps/gateway/src/internal-api.ts").text();
+  expect(internalApiSrc).not.toMatch(/channelKindEnum/);
+  expect(internalApiSrc).not.toMatch(/kind\s*===\s*["'](?:azure|bedrock|vertex)["']/);
+});

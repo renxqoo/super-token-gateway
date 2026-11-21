@@ -12,7 +12,11 @@ export interface Completion {
   usage: Usage | undefined;
 }
 
-export function decodeResponse(value: unknown, source: Protocol, kind: ProviderKind): Completion {
+export function decodeResponse(
+  value: unknown,
+  source: Protocol,
+  kind: ProviderKind | "custom",
+): Completion {
   const body = object(value);
   const result: Completion = {
     id: text(body.id, `gen_${crypto.randomUUID()}`),

@@ -1,7 +1,7 @@
 import { dlopen, FFIType, ptr, toArrayBuffer } from "bun:ffi";
 import { createPublicKey, verify } from "node:crypto";
 import { existsSync } from "node:fs";
-import type { PluginHook, WasmRuntimeExecutor } from "./types.ts";
+import type { WasmCallableHook, WasmRuntimeExecutor } from "./types.ts";
 
 const DEFAULT_MAX_MEMORY = 32 * 1024 * 1024;
 const DEFAULT_FUEL = 2_000_000;
@@ -122,10 +122,19 @@ self.onmessage = (event) => {
 };
 `;
 
+type WorkerReply = {
+  seq: number;
+  ok: boolean;
+  out?: Uint8Array;
+  error?: string;
+};
+
 type PoolSlot = {
   worker: Worker;
   busy: boolean;
   compiledDigests: Map<string, string>;
+  onReply: ((data: WorkerReply) => void) | null;
+  onFault: ((message: string) => void) | null;
 };
 
 export function createBunWasmExecutor(options?: {
@@ -147,6 +156,12 @@ export function createBunWasmExecutor(options?: {
   let closed = false;
   let nextSeq = 1;
 
+  function setWorkerRef(worker: Worker, active: boolean): void {
+    const w = worker as Worker & { ref?: () => void; unref?: () => void };
+    if (active) w.ref?.();
+    else w.unref?.();
+  }
+
   function spawnSlot(): PoolSlot {
     if (!workerBlobUrl) {
       workerBlobUrl = URL.createObjectURL(
@@ -154,11 +169,19 @@ export function createBunWasmExecutor(options?: {
       );
     }
     const worker = new Worker(workerBlobUrl);
-    (worker as Worker & { unref?: () => void }).unref?.();
+    setWorkerRef(worker, false);
     const slot: PoolSlot = {
       worker,
       busy: false,
       compiledDigests: new Map(),
+      onReply: null,
+      onFault: null,
+    };
+    worker.onmessage = (event) => {
+      slot.onReply?.(event.data as WorkerReply);
+    };
+    worker.onerror = (err) => {
+      slot.onFault?.(err.message || "WASM worker crashed");
     };
     slots.add(slot);
     return slot;
@@ -169,22 +192,29 @@ export function createBunWasmExecutor(options?: {
     const idle = idleSlots.pop();
     if (idle) {
       idle.busy = true;
+      setWorkerRef(idle.worker, true);
       return Promise.resolve(idle);
     }
     if (slots.size < poolSize) {
       const created = spawnSlot();
       created.busy = true;
+      setWorkerRef(created.worker, true);
       return Promise.resolve(created);
     }
     return new Promise((resolve, reject) => {
       waiters.push((slot) => {
         if (!slot) reject(new Error("WASM executor is closed"));
-        else resolve(slot);
+        else {
+          setWorkerRef(slot.worker, true);
+          resolve(slot);
+        }
       });
     });
   }
 
   function releaseSlot(slot: PoolSlot, healthy: boolean): void {
+    slot.onReply = null;
+    slot.onFault = null;
     if (!healthy) {
       slots.delete(slot);
       try {
@@ -215,6 +245,7 @@ export function createBunWasmExecutor(options?: {
       return;
     }
     slot.busy = false;
+    setWorkerRef(slot.worker, false);
     idleSlots.push(slot);
   }
 
@@ -247,7 +278,7 @@ export function createBunWasmExecutor(options?: {
 
     async invoke(
       pluginId: string,
-      hook: PluginHook,
+      hook: WasmCallableHook,
       input: Uint8Array,
       invokeOptions: { fuelBudget: number; maxMemoryBytes: number },
     ): Promise<Uint8Array> {
@@ -269,8 +300,8 @@ export function createBunWasmExecutor(options?: {
         let settled = false;
         const cleanupHandlers = () => {
           clearTimeout(timer);
-          slot.worker.onmessage = null;
-          slot.worker.onerror = null;
+          slot.onReply = null;
+          slot.onFault = null;
         };
         const timer = setTimeout(() => {
           if (settled) return;
@@ -280,13 +311,7 @@ export function createBunWasmExecutor(options?: {
           reject(new Error(`WASM execution timed out after ${timeoutMs}ms`));
         }, timeoutMs);
 
-        slot.worker.onmessage = (event) => {
-          const data = event.data as {
-            seq: number;
-            ok: boolean;
-            out?: Uint8Array;
-            error?: string;
-          };
+        slot.onReply = (data) => {
           if (settled || data.seq !== seq) return;
           settled = true;
           cleanupHandlers();
@@ -300,12 +325,12 @@ export function createBunWasmExecutor(options?: {
           }
         };
 
-        slot.worker.onerror = (err) => {
+        slot.onFault = (message) => {
           if (settled) return;
           settled = true;
           cleanupHandlers();
           releaseSlot(slot, false);
-          reject(new Error(err.message || "WASM worker crashed"));
+          reject(new Error(message));
         };
 
         slot.worker.postMessage({
@@ -448,7 +473,7 @@ export function createFfiWasmtimeExecutor(options: {
 
     async invoke(
       pluginId: string,
-      hook: PluginHook,
+      hook: WasmCallableHook,
       input: Uint8Array,
       invokeOptions: { fuelBudget: number; maxMemoryBytes: number },
     ): Promise<Uint8Array> {

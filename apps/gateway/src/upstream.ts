@@ -1,22 +1,44 @@
 import { GatewayError, optionalObject } from "@gateway/contracts";
-import type { Operation, Protocol } from "@gateway/kernel";
-import type { ChannelKind, ChannelRecord, RouteRecord } from "@gateway/ledger";
+import type { Operation, Protocol, Usage } from "@gateway/kernel";
+import type {
+  AdapterOverrides,
+  AuthSchemeConfig,
+  ChannelRecord,
+  ConfigSnapshot,
+  DeclarativeProviderConfig,
+  RouteRecord,
+  UsageAliasRule,
+  UsageDialect,
+} from "@gateway/ledger";
+import {
+  applyBodyTransforms,
+  applyResponseTransforms,
+  evaluateErrorRules,
+  extractUsageAliases,
+  invokeWasmProviderRequest,
+  invokeWasmProviderResponse,
+  mergeAdapterOverrides,
+  renderEndpointUrl,
+  resolveProviderPlugin,
+  sanitizeProviderHeaders,
+  type MatchedProviderError,
+  type ResolvedProvider,
+  type WasmRuntimeExecutor,
+} from "@gateway/plugin-engine";
 import {
   copyExact,
   decodeRequest,
+  decodeResponse,
   encodeRequest,
+  encodeResponse,
   encodeSSE,
+  extractUsage,
   stringifyExact,
   validateRequestPolicy,
+  validateUsageObject,
   type SSEEvent,
 } from "@gateway/protocol";
-import {
-  awsAmzDate,
-  awsCredentials,
-  awsSigningKey,
-  signAwsRequest,
-  type VertexTokens,
-} from "@gateway/runtime";
+import { applyAuthToRequest, type VertexTokens } from "@gateway/runtime";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -25,25 +47,26 @@ export function isConversationalOperation(op: Operation): op is Protocol {
   return op === "chat" || op === "responses" || op === "messages" || op === "gemini";
 }
 
-export function upstreamProtocolFor(kind: ChannelKind, clientOp: Operation): Protocol | null {
+export function upstreamProtocolFor(
+  resolved: ResolvedProvider,
+  clientOp: Operation,
+): Protocol | null {
   if (!isConversationalOperation(clientOp)) return null;
-  if (kind === "anthropic" || kind === "bedrock") return "messages";
-  if (kind === "gemini" || kind === "vertex") return "gemini";
-  if (kind === "openai" || kind === "ollama") {
-    return clientOp === "responses" ? "responses" : "chat";
+  const dialect = resolved.config.base_dialect;
+  if (dialect === "anthropic_messages") return "messages";
+  if (dialect === "gemini") return "gemini";
+  if (dialect === "openai_responses") return "responses";
+  if (dialect === "openai_chat") {
+    if (
+      clientOp === "responses" &&
+      resolved.kind === "DECLARATIVE" &&
+      resolved.config.endpoints.responses
+    ) {
+      return "responses";
+    }
+    return "chat";
   }
-  return "chat";
-}
-
-function parseAzureSecret(secret: string): { apiKey: string; apiVersion: string } {
-  if (secret.startsWith("{")) {
-    const obj = JSON.parse(secret) as Record<string, unknown>;
-    return {
-      apiKey: String(obj.apiKey ?? ""),
-      apiVersion: String(obj.apiVersion ?? "2024-10-21"),
-    };
-  }
-  return { apiKey: secret, apiVersion: "2024-10-21" };
+  return null;
 }
 
 function joinBase(baseUrl: string, path: string): URL {
@@ -51,12 +74,56 @@ function joinBase(baseUrl: string, path: string): URL {
   return new URL(`${base}${path}`);
 }
 
+export type MergedProviderOverrides = ReturnType<typeof mergeAdapterOverrides>;
+
+export function mergeOverridesForResolved(
+  resolved: ResolvedProvider,
+  channelConfig?: AdapterOverrides,
+  routeOverrides?: AdapterOverrides,
+): MergedProviderOverrides {
+  if (resolved.kind === "DECLARATIVE") {
+    return mergeAdapterOverrides(resolved.config, channelConfig, routeOverrides);
+  }
+  const emptyBase: DeclarativeProviderConfig = {
+    base_dialect: resolved.config.base_dialect,
+    usage_dialect: resolved.config.usage_dialect,
+    auth: resolved.config.auth,
+    endpoints: {},
+    ...(resolved.config.extra_headers ? { extra_headers: resolved.config.extra_headers } : {}),
+  };
+  return mergeAdapterOverrides(emptyBase, channelConfig, routeOverrides);
+}
+
+export function mergeUsageWithAliases(
+  baseUsage: Usage | undefined,
+  rawBody: Record<string, unknown>,
+  aliasRules: readonly UsageAliasRule[],
+): Usage | undefined {
+  if (aliasRules.length === 0) return baseUsage;
+  const aliasRaw = extractUsageAliases(rawBody, aliasRules);
+  if (!aliasRaw) return baseUsage;
+  const aliasUsage = validateUsageObject(aliasRaw);
+  if (!baseUsage) return aliasUsage;
+  const merged: Record<string, string> = { ...(baseUsage as Record<string, string>) };
+  for (const [k, v] of Object.entries(aliasUsage)) {
+    if (v === undefined) continue;
+    if (merged[k] !== undefined && merged[k] !== v) {
+      throw new GatewayError(502, "usage_alias_conflict", `Provider usage alias conflict on ${k}`);
+    }
+    merged[k] = v;
+  }
+  return validateUsageObject(merged);
+}
+
 export type PreparedUpstreamRequest = {
   url: URL;
   headers: Headers;
   body: Uint8Array;
   upstreamProtocol: Protocol | null;
+  usageDialect: UsageDialect;
   isBedrockStream: boolean;
+  resolvedProvider: ResolvedProvider;
+  mergedOverrides: MergedProviderOverrides;
 };
 
 async function encodeMultipartWithModel(
@@ -80,212 +147,533 @@ async function encodeMultipartWithModel(
   return { contentType, bytes };
 }
 
+function buildPreparedPayload(options: {
+  resolved: ResolvedProvider;
+  merged: MergedProviderOverrides;
+  operation: Operation;
+  upstreamProtocol: Protocol | null;
+  upstreamModel: string;
+  clientBody: Record<string, unknown>;
+  isStream: boolean;
+}): Record<string, unknown> {
+  const { resolved, merged, operation, upstreamProtocol, upstreamModel, clientBody, isStream } =
+    options;
+  let payload: Record<string, unknown>;
+  if (isConversationalOperation(operation) && upstreamProtocol) {
+    if (operation === upstreamProtocol) {
+      payload = copyExact(clientBody, { ...clientBody });
+    } else {
+      const normalized = decodeRequest(clientBody, operation);
+      payload = encodeRequest(normalized, upstreamProtocol, upstreamModel);
+    }
+  } else {
+    payload = copyExact(clientBody, { ...clientBody });
+  }
+
+  if (resolved.kind === "DECLARATIVE") {
+    const cfg = resolved.config;
+    if (cfg.model_field === null) {
+      delete payload.model;
+    } else {
+      const modelField = cfg.model_field ?? "model";
+      payload[modelField] = upstreamModel;
+      if (modelField !== "model") delete payload.model;
+    }
+    if (cfg.stream_field === null) {
+      delete payload.stream;
+    } else if (typeof cfg.stream_field === "string" && cfg.stream_field !== "stream") {
+      payload[cfg.stream_field] = isStream;
+      delete payload.stream;
+    }
+    if (cfg.include_stream_usage_option && isStream && upstreamProtocol === "chat") {
+      payload.stream_options = { include_usage: true };
+    }
+    if (merged.request_transforms.length > 0) {
+      payload = copyExact(payload, applyBodyTransforms(payload, merged.request_transforms));
+    }
+  } else if (merged.request_transforms.length > 0) {
+    payload = copyExact(payload, applyBodyTransforms(payload, merged.request_transforms));
+  }
+
+  return payload;
+}
+
 export async function prepareUpstreamRequest(options: {
   channel: ChannelRecord;
   route: RouteRecord;
+  snapshot: Pick<ConfigSnapshot, "plugins" | "providerPluginsByName">;
   secret: string;
   operation: Operation;
   clientBody: Record<string, unknown>;
   multipartEntries?: readonly [string, string | File][];
   isStream: boolean;
   vertexTokens: VertexTokens;
+  wasmExecutor: WasmRuntimeExecutor | null;
+  signingPublicKeyPem?: string;
   traceparent?: string;
   signal: AbortSignal;
 }): Promise<PreparedUpstreamRequest> {
   const {
     channel,
     route,
+    snapshot,
     secret,
     operation,
     clientBody,
     multipartEntries,
     isStream,
     vertexTokens,
+    wasmExecutor,
+    signingPublicKeyPem,
     traceparent,
     signal,
   } = options;
+
   if (route.request_policy && Object.keys(route.request_policy).length > 0) {
     validateRequestPolicy(clientBody, route.request_policy);
   }
 
+  const resolved = resolveProviderPlugin(channel.kind, channel.provider_plugin_id, snapshot);
+  if (!resolved) {
+    throw new GatewayError(
+      503,
+      "provider_plugin_unavailable",
+      `Provider plugin unavailable for channel ${channel.kind}`,
+    );
+  }
+
+  const mergedOverrides = mergeOverridesForResolved(
+    resolved,
+    channel.adapter_config,
+    route.adapter_overrides,
+  );
+  const upstreamProtocol = upstreamProtocolFor(resolved, operation);
+  const usageDialect = resolved.config.usage_dialect;
+  const isBedrockStream = isStream && resolved.config.stream_framing === "bedrock_eventstream";
+
   const headers = new Headers();
   if (traceparent) headers.set("traceparent", traceparent);
-  if (isStream) headers.set("accept", "text/event-stream");
+  if (isBedrockStream) headers.set("accept", "application/vnd.amazon.eventstream");
+  else if (isStream) headers.set("accept", "text/event-stream");
+  for (const [k, v] of Object.entries(sanitizeProviderHeaders(mergedOverrides.extra_headers))) {
+    headers.set(k, v);
+  }
 
   if (multipartEntries) {
-    const path =
+    const defaultMultipartPath =
       operation === "transcription"
         ? "/v1/audio/transcriptions"
         : operation === "translation"
           ? "/v1/audio/translations"
           : "/v1/images/edits";
-    const url = joinBase(channel.base_url, path);
-    if (secret) headers.set("authorization", `Bearer ${secret}`);
+    const url =
+      resolved.kind === "DECLARATIVE" &&
+      (resolved.config.endpoints[operation] ||
+        resolved.config.endpoints.default ||
+        mergedOverrides.path_override)
+        ? renderEndpointUrl({
+            baseUrl: channel.base_url,
+            config: resolved.config,
+            operation,
+            upstreamModel: route.upstream_model,
+            isStream: false,
+            ...(mergedOverrides.path_override
+              ? { pathOverride: mergedOverrides.path_override }
+              : {}),
+            extraQuery: mergedOverrides.query_params,
+          })
+        : joinBase(channel.base_url, mergedOverrides.path_override ?? defaultMultipartPath);
     const encoded = await encodeMultipartWithModel(multipartEntries, route.upstream_model);
     headers.set("content-type", encoded.contentType);
+    await applyAuthToRequest({
+      auth: resolved.config.auth,
+      secret,
+      url,
+      headers,
+      body: encoded.bytes,
+      vertexTokens,
+      signal,
+    });
     return {
       url,
       headers,
       body: encoded.bytes,
       upstreamProtocol: null,
+      usageDialect,
       isBedrockStream: false,
+      resolvedProvider: resolved,
+      mergedOverrides,
     };
   }
 
   headers.set("content-type", "application/json");
-  const upstreamProtocol = upstreamProtocolFor(channel.kind, operation);
-  let payload: Record<string, unknown>;
-  if (isConversationalOperation(operation) && upstreamProtocol) {
-    if (operation === upstreamProtocol) {
-      payload = copyExact(clientBody, { ...clientBody });
-      if (upstreamProtocol !== "gemini") {
-        payload.model = route.upstream_model;
-      }
-      if (upstreamProtocol === "chat" && isStream) {
-        payload.stream_options = { include_usage: true };
-      }
-      if (
-        (channel.kind === "deepseek" || channel.kind === "ollama") &&
-        upstreamProtocol === "chat"
-      ) {
-        if (payload.max_completion_tokens !== undefined && payload.max_tokens === undefined) {
-          payload.max_tokens = payload.max_completion_tokens;
-        }
-        delete payload.max_completion_tokens;
-      }
-    } else {
-      const normalized = decodeRequest(clientBody, operation);
-      payload = encodeRequest(normalized, upstreamProtocol, route.upstream_model);
-      if (
-        (channel.kind === "deepseek" || channel.kind === "ollama") &&
-        upstreamProtocol === "chat"
-      ) {
-        if (payload.max_completion_tokens !== undefined && payload.max_tokens === undefined) {
-          payload.max_tokens = payload.max_completion_tokens;
-        }
-        delete payload.max_completion_tokens;
-      }
-    }
-  } else {
-    payload = copyExact(clientBody, { ...clientBody, model: route.upstream_model });
-  }
+  const payload = buildPreparedPayload({
+    resolved,
+    merged: mergedOverrides,
+    operation,
+    upstreamProtocol,
+    upstreamModel: route.upstream_model,
+    clientBody,
+    isStream,
+  });
 
   let url: URL;
-  let isBedrockStream = false;
+  let bodyBytes: Uint8Array;
 
-  switch (channel.kind) {
-    case "openai":
-    case "openai_compatible":
-    case "deepseek":
-    case "ollama": {
-      const path =
-        operation === "embeddings"
-          ? "/v1/embeddings"
-          : operation === "moderations"
-            ? "/v1/moderations"
-            : operation === "completions"
-              ? "/v1/completions"
-              : operation === "images"
-                ? "/v1/images/generations"
-                : operation === "image_edits"
-                  ? "/v1/images/edits"
-                  : operation === "speech"
-                    ? "/v1/audio/speech"
-                    : upstreamProtocol === "responses"
-                      ? "/v1/responses"
-                      : "/v1/chat/completions";
-      url = joinBase(channel.base_url, path);
-      if (secret) headers.set("authorization", `Bearer ${secret}`);
-      break;
-    }
-    case "azure": {
-      const az = parseAzureSecret(secret);
-      const opPath =
-        operation === "embeddings"
-          ? "embeddings"
-          : operation === "completions"
-            ? "completions"
-            : "chat/completions";
-      url = joinBase(
-        channel.base_url,
-        `/openai/deployments/${encodeURIComponent(route.upstream_model)}/${opPath}`,
-      );
-      url.searchParams.set("api-version", az.apiVersion);
-      headers.set("api-key", az.apiKey);
-      break;
-    }
-    case "anthropic": {
-      url = joinBase(channel.base_url, "/v1/messages");
-      headers.set("x-api-key", secret);
-      headers.set("anthropic-version", "2023-06-01");
-      break;
-    }
-    case "bedrock": {
-      const creds = awsCredentials(secret);
-      const action = isStream ? "invoke-with-response-stream" : "invoke";
-      url = joinBase(
-        channel.base_url,
-        `/model/${encodeURIComponent(route.upstream_model)}/${action}`,
-      );
-      delete payload.model;
-      delete payload.stream;
-      payload.anthropic_version = "bedrock-2023-05-31";
-      isBedrockStream = isStream;
-      if (isStream) headers.set("accept", "application/vnd.amazon.eventstream");
-      const rawBytes = encoder.encode(stringifyExact(payload));
-      const amzDate = awsAmzDate();
-      const signingKey = awsSigningKey(
-        creds.secretAccessKey,
-        amzDate.slice(0, 8),
-        creds.region,
-        "bedrock",
-      );
-      signAwsRequest(url, rawBytes, headers, {
-        accessKeyId: creds.accessKeyId,
-        sessionToken: creds.sessionToken,
-        region: creds.region,
-        service: "bedrock",
-        amzDate,
-        signingKey,
+  if (resolved.kind === "DECLARATIVE") {
+    try {
+      url = renderEndpointUrl({
+        baseUrl: channel.base_url,
+        config: resolved.config,
+        operation,
+        upstreamModel: route.upstream_model,
+        isStream,
+        ...(mergedOverrides.path_override ? { pathOverride: mergedOverrides.path_override } : {}),
+        extraQuery: mergedOverrides.query_params,
       });
-      return { url, headers, body: rawBytes, upstreamProtocol, isBedrockStream };
-    }
-    case "gemini": {
-      const action = isStream ? "streamGenerateContent" : "generateContent";
-      url = joinBase(
-        channel.base_url,
-        `/v1beta/models/${encodeURIComponent(route.upstream_model)}:${action}`,
+    } catch (err) {
+      throw new GatewayError(
+        502,
+        "provider_adapter_failed",
+        err instanceof Error ? err.message : "Failed to render provider endpoint URL",
       );
-      if (isStream) url.searchParams.set("alt", "sse");
-      headers.set("x-goog-api-key", secret);
-      delete payload.model;
-      delete payload.stream;
-      break;
     }
-    case "vertex": {
-      const token = await vertexTokens.get(secret, signal);
-      const action = isStream ? "streamGenerateContent" : "generateContent";
-      url = joinBase(
-        channel.base_url,
-        `/models/${encodeURIComponent(route.upstream_model)}:${action}`,
+    bodyBytes = encoder.encode(stringifyExact(payload));
+  } else {
+    let wasmOut: Awaited<ReturnType<typeof invokeWasmProviderRequest>>;
+    try {
+      wasmOut = await invokeWasmProviderRequest({
+        executor: wasmExecutor,
+        plugin: resolved.plugin,
+        config: resolved.config,
+        ...(signingPublicKeyPem ? { signingPublicKeyPem } : {}),
+        input: {
+          operation,
+          upstream_model: route.upstream_model,
+          stream: isStream,
+          client_protocol: isConversationalOperation(operation) ? operation : null,
+          body: payload,
+          headers: sanitizeProviderHeaders(mergedOverrides.extra_headers),
+        },
+      });
+    } catch (err) {
+      throw new GatewayError(
+        502,
+        "provider_adapter_failed",
+        err instanceof Error ? err.message : "WASM provider adapt_request failed",
       );
-      if (isStream) url.searchParams.set("alt", "sse");
-      headers.set("authorization", `Bearer ${token}`);
-      delete payload.model;
-      delete payload.stream;
-      break;
     }
-    default:
-      throw new GatewayError(500, "unsupported_channel", `Unsupported channel kind`);
+    url = joinBase(channel.base_url, mergedOverrides.path_override ?? wasmOut.path);
+    for (const [k, v] of Object.entries(wasmOut.query ?? {})) {
+      url.searchParams.set(k, v);
+    }
+    for (const [k, v] of Object.entries(mergedOverrides.query_params)) {
+      url.searchParams.set(k, v);
+    }
+    for (const [k, v] of Object.entries(wasmOut.headers ?? {})) {
+      headers.set(k, v);
+    }
+    bodyBytes = encoder.encode(stringifyExact(wasmOut.body));
   }
+
+  await applyAuthToRequest({
+    auth: resolved.config.auth,
+    secret,
+    url,
+    headers,
+    body: bodyBytes,
+    vertexTokens,
+    signal,
+  });
 
   return {
     url,
     headers,
-    body: encoder.encode(stringifyExact(payload)),
+    body: bodyBytes,
     upstreamProtocol,
+    usageDialect,
     isBedrockStream,
+    resolvedProvider: resolved,
+    mergedOverrides,
   };
+}
+
+function applyRedactedAuthPreview(auth: AuthSchemeConfig, url: URL, headers: Headers): void {
+  switch (auth.scheme) {
+    case "none":
+      return;
+    case "bearer":
+    case "gcp_vertex_oauth":
+      headers.set("authorization", "Bearer <REDACTED>");
+      return;
+    case "header":
+      headers.set(auth.header_name, `${auth.prefix ?? ""}<REDACTED>`);
+      return;
+    case "query":
+      url.searchParams.set(auth.param_name, "<REDACTED>");
+      return;
+    case "azure_key":
+      if (!url.searchParams.has("api-version")) {
+        url.searchParams.set("api-version", auth.default_api_version ?? "2024-10-21");
+      }
+      headers.set("api-key", "<REDACTED>");
+      return;
+    case "aws_sigv4":
+      headers.set("authorization", "AWS4-HMAC-SHA256 <REDACTED>");
+      return;
+    case "hmac_sha256":
+      headers.set(auth.timestamp_header, "<TIMESTAMP>");
+      headers.set(auth.signature_header, `${auth.signature_prefix ?? ""}<REDACTED>`);
+      if (auth.key_id_header) headers.set(auth.key_id_header, "<REDACTED>");
+      return;
+  }
+}
+
+export async function previewProviderRequest(options: {
+  provider: string;
+  providerPluginId?: string | null;
+  baseUrl: string;
+  operation: Operation;
+  upstreamModel: string;
+  stream: boolean;
+  clientBody: Record<string, unknown>;
+  channelAdapterConfig?: AdapterOverrides;
+  routeAdapterOverrides?: AdapterOverrides;
+  mockUpstreamResponse?: {
+    status: number;
+    headers?: Record<string, string> | undefined;
+    body: Record<string, unknown>;
+  };
+  snapshot: Pick<ConfigSnapshot, "plugins" | "providerPluginsByName">;
+  wasmExecutor: WasmRuntimeExecutor | null;
+  signingPublicKeyPem?: string;
+}): Promise<{
+  resolved_provider: {
+    name: string;
+    version: string;
+    source: ResolvedProvider["source"];
+    kind: ResolvedProvider["kind"];
+    plugin_id: string | null;
+  };
+  prepared_request: {
+    url: string;
+    headers: Record<string, string>;
+    body: Record<string, unknown>;
+  };
+  decoded_response?: {
+    status: number;
+    retry_kind: MatchedProviderError["retry_kind"] | null;
+    error_message?: string;
+    retry_after_ms?: number;
+    body?: Record<string, unknown>;
+    extracted_usage: Usage | null;
+  };
+}> {
+  const resolved = resolveProviderPlugin(
+    options.provider,
+    options.providerPluginId,
+    options.snapshot,
+  );
+  if (!resolved) {
+    throw new GatewayError(
+      404,
+      "unknown_provider",
+      `Provider plugin not found: ${options.provider}`,
+    );
+  }
+  const merged = mergeOverridesForResolved(
+    resolved,
+    options.channelAdapterConfig,
+    options.routeAdapterOverrides,
+  );
+  const upstreamProtocol = upstreamProtocolFor(resolved, options.operation);
+  const isBedrockStream =
+    options.stream && resolved.config.stream_framing === "bedrock_eventstream";
+
+  const headers = new Headers();
+  headers.set("content-type", "application/json");
+  if (isBedrockStream) headers.set("accept", "application/vnd.amazon.eventstream");
+  else if (options.stream) headers.set("accept", "text/event-stream");
+  for (const [k, v] of Object.entries(sanitizeProviderHeaders(merged.extra_headers))) {
+    headers.set(k, v);
+  }
+
+  const payload = buildPreparedPayload({
+    resolved,
+    merged,
+    operation: options.operation,
+    upstreamProtocol,
+    upstreamModel: options.upstreamModel,
+    clientBody: options.clientBody,
+    isStream: options.stream,
+  });
+
+  let url: URL;
+  let finalBody: Record<string, unknown>;
+  if (resolved.kind === "DECLARATIVE") {
+    url = renderEndpointUrl({
+      baseUrl: options.baseUrl,
+      config: resolved.config,
+      operation: options.operation,
+      upstreamModel: options.upstreamModel,
+      isStream: options.stream,
+      ...(merged.path_override ? { pathOverride: merged.path_override } : {}),
+      extraQuery: merged.query_params,
+    });
+    finalBody = payload;
+  } else {
+    const wasmOut = await invokeWasmProviderRequest({
+      executor: options.wasmExecutor,
+      plugin: resolved.plugin,
+      config: resolved.config,
+      ...(options.signingPublicKeyPem ? { signingPublicKeyPem: options.signingPublicKeyPem } : {}),
+      input: {
+        operation: options.operation,
+        upstream_model: options.upstreamModel,
+        stream: options.stream,
+        client_protocol: isConversationalOperation(options.operation) ? options.operation : null,
+        body: payload,
+        headers: sanitizeProviderHeaders(merged.extra_headers),
+      },
+    });
+    url = joinBase(options.baseUrl, merged.path_override ?? wasmOut.path);
+    for (const [k, v] of Object.entries(wasmOut.query ?? {})) {
+      url.searchParams.set(k, v);
+    }
+    for (const [k, v] of Object.entries(merged.query_params)) {
+      url.searchParams.set(k, v);
+    }
+    for (const [k, v] of Object.entries(wasmOut.headers ?? {})) {
+      headers.set(k, v);
+    }
+    finalBody = wasmOut.body;
+  }
+
+  applyRedactedAuthPreview(resolved.config.auth, url, headers);
+  const plainHeaders: Record<string, string> = {};
+  headers.forEach((v, k) => {
+    plainHeaders[k] = v;
+  });
+
+  const result: {
+    resolved_provider: {
+      name: string;
+      version: string;
+      source: ResolvedProvider["source"];
+      kind: ResolvedProvider["kind"];
+      plugin_id: string | null;
+    };
+    prepared_request: {
+      url: string;
+      headers: Record<string, string>;
+      body: Record<string, unknown>;
+    };
+    decoded_response?: {
+      status: number;
+      retry_kind: MatchedProviderError["retry_kind"] | null;
+      error_message?: string;
+      retry_after_ms?: number;
+      body?: Record<string, unknown>;
+      extracted_usage: Usage | null;
+    };
+  } = {
+    resolved_provider: {
+      name: resolved.name,
+      version: resolved.version,
+      source: resolved.source,
+      kind: resolved.kind,
+      plugin_id: resolved.plugin_id,
+    },
+    prepared_request: {
+      url: url.toString(),
+      headers: plainHeaders,
+      body: finalBody,
+    },
+  };
+
+  if (options.mockUpstreamResponse) {
+    const mockResp = options.mockUpstreamResponse;
+    if (resolved.kind === "WASM" && resolved.config.hooks.includes("adapt_response")) {
+      const wasmResp = await invokeWasmProviderResponse({
+        executor: options.wasmExecutor,
+        plugin: resolved.plugin,
+        config: resolved.config,
+        ...(options.signingPublicKeyPem
+          ? { signingPublicKeyPem: options.signingPublicKeyPem }
+          : {}),
+        input: {
+          operation: options.operation,
+          upstream_model: options.upstreamModel,
+          client_protocol: isConversationalOperation(options.operation) ? options.operation : null,
+          status: mockResp.status,
+          headers: mockResp.headers ?? {},
+          body: mockResp.body,
+        },
+      });
+      const extractedUsage = wasmResp.usage
+        ? validateUsageObject(wasmResp.usage)
+        : resolved.config.usage_dialect !== "custom"
+          ? (extractUsage(wasmResp.body ?? mockResp.body, resolved.config.usage_dialect) ?? null)
+          : null;
+      result.decoded_response = {
+        status: wasmResp.status ?? mockResp.status,
+        retry_kind: wasmResp.retry_kind ?? null,
+        ...(wasmResp.error_message ? { error_message: wasmResp.error_message } : {}),
+        ...(wasmResp.retry_after_ms !== undefined
+          ? { retry_after_ms: wasmResp.retry_after_ms }
+          : {}),
+        ...(wasmResp.body ? { body: wasmResp.body } : {}),
+        extracted_usage: extractedUsage,
+      };
+    } else {
+      const matched = evaluateErrorRules(mockResp.status, mockResp.body, merged.error_rules);
+      if (matched) {
+        result.decoded_response = {
+          status: matched.http_status ?? mockResp.status,
+          retry_kind: matched.retry_kind,
+          ...(matched.message ? { error_message: matched.message } : {}),
+          ...(matched.retry_after_ms !== undefined
+            ? { retry_after_ms: matched.retry_after_ms }
+            : {}),
+          extracted_usage: null,
+        };
+      } else {
+        const transformed = applyResponseTransforms(mockResp.body, merged.response_transforms);
+        const baseUsage =
+          resolved.config.usage_dialect === "custom"
+            ? undefined
+            : extractUsage(transformed, resolved.config.usage_dialect);
+        const usage = mergeUsageWithAliases(baseUsage, transformed, merged.usage_aliases) ?? null;
+        let clientBodyOut = transformed;
+        if (
+          isConversationalOperation(options.operation) &&
+          upstreamProtocol &&
+          upstreamProtocol !== options.operation
+        ) {
+          const completion = decodeResponse(
+            transformed,
+            upstreamProtocol,
+            resolved.config.usage_dialect,
+          );
+          clientBodyOut = encodeResponse(
+            completion,
+            options.operation,
+            typeof options.clientBody.model === "string"
+              ? options.clientBody.model
+              : options.upstreamModel,
+          );
+        }
+        result.decoded_response = {
+          status: mockResp.status,
+          retry_kind: null,
+          body: clientBodyOut,
+          extracted_usage: usage,
+        };
+      }
+    }
+  }
+
+  return result;
 }
 
 export function parseRetryAfterMs(header: string | null): number | undefined {

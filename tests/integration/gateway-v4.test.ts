@@ -2521,3 +2521,979 @@ test("G3.4 Built-in pii-guard plugin full lifecycle: discovery, 1-click install,
     await upstreamServer.stop(true);
   }
 });
+
+test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor, hot-override, model failover isolation, fake-200 failover, real WASM proprietary provider, HMAC auth, and dry-run preview", async () => {
+  const { createHmac } = await import("node:crypto");
+  const { resolve } = await import("node:path");
+  const wasmFixturePath = resolve(import.meta.dir, "../fixtures/example-provider.wasm");
+  const wasmProviderBytes = new Uint8Array(await Bun.file(wasmFixturePath).arrayBuffer());
+
+  type Capture = {
+    path: string;
+    query: string;
+    headers: Record<string, string>;
+    body: Record<string, unknown>;
+  };
+  const captures: Capture[] = [];
+  let failoverPrimaryDown = true;
+  let minimaxFake200Mode: "rate_limit" | "ok" = "rate_limit";
+  let acmeWasmMode: "ok" | "evil_usage" = "ok";
+
+  const upstream = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      const rawBody = await req.text();
+      const body = rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : {};
+      const hdrs: Record<string, string> = {};
+      req.headers.forEach((v, k) => {
+        hdrs[k.toLowerCase()] = v;
+      });
+      captures.push({ path: url.pathname, query: url.search, headers: hdrs, body });
+
+      if (url.pathname === "/v2/infer/chat") {
+        expect(hdrs["x-acme-key"]).toBe("Key sk-acme-secret-1");
+        expect(hdrs["x-client-app"]).toBe("super-token-gateway");
+        expect(url.searchParams.get("api_ver")).toBe("2026");
+        return Response.json({
+          id: "acme-1",
+          object: "chat.completion",
+          model: String(body.model ?? "acme-m1"),
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "from-acme-declarative" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 5, cache_hit_tokens: 4 },
+        });
+      }
+
+      if (url.pathname === "/v1/hmac/chat") {
+        const ts = hdrs["x-hmac-ts"] ?? "";
+        const sig = hdrs["x-hmac-sig"] ?? "";
+        const keyId = hdrs["x-hmac-key-id"] ?? "";
+        const bodyHash = new Bun.CryptoHasher("sha256").update(rawBody).digest("hex");
+        const expected = createHmac("sha256", "hmac-secret-xyz")
+          .update(`POST\n${url.pathname}${url.search}\n${ts}\n${bodyHash}`)
+          .digest("hex");
+        expect(keyId).toBe("ak-99");
+        expect(sig).toBe(`v1=${expected}`);
+        return Response.json({
+          id: "hmac-1",
+          object: "chat.completion",
+          model: "hmac-m",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "hmac-verified" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 4, completion_tokens: 2 },
+        });
+      }
+
+      if (url.pathname === "/v1/primary-fail") {
+        if (failoverPrimaryDown) {
+          return Response.json({ error: { message: "primary busy" } }, { status: 503 });
+        }
+        return Response.json({
+          id: "p1",
+          object: "chat.completion",
+          model: "o3-up",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "from-primary" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 3 },
+        });
+      }
+
+      if (url.pathname === "/v1/text/chatcompletion_v2") {
+        if (minimaxFake200Mode === "rate_limit") {
+          return Response.json(
+            { base_resp: { status_code: 1002, status_msg: "minimax fake 200 rate limit" } },
+            { status: 200 },
+          );
+        }
+        return Response.json({
+          id: "mm-1",
+          object: "chat.completion",
+          model: "MiniMax-Text-01",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "from-minimax" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 6, completion_tokens: 4 },
+        });
+      }
+
+      if (url.pathname === "/v9/proprietary/generate") {
+        expect(hdrs.authorization).toBe("Bearer sk-secret-acme-999");
+        expect(hdrs["x-acme-proto"]).toBe("v9");
+        expect(hdrs.host).not.toBe("spoofed.invalid");
+        expect(body.secret_seen_in_wasm).toBe(false);
+        expect(url.searchParams.get("fmt")).toBe("acme_v9");
+        if (acmeWasmMode === "evil_usage") {
+          return Response.json({ evil_usage: true });
+        }
+        return Response.json({
+          answer: `wasm-echo:${String(body.prompt_text ?? "")}`,
+          tok_in: 10,
+          tok_out: 6,
+          tok_cached: 4,
+        });
+      }
+
+      if (url.pathname === "/v9/proprietary/stream") {
+        expect(hdrs.authorization).toBe("Bearer sk-secret-acme-999");
+        expect(hdrs["x-acme-proto"]).toBe("v9");
+        expect(body.streaming).toBe(true);
+        expect(body.secret_seen_in_wasm).toBe(false);
+        const enc = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify({ piece: "Hello " })}\n\n`));
+            controller.enqueue(enc.encode(`data: ${JSON.stringify({ piece: "WASM!" })}\n\n`));
+            controller.enqueue(
+              enc.encode(`data: ${JSON.stringify({ finish: true, tok_in: 8, tok_out: 4 })}\n\n`),
+            );
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream; charset=utf-8" },
+        });
+      }
+
+      return Response.json({
+        id: "std-1",
+        object: "chat.completion",
+        model: String(body.model ?? "std"),
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "from-backup" },
+            finish_reason: "stop",
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+      });
+    },
+  });
+
+  const runtime = createGatewayRuntime({ config: makeConfig(), db });
+
+  try {
+    await runtime.start();
+
+    const { status: bStat, data: bProv } = await internalCall(
+      runtime.internalApp,
+      "GET",
+      "/internal/v1/plugins/builtins?capability=PROVIDER",
+    );
+    expect(bStat).toBe(200);
+    const provNames = (bProv.items as { name: string }[]).map((p) => p.name);
+    expect(provNames.length).toBe(15);
+    expect(provNames).toContain("qwen");
+    expect(provNames).toContain("minimax");
+    expect(provNames).toContain("volcengine");
+    expect(provNames).toContain("zhipu");
+    expect(provNames).toContain("moonshot");
+    expect(provNames).toContain("openrouter");
+
+    const { data: project } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/projects",
+      {
+        name: "g7-proj",
+        currency: "USD",
+      },
+    );
+    const projectId = String(project.id);
+    const { data: keyRes } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/api-keys",
+      {
+        project_id: projectId,
+        name: "g7-key",
+      },
+    );
+    const apiKey = String(keyRes.key);
+    await internalCall(runtime.internalApp, "POST", `/internal/v1/wallets/${projectId}/credits`, {
+      currency: "USD",
+      external_ref: "g7-credit-1",
+      amount_atoms: "10000000",
+      kind: "CASH",
+    });
+    const { data: acc } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/upstream-accounts",
+      { name: "g7-acc" },
+    );
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/upstream-accounts/${acc.id}/recharges`,
+      {
+        currency: "USD",
+        external_ref: "g7-sup-1",
+        amount_atoms: "10000000",
+      },
+    );
+    const { data: custPrice } = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/prices",
+      {
+        side: "CUSTOMER",
+        currency: "USD",
+        rates: {
+          input_tokens: { numerator: "10", denominator: "1" },
+          cached_input_tokens: { numerator: "2", denominator: "1" },
+          output_tokens: { numerator: "20", denominator: "1" },
+        },
+        ceilings: { input_tokens: "1000", cached_input_tokens: "1000", output_tokens: "1000" },
+      },
+    );
+    const { data: supPrice } = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/prices",
+      {
+        side: "SUPPLIER",
+        currency: "USD",
+        rates: {
+          input_tokens: { numerator: "2", denominator: "1" },
+          cached_input_tokens: { numerator: "1", denominator: "1" },
+          output_tokens: { numerator: "4", denominator: "1" },
+        },
+        ceilings: { input_tokens: "1000", cached_input_tokens: "1000", output_tokens: "1000" },
+      },
+    );
+
+    const { status: unknownChStatus, data: unknownChData } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/channels",
+      {
+        account_id: acc.id,
+        name: "bad-ch",
+        kind: "not-installed-vendor",
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: "sk-x",
+      },
+    );
+    expect(unknownChStatus).toBe(400);
+    expect((unknownChData.error as { code: string }).code).toBe("unknown_provider");
+
+    const { status: protoBadStatus } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/plugins",
+      {
+        name: "bad-proto",
+        version: "1.0.0",
+        capability: "PROVIDER",
+        kind: "DECLARATIVE",
+        provider_config: {
+          base_dialect: "openai_chat",
+          usage_dialect: "openai",
+          auth: { scheme: "bearer" },
+          endpoints: { default: { path: "/v1/chat" } },
+          request_transforms: [{ op: "drop", path: "__proto__.polluted" }],
+        },
+      },
+    );
+    expect(protoBadStatus).toBe(400);
+
+    const { status: acmePluginStatus } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/plugins",
+      {
+        name: "acme-llm",
+        version: "1.0.0",
+        capability: "PROVIDER",
+        kind: "DECLARATIVE",
+        provider_config: {
+          base_dialect: "openai_chat",
+          usage_dialect: "openai",
+          auth: { scheme: "header", header_name: "X-Acme-Key", prefix: "Key " },
+          endpoints: {
+            chat: { path: "/v2/infer/chat", query: { api_ver: "2026" } },
+          },
+          extra_headers: { "X-Client-App": "super-token-gateway" },
+          request_transforms: [
+            { op: "rename", from: "max_completion_tokens", to: "max_tokens", overwrite: false },
+            { op: "drop", path: "stream_options" },
+            { op: "clamp", path: "temperature", min: 0, max: 1 },
+            { op: "set_default", path: "thinking_mode", value: "auto" },
+          ],
+          usage_aliases: [{ target: "cached_input_tokens", source_path: "usage.cache_hit_tokens" }],
+        },
+      },
+    );
+    expect(acmePluginStatus).toBe(200);
+
+    const { status: acmeChStatus, data: chAcme } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/channels",
+      {
+        account_id: acc.id,
+        name: "acme-ch",
+        kind: "acme-llm",
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: "sk-acme-secret-1",
+      },
+    );
+    expect(acmeChStatus).toBe(200);
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "acme-model",
+      operations: ["chat"],
+      max_output_tokens: 200,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "acme-model",
+      channel_id: chAcme.id,
+      upstream_model: "acme-v2-pro",
+      operations: ["chat"],
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+    });
+
+    const acmeResp = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "acme-model",
+          messages: [{ role: "user", content: "hi acme" }],
+          max_completion_tokens: 80,
+          temperature: 1.9,
+        }),
+      }),
+    );
+    expect(acmeResp.status).toBe(200);
+    const acmeBody = (await acmeResp.json()) as { choices: { message: { content: string } }[] };
+    expect(acmeBody.choices[0]!.message.content).toBe("from-acme-declarative");
+    const acmeReqId = acmeResp.headers.get("x-request-id")!;
+    const acmeCap = captures[captures.length - 1]!;
+    expect(acmeCap.body.max_tokens).toBe(80);
+    expect(acmeCap.body.max_completion_tokens).toBeUndefined();
+    expect(acmeCap.body.temperature).toBe(1);
+    expect(acmeCap.body.thinking_mode).toBe("auto");
+    const { data: acmeBilling } = await internalCall(
+      runtime.internalApp,
+      "GET",
+      `/internal/v1/requests/${acmeReqId}`,
+    );
+    expect(
+      (acmeBilling.charge as { usage: Record<string, string> }).usage.cached_input_tokens,
+    ).toBe("4");
+
+    const { status: dsInstallStatus } = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/plugins/builtins/deepseek/install",
+      {
+        provider_config: {
+          extra_headers: { "X-Hot-Override": "enabled-v2" },
+          request_transforms: [
+            { op: "rename", from: "max_completion_tokens", to: "max_tokens", overwrite: false },
+            { op: "set_default", path: "custom_hot_flag", value: "live" },
+          ],
+        },
+      },
+    );
+    expect(dsInstallStatus).toBe(200);
+    const { data: chDs } = await internalCall(runtime.internalApp, "PUT", "/internal/v1/channels", {
+      account_id: acc.id,
+      name: "ds-hot-ch",
+      kind: "deepseek",
+      base_url: `http://127.0.0.1:${upstream.port}`,
+      api_key: "sk-ds-hot",
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "ds-hot-model",
+      operations: ["chat"],
+      max_output_tokens: 200,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "ds-hot-model",
+      channel_id: chDs.id,
+      upstream_model: "deepseek-chat",
+      operations: ["chat"],
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+    });
+    const dsHotResp = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "ds-hot-model",
+          messages: [{ role: "user", content: "hot override" }],
+          max_completion_tokens: 40,
+        }),
+      }),
+    );
+    expect(dsHotResp.status).toBe(200);
+    const dsHotCap = captures[captures.length - 1]!;
+    expect(dsHotCap.headers["x-hot-override"]).toBe("enabled-v2");
+    expect(dsHotCap.body.custom_hot_flag).toBe("live");
+    expect(dsHotCap.body.max_tokens).toBe(40);
+
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/plugins", {
+      name: "hmac-vendor",
+      version: "1.0.0",
+      capability: "PROVIDER",
+      kind: "DECLARATIVE",
+      provider_config: {
+        base_dialect: "openai_chat",
+        usage_dialect: "openai",
+        auth: {
+          scheme: "hmac_sha256",
+          signature_header: "X-Hmac-Sig",
+          timestamp_header: "X-Hmac-Ts",
+          key_id_header: "X-Hmac-Key-Id",
+          signature_prefix: "v1=",
+          encoding: "hex",
+        },
+        endpoints: { default: { path: "/v1/hmac/chat" } },
+      },
+    });
+    const { data: chHmac } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/channels",
+      {
+        account_id: acc.id,
+        name: "hmac-ch",
+        kind: "hmac-vendor",
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: JSON.stringify({ keyId: "ak-99", secretKey: "hmac-secret-xyz" }),
+      },
+    );
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "hmac-model",
+      operations: ["chat"],
+      max_output_tokens: 100,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "hmac-model",
+      channel_id: chHmac.id,
+      upstream_model: "hmac-m",
+      operations: ["chat"],
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+    });
+    const hmacResp = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "hmac-model",
+          messages: [{ role: "user", content: "verify hmac" }],
+        }),
+      }),
+    );
+    expect(hmacResp.status).toBe(200);
+    expect(
+      ((await hmacResp.json()) as { choices: { message: { content: string } }[] }).choices[0]!
+        .message.content,
+    ).toBe("hmac-verified");
+
+    const { data: chPri } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/channels",
+      {
+        account_id: acc.id,
+        name: "failover-pri",
+        kind: "openai",
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: "sk-pri",
+        adapter_config: { path_override: "/v1/primary-fail" },
+      },
+    );
+    const { data: chBak } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/channels",
+      {
+        account_id: acc.id,
+        name: "failover-bak",
+        kind: "openai_compatible",
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: "sk-bak",
+      },
+    );
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "o3-failover",
+      operations: ["chat"],
+      max_output_tokens: 200,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "o3-failover",
+      channel_id: chPri.id,
+      upstream_model: "o3-up",
+      operations: ["chat"],
+      priority: 10,
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+      adapter_overrides: {
+        request_transforms: [
+          { op: "drop", path: "temperature" },
+          { op: "force_set", path: "a_flag", value: true },
+        ],
+      },
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "o3-failover",
+      channel_id: chBak.id,
+      upstream_model: "bak-up",
+      operations: ["chat"],
+      priority: 1,
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+      adapter_overrides: {
+        request_transforms: [
+          { op: "rename", from: "max_completion_tokens", to: "max_tokens", overwrite: false },
+          { op: "force_set", path: "b_flag", value: true },
+        ],
+      },
+    });
+
+    const capIdxBeforeFo = captures.length;
+    const foResp = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "o3-failover",
+          messages: [{ role: "user", content: "isolate me" }],
+          temperature: 0.7,
+          max_completion_tokens: 64,
+        }),
+      }),
+    );
+    expect(foResp.status).toBe(200);
+    expect(foResp.headers.get("x-gateway-channel")).toBe("failover-bak");
+    const priCap = captures[capIdxBeforeFo]!;
+    const bakCap = captures[capIdxBeforeFo + 1]!;
+    expect(priCap.body.temperature).toBeUndefined();
+    expect(priCap.body.a_flag).toBe(true);
+    expect(priCap.body.max_completion_tokens).toBe(64);
+    expect(bakCap.body.temperature).toBe(0.7);
+    expect(bakCap.body.a_flag).toBeUndefined();
+    expect(bakCap.body.b_flag).toBe(true);
+    expect(bakCap.body.max_tokens).toBe(64);
+    expect(bakCap.body.max_completion_tokens).toBeUndefined();
+    failoverPrimaryDown = false;
+
+    const { data: chMm } = await internalCall(runtime.internalApp, "PUT", "/internal/v1/channels", {
+      account_id: acc.id,
+      name: "minimax-pri",
+      kind: "minimax",
+      base_url: `http://127.0.0.1:${upstream.port}`,
+      api_key: "sk-mm",
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "mm-failover",
+      operations: ["chat"],
+      max_output_tokens: 200,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "mm-failover",
+      channel_id: chMm.id,
+      upstream_model: "MiniMax-Text-01",
+      operations: ["chat"],
+      priority: 10,
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "mm-failover",
+      channel_id: chBak.id,
+      upstream_model: "bak-mm",
+      operations: ["chat"],
+      priority: 1,
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+    });
+
+    minimaxFake200Mode = "rate_limit";
+    const mmFoResp = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "mm-failover",
+          messages: [{ role: "user", content: "fake 200 failover" }],
+        }),
+      }),
+    );
+    expect(mmFoResp.status).toBe(200);
+    expect(mmFoResp.headers.get("x-gateway-channel")).toBe("failover-bak");
+    const mmHealth = (
+      await internalCall(runtime.internalApp, "GET", "/internal/v1/health/channels")
+    ).data.channels as { channel_id: string; state: string; cooldown_until_ms: number }[];
+    expect(mmHealth.find((c) => c.channel_id === chMm.id)?.cooldown_until_ms).toBeGreaterThan(0);
+
+    const wasiBadBytes = new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 1, 4, 1, 0x60, 0, 0, 2, 36, 1, 21, 0x77, 0x61, 0x73, 0x69,
+      0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65, 0x76, 0x69,
+      0x65, 0x77, 0x31, 9, 0x70, 0x72, 0x6f, 0x63, 0x5f, 0x65, 0x78, 0x69, 0x74, 0x00, 0,
+    ]);
+    const { status: wasiRejectStatus } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/plugins",
+      {
+        name: "bad-wasi-provider",
+        version: "1.0.0",
+        capability: "PROVIDER",
+        kind: "WASM",
+        wasm_bytes_base64: Buffer.from(wasiBadBytes).toString("base64"),
+        provider_config: {
+          base_dialect: "passthrough",
+          usage_dialect: "custom",
+          auth: { scheme: "bearer" },
+          hooks: ["adapt_request"],
+        },
+      },
+    );
+    expect(wasiRejectStatus).toBe(400);
+
+    const { status: wasmRegStatus, data: wasmProvPlugin } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/plugins",
+      {
+        name: "acme-proprietary",
+        version: "1.0.0",
+        capability: "PROVIDER",
+        kind: "WASM",
+        wasm_bytes_base64: Buffer.from(wasmProviderBytes).toString("base64"),
+        provider_config: {
+          base_dialect: "passthrough",
+          usage_dialect: "custom",
+          auth: { scheme: "bearer" },
+          hooks: ["adapt_request", "adapt_response", "adapt_stream_event"],
+          grants: ["extract_usage"],
+          fuel_budget: 5_000_000,
+          max_memory_bytes: 16 * 1024 * 1024,
+        },
+      },
+    );
+    expect(wasmRegStatus).toBe(200);
+
+    const { data: chWasm } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/channels",
+      {
+        account_id: acc.id,
+        name: "acme-wasm-ch",
+        kind: "acme-proprietary",
+        provider_plugin_id: wasmProvPlugin.id,
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: "sk-secret-acme-999",
+      },
+    );
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "acme-wasm-model",
+      operations: ["chat"],
+      max_output_tokens: 200,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "acme-wasm-model",
+      channel_id: chWasm.id,
+      upstream_model: "acme-engine-9",
+      operations: ["chat"],
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+    });
+
+    const wasmUnaryResp = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "acme-wasm-model",
+          messages: [{ role: "user", content: "hello proprietary wasm" }],
+        }),
+      }),
+    );
+    expect(wasmUnaryResp.status).toBe(200);
+    const wasmUnaryJson = (await wasmUnaryResp.json()) as {
+      model: string;
+      choices: { message: { content: string } }[];
+    };
+    expect(wasmUnaryJson.model).toBe("acme-wasm-model");
+    expect(wasmUnaryJson.choices[0]!.message.content).toBe("wasm-echo:hello proprietary wasm");
+    const wasmUnaryReqId = wasmUnaryResp.headers.get("x-request-id")!;
+    const { data: wasmUnaryBill } = await internalCall(
+      runtime.internalApp,
+      "GET",
+      `/internal/v1/requests/${wasmUnaryReqId}`,
+    );
+    expect((wasmUnaryBill.charge as { usage: Record<string, string> }).usage).toEqual({
+      input_tokens: "10",
+      output_tokens: "6",
+      cached_input_tokens: "4",
+    });
+
+    const wasmStreamResp = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "acme-wasm-model",
+          stream: true,
+          messages: [{ role: "user", content: "stream proprietary" }],
+        }),
+      }),
+    );
+    expect(wasmStreamResp.status).toBe(200);
+    const wasmStreamReqId = wasmStreamResp.headers.get("x-request-id")!;
+    const wasmStreamWire = await wasmStreamResp.text();
+    const streamedContent = wasmStreamWire
+      .split("\n")
+      .filter((l) => l.startsWith("data: ") && l !== "data: [DONE]")
+      .map((l) => {
+        const obj = JSON.parse(l.slice(6)) as { choices?: { delta?: { content?: string } }[] };
+        return obj.choices?.[0]?.delta?.content ?? "";
+      })
+      .join("");
+    expect(streamedContent).toBe("Hello WASM!");
+    expect(wasmStreamWire).toContain("[DONE]");
+    const { data: wasmStreamBill } = await internalCall(
+      runtime.internalApp,
+      "GET",
+      `/internal/v1/requests/${wasmStreamReqId}`,
+    );
+    expect((wasmStreamBill.charge as { usage: Record<string, string> }).usage).toEqual({
+      input_tokens: "8",
+      output_tokens: "4",
+    });
+
+    const capCountBeforeEscape = captures.length;
+    const escapeResp = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "acme-wasm-model",
+          messages: [{ role: "user", content: "TRIGGER_HOST_ESCAPE" }],
+        }),
+      }),
+    );
+    expect(escapeResp.status).toBe(502);
+    expect(captures.length).toBe(capCountBeforeEscape);
+
+    acmeWasmMode = "evil_usage";
+    const evilResp = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "acme-wasm-model",
+          messages: [{ role: "user", content: "evil usage" }],
+        }),
+      }),
+    );
+    expect(evilResp.status).toBe(502);
+    const evilReqId = evilResp.headers.get("x-request-id")!;
+    const { data: evilBill } = await internalCall(
+      runtime.internalApp,
+      "GET",
+      `/internal/v1/requests/${evilReqId}`,
+    );
+    expect((evilBill.hold as { state: string }).state).toBe("UNKNOWN");
+    await internalCall(runtime.internalApp, "POST", `/internal/v1/requests/${evilReqId}/resolve`, {
+      action: "RELEASE",
+      reason: "test cleanup after rejected negative usage",
+      actor: "g7-test",
+    });
+    acmeWasmMode = "ok";
+
+    const { status: ungrantedRegStatus, data: ungrantedWasm } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/plugins",
+      {
+        name: "acme-no-grant",
+        version: "1.0.0",
+        capability: "PROVIDER",
+        kind: "WASM",
+        wasm_bytes_base64: Buffer.from(wasmProviderBytes).toString("base64"),
+        provider_config: {
+          base_dialect: "passthrough",
+          usage_dialect: "custom",
+          auth: { scheme: "bearer" },
+          hooks: ["adapt_request", "adapt_response"],
+          grants: [],
+        },
+      },
+    );
+    expect(ungrantedRegStatus).toBe(200);
+    const { data: chUngranted } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/channels",
+      {
+        account_id: acc.id,
+        name: "acme-ungranted-ch",
+        kind: "acme-no-grant",
+        provider_plugin_id: ungrantedWasm.id,
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: "sk-secret-acme-999",
+      },
+    );
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "acme-ungranted-model",
+      operations: ["chat"],
+      max_output_tokens: 200,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "acme-ungranted-model",
+      channel_id: chUngranted.id,
+      upstream_model: "acme-engine-9",
+      operations: ["chat"],
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+    });
+    const ungrantedResp = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "acme-ungranted-model",
+          messages: [{ role: "user", content: "no extract_usage grant" }],
+        }),
+      }),
+    );
+    expect(ungrantedResp.status).toBe(502);
+    const ungrantedReqId = ungrantedResp.headers.get("x-request-id")!;
+    const { data: ungrantedBill } = await internalCall(
+      runtime.internalApp,
+      "GET",
+      `/internal/v1/requests/${ungrantedReqId}`,
+    );
+    expect((ungrantedBill.hold as { state: string }).state).toBe("UNKNOWN");
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/requests/${ungrantedReqId}/resolve`,
+      {
+        action: "RELEASE",
+        reason: "test cleanup after ungranted usage rejection",
+        actor: "g7-test",
+      },
+    );
+
+    const capCountBeforePreview = captures.length;
+    const { status: prev1Status, data: prev1 } = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/providers/preview",
+      {
+        provider: "deepseek",
+        base_url: "https://api.deepseek.com",
+        operation: "chat",
+        upstream_model: "deepseek-reasoner",
+        stream: false,
+        client_body: {
+          model: "ds-r1",
+          messages: [{ role: "user", content: "hi" }],
+          max_completion_tokens: 512,
+          temperature: 1.5,
+        },
+        adapter_overrides: {
+          request_transforms: [{ op: "drop", path: "temperature" }],
+        },
+        mock_upstream_response: {
+          status: 200,
+          body: {
+            choices: [
+              {
+                index: 0,
+                message: { role: "assistant", content: "ok" },
+                finish_reason: "stop",
+              },
+            ],
+            usage: { prompt_tokens: 10, completion_tokens: 5, prompt_cache_hit_tokens: 4 },
+          },
+        },
+      },
+    );
+    expect(prev1Status).toBe(200);
+    expect((prev1.resolved_provider as { source: string }).source).toBe("db_override");
+    expect(
+      (prev1.prepared_request as { headers: Record<string, string> }).headers.authorization,
+    ).toBe("Bearer <REDACTED>");
+    expect((prev1.prepared_request as { body: Record<string, unknown> }).body.max_tokens).toBe(512);
+    expect(
+      (prev1.prepared_request as { body: Record<string, unknown> }).body.temperature,
+    ).toBeUndefined();
+    expect(
+      (prev1.decoded_response as { extracted_usage: Record<string, string> }).extracted_usage,
+    ).toEqual({
+      input_tokens: "6",
+      output_tokens: "5",
+      cached_input_tokens: "4",
+    });
+
+    const { status: prev2Status, data: prev2 } = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/providers/preview",
+      {
+        provider: "minimax",
+        base_url: "https://api.minimax.chat",
+        operation: "chat",
+        upstream_model: "MiniMax-Text-01",
+        stream: false,
+        client_body: {
+          model: "mm",
+          messages: [{ role: "user", content: "test" }],
+        },
+        mock_upstream_response: {
+          status: 200,
+          body: { base_resp: { status_code: 1002, status_msg: "throttled" } },
+        },
+      },
+    );
+    expect(prev2Status).toBe(200);
+    expect((prev2.resolved_provider as { source: string }).source).toBe("builtin");
+    expect((prev2.decoded_response as { retry_kind: string }).retry_kind).toBe("rate_limit");
+    expect(captures.length).toBe(capCountBeforePreview);
+
+    const { data: audit } = await internalCall(
+      runtime.internalApp,
+      "GET",
+      "/internal/v1/audit/conservation",
+    );
+    expect(audit.ok).toBe(true);
+    expect(audit.open_holds).toBe(0);
+    expect(audit.unknown_holds).toBe(0);
+  } finally {
+    await runtime.close();
+    await upstream.stop(true);
+  }
+});

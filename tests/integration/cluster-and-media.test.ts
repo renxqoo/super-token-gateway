@@ -304,8 +304,22 @@ test("Redis cluster syncs rate limits, circuit breaker OPEN state, and config ep
       cost_version_id: supPrice.id,
     });
 
+    await internalCall(nodeA.internalApp, "PUT", "/internal/v1/plugins", {
+      name: "redis-sync-vendor",
+      version: "1.0.0",
+      capability: "PROVIDER",
+      kind: "DECLARATIVE",
+      provider_config: {
+        base_dialect: "openai_chat",
+        usage_dialect: "openai",
+        auth: { scheme: "bearer" },
+        endpoints: { default: { path: "/v1/chat/completions" } },
+      },
+    });
+
     await Bun.sleep(100);
     expect(nodeB.snapshot.get().models.has("cluster-gpt")).toBe(true);
+    expect(nodeB.snapshot.get().providerPluginsByName.has("redis-sync-vendor")).toBe(true);
 
     const callNode = (node: typeof nodeA) =>
       node.publicApp.fetch(

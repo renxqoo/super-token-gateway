@@ -41,7 +41,7 @@ export class StreamTranslator {
   constructor(
     readonly source: Protocol,
     readonly target: Protocol,
-    readonly kind: ProviderKind,
+    readonly kind: ProviderKind | "custom",
     readonly model: string,
     private readonly maxAggregate = 1_048_576,
     private readonly expectedCandidates = 1,

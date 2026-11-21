@@ -5,12 +5,10 @@ import {
   quoteReservation,
   type Operation,
   type Protocol,
-  type ProviderKind,
   type Usage,
 } from "@gateway/kernel";
 import type {
   ApiKeyRecord,
-  ChannelKind,
   ChannelRecord,
   ConfigSnapshot,
   createLedgerEngine,
@@ -21,7 +19,14 @@ import type {
   RouteRecord,
   UpstreamAccountRecord,
 } from "@gateway/ledger";
-import type { PluginPipelineEngine } from "@gateway/plugin-engine";
+import {
+  applyResponseTransforms,
+  evaluateErrorRules,
+  invokeWasmProviderResponse,
+  invokeWasmProviderStreamEvent,
+  type PluginPipelineEngine,
+  type WasmRuntimeExecutor,
+} from "@gateway/plugin-engine";
 import {
   copyExact,
   decodeResponse,
@@ -34,6 +39,7 @@ import {
   SSEParser,
   StreamTranslator,
   stringifyExact,
+  validateUsageObject,
 } from "@gateway/protocol";
 import {
   clientAddress,
@@ -58,6 +64,7 @@ import {
   extractChunkTextFromEncodedSse,
   extractResponseText,
   isConversationalOperation,
+  mergeUsageWithAliases,
   parseRetryAfterMs,
   prepareUpstreamRequest,
   replaceResponseText,
@@ -93,6 +100,7 @@ export type ProxyDependencies = {
   transport: Transport;
   vertexTokens: VertexTokens;
   pluginEngine: PluginPipelineEngine;
+  wasmExecutor: WasmRuntimeExecutor | null;
   lifecycle: Lifecycle;
   metrics: GatewayMetrics;
 };
@@ -233,10 +241,6 @@ function resolveOutputBound(body: Record<string, unknown>, model: ModelRecord): 
     return Math.min(raw, model.max_output_tokens);
   }
   return model.max_output_tokens;
-}
-
-function toProviderKind(kind: ChannelKind): ProviderKind {
-  return kind === "openai_compatible" ? "openai" : kind;
 }
 
 function quoteForPrice(
@@ -843,12 +847,17 @@ export async function handleInferenceRequest(
         prepared = await prepareUpstreamRequest({
           channel: cand.channel,
           route: cand.route,
+          snapshot: snap,
           secret,
           operation,
           clientBody,
           ...(multipartEntries ? { multipartEntries } : {}),
           isStream,
           vertexTokens: deps.vertexTokens,
+          wasmExecutor: deps.wasmExecutor,
+          ...(deps.config.pluginSigningPublicKeyPem
+            ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
+            : {}),
           traceparent: trace.traceparent,
           signal: attemptAbort.signal,
         });
@@ -858,6 +867,24 @@ export async function handleInferenceRequest(
         guard.controller.signal.removeEventListener("abort", onShutdownAbort);
         releaseChannelLimit();
         releaseChannelLimit = null;
+        if (
+          err instanceof GatewayError &&
+          (err.code === "provider_plugin_unavailable" || err.code === "provider_adapter_failed")
+        ) {
+          deps.metrics.recordUpstreamError(cand.channel.name, err.code);
+          deps.router.recordFailure(
+            cand.channel.id,
+            "retryable",
+            undefined,
+            performance.now() - startedAt,
+          );
+          markProbeCompleted(cand.channel.id);
+          pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
+          lastErrorStatus = err.status;
+          lastErrorCode = err.code;
+          lastErrorMessage = err.message;
+          continue;
+        }
         releaseProbeFor(cand.channel_id);
         releaseUnusedProbes(cursor + 1);
         holdFinalized = true;
@@ -970,22 +997,23 @@ export async function handleInferenceRequest(
         );
       }
 
-      releaseUnusedProbes(cursor + 1);
-
       const upstreamContentType = upstreamResp.headers.get("content-type") ?? "application/json";
       const isUpstreamSse = upstreamContentType.toLowerCase().includes("text/event-stream");
       const isUpstreamJson = upstreamContentType.toLowerCase().includes("application/json");
+      const isFakeJsonOnStream =
+        isStream && !isUpstreamSse && isUpstreamJson && !prepared.isBedrockStream;
 
-      if (!isStream && !isUpstreamSse) {
+      if ((!isStream && !isUpstreamSse) || isFakeJsonOnStream) {
+        let retryFromLogicalError = false;
         try {
           const respBytes = await readResponseBytesFast(
             upstreamResp,
             deps.config.maxBodyBytes,
             attemptAbort.signal,
           );
-          const providerKind = toProviderKind(cand.channel.kind);
 
           if (!isUpstreamJson) {
+            releaseUnusedProbes(cursor + 1);
             const usage = buildUsageForOperation(
               operation,
               cand.billingPrice.basis,
@@ -1040,123 +1068,362 @@ export async function handleInferenceRequest(
           }
 
           const rawJson = object(parseProviderJson(utf8FatalDecoder.decode(respBytes)));
-          const rawUsage = extractUsage(rawJson, providerKind);
-          const usage = buildUsageForOperation(operation, cand.billingPrice.basis, rawUsage, chars);
-          if (!usage) {
-            holdFinalized = true;
-            await deps.ledger.markUnknown(requestId);
-            deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
-            markProbeCompleted(cand.channel.id);
-            throw new GatewayError(
-              502,
-              "invalid_upstream_usage",
-              "Upstream omitted usage metadata",
-            );
-          }
-
+          let rawUsage: Usage | undefined;
           let clientJson: Record<string, unknown>;
+
           if (
-            isConversationalOperation(operation) &&
-            prepared.upstreamProtocol &&
-            prepared.upstreamProtocol !== operation
+            prepared.resolvedProvider.kind === "WASM" &&
+            prepared.resolvedProvider.config.hooks.includes("adapt_response")
           ) {
-            const completion = decodeResponse(rawJson, prepared.upstreamProtocol, providerKind);
-            clientJson = encodeResponse(completion, operation, model.name);
+            const respHeadersObj: Record<string, string> = {};
+            upstreamResp.headers.forEach((v, k) => {
+              respHeadersObj[k] = v;
+            });
+            let wasmResp: Awaited<ReturnType<typeof invokeWasmProviderResponse>>;
+            try {
+              wasmResp = await invokeWasmProviderResponse({
+                executor: deps.wasmExecutor,
+                plugin: prepared.resolvedProvider.plugin,
+                config: prepared.resolvedProvider.config,
+                ...(deps.config.pluginSigningPublicKeyPem
+                  ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
+                  : {}),
+                input: {
+                  operation,
+                  upstream_model: cand.route.upstream_model,
+                  client_protocol: isConversationalOperation(operation) ? operation : null,
+                  status: upstreamResp.status,
+                  headers: respHeadersObj,
+                  body: rawJson,
+                },
+              });
+            } catch (err) {
+              releaseUnusedProbes(cursor + 1);
+              holdFinalized = true;
+              await deps.ledger.markUnknown(requestId);
+              deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
+              markProbeCompleted(cand.channel.id);
+              throw new GatewayError(
+                502,
+                "provider_adapter_failed",
+                err instanceof Error ? err.message : "WASM provider adapt_response failed",
+              );
+            }
+
+            if (wasmResp.retry_kind) {
+              if (wasmResp.retry_kind !== "client_error") {
+                deps.metrics.recordUpstreamError(
+                  cand.channel.name,
+                  `logical_${wasmResp.retry_kind}`,
+                );
+                deps.router.recordFailure(
+                  cand.channel.id,
+                  wasmResp.retry_kind,
+                  wasmResp.retry_after_ms,
+                  latencyMs,
+                );
+                markProbeCompleted(cand.channel.id);
+                releaseChannelLimit?.();
+                releaseChannelLimit = null;
+                pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
+                lastErrorStatus =
+                  wasmResp.status ?? (wasmResp.retry_kind === "rate_limit" ? 429 : 502);
+                lastErrorCode =
+                  wasmResp.retry_kind === "rate_limit"
+                    ? "upstream_rate_limited"
+                    : wasmResp.retry_kind === "auth_error"
+                      ? "upstream_auth_error"
+                      : "upstream_error";
+                lastErrorMessage = wasmResp.error_message ?? "Upstream logical error";
+                retryFromLogicalError = true;
+              } else {
+                releaseProbeFor(cand.channel_id);
+                releaseUnusedProbes(cursor + 1);
+                holdFinalized = true;
+                if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
+                else await deps.ledger.releaseHold(requestId);
+                const errStatus = wasmResp.status ?? 400;
+                emitAccessLog(errStatus, "upstream_client_error");
+                return c.json(
+                  {
+                    error: {
+                      code: "upstream_client_error",
+                      message: wasmResp.error_message ?? "Upstream rejected request",
+                      request_id: requestId,
+                    },
+                  },
+                  errStatus as 400,
+                  responseHeaders(requestId, trace),
+                );
+              }
+            }
+
+            if (!retryFromLogicalError) {
+              releaseUnusedProbes(cursor + 1);
+              if (isFakeJsonOnStream) {
+                holdFinalized = true;
+                await deps.ledger.markUnknown(requestId);
+                throw new GatewayError(
+                  502,
+                  "invalid_upstream",
+                  "Upstream returned JSON body instead of event stream",
+                );
+              }
+              const adaptedBody = wasmResp.body ?? rawJson;
+              try {
+                if (wasmResp.usage !== undefined) {
+                  rawUsage = validateUsageObject(wasmResp.usage);
+                } else if (prepared.usageDialect !== "custom") {
+                  rawUsage = extractUsage(adaptedBody, prepared.usageDialect);
+                }
+              } catch (err) {
+                holdFinalized = true;
+                await deps.ledger.markUnknown(requestId);
+                deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
+                markProbeCompleted(cand.channel.id);
+                throw err;
+              }
+              if (
+                isConversationalOperation(operation) &&
+                prepared.upstreamProtocol &&
+                prepared.upstreamProtocol !== operation
+              ) {
+                const completion = decodeResponse(
+                  adaptedBody,
+                  prepared.upstreamProtocol,
+                  prepared.usageDialect,
+                );
+                clientJson = encodeResponse(completion, operation, model.name);
+              } else {
+                clientJson = copyExact(adaptedBody, { ...adaptedBody });
+                if (typeof clientJson.model === "string") clientJson.model = model.name;
+              }
+            } else {
+              clientJson = {};
+            }
           } else {
-            clientJson = copyExact(rawJson, { ...rawJson });
-            if (typeof clientJson.model === "string") clientJson.model = model.name;
-          }
-
-          let moderationBlocked = false;
-          let chargePolicy: "CHARGE_CUSTOMER" | "PLATFORM_ABSORB" = "CHARGE_CUSTOMER";
-          let blockRule = "";
-          let blockStatus = 400;
-          let blockMessage = "Content blocked";
-          const allAudit: PluginAuditEntry[] = [...preRequestAudit];
-
-          if (cand.route.plugin_pipeline.length > 0 && isConversationalOperation(operation)) {
-            const respText = extractResponseText(clientJson, operation);
-            const postRes = await deps.pluginEngine.runUnary(
-              "on_response",
-              cand.route.plugin_pipeline,
-              snap.plugins,
-              { request_id: requestId, project_id: project.id, model: model.name, operation },
-              respText,
-              attemptAbort.signal,
+            const matchedErr = evaluateErrorRules(
+              upstreamResp.status,
+              rawJson,
+              prepared.mergedOverrides.error_rules,
             );
-            allAudit.push(...postRes.audit);
-            if (postRes.blocked) {
-              moderationBlocked = true;
-              logModBlocked = true;
-              chargePolicy = postRes.charge_policy;
-              blockRule = postRes.rule_code ?? "moderation_blocked";
-              blockStatus = postRes.http_status ?? 400;
-              blockMessage = postRes.safe_message ?? "Content blocked by moderation policy";
-              deps.metrics.moderationBlocksTotal++;
-            } else if (postRes.text !== respText) {
-              clientJson = replaceResponseText(clientJson, operation, postRes.text);
+            if (matchedErr) {
+              if (matchedErr.retry_kind !== "client_error") {
+                deps.metrics.recordUpstreamError(
+                  cand.channel.name,
+                  `logical_${matchedErr.retry_kind}`,
+                );
+                deps.router.recordFailure(
+                  cand.channel.id,
+                  matchedErr.retry_kind,
+                  matchedErr.retry_after_ms,
+                  latencyMs,
+                );
+                markProbeCompleted(cand.channel.id);
+                releaseChannelLimit?.();
+                releaseChannelLimit = null;
+                pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
+                lastErrorStatus =
+                  matchedErr.http_status ?? (matchedErr.retry_kind === "rate_limit" ? 429 : 502);
+                lastErrorCode =
+                  matchedErr.retry_kind === "rate_limit"
+                    ? "upstream_rate_limited"
+                    : matchedErr.retry_kind === "auth_error"
+                      ? "upstream_auth_error"
+                      : "upstream_error";
+                lastErrorMessage = matchedErr.message ?? "Upstream logical error";
+                retryFromLogicalError = true;
+                clientJson = {};
+              } else {
+                releaseProbeFor(cand.channel_id);
+                releaseUnusedProbes(cursor + 1);
+                holdFinalized = true;
+                if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
+                else await deps.ledger.releaseHold(requestId);
+                const errStatus = matchedErr.http_status ?? 400;
+                emitAccessLog(errStatus, "upstream_client_error");
+                return c.json(
+                  {
+                    error: {
+                      code: "upstream_client_error",
+                      message: matchedErr.message ?? "Upstream rejected request",
+                      request_id: requestId,
+                    },
+                  },
+                  errStatus as 400,
+                  responseHeaders(requestId, trace),
+                );
+              }
+            } else {
+              releaseUnusedProbes(cursor + 1);
+              if (isFakeJsonOnStream) {
+                holdFinalized = true;
+                await deps.ledger.markUnknown(requestId);
+                throw new GatewayError(
+                  502,
+                  "invalid_upstream",
+                  "Upstream returned JSON body instead of event stream",
+                );
+              }
+              const adaptedJson =
+                prepared.mergedOverrides.response_transforms.length > 0
+                  ? copyExact(
+                      rawJson,
+                      applyResponseTransforms(
+                        rawJson,
+                        prepared.mergedOverrides.response_transforms,
+                      ),
+                    )
+                  : rawJson;
+              try {
+                const baseUsage =
+                  prepared.usageDialect === "custom"
+                    ? undefined
+                    : extractUsage(adaptedJson, prepared.usageDialect);
+                rawUsage = mergeUsageWithAliases(
+                  baseUsage,
+                  adaptedJson,
+                  prepared.mergedOverrides.usage_aliases,
+                );
+              } catch (err) {
+                holdFinalized = true;
+                await deps.ledger.markUnknown(requestId);
+                deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
+                markProbeCompleted(cand.channel.id);
+                throw err;
+              }
+              if (
+                isConversationalOperation(operation) &&
+                prepared.upstreamProtocol &&
+                prepared.upstreamProtocol !== operation
+              ) {
+                const completion = decodeResponse(
+                  adaptedJson,
+                  prepared.upstreamProtocol,
+                  prepared.usageDialect,
+                );
+                clientJson = encodeResponse(completion, operation, model.name);
+              } else {
+                clientJson = copyExact(adaptedJson, { ...adaptedJson });
+                if (typeof clientJson.model === "string") clientJson.model = model.name;
+              }
             }
           }
 
-          const commitRes = await deps.ledger.commitTerminal({
-            request_id: requestId,
-            selected_attempt_id: activeAttemptId,
-            channel_id: cand.channel.id,
-            billing_price_id: cand.billingPrice.id,
-            cost_version_id: cand.costPrice.id,
-            usage,
-            billing_pricing: {
-              currency: cand.billingPrice.currency,
-              rates: cand.billingPrice.rates,
-            },
-            billing_basis: cand.billingPrice.basis,
-            ...(chars !== undefined ? { input_characters: String(chars) } : {}),
-            supplier_pricing: {
-              currency: cand.costPrice.currency,
-              rates: cand.costPrice.rates,
-            },
-            supplier_currency: cand.costPrice.currency,
-            plugin_audit: allAudit,
-            charge_policy: chargePolicy,
-            moderation_blocked: moderationBlocked,
-          });
-          if (!commitRes.ok) {
-            throw new GatewayError(500, "ledger_commit_failed", commitRes.message);
-          }
-
-          holdFinalized = true;
-          deps.router.recordSuccess(cand.channel.id, latencyMs);
-          markProbeCompleted(cand.channel.id);
-          if (moderationBlocked) {
-            emitAccessLog(blockStatus, blockRule);
-            return c.json(
-              {
-                error: {
-                  code: "content_blocked",
-                  rule_code: blockRule,
-                  message: blockMessage,
-                  request_id: requestId,
-                },
-              },
-              blockStatus as 400,
-              responseHeaders(requestId, trace, { "x-gateway-channel": cand.channel.name }),
+          if (!retryFromLogicalError) {
+            const usage = buildUsageForOperation(
+              operation,
+              cand.billingPrice.basis,
+              rawUsage,
+              chars,
             );
+            if (!usage) {
+              holdFinalized = true;
+              await deps.ledger.markUnknown(requestId);
+              deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
+              markProbeCompleted(cand.channel.id);
+              throw new GatewayError(
+                502,
+                "invalid_upstream_usage",
+                "Upstream omitted usage metadata",
+              );
+            }
+
+            let moderationBlocked = false;
+            let chargePolicy: "CHARGE_CUSTOMER" | "PLATFORM_ABSORB" = "CHARGE_CUSTOMER";
+            let blockRule = "";
+            let blockStatus = 400;
+            let blockMessage = "Content blocked";
+            const allAudit: PluginAuditEntry[] = [...preRequestAudit];
+
+            if (cand.route.plugin_pipeline.length > 0 && isConversationalOperation(operation)) {
+              const respText = extractResponseText(clientJson, operation);
+              const postRes = await deps.pluginEngine.runUnary(
+                "on_response",
+                cand.route.plugin_pipeline,
+                snap.plugins,
+                { request_id: requestId, project_id: project.id, model: model.name, operation },
+                respText,
+                attemptAbort.signal,
+              );
+              allAudit.push(...postRes.audit);
+              if (postRes.blocked) {
+                moderationBlocked = true;
+                logModBlocked = true;
+                chargePolicy = postRes.charge_policy;
+                blockRule = postRes.rule_code ?? "moderation_blocked";
+                blockStatus = postRes.http_status ?? 400;
+                blockMessage = postRes.safe_message ?? "Content blocked by moderation policy";
+                deps.metrics.moderationBlocksTotal++;
+              } else if (postRes.text !== respText) {
+                clientJson = replaceResponseText(clientJson, operation, postRes.text);
+              }
+            }
+
+            const commitRes = await deps.ledger.commitTerminal({
+              request_id: requestId,
+              selected_attempt_id: activeAttemptId,
+              channel_id: cand.channel.id,
+              billing_price_id: cand.billingPrice.id,
+              cost_version_id: cand.costPrice.id,
+              usage,
+              billing_pricing: {
+                currency: cand.billingPrice.currency,
+                rates: cand.billingPrice.rates,
+              },
+              billing_basis: cand.billingPrice.basis,
+              ...(chars !== undefined ? { input_characters: String(chars) } : {}),
+              supplier_pricing: {
+                currency: cand.costPrice.currency,
+                rates: cand.costPrice.rates,
+              },
+              supplier_currency: cand.costPrice.currency,
+              plugin_audit: allAudit,
+              charge_policy: chargePolicy,
+              moderation_blocked: moderationBlocked,
+            });
+            if (!commitRes.ok) {
+              throw new GatewayError(500, "ledger_commit_failed", commitRes.message);
+            }
+
+            holdFinalized = true;
+            deps.router.recordSuccess(cand.channel.id, latencyMs);
+            markProbeCompleted(cand.channel.id);
+            if (moderationBlocked) {
+              emitAccessLog(blockStatus, blockRule);
+              return c.json(
+                {
+                  error: {
+                    code: "content_blocked",
+                    rule_code: blockRule,
+                    message: blockMessage,
+                    request_id: requestId,
+                  },
+                },
+                blockStatus as 400,
+                responseHeaders(requestId, trace, { "x-gateway-channel": cand.channel.name }),
+              );
+            }
+            emitAccessLog(200, null);
+            return new Response(stringifyExact(clientJson), {
+              status: 200,
+              headers: responseHeaders(requestId, trace, {
+                "content-type": "application/json",
+                "x-gateway-channel": cand.channel.name,
+              }),
+            });
           }
-          emitAccessLog(200, null);
-          return new Response(stringifyExact(clientJson), {
-            status: 200,
-            headers: responseHeaders(requestId, trace, {
-              "content-type": "application/json",
-              "x-gateway-channel": cand.channel.name,
-            }),
-          });
         } finally {
           clearTimeout(timeoutTimer);
           c.req.raw.signal.removeEventListener("abort", onClientAbort);
           guard.controller.signal.removeEventListener("abort", onShutdownAbort);
         }
+        if (retryFromLogicalError) {
+          continue;
+        }
       }
 
+      releaseUnusedProbes(cursor + 1);
       clearTimeout(timeoutTimer);
       holdFinalized = true;
       const streamProbeChannel = acquiredProbes.delete(cand.channel.id) ? cand.channel.id : null;
@@ -1185,8 +1452,16 @@ export async function handleInferenceRequest(
         releaseGuard();
       };
 
-      if (!isConversationalOperation(operation) || !prepared.upstreamProtocol) {
-        const providerKind = toProviderKind(cand.channel.kind);
+      const isWasmStreamProvider =
+        prepared.resolvedProvider.kind === "WASM" &&
+        prepared.resolvedProvider.config.hooks.includes("adapt_stream_event") &&
+        isConversationalOperation(operation);
+
+      if (
+        !isConversationalOperation(operation) ||
+        (!prepared.upstreamProtocol && !isWasmStreamProvider)
+      ) {
+        const usageDialect = prepared.usageDialect;
         let clientCancelled = false;
         const mediaStream = new ReadableStream<Uint8Array>({
           async start(controller) {
@@ -1206,8 +1481,16 @@ export async function handleInferenceRequest(
                   let isDoneEvent = false;
                   if (ev.data && ev.data !== "[DONE]") {
                     const parsed = object(parseProviderJson(ev.data));
+                    const baseU =
+                      usageDialect === "custom"
+                        ? observedUsage
+                        : (extractUsage(parsed, usageDialect, observedUsage) ?? observedUsage);
                     observedUsage =
-                      extractUsage(parsed, providerKind, observedUsage) ?? observedUsage;
+                      mergeUsageWithAliases(
+                        baseU,
+                        parsed,
+                        prepared.mergedOverrides.usage_aliases,
+                      ) ?? baseU;
                     const t = String(parsed.type ?? ev.event);
                     if (t.endsWith(".done") || t.endsWith(".completed")) isDoneEvent = true;
                   }
@@ -1333,10 +1616,323 @@ export async function handleInferenceRequest(
       }
 
       const clientProtocol: Protocol = operation;
-      const upstreamProtocol: Protocol = prepared.upstreamProtocol;
       const streamId = `gen_${requestId.replaceAll("-", "")}`;
       const hasPlugins = cand.route.plugin_pipeline.length > 0;
       let clientCancelled = false;
+
+      if (isWasmStreamProvider && prepared.resolvedProvider.kind === "WASM") {
+        const wasmProvider = prepared.resolvedProvider;
+        const wasmStream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            const reader = upstreamBody?.getReader();
+            const parser = new SSEParser();
+            const bedrockDecoder = prepared.isBedrockStream
+              ? new BedrockEventStreamDecoder()
+              : null;
+            const pluginSignal = AbortSignal.any([c.req.raw.signal, guard.controller.signal]);
+            const session = hasPlugins
+              ? deps.pluginEngine.createStreamSession(
+                  cand.route.plugin_pipeline,
+                  snap.plugins,
+                  { request_id: requestId, project_id: project.id, model: model.name, operation },
+                  () => attemptAbort.abort(new Error("moderation_blocked")),
+                  pluginSignal,
+                )
+              : null;
+            const heldTerminalChunks: Uint8Array[] = [];
+            const streamPluginAudit: PluginAuditEntry[] = [];
+            let observedOutputChars = 0;
+            let wasmState = "";
+            let wasmUsage: Usage | undefined;
+            let streamFailed = false;
+            let blockedEarly = false;
+
+            const processWasmEvent = async (ev: { event: string; data: string }) => {
+              const out = await invokeWasmProviderStreamEvent({
+                executor: deps.wasmExecutor,
+                plugin: wasmProvider.plugin,
+                config: wasmProvider.config,
+                ...(deps.config.pluginSigningPublicKeyPem
+                  ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
+                  : {}),
+                input: {
+                  operation,
+                  upstream_model: cand.route.upstream_model,
+                  client_protocol: clientProtocol,
+                  event: ev.event,
+                  data: ev.data,
+                  state: wasmState,
+                },
+              });
+              if (out.state !== undefined) wasmState = out.state;
+              if (out.retry_kind) {
+                throw new GatewayError(
+                  out.retry_kind === "rate_limit" ? 429 : 502,
+                  "upstream_stream_error",
+                  out.error_message ?? "Upstream stream reported error",
+                );
+              }
+              if (out.usage !== undefined) {
+                const validated = validateUsageObject(out.usage);
+                wasmUsage = { ...wasmUsage, ...validated };
+              }
+              for (const chunkObj of out.chunks ?? []) {
+                const evName =
+                  clientProtocol === "messages" && typeof chunkObj.type === "string"
+                    ? chunkObj.type
+                    : undefined;
+                const encoded = encodeSSE(chunkObj, evName);
+                if (!session) {
+                  controller.enqueue(encoded);
+                  continue;
+                }
+                const deltaText = extractChunkTextFromEncodedSse(encoded, clientProtocol);
+                if (deltaText === null) {
+                  controller.enqueue(encoded);
+                  continue;
+                }
+                observedOutputChars += deltaText.length;
+                const mod = await session.push(deltaText);
+                if (mod.blocked) {
+                  blockedEarly = true;
+                  break;
+                }
+                if (mod.emit.length > 0) {
+                  controller.enqueue(
+                    buildTextDeltaSse(clientProtocol, model.name, mod.emit, streamId),
+                  );
+                }
+              }
+              if (out.done && clientProtocol === "chat") {
+                heldTerminalChunks.push(utf8Encoder.encode("data: [DONE]\n\n"));
+              }
+            };
+
+            try {
+              if (!reader) {
+                throw new GatewayError(502, "empty_stream", "Upstream returned empty body");
+              }
+              while (true) {
+                let step: Awaited<ReturnType<typeof reader.read>>;
+                try {
+                  step = await reader.read();
+                } catch (readErr) {
+                  if (session?.isBlocked()) {
+                    blockedEarly = true;
+                    break;
+                  }
+                  throw readErr;
+                }
+                if (step.done) break;
+                const events = bedrockDecoder
+                  ? bedrockDecoder.feed(step.value)
+                  : parser.feed(step.value, false);
+                for (const ev of events) {
+                  await processWasmEvent(ev);
+                  if (blockedEarly) break;
+                }
+                if (blockedEarly) {
+                  await reader.cancel().catch(() => undefined);
+                  break;
+                }
+              }
+
+              if (clientCancelled || c.req.raw.signal.aborted) {
+                await deps.ledger.markUnknown(requestId).catch(() => undefined);
+                emitAccessLog(499, "client_aborted");
+                return;
+              }
+
+              if (!blockedEarly && !bedrockDecoder) {
+                for (const ev of parser.feed(new Uint8Array(), true)) {
+                  await processWasmEvent(ev);
+                  if (blockedEarly) break;
+                }
+              }
+
+              if (session) {
+                const finalMod = await session.finalize();
+                streamPluginAudit.push(...finalMod.audit);
+                if (finalMod.blocked) {
+                  deps.metrics.moderationBlocksTotal++;
+                  logModBlocked = true;
+                  const modUsage = buildModerationUsageFallback(
+                    wasmUsage,
+                    chars ?? 0,
+                    observedOutputChars,
+                  );
+                  await deps.ledger.commitTerminal({
+                    request_id: requestId,
+                    selected_attempt_id: activeAttemptId,
+                    channel_id: cand.channel.id,
+                    billing_price_id: cand.billingPrice.id,
+                    cost_version_id: cand.costPrice.id,
+                    usage: modUsage,
+                    billing_pricing: {
+                      currency: cand.billingPrice.currency,
+                      rates: cand.billingPrice.rates,
+                    },
+                    billing_basis: cand.billingPrice.basis,
+                    ...(chars !== undefined ? { input_characters: String(chars) } : {}),
+                    supplier_pricing: {
+                      currency: cand.costPrice.currency,
+                      rates: cand.costPrice.rates,
+                    },
+                    supplier_currency: cand.costPrice.currency,
+                    plugin_audit: [...preRequestAudit, ...streamPluginAudit],
+                    charge_policy: finalMod.charge_policy,
+                    moderation_blocked: true,
+                  });
+                  streamProbeDone = true;
+                  deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
+                  emitAccessLog(400, finalMod.rule_code ?? "content_blocked");
+                  controller.enqueue(
+                    encodeSSE(
+                      {
+                        error: {
+                          code: "content_blocked",
+                          rule_code: finalMod.rule_code,
+                          message: finalMod.safe_message,
+                          request_id: requestId,
+                        },
+                      },
+                      "error",
+                    ),
+                  );
+                  controller.close();
+                  return;
+                }
+                if (finalMod.emit.length > 0) {
+                  controller.enqueue(
+                    buildTextDeltaSse(clientProtocol, model.name, finalMod.emit, streamId),
+                  );
+                }
+              }
+
+              if (clientProtocol === "chat" && heldTerminalChunks.length === 0) {
+                heldTerminalChunks.push(utf8Encoder.encode("data: [DONE]\n\n"));
+              }
+
+              const usage = buildUsageForOperation(
+                operation,
+                cand.billingPrice.basis,
+                wasmUsage,
+                chars,
+              );
+              if (!usage) {
+                streamFailed = true;
+                deps.metrics.recordUpstreamError(cand.channel.name, "missing_usage");
+                streamProbeDone = true;
+                deps.router.recordFailure(
+                  cand.channel.id,
+                  "retryable",
+                  undefined,
+                  performance.now() - startedAt,
+                );
+                await deps.ledger.markUnknown(requestId);
+                emitAccessLog(502, "invalid_upstream_usage");
+                controller.enqueue(
+                  encodeSSE(
+                    {
+                      error: {
+                        code: "invalid_upstream_usage",
+                        message: "Stream finished without usage metadata",
+                        request_id: requestId,
+                      },
+                    },
+                    "error",
+                  ),
+                );
+                controller.close();
+                return;
+              }
+
+              const commitRes = await deps.ledger.commitTerminal({
+                request_id: requestId,
+                selected_attempt_id: activeAttemptId,
+                channel_id: cand.channel.id,
+                billing_price_id: cand.billingPrice.id,
+                cost_version_id: cand.costPrice.id,
+                usage,
+                billing_pricing: {
+                  currency: cand.billingPrice.currency,
+                  rates: cand.billingPrice.rates,
+                },
+                billing_basis: cand.billingPrice.basis,
+                ...(chars !== undefined ? { input_characters: String(chars) } : {}),
+                supplier_pricing: {
+                  currency: cand.costPrice.currency,
+                  rates: cand.costPrice.rates,
+                },
+                supplier_currency: cand.costPrice.currency,
+                plugin_audit: [...preRequestAudit, ...streamPluginAudit],
+                charge_policy: "CHARGE_CUSTOMER",
+                moderation_blocked: false,
+              });
+              if (!commitRes.ok) {
+                throw new GatewayError(500, "ledger_commit_failed", commitRes.message);
+              }
+
+              streamProbeDone = true;
+              deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
+              for (const chunk of heldTerminalChunks) {
+                controller.enqueue(chunk);
+              }
+              emitAccessLog(200, null);
+              controller.close();
+            } catch (err) {
+              const abortedByClient = clientCancelled || c.req.raw.signal.aborted;
+              if (!streamFailed) {
+                streamFailed = true;
+                await deps.ledger.markUnknown(requestId).catch(() => undefined);
+                if (!abortedByClient) {
+                  deps.metrics.recordUpstreamError(cand.channel.name, "stream_interrupted");
+                  streamProbeDone = true;
+                  deps.router.recordFailure(
+                    cand.channel.id,
+                    "retryable",
+                    undefined,
+                    performance.now() - startedAt,
+                  );
+                }
+              }
+              if (abortedByClient) {
+                emitAccessLog(499, "client_aborted");
+                return;
+              }
+              const code = err instanceof GatewayError ? err.code : "stream_interrupted";
+              emitAccessLog(502, code);
+              try {
+                const msg = err instanceof Error ? err.message : "Stream failed";
+                controller.enqueue(
+                  encodeSSE({ error: { code, message: msg, request_id: requestId } }, "error"),
+                );
+                controller.close();
+              } catch {
+                void 0;
+              }
+            } finally {
+              reader?.releaseLock();
+              cleanupStream();
+            }
+          },
+          cancel() {
+            clientCancelled = true;
+            attemptAbort.abort(new Error("client_cancelled"));
+            void upstreamBody?.cancel().catch(() => undefined);
+          },
+        });
+        return new Response(wasmStream, {
+          status: 200,
+          headers: responseHeaders(requestId, trace, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+            "x-gateway-channel": cand.channel.name,
+          }),
+        });
+      }
+
+      const upstreamProtocol: Protocol = prepared.upstreamProtocol!;
 
       const bodyStream = new ReadableStream<Uint8Array>({
         async start(controller) {
@@ -1346,9 +1942,13 @@ export async function handleInferenceRequest(
           const translator = new StreamTranslator(
             upstreamProtocol,
             clientProtocol,
-            toProviderKind(cand.channel.kind),
+            prepared.usageDialect,
             model.name,
           );
+          const hasStreamRules =
+            prepared.mergedOverrides.error_rules.length > 0 ||
+            prepared.mergedOverrides.usage_aliases.length > 0;
+          let streamAliasUsage: Usage | undefined;
           const pluginSignal = AbortSignal.any([c.req.raw.signal, guard.controller.signal]);
           const session = hasPlugins
             ? deps.pluginEngine.createStreamSession(
@@ -1385,6 +1985,30 @@ export async function handleInferenceRequest(
                 ? bedrockDecoder.feed(step.value)
                 : parser.feed(step.value, false);
               for (const ev of events) {
+                if (hasStreamRules && ev.data && ev.data !== "[DONE]") {
+                  const parsedEv = object(parseProviderJson(ev.data));
+                  const matchedErr = evaluateErrorRules(
+                    200,
+                    parsedEv,
+                    prepared.mergedOverrides.error_rules,
+                  );
+                  if (matchedErr) {
+                    throw new GatewayError(
+                      matchedErr.http_status ??
+                        (matchedErr.retry_kind === "rate_limit" ? 429 : 502),
+                      "upstream_stream_error",
+                      matchedErr.message ?? "Upstream stream error",
+                    );
+                  }
+                  if (prepared.mergedOverrides.usage_aliases.length > 0) {
+                    const mergedU = mergeUsageWithAliases(
+                      streamAliasUsage,
+                      parsedEv,
+                      prepared.mergedOverrides.usage_aliases,
+                    );
+                    if (mergedU) streamAliasUsage = mergedU;
+                  }
+                }
                 const translated = translator.consume(ev);
                 for (const chunk of translated.chunks) {
                   if (translated.terminal || translator.holdTerminal) {
@@ -1436,6 +2060,11 @@ export async function handleInferenceRequest(
               }
             }
 
+            const combinedStreamUsage: Usage | undefined =
+              streamAliasUsage && translator.usage
+                ? validateUsageObject({ ...translator.usage, ...streamAliasUsage })
+                : (translator.usage ?? streamAliasUsage);
+
             if (session) {
               const finalMod = await session.finalize();
               streamPluginAudit.push(...finalMod.audit);
@@ -1443,7 +2072,7 @@ export async function handleInferenceRequest(
                 deps.metrics.moderationBlocksTotal++;
                 logModBlocked = true;
                 const modUsage = buildModerationUsageFallback(
-                  translator.usage,
+                  combinedStreamUsage,
                   chars ?? 0,
                   observedOutputChars,
                 );
@@ -1501,7 +2130,7 @@ export async function handleInferenceRequest(
             const usage = buildUsageForOperation(
               operation,
               cand.billingPrice.basis,
-              translator.usage,
+              combinedStreamUsage,
               chars,
             );
             if (!usage) {

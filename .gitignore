@@ -4,6 +4,7 @@ node_modules/
 dist/
 native/plugin-wasmtime/target/
 native/builtin-pii-guard/target/
+native/example-provider-wasm/target/
 coverage/
 .local/
 reports/*.json

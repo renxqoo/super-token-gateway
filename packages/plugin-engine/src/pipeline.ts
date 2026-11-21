@@ -51,7 +51,7 @@ export class PluginPipelineEngine {
       .sort((a, b) => a.priority - b.priority);
     for (const step of sorted) {
       const plugin = plugins.get(step.plugin_id);
-      if (!plugin || !plugin.enabled) continue;
+      if (!plugin || !plugin.enabled || plugin.capability !== "CONTENT") continue;
       const manifestPolicy =
         plugin.kind === "WEBHOOK"
           ? plugin.webhook_config?.charge_policy

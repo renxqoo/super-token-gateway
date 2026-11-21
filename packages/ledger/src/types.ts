@@ -5,19 +5,132 @@ export type WalletPolicy = "GIFT_FIRST" | "CASH_FIRST" | "EARLIEST_EXPIRY";
 export type LotKind = "CASH" | "GRANT";
 export type PriceSide = "CUSTOMER" | "SUPPLIER";
 export type PriceBasis = "PROVIDER_USAGE" | "REQUEST_COMPLETION" | "INPUT_CHARACTERS";
-export type ChannelKind =
-  | "openai"
-  | "anthropic"
-  | "gemini"
-  | "azure"
-  | "bedrock"
-  | "vertex"
-  | "deepseek"
-  | "ollama"
-  | "openai_compatible";
+export type ChannelKind = string;
 export type ChargePolicy = "CHARGE_CUSTOMER" | "PLATFORM_ABSORB";
-export type PluginKind = "WASM" | "WEBHOOK";
+export type PluginCapability = "CONTENT" | "PROVIDER";
+export type PluginKind = "WASM" | "WEBHOOK" | "DECLARATIVE";
 export type PluginAction = "PASS" | "TRANSFORM" | "BLOCK";
+
+export type WireDialect =
+  "openai_chat" | "openai_responses" | "anthropic_messages" | "gemini" | "passthrough";
+
+export type UsageDialect = "openai" | "anthropic" | "gemini" | "custom";
+
+export type StreamFraming = "sse" | "bedrock_eventstream";
+
+export type AuthSchemeConfig =
+  | { scheme: "none" }
+  | { scheme: "bearer" }
+  | { scheme: "header"; header_name: string; prefix?: string }
+  | { scheme: "query"; param_name: string }
+  | { scheme: "azure_key"; default_api_version?: string }
+  | { scheme: "aws_sigv4"; service: string }
+  | { scheme: "gcp_vertex_oauth" }
+  | {
+      scheme: "hmac_sha256";
+      signature_header: string;
+      timestamp_header: string;
+      key_id_header?: string;
+      signature_prefix?: string;
+      encoding?: "hex" | "base64";
+    };
+
+export type BodyTransformRule =
+  | { op: "rename"; from: string; to: string; overwrite?: boolean }
+  | { op: "drop"; path: string }
+  | { op: "set_default"; path: string; value: unknown }
+  | { op: "force_set"; path: string; value: unknown }
+  | { op: "clamp"; path: string; min?: number; max?: number }
+  | { op: "move_to"; from: string; to: string; overwrite?: boolean }
+  | { op: "delete_if_equals"; path: string; value: unknown };
+
+export type ResponseTransformRule =
+  | { op: "rename"; from: string; to: string; overwrite?: boolean }
+  | { op: "drop"; path: string }
+  | { op: "set_default"; path: string; value: unknown };
+
+export type ErrorMatchRule = {
+  when_http_status?: number[];
+  path: string;
+  equals?: string | number | boolean;
+  in?: (string | number)[];
+  regex?: string;
+  retry_kind: "retryable" | "rate_limit" | "auth_error" | "client_error";
+  http_status?: number;
+  message_path?: string;
+  retry_after_path?: string;
+};
+
+export type UsageAliasTarget =
+  | "input_tokens"
+  | "output_tokens"
+  | "cached_input_tokens"
+  | "cache_write_tokens"
+  | "cache_write_5m_tokens"
+  | "cache_write_1h_tokens"
+  | "reasoning_tokens"
+  | "requests"
+  | "images"
+  | "audio_ms"
+  | "audio_seconds"
+  | "video_ms"
+  | "video_seconds"
+  | "music_ms"
+  | "characters";
+
+export type UsageAliasRule = {
+  target: UsageAliasTarget;
+  source_path: string;
+};
+
+export type EndpointTemplate = {
+  path: string;
+  stream_path?: string;
+  query?: Record<string, string>;
+  stream_query?: Record<string, string>;
+};
+
+export type DeclarativeProviderConfig = {
+  base_dialect: WireDialect;
+  usage_dialect: UsageDialect;
+  stream_framing?: StreamFraming;
+  auth: AuthSchemeConfig;
+  endpoints: Partial<Record<Operation, EndpointTemplate>> & { default?: EndpointTemplate };
+  extra_headers?: Record<string, string>;
+  model_field?: string | null;
+  stream_field?: string | null;
+  include_stream_usage_option?: boolean;
+  request_transforms?: BodyTransformRule[];
+  response_transforms?: ResponseTransformRule[];
+  error_rules?: ErrorMatchRule[];
+  usage_aliases?: UsageAliasRule[];
+  reasoning_field?: string;
+};
+
+export type WasmProviderConfig = {
+  base_dialect: WireDialect;
+  usage_dialect: UsageDialect;
+  stream_framing?: StreamFraming;
+  auth: AuthSchemeConfig;
+  extra_headers?: Record<string, string>;
+  hooks: ("adapt_request" | "adapt_response" | "adapt_stream_event")[];
+  grants?: "extract_usage"[];
+  fuel_budget?: number;
+  max_memory_bytes?: number;
+  failure_policy?: "FAIL_CLOSED";
+};
+
+export type ProviderPluginConfig = DeclarativeProviderConfig | WasmProviderConfig;
+
+export type AdapterOverrides = {
+  extra_headers?: Record<string, string>;
+  query_params?: Record<string, string>;
+  path_override?: string;
+  request_transforms?: BodyTransformRule[];
+  response_transforms?: ResponseTransformRule[];
+  error_rules?: ErrorMatchRule[];
+  usage_aliases?: UsageAliasRule[];
+};
 
 export type ProjectRecord = {
   id: string;
@@ -56,12 +169,14 @@ export type ChannelRecord = {
   account_id: string;
   name: string;
   kind: ChannelKind;
+  provider_plugin_id: string | null;
   base_url: string;
   secret_ciphertext: string;
   rpm: number;
   concurrency: number;
   enabled: boolean;
   routing_policy: Record<string, unknown>;
+  adapter_config: AdapterOverrides;
   config_revision: number;
 };
 
@@ -107,6 +222,7 @@ export type RouteRecord = {
   billing_price_id: string;
   cost_version_id: string;
   request_policy: Record<string, unknown>;
+  adapter_overrides: AdapterOverrides;
   plugin_pipeline: PluginPipelineStep[];
   retry_policy: RouteRetryPolicy;
   enabled: boolean;
@@ -140,14 +256,17 @@ export type PluginRecord = {
   id: string;
   name: string;
   version: string;
+  capability: PluginCapability;
   kind: PluginKind;
   digest: string;
   wasm_bytes: Uint8Array | null;
   webhook_config: WebhookPluginConfig | null;
+  provider_config: ProviderPluginConfig | null;
   signature: string | null;
   signing_key_id: string | null;
   manifest: Record<string, unknown>;
   enabled: boolean;
+  created_at?: string;
 };
 
 export type ConfigSnapshot = {
@@ -160,6 +279,7 @@ export type ConfigSnapshot = {
   prices: Map<string, PriceVersionRecord>;
   routesByModel: Map<string, RouteRecord[]>;
   plugins: Map<string, PluginRecord>;
+  providerPluginsByName: Map<string, PluginRecord>;
 };
 
 export type HoldLotAllocation = {

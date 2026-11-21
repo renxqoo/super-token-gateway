@@ -3,40 +3,50 @@ import { z } from "zod";
 import { GatewayError, pricingSchema, usageSchema } from "@gateway/contracts";
 import { operations, type Operation, type Pricing, type Usage } from "@gateway/kernel";
 import type {
+  AdapterOverrides,
   ChannelKind,
   ChargePolicy,
   createCatalogRepository,
   createLedgerEngine,
   createLedgerQueries,
+  DeclarativeProviderConfig,
   LotKind,
+  PluginCapability,
   PluginKind,
   PluginPipelineStep,
   PriceBasis,
   PriceSide,
+  ProviderPluginConfig,
   RouteRetryPolicy,
   RoutingStrategy,
   WalletPolicy,
+  WasmProviderConfig,
   WebhookPluginConfig,
 } from "@gateway/ledger";
 import {
+  assertSafeEndpointTemplate,
+  assertSafeFieldPath,
   getBuiltinPlugin,
   listBuiltinPlugins,
+  resolveProviderPlugin,
   type PluginHook,
   type PluginPipelineEngine,
+  type WasmRuntimeExecutor,
 } from "@gateway/plugin-engine";
 import {
   createKey,
   encrypt,
   secureEqual,
+  validateAuthCredentials,
   validateBaseUrl,
   validateCidr,
-  validateCloudCredentials,
   verifier,
   type ClusterCoordinator,
   type SmartRouter,
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
 import type { SnapshotManager } from "./snapshot.ts";
+import { previewProviderRequest } from "./upstream.ts";
 
 type CatalogRepo = ReturnType<typeof createCatalogRepository>;
 type LedgerEngine = ReturnType<typeof createLedgerEngine>;
@@ -47,17 +57,282 @@ const positiveAtomsSchema = z.string().regex(/^[1-9][0-9]{0,37}$/);
 const nonNegativeAtomsSchema = z.string().regex(/^(0|[1-9][0-9]{0,37})$/);
 const signedAtomsSchema = z.string().regex(/^-?[1-9][0-9]{0,37}$/);
 const operationEnum = z.enum(operations);
-const channelKindEnum = z.enum([
-  "openai",
-  "anthropic",
-  "gemini",
-  "azure",
-  "bedrock",
-  "vertex",
-  "deepseek",
-  "ollama",
-  "openai_compatible",
+const providerNameSchema = z.string().regex(/^[a-z0-9][a-z0-9_-]{1,63}$/);
+const headerNameSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+const headerValueSchema = z
+  .string()
+  .max(2048)
+  .refine((v) => !v.includes("\r") && !v.includes("\n"), {
+    message: "Header value must not contain CR/LF",
+  });
+
+const safeFieldPathSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .superRefine((val, ctx) => {
+    try {
+      assertSafeFieldPath(val);
+    } catch (err) {
+      ctx.addIssue({
+        code: "custom",
+        message: err instanceof Error ? err.message : "Invalid field path",
+      });
+    }
+  });
+
+const safeEndpointPathSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .superRefine((val, ctx) => {
+    try {
+      assertSafeEndpointTemplate(val);
+    } catch (err) {
+      ctx.addIssue({
+        code: "custom",
+        message: err instanceof Error ? err.message : "Invalid endpoint path template",
+      });
+    }
+  });
+
+const safeRegexSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .superRefine((val, ctx) => {
+    if (/\([^)]*[+*][^)]*\)[+*?]/.test(val)) {
+      ctx.addIssue({ code: "custom", message: "Nested quantifiers are not allowed in regex" });
+      return;
+    }
+    try {
+      new RegExp(val);
+    } catch {
+      ctx.addIssue({ code: "custom", message: "Invalid regular expression" });
+    }
+  });
+
+const authSchemeSchema = z.discriminatedUnion("scheme", [
+  z.object({ scheme: z.literal("none") }).strict(),
+  z.object({ scheme: z.literal("bearer") }).strict(),
+  z
+    .object({
+      scheme: z.literal("header"),
+      header_name: headerNameSchema,
+      prefix: headerValueSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      scheme: z.literal("query"),
+      param_name: z.string().regex(/^[A-Za-z0-9_.-]{1,64}$/),
+    })
+    .strict(),
+  z
+    .object({
+      scheme: z.literal("azure_key"),
+      default_api_version: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}(?:-preview)?$/)
+        .optional(),
+    })
+    .strict(),
+  z
+    .object({
+      scheme: z.literal("aws_sigv4"),
+      service: z.string().regex(/^[a-z0-9-]{1,64}$/),
+    })
+    .strict(),
+  z.object({ scheme: z.literal("gcp_vertex_oauth") }).strict(),
+  z
+    .object({
+      scheme: z.literal("hmac_sha256"),
+      signature_header: headerNameSchema,
+      timestamp_header: headerNameSchema,
+      key_id_header: headerNameSchema.optional(),
+      signature_prefix: headerValueSchema.optional(),
+      encoding: z.enum(["hex", "base64"]).optional(),
+    })
+    .strict(),
 ]);
+
+const bodyTransformRuleSchema = z.discriminatedUnion("op", [
+  z
+    .object({
+      op: z.literal("rename"),
+      from: safeFieldPathSchema,
+      to: safeFieldPathSchema,
+      overwrite: z.boolean().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("move_to"),
+      from: safeFieldPathSchema,
+      to: safeFieldPathSchema,
+      overwrite: z.boolean().optional(),
+    })
+    .strict(),
+  z.object({ op: z.literal("drop"), path: safeFieldPathSchema }).strict(),
+  z
+    .object({ op: z.literal("set_default"), path: safeFieldPathSchema, value: z.unknown() })
+    .strict(),
+  z.object({ op: z.literal("force_set"), path: safeFieldPathSchema, value: z.unknown() }).strict(),
+  z
+    .object({
+      op: z.literal("clamp"),
+      path: safeFieldPathSchema,
+      min: z.number().finite().optional(),
+      max: z.number().finite().optional(),
+    })
+    .strict(),
+  z
+    .object({ op: z.literal("delete_if_equals"), path: safeFieldPathSchema, value: z.unknown() })
+    .strict(),
+]);
+
+const responseTransformRuleSchema = z.discriminatedUnion("op", [
+  z
+    .object({
+      op: z.literal("rename"),
+      from: safeFieldPathSchema,
+      to: safeFieldPathSchema,
+      overwrite: z.boolean().optional(),
+    })
+    .strict(),
+  z.object({ op: z.literal("drop"), path: safeFieldPathSchema }).strict(),
+  z
+    .object({ op: z.literal("set_default"), path: safeFieldPathSchema, value: z.unknown() })
+    .strict(),
+]);
+
+const errorMatchRuleSchema = z
+  .object({
+    when_http_status: z.array(z.number().int().min(100).max(599)).min(1).max(20).optional(),
+    path: safeFieldPathSchema,
+    equals: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    in: z
+      .array(z.union([z.string(), z.number()]))
+      .min(1)
+      .max(64)
+      .optional(),
+    regex: safeRegexSchema.optional(),
+    retry_kind: z.enum(["retryable", "rate_limit", "auth_error", "client_error"]),
+    http_status: z.number().int().min(400).max(599).optional(),
+    message_path: safeFieldPathSchema.optional(),
+    retry_after_path: safeFieldPathSchema.optional(),
+  })
+  .strict()
+  .refine((r) => r.equals !== undefined || r.in !== undefined || r.regex !== undefined, {
+    message: "error_rules entry must specify equals, in, or regex",
+  });
+
+const usageAliasRuleSchema = z
+  .object({
+    target: z.enum([
+      "input_tokens",
+      "output_tokens",
+      "cached_input_tokens",
+      "cache_write_tokens",
+      "cache_write_5m_tokens",
+      "cache_write_1h_tokens",
+      "reasoning_tokens",
+      "requests",
+      "images",
+      "audio_ms",
+      "audio_seconds",
+      "video_ms",
+      "video_seconds",
+      "music_ms",
+      "characters",
+    ]),
+    source_path: safeFieldPathSchema,
+  })
+  .strict();
+
+const endpointTemplateSchema = z
+  .object({
+    path: safeEndpointPathSchema,
+    stream_path: safeEndpointPathSchema.optional(),
+    query: z.record(z.string().min(1).max(64), z.string().max(256)).optional(),
+    stream_query: z.record(z.string().min(1).max(64), z.string().max(256)).optional(),
+  })
+  .strict();
+
+const adapterOverridesSchema = z
+  .object({
+    extra_headers: z.record(headerNameSchema, headerValueSchema).optional(),
+    query_params: z.record(z.string().min(1).max(64), z.string().max(256)).optional(),
+    path_override: safeEndpointPathSchema.optional(),
+    request_transforms: z.array(bodyTransformRuleSchema).max(64).optional(),
+    response_transforms: z.array(responseTransformRuleSchema).max(64).optional(),
+    error_rules: z.array(errorMatchRuleSchema).max(64).optional(),
+    usage_aliases: z.array(usageAliasRuleSchema).max(32).optional(),
+  })
+  .strict();
+
+const wireDialectSchema = z.enum([
+  "openai_chat",
+  "openai_responses",
+  "anthropic_messages",
+  "gemini",
+  "passthrough",
+]);
+const usageDialectSchema = z.enum(["openai", "anthropic", "gemini", "custom"]);
+const streamFramingSchema = z.enum(["sse", "bedrock_eventstream"]);
+
+const endpointKeySet = new Set<string>([...operations, "default"]);
+const declarativeProviderConfigSchema = z
+  .object({
+    base_dialect: wireDialectSchema,
+    usage_dialect: usageDialectSchema,
+    stream_framing: streamFramingSchema.optional(),
+    auth: authSchemeSchema,
+    endpoints: z
+      .record(z.string(), endpointTemplateSchema)
+      .refine((rec) => Object.keys(rec).length > 0, {
+        message: "endpoints must define at least one operation or default",
+      })
+      .refine((rec) => Object.keys(rec).every((k) => endpointKeySet.has(k)), {
+        message: "endpoints contains unsupported operation key",
+      }),
+    extra_headers: z.record(headerNameSchema, headerValueSchema).optional(),
+    model_field: safeFieldPathSchema.nullable().optional(),
+    stream_field: safeFieldPathSchema.nullable().optional(),
+    include_stream_usage_option: z.boolean().optional(),
+    request_transforms: z.array(bodyTransformRuleSchema).max(64).optional(),
+    response_transforms: z.array(responseTransformRuleSchema).max(64).optional(),
+    error_rules: z.array(errorMatchRuleSchema).max(64).optional(),
+    usage_aliases: z.array(usageAliasRuleSchema).max(32).optional(),
+    reasoning_field: safeFieldPathSchema.optional(),
+  })
+  .strict();
+
+const wasmProviderConfigSchema = z
+  .object({
+    base_dialect: wireDialectSchema,
+    usage_dialect: usageDialectSchema,
+    stream_framing: streamFramingSchema.optional(),
+    auth: authSchemeSchema,
+    extra_headers: z.record(headerNameSchema, headerValueSchema).optional(),
+    hooks: z
+      .array(z.enum(["adapt_request", "adapt_response", "adapt_stream_event"]))
+      .min(1)
+      .max(3)
+      .refine((hooks) => hooks.includes("adapt_request"), {
+        message: "WASM provider hooks must include adapt_request",
+      }),
+    grants: z.array(z.literal("extract_usage")).max(4).optional(),
+    fuel_budget: z.number().int().min(10_000).max(50_000_000).optional(),
+    max_memory_bytes: z
+      .number()
+      .int()
+      .min(65_536)
+      .max(64 * 1024 * 1024)
+      .optional(),
+    failure_policy: z.literal("FAIL_CLOSED").optional(),
+  })
+  .strict();
 
 const upsertProjectSchema = z
   .object({
@@ -100,13 +375,15 @@ const upsertChannelSchema = z
     id: z.uuid().optional(),
     account_id: z.uuid(),
     name: z.string().min(1).max(120),
-    kind: channelKindEnum,
+    kind: providerNameSchema,
+    provider_plugin_id: z.uuid().nullable().optional(),
     base_url: z.url().max(1000),
     api_key: z.string().max(16384).default(""),
     rpm: z.number().int().min(1).max(10_000_000).default(1_000_000),
     concurrency: z.number().int().min(1).max(100_000).default(1000),
     enabled: z.boolean().default(true),
     routing_policy: z.record(z.string(), z.unknown()).default({}),
+    adapter_config: adapterOverridesSchema.default({}),
   })
   .strict();
 
@@ -162,6 +439,7 @@ const upsertRouteSchema = z
     billing_price_id: z.uuid(),
     cost_version_id: z.uuid(),
     request_policy: z.record(z.string(), z.unknown()).default({}),
+    adapter_overrides: adapterOverridesSchema.default({}),
     plugin_pipeline: z.array(pluginStepSchema).max(20).default([]),
     retry_policy: retryPolicySchema.default({}),
     enabled: z.boolean().default(true),
@@ -187,11 +465,13 @@ const webhookConfigSchema = z
 const upsertPluginSchema = z
   .object({
     id: z.uuid().optional(),
-    name: z.string().min(1).max(120),
+    name: providerNameSchema,
     version: z.string().min(1).max(64),
-    kind: z.enum(["WASM", "WEBHOOK"]),
+    capability: z.enum(["CONTENT", "PROVIDER"]).default("CONTENT"),
+    kind: z.enum(["WASM", "WEBHOOK", "DECLARATIVE"]),
     wasm_bytes_base64: z.string().min(4).optional(),
     webhook_config: webhookConfigSchema.nullable().optional(),
+    provider_config: z.record(z.string(), z.unknown()).nullable().optional(),
     signature: z.string().max(1024).nullable().optional(),
     signing_key_id: z.string().max(120).nullable().optional(),
     manifest: z.record(z.string(), z.unknown()).default({}),
@@ -204,6 +484,7 @@ const installBuiltinPluginSchema = z
     signature: z.string().max(1024).nullable().optional(),
     signing_key_id: z.string().max(120).nullable().optional(),
     manifest: z.record(z.string(), z.unknown()).optional(),
+    provider_config: z.record(z.string(), z.unknown()).optional(),
     enabled: z.boolean().default(true),
   })
   .strict();
@@ -214,6 +495,28 @@ const testPluginSchema = z
     text: z.string().max(65_536),
     model: z.string().min(1).max(150).default("test-model"),
     operation: operationEnum.default("chat"),
+  })
+  .strict();
+
+const previewProviderSchema = z
+  .object({
+    provider: providerNameSchema,
+    provider_plugin_id: z.uuid().nullable().optional(),
+    base_url: z.url().max(1000),
+    operation: operationEnum.default("chat"),
+    upstream_model: z.string().min(1).max(200),
+    stream: z.boolean().default(false),
+    client_body: z.record(z.string(), z.unknown()),
+    channel_adapter_config: adapterOverridesSchema.optional(),
+    adapter_overrides: adapterOverridesSchema.optional(),
+    mock_upstream_response: z
+      .object({
+        status: z.number().int().min(100).max(599).default(200),
+        headers: z.record(z.string(), z.string()).optional(),
+        body: z.record(z.string(), z.unknown()),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -321,6 +624,7 @@ export function createInternalApi(deps: {
   router: SmartRouter;
   cluster: ClusterCoordinator;
   pluginEngine: PluginPipelineEngine;
+  wasmExecutor: WasmRuntimeExecutor | null;
 }): Hono {
   const app = new Hono();
 
@@ -412,21 +716,26 @@ export function createInternalApi(deps: {
       deps.config.allowPrivateUpstreams,
       deps.config.privateUpstreamCidrs,
     );
-    if (kind === "azure" || kind === "bedrock" || kind === "vertex") {
-      validateCloudCredentials(kind, body.api_key);
+    const snap = deps.snapshot.isLoaded() ? deps.snapshot.get() : null;
+    const resolved = resolveProviderPlugin(kind, body.provider_plugin_id ?? null, snap);
+    if (!resolved) {
+      throw new GatewayError(400, "unknown_provider", `Unknown provider plugin: ${kind}`);
     }
+    validateAuthCredentials(resolved.config.auth, body.api_key);
     const secretCiphertext = encrypt(body.api_key, deps.config.encryptionKey, id);
     const rec = await deps.catalog.upsertChannel({
       id,
       account_id: body.account_id,
       name: body.name,
       kind,
+      provider_plugin_id: body.provider_plugin_id ?? null,
       base_url: body.base_url,
       secret_ciphertext: secretCiphertext,
       rpm: body.rpm,
       concurrency: body.concurrency,
       enabled: body.enabled,
       routing_policy: body.routing_policy,
+      adapter_config: body.adapter_config as AdapterOverrides,
     });
     await onConfigUpdated(rec.config_epoch);
     return c.json({ ...rec, secret_ciphertext: undefined });
@@ -472,6 +781,7 @@ export function createInternalApi(deps: {
       billing_price_id: body.billing_price_id,
       cost_version_id: body.cost_version_id,
       request_policy: body.request_policy,
+      adapter_overrides: body.adapter_overrides as AdapterOverrides,
       plugin_pipeline: body.plugin_pipeline as PluginPipelineStep[],
       retry_policy: body.retry_policy as RouteRetryPolicy,
       enabled: body.enabled,
@@ -482,6 +792,48 @@ export function createInternalApi(deps: {
 
   app.put("/internal/v1/plugins", async (c) => {
     const body = parseBody(upsertPluginSchema, await c.req.json());
+    const capability = body.capability as PluginCapability;
+    let validatedProviderConfig: ProviderPluginConfig | null = null;
+
+    if (capability === "CONTENT") {
+      if (body.kind === "DECLARATIVE") {
+        throw new GatewayError(
+          400,
+          "validation_error",
+          "CONTENT plugins must use kind WASM or WEBHOOK",
+        );
+      }
+      if (body.provider_config) {
+        throw new GatewayError(
+          400,
+          "validation_error",
+          "CONTENT plugins cannot define provider_config",
+        );
+      }
+    } else {
+      if (body.kind === "WEBHOOK") {
+        throw new GatewayError(
+          400,
+          "validation_error",
+          "PROVIDER plugins must use kind DECLARATIVE or WASM",
+        );
+      }
+      if (!body.provider_config) {
+        throw new GatewayError(
+          400,
+          "validation_error",
+          "provider_config is required for PROVIDER plugins",
+        );
+      }
+      validatedProviderConfig =
+        body.kind === "DECLARATIVE"
+          ? (parseBody(
+              declarativeProviderConfigSchema,
+              body.provider_config,
+            ) as DeclarativeProviderConfig)
+          : (parseBody(wasmProviderConfigSchema, body.provider_config) as WasmProviderConfig);
+    }
+
     if (body.kind === "WEBHOOK") {
       if (!body.webhook_config) {
         throw new GatewayError(400, "validation_error", "webhook_config is required for WEBHOOK");
@@ -492,19 +844,68 @@ export function createInternalApi(deps: {
         deps.config.privateUpstreamCidrs,
       );
     }
+
     const wasmBytes = body.wasm_bytes_base64
       ? new Uint8Array(Buffer.from(body.wasm_bytes_base64, "base64"))
       : null;
-    if (body.kind === "WASM" && (!wasmBytes || wasmBytes.byteLength === 0)) {
-      throw new GatewayError(400, "validation_error", "wasm_bytes_base64 is required for WASM");
+    if (body.kind === "WASM") {
+      if (!wasmBytes || wasmBytes.byteLength === 0) {
+        throw new GatewayError(400, "validation_error", "wasm_bytes_base64 is required for WASM");
+      }
+      let mod: WebAssembly.Module;
+      try {
+        mod = new WebAssembly.Module(wasmBytes);
+      } catch (err) {
+        throw new GatewayError(
+          400,
+          "validation_error",
+          `Invalid WebAssembly binary: ${err instanceof Error ? err.message : "compile failed"}`,
+        );
+      }
+      if (WebAssembly.Module.imports(mod).length > 0) {
+        throw new GatewayError(
+          400,
+          "validation_error",
+          "WASM plugin must not declare host imports",
+        );
+      }
+      if (
+        capability === "PROVIDER" &&
+        validatedProviderConfig &&
+        "hooks" in validatedProviderConfig
+      ) {
+        const exportMap = new Map(WebAssembly.Module.exports(mod).map((e) => [e.name, e.kind]));
+        if (exportMap.get("memory") !== "memory" || exportMap.get("stg_alloc") !== "function") {
+          throw new GatewayError(
+            400,
+            "validation_error",
+            "PROVIDER WASM plugin must export memory and stg_alloc",
+          );
+        }
+        for (const hook of validatedProviderConfig.hooks) {
+          if (exportMap.get(hook) !== "function") {
+            throw new GatewayError(
+              400,
+              "validation_error",
+              `PROVIDER WASM plugin missing exported hook function: ${hook}`,
+            );
+          }
+        }
+      }
     }
+
     const rec = await deps.catalog.upsertPlugin({
       ...(body.id ? { id: body.id } : {}),
       name: body.name,
       version: body.version,
+      capability,
       kind: body.kind as PluginKind,
-      wasm_bytes: wasmBytes,
-      webhook_config: (body.webhook_config ?? null) as WebhookPluginConfig | null,
+      wasm_bytes: body.kind === "WASM" ? wasmBytes : null,
+      webhook_config:
+        body.kind === "WEBHOOK"
+          ? ((body.webhook_config ?? null) as WebhookPluginConfig | null)
+          : null,
+      provider_config: validatedProviderConfig,
       signature: body.signature ?? null,
       signing_key_id: body.signing_key_id ?? null,
       manifest: body.manifest,
@@ -515,12 +916,20 @@ export function createInternalApi(deps: {
   });
 
   app.get("/internal/v1/plugins", async (c) => {
-    const items = await deps.catalog.listPlugins();
+    const rawCap = c.req.query("capability");
+    const cap = rawCap
+      ? (parseBody(z.enum(["CONTENT", "PROVIDER"]), rawCap) as PluginCapability)
+      : undefined;
+    const items = await deps.catalog.listPlugins(cap);
     return c.json({ items });
   });
 
   app.get("/internal/v1/plugins/builtins", (c) => {
-    return c.json({ items: listBuiltinPlugins() });
+    const rawCap = c.req.query("capability");
+    const cap = rawCap
+      ? (parseBody(z.enum(["CONTENT", "PROVIDER"]), rawCap) as PluginCapability)
+      : undefined;
+    return c.json({ items: listBuiltinPlugins(cap) });
   });
 
   app.post("/internal/v1/plugins/builtins/:name/install", async (c) => {
@@ -535,12 +944,24 @@ export function createInternalApi(deps: {
     const manifest = parsedBody.manifest
       ? { ...builtin.manifest, ...parsedBody.manifest }
       : { ...builtin.manifest };
+    let providerConfig: ProviderPluginConfig | null = null;
+    if (builtin.capability === "PROVIDER") {
+      const mergedCfg = parsedBody.provider_config
+        ? { ...builtin.provider_config, ...parsedBody.provider_config }
+        : builtin.provider_config;
+      providerConfig = parseBody(
+        declarativeProviderConfigSchema,
+        mergedCfg,
+      ) as DeclarativeProviderConfig;
+    }
     const rec = await deps.catalog.upsertPlugin({
       name: builtin.name,
       version: builtin.version,
+      capability: builtin.capability,
       kind: builtin.kind,
-      wasm_bytes: builtin.wasm_bytes,
+      wasm_bytes: builtin.capability === "CONTENT" ? builtin.wasm_bytes : null,
       webhook_config: null,
+      provider_config: providerConfig,
       signature: parsedBody.signature ?? null,
       signing_key_id: parsedBody.signing_key_id ?? null,
       manifest,
@@ -548,6 +969,37 @@ export function createInternalApi(deps: {
     });
     await onConfigUpdated(rec.config_epoch);
     return c.json({ ...rec, wasm_bytes: undefined });
+  });
+
+  app.post("/internal/v1/providers/preview", async (c) => {
+    const body = parseBody(previewProviderSchema, await c.req.json());
+    const snap = deps.snapshot.isLoaded()
+      ? deps.snapshot.get()
+      : { plugins: new Map(), providerPluginsByName: new Map() };
+    const preview = await previewProviderRequest({
+      provider: body.provider,
+      ...(body.provider_plugin_id !== undefined
+        ? { providerPluginId: body.provider_plugin_id }
+        : {}),
+      baseUrl: body.base_url,
+      operation: body.operation as Operation,
+      upstreamModel: body.upstream_model,
+      stream: body.stream,
+      clientBody: body.client_body,
+      ...(body.channel_adapter_config
+        ? { channelAdapterConfig: body.channel_adapter_config as AdapterOverrides }
+        : {}),
+      ...(body.adapter_overrides
+        ? { routeAdapterOverrides: body.adapter_overrides as AdapterOverrides }
+        : {}),
+      ...(body.mock_upstream_response ? { mockUpstreamResponse: body.mock_upstream_response } : {}),
+      snapshot: snap,
+      wasmExecutor: deps.wasmExecutor,
+      ...(deps.config.pluginSigningPublicKeyPem
+        ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
+        : {}),
+    });
+    return c.json(preview);
   });
 
   app.post("/internal/v1/plugins/:pluginId/test", async (c) => {

@@ -52,23 +52,57 @@ CREATE TABLE public.upstream_accounts (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE public.plugins (
+  id UUID PRIMARY KEY,
+  name TEXT NOT NULL CHECK (name ~ '^[a-z0-9][a-z0-9_-]{1,63}$'),
+  version TEXT NOT NULL,
+  capability TEXT NOT NULL DEFAULT 'CONTENT' CHECK (capability IN ('CONTENT', 'PROVIDER')),
+  kind TEXT NOT NULL CHECK (kind IN ('WASM', 'WEBHOOK', 'DECLARATIVE')),
+  digest TEXT NOT NULL CHECK (digest ~ '^[a-f0-9]{64}$'),
+  wasm_bytes BYTEA CHECK (wasm_bytes IS NULL OR octet_length(wasm_bytes) BETWEEN 1 AND 16777216),
+  webhook_config JSONB CHECK (webhook_config IS NULL OR jsonb_typeof(webhook_config) = 'object'),
+  provider_config JSONB CHECK (provider_config IS NULL OR jsonb_typeof(provider_config) = 'object'),
+  signature TEXT,
+  signing_key_id TEXT,
+  manifest JSONB NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(manifest) = 'object'),
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (name, version),
+  CHECK (
+    (capability = 'CONTENT' AND kind IN ('WASM', 'WEBHOOK'))
+    OR (capability = 'PROVIDER' AND kind IN ('DECLARATIVE', 'WASM'))
+  ),
+  CHECK (
+    (kind = 'WASM' AND wasm_bytes IS NOT NULL)
+    OR (kind = 'WEBHOOK' AND webhook_config IS NOT NULL)
+    OR (kind = 'DECLARATIVE' AND provider_config IS NOT NULL)
+  )
+);
+
+CREATE INDEX plugins_provider_name_idx
+  ON public.plugins (name, created_at DESC)
+  WHERE capability = 'PROVIDER' AND enabled;
+
 CREATE TABLE public.channels (
   id UUID PRIMARY KEY,
   account_id UUID NOT NULL REFERENCES public.upstream_accounts(id),
   name TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('openai', 'anthropic', 'gemini', 'azure', 'bedrock', 'vertex', 'deepseek', 'ollama', 'openai_compatible')),
+  kind TEXT NOT NULL CHECK (kind ~ '^[a-z0-9][a-z0-9_-]{1,63}$'),
+  provider_plugin_id UUID REFERENCES public.plugins(id),
   base_url TEXT NOT NULL,
   secret_ciphertext TEXT NOT NULL,
   rpm INTEGER NOT NULL CHECK (rpm > 0),
   concurrency INTEGER NOT NULL CHECK (concurrency > 0),
   enabled BOOLEAN NOT NULL DEFAULT true,
   routing_policy JSONB NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(routing_policy) = 'object'),
+  adapter_config JSONB NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(adapter_config) = 'object'),
   config_revision BIGINT NOT NULL DEFAULT 1,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX channels_account_idx ON public.channels (account_id);
+CREATE INDEX channels_provider_plugin_idx ON public.channels (provider_plugin_id) WHERE provider_plugin_id IS NOT NULL;
 
 CREATE TABLE public.models (
   name TEXT PRIMARY KEY,
@@ -90,22 +124,6 @@ CREATE TABLE public.price_versions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE public.plugins (
-  id UUID PRIMARY KEY,
-  name TEXT NOT NULL,
-  version TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('WASM', 'WEBHOOK')),
-  digest TEXT NOT NULL CHECK (digest ~ '^[a-f0-9]{64}$'),
-  wasm_bytes BYTEA CHECK (wasm_bytes IS NULL OR octet_length(wasm_bytes) BETWEEN 1 AND 16777216),
-  webhook_config JSONB CHECK (webhook_config IS NULL OR jsonb_typeof(webhook_config) = 'object'),
-  signature TEXT,
-  signing_key_id TEXT,
-  manifest JSONB NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(manifest) = 'object'),
-  enabled BOOLEAN NOT NULL DEFAULT true,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (name, version)
-);
-
 CREATE TABLE public.routes (
   id UUID PRIMARY KEY,
   model_name TEXT NOT NULL REFERENCES public.models(name),
@@ -117,6 +135,7 @@ CREATE TABLE public.routes (
   billing_price_id UUID NOT NULL REFERENCES public.price_versions(id),
   cost_version_id UUID NOT NULL REFERENCES public.price_versions(id),
   request_policy JSONB NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(request_policy) = 'object'),
+  adapter_overrides JSONB NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(adapter_overrides) = 'object'),
   plugin_pipeline JSONB NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(plugin_pipeline) = 'array'),
   retry_policy JSONB NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(retry_policy) = 'object'),
   enabled BOOLEAN NOT NULL DEFAULT true,
