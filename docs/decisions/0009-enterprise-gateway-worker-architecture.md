@@ -162,6 +162,18 @@ flowchart LR
 5. **集合式批量写回**：每批仅执行固定数量 `UNNEST` 批量 SQL（更新去重后的 `wallets`/`wallet_lots`/`supplier_cells` 净值，批量 `INSERT` `billing_holds`/`billing_charges`/`ledger_entries`/`outbox_events`）并 `COMMIT`。
 6. **异常与提交未明恢复**：若 `COMMIT` 网络超时结果未知，Gateway 保留客户端 `UNKNOWN` 或按幂等键重查终态；未闭合 `billing_holds` 超过 `expires_at` 由 `apps/worker` 自动扫描对账或置 `UNKNOWN` 锁定待决议。
 
+### 4.4 Drizzle ORM 与原生 `Bun.SQL` 的职责边界
+
+在 `packages/ledger` 内部分层协作，`apps/gateway` 与 `apps/worker` 不直接导入 `drizzle-orm`：
+
+- **使用 Drizzle ORM（`drizzle-orm/bun-sql`）的场景**：
+  1. **单一真源 Schema 声明（`packages/ledger/src/schema.ts`）**：完整声明全部 21 张表的列、类型、JSONB `$type<...>()` 与 `bytea` 自定义类型，并与 `0000_v4_baseline.sql` 在真实 PG 集成测试中逐表逐列 1:1 校验零漂移。
+  2. **配置目录与快照仓储（`packages/ledger/src/catalog.ts`）**：项目、Key、渠道、模型、价目、路由、插件的全部 CRUD Upsert、配置纪元递增与全量快照读取。
+  3. **非热路径查询与状态流转**：钱包/供应商余额查询、版本校验（`assertSchemaVersion`）、`markUnknown`、超时预扣扫尾、Outbox `claim`/`ack` 与月度冷归档导出查询。
+- **保留原生 `Bun.SQL` 的场景**：
+  1. **微批集合热路径**：`acquireHold` / `commitTerminal` 批量 `UPDATE/INSERT ... FROM unnest(...)`、显式升序 `FOR NO KEY UPDATE` 行锁与资金事务（避免 ORM 构造与行映射开销影响 2,500+ RPS 热路径）。
+  2. **DDL 与 PG 专有控制**：基线 SQL 迁移（含 `PARTITION BY RANGE`、`DEFERRABLE` 复式记账触发器、`immutable_record` 触发器与 `pg_advisory_lock`）。
+
 ---
 
 ## 5. 插件管道设计（极薄 Rust `wasmtime` + 外部 HTTP Webhook）

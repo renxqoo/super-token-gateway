@@ -1,4 +1,4 @@
-import { createDatabase, SCHEMA_VERSION } from "@gateway/ledger";
+import { assertSchemaVersion, createDatabase } from "@gateway/ledger";
 import { createWorkerRunner } from "./runner.ts";
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -7,11 +7,7 @@ if (!databaseUrl) {
 }
 
 const db = createDatabase(databaseUrl, Number(process.env.WORKER_DB_MAX ?? 8));
-const versionRows = await db`SELECT max(version) AS version FROM public.schema_migrations`;
-const currentVersion = Number(versionRows[0]?.version ?? 0);
-if (currentVersion !== SCHEMA_VERSION) {
-  throw new Error(`Schema version mismatch: expected ${SCHEMA_VERSION}, got ${currentVersion}`);
-}
+const currentVersion = await assertSchemaVersion(db);
 
 const worker = createWorkerRunner({
   db,

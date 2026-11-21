@@ -1,10 +1,12 @@
 import { SQL } from "bun";
+import { and, asc, gte, lt, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { createGzip, createGunzip } from "node:zlib";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import manifest from "./migrations/manifest.json";
+import { billingCharges, createDrizzle, ledgerEntries, schemaMigrations } from "./schema.ts";
 
 const databases = new WeakMap<SQL, string>();
 
@@ -26,6 +28,18 @@ export function createDatabase(url: string, max = 32): SQL {
   });
   databases.set(db, name);
   return db;
+}
+
+export async function assertSchemaVersion(db: SQL): Promise<number> {
+  const orm = createDrizzle(db);
+  const rows = await orm
+    .select({ version: sql<number>`coalesce(max(${schemaMigrations.version}), 0)::int` })
+    .from(schemaMigrations);
+  const current = Number(rows[0]?.version ?? 0);
+  if (current !== SCHEMA_VERSION) {
+    throw new Error(`Schema version mismatch: expected ${SCHEMA_VERSION}, got ${current}`);
+  }
+  return current;
 }
 
 export async function migrate(db: SQL): Promise<void> {
@@ -170,32 +184,36 @@ export async function exportLedgerArchive(
     for await (const chunk of createReadStream(target)) hash.update(chunk);
     return { kind, file, rows: rows.length, sha256: hash.digest("hex") };
   };
-  const [charges, entries, versionRow] = await Promise.all([
-    db`
-      SELECT id, request_id, project_id, wallet_id, selected_attempt_id, channel_id, model, operation, currency,
-        billing_price_id, cost_version_id, usage, usage_digest, customer_atoms::text, funded_atoms::text,
-        debt_atoms::text, refunded_atoms::text, supplier_cost_atoms::text, supplier_currency,
-        lot_allocations, plugin_audit, charge_policy, outcome, created_at
-      FROM public.billing_charges
-      WHERE created_at >= ${startIso}::timestamptz AND created_at < ${endIso}::timestamptz
-      ORDER BY created_at, id
-    `,
-    db`
-      SELECT journal_id, ordinal, created_at, side, entity_id, request_id, reference, kind, currency, account, atoms::text
-      FROM public.ledger_entries
-      WHERE created_at >= ${startIso}::timestamptz AND created_at < ${endIso}::timestamptz
-      ORDER BY created_at, journal_id, ordinal
-    `,
-    db`SELECT max(version) AS version FROM public.schema_migrations`,
+
+  const orm = createDrizzle(db);
+  const [charges, entries, versionRows] = await Promise.all([
+    orm
+      .select()
+      .from(billingCharges)
+      .where(and(gte(billingCharges.createdAt, startIso), lt(billingCharges.createdAt, endIso)))
+      .orderBy(asc(billingCharges.createdAt), asc(billingCharges.id)),
+    orm
+      .select()
+      .from(ledgerEntries)
+      .where(and(gte(ledgerEntries.createdAt, startIso), lt(ledgerEntries.createdAt, endIso)))
+      .orderBy(
+        asc(ledgerEntries.createdAt),
+        asc(ledgerEntries.journalId),
+        asc(ledgerEntries.ordinal),
+      ),
+    orm
+      .select({ version: sql<number>`coalesce(max(${schemaMigrations.version}), 0)::int` })
+      .from(schemaMigrations),
   ]);
+
   const files = await Promise.all([
-    writeGzip("charges", "charges.ndjson.gz", [...charges]),
-    writeGzip("entries", "entries.ndjson.gz", [...entries]),
+    writeGzip("charges", "charges.ndjson.gz", charges),
+    writeGzip("entries", "entries.ndjson.gz", entries),
   ]);
   const manifestPath = join(directory, "manifest.json");
   const doc: ArchiveManifest = {
     month,
-    schema_version: Number(versionRow[0]?.version ?? SCHEMA_VERSION),
+    schema_version: Number(versionRows[0]?.version || SCHEMA_VERSION),
     exported_at: new Date().toISOString(),
     files,
   };

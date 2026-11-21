@@ -6,18 +6,18 @@
 
 ## 目录结构
 
-| 路径                     | 职责                                                                                                             |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `apps/gateway`           | 高性能无状态公开网关（`/v1/*`, `/v1beta/models/*`, `/livez`, `/readyz`, `/metrics`）+ `/internal/v1/*`           |
-| `apps/worker`            | 后台账务与调度 Worker（PG Advisory Lease 选主、超时预扣扫尾、批次过期、自动收债、供应商分片再平衡、Outbox 推送） |
-| `apps/mock-providers`    | 独立测试用上游替身（OpenAI / Anthropic / Gemini / Azure / Bedrock / Vertex / DeepSeek / Ollama）                 |
-| `packages/ledger`        | 14 表精简 PG 核心账本 + 2–5 ms 同钱包内存微批合并引擎 + 复式记账校验与冷归档                                     |
-| `packages/protocol`      | 多协议无损透传、跨协议转换、有界 SSE 流解析与精确计量                                                            |
-| `packages/plugin-engine` | 内容处理插件管道（极薄 Rust `wasmtime` FFI 沙箱 + 外部 HTTP Webhook 风控、流式滑窗与熔断）                       |
-| `packages/runtime`       | SmartRouter 智能路由熔断器、LocalRateLimiter、SSRF/DNS-Pinning 连接池、加密与云凭证签发                          |
-| `packages/kernel`        | 纯函数精确 `BigInt` 有理数计价与预扣上界计算                                                                     |
-| `packages/contracts`     | 公共 Schema 校验与错误类型                                                                                       |
-| `native/plugin-wasmtime` | 极薄 Rust `wasmtime` cdylib 沙箱（~190 行，零 WASI/网络/FS，硬内存与 Fuel 上限）                                 |
+| 路径                     | 职责                                                                                                                         |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `apps/gateway`           | 高性能无状态公开网关（`/v1/*`, `/v1beta/models/*`, `/livez`, `/readyz`, `/metrics`）+ `/internal/v1/*`                       |
+| `apps/worker`            | 后台账务与调度 Worker（PG Advisory Lease 选主、超时预扣扫尾、批次过期、自动收债、供应商分片再平衡、Outbox 推送）             |
+| `apps/mock-providers`    | 独立测试用上游替身（OpenAI / Anthropic / Gemini / Azure / Bedrock / Vertex / DeepSeek / Ollama）                             |
+| `packages/ledger`        | 精简 PG 核心账本：`drizzle-orm/bun-sql` 强类型 Schema/目录 CRUD/Outbox/归档查询 + 原生 `Bun.SQL` 2–5 ms 同钱包微批聚合热路径 |
+| `packages/protocol`      | 多协议无损透传、跨协议转换、有界 SSE 流解析与精确计量                                                                        |
+| `packages/plugin-engine` | 内容处理插件管道（极薄 Rust `wasmtime` FFI 沙箱 + 外部 HTTP Webhook 风控、流式滑窗与熔断）                                   |
+| `packages/runtime`       | SmartRouter 智能路由熔断器、LocalRateLimiter、SSRF/DNS-Pinning 连接池、加密与云凭证签发                                      |
+| `packages/kernel`        | 纯函数精确 `BigInt` 有理数计价与预扣上界计算                                                                                 |
+| `packages/contracts`     | 公共 Schema 校验与错误类型                                                                                                   |
+| `native/plugin-wasmtime` | 极薄 Rust `wasmtime` cdylib 沙箱（~190 行，零 WASI/网络/FS，硬内存与 Fuel 上限）                                             |
 
 ## 核心特性
 

@@ -1,5 +1,15 @@
 import type { SQL } from "bun";
+import { and, asc, eq, gt, inArray, lte, sql } from "drizzle-orm";
 import { calculateCost, canonical, type Pricing, type Usage } from "@gateway/kernel";
+import {
+  billingHolds,
+  createDrizzle,
+  outboxConsumers,
+  outboxEvents,
+  supplierCells,
+  supplierRootBalances,
+  wallets,
+} from "./schema.ts";
 import type {
   AcquireHoldInput,
   AcquireHoldResult,
@@ -429,6 +439,7 @@ export type LedgerOptions = {
 };
 
 export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
+  const orm = createDrizzle(db);
   const batchWindowMs = options.batchWindowMs ?? 2;
   const maxBatchSize = options.maxBatchSize ?? 64;
   const maxBatchConcurrency = options.maxBatchConcurrency ?? 8;
@@ -1861,12 +1872,11 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
     },
 
     async markUnknown(requestId: string): Promise<boolean> {
-      const rows = await db`
-        UPDATE public.billing_holds
-        SET state = 'UNKNOWN'
-        WHERE request_id = ${requestId} AND state = 'HELD'
-        RETURNING request_id
-      `;
+      const rows = await orm
+        .update(billingHolds)
+        .set({ state: "UNKNOWN" })
+        .where(and(eq(billingHolds.requestId, requestId), eq(billingHolds.state, "HELD")))
+        .returning({ requestId: billingHolds.requestId });
       return rows.length > 0;
     },
 
@@ -2566,45 +2576,43 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
     },
 
     async sweepTimedOutHolds(limit = 100): Promise<number> {
-      const rows = await db`
-        UPDATE public.billing_holds
-        SET state = 'UNKNOWN'
-        WHERE request_id IN (
-          SELECT request_id FROM public.billing_holds
-          WHERE state = 'HELD' AND expires_at <= now()
-          ORDER BY expires_at LIMIT ${limit}
-        )
-        RETURNING request_id
-      `;
+      const expired = orm
+        .select({ requestId: billingHolds.requestId })
+        .from(billingHolds)
+        .where(and(eq(billingHolds.state, "HELD"), lte(billingHolds.expiresAt, sql`now()`)))
+        .orderBy(asc(billingHolds.expiresAt))
+        .limit(limit);
+      const rows = await orm
+        .update(billingHolds)
+        .set({ state: "UNKNOWN" })
+        .where(inArray(billingHolds.requestId, expired))
+        .returning({ requestId: billingHolds.requestId });
       return rows.length;
     },
 
     async getWallet(projectId: string, currency: string): Promise<WalletSnapshot | null> {
-      const rows = await db`
-        SELECT id, project_id, currency, policy,
-          available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
-          debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
-          credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
-        FROM public.wallets WHERE project_id = ${projectId} AND currency = ${currency}
-      `;
-      if (!rows.length) return null;
-      const w = toWalletRow(rows[0]!);
+      const rows = await orm
+        .select()
+        .from(wallets)
+        .where(and(eq(wallets.projectId, projectId), eq(wallets.currency, currency)));
+      const w = rows[0];
+      if (!w) return null;
       return {
         id: w.id,
-        project_id: w.project_id,
+        project_id: w.projectId,
         currency: w.currency,
         policy: w.policy,
-        available_atoms: w.available_atoms.toString(),
-        reserved_atoms: w.reserved_atoms.toString(),
-        spent_atoms: w.spent_atoms.toString(),
-        expired_atoms: w.expired_atoms.toString(),
-        debt_atoms: w.debt_atoms.toString(),
-        credit_limit_atoms: w.credit_limit_atoms.toString(),
-        credit_reserved_atoms: w.credit_reserved_atoms.toString(),
-        credit_policy_version: w.credit_policy_version.toString(),
-        manual_frozen: w.manual_frozen,
-        evidence_disputed: w.evidence_disputed,
-        freeze_reason: w.freeze_reason,
+        available_atoms: w.availableAtoms,
+        reserved_atoms: w.reservedAtoms,
+        spent_atoms: w.spentAtoms,
+        expired_atoms: w.expiredAtoms,
+        debt_atoms: w.debtAtoms,
+        credit_limit_atoms: w.creditLimitAtoms,
+        credit_reserved_atoms: w.creditReservedAtoms,
+        credit_policy_version: w.creditPolicyVersion,
+        manual_frozen: w.manualFrozen,
+        evidence_disputed: w.evidenceDisputed,
+        freeze_reason: w.freezeReason,
       };
     },
 
@@ -2613,14 +2621,32 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
       currency: string,
     ): Promise<{ balance_atoms: string; reserved_atoms: string; spent_atoms: string }> {
       const [rootRows, cellRows] = await Promise.all([
-        db`SELECT balance_atoms::text, spent_atoms::text FROM public.supplier_root_balances WHERE account_id = ${accountId} AND currency = ${currency}`,
-        db`SELECT coalesce(sum(balance_atoms), 0)::text AS bal, coalesce(sum(reserved_atoms), 0)::text AS res, coalesce(sum(spent_atoms), 0)::text AS spent FROM public.supplier_cells WHERE account_id = ${accountId} AND currency = ${currency}`,
+        orm
+          .select({
+            balanceAtoms: supplierRootBalances.balanceAtoms,
+            spentAtoms: supplierRootBalances.spentAtoms,
+          })
+          .from(supplierRootBalances)
+          .where(
+            and(
+              eq(supplierRootBalances.accountId, accountId),
+              eq(supplierRootBalances.currency, currency),
+            ),
+          ),
+        orm
+          .select({
+            bal: sql<string>`coalesce(sum(${supplierCells.balanceAtoms}), 0)::text`,
+            res: sql<string>`coalesce(sum(${supplierCells.reservedAtoms}), 0)::text`,
+            spent: sql<string>`coalesce(sum(${supplierCells.spentAtoms}), 0)::text`,
+          })
+          .from(supplierCells)
+          .where(and(eq(supplierCells.accountId, accountId), eq(supplierCells.currency, currency))),
       ]);
-      const rootBal = BigInt(String(rootRows[0]?.balance_atoms ?? "0"));
-      const rootSpent = BigInt(String(rootRows[0]?.spent_atoms ?? "0"));
-      const cellBal = BigInt(String(cellRows[0]?.bal ?? "0"));
-      const cellRes = BigInt(String(cellRows[0]?.res ?? "0"));
-      const cellSpent = BigInt(String(cellRows[0]?.spent ?? "0"));
+      const rootBal = BigInt(rootRows[0]?.balanceAtoms ?? "0");
+      const rootSpent = BigInt(rootRows[0]?.spentAtoms ?? "0");
+      const cellBal = BigInt(cellRows[0]?.bal ?? "0");
+      const cellRes = BigInt(cellRows[0]?.res ?? "0");
+      const cellSpent = BigInt(cellRows[0]?.spent ?? "0");
       return {
         balance_atoms: (rootBal + cellBal).toString(),
         reserved_atoms: cellRes.toString(),
@@ -2633,39 +2659,41 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
       limit = 100,
     ): Promise<{ lease_token: string; events: OutboxEventRecord[] }> {
       const leaseToken = crypto.randomUUID();
-      return db.begin(async (tx) => {
-        await tx`
-          INSERT INTO public.outbox_consumers (name, acked_seq)
-          VALUES (${consumerName}, 0)
-          ON CONFLICT (name) DO NOTHING
-        `;
-        const cRows = await tx`
-          SELECT acked_seq::text FROM public.outbox_consumers
-          WHERE name = ${consumerName} FOR UPDATE
-        `;
-        const acked = BigInt(String(cRows[0]!.acked_seq));
-        await tx`
-          UPDATE public.outbox_consumers
-          SET lease_token = ${leaseToken}, leased_until = now() + interval '30 seconds', updated_at = now()
-          WHERE name = ${consumerName}
-        `;
-        const evRows = await tx`
-          SELECT seq::text AS seq_text, event_id, kind, request_id, project_id, payload, created_at
-          FROM public.outbox_events
-          WHERE seq > ${acked.toString()}::bigint
-          ORDER BY public.outbox_events.seq
-          LIMIT ${limit}
-        `;
+      return orm.transaction(async (tx) => {
+        await tx
+          .insert(outboxConsumers)
+          .values({ name: consumerName, ackedSeq: 0n })
+          .onConflictDoNothing({ target: outboxConsumers.name });
+        const cRows = await tx
+          .select({ ackedSeq: outboxConsumers.ackedSeq })
+          .from(outboxConsumers)
+          .where(eq(outboxConsumers.name, consumerName))
+          .for("update");
+        const acked = cRows[0]!.ackedSeq;
+        await tx
+          .update(outboxConsumers)
+          .set({
+            leaseToken,
+            leasedUntil: sql`now() + interval '30 seconds'`,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(outboxConsumers.name, consumerName));
+        const evRows = await tx
+          .select()
+          .from(outboxEvents)
+          .where(gt(outboxEvents.seq, acked))
+          .orderBy(asc(outboxEvents.seq))
+          .limit(limit);
         return {
           lease_token: leaseToken,
-          events: evRows.map((r: Record<string, unknown>) => ({
-            seq: String(r.seq_text),
-            event_id: String(r.event_id),
-            kind: String(r.kind),
-            request_id: r.request_id ? String(r.request_id) : null,
-            project_id: r.project_id ? String(r.project_id) : null,
-            payload: (r.payload ?? {}) as Record<string, unknown>,
-            created_at: new Date(String(r.created_at)).toISOString(),
+          events: evRows.map((r) => ({
+            seq: r.seq.toString(),
+            event_id: r.eventId,
+            kind: r.kind,
+            request_id: r.requestId,
+            project_id: r.projectId,
+            payload: r.payload,
+            created_at: new Date(r.createdAt).toISOString(),
           })),
         };
       });
@@ -2676,12 +2704,16 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
       leaseToken: string,
       throughSeq: string,
     ): Promise<boolean> {
-      const rows = await db`
-        UPDATE public.outbox_consumers
-        SET acked_seq = greatest(acked_seq, ${throughSeq}::bigint), updated_at = now()
-        WHERE name = ${consumerName} AND lease_token = ${leaseToken}
-        RETURNING acked_seq::text
-      `;
+      const rows = await orm
+        .update(outboxConsumers)
+        .set({
+          ackedSeq: sql`greatest(${outboxConsumers.ackedSeq}, ${throughSeq}::bigint)`,
+          updatedAt: sql`now()`,
+        })
+        .where(
+          and(eq(outboxConsumers.name, consumerName), eq(outboxConsumers.leaseToken, leaseToken)),
+        )
+        .returning({ ackedSeq: outboxConsumers.ackedSeq });
       return rows.length > 0;
     },
 

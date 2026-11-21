@@ -1,10 +1,10 @@
 import { Hono } from "hono";
 import type { SQL } from "bun";
 import {
+  assertSchemaVersion,
   createCatalogRepository,
   createDatabase,
   createLedgerEngine,
-  SCHEMA_VERSION,
 } from "@gateway/ledger";
 import {
   createFfiWasmtimeExecutor,
@@ -211,13 +211,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     worker,
 
     async start(): Promise<void> {
-      const vRows = await db`SELECT max(version) AS version FROM public.schema_migrations`;
-      const currentVersion = Number(vRows[0]?.version ?? 0);
-      if (currentVersion !== SCHEMA_VERSION) {
-        throw new Error(
-          `Schema version mismatch: expected ${SCHEMA_VERSION}, got ${currentVersion}`,
-        );
-      }
+      await assertSchemaVersion(db);
       await snapshot.load();
       snapshot.start();
       if (worker) await worker.start();

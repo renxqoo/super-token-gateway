@@ -43,6 +43,7 @@
     "@gateway/runtime": "workspace:*",
     "@gateway/worker": "workspace:*",
     "@types/bun": "1.4.4",
+    "drizzle-kit": "0.31.11",
     "oxlint": "1.93.0",
     "zod": "4.6.7"
   }

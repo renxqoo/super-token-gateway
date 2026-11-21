@@ -1,11 +1,14 @@
 import { expect, test } from "bun:test";
 import { appendFile, rm } from "node:fs/promises";
 import type { SQL } from "bun";
+import { getTableConfig } from "drizzle-orm/pg-core";
 import {
+  assertSchemaVersion,
   createCatalogRepository,
   createDatabase,
   createLedgerEngine,
   exportLedgerArchive,
+  ledgerSchema,
   migrate,
   prepareLedgerMonth,
   SCHEMA_VERSION,
@@ -687,4 +690,37 @@ test("G1.5 moderation PLATFORM_ABSORB, DB immutability/balance triggers, and mon
     }
 
     expect((await f.ledger.auditConservation()).ok).toBe(true);
+  }));
+
+test("G1.6 Drizzle schema declarations match migrated PostgreSQL tables and columns 1-to-1 with zero drift", () =>
+  withLedgerDb(async (db) => {
+    expect(await assertSchemaVersion(db)).toBe(SCHEMA_VERSION);
+    const pgRows = await db`
+      SELECT c.table_name, c.column_name
+      FROM information_schema.columns c
+      JOIN pg_class cl ON cl.relname = c.table_name
+      JOIN pg_namespace n ON n.oid = cl.relnamespace AND n.nspname = c.table_schema
+      WHERE c.table_schema = 'public'
+        AND NOT cl.relispartition
+      ORDER BY c.table_name, c.column_name
+    `;
+    const actualByTable = new Map<string, string[]>();
+    for (const row of pgRows) {
+      const t = String(row.table_name);
+      const col = String(row.column_name);
+      const arr = actualByTable.get(t);
+      if (arr) arr.push(col);
+      else actualByTable.set(t, [col]);
+    }
+
+    const declaredByTable = new Map<string, string[]>();
+    for (const table of Object.values(ledgerSchema)) {
+      const cfg = getTableConfig(table);
+      declaredByTable.set(cfg.name, cfg.columns.map((c) => c.name).sort());
+    }
+
+    expect([...declaredByTable.keys()].sort()).toEqual([...actualByTable.keys()].sort());
+    for (const [tableName, cols] of declaredByTable) {
+      expect(actualByTable.get(tableName)).toEqual(cols);
+    }
   }));
