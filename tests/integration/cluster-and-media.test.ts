@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { SQL } from "bun";
 import { ClusterCoordinator } from "@gateway/runtime";
 import { createDatabase, migrate } from "@gateway/ledger";
-import type { WasmRuntimeExecutor } from "@gateway/plugin-engine";
+import { getBuiltinPlugin, type WasmRuntimeExecutor } from "@gateway/plugin-engine";
 import { createGatewayRuntime, type GatewayConfig } from "@gateway/gateway";
 import { createMockApp } from "../../apps/mock-providers/src/app.ts";
 
@@ -197,7 +197,7 @@ test("Redis cluster syncs rate limits, circuit breaker OPEN state, and config ep
     routerOptions: { failureThreshold: 3, baseOpenMs: 30_000 },
   });
   const nodeB = createGatewayRuntime({
-    config: makeConfig(),
+    config: makeConfig({ snapshotPollMs: 250 }),
     db,
     routerOptions: { failureThreshold: 3, baseOpenMs: 30_000 },
   });
@@ -318,22 +318,67 @@ test("Redis cluster syncs rate limits, circuit breaker OPEN state, and config ep
       cost_version_id: supPrice.id,
     });
 
-    await internalCall(nodeA.internalApp, "PUT", "/internal/v1/plugins", {
-      name: "redis-sync-vendor",
-      version: "1.0.0",
-      capability: "PROVIDER",
-      kind: "DECLARATIVE",
-      provider_config: {
-        base_dialect: "openai_chat",
-        usage_dialect: "openai",
-        auth: { scheme: "bearer" },
-        endpoints: { default: { path: "/v1/chat/completions" } },
+    const { data: syncedRevision } = await internalCall(
+      nodeA.internalApp,
+      "PUT",
+      "/internal/v1/plugins",
+      {
+        name: "redis-sync-vendor",
+        version: "1.0.0",
+        capability: "PROVIDER",
+        kind: "DECLARATIVE",
+        provider_config: {
+          base_dialect: "openai_chat",
+          usage_dialect: "openai",
+          auth: { scheme: "bearer" },
+          endpoints: { default: { path: "/v1/chat/completions" } },
+        },
       },
-    });
+    );
+
+    const activated = await internalCall(
+      nodeA.internalApp,
+      "POST",
+      "/internal/v1/plugin-releases",
+      {
+        id: crypto.randomUUID(),
+        expected_epoch: syncedRevision.config_epoch,
+        targets: [{ plugin_id: syncedRevision.id }],
+      },
+    );
+    expect(activated.status, JSON.stringify(activated.data)).toBe(200);
 
     await Bun.sleep(100);
     expect(nodeB.snapshot.get().models.has("cluster-gpt")).toBe(true);
     expect(nodeB.snapshot.get().providerPluginsByName.has("redis-sync-vendor")).toBe(true);
+
+    const originalPublish = nodeA.cluster.publishConfigEpoch.bind(nodeA.cluster);
+    nodeA.cluster.publishConfigEpoch = () => undefined;
+    try {
+      const { status, data } = await internalCall(
+        nodeA.internalApp,
+        "POST",
+        "/internal/v1/plugin-releases",
+        {
+          id: crypto.randomUUID(),
+          expected_epoch: nodeA.snapshot.get().epoch,
+          targets: [{ channel_id: chB.id, provider_plugin_id: syncedRevision.id }],
+        },
+      );
+      expect(status).toBe(200);
+      const deadline = performance.now() + 3000;
+      while (
+        nodeB.snapshot.get().epoch < Number(data.config_epoch) &&
+        performance.now() < deadline
+      ) {
+        await Bun.sleep(20);
+      }
+      expect(nodeB.snapshot.get().channels.get(String(chB.id))?.provider_plugin_id).toBe(
+        String(syncedRevision.id),
+      );
+    } finally {
+      nodeA.cluster.publishConfigEpoch = originalPublish;
+    }
 
     const callNode = (node: typeof nodeA) =>
       node.publicApp.fetch(
@@ -421,6 +466,7 @@ test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcrip
   });
 
   const mockWasm: WasmRuntimeExecutor = {
+    runtimeKind: "mock",
     compile() {},
     async invoke(_id, hook, inputBytes) {
       const payload = JSON.parse(new TextDecoder().decode(inputBytes)) as { text: string };
@@ -507,7 +553,8 @@ test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcrip
       api_key: "sk-media",
     });
 
-    const wasmBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+    const builtin = getBuiltinPlugin("pii-guard");
+    if (builtin?.capability !== "CONTENT") throw new Error("Missing content plugin fixture");
     const { data: plugin } = await internalCall(
       runtime.internalApp,
       "PUT",
@@ -516,10 +563,23 @@ test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcrip
         name: "req-redactor",
         version: "1.0.0",
         kind: "WASM",
-        wasm_bytes_base64: Buffer.from(wasmBytes).toString("base64"),
+        wasm_bytes_base64: Buffer.from(builtin.wasm_bytes).toString("base64"),
         manifest: { hooks: ["on_request"] },
       },
     );
+
+    const activated = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/plugin-releases",
+      {
+        id: crypto.randomUUID(),
+        expected_epoch: plugin.config_epoch,
+        targets: [{ plugin_id: plugin.id }],
+        samples: { [String(plugin.id)]: { text: "Email me at alice@secret.io please" } },
+      },
+    );
+    expect(activated.status, JSON.stringify(activated.data)).toBe(200);
 
     const { data: tokenCustPrice } = await internalCall(
       runtime.internalApp,
@@ -780,6 +840,43 @@ test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcrip
   } finally {
     await runtime.close();
     await mockServer.stop(true);
+  }
+});
+
+test("Redis script cache eviction keeps renewals and shared admission limits intact", async () => {
+  const redis = new Bun.RedisClient(redisUrl, { autoReconnect: false });
+  const namespace = `script-cache-${crypto.randomUUID()}`;
+  const first = new ClusterCoordinator({ redisUrl, namespace });
+  const second = new ClusterCoordinator({ redisUrl, namespace });
+  const limits = { rpm: 2, tpm: 6, concurrency: 1 };
+  try {
+    await Promise.all([first.start(), second.start(), redis.connect()]);
+    const permit = await first.acquireRateLimit("test", limits, 3, 150);
+    if (!permit.ok) throw new Error(`Initial Redis permit failed: ${permit.reason}`);
+    try {
+      await redis.send("SCRIPT", ["FLUSH", "SYNC"]);
+      await Bun.sleep(260);
+      expect(permit.signal?.aborted).toBe(false);
+      expect(await second.acquireRateLimit("test", limits, 3, 150)).toEqual({
+        ok: false,
+        reason: "concurrency",
+      });
+    } finally {
+      permit.release();
+    }
+    let admitted;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      admitted = await second.acquireRateLimit("test", limits, 3, 150);
+      if (admitted.ok) break;
+      await Bun.sleep(10);
+    }
+    if (!admitted?.ok) throw new Error("Released Redis permit continued to block admission");
+    admitted.release();
+    expect(await redis.send("GET", [`${namespace}:rl:rpm:test`])).toBe("2");
+    expect(await redis.send("GET", [`${namespace}:rl:tpm:test`])).toBe("6");
+  } finally {
+    redis.close();
+    await Promise.all([first.close(), second.close()]);
   }
 });
 

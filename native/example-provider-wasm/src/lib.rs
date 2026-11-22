@@ -209,6 +209,16 @@ pub extern "C" fn adapt_stream_event(ptr: i32, len: i32) -> i64 {
         );
         return pack_output(out.as_bytes());
     }
+    if let (Some(input), Some(output)) = (
+        extract_json_i64_field(&data, "tok_in"),
+        extract_json_i64_field(&data, "tok_out"),
+    ) {
+        let out = format!(
+            r#"{{"usage":{{"input_tokens":{},"output_tokens":{}}},"state":"{}"}}"#,
+            input, output, count,
+        );
+        return pack_output(out.as_bytes());
+    }
     if let Some(piece) = extract_json_string_field(&data, "piece") {
         let next = count + 1;
         let out = format!(

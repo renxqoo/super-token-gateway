@@ -1179,11 +1179,20 @@ test.each([
         await migrate(db);
         expect(await assertSchemaVersion(db)).toBe(SCHEMA_VERSION);
         const snapshot = await createCatalogRepository(db).loadSnapshot();
-        expect(snapshot.channels.get(channelId)).toMatchObject({
+        const channel = snapshot.channels.get(channelId);
+        expect(channel).toMatchObject({
+          id: channelId,
           account_id: accountId,
           kind: "openai",
-          provider_plugin_id: null,
+          base_url: "https://old.invalid",
+          secret_ciphertext: "cipher",
           adapter_config: {},
+        });
+        expect(snapshot.plugins.get(channel?.provider_plugin_id ?? "")).toMatchObject({
+          name: "openai",
+          capability: "PROVIDER",
+          builtin: true,
+          provider_config: { endpoints: { chat: { path: "/v1/chat/completions" } } },
         });
         expect(
           await createLedgerEngine(db, { enableLeases: false }).getWallet(projectId, "USD"),
@@ -1194,6 +1203,9 @@ test.each([
         expect(versions.map((r) => Number(r.version))).toEqual([
           version,
           2026112102,
+          2026112201,
+          2026112202,
+          2026112203,
           SCHEMA_VERSION,
         ]);
       },
@@ -1225,6 +1237,13 @@ test("a live node cannot admit new holds against wallet and supplier leases reap
     const f = await seedFixture(db);
     const node = createLedgerEngine(db, { leaseTtlMs: 60_000, leaseIdleReleaseMs: 60_000 });
     const worker = createLedgerEngine(db, { enableLeases: false });
+    const unlock = Promise.withResolvers<void>();
+    const releaseWalletFence = Promise.withResolvers<void>();
+    const releaseSupplierFence = Promise.withResolvers<void>();
+    let settleLock: Promise<unknown> | undefined;
+    let walletFence: Promise<unknown> | undefined;
+    let supplierFence: Promise<unknown> | undefined;
+    let sweep: Promise<number> | undefined;
     try {
       await f.ledger.creditWallet({
         project_id: f.project.id,
@@ -1252,9 +1271,58 @@ test("a live node cannot admit new holds against wallet and supplier leases reap
         });
       const existing = await Promise.all(Array.from({ length: 16 }, acquire));
       expect(existing.every((hold) => hold.ok)).toBe(true);
+      const locked = Promise.withResolvers<void>();
+      settleLock = db.begin(async (tx) => {
+        await tx`SELECT id FROM public.wallet_leases WHERE state = 'ACTIVE' FOR NO KEY UPDATE`;
+        await tx`SELECT id FROM public.supplier_leases WHERE state = 'ACTIVE' FOR NO KEY UPDATE`;
+        locked.resolve();
+        await unlock.promise;
+      });
+      await locked.promise;
+      const concurrent = acquire();
+      const beforeUnlock = await Promise.race([concurrent, Bun.sleep(750).then(() => null)]);
+      unlock.resolve();
+      await settleLock;
+      const independent = await concurrent;
+      expect(independent.ok).toBe(true);
+      expect(beforeUnlock).toMatchObject({ ok: true });
       await db`UPDATE public.wallet_leases SET expires_at = now() WHERE state = 'ACTIVE'`;
       await db`UPDATE public.supplier_leases SET expires_at = now() WHERE state = 'ACTIVE'`;
-      expect(await worker.sweepExpiredLeases()).toBe(2);
+      const walletFenced = Promise.withResolvers<void>();
+      const supplierFenced = Promise.withResolvers<void>();
+      walletFence = db.begin(async (tx) => {
+        await tx`SELECT id FROM public.wallet_leases WHERE state = 'ACTIVE' FOR KEY SHARE`;
+        walletFenced.resolve();
+        await releaseWalletFence.promise;
+      });
+      supplierFence = db.begin(async (tx) => {
+        await tx`SELECT id FROM public.supplier_leases WHERE state = 'ACTIVE' FOR KEY SHARE`;
+        supplierFenced.resolve();
+        await releaseSupplierFence.promise;
+      });
+      await Promise.all([walletFenced.promise, supplierFenced.promise]);
+      sweep = worker.sweepExpiredLeases();
+      const waitForClosure = async (table: string) => {
+        const deadline = performance.now() + 700;
+        while (performance.now() < deadline) {
+          const [activity] = await db`SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+              AND wait_event_type = 'Lock' AND query LIKE ${`%FROM public.${table}%AND state = 'ACTIVE'%`}
+          ) AS waiting`;
+          if (activity?.waiting === true) return true;
+          await Bun.sleep(10);
+        }
+        return false;
+      };
+      const walletBlocked = await waitForClosure("wallet_leases");
+      releaseWalletFence.resolve();
+      await walletFence;
+      const supplierBlocked = await waitForClosure("supplier_leases");
+      releaseSupplierFence.resolve();
+      await supplierFence;
+      expect(await sweep).toBe(2);
+      expect(walletBlocked).toBe(true);
+      expect(supplierBlocked).toBe(true);
       const admitted = await Promise.all(Array.from({ length: 4 }, acquire));
       expect(admitted.every((hold) => hold.ok)).toBe(true);
       const [invalid] = await db`
@@ -1265,7 +1333,7 @@ test("a live node cannot admit new holds against wallet and supplier leases reap
         WHERE h.state = 'HELD' AND (w.state = 'CLOSED' OR s.state = 'CLOSED')
       `;
       expect(invalid!.n).toBe(0);
-      for (const result of [...existing, ...admitted]) {
+      for (const result of [...existing, independent, ...admitted]) {
         if (!result.ok) throw new Error(result.message);
         expect(await node.releaseHold(result.request_id)).toBe(true);
       }
@@ -1275,6 +1343,10 @@ test("a live node cannot admit new holds against wallet and supplier leases reap
         reserved_atoms: "0",
       });
     } finally {
+      unlock.resolve();
+      releaseWalletFence.resolve();
+      releaseSupplierFence.resolve();
+      await Promise.allSettled([settleLock, walletFence, supplierFence, sweep]);
       await node.drain();
       await f.ledger.drain();
       await worker.drain();
@@ -1538,5 +1610,289 @@ test("funds recovery continues while the business webhook is waiting for a respo
       await worker.stop();
       await f.ledger.drain();
       await webhook.stop(true);
+    }
+  }));
+
+test("a locked supplier lease cannot stall settlement for a wallet on another funded cell", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const ledger = createLedgerEngine(db, { leaseIdleReleaseMs: 60_000, batchWindowMs: 1 });
+    const projectIds = [
+      "e01e6e75-7ad7-45de-87c4-000000000001",
+      "e01e6e75-7ad7-45de-87c4-000000000002",
+    ];
+    const locked = Promise.withResolvers<void>();
+    const unlock = Promise.withResolvers<void>();
+    let blocking: Promise<unknown> | undefined;
+    const remaining: string[] = [];
+    const expiry = new Date(Date.now() + 30_000).toISOString();
+
+    async function acquire(projectId: string) {
+      const requestId = crypto.randomUUID();
+      const attemptId = crypto.randomUUID();
+      const hold = await ledger.acquireHold({
+        request_id: requestId,
+        attempt_id: attemptId,
+        project_id: projectId,
+        currency: "PTS",
+        operation: "chat",
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: "",
+        customer_atoms: "200",
+        supplier_account_id: f.accountA.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "100",
+        expires_at: expiry,
+      });
+      expect(hold.ok).toBe(true);
+      remaining.push(requestId);
+      return { requestId, attemptId };
+    }
+    function settle(req: Awaited<ReturnType<typeof acquire>>) {
+      return ledger.commitTerminal({
+        request_id: req.requestId,
+        selected_attempt_id: req.attemptId,
+        channel_id: f.channelA.id,
+        billing_price_id: f.flatBillingPrice.id,
+        cost_version_id: f.costPrice.id,
+        usage: { input_tokens: "60", output_tokens: "40" },
+        billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+        billing_basis: "PROVIDER_USAGE",
+        supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+        supplier_currency: "USD",
+      });
+    }
+
+    try {
+      await ledger.rechargeSupplier({
+        account_id: f.accountA.id,
+        currency: "USD",
+        external_ref: "shared-supplier-cells",
+        amount_atoms: "500000000",
+      });
+      for (const [i, id] of projectIds.entries()) {
+        await f.catalog.upsertProject({
+          id,
+          name: `lease-lane-${i}`,
+          currency: "PTS",
+          rpm: 1000,
+          tpm: 100000,
+          concurrency: 500,
+        });
+        await ledger.creditWallet({
+          project_id: id,
+          currency: "PTS",
+          kind: "CASH",
+          external_ref: `lane-cash-${i}`,
+          amount_atoms: "100000000",
+        });
+      }
+      await Promise.all(projectIds.flatMap((id) => Array.from({ length: 16 }, () => acquire(id))));
+      const [one, two] = await Promise.all(projectIds.map(acquire));
+      const [row] =
+        await db`SELECT supplier_lease_id FROM public.billing_holds WHERE request_id = ${one!.requestId}`;
+      expect(row?.supplier_lease_id).toBeTruthy();
+      blocking = db.begin(async (tx) => {
+        await tx`SELECT id FROM public.supplier_leases WHERE id = ${row!.supplier_lease_id} FOR NO KEY UPDATE`;
+        locked.resolve();
+        await unlock.promise;
+      });
+      await locked.promise;
+      const second = settle(two!);
+      const first = settle(one!);
+      const ahead = await Promise.race([second, Bun.sleep(750).then(() => null)]);
+      unlock.resolve();
+      await blocking;
+      await Promise.all([first, second]);
+      expect(ahead).toMatchObject({ ok: true, customer_atoms: "100", supplier_cost_atoms: "50" });
+      const [balances] = await db`SELECT count(*)::int AS used, sum(spent_atoms)::text AS spent
+        FROM public.supplier_cells WHERE account_id = ${f.accountA.id} AND spent_atoms > 0`;
+      expect(balances).toMatchObject({ used: 2, spent: "100" });
+    } finally {
+      unlock.resolve();
+      await blocking;
+      for (const requestId of remaining) await ledger.releaseHold(requestId);
+      await ledger.drain();
+      await f.ledger.drain();
+    }
+    expect(await ledger.auditConservation()).toMatchObject({
+      ok: true,
+      open_holds: 0,
+      unknown_holds: 0,
+    });
+  }));
+
+test("a wallet row lock timeout does not lose a measured settlement", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const ledger = createLedgerEngine(db, { leaseIdleReleaseMs: 60_000, batchWindowMs: 1 });
+    const requestIds: string[] = [];
+    let pending: Promise<unknown> | undefined;
+
+    async function acquire() {
+      const requestId = crypto.randomUUID();
+      const attemptId = crypto.randomUUID();
+      const hold = await ledger.acquireHold({
+        request_id: requestId,
+        attempt_id: attemptId,
+        project_id: f.project.id,
+        currency: "PTS",
+        operation: "chat",
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: "",
+        customer_atoms: "200",
+        supplier_account_id: f.accountA.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "100",
+        expires_at: new Date(Date.now() + 30_000).toISOString(),
+      });
+      expect(hold.ok).toBe(true);
+      requestIds.push(requestId);
+      return { requestId, attemptId };
+    }
+
+    try {
+      await ledger.creditWallet({
+        project_id: f.project.id,
+        currency: "PTS",
+        kind: "CASH",
+        external_ref: "lock-retry-cash",
+        amount_atoms: "100000000",
+      });
+      await ledger.rechargeSupplier({
+        account_id: f.accountA.id,
+        currency: "USD",
+        external_ref: "lock-retry-supplier",
+        amount_atoms: "500000000",
+      });
+      await Promise.all(Array.from({ length: 16 }, () => acquire()));
+      const { requestId, attemptId } = await acquire();
+      const [hold] = await db`SELECT wallet_id, wallet_lease_id, supplier_lease_id
+        FROM public.billing_holds WHERE request_id = ${requestId}`;
+      expect(hold?.wallet_lease_id).toBeTruthy();
+      expect(hold?.supplier_lease_id).toBeTruthy();
+
+      await db.begin(async (tx) => {
+        const [blocker] = await tx`SELECT pg_backend_pid() AS pid FROM public.wallets
+          WHERE id = ${hold!.wallet_id} FOR NO KEY UPDATE`;
+        pending = ledger
+          .commitTerminal({
+            request_id: requestId,
+            selected_attempt_id: attemptId,
+            channel_id: f.channelA.id,
+            billing_price_id: f.flatBillingPrice.id,
+            cost_version_id: f.costPrice.id,
+            usage: { input_tokens: "60", output_tokens: "40" },
+            billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+            billing_basis: "PROVIDER_USAGE",
+            supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+            supplier_currency: "USD",
+          })
+          .catch((error: unknown) => error);
+        const deadline = Date.now() + 2_000;
+        for (;;) {
+          const [row] = await db`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+              AND query LIKE '%FROM public.wallets%'
+              AND ${blocker!.pid} = ANY(pg_blocking_pids(pid))) AS waiting`;
+          if (row!.waiting) break;
+          if (Date.now() >= deadline)
+            throw new Error("Settlement did not wait for the wallet lock");
+          await Bun.sleep(20);
+        }
+        await Bun.sleep(5_150);
+      });
+
+      expect(await pending).toMatchObject({
+        ok: true,
+        customer_atoms: "100",
+        supplier_cost_atoms: "50",
+      });
+      expect(
+        await db`SELECT customer_atoms::text, supplier_cost_atoms::text, selected_attempt_id
+        FROM public.billing_charges WHERE request_id = ${requestId}`,
+      ).toEqual([
+        { customer_atoms: "100", supplier_cost_atoms: "50", selected_attempt_id: attemptId },
+      ]);
+    } finally {
+      await pending;
+      for (const requestId of requestIds) await ledger.releaseHold(requestId);
+      await ledger.drain();
+      await f.ledger.drain();
+    }
+    expect(await ledger.auditConservation()).toMatchObject({
+      ok: true,
+      open_holds: 0,
+      unknown_holds: 0,
+    });
+  }));
+
+test("a temporarily locked sole funded cell does not falsely reject a supplier hold", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const locked = Promise.withResolvers<void>();
+    const unlock = Promise.withResolvers<void>();
+    let blocking: Promise<unknown> | undefined;
+    const id = "e01e6e75-7ad7-45de-87c4-000000000001";
+    const requestId = crypto.randomUUID();
+    try {
+      await f.catalog.upsertProject({
+        id,
+        name: "only-funded-cell",
+        currency: "PTS",
+        rpm: 1000,
+        tpm: 100000,
+        concurrency: 500,
+      });
+      await f.ledger.creditWallet({
+        project_id: id,
+        currency: "PTS",
+        kind: "CASH",
+        external_ref: "only-funded-cell-cash",
+        amount_atoms: "100000000",
+      });
+      await db`UPDATE public.supplier_cells SET balance_atoms = CASE WHEN cell = 0 THEN 1000000 ELSE 0 END
+        WHERE account_id = ${f.accountA.id} AND currency = 'USD'`;
+      blocking = db.begin(async (tx) => {
+        await tx`SELECT cell FROM public.supplier_cells WHERE account_id = ${f.accountA.id}
+          AND currency = 'USD' AND cell = 0 FOR NO KEY UPDATE`;
+        locked.resolve();
+        await unlock.promise;
+      });
+      await locked.promise;
+      const pending = f.ledger.acquireHold({
+        request_id: requestId,
+        attempt_id: crypto.randomUUID(),
+        project_id: id,
+        currency: "PTS",
+        operation: "chat",
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: "",
+        customer_atoms: "200",
+        supplier_account_id: f.accountA.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "100",
+        expires_at: new Date(Date.now() + 30_000).toISOString(),
+      });
+      await Promise.race([pending, Bun.sleep(150)]);
+      unlock.resolve();
+      await blocking;
+      expect(await pending).toMatchObject({ ok: true, supplier_cell: 0, held_atoms: "200" });
+      expect(await f.ledger.releaseHold(requestId)).toBe(true);
+      expect(await f.ledger.auditConservation()).toMatchObject({
+        ok: true,
+        open_holds: 0,
+        unknown_holds: 0,
+      });
+    } finally {
+      unlock.resolve();
+      await blocking;
+      await f.ledger.drain();
     }
   }));

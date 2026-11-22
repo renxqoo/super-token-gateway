@@ -50,7 +50,10 @@ const PII_GUARD_MANIFEST: WasmPluginManifest = {
   hooks: ["on_request", "on_response", "on_stream_chunk", "on_stream_end"],
   window_bytes: 64,
   fuel_budget: 5_000_000,
+  fuel_per_byte: 120,
+  max_input_bytes: 32_768,
   max_memory_bytes: 4 * 1024 * 1024,
+  deterministic_text_only: true,
   failure_policy: "FAIL_CLOSED",
   charge_policy: "CHARGE_CUSTOMER",
 };

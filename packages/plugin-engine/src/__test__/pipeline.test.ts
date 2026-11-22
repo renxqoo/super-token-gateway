@@ -2,10 +2,11 @@ import { expect, test } from "bun:test";
 import { generateKeyPairSync, sign } from "node:crypto";
 import type { PluginRecord } from "@gateway/ledger";
 import {
-  createBunWasmExecutor,
+  createWasmtimeExecutor,
   createFfiWasmtimeExecutor,
   PluginPipelineEngine,
   resolveWasmtimeLibraryPath,
+  WasmCapacityError,
   WebhookPluginExecutor,
   type PluginHook,
   type WasmRuntimeExecutor,
@@ -448,6 +449,7 @@ function makeMockWasmExecutor(
   const dec = new TextDecoder();
   const enc = new TextEncoder();
   return {
+    runtimeKind: "mock",
     compile() {},
     async invoke(_id, hook, input) {
       const payload = JSON.parse(dec.decode(input)) as { text: string };
@@ -728,9 +730,13 @@ test("G3.2 webhook FAIL_CLOSED blocks and trips circuit while FAIL_OPEN passes t
   expect(r4).toMatchObject({ blocked: false, text: "hello" });
 });
 
-test("WASM invocations expire while waiting behind a busy worker", async () => {
+test("WASM invocations expire while waiting behind a busy worker and reject missing native library", async () => {
+  expect(() =>
+    createWasmtimeExecutor({ wasmtimeLibraryPath: "/nonexistent/libstg_plugin_wasmtime.so" }),
+  ).toThrow("Native Wasmtime library not found");
+
   const maxMemoryBytes = 4 * 1024 * 1024;
-  const executor = createBunWasmExecutor({
+  const executor = createWasmtimeExecutor({
     maxMemoryBytes,
     poolSize: 1,
     minTimeoutMs: 25,
@@ -740,22 +746,28 @@ test("WASM invocations expire while waiting behind a busy worker", async () => {
   executor.compile("fast", "fast", buildCrossTenantProbeWasm());
   const input = new Uint8Array();
   try {
+    await executor.selfCheck?.();
+    await executor
+      .invoke("loop", "on_response", input, { maxMemoryBytes, fuelBudget: 10_000 })
+      .catch(() => undefined);
     const busy = executor
-      .invoke("loop", "on_response", input, { maxMemoryBytes, fuelBudget: 1_500_000 })
+      .invoke("loop", "on_response", input, { maxMemoryBytes, fuelBudget: 250_000_000 })
       .catch((error: unknown) => error);
     await expect(
       executor.invoke("fast", "on_response", input, { maxMemoryBytes, fuelBudget: 250_000 }),
-    ).rejects.toThrow("WASM execution timed out");
+    ).rejects.toThrow("WASM queue timed out");
     expect(await busy).toBeInstanceOf(Error);
-    await expect(
-      executor.invoke("fast", "on_response", input, { maxMemoryBytes, fuelBudget: 1_500_000 }),
-    ).resolves.toBeInstanceOf(Uint8Array);
+    const fastOut = await executor.invoke("fast", "on_response", input, {
+      maxMemoryBytes,
+      fuelBudget: 1_500_000,
+    });
+    expect(fastOut).toBeInstanceOf(Uint8Array);
   } finally {
     executor.close?.();
   }
 });
 
-test("G3.1 Real Bun WebAssembly Worker sandbox executes signed WASM, isolates cross-tenant memory, and kills infinite loops / memory bombs / WASI escapes", async () => {
+test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tenant memory, enforces fuel/memory/WASI limits, and preserves compiled modules after traps", async () => {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const pubPem = publicKey.export({ type: "spki", format: "pem" }).toString();
   const signBytes = (bytes: Uint8Array) => {
@@ -764,11 +776,11 @@ test("G3.1 Real Bun WebAssembly Worker sandbox executes signed WASM, isolates cr
     return { digest, signature };
   };
 
-  const executor = createBunWasmExecutor({
+  const executor = createWasmtimeExecutor({
     maxMemoryBytes: 4 * 1024 * 1024,
-    poolSize: 2,
+    poolSize: 1,
     minTimeoutMs: 40,
-    maxTimeoutMs: 100,
+    maxTimeoutMs: 500,
   });
   const engine = new PluginPipelineEngine({
     wasmExecutor: executor,
@@ -895,9 +907,26 @@ test("G3.1 Real Bun WebAssembly Worker sandbox executes signed WASM, isolates cr
     );
     expect(loopRes).toMatchObject({
       blocked: true,
+      outcome_kind: "plugin_fault",
+      charge_policy: "PLATFORM_ABSORB",
       rule_code: "wasm_execution_failed",
       http_status: 500,
     });
+
+    const compilesAfterFirstLoop = executor.stats!().compileTotal;
+    const loopRes2 = await engine.runUnary(
+      "on_response",
+      [{ plugin_id: loopPlugin.id, priority: 1 }],
+      new Map([[loopPlugin.id, loopPlugin]]),
+      { request_id: "loop-2", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      "hang again",
+    );
+    expect(loopRes2).toMatchObject({
+      blocked: true,
+      outcome_kind: "plugin_fault",
+      rule_code: "wasm_execution_failed",
+    });
+    expect(executor.stats!().compileTotal).toBe(compilesAfterFirstLoop);
 
     const afterLoopRes = await engine.runUnary(
       "on_response",
@@ -925,7 +954,12 @@ test("G3.1 Real Bun WebAssembly Worker sandbox executes signed WASM, isolates cr
       { request_id: "mem-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
       "mem",
     );
-    expect(bigInitRes).toMatchObject({ blocked: true, rule_code: "wasm_execution_failed" });
+    expect(bigInitRes).toMatchObject({
+      blocked: true,
+      outcome_kind: "plugin_fault",
+      charge_policy: "PLATFORM_ABSORB",
+      rule_code: "wasm_memory_limit",
+    });
 
     const growBombBytes = buildMemoryBombWasm(1, 40);
     const growBombSig = signBytes(growBombBytes);
@@ -944,7 +978,12 @@ test("G3.1 Real Bun WebAssembly Worker sandbox executes signed WASM, isolates cr
       { request_id: "mem-2", project_id: "pr1", model: "gpt-4o", operation: "chat" },
       "mem-grow",
     );
-    expect(growBombRes).toMatchObject({ blocked: true, rule_code: "wasm_execution_failed" });
+    expect(growBombRes).toMatchObject({
+      blocked: true,
+      outcome_kind: "plugin_fault",
+      charge_policy: "PLATFORM_ABSORB",
+      rule_code: "wasm_memory_limit",
+    });
 
     const wasiBytes = buildWasiImportWasm();
     const wasiSig = signBytes(wasiBytes);
@@ -963,7 +1002,32 @@ test("G3.1 Real Bun WebAssembly Worker sandbox executes signed WASM, isolates cr
       { request_id: "wasi-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
       "escape",
     );
-    expect(wasiRes).toMatchObject({ blocked: true, rule_code: "wasm_execution_failed" });
+    expect(wasiRes).toMatchObject({
+      blocked: true,
+      outcome_kind: "plugin_fault",
+      charge_policy: "PLATFORM_ABSORB",
+      rule_code: "wasm_compile_failed",
+    });
+
+    const tamperedBytes = new Uint8Array(filterBytes);
+    tamperedBytes[tamperedBytes.length - 1] = (tamperedBytes[tamperedBytes.length - 1]! + 1) & 0xff;
+    const tamperedPlugin: PluginRecord = {
+      ...filterPlugin,
+      id: "wasm-tampered",
+      wasm_bytes: tamperedBytes,
+    };
+    const tamperedRes = await engine.runUnary(
+      "on_response",
+      [{ plugin_id: tamperedPlugin.id, priority: 1 }],
+      new Map([[tamperedPlugin.id, tamperedPlugin]]),
+      { request_id: "tamper-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      "hello",
+    );
+    expect(tamperedRes).toMatchObject({
+      blocked: true,
+      outcome_kind: "plugin_fault",
+      rule_code: "plugin_digest_mismatch",
+    });
   } finally {
     executor.close();
   }
@@ -1277,7 +1341,12 @@ test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross
         { request_id: "fmem-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
         "mem",
       ),
-    ).toMatchObject({ blocked: true, rule_code: "wasm_execution_failed" });
+    ).toMatchObject({
+      blocked: true,
+      outcome_kind: "plugin_fault",
+      charge_policy: "PLATFORM_ABSORB",
+      rule_code: "wasm_memory_limit",
+    });
 
     const wasiBytes = buildWasiImportWasm();
     const wasiSig = signBytes(wasiBytes);
@@ -1297,8 +1366,295 @@ test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross
         { request_id: "fwasi-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
         "escape",
       ),
-    ).toMatchObject({ blocked: true, rule_code: "wasm_execution_failed" });
+    ).toMatchObject({
+      blocked: true,
+      outcome_kind: "plugin_fault",
+      charge_policy: "PLATFORM_ABSORB",
+      rule_code: "wasm_compile_failed",
+    });
   } finally {
     executor.close();
   }
+});
+
+test("D3/D6/D2b webhook invalid-200 tripping, half-open probe, bounded response, concurrency limit, egress priority, ingress shedding, and on_request cache", async () => {
+  let nowMs = 1000;
+  let invalidCalls = 0;
+  const badJsonFetch = (async () => {
+    invalidCalls++;
+    return Response.json({ unexpected: true });
+  }) as unknown as typeof fetch;
+  const whExec = new WebhookPluginExecutor({ fetchImpl: badJsonFetch, now: () => nowMs });
+  const badCfg = {
+    url: "http://mod.local/invalid",
+    failure_policy: "FAIL_CLOSED" as const,
+    circuit_failure_threshold: 2,
+    circuit_open_ms: 5000,
+  };
+  const sampleInput = {
+    hook: "on_response" as const,
+    request_id: "r",
+    project_id: "p1",
+    model: "m",
+    operation: "chat",
+    text: "hi",
+  };
+  const d1 = await whExec.invoke("wh-bad", badCfg, sampleInput);
+  const d2 = await whExec.invoke("wh-bad", badCfg, sampleInput);
+  const d3 = await whExec.invoke("wh-bad", badCfg, sampleInput);
+  expect(d1).toMatchObject({
+    action: "BLOCK",
+    outcome_kind: "plugin_fault",
+    rule_code: "webhook_invalid_reply",
+  });
+  expect(d2).toMatchObject({
+    action: "BLOCK",
+    outcome_kind: "plugin_fault",
+    rule_code: "webhook_invalid_reply",
+  });
+  expect(d3).toMatchObject({
+    action: "BLOCK",
+    outcome_kind: "host_capacity",
+    rule_code: "webhook_circuit_open",
+  });
+  expect(invalidCalls).toBe(2);
+
+  const probeGate = Promise.withResolvers<Response>();
+  let probeCalls = 0;
+  const halfOpenExec = new WebhookPluginExecutor({
+    fetchImpl: (async () => {
+      probeCalls++;
+      if (probeCalls <= 2) return new Response("err", { status: 503 });
+      return probeGate.promise;
+    }) as unknown as typeof fetch,
+    now: () => nowMs,
+  });
+  await halfOpenExec.invoke("wh-ho", badCfg, sampleInput);
+  await halfOpenExec.invoke("wh-ho", badCfg, sampleInput);
+  nowMs += 6000;
+  const probeReq = halfOpenExec.invoke("wh-ho", badCfg, sampleInput);
+  const concurrentDuringProbe = await halfOpenExec.invoke("wh-ho", badCfg, sampleInput);
+  expect(concurrentDuringProbe).toMatchObject({
+    action: "BLOCK",
+    outcome_kind: "host_capacity",
+    rule_code: "webhook_circuit_open",
+  });
+  expect(probeCalls).toBe(3);
+  probeGate.resolve(Response.json({ action: "PASS" }));
+  expect(await probeReq).toMatchObject({ action: "PASS", outcome_kind: "content_decision" });
+
+  const hugeExec = new WebhookPluginExecutor({
+    fetchImpl: (async () =>
+      new Response("x".repeat(2048), { status: 200 })) as unknown as typeof fetch,
+  });
+  const hugeRes = await hugeExec.invoke(
+    "wh-huge",
+    { url: "http://mod.local/huge", max_response_bytes: 128 },
+    sampleInput,
+  );
+  expect(hugeRes).toMatchObject({
+    action: "BLOCK",
+    outcome_kind: "plugin_fault",
+    rule_code: "webhook_response_too_large",
+  });
+
+  const concGate = Promise.withResolvers<Response>();
+  const concExec = new WebhookPluginExecutor({
+    fetchImpl: (async () => concGate.promise) as unknown as typeof fetch,
+  });
+  const pActive = concExec.invoke(
+    "wh-conc",
+    { url: "http://mod.local/slow", max_concurrency: 1 },
+    sampleInput,
+  );
+  const pRejected = await concExec.invoke(
+    "wh-conc",
+    { url: "http://mod.local/slow", max_concurrency: 1 },
+    sampleInput,
+  );
+  expect(pRejected).toMatchObject({
+    action: "BLOCK",
+    outcome_kind: "host_capacity",
+    rule_code: "webhook_concurrency_limit",
+  });
+  concGate.resolve(Response.json({ action: "PASS" }));
+  expect(await pActive).toMatchObject({ action: "PASS" });
+
+  let mockCalls = 0;
+  const countingWasm: WasmRuntimeExecutor = {
+    runtimeKind: "mock",
+    compile() {},
+    async invoke(_id, _hook, input) {
+      mockCalls++;
+      const payload = JSON.parse(new TextDecoder().decode(input)) as { text: string };
+      return new TextEncoder().encode(
+        JSON.stringify({ action: "TRANSFORM", text: payload.text.toUpperCase() }),
+      );
+    },
+    close() {},
+  };
+  const detBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+  const detDigest = new Bun.CryptoHasher("sha256").update(detBytes).digest("hex");
+  const detPlugin: PluginRecord = {
+    id: "p-det",
+    name: "det-wasm",
+    version: "1.0.0",
+    kind: "WASM",
+    capability: "CONTENT",
+    provider_config: null,
+    digest: detDigest,
+    wasm_bytes: detBytes,
+    webhook_config: null,
+    signature: null,
+    signing_key_id: null,
+    manifest: { hooks: ["on_request"], deterministic_text_only: true },
+    enabled: true,
+  };
+  const cacheEngine = new PluginPipelineEngine({ wasmExecutor: countingWasm });
+  const c1 = await cacheEngine.runUnary(
+    "on_request",
+    [{ plugin_id: detPlugin.id, priority: 1 }],
+    new Map([[detPlugin.id, detPlugin]]),
+    { request_id: "c1", project_id: "proj-1", model: "m", operation: "chat" },
+    "hello",
+  );
+  const c2 = await cacheEngine.runUnary(
+    "on_request",
+    [{ plugin_id: detPlugin.id, priority: 1 }],
+    new Map([[detPlugin.id, detPlugin]]),
+    { request_id: "c2", project_id: "proj-1", model: "m", operation: "chat" },
+    "hello",
+  );
+  expect(c1.text).toBe("HELLO");
+  expect(c2.text).toBe("HELLO");
+  expect(mockCalls).toBe(1);
+
+  const sheddingExec = createWasmtimeExecutor({
+    poolSize: 1,
+    maxPending: 2,
+    ingressShedRatio: 0.5,
+    minTimeoutMs: 50,
+    maxTimeoutMs: 500,
+  });
+  const loopBytes = buildInfiniteLoopWasm("on_response");
+  const fastBytes = buildCrossTenantProbeWasm();
+  sheddingExec.compile("loop", "loop-d", loopBytes);
+  sheddingExec.compile("fast", "fast-d", fastBytes);
+  try {
+    await sheddingExec.selfCheck?.();
+    const hold = sheddingExec
+      .invoke("loop", "on_response", new Uint8Array(), {
+        fuelBudget: 50_000_000,
+        maxMemoryBytes: 4 * 1024 * 1024,
+        priority: "egress",
+        tenantId: "t0",
+      })
+      .catch(() => undefined);
+    const queuedEgress = sheddingExec.invoke("fast", "on_response", new Uint8Array(), {
+      fuelBudget: 2_000_000,
+      maxMemoryBytes: 4 * 1024 * 1024,
+      priority: "egress",
+      tenantId: "t-egress",
+    });
+    const shedIngress = await sheddingExec
+      .invoke("fast", "on_response", new Uint8Array(), {
+        fuelBudget: 2_000_000,
+        maxMemoryBytes: 4 * 1024 * 1024,
+        priority: "ingress",
+        tenantId: "t-ingress",
+      })
+      .catch((err: unknown) => err);
+    expect(shedIngress).toBeInstanceOf(WasmCapacityError);
+    expect((shedIngress as WasmCapacityError).code).toBe("wasm_ingress_shed");
+    expect(await queuedEgress).toBeInstanceOf(Uint8Array);
+    await hold;
+  } finally {
+    sheddingExec.close();
+  }
+});
+
+test("Invalid plugin http_status is clamped to 400 and WeakMap integrity cache rejects same-length substituted buffers", async () => {
+  const whExec = new WebhookPluginExecutor({
+    fetchImpl: (async () =>
+      Response.json({
+        action: "BLOCK",
+        rule_code: "BAD_STATUS",
+        http_status: 200,
+      })) as unknown as typeof fetch,
+  });
+  const whRes = await whExec.invoke(
+    "wh-bad-status",
+    { url: "http://mod.local/status" },
+    {
+      hook: "on_request",
+      request_id: "r-st-1",
+      project_id: "p1",
+      model: "m",
+      operation: "chat",
+      text: "hi",
+    },
+  );
+  expect(whRes).toMatchObject({
+    action: "BLOCK",
+    outcome_kind: "content_decision",
+    http_status: 400,
+  });
+
+  const badStatusWasm: WasmRuntimeExecutor = {
+    runtimeKind: "mock",
+    compile() {},
+    async invoke() {
+      return new TextEncoder().encode(
+        JSON.stringify({ action: "BLOCK", rule_code: "WASM_BAD_STATUS", http_status: 999 }),
+      );
+    },
+    close() {},
+  };
+  const goodBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+  const goodDigest = new Bun.CryptoHasher("sha256").update(goodBytes).digest("hex");
+  const plugin: PluginRecord = {
+    id: "p-status-integrity",
+    name: "status-integrity",
+    version: "1.0.0",
+    kind: "WASM",
+    capability: "CONTENT",
+    provider_config: null,
+    digest: goodDigest,
+    wasm_bytes: goodBytes,
+    webhook_config: null,
+    signature: null,
+    signing_key_id: null,
+    manifest: { hooks: ["on_request"] },
+    enabled: true,
+  };
+  const engine = new PluginPipelineEngine({ wasmExecutor: badStatusWasm });
+  const first = await engine.runUnary(
+    "on_request",
+    [{ plugin_id: plugin.id, priority: 1 }],
+    new Map([[plugin.id, plugin]]),
+    { request_id: "r-st-2", project_id: "p1", model: "m", operation: "chat" },
+    "hi",
+  );
+  expect(first).toMatchObject({
+    blocked: true,
+    outcome_kind: "content_decision",
+    rule_code: "WASM_BAD_STATUS",
+    http_status: 400,
+  });
+
+  const tamperedSameLen = new Uint8Array(goodBytes);
+  tamperedSameLen[7] = 1;
+  const tamperedPlugin: PluginRecord = { ...plugin, wasm_bytes: tamperedSameLen };
+  const second = await engine.runUnary(
+    "on_request",
+    [{ plugin_id: tamperedPlugin.id, priority: 1 }],
+    new Map([[tamperedPlugin.id, tamperedPlugin]]),
+    { request_id: "r-st-3", project_id: "p1", model: "m", operation: "chat" },
+    "hi",
+  );
+  expect(second).toMatchObject({
+    blocked: true,
+    outcome_kind: "plugin_fault",
+    rule_code: "plugin_digest_mismatch",
+  });
 });

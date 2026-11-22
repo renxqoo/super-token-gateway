@@ -135,3 +135,39 @@ test("LocalRateLimiter enforces RPM, TPM, and active concurrency accurately", ()
   expect(p3.ok).toBe(true);
   if (p3.ok) p3.release();
 });
+
+test("SmartRouter prefers same-protocol routes within the same priority tier while preserving cross-protocol fallback", () => {
+  const router = new SmartRouter({ random: () => 0.9 });
+  const crossHighPriority: RoutableCandidate = {
+    ...makeCandidate("r-hi", "ch-hi", 20, 1),
+    same_protocol: false,
+  };
+  const crossSameTier: RoutableCandidate = {
+    ...makeCandidate("r-cross", "ch-cross", 10, 100),
+    same_protocol: false,
+  };
+  const nativeSameTier: RoutableCandidate = {
+    ...makeCandidate("r-native", "ch-native", 10, 1),
+    same_protocol: true,
+  };
+
+  const selected = router.selectCandidates(
+    "m-proto",
+    [crossSameTier, nativeSameTier],
+    "WEIGHTED",
+    "chat",
+  );
+  expect(selected.map((x) => x.route.channel_id)).toEqual(["ch-native", "ch-cross"]);
+
+  const withHigherPriority = router.selectCandidates(
+    "m-proto",
+    [crossSameTier, nativeSameTier, crossHighPriority],
+    "WEIGHTED",
+    "chat",
+  );
+  expect(withHigherPriority.map((x) => x.route.channel_id)).toEqual([
+    "ch-hi",
+    "ch-native",
+    "ch-cross",
+  ]);
+});

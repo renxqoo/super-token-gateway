@@ -6,16 +6,41 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import type { SQL } from "bun";
 import { createDatabase } from "@gateway/ledger";
-import { postJsonKeepAlive } from "./bench-http.ts";
+import { auditConservation } from "../packages/ledger/src/conservation.ts";
+import {
+  runMixedSoak,
+  seedMixedPlugins,
+  verifyMixedCharges,
+  verifyMixedBalances,
+  type MixedChargeCheck,
+} from "./bench-mixed.ts";
+import { benchmarkConcurrency, postJsonKeepAlive, warmHttpConnections } from "./bench-http.ts";
 import { runSseBurst } from "./bench-sse-burst.ts";
 
 const baseDbUrl = process.env.DATABASE_URL;
 if (!baseDbUrl) throw new Error("DATABASE_URL is required");
 
 const isStress = process.argv.includes("--stress");
+const isLimit = process.argv.includes("--limit");
+const isMixed = process.argv.includes("--mixed-soak");
+const gatewayNodes = isMixed ? Number(process.env.BENCH_GATEWAY_NODES ?? 2) : 2;
+const soakSeconds = Number(process.env.BENCH_SOAK_SECONDS ?? 1800);
+const soakRps = Number(process.env.BENCH_SOAK_RPS ?? 500);
+const soakConcurrency = Number(process.env.BENCH_SOAK_CONCURRENCY ?? 1024);
+if (
+  isMixed &&
+  (![1, 2].includes(gatewayNodes) ||
+    ![soakSeconds, soakRps, soakConcurrency].every((n) => Number.isSafeInteger(n) && n > 0))
+)
+  throw new Error(
+    "Mixed soak requires one or two nodes and positive integer duration, rate and concurrency",
+  );
+const limitConcurrency = benchmarkConcurrency(process.env.BENCH_JSON_CONCURRENCY, [512, 1024]);
 const isSseBurstFresh = process.argv.includes("--sse-burst-fresh");
 const isSseBurst = isSseBurstFresh || process.argv.includes("--sse-burst");
+const warmLimitSockets = isLimit && process.env.BENCH_LIMIT_COLD_CONNECT !== "1";
 const withRedis = !process.argv.includes("--no-redis");
 if (isSseBurst && !withRedis) throw new Error("--sse-burst requires Redis");
 const durationSec = isStress ? 15 : 5;
@@ -104,11 +129,21 @@ targetUrl.pathname = `/${dbName}`;
 
 const adminDb = createDatabase(adminUrl.toString(), 2);
 const procs: ReturnType<typeof spawn>[] = [];
-const agentOptions = { keepAlive: true, maxSockets: 2048, maxFreeSockets: 1024 };
+const agentOptions = {
+  keepAlive: true,
+  maxSockets: Math.max(2048, ...limitConcurrency, isMixed ? soakConcurrency : 0),
+  maxFreeSockets: isMixed
+    ? Math.ceil(soakConcurrency / gatewayNodes)
+    : warmLimitSockets
+      ? Math.max(1024, Math.ceil(Math.max(...limitConcurrency) / gatewayNodes))
+      : 1024,
+};
 const agent = new Agent(agentOptions);
 
 try {
-  await cp(resolve("dist"), join(tempDir, "dist"), { recursive: true });
+  await cp(resolve(process.env.BENCH_DIST_DIR ?? "dist"), join(tempDir, "dist"), {
+    recursive: true,
+  });
   await adminDb.unsafe(`CREATE DATABASE ${dbName}`);
 
   const [mockPort, gwPort1, intPort1, gwPort2, intPort2, workerPort, redisPort] = await Promise.all(
@@ -174,8 +209,8 @@ try {
     SNAPSHOT_POLL_MS: "2000",
     MAX_IN_FLIGHT: "5000",
     DB_MAX_CONNECTIONS: "32",
-    MICRO_BATCH_WINDOW_MS: "2",
-    MICRO_BATCH_MAX_SIZE: "256",
+    MICRO_BATCH_WINDOW_MS: process.env.BENCH_BATCH_WINDOW_MS ?? "2",
+    MICRO_BATCH_MAX_SIZE: process.env.BENCH_BATCH_MAX_SIZE ?? "256",
     MOCK_HOST: "127.0.0.1",
     MOCK_PORT: String(mockPort),
     MOCK_CONTROL_TOKEN: "bprod-mock-ctrl",
@@ -195,34 +230,26 @@ try {
     env: baseEnv,
     stdio: "ignore",
   });
-  const gw1 = spawn(process.execPath, ["dist/gateway/main.js", "--mode=gateway"], {
-    cwd: tempDir,
-    env: {
-      ...baseEnv,
-      GATEWAY_HOST: "127.0.0.1",
-      GATEWAY_PORT: String(gwPort1),
-      INTERNAL_HOST: "127.0.0.1",
-      INTERNAL_PORT: String(intPort1),
-    },
-    stdio: "ignore",
-  });
-  const gw2 = spawn(process.execPath, ["dist/gateway/main.js", "--mode=gateway"], {
-    cwd: tempDir,
-    env: {
-      ...baseEnv,
-      GATEWAY_HOST: "127.0.0.1",
-      GATEWAY_PORT: String(gwPort2),
-      INTERNAL_HOST: "127.0.0.1",
-      INTERNAL_PORT: String(intPort2),
-    },
-    stdio: "ignore",
-  });
-  procs.push(mockProc, workerProc, gw1, gw2);
+  const ports = [gwPort1, gwPort2].slice(0, gatewayNodes);
+  const internalPorts = [intPort1, intPort2].slice(0, gatewayNodes);
+  const gateways = ports.map((port, index) =>
+    spawn(process.execPath, ["dist/gateway/main.js", "--mode=gateway"], {
+      cwd: tempDir,
+      env: {
+        ...baseEnv,
+        GATEWAY_HOST: "127.0.0.1",
+        GATEWAY_PORT: String(port),
+        INTERNAL_HOST: "127.0.0.1",
+        INTERNAL_PORT: String(internalPorts[index]),
+      },
+      stdio: "ignore",
+    }),
+  );
+  procs.push(mockProc, workerProc, ...gateways);
 
   await Promise.all([
     waitForJson(`http://127.0.0.1:${mockPort}/healthz`),
-    waitForJson(`http://127.0.0.1:${gwPort1}/readyz`),
-    waitForJson(`http://127.0.0.1:${gwPort2}/readyz`),
+    ...ports.map((port) => waitForJson(`http://127.0.0.1:${port}/readyz`)),
     waitForJson(`http://127.0.0.1:${workerPort}/readyz`),
   ]);
 
@@ -353,6 +380,17 @@ try {
     }),
   });
 
+  const mixedPlugins = isMixed
+    ? await seedMixedPlugins({
+        callInternal,
+        mockPort,
+        mockToken: baseEnv.MOCK_CONTROL_TOKEN!,
+        channelId: chPrimary.id,
+        billingPriceId: custPrice.id,
+        costVersionId: supPrice.id,
+      })
+    : null;
+
   const keys: string[] = [];
   for (let i = 0; i < 32; i++) {
     const p = await callInternal("PUT", "/internal/v1/projects", {
@@ -383,7 +421,6 @@ try {
       await db`SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')::bigint::text AS bytes`;
     return BigInt(String(rows[0]!.bytes));
   };
-  const ports = [gwPort1, gwPort2];
 
   async function runTimedLoad(
     label: string,
@@ -406,7 +443,7 @@ try {
     );
     const latencies: number[] = [];
     const walBefore = await walLsnBytes();
-    const rssBefore = getRssMb(gw1.pid!) + getRssMb(gw2.pid!);
+    const rssBefore = gateways.reduce((total, process) => total + getRssMb(process.pid!), 0);
     const started = performance.now();
     const stopAt = started + seconds * 1000;
     let cursor = 0;
@@ -431,7 +468,7 @@ try {
     await Promise.all(Array.from({ length: concurrency }, () => worker()));
     const elapsedSec = (performance.now() - started) / 1000;
     const walAfter = await walLsnBytes();
-    const rssAfter = getRssMb(gw1.pid!) + getRssMb(gw2.pid!);
+    const rssAfter = gateways.reduce((total, process) => total + getRssMb(process.pid!), 0);
     latencies.sort((a, b) => a - b);
     return {
       phase: label,
@@ -473,7 +510,7 @@ try {
     );
     const latencies: number[] = [];
     const walBefore = await walLsnBytes();
-    const rssBefore = getRssMb(gw1.pid!) + getRssMb(gw2.pid!);
+    const rssBefore = gateways.reduce((total, process) => total + getRssMb(process.pid!), 0);
     const started = performance.now();
     let cursor = 0;
 
@@ -498,7 +535,7 @@ try {
     await Promise.all(Array.from({ length: concurrency }, () => worker()));
     const elapsedSec = (performance.now() - started) / 1000;
     const walAfter = await walLsnBytes();
-    const rssAfter = getRssMb(gw1.pid!) + getRssMb(gw2.pid!);
+    const rssAfter = gateways.reduce((total, process) => total + getRssMb(process.pid!), 0);
     latencies.sort((a, b) => a - b);
     return {
       phase: label,
@@ -519,6 +556,27 @@ try {
     };
   }
 
+  async function runLimitPhases() {
+    if (warmLimitSockets) {
+      const target = Math.ceil(Math.max(...limitConcurrency) / ports.length);
+      await Promise.all(ports.map((port) => warmHttpConnections(agent, port, target)));
+    }
+    const results: Awaited<ReturnType<typeof runTimedLoad>>[] = [];
+    for (const concurrency of limitConcurrency) {
+      results.push(
+        await runTimedLoad(
+          `2node_limit_8s_json_${concurrency}c`,
+          "bprod-fast",
+          keys,
+          concurrency,
+          8,
+          false,
+        ),
+      );
+    }
+    return results;
+  }
+
   try {
     const warmup = await runFixedCountLoad("warmup", "bprod-fast", keys, 32, 200, false);
 
@@ -526,102 +584,184 @@ try {
       ? new Bun.RedisClient(redisUrl!, { connectionTimeout: 300, autoReconnect: false })
       : undefined;
     const burstAgent = isSseBurstFresh ? new Agent(agentOptions) : agent;
-    const results = redis
-      ? await runSseBurst({
-          agent: burstAgent,
-          freshOnly: isSseBurstFresh,
-          ports: [gwPort1, gwPort2],
-          keys,
-          db,
-          redis,
-          quotaPattern: "stg_bench:rl:conc:*",
-          mockPort,
-          mockToken: baseEnv.MOCK_CONTROL_TOKEN!,
-          readGatewayRss: () => getRssMb(gw1.pid!) + getRssMb(gw2.pid!),
-        }).finally(() => {
-          redis.close();
-          if (burstAgent !== agent) burstAgent.destroy();
-        })
-      : [
-          await runTimedLoad(
-            `2node_sustained_${durationSec}s_json_128c`,
-            "bprod-fast",
+    if (mixedPlugins) {
+      const target = Math.ceil(soakConcurrency / ports.length);
+      await Promise.all(ports.map((port) => warmHttpConnections(agent, port, target)));
+    }
+    const mixedWalBefore = mixedPlugins ? await walLsnBytes() : null;
+    const results = mixedPlugins
+      ? [
+          await runMixedSoak({
+            agent,
+            ports,
             keys,
-            128,
-            durationSec,
-            false,
-          ),
-          await runTimedLoad(
-            `2node_sustained_${durationSec}s_json_256c`,
-            "bprod-fast",
+            seconds: soakSeconds,
+            targetRps: soakRps,
+            concurrency: soakConcurrency,
+            processes: {
+              client: process.pid,
+              mock: mockProc.pid!,
+              worker: workerProc.pid!,
+              ...(withRedis ? { redis: procs[0]!.pid! } : {}),
+              ...Object.fromEntries(
+                gateways.map((gateway, index) => [`gateway_${index + 1}`, gateway.pid!]),
+              ),
+            },
+          }),
+        ]
+      : redis
+        ? await runSseBurst({
+            agent: burstAgent,
+            freshOnly: isSseBurstFresh,
+            ports: [gwPort1, gwPort2],
             keys,
-            256,
-            durationSec,
-            false,
-          ),
-          await runTimedLoad(
-            `2node_sustained_${durationSec}s_sse_128c`,
-            "bprod-fast",
-            keys,
-            128,
-            durationSec,
-            true,
-          ),
-          await runTimedLoad(
-            `2node_hot_wallet_${hotWalletSec}s_128c`,
-            "bprod-fast",
-            [keys[0]!],
-            128,
-            hotWalletSec,
-            false,
-          ),
-          await runFixedCountLoad(
-            `2node_${longStreamCount}_concurrent_${longStreamMs / 1000}s_sse_streams`,
-            "bprod-long",
-            keys,
-            longStreamCount,
-            longStreamCount,
-            true,
-          ),
-          await runFixedCountLoad(
-            "2node_live_failover_503_to_backup_64c",
-            "bprod-failover",
-            keys,
-            64,
-            1000,
-            false,
-          ),
-        ];
+            db,
+            redis,
+            quotaPattern: "stg_bench:rl:conc:*",
+            mockPort,
+            mockToken: baseEnv.MOCK_CONTROL_TOKEN!,
+            readGatewayRss: () =>
+              gateways.reduce((total, process) => total + getRssMb(process.pid!), 0),
+          }).finally(() => {
+            redis.close();
+            if (burstAgent !== agent) burstAgent.destroy();
+          })
+        : isLimit
+          ? await runLimitPhases()
+          : [
+              await runTimedLoad(
+                `2node_sustained_${durationSec}s_json_128c`,
+                "bprod-fast",
+                keys,
+                128,
+                durationSec,
+                false,
+              ),
+              await runTimedLoad(
+                `2node_sustained_${durationSec}s_json_256c`,
+                "bprod-fast",
+                keys,
+                256,
+                durationSec,
+                false,
+              ),
+              await runTimedLoad(
+                `2node_sustained_${durationSec}s_sse_128c`,
+                "bprod-fast",
+                keys,
+                128,
+                durationSec,
+                true,
+              ),
+              await runTimedLoad(
+                `2node_hot_wallet_${hotWalletSec}s_128c`,
+                "bprod-fast",
+                [keys[0]!],
+                128,
+                hotWalletSec,
+                false,
+              ),
+              await runFixedCountLoad(
+                `2node_${longStreamCount}_concurrent_${longStreamMs / 1000}s_sse_streams`,
+                "bprod-long",
+                keys,
+                longStreamCount,
+                longStreamCount,
+                true,
+              ),
+              await runFixedCountLoad(
+                "2node_live_failover_503_to_backup_64c",
+                "bprod-failover",
+                keys,
+                64,
+                1000,
+                false,
+              ),
+            ];
 
+    const mixedWalBytes =
+      mixedWalBefore === null ? null : ((await walLsnBytes()) - mixedWalBefore).toString();
+    const idleStarted = performance.now();
+    const leaseDrainBudgetMs = 5_000;
     await Bun.sleep(600);
-    const m1 = await (await fetch(`http://127.0.0.1:${gwPort1}/metrics`)).text();
-    const m2 = await (await fetch(`http://127.0.0.1:${gwPort2}/metrics`)).text();
-    const inFlight1 = Number(/gateway_in_flight (\d+)/.exec(m1)?.[1] ?? -1);
-    const inFlight2 = Number(/gateway_in_flight (\d+)/.exec(m2)?.[1] ?? -1);
-    const failovers1 = Number(/gateway_failovers_total (\d+)/.exec(m1)?.[1] ?? 0);
-    const failovers2 = Number(/gateway_failovers_total (\d+)/.exec(m2)?.[1] ?? 0);
-    const activeLeases = Number(
-      (
-        await db`
+    const metrics = await Promise.all(
+      ports.map(async (port) => (await fetch(`http://127.0.0.1:${port}/metrics`)).text()),
+    );
+    const nodeMetrics = (pattern: RegExp, fallback: number) =>
+      Object.fromEntries(
+        metrics.map((body, index) => [
+          `node${index + 1}`,
+          Number(pattern.exec(body)?.[1] ?? fallback),
+        ]),
+      );
+    const inFlight = nodeMetrics(/gateway_in_flight (\d+)/, -1);
+    const failovers = nodeMetrics(/gateway_failovers_total (\d+)/, 0);
+    async function countActiveLeases() {
+      const [row] = await db<{ n: number }[]>`
           SELECT (
             (SELECT count(*) FROM public.wallet_leases WHERE state = 'ACTIVE') +
             (SELECT count(*) FROM public.supplier_leases WHERE state = 'ACTIVE')
           )::int AS n
-        `
-      )[0]!.n,
-    );
+        `;
+      return row!.n;
+    }
+    const firstLeaseProbe = await countActiveLeases();
+    let activeLeases = firstLeaseProbe;
+    while (activeLeases > 0 && performance.now() - idleStarted < leaseDrainBudgetMs) {
+      await Bun.sleep(100);
+      activeLeases = await countActiveLeases();
+    }
+    const idleElapsedMs = Number((performance.now() - idleStarted).toFixed(2));
     const pgSettings = await db`
       SELECT name, setting FROM pg_settings
       WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes')
       ORDER BY name
     `;
-    const [charges] = await db`SELECT count(*) AS total, count(DISTINCT request_id) AS unique,
+    const chargeCounts = (
+      reader: SQL,
+    ) => reader`SELECT count(*) AS total, count(DISTINCT request_id) AS unique,
         count(*) FILTER (WHERE outcome = 'SETTLED') AS settled
       FROM public.billing_charges`;
-    const totalCharges = Number(charges!.total);
-    const uniqueCharges = Number(charges!.unique);
-    const totalSettledCharges = Number(charges!.settled);
-    const audit = await callInternal("GET", "/internal/v1/audit/conservation");
+    const verified = mixedPlugins
+      ? await db.begin(async (tx) => {
+          await tx`SET LOCAL statement_timeout = '90s'`;
+          const counts = await chargeCounts(tx);
+          const audit = await auditConservation(tx);
+          const exact = await verifyMixedCharges(tx, mixedPlugins);
+          const balances = await verifyMixedBalances(tx);
+          const [storage] = await tx`
+            SELECT pg_database_size(current_database())::text AS db_bytes, blks_read::text,
+              blks_hit::text, temp_bytes::text, xact_commit::text
+            FROM pg_stat_database WHERE datname = current_database()
+          `;
+          return { counts, audit, exact, balances, storage };
+        })
+      : {
+          counts: await chargeCounts(db),
+          audit: await callInternal("GET", "/internal/v1/audit/conservation"),
+          exact: null,
+          balances: null,
+          storage: null,
+        };
+    const charges = verified.counts[0]!;
+    const totalCharges = Number(charges.total);
+    const uniqueCharges = Number(charges.unique);
+    const totalSettledCharges = Number(charges.settled);
+    const audit = verified.audit;
+    const mixedReport = results.find((result) => "lanes" in result);
+    const mixedChargeCounts = new Map(
+      mixedReport?.lanes.map((lane) => [`mixed-${lane.name}`, lane.completed]),
+    );
+    const mixedIncorrect =
+      verified.exact?.some(
+        (row: MixedChargeCheck) =>
+          row.wrong_atoms_or_usage !== 0 ||
+          row.wrong_plugin !== 0 ||
+          row.charged !==
+            (row.model === "bprod-fast"
+              ? warmup.completed
+              : mixedChargeCounts.get(String(row.model))),
+      ) ?? false;
     const allPhases = [warmup, ...results];
     const successfulResponses = allPhases.reduce((count, phase) => count + phase.completed, 0);
     const totalErrors = allPhases.reduce((count, phase) => count + phase.errors, 0);
@@ -630,15 +770,23 @@ try {
       JSON.stringify(
         {
           bun_version: Bun.version,
-          mode: isSseBurstFresh
-            ? "sse-burst-fresh"
-            : isSseBurst
-              ? "sse-burst"
-              : isStress
-                ? "stress"
-                : "standard",
-          topology:
-            "2x standalone dist/gateway + 1x standalone dist/worker + 1x Redis 7.4 + 1x standalone dist/mock-providers + separate load client + PG 17",
+          mode: isMixed
+            ? "mixed-soak"
+            : isSseBurstFresh
+              ? "sse-burst-fresh"
+              : isSseBurst
+                ? "sse-burst"
+                : isLimit
+                  ? "limit"
+                  : isStress
+                    ? "stress"
+                    : "standard",
+          topology: `${gatewayNodes}x standalone dist/gateway + 1x standalone dist/worker + ${withRedis ? "1x Redis 7.4 + " : ""}1x standalone dist/mock-providers + separate load client + PG 17`,
+          micro_batch: {
+            window_ms: Number(baseEnv.MICRO_BATCH_WINDOW_MS),
+            max_size: Number(baseEnv.MICRO_BATCH_MAX_SIZE),
+          },
+          ...(isLimit ? { connection_mode: warmLimitSockets ? "warm" : "legacy" } : {}),
           pg_durability: Object.fromEntries(
             pgSettings.map((r: Record<string, unknown>) => [String(r.name), String(r.setting)]),
           ),
@@ -647,9 +795,21 @@ try {
           total_settled_charges: totalSettledCharges,
           duplicate_request_charges: totalCharges - uniqueCharges,
           active_leases_after_idle: activeLeases,
+          lease_drain: {
+            active_at_first_probe: firstLeaseProbe,
+            elapsed_ms: idleElapsedMs,
+            budget_ms: leaseDrainBudgetMs,
+          },
           results,
-          failovers_executed: { node1: failovers1, node2: failovers2 },
-          post_drain_in_flight: { node1: inFlight1, node2: inFlight2 },
+          ...(mixedPlugins
+            ? {
+                exact_ledger: verified.exact,
+                exact_balances: verified.balances,
+                storage: { ...verified.storage, wal_bytes: mixedWalBytes },
+              }
+            : {}),
+          failovers_executed: failovers,
+          post_drain_in_flight: inFlight,
           conservation: audit,
         },
         null,
@@ -665,8 +825,11 @@ try {
       !audit.ok ||
       audit.open_holds !== 0 ||
       audit.unknown_holds !== 0 ||
-      inFlight1 !== 0 ||
-      inFlight2 !== 0 ||
+      mixedIncorrect ||
+      (verified.balances && Object.values(verified.balances).some((n) => n !== 0)) ||
+      (mixedReport && mixedReport.last_dispatch_ms > soakSeconds * 1000 + 50) ||
+      idleElapsedMs > leaseDrainBudgetMs ||
+      Object.values(inFlight).some((count) => count !== 0) ||
       activeLeases !== 0
     ) {
       throw new Error("Production stress benchmark invariant check failed");

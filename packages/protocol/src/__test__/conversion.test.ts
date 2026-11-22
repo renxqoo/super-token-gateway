@@ -1,5 +1,13 @@
 import { expect, test } from "bun:test";
-import { StreamTranslator, decodeRequest, encodeRequest, encodeResponse } from "../index.ts";
+import {
+  FIELD_CONVERSION_POLICY,
+  StreamTranslator,
+  decodeRequest,
+  decodeResponse,
+  encodeRequest,
+  encodeResponse,
+  formatProtocolError,
+} from "../index.ts";
 import type { Protocol } from "@gateway/kernel";
 
 const convert = (body: Record<string, unknown>, source: Protocol, target: Protocol) =>
@@ -221,4 +229,357 @@ test("tool-only converted streams use contiguous stable target block identities"
     }
     expect(output).toContain("北京");
   }
+});
+
+test("cross-protocol reasoning parts convert cleanly in responses and streams without 502", () => {
+  const fromChat = decodeResponse(
+    {
+      id: "chat_1",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            reasoning_content: "step by step",
+            content: "42",
+          },
+          finish_reason: "stop",
+        },
+      ],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    },
+    "chat",
+    "openai",
+  );
+  expect(fromChat.parts).toEqual([
+    { type: "reasoning", text: "step by step" },
+    { type: "text", text: "42" },
+  ]);
+
+  const toMessages = encodeResponse(fromChat, "messages", "m1");
+  expect(toMessages.content).toEqual([
+    { type: "thinking", thinking: "step by step" },
+    { type: "text", text: "42" },
+  ]);
+
+  const toResponses = encodeResponse(fromChat, "responses", "m1");
+  expect(toResponses.output).toEqual([
+    { id: "rs_0", type: "reasoning", summary: [{ type: "summary_text", text: "step by step" }] },
+    {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "42", annotations: [] }],
+    },
+  ]);
+
+  const toGemini = encodeResponse(fromChat, "gemini", "m1");
+  expect((toGemini.candidates as { content: { parts: unknown[] } }[])[0]!.content.parts).toEqual([
+    { text: "step by step", thought: true },
+    { text: "42" },
+  ]);
+
+  const roundTripMessages = decodeResponse(toMessages, "messages", "anthropic");
+  expect(encodeResponse(roundTripMessages, "chat", "m1")).toMatchObject({
+    choices: [{ message: { reasoning_content: "step by step", content: "42" } }],
+  });
+
+  const roundTripGemini = decodeResponse(toGemini, "gemini", "gemini");
+  expect(encodeResponse(roundTripGemini, "chat", "m1")).toMatchObject({
+    choices: [{ message: { reasoning_content: "step by step", content: "42" } }],
+  });
+
+  const roundTripResponses = decodeResponse(toResponses, "responses", "openai");
+  expect(encodeResponse(roundTripResponses, "chat", "m1")).toMatchObject({
+    choices: [{ message: { reasoning_content: "step by step", content: "42" } }],
+  });
+
+  for (const target of ["messages", "responses", "gemini"] as const) {
+    const translator = new StreamTranslator("chat", target, "openai", "m1");
+    const chunks = [
+      ...translator.consume({
+        event: "message",
+        id: "",
+        wire: "",
+        data: JSON.stringify({
+          choices: [{ index: 0, delta: { reasoning_content: "think " }, finish_reason: null }],
+        }),
+      }).chunks,
+      ...translator.consume({
+        event: "message",
+        id: "",
+        wire: "",
+        data: JSON.stringify({
+          choices: [{ index: 0, delta: { content: "answer" }, finish_reason: null }],
+        }),
+      }).chunks,
+      ...translator.consume({
+        event: "message",
+        id: "",
+        wire: "",
+        data: JSON.stringify({
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+        }),
+      }).chunks,
+      ...translator.consume({ event: "message", id: "", wire: "", data: "[DONE]" }).chunks,
+      ...translator.finalize(),
+    ];
+    const wire = new TextDecoder().decode(Buffer.concat(chunks));
+    expect(wire).toContain("think ");
+    expect(wire).toContain("answer");
+    if (target === "messages") expect(wire).toContain('"thinking_delta"');
+    if (target === "responses") expect(wire).toContain("response.reasoning_summary_text.delta");
+    if (target === "gemini") expect(wire).toContain('"thought":true');
+  }
+
+  const fromAnthropicHistory = decodeRequest(
+    {
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "private thought" },
+            { type: "text", text: "hello" },
+          ],
+        },
+        { role: "user", content: "next" },
+      ],
+    },
+    "messages",
+  );
+  const encodedChat = encodeRequest(fromAnthropicHistory, "chat", "m1");
+  expect(JSON.stringify(encodedChat)).not.toContain("private thought");
+  expect(JSON.stringify(encodedChat)).toContain("hello");
+  const encodedAnthropicUnsigned = encodeRequest(fromAnthropicHistory, "messages", "m1");
+  expect(JSON.stringify(encodedAnthropicUnsigned)).not.toContain("private thought");
+});
+
+test("field conversion policy table supports compat drop_hint, bidirectional parallel_tool_calls mapping, and strict reject", () => {
+  expect(
+    FIELD_CONVERSION_POLICY.some((e) => e.field === "cache_control" && e.action === "drop_hint"),
+  ).toBe(true);
+  expect(FIELD_CONVERSION_POLICY.some((e) => e.field === "logprobs" && e.action === "reject")).toBe(
+    true,
+  );
+
+  const dropped: string[] = [];
+  const compatReq = decodeRequest(
+    {
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }],
+        },
+      ],
+      tools: [
+        {
+          name: "lookup",
+          input_schema: { type: "object" },
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+      top_k: 40,
+      metadata: { user_id: "u1" },
+      service_tier: "auto",
+    },
+    "messages",
+    {
+      mode: "compat",
+      onFieldDropped: (field) => dropped.push(field),
+    },
+  );
+  expect(compatReq.parallelToolCalls).toBe(false);
+  expect(compatReq.topK).toBe(40);
+  expect(dropped).toContain("metadata");
+  expect(dropped).toContain("service_tier");
+  expect(dropped).toContain("content.cache_control");
+  expect(dropped).toContain("tools.cache_control");
+
+  const finalDropped: string[] = [];
+  const chatOut = encodeRequest(compatReq, "chat", "gpt-4o", {
+    mode: "compat",
+    droppedFields: finalDropped,
+    onFieldDropped: (field) => dropped.push(field),
+  });
+  expect(chatOut.parallel_tool_calls).toBe(false);
+  expect(finalDropped).toContain("top_k");
+  expect(finalDropped).toContain("metadata");
+
+  const rejected: string[] = [];
+  expect(() =>
+    decodeRequest({ messages: [{ role: "user", content: "x" }], logprobs: true }, "chat", {
+      mode: "compat",
+      onFieldRejected: (field) => rejected.push(field),
+    }),
+  ).toThrow("logprobs");
+  expect(rejected).toEqual(["logprobs"]);
+
+  expect(formatProtocolError("messages", 429, "rate_limit_rpm", "Too many", "req-1")).toEqual({
+    type: "error",
+    error: {
+      type: "rate_limit_error",
+      code: "rate_limit_rpm",
+      message: "Too many",
+      request_id: "req-1",
+    },
+  });
+  expect(formatProtocolError("gemini", 503, "no_route", "No channel", "req-2")).toEqual({
+    error: {
+      code: 503,
+      status: "UNAVAILABLE",
+      gateway_code: "no_route",
+      message: "No channel",
+      request_id: "req-2",
+    },
+  });
+  expect(
+    formatProtocolError("chat", 400, "content_blocked", "Blocked", "req-3", { rule_code: "R1" }),
+  ).toEqual({
+    error: {
+      type: "content_policy_violation",
+      code: "content_blocked",
+      message: "Blocked",
+      request_id: "req-3",
+      rule_code: "R1",
+    },
+  });
+
+  const geminiDropped: string[] = [];
+  const geminiCompat = decodeRequest(
+    {
+      contents: [
+        {
+          role: "model",
+          parts: [
+            { text: "visible answer", thoughtSignature: "sig_1" },
+            {
+              functionCall: { id: "c1", name: "lookup", args: { q: "x" } },
+              thoughtSignature: "sig_2",
+            },
+            { text: "plain", thought: false },
+          ],
+        },
+      ],
+    },
+    "gemini",
+    { mode: "compat", onFieldDropped: (field) => geminiDropped.push(field) },
+  );
+  expect(geminiDropped).toEqual(["part.thoughtSignature"]);
+  expect(geminiCompat.messages[0]!.parts).toEqual([
+    { type: "text", text: "visible answer" },
+    { type: "call", id: "c1", name: "lookup", arguments: '{"q":"x"}' },
+    { type: "text", text: "plain" },
+  ]);
+
+  const respEmptySummary = decodeResponse(
+    {
+      id: "resp_r1",
+      status: "completed",
+      output: [
+        {
+          id: "rs_0",
+          type: "reasoning",
+          status: "completed",
+          summary: [],
+          content: [{ type: "reasoning_text", text: "deep thought" }],
+        },
+        {
+          id: "msg_1",
+          type: "message",
+          content: [{ type: "output_text", text: "done" }],
+        },
+      ],
+    },
+    "responses",
+    "openai",
+  );
+  expect(respEmptySummary.parts).toEqual([
+    { type: "reasoning", text: "deep thought" },
+    { type: "text", text: "done" },
+  ]);
+
+  const respRoundTripReq = decodeRequest(
+    {
+      input: [
+        {
+          id: "rs_0",
+          type: "reasoning",
+          status: "completed",
+          summary: [],
+          content: [{ type: "reasoning_text", text: "history thought" }],
+        },
+        { type: "message", role: "user", content: "follow up" },
+      ],
+    },
+    "responses",
+  );
+  expect(respRoundTripReq.messages[0]!.parts).toEqual([
+    { type: "reasoning", text: "history thought" },
+  ]);
+
+  const noToolsMsg = encodeRequest(
+    decodeRequest(
+      { messages: [{ role: "user", content: "hi" }], parallel_tool_calls: false },
+      "chat",
+    ),
+    "messages",
+    "claude",
+  );
+  expect(noToolsMsg.tool_choice).toBeUndefined();
+  const noneChoiceMsg = encodeRequest(
+    decodeRequest(
+      {
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
+        tool_choice: "none",
+        parallel_tool_calls: false,
+      },
+      "chat",
+    ),
+    "messages",
+    "claude",
+  );
+  expect(noneChoiceMsg.tool_choice).toEqual({ type: "none" });
+
+  const interleaved = new StreamTranslator("chat", "messages", "openai", "m1");
+  const interChunks = [
+    ...interleaved.consume({
+      event: "message",
+      id: "",
+      wire: "",
+      data: JSON.stringify({
+        choices: [{ index: 0, delta: { reasoning_content: "r1" }, finish_reason: null }],
+      }),
+    }).chunks,
+    ...interleaved.consume({
+      event: "message",
+      id: "",
+      wire: "",
+      data: JSON.stringify({
+        choices: [{ index: 0, delta: { content: "t1" }, finish_reason: null }],
+      }),
+    }).chunks,
+    ...interleaved.consume({
+      event: "message",
+      id: "",
+      wire: "",
+      data: JSON.stringify({
+        choices: [{ index: 0, delta: { reasoning_content: "r2" }, finish_reason: null }],
+      }),
+    }).chunks,
+    ...interleaved.consume({
+      event: "message",
+      id: "",
+      wire: "",
+      data: JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+    }).chunks,
+    ...interleaved.consume({ event: "message", id: "", wire: "", data: "[DONE]" }).chunks,
+    ...interleaved.finalize(),
+  ];
+  const interWire = new TextDecoder().decode(Buffer.concat(interChunks));
+  expect(interWire).toContain('"content_block_start","index":2,"content_block":{"type":"thinking"');
 });

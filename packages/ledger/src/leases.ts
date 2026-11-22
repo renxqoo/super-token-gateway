@@ -27,6 +27,7 @@ export type ActiveWalletLease = {
 };
 
 export type ActiveSupplierLease = {
+  lane: number;
   leaseId: string;
   accountId: string;
   currency: string;
@@ -206,7 +207,7 @@ export async function closeWalletLease(
           WHERE id = ${leaseId}
             AND state = 'ACTIVE'
             AND (NOT ${expiredOnly}::boolean OR expires_at <= clock_timestamp())
-          FOR NO KEY UPDATE
+          FOR UPDATE
         `;
       if (!wlRows.length) return false;
       const wl = wlRows[0]!;
@@ -338,7 +339,7 @@ export async function closeSupplierLease(
           WHERE id = ${leaseId}
             AND state = 'ACTIVE'
             AND (NOT ${expiredOnly}::boolean OR expires_at <= clock_timestamp())
-          FOR NO KEY UPDATE
+          FOR UPDATE
         `;
       if (!slRows.length) return false;
       const sl = slRows[0]!;

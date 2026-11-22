@@ -22,6 +22,13 @@ describe("precise cost and usage evidence", () => {
       stringifyExact(parseProviderJson('{"values":[9007199254740992]}')),
     );
   });
+  test("a rewritten output bound cannot resurrect the original numeric literal in a nested body", () => {
+    const { body } = parseProviderJson(
+      '{"body":{"max_tokens":9007199254740993,"reference":9007199254740995}}',
+    ) as { body: Record<string, unknown> };
+    body.max_tokens = 32;
+    expect(stringifyExact(body)).toBe('{"max_tokens":32,"reference":9007199254740995}');
+  });
   test("sums rational dimensions before a single rounding", () => {
     expect(
       calculateCost(

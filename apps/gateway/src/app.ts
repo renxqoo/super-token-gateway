@@ -5,16 +5,19 @@ import {
   assertServiceRole,
   createCatalogRepository,
   createDatabase,
+  createGatewayConfigNodeRepository,
   createLedgerEngine,
   createLedgerQueries,
+  type ConfigSnapshot,
 } from "@gateway/ledger";
 import {
-  createBunWasmExecutor,
+  createWasmtimeExecutor,
   PluginPipelineEngine,
   resolveWasmtimeLibraryPath,
   WebhookPluginExecutor,
   type WasmRuntimeExecutor,
 } from "@gateway/plugin-engine";
+import { formatProtocolError } from "@gateway/protocol";
 import {
   ClusterCoordinator,
   createTransport,
@@ -33,6 +36,8 @@ export type GatewayRuntimeOptions = {
   config: GatewayConfig;
   db?: SQL;
   wasmExecutor?: WasmRuntimeExecutor | null;
+  contentWasmExecutor?: WasmRuntimeExecutor | null;
+  providerWasmExecutor?: WasmRuntimeExecutor | null;
   webhookExecutor?: WebhookPluginExecutor;
   routerOptions?: ConstructorParameters<typeof SmartRouter>[0];
 };
@@ -44,12 +49,85 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   }
   const ownsDb = !options.db;
   const db = options.db ?? createDatabase(config.databaseUrl, config.dbMaxConnections);
+  const snapshotDb = ownsDb
+    ? createDatabase(config.databaseUrl, config.snapshotDbMaxConnections ?? 2)
+    : db;
   const controlDb = config.internalDatabaseUrl
     ? createDatabase(config.internalDatabaseUrl, config.internalDbMaxConnections ?? 4)
     : db;
-  const catalog = createCatalogRepository(db);
+  const catalog = createCatalogRepository(snapshotDb);
   const queries = createLedgerQueries(db);
-  const snapshot = new SnapshotManager(catalog, config.encryptionKey, config.snapshotPollMs);
+  const nodeId = crypto.randomUUID();
+  const metrics = new GatewayMetrics(config.accessLog ?? false);
+
+  const transport = createTransport(Math.max(1024, Math.min(16384, config.maxInFlight)));
+  const vertexTokens = new VertexTokens((url, init) =>
+    transport.fetch(url, init, config.allowPrivateUpstreams, config.privateUpstreamCidrs),
+  );
+
+  const resolvedLib = resolveWasmtimeLibraryPath(config.wasmLibPath);
+  let contentWasmExecutor: WasmRuntimeExecutor | null;
+  let providerWasmExecutor: WasmRuntimeExecutor | null;
+  if (options.contentWasmExecutor !== undefined || options.providerWasmExecutor !== undefined) {
+    contentWasmExecutor =
+      options.contentWasmExecutor !== undefined
+        ? options.contentWasmExecutor
+        : (options.wasmExecutor ?? null);
+    providerWasmExecutor =
+      options.providerWasmExecutor !== undefined
+        ? options.providerWasmExecutor
+        : (options.wasmExecutor ?? null);
+  } else if (options.wasmExecutor !== undefined) {
+    contentWasmExecutor = options.wasmExecutor;
+    providerWasmExecutor = options.wasmExecutor;
+  } else {
+    contentWasmExecutor = createWasmtimeExecutor({
+      poolSize: config.contentWasmPoolSize ?? 4,
+      ...(resolvedLib ? { wasmtimeLibraryPath: resolvedLib } : {}),
+    });
+    providerWasmExecutor = createWasmtimeExecutor({
+      poolSize: config.providerWasmPoolSize ?? 4,
+      ...(resolvedLib ? { wasmtimeLibraryPath: resolvedLib } : {}),
+    });
+  }
+
+  function warmupSnapshotPlugins(snap: ConfigSnapshot): void {
+    for (const plugin of snap.plugins.values()) {
+      if (plugin.kind !== "WASM" || !plugin.wasm_bytes) continue;
+      if (!snapshot.isPluginIntegrityVerified(plugin.id)) continue;
+      const target = plugin.capability === "PROVIDER" ? providerWasmExecutor : contentWasmExecutor;
+      if (!target) continue;
+      try {
+        target.compile(plugin.id, plugin.digest, plugin.wasm_bytes);
+      } catch {
+        void 0;
+      }
+    }
+  }
+
+  const snapshot = new SnapshotManager(
+    catalog,
+    config.encryptionKey,
+    config.snapshotPollMs,
+    {
+      id: nodeId,
+      repository: createGatewayConfigNodeRepository(snapshotDb),
+    },
+    {
+      ...(config.pluginSigningPublicKeyPem
+        ? { signingPublicKeyPem: config.pluginSigningPublicKeyPem }
+        : {}),
+      onDivergence() {
+        metrics.recordSnapshotDiverged();
+      },
+      onIntegrityFailure() {
+        metrics.recordPluginIntegrityFailure();
+      },
+      onSnapshotApplied(snap) {
+        warmupSnapshotPlugins(snap);
+      },
+    },
+  );
 
   let clusterRef: ClusterCoordinator | null = null;
   const externalOnStateChange = options.routerOptions?.onStateChange;
@@ -67,6 +145,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   });
 
   const cluster = new ClusterCoordinator({
+    nodeId,
     ...(config.redisUrl ? { redisUrl: config.redisUrl } : {}),
     ...(config.redisNamespace ? { namespace: config.redisNamespace } : {}),
     ...(config.redisSentinel ? { sentinel: config.redisSentinel } : {}),
@@ -92,7 +171,6 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   });
   clusterRef = cluster;
 
-  const metrics = new GatewayMetrics(config.accessLog ?? false);
   const ledger = createLedgerEngine(db, {
     batchWindowMs: config.microBatchWindowMs,
     maxBatchSize: config.microBatchMaxSize,
@@ -103,32 +181,24 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     },
   });
 
-  const transport = createTransport(Math.max(1024, Math.min(16384, config.maxInFlight)));
-  const vertexTokens = new VertexTokens((url, init) =>
-    transport.fetch(url, init, config.allowPrivateUpstreams, config.privateUpstreamCidrs),
-  );
-  let wasmExecutor: WasmRuntimeExecutor | null = null;
-  if (options.wasmExecutor !== undefined) {
-    wasmExecutor = options.wasmExecutor;
-  } else {
-    const resolvedLib = resolveWasmtimeLibraryPath(config.wasmLibPath);
-    wasmExecutor = createBunWasmExecutor(
-      resolvedLib ? { wasmtimeLibraryPath: resolvedLib } : undefined,
-    );
-  }
+  const webhookExecutor =
+    options.webhookExecutor ??
+    new WebhookPluginExecutor({
+      fetchImpl: (rawUrl, init) =>
+        transport.fetch(
+          new URL(rawUrl),
+          init,
+          config.allowPrivateUpstreams,
+          config.privateUpstreamCidrs,
+        ),
+    });
+
   const pluginEngine = new PluginPipelineEngine({
-    wasmExecutor,
-    webhookExecutor:
-      options.webhookExecutor ??
-      new WebhookPluginExecutor({
-        fetchImpl: (rawUrl, init) =>
-          transport.fetch(
-            new URL(rawUrl),
-            init,
-            config.allowPrivateUpstreams,
-            config.privateUpstreamCidrs,
-          ),
-      }),
+    wasmExecutor: contentWasmExecutor,
+    webhookExecutor,
+    onObservation(obs) {
+      metrics.observePlugin(obs);
+    },
     ...(config.pluginSigningPublicKeyPem
       ? { signingPublicKeyPem: config.pluginSigningPublicKeyPem }
       : {}),
@@ -144,7 +214,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     transport,
     vertexTokens,
     pluginEngine,
-    wasmExecutor,
+    wasmExecutor: providerWasmExecutor,
     lifecycle,
     metrics,
   };
@@ -154,6 +224,9 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   publicApp.get("/livez", (c) => c.json({ status: "ok" }));
 
   async function readiness(): Promise<string> {
+    if (snapshot.isDiverged()) {
+      return "config_diverged";
+    }
     if (!lifecycle.accepting || !snapshot.isFresh()) {
       return "not_ready";
     }
@@ -176,6 +249,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       status,
       epoch: snapshot.get().epoch,
       redis_connected: cluster.isRedisConnected(),
+      wasm_runtime: contentWasmExecutor?.runtimeKind ?? providerWasmExecutor?.runtimeKind ?? "none",
     });
   });
 
@@ -190,6 +264,14 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       redisRequired: Boolean(config.redisUrl),
       ready: (await readiness()) === "ready",
       snapshotVerifiedAt: snapshot.verifiedAtSeconds(),
+      snapshotDiverged: snapshot.isDiverged(),
+      wasmRuntime: contentWasmExecutor?.runtimeKind ?? providerWasmExecutor?.runtimeKind ?? "none",
+      contentWasmStats: contentWasmExecutor?.stats?.() ?? null,
+      providerWasmStats:
+        providerWasmExecutor && providerWasmExecutor !== contentWasmExecutor
+          ? (providerWasmExecutor.stats?.() ?? null)
+          : null,
+      webhookStats: webhookExecutor.stats?.() ?? null,
     });
     return new Response(text, {
       headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
@@ -267,7 +349,13 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     const colon = action.lastIndexOf(":");
     if (colon <= 0) {
       return c.json(
-        { error: { code: "invalid_request", message: "Invalid Gemini action path" } },
+        formatProtocolError(
+          "gemini",
+          400,
+          "invalid_request",
+          "Invalid Gemini action path",
+          crypto.randomUUID(),
+        ),
         400,
       );
     }
@@ -295,14 +383,14 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       metrics.adminAuditFailures++;
     },
     config,
-    catalog: controlDb === db ? catalog : createCatalogRepository(controlDb),
+    catalog: controlDb === snapshotDb ? catalog : createCatalogRepository(controlDb),
     ledger: controlLedger,
     queries: controlDb === db ? queries : createLedgerQueries(controlDb),
     snapshot,
     router,
     cluster,
     pluginEngine,
-    wasmExecutor,
+    wasmExecutor: providerWasmExecutor,
   });
 
   const worker =
@@ -334,6 +422,16 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     worker,
 
     async start(): Promise<void> {
+      const checks: Promise<void>[] = [];
+      if (contentWasmExecutor?.selfCheck) checks.push(contentWasmExecutor.selfCheck());
+      if (
+        providerWasmExecutor &&
+        providerWasmExecutor !== contentWasmExecutor &&
+        providerWasmExecutor.selfCheck
+      ) {
+        checks.push(providerWasmExecutor.selfCheck());
+      }
+      if (checks.length > 0) await Promise.all(checks);
       await assertSchemaVersion(db);
       if (controlDb !== db) await assertSchemaVersion(controlDb);
       if (config.requireDbRoles) {
@@ -344,14 +442,14 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       }
       await snapshot.load();
       await cluster.start();
-      snapshot.start();
+      await snapshot.start();
       if (worker) await worker.start();
     },
 
     async close(drainMs = 5000): Promise<void> {
       const draining = lifecycle.drain(drainMs);
-      await snapshot.stop();
       await draining;
+      await snapshot.stop();
       await ledger.drain();
       if (controlDb !== db) {
         await controlLedger.drain();
@@ -360,7 +458,11 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       if (worker) await worker.stop();
       await cluster.close();
       await transport.close();
-      wasmExecutor?.close();
+      contentWasmExecutor?.close();
+      if (providerWasmExecutor && providerWasmExecutor !== contentWasmExecutor) {
+        providerWasmExecutor.close();
+      }
+      if (snapshotDb !== db) await snapshotDb.close();
       if (ownsDb) await db.close();
     },
   };

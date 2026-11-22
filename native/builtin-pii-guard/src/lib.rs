@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::slice;
 
 const PASS_JSON: &str = r#"{"action":"PASS"}"#;
@@ -38,17 +39,34 @@ fn decode_hex4(b: &[u8], pos: usize) -> Option<u16> {
     Some(val)
 }
 
-fn parse_json_string(b: &[u8], start_quote: usize) -> Option<(String, usize)> {
+fn parse_json_string(b: &[u8], start_quote: usize) -> Option<(Cow<'_, str>, usize)> {
     if start_quote >= b.len() || b[start_quote] != b'"' {
         return None;
     }
-    let mut out = Vec::new();
     let mut i = start_quote + 1;
+    let mut fast_end = i;
+    while fast_end < b.len() {
+        let c = b[fast_end];
+        if c == b'"' {
+            let s = std::str::from_utf8(&b[i..fast_end]).ok()?;
+            return Some((Cow::Borrowed(s), fast_end + 1));
+        }
+        if c == b'\\' {
+            break;
+        }
+        fast_end += 1;
+    }
+    if fast_end >= b.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity((b.len() - i).min(4096));
+    out.extend_from_slice(&b[i..fast_end]);
+    i = fast_end;
     while i < b.len() {
         let c = b[i];
         if c == b'"' {
             let s = String::from_utf8(out).ok()?;
-            return Some((s, i + 1));
+            return Some((Cow::Owned(s), i + 1));
         }
         if c == b'\\' {
             i += 1;
@@ -94,8 +112,11 @@ fn parse_json_string(b: &[u8], start_quote: usize) -> Option<(String, usize)> {
             }
             i += 1;
         } else {
-            out.push(c);
-            i += 1;
+            let chunk_start = i;
+            while i < b.len() && b[i] != b'"' && b[i] != b'\\' {
+                i += 1;
+            }
+            out.extend_from_slice(&b[chunk_start..i]);
         }
     }
     None
@@ -108,20 +129,39 @@ fn skip_ws(b: &[u8], mut i: usize) -> usize {
     i
 }
 
+fn skip_json_string(b: &[u8], start_quote: usize) -> Option<usize> {
+    if start_quote >= b.len() || b[start_quote] != b'"' {
+        return None;
+    }
+    let mut i = start_quote + 1;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' {
+            return Some(i + 1);
+        }
+        if c == b'\\' {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 fn skip_json_value(b: &[u8], start: usize) -> Option<usize> {
     let i = skip_ws(b, start);
     if i >= b.len() {
         return None;
     }
     match b[i] {
-        b'"' => parse_json_string(b, i).map(|(_, next)| next),
+        b'"' => skip_json_string(b, i),
         b'{' => {
             let mut cur = skip_ws(b, i + 1);
             if cur < b.len() && b[cur] == b'}' {
                 return Some(cur + 1);
             }
             while cur < b.len() {
-                let (_, after_key) = parse_json_string(b, cur)?;
+                let after_key = skip_json_string(b, cur)?;
                 cur = skip_ws(b, after_key);
                 if cur >= b.len() || b[cur] != b':' {
                     return None;
@@ -158,7 +198,9 @@ fn skip_json_value(b: &[u8], start: usize) -> Option<usize> {
         }
         _ => {
             let mut cur = i;
-            while cur < b.len() && !matches!(b[cur], b',' | b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n') {
+            while cur < b.len()
+                && !matches!(b[cur], b',' | b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n')
+            {
                 cur += 1;
             }
             Some(cur)
@@ -166,7 +208,7 @@ fn skip_json_value(b: &[u8], start: usize) -> Option<usize> {
     }
 }
 
-fn extract_text_field(input: &[u8]) -> Option<String> {
+fn extract_text_field(input: &[u8]) -> Option<Cow<'_, str>> {
     let mut cur = skip_ws(input, 0);
     if cur >= input.len() || input[cur] != b'{' {
         return None;
@@ -214,33 +256,76 @@ fn write_json_escaped(s: &str, out: &mut String) {
     out.push('"');
 }
 
-fn contains_ascii_ci(haystack: &[u8], needle_lower: &[u8]) -> bool {
-    if needle_lower.is_empty() || needle_lower.len() > haystack.len() {
+#[inline]
+fn starts_with_ascii_ci(slice: &[u8], needle_lower: &[u8]) -> bool {
+    if slice.len() < needle_lower.len() {
         return false;
     }
-    for i in 0..=haystack.len() - needle_lower.len() {
-        let mut ok = true;
-        for j in 0..needle_lower.len() {
-            if haystack[i + j].to_ascii_lowercase() != needle_lower[j] {
-                ok = false;
-                break;
-            }
-        }
-        if ok {
-            return true;
+    for j in 0..needle_lower.len() {
+        if slice[j].to_ascii_lowercase() != needle_lower[j] {
+            return false;
         }
     }
-    false
+    true
 }
 
+fn scan_block_rules(b: &[u8], check_prompt_injection: bool) -> Option<&'static str> {
+    let mut injection_hit = false;
+    let len = b.len();
+    let mut i = 0usize;
+    while i < len {
+        let c = b[i];
+        if c == b'-' {
+            if i + 27 <= len && b[i + 1] == b'-' && b[i + 2] == b'-' && b[i + 3] == b'-' && b[i + 4] == b'-' {
+                let tail = &b[i..];
+                if starts_with_ascii_ci(tail, b"-----begin private key-----")
+                    || starts_with_ascii_ci(tail, b"-----begin rsa private key-----")
+                    || starts_with_ascii_ci(tail, b"-----begin ec private key-----")
+                    || starts_with_ascii_ci(tail, b"-----begin openssh private key-----")
+                    || starts_with_ascii_ci(tail, b"-----begin encrypted private key-----")
+                {
+                    return Some(BLOCK_PRIVATE_KEY_JSON);
+                }
+            }
+        } else if check_prompt_injection && !injection_hit {
+            let lower = c | 0x20;
+            if lower == b'i' {
+                let tail = &b[i..];
+                if starts_with_ascii_ci(tail, b"ignore previous instructions")
+                    || starts_with_ascii_ci(tail, b"ignore all previous instructions")
+                {
+                    injection_hit = true;
+                }
+            } else if lower == b'r' {
+                if starts_with_ascii_ci(&b[i..], b"reveal your system prompt") {
+                    injection_hit = true;
+                }
+            } else if lower == b'd' {
+                if starts_with_ascii_ci(&b[i..], b"dump system prompt") {
+                    injection_hit = true;
+                }
+            }
+        }
+        i += 1;
+    }
+    if injection_hit {
+        Some(BLOCK_INJECTION_JSON)
+    } else {
+        None
+    }
+}
+
+#[inline]
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+#[inline]
 fn is_email_local_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'%' | b'+' | b'-')
 }
 
+#[inline]
 fn is_token_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
@@ -249,42 +334,51 @@ fn match_api_key(b: &[u8], i: usize) -> Option<(usize, &'static str)> {
     if i > 0 && is_word_byte(b[i - 1]) {
         return None;
     }
-    if b[i..].starts_with(b"sk-") {
-        let mut end = i + 3;
-        while end < b.len() && is_token_byte(b[end]) {
-            end += 1;
+    match b[i] {
+        b's' => {
+            if b[i..].starts_with(b"sk-") {
+                let mut end = i + 3;
+                while end < b.len() && is_token_byte(b[end]) {
+                    end += 1;
+                }
+                if end - (i + 3) >= 20 {
+                    return Some((end, "[REDACTED_API_KEY]"));
+                }
+            }
         }
-        if end - (i + 3) >= 20 {
-            return Some((end, "[REDACTED_API_KEY]"));
+        b'A' => {
+            if b[i..].starts_with(b"AKIA") && i + 20 <= b.len() {
+                let valid = b[i + 4..i + 20]
+                    .iter()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+                let after_ok = i + 20 == b.len() || !b[i + 20].is_ascii_alphanumeric();
+                if valid && after_ok {
+                    return Some((i + 20, "[REDACTED_AWS_KEY]"));
+                }
+            }
         }
-    }
-    if b[i..].starts_with(b"AKIA") && i + 20 <= b.len() {
-        let valid = b[i + 4..i + 20]
-            .iter()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
-        let after_ok = i + 20 == b.len() || !b[i + 20].is_ascii_alphanumeric();
-        if valid && after_ok {
-            return Some((i + 20, "[REDACTED_AWS_KEY]"));
+        b'g' => {
+            if b[i..].starts_with(b"ghp_")
+                || b[i..].starts_with(b"gho_")
+                || b[i..].starts_with(b"ghu_")
+                || b[i..].starts_with(b"ghs_")
+            {
+                let mut end = i + 4;
+                while end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_') {
+                    end += 1;
+                }
+                if end - (i + 4) >= 20 {
+                    return Some((end, "[REDACTED_GH_TOKEN]"));
+                }
+            }
         }
-    }
-    if b[i..].starts_with(b"ghp_")
-        || b[i..].starts_with(b"gho_")
-        || b[i..].starts_with(b"ghu_")
-        || b[i..].starts_with(b"ghs_")
-    {
-        let mut end = i + 4;
-        while end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_') {
-            end += 1;
-        }
-        if end - (i + 4) >= 20 {
-            return Some((end, "[REDACTED_GH_TOKEN]"));
-        }
+        _ => {}
     }
     None
 }
 
 fn match_email(b: &[u8], i: usize) -> Option<usize> {
-    if i > 0 && is_email_local_byte(b[i - 1]) {
+    if i > 0 && b[i - 1].is_ascii_alphanumeric() {
         return None;
     }
     if !b[i].is_ascii_alphanumeric() {
@@ -299,20 +393,19 @@ fn match_email(b: &[u8], i: usize) -> Option<usize> {
     }
     cur += 1;
     let domain_start = cur;
-    let mut last_dot: Option<usize> = None;
     while cur < b.len() && (b[cur].is_ascii_alphanumeric() || b[cur] == b'-' || b[cur] == b'.') {
-        if b[cur] == b'.' {
-            if cur == domain_start || b[cur - 1] == b'.' {
-                break;
-            }
-            last_dot = Some(cur);
+        if b[cur] == b'.' && (cur == domain_start || b[cur - 1] == b'.') {
+            break;
         }
         cur += 1;
     }
     while cur > domain_start && b[cur - 1] == b'.' {
         cur -= 1;
     }
-    let dot = last_dot?;
+    let dot = b[domain_start..cur]
+        .iter()
+        .rposition(|&c| c == b'.')
+        .map(|rel| domain_start + rel)?;
     if dot <= domain_start || dot + 2 >= cur {
         return None;
     }
@@ -323,17 +416,37 @@ fn match_email(b: &[u8], i: usize) -> Option<usize> {
     Some(cur)
 }
 
+fn next_email_candidate(b: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut search = from;
+    while search < b.len() {
+        let rel = b[search..].iter().position(|&c| c == b'@')?;
+        let at = search + rel;
+        let mut start = at;
+        while start > from && is_email_local_byte(b[start - 1]) {
+            start -= 1;
+        }
+        while start < at && !b[start].is_ascii_alphanumeric() {
+            start += 1;
+        }
+        if start < at && b[start].is_ascii_alphanumeric() && b[at - 1].is_ascii_alphanumeric() {
+            return Some((start, at));
+        }
+        search = at + 1;
+    }
+    None
+}
+
 fn match_us_ssn(b: &[u8], i: usize) -> Option<usize> {
     if i + 11 > b.len() {
+        return None;
+    }
+    if b[i + 3] != b'-' || b[i + 6] != b'-' {
         return None;
     }
     if i > 0 && b[i - 1].is_ascii_digit() {
         return None;
     }
     if i + 11 < b.len() && b[i + 11].is_ascii_digit() {
-        return None;
-    }
-    if b[i + 3] != b'-' || b[i + 6] != b'-' {
         return None;
     }
     let idx = [0, 1, 2, 4, 5, 7, 8, 9, 10];
@@ -356,13 +469,13 @@ fn match_cn_id(b: &[u8], i: usize) -> Option<usize> {
     if i + 18 > b.len() {
         return None;
     }
+    if !(b'1'..=b'8').contains(&b[i]) {
+        return None;
+    }
     if i > 0 && b[i - 1].is_ascii_alphanumeric() {
         return None;
     }
     if i + 18 < b.len() && b[i + 18].is_ascii_alphanumeric() {
-        return None;
-    }
-    if !(b'1'..=b'8').contains(&b[i]) {
         return None;
     }
     if !b[i..i + 17].iter().all(|c| c.is_ascii_digit()) {
@@ -388,13 +501,13 @@ fn match_cn_phone(b: &[u8], i: usize) -> Option<usize> {
     if i + 11 > b.len() {
         return None;
     }
+    if b[i] != b'1' || !(b'3'..=b'9').contains(&b[i + 1]) {
+        return None;
+    }
     if i > 0 && b[i - 1].is_ascii_digit() {
         return None;
     }
     if i + 11 < b.len() && b[i + 11].is_ascii_digit() {
-        return None;
-    }
-    if b[i] != b'1' || !(b'3'..=b'9').contains(&b[i + 1]) {
         return None;
     }
     if !b[i + 2..i + 11].iter().all(|c| c.is_ascii_digit()) {
@@ -464,54 +577,98 @@ fn match_card(b: &[u8], i: usize) -> Option<usize> {
 
 fn redact_text(text: &str) -> (String, bool) {
     let b = text.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
+    let len = b.len();
+    let mut out: Vec<u8> = Vec::new();
+    let mut last_copy = 0usize;
     let mut i = 0usize;
-    let mut changed = false;
+    let mut email_cand = next_email_candidate(b, 0);
 
-    while i < b.len() {
-        if let Some((end, tag)) = match_api_key(b, i) {
-            out.extend_from_slice(tag.as_bytes());
-            i = end;
-            changed = true;
-            continue;
+    while i < len {
+        let c = b[i];
+        if matches!(c, b's' | b'A' | b'g') {
+            if let Some((end, tag)) = match_api_key(b, i) {
+                if out.is_empty() {
+                    out.reserve(len);
+                }
+                out.extend_from_slice(&b[last_copy..i]);
+                out.extend_from_slice(tag.as_bytes());
+                i = end;
+                last_copy = end;
+                if let Some((es, _)) = email_cand {
+                    if es < i {
+                        email_cand = next_email_candidate(b, i);
+                    }
+                }
+                continue;
+            }
         }
-        if let Some(end) = match_email(b, i) {
-            out.extend_from_slice(b"[REDACTED_EMAIL]");
-            i = end;
-            changed = true;
-            continue;
+        if let Some((es, at)) = email_cand {
+            if i == es {
+                if let Some(end) = match_email(b, i) {
+                    if out.is_empty() {
+                        out.reserve(len);
+                    }
+                    out.extend_from_slice(&b[last_copy..i]);
+                    out.extend_from_slice(b"[REDACTED_EMAIL]");
+                    i = end;
+                    last_copy = end;
+                    email_cand = next_email_candidate(b, i);
+                    continue;
+                }
+                email_cand = next_email_candidate(b, at + 1);
+            } else if i > es {
+                email_cand = next_email_candidate(b, i);
+            }
         }
-        if let Some(end) = match_us_ssn(b, i) {
-            out.extend_from_slice(b"[REDACTED_SSN]");
-            i = end;
-            changed = true;
-            continue;
+        if c.is_ascii_digit() {
+            if let Some(end) = match_us_ssn(b, i) {
+                if out.is_empty() {
+                    out.reserve(len);
+                }
+                out.extend_from_slice(&b[last_copy..i]);
+                out.extend_from_slice(b"[REDACTED_SSN]");
+                i = end;
+                last_copy = end;
+                continue;
+            }
+            if let Some(end) = match_cn_id(b, i) {
+                if out.is_empty() {
+                    out.reserve(len);
+                }
+                out.extend_from_slice(&b[last_copy..i]);
+                out.extend_from_slice(b"[REDACTED_CN_ID]");
+                i = end;
+                last_copy = end;
+                continue;
+            }
+            if let Some(end) = match_card(b, i) {
+                if out.is_empty() {
+                    out.reserve(len);
+                }
+                out.extend_from_slice(&b[last_copy..i]);
+                out.extend_from_slice(b"[REDACTED_CARD]");
+                i = end;
+                last_copy = end;
+                continue;
+            }
+            if let Some(end) = match_cn_phone(b, i) {
+                if out.is_empty() {
+                    out.reserve(len);
+                }
+                out.extend_from_slice(&b[last_copy..i]);
+                out.extend_from_slice(b"[REDACTED_PHONE]");
+                i = end;
+                last_copy = end;
+                continue;
+            }
         }
-        if let Some(end) = match_cn_id(b, i) {
-            out.extend_from_slice(b"[REDACTED_CN_ID]");
-            i = end;
-            changed = true;
-            continue;
-        }
-        if let Some(end) = match_card(b, i) {
-            out.extend_from_slice(b"[REDACTED_CARD]");
-            i = end;
-            changed = true;
-            continue;
-        }
-        if let Some(end) = match_cn_phone(b, i) {
-            out.extend_from_slice(b"[REDACTED_PHONE]");
-            i = end;
-            changed = true;
-            continue;
-        }
-        out.push(b[i]);
         i += 1;
     }
 
-    if !changed {
+    if last_copy == 0 && out.is_empty() {
         return (String::new(), false);
     }
+    out.extend_from_slice(&b[last_copy..len]);
     match String::from_utf8(out) {
         Ok(s) => (s, true),
         Err(_) => (String::new(), false),
@@ -526,22 +683,8 @@ fn process_hook(ptr: i32, len: i32, check_prompt_injection: bool) -> i64 {
     let Some(text) = extract_text_field(input) else {
         return pack_output(PASS_JSON.as_bytes());
     };
-    let text_bytes = text.as_bytes();
-    if contains_ascii_ci(text_bytes, b"-----begin private key-----")
-        || contains_ascii_ci(text_bytes, b"-----begin rsa private key-----")
-        || contains_ascii_ci(text_bytes, b"-----begin ec private key-----")
-        || contains_ascii_ci(text_bytes, b"-----begin openssh private key-----")
-        || contains_ascii_ci(text_bytes, b"-----begin encrypted private key-----")
-    {
-        return pack_output(BLOCK_PRIVATE_KEY_JSON.as_bytes());
-    }
-    if check_prompt_injection
-        && (contains_ascii_ci(text_bytes, b"ignore previous instructions")
-            || contains_ascii_ci(text_bytes, b"ignore all previous instructions")
-            || contains_ascii_ci(text_bytes, b"reveal your system prompt")
-            || contains_ascii_ci(text_bytes, b"dump system prompt"))
-    {
-        return pack_output(BLOCK_INJECTION_JSON.as_bytes());
+    if let Some(blocked_json) = scan_block_rules(text.as_bytes(), check_prompt_injection) {
+        return pack_output(blocked_json.as_bytes());
     }
     let (redacted, changed) = redact_text(&text);
     if !changed {

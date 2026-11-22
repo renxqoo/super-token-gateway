@@ -1,10 +1,11 @@
 import { dimensions } from "./values.ts";
 import type { Pricing, Usage } from "./values.ts";
 
+const pricedDimensions = new Set<string>(dimensions);
 const integer = /^(0|[1-9][0-9]{0,37})$/;
 export function validateUsage(usage: Usage): void {
   for (const [key, value] of Object.entries(usage)) {
-    if (![...dimensions, "reasoning_tokens"].includes(key))
+    if (key !== "reasoning_tokens" && !pricedDimensions.has(key))
       throw new TypeError("Unknown usage dimension");
     const decimal = key === "audio_seconds" || key === "video_seconds";
     if (
@@ -26,7 +27,7 @@ export function validatePricing(pricing: Pricing): void {
   if (!/^[A-Z]{3,8}$/.test(pricing.currency)) throw new TypeError("Invalid currency");
   for (const [key, rate] of Object.entries(pricing.rates)) {
     if (
-      !(dimensions as readonly string[]).includes(key) ||
+      !pricedDimensions.has(key) ||
       !rate ||
       !integer.test(rate.numerator) ||
       !/^[1-9][0-9]{0,37}$/.test(rate.denominator)

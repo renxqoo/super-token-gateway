@@ -1,6 +1,12 @@
 import type { SQL } from "bun";
-import { asc, desc, eq, sql } from "drizzle-orm";
-import { canonical, validatePricing, type Operation, type Pricing } from "@gateway/kernel";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import {
+  canonical,
+  DomainError,
+  validatePricing,
+  type Operation,
+  type Pricing,
+} from "@gateway/kernel";
 import {
   apiKeys,
   channels,
@@ -8,6 +14,7 @@ import {
   createDrizzle,
   models,
   plugins,
+  pluginRevocations,
   priceVersions,
   projects,
   routes,
@@ -21,6 +28,7 @@ import type {
   ChannelKind,
   ChannelRecord,
   ConfigSnapshot,
+  EpochStamp,
   ModelRecord,
   PluginCapability,
   PluginKind,
@@ -44,6 +52,26 @@ function sha256Hex(value: string | Uint8Array): string {
 }
 
 type DrizzleTx = Parameters<Parameters<LedgerDrizzle["transaction"]>[0]>[0];
+
+function pluginRecord(row: typeof plugins.$inferSelect): PluginRecord {
+  return {
+    id: row.id,
+    name: row.name,
+    version: row.version,
+    capability: row.capability,
+    kind: row.kind,
+    digest: row.digest,
+    wasm_bytes: row.wasmBytes ? new Uint8Array(row.wasmBytes) : null,
+    webhook_config: row.webhookConfig,
+    provider_config: row.providerConfig,
+    signature: row.signature,
+    signing_key_id: row.signingKeyId,
+    manifest: row.manifest,
+    enabled: row.enabled,
+    builtin: row.builtin,
+    created_at: row.createdAt,
+  };
+}
 
 async function bumpEpoch(tx: DrizzleTx): Promise<number> {
   const rows = await tx
@@ -69,6 +97,17 @@ export function createCatalogRepository(db: SQL) {
       return rows[0]?.version ?? 0;
     },
 
+    async getEpochStamp(): Promise<EpochStamp> {
+      const rows = await orm
+        .select({ version: configEpoch.version, lineageToken: configEpoch.lineageToken })
+        .from(configEpoch)
+        .where(eq(configEpoch.id, 1));
+      return {
+        version: rows[0]?.version ?? 0,
+        lineageToken: rows[0]?.lineageToken ?? "",
+      };
+    },
+
     async upsertProject(input: {
       id?: string;
       external_ref?: string | null;
@@ -81,8 +120,8 @@ export function createCatalogRepository(db: SQL) {
     }): Promise<ProjectRecord & { config_epoch: number }> {
       const id = input.id ?? crypto.randomUUID();
       const currency = input.currency ?? "USD";
-      const enabled = input.enabled ?? true;
       const externalRef = input.external_ref ?? null;
+      const enabled = input.enabled ?? true;
       return orm.transaction(async (tx) => {
         const rows = await tx
           .insert(projects)
@@ -253,8 +292,29 @@ export function createCatalogRepository(db: SQL) {
       const enabled = input.enabled ?? true;
       const routingPolicy = input.routing_policy ?? {};
       const adapterConfig = input.adapter_config ?? {};
-      const providerPluginId = input.provider_plugin_id ?? null;
       return orm.transaction(async (tx) => {
+        const [existing] = await tx
+          .select({ providerId: channels.providerPluginId })
+          .from(channels)
+          .where(eq(channels.id, id));
+        const requestedProvider = input.provider_plugin_id ?? existing?.providerId;
+        const providerWhere = requestedProvider
+          ? eq(plugins.id, requestedProvider)
+          : eq(plugins.name, input.kind);
+        const [provider] = await tx
+          .select({ id: plugins.id })
+          .from(plugins)
+          .where(and(providerWhere, eq(plugins.capability, "PROVIDER"), eq(plugins.enabled, true)))
+          .orderBy(asc(plugins.builtin), desc(plugins.createdAt), asc(plugins.id))
+          .limit(1)
+          .for("share");
+        if ((enabled || input.provider_plugin_id) && !provider) {
+          throw new DomainError(
+            "invalid_plugin_binding",
+            "Channel requires an enabled provider revision",
+          );
+        }
+        const providerPluginId = provider?.id ?? null;
         const rows = await tx
           .insert(channels)
           .values({
@@ -273,6 +333,7 @@ export function createCatalogRepository(db: SQL) {
           })
           .onConflictDoUpdate({
             target: channels.id,
+            setWhere: sql`${channels.providerPluginId} IS NULL OR ${channels.providerPluginId} IS NOT DISTINCT FROM ${providerPluginId}::uuid`,
             set: {
               accountId: input.account_id,
               name: input.name,
@@ -290,6 +351,11 @@ export function createCatalogRepository(db: SQL) {
             },
           })
           .returning();
+        if (!rows[0])
+          throw new DomainError(
+            "plugin_release_conflict",
+            "Use a plugin release to change an existing channel binding",
+          );
         const epoch = await bumpEpoch(tx);
         const r = rows[0]!;
         return {
@@ -423,10 +489,36 @@ export function createCatalogRepository(db: SQL) {
       const weight = input.weight ?? 1;
       const requestPolicy = input.request_policy ?? {};
       const adapterOverrides = input.adapter_overrides ?? {};
-      const pluginPipeline = input.plugin_pipeline ?? [];
       const retryPolicy = input.retry_policy ?? {};
       const enabled = input.enabled ?? true;
       return orm.transaction(async (tx) => {
+        const [existing] = await tx
+          .select({ pipeline: routes.pluginPipeline })
+          .from(routes)
+          .where(eq(routes.id, id));
+        const pluginPipeline = input.plugin_pipeline ?? existing?.pipeline ?? [];
+        const requiredPlugins = new Set(
+          pluginPipeline.filter((step) => step.enabled !== false).map((step) => step.plugin_id),
+        );
+        if (enabled && requiredPlugins.size) {
+          const available = await tx
+            .select({ id: plugins.id })
+            .from(plugins)
+            .where(
+              and(
+                inArray(plugins.id, [...requiredPlugins]),
+                eq(plugins.capability, "CONTENT"),
+                eq(plugins.enabled, true),
+              ),
+            )
+            .for("share");
+          if (available.length !== requiredPlugins.size) {
+            throw new DomainError(
+              "invalid_plugin_binding",
+              "Route requires an enabled content plugin",
+            );
+          }
+        }
         const rows = await tx
           .insert(routes)
           .values({
@@ -447,6 +539,11 @@ export function createCatalogRepository(db: SQL) {
           })
           .onConflictDoUpdate({
             target: routes.id,
+            ...(input.plugin_pipeline !== undefined
+              ? {
+                  setWhere: sql`${routes.pluginPipeline} = ${JSON.stringify(pluginPipeline)}::text::jsonb`,
+                }
+              : {}),
             set: {
               channelId: input.channel_id,
               upstreamModel: input.upstream_model,
@@ -457,12 +554,16 @@ export function createCatalogRepository(db: SQL) {
               costVersionId: input.cost_version_id,
               requestPolicy,
               adapterOverrides,
-              pluginPipeline,
               retryPolicy,
               enabled,
             },
           })
           .returning();
+        if (!rows[0])
+          throw new DomainError(
+            "plugin_release_conflict",
+            "Use a plugin release to change an existing route pipeline",
+          );
         const epoch = await bumpEpoch(tx);
         const r = rows[0]!;
         return {
@@ -497,7 +598,6 @@ export function createCatalogRepository(db: SQL) {
       signature?: string | null;
       signing_key_id?: string | null;
       manifest?: WasmPluginManifest | Record<string, unknown>;
-      enabled?: boolean;
     }): Promise<PluginRecord & { config_epoch: number }> {
       const id = input.id ?? crypto.randomUUID();
       const capability: PluginCapability = input.capability ?? "CONTENT";
@@ -505,7 +605,6 @@ export function createCatalogRepository(db: SQL) {
       const webhookConfig = input.webhook_config ?? null;
       const providerConfig = input.provider_config ?? null;
       const manifest = (input.manifest ?? {}) as Record<string, unknown>;
-      const enabled = input.enabled ?? true;
       const signature = input.signature ?? null;
       const signingKeyId = input.signing_key_id ?? null;
       const digest = wasmBytes
@@ -537,44 +636,50 @@ export function createCatalogRepository(db: SQL) {
             signature,
             signingKeyId,
             manifest,
-            enabled,
+            enabled: false,
           })
-          .onConflictDoUpdate({
-            target: [plugins.name, plugins.version],
-            set: {
-              capability,
-              kind: input.kind,
-              digest,
-              wasmBytes,
-              webhookConfig,
-              providerConfig,
-              signature,
-              signingKeyId,
-              manifest,
-              enabled,
-            },
-          })
+          .onConflictDoNothing({ target: [plugins.name, plugins.version] })
           .returning();
-        const epoch = await bumpEpoch(tx);
-        const r = rows[0]!;
-        return {
-          id: r.id,
-          name: r.name,
-          version: r.version,
-          capability: r.capability,
-          kind: r.kind,
-          digest: r.digest,
-          wasm_bytes: r.wasmBytes ? new Uint8Array(r.wasmBytes) : null,
-          webhook_config: r.webhookConfig,
-          provider_config: r.providerConfig,
-          signature: r.signature,
-          signing_key_id: r.signingKeyId,
-          manifest: r.manifest,
-          enabled: r.enabled,
-          created_at: r.createdAt,
-          config_epoch: epoch,
-        };
+        const [r] =
+          rows.length > 0
+            ? rows
+            : await tx
+                .select()
+                .from(plugins)
+                .where(and(eq(plugins.name, input.name), eq(plugins.version, input.version)));
+        if (
+          !r ||
+          (input.id !== undefined && r.id !== input.id) ||
+          digest !== r.digest ||
+          capability !== r.capability ||
+          input.kind !== r.kind ||
+          signature !== r.signature ||
+          signingKeyId !== r.signingKeyId ||
+          canonical(manifest) !== canonical(r.manifest) ||
+          canonical(providerConfig) !== canonical(r.providerConfig) ||
+          canonical(webhookConfig) !== canonical(r.webhookConfig)
+        ) {
+          throw new DomainError(
+            "plugin_revision_conflict",
+            "Plugin revisions are immutable. Choose a new version.",
+          );
+        }
+        const epoch =
+          rows.length > 0
+            ? await bumpEpoch(tx)
+            : (
+                await tx
+                  .select({ version: configEpoch.version })
+                  .from(configEpoch)
+                  .where(eq(configEpoch.id, 1))
+              )[0]!.version;
+        return { ...pluginRecord(r), config_epoch: epoch };
       });
+    },
+
+    async getPlugin(id: string): Promise<PluginRecord | null> {
+      const [row] = await orm.select().from(plugins).where(eq(plugins.id, id));
+      return row ? pluginRecord(row) : null;
     },
 
     async listPlugins(capability?: PluginCapability): Promise<Omit<PluginRecord, "wasm_bytes">[]> {
@@ -592,6 +697,7 @@ export function createCatalogRepository(db: SQL) {
           signingKeyId: plugins.signingKeyId,
           manifest: plugins.manifest,
           enabled: plugins.enabled,
+          builtin: plugins.builtin,
           createdAt: plugins.createdAt,
         })
         .from(plugins);
@@ -611,12 +717,13 @@ export function createCatalogRepository(db: SQL) {
         signing_key_id: r.signingKeyId,
         manifest: r.manifest,
         enabled: r.enabled,
+        builtin: r.builtin,
         created_at: r.createdAt,
       }));
     },
 
-    async loadSnapshot(): Promise<ConfigSnapshot> {
-      const [
+    async loadSnapshot(previous?: ConfigSnapshot): Promise<ConfigSnapshot> {
+      const {
         epochRows,
         projectRows,
         keyRows,
@@ -625,12 +732,25 @@ export function createCatalogRepository(db: SQL) {
         modelRows,
         priceRows,
         routeRows,
-        pluginRows,
-      ] = await orm.transaction(
-        (tx) =>
-          Promise.all([
+        pluginMetaRows,
+        wasmBytesById,
+        revokedRows,
+      } = await orm.transaction(
+        async (tx) => {
+          const [
+            epochRows,
+            projectRows,
+            keyRows,
+            accountRows,
+            channelRows,
+            modelRows,
+            priceRows,
+            routeRows,
+            pluginMetaRows,
+            revokedRows,
+          ] = await Promise.all([
             tx
-              .select({ version: configEpoch.version })
+              .select({ version: configEpoch.version, lineageToken: configEpoch.lineageToken })
               .from(configEpoch)
               .where(eq(configEpoch.id, 1)),
             tx.select().from(projects),
@@ -645,11 +765,59 @@ export function createCatalogRepository(db: SQL) {
               .where(eq(routes.enabled, true))
               .orderBy(asc(routes.modelName), desc(routes.priority), asc(routes.id)),
             tx
-              .select()
+              .select({
+                id: plugins.id,
+                name: plugins.name,
+                version: plugins.version,
+                capability: plugins.capability,
+                kind: plugins.kind,
+                digest: plugins.digest,
+                webhookConfig: plugins.webhookConfig,
+                providerConfig: plugins.providerConfig,
+                signature: plugins.signature,
+                signingKeyId: plugins.signingKeyId,
+                manifest: plugins.manifest,
+                enabled: plugins.enabled,
+                builtin: plugins.builtin,
+                createdAt: plugins.createdAt,
+              })
               .from(plugins)
               .where(eq(plugins.enabled, true))
               .orderBy(desc(plugins.createdAt), asc(plugins.id)),
-          ]),
+            tx.select({ id: pluginRevocations.pluginId }).from(pluginRevocations),
+          ]);
+          const missingWasmIds: string[] = [];
+          for (const row of pluginMetaRows) {
+            if (row.kind !== "WASM") continue;
+            const prev = previous?.plugins.get(row.id);
+            if (!prev || prev.digest !== row.digest || !prev.wasm_bytes) {
+              missingWasmIds.push(row.id);
+            }
+          }
+          const wasmBytesById = new Map<string, Uint8Array | null>();
+          if (missingWasmIds.length > 0) {
+            const binaryRows = await tx
+              .select({ id: plugins.id, wasmBytes: plugins.wasmBytes })
+              .from(plugins)
+              .where(inArray(plugins.id, missingWasmIds));
+            for (const row of binaryRows) {
+              wasmBytesById.set(row.id, row.wasmBytes ? new Uint8Array(row.wasmBytes) : null);
+            }
+          }
+          return {
+            epochRows,
+            projectRows,
+            keyRows,
+            accountRows,
+            channelRows,
+            modelRows,
+            priceRows,
+            routeRows,
+            pluginMetaRows,
+            wasmBytesById,
+            revokedRows,
+          };
+        },
         { isolationLevel: "repeatable read", accessMode: "read only" },
       );
 
@@ -762,7 +930,11 @@ export function createCatalogRepository(db: SQL) {
 
       const pluginMap = new Map<string, PluginRecord>();
       const providerPluginsByName = new Map<string, PluginRecord>();
-      for (const r of pluginRows) {
+      for (const r of pluginMetaRows) {
+        const cachedBytes =
+          r.kind === "WASM" && !wasmBytesById.has(r.id)
+            ? (previous?.plugins.get(r.id)?.wasm_bytes ?? null)
+            : (wasmBytesById.get(r.id) ?? null);
         const rec: PluginRecord = {
           id: r.id,
           name: r.name,
@@ -770,23 +942,25 @@ export function createCatalogRepository(db: SQL) {
           capability: r.capability,
           kind: r.kind,
           digest: r.digest,
-          wasm_bytes: r.wasmBytes ? new Uint8Array(r.wasmBytes) : null,
+          wasm_bytes: cachedBytes,
           webhook_config: r.webhookConfig,
           provider_config: r.providerConfig,
           signature: r.signature,
           signing_key_id: r.signingKeyId,
           manifest: r.manifest,
           enabled: r.enabled,
+          builtin: r.builtin,
           created_at: r.createdAt,
         };
         pluginMap.set(rec.id, rec);
-        if (rec.capability === "PROVIDER" && !providerPluginsByName.has(rec.name)) {
+        if (rec.capability === "PROVIDER" && !r.builtin && !providerPluginsByName.has(rec.name)) {
           providerPluginsByName.set(rec.name, rec);
         }
       }
 
       return {
         epoch: epochRows[0]?.version ?? 0,
+        lineageToken: epochRows[0]?.lineageToken ?? "",
         projects: projectMap,
         keysByVerifier,
         accounts: accountMap,
@@ -795,6 +969,7 @@ export function createCatalogRepository(db: SQL) {
         prices: priceMap,
         routesByModel,
         plugins: pluginMap,
+        revokedPlugins: new Set(revokedRows.map(({ id }) => id)),
         providerPluginsByName,
       };
     },

@@ -54,3 +54,19 @@ test("music reservations enforce an explicit music ceiling and request rate", ()
     ),
   ).toMatchObject({ amount_atoms: "2", prices: { channel: "price" } });
 });
+
+test("integral tariff terms and fractional duration share one final rounding", () => {
+  expect(
+    calculateCost(
+      { input_tokens: "1", output_tokens: "2", audio_seconds: "0.125" },
+      {
+        currency: "USD",
+        rates: {
+          input_tokens: { numerator: "1", denominator: "3" },
+          output_tokens: { numerator: "1", denominator: "1" },
+          audio_seconds: { numerator: "1", denominator: "2" },
+        },
+      },
+    ),
+  ).toBe("3");
+});

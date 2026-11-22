@@ -4,7 +4,7 @@ import type { LeaseManager } from "./lease-manager.ts";
 import { MicroBatchQueue } from "./micro-batch.ts";
 import { commitLeasedBatch, type FastCommitCandidate } from "./settlement-leased.ts";
 import { commitDirectBatch } from "./settlement-direct.ts";
-import { postgresState } from "./funds.ts";
+import { postgresState, SETTLEMENT_LANES, walletLane } from "./funds.ts";
 import { priceSettlement } from "./settlement-pricing.ts";
 
 export function createSettlementQueue(
@@ -60,7 +60,11 @@ export function createSettlementQueue(
     const failures = new Map<number, unknown>();
     if (fastCandidates.length > 0) {
       try {
-        const fallback = await commitLeasedBatch(db, leases, fastCandidates, results);
+        const settle = () => commitLeasedBatch(db, leases, fastCandidates, results);
+        const fallback = await settle().catch((error: unknown) => {
+          if (postgresState(error) !== "55P03") throw error;
+          return settle();
+        });
         for (const entry of fallback) directEntries.push(entry);
       } catch (error) {
         const retryIndividually = postgresState(error)?.startsWith("23");
@@ -98,10 +102,20 @@ export function createSettlementQueue(
     );
   }
 
-  const queue = new MicroBatchQueue(runCommitBatch, Math.max(maxBatchSize, 512), batchWindowMs, 2);
+  const batchCapacity = Math.max(maxBatchSize, 512);
+  const queues = Array.from(
+    { length: SETTLEMENT_LANES },
+    () => new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 1),
+  );
+  const direct = new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 2);
   return {
-    commitTerminal: (input: CommitTerminalInput): Promise<CommitTerminalResult> =>
-      queue.enqueue(input),
-    drain: () => queue.drain(),
+    commitTerminal(input: CommitTerminalInput): Promise<CommitTerminalResult> {
+      const hold = leases.holdById(input.request_id);
+      const queue = hold ? queues[walletLane(hold.projectId)]! : direct;
+      return queue.enqueue(input);
+    },
+    async drain(): Promise<void> {
+      await Promise.all([...queues, direct].map((queue) => queue.drain()));
+    },
   };
 }

@@ -4,14 +4,26 @@ export type PluginHook = "on_request" | "on_response" | "on_stream_chunk" | "on_
 export type ProviderHook = "adapt_request" | "adapt_response" | "adapt_stream_event";
 export type WasmCallableHook = PluginHook | ProviderHook;
 
+export type PluginOutcomeKind = "content_decision" | "plugin_fault" | "host_capacity";
+
 export type PluginDecision =
-  | { action: "PASS" }
-  | { action: "TRANSFORM"; text: string }
+  | {
+      action: "PASS";
+      outcome_kind?: PluginOutcomeKind;
+      fail_open_bypassed?: boolean;
+      fault_code?: string;
+    }
+  | {
+      action: "TRANSFORM";
+      text: string;
+      outcome_kind?: "content_decision";
+    }
   | {
       action: "BLOCK";
       rule_code: string;
       http_status?: number;
       safe_message?: string;
+      outcome_kind?: PluginOutcomeKind;
     };
 
 export type PluginHookInput = {
@@ -24,14 +36,42 @@ export type PluginHookInput = {
   final?: boolean;
 };
 
+export type WasmInvokePriority = "ingress" | "egress";
+
+export type WasmInvokeOptions = {
+  fuelBudget: number;
+  maxMemoryBytes: number;
+  signal?: AbortSignal;
+  priority?: WasmInvokePriority;
+  tenantId?: string;
+  compileTimeoutMs?: number;
+};
+
+export type WasmExecutorStats = {
+  runtime: "wasmtime" | "mock";
+  poolSize: number;
+  active: number;
+  queued: number;
+  queuedIngress: number;
+  queuedEgress: number;
+  rejectedTotal: number;
+  shedTotal: number;
+  timeoutTotal: number;
+  trapTotal: number;
+  compileTotal: number;
+};
+
 export type WasmRuntimeExecutor = {
+  readonly runtimeKind: "wasmtime" | "mock";
   compile(pluginId: string, digest: string, wasmBytes: Uint8Array): void;
   invoke(
     pluginId: string,
     hook: WasmCallableHook,
     input: Uint8Array,
-    options: { fuelBudget: number; maxMemoryBytes: number },
+    options: WasmInvokeOptions,
   ): Promise<Uint8Array>;
+  selfCheck?(): Promise<void>;
+  stats?(): WasmExecutorStats;
   close(): void;
 };
 
@@ -42,6 +82,8 @@ export type PipelineExecutionResult = {
   http_status?: number;
   safe_message?: string;
   charge_policy: ChargePolicy;
+  outcome_kind: PluginOutcomeKind;
+  fail_open_count: number;
   audit: PluginAuditEntry[];
 };
 

@@ -26,7 +26,10 @@ import {
   evaluateErrorRules,
   invokeWasmProviderResponse,
   invokeWasmProviderStreamEvent,
+  WasmCapacityError,
+  WasmPluginFaultError,
   type MatchedProviderError,
+  type PluginOutcomeKind,
   type PluginPipelineEngine,
   type WasmRuntimeExecutor,
 } from "@gateway/plugin-engine";
@@ -36,6 +39,8 @@ import {
   encodeResponse,
   encodeSSE,
   extractUsage,
+  formatProtocolError,
+  formatProtocolSseError,
   numberLiteral,
   parseClientJson,
   parseProviderJson,
@@ -75,11 +80,15 @@ import {
   buildTextDeltaSse,
   extractChunkTextFromEncodedSse,
   extractResponseText,
+  inspectAnthropicBlockEvent,
   isConversationalOperation,
+  mergeUsageSources,
   mergeUsageWithAliases,
   parseRetryAfterMs,
   prepareUpstreamRequest,
   replaceResponseText,
+  resolveRouteUpstreamProtocol,
+  stripTextFromSseChunk,
   transformRequestTexts,
 } from "./upstream.ts";
 
@@ -96,6 +105,7 @@ type HydratedCandidate = {
   enabled: boolean;
   channel_enabled: boolean;
   account_active: boolean;
+  same_protocol: boolean;
   route: RouteRecord;
   channel: ChannelRecord;
   account: UpstreamAccountRecord;
@@ -360,16 +370,71 @@ function responseHeaders(
   };
 }
 
-function errorJson(c: Context, err: unknown, requestId: string, trace: TraceContext): Response {
+function errorJson(
+  c: Context,
+  operation: Operation,
+  err: unknown,
+  requestId: string,
+  trace: TraceContext,
+): Response {
   const gw =
     err instanceof GatewayError
       ? err
       : new GatewayError(500, "internal_error", "Internal gateway error");
+  const extraHeaders: Record<string, string> =
+    gw.code === "plugin_capacity_unavailable" || gw.code === "provider_capacity_unavailable"
+      ? { "retry-after": "1" }
+      : {};
   return c.json(
-    { error: { code: gw.code, message: gw.message, request_id: requestId } },
+    formatProtocolError(operation, gw.status, gw.code, gw.message, requestId),
     gw.status as 400,
-    responseHeaders(requestId, trace),
+    responseHeaders(requestId, trace, extraHeaders),
   );
+}
+
+function sanitizeHttpErrorStatus(status: number | undefined, fallback = 400): number {
+  return typeof status === "number" && Number.isInteger(status) && status >= 400 && status <= 599
+    ? status
+    : fallback;
+}
+
+function classifyPluginBlock(
+  outcomeKind: PluginOutcomeKind | undefined,
+  httpStatus: number | undefined,
+  safeMessage: string | undefined,
+): {
+  isContentDecision: boolean;
+  status: number;
+  code: string;
+  message: string;
+  extraHeaders: Record<string, string>;
+} {
+  const kind = outcomeKind ?? "content_decision";
+  if (kind === "host_capacity") {
+    return {
+      isContentDecision: false,
+      status: 503,
+      code: "plugin_capacity_unavailable",
+      message: safeMessage ?? "Plugin runtime capacity unavailable",
+      extraHeaders: { "retry-after": "1" },
+    };
+  }
+  if (kind === "plugin_fault") {
+    return {
+      isContentDecision: false,
+      status: 500,
+      code: "plugin_execution_failed",
+      message: safeMessage ?? "Plugin execution failed",
+      extraHeaders: {},
+    };
+  }
+  return {
+    isContentDecision: true,
+    status: sanitizeHttpErrorStatus(httpStatus, 400),
+    code: "content_blocked",
+    message: safeMessage ?? "Content blocked by moderation policy",
+    extraHeaders: {},
+  };
 }
 
 export async function handleInferenceRequest(
@@ -409,13 +474,17 @@ export async function handleInferenceRequest(
   let holdAcquired = false;
   let holdFinalized = false;
   let anyUnknownAttempt = false;
+  let activePluginSignal: AbortSignal | undefined;
+  let currentAttemptDispatched = false;
 
   const commitMeasured = async (input: CommitTerminalInput) => {
+    activePluginSignal?.throwIfAborted();
     const result = await deps.ledger.commitTerminal(input).catch(() => null);
     if (!result?.ok) {
       deps.metrics.ledgerCommitFailures++;
       throw new GatewayError(503, "ledger_commit_failed", "Ledger could not confirm settlement");
     }
+    return result;
   };
 
   const releaseAllPendingProbes = () => {
@@ -466,6 +535,13 @@ export async function handleInferenceRequest(
         : quotaLost
           ? new GatewayError(503, "rate_limit_unavailable", "Shared concurrency permit was revoked")
           : new GatewayError(503, "overloaded", "Gateway is draining");
+    if (deps.snapshot.isDiverged()) {
+      throw new GatewayError(
+        503,
+        "config_diverged",
+        "Gateway configuration epoch diverged from database lineage",
+      );
+    }
     if (!deps.snapshot.isFresh()) {
       throw new GatewayError(503, "config_unavailable", "Gateway configuration is stale");
     }
@@ -576,6 +652,7 @@ export async function handleInferenceRequest(
 
     const rawRoutes = snap.routesByModel.get(model.name) ?? [];
     const hydrated: HydratedCandidate[] = [];
+    let revokedRoute: AbortSignal | undefined;
     for (const r of rawRoutes) {
       const channel = snap.channels.get(r.channel_id);
       if (!channel) continue;
@@ -585,6 +662,19 @@ export async function handleInferenceRequest(
       const costPrice = snap.prices.get(r.cost_version_id);
       if (!billingPrice || !costPrice) continue;
       if (billingPrice.currency !== project.currency) continue;
+      if (
+        snap.revokedPlugins.size &&
+        r.enabled &&
+        channel.enabled &&
+        r.operations.includes(operation)
+      ) {
+        const signal = deps.snapshot.pluginSignal(r, channel);
+        if (signal.aborted) {
+          revokedRoute = signal;
+          continue;
+        }
+      }
+      const candidateUpstreamProto = resolveRouteUpstreamProtocol(snap, channel, r, operation);
       hydrated.push({
         id: r.id,
         channel_id: channel.id,
@@ -595,6 +685,7 @@ export async function handleInferenceRequest(
         enabled: r.enabled,
         channel_enabled: channel.enabled,
         account_active: account.state === "ACTIVE",
+        same_protocol: candidateUpstreamProto !== null && candidateUpstreamProto === operation,
         route: r,
         channel,
         account,
@@ -610,6 +701,7 @@ export async function handleInferenceRequest(
       operation,
     );
     if (selected.length === 0) {
+      revokedRoute?.throwIfAborted();
       throw new GatewayError(503, "no_route", "No healthy channel available for this model");
     }
     for (const entry of selected) {
@@ -624,16 +716,61 @@ export async function handleInferenceRequest(
       }
     };
 
-    const preRequestAudit: PluginAuditEntry[] = [];
+    const preRequestCache = new Map<
+      string,
+      {
+        body: Record<string, unknown>;
+        chars: number | undefined;
+        measurement: { inputCharacters?: string | undefined; images?: number | undefined };
+        audit: PluginAuditEntry[];
+      }
+    >();
+    const pipelineKeyOf = (steps: readonly RouteRecord["plugin_pipeline"][number][]) =>
+      steps
+        .filter((s) => s.enabled !== false)
+        .map((s) => `${s.plugin_id}:${s.priority}:${s.charge_policy ?? ""}`)
+        .join("|");
     const prepareRouteInput = async (candidate: HydratedCandidate) => {
-      let body = clientBody;
+      const pluginSignal = deps.snapshot.pluginSignal(candidate.route, candidate.channel);
+      activePluginSignal = pluginSignal;
+      pluginSignal.throwIfAborted();
       const steps = candidate.route.plugin_pipeline;
+      const pipeKey = isMultipartOp ? "__multipart__" : pipelineKeyOf(steps);
+      const cached = preRequestCache.get(pipeKey);
+      if (cached) {
+        return { ...cached, pluginSignal };
+      }
+      let body = clientBody;
+      const localAudit: PluginAuditEntry[] = [];
       if (steps.length > 0 && !isMultipartOp) {
+        if (
+          deps.metrics.isTenantPlatformAbsorbExceeded(
+            project.id,
+            deps.config.platformAbsorbMaxCountPerMinute ?? 100,
+            deps.config.platformAbsorbMaxAtomsPerMinute,
+          )
+        ) {
+          releaseUnusedProbes(0);
+          emitAccessLog(503, "plugin_capacity_unavailable");
+          return c.json(
+            formatProtocolError(
+              operation,
+              503,
+              "plugin_capacity_unavailable",
+              "Tenant plugin fault absorption budget exceeded",
+              requestId,
+            ),
+            503,
+            responseHeaders(requestId, trace, { "retry-after": "5" }),
+          );
+        }
         let preBlocked: {
+          outcome_kind?: PluginOutcomeKind;
           rule_code?: string;
           http_status?: number;
           safe_message?: string;
         } | null = null;
+        const policySignal = AbortSignal.any([pluginSignal, requestSignal]);
         const transformed = await transformRequestTexts(clientBody, operation, async (partText) => {
           const preRes = await deps.pluginEngine.runUnary(
             "on_request",
@@ -641,11 +778,12 @@ export async function handleInferenceRequest(
             snap.plugins,
             { request_id: requestId, project_id: project.id, model: model.name, operation },
             partText,
-            requestSignal,
+            policySignal,
           );
-          preRequestAudit.push(...preRes.audit);
+          localAudit.push(...preRes.audit);
           if (preRes.blocked) {
             preBlocked = {
+              ...(preRes.outcome_kind !== undefined ? { outcome_kind: preRes.outcome_kind } : {}),
               ...(preRes.rule_code !== undefined ? { rule_code: preRes.rule_code } : {}),
               ...(preRes.http_status !== undefined ? { http_status: preRes.http_status } : {}),
               ...(preRes.safe_message !== undefined ? { safe_message: preRes.safe_message } : {}),
@@ -656,26 +794,33 @@ export async function handleInferenceRequest(
         });
         if (transformed.blocked && preBlocked) {
           const blk = preBlocked as {
+            outcome_kind?: PluginOutcomeKind;
             rule_code?: string;
             http_status?: number;
             safe_message?: string;
           };
           releaseUnusedProbes(0);
-          deps.metrics.moderationBlocksTotal++;
-          logModBlocked = true;
-          const blockStatus = blk.http_status ?? 400;
-          emitAccessLog(blockStatus, blk.rule_code ?? "content_blocked");
+          const classified = classifyPluginBlock(
+            blk.outcome_kind,
+            blk.http_status,
+            blk.safe_message,
+          );
+          if (classified.isContentDecision) {
+            deps.metrics.moderationBlocksTotal++;
+            logModBlocked = true;
+          }
+          emitAccessLog(classified.status, blk.rule_code ?? classified.code);
           return c.json(
-            {
-              error: {
-                code: "content_blocked",
-                rule_code: blk.rule_code,
-                message: blk.safe_message,
-                request_id: requestId,
-              },
-            },
-            blockStatus as 400,
-            responseHeaders(requestId, trace),
+            formatProtocolError(
+              operation,
+              classified.status,
+              classified.code,
+              classified.message,
+              requestId,
+              blk.rule_code ? { rule_code: blk.rule_code } : undefined,
+            ),
+            classified.status as 400,
+            responseHeaders(requestId, trace, classified.extraHeaders),
           );
         }
         body = transformed.body;
@@ -687,8 +832,9 @@ export async function handleInferenceRequest(
         images:
           operation === "images" || operation === "image_edits" ? Number(body.n ?? 1) : undefined,
       };
-
-      return { body, chars, measurement };
+      const entry = { body, chars, measurement, audit: localAudit };
+      preRequestCache.set(pipeKey, entry);
+      return { ...entry, pluginSignal };
     };
     const firstInput = await prepareRouteInput(selected[0]!.route);
     if (firstInput instanceof Response) return firstInput;
@@ -762,6 +908,7 @@ export async function handleInferenceRequest(
         releaseProbeFor(cand.channel_id);
         continue;
       }
+      preparedInput.pluginSignal.throwIfAborted();
       if (requestSignal.aborted) throw admissionError(Boolean(projAcq.signal?.aborted));
       const attemptId = crypto.randomUUID();
       const holdRes = await deps.ledger.acquireHold({
@@ -791,13 +938,7 @@ export async function handleInferenceRequest(
             : `Request already finalized with state ${holdRes.existing_state ?? "UNKNOWN"}`;
           emitAccessLog(409, code);
           return c.json(
-            {
-              error: {
-                code,
-                message: msg,
-                request_id: holdRes.request_id,
-              },
-            },
+            formatProtocolError(operation, 409, code, msg, holdRes.request_id),
             409,
             responseHeaders(holdRes.request_id, trace),
           );
@@ -843,6 +984,7 @@ export async function handleInferenceRequest(
       const entry = selected[cursor]!;
       const cand = entry.route;
       logChannel = cand.channel.name;
+      currentAttemptDispatched = false;
       const attemptInput = cursor === activeIndex ? activeInput : await prepareRouteInput(cand);
       if (attemptInput instanceof Response) {
         if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
@@ -850,7 +992,15 @@ export async function handleInferenceRequest(
         holdFinalized = true;
         return attemptInput;
       }
-      const { body: attemptBody, measurement, chars } = attemptInput;
+      const {
+        body: attemptBody,
+        measurement,
+        chars,
+        pluginSignal,
+        audit: preRequestAudit,
+      } = attemptInput;
+      activePluginSignal = pluginSignal;
+      pluginSignal.throwIfAborted();
 
       if (pendingSwitchFrom) {
         let nextCustomerAtoms: string;
@@ -939,6 +1089,7 @@ export async function handleInferenceRequest(
       const upstreamSignal = AbortSignal.any([
         attemptAbort.signal,
         requestCancellation,
+        pluginSignal,
         ...permitSignals,
       ]);
       const timeoutTimer = setTimeout(
@@ -950,6 +1101,7 @@ export async function handleInferenceRequest(
       let upstreamResp: Response;
       let prepared: Awaited<ReturnType<typeof prepareUpstreamRequest>>;
       try {
+        pluginSignal.throwIfAborted();
         if (requestCancellation.aborted || permitSignals.some((signal) => signal.aborted)) {
           throw admissionError(permitSignals.some((signal) => signal.aborted));
         }
@@ -966,6 +1118,13 @@ export async function handleInferenceRequest(
           isStream,
           vertexTokens: deps.vertexTokens,
           wasmExecutor: deps.wasmExecutor,
+          tenantId: project.id,
+          onFieldDropped(source, target, field) {
+            deps.metrics.recordProtocolFieldDropped(source, target, field);
+          },
+          onFieldRejected(source, target, field) {
+            deps.metrics.recordProtocolFieldRejected(source, target, field);
+          },
           ...(deps.config.pluginSigningPublicKeyPem
             ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
             : {}),
@@ -976,6 +1135,30 @@ export async function handleInferenceRequest(
         clearTimeout(timeoutTimer);
         releaseChannelLimit();
         releaseChannelLimit = null;
+        pluginSignal.throwIfAborted();
+        if (
+          err instanceof GatewayError &&
+          err.code === "conversion_loss" &&
+          cursor + 1 < selected.length
+        ) {
+          releaseProbeFor(cand.channel.id);
+          pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
+          lastErrorStatus = err.status;
+          lastErrorCode = err.code;
+          lastErrorMessage = err.message;
+          continue;
+        }
+        if (
+          err instanceof GatewayError &&
+          (err.code === "provider_capacity_unavailable" || err.code === "provider_plugin_fault")
+        ) {
+          releaseProbeFor(cand.channel.id);
+          releaseUnusedProbes(cursor + 1);
+          holdFinalized = true;
+          if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
+          else await deps.ledger.releaseHold(requestId);
+          throw err;
+        }
         if (
           err instanceof GatewayError &&
           (err.code === "provider_plugin_unavailable" || err.code === "provider_adapter_failed")
@@ -1003,6 +1186,8 @@ export async function handleInferenceRequest(
       }
 
       try {
+        pluginSignal.throwIfAborted();
+        currentAttemptDispatched = true;
         upstreamResp = await deps.transport.fetch(
           prepared.url,
           {
@@ -1024,6 +1209,10 @@ export async function handleInferenceRequest(
           err instanceof UpstreamPreDispatchError ||
           (err instanceof Error &&
             /ECONNREFUSED|ENOTFOUND|Unable to connect|ConnectionRefused/i.test(err.message));
+        if (pluginSignal.aborted) {
+          if (err instanceof UpstreamPreDispatchError) currentAttemptDispatched = false;
+          throw pluginSignal.reason;
+        }
         const quotaLost = permitSignals.some((signal) => signal.aborted);
         if (requestCancellation.aborted || quotaLost) {
           releaseProbeFor(cand.channel_id);
@@ -1055,6 +1244,11 @@ export async function handleInferenceRequest(
         throw new GatewayError(lastErrorStatus, lastErrorCode, lastErrorMessage);
       }
 
+      if (pluginSignal.aborted) {
+        clearTimeout(timeoutTimer);
+        void upstreamResp.body?.cancel(pluginSignal.reason).catch(() => undefined);
+        throw pluginSignal.reason;
+      }
       const latencyMs = performance.now() - startedAt;
       logTtftMs = latencyMs;
       if (!upstreamResp.ok) {
@@ -1086,13 +1280,13 @@ export async function handleInferenceRequest(
         else await deps.ledger.releaseHold(requestId);
         emitAccessLog(upstreamResp.status, "upstream_client_error");
         return c.json(
-          {
-            error: {
-              code: "upstream_client_error",
-              message: `Upstream rejected request with HTTP ${upstreamResp.status}`,
-              request_id: requestId,
-            },
-          },
+          formatProtocolError(
+            operation,
+            upstreamResp.status,
+            "upstream_client_error",
+            `Upstream rejected request with HTTP ${upstreamResp.status}`,
+            requestId,
+          ),
           upstreamResp.status as 400,
           responseHeaders(requestId, trace),
         );
@@ -1110,8 +1304,15 @@ export async function handleInferenceRequest(
           const respBytes = await readResponseBytesFast(
             upstreamResp,
             deps.config.maxBodyBytes,
-            attemptAbort.signal,
+            upstreamSignal,
           );
+          clearTimeout(timeoutTimer);
+          pluginSignal.throwIfAborted();
+          const postResponseSignal = AbortSignal.any([pluginSignal, requestSignal]);
+          const droppedHeader: Record<string, string> =
+            prepared.droppedFields.length > 0
+              ? { "x-gateway-dropped-fields": prepared.droppedFields.join(",") }
+              : {};
 
           if (!isUpstreamJson) {
             releaseUnusedProbes(cursor + 1);
@@ -1154,6 +1355,7 @@ export async function handleInferenceRequest(
               moderation_blocked: false,
             });
             holdFinalized = true;
+            pluginSignal.throwIfAborted();
             deps.router.recordSuccess(cand.channel.id, latencyMs);
             markProbeCompleted(cand.channel.id);
             emitAccessLog(200, null);
@@ -1184,6 +1386,8 @@ export async function handleInferenceRequest(
                 executor: deps.wasmExecutor,
                 plugin: prepared.resolvedProvider.plugin,
                 config: prepared.resolvedProvider.config,
+                tenantId: project.id,
+                signal: postResponseSignal,
                 ...(deps.config.pluginSigningPublicKeyPem
                   ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
                   : {}),
@@ -1197,9 +1401,22 @@ export async function handleInferenceRequest(
                 },
               });
             } catch (err) {
+              pluginSignal.throwIfAborted();
               releaseUnusedProbes(cursor + 1);
               holdFinalized = true;
               await deps.ledger.markUnknown(requestId);
+              if (requestSignal.aborted) {
+                releaseProbeFor(cand.channel.id);
+                throw admissionError(Boolean(projAcq.signal?.aborted));
+              }
+              if (err instanceof WasmCapacityError) {
+                releaseProbeFor(cand.channel.id);
+                throw new GatewayError(503, "provider_capacity_unavailable", err.message);
+              }
+              if (err instanceof WasmPluginFaultError) {
+                releaseProbeFor(cand.channel.id);
+                throw new GatewayError(502, "provider_plugin_fault", err.message);
+              }
               deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
               markProbeCompleted(cand.channel.id);
               throw new GatewayError(
@@ -1241,16 +1458,16 @@ export async function handleInferenceRequest(
                 holdFinalized = true;
                 if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
                 else await deps.ledger.releaseHold(requestId);
-                const errStatus = wasmResp.status ?? 400;
+                const errStatus = sanitizeHttpErrorStatus(wasmResp.status, 400);
                 emitAccessLog(errStatus, "upstream_client_error");
                 return c.json(
-                  {
-                    error: {
-                      code: "upstream_client_error",
-                      message: wasmResp.error_message ?? "Upstream rejected request",
-                      request_id: requestId,
-                    },
-                  },
+                  formatProtocolError(
+                    operation,
+                    errStatus,
+                    "upstream_client_error",
+                    wasmResp.error_message ?? "Upstream rejected request",
+                    requestId,
+                  ),
                   errStatus as 400,
                   responseHeaders(requestId, trace),
                 );
@@ -1273,7 +1490,7 @@ export async function handleInferenceRequest(
                 if (wasmResp.usage !== undefined) {
                   rawUsage = validateUsageObject(wasmResp.usage);
                 } else if (prepared.usageDialect !== "custom") {
-                  rawUsage = extractUsage(adaptedBody, prepared.usageDialect);
+                  rawUsage = extractUsage(rawJson, prepared.usageDialect);
                 }
               } catch (err) {
                 holdFinalized = true;
@@ -1342,13 +1559,13 @@ export async function handleInferenceRequest(
                 const errStatus = matchedErr.http_status ?? 400;
                 emitAccessLog(errStatus, "upstream_client_error");
                 return c.json(
-                  {
-                    error: {
-                      code: "upstream_client_error",
-                      message: matchedErr.message ?? "Upstream rejected request",
-                      request_id: requestId,
-                    },
-                  },
+                  formatProtocolError(
+                    operation,
+                    errStatus,
+                    "upstream_client_error",
+                    matchedErr.message ?? "Upstream rejected request",
+                    requestId,
+                  ),
                   errStatus as 400,
                   responseHeaders(requestId, trace),
                 );
@@ -1366,13 +1583,7 @@ export async function handleInferenceRequest(
               }
               const adaptedJson =
                 prepared.mergedOverrides.response_transforms.length > 0
-                  ? copyExact(
-                      rawJson,
-                      applyResponseTransforms(
-                        rawJson,
-                        prepared.mergedOverrides.response_transforms,
-                      ),
-                    )
+                  ? applyResponseTransforms(rawJson, prepared.mergedOverrides.response_transforms)
                   : rawJson;
               try {
                 const baseUsage =
@@ -1428,11 +1639,14 @@ export async function handleInferenceRequest(
               );
             }
 
-            let moderationBlocked = false;
+            let responseBlocked = false;
+            let isContentDecision = true;
             let chargePolicy: "CHARGE_CUSTOMER" | "PLATFORM_ABSORB" = "CHARGE_CUSTOMER";
             let blockRule = "";
+            let blockCode = "content_blocked";
             let blockStatus = 400;
             let blockMessage = "Content blocked";
+            let blockExtraHeaders: Record<string, string> = {};
             const allAudit: PluginAuditEntry[] = [...preRequestAudit];
 
             if (cand.route.plugin_pipeline.length > 0 && isConversationalOperation(operation)) {
@@ -1443,23 +1657,33 @@ export async function handleInferenceRequest(
                 snap.plugins,
                 { request_id: requestId, project_id: project.id, model: model.name, operation },
                 respText,
-                attemptAbort.signal,
+                postResponseSignal,
               );
               allAudit.push(...postRes.audit);
               if (postRes.blocked) {
-                moderationBlocked = true;
-                logModBlocked = true;
-                chargePolicy = postRes.charge_policy;
-                blockRule = postRes.rule_code ?? "moderation_blocked";
-                blockStatus = postRes.http_status ?? 400;
-                blockMessage = postRes.safe_message ?? "Content blocked by moderation policy";
-                deps.metrics.moderationBlocksTotal++;
+                responseBlocked = true;
+                const classified = classifyPluginBlock(
+                  postRes.outcome_kind,
+                  postRes.http_status,
+                  postRes.safe_message,
+                );
+                isContentDecision = classified.isContentDecision;
+                chargePolicy = isContentDecision ? postRes.charge_policy : "PLATFORM_ABSORB";
+                blockRule = postRes.rule_code ?? classified.code;
+                blockCode = classified.code;
+                blockStatus = classified.status;
+                blockMessage = classified.message;
+                blockExtraHeaders = classified.extraHeaders;
+                if (isContentDecision) {
+                  logModBlocked = true;
+                  deps.metrics.moderationBlocksTotal++;
+                }
               } else if (postRes.text !== respText) {
                 clientJson = replaceResponseText(clientJson, operation, postRes.text);
               }
             }
 
-            await commitMeasured({
+            const commitRes = await commitMeasured({
               request_id: requestId,
               selected_attempt_id: activeAttemptId,
               channel_id: cand.channel.id,
@@ -1480,25 +1704,33 @@ export async function handleInferenceRequest(
               supplier_currency: cand.costPrice.currency,
               plugin_audit: allAudit,
               charge_policy: chargePolicy,
-              moderation_blocked: moderationBlocked,
+              moderation_blocked: responseBlocked,
             });
+            if (responseBlocked && !isContentDecision) {
+              deps.metrics.recordPlatformAbsorb(project.id, commitRes.supplier_cost_atoms);
+            }
 
             holdFinalized = true;
+            pluginSignal.throwIfAborted();
             deps.router.recordSuccess(cand.channel.id, latencyMs);
             markProbeCompleted(cand.channel.id);
-            if (moderationBlocked) {
+            if (responseBlocked) {
               emitAccessLog(blockStatus, blockRule);
               return c.json(
-                {
-                  error: {
-                    code: "content_blocked",
-                    rule_code: blockRule,
-                    message: blockMessage,
-                    request_id: requestId,
-                  },
-                },
+                formatProtocolError(
+                  operation,
+                  blockStatus,
+                  blockCode,
+                  blockMessage,
+                  requestId,
+                  blockRule ? { rule_code: blockRule } : undefined,
+                ),
                 blockStatus as 400,
-                responseHeaders(requestId, trace, { "x-gateway-channel": cand.channel.name }),
+                responseHeaders(requestId, trace, {
+                  "x-gateway-channel": cand.channel.name,
+                  ...blockExtraHeaders,
+                  ...droppedHeader,
+                }),
               );
             }
             emitAccessLog(200, null);
@@ -1507,6 +1739,7 @@ export async function handleInferenceRequest(
               headers: responseHeaders(requestId, trace, {
                 "content-type": "application/json",
                 "x-gateway-channel": cand.channel.name,
+                ...droppedHeader,
               }),
             });
           }
@@ -1539,8 +1772,13 @@ export async function handleInferenceRequest(
         const bedrock = prepared.isBedrockStream ? new BedrockEventStreamDecoder() : null;
         let logicalError: MatchedProviderError | null = null;
         try {
-          const peeked = await peekStream(upstreamBody, (chunk): SSEEvent | undefined =>
-            (bedrock ? bedrock.feed(chunk) : parser.feed(chunk)).find((frame) => frame.data !== ""),
+          const peeked = await peekStream(
+            upstreamBody,
+            (chunk): SSEEvent | undefined =>
+              (bedrock ? bedrock.feed(chunk) : parser.feed(chunk)).find(
+                (frame) => frame.data !== "",
+              ),
+            upstreamSignal,
           );
           upstreamBody = peeked.body;
           const first = peeked.found;
@@ -1549,6 +1787,8 @@ export async function handleInferenceRequest(
               executor: deps.wasmExecutor,
               plugin: prepared.resolvedProvider.plugin,
               config: prepared.resolvedProvider.config,
+              tenantId: project.id,
+              signal: upstreamSignal,
               ...(deps.config.pluginSigningPublicKeyPem
                 ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
                 : {}),
@@ -1581,7 +1821,16 @@ export async function handleInferenceRequest(
         } catch (err) {
           clearTimeout(timeoutTimer);
           await upstreamBody?.cancel().catch(() => undefined);
+          pluginSignal.throwIfAborted();
           if (c.req.raw.signal.aborted || guard.controller.signal.aborted) throw err;
+          if (err instanceof WasmCapacityError) {
+            releaseProbeFor(cand.channel.id);
+            throw new GatewayError(503, "provider_capacity_unavailable", err.message);
+          }
+          if (err instanceof WasmPluginFaultError) {
+            releaseProbeFor(cand.channel.id);
+            throw new GatewayError(502, "provider_plugin_fault", err.message);
+          }
           throw new GatewayError(
             502,
             "upstream_stream_error",
@@ -1636,27 +1885,36 @@ export async function handleInferenceRequest(
         c.req.raw.signal,
         guard.controller.signal,
         streamDeadline.signal,
+        pluginSignal,
         ...permitSignals,
       ]);
       const abortedFrame = () => {
         if (c.req.raw.signal.aborted) return undefined;
+        if (pluginSignal.aborted) {
+          emitAccessLog(503, "plugin_revoked");
+          return formatProtocolSseError(
+            operation,
+            503,
+            "plugin_revoked",
+            pluginSignal.reason.message,
+            requestId,
+          );
+        }
         const quotaLost = permitSignals.some((signal) => signal.aborted);
-        return encodeSSE(
-          {
-            error: {
-              code: quotaLost ? "rate_limit_unavailable" : "stream_interrupted",
-              message: quotaLost
-                ? "Shared concurrency permit was revoked"
-                : "Gateway interrupted the stream",
-              request_id: requestId,
-            },
-          },
-          "error",
+        return formatProtocolSseError(
+          operation,
+          503,
+          quotaLost ? "rate_limit_unavailable" : "stream_interrupted",
+          quotaLost ? "Shared concurrency permit was revoked" : "Gateway interrupted the stream",
+          requestId,
         );
       };
       const readNext = (reader: ReadableStreamDefaultReader<Uint8Array>) =>
-        readStreamChunk(reader, deps.config.streamIdleTimeoutMs ?? attemptTimeoutMs, () =>
-          attemptAbort.abort(new Error("Upstream stream exceeded its idle timeout")),
+        readStreamChunk(
+          reader,
+          deps.config.streamIdleTimeoutMs ?? attemptTimeoutMs,
+          () => attemptAbort.abort(new Error("Upstream stream exceeded its idle timeout")),
+          streamSignal,
         );
       const capturedProjectLimit = releaseProjectLimit;
       const capturedChannelLimit = releaseChannelLimit;
@@ -1690,6 +1948,9 @@ export async function handleInferenceRequest(
             "content-type": "text/event-stream; charset=utf-8",
             "cache-control": "no-cache",
             "x-gateway-channel": cand.channel.name,
+            ...(prepared.droppedFields.length > 0
+              ? { "x-gateway-dropped-fields": prepared.droppedFields.join(",") }
+              : {}),
           }),
         });
         streamOwnsGuard = true;
@@ -1893,6 +2154,7 @@ export async function handleInferenceRequest(
             let observedOutputChars = 0;
             let wasmState = "";
             let wasmUsage: Usage | undefined;
+            let wasmTerminal = false;
             let streamFailed = false;
             let blockedEarly = false;
 
@@ -1909,6 +2171,8 @@ export async function handleInferenceRequest(
                   executor: deps.wasmExecutor,
                   plugin: wasmProvider.plugin,
                   config: wasmProvider.config,
+                  tenantId: project.id,
+                  signal: streamSignal,
                   ...(deps.config.pluginSigningPublicKeyPem
                     ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
                     : {}),
@@ -1984,9 +2248,7 @@ export async function handleInferenceRequest(
                   );
                 }
               }
-              if (out.done && clientProtocol === "chat") {
-                heldTerminalChunks.push(utf8Encoder.encode("data: [DONE]\n\n"));
-              }
+              wasmTerminal ||= out.done === true;
             };
 
             try {
@@ -2037,14 +2299,24 @@ export async function handleInferenceRequest(
                   : { ...(await session!.finalize()), frames: [] };
                 streamPluginAudit.push(...finalMod.audit);
                 if (finalMod.blocked) {
-                  deps.metrics.moderationBlocksTotal++;
-                  logModBlocked = true;
+                  const classified = classifyPluginBlock(
+                    finalMod.outcome_kind,
+                    finalMod.http_status,
+                    finalMod.safe_message,
+                  );
+                  const effectiveChargePolicy = classified.isContentDecision
+                    ? finalMod.charge_policy
+                    : "PLATFORM_ABSORB";
+                  if (classified.isContentDecision) {
+                    deps.metrics.moderationBlocksTotal++;
+                    logModBlocked = true;
+                  }
                   const modUsage = buildModerationUsageFallback(
                     wasmUsage,
                     chars ?? 0,
                     observedOutputChars,
                   );
-                  await commitMeasured({
+                  const commitRes = await commitMeasured({
                     request_id: requestId,
                     selected_attempt_id: activeAttemptId,
                     channel_id: cand.channel.id,
@@ -2064,23 +2336,23 @@ export async function handleInferenceRequest(
                     },
                     supplier_currency: cand.costPrice.currency,
                     plugin_audit: [...preRequestAudit, ...streamPluginAudit],
-                    charge_policy: finalMod.charge_policy,
+                    charge_policy: effectiveChargePolicy,
                     moderation_blocked: true,
                   });
+                  if (!classified.isContentDecision) {
+                    deps.metrics.recordPlatformAbsorb(project.id, commitRes.supplier_cost_atoms);
+                  }
                   streamProbeDone = true;
                   deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
-                  emitAccessLog(400, finalMod.rule_code ?? "content_blocked");
+                  emitAccessLog(classified.status, finalMod.rule_code ?? classified.code);
                   await controller.enqueue(
-                    encodeSSE(
-                      {
-                        error: {
-                          code: "content_blocked",
-                          rule_code: finalMod.rule_code,
-                          message: finalMod.safe_message,
-                          request_id: requestId,
-                        },
-                      },
-                      "error",
+                    formatProtocolSseError(
+                      operation,
+                      classified.status,
+                      classified.code,
+                      classified.message,
+                      requestId,
+                      finalMod.rule_code ? { rule_code: finalMod.rule_code } : undefined,
                     ),
                   );
                   controller.close();
@@ -2094,7 +2366,14 @@ export async function handleInferenceRequest(
                 }
               }
 
-              if (clientProtocol === "chat" && heldTerminalChunks.length === 0) {
+              if (!wasmTerminal) {
+                throw new GatewayError(
+                  502,
+                  "stream_interrupted",
+                  "Provider stream ended without a terminal event",
+                );
+              }
+              if (clientProtocol === "chat") {
                 heldTerminalChunks.push(utf8Encoder.encode("data: [DONE]\n\n"));
               }
 
@@ -2117,15 +2396,12 @@ export async function handleInferenceRequest(
                 await deps.ledger.markUnknown(requestId);
                 emitAccessLog(502, "invalid_upstream_usage");
                 await controller.enqueue(
-                  encodeSSE(
-                    {
-                      error: {
-                        code: "invalid_upstream_usage",
-                        message: "Stream finished without usage metadata",
-                        request_id: requestId,
-                      },
-                    },
-                    "error",
+                  formatProtocolSseError(
+                    operation,
+                    502,
+                    "invalid_upstream_usage",
+                    "Stream finished without usage metadata",
+                    requestId,
                   ),
                 );
                 controller.close();
@@ -2165,12 +2441,15 @@ export async function handleInferenceRequest(
               controller.close();
             } catch (err) {
               const abortedByClient = clientCancelled || c.req.raw.signal.aborted;
+              const isLocalWasmFault =
+                err instanceof WasmCapacityError || err instanceof WasmPluginFaultError;
               if (!streamFailed) {
                 streamFailed = true;
                 await deps.ledger.markUnknown(requestId).catch(() => undefined);
                 if (
                   !abortedByClient &&
                   !streamSignal.aborted &&
+                  !isLocalWasmFault &&
                   !(err instanceof GatewayError && err.code === "ledger_commit_failed")
                 ) {
                   deps.metrics.recordUpstreamError(cand.channel.name, "stream_interrupted");
@@ -2187,12 +2466,25 @@ export async function handleInferenceRequest(
                 emitAccessLog(499, "client_aborted");
                 return;
               }
-              const code = err instanceof GatewayError ? err.code : "stream_interrupted";
-              emitAccessLog(502, code);
+              const errStatus =
+                err instanceof WasmCapacityError
+                  ? 503
+                  : err instanceof GatewayError
+                    ? err.status
+                    : 502;
+              const code =
+                err instanceof WasmCapacityError
+                  ? "provider_capacity_unavailable"
+                  : err instanceof WasmPluginFaultError
+                    ? "provider_plugin_fault"
+                    : err instanceof GatewayError
+                      ? err.code
+                      : "stream_interrupted";
+              emitAccessLog(errStatus, code);
               try {
                 const msg = err instanceof Error ? err.message : "Stream failed";
                 await controller.enqueue(
-                  encodeSSE({ error: { code, message: msg, request_id: requestId } }, "error"),
+                  formatProtocolSseError(operation, errStatus, code, msg, requestId),
                 );
                 controller.close();
               } catch {
@@ -2243,11 +2535,80 @@ export async function handleInferenceRequest(
             hasPlugins && clientProtocol === "responses"
               ? createResponsesModeration(openContentSession)
               : null;
+          const heldApprovedChunks = createTerminalBuffer();
           const heldTerminalChunks = createTerminalBuffer();
           const streamPluginAudit: PluginAuditEntry[] = [];
           let observedOutputChars = 0;
+          let activeTextBlockIndex = -1;
           let streamFailed = false;
           let blockedEarly = false;
+
+          const handleStreamChunk = async (chunk: Uint8Array, isTerminal: boolean) => {
+            if (responsesModeration) {
+              if (responsesModeration.defer(chunk)) {
+                heldTerminalChunks.push(chunk);
+                return;
+              }
+              const result = await responsesModeration.push(chunk);
+              if (!result) {
+                if (isTerminal) heldTerminalChunks.push(chunk);
+                else await controller.enqueue(responsesModeration.rewrite(chunk));
+              } else {
+                observedOutputChars += result.chars;
+                if (result.blocked) {
+                  blockedEarly = true;
+                  return;
+                }
+                if (result.rendered) {
+                  if (isTerminal) heldApprovedChunks.push(result.rendered);
+                  else await controller.enqueue(result.rendered);
+                }
+              }
+              return;
+            }
+            if (!session) {
+              if (isTerminal) heldTerminalChunks.push(chunk);
+              else await controller.enqueue(chunk);
+              return;
+            }
+            if (clientProtocol === "messages") {
+              const blk = inspectAnthropicBlockEvent(chunk);
+              if (blk?.kind === "text_start") {
+                activeTextBlockIndex = blk.index;
+              } else if (blk?.kind === "block_stop" && blk.index === activeTextBlockIndex) {
+                heldTerminalChunks.push(chunk);
+                return;
+              }
+            }
+            const deltaText = extractChunkTextFromEncodedSse(chunk, clientProtocol);
+            if (deltaText === null) {
+              if (isTerminal) heldTerminalChunks.push(chunk);
+              else await controller.enqueue(chunk);
+              return;
+            }
+            observedOutputChars += deltaText.length;
+            const mod = await session.push(deltaText);
+            if (mod.blocked) {
+              blockedEarly = true;
+              return;
+            }
+            if (mod.emit.length > 0) {
+              const rendered = buildTextDeltaSse(
+                clientProtocol,
+                model.name,
+                mod.emit,
+                streamId,
+                activeTextBlockIndex >= 0 ? activeTextBlockIndex : 0,
+              );
+              if (isTerminal) heldApprovedChunks.push(rendered);
+              else await controller.enqueue(rendered);
+            }
+            const remainder = stripTextFromSseChunk(chunk, clientProtocol);
+            if (remainder) {
+              if (isTerminal) heldTerminalChunks.push(remainder);
+              else await controller.enqueue(remainder);
+            }
+          };
 
           try {
             if (!reader) {
@@ -2294,48 +2655,10 @@ export async function handleInferenceRequest(
                   }
                 }
                 const translated = translator.consume(ev);
+                const isTerminalChunk = translated.terminal || translator.holdTerminal;
                 for (const chunk of translated.chunks) {
-                  if (
-                    translated.terminal ||
-                    translator.holdTerminal ||
-                    responsesModeration?.defer(chunk)
-                  ) {
-                    heldTerminalChunks.push(chunk);
-                    continue;
-                  }
-                  if (responsesModeration) {
-                    const result = await responsesModeration.push(chunk);
-                    if (!result) await controller.enqueue(responsesModeration.rewrite(chunk));
-                    else {
-                      observedOutputChars += result.chars;
-                      if (result.blocked) {
-                        blockedEarly = true;
-                        break;
-                      }
-                      if (result.rendered) await controller.enqueue(result.rendered);
-                    }
-                    continue;
-                  }
-                  if (!session) {
-                    await controller.enqueue(chunk);
-                    continue;
-                  }
-                  const deltaText = extractChunkTextFromEncodedSse(chunk, clientProtocol);
-                  if (deltaText === null) {
-                    await controller.enqueue(chunk);
-                    continue;
-                  }
-                  observedOutputChars += deltaText.length;
-                  const mod = await session.push(deltaText);
-                  if (mod.blocked) {
-                    blockedEarly = true;
-                    break;
-                  }
-                  if (mod.emit.length > 0) {
-                    await controller.enqueue(
-                      buildTextDeltaSse(clientProtocol, model.name, mod.emit, streamId),
-                    );
-                  }
+                  await handleStreamChunk(chunk, isTerminalChunk);
+                  if (blockedEarly) break;
                 }
                 if (blockedEarly) break;
               }
@@ -2356,15 +2679,14 @@ export async function handleInferenceRequest(
               for (const ev of tailEvents) {
                 const translated = translator.consume(ev);
                 for (const chunk of translated.chunks) {
-                  heldTerminalChunks.push(chunk);
+                  await handleStreamChunk(chunk, true);
+                  if (blockedEarly) break;
                 }
+                if (blockedEarly) break;
               }
             }
 
-            const combinedStreamUsage: Usage | undefined =
-              streamAliasUsage && translator.usage
-                ? validateUsageObject({ ...translator.usage, ...streamAliasUsage })
-                : (translator.usage ?? streamAliasUsage);
+            const combinedStreamUsage = mergeUsageSources(translator.usage, streamAliasUsage);
 
             if (session || responsesModeration) {
               const finalMod = responsesModeration
@@ -2372,14 +2694,24 @@ export async function handleInferenceRequest(
                 : { ...(await session!.finalize()), frames: [] };
               streamPluginAudit.push(...finalMod.audit);
               if (finalMod.blocked) {
-                deps.metrics.moderationBlocksTotal++;
-                logModBlocked = true;
+                const classified = classifyPluginBlock(
+                  finalMod.outcome_kind,
+                  finalMod.http_status,
+                  finalMod.safe_message,
+                );
+                const effectiveChargePolicy = classified.isContentDecision
+                  ? finalMod.charge_policy
+                  : "PLATFORM_ABSORB";
+                if (classified.isContentDecision) {
+                  deps.metrics.moderationBlocksTotal++;
+                  logModBlocked = true;
+                }
                 const modUsage = buildModerationUsageFallback(
                   combinedStreamUsage,
                   chars ?? 0,
                   observedOutputChars,
                 );
-                await commitMeasured({
+                const commitRes = await commitMeasured({
                   request_id: requestId,
                   selected_attempt_id: activeAttemptId,
                   channel_id: cand.channel.id,
@@ -2399,32 +2731,38 @@ export async function handleInferenceRequest(
                   },
                   supplier_currency: cand.costPrice.currency,
                   plugin_audit: [...preRequestAudit, ...streamPluginAudit],
-                  charge_policy: finalMod.charge_policy,
+                  charge_policy: effectiveChargePolicy,
                   moderation_blocked: true,
                 });
+                if (!classified.isContentDecision) {
+                  deps.metrics.recordPlatformAbsorb(project.id, commitRes.supplier_cost_atoms);
+                }
                 streamProbeDone = true;
                 deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
-                emitAccessLog(400, finalMod.rule_code ?? "content_blocked");
+                emitAccessLog(classified.status, finalMod.rule_code ?? classified.code);
                 await controller.enqueue(
-                  encodeSSE(
-                    {
-                      error: {
-                        code: "content_blocked",
-                        rule_code: finalMod.rule_code,
-                        message: finalMod.safe_message,
-                        request_id: requestId,
-                      },
-                    },
-                    "error",
+                  formatProtocolSseError(
+                    operation,
+                    classified.status,
+                    classified.code,
+                    classified.message,
+                    requestId,
+                    finalMod.rule_code ? { rule_code: finalMod.rule_code } : undefined,
                   ),
                 );
                 controller.close();
                 return;
               }
-              for (const frame of finalMod.frames) await controller.enqueue(frame);
+              for (const frame of finalMod.frames) heldApprovedChunks.push(frame);
               if (finalMod.emit.length > 0) {
-                await controller.enqueue(
-                  buildTextDeltaSse(clientProtocol, model.name, finalMod.emit, streamId),
+                heldApprovedChunks.push(
+                  buildTextDeltaSse(
+                    clientProtocol,
+                    model.name,
+                    finalMod.emit,
+                    streamId,
+                    activeTextBlockIndex >= 0 ? activeTextBlockIndex : 0,
+                  ),
                 );
               }
             }
@@ -2451,15 +2789,12 @@ export async function handleInferenceRequest(
               await deps.ledger.markUnknown(requestId);
               emitAccessLog(502, "invalid_upstream_usage");
               await controller.enqueue(
-                encodeSSE(
-                  {
-                    error: {
-                      code: "invalid_upstream_usage",
-                      message: "Stream finished without usage metadata",
-                      request_id: requestId,
-                    },
-                  },
-                  "error",
+                formatProtocolSseError(
+                  operation,
+                  502,
+                  "invalid_upstream_usage",
+                  "Stream finished without usage metadata",
+                  requestId,
                 ),
               );
               controller.close();
@@ -2492,6 +2827,9 @@ export async function handleInferenceRequest(
 
             streamProbeDone = true;
             deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
+            for (const chunk of heldApprovedChunks) {
+              await controller.enqueue(chunk);
+            }
             for (const chunk of heldTerminalChunks) {
               await controller.enqueue(responsesModeration?.rewrite(chunk, true) ?? chunk);
             }
@@ -2522,11 +2860,12 @@ export async function handleInferenceRequest(
               return;
             }
             const code = err instanceof GatewayError ? err.code : "stream_interrupted";
-            emitAccessLog(502, code);
+            const errStatus = err instanceof GatewayError ? err.status : 502;
+            emitAccessLog(errStatus, code);
             try {
               const msg = err instanceof Error ? err.message : "Stream failed";
               await controller.enqueue(
-                encodeSSE({ error: { code, message: msg, request_id: requestId } }, "error"),
+                formatProtocolSseError(operation, errStatus, code, msg, requestId),
               );
               controller.close();
             } catch {
@@ -2561,14 +2900,20 @@ export async function handleInferenceRequest(
     throw new GatewayError(lastErrorStatus, lastErrorCode, lastErrorMessage);
   } catch (err) {
     releaseAllPendingProbes();
+    const revocation = activePluginSignal?.aborted ? activePluginSignal.reason : undefined;
     if (holdAcquired && !holdFinalized) {
       holdFinalized = true;
-      await deps.ledger.markUnknown(requestId).catch(() => undefined);
+      const outcome =
+        revocation && !currentAttemptDispatched && !anyUnknownAttempt
+          ? deps.ledger.releaseHold(requestId)
+          : deps.ledger.markUnknown(requestId);
+      await outcome.catch(() => undefined);
     }
-    const status = err instanceof GatewayError ? err.status : 500;
-    const code = err instanceof GatewayError ? err.code : "internal_error";
+    const failure = revocation ?? err;
+    const status = failure instanceof GatewayError ? failure.status : 500;
+    const code = failure instanceof GatewayError ? failure.code : "internal_error";
     emitAccessLog(status, code);
-    return errorJson(c, err, requestId, trace);
+    return errorJson(c, operation, failure, requestId, trace);
   } finally {
     releaseAllPendingProbes();
     releaseLimiters();

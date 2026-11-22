@@ -26,6 +26,33 @@
           "checksum": "2b85b22a294bed4040ee280db9bf6623e6db54a6c3a5cf9d7b5230b694582858"
         }
       ]
+    },
+    {
+      "version": 2026112202,
+      "files": [
+        {
+          "path": "./migrations/0003_plugin_revisions.sql",
+          "checksum": "229427f7fdb69172dbfd935269d54d8b072539bbd8a2f50c3dc5b901ee62a376"
+        }
+      ]
+    },
+    {
+      "version": 2026112203,
+      "files": [
+        {
+          "path": "./migrations/0004_plugin_revocation_and_nodes.sql",
+          "checksum": "412db8c5fb1f75a7ef072584fda694a35fe4cbe7dd241f84ae78f19cd5ce0c42"
+        }
+      ]
+    },
+    {
+      "version": 2026112204,
+      "files": [
+        {
+          "path": "./migrations/0005_config_epoch_lineage.sql",
+          "checksum": "a9234e42d54fee6c4fff48c11a2b5ba07721b5c32fa0d2d148312fbe5c7a06f9"
+        }
+      ]
     }
   ],
   "legacyBaselines": [

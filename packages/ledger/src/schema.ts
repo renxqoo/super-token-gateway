@@ -1,6 +1,7 @@
 import type { SQL } from "bun";
 import { drizzle } from "drizzle-orm/bun-sql";
 import {
+  type AnyPgColumn,
   bigint,
   bigserial,
   boolean,
@@ -33,6 +34,7 @@ import type {
   PluginCapability,
   PluginKind,
   PluginPipelineStep,
+  PluginReleaseChange,
   PriceBasis,
   PriceSide,
   ProviderPluginConfig,
@@ -90,6 +92,9 @@ export const schemaMigrations = pgTable("schema_migrations", {
 export const configEpoch = pgTable("config_epoch", {
   id: smallint("id").primaryKey(),
   version: bigint("version", { mode: "number" }).notNull().default(1),
+  lineageToken: uuid("lineage_token")
+    .notNull()
+    .default(sql`gen_random_uuid()`),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
 
@@ -170,12 +175,64 @@ export const plugins = pgTable(
     manifest: pgJsonb<Record<string, unknown>>("manifest")
       .notNull()
       .default(sql`'{}'::jsonb`),
-    enabled: boolean("enabled").notNull().default(true),
+    enabled: boolean("enabled").notNull().default(false),
+    builtin: boolean("builtin").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .notNull()
       .defaultNow(),
   },
   (t) => [unique("plugins_name_version_key").on(t.name, t.version)],
+);
+
+export const pluginReleases = pgTable("plugin_releases", {
+  id: uuid("id").primaryKey(),
+  requestDigest: text("request_digest").notNull(),
+  actor: text("actor").notNull(),
+  configEpoch: bigint("config_epoch", { mode: "number" })
+    .notNull()
+    .unique("plugin_releases_config_epoch_key"),
+  expectedNodes: uuid("expected_nodes")
+    .array()
+    .notNull()
+    .default(sql`'{}'`),
+  changes: pgJsonb<PluginReleaseChange[]>("changes").notNull(),
+  rollbackOf: uuid("rollback_of").references((): AnyPgColumn => pluginReleases.id),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+});
+
+export const pluginRevocations = pgTable("plugin_revocations", {
+  pluginId: uuid("plugin_id")
+    .primaryKey()
+    .references(() => plugins.id),
+  actor: text("actor").notNull(),
+  reason: text("reason").notNull(),
+  configEpoch: bigint("config_epoch", { mode: "number" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+});
+
+export const gatewayConfigNodes = pgTable("gateway_config_nodes", {
+  id: uuid("id").primaryKey(),
+  appliedEpoch: bigint("applied_epoch", { mode: "number" }).notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: "string" })
+    .notNull()
+    .default(sql`clock_timestamp()`),
+  stoppedAt: timestamp("stopped_at", { withTimezone: true, mode: "string" }),
+});
+
+export const pluginReleaseAcks = pgTable(
+  "plugin_release_acks",
+  {
+    configEpoch: bigint("config_epoch", { mode: "number" })
+      .notNull()
+      .references(() => pluginReleases.configEpoch),
+    nodeId: uuid("node_id")
+      .notNull()
+      .references(() => gatewayConfigNodes.id),
+    appliedAt: timestamp("applied_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+  (t) => [primaryKey({ columns: [t.configEpoch, t.nodeId] })],
 );
 
 export const channels = pgTable(
@@ -673,6 +730,10 @@ export const ledgerSchema = {
   models,
   priceVersions,
   plugins,
+  pluginReleases,
+  pluginRevocations,
+  gatewayConfigNodes,
+  pluginReleaseAcks,
   routes,
   wallets,
   walletLots,

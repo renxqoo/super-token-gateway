@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { createServer, connect, type Socket } from "node:net";
 import { once } from "node:events";
 import { appendFile, cp, mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -216,12 +217,21 @@ synchronous_commit = on
     resolve("infra/postgres/adopt-ownership.sql"),
   ]);
   await migrate(database(pgUrl(primaryPort, "drill_migration")));
+  const fnOwners = await owner<{ proname: string; owner: string }[]>`
+    SELECT p.proname, pg_get_userbyid(p.proowner) AS owner
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public'
+      AND p.proname IN (
+        'prepare_ledger_month',
+        'keep_plugin_revision',
+        'reject_revoked_plugin_activation',
+        'refresh_config_epoch_lineage'
+      )
+  `;
   verify(
-    (
-      await owner`SELECT pg_get_userbyid(proowner) AS owner FROM pg_proc
-    WHERE oid = 'public.prepare_ledger_month(date)'::regprocedure`
-    )[0]?.owner === "drill_migration",
-    "Partition definer must belong to the dedicated migration login",
+    fnOwners.length === 4 && fnOwners.every((row) => row.owner === "drill_migration"),
+    "All definer/trigger functions must belong to the dedicated migration login",
   );
   await runPg("psql", ["-X", "-d", pgUrl(primaryPort), "-f", resolve("infra/postgres/roles.sql")]);
   await owner.unsafe(`
@@ -280,6 +290,7 @@ synchronous_commit = on
       })),
     ),
   );
+  const { publicKey: drillPluginKey } = generateKeyPairSync("ed25519");
   const config = loadConfigFromEnv(
     {
       NODE_ENV: "production",
@@ -289,6 +300,9 @@ synchronous_commit = on
       INTERNAL_AUTH_FILE: authFile,
       KEY_PEPPER: "drill-local-key-pepper",
       ENCRYPTION_KEY: "ab".repeat(32),
+      PLUGIN_SIGNING_PUBLIC_KEY_PEM: drillPluginKey
+        .export({ type: "spki", format: "pem" })
+        .toString(),
       REDIS_URL: `redis://127.0.0.1:${redisPort}`,
       REDIS_SENTINEL_URLS: sentinelPorts.map((p) => `redis://127.0.0.1:${p}`).join(","),
       REDIS_SENTINEL_MASTER: "stg",
@@ -349,6 +363,35 @@ synchronous_commit = on
   verify(
     (await owner`SELECT count(*)::int AS n FROM public.admin_audit_pending`)[0]?.n === 0,
     "Completed management operations are still marked pending",
+  );
+
+  const plugin = await admin("security", "plugins", "PUT", {
+    name: "drill-policy",
+    version: "1",
+    kind: "WEBHOOK",
+    webhook_config: { url: "http://127.0.0.1:9000/policy" },
+  });
+  const release = await admin("security", "plugin-releases", "POST", {
+    id: crypto.randomUUID(),
+    expected_epoch: plugin.config_epoch,
+    targets: [{ plugin_id: plugin.id }],
+    samples: { [String(plugin.id)]: { webhook_reply: { action: "PASS" } } },
+  });
+  await until(async () => {
+    const observed = await admin("security", `plugin-releases/${release.id}`);
+    const confirmations = observed.nodes as { node_id: string; status: string }[];
+    return confirmations.some(
+      (node) => node.node_id === gw.cluster.nodeId && node.status === "APPLIED",
+    )
+      ? true
+      : undefined;
+  }, "Data role persisted its applied release confirmation");
+  const revoked = await admin("security", `plugins/${plugin.id}/revoke`, "POST", {
+    reason: "drill",
+  });
+  verify(
+    gw.snapshot.get().revokedPlugins.has(String(plugin.id)) && revoked.actor === "drill-security",
+    "Split-role Gateway did not apply the committed plugin revocation",
   );
 
   const data = database(pgUrl(writer.port, "drill_data"));
@@ -699,6 +742,7 @@ recovery_target_action = 'promote'
           negative_db_checks: privilegeChecks.length,
           scoped_consumers: true,
           audit_actor: true,
+          plugin_release_ack_and_revocation: true,
           data_role_atoms: "13",
         },
         postgres_failover: {

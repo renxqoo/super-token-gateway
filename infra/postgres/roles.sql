@@ -34,7 +34,15 @@ GRANT SELECT ON public.wallets, public.wallet_lots, public.supplier_cells, publi
   TO stg_data, stg_control, stg_worker;
 GRANT SELECT ON public.supplier_root_balances TO stg_control, stg_worker;
 GRANT SELECT ON public.outbox_events, public.outbox_consumers TO stg_control, stg_worker;
-GRANT SELECT ON public.funding_operations, public.billing_resolutions TO stg_control;
+GRANT SELECT ON public.plugin_revocations TO stg_data, stg_control;
+GRANT SELECT ON public.gateway_config_nodes, public.plugin_release_acks TO stg_data, stg_control, stg_worker;
+GRANT SELECT (config_epoch) ON public.plugin_releases TO stg_data;
+GRANT SELECT (expected_nodes) ON public.plugin_releases TO stg_worker;
+GRANT INSERT, UPDATE ON public.gateway_config_nodes TO stg_data;
+GRANT DELETE ON public.gateway_config_nodes TO stg_worker;
+GRANT INSERT ON public.plugin_release_acks TO stg_data;
+GRANT INSERT ON public.plugin_revocations TO stg_control;
+GRANT SELECT ON public.funding_operations, public.billing_resolutions, public.plugin_releases TO stg_control;
 GRANT SELECT ON public.billing_charges, public.ledger_entries, public.admin_audit_events TO stg_audit;
 
 GRANT INSERT ON public.wallet_leases, public.supplier_leases, public.billing_holds TO stg_data;
@@ -67,7 +75,7 @@ GRANT INSERT, UPDATE ON public.projects, public.api_keys, public.upstream_accoun
   public.channels, public.models, public.routes, public.wallets, public.wallet_lots,
   public.supplier_root_balances, public.supplier_cells TO stg_control;
 GRANT UPDATE ON public.config_epoch TO stg_control;
-GRANT INSERT ON public.price_versions, public.funding_operations, public.billing_resolutions,
+GRANT INSERT ON public.price_versions, public.funding_operations, public.billing_resolutions, public.plugin_releases,
   public.admin_audit_events TO stg_control;
 GRANT INSERT, DELETE ON public.admin_audit_pending TO stg_control;
 GRANT SELECT (request_id) ON public.admin_audit_pending TO stg_control;

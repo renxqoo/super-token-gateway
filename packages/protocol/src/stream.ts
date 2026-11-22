@@ -10,12 +10,13 @@ import type { Completion } from "./response.ts";
 import type { Part } from "./request.ts";
 
 export interface StreamDelta {
-  type: "text" | "tool";
+  type: "text" | "reasoning" | "tool";
   index: number;
   text: string;
   id?: string;
   name?: string;
 }
+
 export class StreamTranslator {
   usage: Usage | undefined;
   terminal = false;
@@ -25,6 +26,7 @@ export class StreamTranslator {
   private sequence = 0;
   private tools = new Map<number, { id: string; name: string; args: string }>();
   private textBlocks = new Map<number, string>();
+  private reasoningBlocks = new Map<number, string>();
   private blockTypes = new Map<number, string>();
   private openBlocks = new Set<number>();
   private accumulatedBytes = 0;
@@ -32,6 +34,7 @@ export class StreamTranslator {
   remoteId: string | undefined;
   publicId: string | undefined;
   private targetIndices = new Map<string, number>();
+  private nextTargetIndex = 0;
   private messageOpen: number | undefined;
   private messageClosed = new Set<number>();
   private geminiCompleted = new Set<number>();
@@ -170,11 +173,11 @@ export class StreamTranslator {
           this.chatCompleted.add(index);
         }
         const delta = optionalObject(choice.delta);
-        if (
-          this.target !== this.source &&
-          (delta.reasoning_content || delta.refusal || delta.audio)
-        )
+        if (this.target !== this.source && (delta.refusal || delta.audio))
           throw new GatewayError(502, "conversion_loss", "Unsupported stream delta");
+        const reasoningDelta = delta.reasoning_content ?? delta.reasoning;
+        if (typeof reasoningDelta === "string" && reasoningDelta.length > 0)
+          deltas.push({ type: "reasoning", index: 0, text: reasoningDelta });
         if (typeof delta.content === "string")
           deltas.push({ type: "text", index: 0, text: delta.content });
         if (Array.isArray(delta.tool_calls))
@@ -200,6 +203,11 @@ export class StreamTranslator {
       const index = Number(body.output_index ?? 0);
       if (type === "response.output_text.delta")
         deltas.push({ type: "text", index, text: text(body.delta) });
+      if (
+        type === "response.reasoning_summary_text.delta" ||
+        type === "response.reasoning_text.delta"
+      )
+        deltas.push({ type: "reasoning", index, text: text(body.delta) });
       if (type === "response.output_item.added") {
         const item = optionalObject(body.item);
         if (item.type === "function_call")
@@ -210,7 +218,11 @@ export class StreamTranslator {
             id: text(item.call_id),
             name: text(item.name),
           });
-        else if (this.target !== this.source && item.type !== "message")
+        else if (
+          this.target !== this.source &&
+          item.type !== "message" &&
+          item.type !== "reasoning"
+        )
           throw new GatewayError(502, "conversion_loss", "Unsupported response output item");
       }
       if (type === "response.function_call_arguments.delta")
@@ -233,16 +245,26 @@ export class StreamTranslator {
             id: text(block.id),
             name: text(block.name),
           });
-        else if (block.type === "text" && typeof block.text === "string")
+        else if (block.type === "text" && typeof block.text === "string" && block.text.length > 0)
           deltas.push({ type: "text", index, text: block.text });
-        else if (this.target !== this.source && block.type !== "text")
+        else if (
+          block.type === "thinking" &&
+          typeof block.thinking === "string" &&
+          block.thinking.length > 0
+        )
+          deltas.push({ type: "reasoning", index, text: block.thinking });
+        else if (this.target !== this.source && block.type !== "text" && block.type !== "thinking")
           throw new GatewayError(502, "conversion_loss", "Unsupported Anthropic stream block");
       }
       if (type === "content_block_delta") {
         const delta = object(body.delta);
         if (delta.type === "text_delta")
           deltas.push({ type: "text", index, text: text(delta.text) });
-        else if (delta.type === "input_json_delta")
+        else if (delta.type === "thinking_delta")
+          deltas.push({ type: "reasoning", index, text: text(delta.thinking) });
+        else if (delta.type === "signature_delta") {
+          void 0;
+        } else if (delta.type === "input_json_delta")
           deltas.push({ type: "tool", index, text: text(delta.partial_json) });
         else if (this.target !== this.source)
           throw new GatewayError(502, "conversion_loss", "Unsupported Anthropic delta");
@@ -265,12 +287,10 @@ export class StreamTranslator {
         if (Array.isArray(content.parts))
           for (let index = 0; index < content.parts.length; index++) {
             const part = object(content.parts[index]);
-            if (this.target !== this.source && (part.thought || part.thoughtSignature))
-              throw new GatewayError(
-                502,
-                "conversion_loss",
-                "Cannot preserve Gemini thought/signature",
-              );
+            if (part.thought === true && typeof part.text === "string") {
+              deltas.push({ type: "reasoning", index: 0, text: part.text });
+              continue;
+            }
             if (typeof part.text === "string")
               deltas.push({ type: "text", index: 0, text: part.text });
             else if (part.functionCall) {
@@ -328,9 +348,11 @@ export class StreamTranslator {
       throw new GatewayError(502, "stream_truncated", "Cannot finalize incomplete stream");
     return this.source === this.target ? [] : this.complete();
   }
+
   private event(type: string, body: Record<string, unknown>): Uint8Array {
     return encodeSSE({ type, sequence_number: this.sequence++, ...body }, type);
   }
+
   private start(): Uint8Array[] {
     this.started = true;
     if (this.target === "chat")
@@ -374,11 +396,15 @@ export class StreamTranslator {
       ];
     return [];
   }
+
   private delta(delta: StreamDelta): Uint8Array[] {
     const sourceIndex = `${delta.type}:${delta.index}`;
     let targetIndex = this.targetIndices.get(sourceIndex);
-    if (targetIndex === undefined) {
-      targetIndex = this.targetIndices.size;
+    if (
+      targetIndex === undefined ||
+      (this.target === "messages" && this.messageClosed.has(targetIndex))
+    ) {
+      targetIndex = this.nextTargetIndex++;
       this.targetIndices.set(sourceIndex, targetIndex);
     }
     delta = { ...delta, index: targetIndex };
@@ -386,7 +412,7 @@ export class StreamTranslator {
     if (!Number.isSafeInteger(delta.index) || delta.index < 0 || delta.index > 127)
       throw new GatewayError(502, "invalid_upstream", "Stream block index is out of range");
     const first = !this.openBlocks.has(delta.index);
-    if (delta.type === "text" && this.tools.has(delta.index))
+    if ((delta.type === "text" || delta.type === "reasoning") && this.tools.has(delta.index))
       throw new GatewayError(502, "invalid_upstream", "Stream block type changed");
     if (delta.type === "tool") {
       const previous = this.tools.get(delta.index);
@@ -408,9 +434,18 @@ export class StreamTranslator {
         );
       if (delta.type === "text")
         this.textBlocks.set(delta.index, (this.textBlocks.get(delta.index) ?? "") + delta.text);
+      if (delta.type === "reasoning")
+        this.reasoningBlocks.set(
+          delta.index,
+          (this.reasoningBlocks.get(delta.index) ?? "") + delta.text,
+        );
     }
     if (this.target === "messages" && delta.type === "tool") return [];
-    if (this.target === "messages" && delta.type === "text" && this.tools.size)
+    if (
+      this.target === "messages" &&
+      (delta.type === "text" || delta.type === "reasoning") &&
+      this.tools.size
+    )
       throw new GatewayError(
         502,
         "conversion_loss",
@@ -420,15 +455,20 @@ export class StreamTranslator {
       const change =
         delta.type === "text"
           ? { content: delta.text }
-          : {
-              tool_calls: [
-                {
-                  index: delta.index,
-                  ...(first ? { id: this.tools.get(delta.index)?.id, type: "function" } : {}),
-                  function: { ...(delta.name ? { name: delta.name } : {}), arguments: delta.text },
-                },
-              ],
-            };
+          : delta.type === "reasoning"
+            ? { reasoning_content: delta.text }
+            : {
+                tool_calls: [
+                  {
+                    index: delta.index,
+                    ...(first ? { id: this.tools.get(delta.index)?.id, type: "function" } : {}),
+                    function: {
+                      ...(delta.name ? { name: delta.name } : {}),
+                      arguments: delta.text,
+                    },
+                  },
+                ],
+              };
       chunks.push(
         encodeSSE({
           id: this.id,
@@ -454,12 +494,14 @@ export class StreamTranslator {
               content_block:
                 delta.type === "text"
                   ? { type: "text", text: "" }
-                  : {
-                      type: "tool_use",
-                      id: this.tools.get(delta.index)?.id,
-                      name: this.tools.get(delta.index)?.name,
-                      input: {},
-                    },
+                  : delta.type === "reasoning"
+                    ? { type: "thinking", thinking: "" }
+                    : {
+                        type: "tool_use",
+                        id: this.tools.get(delta.index)?.id,
+                        name: this.tools.get(delta.index)?.name,
+                        input: {},
+                      },
             },
             "content_block_start",
           ),
@@ -472,7 +514,9 @@ export class StreamTranslator {
             delta:
               delta.type === "text"
                 ? { type: "text_delta", text: delta.text }
-                : { type: "input_json_delta", partial_json: delta.text },
+                : delta.type === "reasoning"
+                  ? { type: "thinking_delta", thinking: delta.text }
+                  : { type: "input_json_delta", partial_json: delta.text },
           },
           "content_block_delta",
         ),
@@ -491,14 +535,21 @@ export class StreamTranslator {
                     content: [],
                     status: "in_progress",
                   }
-                : {
-                    id: `fc_${delta.index}`,
-                    type: "function_call",
-                    call_id: this.tools.get(delta.index)?.id,
-                    name: this.tools.get(delta.index)?.name,
-                    arguments: "",
-                    status: "in_progress",
-                  },
+                : delta.type === "reasoning"
+                  ? {
+                      id: `rs_${delta.index}`,
+                      type: "reasoning",
+                      summary: [],
+                      status: "in_progress",
+                    }
+                  : {
+                      id: `fc_${delta.index}`,
+                      type: "function_call",
+                      call_id: this.tools.get(delta.index)?.id,
+                      name: this.tools.get(delta.index)?.name,
+                      arguments: "",
+                      status: "in_progress",
+                    },
           }),
         );
         if (delta.type === "text")
@@ -515,11 +566,17 @@ export class StreamTranslator {
         this.event(
           delta.type === "text"
             ? "response.output_text.delta"
-            : "response.function_call_arguments.delta",
+            : delta.type === "reasoning"
+              ? "response.reasoning_summary_text.delta"
+              : "response.function_call_arguments.delta",
           {
             output_index: delta.index,
-            item_id: `${delta.type === "text" ? "msg" : "fc"}_${delta.index}`,
-            ...(delta.type === "text" ? { content_index: 0 } : {}),
+            item_id: `${delta.type === "text" ? "msg" : delta.type === "reasoning" ? "rs" : "fc"}_${delta.index}`,
+            ...(delta.type === "text"
+              ? { content_index: 0 }
+              : delta.type === "reasoning"
+                ? { summary_index: 0 }
+                : {}),
             delta: delta.text,
           },
         ),
@@ -530,9 +587,18 @@ export class StreamTranslator {
           candidates: [{ index: 0, content: { role: "model", parts: [{ text: delta.text }] } }],
         }),
       );
+    else if (delta.type === "reasoning")
+      chunks.push(
+        encodeSSE({
+          candidates: [
+            { index: 0, content: { role: "model", parts: [{ text: delta.text, thought: true }] } },
+          ],
+        }),
+      );
     this.openBlocks.add(delta.index);
     return chunks;
   }
+
   private complete(): Uint8Array[] {
     const chunks: Uint8Array[] = [];
     if (!this.started) chunks.push(...this.start());
@@ -607,7 +673,8 @@ export class StreamTranslator {
       chunks.push(encodeSSE({ type: "message_stop" }, "message_stop"));
     } else if (this.target === "responses") {
       const parts: Part[] = [];
-      for (const index of [...this.openBlocks].sort((a, b) => a - b)) {
+      const sortedBlocks = [...this.openBlocks].sort((a, b) => a - b);
+      for (const index of sortedBlocks) {
         const tool = this.tools.get(index);
         if (tool) {
           parts.push({ type: "call", id: tool.id, name: tool.name, arguments: tool.args });
@@ -616,6 +683,17 @@ export class StreamTranslator {
               output_index: index,
               item_id: `fc_${index}`,
               arguments: tool.args,
+            }),
+          );
+        } else if (this.reasoningBlocks.has(index)) {
+          const value = this.reasoningBlocks.get(index) ?? "";
+          parts.push({ type: "reasoning", text: value });
+          chunks.push(
+            this.event("response.reasoning_summary_text.done", {
+              output_index: index,
+              item_id: `rs_${index}`,
+              summary_index: 0,
+              text: value,
             }),
           );
         } else {
@@ -648,7 +726,7 @@ export class StreamTranslator {
       for (let i = 0; i < output.length; i++)
         chunks.push(
           this.event("response.output_item.done", {
-            output_index: [...this.openBlocks].sort((a, b) => a - b)[i],
+            output_index: sortedBlocks[i],
             item: output[i],
           }),
         );

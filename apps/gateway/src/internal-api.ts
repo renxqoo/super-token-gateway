@@ -3,7 +3,15 @@ import { bodyLimit } from "hono/body-limit";
 import type { SQL } from "bun";
 import { z } from "zod";
 import { GatewayError, pricingSchema, usageSchema } from "@gateway/contracts";
-import { operations, type Operation, type Pricing, type Usage } from "@gateway/kernel";
+import {
+  canonical,
+  DomainError,
+  operations,
+  type Operation,
+  type Pricing,
+  type Usage,
+} from "@gateway/kernel";
+import { createPluginReleaseRepository } from "@gateway/ledger";
 import type {
   AdapterOverrides,
   ChannelKind,
@@ -16,6 +24,7 @@ import type {
   PluginCapability,
   PluginKind,
   PluginPipelineStep,
+  PluginReleaseTarget,
   PriceBasis,
   PriceSide,
   ProviderPluginConfig,
@@ -28,8 +37,11 @@ import type {
 import {
   assertSafeEndpointTemplate,
   assertSafeFieldPath,
+  builtinProviderRevisionId,
+  createWasmtimeExecutor,
   getBuiltinPlugin,
   listBuiltinPlugins,
+  resolveWasmtimeLibraryPath,
   resolveProviderPlugin,
   type PluginHook,
   type PluginPipelineEngine,
@@ -52,6 +64,7 @@ import {
   type InternalRole,
 } from "./internal-auth.ts";
 import type { SnapshotManager } from "./snapshot.ts";
+import { validatePluginRelease } from "./plugin-release-validation.ts";
 import { previewProviderRequest } from "./upstream.ts";
 
 type CatalogRepo = ReturnType<typeof createCatalogRepository>;
@@ -446,7 +459,7 @@ const upsertRouteSchema = z
     cost_version_id: z.uuid(),
     request_policy: z.record(z.string(), z.unknown()).default({}),
     adapter_overrides: adapterOverridesSchema.default({}),
-    plugin_pipeline: z.array(pluginStepSchema).max(20).default([]),
+    plugin_pipeline: z.array(pluginStepSchema).max(20).optional(),
     retry_policy: retryPolicySchema.default({}),
     enabled: z.boolean().default(true),
   })
@@ -455,16 +468,50 @@ const upsertRouteSchema = z
 const webhookConfigSchema = z
   .object({
     url: z.url().max(1000),
-    headers: z.record(z.string(), z.string()).optional(),
+    headers: z.record(headerNameSchema, headerValueSchema).optional(),
     timeout_ms: z.number().int().min(50).max(30_000).optional(),
     stream_mode: z.enum(["HOLD_UNTIL_APPROVED", "STREAM_AND_CUTOFF"]).optional(),
-    window_chars: z.number().int().min(1).max(65536).optional(),
-    window_ms: z.number().int().min(10).max(10_000).optional(),
-    max_buffer_bytes: z.number().int().min(64).max(65536).optional(),
+    window_chars: z.number().int().min(1).max(4096).optional(),
+    window_ms: z.number().int().min(10).max(5_000).optional(),
+    max_buffer_bytes: z.number().int().min(64).max(16384).optional(),
+    max_concurrency: z.number().int().min(1).max(256).optional(),
+    max_response_bytes: z
+      .number()
+      .int()
+      .min(1024)
+      .max(4 * 1024 * 1024)
+      .optional(),
     failure_policy: z.enum(["FAIL_CLOSED", "FAIL_OPEN"]).optional(),
     charge_policy: z.enum(["CHARGE_CUSTOMER", "PLATFORM_ABSORB"]).optional(),
     circuit_failure_threshold: z.number().int().min(1).max(100).optional(),
     circuit_open_ms: z.number().int().min(1000).max(300_000).optional(),
+  })
+  .strict();
+
+const pluginManifestSchema = z
+  .object({
+    hooks: z
+      .array(z.enum(["on_request", "on_response", "on_stream_chunk", "on_stream_end"]))
+      .max(4)
+      .optional(),
+    max_memory_bytes: z
+      .number()
+      .int()
+      .min(65_536)
+      .max(64 * 1024 * 1024)
+      .optional(),
+    fuel_budget: z.number().int().min(10_000).max(50_000_000).optional(),
+    fuel_per_byte: z.number().int().min(0).max(5_000).optional(),
+    max_input_bytes: z
+      .number()
+      .int()
+      .min(1024)
+      .max(4 * 1024 * 1024)
+      .optional(),
+    deterministic_text_only: z.boolean().optional(),
+    window_bytes: z.number().int().min(0).max(4096).optional(),
+    charge_policy: z.enum(["CHARGE_CUSTOMER", "PLATFORM_ABSORB"]).optional(),
+    failure_policy: z.enum(["FAIL_CLOSED", "FAIL_OPEN"]).optional(),
   })
   .strict();
 
@@ -477,11 +524,13 @@ const upsertPluginSchema = z
     kind: z.enum(["WASM", "WEBHOOK", "DECLARATIVE"]),
     wasm_bytes_base64: z.string().min(4).optional(),
     webhook_config: webhookConfigSchema.nullable().optional(),
-    provider_config: z.record(z.string(), z.unknown()).nullable().optional(),
+    provider_config: z
+      .union([declarativeProviderConfigSchema, wasmProviderConfigSchema])
+      .nullable()
+      .optional(),
     signature: z.string().max(1024).nullable().optional(),
     signing_key_id: z.string().max(120).nullable().optional(),
-    manifest: z.record(z.string(), z.unknown()).default({}),
-    enabled: z.boolean().default(true),
+    manifest: pluginManifestSchema.default({}),
   })
   .strict();
 
@@ -489,9 +538,52 @@ const installBuiltinPluginSchema = z
   .object({
     signature: z.string().max(1024).nullable().optional(),
     signing_key_id: z.string().max(120).nullable().optional(),
-    manifest: z.record(z.string(), z.unknown()).optional(),
-    provider_config: z.record(z.string(), z.unknown()).optional(),
-    enabled: z.boolean().default(true),
+    manifest: pluginManifestSchema.optional(),
+    provider_config: declarativeProviderConfigSchema.partial().optional(),
+  })
+  .strict();
+
+const pluginReleaseSchema = z
+  .object({
+    id: z.uuid(),
+    expected_epoch: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    targets: z
+      .array(
+        z.union([
+          z.object({ channel_id: z.uuid(), provider_plugin_id: z.uuid() }).strict(),
+          z.object({ plugin_id: z.uuid() }).strict(),
+          z
+            .object({ route_id: z.uuid(), plugin_pipeline: z.array(pluginStepSchema).max(20) })
+            .strict(),
+        ]),
+      )
+      .min(1)
+      .max(50),
+    samples: z
+      .record(
+        z.uuid(),
+        z
+          .object({
+            request: z.record(z.string(), z.unknown()).optional(),
+            response: z.record(z.string(), z.unknown()).optional(),
+            event: z
+              .object({ name: z.string().max(256), data: z.string().max(65_536) })
+              .strict()
+              .optional(),
+            text: z.string().max(65_536).optional(),
+            webhook_reply: z.record(z.string(), z.unknown()).optional(),
+          })
+          .strict(),
+      )
+      .default({}),
+  })
+  .strict();
+
+const rollbackPluginReleaseSchema = z
+  .object({
+    id: z.uuid(),
+    expected_epoch: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    samples: pluginReleaseSchema.shape.samples,
   })
   .strict();
 
@@ -671,6 +763,7 @@ export function createInternalApi(deps: {
   wasmExecutor: WasmRuntimeExecutor | null;
 }) {
   const app = new Hono<AdminEnv>();
+  const pluginReleases = createPluginReleaseRepository(deps.db);
   const requestBodies = new Map<string, { schema: z.ZodType; required: boolean }>();
   const routeRoles = new Map<string, InternalRole>();
 
@@ -797,8 +890,18 @@ export function createInternalApi(deps: {
         500,
       );
     }
+    if (
+      err instanceof DomainError &&
+      ["plugin_revision_conflict", "plugin_release_conflict"].includes(err.code)
+    ) {
+      return c.json({ error: { code: err.code, message: err.message } }, 409);
+    }
     const status = err instanceof GatewayError ? err.status : 400;
-    const code = err instanceof GatewayError ? err.code : "internal_api_error";
+    const code =
+      err instanceof GatewayError ||
+      (err instanceof DomainError && err.code === "invalid_plugin_binding")
+        ? err.code
+        : "internal_api_error";
     return c.json({ error: { code, message: err.message } }, status as 400);
   });
 
@@ -875,7 +978,10 @@ export function createInternalApi(deps: {
       deps.config.privateUpstreamCidrs,
     );
     const snap = deps.snapshot.isLoaded() ? deps.snapshot.get() : null;
-    const resolved = resolveProviderPlugin(kind, body.provider_plugin_id ?? null, snap);
+    const existing = snap?.channels.get(id);
+    const providerPluginId =
+      body.provider_plugin_id ?? (existing?.kind === kind ? existing.provider_plugin_id : null);
+    const resolved = resolveProviderPlugin(kind, providerPluginId, snap);
     if (!resolved) {
       throw new GatewayError(400, "unknown_provider", `Unknown provider plugin: ${kind}`);
     }
@@ -886,7 +992,10 @@ export function createInternalApi(deps: {
       account_id: body.account_id,
       name: body.name,
       kind,
-      provider_plugin_id: body.provider_plugin_id ?? null,
+      provider_plugin_id:
+        resolved.source === "builtin"
+          ? builtinProviderRevisionId(resolved.preset.digest)
+          : resolved.plugin_id,
       base_url: body.base_url,
       secret_ciphertext: secretCiphertext,
       rpm: body.rpm,
@@ -937,7 +1046,9 @@ export function createInternalApi(deps: {
       cost_version_id: body.cost_version_id,
       request_policy: body.request_policy,
       adapter_overrides: body.adapter_overrides as AdapterOverrides,
-      plugin_pipeline: body.plugin_pipeline as PluginPipelineStep[],
+      ...(body.plugin_pipeline
+        ? { plugin_pipeline: body.plugin_pipeline as PluginPipelineStep[] }
+        : {}),
       retry_policy: body.retry_policy as RouteRetryPolicy,
       enabled: body.enabled,
     });
@@ -1063,7 +1174,6 @@ export function createInternalApi(deps: {
       signature: body.signature ?? null,
       signing_key_id: body.signing_key_id ?? null,
       manifest: body.manifest,
-      enabled: body.enabled,
     });
     await onConfigUpdated(rec.config_epoch);
     return c.json({ ...rec, wasm_bytes: undefined });
@@ -1077,6 +1187,186 @@ export function createInternalApi(deps: {
     const items = await deps.catalog.listPlugins(cap);
     return c.json({ items });
   });
+
+  function releaseDigest(value: unknown): string {
+    return new Bun.CryptoHasher("sha256").update(canonical(value)).digest("hex");
+  }
+
+  async function replayRelease(id: string, actor: string, digest: string) {
+    const existing = await pluginReleases.get(id);
+    if (!existing) return null;
+    if (existing.actor !== actor || existing.request_digest !== digest) {
+      throw new GatewayError(
+        409,
+        "plugin_release_conflict",
+        "Release identifier already belongs to another request",
+      );
+    }
+    return existing;
+  }
+
+  async function reportRelease(
+    release: NonNullable<Awaited<ReturnType<typeof pluginReleases.get>>>,
+  ) {
+    const { request_digest: _, ...record } = release;
+    return {
+      ...record,
+      local_applied_epoch: deps.snapshot.get().epoch,
+      nodes: await pluginReleases.confirmations(release),
+    };
+  }
+
+  function releaseTargets(
+    targets: z.output<typeof pluginReleaseSchema.shape.targets>,
+  ): PluginReleaseTarget[] {
+    return targets.map((target) =>
+      "plugin_id" in target ? { ...target, available: true } : (target as PluginReleaseTarget),
+    );
+  }
+
+  function requireReleaseEpoch(expected: number) {
+    const snapshot = deps.snapshot.get();
+    if (snapshot.epoch !== expected || !deps.snapshot.isFresh()) {
+      throw new GatewayError(
+        409,
+        "plugin_release_conflict",
+        "Validate against the current configuration epoch",
+      );
+    }
+    return snapshot;
+  }
+
+  let activePreflights = 0;
+  async function preflight(
+    snapshot: ReturnType<typeof requireReleaseEpoch>,
+    targets: PluginReleaseTarget[],
+    samples: z.output<typeof pluginReleaseSchema.shape.samples>,
+  ) {
+    if (activePreflights >= 2) {
+      throw new GatewayError(503, "plugin_preflight_busy", "Plugin validation capacity is full");
+    }
+    activePreflights++;
+    let executor: WasmRuntimeExecutor | null = null;
+    try {
+      const library = resolveWasmtimeLibraryPath(deps.config.wasmLibPath);
+      executor = createWasmtimeExecutor({
+        poolSize: 1,
+        coldCompileTimeoutMs: 5000,
+        ...(library ? { wasmtimeLibraryPath: library } : {}),
+      });
+      return await validatePluginRelease({
+        snapshot,
+        targets,
+        getPlugin: deps.catalog.getPlugin,
+        decrypt: (channel) => deps.snapshot.decryptChannelSecret(channel),
+        executor,
+        signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem,
+        samples,
+      });
+    } catch (error) {
+      if (error instanceof GatewayError) throw error;
+      throw new GatewayError(422, "plugin_preflight_failed", "Plugin execution preflight failed");
+    } finally {
+      executor?.close();
+      activePreflights--;
+    }
+  }
+
+  jsonRoute(
+    "POST",
+    "/internal/v1/plugin-releases/validate",
+    "security",
+    pluginReleaseSchema,
+    async (c, body) => {
+      const snapshot = requireReleaseEpoch(body.expected_epoch);
+      const changes = await preflight(snapshot, releaseTargets(body.targets), body.samples);
+      return c.json({ config_epoch: snapshot.epoch, changes });
+    },
+  );
+
+  jsonRoute(
+    "POST",
+    "/internal/v1/plugin-releases",
+    "security",
+    pluginReleaseSchema,
+    async (c, body) => {
+      const actor = c.get("principal").id;
+      const digest = releaseDigest(body);
+      const existing = await replayRelease(body.id, actor, digest);
+      if (existing) return c.json(await reportRelease(existing));
+      let changes;
+      try {
+        const snapshot = requireReleaseEpoch(body.expected_epoch);
+        changes = await preflight(snapshot, releaseTargets(body.targets), body.samples);
+      } catch (error) {
+        const replay = await replayRelease(body.id, actor, digest);
+        if (replay) return c.json(await reportRelease(replay));
+        throw error;
+      }
+      const result = await pluginReleases.publish({
+        id: body.id,
+        actor,
+        request_digest: digest,
+        expected_epoch: body.expected_epoch,
+        changes,
+        rollback_of: null,
+      });
+      await onConfigUpdated(result.config_epoch);
+      return c.json(await reportRelease(result));
+    },
+  );
+
+  route("GET", "/internal/v1/plugin-releases/:releaseId", "security", async (c) => {
+    const release = await pluginReleases.get(parseUuid(c.req.param("releaseId"), "releaseId"));
+    if (!release) throw new GatewayError(404, "not_found", "Plugin release not found");
+    return c.json(await reportRelease(release));
+  });
+
+  jsonRoute(
+    "POST",
+    "/internal/v1/plugin-releases/:releaseId/rollback",
+    "security",
+    rollbackPluginReleaseSchema,
+    async (c, body) => {
+      const actor = c.get("principal").id;
+      const releaseId = parseUuid(c.req.param("releaseId"), "releaseId");
+      const digest = releaseDigest({ ...body, rollback_of: releaseId });
+      const existing = await replayRelease(body.id, actor, digest);
+      if (existing) return c.json(await reportRelease(existing));
+      const snapshot = requireReleaseEpoch(body.expected_epoch);
+      const release = await pluginReleases.get(releaseId);
+      if (!release) throw new GatewayError(404, "not_found", "Plugin release not found");
+      await preflight(
+        snapshot,
+        release.changes.map(({ before }) => before),
+        body.samples,
+      );
+      const result = await pluginReleases.publish({
+        id: body.id,
+        actor,
+        request_digest: digest,
+        expected_epoch: body.expected_epoch,
+        changes: release.changes.map(({ before, after }) => ({ before: after, after: before })),
+        rollback_of: releaseId,
+      });
+      await onConfigUpdated(result.config_epoch);
+      return c.json(await reportRelease(result));
+    },
+  );
+
+  jsonRoute(
+    "POST",
+    "/internal/v1/plugins/:pluginId/revoke",
+    "security",
+    z.object({ reason: z.string().trim().min(1).max(1024) }).strict(),
+    async (c, body) => {
+      const pluginId = parseUuid(c.req.param("pluginId"), "pluginId");
+      const revoked = await pluginReleases.revoke(pluginId, c.get("principal").id, body.reason);
+      if (!revoked) throw new GatewayError(404, "not_found", "Plugin revision not found");
+      await onConfigUpdated(revoked.config_epoch);
+      return c.json(revoked);
+    },
+  );
 
   route("GET", "/internal/v1/plugins/builtins", "security", (c) => {
     const rawCap = c.req.query("capability");
@@ -1103,7 +1393,7 @@ export function createInternalApi(deps: {
       const rawBody = await c.req.text();
       const parsedBody = rawBody.trim()
         ? parseBody(installBuiltinPluginSchema, JSON.parse(rawBody))
-        : { enabled: true };
+        : parseBody(installBuiltinPluginSchema, {});
       const manifest = parsedBody.manifest
         ? { ...builtin.manifest, ...parsedBody.manifest }
         : { ...builtin.manifest };
@@ -1128,7 +1418,6 @@ export function createInternalApi(deps: {
         signature: parsedBody.signature ?? null,
         signing_key_id: parsedBody.signing_key_id ?? null,
         manifest,
-        enabled: parsedBody.enabled,
       });
       await onConfigUpdated(rec.config_epoch);
       return c.json({ ...rec, wasm_bytes: undefined });

@@ -53,6 +53,7 @@ for (const target of targets) {
 
 await cp("packages/ledger/src/migrations", join(distDir, "tools/migrations"), { recursive: true });
 
+let bundledNative = false;
 for (const nativeName of ["libstg_plugin_wasmtime.dylib", "libstg_plugin_wasmtime.so"]) {
   const srcPath = join("native/plugin-wasmtime/target/release", nativeName);
   if (existsSync(srcPath)) {
@@ -68,7 +69,11 @@ for (const nativeName of ["libstg_plugin_wasmtime.dylib", "libstg_plugin_wasmtim
       sha256,
       bytes: bytes.byteLength,
     });
+    bundledNative = true;
   }
+}
+if (!bundledNative) {
+  throw new Error("Native Wasmtime library missing; run bun run build:wasmtime first");
 }
 
 const manifest = {

@@ -236,6 +236,8 @@ export type WebhookPluginConfig = {
   window_chars?: number;
   window_ms?: number;
   max_buffer_bytes?: number;
+  max_concurrency?: number;
+  max_response_bytes?: number;
   failure_policy?: "FAIL_CLOSED" | "FAIL_OPEN";
   charge_policy?: ChargePolicy;
   circuit_failure_threshold?: number;
@@ -246,7 +248,9 @@ export type WasmPluginManifest = {
   hooks: ("on_request" | "on_response" | "on_stream_chunk" | "on_stream_end")[];
   max_memory_bytes?: number;
   fuel_budget?: number;
-  async_pool?: boolean;
+  fuel_per_byte?: number;
+  max_input_bytes?: number;
+  deterministic_text_only?: boolean;
   window_bytes?: number;
   charge_policy?: ChargePolicy;
   failure_policy?: "FAIL_CLOSED" | "FAIL_OPEN";
@@ -266,11 +270,28 @@ export type PluginRecord = {
   signing_key_id: string | null;
   manifest: Record<string, unknown>;
   enabled: boolean;
+  builtin?: boolean;
   created_at?: string;
+};
+
+export type PluginReleaseTarget =
+  | { channel_id: string; provider_plugin_id: string }
+  | { route_id: string; plugin_pipeline: PluginPipelineStep[] }
+  | { plugin_id: string; available: boolean };
+
+export type PluginReleaseChange = {
+  before: PluginReleaseTarget;
+  after: PluginReleaseTarget;
+};
+
+export type EpochStamp = {
+  version: number;
+  lineageToken: string;
 };
 
 export type ConfigSnapshot = {
   epoch: number;
+  lineageToken?: string;
   projects: Map<string, ProjectRecord>;
   keysByVerifier: Map<string, ApiKeyRecord>;
   accounts: Map<string, UpstreamAccountRecord>;
@@ -279,6 +300,7 @@ export type ConfigSnapshot = {
   prices: Map<string, PriceVersionRecord>;
   routesByModel: Map<string, RouteRecord[]>;
   plugins: Map<string, PluginRecord>;
+  revokedPlugins: ReadonlySet<string>;
   providerPluginsByName: Map<string, PluginRecord>;
 };
 
@@ -338,6 +360,8 @@ export type PluginAuditEntry = {
   hook: string;
   action: PluginAction;
   rule_code?: string;
+  outcome_kind?: "content_decision" | "plugin_fault" | "host_capacity";
+  fail_open?: boolean;
   latency_us: number;
   executions?: number;
 };

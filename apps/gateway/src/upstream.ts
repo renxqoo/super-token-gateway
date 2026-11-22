@@ -19,13 +19,17 @@ import {
   invokeWasmProviderResponse,
   mergeAdapterOverrides,
   renderEndpointUrl,
+  resolvePinnedProviderPlugin,
   resolveProviderPlugin,
   sanitizeProviderHeaders,
+  WasmCapacityError,
+  WasmPluginFaultError,
   type MatchedProviderError,
   type ResolvedProvider,
   type WasmRuntimeExecutor,
 } from "@gateway/plugin-engine";
 import {
+  clearExactProperty,
   copyExact,
   decodeRequest,
   decodeResponse,
@@ -36,6 +40,7 @@ import {
   stringifyExact,
   validateRequestPolicy,
   validateUsageObject,
+  type ConversionMode,
   type SSEEvent,
 } from "@gateway/protocol";
 import { applyAuthToRequest, type VertexTokens } from "@gateway/runtime";
@@ -102,7 +107,11 @@ export function mergeUsageWithAliases(
   if (aliasRules.length === 0) return baseUsage;
   const aliasRaw = extractUsageAliases(rawBody, aliasRules);
   if (!aliasRaw) return baseUsage;
-  const aliasUsage = validateUsageObject(aliasRaw);
+  return mergeUsageSources(baseUsage, validateUsageObject(aliasRaw));
+}
+
+export function mergeUsageSources(baseUsage?: Usage, aliasUsage?: Usage): Usage | undefined {
+  if (!aliasUsage) return baseUsage;
   if (!baseUsage) return aliasUsage;
   const merged: Record<string, string> = { ...(baseUsage as Record<string, string>) };
   for (const [k, v] of Object.entries(aliasUsage)) {
@@ -124,6 +133,7 @@ export type PreparedUpstreamRequest = {
   isBedrockStream: boolean;
   resolvedProvider: ResolvedProvider;
   mergedOverrides: MergedProviderOverrides;
+  droppedFields: string[];
 };
 
 async function encodeMultipartWithModel(
@@ -158,17 +168,21 @@ function capKnownOutput(body: Record<string, unknown>, protocol: Protocol, bound
         ? "max_tokens"
         : "max_completion_tokens";
     body[name] = cap(body[name]);
+    clearExactProperty(body, name);
     if (name === "max_completion_tokens") delete body.max_tokens;
   } else if (protocol === "responses") {
     body.max_output_tokens = cap(body.max_output_tokens);
+    clearExactProperty(body, "max_output_tokens");
   } else if (protocol === "messages") {
     body.max_tokens = cap(body.max_tokens);
+    clearExactProperty(body, "max_tokens");
   } else {
     const config = optionalObject(body.generationConfig);
     body.generationConfig = copyExact(config, {
       ...config,
       maxOutputTokens: cap(config.maxOutputTokens),
     });
+    clearExactProperty(body.generationConfig as object, "maxOutputTokens");
   }
 }
 
@@ -181,16 +195,50 @@ function buildPreparedPayload(options: {
   clientBody: Record<string, unknown>;
   isStream: boolean;
   outputBound?: number;
-}): Record<string, unknown> {
+  conversionMode?: ConversionMode;
+  onFieldDropped?: (source: Protocol, target: Protocol, field: string) => void;
+  onFieldRejected?: (source: Protocol, target: Protocol, field: string) => void;
+}): { payload: Record<string, unknown>; droppedFields: string[] } {
   const { resolved, merged, operation, upstreamProtocol, upstreamModel, clientBody, isStream } =
     options;
+  const droppedFields: string[] = [];
   let payload: Record<string, unknown>;
   if (isConversationalOperation(operation) && upstreamProtocol) {
     if (operation === upstreamProtocol) {
       payload = copyExact(clientBody, { ...clientBody });
     } else {
-      const normalized = decodeRequest(clientBody, operation);
-      payload = encodeRequest(normalized, upstreamProtocol, upstreamModel);
+      const mode: ConversionMode = options.conversionMode ?? "strict";
+      const normalized = decodeRequest(clientBody, operation, {
+        mode,
+        ...(options.onFieldDropped
+          ? {
+              onFieldDropped: (field) =>
+                options.onFieldDropped?.(operation, upstreamProtocol, field),
+            }
+          : {}),
+        ...(options.onFieldRejected
+          ? {
+              onFieldRejected: (field) =>
+                options.onFieldRejected?.(operation, upstreamProtocol, field),
+            }
+          : {}),
+      });
+      payload = encodeRequest(normalized, upstreamProtocol, upstreamModel, {
+        mode,
+        droppedFields,
+        ...(options.onFieldDropped
+          ? {
+              onFieldDropped: (field) =>
+                options.onFieldDropped?.(operation, upstreamProtocol, field),
+            }
+          : {}),
+        ...(options.onFieldRejected
+          ? {
+              onFieldRejected: (field) =>
+                options.onFieldRejected?.(operation, upstreamProtocol, field),
+            }
+          : {}),
+      });
     }
   } else {
     payload = copyExact(clientBody, { ...clientBody });
@@ -219,10 +267,10 @@ function buildPreparedPayload(options: {
       payload.stream_options = { include_usage: true };
     }
     if (merged.request_transforms.length > 0) {
-      payload = copyExact(payload, applyBodyTransforms(payload, merged.request_transforms));
+      payload = applyBodyTransforms(payload, merged.request_transforms);
     }
   } else if (merged.request_transforms.length > 0) {
-    payload = copyExact(payload, applyBodyTransforms(payload, merged.request_transforms));
+    payload = applyBodyTransforms(payload, merged.request_transforms);
   }
 
   if (options.outputBound !== undefined && upstreamProtocol) {
@@ -235,7 +283,7 @@ function buildPreparedPayload(options: {
         ? Math.min(requested, options.outputBound)
         : options.outputBound;
   }
-  return payload;
+  return { payload, droppedFields };
 }
 
 const providerPlans = new WeakMap<
@@ -255,7 +303,9 @@ function getProviderPlan(
 ) {
   const cached = providerPlans.get(route);
   if (cached && cached.channel === channel && cached.snapshot === snapshot) return cached;
-  const resolved = resolveProviderPlugin(channel.kind, channel.provider_plugin_id, snapshot);
+  const resolved = channel.provider_plugin_id
+    ? resolvePinnedProviderPlugin(channel.provider_plugin_id, snapshot)
+    : null;
   if (!resolved) {
     throw new GatewayError(
       503,
@@ -273,6 +323,20 @@ function getProviderPlan(
   return plan;
 }
 
+export function resolveRouteUpstreamProtocol(
+  snapshot: Pick<ConfigSnapshot, "plugins" | "providerPluginsByName">,
+  channel: ChannelRecord,
+  route: RouteRecord,
+  operation: Operation,
+): Protocol | null {
+  try {
+    const { resolved } = getProviderPlan(snapshot, channel, route);
+    return upstreamProtocolFor(resolved, operation);
+  } catch {
+    return null;
+  }
+}
+
 export async function prepareUpstreamRequest(options: {
   channel: ChannelRecord;
   route: RouteRecord;
@@ -286,7 +350,10 @@ export async function prepareUpstreamRequest(options: {
   vertexTokens: VertexTokens;
   wasmExecutor: WasmRuntimeExecutor | null;
   signingPublicKeyPem?: string;
+  tenantId?: string;
   traceparent?: string;
+  onFieldDropped?: (source: Protocol, target: Protocol, field: string) => void;
+  onFieldRejected?: (source: Protocol, target: Protocol, field: string) => void;
   signal: AbortSignal;
 }): Promise<PreparedUpstreamRequest> {
   const {
@@ -366,11 +433,14 @@ export async function prepareUpstreamRequest(options: {
       isBedrockStream: false,
       resolvedProvider: resolved,
       mergedOverrides,
+      droppedFields: [],
     };
   }
 
   headers.set("content-type", "application/json");
-  const payload = buildPreparedPayload({
+  const conversionMode: ConversionMode =
+    route.request_policy?.conversion_mode === "compat" ? "compat" : "strict";
+  const { payload, droppedFields } = buildPreparedPayload({
     resolved,
     merged: mergedOverrides,
     operation,
@@ -378,6 +448,9 @@ export async function prepareUpstreamRequest(options: {
     upstreamModel: route.upstream_model,
     clientBody,
     isStream,
+    conversionMode,
+    ...(options.onFieldDropped ? { onFieldDropped: options.onFieldDropped } : {}),
+    ...(options.onFieldRejected ? { onFieldRejected: options.onFieldRejected } : {}),
     ...(options.outputBound === undefined ? {} : { outputBound: options.outputBound }),
   });
 
@@ -410,6 +483,8 @@ export async function prepareUpstreamRequest(options: {
         executor: wasmExecutor,
         plugin: resolved.plugin,
         config: resolved.config,
+        ...(options.tenantId ? { tenantId: options.tenantId } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
         ...(signingPublicKeyPem ? { signingPublicKeyPem } : {}),
         input: {
           operation,
@@ -421,6 +496,13 @@ export async function prepareUpstreamRequest(options: {
         },
       });
     } catch (err) {
+      if (err instanceof WasmCapacityError) {
+        throw new GatewayError(503, "provider_capacity_unavailable", err.message);
+      }
+      if (err instanceof WasmPluginFaultError) {
+        throw new GatewayError(502, "provider_plugin_fault", err.message);
+      }
+      if (err instanceof GatewayError) throw err;
       throw new GatewayError(
         502,
         "provider_adapter_failed",
@@ -466,6 +548,7 @@ export async function prepareUpstreamRequest(options: {
     isBedrockStream,
     resolvedProvider: resolved,
     mergedOverrides,
+    droppedFields,
   };
 }
 
@@ -569,7 +652,7 @@ export async function previewProviderRequest(options: {
     headers.set(k, v);
   }
 
-  const payload = buildPreparedPayload({
+  const { payload } = buildPreparedPayload({
     resolved,
     merged,
     operation: options.operation,
@@ -684,7 +767,7 @@ export async function previewProviderRequest(options: {
       const extractedUsage = wasmResp.usage
         ? validateUsageObject(wasmResp.usage)
         : resolved.config.usage_dialect !== "custom"
-          ? (extractUsage(wasmResp.body ?? mockResp.body, resolved.config.usage_dialect) ?? null)
+          ? (extractUsage(mockResp.body, resolved.config.usage_dialect) ?? null)
           : null;
       result.decoded_response = {
         status: wasmResp.status ?? mockResp.status,
@@ -820,6 +903,12 @@ export function extractRequestText(body: Record<string, unknown>, operation: Ope
     }
   } else if (operation === "messages") {
     if (typeof body.system === "string") parts.push(body.system);
+    else if (Array.isArray(body.system)) {
+      for (const p of body.system) {
+        const part = optionalObject(p);
+        if (typeof part.text === "string") parts.push(part.text);
+      }
+    }
     if (Array.isArray(body.messages)) {
       for (const m of body.messages) {
         const msg = optionalObject(m);
@@ -847,13 +936,22 @@ export function extractRequestText(body: Record<string, unknown>, operation: Ope
         }
       }
     }
-  } else if (operation === "gemini" && Array.isArray(body.contents)) {
-    for (const c of body.contents) {
-      const content = optionalObject(c);
-      if (Array.isArray(content.parts)) {
-        for (const p of content.parts) {
-          const part = optionalObject(p);
-          if (typeof part.text === "string") parts.push(part.text);
+  } else if (operation === "gemini") {
+    const sys = optionalObject(body.systemInstruction);
+    if (Array.isArray(sys.parts)) {
+      for (const p of sys.parts) {
+        const part = optionalObject(p);
+        if (typeof part.text === "string") parts.push(part.text);
+      }
+    }
+    if (Array.isArray(body.contents)) {
+      for (const c of body.contents) {
+        const content = optionalObject(c);
+        if (Array.isArray(content.parts)) {
+          for (const p of content.parts) {
+            const part = optionalObject(p);
+            if (typeof part.text === "string") parts.push(part.text);
+          }
         }
       }
     }
@@ -970,6 +1068,23 @@ export async function transformRequestTexts(
         nextSystem = res.text;
         changed = true;
       }
+    } else if (Array.isArray(body.system)) {
+      const sysParts = body.system.map((p) => ({ ...optionalObject(p) }));
+      let sysChanged = false;
+      for (const part of sysParts) {
+        if (typeof part.text === "string" && part.text.length > 0) {
+          const res = await transform(part.text);
+          if (res.blocked) return { blocked: true, body };
+          if (res.text !== part.text) {
+            part.text = res.text;
+            sysChanged = true;
+          }
+        }
+      }
+      if (sysChanged) {
+        nextSystem = sysParts;
+        changed = true;
+      }
     }
     const messages = Array.isArray(body.messages)
       ? body.messages.map((m) => ({ ...optionalObject(m) }))
@@ -1079,30 +1194,64 @@ export async function transformRequestTexts(
     };
   }
 
-  if (operation === "gemini" && Array.isArray(body.contents)) {
+  if (operation === "gemini") {
     let changed = false;
-    const contents = body.contents.map((c) => ({ ...optionalObject(c) }));
-    for (const c of contents) {
-      if (Array.isArray(c.parts)) {
-        const parts = c.parts.map((p) => ({ ...optionalObject(p) }));
-        let partChanged = false;
-        for (const part of parts) {
-          if (typeof part.text === "string" && part.text.length > 0) {
-            const res = await transform(part.text);
-            if (res.blocked) return { blocked: true, body };
-            if (res.text !== part.text) {
-              part.text = res.text;
-              partChanged = true;
-            }
+    let nextSystemInstruction = body.systemInstruction;
+    const sysObj = optionalObject(body.systemInstruction);
+    if (Array.isArray(sysObj.parts)) {
+      const sysParts = sysObj.parts.map((p) => ({ ...optionalObject(p) }));
+      let sysChanged = false;
+      for (const part of sysParts) {
+        if (typeof part.text === "string" && part.text.length > 0) {
+          const res = await transform(part.text);
+          if (res.blocked) return { blocked: true, body };
+          if (res.text !== part.text) {
+            part.text = res.text;
+            sysChanged = true;
           }
         }
-        if (partChanged) {
-          c.parts = parts;
-          changed = true;
+      }
+      if (sysChanged) {
+        nextSystemInstruction = copyExact(sysObj, { ...sysObj, parts: sysParts });
+        changed = true;
+      }
+    }
+    const contents = Array.isArray(body.contents)
+      ? body.contents.map((c) => ({ ...optionalObject(c) }))
+      : null;
+    if (contents) {
+      for (const c of contents) {
+        if (Array.isArray(c.parts)) {
+          const parts = c.parts.map((p) => ({ ...optionalObject(p) }));
+          let partChanged = false;
+          for (const part of parts) {
+            if (typeof part.text === "string" && part.text.length > 0) {
+              const res = await transform(part.text);
+              if (res.blocked) return { blocked: true, body };
+              if (res.text !== part.text) {
+                part.text = res.text;
+                partChanged = true;
+              }
+            }
+          }
+          if (partChanged) {
+            c.parts = parts;
+            changed = true;
+          }
         }
       }
     }
-    return { blocked: false, body: changed ? copyExact(body, { ...body, contents }) : body };
+    if (!changed) return { blocked: false, body };
+    return {
+      blocked: false,
+      body: copyExact(body, {
+        ...body,
+        ...(nextSystemInstruction !== body.systemInstruction
+          ? { systemInstruction: nextSystemInstruction }
+          : {}),
+        ...(contents ? { contents } : {}),
+      }),
+    };
   }
 
   const singleText = extractRequestText(body, operation);
@@ -1149,7 +1298,7 @@ export function extractResponseText(body: Record<string, unknown>, protocol: Pro
   return parts
     .map((p) => {
       const part = optionalObject(p);
-      return typeof part.text === "string" ? part.text : "";
+      return typeof part.text === "string" && part.thought !== true ? part.text : "";
     })
     .join("");
 }
@@ -1192,8 +1341,10 @@ export function replaceResponseText(
     const existingParts = Array.isArray(optionalObject(cand.content).parts)
       ? (optionalObject(cand.content).parts as unknown[])
       : [];
-    const nonTextParts = existingParts.filter((p) => typeof optionalObject(p).text !== "string");
-    cand.content = { role: "model", parts: [{ text: nextText }, ...nonTextParts] };
+    const nonTextParts = existingParts.filter(
+      (p) => typeof optionalObject(p).text !== "string" || optionalObject(p).thought === true,
+    );
+    cand.content = { role: "model", parts: [...nonTextParts, { text: nextText }] };
     return { ...body, candidates: [cand, ...body.candidates.slice(1)] };
   }
   return body;
@@ -1238,10 +1389,91 @@ export function extractChunkTextFromEncodedSse(
   const texts = parts
     .map((p) => {
       const part = optionalObject(p);
-      return typeof part.text === "string" ? part.text : "";
+      return typeof part.text === "string" && part.thought !== true ? part.text : "";
     })
     .join("");
   return texts.length > 0 ? texts : null;
+}
+
+export function inspectAnthropicBlockEvent(
+  chunkBytes: Uint8Array,
+): { kind: "text_start" | "block_stop"; index: number } | null {
+  const raw = decoder.decode(chunkBytes);
+  const dataLines = raw
+    .split("\n")
+    .filter((l) => l.startsWith("data: "))
+    .map((l) => l.slice(6));
+  if (dataLines.length === 0) return null;
+  const payload = dataLines.join("\n").trim();
+  if (!payload || payload === "[DONE]") return null;
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(payload) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const index = typeof obj.index === "number" && Number.isInteger(obj.index) ? obj.index : 0;
+  if (obj.type === "content_block_start" && optionalObject(obj.content_block).type === "text") {
+    return { kind: "text_start", index };
+  }
+  if (obj.type === "content_block_stop") {
+    return { kind: "block_stop", index };
+  }
+  return null;
+}
+
+export function stripTextFromSseChunk(
+  chunkBytes: Uint8Array,
+  protocol: Protocol,
+): Uint8Array | null {
+  if (protocol === "messages" || protocol === "responses") return null;
+  const raw = decoder.decode(chunkBytes);
+  const dataLines = raw
+    .split("\n")
+    .filter((l) => l.startsWith("data: "))
+    .map((l) => l.slice(6));
+  if (dataLines.length === 0) return null;
+  const payload = dataLines.join("\n").trim();
+  if (!payload || payload === "[DONE]") return null;
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(payload) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (protocol === "chat") {
+    const choices = Array.isArray(obj.choices) ? obj.choices : [];
+    if (choices.length === 0) return null;
+    const first = { ...optionalObject(choices[0]) };
+    const delta = { ...optionalObject(first.delta) };
+    delete delta.content;
+    first.delta = delta;
+    const hasMeta =
+      Object.keys(delta).length > 0 ||
+      (first.finish_reason !== null && first.finish_reason !== undefined) ||
+      obj.usage !== undefined;
+    if (!hasMeta) return null;
+    return encodeSSE({ ...obj, choices: [first, ...choices.slice(1)] });
+  }
+  const cands = Array.isArray(obj.candidates) ? obj.candidates : [];
+  if (cands.length === 0) return null;
+  const first = { ...optionalObject(cands[0]) };
+  const content = optionalObject(first.content);
+  const parts = Array.isArray(content.parts) ? (content.parts as unknown[]) : [];
+  const remainingParts = parts.filter(
+    (p) => typeof optionalObject(p).text !== "string" || optionalObject(p).thought === true,
+  );
+  const hasMeta =
+    remainingParts.length > 0 ||
+    (first.finishReason !== null && first.finishReason !== undefined) ||
+    obj.usageMetadata !== undefined;
+  if (!hasMeta) return null;
+  if (remainingParts.length > 0) {
+    first.content = { ...content, parts: remainingParts };
+  } else {
+    delete first.content;
+  }
+  return encodeSSE({ ...obj, candidates: [first, ...cands.slice(1)] });
 }
 
 export function buildTextDeltaSse(
@@ -1249,6 +1481,7 @@ export function buildTextDeltaSse(
   model: string,
   text: string,
   streamId: string,
+  blockIndex = 0,
 ): Uint8Array {
   if (protocol === "chat") {
     return encodeSSE({
@@ -1262,7 +1495,7 @@ export function buildTextDeltaSse(
     return encodeSSE(
       {
         type: "content_block_delta",
-        index: 0,
+        index: blockIndex,
         delta: { type: "text_delta", text },
       },
       "content_block_delta",

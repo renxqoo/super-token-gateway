@@ -21,7 +21,7 @@ test("workspace dependencies remain strictly acyclic with zero legacy dual-track
     protocol: ["kernel", "contracts"],
     runtime: ["kernel", "contracts"],
     ledger: ["kernel"],
-    "plugin-engine": ["ledger"],
+    "plugin-engine": ["contracts", "ledger", "protocol"],
   };
 
   for (const [name, imports] of Object.entries(allowed)) {

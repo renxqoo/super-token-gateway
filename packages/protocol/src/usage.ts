@@ -7,6 +7,32 @@ import { exactInteger } from "./json.ts";
 const allowedUsageKeys = new Set<string>([...dimensions, "reasoning_tokens"]);
 const decimalDurationKeys = new Set<string>(["audio_seconds", "video_seconds"]);
 
+export function readUsageQuantity(
+  source: Record<string, unknown>,
+  key: string,
+  dimension: string,
+): string | undefined {
+  const value = source[key];
+  if (value === undefined || value === null) return undefined;
+  if (!allowedUsageKeys.has(dimension)) {
+    throw new GatewayError(
+      502,
+      "invalid_upstream_usage",
+      `Unsupported usage dimension ${dimension}`,
+    );
+  }
+  if (decimalDurationKeys.has(dimension)) return seconds(source, key);
+  const quantity = exactInteger(source, key) ?? count(value);
+  if (quantity === undefined) {
+    throw new GatewayError(
+      502,
+      "invalid_upstream_usage",
+      `Invalid nonnegative integer for usage.${dimension}`,
+    );
+  }
+  return quantity;
+}
+
 export function validateUsageObject(raw: unknown): Usage {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new GatewayError(502, "invalid_upstream_usage", "Usage payload must be an object");
@@ -14,34 +40,11 @@ export function validateUsageObject(raw: unknown): Usage {
   const obj = raw as Record<string, unknown>;
   const out: Usage = {};
   let hasAny = false;
-  for (const [k, v] of Object.entries(obj)) {
-    if (v === undefined || v === null) continue;
-    if (!allowedUsageKeys.has(k)) {
-      throw new GatewayError(502, "invalid_upstream_usage", `Unsupported usage dimension ${k}`);
-    }
-    if (decimalDurationKeys.has(k)) {
-      if (typeof v !== "number" && typeof v !== "string") {
-        throw new GatewayError(
-          502,
-          "invalid_upstream_usage",
-          "Duration must be an exact nonnegative quantity",
-        );
-      }
-      const lit = numberLiteral(obj, k) ?? String(v);
-      out[k as "audio_seconds" | "video_seconds"] = decimalDuration(lit);
-      hasAny = true;
-    } else {
-      const q = exactInteger(obj, k) ?? count(v);
-      if (q === undefined) {
-        throw new GatewayError(
-          502,
-          "invalid_upstream_usage",
-          `Invalid nonnegative integer for usage.${k}`,
-        );
-      }
-      out[k as Dimension | "reasoning_tokens"] = q;
-      hasAny = true;
-    }
+  for (const key of Object.keys(obj)) {
+    const quantity = readUsageQuantity(obj, key, key);
+    if (quantity === undefined) continue;
+    out[key as Dimension | "reasoning_tokens"] = quantity;
+    hasAny = true;
   }
   if (!hasAny) {
     throw new GatewayError(502, "invalid_upstream_usage", "Usage payload contains no dimensions");

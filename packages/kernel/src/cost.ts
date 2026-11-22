@@ -19,11 +19,20 @@ export function calculateCost(usage: Usage, pricing: Pricing): string {
   let denominator = 1n;
   for (const dimension of dimensions) {
     const rate = pricing.rates[dimension];
-    if (!rate) continue;
-    const parts = (usage[dimension] ?? "0").split(".");
-    const quantity = BigInt(parts.join(""));
-    const divisor = BigInt(rate.denominator) * 10n ** BigInt(parts[1]?.length ?? 0);
-    numerator = numerator * divisor + quantity * BigInt(rate.numerator) * denominator;
+    const quantityText = usage[dimension];
+    if (!rate || quantityText === undefined || quantityText === "0" || rate.numerator === "0")
+      continue;
+    const decimal = quantityText.indexOf(".");
+    const quantity = BigInt(decimal < 0 ? quantityText : quantityText.replace(".", ""));
+    const product = quantity * BigInt(rate.numerator);
+    const rateDivisor = BigInt(rate.denominator);
+    if (decimal < 0 && rateDivisor === 1n) {
+      numerator += product * denominator;
+      continue;
+    }
+    const divisor =
+      decimal < 0 ? rateDivisor : rateDivisor * 10n ** BigInt(quantityText.length - decimal - 1);
+    numerator = numerator * divisor + product * denominator;
     denominator *= divisor;
     const common = gcd(numerator, denominator);
     numerator /= common;

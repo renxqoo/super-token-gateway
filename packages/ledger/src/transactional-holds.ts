@@ -11,6 +11,9 @@ import type { LeaseManager } from "./lease-manager.ts";
 import {
   MAX_ATOMS,
   CELL_COUNT,
+  SETTLEMENT_LANES,
+  SUPPLIER_CELLS_PER_LANE,
+  walletLane,
   parseAtoms,
   computeFreezeReason,
   sortLots,
@@ -53,13 +56,15 @@ function recordHit(
 }
 
 export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
-  let batchCellCursor = Math.floor(Math.random() * CELL_COUNT);
+  const cellOffsets = new Bun.CryptoHasher("sha256").update(leases.nodeId).digest();
+  let batchCellCursor = 0;
   const recentWalletHits = new Map<string, { count: number; windowStart: number }>();
   const recentSupplierHits = new Map<string, { count: number; windowStart: number }>();
 
   let pruneDemandAt = 0;
 
-  return async function acquireBatch(items: AcquireHoldInput[]): Promise<AcquireHoldResult[]> {
+  async function acquireBatch(items: AcquireHoldInput[], lockAllCells: boolean) {
+    const retry: number[] = [];
     const results = Array.from<AcquireHoldResult>({ length: items.length });
     const parsed = items.map((item) => ({
       item,
@@ -143,12 +148,21 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
         if (r.state === "ACTIVE") activeAccounts.add(String(r.id));
       }
 
-      const targetCell = batchCellCursor++ % CELL_COUNT;
+      const cursor = batchCellCursor++ % SUPPLIER_CELLS_PER_LANE;
+      const targetCellsByLane = Array.from(
+        { length: SETTLEMENT_LANES },
+        (_, lane) =>
+          lane * SUPPLIER_CELLS_PER_LANE +
+          ((cellOffsets[lane]! + cursor) % SUPPLIER_CELLS_PER_LANE),
+      );
+      const targetCells = lockAllCells
+        ? Array.from({ length: CELL_COUNT }, (_, cell) => cell)
+        : [...new Set(items.map((item) => targetCellsByLane[walletLane(item.project_id)]!))];
       const cellRowsRaw = supplierAccounts.length
         ? await tx`
             SELECT account_id, currency, cell, balance_atoms::text, reserved_atoms::text, spent_atoms::text, revision::text
             FROM public.supplier_cells
-            WHERE account_id = ANY(${supplierAccounts}::uuid[]) AND cell = ${targetCell}
+            WHERE account_id = ANY(${supplierAccounts}::uuid[]) AND cell = ANY(${targetCells}::smallint[])
             ORDER BY account_id, currency, cell
             FOR NO KEY UPDATE
           `
@@ -225,7 +239,13 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
       >();
       const supplierLeaseDemand = new Map<
         string,
-        { cell: SupplierCellRow; maxQuote: bigint; count: number }
+        {
+          accountCurrency: string;
+          lane: number;
+          cell: SupplierCellRow;
+          maxQuote: bigint;
+          count: number;
+        }
       >();
 
       for (let i = 0; i < parsed.length; i++) {
@@ -282,6 +302,10 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
         }
 
         const acctCurKey = supplierKey(item.supplier_account_id, item.supplier_currency);
+        const lane = walletLane(item.project_id);
+        const firstCell = lane * SUPPLIER_CELLS_PER_LANE;
+        const sameLane = (cell: SupplierCellRow) =>
+          cell.cell >= firstCell && cell.cell < firstCell + SUPPLIER_CELLS_PER_LANE;
         let acctCells = cellsByAcctCur.get(acctCurKey) ?? [];
         const pickCell = (list: SupplierCellRow[]): SupplierCellRow | undefined => {
           if (list.length === 0) return undefined;
@@ -294,13 +318,13 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
           }
           return undefined;
         };
-        let chosenCell = pickCell(acctCells);
-        if (!chosenCell && !expandedAcctCur.has(acctCurKey)) {
+        let chosenCell = pickCell(acctCells.filter(sameLane)) ?? pickCell(acctCells);
+        if (!chosenCell && !lockAllCells && !expandedAcctCur.has(acctCurKey)) {
           expandedAcctCur.add(acctCurKey);
           const extraRows = await tx`
             SELECT account_id, currency, cell, balance_atoms::text, reserved_atoms::text, spent_atoms::text, revision::text
             FROM public.supplier_cells
-            WHERE account_id = ${item.supplier_account_id} AND currency = ${item.supplier_currency} AND cell <> ${targetCell}
+            WHERE account_id = ${item.supplier_account_id} AND currency = ${item.supplier_currency} AND cell <> ALL(${targetCells}::smallint[])
             ORDER BY cell
             FOR NO KEY UPDATE SKIP LOCKED
           `;
@@ -313,10 +337,11 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
             }
             cellsByAcctCur.set(acctCurKey, nextList);
             acctCells = nextList;
-            chosenCell = pickCell(acctCells);
+            chosenCell = pickCell(acctCells.filter(sameLane)) ?? pickCell(acctCells);
           }
         }
         if (!chosenCell) {
+          if (!lockAllCells && acctCells.length < CELL_COUNT) retry.push(i);
           results[i] = {
             ok: false,
             code: "supplier_insufficient_balance",
@@ -429,24 +454,22 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
             const d = walletLeaseDemand.get(wk);
             if (d && d.count < 4) d.count = 4;
           }
-          if (supplierAtoms > 0n) {
-            const sHits = recordHit(recentSupplierHits, acctCurKey, nowMs);
-            if (!leases.hasSupplier(acctCurKey)) {
-              const sd = supplierLeaseDemand.get(acctCurKey);
-              if (sd) {
-                if (supplierAtoms > sd.maxQuote) sd.maxQuote = supplierAtoms;
-                sd.count++;
-              } else {
-                supplierLeaseDemand.set(acctCurKey, {
-                  cell: chosenCell,
-                  maxQuote: supplierAtoms,
-                  count: 1,
-                });
-              }
-            }
-            if (sHits >= 16 && !leases.hasSupplier(acctCurKey)) {
-              const sd = supplierLeaseDemand.get(acctCurKey);
-              if (sd && sd.count < 4) sd.count = 4;
+          if (supplierAtoms > 0n && sameLane(chosenCell) && !leases.hasSupplier(acctCurKey, lane)) {
+            const demandKey = `${acctCurKey}:${lane}`;
+            const sHits = recordHit(recentSupplierHits, demandKey, nowMs);
+            const demand = supplierLeaseDemand.get(demandKey);
+            if (demand) {
+              if (supplierAtoms > demand.maxQuote) demand.maxQuote = supplierAtoms;
+              demand.count++;
+              if (sHits >= 16 && demand.count < 4) demand.count = 4;
+            } else {
+              supplierLeaseDemand.set(demandKey, {
+                accountCurrency: acctCurKey,
+                lane,
+                cell: chosenCell,
+                maxQuote: supplierAtoms,
+                count: sHits >= 16 ? 4 : 1,
+              });
             }
           }
         }
@@ -554,13 +577,17 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
       }[] = [];
 
       const hasAnyWalletLease = leases.hasAnyWallet() || createdWalletLeases.length > 0;
-      for (const [sk, demand] of supplierLeaseDemand) {
-        if (!hasAnyWalletLease || demand.count < 4 || leases.hasSupplier(sk)) continue;
+      for (const demand of supplierLeaseDemand.values()) {
+        const { accountCurrency, lane } = demand;
+        if (!hasAnyWalletLease || demand.count < 4 || leases.hasSupplier(accountCurrency, lane))
+          continue;
         const cell = demand.cell;
         const free = cell.balance_atoms - cell.reserved_atoms;
         if (free < demand.maxQuote * LEASE_MIN_MULTIPLIER) continue;
-        const target = demand.maxQuote * LEASE_TARGET_MULTIPLIER;
-        const desired = target > LEASE_MIN_SUPPLIER_CHUNK ? target : LEASE_MIN_SUPPLIER_CHUNK;
+        const budget = BigInt(SETTLEMENT_LANES);
+        const target = (demand.maxQuote * LEASE_TARGET_MULTIPLIER) / budget;
+        const minimum = LEASE_MIN_SUPPLIER_CHUNK / budget;
+        const desired = target > minimum ? target : minimum;
         const halfFree = free / 2n;
         const chunk = desired < halfFree ? desired : halfFree;
         if (chunk < demand.maxQuote * 8n) continue;
@@ -578,6 +605,7 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
           expires_at: new Date(expiresAtMs).toISOString(),
         });
         createdSupplierLeases.push({
+          lane,
           leaseId,
           accountId: cell.account_id,
           currency: cell.currency,
@@ -666,6 +694,24 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
 
     for (const lease of createdWalletLeases) leases.registerWallet(lease);
     for (const lease of createdSupplierLeases) leases.registerSupplier(lease);
-    return results;
+    return { results, retry };
+  }
+
+  return async (items: AcquireHoldInput[]) => {
+    const { results, retry } = await acquireBatch(items, false);
+    if (!retry.length) return results;
+    try {
+      const retried = await acquireBatch(
+        retry.map((index) => items[index]!),
+        true,
+      );
+      for (const [index, result] of retried.results.entries()) results[retry[index]!] = result;
+      return results;
+    } catch (error) {
+      const retriedIndexes = new Set(retry);
+      return results.map((result, index) =>
+        retriedIndexes.has(index) ? Promise.reject(error) : result,
+      );
+    }
   };
 }

@@ -148,6 +148,13 @@ export function preferredCell(seed: string): number {
   return (h >>> 0) % CELL_COUNT;
 }
 
+export const SETTLEMENT_LANES = 4;
+export const SUPPLIER_CELLS_PER_LANE = CELL_COUNT / SETTLEMENT_LANES;
+
+export function walletLane(projectId: string): number {
+  return preferredCell(projectId) % SETTLEMENT_LANES;
+}
+
 export function cellKey(accountId: string, currency: string, cell: number): string {
   return `${accountId}:${currency}:${cell}`;
 }

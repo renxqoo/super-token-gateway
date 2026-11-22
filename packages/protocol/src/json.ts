@@ -1,7 +1,7 @@
 import { GatewayError } from "@gateway/contracts";
 import { normalizedNumber, DomainError } from "@gateway/kernel";
 
-const numericLiterals = new WeakMap<object, Map<string, string>>();
+const numericLiterals = new WeakMap<object, Map<string, { literal: string; value: number }>>();
 const hasTrackedExact = new WeakSet<object>();
 
 export function normalizedProviderNumber(source: string): ReturnType<typeof normalizedNumber> {
@@ -14,7 +14,26 @@ export function normalizedProviderNumber(source: string): ReturnType<typeof norm
 }
 
 export function numberLiteral(parent: object, key: string): string | undefined {
-  return numericLiterals.get(parent)?.get(key);
+  const entry = numericLiterals.get(parent)?.get(key);
+  return entry && Object.is(entry.value, Reflect.get(parent, key)) ? entry.literal : undefined;
+}
+
+export function clearExactProperty(parent: object, key: string): void {
+  numericLiterals.get(parent)?.delete(key);
+}
+
+export function setExactProperty(parent: object, key: string, literal: string): void {
+  const value = Reflect.get(parent, key);
+  if (typeof value !== "number") throw new TypeError("Exact numeric property must be a number");
+  let fields = numericLiterals.get(parent);
+  if (!fields) numericLiterals.set(parent, (fields = new Map()));
+  fields.set(key, { literal, value });
+  hasTrackedExact.add(parent);
+}
+
+export function trackExactChild<T extends object>(parent: T, child: object): T {
+  if (hasTrackedExact.has(child)) hasTrackedExact.add(parent);
+  return parent;
 }
 
 const rawJson = (JSON as JSON & { rawJSON: (source: string) => unknown }).rawJSON;
@@ -87,6 +106,10 @@ function parseExactJson(source: string, preserveMeteringIntegers: boolean): unkn
   ) => unknown;
   try {
     const parsed = parse(source, function (key, value, context) {
+      if (value !== null && typeof value === "object" && hasTrackedExact.has(value)) {
+        hasTrackedExact.add(this);
+        return value;
+      }
       if (typeof value !== "number" || !context?.source) return value;
       if (!preserveMeteringIntegers || !Number.isInteger(value) || Number.isSafeInteger(value)) {
         const serialized = String(value);
@@ -110,7 +133,8 @@ function parseExactJson(source: string, preserveMeteringIntegers: boolean): unkn
         map = new Map();
         numericLiterals.set(this, map);
       }
-      map.set(key, context.source);
+      map.set(key, { literal: context.source, value });
+      hasTrackedExact.add(this);
       return value;
     });
     if (tracked > 0 && parsed !== null && typeof parsed === "object") {
@@ -158,9 +182,14 @@ export function copyExact<T extends object>(source: object, target: T): T {
   if (hasTrackedExact.has(source)) hasTrackedExact.add(target);
   const fields = numericLiterals.get(source);
   if (fields) {
-    const copied = new Map<string, string>();
-    for (const [key, literal] of fields) {
-      if (Object.is(Reflect.get(source, key), Reflect.get(target, key))) copied.set(key, literal);
+    const copied = new Map<string, { literal: string; value: number }>();
+    for (const [key, entry] of fields) {
+      if (
+        Object.is(entry.value, Reflect.get(source, key)) &&
+        Object.is(entry.value, Reflect.get(target, key))
+      ) {
+        copied.set(key, entry);
+      }
     }
     if (copied.size) {
       numericLiterals.set(target, copied);

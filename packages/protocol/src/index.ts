@@ -1,6 +1,7 @@
 export * from "./request.ts";
 export * from "./response.ts";
 export * from "./stream.ts";
+export * from "./errors.ts";
 export * from "./finish.ts";
 export * from "./policy.ts";
 export * from "./json.ts";

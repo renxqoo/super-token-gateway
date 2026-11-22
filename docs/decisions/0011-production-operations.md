@@ -17,7 +17,7 @@ Gateway 使用稳定的 PostgreSQL 写入口，切换前应隔离旧主连接。
 | `auditor`  | 余额、收费、分录、预扣、请求账务与守恒检查         |
 | `events`   | 指定消费者的 Outbox claim 和 ACK                   |
 
-每个身份持有独立的至少 32 字节随机令牌，编码为无填充 Base64URL 或十六进制。使用私网 HTTPS 管理入口。将令牌保存在调用方密钥存储，Gateway 的 `INTERNAL_AUTH_FILE` 只包含令牌的 SHA-256 十六进制散列。多个角色可以赋予同一身份。替换或撤销凭证后滚动重启 Gateway。生产模式禁用共享 `ADMIN_TOKEN`，需要明确配置两个 PostgreSQL 登录和共享 Redis。
+每个身份持有独立的至少 32 字节随机令牌，编码为无填充 Base64URL 或十六进制。使用私网 HTTPS 管理入口。将令牌保存在调用方密钥存储，Gateway 的 `INTERNAL_AUTH_FILE` 只包含令牌的 SHA-256 十六进制散列。多个角色可以赋予同一身份。替换或撤销凭证后滚动重启 Gateway。生产模式禁用共享 `ADMIN_TOKEN`，需要明确配置两个 PostgreSQL 登录、共享 Redis 和插件验签公钥 `PLUGIN_SIGNING_PUBLIC_KEY_PEM`（启动期校验公钥合法性及原生 `wasmtime` 沙箱自检）。
 
 ```json
 [
@@ -40,7 +40,7 @@ Gateway 使用稳定的 PostgreSQL 写入口，切换前应隔离旧主连接。
 ### 建库和迁移顺序
 
 1. 为账本使用独立数据库。用部署管理员创建专用迁移登录 `stg_migration` 和四个新的无额外权限的运行登录。迁移登录持有数据库应用对象。使用数据库管理员或秘密管理系统为登录设置密码。
-2. 新库由迁移登录建对象。存量库先做可恢复备份并停止写入，再以部署管理员运行 `psql -X "$DBA_URL" -v migration_role=stg_migration -f infra/postgres/adopt-ownership.sql`，仅转移 Gateway 应用对象。以迁移身份执行 `bun dist/tools/migrate.js`，确认 schema 为 `2026112201`。
+2. 新库由迁移登录建对象。存量库先做可恢复备份并停止写入，再以部署管理员运行 `psql -X "$DBA_URL" -v migration_role=stg_migration -f infra/postgres/adopt-ownership.sql`，仅转移 Gateway 应用对象。以迁移身份执行 `bun dist/tools/migrate.js`，确认 schema 版本与构建产物清单一致。插件绑定升级见 [ADR 0012](0012-plugin-revisions-and-provider-verification.md)。
 3. 在专用数据库执行 `psql -X "$DBA_URL" -f infra/postgres/roles.sql`。此脚本收回 `PUBLIC` 对当前数据库和公共 schema 的默认访问，按实际 SQL 授予权限。将 `stg_data`、`stg_control`、`stg_worker`、`stg_audit` 分别授给对应的专用登录。表权限集中授予父分区表。Worker 只可通过限定月份的函数建分区。
 4. 配置生产 Gateway 的 `DATABASE_URL` 和 `INTERNAL_DATABASE_URL` 指向同一个写入口和数据库，分别使用数据和控制登录。独立 Worker 使用自己的登录。归档使用只读审计登录。运行身份须为独立登录，Gateway 和 Worker 启动会检查当前身份与所属角色。生产网络还应限制运行登录来源与 SQL 入口。 [角色授权](../../infra/postgres/roles.sql) · [对象转属](../../infra/postgres/adopt-ownership.sql) · [Gateway 样例](../../infra/gateway.example.env) · [Worker 样例](../../infra/worker.example.env)
 
@@ -73,7 +73,7 @@ macOS 原机升级队列后的复测需管理员授权；本次已完成上述 L
 
 - **PostgreSQL**。在负载均衡和写入口先隔离旧主及旧连接，确认备库已追到可接受的 WAL 位置，再提升并切换写入口。同步确认模式取决于目标复制策略和延迟。确认 Gateway 能完成实际结算，检查旧主保持隔离、仅一个 Worker 持有选主锁，随后读取账本守恒和未明账。 [PostgreSQL 17 流复制](https://www.postgresql.org/docs/17/warm-standby.html)
 - **Redis**。托管服务提供稳定主节点地址。使用 Sentinel 时，设置 `REDIS_SENTINEL_URLS` 和 `REDIS_SENTINEL_MASTER`，`REDIS_URL` 提供数据服务的 TLS 和认证参数。生产配置至少三个独立 Sentinel。Gateway 取地址多数并验证 Redis 角色。Redis TLS 部署应确保 Sentinel 返回的主机名匹配数据端证书。异步复制可能丢失配额计数，活着的旧主需要由部署侧隔离。对必须跨故障严格不超限的配额，需单独验证共享配额的持久性与隔离。 [Redis Sentinel](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/) · [客户端发现](https://redis.io/docs/latest/develop/reference/sentinel-clients/)
-- **PITR**。保持基础备份以及连续 WAL 归档，定期验证备份和保留窗口。事故后冻结对旧主的写入，选择目标时刻并恢复到独立实例，重放连续 WAL 到目标，核对关键交易、账本守恒、角色、消费游标与后续写入。验证通过后切换写入口。对恢复目标之后已确认的业务操作单独对账，通过原幂等键处置。 [PostgreSQL 17 PITR](https://www.postgresql.org/docs/17/continuous-archiving.html)
+- **PITR**。保持基础备份以及连续 WAL 归档，定期验证备份和保留窗口。事故后冻结对旧主的写入，选择目标时刻并恢复到独立实例，重放连续 WAL 到目标，核对关键交易、账本守恒、角色、消费游标、`plugin_revocations` 撤销清单与后续写入。验证通过后切换写入口。若某节点检测到数据库 `config_epoch` 回退、同 epoch 的 `lineage_token` 分叉或撤销清单回退，节点会立即置 `gateway_snapshot_diverged=1`、保留本地已撤销集合并使 `/readyz` 返回 `503 config_diverged`，待运维核验撤销记录并滚动重启后恢复。对恢复目标之后已确认的业务操作单独对账，通过原幂等键处置。 [PostgreSQL 17 PITR](https://www.postgresql.org/docs/17/continuous-archiving.html)
 
 ### 复现与计时
 

@@ -7,6 +7,7 @@ FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
 WHERE c.relkind IN ('r', 'p') AND (c.relname IN (
   'schema_migrations', 'config_epoch', 'projects', 'api_keys', 'upstream_accounts', 'plugins',
+  'plugin_releases', 'plugin_revocations', 'gateway_config_nodes', 'plugin_release_acks',
   'channels', 'models', 'price_versions', 'routes', 'wallets', 'wallet_lots', 'supplier_root_balances',
   'supplier_cells', 'wallet_leases', 'supplier_leases', 'billing_holds', 'billing_charges',
   'ledger_entries', 'ledger_entries_default', 'funding_operations', 'billing_resolutions',
@@ -19,7 +20,8 @@ SELECT format('ALTER FUNCTION public.%I(%s) OWNER TO %I', p.proname, pg_get_func
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname = 'public' AND p.proname IN (
   'prepare_ledger_month', 'immutable_record', 'check_ledger_journal_balance', 'order_outbox_publish',
-  'operations_health'
+  'operations_health', 'refresh_config_epoch_lineage', 'reject_revoked_plugin_activation',
+  'keep_plugin_revision'
 )
 \gexec
 COMMIT;

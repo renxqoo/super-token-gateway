@@ -8,7 +8,7 @@ name = "stg_builtin_pii_guard"
 crate-type = ["cdylib"]
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"

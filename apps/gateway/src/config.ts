@@ -1,3 +1,4 @@
+import { createPublicKey } from "node:crypto";
 import { validateCidr } from "@gateway/runtime";
 import { loadInternalCredentials, type InternalCredentials } from "./internal-auth.ts";
 
@@ -9,6 +10,7 @@ export type GatewayConfig = {
   internalPort: number;
   databaseUrl: string;
   dbMaxConnections: number;
+  snapshotDbMaxConnections?: number;
   redisUrl?: string;
   redisNamespace?: string;
   redisSentinel?: { urls: string[]; master: string };
@@ -34,7 +36,11 @@ export type GatewayConfig = {
   microBatchWindowMs: number;
   microBatchMaxSize: number;
   wasmLibPath?: string;
+  contentWasmPoolSize?: number;
+  providerWasmPoolSize?: number;
   pluginSigningPublicKeyPem?: string;
+  platformAbsorbMaxCountPerMinute?: number;
+  platformAbsorbMaxAtomsPerMinute?: string;
   businessWebhookUrl?: string;
   businessWebhookToken?: string;
 };
@@ -122,6 +128,21 @@ export function loadConfigFromEnv(
       "Production requires standalone Gateway, INTERNAL_AUTH_FILE, INTERNAL_DATABASE_URL and REDIS_URL",
     );
   }
+  const signingKeyPem = env.PLUGIN_SIGNING_PUBLIC_KEY_PEM?.trim();
+  if (production && !signingKeyPem) {
+    throw new Error("Production requires PLUGIN_SIGNING_PUBLIC_KEY_PEM");
+  }
+  if (signingKeyPem) {
+    try {
+      const pub = createPublicKey(signingKeyPem);
+      if (pub.asymmetricKeyType !== "ed25519") {
+        throw new Error("PLUGIN_SIGNING_PUBLIC_KEY_PEM must be an Ed25519 public key");
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("Ed25519")) throw error;
+      throw new Error("PLUGIN_SIGNING_PUBLIC_KEY_PEM is not a valid public key");
+    }
+  }
   if (env.INTERNAL_DATABASE_URL) {
     const dataUrl = new URL(databaseUrl);
     const controlUrl = new URL(env.INTERNAL_DATABASE_URL);
@@ -135,6 +156,10 @@ export function loadConfigFromEnv(
       );
     }
   }
+  const absorbAtoms = env.PLATFORM_ABSORB_MAX_ATOMS_PER_MINUTE?.trim();
+  if (absorbAtoms !== undefined && !/^[1-9][0-9]{0,37}$/.test(absorbAtoms)) {
+    throw new Error("PLATFORM_ABSORB_MAX_ATOMS_PER_MINUTE must be a positive integer");
+  }
   return {
     mode,
     host: env.GATEWAY_HOST ?? "0.0.0.0",
@@ -143,6 +168,7 @@ export function loadConfigFromEnv(
     internalPort: intFromEnv(env, "INTERNAL_PORT", 8081, 0, 65535),
     databaseUrl,
     dbMaxConnections: intFromEnv(env, "DB_MAX_CONNECTIONS", 32, mode === "all-in-one" ? 2 : 1),
+    snapshotDbMaxConnections: intFromEnv(env, "SNAPSHOT_DB_MAX_CONNECTIONS", 2, 1, 16),
     ...(env.REDIS_URL ? { redisUrl: env.REDIS_URL } : {}),
     ...(env.REDIS_NAMESPACE ? { redisNamespace: env.REDIS_NAMESPACE } : {}),
     ...(sentinelUrls && sentinelMaster
@@ -176,9 +202,16 @@ export function loadConfigFromEnv(
     microBatchWindowMs: intFromEnv(env, "MICRO_BATCH_WINDOW_MS", 3, 0),
     microBatchMaxSize: intFromEnv(env, "MICRO_BATCH_MAX_SIZE", 64),
     ...(env.STG_WASMTIME_LIB ? { wasmLibPath: env.STG_WASMTIME_LIB } : {}),
-    ...(env.PLUGIN_SIGNING_PUBLIC_KEY_PEM
-      ? { pluginSigningPublicKeyPem: env.PLUGIN_SIGNING_PUBLIC_KEY_PEM }
-      : {}),
+    contentWasmPoolSize: intFromEnv(env, "CONTENT_WASM_POOL_SIZE", 4, 1, 16),
+    providerWasmPoolSize: intFromEnv(env, "PROVIDER_WASM_POOL_SIZE", 4, 1, 16),
+    ...(signingKeyPem ? { pluginSigningPublicKeyPem: signingKeyPem } : {}),
+    platformAbsorbMaxCountPerMinute: intFromEnv(
+      env,
+      "PLATFORM_ABSORB_MAX_COUNT_PER_MINUTE",
+      100,
+      1,
+    ),
+    ...(absorbAtoms ? { platformAbsorbMaxAtomsPerMinute: absorbAtoms } : {}),
     ...(env.BUSINESS_WEBHOOK_URL ? { businessWebhookUrl: env.BUSINESS_WEBHOOK_URL } : {}),
     ...(env.BUSINESS_WEBHOOK_TOKEN ? { businessWebhookToken: env.BUSINESS_WEBHOOK_TOKEN } : {}),
   };

@@ -23,6 +23,7 @@ export type RoutableCandidate = {
   enabled: boolean;
   channel_enabled: boolean;
   account_active: boolean;
+  same_protocol?: boolean;
 };
 
 export type SmartRouterOptions = {
@@ -316,17 +317,21 @@ export class SmartRouter {
     const priorities = [...byPriority.keys()].sort((a, b) => b - a);
     const ordered: { route: T; isProbe: boolean }[] = [];
 
-    for (const p of priorities) {
-      const group = byPriority.get(p)!;
+    const orderSubgroup = (
+      p: number,
+      suffix: string,
+      group: { route: T; isProbe: boolean; st: InternalChannelState | undefined }[],
+    ) => {
+      if (group.length === 0) return;
       if (group.length === 1) {
         ordered.push({ route: group[0]!.route, isProbe: group[0]!.isProbe });
-        continue;
+        return;
       }
       if (strategy === "LEAST_LATENCY") {
         group.sort((a, b) => (a.st?.ewmaLatencyMs ?? 100) - (b.st?.ewmaLatencyMs ?? 100));
         for (const item of group) ordered.push({ route: item.route, isProbe: item.isProbe });
       } else if (strategy === "ROUND_ROBIN") {
-        const cursorKey = `${modelKey}:${p}`;
+        const cursorKey = `${modelKey}:${p}${suffix}`;
         const cursor = this.rrCursors.get(cursorKey) ?? 0;
         this.rrCursors.set(cursorKey, (cursor + 1) % group.length);
         for (let i = 0; i < group.length; i++) {
@@ -354,6 +359,18 @@ export class SmartRouter {
           const [chosen] = remaining.splice(chosenIdx, 1);
           ordered.push({ route: chosen!.route, isProbe: chosen!.isProbe });
         }
+      }
+    };
+
+    for (const p of priorities) {
+      const group = byPriority.get(p)!;
+      const sameProto = group.filter((item) => item.route.same_protocol === true);
+      if (sameProto.length > 0 && sameProto.length < group.length) {
+        const crossProto = group.filter((item) => item.route.same_protocol !== true);
+        orderSubgroup(p, ":same", sameProto);
+        orderSubgroup(p, ":cross", crossProto);
+      } else {
+        orderSubgroup(p, "", group);
       }
     }
     return ordered;

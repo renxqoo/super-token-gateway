@@ -1,11 +1,10 @@
 import { expect, test } from "bun:test";
 import type { PluginRecord } from "@gateway/ledger";
 import {
-  createBunWasmExecutor,
+  createWasmtimeExecutor,
   getBuiltinPlugin,
   listBuiltinPlugins,
   PluginPipelineEngine,
-  resolveWasmtimeLibraryPath,
   type WasmRuntimeExecutor,
 } from "../index.ts";
 
@@ -48,6 +47,16 @@ async function runPiiGuardMatrix(executor: WasmRuntimeExecutor) {
     '请联\n系 "张三" 邮箱 [REDACTED_EMAIL]，手机 [REDACTED_PHONE]，身份证 [REDACTED_CN_ID]，SSN [REDACTED_SSN]，卡号 [REDACTED_CARD]，密钥 [REDACTED_API_KEY]，AWS [REDACTED_AWS_KEY]，GH [REDACTED_GH_TOKEN] 🎉',
   );
 
+  const leadingBoundaryEmail = await engine.runUnary(
+    "on_request",
+    steps,
+    plugins,
+    meta,
+    "Flag -alice@example.com and --bob.ops+1@corp.io.",
+  );
+  expect(leadingBoundaryEmail.blocked).toBe(false);
+  expect(leadingBoundaryEmail.text).toBe("Flag -[REDACTED_EMAIL] and --[REDACTED_EMAIL].");
+
   const injReq = await engine.runUnary(
     "on_request",
     steps,
@@ -57,6 +66,7 @@ async function runPiiGuardMatrix(executor: WasmRuntimeExecutor) {
   );
   expect(injReq).toMatchObject({
     blocked: true,
+    outcome_kind: "content_decision",
     rule_code: "PROMPT_INJECTION",
     http_status: 400,
   });
@@ -79,6 +89,7 @@ async function runPiiGuardMatrix(executor: WasmRuntimeExecutor) {
   );
   expect(pemBlock).toMatchObject({
     blocked: true,
+    outcome_kind: "content_decision",
     rule_code: "DLP_PRIVATE_KEY",
     http_status: 400,
   });
@@ -106,24 +117,72 @@ async function runPiiGuardMatrix(executor: WasmRuntimeExecutor) {
   );
 }
 
-test("Built-in pii-guard WASM plugin passes full DLP/PII/streaming matrix on both Bun WebAssembly Worker and native Rust wasmtime FFI", async () => {
+test("Built-in pii-guard WASM plugin passes full DLP/PII/streaming matrix on native Rust wasmtime", async () => {
   const catalog = listBuiltinPlugins();
   expect(catalog.some((p) => p.name === "pii-guard" && p.version === "1.0.0")).toBe(true);
 
-  const bunExec = createBunWasmExecutor();
+  const ffiExec = createWasmtimeExecutor({ poolSize: 2 });
   try {
-    await runPiiGuardMatrix(bunExec);
+    await ffiExec.selfCheck?.();
+    await runPiiGuardMatrix(ffiExec);
   } finally {
-    bunExec.close();
+    ffiExec.close();
   }
+});
 
-  const libPath = resolveWasmtimeLibraryPath();
-  if (libPath) {
-    const ffiExec = createBunWasmExecutor({ wasmtimeLibraryPath: libPath });
-    try {
-      await runPiiGuardMatrix(ffiExec);
-    } finally {
-      ffiExec.close();
+test("Built-in pii-guard handles 4KB, 16KB, 64KB, and 128KB inputs including segment-boundary PII without exhausting fuel", async () => {
+  const builtin = getBuiltinPlugin("pii-guard");
+  if (!builtin || builtin.capability !== "CONTENT") throw new Error("Missing pii-guard");
+  const plugin: PluginRecord = {
+    id: "builtin-pii-guard-large",
+    name: builtin.name,
+    version: builtin.version,
+    capability: "CONTENT",
+    kind: "WASM",
+    digest: builtin.digest,
+    wasm_bytes: builtin.wasm_bytes,
+    webhook_config: null,
+    provider_config: null,
+    signature: null,
+    signing_key_id: null,
+    manifest: builtin.manifest,
+    enabled: true,
+  };
+  const plugins = new Map([[plugin.id, plugin]]);
+  const steps = [{ plugin_id: plugin.id, priority: 1 }];
+  const executor = createWasmtimeExecutor({ poolSize: 2 });
+  const engine = new PluginPipelineEngine({ wasmExecutor: executor });
+  const meta = { request_id: "r-large", project_id: "p1", model: "gpt-4o", operation: "chat" };
+
+  try {
+    for (const sizeKb of [4, 16, 64, 128]) {
+      const filler = "normal text payload for enterprise gateway check. ".repeat(
+        Math.ceil((sizeKb * 1024) / 50),
+      );
+      const boundaryPos = Math.min(filler.length - 100, 32_760);
+      const input =
+        filler.slice(0, boundaryPos) +
+        " contact ops.user@example.com phone 13812345678 " +
+        filler.slice(boundaryPos);
+      const res = await engine.runUnary("on_request", steps, plugins, meta, input);
+      expect(res.blocked).toBe(false);
+      expect(res.outcome_kind).toBe("content_decision");
+      expect(res.text).toContain("[REDACTED_EMAIL]");
+      expect(res.text).toContain("[REDACTED_PHONE]");
+      expect(res.text).not.toContain("ops.user@example.com");
+      expect(res.text).not.toContain("13812345678");
     }
+
+    const boundaryPem =
+      "a".repeat(32_755) + "-----BEGIN RSA PRIVATE KEY-----\nMIIE" + "b".repeat(10_000);
+    const pemRes = await engine.runUnary("on_response", steps, plugins, meta, boundaryPem);
+    expect(pemRes).toMatchObject({
+      blocked: true,
+      outcome_kind: "content_decision",
+      rule_code: "DLP_PRIVATE_KEY",
+      http_status: 400,
+    });
+  } finally {
+    executor.close();
   }
 });

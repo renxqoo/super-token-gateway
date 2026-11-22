@@ -82,6 +82,23 @@ redis.call('PEXPIREAT', key, math.ceil(tonumber(latest[2])))
 return 1
 `;
 
+const acquireSha = new Bun.CryptoHasher("sha1").update(ACQUIRE_LUA).digest("hex");
+const renewSha = new Bun.CryptoHasher("sha1").update(RENEW_LUA).digest("hex");
+
+async function evalPermit(
+  redis: RedisClient,
+  script: string,
+  sha: string,
+  args: string[],
+): Promise<unknown> {
+  try {
+    return await redis.send("EVALSHA", [sha, ...args]);
+  } catch (error) {
+    if (!(error instanceof Error) || !/^NOSCRIPT\b/.test(error.message)) throw error;
+    return redis.send("EVAL", [script, ...args]);
+  }
+}
+
 async function withRedisDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -318,8 +335,7 @@ export class ClusterCoordinator {
     try {
       const code = Number(
         await withRedisDeadline(
-          redis.send("EVAL", [
-            ACQUIRE_LUA,
+          evalPermit(redis, ACQUIRE_LUA, acquireSha, [
             "3",
             rpmKey,
             tpmKey,
@@ -362,7 +378,7 @@ export class ClusterCoordinator {
         if (released) return;
         try {
           const renewed = await withRedisDeadline(
-            redis.send("EVAL", [RENEW_LUA, "1", concKey, member, String(leaseTtlMs)]),
+            evalPermit(redis, RENEW_LUA, renewSha, ["1", concKey, member, String(leaseTtlMs)]),
             Math.min(1000, renewEveryMs),
           );
           if (Number(renewed) !== 1) {

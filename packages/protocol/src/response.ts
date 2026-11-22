@@ -27,6 +27,15 @@ export function decodeResponse(
   const addText = (value: unknown) => {
     if (typeof value === "string") result.parts.push({ type: "text", text: value });
   };
+  const addReasoning = (value: unknown, signature?: unknown) => {
+    if (typeof value === "string" && value.length > 0) {
+      result.parts.push({
+        type: "reasoning",
+        text: value,
+        ...(typeof signature === "string" && signature.length > 0 ? { signature } : {}),
+      });
+    }
+  };
   const addCall = (id: unknown, name: unknown, args: unknown) =>
     result.parts.push({
       type: "call",
@@ -43,9 +52,19 @@ export function decodeResponse(
       );
     const choice = object(body.choices[0]);
     const message = object(choice.message);
-    for (const key of ["refusal", "reasoning_content", "audio"])
+    for (const key of ["refusal", "audio"])
       if (message[key])
         throw new GatewayError(502, "conversion_loss", `Conversion cannot preserve ${key}`);
+    const reasoningRaw = message.reasoning_content ?? message.reasoning;
+    if (reasoningRaw !== undefined && reasoningRaw !== null) {
+      if (typeof reasoningRaw !== "string")
+        throw new GatewayError(
+          502,
+          "conversion_loss",
+          "Conversion cannot preserve reasoning_content",
+        );
+      addReasoning(reasoningRaw);
+    }
     if (typeof message.content === "string") addText(message.content);
     else if (Array.isArray(message.content))
       for (const raw of message.content) {
@@ -71,7 +90,20 @@ export function decodeResponse(
       for (const raw of body.output) {
         const item = object(raw);
         if (item.type === "function_call") addCall(item.call_id, item.name, item.arguments);
-        else if (item.type === "message" && Array.isArray(item.content))
+        else if (item.type === "reasoning") {
+          const summaryList =
+            Array.isArray(item.summary) && item.summary.length > 0
+              ? item.summary
+              : Array.isArray(item.content)
+                ? item.content
+                : [];
+          const texts: string[] = [];
+          for (const rawSummary of summaryList) {
+            const s = optionalObject(rawSummary);
+            if (typeof s.text === "string") texts.push(s.text);
+          }
+          addReasoning(texts.join(""));
+        } else if (item.type === "message" && Array.isArray(item.content))
           for (const rawPart of item.content) {
             const part = object(rawPart);
             if (part.type !== "output_text")
@@ -87,6 +119,7 @@ export function decodeResponse(
     for (const raw of body.content) {
       const part = object(raw);
       if (part.type === "text") addText(part.text);
+      else if (part.type === "thinking") addReasoning(part.thinking, part.signature);
       else if (part.type === "tool_use") addCall(part.id, part.name, part.input);
       else throw new GatewayError(502, "conversion_loss", "Unsupported Anthropic response block");
     }
@@ -106,12 +139,10 @@ export function decodeResponse(
     if (Array.isArray(content.parts))
       for (const raw of content.parts) {
         const part = object(raw);
-        if (part.thought || part.thoughtSignature)
-          throw new GatewayError(
-            502,
-            "conversion_loss",
-            "Cannot preserve Gemini thought/signature",
-          );
+        if (part.thought === true && typeof part.text === "string") {
+          addReasoning(part.text);
+          continue;
+        }
         if (typeof part.text === "string") addText(part.text);
         else if (part.functionCall) {
           const call = object(part.functionCall);
@@ -192,6 +223,7 @@ export function encodeResponse(
       : [],
   );
   const content = parts.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("");
+  const reasoning = parts.flatMap((p) => (p.type === "reasoning" ? [p.text] : [])).join("");
   const usage = publicUsage(result.usage, target);
   if (target === "chat")
     return {
@@ -205,6 +237,7 @@ export function encodeResponse(
           message: {
             role: "assistant",
             content: content || null,
+            ...(reasoning ? { reasoning_content: reasoning } : {}),
             ...(calls.length ? { tool_calls: calls } : {}),
           },
           finish_reason: result.finish,
@@ -235,19 +268,25 @@ export function encodeResponse(
               arguments: part.arguments,
               status: "completed",
             }
-          : {
-              id: `msg_${index}`,
-              type: "message",
-              role: "assistant",
-              status: "completed",
-              content: [
-                {
-                  type: "output_text",
-                  text: part.type === "text" ? part.text : "",
-                  annotations: [],
-                },
-              ],
-            },
+          : part.type === "reasoning"
+            ? {
+                id: `rs_${index}`,
+                type: "reasoning",
+                summary: [{ type: "summary_text", text: part.text }],
+              }
+            : {
+                id: `msg_${index}`,
+                type: "message",
+                role: "assistant",
+                status: "completed",
+                content: [
+                  {
+                    type: "output_text",
+                    text: part.type === "text" ? part.text : "",
+                    annotations: [],
+                  },
+                ],
+              },
       ),
       ...(result.usage ? { usage } : {}),
     };
@@ -265,7 +304,13 @@ export function encodeResponse(
               name: part.name,
               input: parseProviderJson(part.arguments),
             }
-          : { type: "text", text: part.type === "text" ? part.text : "" },
+          : part.type === "reasoning"
+            ? {
+                type: "thinking",
+                thinking: part.text,
+                ...(part.signature ? { signature: part.signature } : {}),
+              }
+            : { type: "text", text: part.type === "text" ? part.text : "" },
       ),
       stop_reason:
         result.finish === "content_filter"
@@ -293,7 +338,9 @@ export function encodeResponse(
                     args: parseProviderJson(part.arguments),
                   },
                 }
-              : { text: part.type === "text" ? part.text : "" },
+              : part.type === "reasoning"
+                ? { text: part.text, thought: true }
+                : { text: part.type === "text" ? part.text : "" },
           ),
         },
         finishReason:

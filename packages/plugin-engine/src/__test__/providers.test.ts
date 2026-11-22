@@ -2,13 +2,14 @@ import { expect, test } from "bun:test";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { resolve } from "node:path";
 import type { PluginRecord, WasmProviderConfig } from "@gateway/ledger";
+import { parseProviderJson } from "@gateway/protocol";
 import {
   applyBodyTransforms,
   applyResponseTransforms,
   assertSafeEndpointTemplate,
   assertSafeFieldPath,
   assertSafeRelativePath,
-  createBunWasmExecutor,
+  createWasmtimeExecutor,
   createFfiWasmtimeExecutor,
   evaluateErrorRules,
   extractUsageAliases,
@@ -24,6 +25,7 @@ import {
   resolveProviderPlugin,
   resolveWasmtimeLibraryPath,
   sanitizeProviderHeaders,
+  WasmPluginFaultError,
   type WasmRuntimeExecutor,
 } from "../index.ts";
 
@@ -219,7 +221,7 @@ test("Declarative transforms, endpoint rendering, error rules, usage aliases, an
       { target: "output_tokens", source_path: "custom.out" },
     ],
   );
-  expect(aliases).toEqual({ cached_input_tokens: 42, output_tokens: 9 });
+  expect(aliases).toEqual({ cached_input_tokens: "42", output_tokens: "9" });
 
   const merged = mergeAdapterOverrides(
     getBuiltinProvider("deepseek")!.provider_config,
@@ -469,21 +471,132 @@ async function runWasmProviderSuite(executor: WasmRuntimeExecutor) {
   );
 }
 
-test("G7.6 Real compiled Rust WASM proprietary provider passes full lifecycle and security matrix on Bun Worker and native Rust wasmtime", async () => {
-  const bunExec = createBunWasmExecutor({ minTimeoutMs: 40, maxTimeoutMs: 120 });
+test("G7.6 Real compiled Rust WASM proprietary provider passes full lifecycle and security matrix on native Rust wasmtime worker pool and FFI", async () => {
+  const workerExec = createWasmtimeExecutor({ poolSize: 2, minTimeoutMs: 40, maxTimeoutMs: 500 });
   try {
-    await runWasmProviderSuite(bunExec);
+    await workerExec.selfCheck?.();
+    await runWasmProviderSuite(workerExec);
   } finally {
-    bunExec.close();
+    workerExec.close();
   }
 
-  const libPath = resolveWasmtimeLibraryPath();
-  if (libPath) {
-    const ffiExec = createFfiWasmtimeExecutor({ libraryPath: libPath });
-    try {
-      await runWasmProviderSuite(ffiExec);
-    } finally {
-      ffiExec.close();
-    }
+  const libPath = resolveWasmtimeLibraryPath()!;
+  const ffiExec = createFfiWasmtimeExecutor({ libraryPath: libPath });
+  try {
+    await runWasmProviderSuite(ffiExec);
+  } finally {
+    ffiExec.close();
   }
+});
+
+test("a failed WASM revision cannot leave its previous revision unavailable in a worker slot", async () => {
+  const previous = new Uint8Array(
+    await Bun.file(
+      resolve(import.meta.dir, "../../../../tests/fixtures/example-provider.wasm"),
+    ).arrayBuffer(),
+  );
+  const different = getBuiltinPlugin("pii-guard");
+  if (different?.capability !== "CONTENT") throw new Error("Missing content WASM fixture");
+  const previousDigest = new Bun.CryptoHasher("sha256").update(previous).digest("hex");
+  const executor = createWasmtimeExecutor({
+    poolSize: 1,
+    minTimeoutMs: 2_000,
+  });
+  const input = new TextEncoder().encode(
+    JSON.stringify({ operation: "chat", upstream_model: "fixture", body: {} }),
+  );
+  const invokeRequest = async () => {
+    const result = await executor.invoke("fixture", "adapt_request", input, {
+      fuelBudget: 5_000_000,
+      maxMemoryBytes: 16 * 1024 * 1024,
+    });
+    return JSON.parse(new TextDecoder().decode(result));
+  };
+  try {
+    executor.compile("fixture", previousDigest, previous);
+    expect((await invokeRequest()).path).toBe("/v9/proprietary/generate");
+    executor.compile("fixture", different.digest, different.wasm_bytes);
+    const failure = await invokeRequest().catch((err: Error) => err.message);
+    expect(failure).toContain("missing exported hook");
+    executor.compile("fixture", previousDigest, previous);
+    expect((await invokeRequest()).path).toBe("/v9/proprietary/generate");
+  } finally {
+    executor.close();
+  }
+});
+
+test("two different values for the same provider usage alias cannot silently replace one another", () => {
+  expect(() =>
+    extractUsageAliases({ vendor: { charged: 10, reported: 12 } }, [
+      { target: "input_tokens", source_path: "vendor.charged" },
+      { target: "input_tokens", source_path: "vendor.reported" },
+    ]),
+  ).toThrow("Provider usage alias conflict on input_tokens");
+});
+
+test("renaming an upstream usage field preserves its original decimal precision", () => {
+  const raw = parseProviderJson('{"vendor":{"duration":0.123456789012345678}}') as Record<
+    string,
+    unknown
+  >;
+  const adapted = applyResponseTransforms(raw, [
+    { op: "rename", from: "vendor.duration", to: "usage.duration" },
+  ]);
+  expect(
+    extractUsageAliases(adapted, [{ target: "audio_seconds", source_path: "usage.duration" }]),
+  ).toEqual({ audio_seconds: "0.123456789012345678" });
+});
+
+test("malformed JSON returned by WASM provider adapt_response throws WasmPluginFaultError instead of blaming upstream", async () => {
+  const bytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+  const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+  const plugin: PluginRecord = {
+    id: "p-bad-json-provider",
+    name: "bad-json-provider",
+    version: "1.0.0",
+    capability: "PROVIDER",
+    kind: "WASM",
+    digest,
+    wasm_bytes: bytes,
+    webhook_config: null,
+    provider_config: {
+      base_dialect: "passthrough",
+      usage_dialect: "custom",
+      auth: { scheme: "bearer" },
+      hooks: ["adapt_response"],
+      grants: ["extract_usage"],
+    },
+    signature: null,
+    signing_key_id: null,
+    manifest: {},
+    enabled: true,
+  };
+  const badJsonExec: WasmRuntimeExecutor = {
+    runtimeKind: "mock",
+    compile() {},
+    async invoke() {
+      return new TextEncoder().encode("{not-valid-json");
+    },
+    close() {},
+  };
+  let caught: unknown = null;
+  try {
+    await invokeWasmProviderResponse({
+      executor: badJsonExec,
+      plugin,
+      config: plugin.provider_config as WasmProviderConfig,
+      input: {
+        operation: "chat",
+        upstream_model: "m",
+        client_protocol: "chat",
+        status: 200,
+        headers: {},
+        body: {},
+      },
+    });
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(WasmPluginFaultError);
+  expect((caught as WasmPluginFaultError).code).toBe("wasm_execution_failed");
 });

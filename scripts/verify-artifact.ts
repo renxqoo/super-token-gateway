@@ -154,8 +154,16 @@ try {
   if (!builtins.items.some((b) => b.name === "pii-guard")) {
     throw new Error(`Built-in pii-guard missing from artifact: ${JSON.stringify(builtins)}`);
   }
-  const artPlugin = await postInternal("POST", "/internal/v1/plugins/builtins/pii-guard/install", {
-    enabled: true,
+  const artPlugin = await postInternal(
+    "POST",
+    "/internal/v1/plugins/builtins/pii-guard/install",
+    {},
+  );
+  await postInternal("POST", "/internal/v1/plugin-releases", {
+    id: crypto.randomUUID(),
+    expected_epoch: artPlugin.config_epoch,
+    targets: [{ plugin_id: artPlugin.id }],
+    samples: { [String(artPlugin.id)]: { text: "Contact 13812345678 or alice@example.com" } },
   });
   const dryTest = (await postInternal("POST", `/internal/v1/plugins/${artPlugin.id}/test`, {
     hook: "on_response",

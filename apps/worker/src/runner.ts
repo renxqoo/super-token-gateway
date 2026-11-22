@@ -1,5 +1,9 @@
 import type { SQL } from "bun";
-import { createLedgerEngine, prepareLedgerMonth } from "@gateway/ledger";
+import {
+  createGatewayConfigNodeRepository,
+  createLedgerEngine,
+  prepareLedgerMonth,
+} from "@gateway/ledger";
 
 export type WorkerTickStats = {
   is_leader: boolean;
@@ -36,6 +40,7 @@ function currentAndNextMonths(now = new Date()): [string, string] {
 export function createWorkerRunner(options: WorkerRunnerOptions) {
   const db = options.db;
   const ledger = createLedgerEngine(db, { enableLeases: false });
+  const configNodes = createGatewayConfigNodeRepository(db);
   const leaseKey = options.leaseKey ?? 81442599;
   const consumerName = options.outboxConsumerName ?? "business_webhook";
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -346,6 +351,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
       scheduleTask(async () => {
         if (await ensureLeadership()) {
           await ensurePartitions();
+          await configNodes.pruneStaleNodes(24).catch(() => undefined);
         }
       }, options.partitionIntervalMs ?? 3_600_000);
     },

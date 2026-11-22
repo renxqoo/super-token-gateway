@@ -1,3 +1,14 @@
+import { GatewayError } from "@gateway/contracts";
+import {
+  clearExactProperty,
+  copyExact,
+  numberLiteral,
+  parseProviderJson,
+  readUsageQuantity,
+  setExactProperty,
+  stringifyExact,
+  trackExactChild,
+} from "@gateway/protocol";
 import type {
   AdapterOverrides,
   BodyTransformRule,
@@ -20,7 +31,7 @@ import type {
   WasmProviderStreamOutput,
   WasmRuntimeExecutor,
 } from "../types.ts";
-import { verifyPluginSignature } from "../wasm-host.ts";
+import { verifyPluginIntegrity, WasmCapacityError, WasmPluginFaultError } from "../wasm-host.ts";
 import { getBuiltinProviderReadonly, type BuiltinProviderPreset } from "./builtins.ts";
 
 const SAFE_PATH_RE = /^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+){0,7}$/;
@@ -112,36 +123,43 @@ export type ResolvedProvider =
       preset: BuiltinProviderPreset;
     };
 
+export function resolvePinnedProviderPlugin(
+  providerPluginId: string,
+  snapshot: Pick<ConfigSnapshot, "plugins"> | null,
+): ResolvedProvider | null {
+  const pinned = snapshot?.plugins.get(providerPluginId);
+  if (!pinned || !pinned.enabled || pinned.capability !== "PROVIDER" || !pinned.provider_config) {
+    return null;
+  }
+  if (pinned.kind === "WASM") {
+    return {
+      source: "db_pinned",
+      name: pinned.name,
+      version: pinned.version,
+      plugin_id: pinned.id,
+      kind: "WASM",
+      config: pinned.provider_config as WasmProviderConfig,
+      plugin: pinned,
+    };
+  }
+  return {
+    source: "db_pinned",
+    name: pinned.name,
+    version: pinned.version,
+    plugin_id: pinned.id,
+    kind: "DECLARATIVE",
+    config: pinned.provider_config as DeclarativeProviderConfig,
+    plugin: pinned,
+  };
+}
+
 export function resolveProviderPlugin(
   channelKind: string,
   providerPluginId: string | null | undefined,
   snapshot: Pick<ConfigSnapshot, "plugins" | "providerPluginsByName"> | null,
 ): ResolvedProvider | null {
   if (providerPluginId) {
-    const pinned = snapshot?.plugins.get(providerPluginId);
-    if (!pinned || !pinned.enabled || pinned.capability !== "PROVIDER" || !pinned.provider_config) {
-      return null;
-    }
-    if (pinned.kind === "WASM") {
-      return {
-        source: "db_pinned",
-        name: pinned.name,
-        version: pinned.version,
-        plugin_id: pinned.id,
-        kind: "WASM",
-        config: pinned.provider_config as WasmProviderConfig,
-        plugin: pinned,
-      };
-    }
-    return {
-      source: "db_pinned",
-      name: pinned.name,
-      version: pinned.version,
-      plugin_id: pinned.id,
-      kind: "DECLARATIVE",
-      config: pinned.provider_config as DeclarativeProviderConfig,
-      plugin: pinned,
-    };
+    return resolvePinnedProviderPlugin(providerPluginId, snapshot);
   }
 
   const dbPlugin = snapshot?.providerPluginsByName.get(channelKind);
@@ -196,13 +214,21 @@ export function getAtPath(obj: unknown, parts: readonly string[]): unknown {
   return cur;
 }
 
-function setAtPath(root: Record<string, unknown>, parts: readonly string[], value: unknown): void {
+function setAtPath(
+  root: Record<string, unknown>,
+  parts: readonly string[],
+  value: unknown,
+  literal?: string,
+): void {
+  const ancestors: Record<string, unknown>[] = [];
+  const carryExact = literal !== undefined || (value !== null && typeof value === "object");
   let cur: Record<string, unknown> = root;
   for (let i = 0; i < parts.length - 1; i++) {
     const seg = parts[i]!;
+    if (carryExact) ancestors.push(cur);
     const existing = Object.hasOwn(cur, seg) ? cur[seg] : undefined;
     if (existing !== null && typeof existing === "object" && !Array.isArray(existing)) {
-      const cloned = { ...(existing as Record<string, unknown>) };
+      const cloned = copyExact(existing, { ...(existing as Record<string, unknown>) });
       cur[seg] = cloned;
       cur = cloned;
     } else {
@@ -211,28 +237,53 @@ function setAtPath(root: Record<string, unknown>, parts: readonly string[], valu
       cur = created;
     }
   }
-  cur[parts[parts.length - 1]!] = value;
+  const key = parts[parts.length - 1]!;
+  clearExactProperty(cur, key);
+  cur[key] = value;
+  if (literal !== undefined) setExactProperty(cur, key, literal);
+  if (value !== null && typeof value === "object") trackExactChild(cur, value);
+  for (const parent of ancestors.reverse()) {
+    trackExactChild(parent, cur);
+    cur = parent;
+  }
 }
 
 function deleteAtPath(root: Record<string, unknown>, parts: readonly string[]): void {
-  if (parts.length === 1) {
-    delete root[parts[0]!];
-    return;
-  }
-  const parents: { obj: Record<string, unknown>; key: string }[] = [];
   let cur: Record<string, unknown> = root;
   for (let i = 0; i < parts.length - 1; i++) {
     const seg = parts[i]!;
     if (!Object.hasOwn(cur, seg)) return;
     const next = cur[seg];
     if (next === null || typeof next !== "object" || Array.isArray(next)) return;
-    const cloned = { ...(next as Record<string, unknown>) };
+    const cloned = copyExact(next, { ...(next as Record<string, unknown>) });
     cur[seg] = cloned;
-    parents.push({ obj: cur, key: seg });
     cur = cloned;
   }
-  delete cur[parts[parts.length - 1]!];
-  void parents;
+  const key = parts[parts.length - 1]!;
+  clearExactProperty(cur, key);
+  delete cur[key];
+}
+
+function moveAtPath(
+  root: Record<string, unknown>,
+  from: string,
+  to: string,
+  overwrite?: boolean,
+): void {
+  const fromParts = assertSafeFieldPath(from);
+  const toParts = assertSafeFieldPath(to);
+  if (from === to) return;
+  const value = getAtPath(root, fromParts);
+  if (value === undefined) return;
+  if (overwrite || getAtPath(root, toParts) === undefined) {
+    const parent = getAtPath(root, fromParts.slice(0, -1));
+    const literal =
+      typeof value === "number" && parent !== null && typeof parent === "object"
+        ? numberLiteral(parent, fromParts.at(-1)!)
+        : undefined;
+    setAtPath(root, toParts, value, literal);
+  }
+  deleteAtPath(root, fromParts);
 }
 
 export function mergeAdapterOverrides(
@@ -294,21 +345,12 @@ export function applyBodyTransforms(
   rules: readonly BodyTransformRule[],
 ): Record<string, unknown> {
   if (rules.length === 0) return body;
-  const out: Record<string, unknown> = { ...body };
+  const out = copyExact(body, { ...body });
   for (const rule of rules) {
     switch (rule.op) {
       case "rename":
       case "move_to": {
-        const fromParts = assertSafeFieldPath(rule.from);
-        const toParts = assertSafeFieldPath(rule.to);
-        const val = getAtPath(out, fromParts);
-        if (val !== undefined) {
-          const destVal = getAtPath(out, toParts);
-          if (rule.overwrite === true || destVal === undefined) {
-            setAtPath(out, toParts, val);
-          }
-          deleteAtPath(out, fromParts);
-        }
+        moveAtPath(out, rule.from, rule.to, rule.overwrite);
         break;
       }
       case "drop": {
@@ -355,19 +397,10 @@ export function applyResponseTransforms(
   rules: readonly ResponseTransformRule[],
 ): Record<string, unknown> {
   if (rules.length === 0) return body;
-  const out: Record<string, unknown> = { ...body };
+  const out = copyExact(body, { ...body });
   for (const rule of rules) {
     if (rule.op === "rename") {
-      const fromParts = assertSafeFieldPath(rule.from);
-      const toParts = assertSafeFieldPath(rule.to);
-      const val = getAtPath(out, fromParts);
-      if (val !== undefined) {
-        const destVal = getAtPath(out, toParts);
-        if (rule.overwrite === true || destVal === undefined) {
-          setAtPath(out, toParts, val);
-        }
-        deleteAtPath(out, fromParts);
-      }
+      moveAtPath(out, rule.from, rule.to, rule.overwrite);
     } else if (rule.op === "drop") {
       deleteAtPath(out, assertSafeFieldPath(rule.path));
     } else if (rule.op === "set_default") {
@@ -477,16 +510,32 @@ export function evaluateErrorRules(
 export function extractUsageAliases(
   body: unknown,
   rules: readonly UsageAliasRule[],
-): Record<string, unknown> | null {
+): Record<string, string> | null {
   if (rules.length === 0 || body === null || typeof body !== "object") return null;
-  const out: Record<string, unknown> = {};
+  const out: Record<string, string> = {};
   let found = false;
   for (const rule of rules) {
-    const val = getAtPath(body, assertSafeFieldPath(rule.source_path));
-    if (val !== undefined && val !== null) {
-      out[rule.target] = val;
-      found = true;
+    const parts = assertSafeFieldPath(rule.source_path);
+    const key = parts.pop()!;
+    const parent = getAtPath(body, parts);
+    if (
+      parent === null ||
+      typeof parent !== "object" ||
+      Array.isArray(parent) ||
+      !Object.hasOwn(parent, key)
+    )
+      continue;
+    const value = readUsageQuantity(parent as Record<string, unknown>, key, rule.target);
+    if (value === undefined) continue;
+    if (out[rule.target] !== undefined && out[rule.target] !== value) {
+      throw new GatewayError(
+        502,
+        "usage_alias_conflict",
+        `Provider usage alias conflict on ${rule.target}`,
+      );
     }
+    out[rule.target] = value;
+    found = true;
   }
   return found ? out : null;
 }
@@ -513,14 +562,30 @@ export async function invokeWasmProviderRequest(options: {
   config: WasmProviderConfig;
   input: WasmProviderRequestInput;
   signingPublicKeyPem?: string;
+  signal?: AbortSignal;
+  tenantId?: string;
 }): Promise<WasmProviderRequestOutput> {
   const raw = await invokeWasmProviderRaw(options, "adapt_request", options.input);
   if (typeof raw.path !== "string") {
-    throw new Error("WASM adapt_request reply missing path");
+    throw new WasmPluginFaultError(
+      "wasm_execution_failed",
+      "WASM adapt_request reply missing path",
+    );
   }
-  const safePath = assertSafeRelativePath(raw.path);
+  let safePath: string;
+  try {
+    safePath = assertSafeRelativePath(raw.path);
+  } catch (err) {
+    throw new WasmPluginFaultError(
+      "wasm_execution_failed",
+      err instanceof Error ? err.message : "WASM adapt_request returned unsafe path",
+    );
+  }
   if (raw.body === null || typeof raw.body !== "object" || Array.isArray(raw.body)) {
-    throw new Error("WASM adapt_request reply missing object body");
+    throw new WasmPluginFaultError(
+      "wasm_execution_failed",
+      "WASM adapt_request reply missing object body",
+    );
   }
   const query: Record<string, string> = {};
   if (raw.query && typeof raw.query === "object" && !Array.isArray(raw.query)) {
@@ -548,14 +613,24 @@ export async function invokeWasmProviderResponse(options: {
   config: WasmProviderConfig;
   input: WasmProviderResponseInput;
   signingPublicKeyPem?: string;
+  signal?: AbortSignal;
+  tenantId?: string;
 }): Promise<WasmProviderResponseOutput> {
   const raw = await invokeWasmProviderRaw(options, "adapt_response", options.input);
   const canExtractUsage = Boolean(options.config.grants?.includes("extract_usage"));
   if (raw.usage !== undefined && !canExtractUsage) {
-    throw new Error("WASM provider plugin lacks extract_usage grant");
+    throw new WasmPluginFaultError(
+      "wasm_execution_failed",
+      "WASM provider plugin lacks extract_usage grant",
+    );
   }
   return {
-    ...(typeof raw.status === "number" ? { status: raw.status } : {}),
+    ...(typeof raw.status === "number" &&
+    Number.isInteger(raw.status) &&
+    raw.status >= 100 &&
+    raw.status <= 599
+      ? { status: raw.status }
+      : {}),
     ...(raw.body && typeof raw.body === "object" && !Array.isArray(raw.body)
       ? { body: raw.body as Record<string, unknown> }
       : {}),
@@ -574,20 +649,31 @@ export async function invokeWasmProviderStreamEvent(options: {
   config: WasmProviderConfig;
   input: WasmProviderStreamInput;
   signingPublicKeyPem?: string;
+  signal?: AbortSignal;
+  tenantId?: string;
 }): Promise<WasmProviderStreamOutput> {
   if (encoder.encode(options.input.state).byteLength > MAX_WASM_STREAM_STATE_BYTES) {
-    throw new Error("WASM stream state exceeds 4096 bytes limit");
+    throw new WasmPluginFaultError(
+      "wasm_execution_failed",
+      "WASM stream state exceeds 4096 bytes limit",
+    );
   }
   const raw = await invokeWasmProviderRaw(options, "adapt_stream_event", options.input);
   const canExtractUsage = Boolean(options.config.grants?.includes("extract_usage"));
   if (raw.usage !== undefined && !canExtractUsage) {
-    throw new Error("WASM provider plugin lacks extract_usage grant");
+    throw new WasmPluginFaultError(
+      "wasm_execution_failed",
+      "WASM provider plugin lacks extract_usage grant",
+    );
   }
   if (
     typeof raw.state === "string" &&
     encoder.encode(raw.state).byteLength > MAX_WASM_STREAM_STATE_BYTES
   ) {
-    throw new Error("WASM returned stream state exceeding 4096 bytes limit");
+    throw new WasmPluginFaultError(
+      "wasm_execution_failed",
+      "WASM returned stream state exceeding 4096 bytes limit",
+    );
   }
   const chunks = Array.isArray(raw.chunks)
     ? raw.chunks.filter(
@@ -617,35 +703,90 @@ function isRetryKind(value: unknown): value is ProviderRetryKind {
   );
 }
 
+type ProviderIntegrityResult =
+  { ok: true } | { ok: false; reason: "missing_bytes" | "digest_mismatch" | "signature_invalid" };
+
+const providerIntegrityByBuffer = new WeakMap<Uint8Array, Map<string, ProviderIntegrityResult>>();
+
+function checkProviderIntegrity(
+  plugin: PluginRecord,
+  signingPublicKeyPem: string | undefined,
+): ProviderIntegrityResult {
+  if (!plugin.wasm_bytes) return { ok: false, reason: "missing_bytes" };
+  const metaKey = `${plugin.id}:${plugin.digest}:${plugin.signature ?? ""}:${signingPublicKeyPem ?? ""}`;
+  let perBuf = providerIntegrityByBuffer.get(plugin.wasm_bytes);
+  const cached = perBuf?.get(metaKey);
+  if (cached) return cached;
+  const verified = verifyPluginIntegrity(plugin, signingPublicKeyPem);
+  if (!perBuf) {
+    perBuf = new Map();
+    providerIntegrityByBuffer.set(plugin.wasm_bytes, perBuf);
+  }
+  if (perBuf.size >= 16) perBuf.clear();
+  perBuf.set(metaKey, verified);
+  return verified;
+}
+
 async function invokeWasmProviderRaw(
   options: {
     executor: WasmRuntimeExecutor | null;
     plugin: PluginRecord;
     config: WasmProviderConfig;
     signingPublicKeyPem?: string;
+    signal?: AbortSignal;
+    tenantId?: string;
   },
   hook: ProviderHook,
-  payload: unknown,
+  payload: WasmProviderRequestInput | WasmProviderResponseInput | WasmProviderStreamInput,
 ): Promise<Record<string, unknown>> {
-  const { executor, plugin, config, signingPublicKeyPem } = options;
-  if (!verifyPluginSignature(plugin.digest, plugin.signature, signingPublicKeyPem)) {
-    throw new Error("Provider WASM plugin signature verification failed");
+  const { executor, plugin, config, signingPublicKeyPem, signal, tenantId } = options;
+  signal?.throwIfAborted();
+  const integrity = checkProviderIntegrity(plugin, signingPublicKeyPem);
+  if (!integrity.ok) {
+    throw new WasmPluginFaultError(
+      "wasm_execution_failed",
+      integrity.reason === "digest_mismatch"
+        ? "Provider WASM plugin digest verification failed"
+        : "Provider WASM plugin signature verification failed",
+    );
   }
   if (!executor || !plugin.wasm_bytes) {
-    throw new Error("WASM runtime unavailable for provider plugin");
+    throw new WasmCapacityError("wasm_queue_full", "WASM runtime unavailable for provider plugin");
   }
   if (!config.hooks.includes(hook)) {
-    throw new Error(`Provider WASM plugin does not declare hook ${hook}`);
+    throw new WasmPluginFaultError(
+      "wasm_execution_failed",
+      `Provider WASM plugin does not declare hook ${hook}`,
+    );
   }
   executor.compile(plugin.id, plugin.digest, plugin.wasm_bytes);
-  const inputBytes = encoder.encode(JSON.stringify(payload));
+  const input =
+    "body" in payload && payload.body && typeof payload.body === "object"
+      ? trackExactChild(payload, payload.body)
+      : payload;
+  const inputBytes = encoder.encode(stringifyExact(input));
   const rawOut = await executor.invoke(plugin.id, hook, inputBytes, {
     fuelBudget: config.fuel_budget ?? 5_000_000,
     maxMemoryBytes: config.max_memory_bytes ?? 16 * 1024 * 1024,
+    priority: hook === "adapt_request" ? "ingress" : "egress",
+    ...(tenantId ? { tenantId } : {}),
+    ...(signal ? { signal } : {}),
   });
-  const parsed = JSON.parse(decoder.decode(rawOut)) as unknown;
+  signal?.throwIfAborted();
+  let parsed: unknown;
+  try {
+    parsed = parseProviderJson(decoder.decode(rawOut));
+  } catch (err) {
+    throw new WasmPluginFaultError(
+      "wasm_execution_failed",
+      `Provider WASM hook ${hook} returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`Provider WASM hook ${hook} returned non-object JSON`);
+    throw new WasmPluginFaultError(
+      "wasm_execution_failed",
+      `Provider WASM hook ${hook} returned non-object JSON`,
+    );
   }
   return parsed as Record<string, unknown>;
 }

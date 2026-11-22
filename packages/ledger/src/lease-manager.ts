@@ -7,7 +7,7 @@ import {
   type LeasedHoldMeta,
 } from "./leases.ts";
 import type { AcquireHoldInput } from "./types.ts";
-import { walletKey, supplierKey } from "./funds.ts";
+import { walletKey, supplierKey, walletLane } from "./funds.ts";
 
 const LEASE_TTL_MS = 15_000;
 const LEASE_RENEW_MARGIN_MS = 6_000;
@@ -57,9 +57,11 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
     closingWalletLeases.add(lease);
   }
 
+  const supplierLeaseKey = (key: string, lane: number) => `${key}:${lane}`;
+
   function retireSupplierLease(lease: ActiveSupplierLease): void {
     lease.closing = true;
-    const sk = supplierKey(lease.accountId, lease.currency);
+    const sk = supplierLeaseKey(supplierKey(lease.accountId, lease.currency), lease.lane);
     if (activeSupplierLeases.get(sk) === lease) {
       activeSupplierLeases.delete(sk);
     }
@@ -190,7 +192,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
           ORDER BY l.id FOR NO KEY UPDATE OF l
         )
         UPDATE public.wallet_leases l
-        SET expires_at = clock_timestamp() + ${leaseTtlMs} * interval '1 millisecond', updated_at = now()
+        SET expires_at = GREATEST(l.expires_at, clock_timestamp() + ${leaseTtlMs} * interval '1 millisecond'), updated_at = now()
         FROM eligible
         WHERE l.id = eligible.id
         RETURNING l.id, (extract(epoch FROM l.expires_at) * 1000)::float8 AS expires_ms
@@ -204,7 +206,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
         if (!lease) continue;
         const expires = expiries.get(id);
         if (expires === undefined) retireWalletLease(lease);
-        else lease.expiresAtMs = expires;
+        else lease.expiresAtMs = Math.max(lease.expiresAtMs, expires);
       }
     }
     if (slToRenew.length > 0) {
@@ -218,7 +220,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
           ORDER BY l.id FOR NO KEY UPDATE OF l
         )
         UPDATE public.supplier_leases l
-        SET expires_at = clock_timestamp() + ${leaseTtlMs} * interval '1 millisecond', updated_at = now()
+        SET expires_at = GREATEST(l.expires_at, clock_timestamp() + ${leaseTtlMs} * interval '1 millisecond'), updated_at = now()
         FROM eligible
         WHERE l.id = eligible.id
         RETURNING l.id, (extract(epoch FROM l.expires_at) * 1000)::float8 AS expires_ms
@@ -232,7 +234,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
         if (!lease) continue;
         const expires = expiries.get(id);
         if (expires === undefined) retireSupplierLease(lease);
-        else lease.expiresAtMs = expires;
+        else lease.expiresAtMs = Math.max(lease.expiresAtMs, expires);
       }
     }
 
@@ -262,7 +264,10 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
   function reserveHold(input: AcquireHoldInput, cust: bigint, sup: bigint): FastHoldRequest | null {
     const nowMs = Date.now();
     const wk = walletKey(input.project_id, input.currency);
-    const sk = supplierKey(input.supplier_account_id, input.supplier_currency);
+    const sk = supplierLeaseKey(
+      supplierKey(input.supplier_account_id, input.supplier_currency),
+      walletLane(input.project_id),
+    );
     const wl = activeWalletLeases.get(wk);
     const sl = activeSupplierLeases.get(sk);
     if (
@@ -345,7 +350,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
       wl.remainingInPg -= customerAtoms;
       wl.freeInMemory += meta.heldCustomerAtoms - customerAtoms;
       if (wl.inFlightHolds > 0) wl.inFlightHolds--;
-      wl.expiresAtMs = expiresAtMs;
+      wl.expiresAtMs = Math.max(wl.expiresAtMs, expiresAtMs);
       wl.lastUsedAtMs = postNow;
     }
     const sl = supplierLeasesById.get(meta.supplierLeaseId);
@@ -353,7 +358,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
       sl.remainingInPg -= supplierAtoms;
       sl.freeInMemory += meta.heldSupplierAtoms - supplierAtoms;
       if (sl.inFlightHolds > 0) sl.inFlightHolds--;
-      sl.expiresAtMs = expiresAtMs;
+      sl.expiresAtMs = Math.max(sl.expiresAtMs, expiresAtMs);
       sl.lastUsedAtMs = postNow;
     }
   }
@@ -367,7 +372,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
   }
 
   function registerSupplier(lease: ActiveSupplierLease) {
-    const key = supplierKey(lease.accountId, lease.currency);
+    const key = supplierLeaseKey(supplierKey(lease.accountId, lease.currency), lease.lane);
     const previous = activeSupplierLeases.get(key);
     if (previous) retireSupplierLease(previous);
     supplierLeasesById.set(lease.leaseId, lease);
@@ -380,7 +385,8 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
     canAcquire: () => leaseEnabled && !draining,
     reserveHold,
     hasWallet: (key: string) => activeWalletLeases.has(key),
-    hasSupplier: (key: string) => activeSupplierLeases.has(key),
+    hasSupplier: (key: string, lane: number) =>
+      activeSupplierLeases.has(supplierLeaseKey(key, lane)),
     hasAnyWallet: () => activeWalletLeases.size > 0,
     walletById: (id: string) => walletLeasesById.get(id),
     supplierById: (id: string) => supplierLeasesById.get(id),

@@ -6,6 +6,7 @@ import type { WasmRuntimeExecutor } from "@gateway/plugin-engine";
 import { createGatewayRuntime, type GatewayConfig } from "@gateway/gateway";
 import { createWorkerRunner } from "@gateway/worker";
 import { createMockApp } from "../../apps/mock-providers/src/app.ts";
+import { getBuiltinPlugin, listBuiltinProviders } from "@gateway/plugin-engine";
 
 const baseDbUrl = process.env.DATABASE_URL;
 if (!baseDbUrl) throw new Error("DATABASE_URL is required");
@@ -86,6 +87,439 @@ async function internalCall(
   const data = (await res.json()) as Record<string, unknown>;
   return { status: res.status, data };
 }
+
+async function publishPlugins(
+  runtime: ReturnType<typeof createGatewayRuntime>,
+  plugins: [unknown, Record<string, unknown>?][],
+) {
+  const release = await internalCall(runtime.internalApp, "POST", "/internal/v1/plugin-releases", {
+    id: crypto.randomUUID(),
+    expected_epoch: runtime.snapshot.get().epoch,
+    targets: plugins.map(([id]) => ({ plugin_id: id })),
+    samples: Object.fromEntries(plugins.filter(([, sample]) => sample)),
+  });
+  expect(release.status, JSON.stringify(release.data)).toBe(200);
+  return release.data;
+}
+
+const textSample = { text: "Contact alice@example.com" };
+const webhookSample = { webhook_reply: { action: "PASS" } };
+
+test("G7 Plugin uploads and builtin installs reject enabled:true", async () => {
+  const runtime = createGatewayRuntime({ config: makeConfig(), db });
+  try {
+    await runtime.start();
+    const draft = {
+      name: "reject-legacy-activation",
+      version: "1",
+      kind: "WEBHOOK",
+      webhook_config: { url: "http://127.0.0.1:1234/hook" },
+    };
+    expect(
+      (
+        await internalCall(runtime.internalApp, "PUT", "/internal/v1/plugins", {
+          ...draft,
+          enabled: true,
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await internalCall(
+          runtime.internalApp,
+          "POST",
+          "/internal/v1/plugins/builtins/pii-guard/install",
+          { enabled: true },
+        )
+      ).status,
+    ).toBe(400);
+    const created = await internalCall(runtime.internalApp, "PUT", "/internal/v1/plugins", draft);
+    expect(created.status).toBe(200);
+    expect(created.data.enabled).toBe(false);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("G7 Cross-node publication confirms applied snapshots and revokes pending and dispatched plugin work", async () => {
+  const policyEntered = Promise.withResolvers<void>();
+  const policyCancelled = Promise.withResolvers<void>();
+  const upstreamCancelled = Promise.withResolvers<void>();
+  const unlockAck = Promise.withResolvers<void>();
+  const returnSettlement = Promise.withResolvers<void>();
+  let ackLock: Promise<unknown> | undefined;
+  let upstreamCalls = 0;
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      if (new URL(request.url).pathname === "/policy") {
+        return new Response(
+          new ReadableStream({
+            start() {
+              policyEntered.resolve();
+            },
+            cancel() {
+              policyCancelled.resolve();
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      upstreamCalls++;
+      const body = (await request.json()) as { stream?: boolean };
+      if (!body.stream) {
+        return Response.json({
+          id: "result",
+          model: "upstream",
+          object: "chat.completion",
+          choices: [
+            { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+          ],
+          usage: { prompt_tokens: 3, completion_tokens: 2 },
+        });
+      }
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"id":"running","model":"upstream","choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n',
+              ),
+            );
+          },
+          cancel() {
+            upstreamCancelled.resolve();
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+
+  const admin = createGatewayRuntime({ config: makeConfig(), db });
+  const peer = createGatewayRuntime({ config: makeConfig({ snapshotPollMs: 250 }), db });
+  const waitFor = async (condition: () => Promise<boolean>) => {
+    const deadline = Date.now() + 3000;
+    while (!(await condition())) {
+      if (Date.now() >= deadline) throw new Error("Configuration was not applied within 3 seconds");
+      await Bun.sleep(20);
+    }
+  };
+  const call = async (method: string, path: string, body?: unknown) => {
+    const result = await internalCall(admin.internalApp, method, path, body);
+    expect(result.status, JSON.stringify(result.data)).toBe(
+      path === "/internal/v1/prices" ? 201 : 200,
+    );
+    return result.data;
+  };
+
+  try {
+    await admin.start();
+    await peer.start();
+    const seenNodes = [admin.cluster.nodeId, peer.cluster.nodeId].sort();
+    const project = await call("PUT", "/internal/v1/projects", {
+      name: "revoke-project",
+      currency: "USD",
+      rpm: 500,
+      tpm: 100_000,
+      concurrency: 20,
+    });
+    await call("POST", `/internal/v1/wallets/${project.id}/credits`, {
+      currency: "USD",
+      external_ref: "revoke-credit",
+      amount_atoms: "1000000",
+      kind: "CASH",
+    });
+    const key = await call("PUT", "/internal/v1/api-keys", {
+      project_id: project.id,
+      name: "revoke-test",
+    });
+    const account = await call("PUT", "/internal/v1/upstream-accounts", {
+      name: "revoke-upstream",
+    });
+    await call("POST", `/internal/v1/upstream-accounts/${account.id}/recharges`, {
+      currency: "USD",
+      external_ref: "revoke-supplier-credit",
+      amount_atoms: "1000000",
+    });
+    const channel = await call("PUT", "/internal/v1/channels", {
+      account_id: account.id,
+      kind: "openai",
+      name: "revoke-primary",
+      base_url: upstream.url.origin,
+      api_key: "mock-revoke",
+    });
+    const healthyChannel = await call("PUT", "/internal/v1/channels", {
+      account_id: account.id,
+      kind: "openai_compatible",
+      name: "revoke-unrelated",
+      base_url: upstream.url.origin,
+      api_key: "mock-revoke",
+    });
+    const customer = await call("POST", "/internal/v1/prices", {
+      side: "CUSTOMER",
+      currency: "USD",
+      rates: { input_tokens: { numerator: "1", denominator: "1" } },
+      ceilings: { input_tokens: "50" },
+    });
+    const supplier = await call("POST", "/internal/v1/prices", {
+      side: "SUPPLIER",
+      currency: "USD",
+      rates: { input_tokens: { numerator: "1", denominator: "1" } },
+      ceilings: { input_tokens: "50" },
+    });
+    const policy = await call("PUT", "/internal/v1/plugins", {
+      name: "revoke-policy",
+      version: "1",
+      kind: "WEBHOOK",
+      webhook_config: {
+        url: `${upstream.url.origin}/policy`,
+        timeout_ms: 5000,
+        failure_policy: "FAIL_OPEN",
+      },
+      manifest: { hooks: ["on_request"] },
+    });
+    const providerDefinition = {
+      name: "revoke-provider",
+      version: "1",
+      capability: "PROVIDER",
+      kind: "DECLARATIVE",
+      provider_config: {
+        base_dialect: "openai_chat",
+        usage_dialect: "openai",
+        auth: { scheme: "bearer" },
+        endpoints: { chat: { path: "/v1/chat/completions" } },
+      },
+    };
+    const provider = await call("PUT", "/internal/v1/plugins", providerDefinition);
+
+    const routes = new Map<string, Record<string, unknown>>();
+    for (const model of ["revoke-pre", "revoke-after", "revoke-unrelated"]) {
+      await call("PUT", "/internal/v1/models", {
+        name: model,
+        operations: ["chat"],
+        max_output_tokens: 20,
+      });
+      routes.set(
+        model,
+        await call("PUT", "/internal/v1/routes", {
+          model_name: model,
+          channel_id: model === "revoke-after" ? channel.id : healthyChannel.id,
+          upstream_model: "upstream",
+          operations: ["chat"],
+          priority: model === "revoke-after" ? 10 : 0,
+          billing_price_id: customer.id,
+          cost_version_id: supplier.id,
+        }),
+      );
+    }
+    const release = await call("POST", "/internal/v1/plugin-releases", {
+      id: crypto.randomUUID(),
+      expected_epoch: admin.snapshot.get().epoch,
+      targets: [
+        { channel_id: channel.id, provider_plugin_id: provider.id },
+        {
+          route_id: routes.get("revoke-pre")!.id,
+          plugin_pipeline: [{ plugin_id: policy.id, priority: 1 }],
+        },
+      ],
+      samples: { [String(policy.id)]: webhookSample },
+    });
+    expect(release.expected_nodes).toEqual(seenNodes);
+    const releasePath = `/internal/v1/plugin-releases/${release.id}`;
+    await waitFor(async () => {
+      const value = await call("GET", releasePath);
+      const confirmations = value.nodes as {
+        node_id: string;
+        applied_epoch: number;
+        status: string;
+        applied_at: string;
+      }[];
+      return (
+        confirmations.length === 2 &&
+        confirmations.every(
+          (node) =>
+            node.status === "APPLIED" &&
+            Boolean(node.applied_at) &&
+            Number(node.applied_epoch) === release.config_epoch,
+        )
+      );
+    });
+
+    const request = (model: string, stream = false) =>
+      peer.publicApp.fetch(
+        new Request("http://gw.local/v1/chat/completions", {
+          method: "POST",
+          headers: { authorization: `Bearer ${key.key}`, "content-type": "application/json" },
+          body: JSON.stringify({ model, stream, messages: [{ role: "user", content: "test" }] }),
+        }),
+      );
+    const pending = request("revoke-pre");
+    await policyEntered.promise;
+    const ackLocked = Promise.withResolvers<void>();
+    ackLock = db.begin(async (tx) => {
+      await tx`SELECT id FROM public.gateway_config_nodes WHERE id = ${peer.cluster.nodeId} FOR UPDATE`;
+      ackLocked.resolve();
+      await unlockAck.promise;
+    });
+    await ackLocked.promise;
+    await waitFor(async () => {
+      const [blocked] = await db`SELECT EXISTS (
+        SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+          AND wait_event_type = 'Lock' AND query LIKE '%INSERT INTO public.gateway_config_nodes%'
+      ) AS waiting`;
+      return blocked?.waiting === true;
+    });
+    const revokedPolicy = await call("POST", `/internal/v1/plugins/${policy.id}/revoke`, {
+      reason: "policy incident",
+    });
+    const cancelledBefore = await Promise.race([pending, Bun.sleep(1500).then(() => null)]);
+    unlockAck.resolve();
+    await ackLock;
+    if (!cancelledBefore)
+      throw new Error("Node waited for its write lock before applying revocation");
+    expect(cancelledBefore.status).toBe(503);
+    expect(await cancelledBefore.json()).toMatchObject({ error: { code: "plugin_revoked" } });
+    await policyCancelled.promise;
+    expect(upstreamCalls).toBe(0);
+    expect(
+      (
+        await internalCall(
+          admin.internalApp,
+          "GET",
+          `/internal/v1/requests/${cancelledBefore.headers.get("x-request-id")}`,
+        )
+      ).status,
+    ).toBe(404);
+
+    const running = await request("revoke-after", true);
+    expect(running.status).toBe(200);
+    const reader = running.body!.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain("partial");
+    const revokedProvider = await call("POST", `/internal/v1/plugins/${provider.id}/revoke`, {
+      reason: "provider incident",
+    });
+    expect(revokedProvider.config_epoch).toBe(Number(revokedPolicy.config_epoch) + 1);
+    const interruptedFrames = await new Response(
+      new ReadableStream({
+        async pull(controller) {
+          const item = await reader.read();
+          if (item.done) controller.close();
+          else controller.enqueue(item.value);
+        },
+      }),
+    ).text();
+    expect(interruptedFrames).toContain("plugin_revoked");
+    expect(interruptedFrames).not.toContain("[DONE]");
+    await upstreamCancelled.promise;
+    const requestPath = `/internal/v1/requests/${running.headers.get("x-request-id")}`;
+    await waitFor(
+      async () =>
+        ((await call("GET", requestPath)).hold as { state?: string } | null)?.state === "UNKNOWN",
+    );
+    const outcome = await call("GET", requestPath);
+    expect(outcome.hold).toMatchObject({ state: "UNKNOWN" });
+    expect(outcome.charge).toBeNull();
+    await call("POST", `${requestPath}/resolve`, {
+      action: "RELEASE",
+      reason: "synthetic upstream stopped",
+      actor: "test",
+    });
+    expect((await request("revoke-after", true)).status).toBe(503);
+    expect((await request("revoke-unrelated")).status).toBe(200);
+    expect(upstreamCalls).toBe(2);
+
+    const rePublish = await internalCall(
+      admin.internalApp,
+      "POST",
+      "/internal/v1/plugin-releases",
+      {
+        id: crypto.randomUUID(),
+        expected_epoch: admin.snapshot.get().epoch,
+        targets: [{ plugin_id: provider.id }],
+      },
+    );
+    expect(rePublish.status).toBe(422);
+    await expect(
+      db`UPDATE public.plugins SET enabled = true WHERE id = ${provider.id}`,
+    ).rejects.toThrow("Revoked plugin revisions cannot be enabled");
+
+    await call("PUT", "/internal/v1/routes", {
+      model_name: "revoke-after",
+      channel_id: healthyChannel.id,
+      upstream_model: "upstream",
+      operations: ["chat"],
+      billing_price_id: customer.id,
+      cost_version_id: supplier.id,
+      priority: 1,
+    });
+    await waitFor(async () => peer.snapshot.get().epoch === admin.snapshot.get().epoch);
+    const fallback = await request("revoke-after");
+    expect(fallback.status).toBe(200);
+    expect(fallback.headers.get("x-gateway-channel")).toBe("revoke-unrelated");
+
+    const replacement = await call("PUT", "/internal/v1/plugins", {
+      ...providerDefinition,
+      version: "2",
+    });
+    const recovered = await call("POST", "/internal/v1/plugin-releases", {
+      id: crypto.randomUUID(),
+      expected_epoch: admin.snapshot.get().epoch,
+      targets: [{ channel_id: channel.id, provider_plugin_id: replacement.id }],
+    });
+    const forbiddenRollback = await internalCall(
+      admin.internalApp,
+      "POST",
+      `/internal/v1/plugin-releases/${recovered.id}/rollback`,
+      { id: crypto.randomUUID(), expected_epoch: recovered.config_epoch },
+    );
+    expect(forbiddenRollback.status).toBe(422);
+    await waitFor(async () => peer.snapshot.get().epoch === recovered.config_epoch);
+    const originalCommit = peer.ledger.commitTerminal;
+    const settlementCommitted = Promise.withResolvers<void>();
+    peer.ledger.commitTerminal = async (input) => {
+      const result = await originalCommit(input);
+      settlementCommitted.resolve();
+      await returnSettlement.promise;
+      return result;
+    };
+    const untilSettlement = request("revoke-after");
+    await settlementCommitted.promise;
+    const lateRevocation = await call("POST", `/internal/v1/plugins/${replacement.id}/revoke`, {
+      reason: "revoke while returning a committed response",
+    });
+    await waitFor(async () => peer.snapshot.get().epoch === lateRevocation.config_epoch);
+    returnSettlement.resolve();
+    const suppressed = await untilSettlement;
+    peer.ledger.commitTerminal = originalCommit;
+    expect(suppressed.status).toBe(503);
+    expect(await suppressed.json()).toMatchObject({ error: { code: "plugin_revoked" } });
+    const settled = await call(
+      "GET",
+      `/internal/v1/requests/${suppressed.headers.get("x-request-id")}`,
+    );
+    expect(settled.charge).toMatchObject({
+      outcome: "SETTLED",
+      channelId: channel.id,
+      customerAtoms: "3",
+    });
+    const retry = await call("POST", `/internal/v1/plugins/${provider.id}/revoke`, {
+      reason: "repeat",
+    });
+    expect(retry).toMatchObject({
+      reason: "provider incident",
+      config_epoch: revokedProvider.config_epoch,
+    });
+  } finally {
+    unlockAck.resolve();
+    returnSettlement.resolve();
+    await ackLock;
+    await upstream.stop(true);
+    await Promise.all([peer.close(), admin.close()]);
+  }
+}, 12_000);
 
 test("G2.1 + G2.2 SmartRouter pre-first-byte dynamic failover (503, 429, 401, ECONNREFUSED), circuit breaker trip & HALF_OPEN recovery, single customer charge", async () => {
   let primaryCalls = 0;
@@ -421,11 +855,14 @@ test("G2.3 + G3.1 + G3.2 SSE streaming atomic [DONE], HOLD_UNTIL_APPROVED zero-l
 
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const pubPem = publicKey.export({ type: "spki", format: "pem" }).toString();
-  const wasmBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+  const guard = getBuiltinPlugin("pii-guard");
+  if (guard?.capability !== "CONTENT") throw new Error("Missing content plugin fixture");
+  const wasmBytes = guard.wasm_bytes;
   const digest = new Bun.CryptoHasher("sha256").update(wasmBytes).digest("hex");
   const signature = sign(null, Buffer.from(digest, "utf8"), privateKey).toString("base64");
 
   const mockWasm: WasmRuntimeExecutor = {
+    runtimeKind: "mock",
     compile() {},
     async invoke(_id, _hook, inputBytes) {
       const payload = JSON.parse(new TextDecoder().decode(inputBytes)) as { text: string };
@@ -579,6 +1016,12 @@ test("G2.3 + G3.1 + G3.2 SSE streaming atomic [DONE], HOLD_UNTIL_APPROVED zero-l
         },
       },
     );
+
+    await publishPlugins(runtime, [
+      [wasmPlugin.id, textSample],
+      [whAbsorb.id, webhookSample],
+      [whCharge.id, webhookSample],
+    ]);
 
     await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
       name: "mod-absorb",
@@ -2033,6 +2476,27 @@ test("G3.3 Full E2E real plugin mechanism (zero mocks): real Bun WASM Worker on_
       },
     );
 
+    await publishPlugins(runtime, [
+      [pReqBlock.id, textSample],
+      [pReqTransform.id, textSample],
+      [pRespMask.id, textSample],
+      [pCutoffWh.id, webhookSample],
+    ]);
+    const rejectedLoop = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/plugin-releases/validate",
+      {
+        id: crypto.randomUUID(),
+        expected_epoch: runtime.snapshot.get().epoch,
+        targets: [{ plugin_id: pLoop.id }],
+        samples: { [String(pLoop.id)]: textSample },
+      },
+    );
+    expect(rejectedLoop.status).toBe(422);
+    await db`UPDATE public.plugins SET enabled = true WHERE id = ${pLoop.id}`;
+    await runtime.snapshot.load();
+
     for (const m of ["real-wasm-model", "loop-wasm-model", "cutoff-wh-model"]) {
       await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
         name: m,
@@ -2167,6 +2631,11 @@ test("G3.3 Full E2E real plugin mechanism (zero mocks): real Bun WASM Worker on_
       true,
     );
 
+    const { data: walletBeforeLoop } = await internalCall(
+      runtime.internalApp,
+      "GET",
+      `/internal/v1/wallets/${projectId}?currency=USD`,
+    );
     const loopResp = await runtime.publicApp.fetch(
       new Request("http://gateway.local/v1/chat/completions", {
         method: "POST",
@@ -2179,9 +2648,19 @@ test("G3.3 Full E2E real plugin mechanism (zero mocks): real Bun WASM Worker on_
       }),
     );
     expect(loopResp.status).toBe(500);
+    const loopReqId = loopResp.headers.get("x-request-id")!;
     const loopJson = (await loopResp.json()) as { error: { code: string; rule_code: string } };
-    expect(loopJson.error.code).toBe("content_blocked");
+    expect(loopJson.error.code).toBe("plugin_execution_failed");
     expect(loopJson.error.rule_code).toBe("wasm_execution_failed");
+    const { data: walletAfterLoop } = await internalCall(
+      runtime.internalApp,
+      "GET",
+      `/internal/v1/wallets/${projectId}?currency=USD`,
+    );
+    expect(walletAfterLoop.available_atoms).toBe(walletBeforeLoop.available_atoms);
+    const loopCharge = await runtime.queries.getRequestBilling(loopReqId);
+    expect(loopCharge.charge?.customerAtoms).toBe("0");
+    expect(loopCharge.charge?.chargePolicy).toBe("PLATFORM_ABSORB");
 
     const postLoopResp = await runtime.publicApp.fetch(
       new Request("http://gateway.local/v1/chat/completions", {
@@ -2259,7 +2738,7 @@ test("G3.3 Full E2E real plugin mechanism (zero mocks): real Bun WASM Worker on_
   }
 });
 
-test("G3.4 Built-in pii-guard plugin full lifecycle: discovery, 1-click install, dry-run test, multi-turn request redaction, Anthropic tool_use preservation, split-chunk SSE redaction, native Responses snapshots preserve redaction, and PEM block", async () => {
+test("G3.4 Built-in pii-guard plugin full lifecycle: discovery, draft install, release, dry-run test, multi-turn request redaction, Anthropic tool_use preservation, split-chunk SSE redaction, native Responses snapshots preserve redaction, and PEM block", async () => {
   const receivedBodies: Record<string, unknown>[] = [];
   let upstreamMode: "echo" | "anthropic_tool" | "sse_pii" | "responses_pii" | "sse_pem" = "echo";
 
@@ -2424,12 +2903,14 @@ test("G3.4 Built-in pii-guard plugin full lifecycle: discovery, 1-click install,
       runtime.internalApp,
       "POST",
       "/internal/v1/plugins/builtins/pii-guard/install",
-      { enabled: true },
+      {},
     );
     expect(iStatus).toBe(200);
     expect(installed.name).toBe("pii-guard");
     expect(installed.wasm_bytes).toBeUndefined();
     const pluginId = String(installed.id);
+    expect(installed.enabled).toBe(false);
+    await publishPlugins(runtime, [[pluginId, textSample]]);
 
     const { status: lStatus, data: listed } = await internalCall(
       runtime.internalApp,
@@ -2762,6 +3243,7 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
   let failoverPrimaryDown = true;
   let minimaxFake200Mode: "rate_limit" | "ok" = "rate_limit";
   let acmeWasmMode: "ok" | "evil_usage" = "ok";
+  let acmeStreamTerminates = true;
 
   const upstream = Bun.serve({
     port: 0,
@@ -2896,7 +3378,9 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
             controller.enqueue(enc.encode(`data: ${JSON.stringify({ piece: "Hello " })}\n\n`));
             controller.enqueue(enc.encode(`data: ${JSON.stringify({ piece: "WASM!" })}\n\n`));
             controller.enqueue(
-              enc.encode(`data: ${JSON.stringify({ finish: true, tok_in: 8, tok_out: 4 })}\n\n`),
+              enc.encode(
+                `data: ${JSON.stringify({ finish: acmeStreamTerminates, tok_in: 8, tok_out: 4 })}\n\n`,
+              ),
             );
             controller.close();
           },
@@ -3078,7 +3562,7 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
     );
     expect(protoBadStatus).toBe(400);
 
-    const { status: acmePluginStatus } = await internalCall(
+    const { status: acmePluginStatus, data: acmePlugin } = await internalCall(
       runtime.internalApp,
       "PUT",
       "/internal/v1/plugins",
@@ -3106,6 +3590,26 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       },
     );
     expect(acmePluginStatus).toBe(200);
+    await publishPlugins(runtime, [[acmePlugin.id]]);
+    const immutableRevision = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/plugins",
+      {
+        name: "acme-llm",
+        version: "1.0.0",
+        capability: "PROVIDER",
+        kind: "DECLARATIVE",
+        provider_config: {
+          base_dialect: "openai_chat",
+          usage_dialect: "openai",
+          auth: { scheme: "bearer" },
+          endpoints: { chat: { path: "/does-not-replace-existing-revision" } },
+        },
+      },
+    );
+    expect(immutableRevision.status).toBe(409);
+    expect(immutableRevision.data.error).toMatchObject({ code: "plugin_revision_conflict" });
 
     const { status: acmeChStatus, data: chAcme } = await internalCall(
       runtime.internalApp,
@@ -3125,14 +3629,30 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       operations: ["chat"],
       max_output_tokens: 200,
     });
-    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+    const invalidBinding = await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
       model_name: "acme-model",
       channel_id: chAcme.id,
       upstream_model: "acme-v2-pro",
       operations: ["chat"],
       billing_price_id: custPrice.id,
       cost_version_id: supPrice.id,
+      plugin_pipeline: [{ plugin_id: crypto.randomUUID(), priority: 1 }],
     });
+    expect(invalidBinding.status).toBe(400);
+    expect(invalidBinding.data.error).toMatchObject({ code: "invalid_plugin_binding" });
+    const { data: acmeRoute } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/routes",
+      {
+        model_name: "acme-model",
+        channel_id: chAcme.id,
+        upstream_model: "acme-v2-pro",
+        operations: ["chat"],
+        billing_price_id: custPrice.id,
+        cost_version_id: supPrice.id,
+      },
+    );
 
     const acmeResp = await runtime.publicApp.fetch(
       new Request("http://gw.local/v1/chat/completions", {
@@ -3164,7 +3684,130 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       (acmeBilling.charge as { usage: Record<string, string> }).usage.cached_input_tokens,
     ).toBe("4");
 
-    const { status: dsInstallStatus } = await internalCall(
+    const draftRevision = await internalCall(runtime.internalApp, "PUT", "/internal/v1/plugins", {
+      name: "acme-llm",
+      version: "2.0.0",
+      capability: "PROVIDER",
+      kind: "DECLARATIVE",
+      provider_config: {
+        base_dialect: "openai_chat",
+        usage_dialect: "openai",
+        auth: { scheme: "header", header_name: "X-Acme-Key", prefix: "Key " },
+        endpoints: { chat: { path: "/v2/infer/chat-next" } },
+      },
+    });
+    expect(draftRevision.status).toBe(200);
+    expect(draftRevision.data.enabled).toBe(false);
+    const releaseId = crypto.randomUUID();
+    const publish = {
+      id: releaseId,
+      expected_epoch: runtime.snapshot.get().epoch,
+      targets: [{ channel_id: chAcme.id, provider_plugin_id: draftRevision.data.id }],
+    };
+    const dispatchAcme = async (content = "release check") => {
+      const response = await runtime.publicApp.fetch(
+        new Request("http://gw.local/v1/chat/completions", {
+          method: "POST",
+          headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "acme-model",
+            messages: [{ role: "user", content }],
+          }),
+        }),
+      );
+      expect(response.status, await response.text()).toBe(200);
+      return captures.at(-1)?.path;
+    };
+    expect(await dispatchAcme()).toBe("/v2/infer/chat");
+    const validated = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/plugin-releases/validate",
+      publish,
+    );
+    expect(validated.status).toBe(200);
+    expect(await dispatchAcme()).toBe("/v2/infer/chat");
+    const published = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/plugin-releases",
+      publish,
+    );
+    expect(published.status, JSON.stringify(published.data)).toBe(200);
+    expect(published.data.config_epoch).toBe(publish.expected_epoch + 1);
+    expect(await dispatchAcme()).toBe("/v2/infer/chat-next");
+    const replay = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/plugin-releases",
+      publish,
+    );
+    expect(replay.data.config_epoch).toBe(published.data.config_epoch);
+    const stale = await internalCall(runtime.internalApp, "POST", "/internal/v1/plugin-releases", {
+      ...publish,
+      id: crypto.randomUUID(),
+    });
+    expect(stale.status).toBe(409);
+    const rollbackPath = `/internal/v1/plugin-releases/${releaseId}/rollback`;
+    const rollback = await internalCall(runtime.internalApp, "POST", rollbackPath, {
+      id: crypto.randomUUID(),
+      expected_epoch: published.data.config_epoch,
+    });
+    expect(rollback.status, JSON.stringify(rollback.data)).toBe(200);
+    expect(rollback.data.rollback_of).toBe(releaseId);
+    expect(await dispatchAcme()).toBe("/v2/infer/chat");
+    const lateRollback = await internalCall(runtime.internalApp, "POST", rollbackPath, {
+      id: crypto.randomUUID(),
+      expected_epoch: rollback.data.config_epoch,
+    });
+    expect(lateRollback.status).toBe(409);
+
+    const guard = getBuiltinPlugin("pii-guard");
+    if (guard?.capability !== "CONTENT") throw new Error("Missing content plugin fixture");
+    const contentDraft = await internalCall(runtime.internalApp, "PUT", "/internal/v1/plugins", {
+      name: "acme-contact-filter",
+      version: "1.0.0",
+      kind: "WASM",
+      wasm_bytes_base64: Buffer.from(guard.wasm_bytes).toString("base64"),
+      manifest: { hooks: ["on_request"], failure_policy: "FAIL_CLOSED" },
+    });
+    expect(contentDraft.status).toBe(200);
+    const contactText = "Contact alice@example.com";
+    const contentRelease = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/plugin-releases",
+      {
+        id: crypto.randomUUID(),
+        expected_epoch: runtime.snapshot.get().epoch,
+        targets: [
+          {
+            route_id: acmeRoute.id,
+            plugin_pipeline: [{ plugin_id: contentDraft.data.id, priority: 1 }],
+          },
+        ],
+        samples: { [String(contentDraft.data.id)]: { text: contactText } },
+      },
+    );
+    expect(contentRelease.status, JSON.stringify(contentRelease.data)).toBe(200);
+    await dispatchAcme(contactText);
+    expect(captures.at(-1)?.body.messages).toEqual([
+      { role: "user", content: "Contact [REDACTED_EMAIL]" },
+    ]);
+    const contentRollback = await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/plugin-releases/${contentRelease.data.id}/rollback`,
+      {
+        id: crypto.randomUUID(),
+        expected_epoch: runtime.snapshot.get().epoch,
+      },
+    );
+    expect(contentRollback.status).toBe(200);
+    await dispatchAcme(contactText);
+    expect(captures.at(-1)?.body.messages).toEqual([{ role: "user", content: contactText }]);
+
+    const { status: dsInstallStatus, data: deepseekPlugin } = await internalCall(
       runtime.internalApp,
       "POST",
       "/internal/v1/plugins/builtins/deepseek/install",
@@ -3179,6 +3822,7 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       },
     );
     expect(dsInstallStatus).toBe(200);
+    await publishPlugins(runtime, [[deepseekPlugin.id]]);
     const { data: chDs } = await internalCall(runtime.internalApp, "PUT", "/internal/v1/channels", {
       account_id: acc.id,
       name: "ds-hot-ch",
@@ -3216,25 +3860,31 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
     expect(dsHotCap.body.custom_hot_flag).toBe("live");
     expect(dsHotCap.body.max_tokens).toBe(40);
 
-    await internalCall(runtime.internalApp, "PUT", "/internal/v1/plugins", {
-      name: "hmac-vendor",
-      version: "1.0.0",
-      capability: "PROVIDER",
-      kind: "DECLARATIVE",
-      provider_config: {
-        base_dialect: "openai_chat",
-        usage_dialect: "openai",
-        auth: {
-          scheme: "hmac_sha256",
-          signature_header: "X-Hmac-Sig",
-          timestamp_header: "X-Hmac-Ts",
-          key_id_header: "X-Hmac-Key-Id",
-          signature_prefix: "v1=",
-          encoding: "hex",
+    const { data: hmacPlugin } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/plugins",
+      {
+        name: "hmac-vendor",
+        version: "1.0.0",
+        capability: "PROVIDER",
+        kind: "DECLARATIVE",
+        provider_config: {
+          base_dialect: "openai_chat",
+          usage_dialect: "openai",
+          auth: {
+            scheme: "hmac_sha256",
+            signature_header: "X-Hmac-Sig",
+            timestamp_header: "X-Hmac-Ts",
+            key_id_header: "X-Hmac-Key-Id",
+            signature_prefix: "v1=",
+            encoding: "hex",
+          },
+          endpoints: { default: { path: "/v1/hmac/chat" } },
         },
-        endpoints: { default: { path: "/v1/hmac/chat" } },
       },
-    });
+    );
+    await publishPlugins(runtime, [[hmacPlugin.id]]);
     const { data: chHmac } = await internalCall(
       runtime.internalApp,
       "PUT",
@@ -3281,6 +3931,8 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       "POST",
       "/internal/v1/plugins/builtins/pii-guard/install",
     );
+    if (!backupContentPolicy.enabled)
+      await publishPlugins(runtime, [[backupContentPolicy.id, textSample]]);
     const { data: chPri } = await internalCall(
       runtime.internalApp,
       "PUT",
@@ -3515,6 +4167,17 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       },
     );
     expect(wasmRegStatus).toBe(200);
+    const wasmRequestSample = { messages: [{ role: "user", content: "validation" }] };
+    await publishPlugins(runtime, [
+      [
+        wasmProvPlugin.id,
+        {
+          request: wasmRequestSample,
+          response: { answer: "validation", tok_in: 4, tok_out: 2 },
+          event: { name: "message", data: '{"finish":true,"tok_in":4,"tok_out":2}' },
+        },
+      ],
+    ]);
 
     const { data: chWasm } = await internalCall(
       runtime.internalApp,
@@ -3606,6 +4269,36 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       output_tokens: "4",
     });
 
+    acmeStreamTerminates = false;
+    const truncatedStream = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "acme-wasm-model",
+          stream: true,
+          messages: [{ role: "user", content: "metered stream without a terminal" }],
+        }),
+      }),
+    );
+    const truncatedWire = await truncatedStream.text();
+    expect(truncatedWire).toContain("event: error");
+    expect(truncatedWire).not.toContain("[DONE]");
+    const { data: truncatedDetails } = await internalCall(
+      runtime.internalApp,
+      "GET",
+      `/internal/v1/requests/${truncatedStream.headers.get("x-request-id")}`,
+    );
+    expect((truncatedDetails.hold as { state: string }).state).toBe("UNKNOWN");
+    expect(
+      await runtime.ledger.resolveRequest({
+        request_id: truncatedStream.headers.get("x-request-id")!,
+        action: "RELEASE",
+        actor: "fixture",
+        reason: "Verified incomplete test response",
+      }),
+    ).toMatchObject({ state: "RELEASED" });
+
     const capCountBeforeEscape = captures.length;
     const escapeResp = await runtime.publicApp.fetch(
       new Request("http://gw.local/v1/chat/completions", {
@@ -3666,6 +4359,15 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       },
     );
     expect(ungrantedRegStatus).toBe(200);
+    await publishPlugins(runtime, [
+      [
+        ungrantedWasm.id,
+        {
+          request: wasmRequestSample,
+          response: { err_code: 9002 },
+        },
+      ],
+    ]);
     const { data: chUngranted } = await internalCall(
       runtime.internalApp,
       "PUT",
@@ -3710,6 +4412,11 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       `/internal/v1/requests/${ungrantedReqId}`,
     );
     expect((ungrantedBill.hold as { state: string }).state).toBe("UNKNOWN");
+    const ungrantedHealth = runtime.router
+      .snapshot()
+      .find((s) => s.channel_id === String(chUngranted.id));
+    expect(ungrantedHealth?.state ?? "CLOSED").toBe("CLOSED");
+    expect(ungrantedHealth?.consecutive_failures ?? 0).toBe(0);
     await internalCall(
       runtime.internalApp,
       "POST",
@@ -3806,6 +4513,629 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
     expect(audit.ok).toBe(true);
     expect(audit.open_holds).toBe(0);
     expect(audit.unknown_holds).toBe(0);
+  } finally {
+    await runtime.close();
+    await upstream.stop(true);
+  }
+});
+
+test("all builtin provider presets complete JSON and SSE requests through independent upstream fixtures", async () => {
+  const upstream = createMockApp("builtin-matrix");
+  const listener = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: upstream.app.fetch });
+  const runtime = createGatewayRuntime({ config: makeConfig(), db });
+  const paths: Record<string, string> = {
+    openai: "/openai",
+    openai_compatible: "/openai-compatible",
+    anthropic: "/anthropic",
+    gemini: "/gemini",
+    azure: "/azure",
+    bedrock: "/bedrock",
+    vertex: "/vertex/v1/projects/test/locations/test/publishers/google",
+    deepseek: "/deepseek",
+    ollama: "/ollama",
+    qwen: "/qwen",
+    volcengine: "/volcengine",
+    zhipu: "/zhipu",
+    moonshot: "/moonshot",
+    minimax: "/minimax",
+    openrouter: "/openrouter",
+  };
+  const credentials: Record<string, string> = {
+    vertex: JSON.stringify({
+      access_token: "fixture-vertex",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    bedrock: JSON.stringify({
+      accessKeyId: "AKIAFIXTURE00000000",
+      secretAccessKey: "fixtureSecretKeyForSignatureTesting",
+      region: "us-east-1",
+    }),
+  };
+
+  try {
+    await runtime.start();
+    const put = async (path: string, body: unknown) => {
+      const result = await internalCall(runtime.internalApp, "PUT", path, body);
+      expect(result.status, JSON.stringify(result.data.error)).toBe(200);
+      return result.data;
+    };
+    const project = await put("/internal/v1/projects", { name: "builtin-matrix", currency: "USD" });
+    const key = await put("/internal/v1/api-keys", { project_id: project.id, name: "fixture" });
+    const account = await put("/internal/v1/upstream-accounts", { name: "builtin-matrix" });
+    await runtime.ledger.creditWallet({
+      project_id: String(project.id),
+      kind: "CASH",
+      currency: "USD",
+      external_ref: "builtin-matrix-credit",
+      amount_atoms: "10000000",
+    });
+    await runtime.ledger.rechargeSupplier({
+      account_id: String(account.id),
+      currency: "USD",
+      external_ref: "builtin-matrix-recharge",
+      amount_atoms: "10000000",
+    });
+    const prices = await Promise.all(
+      ["CUSTOMER", "SUPPLIER"].map((side) =>
+        runtime.catalog.createPriceVersion({
+          side: side as "CUSTOMER" | "SUPPLIER",
+          currency: "USD",
+          rates: {
+            input_tokens: { numerator: "2", denominator: "1" },
+            cached_input_tokens: { numerator: "1", denominator: "1" },
+            output_tokens: { numerator: "3", denominator: "1" },
+          },
+          ceilings: { input_tokens: "1000", cached_input_tokens: "1000", output_tokens: "128" },
+        }),
+      ),
+    );
+    await runtime.snapshot.load();
+
+    expect(
+      listBuiltinProviders()
+        .map((provider) => provider.name)
+        .sort(),
+    ).toEqual(Object.keys(paths).sort());
+    for (const [provider, path] of Object.entries(paths)) {
+      const model = `builtin-${provider}`;
+      const upstreamModel = `fixture-${provider}`;
+      const output = `response from ${provider}`;
+      upstream.scenarios.set(upstreamModel, { output });
+      const channel = await put("/internal/v1/channels", {
+        account_id: account.id,
+        name: model,
+        kind: provider,
+        base_url: `http://127.0.0.1:${listener.port}${path}`,
+        api_key: credentials[provider] ?? "fixture-upstream-key",
+      });
+      await put("/internal/v1/models", {
+        name: model,
+        operations: ["chat"],
+        max_output_tokens: 128,
+      });
+      await put("/internal/v1/routes", {
+        model_name: model,
+        upstream_model: upstreamModel,
+        channel_id: channel.id,
+        operations: ["chat"],
+        billing_price_id: prices[0]!.id,
+        cost_version_id: prices[1]!.id,
+      });
+
+      for (const stream of [false, true]) {
+        const response = await runtime.publicApp.fetch(
+          new Request("http://gw.local/v1/chat/completions", {
+            method: "POST",
+            headers: { authorization: `Bearer ${key.key}`, "content-type": "application/json" },
+            body: JSON.stringify({
+              model,
+              stream,
+              max_completion_tokens: 32,
+              messages: [{ role: "user", content: "Hello" }],
+            }),
+          }),
+        );
+        const wire = await response.text();
+        const mode = `${provider} ${stream ? "stream" : "JSON"}`;
+        expect(response.status, `${mode}: ${wire}`).toBe(200);
+        if (stream) {
+          const data = wire.split("\n").filter((line) => line.startsWith("data: "));
+          const content = data
+            .filter((line) => line !== "data: [DONE]")
+            .map((line) => {
+              const frame = JSON.parse(line.slice(6)) as {
+                choices?: { delta?: { content?: string } }[];
+              };
+              return frame.choices?.[0]?.delta?.content ?? "";
+            })
+            .join("");
+          expect(content, mode).toBe(output);
+          expect(data.at(-1), mode).toBe("data: [DONE]");
+        } else {
+          expect(JSON.parse(wire).choices[0].message.content, mode).toBe(output);
+        }
+        const billing = await runtime.queries.getRequestBilling(
+          response.headers.get("x-request-id")!,
+        );
+        expect(billing.charge?.usage, mode).toMatchObject({
+          input_tokens: "7",
+          cached_input_tokens: "3",
+          output_tokens: "5",
+        });
+      }
+    }
+
+    expect(upstream.stats.requests).toBe(30);
+    expect(await runtime.ledger.auditConservation()).toMatchObject({
+      ok: true,
+      open_holds: 0,
+      unknown_holds: 0,
+    });
+  } finally {
+    await runtime.close();
+    await listener.stop(true);
+  }
+});
+
+test("Hardened plugin billing, FAIL_OPEN audit, reasoning cross-protocol, compat dropped-fields, native errors, and epoch lineage", async () => {
+  let upstreamMode: "reasoning" | "normal" | "gemini_single_sse" | "anthropic_thinking_sse" =
+    "reasoning";
+  const upstream = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/webhook-down") {
+        return new Response("down", { status: 503 });
+      }
+      if (upstreamMode === "gemini_single_sse") {
+        const sse = `data: ${JSON.stringify({
+          candidates: [
+            {
+              content: { role: "model", parts: [{ text: "Reach bob@example.com now" }] },
+              finishReason: "STOP",
+            },
+          ],
+          usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 6 },
+        })}\n\n`;
+        return new Response(sse, {
+          status: 200,
+          headers: { "content-type": "text/event-stream; charset=utf-8" },
+        });
+      }
+      if (upstreamMode === "anthropic_thinking_sse") {
+        const events = [
+          `event: message_start\ndata: ${JSON.stringify({
+            type: "message_start",
+            message: {
+              id: "msg_ant_sse",
+              type: "message",
+              role: "assistant",
+              model: "claude-sse-up",
+              content: [],
+              stop_reason: null,
+              usage: { input_tokens: 8, output_tokens: 0 },
+            },
+          })}\n\n`,
+          `event: content_block_start\ndata: ${JSON.stringify({
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "thinking", thinking: "" },
+          })}\n\n`,
+          `event: content_block_delta\ndata: ${JSON.stringify({
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "Internal note bob@example.com" },
+          })}\n\n`,
+          `event: content_block_stop\ndata: ${JSON.stringify({
+            type: "content_block_stop",
+            index: 0,
+          })}\n\n`,
+          `event: content_block_start\ndata: ${JSON.stringify({
+            type: "content_block_start",
+            index: 1,
+            content_block: { type: "text", text: "" },
+          })}\n\n`,
+          `event: content_block_delta\ndata: ${JSON.stringify({
+            type: "content_block_delta",
+            index: 1,
+            delta: { type: "text_delta", text: "Contact alice@example.com" },
+          })}\n\n`,
+          `event: content_block_stop\ndata: ${JSON.stringify({
+            type: "content_block_stop",
+            index: 1,
+          })}\n\n`,
+          `event: message_delta\ndata: ${JSON.stringify({
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 12 },
+          })}\n\n`,
+          `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`,
+        ];
+        return new Response(events.join(""), {
+          status: 200,
+          headers: { "content-type": "text/event-stream; charset=utf-8" },
+        });
+      }
+      if (upstreamMode === "reasoning") {
+        return Response.json({
+          id: "chatcmpl_reason_1",
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: "reason-up",
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                reasoning_content: "internal chain of thought",
+                content: "final answer 42",
+              },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+        });
+      }
+      return Response.json({
+        id: "chatcmpl_norm_1",
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model: "norm-up",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "delivered despite fail-open" },
+            finish_reason: "stop",
+          },
+        ],
+        usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 },
+      });
+    },
+  });
+
+  const runtime = createGatewayRuntime({
+    config: makeConfig(),
+    db,
+  });
+  await runtime.start();
+  try {
+    const project = (
+      await internalCall(runtime.internalApp, "PUT", "/internal/v1/projects", {
+        name: "hardened-proj",
+        currency: "USD",
+      })
+    ).data;
+    const key = (
+      await internalCall(runtime.internalApp, "PUT", "/internal/v1/api-keys", {
+        project_id: project.id,
+        name: "hardened-key",
+      })
+    ).data;
+    await runtime.ledger.creditWallet({
+      project_id: String(project.id),
+      currency: "USD",
+      external_ref: "hardened-credit",
+      amount_atoms: "1000000",
+      kind: "CASH",
+    });
+    const account = (
+      await internalCall(runtime.internalApp, "PUT", "/internal/v1/upstream-accounts", {
+        name: "hardened-acct",
+      })
+    ).data;
+    await runtime.ledger.rechargeSupplier({
+      account_id: String(account.id),
+      currency: "USD",
+      external_ref: "hardened-sup",
+      amount_atoms: "1000000",
+    });
+    const channel = (
+      await internalCall(runtime.internalApp, "PUT", "/internal/v1/channels", {
+        account_id: account.id,
+        name: "openai-reason-ch",
+        kind: "openai",
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: "sk-test",
+      })
+    ).data;
+    const custPrice = (
+      await internalCall(runtime.internalApp, "POST", "/internal/v1/prices", {
+        side: "CUSTOMER",
+        currency: "USD",
+        rates: {
+          input_tokens: { numerator: "2", denominator: "1" },
+          output_tokens: { numerator: "3", denominator: "1" },
+        },
+        ceilings: { input_tokens: "1000", output_tokens: "1000" },
+      })
+    ).data;
+    const supPrice = (
+      await internalCall(runtime.internalApp, "POST", "/internal/v1/prices", {
+        side: "SUPPLIER",
+        currency: "USD",
+        rates: {
+          input_tokens: { numerator: "1", denominator: "1" },
+          output_tokens: { numerator: "1", denominator: "1" },
+        },
+        ceilings: { input_tokens: "1000", output_tokens: "1000" },
+      })
+    ).data;
+
+    const failOpenPlugin = (
+      await internalCall(runtime.internalApp, "PUT", "/internal/v1/plugins", {
+        name: "fail-open-wh",
+        version: "1.0.0",
+        capability: "CONTENT",
+        kind: "WEBHOOK",
+        webhook_config: {
+          url: `http://127.0.0.1:${upstream.port}/webhook-down`,
+          failure_policy: "FAIL_OPEN",
+          timeout_ms: 200,
+        },
+        manifest: { hooks: ["on_response"] },
+      })
+    ).data;
+    await internalCall(runtime.internalApp, "POST", "/internal/v1/plugin-releases", {
+      id: crypto.randomUUID(),
+      expected_epoch: failOpenPlugin.config_epoch,
+      targets: [{ plugin_id: failOpenPlugin.id }],
+      samples: { [String(failOpenPlugin.id)]: { webhook_reply: { action: "PASS" } } },
+    });
+
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "compat-reason",
+      operations: ["chat", "messages", "gemini"],
+      max_output_tokens: 128,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "compat-reason",
+      channel_id: channel.id,
+      upstream_model: "reason-up",
+      operations: ["chat", "messages", "gemini"],
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+      request_policy: { conversion_mode: "compat" },
+    });
+
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "fail-open-model",
+      operations: ["chat"],
+      max_output_tokens: 128,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "fail-open-model",
+      channel_id: channel.id,
+      upstream_model: "norm-up",
+      operations: ["chat"],
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+      plugin_pipeline: [{ plugin_id: failOpenPlugin.id, priority: 1 }],
+    });
+
+    const epochBefore = await runtime.catalog.getEpochStamp();
+    expect(epochBefore.lineageToken.length).toBeGreaterThan(10);
+
+    const msgRes = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": String(key.key), "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "compat-reason",
+          max_tokens: 64,
+          metadata: { user_id: "u1" },
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "think", cache_control: { type: "ephemeral" } }],
+            },
+          ],
+        }),
+      }),
+    );
+    expect(msgRes.status).toBe(200);
+    expect(msgRes.headers.get("x-gateway-dropped-fields")).toContain("metadata");
+    expect(msgRes.headers.get("x-gateway-dropped-fields")).toContain("content.cache_control");
+    const msgJson = (await msgRes.json()) as {
+      type: string;
+      content: { type: string; thinking?: string; text?: string }[];
+    };
+    expect(msgJson.type).toBe("message");
+    expect(msgJson.content).toEqual([
+      { type: "thinking", thinking: "internal chain of thought" },
+      { type: "text", text: "final answer 42" },
+    ]);
+
+    const badAnthropic = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": String(key.key), "content-type": "application/json" },
+        body: JSON.stringify({ model: "missing-model", max_tokens: 10, messages: [] }),
+      }),
+    );
+    expect(badAnthropic.status).toBe(404);
+    expect(await badAnthropic.json()).toMatchObject({
+      type: "error",
+      error: { type: "not_found_error", code: "model_not_found" },
+    });
+
+    const badGemini = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1beta/models/missing-model:generateContent", {
+        method: "POST",
+        headers: { "x-goog-api-key": String(key.key), "content-type": "application/json" },
+        body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "hi" }] }] }),
+      }),
+    );
+    expect(badGemini.status).toBe(404);
+    expect(await badGemini.json()).toMatchObject({
+      error: { code: 404, status: "NOT_FOUND", gateway_code: "model_not_found" },
+    });
+
+    upstreamMode = "normal";
+    const foRes = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${key.key}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "fail-open-model",
+          messages: [{ role: "user", content: "hello" }],
+          max_tokens: 32,
+        }),
+      }),
+    );
+    expect(foRes.status).toBe(200);
+    const foReqId = foRes.headers.get("x-request-id")!;
+    const foBilling = await runtime.queries.getRequestBilling(foReqId);
+    expect(foBilling.charge?.customerAtoms).toBe("25");
+    expect(foBilling.charge?.pluginAudit).toEqual(
+      expect.arrayContaining([expect.objectContaining({ fail_open: true, hook: "on_response" })]),
+    );
+
+    const readyRes = await runtime.publicApp.fetch(new Request("http://gw.local/readyz"));
+    expect(readyRes.status).toBe(200);
+    expect(await readyRes.json()).toMatchObject({ status: "ready", wasm_runtime: "wasmtime" });
+
+    const metricsText = await (await runtime.metricsResponse()).text();
+    expect(metricsText).toContain('gateway_wasm_runtime_info{runtime="wasmtime"} 1');
+    expect(metricsText).toContain("gateway_plugin_fail_open_total");
+    expect(metricsText).toContain("gateway_protocol_field_dropped_total");
+
+    const epochAfter = await runtime.catalog.upsertProject({
+      id: String(project.id),
+      name: "hardened-proj-2",
+      rpm: 6000,
+      tpm: 10_000_000,
+      concurrency: 1000,
+    });
+    const stampAfter = await runtime.catalog.getEpochStamp();
+    expect(stampAfter.version).toBe(epochAfter.config_epoch);
+    expect(stampAfter.lineageToken).not.toBe(epochBefore.lineageToken);
+
+    const piiInstalled = (
+      await internalCall(
+        runtime.internalApp,
+        "POST",
+        "/internal/v1/plugins/builtins/pii-guard/install",
+        {},
+      )
+    ).data;
+    await publishPlugins(runtime, [[piiInstalled.id, textSample]]);
+
+    const chGemini = (
+      await internalCall(runtime.internalApp, "PUT", "/internal/v1/channels", {
+        account_id: account.id,
+        name: "hardened-gemini-ch",
+        kind: "gemini",
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: "sk-gemini",
+      })
+    ).data;
+    const chAnthropic = (
+      await internalCall(runtime.internalApp, "PUT", "/internal/v1/channels", {
+        account_id: account.id,
+        name: "hardened-anthropic-ch",
+        kind: "anthropic",
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: "sk-anthropic",
+      })
+    ).data;
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "pii-gemini-stream",
+      operations: ["gemini"],
+      max_output_tokens: 128,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "pii-gemini-stream",
+      channel_id: chGemini.id,
+      upstream_model: "gemini-up",
+      operations: ["gemini"],
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+      plugin_pipeline: [{ plugin_id: piiInstalled.id, priority: 1 }],
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/models", {
+      name: "pii-anthropic-thinking",
+      operations: ["messages"],
+      max_output_tokens: 128,
+    });
+    await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      model_name: "pii-anthropic-thinking",
+      channel_id: chAnthropic.id,
+      upstream_model: "claude-sse-up",
+      operations: ["messages"],
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+      plugin_pipeline: [{ plugin_id: piiInstalled.id, priority: 1 }],
+    });
+
+    upstreamMode = "gemini_single_sse";
+    const gemSseRes = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1beta/models/pii-gemini-stream:streamGenerateContent?alt=sse", {
+        method: "POST",
+        headers: { "x-goog-api-key": String(key.key), "content-type": "application/json" },
+        body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "hello" }] }] }),
+      }),
+    );
+    expect(gemSseRes.status).toBe(200);
+    const gemSseText = await gemSseRes.text();
+    expect(gemSseText).toContain("[REDACTED_EMAIL]");
+    expect(gemSseText).not.toContain("bob@example.com");
+    expect(gemSseText).toContain('"finishReason":"STOP"');
+
+    upstreamMode = "anthropic_thinking_sse";
+    const antSseRes = await runtime.publicApp.fetch(
+      new Request("http://gw.local/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": String(key.key), "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "pii-anthropic-thinking",
+          stream: true,
+          max_tokens: 64,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      }),
+    );
+    expect(antSseRes.status).toBe(200);
+    const antSseText = await antSseRes.text();
+    const antEvents = antSseText
+      .split("\n\n")
+      .filter((block) => block.includes("data: "))
+      .map((block) => {
+        const dataLine = block.split("\n").find((l) => l.startsWith("data: "));
+        return dataLine ? (JSON.parse(dataLine.slice(6)) as Record<string, unknown>) : null;
+      })
+      .filter((ev): ev is Record<string, unknown> => ev !== null);
+    const thinkingDeltaIdx = antEvents.findIndex(
+      (ev) =>
+        ev.type === "content_block_delta" &&
+        ev.index === 0 &&
+        (ev.delta as { type?: string; thinking?: string })?.type === "thinking_delta",
+    );
+    const textDeltaIdx = antEvents.findIndex(
+      (ev) =>
+        ev.type === "content_block_delta" &&
+        ev.index === 1 &&
+        (ev.delta as { type?: string; text?: string })?.type === "text_delta",
+    );
+    const textStopIdx = antEvents.findIndex(
+      (ev) => ev.type === "content_block_stop" && ev.index === 1,
+    );
+    expect(thinkingDeltaIdx).toBeGreaterThanOrEqual(0);
+    expect((antEvents[thinkingDeltaIdx]!.delta as { thinking?: string }).thinking).toBe(
+      "Internal note bob@example.com",
+    );
+    expect(textDeltaIdx).toBeGreaterThan(thinkingDeltaIdx);
+    expect((antEvents[textDeltaIdx]!.delta as { text?: string }).text).toContain(
+      "[REDACTED_EMAIL]",
+    );
+    expect(antSseText).not.toContain("alice@example.com");
+    expect(textStopIdx).toBeGreaterThan(textDeltaIdx);
+
+    expect(await runtime.ledger.auditConservation()).toMatchObject({
+      ok: true,
+      open_holds: 0,
+      unknown_holds: 0,
+    });
   } finally {
     await runtime.close();
     await upstream.stop(true);

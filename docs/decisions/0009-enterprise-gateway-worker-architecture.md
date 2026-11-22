@@ -1,6 +1,6 @@
 # ADR 0009: 企业级 Bun 主力架构（Gateway + Worker、精简微批 PG 核心账本、智能路由与插件管道）
 
-- **状态**：已实施并验收通过（单机实测 12,930 RPS / 0 错误 / 全量守恒；WASM 插件内置 Bun 隔离 Worker 沙箱开箱即用，可选 Rust `wasmtime` FFI 源码就绪）
+- **状态**：已实施并验收通过（单机实测 12,930 RPS / 0 错误 / 全量守恒；唯一 WASM 运行时为原生 Rust `wasmtime` FFI 池化沙箱）
 - **日期**：2026-11-21
 - **适用范围**：`apps/gateway`、`apps/worker`、`native/plugin-wasmtime`、`packages/{kernel,contracts,protocol,plugin-engine,ledger,runtime}`（后续同仓扩展 `apps/business` 业务系统）
 
@@ -201,15 +201,14 @@ flowchart LR
   - `BLOCK { rule_code, http_status, safe_message }`：立即短路后续插件并向 LLM 上游发出 `Abort` 止损。
 - **权限铁律**：内容处理插件**无权写入或篡改 `usage` 计量维度**；仅带显式授权的协议适配器/计量插件可产出 usage。
 
-### 5.2 WASM 沙箱执行器（内置 Bun 隔离 Worker + 可选 Rust `wasmtime` FFI）
+### 5.2 WASM 沙箱执行器（唯一原生 Rust `wasmtime` FFI 池化沙箱）
 
-- **统一 Guest ABI（零 Host Import）**：导出 `memory`、`stg_alloc(i32) -> i32` 及 `<hook>(ptr, len) -> i64`（高 32 位指针、低 32 位长度），同一 `.wasm` 插件产物无需修改即可在两种执行器上一致运行。
-- **开箱即用 Bun 隔离 Worker 沙箱（`createBunWasmExecutor`）**：
-  - 编译期严格校验零 Host Import（拒绝 WASI/FS/网络/Env 导入）并解析 WASM Memory 段校验初始内存上限；
-  - 每次调用在池化隔离 `Worker` 线程内创建全新 `WebAssembly.Instance`，确保线性内存天然零化、杜绝跨租户残留，并在调用前后强制校验 `memory.buffer.byteLength <= maxMemoryBytes` 拦截 `memory.grow` 内存炸弹；
-  - 恶意死循环到达 `fuelBudget` 对应超时立即执行 `worker.terminate()` 强杀线程（实测释放后 0 CPU 残留）并自动补充新 Worker，宿主零中断；
-  - 采用内联 `Blob` Worker，独立打包产物 `dist/gateway/main.js` 零外部文件依赖直接可用。
-- **可选 Rust `wasmtime` FFI 沙箱（`native/plugin-wasmtime`）**：编译出 `libstg_plugin_wasmtime.{dylib,so}` 时由 `resolveWasmtimeLibraryPath` 自动切换启用，提供 Cranelift AOT 与精确指令级 Fuel 计量。
+- **统一 Guest ABI（零 Host Import）**：导出 `memory`、`stg_alloc(i32) -> i32` 及 `<hook>(ptr, len) -> i64`（高 32 位指针、低 32 位长度）；编译期拒绝任何 Host Import。
+- **唯一原生 Rust `wasmtime` 沙箱（`createWasmtimeExecutor` + `native/plugin-wasmtime`）**：
+  - 彻底移除旧 Bun `WebAssembly` Worker 回退实现；启动阶段强制执行零导入自检（`selfCheck()`），缺失原生库或自检失败拒绝启动；
+  - 所有 Rust `extern "C"` FFI 入口均使用 `catch_unwind` 边界保护，启用紧致 `PoolingAllocationConfig` 复用内存页槽位，按插件硬上限通过 `ResourceLimiter` 拦截 `memory.grow` 越界与指令级精确 Fuel 计量；
+  - Gateway 拆分为内容插件池（`CONTENT_WASM_POOL_SIZE`）与渠道插件池（`PROVIDER_WASM_POOL_SIZE`）两套隔离执行池；队列采用租户公平调度与 `egress > ingress` 双优先级（80% 队列水位触发 ingress 主动丢弃，保护已产生上游成本的回程校验）；
+  - Guest Trap/Fuel 耗尽不再驱逐已编译模块缓存；所有 WASM 加载前均执行 `sha256(wasm_bytes) === digest` + Ed25519 签名缓存校验，生产模式（`NODE_ENV=production`）强制要求 `PLUGIN_SIGNING_PUBLIC_KEY_PEM`。
 - **零长流占槽**：流式插件滑窗状态以受限字节（≤ 4 KB）寄存在 Gateway 连接上下文中，SSE 等待吐字期间占用 **0 个插件实例**。
 
 ### 5.3 外部 HTTP Webhook 风控插件
@@ -218,15 +217,17 @@ flowchart LR
 - **两种可配置流式模式**：
   - `HOLD_UNTIL_APPROVED`（缓冲审核）：暂存当前有界小窗（上限 4 KB），Webhook 放行后再吐给客户端，违禁词零漏出；
   - `STREAM_AND_CUTOFF`（旁路审核）：首字直出保 TTFT，异步送审，命中 `BLOCK` 立刻截断后续流并中止上游。
-- **弹性保护**：独立超时（默认 200 ms）、专用熔断器与可配降级策略（`FAIL_CLOSED` 严格阻断 / `FAIL_OPEN` 放行并记审计告警）。
+- **弹性保护**：独立超时（默认 200 ms）、有界响应体上限（默认 1 MiB）、按插件并发上限（默认 64）、`HALF_OPEN` 单探针熔断恢复与可配降级策略（`FAIL_CLOSED` 严格阻断 / `FAIL_OPEN` 放行并记 `fail_open: true` 审计与指标）。
 
-### 5.4 拦截后的账务结算策略
+### 5.4 三分故障分类与拦截账务策略
 
-- 供应商侧：始终按上游实际已消耗 usage 如实结算供应商成本；
-- 客户侧：按路由/插件配置执行：
-  - **`CHARGE_CUSTOMER`（默认）**：按实际已生成 usage 正常向客户扣费；
-  - **`PLATFORM_ABSORB`**：全额释放/退还客户预扣，对应科目计入 `system:moderation_loss`，双式分录严格归零；
-- 账单 `billing_charges.plugin_audit` 记录 `{plugin_id, version, action, rule_code, latency_us}`，不留存任何文本正文。
+- 所有插件结果显式区分 `content_decision`（内容策略判决）、`plugin_fault`（插件故障/Trap/非法响应）与 `host_capacity`（沙箱队列满/熔断/超载）；
+- **客户侧与通道健康隔离铁律**：
+  - 仅 `content_decision` 按配置执行 `CHARGE_CUSTOMER`（默认）或 `PLATFORM_ABSORB` 并返回 `content_blocked`；
+  - `plugin_fault` / `host_capacity` 在 `FAIL_CLOSED` 下上游调用前返回 `500 plugin_execution_failed` / `503 plugin_capacity_unavailable`（附 `Retry-After`）且 0 扣费；上游调用后强制 `PLATFORM_ABSORB`（不向客户扣费、记入 `system:moderation_loss` 并受每租户吸收上限保护），且绝不计入上游渠道熔断器；
+  - `FAIL_OPEN` 放行正文时正常向客户扣费，并在 `billing_charges.plugin_audit` 写入 `fail_open: true` 供事后对账；
+  - `adapt_response` 本地故障保留 `UNKNOWN` 挂账且不误伤渠道熔断器。
+- 账单 `billing_charges.plugin_audit` 记录 `{plugin_id, version, hook, action, rule_code, outcome_kind, fail_open, latency_us}`，不留存任何文本正文。
 
 ---
 

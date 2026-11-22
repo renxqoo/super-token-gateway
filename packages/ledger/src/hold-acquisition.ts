@@ -57,7 +57,7 @@ export function createHoldAcquirer(
             AND l.state = 'ACTIVE' AND l.expires_at > clock_timestamp()
             AND (l.earliest_lot_expires_at IS NULL OR l.earliest_lot_expires_at > clock_timestamp())
             AND w.freeze_reason IS NULL
-          ORDER BY l.id FOR SHARE OF l
+          ORDER BY l.id FOR KEY SHARE OF l
         ), active_supplier_leases AS MATERIALIZED (
           SELECT l.id
           FROM public.supplier_leases l
@@ -65,7 +65,7 @@ export function createHoldAcquirer(
           WHERE (SELECT count(*) FROM active_wallet_leases) > 0
             AND l.id = ANY(${sLeaseIds}::uuid[]) AND l.node_id = ${leases.nodeId}
             AND l.state = 'ACTIVE' AND l.expires_at > clock_timestamp() AND a.state = 'ACTIVE'
-          ORDER BY l.id FOR SHARE OF l
+          ORDER BY l.id FOR KEY SHARE OF l
         )
         INSERT INTO public.billing_holds (
           request_id, project_id, wallet_id, operation, model, idempotency_key, fingerprint,

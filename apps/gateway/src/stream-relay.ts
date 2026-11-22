@@ -110,21 +110,32 @@ export async function readStreamChunk(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   timeoutMs: number,
   onTimeout: () => void,
+  signal: AbortSignal,
 ) {
+  signal.throwIfAborted();
+  const abort = () => void reader.cancel(signal.reason).catch(() => undefined);
+  signal.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(onTimeout, timeoutMs);
   timer.unref();
   try {
-    return await reader.read();
+    const next = await reader.read();
+    signal.throwIfAborted();
+    return next;
   } finally {
     clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
   }
 }
 
 export async function peekStream<T>(
   source: ReadableStream<Uint8Array>,
   inspect: (chunk: Uint8Array) => T | undefined,
+  signal: AbortSignal,
 ): Promise<{ body: ReadableStream<Uint8Array>; found: T | undefined }> {
+  signal.throwIfAborted();
   const reader = source.getReader();
+  const abort = () => void reader.cancel(signal.reason).catch(() => undefined);
+  signal.addEventListener("abort", abort, { once: true });
   const buffered: Uint8Array[] = [];
   let total = 0;
   let found: T | undefined;
@@ -132,6 +143,7 @@ export async function peekStream<T>(
   try {
     while (found === undefined) {
       const step = await reader.read();
+      signal.throwIfAborted();
       if (step.done) {
         done = true;
         break;
@@ -151,6 +163,8 @@ export async function peekStream<T>(
     await reader.cancel(error).catch(() => undefined);
     reader.releaseLock();
     throw error;
+  } finally {
+    signal.removeEventListener("abort", abort);
   }
 
   let offset = 0;
