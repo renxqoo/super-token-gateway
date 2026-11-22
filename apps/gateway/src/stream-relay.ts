@@ -106,25 +106,70 @@ export function createTerminalBuffer() {
   };
 }
 
-export async function readStreamChunk(
+type IdleWatch = {
+  deadlineMs: number;
+  onTimeout: () => void;
+};
+
+const activeIdleWatches = new Set<IdleWatch>();
+let idleWatchTimer: ReturnType<typeof setInterval> | undefined;
+
+function ensureIdleWatchTimer(): void {
+  if (idleWatchTimer) return;
+  idleWatchTimer = setInterval(() => {
+    if (activeIdleWatches.size === 0) return;
+    const now = performance.now();
+    for (const watch of activeIdleWatches) {
+      if (now >= watch.deadlineMs) {
+        activeIdleWatches.delete(watch);
+        watch.onTimeout();
+      }
+    }
+  }, 250);
+  idleWatchTimer.unref();
+}
+
+export function createStreamChunkReader(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   timeoutMs: number,
   onTimeout: () => void,
   signal: AbortSignal,
 ) {
-  signal.throwIfAborted();
   const abort = () => void reader.cancel(signal.reason).catch(() => undefined);
   signal.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(onTimeout, timeoutMs);
-  timer.unref();
-  try {
-    const next = await reader.read();
-    signal.throwIfAborted();
-    return next;
-  } finally {
-    clearTimeout(timer);
-    signal.removeEventListener("abort", abort);
-  }
+  const useSweep = timeoutMs >= 1500;
+  const watch: IdleWatch | null = useSweep ? { deadlineMs: Infinity, onTimeout } : null;
+  if (watch) ensureIdleWatchTimer();
+
+  return {
+    async read() {
+      signal.throwIfAborted();
+      if (watch) {
+        watch.deadlineMs = performance.now() + timeoutMs;
+        activeIdleWatches.add(watch);
+        try {
+          const next = await reader.read();
+          signal.throwIfAborted();
+          return next;
+        } finally {
+          activeIdleWatches.delete(watch);
+        }
+      }
+      const timer = setTimeout(onTimeout, timeoutMs);
+      timer.unref();
+      try {
+        const next = await reader.read();
+        signal.throwIfAborted();
+        return next;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    dispose() {
+      if (watch) activeIdleWatches.delete(watch);
+      signal.removeEventListener("abort", abort);
+    },
+  };
 }
 
 export async function peekStream<T>(

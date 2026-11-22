@@ -13,32 +13,34 @@ export function createHoldAcquirer(
   maxBatchConcurrency: number,
 ) {
   async function runFastHoldBatch(items: FastHoldRequest[]) {
-    const reqIds = items.map((x) => x.input.request_id);
-    const projIds = items.map((x) => x.input.project_id);
-    const walletIds = items.map((x) => x.walletLease.walletId);
-    const ops = items.map((x) => x.input.operation);
-    const models = items.map((x) => x.input.model);
-    const fps = items.map((x) => x.input.fingerprint);
-    const helds = items.map((x) => x.customerAtoms.toString());
-    const supHoldsJson = items.map((x) =>
-      JSON.stringify([
-        {
-          attempt_id: x.input.attempt_id,
-          ...(x.input.supplier_cost_version_id
-            ? { cost_version_id: x.input.supplier_cost_version_id }
-            : {}),
-          account_id: x.input.supplier_account_id,
-          channel_id: x.input.supplier_channel_id,
-          currency: x.input.supplier_currency,
-          cell: x.supplierLease.cell,
-          held_atoms: x.supplierAtoms.toString(),
-          state: "HELD",
-        },
-      ]),
+    const batchPayload = JSON.stringify(
+      items.map((x) => ({
+        request_id: x.input.request_id,
+        project_id: x.input.project_id,
+        wallet_id: x.walletLease.walletId,
+        operation: x.input.operation,
+        model: x.input.model,
+        fingerprint: x.input.fingerprint,
+        held_atoms: x.customerAtoms.toString(),
+        supplier_holds: [
+          {
+            attempt_id: x.input.attempt_id,
+            ...(x.input.supplier_cost_version_id
+              ? { cost_version_id: x.input.supplier_cost_version_id }
+              : {}),
+            account_id: x.input.supplier_account_id,
+            channel_id: x.input.supplier_channel_id,
+            currency: x.input.supplier_currency,
+            cell: x.supplierLease.cell,
+            held_atoms: x.supplierAtoms.toString(),
+            state: "HELD",
+          },
+        ],
+        wallet_lease_id: x.walletLease.leaseId,
+        supplier_lease_id: x.supplierLease.leaseId,
+        expires_at: x.input.expires_at,
+      })),
     );
-    const wLeaseIds = items.map((x) => x.walletLease.leaseId);
-    const sLeaseIds = items.map((x) => x.supplierLease.leaseId);
-    const expAts = items.map((x) => x.input.expires_at);
 
     const retireLeases = (item: FastHoldRequest) => {
       if (item.walletLease.inFlightHolds > 0) item.walletLease.inFlightHolds--;
@@ -49,11 +51,26 @@ export function createHoldAcquirer(
     let admitted: Set<string>;
     try {
       const rows = await db<{ request_id: string }[]>`
-        WITH active_wallet_leases AS MATERIALIZED (
+        WITH batch AS MATERIALIZED (
+          SELECT * FROM jsonb_to_recordset(${batchPayload}::text::jsonb) AS u(
+            request_id uuid,
+            project_id uuid,
+            wallet_id uuid,
+            operation text,
+            model text,
+            fingerprint text,
+            held_atoms numeric,
+            supplier_holds jsonb,
+            wallet_lease_id uuid,
+            supplier_lease_id uuid,
+            expires_at timestamptz
+          )
+        ), active_wallet_leases AS MATERIALIZED (
           SELECT l.id
           FROM public.wallet_leases l
           JOIN public.wallets w ON w.id = l.wallet_id
-          WHERE l.id = ANY(${wLeaseIds}::uuid[]) AND l.node_id = ${leases.nodeId}
+          WHERE l.id = ANY(ARRAY(SELECT DISTINCT wallet_lease_id FROM batch))
+            AND l.node_id = ${leases.nodeId}
             AND l.state = 'ACTIVE' AND l.expires_at > clock_timestamp()
             AND (l.earliest_lot_expires_at IS NULL OR l.earliest_lot_expires_at > clock_timestamp())
             AND w.freeze_reason IS NULL
@@ -63,7 +80,8 @@ export function createHoldAcquirer(
           FROM public.supplier_leases l
           JOIN public.upstream_accounts a ON a.id = l.account_id
           WHERE (SELECT count(*) FROM active_wallet_leases) > 0
-            AND l.id = ANY(${sLeaseIds}::uuid[]) AND l.node_id = ${leases.nodeId}
+            AND l.id = ANY(ARRAY(SELECT DISTINCT supplier_lease_id FROM batch))
+            AND l.node_id = ${leases.nodeId}
             AND l.state = 'ACTIVE' AND l.expires_at > clock_timestamp() AND a.state = 'ACTIVE'
           ORDER BY l.id FOR KEY SHARE OF l
         )
@@ -73,23 +91,8 @@ export function createHoldAcquirer(
         )
         SELECT
           u.request_id, u.project_id, u.wallet_id, u.operation, u.model, NULL, u.fingerprint,
-          u.held_atoms, 0, '[]'::jsonb, u.supplier_holds::jsonb, u.wallet_lease_id, u.supplier_lease_id, 'HELD', u.expires_at
-        FROM unnest(
-          ${reqIds}::uuid[],
-          ${projIds}::uuid[],
-          ${walletIds}::uuid[],
-          ${ops}::text[],
-          ${models}::text[],
-          ${fps}::text[],
-          ${helds}::numeric[],
-          ${supHoldsJson}::text[],
-          ${wLeaseIds}::uuid[],
-          ${sLeaseIds}::uuid[],
-          ${expAts}::timestamptz[]
-        ) AS u(
-          request_id, project_id, wallet_id, operation, model, fingerprint,
-          held_atoms, supplier_holds, wallet_lease_id, supplier_lease_id, expires_at
-        )
+          u.held_atoms, 0, '[]'::jsonb, u.supplier_holds, u.wallet_lease_id, u.supplier_lease_id, 'HELD', u.expires_at
+        FROM batch u
         JOIN active_wallet_leases w ON w.id = u.wallet_lease_id
         JOIN active_supplier_leases s ON s.id = u.supplier_lease_id
         RETURNING request_id

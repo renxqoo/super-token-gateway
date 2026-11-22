@@ -2,18 +2,16 @@ import { GatewayError } from "@gateway/contracts";
 
 export class Lifecycle {
   private active = new Set<Promise<unknown>>();
-  private controllers = new Set<AbortController>();
+  private handlers = new Set<() => void>();
   accepting = true;
   constructor(readonly maxInFlight: number) {}
-  enter(): { controller: AbortController; release: () => void } {
-    if (!this.accepting || this.controllers.size >= this.maxInFlight)
+  enterCallback(onDrain: () => void): { release: () => void } {
+    if (!this.accepting || this.size >= this.maxInFlight)
       throw new GatewayError(503, "overloaded", "Gateway admission capacity reached");
-    const controller = new AbortController();
-    this.controllers.add(controller);
+    this.handlers.add(onDrain);
     return {
-      controller,
       release: () => {
-        this.controllers.delete(controller);
+        this.handlers.delete(onDrain);
       },
     };
   }
@@ -28,14 +26,13 @@ export class Lifecycle {
   async drain(graceMs: number, cleanupMs = 30000): Promise<boolean> {
     this.accepting = false;
     const until = Date.now() + graceMs;
-    while ((this.active.size || this.controllers.size) && Date.now() < until) await Bun.sleep(20);
-    for (const controller of this.controllers) controller.abort(new Error("Gateway shutting down"));
+    while ((this.active.size || this.size) && Date.now() < until) await Bun.sleep(20);
+    for (const handler of this.handlers) handler();
     const cleanupUntil = Date.now() + cleanupMs;
-    while ((this.active.size || this.controllers.size) && Date.now() < cleanupUntil)
-      await Bun.sleep(20);
-    return this.active.size === 0 && this.controllers.size === 0;
+    while ((this.active.size || this.size) && Date.now() < cleanupUntil) await Bun.sleep(20);
+    return this.active.size === 0 && this.size === 0;
   }
   get size(): number {
-    return this.controllers.size;
+    return this.handlers.size;
   }
 }

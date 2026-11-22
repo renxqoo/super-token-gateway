@@ -1,11 +1,16 @@
-import { numberLiteral, normalizedProviderNumber } from "./json.ts";
-import { dimensions, type Dimension, type ProviderKind, type Usage } from "@gateway/kernel";
-import { GatewayError, optionalObject } from "@gateway/contracts";
-import { count } from "@gateway/kernel";
-import { exactInteger } from "./json.ts";
+import { exactInteger, hasExactLiterals, numberLiteral, normalizedProviderNumber } from "./json.ts";
+import { count, dimensions, type Dimension, type ProviderKind, type Usage } from "@gateway/kernel";
+import { GatewayError } from "@gateway/contracts";
 
 const allowedUsageKeys = new Set<string>([...dimensions, "reasoning_tokens"]);
 const decimalDurationKeys = new Set<string>(["audio_seconds", "video_seconds"]);
+const PROMPT_KEYS = ["prompt_tokens", "input_tokens", "promptTokenCount"] as const;
+const OUTPUT_KEYS = ["completion_tokens", "output_tokens", "candidatesTokenCount"] as const;
+const CACHED_RAW_KEYS = [
+  "cache_read_input_tokens",
+  "cachedContentTokenCount",
+  "prompt_cache_hit_tokens",
+] as const;
 
 export function readUsageQuantity(
   source: Record<string, unknown>,
@@ -21,8 +26,14 @@ export function readUsageQuantity(
       `Unsupported usage dimension ${dimension}`,
     );
   }
-  if (decimalDurationKeys.has(dimension)) return seconds(source, key);
-  const quantity = exactInteger(source, key) ?? count(value);
+  if (decimalDurationKeys.has(dimension)) return seconds(source, key, hasExactLiterals(source));
+  const quantity =
+    typeof value === "number" &&
+    !hasExactLiterals(source) &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+      ? String(value)
+      : (exactInteger(source, key) ?? count(value));
   if (quantity === undefined) {
     throw new GatewayError(
       502,
@@ -59,7 +70,7 @@ export function validateUsageObject(raw: unknown): Usage {
   return out;
 }
 
-function seconds(source: Record<string, unknown>, key: string): string | undefined {
+function seconds(source: Record<string, unknown>, key: string, exact: boolean): string | undefined {
   const raw = source[key];
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "number" && typeof raw !== "string")
@@ -68,7 +79,7 @@ function seconds(source: Record<string, unknown>, key: string): string | undefin
       "invalid_upstream_usage",
       "Duration must be an exact nonnegative quantity",
     );
-  return decimalDuration(numberLiteral(source, key) ?? String(raw));
+  return decimalDuration((exact ? numberLiteral(source, key) : undefined) ?? String(raw));
 }
 
 function decimalDuration(literal: string): string {
@@ -80,9 +91,17 @@ function decimalDuration(literal: string): string {
   return `${digits.slice(0, value.exponent)}.${digits.slice(value.exponent)}`;
 }
 
-function quantity(source: Record<string, unknown>, key: string): string | undefined {
-  if (source[key] === undefined || source[key] === null) return undefined;
-  const value = exactInteger(source, key) ?? count(source[key]);
+function quantity(
+  source: Record<string, unknown>,
+  key: string,
+  exact: boolean,
+): string | undefined {
+  const raw = source[key];
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === "number" && !exact && Number.isSafeInteger(raw) && raw >= 0) {
+    return String(raw);
+  }
+  const value = (exact ? exactInteger(source, key) : undefined) ?? count(raw);
   if (value === undefined)
     throw new GatewayError(
       502,
@@ -91,10 +110,15 @@ function quantity(source: Record<string, unknown>, key: string): string | undefi
     );
   return value;
 }
-function aliases(source: Record<string, unknown>, keys: string[]): string | undefined {
+
+function aliases(
+  source: Record<string, unknown>,
+  keys: readonly string[],
+  exact: boolean,
+): string | undefined {
   let selected: string | undefined;
-  for (const key of keys) {
-    const value = quantity(source, key);
+  for (let i = 0; i < keys.length; i++) {
+    const value = quantity(source, keys[i]!, exact);
     if (value === undefined) continue;
     if (selected !== undefined && selected !== value)
       throw new GatewayError(502, "usage_alias_conflict", "Provider usage aliases disagree");
@@ -106,14 +130,18 @@ function aliases(source: Record<string, unknown>, keys: string[]): string | unde
 function measureDuration(
   usage: Usage,
   source: Record<string, unknown>,
-  media: "audio" | "video",
+  secondsKey: "audio_seconds" | "video_seconds",
+  millisecondsKey: "audio_ms" | "video_ms",
+  allowBareSeconds: boolean,
+  exact: boolean,
 ): boolean {
-  const secondsKey = `${media}_seconds` as const;
-  const millisecondsKey = `${media}_ms` as const;
-  const reported = seconds(source, secondsKey);
-  const alias =
-    media === "audio" && source.type === "duration" ? seconds(source, "seconds") : undefined;
-  const milliseconds = quantity(source, millisecondsKey);
+  const hasBare = allowBareSeconds && source.type === "duration" && source.seconds !== undefined;
+  if (source[secondsKey] === undefined && source[millisecondsKey] === undefined && !hasBare) {
+    return false;
+  }
+  const reported = seconds(source, secondsKey, exact);
+  const alias = hasBare ? seconds(source, "seconds", exact) : undefined;
+  const milliseconds = quantity(source, millisecondsKey, exact);
   const fromMilliseconds =
     milliseconds === undefined ? undefined : decimalDuration(`${milliseconds}e-3`);
   const duration = reported ?? alias ?? fromMilliseconds;
@@ -132,6 +160,12 @@ function measureDuration(
   return true;
 }
 
+function asRecord(v: unknown): Record<string, unknown> | undefined {
+  return v !== null && typeof v === "object" && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : undefined;
+}
+
 export function extractUsage(
   body: unknown,
   kind: ProviderKind | "custom",
@@ -140,28 +174,31 @@ export function extractUsage(
   if (kind === "bedrock") kind = "anthropic";
   if (kind === "vertex") kind = "gemini";
   if (kind === "custom") kind = "openai";
-  const value = optionalObject(body);
-  const response = optionalObject(value.response);
-  const raw = optionalObject(
-    kind === "gemini" ? value.usageMetadata : (value.usage ?? response.usage),
-  );
-  const details = optionalObject(
+  const value = asRecord(body);
+  if (!value) return undefined;
+  const rawCandidate =
+    kind === "gemini" ? value.usageMetadata : (value.usage ?? asRecord(value.response)?.usage);
+  const raw = asRecord(rawCandidate);
+  if (!raw) return undefined;
+  const rawExact = hasExactLiterals(raw);
+  const details = asRecord(
     raw.prompt_tokens_details ?? raw.input_tokens_details ?? raw.input_token_details,
   );
-  const outputDetails = optionalObject(raw.completion_tokens_details ?? raw.output_tokens_details);
-  const prompt = aliases(raw, ["prompt_tokens", "input_tokens", "promptTokenCount"]);
-  const toolUse = kind === "gemini" ? quantity(raw, "toolUsePromptTokenCount") : undefined;
+  const outputDetails = asRecord(raw.completion_tokens_details ?? raw.output_tokens_details);
+  const prompt = aliases(raw, PROMPT_KEYS, rawExact);
+  const toolUse =
+    kind === "gemini" ? quantity(raw, "toolUsePromptTokenCount", rawExact) : undefined;
   const input =
     toolUse === undefined ? prompt : (BigInt(prompt ?? "0") + BigInt(toolUse)).toString();
-  const output = aliases(raw, ["completion_tokens", "output_tokens", "candidatesTokenCount"]);
-  const cachedAliases = [
-    aliases(details, ["cached_tokens"]),
-    aliases(raw, ["cache_read_input_tokens", "cachedContentTokenCount", "prompt_cache_hit_tokens"]),
-  ].filter((v): v is string => v !== undefined);
-  if (new Set(cachedAliases).size > 1)
+  const output = aliases(raw, OUTPUT_KEYS, rawExact);
+  const cachedDetails = details
+    ? quantity(details, "cached_tokens", hasExactLiterals(details))
+    : undefined;
+  const cachedRaw = aliases(raw, CACHED_RAW_KEYS, rawExact);
+  if (cachedDetails !== undefined && cachedRaw !== undefined && cachedDetails !== cachedRaw)
     throw new GatewayError(502, "usage_alias_conflict", "Provider cache usage aliases disagree");
-  const observedCached = cachedAliases[0];
-  const cacheMiss = quantity(raw, "prompt_cache_miss_tokens");
+  const observedCached = cachedDetails ?? cachedRaw;
+  const cacheMiss = quantity(raw, "prompt_cache_miss_tokens", rawExact);
   if (
     cacheMiss !== undefined &&
     input !== undefined &&
@@ -173,10 +210,15 @@ export function extractUsage(
       "usage_alias_conflict",
       "Provider cache partition does not equal prompt usage",
     );
-  const creation = optionalObject(raw.cache_creation);
-  const write5m = quantity(creation, "ephemeral_5m_input_tokens");
-  const write1h = quantity(creation, "ephemeral_1h_input_tokens");
-  let write = quantity(raw, "cache_creation_input_tokens");
+  const creation = asRecord(raw.cache_creation);
+  const creationExact = creation ? hasExactLiterals(creation) : false;
+  const write5m = creation
+    ? quantity(creation, "ephemeral_5m_input_tokens", creationExact)
+    : undefined;
+  const write1h = creation
+    ? quantity(creation, "ephemeral_1h_input_tokens", creationExact)
+    : undefined;
+  let write = quantity(raw, "cache_creation_input_tokens", rawExact);
   if (write5m !== undefined && write1h !== undefined) {
     const total = (BigInt(write5m) + BigInt(write1h)).toString();
     if ((write !== undefined && write !== total) || total.length > 38)
@@ -188,10 +230,12 @@ export function extractUsage(
     write = total;
   }
   const observedReasoning =
-    quantity(outputDetails, "reasoning_tokens") ?? quantity(raw, "thoughtsTokenCount");
-  const usage: Usage = { ...previous };
-  const audioDuration = measureDuration(usage, raw, "audio");
-  const videoDuration = measureDuration(usage, raw, "video");
+    (outputDetails
+      ? quantity(outputDetails, "reasoning_tokens", hasExactLiterals(outputDetails))
+      : undefined) ?? quantity(raw, "thoughtsTokenCount", rawExact);
+  const usage: Usage = previous ? { ...previous } : {};
+  const audioDuration = measureDuration(usage, raw, "audio_seconds", "audio_ms", true, rawExact);
+  const videoDuration = measureDuration(usage, raw, "video_seconds", "video_ms", false, rawExact);
   if (
     input === undefined &&
     output === undefined &&
@@ -209,28 +253,38 @@ export function extractUsage(
   const totalInput =
     input ??
     (previous?.input_tokens !== undefined && kind !== "anthropic"
-      ? (BigInt(previous.input_tokens) + BigInt(previous.cached_input_tokens ?? "0")).toString()
+      ? previous.cached_input_tokens === undefined
+        ? previous.input_tokens
+        : (BigInt(previous.input_tokens) + BigInt(previous.cached_input_tokens)).toString()
       : undefined);
   const candidateOutput =
     output ??
     (kind === "gemini" && previous?.output_tokens !== undefined
-      ? (BigInt(previous.output_tokens) - BigInt(previous.reasoning_tokens ?? "0")).toString()
+      ? previous.reasoning_tokens === undefined
+        ? previous.output_tokens
+        : (BigInt(previous.output_tokens) - BigInt(previous.reasoning_tokens)).toString()
       : undefined);
   if (totalInput !== undefined || input !== undefined) {
-    const uncached =
-      BigInt(totalInput ?? input ?? "0") - (kind === "anthropic" ? 0n : BigInt(cached ?? "0"));
-    if (uncached < 0n)
-      throw new GatewayError(
-        502,
-        "invalid_upstream_usage",
-        "Provider cached usage exceeds total input",
-      );
-    usage.input_tokens = uncached.toString();
+    const total = totalInput ?? input ?? "0";
+    if (kind === "anthropic" || cached === undefined || cached === "0") {
+      usage.input_tokens = total;
+    } else {
+      const uncached = BigInt(total) - BigInt(cached);
+      if (uncached < 0n)
+        throw new GatewayError(
+          502,
+          "invalid_upstream_usage",
+          "Provider cached usage exceeds total input",
+        );
+      usage.input_tokens = uncached.toString();
+    }
   }
-  if (candidateOutput !== undefined)
-    usage.output_tokens = (
-      BigInt(candidateOutput) + (kind === "gemini" ? BigInt(reasoning ?? "0") : 0n)
-    ).toString();
+  if (candidateOutput !== undefined) {
+    usage.output_tokens =
+      kind === "gemini" && reasoning !== undefined && reasoning !== "0"
+        ? (BigInt(candidateOutput) + BigInt(reasoning)).toString()
+        : candidateOutput;
+  }
   if (
     kind !== "gemini" &&
     reasoning !== undefined &&

@@ -150,9 +150,25 @@ export function preferredCell(seed: string): number {
 
 export const SETTLEMENT_LANES = 4;
 export const SUPPLIER_CELLS_PER_LANE = CELL_COUNT / SETTLEMENT_LANES;
+export const OUTBOX_SHARDS = 16;
+
+function hexNibble(code: number): number {
+  if (code >= 48 && code <= 57) return code - 48;
+  if (code >= 97 && code <= 102) return code - 87;
+  if (code >= 65 && code <= 70) return code - 55;
+  return -1;
+}
+
+export function outboxShard(projectId: string | null | undefined): number {
+  if (!projectId || projectId.length < 36) return 0;
+  const first = hexNibble(projectId.charCodeAt(0));
+  const last = hexNibble(projectId.charCodeAt(35));
+  if (first < 0 || last < 0) return 0;
+  return (first ^ last) & (OUTBOX_SHARDS - 1);
+}
 
 export function walletLane(projectId: string): number {
-  return preferredCell(projectId) % SETTLEMENT_LANES;
+  return outboxShard(projectId) % SETTLEMENT_LANES;
 }
 
 export function cellKey(accountId: string, currency: string, cell: number): string {

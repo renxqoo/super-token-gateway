@@ -341,7 +341,8 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
     meta: LeasedHoldMeta,
     customerAtoms: bigint,
     supplierAtoms: bigint,
-    expiresAtMs: number,
+    wlExpiresAtMs: number,
+    slExpiresAtMs: number,
     postNow: number,
   ): void {
     leasedHolds.delete(meta.requestId);
@@ -350,7 +351,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
       wl.remainingInPg -= customerAtoms;
       wl.freeInMemory += meta.heldCustomerAtoms - customerAtoms;
       if (wl.inFlightHolds > 0) wl.inFlightHolds--;
-      wl.expiresAtMs = Math.max(wl.expiresAtMs, expiresAtMs);
+      if (wlExpiresAtMs > wl.expiresAtMs) wl.expiresAtMs = wlExpiresAtMs;
       wl.lastUsedAtMs = postNow;
     }
     const sl = supplierLeasesById.get(meta.supplierLeaseId);
@@ -358,7 +359,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
       sl.remainingInPg -= supplierAtoms;
       sl.freeInMemory += meta.heldSupplierAtoms - supplierAtoms;
       if (sl.inFlightHolds > 0) sl.inFlightHolds--;
-      sl.expiresAtMs = Math.max(sl.expiresAtMs, expiresAtMs);
+      if (slExpiresAtMs > sl.expiresAtMs) sl.expiresAtMs = slExpiresAtMs;
       sl.lastUsedAtMs = postNow;
     }
   }

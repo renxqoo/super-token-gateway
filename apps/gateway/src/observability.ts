@@ -14,21 +14,28 @@ export type TraceContext = {
 const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
 const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, "0"));
 const randBuf = new Uint8Array(24);
+const spanBuf = randBuf.subarray(0, 8);
 
-function randomHex(byteLength: number): string {
-  const slice = randBuf.subarray(0, byteLength);
-  crypto.getRandomValues(slice);
+function bytesToHex(buf: Uint8Array, start: number, end: number): string {
   let out = "";
-  for (let i = 0; i < byteLength; i++) out += HEX[slice[i]!]!;
+  for (let i = start; i < end; i++) out += HEX[buf[i]!]!;
   return out;
 }
 
 export function parseOrCreateTrace(headerValue: string | undefined): TraceContext {
   const match = headerValue ? TRACEPARENT_RE.exec(headerValue.trim().toLowerCase()) : null;
-  const traceId =
-    match && match[1] !== "00000000000000000000000000000000" ? match[1]! : randomHex(16);
+  let traceId: string;
+  let spanId: string;
+  if (match && match[1] !== "00000000000000000000000000000000") {
+    traceId = match[1]!;
+    crypto.getRandomValues(spanBuf);
+    spanId = bytesToHex(spanBuf, 0, 8);
+  } else {
+    crypto.getRandomValues(randBuf);
+    traceId = bytesToHex(randBuf, 0, 16);
+    spanId = bytesToHex(randBuf, 16, 24);
+  }
   const flags = match ? match[3]! : "01";
-  const spanId = randomHex(8);
   return {
     traceId,
     spanId,
@@ -74,14 +81,31 @@ function escapeLabel(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\n", " ");
 }
 
-function bumpCounter(map: Map<string, number>, key: string, maxEntries = 2048): void {
+type LabeledCounter<T extends readonly string[]> = {
+  labels: T;
+  count: number;
+};
+
+function bumpLabeled<T extends readonly string[]>(
+  map: Map<string, LabeledCounter<T>>,
+  key: string,
+  labels: () => T,
+  maxEntries = 2048,
+): void {
   const existing = map.get(key);
   if (existing !== undefined) {
-    map.set(key, existing + 1);
+    existing.count++;
     return;
   }
   if (map.size >= maxEntries) return;
-  map.set(key, 1);
+  map.set(key, { labels: labels(), count: 1 });
+}
+
+function statusClassOf(status: number): string {
+  if (status >= 200 && status < 300) return "2xx";
+  if (status >= 400 && status < 500) return "4xx";
+  if (status >= 500 && status < 600) return "5xx";
+  return `${Math.floor(status / 100)}xx`;
 }
 
 export type AccessLogRecord = {
@@ -119,14 +143,35 @@ export class GatewayMetrics {
   pluginPlatformAbsorbTotal = 0;
   pluginPlatformAbsorbAtoms = 0n;
   snapshotDiverged = false;
-  private readonly httpCounters = new Map<string, number>();
-  private readonly upstreamErrorCounters = new Map<string, number>();
-  private readonly pluginInvocations = new Map<string, number>();
-  private readonly pluginFaults = new Map<string, number>();
-  private readonly pluginCapacityRejections = new Map<string, number>();
-  private readonly pluginFailOpen = new Map<string, number>();
-  private readonly protocolFieldDropped = new Map<string, number>();
-  private readonly protocolFieldRejected = new Map<string, number>();
+  private readonly httpCounters = new Map<
+    string,
+    LabeledCounter<readonly [string, string, string]>
+  >();
+  private readonly upstreamErrorCounters = new Map<
+    string,
+    LabeledCounter<readonly [string, string]>
+  >();
+  private readonly pluginInvocations = new Map<
+    string,
+    LabeledCounter<readonly [string, string, string, string]>
+  >();
+  private readonly pluginFaults = new Map<
+    string,
+    LabeledCounter<readonly [string, string, string]>
+  >();
+  private readonly pluginCapacityRejections = new Map<
+    string,
+    LabeledCounter<readonly [string, string, string]>
+  >();
+  private readonly pluginFailOpen = new Map<string, LabeledCounter<readonly [string, string]>>();
+  private readonly protocolFieldDropped = new Map<
+    string,
+    LabeledCounter<readonly [string, string, string]>
+  >();
+  private readonly protocolFieldRejected = new Map<
+    string,
+    LabeledCounter<readonly [string, string, string]>
+  >();
   private readonly tenantAbsorbWindows = new Map<string, TenantAbsorbWindow>();
   private readonly requestDuration = new Histogram();
   private readonly ttftDuration = new Histogram();
@@ -134,14 +179,35 @@ export class GatewayMetrics {
 
   constructor(private readonly accessLogEnabled: boolean) {}
 
-  observeRequest(record: AccessLogRecord): void {
-    const statusClass = `${Math.floor(record.status / 100)}xx`;
-    const key = JSON.stringify([record.operation, statusClass, record.channel ?? "none"]);
-    bumpCounter(this.httpCounters, key);
-    this.requestDuration.observe(record.duration_ms);
-    if (record.ttft_ms !== null) {
-      this.ttftDuration.observe(record.ttft_ms);
+  get isAccessLogEnabled(): boolean {
+    return this.accessLogEnabled;
+  }
+
+  observeRequestFast(
+    operation: string,
+    status: number,
+    channel: string | null,
+    durationMs: number,
+    ttftMs: number | null,
+  ): void {
+    const statusClass = statusClassOf(status);
+    const ch = channel ?? "none";
+    const key = `${operation}\0${statusClass}\0${ch}`;
+    bumpLabeled(this.httpCounters, key, () => [operation, statusClass, ch] as const);
+    this.requestDuration.observe(durationMs);
+    if (ttftMs !== null) {
+      this.ttftDuration.observe(ttftMs);
     }
+  }
+
+  observeRequest(record: AccessLogRecord): void {
+    this.observeRequestFast(
+      record.operation,
+      record.status,
+      record.channel,
+      record.duration_ms,
+      record.ttft_ms,
+    );
     if (this.accessLogEnabled) {
       console.log(
         JSON.stringify({
@@ -157,33 +223,38 @@ export class GatewayMetrics {
   }
 
   recordUpstreamError(channel: string, kind: string): void {
-    const key = JSON.stringify([channel, kind]);
-    bumpCounter(this.upstreamErrorCounters, key);
+    const key = `${channel}\0${kind}`;
+    bumpLabeled(this.upstreamErrorCounters, key, () => [channel, kind] as const);
   }
 
   observePlugin(event: PluginObservation): void {
     this.pluginDuration.observe(event.latency_ms);
-    bumpCounter(
+    const action = event.blocked ? "BLOCK" : "PASS";
+    bumpLabeled(
       this.pluginInvocations,
-      JSON.stringify([
-        event.plugin_id,
-        event.hook,
-        event.outcome_kind,
-        event.blocked ? "BLOCK" : "PASS",
-      ]),
+      `${event.plugin_id}\0${event.hook}\0${event.outcome_kind}\0${action}`,
+      () => [event.plugin_id, event.hook, event.outcome_kind, action] as const,
     );
     if (event.fail_open) {
-      bumpCounter(this.pluginFailOpen, JSON.stringify([event.plugin_id, event.hook]));
+      bumpLabeled(
+        this.pluginFailOpen,
+        `${event.plugin_id}\0${event.hook}`,
+        () => [event.plugin_id, event.hook] as const,
+      );
     }
     if (event.outcome_kind === "plugin_fault") {
-      bumpCounter(
+      const ruleCode = event.rule_code ?? "plugin_fault";
+      bumpLabeled(
         this.pluginFaults,
-        JSON.stringify([event.plugin_id, event.hook, event.rule_code ?? "plugin_fault"]),
+        `${event.plugin_id}\0${event.hook}\0${ruleCode}`,
+        () => [event.plugin_id, event.hook, ruleCode] as const,
       );
     } else if (event.outcome_kind === "host_capacity") {
-      bumpCounter(
+      const ruleCode = event.rule_code ?? "host_capacity";
+      bumpLabeled(
         this.pluginCapacityRejections,
-        JSON.stringify([event.plugin_id, event.hook, event.rule_code ?? "host_capacity"]),
+        `${event.plugin_id}\0${event.hook}\0${ruleCode}`,
+        () => [event.plugin_id, event.hook, ruleCode] as const,
       );
     }
   }
@@ -228,11 +299,19 @@ export class GatewayMetrics {
   }
 
   recordProtocolFieldDropped(source: string, target: string, field: string): void {
-    bumpCounter(this.protocolFieldDropped, JSON.stringify([source, target, field]));
+    bumpLabeled(
+      this.protocolFieldDropped,
+      `${source}\0${target}\0${field}`,
+      () => [source, target, field] as const,
+    );
   }
 
   recordProtocolFieldRejected(source: string, target: string, field: string): void {
-    bumpCounter(this.protocolFieldRejected, JSON.stringify([source, target, field]));
+    bumpLabeled(
+      this.protocolFieldRejected,
+      `${source}\0${target}\0${field}`,
+      () => [source, target, field] as const,
+    );
   }
 
   renderPrometheus(gauges: {
@@ -342,64 +421,59 @@ export class GatewayMetrics {
       );
     }
     lines.push("# TYPE gateway_http_requests_total counter");
-    for (const [key, val] of this.httpCounters) {
-      const [op, statusClass, channel] = JSON.parse(key) as [string, string, string];
+    for (const entry of this.httpCounters.values()) {
+      const [op, statusClass, channel] = entry.labels;
       lines.push(
-        `gateway_http_requests_total{operation="${escapeLabel(op!)}",status_class="${escapeLabel(statusClass!)}",channel="${escapeLabel(channel!)}"} ${val}`,
+        `gateway_http_requests_total{operation="${escapeLabel(op)}",status_class="${escapeLabel(statusClass)}",channel="${escapeLabel(channel)}"} ${entry.count}`,
       );
     }
     lines.push("# TYPE gateway_upstream_errors_total counter");
-    for (const [key, val] of this.upstreamErrorCounters) {
-      const [channel, kind] = JSON.parse(key) as [string, string];
+    for (const entry of this.upstreamErrorCounters.values()) {
+      const [channel, kind] = entry.labels;
       lines.push(
-        `gateway_upstream_errors_total{channel="${escapeLabel(channel!)}",kind="${escapeLabel(kind!)}"} ${val}`,
+        `gateway_upstream_errors_total{channel="${escapeLabel(channel)}",kind="${escapeLabel(kind)}"} ${entry.count}`,
       );
     }
     lines.push("# TYPE gateway_plugin_invocations_total counter");
-    for (const [key, val] of this.pluginInvocations) {
-      const [plugin, hook, outcomeKind, action] = JSON.parse(key) as [
-        string,
-        string,
-        string,
-        string,
-      ];
+    for (const entry of this.pluginInvocations.values()) {
+      const [plugin, hook, outcomeKind, action] = entry.labels;
       lines.push(
-        `gateway_plugin_invocations_total{plugin="${escapeLabel(plugin!)}",hook="${escapeLabel(hook!)}",outcome_kind="${escapeLabel(outcomeKind!)}",action="${escapeLabel(action!)}"} ${val}`,
+        `gateway_plugin_invocations_total{plugin="${escapeLabel(plugin)}",hook="${escapeLabel(hook)}",outcome_kind="${escapeLabel(outcomeKind)}",action="${escapeLabel(action)}"} ${entry.count}`,
       );
     }
     lines.push("# TYPE gateway_plugin_faults_total counter");
-    for (const [key, val] of this.pluginFaults) {
-      const [plugin, hook, ruleCode] = JSON.parse(key) as [string, string, string];
+    for (const entry of this.pluginFaults.values()) {
+      const [plugin, hook, ruleCode] = entry.labels;
       lines.push(
-        `gateway_plugin_faults_total{plugin="${escapeLabel(plugin!)}",hook="${escapeLabel(hook!)}",rule_code="${escapeLabel(ruleCode!)}"} ${val}`,
+        `gateway_plugin_faults_total{plugin="${escapeLabel(plugin)}",hook="${escapeLabel(hook)}",rule_code="${escapeLabel(ruleCode)}"} ${entry.count}`,
       );
     }
     lines.push("# TYPE gateway_plugin_capacity_rejections_total counter");
-    for (const [key, val] of this.pluginCapacityRejections) {
-      const [plugin, hook, ruleCode] = JSON.parse(key) as [string, string, string];
+    for (const entry of this.pluginCapacityRejections.values()) {
+      const [plugin, hook, ruleCode] = entry.labels;
       lines.push(
-        `gateway_plugin_capacity_rejections_total{plugin="${escapeLabel(plugin!)}",hook="${escapeLabel(hook!)}",rule_code="${escapeLabel(ruleCode!)}"} ${val}`,
+        `gateway_plugin_capacity_rejections_total{plugin="${escapeLabel(plugin)}",hook="${escapeLabel(hook)}",rule_code="${escapeLabel(ruleCode)}"} ${entry.count}`,
       );
     }
     lines.push("# TYPE gateway_plugin_fail_open_total counter");
-    for (const [key, val] of this.pluginFailOpen) {
-      const [plugin, hook] = JSON.parse(key) as [string, string];
+    for (const entry of this.pluginFailOpen.values()) {
+      const [plugin, hook] = entry.labels;
       lines.push(
-        `gateway_plugin_fail_open_total{plugin="${escapeLabel(plugin!)}",hook="${escapeLabel(hook!)}"} ${val}`,
+        `gateway_plugin_fail_open_total{plugin="${escapeLabel(plugin)}",hook="${escapeLabel(hook)}"} ${entry.count}`,
       );
     }
     lines.push("# TYPE gateway_protocol_field_dropped_total counter");
-    for (const [key, val] of this.protocolFieldDropped) {
-      const [source, target, field] = JSON.parse(key) as [string, string, string];
+    for (const entry of this.protocolFieldDropped.values()) {
+      const [source, target, field] = entry.labels;
       lines.push(
-        `gateway_protocol_field_dropped_total{source="${escapeLabel(source!)}",target="${escapeLabel(target!)}",field="${escapeLabel(field!)}"} ${val}`,
+        `gateway_protocol_field_dropped_total{source="${escapeLabel(source)}",target="${escapeLabel(target)}",field="${escapeLabel(field)}"} ${entry.count}`,
       );
     }
     lines.push("# TYPE gateway_protocol_field_rejected_total counter");
-    for (const [key, val] of this.protocolFieldRejected) {
-      const [source, target, field] = JSON.parse(key) as [string, string, string];
+    for (const entry of this.protocolFieldRejected.values()) {
+      const [source, target, field] = entry.labels;
       lines.push(
-        `gateway_protocol_field_rejected_total{source="${escapeLabel(source!)}",target="${escapeLabel(target!)}",field="${escapeLabel(field!)}"} ${val}`,
+        `gateway_protocol_field_rejected_total{source="${escapeLabel(source)}",target="${escapeLabel(target)}",field="${escapeLabel(field)}"} ${entry.count}`,
       );
     }
     lines.push(

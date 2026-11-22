@@ -722,14 +722,17 @@ test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcrip
     expect(lastUpstreamTraceparent).toStartWith("00-4bf92f3577b34da6a3ce929d0e0e4736-");
     const chatReqId = chatResp.headers.get("x-request-id")!;
 
-    const modResp = await runtime.publicApp.fetch(
+    const modResp = await runtime.fetchPublic(
       new Request("http://gw.local/v1/moderations", {
         method: "POST",
         headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
         body: JSON.stringify({ model: "omni-model", input: "safe text" }),
       }),
+      { getPeerAddress: () => "127.0.0.1" },
     );
     expect(modResp.status).toBe(200);
+    const livezResp = await runtime.fetchPublic(new Request("http://gw.local/livez"));
+    expect(livezResp.status).toBe(200);
 
     const speechBin = await runtime.publicApp.fetch(
       new Request("http://gw.local/v1/audio/speech", {
@@ -907,3 +910,39 @@ test.each([60_000, 90])(
     }
   },
 );
+
+test("batched Redis permits flush pending releases before dispatching new acquires", async () => {
+  const redis = new Bun.RedisClient(redisUrl, { autoReconnect: false });
+  const namespace = `batch-rel-acq-${crypto.randomUUID()}`;
+  const coord = new ClusterCoordinator({ redisUrl, namespace });
+  const holdPermits: { release: () => void }[] = [];
+  try {
+    await Promise.all([coord.start(), redis.connect()]);
+    for (let i = 0; i < 6; i++) {
+      const p = await coord.acquireRateLimit(
+        `bg-${i}`,
+        { rpm: 1000, tpm: 1000, concurrency: 10 },
+        1,
+        60_000,
+      );
+      if (!p.ok) throw new Error(`Background permit failed: ${p.reason}`);
+      holdPermits.push(p);
+    }
+    const tight = { rpm: 1000, tpm: 1000, concurrency: 1 };
+    for (let round = 0; round < 15; round++) {
+      if (round === 5) await redis.send("SCRIPT", ["FLUSH", "SYNC"]);
+      const [pA, pB] = await Promise.all([
+        coord.acquireRateLimit("tight-slot-a", tight, 1, 60_000),
+        coord.acquireRateLimit("tight-slot-b", tight, 1, 60_000),
+      ]);
+      expect(pA.ok).toBe(true);
+      expect(pB.ok).toBe(true);
+      if (pA.ok) pA.release();
+      if (pB.ok) pB.release();
+    }
+  } finally {
+    for (const p of holdPermits) p.release();
+    redis.close();
+    await coord.close();
+  }
+});

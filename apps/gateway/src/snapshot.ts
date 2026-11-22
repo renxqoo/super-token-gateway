@@ -25,6 +25,8 @@ export type SnapshotManagerOptions = {
   onSnapshotApplied?: (snapshot: ConfigSnapshot) => void;
 };
 
+const NOOP_PLUGIN_SIGNAL = new AbortController().signal;
+
 export class SnapshotManager {
   private current: ConfigSnapshot | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -231,6 +233,10 @@ export class SnapshotManager {
     return controller.signal;
   }
 
+  isNoopPluginSignal(signal: AbortSignal): boolean {
+    return signal === NOOP_PLUGIN_SIGNAL;
+  }
+
   pluginSignal(route: RouteRecord, channel: ChannelRecord): AbortSignal {
     const existing = this.routeSignals.get(route);
     if (existing) return existing;
@@ -238,6 +244,10 @@ export class SnapshotManager {
     if (channel.provider_plugin_id) ids.add(channel.provider_plugin_id);
     for (const step of route.plugin_pipeline) {
       if (step.enabled !== false) ids.add(step.plugin_id);
+    }
+    if (ids.size === 0) {
+      this.routeSignals.set(route, NOOP_PLUGIN_SIGNAL);
+      return NOOP_PLUGIN_SIGNAL;
     }
     const signals = [...ids].map((id) => this.revisionSignal(id));
     const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);

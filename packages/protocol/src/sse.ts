@@ -26,7 +26,7 @@ export class SSEParser {
       const line = this.buffer.slice(start, i);
       if (ch === "\r" && this.buffer[i + 1] === "\n") i++;
       start = i + 1;
-      this.eventSize += encoder.encode(line).byteLength + 1;
+      this.eventSize += Buffer.byteLength(line) + 1;
       if (this.eventSize > this.maxBytes) throw new Error("SSE event exceeds limit");
       if (line !== "") {
         this.eventLines.push(line);
@@ -52,7 +52,7 @@ export class SSEParser {
       } else this.eventSize = 0;
     }
     this.buffer = this.buffer.slice(start);
-    this.trailingBytes = encoder.encode(this.buffer).byteLength;
+    this.trailingBytes = this.buffer.length === 0 ? 0 : Buffer.byteLength(this.buffer);
     if (this.bufferedBytes > this.maxBytes) {
       throw new Error("SSE event exceeds limit");
     }
@@ -67,7 +67,7 @@ export class SSEParser {
 }
 
 export const encodeSSE = (data: unknown, event?: string): Uint8Array =>
-  new TextEncoder().encode(
+  encoder.encode(
     `${event ? `event: ${event}\n` : ""}data: ${typeof data === "string" ? data : stringifyExact(data)}\n\n`,
   );
 import { stringifyExact } from "./json.ts";

@@ -11,6 +11,7 @@ import {
   createZstdDecompress,
 } from "node:zlib";
 import { GatewayError } from "@gateway/contracts";
+import { createBunHttp1Pool } from "./bun-http1.ts";
 
 export interface PinnedRequestInit extends RequestInit {
   tls?: { serverName?: string; rejectUnauthorized: true };
@@ -48,11 +49,32 @@ function toPlainHeaders(input: HeadersInit | undefined): Record<string, string> 
     for (const [k, v] of input) out[k.toLowerCase()] = v;
     return out;
   }
-  for (const [k, v] of Object.entries(input)) {
+  for (const k in input) {
+    const v = input[k];
     if (v !== undefined) out[k.toLowerCase()] = v;
   }
   return out;
 }
+
+function buildResponseHeaders(rawHeaders: string[]): Headers | Record<string, string> {
+  const record: Record<string, string> = {};
+  for (let i = 0; i < rawHeaders.length; i += 2) {
+    const k = rawHeaders[i]!.toLowerCase();
+    const v = rawHeaders[i + 1]!;
+    if (k in record) {
+      const headers = new Headers();
+      for (let j = 0; j < rawHeaders.length; j += 2) {
+        headers.append(rawHeaders[j]!, rawHeaders[j + 1]!);
+      }
+      return headers;
+    }
+    record[k] = v;
+  }
+  return record;
+}
+
+const IDLE_TTL_MS = 30_000;
+const IDLE_SWEEP_MS = 5_000;
 
 export function createHttpPool(maxConnections: number) {
   if (!Number.isSafeInteger(maxConnections) || maxConnections < 1 || maxConnections > 65535) {
@@ -68,12 +90,15 @@ export function createHttpPool(maxConnections: number) {
   };
   const plain = new Agent(options);
   const secure = new HttpsAgent({ ...options, rejectUnauthorized: true });
-  const idle = new Map<Duplex, ReturnType<typeof setTimeout>>();
+  const idle = new Map<Duplex, number>();
   const watched = new WeakSet<Duplex>();
   const sseFraming = new WeakMap<Response, "chunked" | number>();
+  const bufferedBodies = new WeakMap<Response, Uint8Array>();
+  const bunPlain = createBunHttp1Pool(maxIdle, sseFraming, bufferedBodies);
   const active = new Set<ClientRequest>();
   const httpSlots = { inUse: 0, waiting: new Map<() => void, () => void>() };
   const httpsSlots = { inUse: 0, waiting: new Map<() => void, () => void>() };
+  let idleSweepTimer: ReturnType<typeof setInterval> | undefined;
   let closed = false;
 
   const notDispatched = () =>
@@ -82,12 +107,22 @@ export function createHttpPool(maxConnections: number) {
       "Upstream request stopped before obtaining a connection",
     );
 
+  const ensureSweep = () => {
+    if (idleSweepTimer) return;
+    idleSweepTimer = setInterval(() => {
+      if (idle.size === 0) return;
+      const cutoff = performance.now() - IDLE_TTL_MS;
+      for (const [socket, since] of idle) {
+        if (since > cutoff) break;
+        idle.delete(socket);
+        socket.destroy();
+      }
+    }, IDLE_SWEEP_MS);
+    idleSweepTimer.unref();
+  };
+
   const forget = (socket: Duplex) => {
-    const t = idle.get(socket);
-    if (t) {
-      clearTimeout(t);
-      idle.delete(socket);
-    }
+    idle.delete(socket);
   };
 
   for (const agent of [plain, secure]) {
@@ -95,13 +130,9 @@ export function createHttpPool(maxConnections: number) {
     const reuse = agent.reuseSocket.bind(agent);
     agent.keepSocketAlive = (socket) => {
       if (closed || maxIdle === 0 || !keep(socket)) return false;
-      forget(socket);
-      const timer = setTimeout(() => {
-        forget(socket);
-        socket.destroy();
-      }, 30_000);
-      timer.unref();
-      idle.set(socket, timer);
+      idle.delete(socket);
+      idle.set(socket, performance.now());
+      ensureSweep();
       if (!watched.has(socket)) {
         watched.add(socket);
         socket.once("close", () => forget(socket));
@@ -109,7 +140,7 @@ export function createHttpPool(maxConnections: number) {
       while (idle.size > maxIdle) {
         const oldest = idle.keys().next().value;
         if (!oldest) break;
-        forget(oldest);
+        idle.delete(oldest);
         oldest.destroy();
       }
       return true;
@@ -123,6 +154,10 @@ export function createHttpPool(maxConnections: number) {
   return {
     sseFraming(response: Response) {
       return sseFraming.get(response);
+    },
+
+    bufferedBody(response: Response) {
+      return bufferedBodies.get(response);
     },
 
     async send(url: URL, init: PinnedRequestInit): Promise<Response> {
@@ -191,7 +226,11 @@ export function createHttpPool(maxConnections: number) {
         } else if (input instanceof ReadableStream) {
           streamBody = input;
         }
-        if (bytes !== undefined && plainHeaders["content-length"] === undefined) {
+        if (!streamBody) {
+          delete plainHeaders["transfer-encoding"];
+          if (bytes === undefined) delete plainHeaders["content-length"];
+        }
+        if (bytes !== undefined) {
           plainHeaders["content-length"] = String(
             typeof bytes === "string" ? Buffer.byteLength(bytes) : bytes.byteLength,
           );
@@ -199,6 +238,26 @@ export function createHttpPool(maxConnections: number) {
 
         const tls = init.tls;
         const serverName = typeof tls === "object" && tls ? tls.serverName : undefined;
+        const rawHost = url.hostname;
+        const hostname = rawHost.charCodeAt(0) === 91 ? rawHost.slice(1, -1) : rawHost;
+        const port = url.port ? Number(url.port) : secureRequest ? 443 : 80;
+        const path = url.search ? `${url.pathname}${url.search}` : url.pathname;
+
+        if (!secureRequest && !streamBody) {
+          const promise = bunPlain.send(
+            hostname,
+            port,
+            path,
+            method,
+            plainHeaders,
+            bytes,
+            init.signal ?? undefined,
+            init.dispatchDeadline,
+            release,
+          );
+          releaseOnClose = true;
+          return await promise;
+        }
 
         return await new Promise<Response>((resolve, reject) => {
           let canHaveDispatched = false;
@@ -232,126 +291,130 @@ export function createHttpPool(maxConnections: number) {
             if (init.dispatchDeadline !== undefined) sendBody();
           };
 
-          const request = (secureRequest ? httpsRequest : httpRequest)(
-            url,
-            {
-              method,
-              headers: plainHeaders,
-              agent: secureRequest ? secure : plain,
-              ...(secureRequest ? { rejectUnauthorized: true as const } : {}),
-              ...(secureRequest && serverName ? { servername: serverName } : {}),
-            },
-            (response) => {
-              markConnected();
-              response.once("end", detachAbort);
-              try {
-                const status = response.statusCode ?? 502;
-                const rawHeaders = response.rawHeaders;
-                let contentEncoding = "";
-                let contentType = "";
-                let contentLengthStr: string | null = null;
-                let transferEncoding: string | null = null;
-                for (let i = 0; i < rawHeaders.length; i += 2) {
-                  const k = rawHeaders[i]!.toLowerCase();
-                  const v = rawHeaders[i + 1]!;
-                  if (k === "content-encoding") {
-                    contentEncoding = contentEncoding ? `${contentEncoding},${v}` : v;
-                  } else if (k === "content-type") contentType = v;
-                  else if (k === "content-length") contentLengthStr = v;
-                  else if (k === "transfer-encoding") transferEncoding = v;
-                }
+          const reqOptions = {
+            protocol: url.protocol,
+            hostname,
+            port,
+            path,
+            method,
+            headers: plainHeaders,
+            agent: secureRequest ? secure : plain,
+            ...(secureRequest ? { rejectUnauthorized: true as const } : {}),
+            ...(secureRequest && serverName ? { servername: serverName } : {}),
+          };
 
-                if (status === 204 || status === 205 || status === 304 || method === "HEAD") {
-                  const output = new Headers();
-                  for (let i = 0; i < rawHeaders.length; i += 2) {
-                    output.append(rawHeaders[i]!, rawHeaders[i + 1]!);
-                  }
-                  response.resume();
-                  resolve(new Response(null, { status, headers: output }));
-                  return;
-                }
-
-                const isSse = /^text\/event-stream(?:\s*;|$)/i.test(contentType);
-                const contentLen =
-                  contentLengthStr !== null && /^\d+$/.test(contentLengthStr)
-                    ? Number(contentLengthStr)
-                    : -1;
-
-                if (!contentEncoding && !isSse && contentLen >= 0 && contentLen <= 65536) {
-                  const chunks: Buffer[] = [];
-                  let total = 0;
-                  response.on("data", (chunk: Buffer) => {
-                    chunks.push(chunk);
-                    total += chunk.byteLength;
-                  });
-                  response.once("end", () => {
-                    const output = new Headers();
-                    for (let i = 0; i < rawHeaders.length; i += 2) {
-                      output.append(rawHeaders[i]!, rawHeaders[i + 1]!);
-                    }
-                    const buf = chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks, total);
-                    resolve(new Response(buf as BodyInit, { status, headers: output }));
-                  });
-                  response.once("error", (err) => reject(err));
-                  return;
-                }
-
-                const output = new Headers();
-                for (let i = 0; i < rawHeaders.length; i += 2) {
-                  output.append(rawHeaders[i]!, rawHeaders[i + 1]!);
-                }
-                const decompressors = {
-                  gzip: createGunzip,
-                  "x-gzip": createGunzip,
-                  deflate: createInflate,
-                  br: createBrotliDecompress,
-                  zstd: createZstdDecompress,
-                };
-                const encodings = contentEncoding
-                  .split(",")
-                  .map((value) => value.trim().toLowerCase())
-                  .filter((value) => value && value !== "identity");
-                let body: Readable = response;
-                if (
-                  encodings.length &&
-                  encodings.every((value) => Object.hasOwn(decompressors, value))
-                ) {
-                  const streams = encodings
-                    .reverse()
-                    .map((value) => decompressors[value as keyof typeof decompressors]());
-                  body = streams.at(-1)!;
-                  pipeline([response, ...streams], () => {});
-                  output.delete("content-encoding");
-                  output.delete("content-length");
-                }
-                const result = new Response(
-                  Readable.toWeb(body, {
-                    strategy: {
-                      highWaterMark: 16384,
-                      size: (chunk: Uint8Array) => chunk.byteLength,
-                    },
-                  }) as unknown as ReadableStream<Uint8Array>,
-                  { status, headers: output },
-                );
-                if (!encodings.length && isSse) {
-                  if (contentLengthStr === null && transferEncoding?.toLowerCase() === "chunked") {
-                    sseFraming.set(result, "chunked");
-                  } else if (
-                    transferEncoding === null &&
-                    contentLengthStr !== null &&
-                    /^\d+$/.test(contentLengthStr) &&
-                    Number.isSafeInteger(Number(contentLengthStr))
-                  ) {
-                    sseFraming.set(result, Number(contentLengthStr));
-                  }
-                }
-                resolve(result);
-              } catch (error) {
-                response.destroy();
-                reject(error);
+          const request = (secureRequest ? httpsRequest : httpRequest)(reqOptions, (response) => {
+            markConnected();
+            response.once("end", detachAbort);
+            try {
+              const status = response.statusCode ?? 502;
+              const rawHeaders = response.rawHeaders;
+              let contentEncoding = "";
+              let contentType = "";
+              let contentLengthStr: string | null = null;
+              let transferEncoding: string | null = null;
+              for (let i = 0; i < rawHeaders.length; i += 2) {
+                const k = rawHeaders[i]!.toLowerCase();
+                const v = rawHeaders[i + 1]!;
+                if (k === "content-encoding") {
+                  contentEncoding = contentEncoding ? `${contentEncoding},${v}` : v;
+                } else if (k === "content-type") contentType = v;
+                else if (k === "content-length") contentLengthStr = v;
+                else if (k === "transfer-encoding") transferEncoding = v;
               }
-            },
-          );
+
+              if (status === 204 || status === 205 || status === 304 || method === "HEAD") {
+                response.resume();
+                resolve(new Response(null, { status, headers: buildResponseHeaders(rawHeaders) }));
+                return;
+              }
+
+              const isSse = /^text\/event-stream(?:\s*;|$)/i.test(contentType);
+              const contentLen =
+                contentLengthStr !== null && /^\d+$/.test(contentLengthStr)
+                  ? Number(contentLengthStr)
+                  : -1;
+
+              if (!contentEncoding && !isSse && contentLen >= 0 && contentLen <= 65536) {
+                const chunks: Buffer[] = [];
+                let total = 0;
+                response.on("data", (chunk: Buffer) => {
+                  chunks.push(chunk);
+                  total += chunk.byteLength;
+                });
+                response.once("end", () => {
+                  const buf =
+                    chunks.length === 1
+                      ? chunks[0]!
+                      : chunks.length === 0
+                        ? new Uint8Array(0)
+                        : Buffer.concat(chunks, total);
+                  const res = new Response(buf as BodyInit, {
+                    status,
+                    headers: buildResponseHeaders(rawHeaders),
+                  });
+                  bufferedBodies.set(res, buf);
+                  resolve(res);
+                });
+                response.once("error", (err) => reject(err));
+                return;
+              }
+
+              const output = new Headers();
+              for (let i = 0; i < rawHeaders.length; i += 2) {
+                output.append(rawHeaders[i]!, rawHeaders[i + 1]!);
+              }
+              const decompressors = {
+                gzip: createGunzip,
+                "x-gzip": createGunzip,
+                deflate: createInflate,
+                br: createBrotliDecompress,
+                zstd: createZstdDecompress,
+              };
+              const encodings = contentEncoding
+                .split(",")
+                .map((value) => value.trim().toLowerCase())
+                .filter((value) => value && value !== "identity");
+              let body: Readable = response;
+              if (
+                encodings.length &&
+                encodings.every((value) => Object.hasOwn(decompressors, value))
+              ) {
+                const streams = encodings
+                  .reverse()
+                  .map((value) => decompressors[value as keyof typeof decompressors]());
+                body = streams.at(-1)!;
+                pipeline([response, ...streams], () => {});
+                output.delete("content-encoding");
+                output.delete("content-length");
+              }
+              const result = new Response(
+                Readable.toWeb(body, {
+                  strategy: {
+                    highWaterMark: 16384,
+                    size: (chunk: Uint8Array) => chunk.byteLength,
+                  },
+                }) as unknown as ReadableStream<Uint8Array>,
+                { status, headers: output },
+              );
+              if (!encodings.length && isSse) {
+                if (contentLengthStr === null && transferEncoding?.toLowerCase() === "chunked") {
+                  sseFraming.set(result, "chunked");
+                } else if (
+                  transferEncoding === null &&
+                  contentLengthStr !== null &&
+                  /^\d+$/.test(contentLengthStr) &&
+                  Number.isSafeInteger(Number(contentLengthStr))
+                ) {
+                  sseFraming.set(result, Number(contentLengthStr));
+                }
+              }
+              resolve(result);
+            } catch (error) {
+              response.destroy();
+              reject(error);
+            }
+          });
 
           const watchSocket = (socket: NonNullable<ClientRequest["socket"]>) => {
             assigned = socket;
@@ -438,10 +501,14 @@ export function createHttpPool(maxConnections: number) {
       for (const slots of [httpSlots, httpsSlots]) {
         for (const abort of slots.waiting.keys()) abort();
       }
-      for (const timer of idle.values()) clearTimeout(timer);
+      if (idleSweepTimer) {
+        clearInterval(idleSweepTimer);
+        idleSweepTimer = undefined;
+      }
       idle.clear();
       for (const request of active) request.destroy(new Error("Upstream transport closed"));
       active.clear();
+      bunPlain.close();
       plain.destroy();
       secure.destroy();
     },

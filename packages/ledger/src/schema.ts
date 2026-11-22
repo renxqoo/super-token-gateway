@@ -672,12 +672,16 @@ export const outboxEvents = pgTable(
     kind: text("kind").notNull(),
     requestId: uuid("request_id"),
     projectId: uuid("project_id"),
+    shard: smallint("shard").notNull().default(0),
     payload: pgJsonb<Record<string, unknown>>("payload").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .notNull()
       .defaultNow(),
   },
-  (t) => [index("outbox_events_project_idx").on(t.projectId, t.seq)],
+  (t) => [
+    index("outbox_events_project_idx").on(t.projectId, t.seq),
+    index("outbox_events_shard_seq_idx").on(t.shard, t.seq),
+  ],
 );
 
 export const outboxConsumers = pgTable("outbox_consumers", {
@@ -690,6 +694,24 @@ export const outboxConsumers = pgTable("outbox_consumers", {
   leasedUntil: timestamp("leased_until", { withTimezone: true, mode: "string" }),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
+
+export const outboxConsumerShards = pgTable(
+  "outbox_consumer_shards",
+  {
+    name: text("name").notNull(),
+    shard: smallint("shard").notNull(),
+    ackedSeq: bigint("acked_seq", { mode: "bigint" })
+      .notNull()
+      .default(sql`0`),
+    leaseToken: uuid("lease_token"),
+    leasedThroughSeq: bigint("leased_through_seq", { mode: "bigint" }),
+    leasedUntil: timestamp("leased_until", { withTimezone: true, mode: "string" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.name, t.shard] })],
+);
 
 export const adminAuditEvents = pgTable(
   "admin_audit_events",
@@ -748,6 +770,7 @@ export const ledgerSchema = {
   billingResolutions,
   outboxEvents,
   outboxConsumers,
+  outboxConsumerShards,
 };
 
 export function createDrizzle(db: SQL) {

@@ -716,16 +716,22 @@ export async function applyDirectSettlements(
   }
 
   if (outboxBatch.length > 0) {
+    const outboxJson = JSON.stringify(
+      outboxBatch.map((o) => ({
+        event_id: o.event_id,
+        kind: o.kind,
+        request_id: o.request_id,
+        project_id: o.project_id,
+        payload: o.payload,
+      })),
+    );
     await tx`
           INSERT INTO public.outbox_events (event_id, kind, request_id, project_id, payload)
-          SELECT u.event_id, u.kind, u.request_id, u.project_id, u.payload::jsonb
-          FROM unnest(
-            ${outboxBatch.map((o) => o.event_id)}::uuid[],
-            ${outboxBatch.map((o) => o.kind)}::text[],
-            ${outboxBatch.map((o) => o.request_id)}::uuid[],
-            ${outboxBatch.map((o) => o.project_id)}::uuid[],
-            ${outboxBatch.map((o) => JSON.stringify(o.payload))}::text[]
-          ) AS u(event_id, kind, request_id, project_id, payload)
+          SELECT u.event_id, u.kind, u.request_id, u.project_id, u.payload
+          FROM jsonb_to_recordset(${outboxJson}::text::jsonb) AS u(
+            event_id uuid, kind text, request_id uuid, project_id uuid, payload jsonb
+          )
+          ORDER BY public.outbox_shard(u.project_id) ASC, u.request_id ASC
         `;
   }
   return detachedNotifications;

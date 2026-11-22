@@ -1,5 +1,13 @@
-import type { Context } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { GatewayError, object, optionalObject } from "@gateway/contracts";
+
+export interface InferenceContext {
+  req: {
+    raw: Request;
+    query(name: string): string | undefined;
+  };
+  json(data: unknown, status?: ContentfulStatusCode, headers?: Record<string, string>): Response;
+}
 import {
   canonical,
   normalizedNumber,
@@ -67,10 +75,10 @@ import {
 import type { GatewayConfig } from "./config.ts";
 import { createResponsesModeration } from "./responses-moderation.ts";
 import {
+  createStreamChunkReader,
   createStreamRelay,
   createTerminalBuffer,
   peekStream,
-  readStreamChunk,
 } from "./stream-relay.ts";
 import { parseOrCreateTrace, type GatewayMetrics, type TraceContext } from "./observability.ts";
 import type { SnapshotManager } from "./snapshot.ts";
@@ -182,7 +190,15 @@ async function readResponseBytesFast(
   resp: Response,
   maxBytes: number,
   signal: AbortSignal,
+  bufferedBody?: Uint8Array,
 ): Promise<Uint8Array> {
+  if (bufferedBody !== undefined) {
+    signal.throwIfAborted();
+    if (bufferedBody.byteLength > maxBytes) {
+      throw new GatewayError(413, "body_too_large", "Payload exceeds the configured size limit");
+    }
+    return bufferedBody;
+  }
   const clHeader = resp.headers.get("content-length");
   if (clHeader !== null && /^\d+$/.test(clHeader)) {
     const cl = Number(clHeader);
@@ -201,29 +217,30 @@ async function readResponseBytesFast(
   return readBounded(resp.body, maxBytes, signal);
 }
 
-function extractApiKey(c: Context, operation?: Operation): string | null {
-  const auth = c.req.header("authorization");
-  if (auth && auth.toLowerCase().startsWith("bearer ")) {
+function extractApiKey(c: InferenceContext, operation?: Operation): string | null {
+  const headers = c.req.raw.headers;
+  const auth = headers.get("authorization");
+  if (auth && (auth.startsWith("Bearer ") || auth.toLowerCase().startsWith("bearer "))) {
     const token = auth.slice(7).trim();
     if (token) return token;
   }
   if (operation === "messages" || operation === undefined) {
-    const xKey = c.req.header("x-api-key")?.trim();
+    const xKey = headers.get("x-api-key")?.trim();
     if (xKey) return xKey;
   }
   if (operation === "gemini" || operation === undefined) {
-    const gKey = c.req.header("x-goog-api-key")?.trim() || c.req.query("key")?.trim();
+    const gKey = headers.get("x-goog-api-key")?.trim() || c.req.query("key")?.trim();
     if (gKey) return gKey;
   }
   return null;
 }
 
 export function authenticateRequest(
-  c: Context,
+  c: InferenceContext,
   snap: ConfigSnapshot,
   config: GatewayConfig,
   operation?: Operation,
-  peerAddress?: string,
+  peerAddress?: string | (() => string | undefined),
 ): { key: ApiKeyRecord; project: ProjectRecord } {
   const rawKey = extractApiKey(c, operation);
   if (!rawKey) throw new GatewayError(401, "unauthorized", "Missing API key");
@@ -236,9 +253,10 @@ export function authenticateRequest(
     throw new GatewayError(403, "forbidden", "API key role cannot invoke models");
   }
   if (key.allowed_cidrs.length > 0) {
+    const resolvedPeer = typeof peerAddress === "function" ? peerAddress() : peerAddress;
     const addr = clientAddress(
-      peerAddress,
-      c.req.header("x-forwarded-for") ?? null,
+      resolvedPeer,
+      c.req.raw.headers.get("x-forwarded-for"),
       config.trustedProxyCidrs,
     );
     if (!addr || !inCidrs(addr, key.allowed_cidrs)) {
@@ -371,7 +389,7 @@ function responseHeaders(
 }
 
 function errorJson(
-  c: Context,
+  c: InferenceContext,
   operation: Operation,
   err: unknown,
   requestId: string,
@@ -438,19 +456,68 @@ function classifyPluginBlock(
 }
 
 export async function handleInferenceRequest(
-  c: Context,
+  c: InferenceContext,
   deps: ProxyDependencies,
   operation: Operation,
   pathOverride?: { model: string; stream: boolean },
-  peerAddress?: string,
+  peerAddress?: string | (() => string | undefined),
 ): Promise<Response> {
   const requestId = crypto.randomUUID();
-  const trace = parseOrCreateTrace(c.req.header("traceparent"));
+  const reqHeaders = c.req.raw.headers;
+  const trace = parseOrCreateTrace(reqHeaders.get("traceparent") ?? undefined);
   const requestStart = performance.now();
   deps.metrics.requestsTotal++;
 
   let releaseGuard: (() => void) | undefined;
   let streamOwnsGuard = false;
+  let drainAborted = false;
+  let projectPermitRevoked = false;
+  let channelPermitRevoked = false;
+  let activeAbortNotify: ((reason: unknown) => void) | null = null;
+  let activeLinkedDispose: (() => void) | null = null;
+
+  const createLinkedController = (
+    sources: readonly (AbortSignal | undefined)[],
+    includeChannelPermit = false,
+    attachToRequest = true,
+  ) => {
+    const controller = new AbortController();
+    let disposed = false;
+    const trigger = (reason: unknown) => {
+      if (!controller.signal.aborted) controller.abort(reason);
+    };
+    if (drainAborted) {
+      trigger(new Error("Gateway shutting down"));
+    } else if (projectPermitRevoked || (includeChannelPermit && channelPermitRevoked)) {
+      trigger(new Error("Shared concurrency permit could not be renewed"));
+    }
+    let singleExtra: AbortSignal | undefined;
+    let activeSources: AbortSignal[] | undefined;
+    for (let i = 0; i < sources.length; i++) {
+      const src = sources[i];
+      if (!src || deps.snapshot.isNoopPluginSignal(src)) continue;
+      if (!singleExtra) {
+        singleExtra = src;
+      } else {
+        if (!activeSources) activeSources = [controller.signal, singleExtra];
+        activeSources.push(src);
+      }
+    }
+    const signal = activeSources
+      ? AbortSignal.any(activeSources)
+      : singleExtra
+        ? AbortSignal.any([controller.signal, singleExtra])
+        : controller.signal;
+    if (!controller.signal.aborted && attachToRequest) {
+      activeAbortNotify = trigger;
+    }
+    const dispose = () => {
+      if (disposed) return;
+      disposed = true;
+      if (attachToRequest && activeAbortNotify === trigger) activeAbortNotify = null;
+    };
+    return { controller, signal, trigger, dispose };
+  };
 
   let releaseProjectLimit: (() => void) | null = null;
   let releaseChannelLimit: (() => void) | null = null;
@@ -507,6 +574,11 @@ export async function handleInferenceRequest(
   const emitAccessLog = (status: number, errorCode: string | null) => {
     if (logged) return;
     logged = true;
+    const durationMs = performance.now() - requestStart;
+    if (!deps.metrics.isAccessLogEnabled) {
+      deps.metrics.observeRequestFast(operation, status, logChannel, durationMs, logTtftMs);
+      return;
+    }
     deps.metrics.observeRequest({
       trace_id: trace.traceId,
       request_id: requestId,
@@ -519,16 +591,18 @@ export async function handleInferenceRequest(
       attempts: logAttempts,
       failover: logFailover,
       moderation_blocked: logModBlocked,
-      duration_ms: performance.now() - requestStart,
+      duration_ms: durationMs,
       ttft_ms: logTtftMs,
       error_code: errorCode,
     });
   };
 
   try {
-    const guard = deps.lifecycle.enter();
+    const guard = deps.lifecycle.enterCallback(() => {
+      drainAborted = true;
+      activeAbortNotify?.(new Error("Gateway shutting down"));
+    });
     releaseGuard = guard.release;
-    const requestCancellation = AbortSignal.any([c.req.raw.signal, guard.controller.signal]);
     const admissionError = (quotaLost: boolean) =>
       c.req.raw.signal.aborted
         ? new GatewayError(499, "client_aborted", "Client disconnected")
@@ -549,7 +623,7 @@ export async function handleInferenceRequest(
     const { key, project } = authenticateRequest(c, snap, deps.config, operation, peerAddress);
     logProjectId = project.id;
 
-    const contentType = c.req.header("content-type") ?? "";
+    const contentType = reqHeaders.get("content-type") ?? "";
     const isMultipartOp =
       (operation === "transcription" ||
         operation === "translation" ||
@@ -560,15 +634,18 @@ export async function handleInferenceRequest(
     let multipartEntries: [string, string | File][] | undefined;
 
     if (isMultipartOp) {
-      const received = await readBounded(
-        c.req.raw.body,
-        deps.config.maxBodyBytes,
-        AbortSignal.any([
-          c.req.raw.signal,
-          guard.controller.signal,
-          AbortSignal.timeout(deps.config.attemptTimeoutMs),
-        ]),
+      const mpLinked = createLinkedController([c.req.raw.signal]);
+      const mpTimer = setTimeout(
+        () => mpLinked.trigger(new Error("Request body read timed out")),
+        deps.config.attemptTimeoutMs,
       );
+      let received: Uint8Array;
+      try {
+        received = await readBounded(c.req.raw.body, deps.config.maxBodyBytes, mpLinked.signal);
+      } finally {
+        clearTimeout(mpTimer);
+        mpLinked.dispose();
+      }
       const form = await new Response(received as BodyInit, {
         headers: { "content-type": contentType },
       })
@@ -634,6 +711,10 @@ export async function handleInferenceRequest(
       { rpm: project.rpm, tpm: project.tpm, concurrency: project.concurrency },
       estimatedTokens,
       deps.config.holdTtlMs,
+      () => {
+        projectPermitRevoked = true;
+        activeAbortNotify?.(new Error("Shared concurrency permit could not be renewed"));
+      },
     );
     if (!projAcq.ok) {
       if (projAcq.reason === "unavailable") {
@@ -646,9 +727,6 @@ export async function handleInferenceRequest(
       throw new GatewayError(429, `rate_limit_${projAcq.reason}`, "Project rate limit exceeded");
     }
     releaseProjectLimit = projAcq.release;
-    const requestSignal = projAcq.signal
-      ? AbortSignal.any([requestCancellation, projAcq.signal])
-      : requestCancellation;
 
     const rawRoutes = snap.routesByModel.get(model.name) ?? [];
     const hydrated: HydratedCandidate[] = [];
@@ -770,28 +848,33 @@ export async function handleInferenceRequest(
           http_status?: number;
           safe_message?: string;
         } | null = null;
-        const policySignal = AbortSignal.any([pluginSignal, requestSignal]);
-        const transformed = await transformRequestTexts(clientBody, operation, async (partText) => {
-          const preRes = await deps.pluginEngine.runUnary(
-            "on_request",
-            steps,
-            snap.plugins,
-            { request_id: requestId, project_id: project.id, model: model.name, operation },
-            partText,
-            policySignal,
-          );
-          localAudit.push(...preRes.audit);
-          if (preRes.blocked) {
-            preBlocked = {
-              ...(preRes.outcome_kind !== undefined ? { outcome_kind: preRes.outcome_kind } : {}),
-              ...(preRes.rule_code !== undefined ? { rule_code: preRes.rule_code } : {}),
-              ...(preRes.http_status !== undefined ? { http_status: preRes.http_status } : {}),
-              ...(preRes.safe_message !== undefined ? { safe_message: preRes.safe_message } : {}),
-            };
-            return { blocked: true, text: "" };
-          }
-          return { blocked: false, text: preRes.text };
-        });
+        const policyLinked = createLinkedController([c.req.raw.signal, pluginSignal]);
+        let transformed: Awaited<ReturnType<typeof transformRequestTexts>>;
+        try {
+          transformed = await transformRequestTexts(clientBody, operation, async (partText) => {
+            const preRes = await deps.pluginEngine.runUnary(
+              "on_request",
+              steps,
+              snap.plugins,
+              { request_id: requestId, project_id: project.id, model: model.name, operation },
+              partText,
+              policyLinked.signal,
+            );
+            localAudit.push(...preRes.audit);
+            if (preRes.blocked) {
+              preBlocked = {
+                ...(preRes.outcome_kind !== undefined ? { outcome_kind: preRes.outcome_kind } : {}),
+                ...(preRes.rule_code !== undefined ? { rule_code: preRes.rule_code } : {}),
+                ...(preRes.http_status !== undefined ? { http_status: preRes.http_status } : {}),
+                ...(preRes.safe_message !== undefined ? { safe_message: preRes.safe_message } : {}),
+              };
+              return { blocked: true, text: "" };
+            }
+            return { blocked: false, text: preRes.text };
+          });
+        } finally {
+          policyLinked.dispose();
+        }
         if (transformed.blocked && preBlocked) {
           const blk = preBlocked as {
             outcome_kind?: PluginOutcomeKind;
@@ -840,7 +923,7 @@ export async function handleInferenceRequest(
     if (firstInput instanceof Response) return firstInput;
     let activeInput = firstInput;
 
-    const idempotencyKey = c.req.header("idempotency-key")?.trim() || null;
+    const idempotencyKey = reqHeaders.get("idempotency-key")?.trim() || null;
     let fingerprint = "";
     if (idempotencyKey !== null) {
       const body = multipartEntries
@@ -909,7 +992,9 @@ export async function handleInferenceRequest(
         continue;
       }
       preparedInput.pluginSignal.throwIfAborted();
-      if (requestSignal.aborted) throw admissionError(Boolean(projAcq.signal?.aborted));
+      if (c.req.raw.signal.aborted || drainAborted || projectPermitRevoked) {
+        throw admissionError(projectPermitRevoked);
+      }
       const attemptId = crypto.randomUUID();
       const holdRes = await deps.ledger.acquireHold({
         request_id: requestId,
@@ -1048,6 +1133,7 @@ export async function handleInferenceRequest(
         deps.metrics.failoversTotal++;
       }
 
+      channelPermitRevoked = false;
       const chLimit = await deps.cluster.acquireRateLimit(
         `channel:${cand.channel.id}`,
         {
@@ -1057,6 +1143,10 @@ export async function handleInferenceRequest(
         },
         1,
         deps.config.holdTtlMs,
+        () => {
+          channelPermitRevoked = true;
+          activeAbortNotify?.(new Error("Shared concurrency permit could not be renewed"));
+        },
       );
       if (!chLimit.ok) {
         if (chLimit.reason === "unavailable") {
@@ -1082,16 +1172,10 @@ export async function handleInferenceRequest(
 
       const attemptTimeoutMs =
         cand.route.retry_policy.attempt_timeout_ms ?? deps.config.attemptTimeoutMs;
-      const attemptAbort = new AbortController();
-      const permitSignals = [projAcq.signal, chLimit.signal].filter(
-        (signal) => signal !== undefined,
-      );
-      const upstreamSignal = AbortSignal.any([
-        attemptAbort.signal,
-        requestCancellation,
-        pluginSignal,
-        ...permitSignals,
-      ]);
+      const attemptLinked = createLinkedController([c.req.raw.signal, pluginSignal], true);
+      activeLinkedDispose = attemptLinked.dispose;
+      const attemptAbort = attemptLinked.controller;
+      const upstreamSignal = attemptLinked.signal;
       const timeoutTimer = setTimeout(
         () => attemptAbort.abort(new Error("attempt_timeout")),
         attemptTimeoutMs,
@@ -1102,8 +1186,9 @@ export async function handleInferenceRequest(
       let prepared: Awaited<ReturnType<typeof prepareUpstreamRequest>>;
       try {
         pluginSignal.throwIfAborted();
-        if (requestCancellation.aborted || permitSignals.some((signal) => signal.aborted)) {
-          throw admissionError(permitSignals.some((signal) => signal.aborted));
+        const quotaLostNow = projectPermitRevoked || channelPermitRevoked;
+        if (c.req.raw.signal.aborted || drainAborted || quotaLostNow) {
+          throw admissionError(quotaLostNow);
         }
         const secret = deps.snapshot.decryptChannelSecret(cand.channel);
         prepared = await prepareUpstreamRequest({
@@ -1133,6 +1218,8 @@ export async function handleInferenceRequest(
         });
       } catch (err) {
         clearTimeout(timeoutTimer);
+        attemptLinked.dispose();
+        activeLinkedDispose = null;
         releaseChannelLimit();
         releaseChannelLimit = null;
         pluginSignal.throwIfAborted();
@@ -1202,6 +1289,8 @@ export async function handleInferenceRequest(
         );
       } catch (err) {
         clearTimeout(timeoutTimer);
+        attemptLinked.dispose();
+        activeLinkedDispose = null;
         releaseChannelLimit();
         releaseChannelLimit = null;
         const latencyMs = performance.now() - startedAt;
@@ -1213,8 +1302,8 @@ export async function handleInferenceRequest(
           if (err instanceof UpstreamPreDispatchError) currentAttemptDispatched = false;
           throw pluginSignal.reason;
         }
-        const quotaLost = permitSignals.some((signal) => signal.aborted);
-        if (requestCancellation.aborted || quotaLost) {
+        const quotaLost = projectPermitRevoked || channelPermitRevoked;
+        if (c.req.raw.signal.aborted || drainAborted || quotaLost) {
           releaseProbeFor(cand.channel_id);
           releaseUnusedProbes(cursor + 1);
           holdFinalized = true;
@@ -1246,6 +1335,8 @@ export async function handleInferenceRequest(
 
       if (pluginSignal.aborted) {
         clearTimeout(timeoutTimer);
+        attemptLinked.dispose();
+        activeLinkedDispose = null;
         void upstreamResp.body?.cancel(pluginSignal.reason).catch(() => undefined);
         throw pluginSignal.reason;
       }
@@ -1253,6 +1344,8 @@ export async function handleInferenceRequest(
       logTtftMs = latencyMs;
       if (!upstreamResp.ok) {
         clearTimeout(timeoutTimer);
+        attemptLinked.dispose();
+        activeLinkedDispose = null;
         void upstreamResp.body?.cancel().catch(() => undefined);
         releaseChannelLimit();
         releaseChannelLimit = null;
@@ -1300,15 +1393,28 @@ export async function handleInferenceRequest(
 
       if ((!isStream && !isUpstreamSse) || isFakeJsonOnStream) {
         let retryFromLogicalError = false;
+        const postResponse: { linked: ReturnType<typeof createLinkedController> | null } = {
+          linked: null,
+        };
+        const getPostResponseSignal = () => {
+          if (!postResponse.linked) {
+            postResponse.linked = createLinkedController([c.req.raw.signal, pluginSignal], false);
+          }
+          return postResponse.linked.signal;
+        };
         try {
           const respBytes = await readResponseBytesFast(
             upstreamResp,
             deps.config.maxBodyBytes,
             upstreamSignal,
+            deps.transport.bufferedBody(upstreamResp),
           );
           clearTimeout(timeoutTimer);
+          attemptLinked.dispose();
+          activeLinkedDispose = null;
+          releaseChannelLimit?.();
+          releaseChannelLimit = null;
           pluginSignal.throwIfAborted();
-          const postResponseSignal = AbortSignal.any([pluginSignal, requestSignal]);
           const droppedHeader: Record<string, string> =
             prepared.droppedFields.length > 0
               ? { "x-gateway-dropped-fields": prepared.droppedFields.join(",") }
@@ -1387,7 +1493,7 @@ export async function handleInferenceRequest(
                 plugin: prepared.resolvedProvider.plugin,
                 config: prepared.resolvedProvider.config,
                 tenantId: project.id,
-                signal: postResponseSignal,
+                signal: getPostResponseSignal(),
                 ...(deps.config.pluginSigningPublicKeyPem
                   ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
                   : {}),
@@ -1405,9 +1511,9 @@ export async function handleInferenceRequest(
               releaseUnusedProbes(cursor + 1);
               holdFinalized = true;
               await deps.ledger.markUnknown(requestId);
-              if (requestSignal.aborted) {
+              if (c.req.raw.signal.aborted || drainAborted || projectPermitRevoked) {
                 releaseProbeFor(cand.channel.id);
-                throw admissionError(Boolean(projAcq.signal?.aborted));
+                throw admissionError(projectPermitRevoked);
               }
               if (err instanceof WasmCapacityError) {
                 releaseProbeFor(cand.channel.id);
@@ -1439,8 +1545,6 @@ export async function handleInferenceRequest(
                   latencyMs,
                 );
                 markProbeCompleted(cand.channel.id);
-                releaseChannelLimit?.();
-                releaseChannelLimit = null;
                 pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
                 lastErrorStatus =
                   wasmResp.status ?? (wasmResp.retry_kind === "rate_limit" ? 429 : 502);
@@ -1536,8 +1640,6 @@ export async function handleInferenceRequest(
                   latencyMs,
                 );
                 markProbeCompleted(cand.channel.id);
-                releaseChannelLimit?.();
-                releaseChannelLimit = null;
                 pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
                 lastErrorStatus =
                   matchedErr.http_status ?? (matchedErr.retry_kind === "rate_limit" ? 429 : 502);
@@ -1614,7 +1716,7 @@ export async function handleInferenceRequest(
                 );
                 clientJson = encodeResponse(completion, operation, model.name);
               } else {
-                clientJson = copyExact(adaptedJson, { ...adaptedJson });
+                clientJson = adaptedJson;
                 if (typeof clientJson.model === "string") clientJson.model = model.name;
               }
             }
@@ -1657,7 +1759,7 @@ export async function handleInferenceRequest(
                 snap.plugins,
                 { request_id: requestId, project_id: project.id, model: model.name, operation },
                 respText,
-                postResponseSignal,
+                getPostResponseSignal(),
               );
               allAudit.push(...postRes.audit);
               if (postRes.blocked) {
@@ -1734,17 +1836,26 @@ export async function handleInferenceRequest(
               );
             }
             emitAccessLog(200, null);
+            const okHeaders: Record<string, string> = {
+              "x-request-id": requestId,
+              "x-trace-id": trace.traceId,
+              traceparent: trace.traceparent,
+              "content-type": "application/json",
+              "x-gateway-channel": cand.channel.name,
+            };
+            if (prepared.droppedFields.length > 0) {
+              okHeaders["x-gateway-dropped-fields"] = prepared.droppedFields.join(",");
+            }
             return new Response(stringifyExact(clientJson), {
               status: 200,
-              headers: responseHeaders(requestId, trace, {
-                "content-type": "application/json",
-                "x-gateway-channel": cand.channel.name,
-                ...droppedHeader,
-              }),
+              headers: okHeaders,
             });
           }
         } finally {
           clearTimeout(timeoutTimer);
+          postResponse.linked?.dispose();
+          attemptLinked.dispose();
+          activeLinkedDispose = null;
         }
         if (retryFromLogicalError) {
           continue;
@@ -1820,9 +1931,11 @@ export async function handleInferenceRequest(
           }
         } catch (err) {
           clearTimeout(timeoutTimer);
+          attemptLinked.dispose();
+          activeLinkedDispose = null;
           await upstreamBody?.cancel().catch(() => undefined);
           pluginSignal.throwIfAborted();
-          if (c.req.raw.signal.aborted || guard.controller.signal.aborted) throw err;
+          if (c.req.raw.signal.aborted || drainAborted) throw err;
           if (err instanceof WasmCapacityError) {
             releaseProbeFor(cand.channel.id);
             throw new GatewayError(503, "provider_capacity_unavailable", err.message);
@@ -1839,6 +1952,8 @@ export async function handleInferenceRequest(
         }
         if (logicalError) {
           clearTimeout(timeoutTimer);
+          attemptLinked.dispose();
+          activeLinkedDispose = null;
           await upstreamBody?.cancel().catch(() => undefined);
           releaseChannelLimit?.();
           releaseChannelLimit = null;
@@ -1874,20 +1989,18 @@ export async function handleInferenceRequest(
       clearTimeout(timeoutTimer);
       holdFinalized = true;
       const streamProbeChannel = acquiredProbes.delete(cand.channel.id) ? cand.channel.id : null;
-      const streamDeadline = new AbortController();
+      const streamLinked = createLinkedController([c.req.raw.signal, pluginSignal], true, false);
+      const streamSignal = streamLinked.signal;
+      activeAbortNotify = (reason) => {
+        attemptLinked.trigger(reason);
+        streamLinked.trigger(reason);
+      };
       const durationTimer = setTimeout(() => {
         const reason = new Error("Upstream stream exceeded its maximum duration");
-        streamDeadline.abort(reason);
+        streamLinked.trigger(reason);
         attemptAbort.abort(reason);
       }, maxStreamDurationMs);
       durationTimer.unref();
-      const streamSignal = AbortSignal.any([
-        c.req.raw.signal,
-        guard.controller.signal,
-        streamDeadline.signal,
-        pluginSignal,
-        ...permitSignals,
-      ]);
       const abortedFrame = () => {
         if (c.req.raw.signal.aborted) return undefined;
         if (pluginSignal.aborted) {
@@ -1900,7 +2013,7 @@ export async function handleInferenceRequest(
             requestId,
           );
         }
-        const quotaLost = permitSignals.some((signal) => signal.aborted);
+        const quotaLost = projectPermitRevoked || channelPermitRevoked;
         return formatProtocolSseError(
           operation,
           503,
@@ -1909,8 +2022,8 @@ export async function handleInferenceRequest(
           requestId,
         );
       };
-      const readNext = (reader: ReadableStreamDefaultReader<Uint8Array>) =>
-        readStreamChunk(
+      const openStreamReader = (reader: ReadableStreamDefaultReader<Uint8Array>) =>
+        createStreamChunkReader(
           reader,
           deps.config.streamIdleTimeoutMs ?? attemptTimeoutMs,
           () => attemptAbort.abort(new Error("Upstream stream exceeded its idle timeout")),
@@ -1935,6 +2048,10 @@ export async function handleInferenceRequest(
         streamCleanupDone = true;
         if (streamCounted) deps.metrics.activeStreams--;
         clearTimeout(durationTimer);
+        streamLinked.dispose();
+        attemptLinked.dispose();
+        activeAbortNotify = null;
+        activeLinkedDispose = null;
         finishStreamProbe();
         capturedChannelLimit?.();
         capturedProjectLimit?.();
@@ -1970,15 +2087,16 @@ export async function handleInferenceRequest(
         const mediaStream = createStreamRelay(
           async (controller) => {
             const reader = upstreamBody?.getReader();
+            const chunkReader = reader ? openStreamReader(reader) : null;
             const parser = new SSEParser();
             let observedUsage: Usage | undefined;
             const heldChunks = createTerminalBuffer();
             try {
-              if (!reader) {
+              if (!chunkReader) {
                 throw new GatewayError(502, "empty_stream", "Upstream returned empty body");
               }
               while (true) {
-                const step = await readNext(reader);
+                const step = await chunkReader.read();
                 if (step.done) break;
                 const events = parser.feed(step.value, false);
                 for (const ev of events) {
@@ -2100,6 +2218,7 @@ export async function handleInferenceRequest(
                 void 0;
               }
             } finally {
+              chunkReader?.dispose();
               if (reader) {
                 await reader.cancel().catch(() => undefined);
                 reader.releaseLock();
@@ -2138,6 +2257,7 @@ export async function handleInferenceRequest(
         const wasmStream = createStreamRelay(
           async (controller) => {
             const reader = upstreamBody?.getReader();
+            const chunkReader = reader ? openStreamReader(reader) : null;
             const parser = new SSEParser();
             const bedrockDecoder = prepared.isBedrockStream
               ? new BedrockEventStreamDecoder()
@@ -2252,13 +2372,13 @@ export async function handleInferenceRequest(
             };
 
             try {
-              if (!reader) {
+              if (!reader || !chunkReader) {
                 throw new GatewayError(502, "empty_stream", "Upstream returned empty body");
               }
               while (true) {
-                let step: Awaited<ReturnType<typeof readNext>>;
+                let step: Awaited<ReturnType<typeof chunkReader.read>>;
                 try {
-                  step = await readNext(reader);
+                  step = await chunkReader.read();
                 } catch (readErr) {
                   if (session?.isBlocked() || responsesModeration?.isBlocked()) {
                     blockedEarly = true;
@@ -2491,6 +2611,7 @@ export async function handleInferenceRequest(
                 void 0;
               }
             } finally {
+              chunkReader?.dispose();
               if (reader) {
                 await reader.cancel().catch(() => undefined);
                 reader.releaseLock();
@@ -2516,6 +2637,7 @@ export async function handleInferenceRequest(
       const bodyStream = createStreamRelay(
         async (controller) => {
           const reader = upstreamBody?.getReader();
+          const chunkReader = reader ? openStreamReader(reader) : null;
           const parser = new SSEParser();
           const bedrockDecoder = prepared.isBedrockStream ? new BedrockEventStreamDecoder() : null;
           const translator = new StreamTranslator(
@@ -2611,13 +2733,13 @@ export async function handleInferenceRequest(
           };
 
           try {
-            if (!reader) {
+            if (!reader || !chunkReader) {
               throw new GatewayError(502, "empty_stream", "Upstream returned empty body");
             }
             while (true) {
-              let step: Awaited<ReturnType<typeof readNext>>;
+              let step: Awaited<ReturnType<typeof chunkReader.read>>;
               try {
-                step = await readNext(reader);
+                step = await chunkReader.read();
               } catch (readErr) {
                 if (session?.isBlocked() || responsesModeration?.isBlocked()) {
                   blockedEarly = true;
@@ -2872,6 +2994,7 @@ export async function handleInferenceRequest(
               void 0;
             }
           } finally {
+            chunkReader?.dispose();
             if (reader) {
               await reader.cancel().catch(() => undefined);
               reader.releaseLock();
@@ -2917,6 +3040,10 @@ export async function handleInferenceRequest(
   } finally {
     releaseAllPendingProbes();
     releaseLimiters();
-    if (!streamOwnsGuard) releaseGuard?.();
+    if (!streamOwnsGuard) {
+      activeLinkedDispose?.();
+      activeLinkedDispose = null;
+      releaseGuard?.();
+    }
   }
 }

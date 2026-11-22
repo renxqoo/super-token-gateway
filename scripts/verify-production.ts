@@ -226,11 +226,13 @@ synchronous_commit = on
         'prepare_ledger_month',
         'keep_plugin_revision',
         'reject_revoked_plugin_activation',
-        'refresh_config_epoch_lineage'
+        'refresh_config_epoch_lineage',
+        'outbox_shard',
+        'commit_leased_batch'
       )
   `;
   verify(
-    fnOwners.length === 4 && fnOwners.every((row) => row.owner === "drill_migration"),
+    fnOwners.length === 6 && fnOwners.every((row) => row.owner === "drill_migration"),
     "All definer/trigger functions must belong to the dedicated migration login",
   );
   await runPg("psql", ["-X", "-d", pgUrl(primaryPort), "-f", resolve("infra/postgres/roles.sql")]);

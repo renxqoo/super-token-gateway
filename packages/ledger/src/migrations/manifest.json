@@ -53,6 +53,15 @@
           "checksum": "a9234e42d54fee6c4fff48c11a2b5ba07721b5c32fa0d2d148312fbe5c7a06f9"
         }
       ]
+    },
+    {
+      "version": 2026112205,
+      "files": [
+        {
+          "path": "./migrations/0006_ledger_settlement_perf.sql",
+          "checksum": "27ebcbee33e71f3eda097e0180b98e90e63615e9339719e5b73bdb4f371b68ab"
+        }
+      ]
     }
   ],
   "legacyBaselines": [

@@ -26,24 +26,107 @@ export async function commitLeasedBatch(
   const fallback: { index: number; item: CommitTerminalInput }[] = [];
   if (candidates.length === 0) return fallback;
 
-  const reqIds = [...new Set(candidates.map((c) => c.item.request_id))].sort();
-  const wLeaseIds = [...new Set(candidates.map((c) => c.meta.walletLeaseId))].sort();
-  const sLeaseIds = [...new Set(candidates.map((c) => c.meta.supplierLeaseId))].sort();
-  const walletIds = [...new Set(candidates.map((c) => c.meta.walletId))].sort();
+  const nowMs = Date.now();
+  const nextExpMs = nowMs + leases.ttlMs;
+  const renewThresholdMs = nowMs + Math.floor(leases.ttlMs / 2);
+  const nowIso = new Date(nowMs).toISOString();
+  const nextExpIso = new Date(nextExpMs).toISOString();
+  const renewThresholdIso = new Date(renewThresholdMs).toISOString();
 
   const serialized = candidates.map((cand) => ({
     cand,
     chargeId: crypto.randomUUID(),
     eventId: crypto.randomUUID(),
     usageDigest: sha256Hex(cand.item.usage),
-    usageJson: JSON.stringify(cand.item.usage),
-    pluginAuditJson: JSON.stringify(cand.item.plugin_audit ?? []),
     customerAtomsText: cand.customerAtoms.toString(),
     supplierAtomsText: cand.supplierAtoms.toString(),
   }));
+
+  const fastPayload = JSON.stringify(
+    serialized.map((s) => ({
+      charge_id: s.chargeId,
+      event_id: s.eventId,
+      request_id: s.cand.item.request_id,
+      project_id: s.cand.meta.projectId,
+      wallet_id: s.cand.meta.walletId,
+      wallet_lease_id: s.cand.meta.walletLeaseId,
+      supplier_lease_id: s.cand.meta.supplierLeaseId,
+      selected_attempt_id: s.cand.item.selected_attempt_id,
+      channel_id: s.cand.item.channel_id,
+      model: s.cand.meta.model,
+      operation: s.cand.meta.operation,
+      currency: s.cand.meta.currency,
+      billing_price_id: s.cand.item.billing_price_id,
+      cost_version_id: s.cand.item.cost_version_id,
+      usage: s.cand.item.usage,
+      usage_digest: s.usageDigest,
+      customer_atoms: s.customerAtomsText,
+      supplier_atoms: s.supplierAtomsText,
+      supplier_currency: s.cand.item.supplier_currency,
+      plugin_audit: s.cand.item.plugin_audit ?? [],
+      charge_policy: s.cand.item.charge_policy ?? "CHARGE_CUSTOMER",
+    })),
+  );
+
+  const [fastRow] = await db<
+    {
+      res: {
+        fast: boolean;
+        wl_expiries?: Record<string, number>;
+        sl_expiries?: Record<string, number>;
+      };
+    }[]
+  >`
+    SELECT public.commit_leased_batch(
+      ${fastPayload}::text::jsonb,
+      ${nextExpIso}::timestamptz,
+      ${renewThresholdIso}::timestamptz,
+      ${nowIso}::timestamptz
+    ) AS res
+  `;
+
+  if (fastRow?.res?.fast) {
+    const wlExp = fastRow.res.wl_expiries ?? {};
+    const slExp = fastRow.res.sl_expiries ?? {};
+    const postNow = Date.now();
+    for (const s of serialized) {
+      results[s.cand.index] = {
+        ok: true,
+        replayed: false,
+        charge_id: s.chargeId,
+        outcome: "SETTLED",
+        customer_atoms: s.customerAtomsText,
+        funded_atoms: s.customerAtomsText,
+        debt_atoms: "0",
+        supplier_cost_atoms: s.supplierAtomsText,
+      };
+      const wlExpMs = Number(wlExp[s.cand.meta.walletLeaseId] ?? 0);
+      const slExpMs = Number(slExp[s.cand.meta.supplierLeaseId] ?? 0);
+      leases.settleHold(
+        s.cand.meta,
+        s.cand.customerAtoms,
+        s.cand.supplierAtoms,
+        wlExpMs,
+        slExpMs,
+        postNow,
+      );
+    }
+    return fallback;
+  }
+
+  const reqIds = [...new Set(candidates.map((c) => c.item.request_id))].sort();
+  const wLeaseIds = [...new Set(candidates.map((c) => c.meta.walletLeaseId))].sort();
+  const sLeaseIds = [...new Set(candidates.map((c) => c.meta.supplierLeaseId))].sort();
+  const walletIds = [...new Set(candidates.map((c) => c.meta.walletId))].sort();
+
+  const slowSerialized = serialized.map((s) => ({
+    ...s,
+    usageJson: JSON.stringify(s.cand.item.usage),
+    pluginAuditJson: JSON.stringify(s.cand.item.plugin_audit ?? []),
+  }));
   const committed: FastCommitCandidate[] = [];
-  const nowMs = Date.now();
-  const nextExpIso = new Date(nowMs + leases.ttlMs).toISOString();
+  let slowWlExp: Record<string, number> = {};
+  let slowSlExp: Record<string, number> = {};
 
   await db.begin(async (tx) => {
     const holdRows = await tx`
@@ -193,7 +276,7 @@ export async function commitLeasedBatch(
       { account_id: string; currency: string; cell: number; spent: bigint }
     >();
 
-    type PreparedFastCharge = (typeof serialized)[number] & {
+    type PreparedFastCharge = (typeof slowSerialized)[number] & {
       chargeAllocations: ChargeLotAllocation[];
       customerJournalId: string | null;
       supplierJournalId: string | null;
@@ -219,7 +302,7 @@ export async function commitLeasedBatch(
       }
     >();
 
-    for (const data of serialized) {
+    for (const data of slowSerialized) {
       const { cand } = data;
       const h = holdByReq.get(cand.item.request_id);
       const wl = wlById.get(cand.meta.walletLeaseId);
@@ -402,14 +485,22 @@ export async function commitLeasedBatch(
     const lEntries = [...lotSpentDelta.entries()];
     const cEntries = [...cellSpentDelta.values()];
 
-    await tx`
+    const [slowExpRow] = await tx<
+      {
+        wl_expiries: Record<string, number>;
+        sl_expiries: Record<string, number>;
+      }[]
+    >`
         WITH
           upd_wl AS (
             UPDATE public.wallet_leases AS l SET
               lot_allocations = u.lot_allocations::jsonb,
               remaining_atoms = u.remaining_atoms,
               earliest_lot_expires_at = u.earliest_lot_expires_at,
-              expires_at = GREATEST(l.expires_at, ${nextExpIso}::timestamptz),
+              expires_at = CASE
+                WHEN l.expires_at < ${renewThresholdIso}::timestamptz THEN GREATEST(l.expires_at, ${nextExpIso}::timestamptz)
+                ELSE l.expires_at
+              END,
               updated_at = now()
             FROM unnest(
               ${dirtyWl.map((w) => w.id)}::uuid[],
@@ -420,17 +511,22 @@ export async function commitLeasedBatch(
               )}::timestamptz[]
             ) AS u(id, lot_allocations, remaining_atoms, earliest_lot_expires_at)
             WHERE l.id = u.id
+            RETURNING l.id, (extract(epoch FROM l.expires_at) * 1000)::bigint AS expires_ms
           ),
           upd_sl AS (
             UPDATE public.supplier_leases AS l SET
               remaining_atoms = u.remaining_atoms,
-              expires_at = GREATEST(l.expires_at, ${nextExpIso}::timestamptz),
+              expires_at = CASE
+                WHEN l.expires_at < ${renewThresholdIso}::timestamptz THEN GREATEST(l.expires_at, ${nextExpIso}::timestamptz)
+                ELSE l.expires_at
+              END,
               updated_at = now()
             FROM unnest(
               ${dirtySl.map((s) => s.id)}::uuid[],
               ${dirtySl.map((s) => s.remaining.toString())}::numeric[]
             ) AS u(id, remaining_atoms)
             WHERE l.id = u.id
+            RETURNING l.id, (extract(epoch FROM l.expires_at) * 1000)::bigint AS expires_ms
           ),
           upd_w AS (
             UPDATE public.wallets AS w SET
@@ -530,35 +626,45 @@ export async function commitLeasedBatch(
               ${journals.map((l) => l.atoms.toString())}::numeric[]
             )
           )
-        SELECT 1
+        SELECT
+          COALESCE((SELECT jsonb_object_agg(id::text, expires_ms) FROM upd_wl), '{}'::jsonb) AS wl_expiries,
+          COALESCE((SELECT jsonb_object_agg(id::text, expires_ms) FROM upd_sl), '{}'::jsonb) AS sl_expiries
       `;
+    if (slowExpRow) {
+      slowWlExp = slowExpRow.wl_expiries ?? {};
+      slowSlExp = slowExpRow.sl_expiries ?? {};
+    }
 
+    const slowOutboxJson = JSON.stringify(
+      prepared.map((p) => ({
+        event_id: p.eventId,
+        request_id: p.cand.item.request_id,
+        project_id: p.cand.meta.projectId,
+        payload: {
+          charge_id: p.chargeId,
+          request_id: p.cand.item.request_id,
+          attempt_id: p.cand.item.selected_attempt_id,
+          channel_id: p.cand.item.channel_id,
+          model: p.cand.meta.model,
+          operation: p.cand.meta.operation,
+          currency: p.cand.meta.currency,
+          usage: p.cand.item.usage,
+          customer_atoms: p.customerAtomsText,
+          funded_atoms: p.customerAtomsText,
+          debt_atoms: "0",
+          supplier_cost_atoms: p.supplierAtomsText,
+          outcome: "SETTLED",
+          wallet_available_atoms: (wAvailAfter.get(p.cand.meta.walletId) ?? 0n).toString(),
+        },
+      })),
+    );
     await tx`
             INSERT INTO public.outbox_events (event_id, kind, request_id, project_id, payload)
-            SELECT u.event_id, 'billing.settled', u.request_id, u.project_id, u.payload::jsonb
-            FROM unnest(
-              ${prepared.map((p) => p.eventId)}::uuid[],
-              ${prepared.map((p) => p.cand.item.request_id)}::uuid[],
-              ${prepared.map((p) => p.cand.meta.projectId)}::uuid[],
-              ${prepared.map((p) =>
-                JSON.stringify({
-                  charge_id: p.chargeId,
-                  request_id: p.cand.item.request_id,
-                  attempt_id: p.cand.item.selected_attempt_id,
-                  channel_id: p.cand.item.channel_id,
-                  model: p.cand.meta.model,
-                  operation: p.cand.meta.operation,
-                  currency: p.cand.meta.currency,
-                  usage: p.cand.item.usage,
-                  customer_atoms: p.customerAtomsText,
-                  funded_atoms: p.customerAtomsText,
-                  debt_atoms: "0",
-                  supplier_cost_atoms: p.supplierAtomsText,
-                  outcome: "SETTLED",
-                  wallet_available_atoms: (wAvailAfter.get(p.cand.meta.walletId) ?? 0n).toString(),
-                }),
-              )}::text[]
-            ) AS u(event_id, request_id, project_id, payload)
+            SELECT u.event_id, 'billing.settled', u.request_id, u.project_id, u.payload
+            FROM jsonb_to_recordset(${slowOutboxJson}::text::jsonb) AS u(
+              event_id uuid, request_id uuid, project_id uuid, payload jsonb
+            )
+            ORDER BY public.outbox_shard(u.project_id) ASC, u.request_id ASC
       `;
 
     for (const p of prepared) {
@@ -581,7 +687,8 @@ export async function commitLeasedBatch(
       candidate.meta,
       candidate.customerAtoms,
       candidate.supplierAtoms,
-      nowMs + leases.ttlMs,
+      Number(slowWlExp[candidate.meta.walletLeaseId] ?? 0),
+      Number(slowSlExp[candidate.meta.supplierLeaseId] ?? 0),
       postNow,
     );
   }

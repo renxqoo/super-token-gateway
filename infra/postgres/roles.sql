@@ -33,7 +33,7 @@ GRANT SELECT ON public.wallets, public.wallet_lots, public.supplier_cells, publi
   public.supplier_leases, public.billing_holds, public.billing_charges, public.ledger_entries
   TO stg_data, stg_control, stg_worker;
 GRANT SELECT ON public.supplier_root_balances TO stg_control, stg_worker;
-GRANT SELECT ON public.outbox_events, public.outbox_consumers TO stg_control, stg_worker;
+GRANT SELECT ON public.outbox_events, public.outbox_consumers, public.outbox_consumer_shards TO stg_control, stg_worker;
 GRANT SELECT ON public.plugin_revocations TO stg_data, stg_control;
 GRANT SELECT ON public.gateway_config_nodes, public.plugin_release_acks TO stg_data, stg_control, stg_worker;
 GRANT SELECT (config_epoch) ON public.plugin_releases TO stg_data;
@@ -69,7 +69,7 @@ GRANT INSERT (journal_id, ordinal, side, entity_id, request_id, reference, kind,
   ON public.ledger_entries TO stg_data, stg_control, stg_worker;
 GRANT INSERT (event_id, kind, request_id, project_id, payload) ON public.outbox_events TO stg_data, stg_control;
 GRANT USAGE ON SEQUENCE public.outbox_events_seq_seq TO stg_data, stg_control;
-GRANT INSERT, UPDATE ON public.outbox_consumers TO stg_control, stg_worker;
+GRANT INSERT, UPDATE ON public.outbox_consumers, public.outbox_consumer_shards TO stg_control, stg_worker;
 
 GRANT INSERT, UPDATE ON public.projects, public.api_keys, public.upstream_accounts, public.plugins,
   public.channels, public.models, public.routes, public.wallets, public.wallet_lots,
@@ -81,4 +81,6 @@ GRANT INSERT, DELETE ON public.admin_audit_pending TO stg_control;
 GRANT SELECT (request_id) ON public.admin_audit_pending TO stg_control;
 GRANT EXECUTE ON FUNCTION public.prepare_ledger_month(DATE) TO stg_worker;
 GRANT EXECUTE ON FUNCTION public.operations_health(TEXT) TO stg_worker;
+GRANT EXECUTE ON FUNCTION public.outbox_shard(UUID) TO stg_data, stg_control, stg_worker;
+GRANT EXECUTE ON FUNCTION public.commit_leased_batch(JSONB, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) TO stg_data;
 COMMIT;

@@ -13,6 +13,10 @@ export function normalizedProviderNumber(source: string): ReturnType<typeof norm
   }
 }
 
+export function hasExactLiterals(parent: object): boolean {
+  return numericLiterals.has(parent);
+}
+
 export function numberLiteral(parent: object, key: string): string | undefined {
   const entry = numericLiterals.get(parent)?.get(key);
   return entry && Object.is(entry.value, Reflect.get(parent, key)) ? entry.literal : undefined;

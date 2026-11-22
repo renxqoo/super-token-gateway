@@ -154,16 +154,16 @@ flowchart LR
 
 - `funding_operations (id PK, side, entity_id, kind CHECK('CREDIT','REFUND','ADJUST','SUPPLIER_RECHARGE','SUPPLIER_ADJUST'), external_ref, fingerprint, amount_atoms, currency, payload jsonb, receipt jsonb, created_at)` — `UNIQUE(side, entity_id, kind, external_ref)`
 - `billing_resolutions (id PK, request_id UNIQUE, action CHECK('SETTLE','RELEASE'), billing_price_id, usage jsonb, reason, actor, created_at)`
-- `outbox_events` 保留单调序号和稳定的 event ID。发布语句在分配序号前持有事务级锁，使可见顺序与序号一致。消费者只能确认本次有效认领的范围，失败后允许重投。升级前已经跳过的事件可用新消费者从保留的事件中重放，并按 event ID 幂等处理。
+- `outbox_events` 与 `outbox_consumer_shards` 共同承载事件发布与消费水位：事件按 `public.outbox_shard(project_id)` 划入 `0..15` 十六个分片并保留单调 `seq` 与稳定 `event_id`；`BEFORE INSERT FOR EACH ROW` 触发器 `order_outbox_publish()` 先按分片获取事务级咨询锁 `pg_advisory_xact_lock(81442591, 100 + shard)` 再分配 `nextval('public.outbox_events_seq_seq')`，保证单项目与单分片内提交可见顺序与序号严格一致且消除全局单锁串行瓶颈。消费者按 16 分片独立维护 `acked_seq` 与租约状态，`outbox_consumers.acked_seq` 维护跨分片保守最小水位，确认时只能提交本次有效认领范围内的序号，失败后允许重投并按 `event_id` 幂等处理。
 
-### 4.3 自适应分片租约 + 2 ms 微批 9 表 CTE 聚合事务协议（强类型 Bun/TS）
+### 4.3 自适应分片租约 + 微批聚合与 `commit_leased_batch` 事务协议
 
 1. **双轨自适应快慢路径（同一账本引擎内，无旧代码）**：
    - **冷钱包 / 授信 / 限模型 Lot / 幂等键请求**：走 2 ms 同钱包微批聚合器（`acquireQueue`），按全局升序 `FOR NO KEY UPDATE` 锁序批量完成 lot 预扣与 `billing_holds` 写入；达到热度条件后在同一事务内无缝签发 `wallet_leases` + `supplier_leases`。
    - **热钱包租赁快路径（`fastHoldQueue`，并发度 4、单批上限 512）**：先在内存中从活跃租约划拨预扣额度，随后在一条集合 SQL 内锁定并校验当前节点持有的活跃租约，再持久化预扣。快路径只锁租约行，失效项回落到普通预扣。收到持久化确认后才派发。
-2. **9 表单一 Data-Modifying CTE 微批结算（`commitQueue`，并发度 2、单批上限 512）**：
+2. **微批结算（`commitQueue`，并发度 4、单批上限 512）**：
    - 严格遵循全局锁序：`1. billing_holds → 2. wallet_leases → 3. supplier_leases → 4. wallets → 5. wallet_lots → 6. upstream_accounts → 7. supplier_cells`，全线使用 **`FOR NO KEY UPDATE`** 避免与并发 `INSERT INTO billing_holds` 外键 `FOR KEY SHARE` 产生锁冲突或死锁。
-   - 单条 SQL 9 表 CTE 原子完成 `wallet_leases`、`supplier_leases`、`wallets`、`wallet_lots`、`supplier_cells`、`billing_holds` 更新与 `billing_charges`、`ledger_entries`（受 PG 平衡/不可变触发器硬守卫）、`outbox_events` 批量插入，单笔 PG WAL 降至 **3.4–3.7 KB**。
+   - **单一 DB 往返 PL/pgSQL 快路径（`public.commit_leased_batch`）**：当批量全部命中活跃单 Lot 租约时，通过单次 `SELECT public.commit_leased_batch(...)` 在 PG 服务端单事务内完成全部校验、行锁、9 表 Data-Modifying CTE（更新 `wallet_leases`、`supplier_leases`、`wallets`、`wallet_lots`、`supplier_cells`、`billing_holds`，写入 `billing_charges` 与受不可变/复式平衡触发器保护的 `ledger_entries`），随后按升序分片锁写入 `outbox_events`，消除多轮锁往返并将单笔 PG WAL 降至 **3.4–3.7 KB**；遇到多 Lot、租约不足或失效等复杂项时自动回落至标准慢路径事务。
 3. **异常、故障切换与 `SIGKILL` 恢复**：
    - 故障切换（`switchSupplierAttempt`）、释放（`releaseHold`）、标未明（`markUnknown`）及跨租约/过期边界请求自动调用 `detachHoldFromLeaseTx` 从租约分离并安全落回标准事务路径；
    - 进程被 `SIGKILL` 强杀后，未闭合 `billing_holds` 与过期 `wallet_leases`/`supplier_leases` 由 `apps/worker` 的 `sweepTimedOutHolds` + `sweepExpiredLeases` + `expireAllLots` 全量回收，经人工或自动决议后 `auditConservation()` 100% 归零守恒。
@@ -173,12 +173,12 @@ flowchart LR
 在 `packages/ledger` 内部分层协作，`apps/gateway` 与 `apps/worker` 不直接导入 `drizzle-orm`：
 
 - **使用 Drizzle ORM（`drizzle-orm/bun-sql`）的场景**：
-  1. **单一真源 Schema 声明（`packages/ledger/src/schema.ts`）**：完整声明全部 23 张表的列、类型、JSONB `$type<...>()` 与 `bytea` 自定义类型，并与 `0000_v4_baseline.sql` 在真实 PG 集成测试（`G1.6`）中逐表逐列 1:1 校验零漂移。
+  1. **单一真源 Schema 声明（`packages/ledger/src/schema.ts`）**：完整声明全部业务表（含 `outbox_consumer_shards`）的列、类型、JSONB `$type<...>()` 与 `bytea` 自定义类型，并与迁移后的真实 PG Schema 在集成测试（`G1.6`）中逐表逐列 1:1 校验零漂移。
   2. **配置目录与快照仓储（`packages/ledger/src/catalog.ts`）**：项目、Key、渠道、模型、价目、路由、插件的全部 CRUD Upsert、配置纪元递增与全量快照读取。
   3. **非热路径查询与状态流转**：钱包/供应商余额查询、版本校验（`assertSchemaVersion`）、`markUnknown`、超时预扣扫尾、Outbox `claim`/`ack` 与月度冷归档导出查询。
 - **保留原生 `Bun.SQL` 的场景**：
-  1. **微批集合热路径**：`fastHoldQueue` / `acquireQueue` / 9 表单 CTE `commitQueue` 批量 `UPDATE/INSERT ... FROM unnest(...)`、显式升序 `FOR NO KEY UPDATE` 行锁与资金事务（支撑单机 12,930+ RPS 热路径）。
-  2. **DDL 与 PG 专有控制**：基线 SQL 迁移（含 `PARTITION BY RANGE`、`DEFERRABLE` 复式记账触发器、`immutable_record` 触发器与 `pg_advisory_lock`）。
+  1. **微批集合热路径**：`fastHoldQueue` / `acquireQueue` / `commit_leased_batch` 与 9 表单 CTE `commitQueue` 批量 `UPDATE/INSERT ... FROM unnest(...)`、显式升序 `FOR NO KEY UPDATE` 行锁与资金事务。
+  2. **DDL 与 PG 专有控制**：基线及增量 SQL 迁移（含 `PARTITION BY RANGE`、`DEFERRABLE` 复式记账触发器、`immutable_record` 触发器、`outbox_shard`/`commit_leased_batch` 与 `pg_advisory_xact_lock`）。
 
 ### 4.5 账本实现边界
 

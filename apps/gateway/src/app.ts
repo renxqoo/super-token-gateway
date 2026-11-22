@@ -1,5 +1,7 @@
 import { Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { SQL } from "bun";
+import type { Operation } from "@gateway/kernel";
 import {
   assertSchemaVersion,
   assertServiceRole,
@@ -29,7 +31,12 @@ import { createWorkerRunner } from "@gateway/worker";
 import type { GatewayConfig } from "./config.ts";
 import { createInternalApi } from "./internal-api.ts";
 import { GatewayMetrics } from "./observability.ts";
-import { authenticateRequest, handleInferenceRequest, type ProxyDependencies } from "./proxy.ts";
+import {
+  authenticateRequest,
+  handleInferenceRequest,
+  type InferenceContext,
+  type ProxyDependencies,
+} from "./proxy.ts";
 import { SnapshotManager } from "./snapshot.ts";
 
 export type GatewayRuntimeOptions = {
@@ -279,9 +286,10 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   }
   publicApp.get("/metrics", (c) => (config.privateMetrics ? c.notFound() : metricsResponse()));
 
-  const peerOf = (c: { env?: unknown }): string | undefined => {
-    const env = c.env as { peerAddress?: string } | undefined;
-    return env?.peerAddress;
+  const peerOf = (c: { env?: unknown }): string | (() => string | undefined) | undefined => {
+    const env = c.env as
+      { peerAddress?: string; getPeerAddress?: () => string | undefined } | undefined;
+    return env?.peerAddress ?? env?.getPeerAddress;
   };
 
   publicApp.get("/v1/models", (c) => {
@@ -404,6 +412,67 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
         })
       : null;
 
+  const staticInferenceRoutes = new Map<string, Operation>([
+    ["/v1/chat/completions", "chat"],
+    ["/v1/responses", "responses"],
+    ["/v1/messages", "messages"],
+    ["/v1/embeddings", "embeddings"],
+    ["/v1/moderations", "moderations"],
+    ["/v1/completions", "completions"],
+    ["/v1/images/generations", "images"],
+    ["/v1/images/edits", "image_edits"],
+    ["/v1/audio/speech", "speech"],
+    ["/v1/audio/transcriptions", "transcription"],
+    ["/v1/audio/translations", "translation"],
+  ]);
+
+  function fastContext(req: Request): InferenceContext {
+    return {
+      req: {
+        raw: req,
+        query(name: string) {
+          return new URL(req.url).searchParams.get(name) ?? undefined;
+        },
+      },
+      json(data: unknown, status?: ContentfulStatusCode, headers?: Record<string, string>) {
+        return new Response(JSON.stringify(data), {
+          status: status ?? 200,
+          headers: {
+            "content-type": "application/json; charset=UTF-8",
+            ...headers,
+          },
+        });
+      },
+    };
+  }
+
+  function fetchPublic(
+    req: Request,
+    env?: { peerAddress?: string; getPeerAddress?: () => string | undefined },
+  ): Response | Promise<Response> {
+    if (req.method === "POST") {
+      const url = req.url;
+      const schemeIdx = url.indexOf("://");
+      const pathStart = schemeIdx === -1 ? 0 : url.indexOf("/", schemeIdx + 3);
+      if (pathStart !== -1) {
+        const queryStart = url.indexOf("?", pathStart);
+        const pathname =
+          queryStart === -1 ? url.slice(pathStart) : url.slice(pathStart, queryStart);
+        const op = staticInferenceRoutes.get(pathname);
+        if (op) {
+          return handleInferenceRequest(
+            fastContext(req),
+            proxyDeps,
+            op,
+            undefined,
+            env?.peerAddress ?? env?.getPeerAddress,
+          );
+        }
+      }
+    }
+    return publicApp.fetch(req, env);
+  }
+
   return {
     db,
     catalog,
@@ -416,6 +485,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     metrics,
     metricsResponse,
     publicApp,
+    fetchPublic,
     internalApp,
     internalRequestBodies,
     internalRouteRoles,

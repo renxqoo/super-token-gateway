@@ -81,9 +81,7 @@ const headerNameSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 const headerValueSchema = z
   .string()
   .max(2048)
-  .refine((v) => !v.includes("\r") && !v.includes("\n"), {
-    message: "Header value must not contain CR/LF",
-  });
+  .regex(/^[\t\x20-\x7e]*$/, "Header value must contain only printable ASCII characters");
 
 const safeFieldPathSchema = z
   .string()

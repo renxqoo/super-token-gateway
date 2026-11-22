@@ -9,6 +9,8 @@ import { encodeResponse, publicUsage } from "./response.ts";
 import type { Completion } from "./response.ts";
 import type { Part } from "./request.ts";
 
+const streamEncoder = new TextEncoder();
+
 export interface StreamDelta {
   type: "text" | "reasoning" | "tool";
   index: number;
@@ -40,7 +42,10 @@ export class StreamTranslator {
   private geminiCompleted = new Set<number>();
   private chatCompleted = new Set<number>();
   private geminiCalls = new Map<string, { index: number; args: string; name: string }>();
-  private readonly id = `gen_${crypto.randomUUID()}`;
+  private cachedId: string | undefined;
+  private get id(): string {
+    return (this.cachedId ??= `gen_${crypto.randomUUID()}`);
+  }
   constructor(
     readonly source: Protocol,
     readonly target: Protocol,
@@ -74,7 +79,7 @@ export class StreamTranslator {
     const chunks: Uint8Array[] = [];
     if (!event.data)
       return {
-        chunks: this.source === this.target ? [new TextEncoder().encode(event.wire)] : [],
+        chunks: this.source === this.target ? [streamEncoder.encode(event.wire)] : [],
         terminal: false,
       };
     if (event.data === "[DONE]") {
@@ -117,9 +122,13 @@ export class StreamTranslator {
       optionalObject(body.delta).stop_reason !== undefined
     )
       this.holdTerminal = true;
-    const nested = optionalObject(body.message);
+    const hasNestedMessage =
+      body.message !== null && typeof body.message === "object" && !Array.isArray(body.message);
+    const nested = hasNestedMessage ? (body.message as Record<string, unknown>) : undefined;
     this.usage =
-      extractUsage(Object.keys(nested).length ? nested : body, this.kind, this.usage) ?? this.usage;
+      (nested ? extractUsage(nested, this.kind, this.usage) : undefined) ??
+      extractUsage(body, this.kind, this.usage) ??
+      this.usage;
     if (
       body.error ||
       event.event === "error" ||
@@ -153,10 +162,11 @@ export class StreamTranslator {
       this.finish = "content_filter";
     }
     this.terminal = terminalNow;
+    const sameProtocol = this.source === this.target;
     const deltas: StreamDelta[] = [];
     if (this.source === "chat") {
       const choices = Array.isArray(body.choices) ? body.choices : [];
-      if (this.target !== "chat" && choices.length > 1)
+      if (!sameProtocol && choices.length > 1)
         throw new GatewayError(
           502,
           "conversion_loss",
@@ -172,28 +182,29 @@ export class StreamTranslator {
             throw new GatewayError(502, "invalid_upstream", "Invalid choice completion reason");
           this.chatCompleted.add(index);
         }
-        const delta = optionalObject(choice.delta);
-        if (this.target !== this.source && (delta.refusal || delta.audio))
-          throw new GatewayError(502, "conversion_loss", "Unsupported stream delta");
-        const reasoningDelta = delta.reasoning_content ?? delta.reasoning;
-        if (typeof reasoningDelta === "string" && reasoningDelta.length > 0)
-          deltas.push({ type: "reasoning", index: 0, text: reasoningDelta });
-        if (typeof delta.content === "string")
-          deltas.push({ type: "text", index: 0, text: delta.content });
-        if (Array.isArray(delta.tool_calls))
-          for (const rawCall of delta.tool_calls) {
-            const call = object(rawCall);
-            const fn = optionalObject(call.function);
-            deltas.push({
-              type: "tool",
-              index: Number(call.index ?? 0) + 1,
-              text: text(fn.arguments),
-              ...(call.id ? { id: text(call.id) } : {}),
-              ...(fn.name ? { name: text(fn.name) } : {}),
-            });
-          }
-        if (this.target !== this.source)
+        if (!sameProtocol) {
+          const delta = optionalObject(choice.delta);
+          if (delta.refusal || delta.audio)
+            throw new GatewayError(502, "conversion_loss", "Unsupported stream delta");
+          const reasoningDelta = delta.reasoning_content ?? delta.reasoning;
+          if (typeof reasoningDelta === "string" && reasoningDelta.length > 0)
+            deltas.push({ type: "reasoning", index: 0, text: reasoningDelta });
+          if (typeof delta.content === "string")
+            deltas.push({ type: "text", index: 0, text: delta.content });
+          if (Array.isArray(delta.tool_calls))
+            for (const rawCall of delta.tool_calls) {
+              const call = object(rawCall);
+              const fn = optionalObject(call.function);
+              deltas.push({
+                type: "tool",
+                index: Number(call.index ?? 0) + 1,
+                text: text(fn.arguments),
+                ...(call.id ? { id: text(call.id) } : {}),
+                ...(fn.name ? { name: text(fn.name) } : {}),
+              });
+            }
           this.finish = finishReason("chat", choice.finish_reason) ?? this.finish;
+        }
         if (choice.finish_reason === "length") this.finish = "length";
         if (choice.finish_reason === "tool_calls") this.finish = "tool_calls";
         if (choice.finish_reason === "content_filter") this.finish = "content_filter";
@@ -327,14 +338,13 @@ export class StreamTranslator {
         }
       }
     }
-    if (this.source === this.target) {
-      const native = copyExact(body, { ...body });
-      if (typeof native.model === "string") native.model = this.model;
-      if (body.message && typeof nested.model === "string")
-        native.message = { ...nested, model: this.model };
-      if (native.response && typeof optionalObject(native.response).model === "string")
-        native.response = { ...optionalObject(native.response), model: this.model };
-      chunks.push(encodeSSE(native, event.event === "message" ? undefined : event.event));
+    if (sameProtocol) {
+      if (typeof body.model === "string") body.model = this.model;
+      if (nested && typeof nested.model === "string") nested.model = this.model;
+      if (body.response && typeof optionalObject(body.response).model === "string") {
+        (body.response as Record<string, unknown>).model = this.model;
+      }
+      chunks.push(encodeSSE(body, event.event === "message" ? undefined : event.event));
     } else {
       if (!this.started) chunks.push(...this.start());
       for (const delta of deltas) chunks.push(...this.delta(delta));

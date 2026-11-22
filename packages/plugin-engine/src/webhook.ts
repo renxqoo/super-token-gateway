@@ -189,12 +189,30 @@ export class WebhookPluginExecutor {
     signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
+      const headers: Record<string, string> = {};
+      if (cfg.headers) {
+        for (const [k, v] of Object.entries(cfg.headers)) {
+          const lower = k.toLowerCase();
+          if (
+            lower === "host" ||
+            lower === "content-length" ||
+            lower === "transfer-encoding" ||
+            lower === "connection" ||
+            lower === "keep-alive" ||
+            lower === "te" ||
+            lower === "upgrade" ||
+            lower === "proxy-connection" ||
+            lower === "content-type"
+          ) {
+            continue;
+          }
+          headers[k] = v;
+        }
+      }
+      headers["content-type"] = "application/json";
       const response = await this.fetchImpl(cfg.url, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...cfg.headers,
-        },
+        headers,
         body: JSON.stringify(input),
         signal: controller.signal,
       });

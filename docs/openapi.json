@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Super Token Gateway",
-    "version": "2026112204",
+    "version": "2026112205",
     "description": "Public and internal routes use separate listeners. Inference payloads and success responses depend on the endpoint protocol and provider adapter."
   },
   "paths": {
@@ -1661,7 +1661,8 @@
                         },
                         "additionalProperties": {
                           "type": "string",
-                          "maxLength": 2048
+                          "maxLength": 2048,
+                          "pattern": "^[\\t\\x20-\\x7e]*$"
                         }
                       },
                       "query_params": {
@@ -2368,7 +2369,8 @@
                         },
                         "additionalProperties": {
                           "type": "string",
-                          "maxLength": 2048
+                          "maxLength": 2048,
+                          "pattern": "^[\\t\\x20-\\x7e]*$"
                         }
                       },
                       "query_params": {
@@ -2862,7 +2864,8 @@
                             },
                             "additionalProperties": {
                               "type": "string",
-                              "maxLength": 2048
+                              "maxLength": 2048,
+                              "pattern": "^[\\t\\x20-\\x7e]*$"
                             }
                           },
                           "timeout_ms": {
@@ -2988,7 +2991,8 @@
                                       },
                                       "prefix": {
                                         "type": "string",
-                                        "maxLength": 2048
+                                        "maxLength": 2048,
+                                        "pattern": "^[\\t\\x20-\\x7e]*$"
                                       }
                                     },
                                     "required": ["scheme", "header_name"],
@@ -3071,7 +3075,8 @@
                                       },
                                       "signature_prefix": {
                                         "type": "string",
-                                        "maxLength": 2048
+                                        "maxLength": 2048,
+                                        "pattern": "^[\\t\\x20-\\x7e]*$"
                                       },
                                       "encoding": {
                                         "type": "string",
@@ -3138,7 +3143,8 @@
                                 },
                                 "additionalProperties": {
                                   "type": "string",
-                                  "maxLength": 2048
+                                  "maxLength": 2048,
+                                  "pattern": "^[\\t\\x20-\\x7e]*$"
                                 }
                               },
                               "model_field": {
@@ -3547,7 +3553,8 @@
                                       },
                                       "prefix": {
                                         "type": "string",
-                                        "maxLength": 2048
+                                        "maxLength": 2048,
+                                        "pattern": "^[\\t\\x20-\\x7e]*$"
                                       }
                                     },
                                     "required": ["scheme", "header_name"],
@@ -3630,7 +3637,8 @@
                                       },
                                       "signature_prefix": {
                                         "type": "string",
-                                        "maxLength": 2048
+                                        "maxLength": 2048,
+                                        "pattern": "^[\\t\\x20-\\x7e]*$"
                                       },
                                       "encoding": {
                                         "type": "string",
@@ -3650,7 +3658,8 @@
                                 },
                                 "additionalProperties": {
                                   "type": "string",
-                                  "maxLength": 2048
+                                  "maxLength": 2048,
+                                  "pattern": "^[\\t\\x20-\\x7e]*$"
                                 }
                               },
                               "hooks": {
@@ -4753,7 +4762,8 @@
                               },
                               "prefix": {
                                 "type": "string",
-                                "maxLength": 2048
+                                "maxLength": 2048,
+                                "pattern": "^[\\t\\x20-\\x7e]*$"
                               }
                             },
                             "required": ["scheme", "header_name"],
@@ -4836,7 +4846,8 @@
                               },
                               "signature_prefix": {
                                 "type": "string",
-                                "maxLength": 2048
+                                "maxLength": 2048,
+                                "pattern": "^[\\t\\x20-\\x7e]*$"
                               },
                               "encoding": {
                                 "type": "string",
@@ -4903,7 +4914,8 @@
                         },
                         "additionalProperties": {
                           "type": "string",
-                          "maxLength": 2048
+                          "maxLength": 2048,
+                          "pattern": "^[\\t\\x20-\\x7e]*$"
                         }
                       },
                       "model_field": {
@@ -5377,7 +5389,8 @@
                         },
                         "additionalProperties": {
                           "type": "string",
-                          "maxLength": 2048
+                          "maxLength": 2048,
+                          "pattern": "^[\\t\\x20-\\x7e]*$"
                         }
                       },
                       "query_params": {
@@ -5718,7 +5731,8 @@
                         },
                         "additionalProperties": {
                           "type": "string",
-                          "maxLength": 2048
+                          "maxLength": 2048,
+                          "pattern": "^[\\t\\x20-\\x7e]*$"
                         }
                       },
                       "query_params": {

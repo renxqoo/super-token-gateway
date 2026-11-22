@@ -2,6 +2,7 @@ import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 import { inCidrs } from "./ip.ts";
 import { GatewayError } from "@gateway/contracts";
+import { isValidHttpHeaderName, isValidHttpHeaderValue } from "./bun-http1.ts";
 import { createHttpPool, UpstreamPreDispatchError } from "./http-pool.ts";
 import type { PinnedRequestInit } from "./http-pool.ts";
 
@@ -19,6 +20,7 @@ export function createTransport(maxConnections = 1024) {
       return safeFetch(url, init, allowPrivate, privateCidrs, pool.send);
     },
     sseFraming: pool.sseFraming,
+    bufferedBody: pool.bufferedBody,
     close: pool.close,
   };
 }
@@ -111,7 +113,8 @@ export async function safeFetch(
   const expired = () =>
     init.dispatchDeadline !== undefined && !(performance.now() < init.dispatchDeadline);
   if (signal?.aborted || expired()) throw cancelled();
-  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const rawHost = url.hostname;
+  const hostname = rawHost.charCodeAt(0) === 91 ? rawHost.slice(1, -1) : rawHost;
   const ipFamily = isIP(hostname);
   const addresses = ipFamily
     ? [{ address: hostname, family: ipFamily }]
@@ -141,10 +144,28 @@ export async function safeFetch(
   const pinnedHost = chosen.family === 6 ? `[${chosen.address}]` : chosen.address;
   const pinned = pinnedHost === url.hostname ? url : new URL(url);
   if (pinned !== url) pinned.hostname = pinnedHost;
-  const headers =
-    init.headers instanceof Headers ? new Headers(init.headers) : new Headers(init.headers);
-  if (pinned !== url || !headers.has("host")) headers.set("host", url.host);
-  headers.set("accept-encoding", "identity");
+  let headers: HeadersInit;
+  if (init.headers instanceof Headers || Array.isArray(init.headers)) {
+    const h = new Headers(init.headers);
+    if (pinned !== url || !h.has("host")) h.set("host", url.host);
+    h.set("accept-encoding", "identity");
+    headers = h;
+  } else {
+    const plain: Record<string, string> = {};
+    if (init.headers) {
+      for (const k in init.headers) {
+        const v = init.headers[k];
+        if (v === undefined) continue;
+        if (!isValidHttpHeaderName(k) || !isValidHttpHeaderValue(v)) {
+          throw new TypeError("Invalid HTTP header");
+        }
+        plain[k.toLowerCase()] = v;
+      }
+    }
+    if (pinned !== url || !("host" in plain)) plain.host = url.host;
+    plain["accept-encoding"] = "identity";
+    headers = plain;
+  }
   return send(pinned, {
     ...init,
     headers,

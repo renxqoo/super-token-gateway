@@ -583,3 +583,19 @@ test("field conversion policy table supports compat drop_hint, bidirectional par
   const interWire = new TextDecoder().decode(Buffer.concat(interChunks));
   expect(interWire).toContain('"content_block_start","index":2,"content_block":{"type":"thinking"');
 });
+
+test("StreamTranslator falls back to top-level usage when message object is empty", () => {
+  const translator = new StreamTranslator("messages", "messages", "anthropic", "claude-3");
+  translator.consume({
+    event: "message_delta",
+    id: "",
+    wire: "",
+    data: JSON.stringify({
+      type: "message_delta",
+      message: {},
+      delta: { stop_reason: "end_turn" },
+      usage: { input_tokens: 12, output_tokens: 7 },
+    }),
+  });
+  expect(translator.usage).toMatchObject({ input_tokens: "12", output_tokens: "7" });
+});
