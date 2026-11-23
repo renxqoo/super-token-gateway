@@ -118,18 +118,21 @@ export async function detachHoldFromLeaseTx(
     lot_allocations: HoldLotAllocation[];
     supplier_holds: { held_atoms: string; state: string }[];
   },
+  options: { detachWallet?: boolean; detachSupplier?: boolean } = {},
 ): Promise<{
   lot_allocations: HoldLotAllocation[];
   detachedWalletLeaseId: string | null;
   detachedSupplierLeaseId: string | null;
   detachedSupplierAtoms: bigint;
 }> {
+  const detachWallet = options.detachWallet ?? true;
+  const detachSupplier = options.detachSupplier ?? true;
   let lotAllocations = hold.lot_allocations;
   let detachedWalletLeaseId: string | null = null;
   let detachedSupplierLeaseId: string | null = null;
   let detachedSupplierAtoms = 0n;
 
-  if (hold.wallet_lease_id) {
+  if (detachWallet && hold.wallet_lease_id) {
     const wlRows = await tx`
       SELECT id, lot_allocations, remaining_atoms::text, state
       FROM public.wallet_leases
@@ -158,7 +161,7 @@ export async function detachHoldFromLeaseTx(
     }
   }
 
-  if (hold.supplier_lease_id) {
+  if (detachSupplier && hold.supplier_lease_id) {
     const slRows = await tx`
       SELECT id, remaining_atoms::text, state
       FROM public.supplier_leases
@@ -166,7 +169,11 @@ export async function detachHoldFromLeaseTx(
       FOR NO KEY UPDATE
     `;
     if (slRows.length > 0 && slRows[0]!.state === "ACTIVE") {
-      const supAtoms = hold.supplier_holds.reduce((sum, s) => sum + BigInt(s.held_atoms), 0n);
+      const supAtoms = hold.supplier_holds.reduce(
+        (sum, s) =>
+          s.state === "HELD" || s.state === "UNKNOWN" ? sum + BigInt(s.held_atoms) : sum,
+        0n,
+      );
       const slRem = BigInt(String(slRows[0]!.remaining_atoms));
       const nextRem = slRem >= supAtoms ? slRem - supAtoms : 0n;
       await tx`
@@ -180,12 +187,25 @@ export async function detachHoldFromLeaseTx(
     }
   }
 
-  if (detachedWalletLeaseId || detachedSupplierLeaseId) {
+  if (detachedWalletLeaseId && detachedSupplierLeaseId) {
     await tx`
       UPDATE public.billing_holds
       SET lot_allocations = ${lotAllocations}::jsonb,
           wallet_lease_id = NULL,
           supplier_lease_id = NULL
+      WHERE request_id = ${hold.request_id}
+    `;
+  } else if (detachedWalletLeaseId) {
+    await tx`
+      UPDATE public.billing_holds
+      SET lot_allocations = ${lotAllocations}::jsonb,
+          wallet_lease_id = NULL
+      WHERE request_id = ${hold.request_id}
+    `;
+  } else if (detachedSupplierLeaseId) {
+    await tx`
+      UPDATE public.billing_holds
+      SET supplier_lease_id = NULL
       WHERE request_id = ${hold.request_id}
     `;
   }
@@ -357,7 +377,11 @@ export async function closeSupplierLease(
       let remainingAtoms = BigInt(String(sl.remaining_atoms));
       for (const oh of openHolds) {
         const holds = (oh.supplier_holds ?? []) as SupplierHoldEntry[];
-        const heldSum = holds.reduce((acc, s) => acc + BigInt(s.held_atoms), 0n);
+        const heldSum = holds.reduce(
+          (acc, s) =>
+            s.state === "HELD" || s.state === "UNKNOWN" ? acc + BigInt(s.held_atoms) : acc,
+          0n,
+        );
         remainingAtoms = remainingAtoms >= heldSum ? remainingAtoms - heldSum : 0n;
         await tx`
             UPDATE public.billing_holds SET supplier_lease_id = NULL WHERE request_id = ${oh.request_id}

@@ -29,12 +29,15 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
     options.maxBatchConcurrency ?? 4,
   );
   const settlement = createSettlementQueue(db, leases, batchWindowMs, maxBatchSize);
-  const holds = createHoldTransitions(db, orm, leases.notifyDetachedLocal);
+  const holds = createHoldTransitions(db, orm, leases, batchWindowMs, maxBatchSize);
 
   return {
     acquireHold: acquisition.acquireHold,
     commitTerminal: settlement.commitTerminal,
-    ...holds,
+    switchSupplierAttempt: holds.switchSupplierAttempt,
+    releaseHold: holds.releaseHold,
+    markUnknown: holds.markUnknown,
+    sweepTimedOutHolds: holds.sweepTimedOutHolds,
     ...createWalletOperations(db, orm, leases.invalidateWallet),
     ...createSupplierFunds(db, orm),
     ...createReconciliation(db, leases.notifyDetachedLocal),
@@ -45,6 +48,7 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
     async drain(): Promise<void> {
       leases.stopAcquiring();
       await acquisition.drain();
+      await holds.drain();
       await settlement.drain();
       await leases.releaseIdleLeases();
     },

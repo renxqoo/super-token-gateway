@@ -11,7 +11,7 @@ import { walletKey, supplierKey, walletLane } from "./funds.ts";
 
 const LEASE_TTL_MS = 15_000;
 const LEASE_RENEW_MARGIN_MS = 6_000;
-const LEASE_IDLE_RELEASE_MS = 250;
+const LEASE_IDLE_RELEASE_MS = 450;
 
 export type LeaseOptions = {
   nodeId?: string;
@@ -101,6 +101,36 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
         retireSupplierLease(sl);
       }
     }
+  }
+
+  function notifySupplierDetachedLocal(
+    requestId: string,
+    detachedSupplierLeaseId: string | null,
+    detachedSupplierAtoms: bigint,
+  ): void {
+    const meta = leasedHolds.get(requestId);
+    leasedHolds.delete(requestId);
+    const sl = supplierLeasesById.get(detachedSupplierLeaseId ?? meta?.supplierLeaseId ?? "");
+    if (sl) {
+      if (sl.inFlightHolds > 0) sl.inFlightHolds--;
+      if (detachedSupplierLeaseId) {
+        sl.remainingInPg =
+          sl.remainingInPg >= detachedSupplierAtoms ? sl.remainingInPg - detachedSupplierAtoms : 0n;
+      } else {
+        retireSupplierLease(sl);
+      }
+    }
+  }
+
+  function rebindHoldAttempt(
+    requestId: string,
+    nextAttemptId: string,
+    nextChannelId: string,
+  ): void {
+    const meta = leasedHolds.get(requestId);
+    if (!meta) return;
+    meta.attemptId = nextAttemptId;
+    meta.channelId = nextChannelId;
   }
 
   async function closeWalletLeaseInPg(leaseId: string, expiredOnly = false): Promise<boolean> {
@@ -240,7 +270,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
 
     async function closeInParallel<T>(items: T[], worker: (item: T) => Promise<void>) {
       if (items.length === 0) return;
-      const concurrency = Math.min(8, items.length);
+      const concurrency = Math.min(12, items.length);
       let cursor = 0;
       await Promise.all(
         Array.from({ length: concurrency }, async () => {
@@ -270,7 +300,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
           maintenance = undefined;
         });
       },
-      Math.max(100, Math.min(leaseIdleReleaseMs, 500)),
+      Math.max(100, Math.min(leaseIdleReleaseMs, 150)),
     );
     maintenanceTimer.unref();
   }
@@ -415,6 +445,8 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
     registerWallet,
     registerSupplier,
     notifyDetachedLocal,
+    notifySupplierDetachedLocal,
+    rebindHoldAttempt,
     settleHold,
     sweepExpiredLeases,
     async releaseIdleLeases(): Promise<void> {

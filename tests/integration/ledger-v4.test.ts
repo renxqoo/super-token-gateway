@@ -2208,3 +2208,229 @@ test("symptom: commit_leased_batch succeeds under least-privilege stg_data outbo
       await db.unsafe(`DROP ROLE IF EXISTS ${roleName}`).catch(() => undefined);
     }
   }));
+
+test("same-account confirmed-FAILED switchSupplierAttempt preserves active leases for fast settle and release, and cross-account targeted cell switch conserves funds", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const channelA2 = await f.catalog.upsertChannel({
+      account_id: f.accountA.id,
+      name: "chan-a-2",
+      kind: "openai",
+      base_url: "https://a2.invalid/v1",
+      secret_ciphertext: "enc-a2",
+      rpm: 10000,
+      concurrency: 1000,
+    });
+    await f.ledger.creditWallet({
+      project_id: f.project.id,
+      currency: "PTS",
+      external_ref: "fast-switch-fund",
+      amount_atoms: "100000",
+      kind: "CASH",
+    });
+
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const warmup = Array.from({ length: 16 }, () => ({
+      reqId: crypto.randomUUID(),
+      attId: crypto.randomUUID(),
+    }));
+    const warmHolds = await Promise.all(
+      warmup.map((item) =>
+        f.ledger.acquireHold({
+          request_id: item.reqId,
+          attempt_id: item.attId,
+          project_id: f.project.id,
+          currency: "PTS",
+          operation: "chat",
+          model: "gpt-4o",
+          idempotency_key: null,
+          fingerprint: "",
+          customer_atoms: "100",
+          supplier_account_id: f.accountA.id,
+          supplier_cost_version_id: f.costPrice.id,
+          supplier_channel_id: f.channelA.id,
+          supplier_currency: "USD",
+          supplier_atoms: "50",
+          expires_at: expiresAt,
+        }),
+      ),
+    );
+    expect(warmHolds.every((h) => h.ok)).toBe(true);
+    await Promise.all(
+      warmup.map((item) =>
+        f.ledger.commitTerminal({
+          request_id: item.reqId,
+          project_id: f.project.id,
+          selected_attempt_id: item.attId,
+          channel_id: f.channelA.id,
+          billing_price_id: f.flatBillingPrice.id,
+          cost_version_id: f.costPrice.id,
+          usage: { input_tokens: "10", output_tokens: "10" },
+          billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+          billing_basis: "PROVIDER_USAGE",
+          supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+          supplier_currency: "USD",
+        }),
+      ),
+    );
+
+    const reqCommit = crypto.randomUUID();
+    const attCommit1 = crypto.randomUUID();
+    const attCommit2 = crypto.randomUUID();
+    const reqRelease = crypto.randomUUID();
+    const attRelease1 = crypto.randomUUID();
+    const attRelease2 = crypto.randomUUID();
+    const reqCross = crypto.randomUUID();
+    const attCross1 = crypto.randomUUID();
+    const attCross2 = crypto.randomUUID();
+
+    for (const [reqId, attId] of [
+      [reqCommit, attCommit1],
+      [reqRelease, attRelease1],
+      [reqCross, attCross1],
+    ] as const) {
+      const h = await f.ledger.acquireHold({
+        request_id: reqId,
+        attempt_id: attId,
+        project_id: f.project.id,
+        currency: "PTS",
+        operation: "chat",
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: "",
+        customer_atoms: "100",
+        supplier_account_id: f.accountA.id,
+        supplier_cost_version_id: f.costPrice.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "50",
+        expires_at: expiresAt,
+      });
+      expect(h.ok).toBe(true);
+    }
+
+    const beforeRows = await db<
+      { request_id: string; wallet_lease_id: string | null; supplier_lease_id: string | null }[]
+    >`SELECT request_id, wallet_lease_id, supplier_lease_id FROM public.billing_holds WHERE request_id IN (${reqCommit}, ${reqRelease}, ${reqCross})`;
+    const beforeByReq = new Map(beforeRows.map((r) => [r.request_id, r]));
+    expect(beforeByReq.get(reqCommit)?.wallet_lease_id).not.toBeNull();
+    expect(beforeByReq.get(reqCommit)?.supplier_lease_id).not.toBeNull();
+    expect(beforeByReq.get(reqRelease)?.wallet_lease_id).not.toBeNull();
+    expect(beforeByReq.get(reqRelease)?.supplier_lease_id).not.toBeNull();
+
+    const swCommit = await f.ledger.switchSupplierAttempt({
+      request_id: reqCommit,
+      failed_attempt_id: attCommit1,
+      failed_outcome: "FAILED",
+      next_attempt_id: attCommit2,
+      next_account_id: f.accountA.id,
+      next_channel_id: channelA2.id,
+      next_currency: "USD",
+      next_supplier_atoms: "50",
+      next_supplier_cost_version_id: f.costPrice.id,
+    });
+    expect(swCommit).toMatchObject({ ok: true, held_atoms: "100" });
+
+    const swRelease = await f.ledger.switchSupplierAttempt({
+      request_id: reqRelease,
+      failed_attempt_id: attRelease1,
+      failed_outcome: "FAILED",
+      next_attempt_id: attRelease2,
+      next_account_id: f.accountA.id,
+      next_channel_id: channelA2.id,
+      next_currency: "USD",
+      next_supplier_atoms: "50",
+      next_supplier_cost_version_id: f.costPrice.id,
+    });
+    expect(swRelease).toMatchObject({ ok: true, held_atoms: "100" });
+
+    const afterFastRows = await db<
+      { request_id: string; wallet_lease_id: string | null; supplier_lease_id: string | null }[]
+    >`SELECT request_id, wallet_lease_id, supplier_lease_id FROM public.billing_holds WHERE request_id IN (${reqCommit}, ${reqRelease})`;
+    for (const row of afterFastRows) {
+      expect(row.wallet_lease_id).toBe(beforeByReq.get(row.request_id)!.wallet_lease_id);
+      expect(row.supplier_lease_id).toBe(beforeByReq.get(row.request_id)!.supplier_lease_id);
+    }
+
+    const swCross = await f.ledger.switchSupplierAttempt({
+      request_id: reqCross,
+      failed_attempt_id: attCross1,
+      failed_outcome: "FAILED",
+      next_attempt_id: attCross2,
+      next_account_id: f.accountB.id,
+      next_channel_id: f.channelB.id,
+      next_currency: "USD",
+      next_supplier_atoms: "50",
+      next_supplier_cost_version_id: f.costPrice.id,
+    });
+    expect(swCross).toMatchObject({ ok: true, held_atoms: "100" });
+    const [crossHold] = await db<
+      { wallet_lease_id: string | null; supplier_lease_id: string | null }[]
+    >`SELECT wallet_lease_id, supplier_lease_id FROM public.billing_holds WHERE request_id = ${reqCross}`;
+    expect(crossHold?.wallet_lease_id).toBe(beforeByReq.get(reqCross)!.wallet_lease_id);
+    expect(crossHold?.supplier_lease_id).toBeNull();
+
+    const commitFast = await f.ledger.commitTerminal({
+      request_id: reqCommit,
+      project_id: f.project.id,
+      selected_attempt_id: attCommit2,
+      channel_id: channelA2.id,
+      billing_price_id: f.flatBillingPrice.id,
+      cost_version_id: f.costPrice.id,
+      usage: { input_tokens: "30", output_tokens: "20" },
+      billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+      billing_basis: "PROVIDER_USAGE",
+      supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+      supplier_currency: "USD",
+    });
+    expect(commitFast).toMatchObject({ ok: true, customer_atoms: "50", supplier_cost_atoms: "25" });
+
+    await f.ledger.releaseHold(reqRelease);
+
+    const commitCross = await f.ledger.commitTerminal({
+      request_id: reqCross,
+      project_id: f.project.id,
+      selected_attempt_id: attCross2,
+      channel_id: f.channelB.id,
+      billing_price_id: f.flatBillingPrice.id,
+      cost_version_id: f.costPrice.id,
+      usage: { input_tokens: "40", output_tokens: "20" },
+      billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+      billing_basis: "PROVIDER_USAGE",
+      supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+      supplier_currency: "USD",
+    });
+    expect(commitCross).toMatchObject({
+      ok: true,
+      customer_atoms: "60",
+      supplier_cost_atoms: "30",
+    });
+
+    await f.ledger.drain();
+    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+      available_atoms: "99570",
+      reserved_atoms: "0",
+      spent_atoms: "430",
+    });
+    expect(await f.ledger.getSupplierBalance(f.accountA.id, "USD")).toEqual({
+      balance_atoms: "999815",
+      reserved_atoms: "0",
+      spent_atoms: "185",
+    });
+    expect(await f.ledger.getSupplierBalance(f.accountB.id, "USD")).toEqual({
+      balance_atoms: "999970",
+      reserved_atoms: "0",
+      spent_atoms: "30",
+    });
+    expect(await f.ledger.auditConservation()).toEqual({
+      ok: true,
+      unbalanced_journals: 0,
+      broken_lots: 0,
+      wallet_mismatches: 0,
+      reservation_mismatches: 0,
+      customer_ledger_mismatches: 0,
+      supplier_ledger_mismatches: 0,
+      open_holds: 0,
+      unknown_holds: 0,
+    });
+  }));

@@ -107,15 +107,24 @@ export function createSettlementQueue(
     { length: SETTLEMENT_LANES },
     () => new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 1),
   );
-  const direct = new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 2);
+  const directQueues = Array.from(
+    { length: SETTLEMENT_LANES },
+    () => new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 1),
+  );
+  const directFallback = new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 2);
   return {
     commitTerminal(input: CommitTerminalInput): Promise<CommitTerminalResult> {
       const hold = leases.holdById(input.request_id);
-      const queue = hold ? queues[walletLane(hold.projectId)]! : direct;
-      return queue.enqueue(input);
+      if (hold) return queues[walletLane(hold.projectId)]!.enqueue(input);
+      if (input.project_id) return directQueues[walletLane(input.project_id)]!.enqueue(input);
+      return directFallback.enqueue(input);
     },
     async drain(): Promise<void> {
-      await Promise.all([...queues, direct].map((queue) => queue.drain()));
+      await Promise.all([
+        ...queues.map((queue) => queue.drain()),
+        ...directQueues.map((queue) => queue.drain()),
+        directFallback.drain(),
+      ]);
     },
   };
 }

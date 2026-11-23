@@ -32,6 +32,8 @@ export type GatewayConfig = {
   reusePort?: boolean;
   holdTtlMs: number;
   attemptTimeoutMs: number;
+  firstByteTimeoutMs?: number;
+  maxAmbiguousRetriesPerMinute?: number;
   streamIdleTimeoutMs?: number;
   streamMaxDurationMs?: number;
   snapshotPollMs: number;
@@ -203,6 +205,14 @@ export function loadConfigFromEnv(
     ...(env.GATEWAY_REUSE_PORT === "true" ? { reusePort: true } : {}),
     holdTtlMs: intFromEnv(env, "HOLD_TTL_MS", 60_000),
     attemptTimeoutMs: intFromEnv(env, "ATTEMPT_TIMEOUT_MS", 30_000),
+    ...(env.FIRST_BYTE_TIMEOUT_MS !== undefined
+      ? { firstByteTimeoutMs: intFromEnv(env, "FIRST_BYTE_TIMEOUT_MS", 15_000) }
+      : {}),
+    ...(env.MAX_AMBIGUOUS_RETRIES_PER_MINUTE !== undefined
+      ? {
+          maxAmbiguousRetriesPerMinute: intFromEnv(env, "MAX_AMBIGUOUS_RETRIES_PER_MINUTE", 60, 0),
+        }
+      : {}),
     ...(env.STREAM_IDLE_TIMEOUT_MS !== undefined
       ? { streamIdleTimeoutMs: intFromEnv(env, "STREAM_IDLE_TIMEOUT_MS", 30_000) }
       : {}),

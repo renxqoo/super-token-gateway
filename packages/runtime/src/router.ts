@@ -151,6 +151,18 @@ export class SmartRouter {
     return { available: true, isProbe: false };
   }
 
+  peekAvailable(channelId: string, ownsProbe = false): boolean {
+    const st = this.channels.get(channelId);
+    if (!st) return true;
+    const t = this.now();
+    if (st.cooldownUntilMs > t) return false;
+    if (st.state === "OPEN") return st.openUntilMs <= t && (ownsProbe || !st.probeInFlight);
+    if (st.state === "HALF_OPEN") {
+      return ownsProbe || !st.probeInFlight || t - st.probeStartedAtMs >= this.probeTimeoutMs;
+    }
+    return true;
+  }
+
   releaseProbe(channelId: string): void {
     const st = this.channels.get(channelId);
     if (st && st.probeInFlight) {

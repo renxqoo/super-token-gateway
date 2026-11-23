@@ -136,9 +136,15 @@ type TenantAbsorbWindow = {
   atoms: bigint;
 };
 
+type AmbiguousRetryWindow = {
+  windowStartMs: number;
+  count: number;
+};
+
 export class GatewayMetrics {
   requestsTotal = 0;
   failoversTotal = 0;
+  ambiguousRetriesCappedTotal = 0;
   moderationBlocksTotal = 0;
   ledgerCommitFailures = 0;
   leaseRenewalFailures = 0;
@@ -178,6 +184,7 @@ export class GatewayMetrics {
     LabeledCounter<readonly [string, string, string]>
   >();
   private readonly tenantAbsorbWindows = new Map<string, TenantAbsorbWindow>();
+  private readonly ambiguousRetryWindows = new Map<string, AmbiguousRetryWindow>();
   private readonly requestDuration = new Histogram();
   private readonly ttftDuration = new Histogram();
   private readonly pluginDuration = new Histogram(PLUGIN_BUCKETS_MS);
@@ -324,6 +331,26 @@ export class GatewayMetrics {
     );
   }
 
+  tryConsumeAmbiguousRetry(channelId: string, maxPerMinute: number): boolean {
+    if (maxPerMinute <= 0) {
+      this.ambiguousRetriesCappedTotal++;
+      return false;
+    }
+    const now = performance.now();
+    const existing = this.ambiguousRetryWindows.get(channelId);
+    if (!existing || now - existing.windowStartMs >= 60_000) {
+      if (this.ambiguousRetryWindows.size >= 4096) this.ambiguousRetryWindows.clear();
+      this.ambiguousRetryWindows.set(channelId, { windowStartMs: now, count: 1 });
+      return true;
+    }
+    if (existing.count >= maxPerMinute) {
+      this.ambiguousRetriesCappedTotal++;
+      return false;
+    }
+    existing.count++;
+    return true;
+  }
+
   renderPrometheus(gauges: {
     inFlight: number;
     configEpoch: number;
@@ -344,6 +371,8 @@ export class GatewayMetrics {
       `gateway_requests_total ${this.requestsTotal}`,
       "# TYPE gateway_failovers_total counter",
       `gateway_failovers_total ${this.failoversTotal}`,
+      "# TYPE gateway_ambiguous_retries_capped_total counter",
+      `gateway_ambiguous_retries_capped_total ${this.ambiguousRetriesCappedTotal}`,
       "# TYPE gateway_moderation_blocks_total counter",
       `gateway_moderation_blocks_total ${this.moderationBlocksTotal}`,
       "# TYPE gateway_ledger_commit_failures_total counter",

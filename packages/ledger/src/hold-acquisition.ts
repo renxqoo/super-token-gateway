@@ -119,7 +119,7 @@ export function createHoldAcquirer(
     for (const x of items) {
       if (!admitted.has(x.input.request_id)) {
         retireLeases(x);
-        out.push(acquireQueue.enqueue(x.input));
+        out.push(acquireQueues[walletLane(x.input.project_id)]!.enqueue(x.input));
         continue;
       }
       leases.trackHold({
@@ -156,11 +156,10 @@ export function createHoldAcquirer(
     return out;
   }
 
-  const acquireQueue = new MicroBatchQueue(
-    createTransactionalHoldBatch(db, leases),
-    maxBatchSize,
-    batchWindowMs,
-    1,
+  const acquireQueues = Array.from(
+    { length: SETTLEMENT_LANES },
+    () =>
+      new MicroBatchQueue(createTransactionalHoldBatch(db, leases), maxBatchSize, batchWindowMs, 1),
   );
   const fastHoldQueues = Array.from(
     { length: SETTLEMENT_LANES },
@@ -169,19 +168,22 @@ export function createHoldAcquirer(
 
   return {
     acquireHold(input: AcquireHoldInput): Promise<AcquireHoldResult> {
+      const lane = walletLane(input.project_id);
       if (leases.canAcquire() && input.idempotency_key === null && !input.enforce_key_spend_limit) {
         const customerAtoms = parseAtoms(input.customer_atoms);
         const supplierAtoms = parseAtoms(input.supplier_atoms);
         if (customerAtoms !== null && supplierAtoms !== null) {
           const reserved = leases.reserveHold(input, customerAtoms, supplierAtoms);
-          if (reserved) return fastHoldQueues[walletLane(input.project_id)]!.enqueue(reserved);
+          if (reserved) return fastHoldQueues[lane]!.enqueue(reserved);
         }
       }
-      return acquireQueue.enqueue(input);
+      return acquireQueues[lane]!.enqueue(input);
     },
     async drain(): Promise<void> {
-      await Promise.all(fastHoldQueues.map((queue) => queue.drain()));
-      await acquireQueue.drain();
+      await Promise.all([
+        ...fastHoldQueues.map((queue) => queue.drain()),
+        ...acquireQueues.map((queue) => queue.drain()),
+      ]);
     },
   };
 }

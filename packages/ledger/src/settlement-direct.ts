@@ -18,10 +18,6 @@ import {
   toWalletRow,
   toLotRow,
   toCellRow,
-  insertJournalLines,
-  flushDirtyWallets,
-  flushDirtyLots,
-  flushDirtyCells,
   expireLotsInMemory,
   type WalletRow,
   type LotRow,
@@ -184,11 +180,15 @@ export async function applyDirectSettlements(
     }
   }
 
-  const existingChargesRaw = await tx`
+  const mayHaveExistingCharge =
+    holdsByReq.size < requestIds.length || [...holdsByReq.values()].some((h) => h.state !== "HELD");
+  const existingChargesRaw = mayHaveExistingCharge
+    ? await tx`
         SELECT id, request_id, outcome, customer_atoms::text, funded_atoms::text, debt_atoms::text, supplier_cost_atoms::text
         FROM public.billing_charges
         WHERE request_id = ANY(${requestIds}::uuid[])
-      `;
+      `
+    : [];
   const existingCharges = new Map<
     string,
     {
@@ -219,11 +219,10 @@ export async function applyDirectSettlements(
   ].sort();
   const keySpendsById = new Map<string, KeySpendRow>();
   if (keyIdsWithTracking.length > 0) {
-    const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
-    const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : nowMs;
     const lockedKeys = await tx`
       SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
-        spend_window_start, spent_atoms::text, reserved_atoms::text
+        spend_window_start, spent_atoms::text, reserved_atoms::text,
+        floor(extract(epoch from now()) * 1000)::bigint AS pg_now_ms
       FROM public.api_keys
       WHERE id = ANY(${keyIdsWithTracking}::uuid[])
         AND (spend_limit_atoms IS NOT NULL OR reserved_atoms > 0)
@@ -232,6 +231,7 @@ export async function applyDirectSettlements(
     `;
     for (const r of lockedKeys) {
       const row = toKeySpendRow(r);
+      const pgNowMs = r.pg_now_ms !== undefined ? Number(r.pg_now_ms) : nowMs;
       rolloverKeySpendInMemory(row, pgNowMs);
       keySpendsById.set(row.id, row);
     }
@@ -746,13 +746,103 @@ export async function applyDirectSettlements(
   }
 
   await flushDirtyKeySpends(tx, keySpendsById.values());
-  await flushDirtyWallets(tx, walletsById.values());
-  await flushDirtyLots(tx, lotsById.values());
-  await flushDirtyCells(tx, cellsByKey.values());
-  await insertJournalLines(tx, journals);
-
-  if (holdUpdates.length > 0) {
+  const dirtyWallets = [...walletsById.values()].filter((w) => w.dirty);
+  const dirtyLots = [...lotsById.values()].filter((l) => l.dirty);
+  const dirtyCells = [...cellsByKey.values()].filter((c) => c.dirty);
+  const outboxJson =
+    outboxBatch.length > 0
+      ? JSON.stringify(
+          outboxBatch.map((o) => ({
+            event_id: o.event_id,
+            kind: o.kind,
+            request_id: o.request_id,
+            project_id: o.project_id,
+            payload: o.payload,
+          })),
+        )
+      : "[]";
+  if (
+    dirtyWallets.length > 0 ||
+    dirtyLots.length > 0 ||
+    dirtyCells.length > 0 ||
+    journals.length > 0 ||
+    holdUpdates.length > 0 ||
+    newCharges.length > 0 ||
+    outboxBatch.length > 0
+  ) {
     await tx`
+      WITH
+        upd_w AS (
+          UPDATE public.wallets AS w SET
+            available_atoms = u.available_atoms,
+            reserved_atoms = u.reserved_atoms,
+            spent_atoms = u.spent_atoms,
+            expired_atoms = u.expired_atoms,
+            debt_atoms = u.debt_atoms,
+            credit_reserved_atoms = u.credit_reserved_atoms,
+            freeze_reason = u.freeze_reason
+          FROM unnest(
+            ${dirtyWallets.map((w) => w.id)}::uuid[],
+            ${dirtyWallets.map((w) => w.available_atoms.toString())}::numeric[],
+            ${dirtyWallets.map((w) => w.reserved_atoms.toString())}::numeric[],
+            ${dirtyWallets.map((w) => w.spent_atoms.toString())}::numeric[],
+            ${dirtyWallets.map((w) => w.expired_atoms.toString())}::numeric[],
+            ${dirtyWallets.map((w) => w.debt_atoms.toString())}::numeric[],
+            ${dirtyWallets.map((w) => w.credit_reserved_atoms.toString())}::numeric[],
+            ${dirtyWallets.map((w) => w.freeze_reason)}::text[]
+          ) AS u(id, available_atoms, reserved_atoms, spent_atoms, expired_atoms, debt_atoms, credit_reserved_atoms, freeze_reason)
+          WHERE w.id = u.id
+        ),
+        upd_l AS (
+          UPDATE public.wallet_lots AS l SET
+            available_atoms = u.available_atoms,
+            reserved_atoms = u.reserved_atoms,
+            spent_atoms = u.spent_atoms,
+            expired_atoms = u.expired_atoms
+          FROM unnest(
+            ${dirtyLots.map((l) => l.id)}::uuid[],
+            ${dirtyLots.map((l) => l.available_atoms.toString())}::numeric[],
+            ${dirtyLots.map((l) => l.reserved_atoms.toString())}::numeric[],
+            ${dirtyLots.map((l) => l.spent_atoms.toString())}::numeric[],
+            ${dirtyLots.map((l) => l.expired_atoms.toString())}::numeric[]
+          ) AS u(id, available_atoms, reserved_atoms, spent_atoms, expired_atoms)
+          WHERE l.id = u.id
+        ),
+        upd_c AS (
+          UPDATE public.supplier_cells AS c SET
+            balance_atoms = u.balance_atoms,
+            reserved_atoms = u.reserved_atoms,
+            spent_atoms = u.spent_atoms,
+            revision = u.revision
+          FROM unnest(
+            ${dirtyCells.map((c) => c.account_id)}::uuid[],
+            ${dirtyCells.map((c) => c.currency)}::text[],
+            ${dirtyCells.map((c) => c.cell)}::smallint[],
+            ${dirtyCells.map((c) => c.balance_atoms.toString())}::numeric[],
+            ${dirtyCells.map((c) => c.reserved_atoms.toString())}::numeric[],
+            ${dirtyCells.map((c) => c.spent_atoms.toString())}::numeric[],
+            ${dirtyCells.map((c) => c.revision.toString())}::bigint[]
+          ) AS u(account_id, currency, cell, balance_atoms, reserved_atoms, spent_atoms, revision)
+          WHERE c.account_id = u.account_id AND c.currency = u.currency AND c.cell = u.cell
+        ),
+        ins_le AS (
+          INSERT INTO public.ledger_entries (
+            journal_id, ordinal, side, entity_id, request_id, reference, kind, currency, account, atoms
+          )
+          SELECT * FROM unnest(
+            ${journals.map((l) => l.journal_id)}::uuid[],
+            ${journals.map((l) => l.ordinal)}::smallint[],
+            ${journals.map((l) => l.side)}::text[],
+            ${journals.map((l) => l.entity_id)}::uuid[],
+            ${journals.map((l) => l.request_id)}::uuid[],
+            ${journals.map((l) => l.reference)}::text[],
+            ${journals.map((l) => l.kind)}::text[],
+            ${journals.map((l) => l.currency)}::text[],
+            ${journals.map((l) => l.account)}::text[],
+            ${journals.map((l) => l.atoms.toString())}::numeric[]
+          )
+        ),
+        upd_h AS (
           UPDATE public.billing_holds AS h SET
             state = u.state,
             supplier_holds = u.supplier_holds::jsonb,
@@ -763,11 +853,8 @@ export async function applyDirectSettlements(
             ${holdUpdates.map((h) => JSON.stringify(h.supplier_holds))}::text[]
           ) AS u(request_id, state, supplier_holds)
           WHERE h.request_id = u.request_id
-        `;
-  }
-
-  if (newCharges.length > 0) {
-    await tx`
+        ),
+        ins_ch AS (
           INSERT INTO public.billing_charges (
             id, request_id, project_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
             model, operation, currency, billing_price_id, cost_version_id,
@@ -821,27 +908,17 @@ export async function applyDirectSettlements(
             customer_atoms, funded_atoms, debt_atoms, supplier_cost_atoms, supplier_currency,
             lot_allocations, plugin_audit, charge_policy, outcome, customer_journal_id, supplier_journal_id
           )
-        `;
-  }
-
-  if (outboxBatch.length > 0) {
-    const outboxJson = JSON.stringify(
-      outboxBatch.map((o) => ({
-        event_id: o.event_id,
-        kind: o.kind,
-        request_id: o.request_id,
-        project_id: o.project_id,
-        payload: o.payload,
-      })),
-    );
-    await tx`
+        ),
+        ins_ob AS (
           INSERT INTO public.outbox_events (event_id, kind, request_id, project_id, payload)
           SELECT u.event_id, u.kind, u.request_id, u.project_id, u.payload
           FROM jsonb_to_recordset(${outboxJson}::text::jsonb) AS u(
             event_id uuid, kind text, request_id uuid, project_id uuid, payload jsonb
           )
           ORDER BY public.outbox_shard(u.project_id) ASC, u.request_id ASC
-        `;
+        )
+      SELECT 1
+    `;
   }
   return {
     detached: detachedNotifications,

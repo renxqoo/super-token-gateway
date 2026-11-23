@@ -532,6 +532,7 @@ export type SwitchSupplierResult =
 
 export type CommitTerminalInput = {
   request_id: string;
+  project_id?: string;
   selected_attempt_id: string;
   channel_id: string;
   billing_price_id: string;

@@ -1094,13 +1094,30 @@ export async function handleInferenceRequest(
       deps.config.holdTtlMs + (isStream ? maxStreamDurationMs : 0),
     );
 
+    const firstByteDeadlineMs =
+      deps.config.firstByteTimeoutMs !== undefined
+        ? requestStart + deps.config.firstByteTimeoutMs
+        : null;
     let activeIndex = -1;
     let activeAttemptId = "";
     let holdCustomerAtoms = "0";
     let lastHoldErr: GatewayError | null = null;
 
     for (let idx = 0; idx < selected.length; idx++) {
-      const cand = selected[idx]!.route;
+      const entry = selected[idx]!;
+      const cand = entry.route;
+      if (!deps.router.peekAvailable(cand.channel.id, entry.isProbe)) {
+        releaseProbeFor(cand.channel_id);
+        continue;
+      }
+      if (firstByteDeadlineMs !== null && performance.now() >= firstByteDeadlineMs) {
+        releaseUnusedProbes(idx);
+        throw new GatewayError(
+          504,
+          "upstream_timeout",
+          "Request exceeded first-byte timeout budget",
+        );
+      }
       const preparedInput = idx === 0 ? firstInput : await prepareRouteInput(cand);
       if (preparedInput instanceof Response) return preparedInput;
       const { measurement } = preparedInput;
@@ -1216,6 +1233,27 @@ export async function handleInferenceRequest(
     ) {
       const entry = selected[cursor]!;
       const cand = entry.route;
+      if (!deps.router.peekAvailable(cand.channel.id, entry.isProbe)) {
+        releaseProbeFor(cand.channel_id);
+        if (cursor === activeIndex && !pendingSwitchFrom) {
+          pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
+        }
+        if (attemptsMade === 0 && lastErrorCode === "upstream_failed") {
+          lastErrorStatus = 503;
+          lastErrorCode = "no_route";
+          lastErrorMessage = "No healthy channel available for this model";
+        }
+        continue;
+      }
+      if (firstByteDeadlineMs !== null && performance.now() >= firstByteDeadlineMs) {
+        releaseUnusedProbes(cursor);
+        if (attemptsMade === 0) {
+          lastErrorStatus = 504;
+          lastErrorCode = "upstream_timeout";
+          lastErrorMessage = "Request exceeded first-byte timeout budget";
+        }
+        break;
+      }
       const candBilling = resolveEffectiveCustomerPrice(
         snap,
         project.id,
@@ -1299,6 +1337,15 @@ export async function handleInferenceRequest(
         deps.metrics.failoversTotal++;
       }
 
+      if (firstByteDeadlineMs !== null && performance.now() >= firstByteDeadlineMs) {
+        releaseUnusedProbes(cursor);
+        if (attemptsMade === 0) {
+          lastErrorStatus = 504;
+          lastErrorCode = "upstream_timeout";
+          lastErrorMessage = "Request exceeded first-byte timeout budget";
+        }
+        break;
+      }
       channelPermitRevoked = false;
       const chLimit = await deps.cluster.acquireRateLimit(
         `channel:${cand.channel.id}`,
@@ -1333,11 +1380,47 @@ export async function handleInferenceRequest(
         continue;
       }
       releaseChannelLimit = chLimit.release;
+      const baseAttemptTimeoutMs =
+        cand.route.retry_policy.attempt_timeout_ms ?? deps.config.attemptTimeoutMs;
+      let attemptTimeoutMs = baseAttemptTimeoutMs;
+      if (firstByteDeadlineMs !== null) {
+        const remainingTotalMs = Math.floor(firstByteDeadlineMs - performance.now());
+        if (remainingTotalMs <= 0) {
+          releaseChannelLimit();
+          releaseChannelLimit = null;
+          releaseUnusedProbes(cursor);
+          if (attemptsMade === 0) {
+            lastErrorStatus = 504;
+            lastErrorCode = "upstream_timeout";
+            lastErrorMessage = "Request exceeded first-byte timeout budget";
+          }
+          break;
+        }
+        let healthyBackupsLeft = 0;
+        const maxFutureAttempts = maxAttempts - attemptsMade - 1;
+        for (
+          let j = cursor + 1;
+          j < selected.length && healthyBackupsLeft < maxFutureAttempts;
+          j++
+        ) {
+          const nextEntry = selected[j]!;
+          if (deps.router.peekAvailable(nextEntry.route.channel.id, nextEntry.isProbe)) {
+            healthyBackupsLeft++;
+          }
+        }
+        attemptTimeoutMs =
+          healthyBackupsLeft > 0
+            ? Math.min(
+                baseAttemptTimeoutMs,
+                Math.max(
+                  Math.min(100, remainingTotalMs),
+                  Math.floor(remainingTotalMs / (healthyBackupsLeft + 1)),
+                ),
+              )
+            : Math.min(baseAttemptTimeoutMs, remainingTotalMs);
+      }
       attemptsMade++;
       logAttempts = attemptsMade;
-
-      const attemptTimeoutMs =
-        cand.route.retry_policy.attempt_timeout_ms ?? deps.config.attemptTimeoutMs;
       let attemptAborted = false;
       let attemptAbortReason: unknown;
       let attemptCancelCb: ((reason: unknown) => void) | null = null;
@@ -1556,7 +1639,13 @@ export async function handleInferenceRequest(
         markProbeCompleted(cand.channel.id);
         const failedOutcome: "FAILED" | "UNKNOWN" = isPreDispatch ? "FAILED" : "UNKNOWN";
         if (failedOutcome === "UNKNOWN") anyUnknownAttempt = true;
-        const allowAmbiguousRetry = Boolean(cand.route.retry_policy.retry_on_ambiguous);
+        const policyAllowsAmbiguous = Boolean(cand.route.retry_policy.retry_on_ambiguous);
+        const maxAmbiguousPerMin = deps.config.maxAmbiguousRetriesPerMinute;
+        const allowAmbiguousRetry =
+          !isPreDispatch &&
+          policyAllowsAmbiguous &&
+          (maxAmbiguousPerMin === undefined ||
+            deps.metrics.tryConsumeAmbiguousRetry(cand.channel.id, maxAmbiguousPerMin));
         lastErrorStatus = isPreDispatch ? 503 : 504;
         lastErrorCode = isPreDispatch ? "upstream_unreachable" : "upstream_timeout";
         lastErrorMessage = err instanceof Error ? err.message : "Upstream request failed";
@@ -1699,6 +1788,7 @@ export async function handleInferenceRequest(
             }
             await commitMeasured({
               request_id: requestId,
+              project_id: project.id,
               selected_attempt_id: activeAttemptId,
               channel_id: cand.channel.id,
               billing_price_id: candBilling.price.id,
@@ -2053,6 +2143,7 @@ export async function handleInferenceRequest(
 
             const commitRes = await commitMeasured({
               request_id: requestId,
+              project_id: project.id,
               selected_attempt_id: activeAttemptId,
               channel_id: cand.channel.id,
               billing_price_id: candBilling.price.id,
@@ -2230,8 +2321,17 @@ export async function handleInferenceRequest(
           attemptLinked.dispose();
           activeLinkedDispose = null;
           await upstreamBody?.cancel().catch(() => undefined);
+          releaseChannelLimit?.();
+          releaseChannelLimit = null;
           pluginSignal.throwIfAborted();
-          if (c.req.raw.signal.aborted || drainAborted) throw err;
+          const quotaLost = projectPermitRevoked || channelPermitRevoked;
+          if (c.req.raw.signal.aborted || drainAborted || quotaLost) {
+            releaseProbeFor(cand.channel_id);
+            releaseUnusedProbes(cursor + 1);
+            holdFinalized = true;
+            await deps.ledger.markUnknown(requestId);
+            throw admissionError(quotaLost);
+          }
           if (err instanceof WasmCapacityError) {
             releaseProbeFor(cand.channel.id);
             throw new GatewayError(503, "provider_capacity_unavailable", err.message);
@@ -2239,6 +2339,37 @@ export async function handleInferenceRequest(
           if (err instanceof WasmPluginFaultError) {
             releaseProbeFor(cand.channel.id);
             throw new GatewayError(502, "provider_plugin_fault", err.message);
+          }
+          if (attemptAborted) {
+            deps.metrics.recordUpstreamError(cand.channel.name, "timeout");
+            deps.router.recordFailure(
+              cand.channel.id,
+              "retryable",
+              undefined,
+              performance.now() - startedAt,
+            );
+            markProbeCompleted(cand.channel.id);
+            anyUnknownAttempt = true;
+            const policyAllowsAmbiguous = Boolean(cand.route.retry_policy.retry_on_ambiguous);
+            const maxAmbiguousPerMin = deps.config.maxAmbiguousRetriesPerMinute;
+            const allowAmbiguousRetry =
+              policyAllowsAmbiguous &&
+              (maxAmbiguousPerMin === undefined ||
+                deps.metrics.tryConsumeAmbiguousRetry(cand.channel.id, maxAmbiguousPerMin));
+            lastErrorStatus = 504;
+            lastErrorCode = "upstream_timeout";
+            lastErrorMessage =
+              attemptAbortReason instanceof Error
+                ? attemptAbortReason.message
+                : "Upstream stream prelude timed out";
+            if (allowAmbiguousRetry) {
+              pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "UNKNOWN" };
+              continue;
+            }
+            releaseUnusedProbes(cursor + 1);
+            holdFinalized = true;
+            await deps.ledger.markUnknown(requestId);
+            throw new GatewayError(lastErrorStatus, lastErrorCode, lastErrorMessage);
           }
           throw new GatewayError(
             502,
@@ -2321,7 +2452,7 @@ export async function handleInferenceRequest(
       const openStreamReader = (reader: ReadableStreamDefaultReader<Uint8Array>) =>
         createStreamChunkReader(
           reader,
-          deps.config.streamIdleTimeoutMs ?? attemptTimeoutMs,
+          deps.config.streamIdleTimeoutMs ?? baseAttemptTimeoutMs,
           () => attemptAbort.abort(new Error("Upstream stream exceeded its idle timeout")),
           streamSignal,
         );
@@ -2454,6 +2585,7 @@ export async function handleInferenceRequest(
               }
               await commitMeasured({
                 request_id: requestId,
+                project_id: project.id,
                 selected_attempt_id: activeAttemptId,
                 channel_id: cand.channel.id,
                 billing_price_id: candBilling.price.id,
@@ -2735,6 +2867,7 @@ export async function handleInferenceRequest(
                   );
                   const commitRes = await commitMeasured({
                     request_id: requestId,
+                    project_id: project.id,
                     selected_attempt_id: activeAttemptId,
                     channel_id: cand.channel.id,
                     billing_price_id: candBilling.price.id,
@@ -2825,6 +2958,7 @@ export async function handleInferenceRequest(
 
               await commitMeasured({
                 request_id: requestId,
+                project_id: project.id,
                 selected_attempt_id: activeAttemptId,
                 channel_id: cand.channel.id,
                 billing_price_id: candBilling.price.id,
@@ -3128,6 +3262,7 @@ export async function handleInferenceRequest(
                 );
                 const commitRes = await commitMeasured({
                   request_id: requestId,
+                  project_id: project.id,
                   selected_attempt_id: activeAttemptId,
                   channel_id: cand.channel.id,
                   billing_price_id: candBilling.price.id,
@@ -3216,6 +3351,7 @@ export async function handleInferenceRequest(
 
             await commitMeasured({
               request_id: requestId,
+              project_id: project.id,
               selected_attempt_id: activeAttemptId,
               channel_id: cand.channel.id,
               billing_price_id: candBilling.price.id,

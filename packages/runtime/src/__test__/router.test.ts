@@ -171,3 +171,33 @@ test("SmartRouter prefers same-protocol routes within the same priority tier whi
     "ch-cross",
   ]);
 });
+
+test("SmartRouter peekAvailable reflects live OPEN, cooldown, and HALF_OPEN ownership without mutating probe state", () => {
+  let clock = 1000;
+  const router = new SmartRouter({
+    now: () => clock,
+    failureThreshold: 2,
+    baseOpenMs: 5_000,
+    probeTimeoutMs: 10_000,
+  });
+
+  expect(router.peekAvailable("ch-new")).toBe(true);
+  router.recordFailure("ch-1", "retryable");
+  expect(router.peekAvailable("ch-1")).toBe(true);
+  router.recordFailure("ch-1", "retryable");
+  expect(router.peekAvailable("ch-1")).toBe(false);
+  expect(router.peekAvailable("ch-1", true)).toBe(false);
+
+  clock += 5_001;
+  expect(router.peekAvailable("ch-1")).toBe(true);
+  expect(router.snapshot().find((s) => s.channel_id === "ch-1")?.state).toBe("OPEN");
+  expect(router.isAvailable("ch-1")).toEqual({ available: true, isProbe: true });
+  expect(router.peekAvailable("ch-1")).toBe(false);
+  expect(router.peekAvailable("ch-1", true)).toBe(true);
+
+  router.recordFailure("ch-1", "rate_limit", 4_000);
+  expect(router.peekAvailable("ch-1")).toBe(false);
+  expect(router.peekAvailable("ch-1", true)).toBe(false);
+  clock += 4_001;
+  expect(router.peekAvailable("ch-1", true)).toBe(true);
+});

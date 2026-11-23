@@ -31,9 +31,6 @@ import {
   toLotRow,
   toCellRow,
   insertJournalLines,
-  flushDirtyWallets,
-  flushDirtyLots,
-  flushDirtyCells,
   expireLotsInMemory,
   type WalletRow,
   type LotRow,
@@ -45,7 +42,7 @@ const DEMAND_WINDOW_MS = 2000;
 const LEASE_MIN_MULTIPLIER = 64n;
 const LEASE_TARGET_MULTIPLIER = 4096n;
 const LEASE_MIN_WALLET_CHUNK = 50_000_000n;
-const LEASE_MIN_SUPPLIER_CHUNK = 50_000_000n;
+const LEASE_MIN_SUPPLIER_CHUNK = 200_000_000n;
 
 function recordHit(
   map: Map<string, { count: number; windowStart: number }>,
@@ -511,6 +508,13 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
           customerAtoms > 0n
         ) {
           const wHits = recordHit(recentWalletHits, wk, nowMs);
+          const demandKey = `${acctCurKey}:${lane}`;
+          const sHits =
+            supplierAtoms > 0n && sameLane(chosenCell)
+              ? recordHit(recentSupplierHits, demandKey, nowMs)
+              : 0;
+          const highLoadSupplier = sHits >= 32 || leases.hasSupplier(acctCurKey, lane);
+          const walletHot = wHits >= 16 || (highLoadSupplier && wHits >= 2);
           if (!leases.hasWallet(wk)) {
             const d = walletLeaseDemand.get(wk);
             if (d) {
@@ -520,13 +524,11 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
               walletLeaseDemand.set(wk, { wallet, maxQuote: customerAtoms, count: 1 });
             }
           }
-          if (wHits >= 16 && !leases.hasWallet(wk)) {
+          if (walletHot && !leases.hasWallet(wk)) {
             const d = walletLeaseDemand.get(wk);
             if (d && d.count < 4) d.count = 4;
           }
           if (supplierAtoms > 0n && sameLane(chosenCell) && !leases.hasSupplier(acctCurKey, lane)) {
-            const demandKey = `${acctCurKey}:${lane}`;
-            const sHits = recordHit(recentSupplierHits, demandKey, nowMs);
             const demand = supplierLeaseDemand.get(demandKey);
             if (demand) {
               if (supplierAtoms > demand.maxQuote) demand.maxQuote = supplierAtoms;
@@ -690,9 +692,110 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
       }
 
       await flushDirtyKeySpends(tx, keySpendsById.values());
-      await flushDirtyWallets(tx, walletsById.values());
-      await flushDirtyLots(tx, allLots);
-      await flushDirtyCells(tx, allCells);
+      const dirtyWallets = [...walletsById.values()].filter((w) => w.dirty);
+      const dirtyLots = allLots.filter((l) => l.dirty);
+      const dirtyCells = allCells.filter((c) => c.dirty);
+      if (
+        dirtyWallets.length > 0 ||
+        dirtyLots.length > 0 ||
+        dirtyCells.length > 0 ||
+        newHolds.length > 0
+      ) {
+        await tx`
+          WITH
+            upd_w AS (
+              UPDATE public.wallets AS w SET
+                available_atoms = u.available_atoms,
+                reserved_atoms = u.reserved_atoms,
+                spent_atoms = u.spent_atoms,
+                expired_atoms = u.expired_atoms,
+                debt_atoms = u.debt_atoms,
+                credit_reserved_atoms = u.credit_reserved_atoms,
+                freeze_reason = u.freeze_reason
+              FROM unnest(
+                ${dirtyWallets.map((w) => w.id)}::uuid[],
+                ${dirtyWallets.map((w) => w.available_atoms.toString())}::numeric[],
+                ${dirtyWallets.map((w) => w.reserved_atoms.toString())}::numeric[],
+                ${dirtyWallets.map((w) => w.spent_atoms.toString())}::numeric[],
+                ${dirtyWallets.map((w) => w.expired_atoms.toString())}::numeric[],
+                ${dirtyWallets.map((w) => w.debt_atoms.toString())}::numeric[],
+                ${dirtyWallets.map((w) => w.credit_reserved_atoms.toString())}::numeric[],
+                ${dirtyWallets.map((w) => w.freeze_reason)}::text[]
+              ) AS u(id, available_atoms, reserved_atoms, spent_atoms, expired_atoms, debt_atoms, credit_reserved_atoms, freeze_reason)
+              WHERE w.id = u.id
+            ),
+            upd_l AS (
+              UPDATE public.wallet_lots AS l SET
+                available_atoms = u.available_atoms,
+                reserved_atoms = u.reserved_atoms,
+                spent_atoms = u.spent_atoms,
+                expired_atoms = u.expired_atoms
+              FROM unnest(
+                ${dirtyLots.map((l) => l.id)}::uuid[],
+                ${dirtyLots.map((l) => l.available_atoms.toString())}::numeric[],
+                ${dirtyLots.map((l) => l.reserved_atoms.toString())}::numeric[],
+                ${dirtyLots.map((l) => l.spent_atoms.toString())}::numeric[],
+                ${dirtyLots.map((l) => l.expired_atoms.toString())}::numeric[]
+              ) AS u(id, available_atoms, reserved_atoms, spent_atoms, expired_atoms)
+              WHERE l.id = u.id
+            ),
+            upd_c AS (
+              UPDATE public.supplier_cells AS c SET
+                balance_atoms = u.balance_atoms,
+                reserved_atoms = u.reserved_atoms,
+                spent_atoms = u.spent_atoms,
+                revision = u.revision
+              FROM unnest(
+                ${dirtyCells.map((c) => c.account_id)}::uuid[],
+                ${dirtyCells.map((c) => c.currency)}::text[],
+                ${dirtyCells.map((c) => c.cell)}::smallint[],
+                ${dirtyCells.map((c) => c.balance_atoms.toString())}::numeric[],
+                ${dirtyCells.map((c) => c.reserved_atoms.toString())}::numeric[],
+                ${dirtyCells.map((c) => c.spent_atoms.toString())}::numeric[],
+                ${dirtyCells.map((c) => c.revision.toString())}::bigint[]
+              ) AS u(account_id, currency, cell, balance_atoms, reserved_atoms, spent_atoms, revision)
+              WHERE c.account_id = u.account_id AND c.currency = u.currency AND c.cell = u.cell
+            ),
+            ins_h AS (
+              INSERT INTO public.billing_holds (
+                request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
+                pricing_override_id, discount_numerator, discount_denominator,
+                operation, model, idempotency_key, fingerprint,
+                held_atoms, credit_atoms, lot_allocations, supplier_holds, state, expires_at
+              )
+              SELECT
+                u.request_id, u.project_id, u.wallet_id, u.api_key_id, u.key_reserved_atoms,
+                u.pricing_override_id, u.discount_numerator, u.discount_denominator,
+                u.operation, u.model, u.idempotency_key, u.fingerprint,
+                u.held_atoms, u.credit_atoms, u.lot_allocations::jsonb, u.supplier_holds::jsonb, 'HELD', u.expires_at
+              FROM unnest(
+                ${newHolds.map((h) => h.request_id)}::uuid[],
+                ${newHolds.map((h) => h.project_id)}::uuid[],
+                ${newHolds.map((h) => h.wallet_id)}::uuid[],
+                ${newHolds.map((h) => h.api_key_id)}::uuid[],
+                ${newHolds.map((h) => h.key_reserved_atoms)}::numeric[],
+                ${newHolds.map((h) => h.pricing_override_id)}::uuid[],
+                ${newHolds.map((h) => h.discount_numerator)}::numeric[],
+                ${newHolds.map((h) => h.discount_denominator)}::numeric[],
+                ${newHolds.map((h) => h.operation)}::text[],
+                ${newHolds.map((h) => h.model)}::text[],
+                ${newHolds.map((h) => h.idempotency_key)}::text[],
+                ${newHolds.map((h) => h.fingerprint)}::text[],
+                ${newHolds.map((h) => h.held_atoms)}::numeric[],
+                ${newHolds.map((h) => h.credit_atoms)}::numeric[],
+                ${newHolds.map((h) => JSON.stringify(h.lot_allocations))}::text[],
+                ${newHolds.map((h) => JSON.stringify(h.supplier_holds))}::text[],
+                ${newHolds.map((h) => h.expires_at)}::timestamptz[]
+              ) AS u(
+                request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
+                pricing_override_id, discount_numerator, discount_denominator,
+                operation, model, idempotency_key, fingerprint,
+                held_atoms, credit_atoms, lot_allocations, supplier_holds, expires_at
+              )
+            )
+          SELECT 1
+        `;
+      }
       await insertJournalLines(tx, journals);
 
       if (newWalletLeaseRows.length > 0) {
@@ -730,46 +833,6 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
             ${newSupplierLeaseRows.map((l) => l.remaining_atoms)}::numeric[],
             ${newSupplierLeaseRows.map((l) => l.expires_at)}::timestamptz[]
           ) AS u(id, account_id, currency, cell, remaining_atoms, expires_at)
-        `;
-      }
-
-      if (newHolds.length > 0) {
-        await tx`
-          INSERT INTO public.billing_holds (
-            request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
-            pricing_override_id, discount_numerator, discount_denominator,
-            operation, model, idempotency_key, fingerprint,
-            held_atoms, credit_atoms, lot_allocations, supplier_holds, state, expires_at
-          )
-          SELECT
-            u.request_id, u.project_id, u.wallet_id, u.api_key_id, u.key_reserved_atoms,
-            u.pricing_override_id, u.discount_numerator, u.discount_denominator,
-            u.operation, u.model, u.idempotency_key, u.fingerprint,
-            u.held_atoms, u.credit_atoms, u.lot_allocations::jsonb, u.supplier_holds::jsonb, 'HELD', u.expires_at
-          FROM unnest(
-            ${newHolds.map((h) => h.request_id)}::uuid[],
-            ${newHolds.map((h) => h.project_id)}::uuid[],
-            ${newHolds.map((h) => h.wallet_id)}::uuid[],
-            ${newHolds.map((h) => h.api_key_id)}::uuid[],
-            ${newHolds.map((h) => h.key_reserved_atoms)}::numeric[],
-            ${newHolds.map((h) => h.pricing_override_id)}::uuid[],
-            ${newHolds.map((h) => h.discount_numerator)}::numeric[],
-            ${newHolds.map((h) => h.discount_denominator)}::numeric[],
-            ${newHolds.map((h) => h.operation)}::text[],
-            ${newHolds.map((h) => h.model)}::text[],
-            ${newHolds.map((h) => h.idempotency_key)}::text[],
-            ${newHolds.map((h) => h.fingerprint)}::text[],
-            ${newHolds.map((h) => h.held_atoms)}::numeric[],
-            ${newHolds.map((h) => h.credit_atoms)}::numeric[],
-            ${newHolds.map((h) => JSON.stringify(h.lot_allocations))}::text[],
-            ${newHolds.map((h) => JSON.stringify(h.supplier_holds))}::text[],
-            ${newHolds.map((h) => h.expires_at)}::timestamptz[]
-          ) AS u(
-            request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
-            pricing_override_id, discount_numerator, discount_denominator,
-            operation, model, idempotency_key, fingerprint,
-            held_atoms, credit_atoms, lot_allocations, supplier_holds, expires_at
-          )
         `;
       }
     });

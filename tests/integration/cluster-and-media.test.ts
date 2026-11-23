@@ -429,7 +429,7 @@ test("Redis cluster syncs rate limits, circuit breaker OPEN state, and config ep
     redisProc!.kill("SIGTERM");
     await redisExited;
     await waitForRedisState(false, nodeA.cluster, nodeB.cluster);
-    expect(active.signal?.aborted).toBe(true);
+    expect(active.signal?.aborted).toBe(false);
     expect((await nodeA.publicApp.request("/readyz")).status).toBe(503);
     const unavailable = await callNode(nodeB);
     expect(unavailable.status).toBe(503);
@@ -437,6 +437,7 @@ test("Redis cluster syncs rate limits, circuit breaker OPEN state, and config ep
 
     await startEphemeralRedis(Number(new URL(redisUrl).port));
     await waitForRedisState(true, nodeA.cluster, nodeB.cluster);
+    expect(active.signal?.aborted).toBe(true);
     expect((await nodeB.publicApp.request("/readyz")).status).toBe(200);
     expect((await callNode(nodeA)).status).toBe(200);
   } finally {
@@ -944,6 +945,80 @@ test("batched Redis permits flush pending releases before dispatching new acquir
     for (const p of holdPermits) p.release();
     redis.close();
     await coord.close();
+  }
+});
+
+test("transient Redis socket drop preserves live permits, flushes offline releases on reconnect, and revokes permits before expiry if Redis stays down", async () => {
+  const admin = new Bun.RedisClient(redisUrl, { autoReconnect: false });
+  const namespace = `resilience-${crypto.randomUUID()}`;
+  const coordA = new ClusterCoordinator({ redisUrl, namespace });
+  const coordB = new ClusterCoordinator({ redisUrl, namespace });
+  const limits = { rpm: 10_000, tpm: 10_000, concurrency: 2 };
+  try {
+    await Promise.all([coordA.start(), coordB.start(), admin.connect()]);
+    const live = await coordA.acquireRateLimit("stream-key", limits, 1, 10_000);
+    const releasedOffline = await coordA.acquireRateLimit("stream-key", limits, 1, 10_000);
+    if (!live.ok || !releasedOffline.ok) throw new Error("Initial permits failed");
+    expect(await coordB.acquireRateLimit("stream-key", limits, 1, 10_000)).toEqual({
+      ok: false,
+      reason: "concurrency",
+    });
+
+    await admin.send("CLIENT", ["KILL", "TYPE", "normal", "SKIPME", "yes"]);
+    await waitForRedisState(false, coordA);
+    expect(live.signal?.aborted).toBe(false);
+    releasedOffline.release();
+
+    await waitForRedisState(true, coordA, coordB);
+    expect(live.signal?.aborted).toBe(false);
+    const concKey = `${namespace}:rl:conc:stream-key`;
+    expect(Number(await admin.send("ZCARD", [concKey]))).toBe(1);
+    const reopened = await coordB.acquireRateLimit("stream-key", limits, 1, 10_000);
+    expect(reopened.ok).toBe(true);
+    if (reopened.ok) reopened.release();
+    live.release();
+
+    const batchPermits = await Promise.all(
+      Array.from({ length: 300 }, (_, i) =>
+        coordA.acquireRateLimit(
+          `batch-${i % 10}`,
+          { rpm: 10_000, tpm: 10_000, concurrency: 100 },
+          1,
+          1200,
+        ),
+      ),
+    );
+    expect(batchPermits.every((p) => p.ok)).toBe(true);
+    await Bun.sleep(1500);
+    for (const p of batchPermits) {
+      if (p.ok) expect(p.signal?.aborted).toBe(false);
+    }
+    for (const p of batchPermits) {
+      if (p.ok) p.release();
+    }
+
+    const shortPermit = await coordA.acquireRateLimit(
+      "expiry-cutoff",
+      { rpm: 100, tpm: 100, concurrency: 1 },
+      1,
+      450,
+    );
+    if (!shortPermit.ok) throw new Error("Short permit failed");
+    const redisExited = once(redisProc!, "exit");
+    redisProc!.kill("SIGTERM");
+    await redisExited;
+    await waitForRedisState(false, coordA);
+    const abortDeadline = Date.now() + 900;
+    while (!shortPermit.signal?.aborted && Date.now() < abortDeadline) {
+      await Bun.sleep(15);
+    }
+    expect(shortPermit.signal?.aborted).toBe(true);
+
+    await startEphemeralRedis(Number(new URL(redisUrl).port));
+    await waitForRedisState(true, coordA, coordB);
+  } finally {
+    admin.close();
+    await Promise.all([coordA.close(), coordB.close()]);
   }
 });
 
