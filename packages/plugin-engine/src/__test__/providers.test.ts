@@ -206,6 +206,36 @@ test("Declarative transforms, endpoint rendering, error rules, usage aliases, an
   );
   expect(mmErr).toEqual({ retry_kind: "rate_limit", message: "rate limit reached" });
 
+  const catchAllRules = [
+    ...(minimax.provider_config.error_rules ?? []),
+    {
+      when_http_status: [200],
+      path: "base_resp.status_code",
+      not_equals: 0,
+      retry_kind: "client_error" as const,
+      http_status: 400,
+      message_path: "base_resp.status_msg",
+    },
+  ];
+  expect(
+    evaluateErrorRules(
+      200,
+      { base_resp: { status_code: 0, status_msg: "success" } },
+      catchAllRules,
+    ),
+  ).toBeNull();
+  expect(
+    evaluateErrorRules(
+      200,
+      { base_resp: { status_code: 2049, status_msg: "invalid api key" } },
+      catchAllRules,
+    ),
+  ).toEqual({
+    retry_kind: "client_error",
+    http_status: 400,
+    message: "invalid api key",
+  });
+
   const zhipu = getBuiltinProvider("zhipu")!;
   const zpErr = evaluateErrorRules(
     200,

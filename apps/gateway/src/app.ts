@@ -355,6 +355,12 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   publicApp.post("/v1/audio/translations", (c) =>
     handleInferenceRequest(c, proxyDeps, "translation", undefined, peerOf(c)),
   );
+  publicApp.post("/v1/music/generations", (c) =>
+    handleInferenceRequest(c, proxyDeps, "music", undefined, peerOf(c)),
+  );
+  publicApp.post("/v1/videos", (c) =>
+    handleInferenceRequest(c, proxyDeps, "videos", undefined, peerOf(c)),
+  );
   publicApp.post("/v1beta/models/:action", async (c) => {
     const action = c.req.param("action");
     const colon = action.lastIndexOf(":");
@@ -427,6 +433,8 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     ["/v1/audio/speech", "speech"],
     ["/v1/audio/transcriptions", "transcription"],
     ["/v1/audio/translations", "translation"],
+    ["/v1/music/generations", "music"],
+    ["/v1/videos", "videos"],
   ]);
 
   function fastContext(req: Request): InferenceContext {

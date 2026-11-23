@@ -228,6 +228,7 @@ const errorMatchRuleSchema = z
     when_http_status: z.array(z.number().int().min(100).max(599)).min(1).max(20).optional(),
     path: safeFieldPathSchema,
     equals: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    not_equals: z.union([z.string(), z.number(), z.boolean()]).optional(),
     in: z
       .array(z.union([z.string(), z.number()]))
       .min(1)
@@ -240,9 +241,16 @@ const errorMatchRuleSchema = z
     retry_after_path: safeFieldPathSchema.optional(),
   })
   .strict()
-  .refine((r) => r.equals !== undefined || r.in !== undefined || r.regex !== undefined, {
-    message: "error_rules entry must specify equals, in, or regex",
-  });
+  .refine(
+    (r) =>
+      r.equals !== undefined ||
+      r.not_equals !== undefined ||
+      r.in !== undefined ||
+      r.regex !== undefined,
+    {
+      message: "error_rules entry must specify equals, not_equals, in, or regex",
+    },
+  );
 
 const usageAliasRuleSchema = z
   .object({

@@ -114,7 +114,14 @@ export function requestCharacters(
     case "image_edits":
     case "videos":
       return textCharacters(body.prompt) ?? sumCharacters(body.prompt, textCharacters);
+    case "music":
+      return textCharacters(body.prompt) ?? textCharacters(body.lyrics);
     case "speech":
+      return (
+        textCharacters(body.input) ??
+        textCharacters(body.text) ??
+        sumCharacters(body.input, textCharacters)
+      );
     case "embeddings":
       return textCharacters(body.input) ?? sumCharacters(body.input, textCharacters);
     case "moderations":

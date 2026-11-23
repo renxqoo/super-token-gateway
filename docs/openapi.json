@@ -1053,6 +1053,172 @@
         }
       }
     },
+    "/v1/music/generations": {
+      "post": {
+        "x-stg-listener": "public",
+        "security": [
+          {
+            "projectBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["model"],
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/videos": {
+      "post": {
+        "x-stg-listener": "public",
+        "security": [
+          {
+            "projectBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["model"],
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1beta/models/{action}": {
       "post": {
         "x-stg-listener": "public",
@@ -1916,6 +2082,9 @@
                             "equals": {
                               "type": ["string", "number", "boolean"]
                             },
+                            "not_equals": {
+                              "type": ["string", "number", "boolean"]
+                            },
                             "in": {
                               "minItems": 1,
                               "maxItems": 64,
@@ -2622,6 +2791,9 @@
                               "maxLength": 128
                             },
                             "equals": {
+                              "type": ["string", "number", "boolean"]
+                            },
+                            "not_equals": {
                               "type": ["string", "number", "boolean"]
                             },
                             "in": {
@@ -3406,6 +3578,9 @@
                                       "maxLength": 128
                                     },
                                     "equals": {
+                                      "type": ["string", "number", "boolean"]
+                                    },
+                                    "not_equals": {
                                       "type": ["string", "number", "boolean"]
                                     },
                                     "in": {
@@ -5179,6 +5354,9 @@
                             "equals": {
                               "type": ["string", "number", "boolean"]
                             },
+                            "not_equals": {
+                              "type": ["string", "number", "boolean"]
+                            },
                             "in": {
                               "minItems": 1,
                               "maxItems": 64,
@@ -5644,6 +5822,9 @@
                             "equals": {
                               "type": ["string", "number", "boolean"]
                             },
+                            "not_equals": {
+                              "type": ["string", "number", "boolean"]
+                            },
                             "in": {
                               "minItems": 1,
                               "maxItems": 64,
@@ -5984,6 +6165,9 @@
                               "maxLength": 128
                             },
                             "equals": {
+                              "type": ["string", "number", "boolean"]
+                            },
+                            "not_equals": {
                               "type": ["string", "number", "boolean"]
                             },
                             "in": {

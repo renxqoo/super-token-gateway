@@ -53,6 +53,7 @@ export type ErrorMatchRule = {
   when_http_status?: number[];
   path: string;
   equals?: string | number | boolean;
+  not_equals?: string | number | boolean;
   in?: (string | number)[];
   regex?: string;
   retry_kind: "retryable" | "rate_limit" | "auth_error" | "client_error";

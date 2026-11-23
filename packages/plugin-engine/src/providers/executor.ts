@@ -480,6 +480,7 @@ export function evaluateErrorRules(
     if (val === undefined) continue;
     let matched = false;
     if (rule.equals !== undefined && val === rule.equals) matched = true;
+    else if (rule.not_equals !== undefined && val !== rule.not_equals) matched = true;
     else if (rule.in !== undefined && rule.in.includes(val as string | number)) matched = true;
     else if (rule.regex !== undefined && typeof val === "string") {
       if (rule.regex.length <= 128 && new RegExp(rule.regex).test(val)) matched = true;
