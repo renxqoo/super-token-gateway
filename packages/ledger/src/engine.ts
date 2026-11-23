@@ -29,7 +29,7 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
     options.maxBatchConcurrency ?? 4,
   );
   const settlement = createSettlementQueue(db, leases, batchWindowMs, maxBatchSize);
-  const holds = createHoldTransitions(db, orm, leases, batchWindowMs, maxBatchSize);
+  const holds = createHoldTransitions(db, leases, batchWindowMs, maxBatchSize);
 
   return {
     acquireHold: acquisition.acquireHold,

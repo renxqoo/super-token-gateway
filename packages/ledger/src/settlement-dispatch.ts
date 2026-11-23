@@ -4,7 +4,13 @@ import type { LeaseManager } from "./lease-manager.ts";
 import { MicroBatchQueue } from "./micro-batch.ts";
 import { commitLeasedBatch, type FastCommitCandidate } from "./settlement-leased.ts";
 import { commitDirectBatch } from "./settlement-direct.ts";
-import { postgresState, SETTLEMENT_LANES, walletLane } from "./funds.ts";
+import {
+  isTransientPgConcurrencyError,
+  postgresState,
+  SETTLEMENT_LANES,
+  walletLane,
+  withPgConcurrencyRetry,
+} from "./funds.ts";
 import { priceSettlement } from "./settlement-pricing.ts";
 
 export function createSettlementQueue(
@@ -62,31 +68,47 @@ export function createSettlementQueue(
       try {
         const settle = () => commitLeasedBatch(db, leases, fastCandidates, results);
         const fallback = await settle().catch((error: unknown) => {
-          if (postgresState(error) !== "55P03") throw error;
+          if (!isTransientPgConcurrencyError(error)) throw error;
           return settle();
         });
         for (const entry of fallback) directEntries.push(entry);
       } catch (error) {
-        const retryIndividually = postgresState(error)?.startsWith("23");
+        const retryViaDirect =
+          postgresState(error)?.startsWith("23") || isTransientPgConcurrencyError(error);
         for (const candidate of fastCandidates) {
           const wl = leases.walletById(candidate.meta.walletLeaseId);
           if (wl) leases.retireWalletLease(wl);
           const sl = leases.supplierById(candidate.meta.supplierLeaseId);
           if (sl) leases.retireSupplierLease(sl);
-          if (retryIndividually) directEntries.push(candidate);
+          if (retryViaDirect) directEntries.push(candidate);
           else failures.set(candidate.index, error);
         }
       }
     }
 
+    const bisectDeadline = performance.now() + 12_000;
     async function commitDirect(entries: typeof directEntries): Promise<void> {
       try {
-        await commitDirectBatch(db, leases.notifyDetachedLocal, entries, results);
+        const run = () => commitDirectBatch(db, leases.notifyDetachedLocal, entries, results);
+        if (entries.length === 1) {
+          await withPgConcurrencyRetry(run, 3);
+        } else {
+          await run().catch((error: unknown) => {
+            const code = postgresState(error);
+            if (code === "40P01" || code === "40001") return run();
+            throw error;
+          });
+        }
         for (const { index, item } of entries) {
           if (results[index]?.ok) leases.notifyDetachedLocal(item.request_id, null, 0n, null, 0n);
         }
       } catch (error) {
-        if (entries.length > 1 && postgresState(error)?.startsWith("23")) {
+        const code = postgresState(error);
+        const canBisect =
+          entries.length > 1 &&
+          (code?.startsWith("23") ||
+            (isTransientPgConcurrencyError(error) && performance.now() < bisectDeadline));
+        if (canBisect) {
           const half = Math.floor(entries.length / 2);
           await commitDirect(entries.slice(0, half));
           await commitDirect(entries.slice(half));

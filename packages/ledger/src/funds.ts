@@ -81,6 +81,31 @@ export function postgresState(error: unknown): string | undefined {
     : undefined;
 }
 
+const TRANSIENT_PG_STATES = new Set(["40P01", "40001", "55P03"]);
+
+export function isTransientPgConcurrencyError(error: unknown): boolean {
+  const code = postgresState(error);
+  return code !== undefined && TRANSIENT_PG_STATES.has(code);
+}
+
+export async function withPgConcurrencyRetry<T>(
+  run: () => Promise<T>,
+  maxAttempts = 4,
+): Promise<T> {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await run();
+    } catch (error) {
+      attempt++;
+      if (attempt >= maxAttempts || !isTransientPgConcurrencyError(error)) {
+        throw error;
+      }
+      await Bun.sleep(10 * attempt + Math.floor(Math.random() * 10));
+    }
+  }
+}
+
 export function parseAtoms(value: string): bigint | null {
   if (!/^(0|[1-9][0-9]{0,37})$/.test(value)) return null;
   const n = BigInt(value);

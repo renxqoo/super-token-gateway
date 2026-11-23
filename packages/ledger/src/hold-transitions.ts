@@ -1,8 +1,6 @@
 import type { SQL } from "bun";
-import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { detachHoldFromLeaseTx } from "./leases.ts";
 import { MicroBatchQueue } from "./micro-batch.ts";
-import { billingHolds, type LedgerDrizzle } from "./schema.ts";
 import type {
   HoldLotAllocation,
   SupplierHoldEntry,
@@ -19,7 +17,9 @@ import {
 } from "./key-spend.ts";
 import {
   CELL_COUNT,
+  isTransientPgConcurrencyError,
   parseAtoms,
+  withPgConcurrencyRetry,
   computeFreezeReason,
   sortLots,
   lotEligible,
@@ -269,7 +269,6 @@ type HoldTransitionLeaseHooks = Pick<
 
 export function createHoldTransitions(
   db: SQL,
-  orm: LedgerDrizzle,
   leases: HoldTransitionLeaseHooks,
   batchWindowMs = 2,
   maxBatchSize = 256,
@@ -1117,8 +1116,14 @@ export function createHoldTransitions(
     },
 
     async releaseHold(requestId: string): Promise<boolean> {
-      const result = await db.begin((tx) => releaseHoldInTx(tx, requestId));
-      notifyHoldRelease(leases.notifyDetachedLocal, requestId, result);
+      const result = await withPgConcurrencyRetry(() =>
+        db.begin((tx) => releaseHoldInTx(tx, requestId)),
+      );
+      if (result.released) {
+        notifyHoldRelease(leases.notifyDetachedLocal, requestId, result);
+      } else {
+        leases.notifyDetachedLocal(requestId, null, 0n, null, 0n);
+      }
       return result.released;
     },
 
@@ -1129,37 +1134,40 @@ export function createHoldTransitions(
         slId: string | null;
         supAtoms: bigint;
       } | null = null;
-      const marked = await db.begin(async (tx) => {
-        const rows = await tx`
-          SELECT request_id, held_atoms::text, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state
-          FROM public.billing_holds WHERE request_id = ${requestId} FOR NO KEY UPDATE
-        `;
-        if (!rows.length || rows[0]!.state !== "HELD") return false;
-        const h = rows[0]!;
-        const heldAtoms = BigInt(String(h.held_atoms));
-        const supHolds = (h.supplier_holds ?? []) as SupplierHoldEntry[];
-        if (h.wallet_lease_id || h.supplier_lease_id) {
-          const det = await detachHoldFromLeaseTx(tx, {
-            request_id: String(h.request_id),
-            held_atoms: heldAtoms,
-            wallet_lease_id: h.wallet_lease_id ? String(h.wallet_lease_id) : null,
-            supplier_lease_id: h.supplier_lease_id ? String(h.supplier_lease_id) : null,
-            lot_allocations: (h.lot_allocations ?? []) as HoldLotAllocation[],
-            supplier_holds: supHolds,
-          });
-          detached = {
-            wlId: det.detachedWalletLeaseId,
-            heldCust: heldAtoms,
-            slId: det.detachedSupplierLeaseId,
-            supAtoms: det.detachedSupplierAtoms,
-          };
-        }
-        await tx`
-          UPDATE public.billing_holds SET state = 'UNKNOWN'
-          WHERE request_id = ${requestId} AND state = 'HELD'
-        `;
-        return true;
-      });
+      const marked = await withPgConcurrencyRetry(() =>
+        db.begin(async (tx) => {
+          detached = null;
+          const rows = await tx`
+            SELECT request_id, held_atoms::text, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state
+            FROM public.billing_holds WHERE request_id = ${requestId} FOR NO KEY UPDATE
+          `;
+          if (!rows.length || rows[0]!.state !== "HELD") return false;
+          const h = rows[0]!;
+          const heldAtoms = BigInt(String(h.held_atoms));
+          const supHolds = (h.supplier_holds ?? []) as SupplierHoldEntry[];
+          if (h.wallet_lease_id || h.supplier_lease_id) {
+            const det = await detachHoldFromLeaseTx(tx, {
+              request_id: String(h.request_id),
+              held_atoms: heldAtoms,
+              wallet_lease_id: h.wallet_lease_id ? String(h.wallet_lease_id) : null,
+              supplier_lease_id: h.supplier_lease_id ? String(h.supplier_lease_id) : null,
+              lot_allocations: (h.lot_allocations ?? []) as HoldLotAllocation[],
+              supplier_holds: supHolds,
+            });
+            detached = {
+              wlId: det.detachedWalletLeaseId,
+              heldCust: heldAtoms,
+              slId: det.detachedSupplierLeaseId,
+              supAtoms: det.detachedSupplierAtoms,
+            };
+          }
+          await tx`
+            UPDATE public.billing_holds SET state = 'UNKNOWN'
+            WHERE request_id = ${requestId} AND state = 'HELD'
+          `;
+          return true;
+        }),
+      );
       if (detached) {
         const d = detached as {
           wlId: string | null;
@@ -1168,32 +1176,140 @@ export function createHoldTransitions(
           supAtoms: bigint;
         };
         leases.notifyDetachedLocal(requestId, d.wlId, d.heldCust, d.slId, d.supAtoms);
-      } else if (marked) {
+      } else {
         leases.notifyDetachedLocal(requestId, null, 0n, null, 0n);
       }
       return marked;
     },
 
     async sweepTimedOutHolds(limit = 100): Promise<number> {
-      const expired = orm
-        .select({ requestId: billingHolds.requestId })
-        .from(billingHolds)
-        .where(and(eq(billingHolds.state, "HELD"), lte(billingHolds.expiresAt, sql`now()`)))
-        .orderBy(asc(billingHolds.expiresAt))
-        .limit(limit)
-        .for("no key update", { skipLocked: true });
-      const rows = await orm
-        .update(billingHolds)
-        .set({ state: "UNKNOWN" })
-        .where(
-          and(
-            eq(billingHolds.state, "HELD"),
-            lte(billingHolds.expiresAt, sql`now()`),
-            inArray(billingHolds.requestId, expired),
-          ),
+      const unleasedRows = await db<{ request_id: string }[]>`
+        WITH expired AS MATERIALIZED (
+          SELECT request_id
+          FROM public.billing_holds
+          WHERE state = 'HELD'
+            AND expires_at <= now()
+            AND wallet_lease_id IS NULL
+            AND supplier_lease_id IS NULL
+          ORDER BY expires_at
+          LIMIT ${limit}
+          FOR NO KEY UPDATE SKIP LOCKED
         )
-        .returning({ requestId: billingHolds.requestId });
-      return rows.length;
+        UPDATE public.billing_holds AS h
+        SET state = 'UNKNOWN'
+        FROM expired
+        WHERE h.request_id = expired.request_id AND h.state = 'HELD'
+        RETURNING h.request_id
+      `;
+      let swept = unleasedRows.length;
+      if (swept >= limit) return swept;
+
+      const deadline = performance.now() + 750;
+      const scanCap = Math.min(Math.max((limit - swept) * 4, 200), 2000);
+      let scanned = 0;
+      let cursorExpires: string | null = null;
+      let cursorReqId: string | null = null;
+
+      while (swept < limit && scanned < scanCap && performance.now() < deadline) {
+        const pageSize = Math.min(100, scanCap - scanned);
+        const page: { request_id: string; expires_at: string }[] =
+          cursorExpires !== null && cursorReqId !== null
+            ? await db<{ request_id: string; expires_at: string }[]>`
+                SELECT request_id, expires_at::text AS expires_at
+                FROM public.billing_holds
+                WHERE state = 'HELD'
+                  AND expires_at <= now()
+                  AND (wallet_lease_id IS NOT NULL OR supplier_lease_id IS NOT NULL)
+                  AND (expires_at, request_id) > (${cursorExpires}::timestamptz, ${cursorReqId}::uuid)
+                ORDER BY expires_at, request_id
+                LIMIT ${pageSize}
+              `
+            : await db<{ request_id: string; expires_at: string }[]>`
+                SELECT request_id, expires_at::text AS expires_at
+                FROM public.billing_holds
+                WHERE state = 'HELD'
+                  AND expires_at <= now()
+                  AND (wallet_lease_id IS NOT NULL OR supplier_lease_id IS NOT NULL)
+                ORDER BY expires_at, request_id
+                LIMIT ${pageSize}
+              `;
+        if (page.length === 0) break;
+        for (const row of page) {
+          scanned++;
+          cursorExpires = String(row.expires_at);
+          cursorReqId = String(row.request_id);
+          if (swept >= limit || performance.now() >= deadline) break;
+          const requestId = cursorReqId;
+          let detached: {
+            wlId: string | null;
+            heldCust: bigint;
+            slId: string | null;
+            supAtoms: bigint;
+          } | null = null;
+          const marked = await db
+            .begin(async (tx) => {
+              const rows = await tx`
+                SELECT request_id, held_atoms::text, lot_allocations, supplier_holds,
+                  wallet_lease_id, supplier_lease_id, state
+                FROM public.billing_holds
+                WHERE request_id = ${requestId}
+                  AND state = 'HELD'
+                  AND expires_at <= now()
+                FOR NO KEY UPDATE SKIP LOCKED
+              `;
+              if (!rows.length) return false;
+              const h = rows[0]!;
+              const heldAtoms = BigInt(String(h.held_atoms));
+              const supHolds = (h.supplier_holds ?? []) as SupplierHoldEntry[];
+              if (h.wallet_lease_id || h.supplier_lease_id) {
+                const det = await detachHoldFromLeaseTx(
+                  tx,
+                  {
+                    request_id: String(h.request_id),
+                    held_atoms: heldAtoms,
+                    wallet_lease_id: h.wallet_lease_id ? String(h.wallet_lease_id) : null,
+                    supplier_lease_id: h.supplier_lease_id ? String(h.supplier_lease_id) : null,
+                    lot_allocations: (h.lot_allocations ?? []) as HoldLotAllocation[],
+                    supplier_holds: supHolds,
+                  },
+                  { nowait: true },
+                );
+                detached = {
+                  wlId: det.detachedWalletLeaseId,
+                  heldCust: heldAtoms,
+                  slId: det.detachedSupplierLeaseId,
+                  supAtoms: det.detachedSupplierAtoms,
+                };
+              }
+              await tx`
+                UPDATE public.billing_holds
+                SET state = 'UNKNOWN'
+                WHERE request_id = ${requestId} AND state = 'HELD'
+              `;
+              return true;
+            })
+            .catch((error: unknown) => {
+              if (isTransientPgConcurrencyError(error)) return false;
+              throw error;
+            });
+          if (marked) {
+            swept++;
+            if (detached) {
+              const d = detached as {
+                wlId: string | null;
+                heldCust: bigint;
+                slId: string | null;
+                supAtoms: bigint;
+              };
+              leases.notifyDetachedLocal(requestId, d.wlId, d.heldCust, d.slId, d.supAtoms);
+            } else {
+              leases.notifyDetachedLocal(requestId, null, 0n, null, 0n);
+            }
+          }
+        }
+        if (page.length < pageSize) break;
+      }
+      return swept;
     },
   };
 }

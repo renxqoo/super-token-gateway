@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { appendFile, rm } from "node:fs/promises";
-import type { SQL } from "bun";
+import { SQL } from "bun";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { createWorkerRunner } from "@gateway/worker";
 import {
@@ -18,7 +18,7 @@ import {
 } from "@gateway/ledger";
 
 async function withLedgerDb(
-  run: (db: SQL) => Promise<void>,
+  run: (db: SQL, dbUrl: string) => Promise<void>,
   initialize: (db: SQL) => Promise<void> = migrate,
 ): Promise<void> {
   const base = process.env.DATABASE_URL;
@@ -31,7 +31,7 @@ async function withLedgerDb(
   const db = createDatabase(url.toString(), 16);
   try {
     await initialize(db);
-    await run(db);
+    await run(db, url.toString());
   } finally {
     await db.close({ timeout: 1 });
     await owner.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
@@ -2433,4 +2433,324 @@ test("same-account confirmed-FAILED switchSupplierAttempt preserves active lease
       open_holds: 0,
       unknown_holds: 0,
     });
+  }));
+
+test("sweepTimedOutHolds detaches active wallet and supplier leases so swept UNKNOWN holds remain self-contained and reconcilable", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    await f.ledger.creditWallet({
+      project_id: f.project.id,
+      currency: "PTS",
+      external_ref: "sweep-detach-fund",
+      amount_atoms: "100000",
+      kind: "CASH",
+    });
+
+    const nodeLedger = createLedgerEngine(db, {
+      enableLeases: true,
+      leaseTtlMs: 30_000,
+      leaseIdleReleaseMs: 30_000,
+    });
+    const workerLedger = createLedgerEngine(db, { enableLeases: false });
+
+    try {
+      const reqExpired = crypto.randomUUID();
+      const attExpired = crypto.randomUUID();
+      const reqLive = crypto.randomUUID();
+      const attLive = crypto.randomUUID();
+      const baseHold = {
+        project_id: f.project.id,
+        currency: "PTS",
+        operation: "chat" as const,
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: "",
+        customer_atoms: "200",
+        supplier_account_id: f.accountA.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "100",
+        expires_at: new Date(Date.now() + 30_000).toISOString(),
+      };
+      const warmup = Array.from({ length: 8 }, () => ({
+        request_id: crypto.randomUUID(),
+        attempt_id: crypto.randomUUID(),
+      }));
+      await Promise.all(warmup.map((w) => nodeLedger.acquireHold({ ...baseHold, ...w })));
+      await Promise.all(warmup.map((w) => nodeLedger.releaseHold(w.request_id)));
+
+      const [h1, h2] = await Promise.all([
+        nodeLedger.acquireHold({ ...baseHold, request_id: reqExpired, attempt_id: attExpired }),
+        nodeLedger.acquireHold({ ...baseHold, request_id: reqLive, attempt_id: attLive }),
+      ]);
+      expect(h1.ok).toBe(true);
+      expect(h2.ok).toBe(true);
+
+      const [before] = await db`
+        SELECT wallet_lease_id, supplier_lease_id, state
+        FROM public.billing_holds WHERE request_id = ${reqExpired}
+      `;
+      expect(before?.state).toBe("HELD");
+      expect(before?.wallet_lease_id).not.toBeNull();
+      expect(before?.supplier_lease_id).not.toBeNull();
+
+      await db`
+        UPDATE public.billing_holds
+        SET expires_at = now() - interval '1 second'
+        WHERE request_id = ${reqExpired}
+      `;
+
+      const swept = await workerLedger.sweepTimedOutHolds(100);
+      expect(swept).toBe(1);
+
+      const [after] = await db`
+        SELECT state, wallet_lease_id, supplier_lease_id, lot_allocations
+        FROM public.billing_holds WHERE request_id = ${reqExpired}
+      `;
+      expect(after?.state).toBe("UNKNOWN");
+      expect(after?.wallet_lease_id).toBeNull();
+      expect(after?.supplier_lease_id).toBeNull();
+      const allocs = (after?.lot_allocations ?? []) as { amount_atoms: string }[];
+      const allocSum = allocs.reduce((s, a) => s + BigInt(a.amount_atoms), 0n);
+      expect(allocSum).toBe(200n);
+
+      const liveCommit = await nodeLedger.commitTerminal({
+        request_id: reqLive,
+        project_id: f.project.id,
+        selected_attempt_id: attLive,
+        channel_id: f.channelA.id,
+        billing_price_id: f.flatBillingPrice.id,
+        cost_version_id: f.costPrice.id,
+        usage: { input_tokens: "30", output_tokens: "20" },
+        billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+        billing_basis: "PROVIDER_USAGE",
+        supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+        supplier_currency: "USD",
+      });
+      expect(liveCommit).toMatchObject({
+        ok: true,
+        customer_atoms: "50",
+        supplier_cost_atoms: "25",
+      });
+
+      expect(await workerLedger.auditConservation()).toMatchObject({
+        ok: true,
+        open_holds: 0,
+        unknown_holds: 1,
+      });
+
+      const resolved = await workerLedger.resolveRequest({
+        request_id: reqExpired,
+        action: "RELEASE",
+        reason: "verified_unused",
+        actor: "ops",
+      });
+      expect(resolved.state).toBe("RELEASED");
+
+      expect(await nodeLedger.markUnknown(reqExpired)).toBe(false);
+      await nodeLedger.releaseIdleLeases();
+      expect(await workerLedger.auditConservation()).toEqual({
+        ok: true,
+        unbalanced_journals: 0,
+        broken_lots: 0,
+        wallet_mismatches: 0,
+        reservation_mismatches: 0,
+        customer_ledger_mismatches: 0,
+        supplier_ledger_mismatches: 0,
+        open_holds: 0,
+        unknown_holds: 0,
+      });
+    } finally {
+      await nodeLedger.drain();
+      await workerLedger.drain();
+    }
+  }));
+
+test("worker periodic sweep drains a large expired-hold backlog in one tick instead of capping at 200 holds per interval", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    await f.ledger.creditWallet({
+      project_id: f.project.id,
+      currency: "PTS",
+      external_ref: "worker-drain-fund",
+      amount_atoms: "1000000",
+      kind: "CASH",
+    });
+
+    const total = 620;
+    const base = {
+      project_id: f.project.id,
+      currency: "PTS",
+      operation: "chat" as const,
+      model: "gpt-4o",
+      idempotency_key: null,
+      fingerprint: "",
+      customer_atoms: "100",
+      supplier_account_id: f.accountA.id,
+      supplier_channel_id: f.channelA.id,
+      supplier_currency: "USD",
+      supplier_atoms: "50",
+      expires_at: new Date(Date.now() - 1000).toISOString(),
+    };
+    const acquired = await Promise.all(
+      Array.from({ length: total }, () =>
+        f.ledger.acquireHold({
+          ...base,
+          request_id: crypto.randomUUID(),
+          attempt_id: crypto.randomUUID(),
+        }),
+      ),
+    );
+    expect(acquired.every((r) => r.ok)).toBe(true);
+
+    const bounded = await f.ledger.sweepTimedOutHolds(50);
+    expect(bounded).toBe(50);
+    const remaining = total - bounded;
+
+    const worker = createWorkerRunner({
+      db,
+      sweepIntervalMs: 1200,
+      maintenanceIntervalMs: 60_000,
+      monitorIntervalMs: 60_000,
+      partitionIntervalMs: 60_000,
+    });
+    await worker.start();
+    try {
+      const deadline = performance.now() + 3000;
+      while (worker.status().last_successful_sweep === null && performance.now() < deadline) {
+        await Bun.sleep(25);
+      }
+      expect(worker.status().last_successful_sweep).not.toBeNull();
+      const audit = await f.ledger.auditConservation();
+      expect(audit.ok).toBe(true);
+      expect(audit.open_holds).toBe(0);
+      expect(audit.unknown_holds).toBe(total);
+      expect(worker.metrics()).toContain(`stg_worker_swept_holds_total ${remaining}\n`);
+    } finally {
+      await worker.stop();
+      await f.ledger.drain();
+    }
+  }));
+
+test("direct settlement microbatch isolates lock-timeout holds and releaseHold/markUnknown retry transient lock timeouts", () =>
+  withLedgerDb(async (db, dbUrl) => {
+    const f = await seedFixture(db);
+    await f.ledger.creditWallet({
+      project_id: f.project.id,
+      currency: "PTS",
+      external_ref: "lock-retry-fund",
+      amount_atoms: "100000",
+      kind: "CASH",
+    });
+
+    const shortLockDb = new SQL(dbUrl, {
+      max: 4,
+      connection: {
+        statement_timeout: 8000,
+        lock_timeout: 30,
+      },
+    });
+    const shortLedger = createLedgerEngine(shortLockDb, {
+      enableLeases: false,
+      batchWindowMs: 15,
+      maxBatchSize: 64,
+    });
+    await shortLockDb`SELECT 1`;
+
+    try {
+      const reqLocked = crypto.randomUUID();
+      const attLocked = crypto.randomUUID();
+      const reqFree = crypto.randomUUID();
+      const attFree = crypto.randomUUID();
+      const reqRetry = crypto.randomUUID();
+      const attRetry = crypto.randomUUID();
+      const base = {
+        project_id: f.project.id,
+        currency: "PTS",
+        operation: "chat" as const,
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: "",
+        customer_atoms: "200",
+        supplier_account_id: f.accountA.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "100",
+        expires_at: new Date(Date.now() + 30_000).toISOString(),
+      };
+      for (const [request_id, attempt_id] of [
+        [reqLocked, attLocked],
+        [reqFree, attFree],
+        [reqRetry, attRetry],
+      ] as const) {
+        expect((await f.ledger.acquireHold({ ...base, request_id, attempt_id })).ok).toBe(true);
+      }
+
+      const hold1Locked = Promise.withResolvers<void>();
+      const unlockHold1 = Promise.withResolvers<void>();
+      const hold1Barrier = db.begin(async (tx) => {
+        await tx`SELECT request_id FROM public.billing_holds WHERE request_id = ${reqLocked} FOR UPDATE`;
+        hold1Locked.resolve();
+        await unlockHold1.promise;
+      });
+      await hold1Locked.promise;
+
+      const makeCommit = (request_id: string, selected_attempt_id: string) => ({
+        request_id,
+        project_id: f.project.id,
+        selected_attempt_id,
+        channel_id: f.channelA.id,
+        billing_price_id: f.flatBillingPrice.id,
+        cost_version_id: f.costPrice.id,
+        usage: { input_tokens: "10", output_tokens: "10" },
+        billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+        billing_basis: "PROVIDER_USAGE" as const,
+        supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+        supplier_currency: "USD",
+      });
+
+      const [resLocked, resFree] = await Promise.allSettled([
+        shortLedger.commitTerminal(makeCommit(reqLocked, attLocked)),
+        shortLedger.commitTerminal(makeCommit(reqFree, attFree)),
+      ]);
+      unlockHold1.resolve();
+      await hold1Barrier;
+
+      expect(resLocked.status).toBe("rejected");
+      expect(resFree.status).toBe("fulfilled");
+      if (resFree.status === "fulfilled") {
+        expect(resFree.value).toMatchObject({ ok: true, customer_atoms: "20" });
+      }
+
+      const hold3Locked = Promise.withResolvers<void>();
+      const hold3Barrier = db.begin(async (tx) => {
+        await tx`SELECT request_id FROM public.billing_holds WHERE request_id = ${reqRetry} FOR UPDATE`;
+        hold3Locked.resolve();
+        await Bun.sleep(55);
+      });
+      await hold3Locked.promise;
+      expect(await shortLedger.markUnknown(reqRetry)).toBe(true);
+      await hold3Barrier;
+
+      const hold1ReleaseLocked = Promise.withResolvers<void>();
+      const hold1ReleaseBarrier = db.begin(async (tx) => {
+        await tx`SELECT request_id FROM public.billing_holds WHERE request_id = ${reqLocked} FOR UPDATE`;
+        hold1ReleaseLocked.resolve();
+        await Bun.sleep(55);
+      });
+      await hold1ReleaseLocked.promise;
+      expect(await shortLedger.releaseHold(reqLocked)).toBe(true);
+      await hold1ReleaseBarrier;
+      expect(await shortLedger.releaseHold(reqRetry)).toBe(true);
+
+      expect(await f.ledger.auditConservation()).toMatchObject({
+        ok: true,
+        open_holds: 0,
+        unknown_holds: 0,
+      });
+    } finally {
+      await shortLedger.drain();
+      await shortLockDb.close();
+      await f.ledger.drain();
+    }
   }));

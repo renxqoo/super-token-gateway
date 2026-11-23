@@ -63,6 +63,8 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
   let lastOperationsSample = 0;
   let operationsSample: Record<string, number> = {};
   let deliveryFailures = 0;
+  let sweptHoldsTotal = 0;
+  let sweptLeasesTotal = 0;
 
   function ensureLeadership(): Promise<boolean> {
     leadershipCheck ??= checkLeadership().finally(() => {
@@ -194,6 +196,33 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
     return months;
   }
 
+  async function drainExpired(budgetMs: number): Promise<{ holds: number; leases: number }> {
+    const holdBatch = 500;
+    const leaseBatch = 100;
+    const until = performance.now() + budgetMs;
+    let holds = 0;
+    let leases = 0;
+    let moreHolds = true;
+    let moreLeases = true;
+    do {
+      if (stopped || !hasLeadership) break;
+      if (moreHolds) {
+        const h = await ledger.sweepTimedOutHolds(holdBatch);
+        holds += h;
+        sweptHoldsTotal += h;
+        moreHolds = h >= holdBatch;
+      }
+      if (stopped || !hasLeadership) break;
+      if (moreLeases) {
+        const l = await ledger.sweepExpiredLeases(leaseBatch);
+        leases += l;
+        sweptLeasesTotal += l;
+        moreLeases = l >= leaseBatch;
+      }
+    } while ((moreHolds || moreLeases) && !stopped && hasLeadership && performance.now() < until);
+    return { holds, leases };
+  }
+
   async function runOnce(includePartitions = true): Promise<WorkerTickStats> {
     const leader = await ensureLeadership();
     if (!leader) {
@@ -208,8 +237,9 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
         prepared_months: [],
       };
     }
-    const swept_holds = await ledger.sweepTimedOutHolds(200);
-    const swept_leases = await ledger.sweepExpiredLeases(100);
+    const swept = await drainExpired(1000);
+    const swept_holds = swept.holds;
+    const swept_leases = swept.leases;
     lastSuccessfulSweep = new Date().toISOString();
     const expired_wallets = await ledger.expireAllLots(100);
     const collected_debts = await ledger.collectAllDebts(100);
@@ -283,6 +313,8 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
           : 0,
         outbox_enabled: Number(Boolean(options.businessWebhookUrl)),
         outbox_delivery_failures_total: deliveryFailures,
+        swept_holds_total: sweptHoldsTotal,
+        swept_leases_total: sweptLeasesTotal,
         operations_sample_timestamp_seconds: lastOperationsSample,
         ...operationsSample,
       };
@@ -302,13 +334,13 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
         await ensurePartitions().catch(() => undefined);
       }
       if (stopped) return;
+      const sweepIntervalMs = options.sweepIntervalMs ?? 2000;
       scheduleTask(async () => {
         if (await ensureLeadership()) {
-          await ledger.sweepTimedOutHolds(200);
-          await ledger.sweepExpiredLeases(100);
-          lastSuccessfulSweep = new Date().toISOString();
+          await drainExpired(Math.min(sweepIntervalMs, 1000));
+          if (hasLeadership) lastSuccessfulSweep = new Date().toISOString();
         }
-      }, options.sweepIntervalMs ?? 2000);
+      }, sweepIntervalMs);
       scheduleTask(
         async () => {
           if (!hasLeadership) return;

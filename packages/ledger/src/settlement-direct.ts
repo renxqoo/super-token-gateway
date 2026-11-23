@@ -19,6 +19,7 @@ import {
   toLotRow,
   toCellRow,
   expireLotsInMemory,
+  withPgConcurrencyRetry,
   type WalletRow,
   type LotRow,
   type SupplierCellRow,
@@ -68,11 +69,16 @@ export async function commitDirectBatch(
   entries: DirectSettlementEntry[],
   results: CommitTerminalResult[],
 ): Promise<void> {
-  const { detached, reconcileAccounts } = await db.begin((tx) =>
-    applyDirectSettlements(tx, entries, results),
-  );
+  const staged: CommitTerminalResult[] = [];
+  const { detached, reconcileAccounts } = await db.begin((tx) => {
+    staged.length = 0;
+    return applyDirectSettlements(tx, entries, staged);
+  });
+  for (const { index } of entries) {
+    if (staged[index] !== undefined) results[index] = staged[index]!;
+  }
   if (reconcileAccounts.length > 0) {
-    await markAccountsReconcileRequired(db, reconcileAccounts);
+    await withPgConcurrencyRetry(() => markAccountsReconcileRequired(db, reconcileAccounts), 3);
   }
   for (const d of detached) {
     notifyDetachedLocal(d.requestId, d.wlId, d.heldCust, d.slId, d.supAtoms);

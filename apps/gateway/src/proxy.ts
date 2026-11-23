@@ -578,6 +578,7 @@ export async function handleInferenceRequest(
   const acquiredProbes = new Set<string>();
   let holdAcquired = false;
   let holdFinalized = false;
+  let holdFinalizeAttempted = false;
   let anyUnknownAttempt = false;
   let activePluginSignal: AbortSignal | undefined;
   let currentAttemptDispatched = false;
@@ -589,7 +590,25 @@ export async function handleInferenceRequest(
       deps.metrics.ledgerCommitFailures++;
       throw new GatewayError(503, "ledger_commit_failed", "Ledger could not confirm settlement");
     }
+    holdFinalized = true;
     return result;
+  };
+
+  const finalizeHold = async (mode: "release" | "unknown"): Promise<boolean> => {
+    if (!holdAcquired || holdFinalized) return true;
+    holdFinalizeAttempted = true;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        if (mode === "release") await deps.ledger.releaseHold(requestId);
+        else await deps.ledger.markUnknown(requestId);
+        holdFinalized = true;
+        return true;
+      } catch {
+        if (attempt === 1) return false;
+        await Bun.sleep(15);
+      }
+    }
+    return false;
   };
 
   const releaseAllPendingProbes = () => {
@@ -1265,9 +1284,7 @@ export async function handleInferenceRequest(
       currentAttemptDispatched = false;
       const attemptInput = cursor === activeIndex ? activeInput : await prepareRouteInput(cand);
       if (attemptInput instanceof Response) {
-        if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
-        else await deps.ledger.releaseHold(requestId);
-        holdFinalized = true;
+        await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
         return attemptInput;
       }
       const {
@@ -1325,9 +1342,7 @@ export async function handleInferenceRequest(
             continue;
           }
           releaseUnusedProbes(cursor + 1);
-          holdFinalized = true;
-          if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
-          else await deps.ledger.releaseHold(requestId);
+          await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
           throw mapHoldError(sw.code, sw.message);
         }
         activeAttemptId = nextAttemptId;
@@ -1363,9 +1378,7 @@ export async function handleInferenceRequest(
       );
       if (!chLimit.ok) {
         if (chLimit.reason === "unavailable") {
-          if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
-          else await deps.ledger.releaseHold(requestId);
-          holdFinalized = true;
+          await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
           throw new GatewayError(
             503,
             "rate_limit_unavailable",
@@ -1560,9 +1573,7 @@ export async function handleInferenceRequest(
         ) {
           releaseProbeFor(cand.channel.id);
           releaseUnusedProbes(cursor + 1);
-          holdFinalized = true;
-          if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
-          else await deps.ledger.releaseHold(requestId);
+          await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
           throw err;
         }
         if (
@@ -1585,9 +1596,7 @@ export async function handleInferenceRequest(
         }
         releaseProbeFor(cand.channel_id);
         releaseUnusedProbes(cursor + 1);
-        holdFinalized = true;
-        if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
-        else await deps.ledger.releaseHold(requestId);
+        await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
         throw err;
       }
 
@@ -1626,9 +1635,7 @@ export async function handleInferenceRequest(
         if (c.req.raw.signal.aborted || drainAborted || quotaLost) {
           releaseProbeFor(cand.channel_id);
           releaseUnusedProbes(cursor + 1);
-          holdFinalized = true;
-          if (isPreDispatch && !anyUnknownAttempt) await deps.ledger.releaseHold(requestId);
-          else await deps.ledger.markUnknown(requestId);
+          await finalizeHold(isPreDispatch && !anyUnknownAttempt ? "release" : "unknown");
           throw admissionError(quotaLost);
         }
         deps.metrics.recordUpstreamError(
@@ -1654,8 +1661,7 @@ export async function handleInferenceRequest(
           continue;
         }
         releaseUnusedProbes(cursor + 1);
-        holdFinalized = true;
-        await deps.ledger.markUnknown(requestId);
+        await finalizeHold("unknown");
         throw new GatewayError(lastErrorStatus, lastErrorCode, lastErrorMessage);
       }
 
@@ -1701,9 +1707,7 @@ export async function handleInferenceRequest(
         }
         releaseProbeFor(cand.channel_id);
         releaseUnusedProbes(cursor + 1);
-        holdFinalized = true;
-        if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
-        else await deps.ledger.releaseHold(requestId);
+        await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
         emitAccessLog(upstreamStatus, "upstream_client_error");
         return c.json(
           formatProtocolError(
@@ -1778,8 +1782,7 @@ export async function handleInferenceRequest(
               undefined,
             );
             if (!usage) {
-              holdFinalized = true;
-              await deps.ledger.markUnknown(requestId);
+              await finalizeHold("unknown");
               throw new GatewayError(
                 502,
                 "invalid_upstream_usage",
@@ -1808,7 +1811,6 @@ export async function handleInferenceRequest(
               charge_policy: "CHARGE_CUSTOMER",
               moderation_blocked: false,
             });
-            holdFinalized = true;
             pluginSignal.throwIfAborted();
             deps.router.recordSuccess(cand.channel.id, latencyMs);
             markProbeCompleted(cand.channel.id);
@@ -1862,8 +1864,7 @@ export async function handleInferenceRequest(
             } catch (err) {
               pluginSignal.throwIfAborted();
               releaseUnusedProbes(cursor + 1);
-              holdFinalized = true;
-              await deps.ledger.markUnknown(requestId);
+              await finalizeHold("unknown");
               if (c.req.raw.signal.aborted || drainAborted || projectPermitRevoked) {
                 releaseProbeFor(cand.channel.id);
                 throw admissionError(projectPermitRevoked);
@@ -1912,9 +1913,7 @@ export async function handleInferenceRequest(
               } else {
                 releaseProbeFor(cand.channel_id);
                 releaseUnusedProbes(cursor + 1);
-                holdFinalized = true;
-                if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
-                else await deps.ledger.releaseHold(requestId);
+                await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
                 const errStatus = sanitizeHttpErrorStatus(wasmResp.status, 400);
                 emitAccessLog(errStatus, "upstream_client_error");
                 return c.json(
@@ -1934,8 +1933,7 @@ export async function handleInferenceRequest(
             if (!retryFromLogicalError) {
               releaseUnusedProbes(cursor + 1);
               if (isFakeJsonOnStream) {
-                holdFinalized = true;
-                await deps.ledger.markUnknown(requestId);
+                await finalizeHold("unknown");
                 throw new GatewayError(
                   502,
                   "invalid_upstream",
@@ -1950,8 +1948,7 @@ export async function handleInferenceRequest(
                   rawUsage = extractUsage(rawJson, prepared.usageDialect);
                 }
               } catch (err) {
-                holdFinalized = true;
-                await deps.ledger.markUnknown(requestId);
+                await finalizeHold("unknown");
                 deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
                 markProbeCompleted(cand.channel.id);
                 throw err;
@@ -2007,9 +2004,7 @@ export async function handleInferenceRequest(
               } else {
                 releaseProbeFor(cand.channel_id);
                 releaseUnusedProbes(cursor + 1);
-                holdFinalized = true;
-                if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
-                else await deps.ledger.releaseHold(requestId);
+                await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
                 const errStatus = matchedErr.http_status ?? 400;
                 emitAccessLog(errStatus, "upstream_client_error");
                 return c.json(
@@ -2027,8 +2022,7 @@ export async function handleInferenceRequest(
             } else {
               releaseUnusedProbes(cursor + 1);
               if (isFakeJsonOnStream) {
-                holdFinalized = true;
-                await deps.ledger.markUnknown(requestId);
+                await finalizeHold("unknown");
                 throw new GatewayError(
                   502,
                   "invalid_upstream",
@@ -2053,8 +2047,7 @@ export async function handleInferenceRequest(
                       )
                     : baseUsage;
               } catch (err) {
-                holdFinalized = true;
-                await deps.ledger.markUnknown(requestId);
+                await finalizeHold("unknown");
                 deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
                 markProbeCompleted(cand.channel.id);
                 throw err;
@@ -2085,8 +2078,7 @@ export async function handleInferenceRequest(
               rawUsage,
             );
             if (!usage) {
-              holdFinalized = true;
-              await deps.ledger.markUnknown(requestId);
+              await finalizeHold("unknown");
               deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
               markProbeCompleted(cand.channel.id);
               throw new GatewayError(
@@ -2197,7 +2189,6 @@ export async function handleInferenceRequest(
               }
             }
 
-            holdFinalized = true;
             pluginSignal.throwIfAborted();
             deps.router.recordSuccess(cand.channel.id, latencyMs);
             markProbeCompleted(cand.channel.id);
@@ -2328,8 +2319,7 @@ export async function handleInferenceRequest(
           if (c.req.raw.signal.aborted || drainAborted || quotaLost) {
             releaseProbeFor(cand.channel_id);
             releaseUnusedProbes(cursor + 1);
-            holdFinalized = true;
-            await deps.ledger.markUnknown(requestId);
+            await finalizeHold("unknown");
             throw admissionError(quotaLost);
           }
           if (err instanceof WasmCapacityError) {
@@ -2367,8 +2357,7 @@ export async function handleInferenceRequest(
               continue;
             }
             releaseUnusedProbes(cursor + 1);
-            holdFinalized = true;
-            await deps.ledger.markUnknown(requestId);
+            await finalizeHold("unknown");
             throw new GatewayError(lastErrorStatus, lastErrorCode, lastErrorMessage);
           }
           throw new GatewayError(
@@ -2385,9 +2374,7 @@ export async function handleInferenceRequest(
           releaseChannelLimit?.();
           releaseChannelLimit = null;
           if (logicalError.retry_kind === "client_error") {
-            if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
-            else await deps.ledger.releaseHold(requestId);
-            holdFinalized = true;
+            await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
             throw new GatewayError(
               logicalError.http_status ?? 400,
               "upstream_client_error",
@@ -2414,7 +2401,6 @@ export async function handleInferenceRequest(
 
       releaseUnusedProbes(cursor + 1);
       cancelTimeout();
-      holdFinalized = true;
       const streamProbeChannel = acquiredProbes.delete(cand.channel.id) ? cand.channel.id : null;
       const streamLinked = createLinkedController([c.req.raw.signal, pluginSignal], true, false);
       const streamSignal = streamLinked.signal;
@@ -2552,7 +2538,7 @@ export async function handleInferenceRequest(
                 }
               }
               if (clientCancelled || c.req.raw.signal.aborted) {
-                await deps.ledger.markUnknown(requestId).catch(() => undefined);
+                await finalizeHold("unknown");
                 emitAccessLog(499, "client_aborted");
                 return;
               }
@@ -2566,7 +2552,7 @@ export async function handleInferenceRequest(
                 observedUsage,
               );
               if (!usage) {
-                await deps.ledger.markUnknown(requestId);
+                await finalizeHold("unknown");
                 emitAccessLog(502, "invalid_upstream_usage");
                 await controller.enqueue(
                   encodeSSE(
@@ -2612,7 +2598,7 @@ export async function handleInferenceRequest(
               controller.close();
             } catch (err) {
               const abortedByClient = clientCancelled || c.req.raw.signal.aborted;
-              await deps.ledger.markUnknown(requestId).catch(() => undefined);
+              await finalizeHold("unknown");
               if (abortedByClient) {
                 emitAccessLog(499, "client_aborted");
                 return;
@@ -2660,7 +2646,7 @@ export async function handleInferenceRequest(
               clientCancelled = true;
               attemptAbort.abort(new Error("client_cancelled"));
             },
-            fail: () => deps.ledger.markUnknown(requestId).catch(() => undefined),
+            fail: () => finalizeHold("unknown"),
             abortedFrame,
             finish: cleanupStream,
           },
@@ -2830,7 +2816,7 @@ export async function handleInferenceRequest(
               }
 
               if (clientCancelled || c.req.raw.signal.aborted) {
-                await deps.ledger.markUnknown(requestId).catch(() => undefined);
+                await finalizeHold("unknown");
                 emitAccessLog(499, "client_aborted");
                 return;
               }
@@ -2941,7 +2927,7 @@ export async function handleInferenceRequest(
                   undefined,
                   performance.now() - startedAt,
                 );
-                await deps.ledger.markUnknown(requestId);
+                await finalizeHold("unknown");
                 emitAccessLog(502, "invalid_upstream_usage");
                 await controller.enqueue(
                   formatProtocolSseError(
@@ -2992,7 +2978,7 @@ export async function handleInferenceRequest(
                 err instanceof WasmCapacityError || err instanceof WasmPluginFaultError;
               if (!streamFailed) {
                 streamFailed = true;
-                await deps.ledger.markUnknown(requestId).catch(() => undefined);
+                await finalizeHold("unknown");
                 if (
                   !abortedByClient &&
                   !streamSignal.aborted &&
@@ -3051,7 +3037,7 @@ export async function handleInferenceRequest(
               clientCancelled = true;
               attemptAbort.abort(new Error("client_cancelled"));
             },
-            fail: () => deps.ledger.markUnknown(requestId).catch(() => undefined),
+            fail: () => finalizeHold("unknown"),
             abortedFrame,
             finish: cleanupStream,
           },
@@ -3218,7 +3204,7 @@ export async function handleInferenceRequest(
             }
 
             if (clientCancelled || c.req.raw.signal.aborted) {
-              await deps.ledger.markUnknown(requestId).catch(() => undefined);
+              await finalizeHold("unknown");
               emitAccessLog(499, "client_aborted");
               return;
             }
@@ -3334,7 +3320,7 @@ export async function handleInferenceRequest(
                 undefined,
                 performance.now() - startedAt,
               );
-              await deps.ledger.markUnknown(requestId);
+              await finalizeHold("unknown");
               emitAccessLog(502, "invalid_upstream_usage");
               await controller.enqueue(
                 formatProtocolSseError(
@@ -3386,7 +3372,7 @@ export async function handleInferenceRequest(
             const abortedByClient = clientCancelled || c.req.raw.signal.aborted;
             if (!streamFailed) {
               streamFailed = true;
-              await deps.ledger.markUnknown(requestId).catch(() => undefined);
+              await finalizeHold("unknown");
               if (
                 !abortedByClient &&
                 !streamSignal.aborted &&
@@ -3432,7 +3418,7 @@ export async function handleInferenceRequest(
             clientCancelled = true;
             attemptAbort.abort(new Error("client_cancelled"));
           },
-          fail: () => deps.ledger.markUnknown(requestId).catch(() => undefined),
+          fail: () => finalizeHold("unknown"),
           abortedFrame,
           finish: cleanupStream,
         },
@@ -3442,20 +3428,15 @@ export async function handleInferenceRequest(
     }
 
     releaseAllPendingProbes();
-    holdFinalized = true;
-    if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
-    else await deps.ledger.releaseHold(requestId);
+    await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
     throw new GatewayError(lastErrorStatus, lastErrorCode, lastErrorMessage);
   } catch (err) {
     releaseAllPendingProbes();
     const revocation = activePluginSignal?.aborted ? activePluginSignal.reason : undefined;
-    if (holdAcquired && !holdFinalized) {
-      holdFinalized = true;
-      const outcome =
-        revocation && !currentAttemptDispatched && !anyUnknownAttempt
-          ? deps.ledger.releaseHold(requestId)
-          : deps.ledger.markUnknown(requestId);
-      await outcome.catch(() => undefined);
+    if (holdAcquired && !holdFinalized && !holdFinalizeAttempted && !streamOwnsGuard) {
+      await finalizeHold(
+        revocation && !currentAttemptDispatched && !anyUnknownAttempt ? "release" : "unknown",
+      );
     }
     const failure = revocation ?? err;
     const status = failure instanceof GatewayError ? failure.status : 500;

@@ -118,7 +118,7 @@ export async function detachHoldFromLeaseTx(
     lot_allocations: HoldLotAllocation[];
     supplier_holds: { held_atoms: string; state: string }[];
   },
-  options: { detachWallet?: boolean; detachSupplier?: boolean } = {},
+  options: { detachWallet?: boolean; detachSupplier?: boolean; nowait?: boolean } = {},
 ): Promise<{
   lot_allocations: HoldLotAllocation[];
   detachedWalletLeaseId: string | null;
@@ -127,18 +127,26 @@ export async function detachHoldFromLeaseTx(
 }> {
   const detachWallet = options.detachWallet ?? true;
   const detachSupplier = options.detachSupplier ?? true;
+  const nowait = options.nowait ?? false;
   let lotAllocations = hold.lot_allocations;
   let detachedWalletLeaseId: string | null = null;
   let detachedSupplierLeaseId: string | null = null;
   let detachedSupplierAtoms = 0n;
 
   if (detachWallet && hold.wallet_lease_id) {
-    const wlRows = await tx`
-      SELECT id, lot_allocations, remaining_atoms::text, state
-      FROM public.wallet_leases
-      WHERE id = ${hold.wallet_lease_id}
-      FOR NO KEY UPDATE
-    `;
+    const wlRows = nowait
+      ? await tx`
+          SELECT id, lot_allocations, remaining_atoms::text, state
+          FROM public.wallet_leases
+          WHERE id = ${hold.wallet_lease_id}
+          FOR NO KEY UPDATE NOWAIT
+        `
+      : await tx`
+          SELECT id, lot_allocations, remaining_atoms::text, state
+          FROM public.wallet_leases
+          WHERE id = ${hold.wallet_lease_id}
+          FOR NO KEY UPDATE
+        `;
     if (wlRows.length > 0 && wlRows[0]!.state === "ACTIVE") {
       const leaseLots = (wlRows[0]!.lot_allocations ?? []) as LeaseLotAllocation[];
       const leaseRem = BigInt(String(wlRows[0]!.remaining_atoms));
@@ -162,12 +170,19 @@ export async function detachHoldFromLeaseTx(
   }
 
   if (detachSupplier && hold.supplier_lease_id) {
-    const slRows = await tx`
-      SELECT id, remaining_atoms::text, state
-      FROM public.supplier_leases
-      WHERE id = ${hold.supplier_lease_id}
-      FOR NO KEY UPDATE
-    `;
+    const slRows = nowait
+      ? await tx`
+          SELECT id, remaining_atoms::text, state
+          FROM public.supplier_leases
+          WHERE id = ${hold.supplier_lease_id}
+          FOR NO KEY UPDATE NOWAIT
+        `
+      : await tx`
+          SELECT id, remaining_atoms::text, state
+          FROM public.supplier_leases
+          WHERE id = ${hold.supplier_lease_id}
+          FOR NO KEY UPDATE
+        `;
     if (slRows.length > 0 && slRows[0]!.state === "ACTIVE") {
       const supAtoms = hold.supplier_holds.reduce(
         (sum, s) =>

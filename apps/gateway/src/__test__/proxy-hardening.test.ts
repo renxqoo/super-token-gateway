@@ -789,3 +789,219 @@ test("failover skips newly-OPEN backup channels without redundant switchSupplier
     await upstream.stop(true);
   }
 });
+
+test("proxy retries transient hold finalization failures and preserves upstream error status instead of returning 500", async () => {
+  const proj = makeProject("11111111-1111-4111-8111-111111111199", 10);
+  const rawKey = "sk-hold-finalize-retry-key";
+  const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
+  const preset = getBuiltinProvider("openai")!;
+  const pluginId = "88888888-8888-4888-8888-888888888899";
+  const pluginRecord: PluginRecord = {
+    id: pluginId,
+    name: preset.name,
+    version: preset.version,
+    capability: "PROVIDER",
+    kind: "DECLARATIVE",
+    digest: preset.digest,
+    wasm_bytes: null,
+    webhook_config: null,
+    provider_config: preset.provider_config,
+    signature: null,
+    signing_key_id: null,
+    manifest: {},
+    enabled: true,
+    builtin: true,
+  };
+  snap.plugins.set(pluginId, pluginRecord);
+  snap.providerPluginsByName.set("openai", pluginRecord);
+  const billingPrice = {
+    id: "66666666-6666-4666-8666-666666666699",
+    side: "CUSTOMER" as const,
+    currency: "USD",
+    basis: "PROVIDER_USAGE" as const,
+    rates: {
+      input_tokens: { numerator: "1", denominator: "1" },
+      output_tokens: { numerator: "1", denominator: "1" },
+    },
+    ceilings: { input_tokens: "1000", output_tokens: "1000" },
+    source_digest: "d1",
+  };
+  const costPrice = {
+    id: "77777777-7777-4777-8777-777777777799",
+    side: "SUPPLIER" as const,
+    currency: "USD",
+    basis: "PROVIDER_USAGE" as const,
+    rates: {
+      input_tokens: { numerator: "1", denominator: "2" },
+      output_tokens: { numerator: "1", denominator: "2" },
+    },
+    ceilings: { input_tokens: "1000", output_tokens: "1000" },
+    source_digest: "d2",
+  };
+  snap.prices.set(billingPrice.id, billingPrice);
+  snap.prices.set(costPrice.id, costPrice);
+  snap.models.set("gpt-4o", {
+    name: "gpt-4o",
+    operations: ["chat"],
+    routing_strategy: "WEIGHTED",
+    max_output_tokens: 1000,
+    enabled: true,
+  });
+  const acctId = "44444444-4444-4444-8444-444444444499";
+  snap.accounts.set(acctId, { id: acctId, name: "acct-400", state: "ACTIVE", revision: "1" });
+  let upstreamMode: "client_400" | "server_502" | "broken_stream" = "client_400";
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      if (upstreamMode === "server_502") {
+        return new Response("bad gateway", { status: 502 });
+      }
+      if (upstreamMode === "broken_stream") {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"id":"cmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\n',
+              ),
+            );
+            controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream; charset=utf-8" },
+        });
+      }
+      return Response.json({ error: { message: "bad input" } }, { status: 400 });
+    },
+  });
+  const chId = "33333333-3333-4333-8333-333333333399";
+  snap.channels.set(chId, {
+    id: chId,
+    account_id: acctId,
+    name: "ch-400",
+    kind: "openai",
+    provider_plugin_id: pluginId,
+    base_url: `http://127.0.0.1:${upstream.port}`,
+    secret_ciphertext: "",
+    adapter_config: {},
+    rpm: 10_000,
+    concurrency: 100,
+    enabled: true,
+    routing_policy: {},
+    config_revision: 1,
+  });
+  snap.routesByModel.set("gpt-4o", [
+    {
+      id: "r-400",
+      model_name: "gpt-4o",
+      channel_id: chId,
+      upstream_model: "gpt-4o",
+      operations: ["chat"],
+      billing_price_id: billingPrice.id,
+      cost_version_id: costPrice.id,
+      priority: 1,
+      weight: 100,
+      enabled: true,
+      retry_policy: { max_attempts: 1 },
+      request_policy: {},
+      plugin_pipeline: [],
+      adapter_overrides: {},
+    },
+  ]);
+  const deps = makeFakeDeps(snap, makeConfig());
+  let releaseAttempts = 0;
+  let unknownAttempts = 0;
+  let ledgerMode: "recover" | "always_fail" = "recover";
+  deps.ledger = {
+    async acquireHold() {
+      return { ok: true, replayed: false, request_id: "req", held_atoms: "1000" };
+    },
+    async releaseHold() {
+      releaseAttempts++;
+      if (ledgerMode === "always_fail" || releaseAttempts < 2) {
+        const err = new Error("lock timeout") as Error & { errno?: string };
+        err.errno = "55P03";
+        throw err;
+      }
+      return true;
+    },
+    async markUnknown() {
+      unknownAttempts++;
+      if (ledgerMode === "always_fail" || unknownAttempts < 2) {
+        const err = new Error("lock timeout") as Error & { errno?: string };
+        err.errno = "55P03";
+        throw err;
+      }
+      return true;
+    },
+  } as unknown as ProxyDependencies["ledger"];
+
+  const invoke = (stream = false) =>
+    handleInferenceRequest(
+      {
+        req: {
+          raw: new Request("http://127.0.0.1/v1/chat/completions", {
+            method: "POST",
+            headers: { authorization: `Bearer ${rawKey}`, "content-type": "application/json" },
+            body: JSON.stringify({
+              model: "gpt-4o",
+              stream,
+              messages: [{ role: "user", content: "hi" }],
+            }),
+          }),
+          query: () => undefined,
+        },
+        json(data, status, headers) {
+          return new Response(JSON.stringify(data), {
+            status: status ?? 200,
+            headers: { "content-type": "application/json", ...headers },
+          });
+        },
+      },
+      deps,
+      "chat",
+    );
+
+  try {
+    upstreamMode = "client_400";
+    ledgerMode = "recover";
+    const res1 = await invoke();
+    expect(res1.status).toBe(400);
+    expect(releaseAttempts).toBe(2);
+    expect(unknownAttempts).toBe(0);
+
+    ledgerMode = "always_fail";
+    releaseAttempts = 0;
+    const res2 = await invoke();
+    expect(res2.status).toBe(400);
+    expect(releaseAttempts).toBe(2);
+    expect(unknownAttempts).toBe(0);
+
+    upstreamMode = "server_502";
+    ledgerMode = "always_fail";
+    releaseAttempts = 0;
+    unknownAttempts = 0;
+    const res3 = await invoke();
+    expect(res3.status).toBe(502);
+    expect(releaseAttempts).toBe(2);
+    expect(unknownAttempts).toBe(0);
+
+    upstreamMode = "broken_stream";
+    ledgerMode = "recover";
+    releaseAttempts = 0;
+    unknownAttempts = 0;
+    const res4 = await invoke(true);
+    expect(res4.status).toBe(200);
+    const sseText = await res4.text();
+    expect(sseText).toContain("invalid_upstream_usage");
+    expect(unknownAttempts).toBe(2);
+    expect(releaseAttempts).toBe(0);
+  } finally {
+    deps.state?.close();
+    deps.transport.close();
+    await upstream.stop(true);
+  }
+});
