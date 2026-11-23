@@ -3,7 +3,7 @@ import { readdir } from "node:fs/promises";
 
 test("workspace dependencies remain strictly acyclic with zero legacy dual-track modules", async () => {
   const apps = (await readdir("apps")).filter((name) => !name.startsWith(".")).sort();
-  expect(apps).toEqual(["gateway", "mock-providers", "worker"]);
+  expect(apps).toEqual(["console-api", "gateway", "mock-providers", "worker"]);
 
   const packages = (await readdir("packages")).filter((name) => !name.startsWith(".")).sort();
   expect(packages).toEqual([
@@ -50,8 +50,12 @@ test("workspace dependencies remain strictly acyclic with zero legacy dual-track
 
 test("apps keep strict responsibility boundaries and never reference legacy artifacts", async () => {
   const forbidden: Record<string, RegExp> = {
-    gateway: /@gateway\/(?:storage|core-client|plugin-host|plugin-sdk|adapters)|drizzle-orm/,
-    worker: /@gateway\/(?:gateway|protocol|plugin-engine|storage|core-client)|drizzle-orm/,
+    "console-api":
+      /@gateway\/(?:ledger|gateway|worker|plugin-engine|protocol|runtime|storage|core-client)/,
+    gateway:
+      /@gateway\/(?:console-api|storage|core-client|plugin-host|plugin-sdk|adapters)|drizzle-orm/,
+    worker:
+      /@gateway\/(?:console-api|gateway|protocol|plugin-engine|storage|core-client)|drizzle-orm/,
     "mock-providers": /@gateway\//,
   };
   for (const [app, pattern] of Object.entries(forbidden)) {

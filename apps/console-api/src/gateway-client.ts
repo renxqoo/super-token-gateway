@@ -1,0 +1,508 @@
+import { GatewayError } from "@gateway/contracts";
+import type { Pricing } from "@gateway/kernel";
+import type { GatewayRoleTokens } from "./config.ts";
+
+export type GatewayInternalRole = "catalog" | "security" | "finance" | "auditor" | "ops" | "events";
+
+export type GatewayClientOptions = {
+  baseUrl: string;
+  tokens: GatewayRoleTokens;
+  fetchImpl?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  timeoutMs?: number;
+};
+
+export class GatewayClient {
+  private readonly baseUrl: string;
+  private readonly tokens: GatewayRoleTokens;
+  private readonly fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  private readonly timeoutMs: number;
+
+  constructor(options: GatewayClientOptions) {
+    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.tokens = options.tokens;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.timeoutMs = options.timeoutMs ?? 15_000;
+  }
+
+  private tokenFor(role: GatewayInternalRole): string {
+    const token = this.tokens[role] ?? this.tokens.admin;
+    if (!token) {
+      throw new GatewayError(
+        500,
+        "gateway_credential_missing",
+        `Missing gateway token for ${role}`,
+      );
+    }
+    return token;
+  }
+
+  async request<T = Record<string, unknown>>(
+    role: GatewayInternalRole,
+    method: "GET" | "POST" | "PUT",
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
+    const url = `${this.baseUrl}${path}`;
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${this.tokenFor(role)}`,
+      accept: "application/json",
+    };
+    if (body !== undefined) {
+      headers["content-type"] = "application/json";
+    }
+    const resp = await this.fetchImpl(url, {
+      method,
+      headers,
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    const text = await resp.text();
+    let parsed: unknown = null;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = { raw: text };
+      }
+    }
+    if (!resp.ok) {
+      const errObj =
+        parsed && typeof parsed === "object" && "error" in parsed
+          ? (parsed as { error?: { code?: string; message?: string } }).error
+          : undefined;
+      throw new GatewayError(
+        resp.status >= 400 && resp.status < 600 ? resp.status : 502,
+        errObj?.code ?? "gateway_upstream_error",
+        errObj?.message ?? `Gateway internal API returned HTTP ${resp.status}`,
+      );
+    }
+    return parsed as T;
+  }
+
+  getHealth() {
+    return this.request<Record<string, unknown>>("ops", "GET", "/internal/v1/health");
+  }
+
+  getChannelHealth() {
+    return this.request<{ channels: unknown[] }>("ops", "GET", "/internal/v1/health/channels");
+  }
+
+  upsertProject(input: {
+    id: string;
+    external_ref?: string | null;
+    name: string;
+    currency: string;
+    rpm: number;
+    tpm: number;
+    concurrency: number;
+    enabled: boolean;
+  }) {
+    return this.request<{ id: string; config_epoch: number }>(
+      "catalog",
+      "PUT",
+      "/internal/v1/projects",
+      input,
+    );
+  }
+
+  upsertApiKey(input: {
+    id: string;
+    project_id: string;
+    name: string;
+    raw_key?: string;
+    role: "ADMIN" | "BILLING" | "INVOKER" | "VIEWER";
+    allowed_cidrs: string[];
+    models: string[];
+    operations: string[];
+    enabled: boolean;
+    expires_at: string | null;
+    spend_limit_atoms: string | null;
+    spend_limit_window: "LIFETIME" | "DAILY" | "MONTHLY";
+  }) {
+    return this.request<{
+      id: string;
+      project_id: string;
+      prefix: string;
+      key?: string;
+      config_epoch: number;
+    }>("security", "PUT", "/internal/v1/api-keys", input);
+  }
+
+  getApiKeySpend(keyId: string) {
+    return this.request<{
+      id: string;
+      project_id: string;
+      spend_limit_atoms: string | null;
+      spend_limit_window: "LIFETIME" | "DAILY" | "MONTHLY";
+      spend_window_start: string;
+      spent_atoms: string;
+      reserved_atoms: string;
+      remaining_atoms: string | null;
+    }>("auditor", "GET", `/internal/v1/api-keys/${keyId}/spend`);
+  }
+
+  resetApiKeySpend(keyId: string, reason?: string) {
+    return this.request<Record<string, unknown>>(
+      "security",
+      "POST",
+      `/internal/v1/api-keys/${keyId}/reset-spend`,
+      reason ? { reason } : {},
+    );
+  }
+
+  upsertUpstreamAccount(input: {
+    id: string;
+    name: string;
+    state: "ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED";
+  }) {
+    return this.request<{ id: string; config_epoch: number }>(
+      "catalog",
+      "PUT",
+      "/internal/v1/upstream-accounts",
+      input,
+    );
+  }
+
+  rechargeSupplier(
+    accountId: string,
+    input: { currency: string; external_ref: string; amount_atoms: string; reason?: string },
+  ) {
+    return this.request<Record<string, unknown>>(
+      "finance",
+      "POST",
+      `/internal/v1/upstream-accounts/${accountId}/recharges`,
+      input,
+    );
+  }
+
+  getSupplierBalance(accountId: string, currency = "USD") {
+    return this.request<Record<string, unknown>>(
+      "auditor",
+      "GET",
+      `/internal/v1/upstream-accounts/${accountId}/balance?currency=${encodeURIComponent(currency)}`,
+    );
+  }
+
+  upsertChannel(input: {
+    id: string;
+    account_id: string;
+    name: string;
+    kind: string;
+    provider_plugin_id?: string | null;
+    base_url: string;
+    api_key?: string;
+    rpm: number;
+    concurrency: number;
+    enabled: boolean;
+    routing_policy: Record<string, unknown>;
+    adapter_config: Record<string, unknown>;
+  }) {
+    return this.request<{ id: string; provider_plugin_id: string | null; config_epoch: number }>(
+      "catalog",
+      "PUT",
+      "/internal/v1/channels",
+      input,
+    );
+  }
+
+  upsertModel(input: {
+    name: string;
+    operations: string[];
+    routing_strategy: "WEIGHTED" | "ROUND_ROBIN" | "LEAST_LATENCY";
+    max_output_tokens: number;
+    enabled: boolean;
+  }) {
+    return this.request<{ name: string; config_epoch: number }>(
+      "catalog",
+      "PUT",
+      "/internal/v1/models",
+      input,
+    );
+  }
+
+  createPrice(input: {
+    id?: string;
+    side: "CUSTOMER" | "SUPPLIER";
+    currency: string;
+    basis: "PROVIDER_USAGE" | "REQUEST_COMPLETION" | "INPUT_CHARACTERS";
+    rates: Pricing["rates"];
+    ceilings: Record<string, string>;
+  }) {
+    return this.request<{ id: string; config_epoch: number }>(
+      "finance",
+      "POST",
+      "/internal/v1/prices",
+      input,
+    );
+  }
+
+  upsertRoute(input: {
+    id: string;
+    model_name: string;
+    channel_id: string;
+    upstream_model: string;
+    operations: string[];
+    priority: number;
+    weight: number;
+    billing_price_id: string;
+    cost_version_id: string;
+    request_policy: Record<string, unknown>;
+    adapter_overrides: Record<string, unknown>;
+    retry_policy: Record<string, unknown>;
+    enabled: boolean;
+  }) {
+    return this.request<{ id: string; config_epoch: number }>(
+      "catalog",
+      "PUT",
+      "/internal/v1/routes",
+      input,
+    );
+  }
+
+  upsertPricingOverride(input: {
+    id: string;
+    project_id: string;
+    model_name: string;
+    operation: string;
+    override_kind: "EXACT_PRICE" | "MULTIPLIER";
+    billing_price_id?: string | null;
+    multiplier_numerator?: string | null;
+    multiplier_denominator?: string | null;
+    enabled: boolean;
+  }) {
+    return this.request<{ id: string; config_epoch: number }>(
+      "finance",
+      "PUT",
+      "/internal/v1/pricing-overrides",
+      input,
+    );
+  }
+
+  listPricingOverrides(projectId?: string) {
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return this.request<{ items: unknown[] }>(
+      "auditor",
+      "GET",
+      `/internal/v1/pricing-overrides${qs}`,
+    );
+  }
+
+  creditWallet(
+    projectId: string,
+    input: {
+      currency: string;
+      external_ref: string;
+      amount_atoms: string;
+      kind: "CASH" | "GRANT";
+      priority?: number;
+      expires_at?: string | null;
+      models?: string[];
+      operations?: string[];
+      reason?: string;
+    },
+  ) {
+    return this.request<Record<string, unknown>>(
+      "finance",
+      "POST",
+      `/internal/v1/wallets/${projectId}/credits`,
+      input,
+    );
+  }
+
+  configureCreditPolicy(
+    projectId: string,
+    input: {
+      currency: string;
+      expected_version: string;
+      credit_limit_atoms: string;
+      policy?: "GIFT_FIRST" | "CASH_FIRST" | "EARLIEST_EXPIRY";
+    },
+  ) {
+    return this.request<Record<string, unknown>>(
+      "finance",
+      "POST",
+      `/internal/v1/wallets/${projectId}/credit-policy`,
+      input,
+    );
+  }
+
+  getWallet(projectId: string, currency = "USD") {
+    return this.request<Record<string, unknown>>(
+      "auditor",
+      "GET",
+      `/internal/v1/wallets/${projectId}?currency=${encodeURIComponent(currency)}`,
+    );
+  }
+
+  refundCharge(
+    chargeId: string,
+    input: { external_ref: string; amount_atoms: string; reason: string },
+  ) {
+    return this.request<Record<string, unknown>>(
+      "finance",
+      "POST",
+      `/internal/v1/charges/${chargeId}/refunds`,
+      input,
+    );
+  }
+
+  adjustCharge(
+    chargeId: string,
+    input: { external_ref: string; delta_atoms: string; reason: string },
+  ) {
+    return this.request<Record<string, unknown>>(
+      "finance",
+      "POST",
+      `/internal/v1/charges/${chargeId}/adjustments`,
+      input,
+    );
+  }
+
+  resolveRequest(requestId: string, body: Record<string, unknown>) {
+    return this.request<Record<string, unknown>>(
+      "finance",
+      "POST",
+      `/internal/v1/requests/${requestId}/resolve`,
+      body,
+    );
+  }
+
+  resolveSupplierAttempt(requestId: string, attemptId: string, body: Record<string, unknown>) {
+    return this.request<Record<string, unknown>>(
+      "finance",
+      "POST",
+      `/internal/v1/requests/${requestId}/attempts/${attemptId}/resolve`,
+      body,
+    );
+  }
+
+  listCharges(query: Record<string, string | undefined>) {
+    const sp = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== "") sp.set(k, v);
+    }
+    const qs = sp.toString() ? `?${sp.toString()}` : "";
+    return this.request<Record<string, unknown>>("auditor", "GET", `/internal/v1/charges${qs}`);
+  }
+
+  listHolds(query: Record<string, string | undefined>) {
+    const sp = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== "") sp.set(k, v);
+    }
+    const qs = sp.toString() ? `?${sp.toString()}` : "";
+    return this.request<Record<string, unknown>>("auditor", "GET", `/internal/v1/holds${qs}`);
+  }
+
+  listAsyncTasks(query: Record<string, string | undefined>) {
+    const sp = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== "") sp.set(k, v);
+    }
+    const qs = sp.toString() ? `?${sp.toString()}` : "";
+    return this.request<Record<string, unknown>>("auditor", "GET", `/internal/v1/async-tasks${qs}`);
+  }
+
+  getConservationAudit() {
+    return this.request<Record<string, unknown>>(
+      "auditor",
+      "GET",
+      "/internal/v1/audit/conservation",
+    );
+  }
+
+  listPlugins(capability?: string) {
+    const qs = capability ? `?capability=${encodeURIComponent(capability)}` : "";
+    return this.request<Record<string, unknown>>("security", "GET", `/internal/v1/plugins${qs}`);
+  }
+
+  listBuiltinPlugins(capability?: string) {
+    const qs = capability ? `?capability=${encodeURIComponent(capability)}` : "";
+    return this.request<Record<string, unknown>>(
+      "security",
+      "GET",
+      `/internal/v1/plugins/builtins${qs}`,
+    );
+  }
+
+  installBuiltinPlugin(name: string, body: Record<string, unknown>) {
+    return this.request<Record<string, unknown>>(
+      "security",
+      "POST",
+      `/internal/v1/plugins/builtins/${encodeURIComponent(name)}/install`,
+      body,
+    );
+  }
+
+  upsertPlugin(body: Record<string, unknown>) {
+    return this.request<Record<string, unknown>>("security", "PUT", "/internal/v1/plugins", body);
+  }
+
+  validatePluginRelease(body: Record<string, unknown>) {
+    return this.request<Record<string, unknown>>(
+      "security",
+      "POST",
+      "/internal/v1/plugin-releases/validate",
+      body,
+    );
+  }
+
+  publishPluginRelease(body: Record<string, unknown>) {
+    return this.request<Record<string, unknown>>(
+      "security",
+      "POST",
+      "/internal/v1/plugin-releases",
+      body,
+    );
+  }
+
+  rollbackPluginRelease(releaseId: string, body: Record<string, unknown>) {
+    return this.request<Record<string, unknown>>(
+      "security",
+      "POST",
+      `/internal/v1/plugin-releases/${releaseId}/rollback`,
+      body,
+    );
+  }
+
+  revokePlugin(pluginId: string, reason: string) {
+    return this.request<Record<string, unknown>>(
+      "security",
+      "POST",
+      `/internal/v1/plugins/${pluginId}/revoke`,
+      { reason },
+    );
+  }
+
+  previewProvider(body: Record<string, unknown>) {
+    return this.request<Record<string, unknown>>(
+      "catalog",
+      "POST",
+      "/internal/v1/providers/preview",
+      body,
+    );
+  }
+
+  claimOutboxEvents(consumer: string, limit = 200) {
+    return this.request<{
+      lease_token: string;
+      events: {
+        seq: string;
+        event_id: string;
+        kind: string;
+        request_id: string | null;
+        project_id: string | null;
+        payload: Record<string, unknown>;
+        created_at: string;
+      }[];
+    }>("events", "POST", "/internal/v1/events/claim", { consumer, limit });
+  }
+
+  ackOutboxEvents(consumer: string, leaseToken: string, throughSeq: string) {
+    return this.request<{ ok: boolean }>("events", "POST", "/internal/v1/events/ack", {
+      consumer,
+      lease_token: leaseToken,
+      through_seq: throughSeq,
+    });
+  }
+}

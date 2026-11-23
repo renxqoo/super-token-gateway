@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { cp, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { SCHEMA_VERSION } from "@gateway/ledger";
+import { CONSOLE_SCHEMA_VERSION } from "@gateway/console-api";
 
 const distDir = "dist";
 await rm(distDir, { recursive: true, force: true });
@@ -15,12 +16,14 @@ const targets = [
     name: "wasmtime-worker",
   },
   { entry: "apps/worker/src/main.ts", outdir: "dist/worker", name: "worker" },
+  { entry: "apps/console-api/src/main.ts", outdir: "dist/console-api", name: "console-api" },
   {
     entry: "apps/mock-providers/src/main.ts",
     outdir: "dist/mock-providers",
     name: "mock-providers",
   },
   { entry: "scripts/migrate.ts", outdir: "dist/tools", name: "migrate" },
+  { entry: "scripts/console-migrate.ts", outdir: "dist/tools", name: "console-migrate" },
   { entry: "scripts/archive.ts", outdir: "dist/tools", name: "archive" },
 ];
 
@@ -52,6 +55,9 @@ for (const target of targets) {
 }
 
 await cp("packages/ledger/src/migrations", join(distDir, "tools/migrations"), { recursive: true });
+await cp("apps/console-api/src/db/migrations", join(distDir, "tools/console-migrations"), {
+  recursive: true,
+});
 
 let bundledNative = false;
 for (const nativeName of ["libstg_plugin_wasmtime.dylib", "libstg_plugin_wasmtime.so"]) {
@@ -79,10 +85,16 @@ if (!bundledNative) {
 const manifest = {
   bun_version: Bun.version,
   schema_version: SCHEMA_VERSION,
+  console_schema_version: CONSOLE_SCHEMA_VERSION,
   built_at: new Date().toISOString(),
   outputs,
 };
 await Bun.write(join(distDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 console.log(
-  JSON.stringify({ built: true, artifacts: outputs.length, schema_version: SCHEMA_VERSION }),
+  JSON.stringify({
+    built: true,
+    artifacts: outputs.length,
+    schema_version: SCHEMA_VERSION,
+    console_schema_version: CONSOLE_SCHEMA_VERSION,
+  }),
 );
