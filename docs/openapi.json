@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Super Token Gateway",
-    "version": "2026112302",
+    "version": "2026112303",
     "description": "Public and internal routes use separate listeners. Inference payloads and success responses depend on the endpoint protocol and provider adapter."
   },
   "paths": {
@@ -1576,6 +1576,11 @@
                   "enabled": {
                     "default": true,
                     "type": "boolean"
+                  },
+                  "source_revision": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
                   }
                 },
                 "required": ["name"],
@@ -1740,6 +1745,11 @@
                     "default": "LIFETIME",
                     "type": "string",
                     "enum": ["LIFETIME", "DAILY", "MONTHLY"]
+                  },
+                  "source_revision": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
                   }
                 },
                 "required": ["project_id"],
@@ -1917,6 +1927,50 @@
       }
     },
     "/internal/v1/upstream-accounts": {
+      "get": {
+        "x-stg-listener": "internal",
+        "x-stg-role": "auditor",
+        "security": [
+          {
+            "internalBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "put": {
         "x-stg-listener": "internal",
         "x-stg-role": "catalog",
@@ -1943,9 +1997,17 @@
                     "maxLength": 120
                   },
                   "state": {
-                    "default": "ACTIVE",
                     "type": "string",
                     "enum": ["ACTIVE", "DISABLED", "RECONCILE_REQUIRED"]
+                  },
+                  "expected_state": {
+                    "type": "string",
+                    "enum": ["ACTIVE", "DISABLED", "RECONCILE_REQUIRED"]
+                  },
+                  "source_revision": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
                   }
                 },
                 "required": ["name"],
@@ -1992,6 +2054,50 @@
       }
     },
     "/internal/v1/channels": {
+      "get": {
+        "x-stg-listener": "internal",
+        "x-stg-role": "auditor",
+        "security": [
+          {
+            "internalBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "put": {
         "x-stg-listener": "internal",
         "x-stg-role": "catalog",
@@ -2416,6 +2522,11 @@
                       }
                     },
                     "additionalProperties": false
+                  },
+                  "source_revision": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
                   }
                 },
                 "required": ["account_id", "name", "kind", "base_url"],
@@ -2520,6 +2631,11 @@
                   "enabled": {
                     "default": true,
                     "type": "boolean"
+                  },
+                  "source_revision": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
                   }
                 },
                 "required": ["name", "operations"],
@@ -2528,6 +2644,63 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/prices/{priceId}": {
+      "get": {
+        "x-stg-listener": "internal",
+        "x-stg-role": "auditor",
+        "security": [
+          {
+            "internalBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "priceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful response",
@@ -2800,6 +2973,11 @@
                   "enabled": {
                     "default": true,
                     "type": "boolean"
+                  },
+                  "source_revision": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
                   }
                 },
                 "required": ["project_id", "model_name", "override_kind"],
@@ -3388,6 +3566,11 @@
                   "enabled": {
                     "default": true,
                     "type": "boolean"
+                  },
+                  "source_revision": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
                   }
                 },
                 "required": [

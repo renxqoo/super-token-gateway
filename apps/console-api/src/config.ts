@@ -1,3 +1,5 @@
+import { normalizeAndValidateCidr } from "./auth.ts";
+
 export type GatewayRoleTokens = {
   admin?: string;
   catalog?: string;
@@ -22,11 +24,13 @@ export type ConsoleConfig = {
   outboxConsumerName: string;
   bootstrapAdminEmail?: string;
   bootstrapAdminToken?: string;
-  trustProxyHeaders?: boolean;
+  trustedProxyCidrs: string[];
   sessionTtlMs: number;
   refreshTtlMs: number;
   reconcileIntervalMs: number;
   outboxPullIntervalMs: number;
+  alertDeliveryIntervalMs: number;
+  allowPrivateAlertWebhooks?: boolean;
   clientCorsOrigins: string[];
   adminCorsOrigins: string[];
 };
@@ -46,7 +50,7 @@ function intEnv(
   return parsed;
 }
 
-function parseOriginList(raw: string | undefined): string[] {
+function parseList(raw: string | undefined): string[] {
   return (raw ?? "")
     .split(",")
     .map((s) => s.trim())
@@ -63,6 +67,7 @@ export function loadConsoleConfigFromEnv(
     "",
   );
   const gatewayPublicUrl = (env.GATEWAY_PUBLIC_URL ?? "http://127.0.0.1:8080").replace(/\/+$/, "");
+  const outboxPullIntervalMs = intEnv(env, "CONSOLE_OUTBOX_PULL_INTERVAL_MS", 0, 0);
 
   const gatewayTokens: GatewayRoleTokens = {
     ...(env.GATEWAY_ADMIN_TOKEN ? { admin: env.GATEWAY_ADMIN_TOKEN } : {}),
@@ -78,21 +83,44 @@ export function loadConsoleConfigFromEnv(
     (!gatewayTokens.catalog ||
       !gatewayTokens.security ||
       !gatewayTokens.finance ||
-      !gatewayTokens.auditor)
+      !gatewayTokens.auditor ||
+      !gatewayTokens.ops)
   ) {
     throw new Error(
-      "Provide GATEWAY_ADMIN_TOKEN or role-scoped GATEWAY_*_TOKEN credentials for Gateway internal API",
+      "Provide GATEWAY_ADMIN_TOKEN or role-scoped GATEWAY_{CATALOG,SECURITY,FINANCE,AUDITOR,OPS}_TOKEN credentials",
+    );
+  }
+  if (outboxPullIntervalMs > 0 && !gatewayTokens.admin && !gatewayTokens.events) {
+    throw new Error(
+      "Provide GATEWAY_ADMIN_TOKEN or GATEWAY_EVENTS_TOKEN when CONSOLE_OUTBOX_PULL_INTERVAL_MS > 0",
     );
   }
   const outboxWebhookToken = env.OUTBOX_WEBHOOK_TOKEN;
   if (!outboxWebhookToken || outboxWebhookToken.length < 16) {
     throw new Error("OUTBOX_WEBHOOK_TOKEN must be at least 16 characters");
   }
+  const bootstrapAdminEmail = env.BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase() || undefined;
+  const bootstrapAdminToken = env.BOOTSTRAP_ADMIN_TOKEN || undefined;
+  if (bootstrapAdminEmail && (!bootstrapAdminToken || bootstrapAdminToken.length < 16)) {
+    throw new Error(
+      "BOOTSTRAP_ADMIN_TOKEN of at least 16 characters is required when BOOTSTRAP_ADMIN_EMAIL is set",
+    );
+  }
+
+  const trustedProxyCidrs: string[] = [];
+  for (const rawCidr of parseList(env.CONSOLE_TRUSTED_PROXY_CIDRS)) {
+    const normalized = normalizeAndValidateCidr(rawCidr);
+    if (!normalized) {
+      throw new Error(`Invalid CIDR in CONSOLE_TRUSTED_PROXY_CIDRS: ${rawCidr}`);
+    }
+    trustedProxyCidrs.push(normalized);
+  }
+
   return {
     host: env.CONSOLE_HOST ?? "0.0.0.0",
-    port: intEnv(env, "CONSOLE_PORT", 8090, 0),
+    port: intEnv(env, "CONSOLE_PORT", 8092, 0),
     adminHost: env.CONSOLE_ADMIN_HOST ?? "127.0.0.1",
-    adminPort: intEnv(env, "CONSOLE_ADMIN_PORT", 8091, 0),
+    adminPort: intEnv(env, "CONSOLE_ADMIN_PORT", 8093, 0),
     databaseUrl,
     dbMaxConnections: intEnv(env, "CONSOLE_DB_MAX_CONNECTIONS", 16, 2),
     gatewayInternalUrl,
@@ -100,16 +128,15 @@ export function loadConsoleConfigFromEnv(
     gatewayTokens,
     outboxWebhookToken,
     outboxConsumerName: env.OUTBOX_CONSUMER_NAME ?? "console_api",
-    ...(env.BOOTSTRAP_ADMIN_EMAIL
-      ? { bootstrapAdminEmail: env.BOOTSTRAP_ADMIN_EMAIL.trim().toLowerCase() }
-      : {}),
-    ...(env.BOOTSTRAP_ADMIN_TOKEN ? { bootstrapAdminToken: env.BOOTSTRAP_ADMIN_TOKEN } : {}),
-    trustProxyHeaders: env.CONSOLE_TRUST_PROXY_HEADERS === "true",
+    ...(bootstrapAdminEmail ? { bootstrapAdminEmail } : {}),
+    ...(bootstrapAdminToken ? { bootstrapAdminToken } : {}),
+    trustedProxyCidrs,
     sessionTtlMs: intEnv(env, "CONSOLE_SESSION_TTL_MS", 24 * 3_600_000, 60_000),
     refreshTtlMs: intEnv(env, "CONSOLE_REFRESH_TTL_MS", 30 * 24 * 3_600_000, 300_000),
     reconcileIntervalMs: intEnv(env, "CONSOLE_RECONCILE_INTERVAL_MS", 10_000, 0),
-    outboxPullIntervalMs: intEnv(env, "CONSOLE_OUTBOX_PULL_INTERVAL_MS", 0, 0),
-    clientCorsOrigins: parseOriginList(env.CONSOLE_CLIENT_CORS_ORIGINS ?? env.CONSOLE_CORS_ORIGINS),
-    adminCorsOrigins: parseOriginList(env.CONSOLE_ADMIN_CORS_ORIGINS),
+    outboxPullIntervalMs,
+    alertDeliveryIntervalMs: intEnv(env, "CONSOLE_ALERT_DELIVERY_INTERVAL_MS", 5_000, 0),
+    clientCorsOrigins: parseList(env.CONSOLE_CLIENT_CORS_ORIGINS),
+    adminCorsOrigins: parseList(env.CONSOLE_ADMIN_CORS_ORIGINS),
   };
 }

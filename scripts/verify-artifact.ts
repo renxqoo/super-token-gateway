@@ -10,10 +10,13 @@ if (!baseDbUrl) throw new Error("DATABASE_URL is required");
 const distSource = resolve("dist");
 const tempDir = await mkdtemp(join(tmpdir(), "stg-artifact-"));
 const dbName = `gateway_v4_art_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+const consoleDbName = `console_art_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 const adminUrl = new URL(baseDbUrl);
 adminUrl.pathname = "/postgres";
 const targetUrl = new URL(baseDbUrl);
 targetUrl.pathname = `/${dbName}`;
+const consoleTargetUrl = new URL(baseDbUrl);
+consoleTargetUrl.pathname = `/${consoleDbName}`;
 
 const adminDb = createDatabase(adminUrl.toString(), 2);
 const children: ReturnType<typeof spawn>[] = [];
@@ -48,13 +51,15 @@ function runSync(cwd: string, args: string[], env: Record<string, string>): Prom
 try {
   await cp(distSource, join(tempDir, "dist"), { recursive: true });
   await adminDb.unsafe(`CREATE DATABASE ${dbName}`);
+  await adminDb.unsafe(`CREATE DATABASE ${consoleDbName}`);
 
+  const adminToken = "artifact-admin-token-0123456789ab";
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     DATABASE_URL: targetUrl.toString(),
     KEY_PEPPER: "artifact-pepper-0123456789abcdef",
     ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    ADMIN_TOKEN: "artifact-admin-token-0123456789ab",
+    ADMIN_TOKEN: adminToken,
     ALLOW_PRIVATE_UPSTREAMS: "true",
     GATEWAY_HOST: "127.0.0.1",
     GATEWAY_PORT: "18080",
@@ -67,7 +72,23 @@ try {
     WORKER_HEALTH_PORT: "18090",
   };
 
+  const consoleEnv: Record<string, string> = {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    CONSOLE_DATABASE_URL: consoleTargetUrl.toString(),
+    CONSOLE_HOST: "127.0.0.1",
+    CONSOLE_PORT: "18092",
+    CONSOLE_ADMIN_HOST: "127.0.0.1",
+    CONSOLE_ADMIN_PORT: "18093",
+    GATEWAY_INTERNAL_URL: "http://127.0.0.1:18081",
+    GATEWAY_PUBLIC_URL: "http://127.0.0.1:18080",
+    GATEWAY_ADMIN_TOKEN: adminToken,
+    OUTBOX_WEBHOOK_TOKEN: "artifact-outbox-webhook-token-1234",
+    BOOTSTRAP_ADMIN_EMAIL: "root@artifact.test",
+    BOOTSTRAP_ADMIN_TOKEN: "artifact-bootstrap-token-1234",
+  };
+
   await runSync(tempDir, ["dist/tools/migrate.js"], env);
+  await runSync(tempDir, ["dist/tools/console-migrate.js"], consoleEnv);
 
   for (const script of [
     ["dist/mock-providers/main.js"],
@@ -77,10 +98,57 @@ try {
     const child = spawn(process.execPath, script, { cwd: tempDir, env, stdio: "inherit" });
     children.push(child);
   }
+  children.push(
+    spawn(process.execPath, ["dist/console-api/main.js"], {
+      cwd: tempDir,
+      env: consoleEnv,
+      stdio: "inherit",
+    }),
+  );
 
   await waitForJson("http://127.0.0.1:19088/healthz");
   await waitForJson("http://127.0.0.1:18080/readyz");
   await waitForJson("http://127.0.0.1:18090/readyz");
+  await waitForJson("http://127.0.0.1:18092/readyz");
+  await waitForJson("http://127.0.0.1:18093/readyz");
+
+  const consoleClientAdminProbe = await fetch("http://127.0.0.1:18092/admin/v1/users");
+  if (consoleClientAdminProbe.status !== 404) {
+    throw new Error(
+      `Expected client listener to return 404 for /admin/v1/users, got ${consoleClientAdminProbe.status}`,
+    );
+  }
+  const consoleAdminClientProbe = await fetch("http://127.0.0.1:18093/api/v1/models");
+  if (consoleAdminClientProbe.status !== 404) {
+    throw new Error(
+      `Expected admin listener to return 404 for /api/v1/models, got ${consoleAdminClientProbe.status}`,
+    );
+  }
+
+  const bootstrapRes = await fetch("http://127.0.0.1:18093/admin/v1/auth/bootstrap", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "root@artifact.test",
+      password: "ArtifactPassword123!",
+      display_name: "Artifact Root",
+      bootstrap_token: consoleEnv.BOOTSTRAP_ADMIN_TOKEN,
+    }),
+  });
+  if (bootstrapRes.status !== 201) {
+    throw new Error(
+      `Console artifact bootstrap failed: ${bootstrapRes.status} ${await bootstrapRes.text()}`,
+    );
+  }
+  const bootstrapJson = (await bootstrapRes.json()) as { access_token: string };
+  const crossPortRes = await fetch("http://127.0.0.1:18092/api/v1/auth/me", {
+    headers: { authorization: `Bearer ${bootstrapJson.access_token}` },
+  });
+  if (crossPortRes.status !== 401) {
+    throw new Error(
+      `Expected admin token to be rejected on client listener, got ${crossPortRes.status}`,
+    );
+  }
 
   const adminHeaders = {
     authorization: `Bearer ${env.ADMIN_TOKEN}`,
@@ -225,6 +293,17 @@ try {
     throw new Error(`Conservation check failed: ${JSON.stringify(audit)}`);
   }
 
+  const consoleAuditRes = await fetch("http://127.0.0.1:18093/admin/v1/finance/conservation", {
+    headers: { authorization: `Bearer ${bootstrapJson.access_token}` },
+  });
+  if (consoleAuditRes.status !== 200) {
+    throw new Error(`Console artifact conservation failed: ${consoleAuditRes.status}`);
+  }
+  const consoleAudit = (await consoleAuditRes.json()) as { ok?: boolean };
+  if (!consoleAudit.ok) {
+    throw new Error(`Console artifact conservation not ok: ${JSON.stringify(consoleAudit)}`);
+  }
+
   const archiveDir = join(tempDir, "archive");
   const month = new Date().toISOString().slice(0, 7);
   await runSync(tempDir, ["dist/tools/archive.js", "export", month, archiveDir], env);
@@ -234,14 +313,22 @@ try {
     env,
   );
 
-  console.log(JSON.stringify({ artifact_verified: true, conservation: audit }));
+  console.log(
+    JSON.stringify({ artifact_verified: true, console_verified: true, conservation: audit }),
+  );
 } finally {
   for (const child of children) child.kill("SIGTERM");
   await Bun.sleep(300);
-  await adminDb.unsafe(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${dbName}' AND pid <> pg_backend_pid()`,
-  );
-  await adminDb.unsafe(`DROP DATABASE IF EXISTS ${dbName}`);
-  await adminDb.close();
+  for (const targetDb of [dbName, consoleDbName]) {
+    try {
+      await adminDb.unsafe(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${targetDb}' AND pid <> pg_backend_pid()`,
+      );
+      await adminDb.unsafe(`DROP DATABASE IF EXISTS ${targetDb}`);
+    } catch {
+      void 0;
+    }
+  }
+  await adminDb.close().catch(() => undefined);
   await rm(tempDir, { recursive: true, force: true });
 }

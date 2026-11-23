@@ -2,23 +2,20 @@ import { Hono } from "hono";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
-import { isValidCidr, recordAuditLog, requireProjectAccess } from "../auth.ts";
+import { recordAuditLog, requireProjectAccess } from "../auth.ts";
 import { apiKeyRecords, type SpendLimitWindow } from "../db/schema.ts";
 import {
+  cidrSchema,
   nonNegativeAtomsSchema,
   operationEnum,
   parseJsonBody,
+  parseLimitOffset,
   parseUuid,
-  requireAuth,
+  requireClientAuth,
+  sanitizeApiKeyForClient,
   type ConsoleDeps,
   type ConsoleEnv,
 } from "./shared.ts";
-
-const cidrSchema = z
-  .string()
-  .min(2)
-  .max(64)
-  .refine((val) => isValidCidr(val), { message: "Invalid IP or CIDR notation" });
 
 const createApiKeySchema = z
   .object({
@@ -27,7 +24,7 @@ const createApiKeySchema = z
     allowed_cidrs: z.array(cidrSchema).max(100).default([]),
     models: z.array(z.string().min(1).max(150)).max(1000).default([]),
     operations: z.array(operationEnum).max(32).default([]),
-    expires_at: z.iso.datetime().nullable().optional(),
+    expires_at: z.iso.datetime({ offset: true }).nullable().optional(),
     spend_limit_atoms: nonNegativeAtomsSchema.nullable().optional(),
     spend_limit_window: z.enum(["LIFETIME", "DAILY", "MONTHLY"]).default("LIFETIME"),
   })
@@ -40,7 +37,7 @@ const updateApiKeySchema = z
     models: z.array(z.string().min(1).max(150)).max(1000).optional(),
     operations: z.array(operationEnum).max(32).optional(),
     enabled: z.boolean().optional(),
-    expires_at: z.iso.datetime().nullable().optional(),
+    expires_at: z.iso.datetime({ offset: true }).nullable().optional(),
     spend_limit_atoms: nonNegativeAtomsSchema.nullable().optional(),
     spend_limit_window: z.enum(["LIFETIME", "DAILY", "MONTHLY"]).optional(),
   })
@@ -48,7 +45,7 @@ const updateApiKeySchema = z
 
 export function createApiKeyRoutes(deps: ConsoleDeps) {
   const app = new Hono<ConsoleEnv>();
-  const auth = requireAuth(deps);
+  const auth = requireClientAuth(deps);
   app.use("/projects/:projectId/api-keys", auth);
   app.use("/projects/:projectId/api-keys/*", auth);
 
@@ -56,39 +53,92 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     const user = c.get("user");
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
     await requireProjectAccess(deps.orm, user.id, projectId);
+    const { limit, offset } = parseLimitOffset(c, 50, 200);
     const items = await deps.orm
       .select()
       .from(apiKeyRecords)
       .where(eq(apiKeyRecords.projectId, projectId))
-      .orderBy(desc(apiKeyRecords.createdAt));
-    return c.json({ items });
+      .orderBy(desc(apiKeyRecords.createdAt))
+      .limit(limit)
+      .offset(offset);
+    return c.json({ items: items.map(sanitizeApiKeyForClient), limit, offset });
   });
 
   app.post("/projects/:projectId/api-keys", async (c) => {
     const user = c.get("user");
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId, [
+    const { project, role } = await requireProjectAccess(deps.orm, user.id, projectId, [
       "OWNER",
       "ADMIN",
       "DEVELOPER",
     ]);
     const body = await parseJsonBody(c, createApiKeySchema);
+
+    let effectiveSpendLimit = body.spend_limit_atoms ?? null;
+    if (role === "DEVELOPER") {
+      if (body.role !== "INVOKER" && body.role !== "VIEWER") {
+        throw new GatewayError(
+          403,
+          "forbidden",
+          "DEVELOPER role can only create INVOKER or VIEWER API keys",
+        );
+      }
+      if (project.developerKeySpendLimitAtoms !== null) {
+        if (body.spend_limit_atoms === undefined) {
+          effectiveSpendLimit = project.developerKeySpendLimitAtoms;
+        } else if (
+          body.spend_limit_atoms === null ||
+          BigInt(body.spend_limit_atoms) > BigInt(project.developerKeySpendLimitAtoms)
+        ) {
+          throw new GatewayError(
+            403,
+            "forbidden",
+            "API key spend limit exceeds project policy for DEVELOPER role",
+          );
+        }
+      }
+    }
+
     const keyId = crypto.randomUUID();
-    await deps.orm.insert(apiKeyRecords).values({
-      id: keyId,
-      projectId,
-      createdBy: user.id,
-      name: body.name,
-      keyPrefix: "pending",
-      role: body.role,
-      allowedCidrs: body.allowed_cidrs,
-      models: body.models,
-      operations: body.operations,
-      spendLimitAtoms: body.spend_limit_atoms ?? null,
-      spendLimitWindow: body.spend_limit_window as SpendLimitWindow,
-      enabled: true,
-      expiresAt: body.expires_at ?? null,
-      syncStatus: "PENDING",
+    await deps.orm.transaction(async (tx) => {
+      if (role === "DEVELOPER" && project.developerMaxActiveKeys !== null) {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(88421201, hashtext(${`${projectId}:${user.id}`}))`,
+        );
+        const [cnt] = await tx
+          .select({ total: sql<number>`count(*)::int` })
+          .from(apiKeyRecords)
+          .where(
+            and(
+              eq(apiKeyRecords.projectId, projectId),
+              eq(apiKeyRecords.createdBy, user.id),
+              isNull(apiKeyRecords.revokedAt),
+            ),
+          );
+        if (Number(cnt?.total ?? 0) >= project.developerMaxActiveKeys) {
+          throw new GatewayError(
+            403,
+            "key_limit_exceeded",
+            "Active API key limit reached for DEVELOPER role in this project",
+          );
+        }
+      }
+      await tx.insert(apiKeyRecords).values({
+        id: keyId,
+        projectId,
+        createdBy: user.id,
+        name: body.name,
+        keyPrefix: "pending",
+        role: body.role,
+        allowedCidrs: body.allowed_cidrs,
+        models: body.models,
+        operations: body.operations,
+        spendLimitAtoms: effectiveSpendLimit,
+        spendLimitWindow: body.spend_limit_window as SpendLimitWindow,
+        enabled: true,
+        expiresAt: body.expires_at ? new Date(body.expires_at) : null,
+        syncStatus: "PENDING",
+      });
     });
 
     try {
@@ -102,14 +152,24 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
         metadata: {
           project_id: projectId,
           name: body.name,
-          spend_limit_atoms: body.spend_limit_atoms ?? null,
+          allowed_cidrs: body.allowed_cidrs,
+          spend_limit_atoms: effectiveSpendLimit,
           spend_limit_window: body.spend_limit_window,
         },
       });
-      return c.json({ ...synced.record, key: synced.key }, 201);
+      return c.json({ ...sanitizeApiKeyForClient(synced.record), key: synced.key }, 201);
     } catch (err) {
       if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
         await deps.orm.delete(apiKeyRecords).where(eq(apiKeyRecords.id, keyId));
+      } else {
+        await deps.orm
+          .update(apiKeyRecords)
+          .set({
+            enabled: false,
+            revokedAt: sql`COALESCE(${apiKeyRecords.revokedAt}, now())`,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(apiKeyRecords.id, keyId));
       }
       throw err;
     }
@@ -170,7 +230,9 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
         ...(body.models !== undefined ? { models: body.models } : {}),
         ...(body.operations !== undefined ? { operations: body.operations } : {}),
         ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
-        ...(body.expires_at !== undefined ? { expiresAt: body.expires_at } : {}),
+        ...(body.expires_at !== undefined
+          ? { expiresAt: body.expires_at ? new Date(body.expires_at) : null }
+          : {}),
         ...(body.spend_limit_atoms !== undefined
           ? { spendLimitAtoms: body.spend_limit_atoms }
           : {}),
@@ -183,15 +245,38 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
       })
       .where(eq(apiKeyRecords.id, keyId));
 
-    const synced = await deps.sync.syncApiKey(keyId);
-    await recordAuditLog(deps.orm, {
-      actor: user,
-      orgId: project.orgId,
-      action: "api_key.update",
-      targetType: "api_key",
-      targetId: keyId,
-    });
-    return c.json(synced.record);
+    try {
+      const synced = await deps.sync.syncApiKey(keyId);
+      await recordAuditLog(deps.orm, {
+        actor: user,
+        orgId: project.orgId,
+        action: "api_key.update",
+        targetType: "api_key",
+        targetId: keyId,
+      });
+      return c.json(sanitizeApiKeyForClient(synced.record));
+    } catch (err) {
+      if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
+        await deps.orm
+          .update(apiKeyRecords)
+          .set({
+            name: existing.name,
+            allowedCidrs: existing.allowedCidrs,
+            models: existing.models,
+            operations: existing.operations,
+            enabled: existing.enabled,
+            expiresAt: existing.expiresAt,
+            spendLimitAtoms: existing.spendLimitAtoms,
+            spendLimitWindow: existing.spendLimitWindow,
+            desiredRevision: existing.desiredRevision,
+            syncStatus: existing.syncStatus,
+            lastSyncError: existing.lastSyncError,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(apiKeyRecords.id, keyId));
+      }
+      throw err;
+    }
   });
 
   app.get("/projects/:projectId/api-keys/:keyId/spend", async (c) => {
@@ -268,20 +353,11 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
           );
         }
       }
-      await tx
-        .update(apiKeyRecords)
-        .set({
-          enabled: false,
-          revokedAt: sql`now()`,
-          desiredRevision: sql`${apiKeyRecords.desiredRevision} + 1`,
-          syncStatus: "PENDING",
-          updatedAt: sql`now()`,
-        })
-        .where(and(eq(apiKeyRecords.id, keyId), isNull(apiKeyRecords.revokedAt)));
       await tx.insert(apiKeyRecords).values({
         id: newKeyId,
         projectId,
         createdBy: user.id,
+        rotatedFromKeyId: keyId,
         name: existing.name,
         keyPrefix: "pending",
         role: existing.role,
@@ -302,9 +378,30 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     } catch (err) {
       if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
         await deps.orm.delete(apiKeyRecords).where(eq(apiKeyRecords.id, newKeyId));
+      } else {
+        await deps.orm
+          .update(apiKeyRecords)
+          .set({
+            enabled: false,
+            revokedAt: sql`COALESCE(${apiKeyRecords.revokedAt}, now())`,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(apiKeyRecords.id, newKeyId));
       }
       throw err;
     }
+
+    await deps.orm
+      .update(apiKeyRecords)
+      .set({
+        enabled: false,
+        allowedCidrs: [],
+        revokedAt: sql`COALESCE(${apiKeyRecords.revokedAt}, now())`,
+        desiredRevision: sql`${apiKeyRecords.desiredRevision} + 1`,
+        syncStatus: "PENDING",
+        updatedAt: sql`now()`,
+      })
+      .where(and(eq(apiKeyRecords.id, keyId), isNull(apiKeyRecords.revokedAt)));
 
     let oldKeyRevokePending = false;
     try {
@@ -323,7 +420,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     });
     return c.json(
       {
-        ...syncedNew.record,
+        ...sanitizeApiKeyForClient(syncedNew.record),
         key: syncedNew.key,
         rotated_from: keyId,
         old_key_revoke_pending: oldKeyRevokePending,
@@ -347,8 +444,17 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
       .where(and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.projectId, projectId)))
       .limit(1);
     if (!existing) throw new GatewayError(404, "not_found", "API key not found");
-    if (role === "DEVELOPER" && existing.createdBy !== user.id) {
-      throw new GatewayError(403, "forbidden", "DEVELOPER role can only revoke own API keys");
+    if (role === "DEVELOPER") {
+      if (existing.createdBy !== user.id) {
+        throw new GatewayError(403, "forbidden", "DEVELOPER role can only revoke own API keys");
+      }
+      if (existing.spendLimitAtoms !== null) {
+        throw new GatewayError(
+          403,
+          "forbidden",
+          "Only OWNER or ADMIN can revoke a spend-limited API key; disable it instead",
+        );
+      }
     }
 
     await deps.orm
@@ -362,7 +468,9 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
         updatedAt: sql`now()`,
       })
       .where(eq(apiKeyRecords.id, keyId));
-    await deps.sync.syncApiKey(keyId);
+    if (existing.syncedRevision > 0) {
+      await deps.sync.syncApiKey(keyId);
+    }
 
     await recordAuditLog(deps.orm, {
       actor: user,

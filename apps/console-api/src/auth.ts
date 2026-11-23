@@ -1,15 +1,19 @@
 import { timingSafeEqual } from "node:crypto";
-import { isIP } from "node:net";
+import { lookup } from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import { GatewayError } from "@gateway/contracts";
 import {
   consoleAuditLogs,
+  organizations,
   orgMembers,
   projects,
   sessions,
   users,
   type ConsoleDrizzle,
+  type OrgKind,
   type OrgRole,
+  type SessionScope,
 } from "./db/schema.ts";
 
 export type AuthUser = {
@@ -19,6 +23,7 @@ export type AuthUser = {
   isPlatformAdmin: boolean;
   status: "ACTIVE" | "SUSPENDED";
   sessionId: string;
+  sessionScope: SessionScope;
 };
 
 export function sha256Hex(value: string): string {
@@ -50,6 +55,13 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
   return Bun.password.verify(password, hash);
 }
 
+let dummyHashPromise: Promise<string> | null = null;
+export async function burnDummyPasswordVerify(password: string): Promise<void> {
+  dummyHashPromise ??= hashPassword("console-dummy-timing-guard-0000");
+  const dummy = await dummyHashPromise;
+  await verifyPassword(password, dummy).catch(() => false);
+}
+
 export function maskSecret(secret: string): string {
   const trimmed = secret.trim();
   if (!trimmed) return "";
@@ -57,18 +69,134 @@ export function maskSecret(secret: string): string {
   return `${trimmed.slice(0, 6)}***${trimmed.slice(-4)}`;
 }
 
-export function isValidCidr(raw: string): boolean {
+export function normalizeIpAddress(raw: string): string {
+  const trimmed = raw
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  if (trimmed.startsWith("::ffff:")) {
+    const rest = trimmed.slice(7);
+    if (isIP(rest) === 4) return rest;
+    const hexMatch = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
+    if (hexMatch) {
+      const hi = Number.parseInt(hexMatch[1]!, 16);
+      const lo = Number.parseInt(hexMatch[2]!, 16);
+      return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+    }
+  }
+  return trimmed;
+}
+
+export function normalizeAndValidateCidr(raw: string): string | null {
   const trimmed = raw.trim();
-  const slash = trimmed.indexOf("/");
-  const ipPart = slash === -1 ? trimmed : trimmed.slice(0, slash);
-  const prefixPart = slash === -1 ? null : trimmed.slice(slash + 1);
-  const family = isIP(ipPart);
-  if (family === 0) return false;
-  if (prefixPart === null) return true;
-  if (!/^\d{1,3}$/.test(prefixPart)) return false;
-  const bits = Number(prefixPart);
+  const parts = trimmed.split("/");
+  if (parts.length > 2) return null;
+  const address = normalizeIpAddress(parts[0] ?? "");
+  const family = isIP(address);
+  if (family === 0) return null;
   const maxBits = family === 4 ? 32 : 128;
-  return Number.isInteger(bits) && bits >= 0 && bits <= maxBits;
+  if (parts[1] === undefined) return `${address}/${maxBits}`;
+  if (!/^\d{1,3}$/.test(parts[1])) return null;
+  const bits = Number(parts[1]);
+  if (!Number.isInteger(bits) || bits < 0 || bits > maxBits) return null;
+  return `${address}/${bits}`;
+}
+
+export function isValidCidr(raw: string): boolean {
+  return normalizeAndValidateCidr(raw) !== null;
+}
+
+const blockedV4 = new BlockList();
+for (const [address, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.88.99.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 4],
+  ["240.0.0.0", 4],
+] as const) {
+  blockedV4.addSubnet(address, prefix, "ipv4");
+}
+
+const blockedV6 = new BlockList();
+for (const [address, prefix] of [
+  ["2001::", 23],
+  ["2001:2::", 48],
+  ["2001:db8::", 32],
+  ["2001:10::", 28],
+  ["2001:20::", 28],
+  ["2002::", 16],
+  ["3fff::", 20],
+] as const) {
+  blockedV6.addSubnet(address, prefix, "ipv6");
+}
+
+const globalV6 = new BlockList();
+globalV6.addSubnet("2000::", 3, "ipv6");
+
+export function isPublicIpAddress(raw: string): boolean {
+  const address = normalizeIpAddress(raw);
+  const family = isIP(address);
+  if (family === 4) return !blockedV4.check(address, "ipv4");
+  if (family === 6) return globalV6.check(address, "ipv6") && !blockedV6.check(address, "ipv6");
+  return false;
+}
+
+const cidrMatcherCache = new Map<string, BlockList>();
+
+export function inCidrList(rawAddress: string, cidrs: readonly string[]): boolean {
+  const address = normalizeIpAddress(rawAddress);
+  const family = isIP(address);
+  if (family === 0 || cidrs.length === 0) return false;
+  const key = cidrs.join(",");
+  let matcher = cidrMatcherCache.get(key);
+  if (!matcher) {
+    matcher = new BlockList();
+    for (const cidr of cidrs) {
+      const normalized = normalizeAndValidateCidr(cidr);
+      if (!normalized) continue;
+      const [base, prefix] = normalized.split("/");
+      matcher.addSubnet(base!, Number(prefix), isIP(base!) === 4 ? "ipv4" : "ipv6");
+    }
+    if (cidrMatcherCache.size > 1000) cidrMatcherCache.clear();
+    cidrMatcherCache.set(key, matcher);
+  }
+  return matcher.check(address, family === 4 ? "ipv4" : "ipv6");
+}
+
+export function resolveClientIp(
+  peerIp: string | undefined,
+  forwardedHeader: string | undefined,
+  trustedProxyCidrs: readonly string[],
+): string | null {
+  if (!peerIp) return null;
+  const peer = normalizeIpAddress(peerIp);
+  if (isIP(peer) === 0) return null;
+  if (trustedProxyCidrs.length === 0 || !inCidrList(peer, trustedProxyCidrs) || !forwardedHeader) {
+    return peer;
+  }
+  const chain = forwardedHeader
+    .split(",")
+    .map((part) => normalizeIpAddress(part))
+    .filter(Boolean);
+  if (chain.length === 0 || chain.length > 32 || chain.some((ip) => isIP(ip) === 0)) {
+    return peer;
+  }
+  let current = peer;
+  for (let i = chain.length - 1; i >= 0; i--) {
+    if (!inCidrList(current, trustedProxyCidrs)) break;
+    current = chain[i]!;
+  }
+  return current;
 }
 
 export function isSafePublicWebhookUrl(raw: string): boolean {
@@ -79,27 +207,65 @@ export function isSafePublicWebhookUrl(raw: string): boolean {
     return false;
   }
   if (parsed.protocol !== "https:") return false;
-  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (!host || host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) {
+  if (parsed.username || parsed.password) return false;
+  const rawHost = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const host = rawHost.replace(/\.+$/, "");
+  if (
+    !host ||
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal")
+  ) {
     return false;
   }
-  if (isIP(host) !== 0) {
-    if (
-      host === "::1" ||
-      host.startsWith("127.") ||
-      host.startsWith("10.") ||
-      host.startsWith("169.254.") ||
-      host.startsWith("192.168.") ||
-      host.startsWith("0.") ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-      host.startsWith("fc") ||
-      host.startsWith("fd") ||
-      host.startsWith("fe80")
-    ) {
-      return false;
-    }
+  const normalizedIp = normalizeIpAddress(host);
+  if (isIP(normalizedIp) !== 0) {
+    return isPublicIpAddress(normalizedIp);
   }
   return true;
+}
+
+export async function assertPublicWebhookDns(
+  rawUrl: string,
+  lookupImpl: typeof lookup = lookup,
+): Promise<string[]> {
+  if (!isSafePublicWebhookUrl(rawUrl)) {
+    throw new GatewayError(
+      400,
+      "unsafe_webhook_url",
+      "Webhook URL must target a public HTTPS host",
+    );
+  }
+  const parsed = new URL(rawUrl);
+  const host = parsed.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.+$/, "");
+  const normalizedIp = normalizeIpAddress(host);
+  if (isIP(normalizedIp) !== 0) {
+    if (!isPublicIpAddress(normalizedIp)) {
+      throw new GatewayError(400, "unsafe_webhook_url", "Webhook URL resolves to a non-public IP");
+    }
+    return [normalizedIp];
+  }
+  const records = await lookupImpl(host, { all: true, verbatim: true });
+  if (!records || records.length === 0) {
+    throw new GatewayError(502, "webhook_dns_failed", "Webhook hostname did not resolve");
+  }
+  const resolved: string[] = [];
+  for (const rec of records) {
+    const ip = normalizeIpAddress(rec.address);
+    if (!isPublicIpAddress(ip)) {
+      throw new GatewayError(
+        400,
+        "unsafe_webhook_url",
+        "Webhook hostname resolved to non-public IP",
+      );
+    }
+    resolved.push(ip);
+  }
+  return resolved;
 }
 
 export class LoginRateLimiter {
@@ -130,25 +296,34 @@ export class LoginRateLimiter {
     }
   }
 
+  private makeCapacity(key: string, now: number): boolean {
+    if (this.buckets.size < this.maxKeys || this.buckets.has(key)) return true;
+    this.pruneExpiredAll(now);
+    if (this.buckets.size < this.maxKeys) return true;
+    for (const [k, arr] of this.buckets) {
+      if (arr.length < this.maxAttempts) {
+        this.buckets.delete(k);
+        return true;
+      }
+    }
+    return false;
+  }
+
   check(key: string, now = Date.now()): void {
     const kept = this.prune(key, now);
     if (kept.length >= this.maxAttempts) {
       throw new GatewayError(429, "too_many_attempts", "Too many failed login attempts");
     }
+    if (!this.buckets.has(key) && this.buckets.size >= this.maxKeys) {
+      if (!this.makeCapacity(key, now)) {
+        throw new GatewayError(429, "too_many_attempts", "Authentication rate limit capacity full");
+      }
+    }
   }
 
   recordFailure(key: string, now = Date.now()): void {
-    if (this.buckets.size >= this.maxKeys && !this.buckets.has(key)) {
-      this.pruneExpiredAll(now);
-      if (this.buckets.size >= this.maxKeys) {
-        for (const [k, arr] of this.buckets) {
-          if (arr.length < this.maxAttempts) {
-            this.buckets.delete(k);
-            break;
-          }
-        }
-      }
-      if (this.buckets.size >= this.maxKeys) return;
+    if (!this.makeCapacity(key, now)) {
+      throw new GatewayError(429, "too_many_attempts", "Authentication rate limit capacity full");
     }
     const kept = this.prune(key, now);
     kept.push(now);
@@ -170,14 +345,16 @@ export function extractBearerToken(headerValue: string | undefined): string | nu
 export async function authenticateSession(
   orm: ConsoleDrizzle,
   authHeader: string | undefined,
+  expectedScope: SessionScope,
 ): Promise<AuthUser> {
   const token = extractBearerToken(authHeader);
   if (!token) throw new GatewayError(401, "unauthorized", "Missing authentication token");
   const digest = sha256Hex(token);
-  const nowIso = new Date().toISOString();
+  const now = new Date();
   const rows = await orm
     .select({
       sessionId: sessions.id,
+      sessionScope: sessions.scope,
       userId: users.id,
       email: users.email,
       displayName: users.displayName,
@@ -189,8 +366,9 @@ export async function authenticateSession(
     .where(
       and(
         eq(sessions.tokenHash, digest),
+        eq(sessions.scope, expectedScope),
         isNull(sessions.revokedAt),
-        gt(sessions.expiresAt, nowIso),
+        gt(sessions.expiresAt, now),
       ),
     )
     .limit(1);
@@ -199,6 +377,9 @@ export async function authenticateSession(
   if (row.status !== "ACTIVE") {
     throw new GatewayError(403, "account_suspended", "User account is suspended");
   }
+  if (expectedScope === "ADMIN" && !row.isPlatformAdmin) {
+    throw new GatewayError(403, "forbidden", "Platform administrator privileges required");
+  }
   return {
     id: row.userId,
     email: row.email,
@@ -206,6 +387,7 @@ export async function authenticateSession(
     isPlatformAdmin: row.isPlatformAdmin,
     status: row.status,
     sessionId: row.sessionId,
+    sessionScope: row.sessionScope,
   };
 }
 
@@ -214,18 +396,26 @@ export async function requireOrgMember(
   userId: string,
   orgId: string,
   allowedRoles?: readonly OrgRole[],
-): Promise<OrgRole> {
+): Promise<{ role: OrgRole; orgKind: OrgKind }> {
   const rows = await orm
-    .select({ role: orgMembers.role })
+    .select({
+      role: orgMembers.role,
+      orgKind: organizations.kind,
+      orgStatus: organizations.status,
+    })
     .from(orgMembers)
+    .innerJoin(organizations, eq(organizations.id, orgMembers.orgId))
     .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
     .limit(1);
   const member = rows[0];
   if (!member) throw new GatewayError(404, "not_found", "Organization not found");
+  if (member.orgStatus !== "ACTIVE") {
+    throw new GatewayError(403, "org_suspended", "Organization is suspended");
+  }
   if (allowedRoles && !allowedRoles.includes(member.role)) {
     throw new GatewayError(403, "forbidden", "Insufficient organization role");
   }
-  return member.role;
+  return { role: member.role, orgKind: member.orgKind };
 }
 
 export async function requireProjectAccess(
@@ -238,17 +428,23 @@ export async function requireProjectAccess(
     .select({
       project: projects,
       role: orgMembers.role,
+      orgKind: organizations.kind,
+      orgStatus: organizations.status,
     })
     .from(projects)
+    .innerJoin(organizations, eq(organizations.id, projects.orgId))
     .innerJoin(orgMembers, and(eq(orgMembers.orgId, projects.orgId), eq(orgMembers.userId, userId)))
     .where(eq(projects.id, projectId))
     .limit(1);
   const row = rows[0];
   if (!row) throw new GatewayError(404, "not_found", "Project not found");
+  if (row.orgStatus !== "ACTIVE") {
+    throw new GatewayError(403, "org_suspended", "Organization is suspended");
+  }
   if (allowedRoles && !allowedRoles.includes(row.role)) {
     throw new GatewayError(403, "forbidden", "Insufficient role for project operation");
   }
-  return row;
+  return { project: row.project, role: row.role, orgKind: row.orgKind };
 }
 
 export async function recordAuditLog(

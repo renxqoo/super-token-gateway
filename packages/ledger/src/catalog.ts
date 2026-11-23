@@ -120,11 +120,13 @@ export function createCatalogRepository(db: SQL) {
       tpm: number;
       concurrency: number;
       enabled?: boolean;
-    }): Promise<ProjectRecord & { config_epoch: number }> {
+      source_revision?: number;
+    }): Promise<ProjectRecord & { config_epoch: number; source_revision: number }> {
       const id = input.id ?? crypto.randomUUID();
       const currency = input.currency ?? "USD";
       const externalRef = input.external_ref ?? null;
       const enabled = input.enabled ?? true;
+      const sourceRev = input.source_revision;
       return orm.transaction(async (tx) => {
         const rows = await tx
           .insert(projects)
@@ -137,9 +139,13 @@ export function createCatalogRepository(db: SQL) {
             tpm: input.tpm,
             concurrency: input.concurrency,
             enabled,
+            ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
           })
           .onConflictDoUpdate({
             target: projects.id,
+            ...(sourceRev !== undefined
+              ? { setWhere: sql`${projects.sourceRevision} <= ${sourceRev}` }
+              : {}),
             set: {
               externalRef,
               name: input.name,
@@ -148,10 +154,17 @@ export function createCatalogRepository(db: SQL) {
               tpm: input.tpm,
               concurrency: input.concurrency,
               enabled,
+              ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
               updatedAt: sql`now()`,
             },
           })
           .returning();
+        if (!rows[0]) {
+          throw new DomainError(
+            "stale_revision",
+            "Incoming project revision is older than current Gateway revision",
+          );
+        }
         await tx
           .insert(wallets)
           .values({
@@ -171,6 +184,7 @@ export function createCatalogRepository(db: SQL) {
           tpm: r.tpm,
           concurrency: r.concurrency,
           enabled: r.enabled,
+          source_revision: r.sourceRevision,
           config_epoch: epoch,
         };
       });
@@ -190,7 +204,10 @@ export function createCatalogRepository(db: SQL) {
       expires_at?: string | null;
       spend_limit_atoms?: string | null;
       spend_limit_window?: SpendLimitWindow;
-    }): Promise<ApiKeyRecord & { config_epoch: number; created: boolean }> {
+      source_revision?: number;
+    }): Promise<
+      ApiKeyRecord & { config_epoch: number; created: boolean; source_revision: number }
+    > {
       const id = input.id ?? crypto.randomUUID();
       const role = input.role ?? "INVOKER";
       const allowedCidrs = input.allowed_cidrs ?? [];
@@ -200,11 +217,19 @@ export function createCatalogRepository(db: SQL) {
       const expiresAt = input.expires_at ?? null;
       const spendLimitAtoms = input.spend_limit_atoms ?? null;
       const spendLimitWindow = input.spend_limit_window ?? "LIFETIME";
+      const sourceRev = input.source_revision;
       return orm.transaction(async (tx) => {
         const [existed] = await tx
-          .select({ id: apiKeys.id })
+          .select({ id: apiKeys.id, sourceRevision: apiKeys.sourceRevision })
           .from(apiKeys)
-          .where(eq(apiKeys.id, id));
+          .where(eq(apiKeys.id, id))
+          .for("update");
+        if (existed && sourceRev !== undefined && existed.sourceRevision > sourceRev) {
+          throw new DomainError(
+            "stale_revision",
+            "Incoming API key revision is older than current Gateway revision",
+          );
+        }
         const rows = await tx
           .insert(apiKeys)
           .values({
@@ -221,9 +246,13 @@ export function createCatalogRepository(db: SQL) {
             expiresAt,
             spendLimitAtoms,
             spendLimitWindow,
+            ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
           })
           .onConflictDoUpdate({
             target: apiKeys.id,
+            ...(sourceRev !== undefined
+              ? { setWhere: sql`${apiKeys.sourceRevision} <= ${sourceRev}` }
+              : {}),
             set: {
               name: input.name,
               role,
@@ -234,9 +263,16 @@ export function createCatalogRepository(db: SQL) {
               expiresAt,
               spendLimitAtoms,
               spendLimitWindow,
+              ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
             },
           })
           .returning();
+        if (!rows[0]) {
+          throw new DomainError(
+            "stale_revision",
+            "Incoming API key revision is older than current Gateway revision",
+          );
+        }
         const epoch = await bumpEpoch(tx);
         const r = rows[0]!;
         return {
@@ -253,6 +289,7 @@ export function createCatalogRepository(db: SQL) {
           expires_at: r.expiresAt ? new Date(r.expiresAt).toISOString() : null,
           spend_limit_atoms: r.spendLimitAtoms,
           spend_limit_window: r.spendLimitWindow,
+          source_revision: r.sourceRevision,
           config_epoch: epoch,
           created: !existed,
         };
@@ -263,33 +300,127 @@ export function createCatalogRepository(db: SQL) {
       id?: string;
       name: string;
       state?: "ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED";
-    }): Promise<UpstreamAccountRecord & { config_epoch: number }> {
+      expected_state?: "ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED";
+      source_revision?: number;
+    }): Promise<UpstreamAccountRecord & { config_epoch: number; source_revision: number }> {
       const id = input.id ?? crypto.randomUUID();
-      const state = input.state ?? "ACTIVE";
+      const sourceRev = input.source_revision;
       return orm.transaction(async (tx) => {
-        const rows = await tx
-          .insert(upstreamAccounts)
-          .values({ id, name: input.name, state })
-          .onConflictDoUpdate({
-            target: upstreamAccounts.id,
-            set: {
+        const [existing] = await tx
+          .select()
+          .from(upstreamAccounts)
+          .where(eq(upstreamAccounts.id, id))
+          .for("update");
+        if (existing) {
+          if (sourceRev !== undefined && existing.sourceRevision > sourceRev) {
+            throw new DomainError(
+              "stale_revision",
+              "Incoming upstream account revision is older than current Gateway revision",
+            );
+          }
+          if (input.expected_state !== undefined && existing.state !== input.expected_state) {
+            throw new DomainError(
+              "reconcile_required_conflict",
+              `Upstream account state is ${existing.state}, expected ${input.expected_state}`,
+            );
+          }
+          const nextState = input.state ?? existing.state;
+          if (
+            existing.state === "RECONCILE_REQUIRED" &&
+            nextState !== "RECONCILE_REQUIRED" &&
+            input.expected_state !== "RECONCILE_REQUIRED"
+          ) {
+            throw new DomainError(
+              "reconcile_required_conflict",
+              "Upstream account in RECONCILE_REQUIRED state requires explicit reconciliation",
+            );
+          }
+          const [r] = await tx
+            .update(upstreamAccounts)
+            .set({
               name: input.name,
-              state,
+              state: nextState,
               revision: sql`${upstreamAccounts.revision} + 1`,
+              ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
               updatedAt: sql`now()`,
-            },
+            })
+            .where(eq(upstreamAccounts.id, id))
+            .returning();
+          const epoch = await bumpEpoch(tx);
+          return {
+            id: r!.id,
+            name: r!.name,
+            state: r!.state,
+            revision: r!.revision,
+            source_revision: r!.sourceRevision,
+            config_epoch: epoch,
+          };
+        }
+        const [r] = await tx
+          .insert(upstreamAccounts)
+          .values({
+            id,
+            name: input.name,
+            state: input.state ?? "ACTIVE",
+            ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
           })
           .returning();
         const epoch = await bumpEpoch(tx);
-        const r = rows[0]!;
         return {
-          id: r.id,
-          name: r.name,
-          state: r.state,
-          revision: r.revision,
+          id: r!.id,
+          name: r!.name,
+          state: r!.state,
+          revision: r!.revision,
+          source_revision: r!.sourceRevision,
           config_epoch: epoch,
         };
       });
+    },
+
+    async listUpstreamAccounts(): Promise<(UpstreamAccountRecord & { source_revision: number })[]> {
+      const rows = await orm.select().from(upstreamAccounts).orderBy(asc(upstreamAccounts.name));
+      return rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        state: r.state,
+        revision: r.revision,
+        source_revision: r.sourceRevision,
+      }));
+    },
+
+    async listChannels(): Promise<
+      (Omit<ChannelRecord, "secret_ciphertext"> & { source_revision: number })[]
+    > {
+      const rows = await orm.select().from(channels).orderBy(asc(channels.name));
+      return rows.map((r) => ({
+        id: r.id,
+        account_id: r.accountId,
+        name: r.name,
+        kind: r.kind,
+        provider_plugin_id: r.providerPluginId,
+        base_url: r.baseUrl,
+        rpm: r.rpm,
+        concurrency: r.concurrency,
+        enabled: r.enabled,
+        routing_policy: r.routingPolicy,
+        adapter_config: r.adapterConfig,
+        config_revision: r.configRevision,
+        source_revision: r.sourceRevision,
+      }));
+    },
+
+    async getPriceVersion(id: string): Promise<PriceVersionRecord | null> {
+      const [r] = await orm.select().from(priceVersions).where(eq(priceVersions.id, id)).limit(1);
+      if (!r) return null;
+      return {
+        id: r.id,
+        side: r.side,
+        currency: r.currency,
+        basis: r.basis,
+        rates: r.rates,
+        ceilings: r.ceilings,
+        source_digest: r.sourceDigest,
+      };
     },
 
     async upsertChannel(input: {
@@ -305,19 +436,29 @@ export function createCatalogRepository(db: SQL) {
       enabled?: boolean;
       routing_policy?: Record<string, unknown>;
       adapter_config?: AdapterOverrides;
-    }): Promise<ChannelRecord & { config_epoch: number }> {
+      source_revision?: number;
+    }): Promise<ChannelRecord & { config_epoch: number; source_revision: number }> {
       const id = input.id ?? crypto.randomUUID();
       const enabled = input.enabled ?? true;
       const routingPolicy = input.routing_policy ?? {};
       const adapterConfig = input.adapter_config ?? {};
+      const sourceRev = input.source_revision;
       return orm.transaction(async (tx) => {
         const [existing] = await tx
           .select({
             providerId: channels.providerPluginId,
             secretCiphertext: channels.secretCiphertext,
+            sourceRevision: channels.sourceRevision,
           })
           .from(channels)
-          .where(eq(channels.id, id));
+          .where(eq(channels.id, id))
+          .for("update");
+        if (existing && sourceRev !== undefined && existing.sourceRevision > sourceRev) {
+          throw new DomainError(
+            "stale_revision",
+            "Incoming channel revision is older than current Gateway revision",
+          );
+        }
         const effectiveSecret = input.secret_ciphertext ?? existing?.secretCiphertext;
         if (effectiveSecret === undefined) {
           throw new DomainError(
@@ -343,6 +484,10 @@ export function createCatalogRepository(db: SQL) {
           );
         }
         const providerPluginId = provider?.id ?? null;
+        const setWhere =
+          sourceRev !== undefined
+            ? sql`(${channels.providerPluginId} IS NULL OR ${channels.providerPluginId} IS NOT DISTINCT FROM ${providerPluginId}::uuid) AND ${channels.sourceRevision} <= ${sourceRev}`
+            : sql`${channels.providerPluginId} IS NULL OR ${channels.providerPluginId} IS NOT DISTINCT FROM ${providerPluginId}::uuid`;
         const rows = await tx
           .insert(channels)
           .values({
@@ -358,10 +503,11 @@ export function createCatalogRepository(db: SQL) {
             enabled,
             routingPolicy,
             adapterConfig,
+            ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
           })
           .onConflictDoUpdate({
             target: channels.id,
-            setWhere: sql`${channels.providerPluginId} IS NULL OR ${channels.providerPluginId} IS NOT DISTINCT FROM ${providerPluginId}::uuid`,
+            setWhere,
             set: {
               accountId: input.account_id,
               name: input.name,
@@ -377,6 +523,7 @@ export function createCatalogRepository(db: SQL) {
               routingPolicy,
               adapterConfig,
               configRevision: sql`${channels.configRevision} + 1`,
+              ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
               updatedAt: sql`now()`,
             },
           })
@@ -402,6 +549,7 @@ export function createCatalogRepository(db: SQL) {
           routing_policy: r.routingPolicy,
           adapter_config: r.adapterConfig,
           config_revision: r.configRevision,
+          source_revision: r.sourceRevision,
           config_epoch: epoch,
         };
       });
@@ -413,9 +561,11 @@ export function createCatalogRepository(db: SQL) {
       routing_strategy?: RoutingStrategy;
       max_output_tokens: number;
       enabled?: boolean;
-    }): Promise<ModelRecord & { config_epoch: number }> {
+      source_revision?: number;
+    }): Promise<ModelRecord & { config_epoch: number; source_revision: number }> {
       const routingStrategy = input.routing_strategy ?? "WEIGHTED";
       const enabled = input.enabled ?? true;
+      const sourceRev = input.source_revision;
       return orm.transaction(async (tx) => {
         const rows = await tx
           .insert(models)
@@ -425,17 +575,28 @@ export function createCatalogRepository(db: SQL) {
             routingStrategy,
             maxOutputTokens: input.max_output_tokens,
             enabled,
+            ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
           })
           .onConflictDoUpdate({
             target: models.name,
+            ...(sourceRev !== undefined
+              ? { setWhere: sql`${models.sourceRevision} <= ${sourceRev}` }
+              : {}),
             set: {
               operations: input.operations,
               routingStrategy,
               maxOutputTokens: input.max_output_tokens,
               enabled,
+              ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
             },
           })
           .returning();
+        if (!rows[0]) {
+          throw new DomainError(
+            "stale_revision",
+            "Incoming model revision is older than current Gateway revision",
+          );
+        }
         const epoch = await bumpEpoch(tx);
         const r = rows[0]!;
         return {
@@ -444,6 +605,7 @@ export function createCatalogRepository(db: SQL) {
           routing_strategy: r.routingStrategy,
           max_output_tokens: r.maxOutputTokens,
           enabled: r.enabled,
+          source_revision: r.sourceRevision,
           config_epoch: epoch,
         };
       });
@@ -456,7 +618,7 @@ export function createCatalogRepository(db: SQL) {
       basis?: PriceBasis;
       rates: Pricing["rates"];
       ceilings?: Record<string, string>;
-    }): Promise<PriceVersionRecord & { config_epoch: number }> {
+    }): Promise<PriceVersionRecord & { config_epoch: number; replayed?: boolean }> {
       validatePricing({ currency: input.currency, rates: input.rates });
       const id = input.id ?? crypto.randomUUID();
       const basis = input.basis ?? "PROVIDER_USAGE";
@@ -482,18 +644,48 @@ export function createCatalogRepository(db: SQL) {
             ceilings,
             sourceDigest,
           })
+          .onConflictDoNothing({ target: priceVersions.id })
           .returning();
-        const epoch = await bumpEpoch(tx);
-        const r = rows[0]!;
+        if (rows[0]) {
+          const epoch = await bumpEpoch(tx);
+          const r = rows[0]!;
+          return {
+            id: r.id,
+            side: r.side,
+            currency: r.currency,
+            basis: r.basis,
+            rates: r.rates,
+            ceilings: r.ceilings,
+            source_digest: r.sourceDigest,
+            config_epoch: epoch,
+            replayed: false,
+          };
+        }
+        const [existing] = await tx
+          .select()
+          .from(priceVersions)
+          .where(eq(priceVersions.id, id))
+          .limit(1);
+        if (!existing || existing.sourceDigest !== sourceDigest) {
+          throw new DomainError(
+            "price_version_conflict",
+            "Price version identifier already exists with different rates",
+          );
+        }
+        const [epochRow] = await tx
+          .select({ version: configEpoch.version })
+          .from(configEpoch)
+          .where(eq(configEpoch.id, 1));
         return {
-          id: r.id,
-          side: r.side,
-          currency: r.currency,
-          basis: r.basis,
-          rates: r.rates,
-          ceilings: r.ceilings,
-          source_digest: r.sourceDigest,
-          config_epoch: epoch,
+          id: existing.id,
+          side: existing.side,
+          currency: existing.currency,
+          basis: existing.basis,
+          rates: existing.rates,
+          ceilings: existing.ceilings,
+          source_digest: existing.sourceDigest,
+          config_epoch: epochRow?.version ?? 0,
+          replayed: true,
         };
       });
     },
@@ -513,7 +705,8 @@ export function createCatalogRepository(db: SQL) {
       plugin_pipeline?: PluginPipelineStep[];
       retry_policy?: RouteRetryPolicy;
       enabled?: boolean;
-    }): Promise<RouteRecord & { config_epoch: number }> {
+      source_revision?: number;
+    }): Promise<RouteRecord & { config_epoch: number; source_revision: number }> {
       const id = input.id ?? crypto.randomUUID();
       const priority = input.priority ?? 0;
       const weight = input.weight ?? 1;
@@ -521,11 +714,19 @@ export function createCatalogRepository(db: SQL) {
       const adapterOverrides = input.adapter_overrides ?? {};
       const retryPolicy = input.retry_policy ?? {};
       const enabled = input.enabled ?? true;
+      const sourceRev = input.source_revision;
       return orm.transaction(async (tx) => {
         const [existing] = await tx
-          .select({ pipeline: routes.pluginPipeline })
+          .select({ pipeline: routes.pluginPipeline, sourceRevision: routes.sourceRevision })
           .from(routes)
-          .where(eq(routes.id, id));
+          .where(eq(routes.id, id))
+          .for("update");
+        if (existing && sourceRev !== undefined && existing.sourceRevision > sourceRev) {
+          throw new DomainError(
+            "stale_revision",
+            "Incoming route revision is older than current Gateway revision",
+          );
+        }
         const pluginPipeline = input.plugin_pipeline ?? existing?.pipeline ?? [];
         const requiredPlugins = new Set(
           pluginPipeline.filter((step) => step.enabled !== false).map((step) => step.plugin_id),
@@ -549,6 +750,14 @@ export function createCatalogRepository(db: SQL) {
             );
           }
         }
+        const setWhere =
+          input.plugin_pipeline !== undefined && sourceRev !== undefined
+            ? sql`${routes.pluginPipeline} = ${JSON.stringify(pluginPipeline)}::text::jsonb AND ${routes.sourceRevision} <= ${sourceRev}`
+            : input.plugin_pipeline !== undefined
+              ? sql`${routes.pluginPipeline} = ${JSON.stringify(pluginPipeline)}::text::jsonb`
+              : sourceRev !== undefined
+                ? sql`${routes.sourceRevision} <= ${sourceRev}`
+                : undefined;
         const rows = await tx
           .insert(routes)
           .values({
@@ -566,14 +775,11 @@ export function createCatalogRepository(db: SQL) {
             pluginPipeline,
             retryPolicy,
             enabled,
+            ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
           })
           .onConflictDoUpdate({
             target: routes.id,
-            ...(input.plugin_pipeline !== undefined
-              ? {
-                  setWhere: sql`${routes.pluginPipeline} = ${JSON.stringify(pluginPipeline)}::text::jsonb`,
-                }
-              : {}),
+            ...(setWhere ? { setWhere } : {}),
             set: {
               channelId: input.channel_id,
               upstreamModel: input.upstream_model,
@@ -586,6 +792,7 @@ export function createCatalogRepository(db: SQL) {
               adapterOverrides,
               retryPolicy,
               enabled,
+              ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
             },
           })
           .returning();
@@ -611,6 +818,7 @@ export function createCatalogRepository(db: SQL) {
           plugin_pipeline: r.pluginPipeline,
           retry_policy: r.retryPolicy,
           enabled: r.enabled,
+          source_revision: r.sourceRevision,
           config_epoch: epoch,
         };
       });
@@ -1042,10 +1250,12 @@ export function createCatalogRepository(db: SQL) {
       multiplier_numerator?: string | null;
       multiplier_denominator?: string | null;
       enabled?: boolean;
-    }): Promise<ProjectPricingOverrideRecord & { config_epoch: number }> {
+      source_revision?: number;
+    }): Promise<ProjectPricingOverrideRecord & { config_epoch: number; source_revision: number }> {
       const id = input.id ?? crypto.randomUUID();
       const operation = input.operation ?? "*";
       const enabled = input.enabled ?? true;
+      const sourceRev = input.source_revision;
       const billingPriceId =
         input.override_kind === "EXACT_PRICE" ? (input.billing_price_id ?? null) : null;
       const num =
@@ -1077,6 +1287,7 @@ export function createCatalogRepository(db: SQL) {
             multiplierNumerator: num,
             multiplierDenominator: den,
             enabled,
+            ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
           })
           .onConflictDoUpdate({
             target: [
@@ -1084,16 +1295,26 @@ export function createCatalogRepository(db: SQL) {
               projectPricingOverrides.modelName,
               projectPricingOverrides.operation,
             ],
+            ...(sourceRev !== undefined
+              ? { setWhere: sql`${projectPricingOverrides.sourceRevision} <= ${sourceRev}` }
+              : {}),
             set: {
               overrideKind: input.override_kind,
               billingPriceId,
               multiplierNumerator: num,
               multiplierDenominator: den,
               enabled,
+              ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
               updatedAt: sql`now()`,
             },
           })
           .returning();
+        if (!rows[0]) {
+          throw new DomainError(
+            "stale_revision",
+            "Incoming pricing override revision is older than current Gateway revision",
+          );
+        }
         const epoch = await bumpEpoch(tx);
         const r = rows[0]!;
         return {
@@ -1106,6 +1327,7 @@ export function createCatalogRepository(db: SQL) {
           multiplier_numerator: r.multiplierNumerator,
           multiplier_denominator: r.multiplierDenominator,
           enabled: r.enabled,
+          source_revision: r.sourceRevision,
           config_epoch: epoch,
         };
       });

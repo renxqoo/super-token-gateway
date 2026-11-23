@@ -107,6 +107,7 @@ export const projects = pgTable("projects", {
   tpm: bigint("tpm", { mode: "number" }).notNull(),
   concurrency: integer("concurrency").notNull(),
   enabled: boolean("enabled").notNull().default(true),
+  sourceRevision: integer("source_revision").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
@@ -149,6 +150,7 @@ export const apiKeys = pgTable(
       .defaultNow(),
     spentAtoms: numeric("spent_atoms", { precision: 38, scale: 0 }).notNull().default("0"),
     reservedAtoms: numeric("reserved_atoms", { precision: 38, scale: 0 }).notNull().default("0"),
+    sourceRevision: integer("source_revision").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .notNull()
       .defaultNow(),
@@ -164,6 +166,7 @@ export const upstreamAccounts = pgTable("upstream_accounts", {
     .notNull()
     .default("ACTIVE"),
   revision: numeric("revision", { precision: 38, scale: 0 }).notNull().default("0"),
+  sourceRevision: integer("source_revision").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
@@ -267,6 +270,7 @@ export const channels = pgTable(
       .notNull()
       .default(sql`'{}'::jsonb`),
     configRevision: bigint("config_revision", { mode: "number" }).notNull().default(1),
+    sourceRevision: integer("source_revision").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .notNull()
       .defaultNow(),
@@ -283,6 +287,7 @@ export const models = pgTable("models", {
   routingStrategy: text("routing_strategy").$type<RoutingStrategy>().notNull().default("WEIGHTED"),
   maxOutputTokens: integer("max_output_tokens").notNull(),
   enabled: boolean("enabled").notNull().default(true),
+  sourceRevision: integer("source_revision").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
 
@@ -332,6 +337,7 @@ export const routes = pgTable(
       .notNull()
       .default(sql`'{}'::jsonb`),
     enabled: boolean("enabled").notNull().default(true),
+    sourceRevision: integer("source_revision").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .notNull()
       .defaultNow(),
@@ -764,6 +770,7 @@ export const projectPricingOverrides = pgTable(
     multiplierNumerator: numeric("multiplier_numerator", { precision: 38, scale: 0 }),
     multiplierDenominator: numeric("multiplier_denominator", { precision: 38, scale: 0 }),
     enabled: boolean("enabled").notNull().default(true),
+    sourceRevision: integer("source_revision").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .notNull()
       .defaultNow(),

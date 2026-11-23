@@ -80,6 +80,15 @@
           "checksum": "0173343ecbb522312b6b899e46172bf45062bfda695f1d011f5d76f3f9475fa5"
         }
       ]
+    },
+    {
+      "version": 2026112303,
+      "files": [
+        {
+          "path": "./migrations/0009_console_sync_guard.sql",
+          "checksum": "12c4bf231bb519e51991739582e2674e9825d6c7003281da51416d012da2b340"
+        }
+      ]
     }
   ],
   "legacyBaselines": [

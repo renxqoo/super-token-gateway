@@ -1,0 +1,14 @@
+{
+  "migrations": [
+    {
+      "version": 2026112301,
+      "path": "./migrations/0000_console_baseline.sql",
+      "checksum": "15c5b5c875373440a6fe07c72bf51a1db97f1668e5afef02eb72dd1f7963ad4e"
+    },
+    {
+      "version": 2026112302,
+      "path": "./migrations/0001_console_hardening.sql",
+      "checksum": "69321234df44e790650b55e22077658741cecd5d89e39c0f905254ee6f38de8b"
+    }
+  ]
+}

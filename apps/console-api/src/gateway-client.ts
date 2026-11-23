@@ -11,6 +11,37 @@ export type GatewayClientOptions = {
   timeoutMs?: number;
 };
 
+export type GatewayUpstreamAccountView = {
+  id: string;
+  name: string;
+  state: "ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED";
+  revision: string;
+  source_revision: number;
+};
+
+export type GatewayChannelView = {
+  id: string;
+  account_id: string;
+  name: string;
+  kind: string;
+  provider_plugin_id: string | null;
+  base_url: string;
+  rpm: number;
+  concurrency: number;
+  enabled: boolean;
+  source_revision: number;
+};
+
+export type GatewayPriceVersionView = {
+  id: string;
+  side: "CUSTOMER" | "SUPPLIER";
+  currency: string;
+  basis: "PROVIDER_USAGE" | "REQUEST_COMPLETION" | "INPUT_CHARACTERS";
+  rates: Pricing["rates"];
+  ceilings: Record<string, string>;
+  source_digest: string;
+};
+
 export class GatewayClient {
   private readonly baseUrl: string;
   private readonly tokens: GatewayRoleTokens;
@@ -28,7 +59,7 @@ export class GatewayClient {
     const token = this.tokens[role] ?? this.tokens.admin;
     if (!token) {
       throw new GatewayError(
-        500,
+        502,
         "gateway_credential_missing",
         `Missing gateway token for ${role}`,
       );
@@ -36,12 +67,12 @@ export class GatewayClient {
     return token;
   }
 
-  async request<T = Record<string, unknown>>(
+  private async sendRaw(
     role: GatewayInternalRole,
     method: "GET" | "POST" | "PUT",
     path: string,
     body?: unknown,
-  ): Promise<T> {
+  ): Promise<{ status: number; ok: boolean; text: string }> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {
       authorization: `Bearer ${this.tokenFor(role)}`,
@@ -50,30 +81,66 @@ export class GatewayClient {
     if (body !== undefined) {
       headers["content-type"] = "application/json";
     }
-    const resp = await this.fetchImpl(url, {
-      method,
-      headers,
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
+    let resp: Response;
+    try {
+      resp = await this.fetchImpl(url, {
+        method,
+        headers,
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (err) {
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        throw new GatewayError(504, "gateway_timeout", "Gateway internal API timed out");
+      }
+      throw new GatewayError(
+        502,
+        "gateway_unavailable",
+        err instanceof Error ? err.message : "Gateway internal API unavailable",
+      );
+    }
     const text = await resp.text();
+    return { status: resp.status, ok: resp.ok, text };
+  }
+
+  async request<T = Record<string, unknown>>(
+    role: GatewayInternalRole,
+    method: "GET" | "POST" | "PUT",
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
+    const { status, ok, text } = await this.sendRaw(role, method, path, body);
     let parsed: unknown = null;
     if (text) {
       try {
         parsed = JSON.parse(text);
       } catch {
-        parsed = { raw: text };
+        if (ok) {
+          throw new GatewayError(
+            502,
+            "gateway_invalid_response",
+            "Gateway internal API returned non-JSON response",
+          );
+        }
+        parsed = null;
       }
     }
-    if (!resp.ok) {
+    if (!ok) {
+      if (status === 401 || status === 403) {
+        throw new GatewayError(
+          502,
+          "gateway_auth_error",
+          "Gateway internal API rejected service credential",
+        );
+      }
       const errObj =
         parsed && typeof parsed === "object" && "error" in parsed
           ? (parsed as { error?: { code?: string; message?: string } }).error
           : undefined;
       throw new GatewayError(
-        resp.status >= 400 && resp.status < 600 ? resp.status : 502,
+        status >= 400 && status < 600 ? status : 502,
         errObj?.code ?? "gateway_upstream_error",
-        errObj?.message ?? `Gateway internal API returned HTTP ${resp.status}`,
+        errObj?.message ?? `Gateway internal API returned HTTP ${status}`,
       );
     }
     return parsed as T;
@@ -96,8 +163,9 @@ export class GatewayClient {
     tpm: number;
     concurrency: number;
     enabled: boolean;
+    source_revision?: number;
   }) {
-    return this.request<{ id: string; config_epoch: number }>(
+    return this.request<{ id: string; config_epoch: number; source_revision: number }>(
       "catalog",
       "PUT",
       "/internal/v1/projects",
@@ -118,6 +186,7 @@ export class GatewayClient {
     expires_at: string | null;
     spend_limit_atoms: string | null;
     spend_limit_window: "LIFETIME" | "DAILY" | "MONTHLY";
+    source_revision?: number;
   }) {
     return this.request<{
       id: string;
@@ -125,6 +194,7 @@ export class GatewayClient {
       prefix: string;
       key?: string;
       config_epoch: number;
+      source_revision: number;
     }>("security", "PUT", "/internal/v1/api-keys", input);
   }
 
@@ -150,17 +220,27 @@ export class GatewayClient {
     );
   }
 
+  listUpstreamAccounts() {
+    return this.request<{ items: GatewayUpstreamAccountView[] }>(
+      "auditor",
+      "GET",
+      "/internal/v1/upstream-accounts",
+    );
+  }
+
   upsertUpstreamAccount(input: {
     id: string;
     name: string;
-    state: "ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED";
+    state?: "ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED";
+    expected_state?: "ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED";
+    source_revision?: number;
   }) {
-    return this.request<{ id: string; config_epoch: number }>(
-      "catalog",
-      "PUT",
-      "/internal/v1/upstream-accounts",
-      input,
-    );
+    return this.request<{
+      id: string;
+      state: "ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED";
+      config_epoch: number;
+      source_revision: number;
+    }>("catalog", "PUT", "/internal/v1/upstream-accounts", input);
   }
 
   rechargeSupplier(
@@ -183,6 +263,10 @@ export class GatewayClient {
     );
   }
 
+  listChannels() {
+    return this.request<{ items: GatewayChannelView[] }>("auditor", "GET", "/internal/v1/channels");
+  }
+
   upsertChannel(input: {
     id: string;
     account_id: string;
@@ -196,13 +280,14 @@ export class GatewayClient {
     enabled: boolean;
     routing_policy: Record<string, unknown>;
     adapter_config: Record<string, unknown>;
+    source_revision?: number;
   }) {
-    return this.request<{ id: string; provider_plugin_id: string | null; config_epoch: number }>(
-      "catalog",
-      "PUT",
-      "/internal/v1/channels",
-      input,
-    );
+    return this.request<{
+      id: string;
+      provider_plugin_id: string | null;
+      config_epoch: number;
+      source_revision: number;
+    }>("catalog", "PUT", "/internal/v1/channels", input);
   }
 
   upsertModel(input: {
@@ -211,12 +296,21 @@ export class GatewayClient {
     routing_strategy: "WEIGHTED" | "ROUND_ROBIN" | "LEAST_LATENCY";
     max_output_tokens: number;
     enabled: boolean;
+    source_revision?: number;
   }) {
-    return this.request<{ name: string; config_epoch: number }>(
+    return this.request<{ name: string; config_epoch: number; source_revision: number }>(
       "catalog",
       "PUT",
       "/internal/v1/models",
       input,
+    );
+  }
+
+  getPriceVersion(priceId: string) {
+    return this.request<GatewayPriceVersionView>(
+      "auditor",
+      "GET",
+      `/internal/v1/prices/${priceId}`,
     );
   }
 
@@ -228,7 +322,7 @@ export class GatewayClient {
     rates: Pricing["rates"];
     ceilings: Record<string, string>;
   }) {
-    return this.request<{ id: string; config_epoch: number }>(
+    return this.request<{ id: string; config_epoch: number; replayed?: boolean }>(
       "finance",
       "POST",
       "/internal/v1/prices",
@@ -250,8 +344,9 @@ export class GatewayClient {
     adapter_overrides: Record<string, unknown>;
     retry_policy: Record<string, unknown>;
     enabled: boolean;
+    source_revision?: number;
   }) {
-    return this.request<{ id: string; config_epoch: number }>(
+    return this.request<{ id: string; config_epoch: number; source_revision: number }>(
       "catalog",
       "PUT",
       "/internal/v1/routes",
@@ -269,8 +364,9 @@ export class GatewayClient {
     multiplier_numerator?: string | null;
     multiplier_denominator?: string | null;
     enabled: boolean;
+    source_revision?: number;
   }) {
-    return this.request<{ id: string; config_epoch: number }>(
+    return this.request<{ id: string; config_epoch: number; source_revision: number }>(
       "finance",
       "PUT",
       "/internal/v1/pricing-overrides",
@@ -403,11 +499,43 @@ export class GatewayClient {
     return this.request<Record<string, unknown>>("auditor", "GET", `/internal/v1/async-tasks${qs}`);
   }
 
-  getConservationAudit() {
-    return this.request<Record<string, unknown>>(
+  async getConservationAudit(): Promise<{ status: number; data: Record<string, unknown> }> {
+    const { status, ok, text } = await this.sendRaw(
       "auditor",
       "GET",
       "/internal/v1/audit/conservation",
+    );
+    let parsed: unknown = null;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        throw new GatewayError(
+          502,
+          "gateway_invalid_response",
+          "Gateway conservation endpoint returned non-JSON response",
+        );
+      }
+    }
+    if (status === 401 || status === 403) {
+      throw new GatewayError(
+        502,
+        "gateway_auth_error",
+        "Gateway internal API rejected service credential",
+      );
+    }
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      "ok" in parsed &&
+      typeof (parsed as { ok?: unknown }).ok === "boolean"
+    ) {
+      return { status: ok ? 200 : 500, data: parsed as Record<string, unknown> };
+    }
+    throw new GatewayError(
+      status >= 400 && status < 600 ? status : 502,
+      "gateway_upstream_error",
+      `Gateway internal API returned HTTP ${status}`,
     );
   }
 

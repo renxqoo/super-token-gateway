@@ -19,9 +19,12 @@ import {
 } from "../db/schema.ts";
 import {
   currencySchema,
+  nonNegativeAtomsSchema,
   parseJsonBody,
+  parseLimitOffset,
   parseUuid,
-  requireAuth,
+  requireClientAuth,
+  sanitizeProjectForClient,
   type ConsoleDeps,
   type ConsoleEnv,
 } from "./shared.ts";
@@ -59,18 +62,22 @@ const createProjectSchema = z
   .object({
     name: z.string().trim().min(1).max(120),
     currency: currencySchema.default("USD"),
+    developer_key_spend_limit_atoms: nonNegativeAtomsSchema.nullable().optional(),
+    developer_max_active_keys: z.number().int().min(1).max(1000).nullable().optional(),
   })
   .strict();
 
 const updateProjectSchema = z
   .object({
     name: z.string().trim().min(1).max(120).optional(),
+    developer_key_spend_limit_atoms: nonNegativeAtomsSchema.nullable().optional(),
+    developer_max_active_keys: z.number().int().min(1).max(1000).nullable().optional(),
   })
   .strict();
 
 export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
   const app = new Hono<ConsoleEnv>();
-  const auth = requireAuth(deps);
+  const auth = requireClientAuth(deps);
   app.use("/orgs", auth);
   app.use("/orgs/*", auth);
   app.use("/invitations/*", auth);
@@ -78,6 +85,7 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
 
   app.get("/orgs", async (c) => {
     const user = c.get("user");
+    const { limit, offset } = parseLimitOffset(c, 50, 200);
     const rows = await deps.orm
       .select({
         id: organizations.id,
@@ -91,8 +99,10 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
       .from(orgMembers)
       .innerJoin(organizations, eq(organizations.id, orgMembers.orgId))
       .where(eq(orgMembers.userId, user.id))
-      .orderBy(desc(organizations.createdAt));
-    return c.json({ items: rows });
+      .orderBy(desc(organizations.createdAt))
+      .limit(limit)
+      .offset(offset);
+    return c.json({ items: rows, limit, offset });
   });
 
   app.post("/orgs", async (c) => {
@@ -151,7 +161,7 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
   app.get("/orgs/:orgId", async (c) => {
     const user = c.get("user");
     const orgId = parseUuid(c.req.param("orgId"), "orgId");
-    const role = await requireOrgMember(deps.orm, user.id, orgId);
+    const { role } = await requireOrgMember(deps.orm, user.id, orgId);
     const [org] = await deps.orm
       .select()
       .from(organizations)
@@ -202,16 +212,34 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
     return c.json({ items: rows });
   });
 
+  app.get("/orgs/:orgId/invitations", async (c) => {
+    const user = c.get("user");
+    const orgId = parseUuid(c.req.param("orgId"), "orgId");
+    await requireOrgMember(deps.orm, user.id, orgId, ["OWNER", "ADMIN"]);
+    const items = await deps.orm
+      .select({
+        id: orgInvitations.id,
+        org_id: orgInvitations.orgId,
+        email: orgInvitations.email,
+        role: orgInvitations.role,
+        status: orgInvitations.status,
+        expires_at: orgInvitations.expiresAt,
+        created_at: orgInvitations.createdAt,
+      })
+      .from(orgInvitations)
+      .where(eq(orgInvitations.orgId, orgId))
+      .orderBy(desc(orgInvitations.createdAt));
+    return c.json({ items });
+  });
+
   app.post("/orgs/:orgId/invitations", async (c) => {
     const user = c.get("user");
     const orgId = parseUuid(c.req.param("orgId"), "orgId");
-    const callerRole = await requireOrgMember(deps.orm, user.id, orgId, ["OWNER", "ADMIN"]);
-    const [org] = await deps.orm
-      .select({ kind: organizations.kind })
-      .from(organizations)
-      .where(eq(organizations.id, orgId))
-      .limit(1);
-    if (!org || org.kind !== "ENTERPRISE") {
+    const { role: callerRole, orgKind } = await requireOrgMember(deps.orm, user.id, orgId, [
+      "OWNER",
+      "ADMIN",
+    ]);
+    if (orgKind !== "ENTERPRISE") {
       throw new GatewayError(
         400,
         "invalid_org_kind",
@@ -238,7 +266,7 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
     }
     const rawToken = generateOpaqueToken("stg_inv_");
     const inviteId = crypto.randomUUID();
-    const expiresAt = new Date(Date.now() + 7 * 24 * 3_600_000).toISOString();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 3_600_000);
     await deps.orm.insert(orgInvitations).values({
       id: inviteId,
       orgId,
@@ -264,10 +292,39 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
         email,
         role: body.role,
         token: rawToken,
-        expires_at: expiresAt,
+        expires_at: expiresAt.toISOString(),
       },
       201,
     );
+  });
+
+  app.delete("/orgs/:orgId/invitations/:invitationId", async (c) => {
+    const user = c.get("user");
+    const orgId = parseUuid(c.req.param("orgId"), "orgId");
+    const invitationId = parseUuid(c.req.param("invitationId"), "invitationId");
+    await requireOrgMember(deps.orm, user.id, orgId, ["OWNER", "ADMIN"]);
+    const updated = await deps.orm
+      .update(orgInvitations)
+      .set({ status: "REVOKED" })
+      .where(
+        and(
+          eq(orgInvitations.id, invitationId),
+          eq(orgInvitations.orgId, orgId),
+          eq(orgInvitations.status, "PENDING"),
+        ),
+      )
+      .returning({ id: orgInvitations.id });
+    if (updated.length === 0) {
+      throw new GatewayError(404, "not_found", "Pending invitation not found");
+    }
+    await recordAuditLog(deps.orm, {
+      actor: user,
+      orgId,
+      action: "org.invitation_revoke",
+      targetType: "invitation",
+      targetId: invitationId,
+    });
+    return c.json({ ok: true, id: invitationId });
   });
 
   app.post("/invitations/:token/accept", async (c) => {
@@ -275,7 +332,7 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
     const rawToken = c.req.param("token");
     const hash = sha256Hex(rawToken);
 
-    const accepted = await deps.orm.transaction(async (tx) => {
+    const outcome = await deps.orm.transaction(async (tx) => {
       const [inv] = await tx
         .select()
         .from(orgInvitations)
@@ -284,12 +341,12 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
       if (!inv || inv.status !== "PENDING") {
         throw new GatewayError(404, "not_found", "Invitation not found or already used");
       }
-      if (Date.parse(inv.expiresAt) <= Date.now()) {
+      if (inv.expiresAt.getTime() <= Date.now()) {
         await tx
           .update(orgInvitations)
           .set({ status: "EXPIRED" })
           .where(eq(orgInvitations.id, inv.id));
-        throw new GatewayError(410, "invitation_expired", "Invitation has expired");
+        return { expired: true as const };
       }
       if (inv.email.toLowerCase() !== user.email.toLowerCase()) {
         throw new GatewayError(
@@ -297,6 +354,14 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
           "forbidden",
           "Invitation email does not match authenticated user",
         );
+      }
+      const [org] = await tx
+        .select({ status: organizations.status })
+        .from(organizations)
+        .where(eq(organizations.id, inv.orgId))
+        .limit(1);
+      if (!org || org.status !== "ACTIVE") {
+        throw new GatewayError(403, "org_suspended", "Organization is suspended");
       }
       const existing = await tx
         .select({ role: orgMembers.role })
@@ -315,25 +380,29 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
         .update(orgInvitations)
         .set({ status: "ACCEPTED" })
         .where(eq(orgInvitations.id, inv.id));
-      return { orgId: inv.orgId, role: inv.role };
+      return { expired: false as const, orgId: inv.orgId, role: inv.role };
     });
+
+    if (outcome.expired) {
+      throw new GatewayError(410, "invitation_expired", "Invitation has expired");
+    }
 
     await recordAuditLog(deps.orm, {
       actor: user,
-      orgId: accepted.orgId,
+      orgId: outcome.orgId,
       action: "org.invitation_accept",
       targetType: "organization",
-      targetId: accepted.orgId,
-      metadata: { role: accepted.role },
+      targetId: outcome.orgId,
+      metadata: { role: outcome.role },
     });
-    return c.json({ ok: true, org_id: accepted.orgId, role: accepted.role });
+    return c.json({ ok: true, org_id: outcome.orgId, role: outcome.role });
   });
 
   app.patch("/orgs/:orgId/members/:userId", async (c) => {
     const user = c.get("user");
     const orgId = parseUuid(c.req.param("orgId"), "orgId");
     const targetUserId = parseUuid(c.req.param("userId"), "userId");
-    const callerRole = await requireOrgMember(deps.orm, user.id, orgId, ["OWNER", "ADMIN"]);
+    await requireOrgMember(deps.orm, user.id, orgId, ["OWNER", "ADMIN"]);
     const body = await parseJsonBody(c, updateMemberRoleSchema);
 
     const prevRole = await deps.orm.transaction(async (tx) => {
@@ -342,11 +411,16 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
         .from(orgMembers)
         .where(eq(orgMembers.orgId, orgId))
         .for("update");
+      const caller = members.find((m) => m.userId === user.id);
+      if (!caller) throw new GatewayError(404, "not_found", "Organization not found");
+      if (caller.role !== "OWNER" && caller.role !== "ADMIN") {
+        throw new GatewayError(403, "forbidden", "Insufficient organization role");
+      }
       const target = members.find((m) => m.userId === targetUserId);
       if (!target) throw new GatewayError(404, "not_found", "Member not found");
 
       if (
-        callerRole !== "OWNER" &&
+        caller.role !== "OWNER" &&
         (target.role === "OWNER" ||
           target.role === "ADMIN" ||
           body.role === "OWNER" ||
@@ -355,10 +429,14 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
         throw new GatewayError(403, "forbidden", "Only OWNER can manage OWNER or ADMIN roles");
       }
       if (target.role === "OWNER" && body.role !== "OWNER") {
-        const ownerCount = members.filter((m) => m.role === "OWNER").length;
-        if (ownerCount <= 1) {
+        const otherOwners = members.filter((m) => m.role === "OWNER" && m.userId !== targetUserId);
+        if (otherOwners.length === 0) {
           throw new GatewayError(400, "last_owner", "Organization must retain at least one OWNER");
         }
+        await tx
+          .update(organizations)
+          .set({ ownerUserId: otherOwners[0]!.userId, updatedAt: sql`now()` })
+          .where(and(eq(organizations.id, orgId), eq(organizations.ownerUserId, targetUserId)));
       }
       await tx
         .update(orgMembers)
@@ -382,7 +460,7 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
     const user = c.get("user");
     const orgId = parseUuid(c.req.param("orgId"), "orgId");
     const targetUserId = parseUuid(c.req.param("userId"), "userId");
-    const callerRole = await requireOrgMember(deps.orm, user.id, orgId, ["OWNER", "ADMIN"]);
+    await requireOrgMember(deps.orm, user.id, orgId, ["OWNER", "ADMIN"]);
 
     await deps.orm.transaction(async (tx) => {
       const members = await tx
@@ -390,16 +468,25 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
         .from(orgMembers)
         .where(eq(orgMembers.orgId, orgId))
         .for("update");
+      const caller = members.find((m) => m.userId === user.id);
+      if (!caller) throw new GatewayError(404, "not_found", "Organization not found");
+      if (caller.role !== "OWNER" && caller.role !== "ADMIN") {
+        throw new GatewayError(403, "forbidden", "Insufficient organization role");
+      }
       const target = members.find((m) => m.userId === targetUserId);
       if (!target) throw new GatewayError(404, "not_found", "Member not found");
-      if (callerRole !== "OWNER" && (target.role === "OWNER" || target.role === "ADMIN")) {
+      if (caller.role !== "OWNER" && (target.role === "OWNER" || target.role === "ADMIN")) {
         throw new GatewayError(403, "forbidden", "Only OWNER can remove OWNER or ADMIN members");
       }
       if (target.role === "OWNER") {
-        const ownerCount = members.filter((m) => m.role === "OWNER").length;
-        if (ownerCount <= 1) {
+        const otherOwners = members.filter((m) => m.role === "OWNER" && m.userId !== targetUserId);
+        if (otherOwners.length === 0) {
           throw new GatewayError(400, "last_owner", "Cannot remove the last OWNER");
         }
+        await tx
+          .update(organizations)
+          .set({ ownerUserId: otherOwners[0]!.userId, updatedAt: sql`now()` })
+          .where(and(eq(organizations.id, orgId), eq(organizations.ownerUserId, targetUserId)));
       }
       await tx
         .delete(orgMembers)
@@ -420,12 +507,15 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
     const user = c.get("user");
     const orgId = parseUuid(c.req.param("orgId"), "orgId");
     await requireOrgMember(deps.orm, user.id, orgId);
+    const { limit, offset } = parseLimitOffset(c, 50, 200);
     const items = await deps.orm
       .select()
       .from(projects)
       .where(eq(projects.orgId, orgId))
-      .orderBy(desc(projects.createdAt));
-    return c.json({ items });
+      .orderBy(desc(projects.createdAt))
+      .limit(limit)
+      .offset(offset);
+    return c.json({ items: items.map(sanitizeProjectForClient), limit, offset });
   });
 
   app.post("/orgs/:orgId/projects", async (c) => {
@@ -442,6 +532,8 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
         gatewayProjectId: projectId,
         name: body.name,
         currency: body.currency,
+        developerKeySpendLimitAtoms: body.developer_key_spend_limit_atoms ?? null,
+        developerMaxActiveKeys: body.developer_max_active_keys ?? null,
         enabled: true,
         gatewaySynced: false,
         syncStatus: "PENDING",
@@ -456,38 +548,51 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
       targetId: projectId,
       metadata: { name: body.name, currency: body.currency },
     });
-    return c.json(created, 201);
+    return c.json(sanitizeProjectForClient(created!), 201);
   });
 
   app.get("/projects/:projectId", async (c) => {
     const user = c.get("user");
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
     const { project, role } = await requireProjectAccess(deps.orm, user.id, projectId);
-    return c.json({ ...project, role });
+    return c.json({ ...sanitizeProjectForClient(project), role });
   });
 
   app.patch("/projects/:projectId", async (c) => {
     const user = c.get("user");
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId, [
+    const { project, role } = await requireProjectAccess(deps.orm, user.id, projectId, [
       "OWNER",
       "ADMIN",
+      "FINANCE",
     ]);
     const body = await parseJsonBody(c, updateProjectSchema);
+    if (role === "FINANCE" && body.name !== undefined) {
+      throw new GatewayError(403, "forbidden", "FINANCE role can only update developer key limits");
+    }
+    const touchesGateway = body.name !== undefined;
     const [updated] = await deps.orm
       .update(projects)
       .set({
         ...(body.name !== undefined ? { name: body.name } : {}),
-        desiredRevision: sql`${projects.desiredRevision} + 1`,
-        syncStatus: "PENDING",
+        ...(body.developer_key_spend_limit_atoms !== undefined
+          ? { developerKeySpendLimitAtoms: body.developer_key_spend_limit_atoms }
+          : {}),
+        ...(body.developer_max_active_keys !== undefined
+          ? { developerMaxActiveKeys: body.developer_max_active_keys }
+          : {}),
+        ...(touchesGateway
+          ? { desiredRevision: sql`${projects.desiredRevision} + 1`, syncStatus: "PENDING" }
+          : {}),
         updatedAt: sql`now()`,
       })
       .where(eq(projects.id, projectId))
       .returning();
 
-    const finalProject = project.gatewaySynced
-      ? await deps.sync.ensureProjectSynced(projectId)
-      : updated!;
+    const finalProject =
+      touchesGateway && updated!.gatewaySynced
+        ? await deps.sync.ensureProjectSynced(projectId)
+        : updated!;
 
     await recordAuditLog(deps.orm, {
       actor: user,
@@ -496,7 +601,7 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
       targetType: "project",
       targetId: projectId,
     });
-    return c.json(finalProject);
+    return c.json(sanitizeProjectForClient(finalProject));
   });
 
   return app;

@@ -86,6 +86,24 @@ test("ledger schema baseline has checksummed single-owner manifest and matches d
   expect(sqlFiles.map((p) => `./${p}`).sort()).toEqual([...reachable].sort());
 });
 
+test("console-api schema baseline has checksummed single-owner manifest and matches disk SQL", async () => {
+  const root = "apps/console-api/src/db/";
+  const manifest = (await Bun.file(`${root}migrations/manifest.json`).json()) as {
+    migrations: { version: number; path: string; checksum: string }[];
+  };
+  const reachable = new Set<string>();
+  for (const entry of manifest.migrations) {
+    expect(reachable.has(entry.path)).toBe(false);
+    reachable.add(entry.path);
+    const source = await Bun.file(
+      new URL(entry.path, new URL(`../../${root}migrate.ts`, import.meta.url)),
+    ).text();
+    expect(new Bun.CryptoHasher("sha256").update(source).digest("hex")).toBe(entry.checksum);
+  }
+  const sqlFiles = await Array.fromAsync(new Bun.Glob("**/*.sql").scan(root));
+  expect(sqlFiles.map((p) => `./${p}`).sort()).toEqual([...reachable].sort());
+});
+
 test("deployment units match build script targets and expose zero internal admin routes via Caddy", async () => {
   const build = await Bun.file("scripts/build.ts").text();
   const units: Record<string, Record<string, string[]>> = {};
@@ -110,7 +128,7 @@ test("deployment units match build script targets and expose zero internal admin
   }
   expect(Object.keys(units).sort()).toEqual(["gateway@.service", "worker.service"]);
   const caddy = await Bun.file("infra/Caddyfile").text();
-  expect(caddy).not.toMatch(/\/internal|\/admin|8081/);
+  expect(caddy).not.toMatch(/\/internal|\/admin|8081|8093/);
   expect(caddy).toContain("/v1/chat/completions");
   expect(caddy).toContain("flush_interval -1");
 });

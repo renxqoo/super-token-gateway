@@ -11,6 +11,8 @@ import { createConsoleDrizzle } from "./db/schema.ts";
 import { GatewayClient } from "./gateway-client.ts";
 import {
   ingestOutboxEvents,
+  processPendingAlertEvaluations,
+  processPendingWebhookDeliveries,
   pullOutboxBatch,
   type IncomingOutboxEvent,
 } from "./outbox-consumer.ts";
@@ -19,13 +21,19 @@ import { createApiKeyRoutes } from "./routes/api-keys.ts";
 import { createAdminAuthRoutes, createClientAuthRoutes } from "./routes/auth.ts";
 import { createMarketplaceAndBillingRoutes } from "./routes/marketplace-billing.ts";
 import { createOrgAndProjectRoutes } from "./routes/orgs.ts";
-import { parseJsonBody, type ConsoleDeps, type ConsoleEnv } from "./routes/shared.ts";
+import {
+  extractPgErrno,
+  parseJsonBody,
+  type ConsoleDeps,
+  type ConsoleEnv,
+} from "./routes/shared.ts";
 import { ConsoleSyncEngine } from "./sync.ts";
 
 export type ConsoleRuntimeOptions = {
   config: ConsoleConfig;
   db?: SQL;
   gatewayFetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  alertFetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 };
 
 const outboxBatchSchema = z
@@ -47,7 +55,29 @@ const outboxBatchSchema = z
   })
   .strict();
 
-function attachCommonHandlers(app: Hono<ConsoleEnv>, db: SQL): void {
+function logStructuredError(event: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(
+    JSON.stringify({
+      service: "console-api",
+      level: "error",
+      event,
+      message,
+    }),
+  );
+}
+
+function attachCommonHandlers(
+  app: Hono<ConsoleEnv>,
+  db: SQL,
+  peerIpMap: WeakMap<Request, string>,
+): void {
+  app.use("*", async (c, next) => {
+    const peerIp = peerIpMap.get(c.req.raw);
+    if (peerIp) c.set("peerIp", peerIp);
+    await next();
+  });
+
   app.use(
     "*",
     bodyLimit({
@@ -61,20 +91,26 @@ function attachCommonHandlers(app: Hono<ConsoleEnv>, db: SQL): void {
     if (err instanceof GatewayError) {
       return c.json({ error: { code: err.code, message: err.message } }, err.status as 400);
     }
-    if ("errno" in err && typeof err.errno === "string") {
-      if (err.errno === "23505") {
-        return c.json(
-          { error: { code: "conflict", message: "A conflicting record already exists" } },
-          409,
-        );
-      }
-      if (err.errno === "23503") {
-        return c.json(
-          { error: { code: "reference_error", message: "Referenced entity does not exist" } },
-          400,
-        );
-      }
+    const errno = extractPgErrno(err);
+    if (errno === "23505") {
+      return c.json(
+        { error: { code: "conflict", message: "A conflicting record already exists" } },
+        409,
+      );
     }
+    if (errno === "23503") {
+      return c.json(
+        { error: { code: "reference_error", message: "Referenced entity does not exist" } },
+        400,
+      );
+    }
+    if (errno === "22P02" || errno === "22007") {
+      return c.json(
+        { error: { code: "validation_error", message: "Invalid parameter syntax" } },
+        400,
+      );
+    }
+    logStructuredError("http_unhandled_error", err);
     return c.json(
       { error: { code: "internal_error", message: "Internal console API error" } },
       500,
@@ -103,8 +139,9 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
     tokens: config.gatewayTokens,
     ...(options.gatewayFetch ? { fetchImpl: options.gatewayFetch } : {}),
   });
-  const sync = new ConsoleSyncEngine(orm, gateway);
+  const sync = new ConsoleSyncEngine(db, orm, gateway);
   const loginLimiter = new LoginRateLimiter();
+  const peerIpMap = new WeakMap<Request, string>();
 
   const deps: ConsoleDeps = {
     config,
@@ -126,7 +163,7 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
       }),
     );
   }
-  attachCommonHandlers(clientApp, db);
+  attachCommonHandlers(clientApp, db, peerIpMap);
   clientApp.route("/api/v1/auth", createClientAuthRoutes(deps));
   clientApp.route("/api/v1", createOrgAndProjectRoutes(deps));
   clientApp.route("/api/v1", createApiKeyRoutes(deps));
@@ -143,7 +180,7 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
       }),
     );
   }
-  attachCommonHandlers(adminApp, db);
+  attachCommonHandlers(adminApp, db, peerIpMap);
 
   adminApp.post("/internal/outbox/events", async (c) => {
     const token = extractBearerToken(c.req.header("authorization"));
@@ -160,8 +197,17 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
 
   const timers: ReturnType<typeof setInterval>[] = [];
   let running = false;
+  let stopController = new AbortController();
   let activeReconcile: Promise<unknown> | null = null;
   let activePull: Promise<unknown> | null = null;
+  let activeAlerts: Promise<unknown> | null = null;
+
+  const webhookDeliveryOpts = {
+    ...(options.alertFetch ? { fetchImpl: options.alertFetch } : {}),
+    ...(config.allowPrivateAlertWebhooks !== undefined
+      ? { allowPrivateWebhooks: config.allowPrivateAlertWebhooks }
+      : {}),
+  };
 
   return {
     clientApp,
@@ -171,20 +217,41 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
     gateway,
     sync,
 
+    fetchClient(req: Request, peerIp?: string): Promise<Response> | Response {
+      if (peerIp) peerIpMap.set(req, peerIp);
+      return clientApp.fetch(req);
+    },
+
+    fetchAdmin(req: Request, peerIp?: string): Promise<Response> | Response {
+      if (peerIp) peerIpMap.set(req, peerIp);
+      return adminApp.fetch(req);
+    },
+
     async pullOutboxOnce() {
       return pullOutboxBatch(db, orm, gateway, config.outboxConsumerName);
+    },
+
+    async flushAlertsOnce() {
+      return processPendingAlertEvaluations(db, orm, gateway);
+    },
+
+    async deliverAlertWebhooksOnce() {
+      return processPendingWebhookDeliveries(db, webhookDeliveryOpts);
     },
 
     async start(): Promise<void> {
       if (running) return;
       await assertConsoleSchemaVersion(db);
+      stopController = new AbortController();
       running = true;
       if (config.reconcileIntervalMs > 0) {
         const t = setInterval(() => {
           if (!running || activeReconcile) return;
           activeReconcile = sync
-            .reconcilePending()
-            .catch(() => undefined)
+            .reconcilePending(stopController.signal)
+            .catch((err) => {
+              logStructuredError("reconcile_failed", err);
+            })
             .finally(() => {
               activeReconcile = null;
             });
@@ -196,7 +263,9 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
         const t = setInterval(() => {
           if (!running || activePull) return;
           activePull = pullOutboxBatch(db, orm, gateway, config.outboxConsumerName)
-            .catch(() => undefined)
+            .catch((err) => {
+              logStructuredError("outbox_pull_failed", err);
+            })
             .finally(() => {
               activePull = null;
             });
@@ -204,13 +273,34 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
         t.unref();
         timers.push(t);
       }
+      if (config.alertDeliveryIntervalMs > 0) {
+        const t = setInterval(() => {
+          if (!running || activeAlerts) return;
+          activeAlerts = processPendingAlertEvaluations(db, orm, gateway)
+            .then(() => processPendingWebhookDeliveries(db, webhookDeliveryOpts))
+            .catch((err) => {
+              logStructuredError("alert_delivery_failed", err);
+            })
+            .finally(() => {
+              activeAlerts = null;
+            });
+        }, config.alertDeliveryIntervalMs);
+        t.unref();
+        timers.push(t);
+      }
     },
 
-    async close(): Promise<void> {
+    async close(timeoutMs = 5_000): Promise<void> {
       running = false;
+      stopController.abort();
       for (const t of timers) clearInterval(t);
       timers.length = 0;
-      await Promise.allSettled([activeReconcile, activePull].filter(Boolean));
+      const pending = [activeReconcile, activePull, activeAlerts].filter(
+        (p): p is Promise<unknown> => p !== null,
+      );
+      if (pending.length > 0) {
+        await Promise.race([Promise.allSettled(pending), Bun.sleep(timeoutMs)]);
+      }
       if (ownsDb) await db.close();
     },
   };

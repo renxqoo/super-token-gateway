@@ -1,6 +1,7 @@
 import type { SQL } from "bun";
 import { drizzle } from "drizzle-orm/bun-sql";
 import {
+  type AnyPgColumn,
   bigint,
   boolean,
   date,
@@ -12,7 +13,7 @@ import {
   primaryKey,
   text,
   timestamp,
-  uniqueIndex,
+  unique,
   uuid,
 } from "drizzle-orm/pg-core";
 import type { Pricing } from "@gateway/kernel";
@@ -21,6 +22,7 @@ export type OrgKind = "PERSONAL" | "ENTERPRISE";
 export type OrgRole = "OWNER" | "ADMIN" | "FINANCE" | "DEVELOPER" | "VIEWER";
 export type SyncStatus = "PENDING" | "SYNCED" | "FAILED";
 export type SpendLimitWindow = "LIFETIME" | "DAILY" | "MONTHLY";
+export type SessionScope = "CLIENT" | "ADMIN";
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey(),
@@ -29,43 +31,27 @@ export const users = pgTable("users", {
   displayName: text("display_name").notNull(),
   isPlatformAdmin: boolean("is_platform_admin").notNull().default(false),
   status: text("status").$type<"ACTIVE" | "SUSPENDED">().notNull().default("ACTIVE"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
-
-export const userIdentities = pgTable(
-  "user_identities",
-  {
-    id: uuid("id").primaryKey(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    provider: text("provider").notNull(),
-    providerSubject: text("provider_subject").notNull(),
-    email: text("email"),
-    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
-      .notNull()
-      .defaultNow(),
-  },
-  (t) => [uniqueIndex("user_identities_provider_subject_idx").on(t.provider, t.providerSubject)],
-);
 
 export const sessions = pgTable("sessions", {
   id: uuid("id").primaryKey(),
   userId: uuid("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
+  scope: text("scope").$type<SessionScope>().notNull().default("CLIENT"),
   tokenHash: text("token_hash").notNull().unique(),
   refreshTokenHash: text("refresh_token_hash").notNull().unique(),
-  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
   refreshExpiresAt: timestamp("refresh_expires_at", {
     withTimezone: true,
-    mode: "string",
+    mode: "date",
   }).notNull(),
-  revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "date" }),
   userAgent: text("user_agent"),
   ipAddress: text("ip_address"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const organizations = pgTable("organizations", {
@@ -77,8 +63,8 @@ export const organizations = pgTable("organizations", {
     .notNull()
     .references(() => users.id),
   status: text("status").$type<"ACTIVE" | "SUSPENDED">().notNull().default("ACTIVE"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const orgMembers = pgTable(
@@ -91,9 +77,7 @@ export const orgMembers = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     role: text("role").$type<OrgRole>().notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
-      .notNull()
-      .defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.orgId, t.userId] })],
 );
@@ -113,8 +97,8 @@ export const orgInvitations = pgTable("org_invitations", {
     .$type<"PENDING" | "ACCEPTED" | "REVOKED" | "EXPIRED">()
     .notNull()
     .default("PENDING"),
-  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const projects = pgTable("projects", {
@@ -128,14 +112,19 @@ export const projects = pgTable("projects", {
   rpm: integer("rpm").notNull().default(6000),
   tpm: bigint("tpm", { mode: "number" }).notNull().default(10_000_000),
   concurrency: integer("concurrency").notNull().default(1000),
+  developerKeySpendLimitAtoms: numeric("developer_key_spend_limit_atoms", {
+    precision: 38,
+    scale: 0,
+  }),
+  developerMaxActiveKeys: integer("developer_max_active_keys"),
   enabled: boolean("enabled").notNull().default(true),
   gatewaySynced: boolean("gateway_synced").notNull().default(false),
   desiredRevision: integer("desired_revision").notNull().default(1),
   syncedRevision: integer("synced_revision").notNull().default(0),
   syncStatus: text("sync_status").$type<SyncStatus>().notNull().default("PENDING"),
   lastSyncError: text("last_sync_error"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const apiKeyRecords = pgTable("api_key_records", {
@@ -146,6 +135,9 @@ export const apiKeyRecords = pgTable("api_key_records", {
   createdBy: uuid("created_by")
     .notNull()
     .references(() => users.id),
+  rotatedFromKeyId: uuid("rotated_from_key_id").references((): AnyPgColumn => apiKeyRecords.id, {
+    onDelete: "set null",
+  }),
   name: text("name").notNull(),
   keyPrefix: text("key_prefix").notNull(),
   role: text("role")
@@ -161,14 +153,14 @@ export const apiKeyRecords = pgTable("api_key_records", {
     .notNull()
     .default("LIFETIME"),
   enabled: boolean("enabled").notNull().default(true),
-  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }),
-  revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "date" }),
   desiredRevision: integer("desired_revision").notNull().default(1),
   syncedRevision: integer("synced_revision").notNull().default(0),
   syncStatus: text("sync_status").$type<SyncStatus>().notNull().default("PENDING"),
   lastSyncError: text("last_sync_error"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const upstreamAccounts = pgTable("upstream_accounts", {
@@ -182,8 +174,8 @@ export const upstreamAccounts = pgTable("upstream_accounts", {
   syncedRevision: integer("synced_revision").notNull().default(0),
   syncStatus: text("sync_status").$type<SyncStatus>().notNull().default("PENDING"),
   lastSyncError: text("last_sync_error"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const channels = pgTable("channels", {
@@ -205,8 +197,8 @@ export const channels = pgTable("channels", {
   syncedRevision: integer("synced_revision").notNull().default(0),
   syncStatus: text("sync_status").$type<SyncStatus>().notNull().default("PENDING"),
   lastSyncError: text("last_sync_error"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const pricingTemplates = pgTable("pricing_templates", {
@@ -222,12 +214,13 @@ export const pricingTemplates = pgTable("pricing_templates", {
   ceilings: jsonb("ceilings").$type<Record<string, string>>().notNull().default({}),
   currentPriceVersionId: uuid("current_price_version_id"),
   pendingPriceVersionId: uuid("pending_price_version_id"),
+  pendingPriceRevision: integer("pending_price_revision"),
   desiredRevision: integer("desired_revision").notNull().default(1),
   syncedRevision: integer("synced_revision").notNull().default(0),
   syncStatus: text("sync_status").$type<SyncStatus>().notNull().default("PENDING"),
   lastSyncError: text("last_sync_error"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const priceVersionSnapshots = pgTable("price_version_snapshots", {
@@ -241,7 +234,7 @@ export const priceVersionSnapshots = pgTable("price_version_snapshots", {
     .default("PROVIDER_USAGE"),
   rates: jsonb("rates").$type<Pricing["rates"]>().notNull(),
   ceilings: jsonb("ceilings").$type<Record<string, string>>().notNull().default({}),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const modelCatalog = pgTable("model_catalog", {
@@ -267,8 +260,8 @@ export const modelCatalog = pgTable("model_catalog", {
   syncedRevision: integer("synced_revision").notNull().default(0),
   syncStatus: text("sync_status").$type<SyncStatus>().notNull().default("PENDING"),
   lastSyncError: text("last_sync_error"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const routes = pgTable("routes", {
@@ -296,8 +289,8 @@ export const routes = pgTable("routes", {
   syncedRevision: integer("synced_revision").notNull().default(0),
   syncStatus: text("sync_status").$type<SyncStatus>().notNull().default("PENDING"),
   lastSyncError: text("last_sync_error"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const pricingOverrides = pgTable(
@@ -318,14 +311,16 @@ export const pricingOverrides = pgTable(
     syncedRevision: integer("synced_revision").notNull().default(0),
     syncStatus: text("sync_status").$type<SyncStatus>().notNull().default("PENDING"),
     lastSyncError: text("last_sync_error"),
-    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
-      .notNull()
-      .defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
-      .notNull()
-      .defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("pricing_overrides_scope_idx").on(t.projectId, t.modelName, t.operation)],
+  (t) => [
+    unique("pricing_overrides_project_id_model_name_operation_key").on(
+      t.projectId,
+      t.modelName,
+      t.operation,
+    ),
+  ],
 );
 
 export const usageEvents = pgTable("usage_events", {
@@ -352,15 +347,13 @@ export const usageEvents = pgTable("usage_events", {
   reasoningTokens: bigint("reasoning_tokens", { mode: "number" }).notNull().default(0),
   pricingOverrideId: uuid("pricing_override_id"),
   payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
-  occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "string" })
-    .notNull()
-    .defaultNow(),
+  occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const usageHourlyRollups = pgTable(
   "usage_hourly_rollups",
   {
-    bucketHour: timestamp("bucket_hour", { withTimezone: true, mode: "string" }).notNull(),
+    bucketHour: timestamp("bucket_hour", { withTimezone: true, mode: "date" }).notNull(),
     projectId: uuid("project_id").notNull(),
     apiKeyId: text("api_key_id").notNull(),
     model: text("model").notNull(),
@@ -418,9 +411,21 @@ export const alertRules = pgTable("alert_rules", {
   thresholdAtoms: numeric("threshold_atoms", { precision: 38, scale: 0 }).notNull(),
   webhookUrl: text("webhook_url"),
   enabled: boolean("enabled").notNull().default(true),
-  lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true, mode: "string" }),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true, mode: "date" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+});
+
+export const alertEvalQueue = pgTable("alert_eval_queue", {
+  projectId: uuid("project_id")
+    .primaryKey()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  latestWalletAvailableAtoms: numeric("latest_wallet_available_atoms", {
+    precision: 38,
+    scale: 0,
+  }),
+  currency: text("currency").notNull().default("USD"),
+  dirtyAt: timestamp("dirty_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const alertDeliveries = pgTable("alert_deliveries", {
@@ -429,9 +434,17 @@ export const alertDeliveries = pgTable("alert_deliveries", {
     .notNull()
     .references(() => alertRules.id, { onDelete: "cascade" }),
   projectId: uuid("project_id").notNull(),
-  status: text("status").notNull(),
+  status: text("status").$type<"RECORDED" | "PENDING" | "DELIVERED" | "FAILED">().notNull(),
+  webhookUrl: text("webhook_url"),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true, mode: "date" })
+    .notNull()
+    .defaultNow(),
+  lastHttpStatus: integer("last_http_status"),
+  lastError: text("last_error"),
+  deliveredAt: timestamp("delivered_at", { withTimezone: true, mode: "date" }),
   payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const consoleAuditLogs = pgTable("console_audit_logs", {
@@ -443,12 +456,11 @@ export const consoleAuditLogs = pgTable("console_audit_logs", {
   targetType: text("target_type").notNull(),
   targetId: text("target_id").notNull(),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
 export const consoleSchema = {
   users,
-  userIdentities,
   sessions,
   organizations,
   orgMembers,
@@ -466,6 +478,7 @@ export const consoleSchema = {
   usageHourlyRollups,
   usageDailyRollups,
   alertRules,
+  alertEvalQueue,
   alertDeliveries,
   consoleAuditLogs,
 };

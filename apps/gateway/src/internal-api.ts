@@ -391,6 +391,8 @@ const wasmProviderConfigSchema = z
   })
   .strict();
 
+const sourceRevisionSchema = z.number().int().min(1).max(2_147_483_647).optional();
+
 const upsertProjectSchema = z
   .object({
     id: z.uuid().optional(),
@@ -401,6 +403,7 @@ const upsertProjectSchema = z
     tpm: z.number().int().min(1).max(9_007_199_254_740_991).default(10_000_000),
     concurrency: z.number().int().min(1).max(1_000_000).default(1000),
     enabled: z.boolean().default(true),
+    source_revision: sourceRevisionSchema,
   })
   .strict();
 
@@ -418,6 +421,7 @@ const upsertApiKeySchema = z
     expires_at: z.iso.datetime().nullable().optional(),
     spend_limit_atoms: nonNegativeAtomsSchema.nullable().optional(),
     spend_limit_window: z.enum(["LIFETIME", "DAILY", "MONTHLY"]).default("LIFETIME"),
+    source_revision: sourceRevisionSchema,
   })
   .strict();
 
@@ -438,6 +442,7 @@ const upsertPricingOverrideSchema = z
     multiplier_numerator: multiplierIntSchema.nullable().optional(),
     multiplier_denominator: multiplierIntSchema.nullable().optional(),
     enabled: z.boolean().default(true),
+    source_revision: sourceRevisionSchema,
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -469,7 +474,9 @@ const upsertAccountSchema = z
   .object({
     id: z.uuid().optional(),
     name: z.string().min(1).max(120),
-    state: z.enum(["ACTIVE", "DISABLED", "RECONCILE_REQUIRED"]).default("ACTIVE"),
+    state: z.enum(["ACTIVE", "DISABLED", "RECONCILE_REQUIRED"]).optional(),
+    expected_state: z.enum(["ACTIVE", "DISABLED", "RECONCILE_REQUIRED"]).optional(),
+    source_revision: sourceRevisionSchema,
   })
   .strict();
 
@@ -487,6 +494,7 @@ const upsertChannelSchema = z
     enabled: z.boolean().default(true),
     routing_policy: z.record(z.string(), z.unknown()).default({}),
     adapter_config: adapterOverridesSchema.default({}),
+    source_revision: sourceRevisionSchema,
   })
   .strict();
 
@@ -497,6 +505,7 @@ const upsertModelSchema = z
     routing_strategy: z.enum(["WEIGHTED", "ROUND_ROBIN", "LEAST_LATENCY"]).default("WEIGHTED"),
     max_output_tokens: z.number().int().min(1).max(10_000_000).default(32768),
     enabled: z.boolean().default(true),
+    source_revision: sourceRevisionSchema,
   })
   .strict();
 
@@ -546,6 +555,7 @@ const upsertRouteSchema = z
     plugin_pipeline: z.array(pluginStepSchema).max(20).optional(),
     retry_policy: retryPolicySchema.default({}),
     enabled: z.boolean().default(true),
+    source_revision: sourceRevisionSchema,
   })
   .strict();
 
@@ -951,15 +961,36 @@ export function createInternalApi(deps: {
     });
   };
 
+  function extractPgErrno(err: unknown): string | null {
+    let cur: unknown = err;
+    for (let depth = 0; depth < 6 && cur && typeof cur === "object"; depth++) {
+      if ("errno" in cur && typeof cur.errno === "string" && /^[0-9A-Z]{5}$/.test(cur.errno)) {
+        return cur.errno;
+      }
+      if ("code" in cur && typeof cur.code === "string" && /^[0-9A-Z]{5}$/.test(cur.code)) {
+        return cur.code;
+      }
+      cur = "cause" in cur ? cur.cause : null;
+    }
+    return null;
+  }
+
   app.onError((err, c) => {
-    if ("errno" in err && typeof err.errno === "string") {
-      if (err.errno === "23505") {
+    const pgErrno = extractPgErrno(err);
+    if (pgErrno) {
+      if (pgErrno === "23505") {
         return c.json(
           { error: { code: "conflict", message: "A conflicting record already exists" } },
           409,
         );
       }
-      if (err.errno.startsWith("08") || ["40P01", "40001", "55P03", "57014"].includes(err.errno)) {
+      if (pgErrno === "23503") {
+        return c.json(
+          { error: { code: "reference_error", message: "Referenced entity does not exist" } },
+          400,
+        );
+      }
+      if (pgErrno.startsWith("08") || ["40P01", "40001", "55P03", "57014"].includes(pgErrno)) {
         return c.json(
           {
             error: {
@@ -977,7 +1008,13 @@ export function createInternalApi(deps: {
     }
     if (
       err instanceof DomainError &&
-      ["plugin_revision_conflict", "plugin_release_conflict"].includes(err.code)
+      [
+        "plugin_revision_conflict",
+        "plugin_release_conflict",
+        "stale_revision",
+        "price_version_conflict",
+        "reconcile_required_conflict",
+      ].includes(err.code)
     ) {
       return c.json({ error: { code: err.code, message: err.message } }, 409);
     }
@@ -1016,6 +1053,7 @@ export function createInternalApi(deps: {
       tpm: body.tpm,
       concurrency: body.concurrency,
       enabled: body.enabled,
+      ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),
     });
     await onConfigUpdated(rec.config_epoch);
     return c.json(rec);
@@ -1038,6 +1076,7 @@ export function createInternalApi(deps: {
       expires_at: body.expires_at ?? null,
       spend_limit_atoms: body.spend_limit_atoms ?? null,
       spend_limit_window: body.spend_limit_window as SpendLimitWindow,
+      ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),
     });
     await onConfigUpdated(rec.config_epoch);
     const { created, verifier: _verifier, ...publicRec } = rec;
@@ -1066,6 +1105,11 @@ export function createInternalApi(deps: {
     },
   );
 
+  route("GET", "/internal/v1/upstream-accounts", "auditor", async (c) => {
+    const items = await deps.catalog.listUpstreamAccounts();
+    return c.json({ items });
+  });
+
   jsonRoute(
     "PUT",
     "/internal/v1/upstream-accounts",
@@ -1075,12 +1119,19 @@ export function createInternalApi(deps: {
       const rec = await deps.catalog.upsertUpstreamAccount({
         ...(body.id ? { id: body.id } : {}),
         name: body.name,
-        state: body.state,
+        ...(body.state !== undefined ? { state: body.state } : {}),
+        ...(body.expected_state !== undefined ? { expected_state: body.expected_state } : {}),
+        ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),
       });
       await onConfigUpdated(rec.config_epoch);
       return c.json(rec);
     },
   );
+
+  route("GET", "/internal/v1/channels", "auditor", async (c) => {
+    const items = await deps.catalog.listChannels();
+    return c.json({ items });
+  });
 
   jsonRoute("PUT", "/internal/v1/channels", "catalog", upsertChannelSchema, async (c, body) => {
     const id = body.id ?? crypto.randomUUID();
@@ -1113,10 +1164,14 @@ export function createInternalApi(deps: {
       account_id: body.account_id,
       name: body.name,
       kind,
-      provider_plugin_id:
-        resolved.source === "builtin"
-          ? builtinProviderRevisionId(resolved.preset.digest)
-          : resolved.plugin_id,
+      ...(body.provider_plugin_id === undefined && body.id && existing
+        ? {}
+        : {
+            provider_plugin_id:
+              resolved.source === "builtin"
+                ? builtinProviderRevisionId(resolved.preset.digest)
+                : resolved.plugin_id,
+          }),
       base_url: body.base_url,
       ...(secretCiphertext !== undefined ? { secret_ciphertext: secretCiphertext } : {}),
       rpm: body.rpm,
@@ -1124,6 +1179,7 @@ export function createInternalApi(deps: {
       enabled: body.enabled,
       routing_policy: body.routing_policy,
       adapter_config: body.adapter_config as AdapterOverrides,
+      ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),
     });
     await onConfigUpdated(rec.config_epoch);
     return c.json({ ...rec, secret_ciphertext: undefined });
@@ -1136,8 +1192,18 @@ export function createInternalApi(deps: {
       routing_strategy: body.routing_strategy as RoutingStrategy,
       max_output_tokens: body.max_output_tokens,
       enabled: body.enabled,
+      ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),
     });
     await onConfigUpdated(rec.config_epoch);
+    return c.json(rec);
+  });
+
+  route("GET", "/internal/v1/prices/:priceId", "auditor", async (c) => {
+    const priceId = parseUuid(c.req.param("priceId"), "priceId");
+    const rec = await deps.catalog.getPriceVersion(priceId);
+    if (!rec) {
+      return c.json({ error: { code: "not_found", message: "Price version not found" } }, 404);
+    }
     return c.json(rec);
   });
 
@@ -1150,8 +1216,8 @@ export function createInternalApi(deps: {
       rates: body.rates as Pricing["rates"],
       ceilings: body.ceilings,
     });
-    await onConfigUpdated(rec.config_epoch);
-    return c.json(rec, 201);
+    if (!rec.replayed) await onConfigUpdated(rec.config_epoch);
+    return c.json(rec, rec.replayed ? 200 : 201);
   });
 
   jsonRoute(
@@ -1170,6 +1236,7 @@ export function createInternalApi(deps: {
         multiplier_numerator: body.multiplier_numerator ?? null,
         multiplier_denominator: body.multiplier_denominator ?? null,
         enabled: body.enabled,
+        ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),
       });
       await onConfigUpdated(rec.config_epoch);
       return c.json(rec);
@@ -1202,6 +1269,7 @@ export function createInternalApi(deps: {
         : {}),
       retry_policy: body.retry_policy as RouteRetryPolicy,
       enabled: body.enabled,
+      ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),
     });
     await onConfigUpdated(rec.config_epoch);
     return c.json(rec);

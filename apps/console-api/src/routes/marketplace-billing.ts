@@ -1,5 +1,16 @@
 import { Hono } from "hono";
-import { and, asc, desc, eq, gte, inArray, lte, sql, type SQL as DrizzleSQL } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  lte,
+  sql,
+  type SQL as DrizzleSQL,
+} from "drizzle-orm";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
 import {
@@ -26,28 +37,15 @@ import {
 } from "../marketplace.ts";
 import {
   nonNegativeAtomsSchema,
+  parseIsoDateParam,
+  parseIsoDatetimeParam,
   parseJsonBody,
+  parseLimitOffset,
   parseUuid,
-  requireAuth,
+  requireClientAuth,
   type ConsoleDeps,
   type ConsoleEnv,
 } from "./shared.ts";
-
-const createAlertSchema = z
-  .object({
-    kind: z.enum(["LOW_BALANCE", "DAILY_SPEND"]),
-    threshold_atoms: nonNegativeAtomsSchema,
-    webhook_url: z
-      .url()
-      .max(1000)
-      .refine((v) => isSafePublicWebhookUrl(v), {
-        message: "webhook_url must be a public HTTPS URL",
-      })
-      .nullable()
-      .optional(),
-    enabled: z.boolean().default(true),
-  })
-  .strict();
 
 function sanitizeCustomerCharge(raw: Record<string, unknown>) {
   return {
@@ -72,9 +70,46 @@ function sanitizeCustomerCharge(raw: Record<string, unknown>) {
   };
 }
 
+function sanitizeCustomerAsyncTask(raw: Record<string, unknown>) {
+  return {
+    id: raw.id,
+    request_id: raw.request_id ?? raw.requestId,
+    charge_id: raw.charge_id ?? raw.chargeId ?? null,
+    project_id: raw.project_id ?? raw.projectId,
+    api_key_id: raw.api_key_id ?? raw.apiKeyId ?? null,
+    model: raw.model,
+    operation: raw.operation,
+    status: raw.status,
+    user_cancelled: raw.user_cancelled ?? raw.userCancelled ?? false,
+    failure_category: raw.failure_category ?? raw.failureCategory ?? null,
+    refund_eligibility: raw.refund_eligibility ?? raw.refundEligibility,
+    refund_id: raw.refund_id ?? raw.refundId ?? null,
+    result_json: raw.result_json ?? raw.resultJson ?? {},
+    created_at: raw.created_at ?? raw.createdAt,
+    updated_at: raw.updated_at ?? raw.updatedAt,
+    completed_at: raw.completed_at ?? raw.completedAt ?? null,
+  };
+}
+
 export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
   const app = new Hono<ConsoleEnv>();
-  const auth = requireAuth(deps);
+  const auth = requireClientAuth(deps);
+
+  const createAlertSchema = z
+    .object({
+      kind: z.enum(["LOW_BALANCE", "DAILY_SPEND"]),
+      threshold_atoms: nonNegativeAtomsSchema,
+      webhook_url: z
+        .url()
+        .max(1000)
+        .refine((v) => deps.config.allowPrivateAlertWebhooks || isSafePublicWebhookUrl(v), {
+          message: "webhook_url must be a public HTTPS URL",
+        })
+        .nullable()
+        .optional(),
+      enabled: z.boolean().default(true),
+    })
+    .strict();
 
   async function loadProjectOverridesIfAuthorized(
     authHeader: string | undefined,
@@ -85,12 +120,18 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
   }> {
     if (!rawProjectId) return { overrides: [], exactPrices: new Map() };
     const projectId = parseUuid(rawProjectId, "project_id");
-    const user = await authenticateSession(deps.orm, authHeader);
+    const user = await authenticateSession(deps.orm, authHeader, "CLIENT");
     await requireProjectAccess(deps.orm, user.id, projectId);
     const rows = await deps.orm
       .select()
       .from(pricingOverrides)
-      .where(and(eq(pricingOverrides.projectId, projectId), eq(pricingOverrides.enabled, true)));
+      .where(
+        and(
+          eq(pricingOverrides.projectId, projectId),
+          eq(pricingOverrides.enabled, true),
+          gt(pricingOverrides.syncedRevision, 0),
+        ),
+      );
     const exactPriceIds = rows
       .filter((r) => r.overrideKind === "EXACT_PRICE" && r.billingPriceId)
       .map((r) => r.billingPriceId!);
@@ -126,7 +167,13 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     const rows = await deps.orm
       .select()
       .from(modelCatalog)
-      .where(and(eq(modelCatalog.enabled, true), eq(modelCatalog.isPublic, true)))
+      .where(
+        and(
+          eq(modelCatalog.enabled, true),
+          eq(modelCatalog.isPublic, true),
+          gt(modelCatalog.syncedRevision, 0),
+        ),
+      )
       .orderBy(asc(modelCatalog.providerBrand), asc(modelCatalog.name));
 
     const filtered = rows.filter((m) => {
@@ -171,12 +218,23 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
   });
 
   app.get("/models/:name", async (c) => {
-    const modelName = decodeURIComponent(c.req.param("name"));
+    let modelName: string;
+    try {
+      modelName = decodeURIComponent(c.req.param("name"));
+    } catch {
+      throw new GatewayError(400, "validation_error", "Malformed model name encoding");
+    }
     const projectIdParam = c.req.query("project_id")?.trim();
     const [m] = await deps.orm
       .select()
       .from(modelCatalog)
-      .where(and(eq(modelCatalog.name, modelName), eq(modelCatalog.enabled, true)))
+      .where(
+        and(
+          eq(modelCatalog.name, modelName),
+          eq(modelCatalog.enabled, true),
+          gt(modelCatalog.syncedRevision, 0),
+        ),
+      )
       .limit(1);
     if (!m || !m.isPublic) throw new GatewayError(404, "not_found", "Model not found");
 
@@ -237,8 +295,9 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     const user = c.get("user");
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
     const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const { limit, offset } = parseLimitOffset(c, 50, 200);
     if (!project.gatewaySynced) {
-      return c.json({ items: [], total: 0, limit: 50, offset: 0 });
+      return c.json({ items: [], total: 0, limit, offset });
     }
     const raw = (await deps.gateway.listCharges({
       project_id: project.gatewayProjectId,
@@ -246,14 +305,14 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
       outcome: c.req.query("outcome"),
       from: c.req.query("from"),
       to: c.req.query("to"),
-      limit: c.req.query("limit"),
-      offset: c.req.query("offset"),
+      limit: String(limit),
+      offset: String(offset),
     })) as { items?: Record<string, unknown>[]; total?: number; limit?: number; offset?: number };
     return c.json({
       items: (raw.items ?? []).map(sanitizeCustomerCharge),
       total: raw.total ?? 0,
-      limit: raw.limit ?? 50,
-      offset: raw.offset ?? 0,
+      limit: raw.limit ?? limit,
+      offset: raw.offset ?? offset,
     });
   });
 
@@ -261,26 +320,35 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     const user = c.get("user");
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
     const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const { limit, offset } = parseLimitOffset(c, 50, 200);
     if (!project.gatewaySynced) {
-      return c.json({ items: [], total: 0, limit: 50, offset: 0 });
+      return c.json({ items: [], total: 0, limit, offset });
     }
-    const res = await deps.gateway.listAsyncTasks({
+    const raw = (await deps.gateway.listAsyncTasks({
       project_id: project.gatewayProjectId,
       status: c.req.query("status"),
       refund_eligibility: c.req.query("refund_eligibility"),
-      limit: c.req.query("limit"),
-      offset: c.req.query("offset"),
+      limit: String(limit),
+      offset: String(offset),
+    })) as { items?: Record<string, unknown>[]; total?: number; limit?: number; offset?: number };
+    return c.json({
+      items: (raw.items ?? []).map(sanitizeCustomerAsyncTask),
+      total: raw.total ?? 0,
+      limit: raw.limit ?? limit,
+      offset: raw.offset ?? offset,
     });
-    return c.json(res);
   });
 
   app.get("/projects/:projectId/usage/summary", auth, async (c) => {
     const user = c.get("user");
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    await requireProjectAccess(deps.orm, user.id, projectId);
-    const from = c.req.query("from")?.slice(0, 10);
-    const to = c.req.query("to")?.slice(0, 10);
-    const conds: DrizzleSQL[] = [eq(usageDailyRollups.projectId, projectId)];
+    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const from = parseIsoDateParam(c.req.query("from"), "from");
+    const to = parseIsoDateParam(c.req.query("to"), "to");
+    const conds: DrizzleSQL[] = [
+      eq(usageDailyRollups.projectId, projectId),
+      eq(usageDailyRollups.currency, project.currency),
+    ];
     if (from) conds.push(gte(usageDailyRollups.bucketDay, from));
     if (to) conds.push(lte(usageDailyRollups.bucketDay, to));
 
@@ -297,6 +365,7 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
       .where(and(...conds));
 
     return c.json({
+      currency: project.currency,
       request_count: Number(row?.request_count ?? 0),
       customer_atoms: row?.customer_atoms ?? "0",
       input_tokens: Number(row?.input_tokens ?? 0),
@@ -309,13 +378,16 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
   app.get("/projects/:projectId/usage/timeseries", auth, async (c) => {
     const user = c.get("user");
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    await requireProjectAccess(deps.orm, user.id, projectId);
+    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
     const granularity = c.req.query("granularity") === "hour" ? "hour" : "day";
-    const from = c.req.query("from");
-    const to = c.req.query("to");
 
     if (granularity === "hour") {
-      const conds: DrizzleSQL[] = [eq(usageHourlyRollups.projectId, projectId)];
+      const from = parseIsoDatetimeParam(c.req.query("from"), "from");
+      const to = parseIsoDatetimeParam(c.req.query("to"), "to");
+      const conds: DrizzleSQL[] = [
+        eq(usageHourlyRollups.projectId, projectId),
+        eq(usageHourlyRollups.currency, project.currency),
+      ];
       if (from) conds.push(gte(usageHourlyRollups.bucketHour, from));
       if (to) conds.push(lte(usageHourlyRollups.bucketHour, to));
       const rows = await deps.orm
@@ -329,11 +401,13 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
         .from(usageHourlyRollups)
         .where(and(...conds))
         .groupBy(usageHourlyRollups.bucketHour)
-        .orderBy(asc(usageHourlyRollups.bucketHour));
+        .orderBy(asc(usageHourlyRollups.bucketHour))
+        .limit(744);
       return c.json({
         granularity,
+        currency: project.currency,
         items: rows.map((r) => ({
-          bucket: r.bucket,
+          bucket: r.bucket.toISOString(),
           request_count: Number(r.request_count),
           customer_atoms: r.customer_atoms,
           input_tokens: Number(r.input_tokens),
@@ -342,9 +416,14 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
       });
     }
 
-    const conds: DrizzleSQL[] = [eq(usageDailyRollups.projectId, projectId)];
-    if (from) conds.push(gte(usageDailyRollups.bucketDay, from.slice(0, 10)));
-    if (to) conds.push(lte(usageDailyRollups.bucketDay, to.slice(0, 10)));
+    const from = parseIsoDateParam(c.req.query("from"), "from");
+    const to = parseIsoDateParam(c.req.query("to"), "to");
+    const conds: DrizzleSQL[] = [
+      eq(usageDailyRollups.projectId, projectId),
+      eq(usageDailyRollups.currency, project.currency),
+    ];
+    if (from) conds.push(gte(usageDailyRollups.bucketDay, from));
+    if (to) conds.push(lte(usageDailyRollups.bucketDay, to));
     const rows = await deps.orm
       .select({
         bucket: usageDailyRollups.bucketDay,
@@ -356,9 +435,11 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
       .from(usageDailyRollups)
       .where(and(...conds))
       .groupBy(usageDailyRollups.bucketDay)
-      .orderBy(asc(usageDailyRollups.bucketDay));
+      .orderBy(asc(usageDailyRollups.bucketDay))
+      .limit(366);
     return c.json({
       granularity,
+      currency: project.currency,
       items: rows.map((r) => ({
         bucket: r.bucket,
         request_count: Number(r.request_count),
@@ -372,7 +453,17 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
   app.get("/projects/:projectId/usage/by-key", auth, async (c) => {
     const user = c.get("user");
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    await requireProjectAccess(deps.orm, user.id, projectId);
+    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const from = parseIsoDateParam(c.req.query("from"), "from");
+    const to = parseIsoDateParam(c.req.query("to"), "to");
+    const { limit, offset } = parseLimitOffset(c, 100, 500);
+    const conds: DrizzleSQL[] = [
+      eq(usageDailyRollups.projectId, projectId),
+      eq(usageDailyRollups.currency, project.currency),
+    ];
+    if (from) conds.push(gte(usageDailyRollups.bucketDay, from));
+    if (to) conds.push(lte(usageDailyRollups.bucketDay, to));
+
     const rows = await deps.orm
       .select({
         api_key_id: usageDailyRollups.apiKeyId,
@@ -382,18 +473,26 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
         output_tokens: sql<string>`sum(${usageDailyRollups.outputTokens})::bigint::text`,
       })
       .from(usageDailyRollups)
-      .where(eq(usageDailyRollups.projectId, projectId))
-      .groupBy(usageDailyRollups.apiKeyId);
-    const keys = await deps.orm
-      .select({
-        id: apiKeyRecords.id,
-        name: apiKeyRecords.name,
-        keyPrefix: apiKeyRecords.keyPrefix,
-      })
-      .from(apiKeyRecords)
-      .where(eq(apiKeyRecords.projectId, projectId));
+      .where(and(...conds))
+      .groupBy(usageDailyRollups.apiKeyId)
+      .orderBy(desc(sql`sum(${usageDailyRollups.customerAtoms})`))
+      .limit(limit)
+      .offset(offset);
+    const keyIds = rows.map((r) => r.api_key_id).filter(Boolean);
+    const keys =
+      keyIds.length > 0
+        ? await deps.orm
+            .select({
+              id: apiKeyRecords.id,
+              name: apiKeyRecords.name,
+              keyPrefix: apiKeyRecords.keyPrefix,
+            })
+            .from(apiKeyRecords)
+            .where(and(eq(apiKeyRecords.projectId, projectId), inArray(apiKeyRecords.id, keyIds)))
+        : [];
     const keyMap = new Map(keys.map((k) => [k.id, k]));
     return c.json({
+      currency: project.currency,
       items: rows.map((r) => ({
         api_key_id: r.api_key_id || null,
         request_count: Number(r.request_count),
@@ -403,13 +502,25 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
         key_name: r.api_key_id ? (keyMap.get(r.api_key_id)?.name ?? null) : null,
         key_prefix: r.api_key_id ? (keyMap.get(r.api_key_id)?.keyPrefix ?? null) : null,
       })),
+      limit,
+      offset,
     });
   });
 
   app.get("/projects/:projectId/usage/by-model", auth, async (c) => {
     const user = c.get("user");
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    await requireProjectAccess(deps.orm, user.id, projectId);
+    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const from = parseIsoDateParam(c.req.query("from"), "from");
+    const to = parseIsoDateParam(c.req.query("to"), "to");
+    const { limit, offset } = parseLimitOffset(c, 100, 500);
+    const conds: DrizzleSQL[] = [
+      eq(usageDailyRollups.projectId, projectId),
+      eq(usageDailyRollups.currency, project.currency),
+    ];
+    if (from) conds.push(gte(usageDailyRollups.bucketDay, from));
+    if (to) conds.push(lte(usageDailyRollups.bucketDay, to));
+
     const rows = await deps.orm
       .select({
         model: usageDailyRollups.model,
@@ -420,10 +531,13 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
         output_tokens: sql<string>`sum(${usageDailyRollups.outputTokens})::bigint::text`,
       })
       .from(usageDailyRollups)
-      .where(eq(usageDailyRollups.projectId, projectId))
+      .where(and(...conds))
       .groupBy(usageDailyRollups.model, usageDailyRollups.operation)
-      .orderBy(desc(sql`sum(${usageDailyRollups.customerAtoms})`));
+      .orderBy(desc(sql`sum(${usageDailyRollups.customerAtoms})`))
+      .limit(limit)
+      .offset(offset);
     return c.json({
+      currency: project.currency,
       items: rows.map((r) => ({
         model: r.model,
         operation: r.operation,
@@ -432,6 +546,8 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
         input_tokens: Number(r.input_tokens),
         output_tokens: Number(r.output_tokens),
       })),
+      limit,
+      offset,
     });
   });
 
