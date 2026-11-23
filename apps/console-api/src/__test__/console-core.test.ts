@@ -161,4 +161,6 @@ test("buildSdkSnippets and loadConsoleConfigFromEnv enforce required config", ()
   });
   expect(cfg.bootstrapAdminEmail).toBe("admin@example.com");
   expect(cfg.port).toBe(8090);
+  expect(cfg.adminHost).toBe("127.0.0.1");
+  expect(cfg.adminPort).toBe(8091);
 });

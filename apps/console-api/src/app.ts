@@ -16,7 +16,7 @@ import {
 } from "./outbox-consumer.ts";
 import { createAdminRoutes } from "./routes/admin.ts";
 import { createApiKeyRoutes } from "./routes/api-keys.ts";
-import { createAuthRoutes } from "./routes/auth.ts";
+import { createAdminAuthRoutes, createClientAuthRoutes } from "./routes/auth.ts";
 import { createMarketplaceAndBillingRoutes } from "./routes/marketplace-billing.ts";
 import { createOrgAndProjectRoutes } from "./routes/orgs.ts";
 import { parseJsonBody, type ConsoleDeps, type ConsoleEnv } from "./routes/shared.ts";
@@ -47,49 +47,7 @@ const outboxBatchSchema = z
   })
   .strict();
 
-export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
-  const { config } = options;
-  const ownsDb = !options.db;
-  const db = options.db ?? createConsoleDatabase(config.databaseUrl, config.dbMaxConnections);
-  const orm = createConsoleDrizzle(db);
-  const gateway = new GatewayClient({
-    baseUrl: config.gatewayInternalUrl,
-    tokens: config.gatewayTokens,
-    ...(options.gatewayFetch ? { fetchImpl: options.gatewayFetch } : {}),
-  });
-  const sync = new ConsoleSyncEngine(orm, gateway);
-  const loginLimiter = new LoginRateLimiter();
-
-  const deps: ConsoleDeps = {
-    config,
-    db,
-    orm,
-    gateway,
-    sync,
-    loginLimiter,
-  };
-
-  const app = new Hono<ConsoleEnv>();
-
-  if (config.corsOrigins.length > 0) {
-    app.use(
-      "/api/*",
-      cors({
-        origin: config.corsOrigins,
-        allowHeaders: ["Authorization", "Content-Type"],
-        allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      }),
-    );
-    app.use(
-      "/admin/*",
-      cors({
-        origin: config.corsOrigins,
-        allowHeaders: ["Authorization", "Content-Type"],
-        allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      }),
-    );
-  }
-
+function attachCommonHandlers(app: Hono<ConsoleEnv>, db: SQL): void {
   app.use(
     "*",
     bodyLimit({
@@ -133,8 +91,61 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
       return c.json({ status: "db_unavailable" }, 503);
     }
   });
+}
 
-  app.post("/internal/outbox/events", async (c) => {
+export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
+  const { config } = options;
+  const ownsDb = !options.db;
+  const db = options.db ?? createConsoleDatabase(config.databaseUrl, config.dbMaxConnections);
+  const orm = createConsoleDrizzle(db);
+  const gateway = new GatewayClient({
+    baseUrl: config.gatewayInternalUrl,
+    tokens: config.gatewayTokens,
+    ...(options.gatewayFetch ? { fetchImpl: options.gatewayFetch } : {}),
+  });
+  const sync = new ConsoleSyncEngine(orm, gateway);
+  const loginLimiter = new LoginRateLimiter();
+
+  const deps: ConsoleDeps = {
+    config,
+    db,
+    orm,
+    gateway,
+    sync,
+    loginLimiter,
+  };
+
+  const clientApp = new Hono<ConsoleEnv>();
+  if (config.clientCorsOrigins.length > 0) {
+    clientApp.use(
+      "/api/*",
+      cors({
+        origin: config.clientCorsOrigins,
+        allowHeaders: ["Authorization", "Content-Type"],
+        allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      }),
+    );
+  }
+  attachCommonHandlers(clientApp, db);
+  clientApp.route("/api/v1/auth", createClientAuthRoutes(deps));
+  clientApp.route("/api/v1", createOrgAndProjectRoutes(deps));
+  clientApp.route("/api/v1", createApiKeyRoutes(deps));
+  clientApp.route("/api/v1", createMarketplaceAndBillingRoutes(deps));
+
+  const adminApp = new Hono<ConsoleEnv>();
+  if (config.adminCorsOrigins.length > 0) {
+    adminApp.use(
+      "/admin/*",
+      cors({
+        origin: config.adminCorsOrigins,
+        allowHeaders: ["Authorization", "Content-Type"],
+        allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      }),
+    );
+  }
+  attachCommonHandlers(adminApp, db);
+
+  adminApp.post("/internal/outbox/events", async (c) => {
     const token = extractBearerToken(c.req.header("authorization"));
     if (!token || !constantTimeEquals(token, config.outboxWebhookToken)) {
       return c.json({ error: { code: "unauthorized", message: "Invalid webhook token" } }, 401);
@@ -144,11 +155,8 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
     return c.json({ ok: true, ...result });
   });
 
-  app.route("/api/v1/auth", createAuthRoutes(deps));
-  app.route("/api/v1", createOrgAndProjectRoutes(deps));
-  app.route("/api/v1", createApiKeyRoutes(deps));
-  app.route("/api/v1", createMarketplaceAndBillingRoutes(deps));
-  app.route("/admin/v1", createAdminRoutes(deps));
+  adminApp.route("/admin/v1/auth", createAdminAuthRoutes(deps));
+  adminApp.route("/admin/v1", createAdminRoutes(deps));
 
   const timers: ReturnType<typeof setInterval>[] = [];
   let running = false;
@@ -156,7 +164,8 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
   let activePull: Promise<unknown> | null = null;
 
   return {
-    app,
+    clientApp,
+    adminApp,
     db,
     orm,
     gateway,

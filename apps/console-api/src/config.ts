@@ -11,6 +11,8 @@ export type GatewayRoleTokens = {
 export type ConsoleConfig = {
   host: string;
   port: number;
+  adminHost: string;
+  adminPort: number;
   databaseUrl: string;
   dbMaxConnections: number;
   gatewayInternalUrl: string;
@@ -25,7 +27,8 @@ export type ConsoleConfig = {
   refreshTtlMs: number;
   reconcileIntervalMs: number;
   outboxPullIntervalMs: number;
-  corsOrigins: string[];
+  clientCorsOrigins: string[];
+  adminCorsOrigins: string[];
 };
 
 function intEnv(
@@ -41,6 +44,13 @@ function intEnv(
     throw new Error(`${name} must be an integer >= ${min}`);
   }
   return parsed;
+}
+
+function parseOriginList(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 export function loadConsoleConfigFromEnv(
@@ -81,6 +91,8 @@ export function loadConsoleConfigFromEnv(
   return {
     host: env.CONSOLE_HOST ?? "0.0.0.0",
     port: intEnv(env, "CONSOLE_PORT", 8090, 0),
+    adminHost: env.CONSOLE_ADMIN_HOST ?? "127.0.0.1",
+    adminPort: intEnv(env, "CONSOLE_ADMIN_PORT", 8091, 0),
     databaseUrl,
     dbMaxConnections: intEnv(env, "CONSOLE_DB_MAX_CONNECTIONS", 16, 2),
     gatewayInternalUrl,
@@ -97,9 +109,7 @@ export function loadConsoleConfigFromEnv(
     refreshTtlMs: intEnv(env, "CONSOLE_REFRESH_TTL_MS", 30 * 24 * 3_600_000, 300_000),
     reconcileIntervalMs: intEnv(env, "CONSOLE_RECONCILE_INTERVAL_MS", 10_000, 0),
     outboxPullIntervalMs: intEnv(env, "CONSOLE_OUTBOX_PULL_INTERVAL_MS", 0, 0),
-    corsOrigins: (env.CONSOLE_CORS_ORIGINS ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
+    clientCorsOrigins: parseOriginList(env.CONSOLE_CLIENT_CORS_ORIGINS ?? env.CONSOLE_CORS_ORIGINS),
+    adminCorsOrigins: parseOriginList(env.CONSOLE_ADMIN_CORS_ORIGINS),
   };
 }

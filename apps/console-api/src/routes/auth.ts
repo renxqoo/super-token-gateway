@@ -11,9 +11,23 @@ import {
   verifyPassword,
 } from "../auth.ts";
 import { organizations, orgMembers, projects, sessions, users } from "../db/schema.ts";
-import { parseJsonBody, requireAuth, type ConsoleDeps, type ConsoleEnv } from "./shared.ts";
+import {
+  parseJsonBody,
+  requireAuth,
+  requirePlatformAdmin,
+  type ConsoleDeps,
+  type ConsoleEnv,
+} from "./shared.ts";
 
 const registerSchema = z
+  .object({
+    email: z.email().max(200),
+    password: z.string().min(8).max(128),
+    display_name: z.string().trim().min(1).max(120),
+  })
+  .strict();
+
+const bootstrapAdminSchema = z
   .object({
     email: z.email().max(200),
     password: z.string().min(8).max(128),
@@ -42,48 +56,124 @@ const changePasswordSchema = z
   })
   .strict();
 
-export function createAuthRoutes(deps: ConsoleDeps) {
+function clientIpOf(
+  deps: ConsoleDeps,
+  c: { req: { header(name: string): string | undefined } },
+): string {
+  if (deps.config.trustProxyHeaders) {
+    const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+    if (forwarded) return forwarded;
+  }
+  return "direct";
+}
+
+async function issueSessionInTx(
+  deps: ConsoleDeps,
+  tx: Pick<typeof deps.orm, "insert">,
+  userId: string,
+  userAgent: string | null,
+  ipAddress: string | null,
+) {
+  const now = Date.now();
+  const accessToken = generateOpaqueToken("stg_sess_");
+  const refreshToken = generateOpaqueToken("stg_ref_");
+  const expiresAt = new Date(now + deps.config.sessionTtlMs).toISOString();
+  const refreshExpiresAt = new Date(now + deps.config.refreshTtlMs).toISOString();
+  const id = crypto.randomUUID();
+  await tx.insert(sessions).values({
+    id,
+    userId,
+    tokenHash: sha256Hex(accessToken),
+    refreshTokenHash: sha256Hex(refreshToken),
+    expiresAt,
+    refreshExpiresAt,
+    userAgent,
+    ipAddress,
+  });
+  return {
+    session_id: id,
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    expires_at: expiresAt,
+    refresh_expires_at: refreshExpiresAt,
+  };
+}
+
+async function rotateSession(
+  deps: ConsoleDeps,
+  refreshToken: string,
+  userAgent: string | null,
+  ip: string | null,
+  requireAdmin: boolean,
+) {
+  const refreshHash = sha256Hex(refreshToken);
+  return deps.orm.transaction(async (tx) => {
+    const claimed = await tx
+      .update(sessions)
+      .set({ revokedAt: sql`now()` })
+      .where(
+        and(
+          eq(sessions.refreshTokenHash, refreshHash),
+          isNull(sessions.revokedAt),
+          sql`${sessions.refreshExpiresAt} > now()`,
+        ),
+      )
+      .returning({ id: sessions.id, userId: sessions.userId });
+    const row = claimed[0];
+    if (!row) {
+      throw new GatewayError(401, "invalid_refresh_token", "Invalid or expired refresh token");
+    }
+    const [user] = await tx.select().from(users).where(eq(users.id, row.userId)).limit(1);
+    if (!user || user.status !== "ACTIVE") {
+      throw new GatewayError(403, "account_suspended", "User account is suspended");
+    }
+    if (requireAdmin && !user.isPlatformAdmin) {
+      throw new GatewayError(403, "forbidden", "Platform administrator privileges required");
+    }
+    const next = await issueSessionInTx(deps, tx, user.id, userAgent, ip);
+    return { user, next };
+  });
+}
+
+async function changeUserPassword(
+  deps: ConsoleDeps,
+  user: ConsoleEnv["Variables"]["user"],
+  currentPassword: string,
+  newPassword: string,
+  action: string,
+): Promise<void> {
+  const [row] = await deps.orm.select().from(users).where(eq(users.id, user.id)).limit(1);
+  if (!row || !(await verifyPassword(currentPassword, row.passwordHash))) {
+    throw new GatewayError(400, "invalid_password", "Current password is incorrect");
+  }
+  const nextHash = await hashPassword(newPassword);
+  await deps.orm.transaction(async (tx) => {
+    await tx
+      .update(users)
+      .set({ passwordHash: nextHash, updatedAt: sql`now()` })
+      .where(eq(users.id, user.id));
+    await tx
+      .update(sessions)
+      .set({ revokedAt: sql`now()` })
+      .where(
+        and(
+          eq(sessions.userId, user.id),
+          ne(sessions.id, user.sessionId),
+          isNull(sessions.revokedAt),
+        ),
+      );
+  });
+  await recordAuditLog(deps.orm, {
+    actor: user,
+    action,
+    targetType: "user",
+    targetId: user.id,
+  });
+}
+
+export function createClientAuthRoutes(deps: ConsoleDeps) {
   const app = new Hono<ConsoleEnv>();
   const auth = requireAuth(deps);
-
-  function clientIpOf(c: { req: { header(name: string): string | undefined } }): string {
-    if (deps.config.trustProxyHeaders) {
-      const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-      if (forwarded) return forwarded;
-    }
-    return "direct";
-  }
-
-  async function issueSessionInTx(
-    tx: Pick<typeof deps.orm, "insert">,
-    userId: string,
-    userAgent: string | null,
-    ipAddress: string | null,
-  ) {
-    const now = Date.now();
-    const accessToken = generateOpaqueToken("stg_sess_");
-    const refreshToken = generateOpaqueToken("stg_ref_");
-    const expiresAt = new Date(now + deps.config.sessionTtlMs).toISOString();
-    const refreshExpiresAt = new Date(now + deps.config.refreshTtlMs).toISOString();
-    const id = crypto.randomUUID();
-    await tx.insert(sessions).values({
-      id,
-      userId,
-      tokenHash: sha256Hex(accessToken),
-      refreshTokenHash: sha256Hex(refreshToken),
-      expiresAt,
-      refreshExpiresAt,
-      userAgent,
-      ipAddress,
-    });
-    return {
-      session_id: id,
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      expires_at: expiresAt,
-      refresh_expires_at: refreshExpiresAt,
-    };
-  }
 
   app.post("/register", async (c) => {
     const body = await parseJsonBody(c, registerSchema);
@@ -103,29 +193,13 @@ export function createAuthRoutes(deps: ConsoleDeps) {
     const passwordHash = await hashPassword(body.password);
     const slug = `personal-${userId.slice(0, 8)}`;
 
-    const matchesBootstrapEmail =
-      deps.config.bootstrapAdminEmail !== undefined && email === deps.config.bootstrapAdminEmail;
-    const bootstrapTokenOk =
-      deps.config.bootstrapAdminToken === undefined ||
-      (body.bootstrap_token !== undefined &&
-        constantTimeEquals(body.bootstrap_token, deps.config.bootstrapAdminToken));
-
-    let isAdmin = false;
     const session = await deps.orm.transaction(async (tx) => {
-      if (matchesBootstrapEmail && bootstrapTokenOk) {
-        const existingAdmins = await tx
-          .select({ id: users.id })
-          .from(users)
-          .where(eq(users.isPlatformAdmin, true))
-          .limit(1);
-        isAdmin = existingAdmins.length === 0;
-      }
       await tx.insert(users).values({
         id: userId,
         email,
         passwordHash,
         displayName: body.display_name,
-        isPlatformAdmin: isAdmin,
+        isPlatformAdmin: false,
         status: "ACTIVE",
       });
       await tx.insert(organizations).values({
@@ -150,7 +224,13 @@ export function createAuthRoutes(deps: ConsoleDeps) {
         gatewaySynced: false,
         syncStatus: "PENDING",
       });
-      return issueSessionInTx(tx, userId, c.req.header("user-agent") ?? null, clientIpOf(c));
+      return issueSessionInTx(
+        deps,
+        tx,
+        userId,
+        c.req.header("user-agent") ?? null,
+        clientIpOf(deps, c),
+      );
     });
 
     await recordAuditLog(deps.orm, {
@@ -158,7 +238,7 @@ export function createAuthRoutes(deps: ConsoleDeps) {
         id: userId,
         email,
         displayName: body.display_name,
-        isPlatformAdmin: isAdmin,
+        isPlatformAdmin: false,
         status: "ACTIVE",
         sessionId: session.session_id,
       },
@@ -174,7 +254,7 @@ export function createAuthRoutes(deps: ConsoleDeps) {
           id: userId,
           email,
           display_name: body.display_name,
-          is_platform_admin: isAdmin,
+          is_platform_admin: false,
         },
         default_org_id: orgId,
         default_project_id: projectId,
@@ -187,7 +267,7 @@ export function createAuthRoutes(deps: ConsoleDeps) {
   app.post("/login", async (c) => {
     const body = await parseJsonBody(c, loginSchema);
     const email = body.email.trim().toLowerCase();
-    const ip = clientIpOf(c);
+    const ip = clientIpOf(deps, c);
     const emailKey = `email:${email}`;
     const ipKey = `ip:${ip}`;
     deps.loginLimiter.check(emailKey);
@@ -205,6 +285,7 @@ export function createAuthRoutes(deps: ConsoleDeps) {
     deps.loginLimiter.reset(emailKey);
 
     const session = await issueSessionInTx(
+      deps,
       deps.orm,
       user.id,
       c.req.header("user-agent") ?? null,
@@ -223,34 +304,13 @@ export function createAuthRoutes(deps: ConsoleDeps) {
 
   app.post("/refresh", async (c) => {
     const body = await parseJsonBody(c, refreshSchema);
-    const refreshHash = sha256Hex(body.refresh_token);
-    const userAgent = c.req.header("user-agent") ?? null;
-    const ip = clientIpOf(c);
-
-    const rotated = await deps.orm.transaction(async (tx) => {
-      const claimed = await tx
-        .update(sessions)
-        .set({ revokedAt: sql`now()` })
-        .where(
-          and(
-            eq(sessions.refreshTokenHash, refreshHash),
-            isNull(sessions.revokedAt),
-            sql`${sessions.refreshExpiresAt} > now()`,
-          ),
-        )
-        .returning({ id: sessions.id, userId: sessions.userId });
-      const row = claimed[0];
-      if (!row) {
-        throw new GatewayError(401, "invalid_refresh_token", "Invalid or expired refresh token");
-      }
-      const [user] = await tx.select().from(users).where(eq(users.id, row.userId)).limit(1);
-      if (!user || user.status !== "ACTIVE") {
-        throw new GatewayError(403, "account_suspended", "User account is suspended");
-      }
-      const next = await issueSessionInTx(tx, user.id, userAgent, ip);
-      return { user, next };
-    });
-
+    const rotated = await rotateSession(
+      deps,
+      body.refresh_token,
+      c.req.header("user-agent") ?? null,
+      clientIpOf(deps, c),
+      false,
+    );
     return c.json({
       user: {
         id: rotated.user.id,
@@ -298,33 +358,203 @@ export function createAuthRoutes(deps: ConsoleDeps) {
   app.post("/change-password", auth, async (c) => {
     const user = c.get("user");
     const body = await parseJsonBody(c, changePasswordSchema);
-    const [row] = await deps.orm.select().from(users).where(eq(users.id, user.id)).limit(1);
-    if (!row || !(await verifyPassword(body.current_password, row.passwordHash))) {
-      throw new GatewayError(400, "invalid_password", "Current password is incorrect");
+    await changeUserPassword(
+      deps,
+      user,
+      body.current_password,
+      body.new_password,
+      "auth.change_password",
+    );
+    return c.json({ ok: true });
+  });
+
+  return app;
+}
+
+export function createAdminAuthRoutes(deps: ConsoleDeps) {
+  const app = new Hono<ConsoleEnv>();
+  const adminOnly = requirePlatformAdmin(deps);
+
+  app.post("/bootstrap", async (c) => {
+    const body = await parseJsonBody(c, bootstrapAdminSchema);
+    const email = body.email.trim().toLowerCase();
+    if (!deps.config.bootstrapAdminEmail || email !== deps.config.bootstrapAdminEmail) {
+      throw new GatewayError(
+        403,
+        "forbidden",
+        "Bootstrap admin email does not match configuration",
+      );
     }
-    const nextHash = await hashPassword(body.new_password);
-    await deps.orm.transaction(async (tx) => {
-      await tx
-        .update(users)
-        .set({ passwordHash: nextHash, updatedAt: sql`now()` })
-        .where(eq(users.id, user.id));
-      await tx
-        .update(sessions)
-        .set({ revokedAt: sql`now()` })
-        .where(
-          and(
-            eq(sessions.userId, user.id),
-            ne(sessions.id, user.sessionId),
-            isNull(sessions.revokedAt),
-          ),
+    if (
+      deps.config.bootstrapAdminToken &&
+      (!body.bootstrap_token ||
+        !constantTimeEquals(body.bootstrap_token, deps.config.bootstrapAdminToken))
+    ) {
+      throw new GatewayError(403, "forbidden", "Invalid bootstrap admin token");
+    }
+
+    const userId = crypto.randomUUID();
+    const passwordHash = await hashPassword(body.password);
+
+    const session = await deps.orm.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(88421001)`);
+      const existingAdmins = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.isPlatformAdmin, true))
+        .for("update");
+      if (existingAdmins.length > 0) {
+        throw new GatewayError(
+          409,
+          "admin_already_bootstrapped",
+          "Platform administrator already exists",
         );
+      }
+      const existingEmail = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, email))
+        .limit(1);
+      if (existingEmail.length > 0) {
+        throw new GatewayError(409, "email_exists", "An account with this email already exists");
+      }
+      await tx.insert(users).values({
+        id: userId,
+        email,
+        passwordHash,
+        displayName: body.display_name,
+        isPlatformAdmin: true,
+        status: "ACTIVE",
+      });
+      return issueSessionInTx(
+        deps,
+        tx,
+        userId,
+        c.req.header("user-agent") ?? null,
+        clientIpOf(deps, c),
+      );
     });
+
     await recordAuditLog(deps.orm, {
-      actor: user,
-      action: "auth.change_password",
+      actor: {
+        id: userId,
+        email,
+        displayName: body.display_name,
+        isPlatformAdmin: true,
+        status: "ACTIVE",
+        sessionId: session.session_id,
+      },
+      action: "admin.auth.bootstrap",
       targetType: "user",
-      targetId: user.id,
+      targetId: userId,
     });
+
+    return c.json(
+      {
+        user: {
+          id: userId,
+          email,
+          display_name: body.display_name,
+          is_platform_admin: true,
+        },
+        ...session,
+      },
+      201,
+    );
+  });
+
+  app.post("/login", async (c) => {
+    const body = await parseJsonBody(c, loginSchema);
+    const email = body.email.trim().toLowerCase();
+    const ip = clientIpOf(deps, c);
+    const emailKey = `admin-email:${email}`;
+    const ipKey = `admin-ip:${ip}`;
+    deps.loginLimiter.check(emailKey);
+    if (ip !== "direct") deps.loginLimiter.check(ipKey);
+
+    const [user] = await deps.orm.select().from(users).where(eq(users.email, email)).limit(1);
+    if (!user || !(await verifyPassword(body.password, user.passwordHash))) {
+      deps.loginLimiter.recordFailure(emailKey);
+      if (ip !== "direct") deps.loginLimiter.recordFailure(ipKey);
+      throw new GatewayError(401, "invalid_credentials", "Invalid email or password");
+    }
+    if (user.status !== "ACTIVE") {
+      throw new GatewayError(403, "account_suspended", "User account is suspended");
+    }
+    if (!user.isPlatformAdmin) {
+      throw new GatewayError(403, "forbidden", "Platform administrator privileges required");
+    }
+    deps.loginLimiter.reset(emailKey);
+
+    const session = await issueSessionInTx(
+      deps,
+      deps.orm,
+      user.id,
+      c.req.header("user-agent") ?? null,
+      ip,
+    );
+    return c.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        display_name: user.displayName,
+        is_platform_admin: true,
+      },
+      ...session,
+    });
+  });
+
+  app.post("/refresh", async (c) => {
+    const body = await parseJsonBody(c, refreshSchema);
+    const rotated = await rotateSession(
+      deps,
+      body.refresh_token,
+      c.req.header("user-agent") ?? null,
+      clientIpOf(deps, c),
+      true,
+    );
+    return c.json({
+      user: {
+        id: rotated.user.id,
+        email: rotated.user.email,
+        display_name: rotated.user.displayName,
+        is_platform_admin: true,
+      },
+      ...rotated.next,
+    });
+  });
+
+  app.post("/logout", adminOnly, async (c) => {
+    const user = c.get("user");
+    await deps.orm
+      .update(sessions)
+      .set({ revokedAt: sql`now()` })
+      .where(eq(sessions.id, user.sessionId));
+    return c.json({ ok: true });
+  });
+
+  app.get("/me", adminOnly, (c) => {
+    const user = c.get("user");
+    return c.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        display_name: user.displayName,
+        is_platform_admin: true,
+      },
+    });
+  });
+
+  app.post("/change-password", adminOnly, async (c) => {
+    const user = c.get("user");
+    const body = await parseJsonBody(c, changePasswordSchema);
+    await changeUserPassword(
+      deps,
+      user,
+      body.current_password,
+      body.new_password,
+      "admin.auth.change_password",
+    );
     return c.json({ ok: true });
   });
 

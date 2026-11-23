@@ -256,7 +256,17 @@ const updateUserSchema = z
 
 export function createAdminRoutes(deps: ConsoleDeps) {
   const app = new Hono<ConsoleEnv>();
-  app.use("*", requirePlatformAdmin(deps));
+  const adminOnly = requirePlatformAdmin(deps);
+  app.use("*", async (c, next) => {
+    if (
+      c.req.path === "/admin/v1/auth/bootstrap" ||
+      c.req.path === "/admin/v1/auth/login" ||
+      c.req.path === "/admin/v1/auth/refresh"
+    ) {
+      return next();
+    }
+    return adminOnly(c, next);
+  });
 
   async function resolveTemplatePriceId(templateId: string, expectedSide: "CUSTOMER" | "SUPPLIER") {
     const [tpl] = await deps.orm

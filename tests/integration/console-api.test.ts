@@ -35,16 +35,19 @@ let gateway: ReturnType<typeof createGatewayRuntime>;
 let worker: ReturnType<typeof createWorkerRunner>;
 let consoleRuntime: ReturnType<typeof createConsoleRuntime>;
 let mockServer: ReturnType<typeof Bun.serve>;
-let consoleServer: ReturnType<typeof Bun.serve>;
+let consoleClientServer: ReturnType<typeof Bun.serve>;
+let consoleAdminServer: ReturnType<typeof Bun.serve>;
 let gatewayPublicServer: ReturnType<typeof Bun.serve>;
 let mockUrl = "";
-let consoleUrl = "";
+let clientUrl = "";
+let adminUrlHttp = "";
 let gatewayPublicUrl = "";
 
 let lastUpstreamAuth = "";
 const videoStates = new Map<string, Record<string, unknown>>();
 
-async function api<T = Record<string, unknown>>(
+async function callBase<T = Record<string, unknown>>(
+  baseUrl: string,
   method: string,
   path: string,
   token?: string,
@@ -53,12 +56,50 @@ async function api<T = Record<string, unknown>>(
   const headers: Record<string, string> = {};
   if (token) headers.authorization = `Bearer ${token}`;
   if (body !== undefined) headers["content-type"] = "application/json";
-  const res = await fetch(`${consoleUrl}${path}`, {
+  const res = await fetch(`${baseUrl}${path}`, {
     method,
     headers,
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  return { status: res.status, data: (await res.json()) as T };
+  const text = await res.text();
+  let data: unknown = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+  }
+  return { status: res.status, data: data as T };
+}
+
+function clientApi<T = Record<string, unknown>>(
+  method: string,
+  path: string,
+  token?: string,
+  body?: unknown,
+) {
+  return callBase<T>(clientUrl, method, path, token, body);
+}
+
+function adminApi<T = Record<string, unknown>>(
+  method: string,
+  path: string,
+  token?: string,
+  body?: unknown,
+) {
+  return callBase<T>(adminUrlHttp, method, path, token, body);
+}
+
+function api<T = Record<string, unknown>>(
+  method: string,
+  path: string,
+  token?: string,
+  body?: unknown,
+) {
+  return path.startsWith("/admin/") || path.startsWith("/internal/")
+    ? adminApi<T>(method, path, token, body)
+    : clientApi<T>(method, path, token, body);
 }
 
 beforeAll(async () => {
@@ -144,6 +185,8 @@ beforeAll(async () => {
   const consoleConfig: ConsoleConfig = {
     host: "127.0.0.1",
     port: 0,
+    adminHost: "127.0.0.1",
+    adminPort: 0,
     databaseUrl: conDbUrl.toString(),
     dbMaxConnections: 16,
     gatewayInternalUrl: "http://gateway.internal",
@@ -152,11 +195,13 @@ beforeAll(async () => {
     outboxWebhookToken: OUTBOX_TOKEN,
     outboxConsumerName: "console_e2e",
     bootstrapAdminEmail: "admin@platform.test",
+    bootstrapAdminToken: "bootstrap-secret-token-1234",
     sessionTtlMs: 3_600_000,
     refreshTtlMs: 86_400_000,
     reconcileIntervalMs: 0,
     outboxPullIntervalMs: 0,
-    corsOrigins: [],
+    clientCorsOrigins: [],
+    adminCorsOrigins: [],
   };
   consoleRuntime = createConsoleRuntime({
     config: consoleConfig,
@@ -170,16 +215,23 @@ beforeAll(async () => {
   });
   await consoleRuntime.start();
 
-  consoleServer = Bun.serve({
+  consoleClientServer = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch: consoleRuntime.app.fetch,
+    fetch: consoleRuntime.clientApp.fetch,
   });
-  consoleUrl = `http://127.0.0.1:${consoleServer.port}`;
+  clientUrl = `http://127.0.0.1:${consoleClientServer.port}`;
+
+  consoleAdminServer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: consoleRuntime.adminApp.fetch,
+  });
+  adminUrlHttp = `http://127.0.0.1:${consoleAdminServer.port}`;
 
   worker = createWorkerRunner({
     db: gwDb,
-    businessWebhookUrl: `${consoleUrl}/internal/outbox/events`,
+    businessWebhookUrl: `${adminUrlHttp}/internal/outbox/events`,
     businessWebhookToken: OUTBOX_TOKEN,
     outboxConsumerName: "console_e2e_webhook",
   });
@@ -187,7 +239,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await worker?.stop();
-  consoleServer?.stop(true);
+  consoleClientServer?.stop(true);
+  consoleAdminServer?.stop(true);
   gatewayPublicServer?.stop(true);
   await consoleRuntime?.close();
   await gateway?.close(2000);
@@ -205,20 +258,65 @@ afterAll(async () => {
 });
 
 test("Console API full E2E: auth, enterprise RBAC, marketplace discount pricing, secretless catalog sync, self-service keys, real Worker Outbox rollups, alerts, and async video tasks", async () => {
-  const adminReg = await api<{
-    user: { id: string; is_platform_admin: boolean };
-    access_token: string;
-    refresh_token: string;
-  }>("POST", "/api/v1/auth/register", undefined, {
+  const adminOnClientPort = await clientApi("GET", "/admin/v1/users");
+  expect(adminOnClientPort.status).toBe(404);
+  const webhookOnClientPort = await clientApi("POST", "/internal/outbox/events", OUTBOX_TOKEN, {
+    events: [],
+  });
+  expect(webhookOnClientPort.status).toBe(404);
+  const clientOnAdminPort = await adminApi("GET", "/api/v1/models");
+  expect(clientOnAdminPort.status).toBe(404);
+
+  const badBootstrap = await adminApi("POST", "/admin/v1/auth/bootstrap", undefined, {
     email: "admin@platform.test",
     password: "AdminPassword123!",
     display_name: "Platform Admin",
+    bootstrap_token: "wrong-token",
+  });
+  expect(badBootstrap.status).toBe(403);
+
+  const adminReg = await adminApi<{
+    user: { id: string; is_platform_admin: boolean };
+    access_token: string;
+    refresh_token: string;
+  }>("POST", "/admin/v1/auth/bootstrap", undefined, {
+    email: "admin@platform.test",
+    password: "AdminPassword123!",
+    display_name: "Platform Admin",
+    bootstrap_token: "bootstrap-secret-token-1234",
   });
   expect(adminReg.status).toBe(201);
   expect(adminReg.data.user.is_platform_admin).toBe(true);
-  const adminToken = adminReg.data.access_token;
 
-  const ownerReg = await api<{
+  const dupBootstrap = await adminApi("POST", "/admin/v1/auth/bootstrap", undefined, {
+    email: "admin@platform.test",
+    password: "AdminPassword123!",
+    display_name: "Platform Admin",
+    bootstrap_token: "bootstrap-secret-token-1234",
+  });
+  expect(dupBootstrap.status).toBe(409);
+
+  const adminLogin = await adminApi<{ access_token: string }>(
+    "POST",
+    "/admin/v1/auth/login",
+    undefined,
+    {
+      email: "admin@platform.test",
+      password: "AdminPassword123!",
+    },
+  );
+  expect(adminLogin.status).toBe(200);
+  const adminToken = adminLogin.data.access_token;
+
+  const adminMe = await adminApi<{ user: { is_platform_admin: boolean } }>(
+    "GET",
+    "/admin/v1/auth/me",
+    adminToken,
+  );
+  expect(adminMe.status).toBe(200);
+  expect(adminMe.data.user.is_platform_admin).toBe(true);
+
+  const ownerReg = await clientApi<{
     user: { id: string; is_platform_admin: boolean };
     default_org_id: string;
     default_project_id: string;
@@ -231,6 +329,12 @@ test("Console API full E2E: auth, enterprise RBAC, marketplace discount pricing,
   });
   expect(ownerReg.status).toBe(201);
   expect(ownerReg.data.user.is_platform_admin).toBe(false);
+
+  const nonAdminLoginOnAdminPort = await adminApi("POST", "/admin/v1/auth/login", undefined, {
+    email: "owner@acme.test",
+    password: "OwnerPassword123!",
+  });
+  expect(nonAdminLoginOnAdminPort.status).toBe(403);
 
   const devReg = await api<{ user: { id: string }; access_token: string }>(
     "POST",

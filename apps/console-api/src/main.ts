@@ -5,17 +5,25 @@ const config = loadConsoleConfigFromEnv();
 const runtime = createConsoleRuntime({ config });
 await runtime.start();
 
-const server = Bun.serve({
+const clientServer = Bun.serve({
   hostname: config.host,
   port: config.port,
   idleTimeout: 60,
-  fetch: runtime.app.fetch,
+  fetch: runtime.clientApp.fetch,
+});
+
+const adminServer = Bun.serve({
+  hostname: config.adminHost,
+  port: config.adminPort,
+  idleTimeout: 60,
+  fetch: runtime.adminApp.fetch,
 });
 
 console.log(
   JSON.stringify({
     service: "console-api",
-    port: server.port,
+    client_port: clientServer.port,
+    admin_port: adminServer.port,
   }),
 );
 
@@ -23,7 +31,7 @@ let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  await server.stop();
+  await Promise.all([clientServer.stop(), adminServer.stop()]);
   await runtime.close();
   process.exit(0);
 }
