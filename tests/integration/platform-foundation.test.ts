@@ -315,17 +315,18 @@ test("Phase 1: channel secret preservation, api_key attribution & LIFETIME/DAILY
   );
   expect(overrideRec.id).toBeTruthy();
 
-  const { data: keyLimited } = await internalCall<{ id: string; key?: string }>(
-    "PUT",
-    "/internal/v1/api-keys",
-    {
-      project_id: projA.id,
-      name: "limited-key",
-      spend_limit_atoms: "40000",
-      spend_limit_window: "LIFETIME",
-    },
-  );
+  const { data: keyLimited } = await internalCall<{
+    id: string;
+    key?: string;
+    verifier?: string;
+  }>("PUT", "/internal/v1/api-keys", {
+    project_id: projA.id,
+    name: "limited-key",
+    spend_limit_atoms: "40000",
+    spend_limit_window: "LIFETIME",
+  });
   expect(keyLimited.key).toBeTruthy();
+  expect(keyLimited.verifier).toBeUndefined();
 
   const { data: updatedKeyRes } = await internalCall<{ id: string; key?: string }>(
     "PUT",

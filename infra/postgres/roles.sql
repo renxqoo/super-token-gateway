@@ -74,7 +74,7 @@ GRANT INSERT (event_id, kind, request_id, project_id, payload) ON public.outbox_
 GRANT USAGE ON SEQUENCE public.outbox_events_seq_seq TO stg_data, stg_control;
 GRANT INSERT, UPDATE ON public.outbox_consumers, public.outbox_consumer_shards TO stg_control, stg_worker;
 
-GRANT UPDATE (spend_window_start, spent_atoms, reserved_atoms) ON public.api_keys TO stg_data, stg_worker;
+GRANT UPDATE (spend_window_start, spent_atoms, reserved_atoms) ON public.api_keys TO stg_data;
 GRANT INSERT, UPDATE ON public.projects, public.api_keys, public.upstream_accounts, public.plugins,
   public.channels, public.models, public.routes, public.project_pricing_overrides, public.wallets, public.wallet_lots,
   public.supplier_root_balances, public.supplier_cells TO stg_control;

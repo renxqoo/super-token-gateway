@@ -24,6 +24,11 @@ export async function auditConservation(db: SQL): Promise<ConservationAudit> {
         ), supplier_grants AS (
           SELECT account_id, currency, cell, sum(remaining_atoms) AS reserved
           FROM public.supplier_leases WHERE state = 'ACTIVE' GROUP BY account_id, currency, cell
+        ), key_claims AS (
+          SELECT api_key_id, sum(key_reserved_atoms) AS reserved
+          FROM open_holds
+          WHERE api_key_id IS NOT NULL AND key_reserved_atoms > 0
+          GROUP BY api_key_id
         )
         SELECT
           (SELECT count(*) FROM (
@@ -61,6 +66,10 @@ export async function auditConservation(db: SQL): Promise<ConservationAudit> {
             LEFT JOIN public.supplier_leases s ON s.id = h.supplier_lease_id
             WHERE (h.wallet_lease_id IS NOT NULL AND w.state IS DISTINCT FROM 'ACTIVE')
                OR (h.supplier_lease_id IS NOT NULL AND s.state IS DISTINCT FROM 'ACTIVE')
+          ) +
+          (SELECT count(*) FROM public.api_keys k
+            LEFT JOIN key_claims kc ON kc.api_key_id = k.id
+            WHERE k.reserved_atoms <> coalesce(kc.reserved, 0)
           ) AS reservation_mismatches,
           (SELECT count(*) FROM open_holds WHERE state = 'HELD') AS open_holds,
           (SELECT count(*) FROM open_holds WHERE state = 'UNKNOWN') AS unknown_holds

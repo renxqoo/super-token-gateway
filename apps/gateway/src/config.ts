@@ -47,6 +47,7 @@ export type GatewayConfig = {
   businessWebhookToken?: string;
   maxActiveAsyncTasksPerProject?: number;
   maxAutoRefundsPerProject24h?: number;
+  asyncTaskCancelCooldownMs?: number;
 };
 
 function parseCsv(value: string | undefined): string[] {
@@ -230,5 +231,12 @@ export function loadConfigFromEnv(
       1000,
     ),
     maxAutoRefundsPerProject24h: intFromEnv(env, "MAX_AUTO_REFUNDS_PER_PROJECT_24H", 5, 0, 1000),
+    asyncTaskCancelCooldownMs: intFromEnv(
+      env,
+      "ASYNC_TASK_CANCEL_COOLDOWN_MS",
+      60_000,
+      0,
+      86_400_000,
+    ),
   };
 }

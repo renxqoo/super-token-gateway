@@ -1,5 +1,5 @@
 import type { SQL } from "bun";
-import { and, desc, eq, inArray, lt, sql, type SQL as DrizzleSQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, or, sql, type SQL as DrizzleSQL } from "drizzle-orm";
 import { asyncTasks, createDrizzle } from "./schema.ts";
 import type {
   AsyncTaskFailureCategory,
@@ -79,16 +79,28 @@ export function createAsyncTasksRepository(db: SQL) {
       return row ? mapTaskRow(row) : null;
     },
 
-    async countActiveTasks(projectId: string): Promise<number> {
+    async countActiveTasks(projectId: string, cancelCooldownMs = 0): Promise<number> {
+      const where =
+        cancelCooldownMs > 0
+          ? and(
+              eq(asyncTasks.projectId, projectId),
+              or(
+                inArray(asyncTasks.status, ["QUEUED", "PROCESSING"]),
+                and(
+                  eq(asyncTasks.status, "CANCELLED"),
+                  eq(asyncTasks.userCancelled, true),
+                  sql`${asyncTasks.completedAt} >= ${new Date(Date.now() - cancelCooldownMs).toISOString()}::timestamptz`,
+                ),
+              ),
+            )
+          : and(
+              eq(asyncTasks.projectId, projectId),
+              inArray(asyncTasks.status, ["QUEUED", "PROCESSING"]),
+            );
       const [row] = await orm
         .select({ count: sql<number>`count(*)::int` })
         .from(asyncTasks)
-        .where(
-          and(
-            eq(asyncTasks.projectId, projectId),
-            inArray(asyncTasks.status, ["QUEUED", "PROCESSING"]),
-          ),
-        );
+        .where(where);
       return Number(row?.count ?? 0);
     },
 
@@ -137,7 +149,7 @@ export function createAsyncTasksRepository(db: SQL) {
       const [row] = await orm
         .update(asyncTasks)
         .set({
-          status: sql`CASE WHEN ${asyncTasks.userCancelled} AND ${input.status} = 'FAILED' THEN 'CANCELLED' ELSE ${input.status} END`,
+          status: sql`CASE WHEN ${asyncTasks.userCancelled} THEN 'CANCELLED' ELSE ${input.status} END`,
           ...(input.upstream_billed !== undefined ? { upstreamBilled: input.upstream_billed } : {}),
           ...(input.failure_category !== undefined
             ? {
@@ -154,9 +166,37 @@ export function createAsyncTasksRepository(db: SQL) {
           ...(terminal ? { completedAt: sql`COALESCE(${asyncTasks.completedAt}, now())` } : {}),
           updatedAt: sql`now()`,
         })
-        .where(eq(asyncTasks.id, input.id))
+        .where(
+          and(
+            eq(asyncTasks.id, input.id),
+            inArray(asyncTasks.status, ["QUEUED", "PROCESSING"]),
+            eq(asyncTasks.refundEligibility, "PENDING"),
+          ),
+        )
         .returning();
-      return row ? mapTaskRow(row) : null;
+      if (row) return mapTaskRow(row);
+      const [existing] = await orm.select().from(asyncTasks).where(eq(asyncTasks.id, input.id));
+      return existing ? mapTaskRow(existing) : null;
+    },
+
+    async markZeroChargeNotApplicable(id: string): Promise<AsyncTaskRecord | null> {
+      const [row] = await orm
+        .update(asyncTasks)
+        .set({
+          refundEligibility: "NOT_APPLICABLE",
+          updatedAt: sql`now()`,
+        })
+        .where(
+          and(
+            eq(asyncTasks.id, id),
+            eq(asyncTasks.refundEligibility, "AUTO_REFUNDED"),
+            isNull(asyncTasks.refundId),
+          ),
+        )
+        .returning();
+      if (row) return mapTaskRow(row);
+      const [existing] = await orm.select().from(asyncTasks).where(eq(asyncTasks.id, id));
+      return existing ? mapTaskRow(existing) : null;
     },
 
     async claimAutoRefund(input: {

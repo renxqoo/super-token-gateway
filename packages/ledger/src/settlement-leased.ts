@@ -153,7 +153,7 @@ export async function commitLeasedBatch(
 
   await db.begin(async (tx) => {
     const holdRows = await tx`
-        SELECT request_id, state, wallet_lease_id, supplier_lease_id
+        SELECT request_id, state, wallet_lease_id, supplier_lease_id, key_reserved_atoms::text
         FROM public.billing_holds
         WHERE request_id = ANY(${reqIds}::uuid[])
         ORDER BY request_id
@@ -161,13 +161,19 @@ export async function commitLeasedBatch(
       `;
     const holdByReq = new Map<
       string,
-      { state: string; wallet_lease_id: string | null; supplier_lease_id: string | null }
+      {
+        state: string;
+        wallet_lease_id: string | null;
+        supplier_lease_id: string | null;
+        key_reserved_atoms: bigint;
+      }
     >();
     for (const r of holdRows) {
       holdByReq.set(String(r.request_id), {
         state: String(r.state),
         wallet_lease_id: r.wallet_lease_id ? String(r.wallet_lease_id) : null,
         supplier_lease_id: r.supplier_lease_id ? String(r.supplier_lease_id) : null,
+        key_reserved_atoms: BigInt(String(r.key_reserved_atoms ?? "0")),
       });
     }
 
@@ -333,6 +339,7 @@ export async function commitLeasedBatch(
       if (
         !h ||
         h.state !== "HELD" ||
+        h.key_reserved_atoms !== 0n ||
         h.wallet_lease_id !== cand.meta.walletLeaseId ||
         h.supplier_lease_id !== cand.meta.supplierLeaseId ||
         !wl ||

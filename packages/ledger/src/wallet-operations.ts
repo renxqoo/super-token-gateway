@@ -27,19 +27,49 @@ import {
   type LotRow,
   type JournalLine,
 } from "./funds.ts";
+import {
+  flushDirtyKeySpends,
+  rolloverKeySpendInMemory,
+  toKeySpendRow,
+  type KeySpendRow,
+} from "./key-spend.ts";
 
-async function lockChargeWallet(tx: SQL, chargeId: string): Promise<WalletRow> {
+async function lockChargeContext(
+  tx: SQL,
+  chargeId: string,
+  nowMs: number,
+): Promise<{ wallet: WalletRow; keySpend: KeySpendRow | null }> {
+  const metaRows = await tx`
+    SELECT wallet_id, api_key_id FROM public.billing_charges WHERE id = ${chargeId}
+  `;
+  if (!metaRows.length) throw new Error("Charge not found");
+  const walletId = String(metaRows[0]!.wallet_id);
+  const apiKeyId = metaRows[0]!.api_key_id ? String(metaRows[0]!.api_key_id) : null;
+  let keySpend: KeySpendRow | null = null;
+  if (apiKeyId) {
+    const kRows = await tx`
+      SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
+        spend_window_start, spent_atoms::text, reserved_atoms::text
+      FROM public.api_keys
+      WHERE id = ${apiKeyId} AND spend_limit_atoms IS NOT NULL
+      FOR NO KEY UPDATE
+    `;
+    if (kRows.length > 0) {
+      keySpend = toKeySpendRow(kRows[0]!);
+      rolloverKeySpendInMemory(keySpend, nowMs);
+    }
+  }
   const [wallet] = await tx`
     SELECT id, project_id, currency, policy,
       available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
       debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
       credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
     FROM public.wallets
-    WHERE id = (SELECT wallet_id FROM public.billing_charges WHERE id = ${chargeId})
+    WHERE id = ${walletId}
     FOR NO KEY UPDATE
   `;
   if (!wallet) throw new Error("Charge not found");
-  return toWalletRow(wallet);
+  return { wallet: toWalletRow(wallet), keySpend };
 }
 
 async function collectDebtInTx(tx: SQL, walletId: string, nowMs: number): Promise<number> {
@@ -170,11 +200,13 @@ export function createWalletOperations(
       reason: input.reason,
     });
     return db.begin(async (tx) => {
-      const nowMs = Date.now();
-      const wallet = await lockChargeWallet(tx, input.charge_id);
+      const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
+      const nowMs = pgNowRow ? Number(pgNowRow.ms) : Date.now();
+      const { wallet, keySpend } = await lockChargeContext(tx, input.charge_id, nowMs);
       const chRows = await tx`
-          SELECT id, request_id, wallet_id, currency, customer_atoms::text, funded_atoms::text,
-            debt_atoms::text, refunded_atoms::text, debt_refunded_atoms::text, lot_allocations
+          SELECT id, request_id, project_id, wallet_id, api_key_id, model, operation, currency,
+            customer_atoms::text, funded_atoms::text, debt_atoms::text, refunded_atoms::text,
+            debt_refunded_atoms::text, lot_allocations, created_at
           FROM public.billing_charges WHERE id = ${input.charge_id} FOR UPDATE
         `;
       if (!chRows.length) throw new Error("Charge not found");
@@ -266,6 +298,12 @@ export function createWalletOperations(
       wallet.freeze_reason = computeFreezeReason(wallet);
       wallet.dirty = true;
 
+      if (keySpend && Date.parse(String(ch.created_at)) >= keySpend.spend_window_start_ms) {
+        keySpend.spent_atoms = keySpend.spent_atoms > atoms ? keySpend.spent_atoms - atoms : 0n;
+        keySpend.dirty = true;
+        await flushDirtyKeySpends(tx, [keySpend]);
+      }
+
       await flushDirtyLots(tx, lotsById.values());
       await flushDirtyWallets(tx, [wallet]);
 
@@ -302,6 +340,23 @@ export function createWalletOperations(
       await tx`
           INSERT INTO public.funding_operations (id, side, entity_id, kind, external_ref, fingerprint, amount_atoms, currency, reason, receipt)
           VALUES (${opId}, 'CUSTOMER', ${ch.id}, 'REFUND', ${input.external_ref}, ${fingerprint}, ${atoms.toString()}::numeric, ${wallet.currency}, ${input.reason}, ${receipt}::jsonb)
+        `;
+      const outboxPayload = {
+        operation_id: opId,
+        charge_id: String(ch.id),
+        request_id: String(ch.request_id),
+        project_id: String(ch.project_id),
+        api_key_id: ch.api_key_id ? String(ch.api_key_id) : null,
+        model: String(ch.model),
+        operation: String(ch.operation),
+        currency: wallet.currency,
+        refunded_atoms: atoms.toString(),
+        delta_atoms: (-atoms).toString(),
+        reason: input.reason,
+      };
+      await tx`
+          INSERT INTO public.outbox_events (event_id, kind, request_id, project_id, payload)
+          VALUES (${crypto.randomUUID()}::uuid, 'billing.refunded', ${ch.request_id}::uuid, ${ch.project_id}::uuid, ${outboxPayload}::jsonb)
         `;
 
       if (availBack > 0n && wallet.debt_atoms > 0n) {
@@ -462,9 +517,12 @@ export function createWalletOperations(
         reason: input.reason,
       });
       return db.begin(async (tx) => {
-        const wallet = await lockChargeWallet(tx, input.charge_id);
+        const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
+        const nowMs = pgNowRow ? Number(pgNowRow.ms) : Date.now();
+        const { wallet, keySpend } = await lockChargeContext(tx, input.charge_id, nowMs);
         const chRows = await tx`
-          SELECT id, request_id, wallet_id, currency, customer_atoms::text, debt_atoms::text
+          SELECT id, request_id, project_id, wallet_id, api_key_id, model, operation, currency,
+            customer_atoms::text, debt_atoms::text, created_at
           FROM public.billing_charges WHERE id = ${input.charge_id} FOR UPDATE
         `;
         if (!chRows.length) throw new Error("Charge not found");
@@ -482,6 +540,11 @@ export function createWalletOperations(
             replayed: true,
             delta_atoms: delta.toString(),
           };
+        }
+        if (keySpend && Date.parse(String(ch.created_at)) >= keySpend.spend_window_start_ms) {
+          keySpend.spent_atoms += delta;
+          keySpend.dirty = true;
+          await flushDirtyKeySpends(tx, [keySpend]);
         }
         wallet.debt_atoms += delta;
         wallet.freeze_reason = computeFreezeReason(wallet);
@@ -525,7 +588,23 @@ export function createWalletOperations(
           INSERT INTO public.funding_operations (id, side, entity_id, kind, external_ref, fingerprint, amount_atoms, currency, reason, receipt)
           VALUES (${opId}, 'CUSTOMER', ${ch.id}, 'ADJUST', ${input.external_ref}, ${fingerprint}, ${delta.toString()}::numeric, ${wallet.currency}, ${input.reason}, ${{ delta_atoms: delta.toString() }}::jsonb)
         `;
-        await collectDebtInTx(tx, wallet.id, Date.now());
+        const adjustPayload = {
+          operation_id: opId,
+          charge_id: String(ch.id),
+          request_id: String(ch.request_id),
+          project_id: String(ch.project_id),
+          api_key_id: ch.api_key_id ? String(ch.api_key_id) : null,
+          model: String(ch.model),
+          operation: String(ch.operation),
+          currency: wallet.currency,
+          delta_atoms: delta.toString(),
+          reason: input.reason,
+        };
+        await tx`
+          INSERT INTO public.outbox_events (event_id, kind, request_id, project_id, payload)
+          VALUES (${crypto.randomUUID()}::uuid, 'billing.adjusted', ${ch.request_id}::uuid, ${ch.project_id}::uuid, ${adjustPayload}::jsonb)
+        `;
+        await collectDebtInTx(tx, wallet.id, nowMs);
         return { operation_id: opId, replayed: false, delta_atoms: delta.toString() };
       });
     },

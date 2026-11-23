@@ -105,6 +105,8 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
 
       const keySpendsById = new Map<string, KeySpendRow>();
       if (limitedKeyIds.length > 0) {
+        const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
+        const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : nowMs;
         const lockedKeys = await tx`
           SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
             spend_window_start, spent_atoms::text, reserved_atoms::text
@@ -115,7 +117,7 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
         `;
         for (const r of lockedKeys) {
           const row = toKeySpendRow(r);
-          rolloverKeySpendInMemory(row, nowMs);
+          rolloverKeySpendInMemory(row, pgNowMs);
           keySpendsById.set(row.id, row);
         }
       }

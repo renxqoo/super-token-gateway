@@ -45,13 +45,39 @@ type DetachedHold = {
   supAtoms: bigint;
 };
 
+export async function markAccountsReconcileRequired(
+  db: SQL,
+  accountIds: readonly string[],
+): Promise<void> {
+  if (accountIds.length === 0) return;
+  const sorted = [...new Set(accountIds)].sort();
+  await db.begin(async (tx) => {
+    await tx`
+      SELECT id FROM public.upstream_accounts
+      WHERE id = ANY(${sorted}::uuid[])
+      ORDER BY id
+      FOR NO KEY UPDATE
+    `;
+    await tx`
+      UPDATE public.upstream_accounts
+      SET state = 'RECONCILE_REQUIRED', revision = revision + 1, updated_at = now()
+      WHERE id = ANY(${sorted}::uuid[]) AND state = 'ACTIVE'
+    `;
+  });
+}
+
 export async function commitDirectBatch(
   db: SQL,
   notifyDetachedLocal: LeaseManager["notifyDetachedLocal"],
   entries: DirectSettlementEntry[],
   results: CommitTerminalResult[],
 ): Promise<void> {
-  const detached = await db.begin((tx) => applyDirectSettlements(tx, entries, results));
+  const { detached, reconcileAccounts } = await db.begin((tx) =>
+    applyDirectSettlements(tx, entries, results),
+  );
+  if (reconcileAccounts.length > 0) {
+    await markAccountsReconcileRequired(db, reconcileAccounts);
+  }
   for (const d of detached) {
     notifyDetachedLocal(d.requestId, d.wlId, d.heldCust, d.slId, d.supAtoms);
   }
@@ -61,7 +87,7 @@ export async function applyDirectSettlements(
   tx: SQL,
   directEntries: DirectSettlementEntry[],
   results: CommitTerminalResult[],
-): Promise<DetachedHold[]> {
+): Promise<{ detached: DetachedHold[]; reconcileAccounts: string[] }> {
   const requestIds = [...new Set(directEntries.map((e) => e.item.request_id))].sort();
   const detachedNotifications: DetachedHold[] = [];
   const nowMs = Date.now();
@@ -186,26 +212,27 @@ export async function applyDirectSettlements(
     });
   }
 
-  const keyIdsWithReserve = [
+  const keyIdsWithTracking = [
     ...new Set(
-      [...holdsByReq.values()]
-        .filter((h) => h.key_reserved_atoms > 0n && h.api_key_id !== null)
-        .map((h) => h.api_key_id!),
+      [...holdsByReq.values()].filter((h) => h.api_key_id !== null).map((h) => h.api_key_id!),
     ),
   ].sort();
   const keySpendsById = new Map<string, KeySpendRow>();
-  if (keyIdsWithReserve.length > 0) {
+  if (keyIdsWithTracking.length > 0) {
+    const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
+    const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : nowMs;
     const lockedKeys = await tx`
       SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
         spend_window_start, spent_atoms::text, reserved_atoms::text
       FROM public.api_keys
-      WHERE id = ANY(${keyIdsWithReserve}::uuid[])
+      WHERE id = ANY(${keyIdsWithTracking}::uuid[])
+        AND (spend_limit_atoms IS NOT NULL OR reserved_atoms > 0)
       ORDER BY id
       FOR NO KEY UPDATE
     `;
     for (const r of lockedKeys) {
       const row = toKeySpendRow(r);
-      rolloverKeySpendInMemory(row, nowMs);
+      rolloverKeySpendInMemory(row, pgNowMs);
       keySpendsById.set(row.id, row);
     }
   }
@@ -608,17 +635,24 @@ export async function applyDirectSettlements(
     const chargeId = crypto.randomUUID();
     const usageDigest = sha256Hex(item.usage);
 
-    if (hold.key_reserved_atoms > 0n && hold.api_key_id) {
+    if (hold.api_key_id) {
       const kRow = keySpendsById.get(hold.api_key_id);
       if (kRow) {
-        kRow.reserved_atoms =
-          kRow.reserved_atoms > hold.key_reserved_atoms
-            ? kRow.reserved_atoms - hold.key_reserved_atoms
-            : 0n;
-        if (hold.created_at_ms >= kRow.spend_window_start_ms && billableCustomerAtoms > 0n) {
-          kRow.spent_atoms += billableCustomerAtoms;
+        if (hold.key_reserved_atoms > 0n) {
+          kRow.reserved_atoms =
+            kRow.reserved_atoms > hold.key_reserved_atoms
+              ? kRow.reserved_atoms - hold.key_reserved_atoms
+              : 0n;
+          kRow.dirty = true;
         }
-        kRow.dirty = true;
+        if (
+          kRow.spend_limit_atoms !== null &&
+          hold.created_at_ms >= kRow.spend_window_start_ms &&
+          billableCustomerAtoms > 0n
+        ) {
+          kRow.spent_atoms += billableCustomerAtoms;
+          kRow.dirty = true;
+        }
       }
     }
 
@@ -717,15 +751,6 @@ export async function applyDirectSettlements(
   await flushDirtyCells(tx, cellsByKey.values());
   await insertJournalLines(tx, journals);
 
-  if (reconcileAccounts.size > 0) {
-    const ids = [...reconcileAccounts];
-    await tx`
-          UPDATE public.upstream_accounts
-          SET state = 'RECONCILE_REQUIRED', revision = revision + 1, updated_at = now()
-          WHERE id = ANY(${ids}::uuid[]) AND state = 'ACTIVE'
-        `;
-  }
-
   if (holdUpdates.length > 0) {
     await tx`
           UPDATE public.billing_holds AS h SET
@@ -818,5 +843,8 @@ export async function applyDirectSettlements(
           ORDER BY public.outbox_shard(u.project_id) ASC, u.request_id ASC
         `;
   }
-  return detachedNotifications;
+  return {
+    detached: detachedNotifications,
+    reconcileAccounts: [...reconcileAccounts].sort(),
+  };
 }

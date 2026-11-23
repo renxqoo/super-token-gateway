@@ -52,16 +52,19 @@ function matchPriority(
   return 99;
 }
 
-function multiplyRates(rates: Pricing["rates"], num: bigint, den: bigint): Pricing["rates"] {
+function multiplyRates(rates: Pricing["rates"], num: bigint, den: bigint): Pricing["rates"] | null {
   const out: Record<string, { numerator: string; denominator: string }> = {};
   for (const [metric, rate] of Object.entries(rates)) {
     if (!rate) continue;
     const rawNum = BigInt(rate.numerator) * num;
     const rawDen = BigInt(rate.denominator) * den;
     const g = gcd(rawNum, rawDen);
+    const nStr = (rawNum / g).toString();
+    const dStr = (rawDen / g).toString();
+    if (nStr.length > 38 || dStr.length > 38) return null;
     out[metric] = {
-      numerator: (rawNum / g).toString(),
-      denominator: (rawDen / g).toString(),
+      numerator: nStr,
+      denominator: dStr,
     };
   }
   return out as Pricing["rates"];
@@ -94,16 +97,7 @@ export function resolveEffectiveCustomerPrice(
   const cached = snapCache.get(lookupKey);
   if (cached) return cached;
 
-  let best: ProjectPricingOverrideRecord | null = null;
   let bestPrio = 99;
-  for (const o of overrides) {
-    const p = matchPriority(o, modelName, operation);
-    if (p < bestPrio) {
-      bestPrio = p;
-      best = o;
-    }
-  }
-
   let resolved: EffectiveCustomerPrice = {
     price: basePrice,
     overrideId: null,
@@ -112,41 +106,48 @@ export function resolveEffectiveCustomerPrice(
     cacheKey: basePrice.id,
   };
 
-  if (best) {
-    if (best.override_kind === "EXACT_PRICE" && best.billing_price_id) {
-      const customPrice = snap.prices.get(best.billing_price_id);
+  for (const o of overrides) {
+    const p = matchPriority(o, modelName, operation);
+    if (p >= bestPrio) continue;
+    if (o.override_kind === "EXACT_PRICE" && o.billing_price_id) {
+      const customPrice = snap.prices.get(o.billing_price_id);
       if (
         customPrice &&
         customPrice.side === "CUSTOMER" &&
         customPrice.currency === basePrice.currency
       ) {
+        bestPrio = p;
         resolved = {
           price: customPrice,
-          overrideId: best.id,
+          overrideId: o.id,
           discountNumerator: null,
           discountDenominator: null,
           cacheKey: customPrice.id,
         };
       }
     } else if (
-      best.override_kind === "MULTIPLIER" &&
-      best.multiplier_numerator &&
-      best.multiplier_denominator
+      o.override_kind === "MULTIPLIER" &&
+      o.multiplier_numerator &&
+      o.multiplier_denominator
     ) {
-      const num = BigInt(best.multiplier_numerator);
-      const den = BigInt(best.multiplier_denominator);
+      const num = BigInt(o.multiplier_numerator);
+      const den = BigInt(o.multiplier_denominator);
       if (num > 0n && den > 0n) {
-        const derivedPrice: PriceVersionRecord = {
-          ...basePrice,
-          rates: multiplyRates(basePrice.rates, num, den),
-        };
-        resolved = {
-          price: derivedPrice,
-          overrideId: best.id,
-          discountNumerator: best.multiplier_numerator,
-          discountDenominator: best.multiplier_denominator,
-          cacheKey: `${basePrice.id}:m:${best.id}:${best.multiplier_numerator}/${best.multiplier_denominator}`,
-        };
+        const derivedRates = multiplyRates(basePrice.rates, num, den);
+        if (derivedRates) {
+          bestPrio = p;
+          const derivedPrice: PriceVersionRecord = {
+            ...basePrice,
+            rates: derivedRates,
+          };
+          resolved = {
+            price: derivedPrice,
+            overrideId: o.id,
+            discountNumerator: o.multiplier_numerator,
+            discountDenominator: o.multiplier_denominator,
+            cacheKey: `${basePrice.id}:m:${o.id}:${o.multiplier_numerator}/${o.multiplier_denominator}`,
+          };
+        }
       }
     }
   }

@@ -280,15 +280,20 @@ export function createHoldTransitions(
           }
 
           let lockedKeySpend: KeySpendRow | null = null;
-          if (reqCust !== null && reqCust > heldAtoms && holdApiKeyId && keyReservedAtoms > 0n) {
+          if (reqCust !== null && reqCust > heldAtoms && holdApiKeyId) {
+            const [pgNowRow] =
+              await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
+            const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : nowMs;
             const kRows = await tx`
               SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
                 spend_window_start, spent_atoms::text, reserved_atoms::text
-              FROM public.api_keys WHERE id = ${holdApiKeyId} FOR NO KEY UPDATE
+              FROM public.api_keys
+              WHERE id = ${holdApiKeyId} AND (spend_limit_atoms IS NOT NULL OR reserved_atoms > 0)
+              FOR NO KEY UPDATE
             `;
             if (kRows.length > 0) {
               lockedKeySpend = toKeySpendRow(kRows[0]!);
-              rolloverKeySpendInMemory(lockedKeySpend, nowMs);
+              rolloverKeySpendInMemory(lockedKeySpend, pgNowMs);
             }
           }
 

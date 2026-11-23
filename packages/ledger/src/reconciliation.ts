@@ -10,8 +10,39 @@ import type {
 } from "./types.ts";
 import { parseAtoms, insertJournalLines } from "./funds.ts";
 import { notifyHoldRelease, releaseHoldInTx } from "./hold-transitions.ts";
-import { applyDirectSettlements } from "./settlement-direct.ts";
+import { applyDirectSettlements, markAccountsReconcileRequired } from "./settlement-direct.ts";
 import type { LeaseManager } from "./lease-manager.ts";
+
+function gcdBigInt(a: bigint, b: bigint): bigint {
+  let x = a < 0n ? -a : a;
+  let y = b < 0n ? -b : b;
+  while (y !== 0n) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x === 0n ? 1n : x;
+}
+
+function scalePricingRates(
+  rates: Pricing["rates"],
+  numStr: string | null,
+  denStr: string | null,
+): Pricing["rates"] {
+  if (!numStr || !denStr) return rates;
+  const num = BigInt(numStr);
+  const den = BigInt(denStr);
+  if (num <= 0n || den <= 0n) return rates;
+  const out: Record<string, { numerator: string; denominator: string }> = {};
+  for (const [metric, rate] of Object.entries(rates)) {
+    if (!rate) continue;
+    const rn = BigInt(rate.numerator) * num;
+    const rd = BigInt(rate.denominator) * den;
+    const g = gcdBigInt(rn, rd);
+    out[metric] = { numerator: (rn / g).toString(), denominator: (rd / g).toString() };
+  }
+  return out as Pricing["rates"];
+}
 
 async function recordResolution(tx: SQL, input: ResolveRequestInput): Promise<void> {
   const billingPriceId = input.action === "SETTLE" ? (input.billing_price_id ?? null) : null;
@@ -54,6 +85,11 @@ export function createReconciliation(
         if (attempt.state !== "UNKNOWN" || hold!.state === "HELD" || hold!.supplier_lease_id) {
           return { ok: false, code: "supplier_attempt_conflict" };
         }
+        await tx`
+          SELECT id FROM public.upstream_accounts
+          WHERE id = ${attempt.account_id}
+          FOR NO KEY UPDATE
+        `;
         const [cell] = await tx`
           UPDATE public.supplier_cells
           SET reserved_atoms = reserved_atoms - ${attempt.held_atoms}::numeric,
@@ -109,7 +145,8 @@ export function createReconciliation(
     ): Promise<{ replayed: boolean; state: string }> {
       const settled = await db.begin(async (tx) => {
         const [hold] = await tx`
-          SELECT state, supplier_holds FROM public.billing_holds
+          SELECT state, supplier_holds, discount_numerator::text, discount_denominator::text
+          FROM public.billing_holds
           WHERE request_id = ${input.request_id} FOR NO KEY UPDATE
         `;
         if (!hold) throw new Error("Billing hold not found");
@@ -160,6 +197,11 @@ export function createReconciliation(
       `;
         if (!supplierPrice)
           throw new Error("Supplier price version not found for attempt currency");
+        const effectiveRates = scalePricingRates(
+          pr.rates as Pricing["rates"],
+          hold.discount_numerator ? String(hold.discount_numerator) : null,
+          hold.discount_denominator ? String(hold.discount_denominator) : null,
+        );
         const item: CommitTerminalInput = {
           request_id: input.request_id,
           selected_attempt_id: sh.attempt_id,
@@ -167,7 +209,7 @@ export function createReconciliation(
           billing_price_id: String(pr.id),
           cost_version_id: costVersionId,
           usage: input.usage ?? { requests: "1" },
-          billing_pricing: { currency: String(pr.currency), rates: pr.rates as Pricing["rates"] },
+          billing_pricing: { currency: String(pr.currency), rates: effectiveRates },
           billing_basis: pr.basis as CommitTerminalInput["billing_basis"],
           ...(input.usage?.characters === undefined
             ? {}
@@ -180,15 +222,22 @@ export function createReconciliation(
           supplier_cost_atoms_override: input.supplier_cost_atoms,
         };
         const results: CommitTerminalResult[] = [];
-        const detached = await applyDirectSettlements(tx, [{ index: 0, item }], results);
+        const { detached, reconcileAccounts } = await applyDirectSettlements(
+          tx,
+          [{ index: 0, item }],
+          results,
+        );
         const commit = results[0]!;
         if (!commit.ok) throw new Error(commit.message);
         await recordResolution(tx, input);
-        return { kind: "settle" as const, state: commit.outcome, detached };
+        return { kind: "settle" as const, state: commit.outcome, detached, reconcileAccounts };
       });
       if (settled.kind === "release") {
         notifyHoldRelease(notifyDetachedLocal, input.request_id, settled.release);
       } else if (settled.kind === "settle") {
+        if (settled.reconcileAccounts.length > 0) {
+          await markAccountsReconcileRequired(db, settled.reconcileAccounts);
+        }
         for (const d of settled.detached) {
           notifyDetachedLocal(d.requestId, d.wlId, d.heldCust, d.slId, d.supAtoms);
         }

@@ -753,7 +753,10 @@ export async function handleInferenceRequest(
     }
 
     if (operation === "videos" && deps.asyncTasks) {
-      const activeTasks = await deps.asyncTasks.countActiveTasks(project.id);
+      const activeTasks = await deps.asyncTasks.countActiveTasks(
+        project.id,
+        deps.config.asyncTaskCancelCooldownMs ?? 0,
+      );
       const maxActive = Math.min(
         project.concurrency,
         deps.config.maxActiveAsyncTasksPerProject ?? 10,

@@ -251,6 +251,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     asyncTasks,
     controlLedger,
     queries,
+    cluster,
     transport,
     vertexTokens,
     state: proxyState,

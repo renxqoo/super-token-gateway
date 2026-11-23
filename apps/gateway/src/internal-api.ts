@@ -78,6 +78,7 @@ type AsyncTasksRepo = ReturnType<typeof createAsyncTasksRepository>;
 
 const currencySchema = z.string().regex(/^[A-Z]{3,8}$/);
 const positiveAtomsSchema = z.string().regex(/^[1-9][0-9]{0,37}$/);
+const multiplierIntSchema = z.string().regex(/^[1-9][0-9]{0,12}$/);
 const nonNegativeAtomsSchema = z.string().regex(/^(0|[1-9][0-9]{0,37})$/);
 const signedAtomsSchema = z.string().regex(/^-?[1-9][0-9]{0,37}$/);
 const operationEnum = z.enum(operations);
@@ -434,8 +435,8 @@ const upsertPricingOverrideSchema = z
     operation: z.union([z.literal("*"), operationEnum]).default("*"),
     override_kind: z.enum(["EXACT_PRICE", "MULTIPLIER"]),
     billing_price_id: z.uuid().nullable().optional(),
-    multiplier_numerator: positiveAtomsSchema.nullable().optional(),
-    multiplier_denominator: positiveAtomsSchema.nullable().optional(),
+    multiplier_numerator: multiplierIntSchema.nullable().optional(),
+    multiplier_denominator: multiplierIntSchema.nullable().optional(),
     enabled: z.boolean().default(true),
   })
   .strict()
@@ -1039,7 +1040,7 @@ export function createInternalApi(deps: {
       spend_limit_window: body.spend_limit_window as SpendLimitWindow,
     });
     await onConfigUpdated(rec.config_epoch);
-    const { created, ...publicRec } = rec;
+    const { created, verifier: _verifier, ...publicRec } = rec;
     return c.json(created ? { ...publicRec, key: rawKey } : publicRec);
   });
 
