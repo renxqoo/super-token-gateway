@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { calculateCost, quoteReservation } from "../index.ts";
+import {
+  AMOUNT_DECIMALS,
+  ATOMS_PER_UNIT,
+  calculateCost,
+  formatAtomsToDecimal,
+  parseDecimalToAtoms,
+  quoteReservation,
+} from "../index.ts";
 
 test("fractional dimensions sum to one atom instead of rounding each third", () => {
   expect(
@@ -69,4 +76,37 @@ test("integral tariff terms and fractional duration share one final rounding", (
       },
     ),
   ).toBe("3");
+});
+
+test("18-decimal fixed-point parsing and formatting preserve exact financial precision without float loss", () => {
+  expect(AMOUNT_DECIMALS).toBe(18);
+  expect(ATOMS_PER_UNIT).toBe(1_000_000_000_000_000_000n);
+
+  expect(parseDecimalToAtoms("1")).toBe("1000000000000000000");
+  expect(parseDecimalToAtoms("12.345")).toBe("12345000000000000000");
+  expect(parseDecimalToAtoms("0.000000000000000001")).toBe("1");
+  expect(parseDecimalToAtoms("99999999999999999999.999999999999999999")).toBe("9".repeat(38));
+  expect(parseDecimalToAtoms("-0.000000000000000001", { allowNegative: true })).toBe("-1");
+  expect(parseDecimalToAtoms("0", { allowZero: true })).toBe("0");
+
+  expect(() => parseDecimalToAtoms("0")).toThrow();
+  expect(() => parseDecimalToAtoms("-1")).toThrow();
+  expect(() => parseDecimalToAtoms("-0", { allowNegative: true, allowZero: true })).toThrow();
+  expect(() => parseDecimalToAtoms("0.0000000000000000001")).toThrow();
+  expect(() => parseDecimalToAtoms("1e5")).toThrow();
+  expect(() => parseDecimalToAtoms(" 1.0")).toThrow();
+  expect(() => parseDecimalToAtoms("100000000000000000000")).toThrow();
+
+  expect(formatAtomsToDecimal("12345000000000000000")).toBe("12.345000000000000000");
+  expect(formatAtomsToDecimal("1")).toBe("0.000000000000000001");
+  expect(formatAtomsToDecimal("-1")).toBe("-0.000000000000000001");
+  expect(formatAtomsToDecimal("0")).toBe("0.000000000000000000");
+  expect(formatAtomsToDecimal("9".repeat(38))).toBe("99999999999999999999.999999999999999999");
+  expect(
+    formatAtomsToDecimal("12345000000000000000", { trimTrailingZeros: true, minDecimals: 2 }),
+  ).toBe("12.345");
+  expect(
+    formatAtomsToDecimal("12000000000000000000", { trimTrailingZeros: true, minDecimals: 2 }),
+  ).toBe("12.00");
+  expect(formatAtomsToDecimal("12345678900000000000", { fixedDecimals: 4 })).toBe("12.3456");
 });

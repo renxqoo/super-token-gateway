@@ -13,6 +13,7 @@ import {
 } from "drizzle-orm";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
+import { AMOUNT_DECIMALS } from "@gateway/kernel";
 import {
   authenticateSession,
   isSafePublicWebhookUrl,
@@ -36,6 +37,7 @@ import {
   type MarketplacePriceSnapshot,
 } from "../marketplace.ts";
 import {
+  enrichWalletDecimals,
   nonNegativeAtomsSchema,
   parseIsoDateParam,
   parseIsoDatetimeParam,
@@ -43,11 +45,16 @@ import {
   parseLimitOffset,
   parseUuid,
   requireClientAuth,
+  safeFormatAtoms,
   type ConsoleDeps,
   type ConsoleEnv,
 } from "./shared.ts";
 
 function sanitizeCustomerCharge(raw: Record<string, unknown>) {
+  const customerAtoms = String(raw.customerAtoms ?? raw.customer_atoms ?? "0");
+  const fundedAtoms = String(raw.fundedAtoms ?? raw.funded_atoms ?? "0");
+  const debtAtoms = String(raw.debtAtoms ?? raw.debt_atoms ?? "0");
+  const refundedAtoms = String(raw.refundedAtoms ?? raw.refunded_atoms ?? "0");
   return {
     id: raw.id,
     request_id: raw.requestId ?? raw.request_id,
@@ -61,12 +68,39 @@ function sanitizeCustomerCharge(raw: Record<string, unknown>) {
     discount_numerator: raw.discountNumerator ?? raw.discount_numerator ?? null,
     discount_denominator: raw.discountDenominator ?? raw.discount_denominator ?? null,
     usage: raw.usage,
-    customer_atoms: raw.customerAtoms ?? raw.customer_atoms,
-    funded_atoms: raw.fundedAtoms ?? raw.funded_atoms,
-    debt_atoms: raw.debtAtoms ?? raw.debt_atoms,
-    refunded_atoms: raw.refundedAtoms ?? raw.refunded_atoms,
+    scale: AMOUNT_DECIMALS,
+    customer_atoms: customerAtoms,
+    customer_decimal: safeFormatAtoms(customerAtoms),
+    funded_atoms: fundedAtoms,
+    funded_decimal: safeFormatAtoms(fundedAtoms),
+    debt_atoms: debtAtoms,
+    debt_decimal: safeFormatAtoms(debtAtoms),
+    refunded_atoms: refundedAtoms,
+    refunded_decimal: safeFormatAtoms(refundedAtoms),
     outcome: raw.outcome,
     created_at: raw.createdAt ?? raw.created_at,
+  };
+}
+
+function sanitizeCustomerTransaction(raw: Record<string, unknown>) {
+  const amountAtoms = String(raw.amount_atoms ?? "0");
+  const payload =
+    raw.payload && typeof raw.payload === "object" ? (raw.payload as Record<string, unknown>) : {};
+  const receipt =
+    raw.receipt && typeof raw.receipt === "object" ? (raw.receipt as Record<string, unknown>) : {};
+  return {
+    id: raw.id,
+    project_id: raw.project_id ?? null,
+    charge_id: raw.charge_id ?? null,
+    kind: raw.kind,
+    lot_kind: payload.kind ?? payload.lot_kind ?? receipt.kind ?? null,
+    external_ref: raw.external_ref,
+    currency: raw.currency,
+    scale: AMOUNT_DECIMALS,
+    amount_atoms: amountAtoms,
+    amount_decimal: safeFormatAtoms(amountAtoms),
+    reason: raw.reason ?? "",
+    created_at: raw.created_at,
   };
 }
 
@@ -275,20 +309,57 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
     const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
     if (!project.gatewaySynced) {
-      return c.json({
-        project_id: project.id,
-        currency: project.currency,
-        synced: false,
-        available_atoms: "0",
-        reserved_atoms: "0",
-        spent_atoms: "0",
-        debt_atoms: "0",
-        credit_limit_atoms: "0",
-        freeze_reason: null,
-      });
+      return c.json(
+        enrichWalletDecimals({
+          project_id: project.id,
+          currency: project.currency,
+          synced: false,
+          policy: "GIFT_FIRST",
+          available_atoms: "0",
+          reserved_atoms: "0",
+          spent_atoms: "0",
+          expired_atoms: "0",
+          debt_atoms: "0",
+          credit_limit_atoms: "0",
+          credit_reserved_atoms: "0",
+          manual_frozen: false,
+          freeze_reason: null,
+          lots: [],
+        }),
+      );
     }
-    const wallet = await deps.gateway.getWallet(project.gatewayProjectId, project.currency);
-    return c.json({ ...wallet, synced: true });
+    const wallet = await deps.gateway.getWallet(project.gatewayProjectId, project.currency, true);
+    return c.json(enrichWalletDecimals({ ...wallet, synced: true }));
+  });
+
+  app.get("/projects/:projectId/transactions", auth, async (c) => {
+    const user = c.get("user");
+    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const { limit, offset } = parseLimitOffset(c, 50, 200);
+    if (!project.gatewaySynced) {
+      return c.json({ scale: AMOUNT_DECIMALS, items: [], total: 0, limit, offset });
+    }
+    const rawKind = c.req.query("kind");
+    if (rawKind && !["CREDIT", "REFUND", "ADJUST"].includes(rawKind)) {
+      throw new GatewayError(400, "validation_error", "kind must be CREDIT, REFUND, or ADJUST");
+    }
+    const raw = (await deps.gateway.listFundingOperations({
+      side: "CUSTOMER",
+      project_id: project.gatewayProjectId,
+      kind: rawKind,
+      from: c.req.query("from"),
+      to: c.req.query("to"),
+      limit: String(limit),
+      offset: String(offset),
+    })) as { items?: Record<string, unknown>[]; total?: number; limit?: number; offset?: number };
+    return c.json({
+      scale: AMOUNT_DECIMALS,
+      items: (raw.items ?? []).map(sanitizeCustomerTransaction),
+      total: raw.total ?? 0,
+      limit: raw.limit ?? limit,
+      offset: raw.offset ?? offset,
+    });
   });
 
   app.get("/projects/:projectId/charges", auth, async (c) => {

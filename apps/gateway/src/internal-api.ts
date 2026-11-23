@@ -751,12 +751,44 @@ const adjustChargeSchema = z
   })
   .strict();
 
+const adjustWalletSchema = z
+  .object({
+    currency: currencySchema.default("USD"),
+    external_ref: z.string().min(1).max(200),
+    delta_atoms: signedAtomsSchema,
+    lot_kind: z.enum(["CASH", "GRANT"]).optional(),
+    force_debt: z.boolean().optional(),
+    reason: z.string().min(1).max(500),
+    actor: z.string().min(1).max(120).optional(),
+  })
+  .strict();
+
+const setWalletFreezeSchema = z
+  .object({
+    currency: currencySchema.default("USD"),
+    frozen: z.boolean(),
+    reason: z.string().min(1).max(500),
+    actor: z.string().min(1).max(120).optional(),
+  })
+  .strict();
+
 const rechargeSupplierSchema = z
   .object({
     currency: currencySchema.default("USD"),
     external_ref: z.string().min(1).max(200),
     amount_atoms: positiveAtomsSchema,
     reason: z.string().max(500).optional(),
+  })
+  .strict();
+
+const adjustSupplierBalanceSchema = z
+  .object({
+    currency: currencySchema.default("USD"),
+    external_ref: z.string().min(1).max(200),
+    delta_atoms: signedAtomsSchema,
+    allow_negative: z.boolean().optional(),
+    reason: z.string().min(1).max(500),
+    actor: z.string().min(1).max(120).optional(),
   })
   .strict();
 
@@ -1006,6 +1038,9 @@ export function createInternalApi(deps: {
         500,
       );
     }
+    if (err instanceof DomainError && ["not_found", "wallet_not_found"].includes(err.code)) {
+      return c.json({ error: { code: err.code, message: err.message } }, 404);
+    }
     if (
       err instanceof DomainError &&
       [
@@ -1014,6 +1049,10 @@ export function createInternalApi(deps: {
         "stale_revision",
         "price_version_conflict",
         "reconcile_required_conflict",
+        "insufficient_balance",
+        "credit_limit_exceeded",
+        "supplier_insufficient_balance",
+        "adjustment_conflict",
       ].includes(err.code)
     ) {
       return c.json({ error: { code: err.code, message: err.message } }, 409);
@@ -1754,10 +1793,52 @@ export function createInternalApi(deps: {
     },
   );
 
+  jsonRoute(
+    "POST",
+    "/internal/v1/wallets/:projectId/adjustments",
+    "finance",
+    adjustWalletSchema,
+    async (c, body) => {
+      const projectId = parseUuid(c.req.param("projectId"), "projectId");
+      const res = await deps.ledger.adjustWallet({
+        project_id: projectId,
+        currency: body.currency,
+        external_ref: body.external_ref,
+        delta_atoms: body.delta_atoms,
+        ...(body.lot_kind ? { lot_kind: body.lot_kind as LotKind } : {}),
+        ...(body.force_debt !== undefined ? { force_debt: body.force_debt } : {}),
+        reason: body.reason,
+        actor: resolutionActor(c, body.actor),
+      });
+      return c.json(res);
+    },
+  );
+
+  jsonRoute(
+    "POST",
+    "/internal/v1/wallets/:projectId/freeze",
+    "finance",
+    setWalletFreezeSchema,
+    async (c, body) => {
+      const projectId = parseUuid(c.req.param("projectId"), "projectId");
+      const res = await deps.ledger.setWalletFreeze({
+        project_id: projectId,
+        currency: body.currency,
+        frozen: body.frozen,
+        reason: body.reason,
+        actor: resolutionActor(c, body.actor),
+      });
+      return c.json(res);
+    },
+  );
+
   route("GET", "/internal/v1/wallets/:projectId", "auditor", async (c) => {
     const projectId = parseUuid(c.req.param("projectId"), "projectId");
     const currency = parseBody(currencySchema, c.req.query("currency") ?? "USD");
-    const wallet = await deps.ledger.getWallet(projectId, currency);
+    const includeLots = c.req.query("include_lots") === "true";
+    const wallet = includeLots
+      ? await deps.ledger.getWalletWithLots(projectId, currency)
+      : await deps.ledger.getWallet(projectId, currency);
     if (!wallet) return c.json({ error: { code: "not_found", message: "Wallet not found" } }, 404);
     return c.json(wallet);
   });
@@ -1810,6 +1891,29 @@ export function createInternalApi(deps: {
         amount_atoms: body.amount_atoms,
         ...(body.reason ? { reason: body.reason } : {}),
       });
+      return c.json(res);
+    },
+  );
+
+  jsonRoute(
+    "POST",
+    "/internal/v1/upstream-accounts/:accountId/adjustments",
+    "finance",
+    adjustSupplierBalanceSchema,
+    async (c, body) => {
+      const accountId = parseUuid(c.req.param("accountId"), "accountId");
+      const res = await deps.ledger.adjustSupplierBalance({
+        account_id: accountId,
+        currency: body.currency,
+        external_ref: body.external_ref,
+        delta_atoms: body.delta_atoms,
+        ...(body.allow_negative !== undefined ? { allow_negative: body.allow_negative } : {}),
+        reason: body.reason,
+        actor: resolutionActor(c, body.actor),
+      });
+      if (res.config_epoch !== undefined) {
+        await onConfigUpdated(res.config_epoch);
+      }
       return c.json(res);
     },
   );
@@ -1934,6 +2038,53 @@ export function createInternalApi(deps: {
         : {}),
       ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
       ...(offset !== undefined && Number.isFinite(offset) ? { offset } : {}),
+    });
+    return c.json(res);
+  });
+
+  route("GET", "/internal/v1/funding-operations", "auditor", async (c) => {
+    const side = c.req.query("side");
+    const entityId = c.req.query("entity_id");
+    const projectId = c.req.query("project_id");
+    const accountId = c.req.query("account_id");
+    const kind = c.req.query("kind");
+    const currency = c.req.query("currency");
+    const from = c.req.query("from");
+    const to = c.req.query("to");
+    const limit = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
+    const offset = c.req.query("offset") ? Number(c.req.query("offset")) : undefined;
+    const res = await deps.queries.listFundingOperations({
+      ...(side ? { side: parseBody(z.enum(["CUSTOMER", "SUPPLIER"]), side) } : {}),
+      ...(entityId ? { entity_id: parseUuid(entityId, "entity_id") } : {}),
+      ...(projectId ? { project_id: parseUuid(projectId, "project_id") } : {}),
+      ...(accountId ? { account_id: parseUuid(accountId, "account_id") } : {}),
+      ...(kind
+        ? {
+            kind: parseBody(
+              z.enum(["CREDIT", "REFUND", "ADJUST", "SUPPLIER_RECHARGE", "SUPPLIER_ADJUST"]),
+              kind,
+            ),
+          }
+        : {}),
+      ...(currency ? { currency: parseBody(currencySchema, currency) } : {}),
+      ...(from ? { from } : {}),
+      ...(to ? { to } : {}),
+      ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+      ...(offset !== undefined && Number.isFinite(offset) ? { offset } : {}),
+    });
+    return c.json(res);
+  });
+
+  route("GET", "/internal/v1/finance/summary", "auditor", async (c) => {
+    const projectId = c.req.query("project_id");
+    const currency = c.req.query("currency");
+    const from = c.req.query("from");
+    const to = c.req.query("to");
+    const res = await deps.queries.getFinanceSummary({
+      ...(projectId ? { project_id: parseUuid(projectId, "project_id") } : {}),
+      ...(currency ? { currency: parseBody(currencySchema, currency) } : {}),
+      ...(from ? { from } : {}),
+      ...(to ? { to } : {}),
     });
     return c.json(res);
   });

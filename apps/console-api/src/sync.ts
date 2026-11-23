@@ -5,6 +5,7 @@ import {
   apiKeyRecords,
   channels,
   modelCatalog,
+  platformCreditDefaults,
   priceVersionSnapshots,
   pricingOverrides,
   pricingTemplates,
@@ -91,6 +92,7 @@ export class ConsoleSyncEngine {
           enabled: proj.enabled,
           source_revision: targetRev,
         });
+        const wasSynced = proj.gatewaySynced;
         const acceptedRev = Math.max(targetRev, res.source_revision ?? targetRev);
         const [updated] = await this.orm
           .update(projects)
@@ -103,6 +105,27 @@ export class ConsoleSyncEngine {
           })
           .where(eq(projects.id, proj.id))
           .returning();
+        if (!wasSynced) {
+          const [defaults] = await this.orm
+            .select()
+            .from(platformCreditDefaults)
+            .where(eq(platformCreditDefaults.id, 1))
+            .limit(1);
+          if (
+            defaults &&
+            (defaults.defaultCreditLimitAtoms !== "0" ||
+              defaults.defaultWalletPolicy !== "GIFT_FIRST")
+          ) {
+            await this.gateway
+              .configureCreditPolicy(proj.gatewayProjectId, {
+                currency: proj.currency,
+                expected_version: "0",
+                credit_limit_atoms: defaults.defaultCreditLimitAtoms,
+                policy: defaults.defaultWalletPolicy,
+              })
+              .catch(() => undefined);
+          }
+        }
         return updated ?? proj;
       } catch (err) {
         if (isStaleRevisionError(err)) {

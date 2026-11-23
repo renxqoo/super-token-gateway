@@ -597,12 +597,65 @@ export type AdjustChargeInput = {
   reason: string;
 };
 
+export type AdjustWalletInput = {
+  project_id: string;
+  currency: string;
+  external_ref: string;
+  delta_atoms: string;
+  lot_kind?: LotKind;
+  force_debt?: boolean;
+  reason: string;
+  actor?: string;
+};
+
+export type AdjustWalletResult = {
+  operation_id: string;
+  wallet_id: string;
+  replayed: boolean;
+  delta_atoms: string;
+  lot_id: string | null;
+  funded_atoms: string;
+  debt_delta_atoms: string;
+  available_atoms: string;
+  debt_atoms: string;
+  freeze_reason: string | null;
+  debt_collected_charges: number;
+};
+
+export type SetWalletFreezeInput = {
+  project_id: string;
+  currency: string;
+  frozen: boolean;
+  reason: string;
+  actor?: string;
+};
+
 export type RechargeSupplierInput = {
   account_id: string;
   currency: string;
   external_ref: string;
   amount_atoms: string;
   reason?: string;
+};
+
+export type AdjustSupplierBalanceInput = {
+  account_id: string;
+  currency: string;
+  external_ref: string;
+  delta_atoms: string;
+  allow_negative?: boolean;
+  reason: string;
+  actor?: string;
+};
+
+export type AdjustSupplierBalanceResult = {
+  operation_id: string;
+  replayed: boolean;
+  delta_atoms: string;
+  total_balance_atoms: string;
+  reserved_atoms: string;
+  account_state: "ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED";
+  config_epoch?: number;
 };
 
 export type ResolveRequestInput = {
@@ -634,6 +687,85 @@ export type WalletSnapshot = {
   freeze_reason: string | null;
 };
 
+export type WalletLotSnapshot = {
+  id: string;
+  wallet_id: string;
+  external_ref: string;
+  kind: LotKind;
+  priority: number;
+  models: string[];
+  operations: string[];
+  expires_at: string | null;
+  issued_atoms: string;
+  available_atoms: string;
+  reserved_atoms: string;
+  spent_atoms: string;
+  expired_atoms: string;
+  created_at: string;
+};
+
+export type WalletWithLotsSnapshot = WalletSnapshot & {
+  lots: WalletLotSnapshot[];
+};
+
+export type FundingOperationRecord = {
+  id: string;
+  side: "CUSTOMER" | "SUPPLIER";
+  entity_id: string;
+  project_id: string | null;
+  wallet_id: string | null;
+  charge_id: string | null;
+  account_id: string | null;
+  kind: "CREDIT" | "REFUND" | "ADJUST" | "SUPPLIER_RECHARGE" | "SUPPLIER_ADJUST";
+  external_ref: string;
+  amount_atoms: string;
+  currency: string;
+  reason: string;
+  payload: Record<string, unknown>;
+  receipt: Record<string, unknown>;
+  created_at: string;
+};
+
+export type FinanceSummaryCurrencyRow = {
+  currency: string;
+  charge_count: number;
+  moderation_absorbed_count: number;
+  customer_billed_atoms: string;
+  customer_funded_atoms: string;
+  customer_debt_atoms: string;
+  customer_refunded_atoms: string;
+  net_customer_revenue_atoms: string;
+  supplier_cost_atoms: string;
+  gross_margin_atoms: string;
+  cash_topup_atoms: string;
+  grant_issued_atoms: string;
+  customer_adjustment_net_atoms: string;
+  supplier_recharge_atoms: string;
+  supplier_adjustment_net_atoms: string;
+};
+
+export type FinanceSummaryDimensionRow = {
+  key: string;
+  currency: string;
+  charge_count: number;
+  customer_billed_atoms: string;
+  customer_refunded_atoms: string;
+  net_customer_revenue_atoms: string;
+  supplier_cost_atoms: string;
+  gross_margin_atoms: string;
+};
+
+export type FinanceSummaryReport = {
+  from: string | null;
+  to: string | null;
+  project_id: string | null;
+  currency: string | null;
+  by_currency: FinanceSummaryCurrencyRow[];
+  by_model: FinanceSummaryDimensionRow[];
+  by_project: FinanceSummaryDimensionRow[];
+  by_channel: FinanceSummaryDimensionRow[];
+};
+
 export type OutboxEventRecord = {
   seq: string;
   event_id: string;
@@ -650,6 +782,8 @@ export type ConservationAudit = {
   broken_lots: number;
   wallet_mismatches: number;
   reservation_mismatches: number;
+  customer_ledger_mismatches: number;
+  supplier_ledger_mismatches: number;
   open_holds: number;
   unknown_holds: number;
 };

@@ -271,6 +271,8 @@ test("G1.1 exact rational pricing, multi-lot priority, and expired hold surplus 
       broken_lots: 0,
       wallet_mismatches: 0,
       reservation_mismatches: 0,
+      customer_ledger_mismatches: 0,
+      supplier_ledger_mismatches: 0,
       open_holds: 0,
       unknown_holds: 0,
     });
@@ -503,6 +505,8 @@ test("G1.3 100 concurrent micro-batched holds on one single hot wallet have zero
       broken_lots: 0,
       wallet_mismatches: 0,
       reservation_mismatches: 0,
+      customer_ledger_mismatches: 0,
+      supplier_ledger_mismatches: 0,
       open_holds: 0,
       unknown_holds: 0,
     });
@@ -922,6 +926,8 @@ test("G1.7 sharded wallet & supplier leases settle 200 concurrent requests via f
       broken_lots: 0,
       wallet_mismatches: 0,
       reservation_mismatches: 0,
+      customer_ledger_mismatches: 0,
+      supplier_ledger_mismatches: 0,
       open_holds: 0,
       unknown_holds: 0,
     });
@@ -1149,6 +1155,8 @@ test("G1.8 expired lot inside lease never resurrects and Worker recovers dead no
       broken_lots: 0,
       wallet_mismatches: 0,
       reservation_mismatches: 0,
+      customer_ledger_mismatches: 0,
+      supplier_ledger_mismatches: 0,
       open_holds: 0,
       unknown_holds: 0,
     });

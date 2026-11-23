@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { GatewayError, pricingSchema } from "@gateway/contracts";
-import type { Pricing } from "@gateway/kernel";
+import { AMOUNT_DECIMALS, type Pricing } from "@gateway/kernel";
 import { maskSecret, recordAuditLog } from "../auth.ts";
 import {
   channels,
@@ -21,6 +21,11 @@ import {
   parseLimitOffset,
   parseUuid,
   positiveAtomsSchema,
+  positiveDecimalSchema,
+  resolveAtomsAmount,
+  safeFormatAtoms,
+  signedAtomsSchema,
+  signedDecimalSchema,
   type ConsoleDeps,
   type ConsoleEnv,
 } from "./shared.ts";
@@ -57,8 +62,20 @@ const rechargeSupplierSchema = z
   .object({
     currency: currencySchema.default("USD"),
     external_ref: z.string().min(1).max(200),
-    amount_atoms: positiveAtomsSchema,
+    amount_atoms: positiveAtomsSchema.optional(),
+    amount_decimal: positiveDecimalSchema.optional(),
     reason: z.string().max(500).optional(),
+  })
+  .strict();
+
+const adjustSupplierSchema = z
+  .object({
+    currency: currencySchema.default("USD"),
+    external_ref: z.string().min(1).max(200),
+    delta_atoms: signedAtomsSchema.optional(),
+    delta_decimal: signedDecimalSchema.optional(),
+    allow_negative: z.boolean().optional(),
+    reason: z.string().min(1).max(500),
   })
   .strict();
 
@@ -389,11 +406,16 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
     const actor = c.get("user");
     const id = parseUuid(c.req.param("id"), "id");
     const body = await parseJsonBody(c, rechargeSupplierSchema);
+    const amountAtoms = resolveAtomsAmount(body.amount_atoms, body.amount_decimal, {
+      field: "amount",
+      allowNegative: false,
+      allowZero: false,
+    });
     await deps.sync.syncUpstreamAccount(id, { force: false, includeState: false });
     const res = await deps.gateway.rechargeSupplier(id, {
       currency: body.currency,
       external_ref: body.external_ref,
-      amount_atoms: body.amount_atoms,
+      amount_atoms: amountAtoms,
       ...(body.reason ? { reason: body.reason } : {}),
     });
     await recordAuditLog(deps.orm, {
@@ -401,15 +423,76 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
       action: "admin.upstream_account.recharge",
       targetType: "upstream_account",
       targetId: id,
-      metadata: { amount_atoms: body.amount_atoms, external_ref: body.external_ref },
+      metadata: {
+        currency: body.currency,
+        amount_atoms: amountAtoms,
+        external_ref: body.external_ref,
+      },
     });
-    return c.json(res);
+    return c.json({
+      ...res,
+      scale: AMOUNT_DECIMALS,
+      total_balance_decimal: safeFormatAtoms(res.total_balance_atoms),
+    });
+  });
+
+  app.post("/upstream-accounts/:id/adjustments", async (c) => {
+    const actor = c.get("user");
+    const id = parseUuid(c.req.param("id"), "id");
+    const body = await parseJsonBody(c, adjustSupplierSchema);
+    const deltaAtoms = resolveAtomsAmount(body.delta_atoms, body.delta_decimal, {
+      field: "delta",
+      allowNegative: true,
+      allowZero: false,
+    });
+    await deps.sync.syncUpstreamAccount(id, { force: false, includeState: false });
+    const res = await deps.gateway.adjustSupplierBalance(id, {
+      currency: body.currency,
+      external_ref: body.external_ref,
+      delta_atoms: deltaAtoms,
+      ...(body.allow_negative !== undefined ? { allow_negative: body.allow_negative } : {}),
+      reason: body.reason,
+      actor: actor.email.slice(0, 120),
+    });
+    await deps.orm
+      .update(upstreamAccounts)
+      .set({ state: res.account_state, updatedAt: sql`now()` })
+      .where(eq(upstreamAccounts.id, id));
+    await recordAuditLog(deps.orm, {
+      actor,
+      action: "admin.upstream_account.adjustment",
+      targetType: "upstream_account",
+      targetId: id,
+      metadata: {
+        currency: body.currency,
+        delta_atoms: deltaAtoms,
+        allow_negative: Boolean(body.allow_negative),
+        account_state: res.account_state,
+        external_ref: body.external_ref,
+        reason: body.reason,
+      },
+    });
+    return c.json({
+      ...res,
+      scale: AMOUNT_DECIMALS,
+      delta_decimal: safeFormatAtoms(res.delta_atoms),
+      total_balance_decimal: safeFormatAtoms(res.total_balance_atoms),
+      reserved_decimal: safeFormatAtoms(res.reserved_atoms),
+    });
   });
 
   app.get("/upstream-accounts/:id/balance", async (c) => {
     const id = parseUuid(c.req.param("id"), "id");
     const currency = c.req.query("currency") ?? "USD";
-    return c.json(await deps.gateway.getSupplierBalance(id, currency));
+    const bal = await deps.gateway.getSupplierBalance(id, currency);
+    return c.json({
+      ...bal,
+      currency,
+      scale: AMOUNT_DECIMALS,
+      balance_decimal: safeFormatAtoms(bal.balance_atoms),
+      reserved_decimal: safeFormatAtoms(bal.reserved_atoms),
+      spent_decimal: safeFormatAtoms(bal.spent_atoms),
+    });
   });
 
   app.get("/channels", async (c) => {

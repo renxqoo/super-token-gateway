@@ -11,6 +11,7 @@ import {
   numeric,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -459,6 +460,22 @@ export const consoleAuditLogs = pgTable("console_audit_logs", {
   createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
+export const platformCreditDefaults = pgTable("platform_credit_defaults", {
+  id: smallint("id").primaryKey(),
+  defaultCreditLimitAtoms: numeric("default_credit_limit_atoms", {
+    precision: 38,
+    scale: 0,
+  })
+    .notNull()
+    .default("0"),
+  defaultWalletPolicy: text("default_wallet_policy")
+    .$type<"GIFT_FIRST" | "CASH_FIRST" | "EARLIEST_EXPIRY">()
+    .notNull()
+    .default("GIFT_FIRST"),
+  updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+});
+
 export const consoleSchema = {
   users,
   sessions,
@@ -481,6 +498,7 @@ export const consoleSchema = {
   alertEvalQueue,
   alertDeliveries,
   consoleAuditLogs,
+  platformCreditDefaults,
 };
 
 export function createConsoleDrizzle(db: SQL) {

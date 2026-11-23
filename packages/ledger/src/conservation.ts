@@ -29,6 +29,29 @@ export async function auditConservation(db: SQL): Promise<ConservationAudit> {
           FROM open_holds
           WHERE api_key_id IS NOT NULL AND key_reserved_atoms > 0
           GROUP BY api_key_id
+        ), customer_ledger AS (
+          SELECT entity_id AS wallet_id,
+            coalesce(sum(atoms) FILTER (WHERE account LIKE 'lot:%:available'), 0) AS lot_avail,
+            coalesce(sum(atoms) FILTER (WHERE account LIKE 'lot:%:expired'), 0) AS lot_expired,
+            coalesce(-sum(atoms) FILTER (WHERE account = 'system:receivable'), 0) AS debt
+          FROM public.ledger_entries
+          WHERE side = 'CUSTOMER'
+          GROUP BY entity_id
+        ), supplier_totals AS (
+          SELECT r.account_id, r.currency,
+            r.balance_atoms + coalesce(sum(c.balance_atoms), 0) AS balance_atoms,
+            r.spent_atoms + coalesce(sum(c.spent_atoms), 0) AS spent_atoms
+          FROM public.supplier_root_balances r
+          LEFT JOIN public.supplier_cells c
+            ON c.account_id = r.account_id AND c.currency = r.currency
+          GROUP BY r.account_id, r.currency, r.balance_atoms, r.spent_atoms
+        ), supplier_ledger AS (
+          SELECT entity_id AS account_id, currency,
+            coalesce(sum(atoms) FILTER (WHERE account = 'upstream:available'), 0) AS balance_atoms,
+            coalesce(sum(atoms) FILTER (WHERE account = 'upstream:expense'), 0) AS spent_atoms
+          FROM public.ledger_entries
+          WHERE side = 'SUPPLIER'
+          GROUP BY entity_id, currency
         )
         SELECT
           (SELECT count(*) FROM (
@@ -71,6 +94,18 @@ export async function auditConservation(db: SQL): Promise<ConservationAudit> {
             LEFT JOIN key_claims kc ON kc.api_key_id = k.id
             WHERE k.reserved_atoms <> coalesce(kc.reserved, 0)
           ) AS reservation_mismatches,
+          (SELECT count(*) FROM public.wallets w
+            FULL OUTER JOIN customer_ledger cl ON cl.wallet_id = w.id
+            WHERE coalesce(w.available_atoms + w.reserved_atoms, 0) <> coalesce(cl.lot_avail, 0)
+               OR coalesce(w.expired_atoms, 0) <> coalesce(cl.lot_expired, 0)
+               OR coalesce(w.debt_atoms, 0) <> coalesce(cl.debt, 0)
+          ) AS customer_ledger_mismatches,
+          (SELECT count(*) FROM supplier_totals st
+            FULL OUTER JOIN supplier_ledger sl
+              ON sl.account_id = st.account_id AND sl.currency = st.currency
+            WHERE coalesce(st.balance_atoms, 0) <> coalesce(sl.balance_atoms, 0)
+               OR coalesce(st.spent_atoms, 0) <> coalesce(sl.spent_atoms, 0)
+          ) AS supplier_ledger_mismatches,
           (SELECT count(*) FROM open_holds WHERE state = 'HELD') AS open_holds,
           (SELECT count(*) FROM open_holds WHERE state = 'UNKNOWN') AS unknown_holds
       `;
@@ -78,12 +113,23 @@ export async function auditConservation(db: SQL): Promise<ConservationAudit> {
   const brokenLots = Number(audit!.broken_lots);
   const walletMismatches = Number(audit!.wallet_mismatches);
   const reservationMismatches = Number(audit!.reservation_mismatches);
+  const customerLedgerMismatches = Number(audit!.customer_ledger_mismatches);
+  const supplierLedgerMismatches = Number(audit!.supplier_ledger_mismatches);
   return {
-    ok: unbalancedJournals + brokenLots + walletMismatches + reservationMismatches === 0,
+    ok:
+      unbalancedJournals +
+        brokenLots +
+        walletMismatches +
+        reservationMismatches +
+        customerLedgerMismatches +
+        supplierLedgerMismatches ===
+      0,
     unbalanced_journals: unbalancedJournals,
     broken_lots: brokenLots,
     wallet_mismatches: walletMismatches,
     reservation_mismatches: reservationMismatches,
+    customer_ledger_mismatches: customerLedgerMismatches,
+    supplier_ledger_mismatches: supplierLedgerMismatches,
     open_holds: Number(audit!.open_holds),
     unknown_holds: Number(audit!.unknown_holds),
   };

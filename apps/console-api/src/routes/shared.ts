@@ -2,7 +2,12 @@ import type { SQL } from "bun";
 import type { Context, MiddlewareHandler } from "hono";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
-import { operations } from "@gateway/kernel";
+import {
+  AMOUNT_DECIMALS,
+  formatAtomsToDecimal,
+  operations,
+  parseDecimalToAtoms,
+} from "@gateway/kernel";
 import {
   authenticateSession,
   normalizeAndValidateCidr,
@@ -37,7 +42,197 @@ export const currencySchema = z.string().regex(/^[A-Z]{3,8}$/);
 export const positiveAtomsSchema = z.string().regex(/^[1-9][0-9]{0,37}$/);
 export const nonNegativeAtomsSchema = z.string().regex(/^(0|[1-9][0-9]{0,37})$/);
 export const signedAtomsSchema = z.string().regex(/^-?[1-9][0-9]{0,37}$/);
+export const positiveDecimalSchema = z.string().regex(/^(0|[1-9][0-9]{0,19})(\.[0-9]{1,18})?$/);
+export const signedDecimalSchema = z.string().regex(/^-?(0|[1-9][0-9]{0,19})(\.[0-9]{1,18})?$/);
 export const operationEnum = z.enum(operations);
+
+export function resolveAtomsAmount(
+  atoms: string | undefined,
+  decimal: string | undefined,
+  options: { field: string; allowNegative?: boolean; allowZero?: boolean },
+): string {
+  if (atoms === undefined && decimal === undefined) {
+    throw new GatewayError(
+      400,
+      "validation_error",
+      `${options.field}_atoms or ${options.field}_decimal is required`,
+    );
+  }
+  let fromDecimal: string | undefined;
+  if (decimal !== undefined) {
+    try {
+      fromDecimal = parseDecimalToAtoms(decimal, {
+        ...(options.allowNegative !== undefined ? { allowNegative: options.allowNegative } : {}),
+        ...(options.allowZero !== undefined ? { allowZero: options.allowZero } : {}),
+      });
+    } catch (err) {
+      throw new GatewayError(
+        400,
+        "validation_error",
+        err instanceof Error ? err.message : `Invalid ${options.field}_decimal`,
+      );
+    }
+  }
+  if (atoms !== undefined && fromDecimal !== undefined && atoms !== fromDecimal) {
+    throw new GatewayError(
+      400,
+      "validation_error",
+      `${options.field}_atoms and ${options.field}_decimal disagree`,
+    );
+  }
+  return atoms ?? fromDecimal!;
+}
+
+export function safeFormatAtoms(value: unknown): string {
+  if (typeof value === "bigint") return formatAtomsToDecimal(value);
+  if (typeof value === "string" && /^-?(0|[1-9][0-9]{0,37})$/.test(value)) {
+    return formatAtomsToDecimal(value);
+  }
+  return formatAtomsToDecimal("0");
+}
+
+export function enrichWalletLotDecimals(lot: Record<string, unknown>) {
+  return {
+    ...lot,
+    scale: AMOUNT_DECIMALS,
+    issued_decimal: safeFormatAtoms(lot.issued_atoms),
+    available_decimal: safeFormatAtoms(lot.available_atoms),
+    reserved_decimal: safeFormatAtoms(lot.reserved_atoms),
+    spent_decimal: safeFormatAtoms(lot.spent_atoms),
+    expired_decimal: safeFormatAtoms(lot.expired_atoms),
+  };
+}
+
+export function enrichWalletDecimals(wallet: Record<string, unknown>) {
+  const lots = Array.isArray(wallet.lots)
+    ? (wallet.lots as Record<string, unknown>[]).map(enrichWalletLotDecimals)
+    : undefined;
+  return {
+    ...wallet,
+    scale: AMOUNT_DECIMALS,
+    available_decimal: safeFormatAtoms(wallet.available_atoms),
+    reserved_decimal: safeFormatAtoms(wallet.reserved_atoms),
+    spent_decimal: safeFormatAtoms(wallet.spent_atoms),
+    expired_decimal: safeFormatAtoms(wallet.expired_atoms),
+    debt_decimal: safeFormatAtoms(wallet.debt_atoms),
+    credit_limit_decimal: safeFormatAtoms(wallet.credit_limit_atoms),
+    credit_reserved_decimal: safeFormatAtoms(wallet.credit_reserved_atoms),
+    ...(lots !== undefined ? { lots } : {}),
+  };
+}
+
+export function enrichFundingOperationDecimals(op: Record<string, unknown>) {
+  return {
+    ...op,
+    scale: AMOUNT_DECIMALS,
+    amount_decimal: safeFormatAtoms(op.amount_atoms),
+  };
+}
+
+export function enrichAdminChargeDecimals(raw: Record<string, unknown>) {
+  const customerAtoms = String(raw.customerAtoms ?? raw.customer_atoms ?? "0");
+  const fundedAtoms = String(raw.fundedAtoms ?? raw.funded_atoms ?? "0");
+  const debtAtoms = String(raw.debtAtoms ?? raw.debt_atoms ?? "0");
+  const refundedAtoms = String(raw.refundedAtoms ?? raw.refunded_atoms ?? "0");
+  const supplierCostAtoms = String(raw.supplierCostAtoms ?? raw.supplier_cost_atoms ?? "0");
+  const netRevenue = BigInt(customerAtoms) - BigInt(refundedAtoms);
+  const grossMargin = netRevenue - BigInt(supplierCostAtoms);
+  return {
+    id: raw.id,
+    request_id: raw.requestId ?? raw.request_id,
+    project_id: raw.projectId ?? raw.project_id,
+    wallet_id: raw.walletId ?? raw.wallet_id,
+    api_key_id: raw.apiKeyId ?? raw.api_key_id ?? null,
+    channel_id: raw.channelId ?? raw.channel_id ?? null,
+    model: raw.model,
+    operation: raw.operation,
+    currency: raw.currency,
+    supplier_currency: raw.supplierCurrency ?? raw.supplier_currency ?? null,
+    billing_price_id: raw.billingPriceId ?? raw.billing_price_id,
+    cost_version_id: raw.costVersionId ?? raw.cost_version_id ?? null,
+    pricing_override_id: raw.pricingOverrideId ?? raw.pricing_override_id ?? null,
+    usage: raw.usage,
+    scale: AMOUNT_DECIMALS,
+    customer_atoms: customerAtoms,
+    customer_decimal: safeFormatAtoms(customerAtoms),
+    funded_atoms: fundedAtoms,
+    funded_decimal: safeFormatAtoms(fundedAtoms),
+    debt_atoms: debtAtoms,
+    debt_decimal: safeFormatAtoms(debtAtoms),
+    refunded_atoms: refundedAtoms,
+    refunded_decimal: safeFormatAtoms(refundedAtoms),
+    net_revenue_atoms: netRevenue.toString(),
+    net_revenue_decimal: safeFormatAtoms(netRevenue),
+    supplier_cost_atoms: supplierCostAtoms,
+    supplier_cost_decimal: safeFormatAtoms(supplierCostAtoms),
+    gross_margin_atoms: grossMargin.toString(),
+    gross_margin_decimal: safeFormatAtoms(grossMargin),
+    outcome: raw.outcome,
+    customer_journal_id: raw.customerJournalId ?? raw.customer_journal_id ?? null,
+    supplier_journal_id: raw.supplierJournalId ?? raw.supplier_journal_id ?? null,
+    created_at: raw.createdAt ?? raw.created_at,
+  };
+}
+
+export function enrichLedgerEntryDecimals(raw: Record<string, unknown>) {
+  const atoms = String(raw.atoms ?? "0");
+  return {
+    journal_id: raw.journalId ?? raw.journal_id,
+    ordinal: raw.ordinal,
+    created_at: raw.createdAt ?? raw.created_at,
+    side: raw.side,
+    entity_id: raw.entityId ?? raw.entity_id,
+    request_id: raw.requestId ?? raw.request_id ?? null,
+    reference: raw.reference,
+    kind: raw.kind,
+    currency: raw.currency,
+    account: raw.account,
+    scale: AMOUNT_DECIMALS,
+    atoms,
+    atoms_decimal: safeFormatAtoms(atoms),
+  };
+}
+
+export function enrichFinanceSummaryDecimals(report: Record<string, unknown>) {
+  const byCurrency = Array.isArray(report.by_currency)
+    ? (report.by_currency as Record<string, unknown>[]).map((r) => ({
+        ...r,
+        scale: AMOUNT_DECIMALS,
+        customer_billed_decimal: safeFormatAtoms(r.customer_billed_atoms),
+        customer_funded_decimal: safeFormatAtoms(r.customer_funded_atoms),
+        customer_debt_decimal: safeFormatAtoms(r.customer_debt_atoms),
+        customer_refunded_decimal: safeFormatAtoms(r.customer_refunded_atoms),
+        net_customer_revenue_decimal: safeFormatAtoms(r.net_customer_revenue_atoms),
+        supplier_cost_decimal: safeFormatAtoms(r.supplier_cost_atoms),
+        gross_margin_decimal: safeFormatAtoms(r.gross_margin_atoms),
+        cash_topup_decimal: safeFormatAtoms(r.cash_topup_atoms),
+        grant_issued_decimal: safeFormatAtoms(r.grant_issued_atoms),
+        customer_adjustment_net_decimal: safeFormatAtoms(r.customer_adjustment_net_atoms),
+        supplier_recharge_decimal: safeFormatAtoms(r.supplier_recharge_atoms),
+        supplier_adjustment_net_decimal: safeFormatAtoms(r.supplier_adjustment_net_atoms),
+      }))
+    : [];
+  const enrichDim = (list: unknown) =>
+    Array.isArray(list)
+      ? (list as Record<string, unknown>[]).map((r) => ({
+          ...r,
+          scale: AMOUNT_DECIMALS,
+          customer_billed_decimal: safeFormatAtoms(r.customer_billed_atoms),
+          customer_refunded_decimal: safeFormatAtoms(r.customer_refunded_atoms),
+          net_customer_revenue_decimal: safeFormatAtoms(r.net_customer_revenue_atoms),
+          supplier_cost_decimal: safeFormatAtoms(r.supplier_cost_atoms),
+          gross_margin_decimal: safeFormatAtoms(r.gross_margin_atoms),
+        }))
+      : [];
+  return {
+    ...report,
+    scale: AMOUNT_DECIMALS,
+    by_currency: byCurrency,
+    by_model: enrichDim(report.by_model),
+    by_project: enrichDim(report.by_project),
+    by_channel: enrichDim(report.by_channel),
+  };
+}
 const uuidSchema = z.uuid();
 
 export const cidrSchema = z

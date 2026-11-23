@@ -255,8 +255,34 @@ export class GatewayClient {
     );
   }
 
+  adjustSupplierBalance(
+    accountId: string,
+    input: {
+      currency: string;
+      external_ref: string;
+      delta_atoms: string;
+      allow_negative?: boolean;
+      reason: string;
+      actor?: string;
+    },
+  ) {
+    return this.request<{
+      operation_id: string;
+      replayed: boolean;
+      delta_atoms: string;
+      total_balance_atoms: string;
+      reserved_atoms: string;
+      account_state: "ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED";
+      config_epoch?: number;
+    }>("finance", "POST", `/internal/v1/upstream-accounts/${accountId}/adjustments`, input);
+  }
+
   getSupplierBalance(accountId: string, currency = "USD") {
-    return this.request<Record<string, unknown>>(
+    return this.request<{
+      balance_atoms: string;
+      reserved_atoms: string;
+      spent_atoms: string;
+    }>(
       "auditor",
       "GET",
       `/internal/v1/upstream-accounts/${accountId}/balance?currency=${encodeURIComponent(currency)}`,
@@ -422,11 +448,50 @@ export class GatewayClient {
     );
   }
 
-  getWallet(projectId: string, currency = "USD") {
+  adjustWallet(
+    projectId: string,
+    input: {
+      currency: string;
+      external_ref: string;
+      delta_atoms: string;
+      lot_kind?: "CASH" | "GRANT";
+      force_debt?: boolean;
+      reason: string;
+      actor?: string;
+    },
+  ) {
+    return this.request<Record<string, unknown>>(
+      "finance",
+      "POST",
+      `/internal/v1/wallets/${projectId}/adjustments`,
+      input,
+    );
+  }
+
+  setWalletFreeze(
+    projectId: string,
+    input: {
+      currency: string;
+      frozen: boolean;
+      reason: string;
+      actor?: string;
+    },
+  ) {
+    return this.request<Record<string, unknown>>(
+      "finance",
+      "POST",
+      `/internal/v1/wallets/${projectId}/freeze`,
+      input,
+    );
+  }
+
+  getWallet(projectId: string, currency = "USD", includeLots = false) {
+    const qs = new URLSearchParams({ currency });
+    if (includeLots) qs.set("include_lots", "true");
     return this.request<Record<string, unknown>>(
       "auditor",
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=${encodeURIComponent(currency)}`,
+      `/internal/v1/wallets/${projectId}?${qs.toString()}`,
     );
   }
 
@@ -479,6 +544,53 @@ export class GatewayClient {
     }
     const qs = sp.toString() ? `?${sp.toString()}` : "";
     return this.request<Record<string, unknown>>("auditor", "GET", `/internal/v1/charges${qs}`);
+  }
+
+  listFundingOperations(query: Record<string, string | undefined>) {
+    const sp = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== "") sp.set(k, v);
+    }
+    const qs = sp.toString() ? `?${sp.toString()}` : "";
+    return this.request<Record<string, unknown>>(
+      "auditor",
+      "GET",
+      `/internal/v1/funding-operations${qs}`,
+    );
+  }
+
+  listLedgerEntries(query: Record<string, string | undefined>) {
+    const sp = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== "") sp.set(k, v);
+    }
+    const qs = sp.toString() ? `?${sp.toString()}` : "";
+    return this.request<Record<string, unknown>>(
+      "auditor",
+      "GET",
+      `/internal/v1/ledger-entries${qs}`,
+    );
+  }
+
+  getRequestBilling(requestId: string) {
+    return this.request<Record<string, unknown>>(
+      "auditor",
+      "GET",
+      `/internal/v1/requests/${requestId}`,
+    );
+  }
+
+  getFinanceSummary(query: Record<string, string | undefined>) {
+    const sp = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== "") sp.set(k, v);
+    }
+    const qs = sp.toString() ? `?${sp.toString()}` : "";
+    return this.request<Record<string, unknown>>(
+      "auditor",
+      "GET",
+      `/internal/v1/finance/summary${qs}`,
+    );
   }
 
   listHolds(query: Record<string, string | undefined>) {
