@@ -45,6 +45,8 @@ export type GatewayConfig = {
   platformAbsorbMaxAtomsPerMinute?: string;
   businessWebhookUrl?: string;
   businessWebhookToken?: string;
+  maxActiveAsyncTasksPerProject?: number;
+  maxAutoRefundsPerProject24h?: number;
 };
 
 function parseCsv(value: string | undefined): string[] {
@@ -220,5 +222,13 @@ export function loadConfigFromEnv(
     ...(absorbAtoms ? { platformAbsorbMaxAtomsPerMinute: absorbAtoms } : {}),
     ...(env.BUSINESS_WEBHOOK_URL ? { businessWebhookUrl: env.BUSINESS_WEBHOOK_URL } : {}),
     ...(env.BUSINESS_WEBHOOK_TOKEN ? { businessWebhookToken: env.BUSINESS_WEBHOOK_TOKEN } : {}),
+    maxActiveAsyncTasksPerProject: intFromEnv(
+      env,
+      "MAX_ACTIVE_ASYNC_TASKS_PER_PROJECT",
+      10,
+      1,
+      1000,
+    ),
+    maxAutoRefundsPerProject24h: intFromEnv(env, "MAX_AUTO_REFUNDS_PER_PROJECT_24H", 5, 0, 1000),
   };
 }

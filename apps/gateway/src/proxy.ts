@@ -19,6 +19,7 @@ import type {
   ApiKeyRecord,
   CommitTerminalInput,
   ConfigSnapshot,
+  createAsyncTasksRepository,
   createLedgerEngine,
   ModelRecord,
   PluginAuditEntry,
@@ -72,6 +73,8 @@ import {
   type FastUpstreamResult,
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
+import { extractUpstreamTaskId, getAsyncTaskConfig } from "./async-tasks.ts";
+import { resolveEffectiveCustomerPrice } from "./pricing.ts";
 import {
   fastUuid,
   ProxyRuntimeState,
@@ -107,12 +110,14 @@ import {
 } from "./upstream.ts";
 
 type LedgerEngine = ReturnType<typeof createLedgerEngine>;
+type AsyncTasksRepo = ReturnType<typeof createAsyncTasksRepository>;
 type Transport = ReturnType<typeof createTransport>;
 
 export type ProxyDependencies = {
   config: GatewayConfig;
   snapshot: SnapshotManager;
   ledger: LedgerEngine;
+  asyncTasks?: AsyncTasksRepo;
   router: SmartRouter;
   cluster: ClusterCoordinator;
   transport: Transport;
@@ -360,7 +365,9 @@ function resolveOutputBound(body: Record<string, unknown>, model: ModelRecord): 
 }
 
 function mapHoldError(code: string, message: string): GatewayError {
-  if (code === "insufficient_balance") return new GatewayError(402, code, message);
+  if (code === "insufficient_balance" || code === "key_spend_limit_exceeded") {
+    return new GatewayError(402, code, message);
+  }
   if (code === "wallet_frozen" || code === "wallet_not_found") {
     return new GatewayError(403, code, message);
   }
@@ -745,6 +752,21 @@ export async function handleInferenceRequest(
       throw new GatewayError(404, "model_not_found", "Model or operation is unavailable");
     }
 
+    if (operation === "videos" && deps.asyncTasks) {
+      const activeTasks = await deps.asyncTasks.countActiveTasks(project.id);
+      const maxActive = Math.min(
+        project.concurrency,
+        deps.config.maxActiveAsyncTasksPerProject ?? 10,
+      );
+      if (activeTasks >= maxActive) {
+        throw new GatewayError(
+          429,
+          "rate_limit_async_tasks",
+          "Too many concurrent active async video tasks for this project",
+        );
+      }
+    }
+
     rejectUnmeteredTools(clientBody, operation);
 
     const isStream =
@@ -1079,14 +1101,22 @@ export async function handleInferenceRequest(
       const preparedInput = idx === 0 ? firstInput : await prepareRouteInput(cand);
       if (preparedInput instanceof Response) return preparedInput;
       const { measurement } = preparedInput;
+      const effectiveBilling = resolveEffectiveCustomerPrice(
+        snap,
+        project.id,
+        model.name,
+        operation,
+        cand.billingPrice,
+      );
       let customerAtoms: string;
       let supplierAtoms: string;
       try {
         customerAtoms = state.quoteForPrice(
           snap.epoch,
-          cand.billingPrice,
+          effectiveBilling.price,
           measurement,
           outputBound,
+          effectiveBilling.cacheKey,
         );
         supplierAtoms = state.quoteForPrice(snap.epoch, cand.costPrice, measurement, outputBound);
       } catch (err) {
@@ -1110,6 +1140,11 @@ export async function handleInferenceRequest(
         request_id: requestId,
         attempt_id: attemptId,
         project_id: project.id,
+        api_key_id: key.id,
+        enforce_key_spend_limit: key.spend_limit_atoms !== null,
+        pricing_override_id: effectiveBilling.overrideId,
+        discount_numerator: effectiveBilling.discountNumerator,
+        discount_denominator: effectiveBilling.discountDenominator,
         currency: project.currency,
         operation,
         model: model.name,
@@ -1178,6 +1213,13 @@ export async function handleInferenceRequest(
     ) {
       const entry = selected[cursor]!;
       const cand = entry.route;
+      const candBilling = resolveEffectiveCustomerPrice(
+        snap,
+        project.id,
+        model.name,
+        operation,
+        cand.billingPrice,
+      );
       logChannel = cand.channel.name;
       currentAttemptDispatched = false;
       const attemptInput = cursor === activeIndex ? activeInput : await prepareRouteInput(cand);
@@ -1203,9 +1245,10 @@ export async function handleInferenceRequest(
         try {
           nextCustomerAtoms = state.quoteForPrice(
             snap.epoch,
-            cand.billingPrice,
+            candBilling.price,
             measurement,
             outputBound,
+            candBilling.cacheKey,
           );
           nextSupplierAtoms = state.quoteForPrice(
             snap.epoch,
@@ -1638,7 +1681,7 @@ export async function handleInferenceRequest(
             releaseUnusedProbes(cursor + 1);
             const usage = buildUsageForOperation(
               operation,
-              cand.billingPrice.basis,
+              candBilling.price.basis,
               cand.costPrice.basis,
               undefined,
             );
@@ -1655,11 +1698,15 @@ export async function handleInferenceRequest(
               request_id: requestId,
               selected_attempt_id: activeAttemptId,
               channel_id: cand.channel.id,
-              billing_price_id: cand.billingPrice.id,
+              billing_price_id: candBilling.price.id,
               cost_version_id: cand.costPrice.id,
+              api_key_id: key.id,
+              pricing_override_id: candBilling.overrideId,
+              discount_numerator: candBilling.discountNumerator,
+              discount_denominator: candBilling.discountDenominator,
               usage,
-              billing_pricing: state.pricingOf(cand.billingPrice),
-              billing_basis: cand.billingPrice.basis,
+              billing_pricing: state.pricingOf(candBilling.price),
+              billing_basis: candBilling.price.basis,
               ...(chars !== undefined ? { input_characters: String(chars) } : {}),
               supplier_basis: cand.costPrice.basis,
               supplier_pricing: state.pricingOf(cand.costPrice),
@@ -1940,7 +1987,7 @@ export async function handleInferenceRequest(
           if (!retryFromLogicalError) {
             const usage = buildUsageForOperation(
               operation,
-              cand.billingPrice.basis,
+              candBilling.price.basis,
               cand.costPrice.basis,
               rawUsage,
             );
@@ -2005,11 +2052,15 @@ export async function handleInferenceRequest(
               request_id: requestId,
               selected_attempt_id: activeAttemptId,
               channel_id: cand.channel.id,
-              billing_price_id: cand.billingPrice.id,
+              billing_price_id: candBilling.price.id,
               cost_version_id: cand.costPrice.id,
+              api_key_id: key.id,
+              pricing_override_id: candBilling.overrideId,
+              discount_numerator: candBilling.discountNumerator,
+              discount_denominator: candBilling.discountDenominator,
               usage,
-              billing_pricing: state.pricingOf(cand.billingPrice),
-              billing_basis: cand.billingPrice.basis,
+              billing_pricing: state.pricingOf(candBilling.price),
+              billing_basis: candBilling.price.basis,
               ...(chars !== undefined ? { input_characters: String(chars) } : {}),
               supplier_basis: cand.costPrice.basis,
               supplier_pricing: state.pricingOf(cand.costPrice),
@@ -2020,6 +2071,36 @@ export async function handleInferenceRequest(
             });
             if (responseBlocked && !isContentDecision) {
               deps.metrics.recordPlatformAbsorb(project.id, commitRes.supplier_cost_atoms);
+            }
+
+            if (operation === "videos" && deps.asyncTasks && !responseBlocked) {
+              const asyncCfg = getAsyncTaskConfig(snap, cand.channel);
+              const upstreamTaskId = extractUpstreamTaskId(clientJson, asyncCfg);
+              if (upstreamTaskId) {
+                const taskId = `vid_${fastUuid().replaceAll("-", "")}`;
+                const taskRec = await deps.asyncTasks
+                  .createTask({
+                    id: taskId,
+                    request_id: requestId,
+                    charge_id: commitRes.charge_id,
+                    project_id: project.id,
+                    api_key_id: key.id,
+                    channel_id: cand.channel.id,
+                    model: model.name,
+                    operation,
+                    upstream_task_id: upstreamTaskId,
+                    status: "QUEUED",
+                    result_json: clientJson,
+                  })
+                  .catch(() => null);
+                if (taskRec) {
+                  clientJson = {
+                    ...clientJson,
+                    gateway_task_id: taskRec.id,
+                    ...(typeof clientJson.id !== "string" ? { id: taskRec.id } : {}),
+                  };
+                }
+              }
             }
 
             holdFinalized = true;
@@ -2346,7 +2427,7 @@ export async function handleInferenceRequest(
               }
               const usage = buildUsageForOperation(
                 operation,
-                cand.billingPrice.basis,
+                candBilling.price.basis,
                 cand.costPrice.basis,
                 observedUsage,
               );
@@ -2372,11 +2453,15 @@ export async function handleInferenceRequest(
                 request_id: requestId,
                 selected_attempt_id: activeAttemptId,
                 channel_id: cand.channel.id,
-                billing_price_id: cand.billingPrice.id,
+                billing_price_id: candBilling.price.id,
                 cost_version_id: cand.costPrice.id,
+                api_key_id: key.id,
+                pricing_override_id: candBilling.overrideId,
+                discount_numerator: candBilling.discountNumerator,
+                discount_denominator: candBilling.discountDenominator,
                 usage,
-                billing_pricing: state.pricingOf(cand.billingPrice),
-                billing_basis: cand.billingPrice.basis,
+                billing_pricing: state.pricingOf(candBilling.price),
+                billing_basis: candBilling.price.basis,
                 ...(chars !== undefined ? { input_characters: String(chars) } : {}),
                 supplier_basis: cand.costPrice.basis,
                 supplier_pricing: state.pricingOf(cand.costPrice),
@@ -2649,11 +2734,15 @@ export async function handleInferenceRequest(
                     request_id: requestId,
                     selected_attempt_id: activeAttemptId,
                     channel_id: cand.channel.id,
-                    billing_price_id: cand.billingPrice.id,
+                    billing_price_id: candBilling.price.id,
                     cost_version_id: cand.costPrice.id,
+                    api_key_id: key.id,
+                    pricing_override_id: candBilling.overrideId,
+                    discount_numerator: candBilling.discountNumerator,
+                    discount_denominator: candBilling.discountDenominator,
                     usage: modUsage,
-                    billing_pricing: state.pricingOf(cand.billingPrice),
-                    billing_basis: cand.billingPrice.basis,
+                    billing_pricing: state.pricingOf(candBilling.price),
+                    billing_basis: candBilling.price.basis,
                     ...(chars !== undefined ? { input_characters: String(chars) } : {}),
                     supplier_basis: cand.costPrice.basis,
                     supplier_pricing: state.pricingOf(cand.costPrice),
@@ -2702,7 +2791,7 @@ export async function handleInferenceRequest(
 
               const usage = buildUsageForOperation(
                 operation,
-                cand.billingPrice.basis,
+                candBilling.price.basis,
                 cand.costPrice.basis,
                 wasmUsage,
               );
@@ -2735,11 +2824,15 @@ export async function handleInferenceRequest(
                 request_id: requestId,
                 selected_attempt_id: activeAttemptId,
                 channel_id: cand.channel.id,
-                billing_price_id: cand.billingPrice.id,
+                billing_price_id: candBilling.price.id,
                 cost_version_id: cand.costPrice.id,
+                api_key_id: key.id,
+                pricing_override_id: candBilling.overrideId,
+                discount_numerator: candBilling.discountNumerator,
+                discount_denominator: candBilling.discountDenominator,
                 usage,
-                billing_pricing: state.pricingOf(cand.billingPrice),
-                billing_basis: cand.billingPrice.basis,
+                billing_pricing: state.pricingOf(candBilling.price),
+                billing_basis: candBilling.price.basis,
                 ...(chars !== undefined ? { input_characters: String(chars) } : {}),
                 supplier_basis: cand.costPrice.basis,
                 supplier_pricing: state.pricingOf(cand.costPrice),
@@ -3034,11 +3127,15 @@ export async function handleInferenceRequest(
                   request_id: requestId,
                   selected_attempt_id: activeAttemptId,
                   channel_id: cand.channel.id,
-                  billing_price_id: cand.billingPrice.id,
+                  billing_price_id: candBilling.price.id,
                   cost_version_id: cand.costPrice.id,
+                  api_key_id: key.id,
+                  pricing_override_id: candBilling.overrideId,
+                  discount_numerator: candBilling.discountNumerator,
+                  discount_denominator: candBilling.discountDenominator,
                   usage: modUsage,
-                  billing_pricing: state.pricingOf(cand.billingPrice),
-                  billing_basis: cand.billingPrice.basis,
+                  billing_pricing: state.pricingOf(candBilling.price),
+                  billing_basis: candBilling.price.basis,
                   ...(chars !== undefined ? { input_characters: String(chars) } : {}),
                   supplier_basis: cand.costPrice.basis,
                   supplier_pricing: state.pricingOf(cand.costPrice),
@@ -3085,7 +3182,7 @@ export async function handleInferenceRequest(
 
             const usage = buildUsageForOperation(
               operation,
-              cand.billingPrice.basis,
+              candBilling.price.basis,
               cand.costPrice.basis,
               combinedStreamUsage,
             );
@@ -3118,11 +3215,15 @@ export async function handleInferenceRequest(
               request_id: requestId,
               selected_attempt_id: activeAttemptId,
               channel_id: cand.channel.id,
-              billing_price_id: cand.billingPrice.id,
+              billing_price_id: candBilling.price.id,
               cost_version_id: cand.costPrice.id,
+              api_key_id: key.id,
+              pricing_override_id: candBilling.overrideId,
+              discount_numerator: candBilling.discountNumerator,
+              discount_denominator: candBilling.discountDenominator,
               usage,
-              billing_pricing: state.pricingOf(cand.billingPrice),
-              billing_basis: cand.billingPrice.basis,
+              billing_pricing: state.pricingOf(candBilling.price),
+              billing_basis: candBilling.price.basis,
               ...(chars !== undefined ? { input_characters: String(chars) } : {}),
               supplier_basis: cand.costPrice.basis,
               supplier_pricing: state.pricingOf(cand.costPrice),

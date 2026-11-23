@@ -11,11 +11,14 @@ import {
   type Pricing,
   type Usage,
 } from "@gateway/kernel";
-import { createPluginReleaseRepository } from "@gateway/ledger";
+import { createPluginReleaseRepository, getApiKeySpend, resetApiKeySpend } from "@gateway/ledger";
 import type {
   AdapterOverrides,
+  AsyncTaskRefundEligibility,
+  AsyncTaskStatus,
   ChannelKind,
   ChargePolicy,
+  createAsyncTasksRepository,
   createCatalogRepository,
   createLedgerEngine,
   createLedgerQueries,
@@ -30,6 +33,7 @@ import type {
   ProviderPluginConfig,
   RouteRetryPolicy,
   RoutingStrategy,
+  SpendLimitWindow,
   WalletPolicy,
   WasmProviderConfig,
   WebhookPluginConfig,
@@ -70,6 +74,7 @@ import { previewProviderRequest } from "./upstream.ts";
 type CatalogRepo = ReturnType<typeof createCatalogRepository>;
 type LedgerEngine = ReturnType<typeof createLedgerEngine>;
 type LedgerQueries = ReturnType<typeof createLedgerQueries>;
+type AsyncTasksRepo = ReturnType<typeof createAsyncTasksRepository>;
 
 const currencySchema = z.string().regex(/^[A-Z]{3,8}$/);
 const positiveAtomsSchema = z.string().regex(/^[1-9][0-9]{0,37}$/);
@@ -306,6 +311,31 @@ const wireDialectSchema = z.enum([
 const usageDialectSchema = z.enum(["openai", "anthropic", "gemini", "custom"]);
 const streamFramingSchema = z.enum(["sse", "bedrock_eventstream"]);
 
+const asyncTaskProviderConfigSchema = z
+  .object({
+    query_path: safeEndpointPathSchema,
+    query_param: z
+      .string()
+      .regex(/^[A-Za-z0-9_.-]{1,64}$/)
+      .optional(),
+    task_id_path: safeFieldPathSchema.optional(),
+    status_path: safeFieldPathSchema.optional(),
+    succeeded_values: z.array(z.string().min(1).max(64)).min(1).max(32).optional(),
+    failed_values: z.array(z.string().min(1).max(64)).min(1).max(32).optional(),
+    error_code_path: safeFieldPathSchema.optional(),
+    error_message_path: safeFieldPathSchema.optional(),
+    refundable_system_error_codes: z
+      .array(z.union([z.string(), z.number()]))
+      .max(64)
+      .optional(),
+    non_refundable_error_codes: z
+      .array(z.union([z.string(), z.number()]))
+      .max(64)
+      .optional(),
+    billed_indicator_path: safeFieldPathSchema.optional(),
+  })
+  .strict();
+
 const endpointKeySet = new Set<string>([...operations, "default"]);
 const declarativeProviderConfigSchema = z
   .object({
@@ -330,6 +360,7 @@ const declarativeProviderConfigSchema = z
     error_rules: z.array(errorMatchRuleSchema).max(64).optional(),
     usage_aliases: z.array(usageAliasRuleSchema).max(32).optional(),
     reasoning_field: safeFieldPathSchema.optional(),
+    async_task_config: asyncTaskProviderConfigSchema.optional(),
   })
   .strict();
 
@@ -384,8 +415,54 @@ const upsertApiKeySchema = z
     operations: z.array(operationEnum).max(32).default([]),
     enabled: z.boolean().default(true),
     expires_at: z.iso.datetime().nullable().optional(),
+    spend_limit_atoms: nonNegativeAtomsSchema.nullable().optional(),
+    spend_limit_window: z.enum(["LIFETIME", "DAILY", "MONTHLY"]).default("LIFETIME"),
   })
   .strict();
+
+const resetApiKeySpendSchema = z
+  .object({
+    reason: z.string().max(500).optional(),
+  })
+  .strict();
+
+const upsertPricingOverrideSchema = z
+  .object({
+    id: z.uuid().optional(),
+    project_id: z.uuid(),
+    model_name: z.union([z.literal("*"), z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,149}$/)]),
+    operation: z.union([z.literal("*"), operationEnum]).default("*"),
+    override_kind: z.enum(["EXACT_PRICE", "MULTIPLIER"]),
+    billing_price_id: z.uuid().nullable().optional(),
+    multiplier_numerator: positiveAtomsSchema.nullable().optional(),
+    multiplier_denominator: positiveAtomsSchema.nullable().optional(),
+    enabled: z.boolean().default(true),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.override_kind === "EXACT_PRICE") {
+      if (v.model_name === "*") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["model_name"],
+          message: "EXACT_PRICE override requires a concrete model_name",
+        });
+      }
+      if (!v.billing_price_id) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["billing_price_id"],
+          message: "billing_price_id is required for EXACT_PRICE",
+        });
+      }
+    } else if (!v.multiplier_numerator || !v.multiplier_denominator) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["multiplier_numerator"],
+        message: "multiplier_numerator and multiplier_denominator are required for MULTIPLIER",
+      });
+    }
+  });
 
 const upsertAccountSchema = z
   .object({
@@ -403,7 +480,7 @@ const upsertChannelSchema = z
     kind: providerNameSchema,
     provider_plugin_id: z.uuid().nullable().optional(),
     base_url: z.url().max(1000),
-    api_key: z.string().max(16384).default(""),
+    api_key: z.string().max(16384).optional(),
     rpm: z.number().int().min(1).max(10_000_000).default(1_000_000),
     concurrency: z.number().int().min(1).max(100_000).default(1000),
     enabled: z.boolean().default(true),
@@ -762,6 +839,7 @@ export function createInternalApi(deps: {
   catalog: CatalogRepo;
   ledger: LedgerEngine;
   queries: LedgerQueries;
+  asyncTasks: AsyncTasksRepo;
   snapshot: SnapshotManager;
   router: SmartRouter;
   cluster: ClusterCoordinator;
@@ -905,7 +983,10 @@ export function createInternalApi(deps: {
     const status = err instanceof GatewayError ? err.status : 400;
     const code =
       err instanceof GatewayError ||
-      (err instanceof DomainError && err.code === "invalid_plugin_binding")
+      (err instanceof DomainError &&
+        ["invalid_plugin_binding", "invalid_channel_secret", "invalid_price_override"].includes(
+          err.code,
+        ))
         ? err.code
         : "internal_api_error";
     return c.json({ error: { code, message: err.message } }, status as 400);
@@ -954,10 +1035,35 @@ export function createInternalApi(deps: {
       operations: body.operations,
       enabled: body.enabled,
       expires_at: body.expires_at ?? null,
+      spend_limit_atoms: body.spend_limit_atoms ?? null,
+      spend_limit_window: body.spend_limit_window as SpendLimitWindow,
     });
     await onConfigUpdated(rec.config_epoch);
-    return c.json({ ...rec, key: rawKey });
+    const { created, ...publicRec } = rec;
+    return c.json(created ? { ...publicRec, key: rawKey } : publicRec);
   });
+
+  route("GET", "/internal/v1/api-keys/:keyId/spend", "auditor", async (c) => {
+    const keyId = parseUuid(c.req.param("keyId"), "keyId");
+    const spend = await getApiKeySpend(deps.db, keyId);
+    if (!spend) return c.json({ error: { code: "not_found", message: "API key not found" } }, 404);
+    return c.json(spend);
+  });
+
+  jsonRoute(
+    "POST",
+    "/internal/v1/api-keys/:keyId/reset-spend",
+    "security",
+    resetApiKeySpendSchema,
+    async (c) => {
+      const keyId = parseUuid(c.req.param("keyId"), "keyId");
+      const spend = await resetApiKeySpend(deps.db, keyId);
+      if (!spend) {
+        return c.json({ error: { code: "not_found", message: "API key not found" } }, 404);
+      }
+      return c.json(spend);
+    },
+  );
 
   jsonRoute(
     "PUT",
@@ -991,8 +1097,16 @@ export function createInternalApi(deps: {
     if (!resolved) {
       throw new GatewayError(400, "unknown_provider", `Unknown provider plugin: ${kind}`);
     }
-    validateAuthCredentials(resolved.config.auth, body.api_key);
-    const secretCiphertext = encrypt(body.api_key, deps.config.encryptionKey, id);
+    let secretCiphertext: string | undefined;
+    if (body.api_key !== undefined) {
+      validateAuthCredentials(resolved.config.auth, body.api_key);
+      secretCiphertext = encrypt(body.api_key, deps.config.encryptionKey, id);
+    } else if (!body.id) {
+      validateAuthCredentials(resolved.config.auth, "");
+      secretCiphertext = encrypt("", deps.config.encryptionKey, id);
+    } else if (!existing && resolved.config.auth.scheme === "none") {
+      secretCiphertext = encrypt("", deps.config.encryptionKey, id);
+    }
     const rec = await deps.catalog.upsertChannel({
       id,
       account_id: body.account_id,
@@ -1003,7 +1117,7 @@ export function createInternalApi(deps: {
           ? builtinProviderRevisionId(resolved.preset.digest)
           : resolved.plugin_id,
       base_url: body.base_url,
-      secret_ciphertext: secretCiphertext,
+      ...(secretCiphertext !== undefined ? { secret_ciphertext: secretCiphertext } : {}),
       rpm: body.rpm,
       concurrency: body.concurrency,
       enabled: body.enabled,
@@ -1037,6 +1151,36 @@ export function createInternalApi(deps: {
     });
     await onConfigUpdated(rec.config_epoch);
     return c.json(rec, 201);
+  });
+
+  jsonRoute(
+    "PUT",
+    "/internal/v1/pricing-overrides",
+    "finance",
+    upsertPricingOverrideSchema,
+    async (c, body) => {
+      const rec = await deps.catalog.upsertPricingOverride({
+        ...(body.id ? { id: body.id } : {}),
+        project_id: body.project_id,
+        model_name: body.model_name,
+        operation: body.operation,
+        override_kind: body.override_kind,
+        billing_price_id: body.billing_price_id ?? null,
+        multiplier_numerator: body.multiplier_numerator ?? null,
+        multiplier_denominator: body.multiplier_denominator ?? null,
+        enabled: body.enabled,
+      });
+      await onConfigUpdated(rec.config_epoch);
+      return c.json(rec);
+    },
+  );
+
+  route("GET", "/internal/v1/pricing-overrides", "auditor", async (c) => {
+    const projectId = c.req.query("project_id");
+    const items = await deps.catalog.listPricingOverrides(
+      projectId ? parseUuid(projectId, "project_id") : undefined,
+    );
+    return c.json({ items });
   });
 
   jsonRoute("PUT", "/internal/v1/routes", "catalog", upsertRouteSchema, async (c, body) => {
@@ -1661,6 +1805,7 @@ export function createInternalApi(deps: {
 
   route("GET", "/internal/v1/charges", "auditor", async (c) => {
     const projectId = c.req.query("project_id");
+    const apiKeyId = c.req.query("api_key_id");
     const outcome = c.req.query("outcome");
     const from = c.req.query("from");
     const to = c.req.query("to");
@@ -1668,6 +1813,7 @@ export function createInternalApi(deps: {
     const offset = c.req.query("offset") ? Number(c.req.query("offset")) : undefined;
     const res = await deps.queries.listCharges({
       ...(projectId ? { project_id: parseUuid(projectId, "project_id") } : {}),
+      ...(apiKeyId ? { api_key_id: parseUuid(apiKeyId, "api_key_id") } : {}),
       ...(outcome
         ? {
             outcome: parseBody(
@@ -1678,6 +1824,45 @@ export function createInternalApi(deps: {
         : {}),
       ...(from ? { from } : {}),
       ...(to ? { to } : {}),
+      ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+      ...(offset !== undefined && Number.isFinite(offset) ? { offset } : {}),
+    });
+    return c.json(res);
+  });
+
+  route("GET", "/internal/v1/async-tasks", "auditor", async (c) => {
+    const projectId = c.req.query("project_id");
+    const status = c.req.query("status");
+    const eligibility = c.req.query("refund_eligibility");
+    const limit = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
+    const offset = c.req.query("offset") ? Number(c.req.query("offset")) : undefined;
+    const res = await deps.asyncTasks.listTasks({
+      ...(projectId ? { project_id: parseUuid(projectId, "project_id") } : {}),
+      ...(status
+        ? {
+            status: parseBody(
+              z.enum(["QUEUED", "PROCESSING", "SUCCEEDED", "FAILED", "CANCELLED"]),
+              status,
+            ) as AsyncTaskStatus,
+          }
+        : {}),
+      ...(eligibility
+        ? {
+            refund_eligibility: parseBody(
+              z.enum([
+                "PENDING",
+                "AUTO_REFUNDED",
+                "DENIED_USER_CANCELLED",
+                "DENIED_POLICY_OR_CLIENT",
+                "DENIED_UPSTREAM_BILLED",
+                "DENIED_ABUSE_LIMIT",
+                "MANUAL_REVIEW",
+                "NOT_APPLICABLE",
+              ]),
+              eligibility,
+            ) as AsyncTaskRefundEligibility,
+          }
+        : {}),
       ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
       ...(offset !== undefined && Number.isFinite(offset) ? { offset } : {}),
     });

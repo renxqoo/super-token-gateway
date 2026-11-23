@@ -204,6 +204,7 @@ export class ProxyRuntimeState {
     price: PriceVersionRecord,
     measurement: { inputCharacters?: string | undefined; images?: unknown },
     outputBound: number,
+    cacheKey?: string,
   ): string {
     if (this.quoteCacheEpoch !== snapEpoch) {
       this.quoteCacheEpoch = snapEpoch;
@@ -211,7 +212,7 @@ export class ProxyRuntimeState {
     }
     const cacheable = price.basis === "PROVIDER_USAGE" && measurement.images === undefined;
     if (cacheable) {
-      const ck = `${price.id}:${outputBound}`;
+      const ck = `${cacheKey ?? price.id}:${outputBound}`;
       const hit = this.quoteCache.get(ck);
       if (hit !== undefined) return hit;
       const quote = quoteReservation(

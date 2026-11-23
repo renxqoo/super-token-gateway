@@ -71,6 +71,15 @@
           "checksum": "f8692059e0ffd6000fdea03f573d4075a36c01794a9f128fa86c52698195640e"
         }
       ]
+    },
+    {
+      "version": 2026112302,
+      "files": [
+        {
+          "path": "./migrations/0008_platform_foundation.sql",
+          "checksum": "0173343ecbb522312b6b899e46172bf45062bfda695f1d011f5d76f3f9475fa5"
+        }
+      ]
     }
   ],
   "legacyBaselines": [

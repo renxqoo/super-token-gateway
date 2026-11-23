@@ -139,6 +139,16 @@ export const apiKeys = pgTable(
       .default(sql`'{}'::text[]`),
     enabled: boolean("enabled").notNull().default(true),
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }),
+    spendLimitAtoms: numeric("spend_limit_atoms", { precision: 38, scale: 0 }),
+    spendLimitWindow: text("spend_limit_window")
+      .$type<"LIFETIME" | "DAILY" | "MONTHLY">()
+      .notNull()
+      .default("LIFETIME"),
+    spendWindowStart: timestamp("spend_window_start", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    spentAtoms: numeric("spent_atoms", { precision: 38, scale: 0 }).notNull().default("0"),
+    reservedAtoms: numeric("reserved_atoms", { precision: 38, scale: 0 }).notNull().default("0"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .notNull()
       .defaultNow(),
@@ -496,6 +506,13 @@ export const billingHolds = pgTable(
     requestId: uuid("request_id").primaryKey(),
     projectId: uuid("project_id").notNull(),
     walletId: uuid("wallet_id").notNull(),
+    apiKeyId: uuid("api_key_id"),
+    keyReservedAtoms: numeric("key_reserved_atoms", { precision: 38, scale: 0 })
+      .notNull()
+      .default("0"),
+    pricingOverrideId: uuid("pricing_override_id"),
+    discountNumerator: numeric("discount_numerator", { precision: 38, scale: 0 }),
+    discountDenominator: numeric("discount_denominator", { precision: 38, scale: 0 }),
     operation: text("operation").notNull(),
     model: text("model").notNull(),
     idempotencyKey: text("idempotency_key"),
@@ -537,6 +554,7 @@ export const billingCharges = pgTable(
     requestId: uuid("request_id").notNull().unique(),
     projectId: uuid("project_id").notNull(),
     walletId: uuid("wallet_id").notNull(),
+    apiKeyId: uuid("api_key_id"),
     selectedAttemptId: uuid("selected_attempt_id"),
     channelId: uuid("channel_id"),
     model: text("model").notNull(),
@@ -544,6 +562,9 @@ export const billingCharges = pgTable(
     currency: text("currency").notNull(),
     billingPriceId: uuid("billing_price_id"),
     costVersionId: uuid("cost_version_id"),
+    pricingOverrideId: uuid("pricing_override_id"),
+    discountNumerator: numeric("discount_numerator", { precision: 38, scale: 0 }),
+    discountDenominator: numeric("discount_denominator", { precision: 38, scale: 0 }),
     usage: pgJsonb<Usage>("usage")
       .notNull()
       .default(sql`'{}'::jsonb`),
@@ -729,6 +750,100 @@ export const adminAuditPending = pgTable(
   (t) => [index("admin_audit_pending_created_idx").on(t.createdAt)],
 );
 
+export const projectPricingOverrides = pgTable(
+  "project_pricing_overrides",
+  {
+    id: uuid("id").primaryKey(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id),
+    modelName: text("model_name").notNull(),
+    operation: text("operation").notNull().default("*"),
+    overrideKind: text("override_kind").$type<"EXACT_PRICE" | "MULTIPLIER">().notNull(),
+    billingPriceId: uuid("billing_price_id").references(() => priceVersions.id),
+    multiplierNumerator: numeric("multiplier_numerator", { precision: 38, scale: 0 }),
+    multiplierDenominator: numeric("multiplier_denominator", { precision: 38, scale: 0 }),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("project_pricing_overrides_scope_uniq").on(t.projectId, t.modelName, t.operation),
+    index("project_pricing_overrides_project_idx").on(t.projectId),
+  ],
+);
+
+export const asyncTasks = pgTable(
+  "async_tasks",
+  {
+    id: text("id").primaryKey(),
+    requestId: uuid("request_id").notNull().unique(),
+    chargeId: uuid("charge_id").references(() => billingCharges.id),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id),
+    apiKeyId: uuid("api_key_id"),
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id),
+    model: text("model").notNull(),
+    operation: text("operation").notNull(),
+    upstreamTaskId: text("upstream_task_id").notNull(),
+    status: text("status")
+      .$type<"QUEUED" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "CANCELLED">()
+      .notNull(),
+    userCancelled: boolean("user_cancelled").notNull().default(false),
+    upstreamBilled: boolean("upstream_billed").notNull().default(false),
+    failureCategory: text("failure_category").$type<
+      | "UPSTREAM_SYSTEM"
+      | "CONTENT_POLICY"
+      | "INVALID_INPUT"
+      | "USER_CANCELLED"
+      | "UPSTREAM_BILLED"
+      | "TIMEOUT"
+      | "UNKNOWN"
+      | null
+    >(),
+    refundEligibility: text("refund_eligibility")
+      .$type<
+        | "PENDING"
+        | "AUTO_REFUNDED"
+        | "DENIED_USER_CANCELLED"
+        | "DENIED_POLICY_OR_CLIENT"
+        | "DENIED_UPSTREAM_BILLED"
+        | "DENIED_ABUSE_LIMIT"
+        | "MANUAL_REVIEW"
+        | "NOT_APPLICABLE"
+      >()
+      .notNull()
+      .default("PENDING"),
+    refundId: uuid("refund_id"),
+    resultJson: pgJsonb<Record<string, unknown>>("result_json")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+  },
+  (t) => [
+    index("async_tasks_project_status_idx").on(t.projectId, t.status),
+    index("async_tasks_active_idx")
+      .on(t.status, t.updatedAt)
+      .where(sql`${t.status} IN ('QUEUED', 'PROCESSING')`),
+    index("async_tasks_auto_refund_idx")
+      .on(t.projectId, t.refundEligibility, t.completedAt)
+      .where(sql`${t.refundEligibility} = 'AUTO_REFUNDED'`),
+  ],
+);
+
 export const ledgerSchema = {
   adminAuditEvents,
   adminAuditPending,
@@ -740,6 +855,8 @@ export const ledgerSchema = {
   channels,
   models,
   priceVersions,
+  projectPricingOverrides,
+  asyncTasks,
   plugins,
   pluginReleases,
   pluginRevocations,

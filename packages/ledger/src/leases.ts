@@ -46,6 +46,10 @@ export type LeasedHoldMeta = {
   supplierLeaseId: string;
   walletId: string;
   projectId: string;
+  apiKeyId: string | null;
+  pricingOverrideId: string | null;
+  discountNumerator: string | null;
+  discountDenominator: string | null;
   currency: string;
   operation: string;
   model: string;

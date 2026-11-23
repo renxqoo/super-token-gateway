@@ -78,6 +78,8 @@ function makeApiKey(rawKey: string, projectId: string, pepper = TEST_PEPPER): Ap
     allowed_cidrs: [],
     enabled: true,
     expires_at: null,
+    spend_limit_atoms: null,
+    spend_limit_window: "LIFETIME",
   };
 }
 
@@ -95,6 +97,7 @@ function makeSnapshot(
     channels: new Map(),
     models: new Map(),
     prices: new Map(),
+    pricingOverridesByProject: new Map(),
     routesByModel: new Map(),
     plugins: new Map(),
     revokedPlugins: new Set(),

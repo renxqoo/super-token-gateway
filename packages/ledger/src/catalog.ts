@@ -16,6 +16,7 @@ import {
   plugins,
   pluginRevocations,
   priceVersions,
+  projectPricingOverrides,
   projects,
   routes,
   upstreamAccounts,
@@ -37,11 +38,13 @@ import type {
   PriceBasis,
   PriceSide,
   PriceVersionRecord,
+  ProjectPricingOverrideRecord,
   ProjectRecord,
   ProviderPluginConfig,
   RouteRecord,
   RouteRetryPolicy,
   RoutingStrategy,
+  SpendLimitWindow,
   UpstreamAccountRecord,
   WasmPluginManifest,
   WebhookPluginConfig,
@@ -185,7 +188,9 @@ export function createCatalogRepository(db: SQL) {
       operations?: string[];
       enabled?: boolean;
       expires_at?: string | null;
-    }): Promise<ApiKeyRecord & { config_epoch: number }> {
+      spend_limit_atoms?: string | null;
+      spend_limit_window?: SpendLimitWindow;
+    }): Promise<ApiKeyRecord & { config_epoch: number; created: boolean }> {
       const id = input.id ?? crypto.randomUUID();
       const role = input.role ?? "INVOKER";
       const allowedCidrs = input.allowed_cidrs ?? [];
@@ -193,7 +198,13 @@ export function createCatalogRepository(db: SQL) {
       const keyOperations = input.operations ?? [];
       const enabled = input.enabled ?? true;
       const expiresAt = input.expires_at ?? null;
+      const spendLimitAtoms = input.spend_limit_atoms ?? null;
+      const spendLimitWindow = input.spend_limit_window ?? "LIFETIME";
       return orm.transaction(async (tx) => {
+        const [existed] = await tx
+          .select({ id: apiKeys.id })
+          .from(apiKeys)
+          .where(eq(apiKeys.id, id));
         const rows = await tx
           .insert(apiKeys)
           .values({
@@ -208,6 +219,8 @@ export function createCatalogRepository(db: SQL) {
             operations: keyOperations,
             enabled,
             expiresAt,
+            spendLimitAtoms,
+            spendLimitWindow,
           })
           .onConflictDoUpdate({
             target: apiKeys.id,
@@ -219,6 +232,8 @@ export function createCatalogRepository(db: SQL) {
               operations: keyOperations,
               enabled,
               expiresAt,
+              spendLimitAtoms,
+              spendLimitWindow,
             },
           })
           .returning();
@@ -236,7 +251,10 @@ export function createCatalogRepository(db: SQL) {
           operations: r.operations,
           enabled: r.enabled,
           expires_at: r.expiresAt ? new Date(r.expiresAt).toISOString() : null,
+          spend_limit_atoms: r.spendLimitAtoms,
+          spend_limit_window: r.spendLimitWindow,
           config_epoch: epoch,
+          created: !existed,
         };
       });
     },
@@ -281,7 +299,7 @@ export function createCatalogRepository(db: SQL) {
       kind: ChannelKind;
       provider_plugin_id?: string | null;
       base_url: string;
-      secret_ciphertext: string;
+      secret_ciphertext?: string;
       rpm: number;
       concurrency: number;
       enabled?: boolean;
@@ -294,9 +312,19 @@ export function createCatalogRepository(db: SQL) {
       const adapterConfig = input.adapter_config ?? {};
       return orm.transaction(async (tx) => {
         const [existing] = await tx
-          .select({ providerId: channels.providerPluginId })
+          .select({
+            providerId: channels.providerPluginId,
+            secretCiphertext: channels.secretCiphertext,
+          })
           .from(channels)
           .where(eq(channels.id, id));
+        const effectiveSecret = input.secret_ciphertext ?? existing?.secretCiphertext;
+        if (effectiveSecret === undefined) {
+          throw new DomainError(
+            "invalid_channel_secret",
+            "api_key is required when creating a channel",
+          );
+        }
         const requestedProvider = input.provider_plugin_id ?? existing?.providerId;
         const providerWhere = requestedProvider
           ? eq(plugins.id, requestedProvider)
@@ -324,7 +352,7 @@ export function createCatalogRepository(db: SQL) {
             kind: input.kind,
             providerPluginId,
             baseUrl: input.base_url,
-            secretCiphertext: input.secret_ciphertext,
+            secretCiphertext: effectiveSecret,
             rpm: input.rpm,
             concurrency: input.concurrency,
             enabled,
@@ -340,7 +368,9 @@ export function createCatalogRepository(db: SQL) {
               kind: input.kind,
               providerPluginId,
               baseUrl: input.base_url,
-              secretCiphertext: input.secret_ciphertext,
+              ...(input.secret_ciphertext !== undefined
+                ? { secretCiphertext: input.secret_ciphertext }
+                : {}),
               rpm: input.rpm,
               concurrency: input.concurrency,
               enabled,
@@ -731,6 +761,7 @@ export function createCatalogRepository(db: SQL) {
         channelRows,
         modelRows,
         priceRows,
+        overrideRows,
         routeRows,
         pluginMetaRows,
         wasmBytesById,
@@ -745,6 +776,7 @@ export function createCatalogRepository(db: SQL) {
             channelRows,
             modelRows,
             priceRows,
+            overrideRows,
             routeRows,
             pluginMetaRows,
             revokedRows,
@@ -759,6 +791,10 @@ export function createCatalogRepository(db: SQL) {
             tx.select().from(channels),
             tx.select().from(models),
             tx.select().from(priceVersions),
+            tx
+              .select()
+              .from(projectPricingOverrides)
+              .where(eq(projectPricingOverrides.enabled, true)),
             tx
               .select()
               .from(routes)
@@ -812,6 +848,7 @@ export function createCatalogRepository(db: SQL) {
             channelRows,
             modelRows,
             priceRows,
+            overrideRows,
             routeRows,
             pluginMetaRows,
             wasmBytesById,
@@ -849,6 +886,8 @@ export function createCatalogRepository(db: SQL) {
           operations: r.operations,
           enabled: r.enabled,
           expires_at: r.expiresAt ? new Date(r.expiresAt).toISOString() : null,
+          spend_limit_atoms: r.spendLimitAtoms,
+          spend_limit_window: r.spendLimitWindow,
         });
       }
 
@@ -958,6 +997,24 @@ export function createCatalogRepository(db: SQL) {
         }
       }
 
+      const pricingOverridesByProject = new Map<string, ProjectPricingOverrideRecord[]>();
+      for (const r of overrideRows) {
+        const rec: ProjectPricingOverrideRecord = {
+          id: r.id,
+          project_id: r.projectId,
+          model_name: r.modelName,
+          operation: r.operation,
+          override_kind: r.overrideKind,
+          billing_price_id: r.billingPriceId,
+          multiplier_numerator: r.multiplierNumerator,
+          multiplier_denominator: r.multiplierDenominator,
+          enabled: r.enabled,
+        };
+        const list = pricingOverridesByProject.get(rec.project_id);
+        if (list) list.push(rec);
+        else pricingOverridesByProject.set(rec.project_id, [rec]);
+      }
+
       return {
         epoch: epochRows[0]?.version ?? 0,
         lineageToken: epochRows[0]?.lineageToken ?? "",
@@ -967,11 +1024,119 @@ export function createCatalogRepository(db: SQL) {
         channels: channelMap,
         models: modelMap,
         prices: priceMap,
+        pricingOverridesByProject,
         routesByModel,
         plugins: pluginMap,
         revokedPlugins: new Set(revokedRows.map(({ id }) => id)),
         providerPluginsByName,
       };
+    },
+
+    async upsertPricingOverride(input: {
+      id?: string;
+      project_id: string;
+      model_name: string;
+      operation?: string;
+      override_kind: "EXACT_PRICE" | "MULTIPLIER";
+      billing_price_id?: string | null;
+      multiplier_numerator?: string | null;
+      multiplier_denominator?: string | null;
+      enabled?: boolean;
+    }): Promise<ProjectPricingOverrideRecord & { config_epoch: number }> {
+      const id = input.id ?? crypto.randomUUID();
+      const operation = input.operation ?? "*";
+      const enabled = input.enabled ?? true;
+      const billingPriceId =
+        input.override_kind === "EXACT_PRICE" ? (input.billing_price_id ?? null) : null;
+      const num =
+        input.override_kind === "MULTIPLIER" ? (input.multiplier_numerator ?? null) : null;
+      const den =
+        input.override_kind === "MULTIPLIER" ? (input.multiplier_denominator ?? null) : null;
+      return orm.transaction(async (tx) => {
+        if (billingPriceId) {
+          const [pr] = await tx
+            .select({ id: priceVersions.id, side: priceVersions.side })
+            .from(priceVersions)
+            .where(eq(priceVersions.id, billingPriceId));
+          if (!pr || pr.side !== "CUSTOMER") {
+            throw new DomainError(
+              "invalid_price_override",
+              "Exact price override requires an existing CUSTOMER price version",
+            );
+          }
+        }
+        const rows = await tx
+          .insert(projectPricingOverrides)
+          .values({
+            id,
+            projectId: input.project_id,
+            modelName: input.model_name,
+            operation,
+            overrideKind: input.override_kind,
+            billingPriceId,
+            multiplierNumerator: num,
+            multiplierDenominator: den,
+            enabled,
+          })
+          .onConflictDoUpdate({
+            target: [
+              projectPricingOverrides.projectId,
+              projectPricingOverrides.modelName,
+              projectPricingOverrides.operation,
+            ],
+            set: {
+              overrideKind: input.override_kind,
+              billingPriceId,
+              multiplierNumerator: num,
+              multiplierDenominator: den,
+              enabled,
+              updatedAt: sql`now()`,
+            },
+          })
+          .returning();
+        const epoch = await bumpEpoch(tx);
+        const r = rows[0]!;
+        return {
+          id: r.id,
+          project_id: r.projectId,
+          model_name: r.modelName,
+          operation: r.operation,
+          override_kind: r.overrideKind,
+          billing_price_id: r.billingPriceId,
+          multiplier_numerator: r.multiplierNumerator,
+          multiplier_denominator: r.multiplierDenominator,
+          enabled: r.enabled,
+          config_epoch: epoch,
+        };
+      });
+    },
+
+    async listPricingOverrides(projectId?: string): Promise<ProjectPricingOverrideRecord[]> {
+      const rows = projectId
+        ? await orm
+            .select()
+            .from(projectPricingOverrides)
+            .where(eq(projectPricingOverrides.projectId, projectId))
+            .orderBy(asc(projectPricingOverrides.modelName), asc(projectPricingOverrides.operation))
+        : await orm
+            .select()
+            .from(projectPricingOverrides)
+            .orderBy(
+              asc(projectPricingOverrides.projectId),
+              asc(projectPricingOverrides.modelName),
+              asc(projectPricingOverrides.operation),
+            );
+      return rows.map((r) => ({
+        id: r.id,
+        project_id: r.projectId,
+        model_name: r.modelName,
+        operation: r.operation,
+        override_kind: r.overrideKind,
+        billing_price_id: r.billingPriceId,
+        multiplier_numerator: r.multiplierNumerator,
+        multiplier_denominator: r.multiplierDenominator,
+        enabled: r.enabled,
+      }));
     },
   };
 }

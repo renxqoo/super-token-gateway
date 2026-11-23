@@ -68,6 +68,10 @@ export async function commitLeasedBatch(
       request_id: s.cand.item.request_id,
       project_id: s.cand.meta.projectId,
       wallet_id: s.cand.meta.walletId,
+      api_key_id: s.cand.item.api_key_id ?? s.cand.meta.apiKeyId,
+      pricing_override_id: s.cand.item.pricing_override_id ?? s.cand.meta.pricingOverrideId,
+      discount_numerator: s.cand.item.discount_numerator ?? s.cand.meta.discountNumerator,
+      discount_denominator: s.cand.item.discount_denominator ?? s.cand.meta.discountDenominator,
       wallet_lease_id: s.cand.meta.walletLeaseId,
       supplier_lease_id: s.cand.meta.supplierLeaseId,
       selected_attempt_id: s.cand.item.selected_attempt_id,
@@ -588,14 +592,18 @@ export async function commitLeasedBatch(
           ),
           ins_ch AS (
             INSERT INTO public.billing_charges (
-              id, request_id, project_id, wallet_id, selected_attempt_id, channel_id,
-              model, operation, currency, billing_price_id, cost_version_id, usage, usage_digest,
+              id, request_id, project_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
+              model, operation, currency, billing_price_id, cost_version_id,
+              pricing_override_id, discount_numerator, discount_denominator,
+              usage, usage_digest,
               customer_atoms, funded_atoms, debt_atoms, supplier_cost_atoms, supplier_currency,
               lot_allocations, plugin_audit, charge_policy, outcome, customer_journal_id, supplier_journal_id
             )
             SELECT
-              u.id, u.request_id, u.project_id, u.wallet_id, u.selected_attempt_id, u.channel_id,
-              u.model, u.operation, u.currency, u.billing_price_id, u.cost_version_id, u.usage::jsonb, u.usage_digest,
+              u.id, u.request_id, u.project_id, u.wallet_id, u.api_key_id, u.selected_attempt_id, u.channel_id,
+              u.model, u.operation, u.currency, u.billing_price_id, u.cost_version_id,
+              u.pricing_override_id, u.discount_numerator, u.discount_denominator,
+              u.usage::jsonb, u.usage_digest,
               u.customer_atoms, u.customer_atoms, 0, u.supplier_cost_atoms, u.supplier_currency,
               u.lot_allocations::jsonb, u.plugin_audit::jsonb, u.charge_policy, 'SETTLED',
               u.customer_journal_id, u.supplier_journal_id
@@ -604,6 +612,7 @@ export async function commitLeasedBatch(
               ${prepared.map((p) => p.cand.item.request_id)}::uuid[],
               ${prepared.map((p) => p.cand.meta.projectId)}::uuid[],
               ${prepared.map((p) => p.cand.meta.walletId)}::uuid[],
+              ${prepared.map((p) => p.cand.item.api_key_id ?? p.cand.meta.apiKeyId)}::uuid[],
               ${prepared.map((p) => p.cand.item.selected_attempt_id)}::uuid[],
               ${prepared.map((p) => p.cand.item.channel_id)}::uuid[],
               ${prepared.map((p) => p.cand.meta.model)}::text[],
@@ -611,6 +620,9 @@ export async function commitLeasedBatch(
               ${prepared.map((p) => p.cand.meta.currency)}::text[],
               ${prepared.map((p) => p.cand.item.billing_price_id)}::uuid[],
               ${prepared.map((p) => p.cand.item.cost_version_id)}::uuid[],
+              ${prepared.map((p) => p.cand.item.pricing_override_id ?? p.cand.meta.pricingOverrideId)}::uuid[],
+              ${prepared.map((p) => p.cand.item.discount_numerator ?? p.cand.meta.discountNumerator)}::numeric[],
+              ${prepared.map((p) => p.cand.item.discount_denominator ?? p.cand.meta.discountDenominator)}::numeric[],
               ${prepared.map((p) => p.usageJson)}::text[],
               ${prepared.map((p) => p.usageDigest)}::text[],
               ${prepared.map((p) => p.customerAtomsText)}::numeric[],
@@ -622,8 +634,10 @@ export async function commitLeasedBatch(
               ${prepared.map((p) => p.customerJournalId)}::uuid[],
               ${prepared.map((p) => p.supplierJournalId)}::uuid[]
             ) AS u(
-              id, request_id, project_id, wallet_id, selected_attempt_id, channel_id,
-              model, operation, currency, billing_price_id, cost_version_id, usage, usage_digest,
+              id, request_id, project_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
+              model, operation, currency, billing_price_id, cost_version_id,
+              pricing_override_id, discount_numerator, discount_denominator,
+              usage, usage_digest,
               customer_atoms, supplier_cost_atoms, supplier_currency,
               lot_allocations, plugin_audit, charge_policy, customer_journal_id, supplier_journal_id
             )
@@ -662,11 +676,13 @@ export async function commitLeasedBatch(
         payload: {
           charge_id: p.chargeId,
           request_id: p.cand.item.request_id,
+          api_key_id: p.cand.item.api_key_id ?? p.cand.meta.apiKeyId,
           attempt_id: p.cand.item.selected_attempt_id,
           channel_id: p.cand.item.channel_id,
           model: p.cand.meta.model,
           operation: p.cand.meta.operation,
           currency: p.cand.meta.currency,
+          pricing_override_id: p.cand.item.pricing_override_id ?? p.cand.meta.pricingOverrideId,
           usage: p.cand.item.usage,
           customer_atoms: p.customerAtomsText,
           funded_atoms: p.customerAtomsText,

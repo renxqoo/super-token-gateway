@@ -8,7 +8,7 @@ JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
 WHERE c.relkind IN ('r', 'p') AND (c.relname IN (
   'schema_migrations', 'config_epoch', 'projects', 'api_keys', 'upstream_accounts', 'plugins',
   'plugin_releases', 'plugin_revocations', 'gateway_config_nodes', 'plugin_release_acks',
-  'channels', 'models', 'price_versions', 'routes', 'wallets', 'wallet_lots', 'supplier_root_balances',
+  'channels', 'models', 'price_versions', 'project_pricing_overrides', 'async_tasks', 'routes', 'wallets', 'wallet_lots', 'supplier_root_balances',
   'supplier_cells', 'wallet_leases', 'supplier_leases', 'billing_holds', 'billing_charges',
   'ledger_entries', 'ledger_entries_default', 'funding_operations', 'billing_resolutions',
   'outbox_events', 'outbox_consumers', 'outbox_consumer_shards', 'admin_audit_events', 'admin_audit_pending'

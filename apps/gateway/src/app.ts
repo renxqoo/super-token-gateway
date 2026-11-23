@@ -5,6 +5,7 @@ import type { Operation } from "@gateway/kernel";
 import {
   assertSchemaVersion,
   assertServiceRole,
+  createAsyncTasksRepository,
   createCatalogRepository,
   createDatabase,
   createGatewayConfigNodeRepository,
@@ -29,6 +30,11 @@ import {
 } from "@gateway/runtime";
 import { createWorkerRunner } from "@gateway/worker";
 import type { GatewayConfig } from "./config.ts";
+import {
+  handleCancelAsyncTask,
+  handleGetAsyncTask,
+  type AsyncTaskHandlerDeps,
+} from "./async-tasks.ts";
 import { createInternalApi } from "./internal-api.ts";
 import { GatewayMetrics } from "./observability.ts";
 import {
@@ -213,11 +219,21 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   });
   const lifecycle = new Lifecycle(config.maxInFlight);
   const proxyState = new ProxyRuntimeState();
+  const asyncTasks = createAsyncTasksRepository(db);
+  const controlLedger =
+    controlDb === db
+      ? ledger
+      : createLedgerEngine(controlDb, {
+          enableLeases: false,
+          batchWindowMs: config.microBatchWindowMs,
+          maxBatchSize: config.microBatchMaxSize,
+        });
 
   const proxyDeps: ProxyDependencies = {
     config,
     snapshot,
     ledger,
+    asyncTasks,
     router,
     cluster,
     transport,
@@ -226,6 +242,17 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     wasmExecutor: providerWasmExecutor,
     lifecycle,
     metrics,
+    state: proxyState,
+  };
+
+  const asyncTaskDeps: AsyncTaskHandlerDeps = {
+    config,
+    snapshot,
+    asyncTasks,
+    controlLedger,
+    queries,
+    transport,
+    vertexTokens,
     state: proxyState,
   };
 
@@ -361,6 +388,12 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   publicApp.post("/v1/videos", (c) =>
     handleInferenceRequest(c, proxyDeps, "videos", undefined, peerOf(c)),
   );
+  publicApp.get("/v1/videos/:taskId", (c) =>
+    handleGetAsyncTask(c, asyncTaskDeps, c.req.param("taskId"), peerOf(c)),
+  );
+  publicApp.post("/v1/videos/:taskId/cancel", (c) =>
+    handleCancelAsyncTask(c, asyncTaskDeps, c.req.param("taskId"), peerOf(c)),
+  );
   publicApp.post("/v1beta/models/:action", async (c) => {
     const action = c.req.param("action");
     const colon = action.lastIndexOf(":");
@@ -382,14 +415,6 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     return handleInferenceRequest(c, proxyDeps, "gemini", { model, stream }, peerOf(c));
   });
 
-  const controlLedger =
-    controlDb === db
-      ? ledger
-      : createLedgerEngine(controlDb, {
-          enableLeases: false,
-          batchWindowMs: config.microBatchWindowMs,
-          maxBatchSize: config.microBatchMaxSize,
-        });
   const {
     app: internalApp,
     requestBodies: internalRequestBodies,
@@ -403,6 +428,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     catalog: controlDb === snapshotDb ? catalog : createCatalogRepository(controlDb),
     ledger: controlLedger,
     queries: controlDb === db ? queries : createLedgerQueries(controlDb),
+    asyncTasks: controlDb === db ? asyncTasks : createAsyncTasksRepository(controlDb),
     snapshot,
     router,
     cluster,

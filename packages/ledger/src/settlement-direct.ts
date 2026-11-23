@@ -29,6 +29,12 @@ import {
   type JournalLine,
 } from "./funds.ts";
 import { priceSettlement } from "./settlement-pricing.ts";
+import {
+  flushDirtyKeySpends,
+  rolloverKeySpendInMemory,
+  toKeySpendRow,
+  type KeySpendRow,
+} from "./key-spend.ts";
 
 type DirectSettlementEntry = { index: number; item: CommitTerminalInput };
 type DetachedHold = {
@@ -60,8 +66,10 @@ export async function applyDirectSettlements(
   const detachedNotifications: DetachedHold[] = [];
   const nowMs = Date.now();
   const holdRows = await tx`
-        SELECT request_id, project_id, wallet_id, operation, model, held_atoms::text, credit_atoms::text,
-          lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state
+        SELECT request_id, project_id, wallet_id, api_key_id, key_reserved_atoms::text,
+          pricing_override_id, discount_numerator::text, discount_denominator::text,
+          operation, model, held_atoms::text, credit_atoms::text,
+          lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state, created_at
         FROM public.billing_holds
         WHERE request_id = ANY(${requestIds}::uuid[])
         ORDER BY request_id
@@ -73,6 +81,11 @@ export async function applyDirectSettlements(
       request_id: string;
       project_id: string;
       wallet_id: string;
+      api_key_id: string | null;
+      key_reserved_atoms: bigint;
+      pricing_override_id: string | null;
+      discount_numerator: string | null;
+      discount_denominator: string | null;
       operation: string;
       model: string;
       held_atoms: bigint;
@@ -82,6 +95,7 @@ export async function applyDirectSettlements(
       wallet_lease_id: string | null;
       supplier_lease_id: string | null;
       state: string;
+      created_at_ms: number;
     }
   >();
   for (const r of holdRows) {
@@ -89,6 +103,11 @@ export async function applyDirectSettlements(
       request_id: String(r.request_id),
       project_id: String(r.project_id),
       wallet_id: String(r.wallet_id),
+      api_key_id: r.api_key_id ? String(r.api_key_id) : null,
+      key_reserved_atoms: BigInt(String(r.key_reserved_atoms ?? "0")),
+      pricing_override_id: r.pricing_override_id ? String(r.pricing_override_id) : null,
+      discount_numerator: r.discount_numerator ? String(r.discount_numerator) : null,
+      discount_denominator: r.discount_denominator ? String(r.discount_denominator) : null,
       operation: String(r.operation),
       model: String(r.model),
       held_atoms: BigInt(String(r.held_atoms)),
@@ -98,6 +117,7 @@ export async function applyDirectSettlements(
       wallet_lease_id: r.wallet_lease_id ? String(r.wallet_lease_id) : null,
       supplier_lease_id: r.supplier_lease_id ? String(r.supplier_lease_id) : null,
       state: String(r.state),
+      created_at_ms: Date.parse(String(r.created_at)),
     });
   }
 
@@ -164,6 +184,30 @@ export async function applyDirectSettlements(
       debt_atoms: String(r.debt_atoms),
       supplier_cost_atoms: String(r.supplier_cost_atoms),
     });
+  }
+
+  const keyIdsWithReserve = [
+    ...new Set(
+      [...holdsByReq.values()]
+        .filter((h) => h.key_reserved_atoms > 0n && h.api_key_id !== null)
+        .map((h) => h.api_key_id!),
+    ),
+  ].sort();
+  const keySpendsById = new Map<string, KeySpendRow>();
+  if (keyIdsWithReserve.length > 0) {
+    const lockedKeys = await tx`
+      SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
+        spend_window_start, spent_atoms::text, reserved_atoms::text
+      FROM public.api_keys
+      WHERE id = ANY(${keyIdsWithReserve}::uuid[])
+      ORDER BY id
+      FOR NO KEY UPDATE
+    `;
+    for (const r of lockedKeys) {
+      const row = toKeySpendRow(r);
+      rolloverKeySpendInMemory(row, nowMs);
+      keySpendsById.set(row.id, row);
+    }
   }
 
   const walletIds = [...new Set([...holdsByReq.values()].map((h) => h.wallet_id))].sort();
@@ -261,6 +305,7 @@ export async function applyDirectSettlements(
     request_id: string;
     project_id: string;
     wallet_id: string;
+    api_key_id: string | null;
     selected_attempt_id: string;
     channel_id: string;
     model: string;
@@ -268,6 +313,9 @@ export async function applyDirectSettlements(
     currency: string;
     billing_price_id: string;
     cost_version_id: string;
+    pricing_override_id: string | null;
+    discount_numerator: string | null;
+    discount_denominator: string | null;
     usage: Usage;
     usage_digest: string;
     customer_atoms: string;
@@ -560,6 +608,25 @@ export async function applyDirectSettlements(
     const chargeId = crypto.randomUUID();
     const usageDigest = sha256Hex(item.usage);
 
+    if (hold.key_reserved_atoms > 0n && hold.api_key_id) {
+      const kRow = keySpendsById.get(hold.api_key_id);
+      if (kRow) {
+        kRow.reserved_atoms =
+          kRow.reserved_atoms > hold.key_reserved_atoms
+            ? kRow.reserved_atoms - hold.key_reserved_atoms
+            : 0n;
+        if (hold.created_at_ms >= kRow.spend_window_start_ms && billableCustomerAtoms > 0n) {
+          kRow.spent_atoms += billableCustomerAtoms;
+        }
+        kRow.dirty = true;
+      }
+    }
+
+    const effectiveApiKeyId = item.api_key_id ?? hold.api_key_id;
+    const effectiveOverrideId = item.pricing_override_id ?? hold.pricing_override_id;
+    const effectiveDiscNum = item.discount_numerator ?? hold.discount_numerator;
+    const effectiveDiscDen = item.discount_denominator ?? hold.discount_denominator;
+
     holdUpdates.push({
       request_id: item.request_id,
       state: "SETTLED",
@@ -570,6 +637,7 @@ export async function applyDirectSettlements(
       request_id: item.request_id,
       project_id: hold.project_id,
       wallet_id: wallet.id,
+      api_key_id: effectiveApiKeyId,
       selected_attempt_id: item.selected_attempt_id,
       channel_id: item.channel_id,
       model: hold.model,
@@ -577,6 +645,9 @@ export async function applyDirectSettlements(
       currency: wallet.currency,
       billing_price_id: item.billing_price_id,
       cost_version_id: item.cost_version_id,
+      pricing_override_id: effectiveOverrideId,
+      discount_numerator: effectiveDiscNum,
+      discount_denominator: effectiveDiscDen,
       usage: item.usage,
       usage_digest: usageDigest,
       customer_atoms: billableCustomerAtoms.toString(),
@@ -599,11 +670,13 @@ export async function applyDirectSettlements(
       payload: {
         charge_id: chargeId,
         request_id: item.request_id,
+        api_key_id: effectiveApiKeyId,
         attempt_id: item.selected_attempt_id,
         channel_id: item.channel_id,
         model: hold.model,
         operation: hold.operation,
         currency: wallet.currency,
+        pricing_override_id: effectiveOverrideId,
         usage: item.usage,
         customer_atoms: billableCustomerAtoms.toString(),
         funded_atoms: funded.toString(),
@@ -638,6 +711,7 @@ export async function applyDirectSettlements(
     };
   }
 
+  await flushDirtyKeySpends(tx, keySpendsById.values());
   await flushDirtyWallets(tx, walletsById.values());
   await flushDirtyLots(tx, lotsById.values());
   await flushDirtyCells(tx, cellsByKey.values());
@@ -670,14 +744,18 @@ export async function applyDirectSettlements(
   if (newCharges.length > 0) {
     await tx`
           INSERT INTO public.billing_charges (
-            id, request_id, project_id, wallet_id, selected_attempt_id, channel_id,
-            model, operation, currency, billing_price_id, cost_version_id, usage, usage_digest,
+            id, request_id, project_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
+            model, operation, currency, billing_price_id, cost_version_id,
+            pricing_override_id, discount_numerator, discount_denominator,
+            usage, usage_digest,
             customer_atoms, funded_atoms, debt_atoms, supplier_cost_atoms, supplier_currency,
             lot_allocations, plugin_audit, charge_policy, outcome, customer_journal_id, supplier_journal_id
           )
           SELECT
-            u.id, u.request_id, u.project_id, u.wallet_id, u.selected_attempt_id, u.channel_id,
-            u.model, u.operation, u.currency, u.billing_price_id, u.cost_version_id, u.usage::jsonb, u.usage_digest,
+            u.id, u.request_id, u.project_id, u.wallet_id, u.api_key_id, u.selected_attempt_id, u.channel_id,
+            u.model, u.operation, u.currency, u.billing_price_id, u.cost_version_id,
+            u.pricing_override_id, u.discount_numerator, u.discount_denominator,
+            u.usage::jsonb, u.usage_digest,
             u.customer_atoms, u.funded_atoms, u.debt_atoms, u.supplier_cost_atoms, u.supplier_currency,
             u.lot_allocations::jsonb, u.plugin_audit::jsonb, u.charge_policy, u.outcome,
             u.customer_journal_id, u.supplier_journal_id
@@ -686,6 +764,7 @@ export async function applyDirectSettlements(
             ${newCharges.map((c) => c.request_id)}::uuid[],
             ${newCharges.map((c) => c.project_id)}::uuid[],
             ${newCharges.map((c) => c.wallet_id)}::uuid[],
+            ${newCharges.map((c) => c.api_key_id)}::uuid[],
             ${newCharges.map((c) => c.selected_attempt_id)}::uuid[],
             ${newCharges.map((c) => c.channel_id)}::uuid[],
             ${newCharges.map((c) => c.model)}::text[],
@@ -693,6 +772,9 @@ export async function applyDirectSettlements(
             ${newCharges.map((c) => c.currency)}::text[],
             ${newCharges.map((c) => c.billing_price_id)}::uuid[],
             ${newCharges.map((c) => c.cost_version_id)}::uuid[],
+            ${newCharges.map((c) => c.pricing_override_id)}::uuid[],
+            ${newCharges.map((c) => c.discount_numerator)}::numeric[],
+            ${newCharges.map((c) => c.discount_denominator)}::numeric[],
             ${newCharges.map((c) => JSON.stringify(c.usage))}::text[],
             ${newCharges.map((c) => c.usage_digest)}::text[],
             ${newCharges.map((c) => c.customer_atoms)}::numeric[],
@@ -707,8 +789,10 @@ export async function applyDirectSettlements(
             ${newCharges.map((c) => c.customer_journal_id)}::uuid[],
             ${newCharges.map((c) => c.supplier_journal_id)}::uuid[]
           ) AS u(
-            id, request_id, project_id, wallet_id, selected_attempt_id, channel_id,
-            model, operation, currency, billing_price_id, cost_version_id, usage, usage_digest,
+            id, request_id, project_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
+            model, operation, currency, billing_price_id, cost_version_id,
+            pricing_override_id, discount_numerator, discount_denominator,
+            usage, usage_digest,
             customer_atoms, funded_atoms, debt_atoms, supplier_cost_atoms, supplier_currency,
             lot_allocations, plugin_audit, charge_policy, outcome, customer_journal_id, supplier_journal_id
           )

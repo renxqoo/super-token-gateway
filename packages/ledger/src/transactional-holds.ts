@@ -9,6 +9,12 @@ import type {
 } from "./types.ts";
 import type { LeaseManager } from "./lease-manager.ts";
 import {
+  flushDirtyKeySpends,
+  rolloverKeySpendInMemory,
+  toKeySpendRow,
+  type KeySpendRow,
+} from "./key-spend.ts";
+import {
   MAX_ATOMS,
   CELL_COUNT,
   SETTLEMENT_LANES,
@@ -73,6 +79,11 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
     }));
 
     const projectIds = [...new Set(items.map((i) => i.project_id))];
+    const limitedKeyIds = [
+      ...new Set(
+        items.filter((i) => i.enforce_key_spend_limit && i.api_key_id).map((i) => i.api_key_id!),
+      ),
+    ].sort();
     const supplierAccounts = [...new Set(items.map((i) => i.supplier_account_id))];
     const idempotencyKeys = items
       .filter((i) => i.idempotency_key !== null)
@@ -90,6 +101,23 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
           }
         }
         pruneDemandAt = nowMs + DEMAND_WINDOW_MS;
+      }
+
+      const keySpendsById = new Map<string, KeySpendRow>();
+      if (limitedKeyIds.length > 0) {
+        const lockedKeys = await tx`
+          SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
+            spend_window_start, spent_atoms::text, reserved_atoms::text
+          FROM public.api_keys
+          WHERE id = ANY(${limitedKeyIds}::uuid[])
+          ORDER BY id
+          FOR NO KEY UPDATE
+        `;
+        for (const r of lockedKeys) {
+          const row = toKeySpendRow(r);
+          rolloverKeySpendInMemory(row, nowMs);
+          keySpendsById.set(row.id, row);
+        }
       }
 
       const lockedWallets = await tx`
@@ -222,6 +250,11 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
         request_id: string;
         project_id: string;
         wallet_id: string;
+        api_key_id: string | null;
+        key_reserved_atoms: string;
+        pricing_override_id: string | null;
+        discount_numerator: string | null;
+        discount_denominator: string | null;
         operation: string;
         model: string;
         idempotency_key: string | null;
@@ -385,6 +418,24 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
           continue;
         }
 
+        const keySpendRow =
+          item.enforce_key_spend_limit && item.api_key_id
+            ? keySpendsById.get(item.api_key_id)
+            : undefined;
+        if (
+          keySpendRow &&
+          keySpendRow.spend_limit_atoms !== null &&
+          keySpendRow.spent_atoms + keySpendRow.reserved_atoms + customerAtoms >
+            keySpendRow.spend_limit_atoms
+        ) {
+          results[i] = {
+            ok: false,
+            code: "key_spend_limit_exceeded",
+            message: "API key spend limit exceeded",
+          };
+          continue;
+        }
+
         const allocations: HoldLotAllocation[] = [];
         for (const step of plan) {
           step.lot.available_atoms -= step.take;
@@ -396,6 +447,13 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
         wallet.reserved_atoms += fundedPart;
         wallet.credit_reserved_atoms += creditPart;
         wallet.dirty = true;
+
+        let keyReservedAtoms = 0n;
+        if (keySpendRow && keySpendRow.spend_limit_atoms !== null && customerAtoms > 0n) {
+          keySpendRow.reserved_atoms += customerAtoms;
+          keySpendRow.dirty = true;
+          keyReservedAtoms = customerAtoms;
+        }
 
         chosenCell.reserved_atoms += supplierAtoms;
         chosenCell.revision += 1n;
@@ -418,6 +476,11 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
           request_id: item.request_id,
           project_id: item.project_id,
           wallet_id: wallet.id,
+          api_key_id: item.api_key_id ?? null,
+          key_reserved_atoms: keyReservedAtoms.toString(),
+          pricing_override_id: item.pricing_override_id ?? null,
+          discount_numerator: item.discount_numerator ?? null,
+          discount_denominator: item.discount_denominator ?? null,
           operation: item.operation,
           model: item.model,
           idempotency_key: item.idempotency_key,
@@ -439,7 +502,12 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
             state: "HELD",
             supplier_holds: [supplierHold],
           });
-        } else if (leases.canAcquire() && creditPart === 0n && customerAtoms > 0n) {
+        } else if (
+          leases.canAcquire() &&
+          !item.enforce_key_spend_limit &&
+          creditPart === 0n &&
+          customerAtoms > 0n
+        ) {
           const wHits = recordHit(recentWalletHits, wk, nowMs);
           if (!leases.hasWallet(wk)) {
             const d = walletLeaseDemand.get(wk);
@@ -619,6 +687,7 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
         });
       }
 
+      await flushDirtyKeySpends(tx, keySpendsById.values());
       await flushDirtyWallets(tx, walletsById.values());
       await flushDirtyLots(tx, allLots);
       await flushDirtyCells(tx, allCells);
@@ -665,16 +734,25 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
       if (newHolds.length > 0) {
         await tx`
           INSERT INTO public.billing_holds (
-            request_id, project_id, wallet_id, operation, model, idempotency_key, fingerprint,
+            request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
+            pricing_override_id, discount_numerator, discount_denominator,
+            operation, model, idempotency_key, fingerprint,
             held_atoms, credit_atoms, lot_allocations, supplier_holds, state, expires_at
           )
           SELECT
-            u.request_id, u.project_id, u.wallet_id, u.operation, u.model, u.idempotency_key, u.fingerprint,
+            u.request_id, u.project_id, u.wallet_id, u.api_key_id, u.key_reserved_atoms,
+            u.pricing_override_id, u.discount_numerator, u.discount_denominator,
+            u.operation, u.model, u.idempotency_key, u.fingerprint,
             u.held_atoms, u.credit_atoms, u.lot_allocations::jsonb, u.supplier_holds::jsonb, 'HELD', u.expires_at
           FROM unnest(
             ${newHolds.map((h) => h.request_id)}::uuid[],
             ${newHolds.map((h) => h.project_id)}::uuid[],
             ${newHolds.map((h) => h.wallet_id)}::uuid[],
+            ${newHolds.map((h) => h.api_key_id)}::uuid[],
+            ${newHolds.map((h) => h.key_reserved_atoms)}::numeric[],
+            ${newHolds.map((h) => h.pricing_override_id)}::uuid[],
+            ${newHolds.map((h) => h.discount_numerator)}::numeric[],
+            ${newHolds.map((h) => h.discount_denominator)}::numeric[],
             ${newHolds.map((h) => h.operation)}::text[],
             ${newHolds.map((h) => h.model)}::text[],
             ${newHolds.map((h) => h.idempotency_key)}::text[],
@@ -685,7 +763,9 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
             ${newHolds.map((h) => JSON.stringify(h.supplier_holds))}::text[],
             ${newHolds.map((h) => h.expires_at)}::timestamptz[]
           ) AS u(
-            request_id, project_id, wallet_id, operation, model, idempotency_key, fingerprint,
+            request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
+            pricing_override_id, discount_numerator, discount_denominator,
+            operation, model, idempotency_key, fingerprint,
             held_atoms, credit_atoms, lot_allocations, supplier_holds, expires_at
           )
         `;

@@ -10,6 +10,13 @@ import type {
 } from "./types.ts";
 import type { LeaseManager } from "./lease-manager.ts";
 import {
+  flushDirtyKeySpends,
+  releaseKeyReservationInTx,
+  rolloverKeySpendInMemory,
+  toKeySpendRow,
+  type KeySpendRow,
+} from "./key-spend.ts";
+import {
   parseAtoms,
   computeFreezeReason,
   sortLots,
@@ -43,7 +50,7 @@ export async function releaseHoldInTx(tx: SQL, requestId: string): Promise<HoldR
   let detachment: HoldRelease["detachment"];
   const nowMs = Date.now();
   const rows = await tx`
-          SELECT request_id, wallet_id, held_atoms::text, credit_atoms::text, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state
+          SELECT request_id, wallet_id, api_key_id, key_reserved_atoms::text, held_atoms::text, credit_atoms::text, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state
           FROM public.billing_holds WHERE request_id = ${requestId} FOR NO KEY UPDATE
         `;
   if (!rows.length) return { released: false };
@@ -53,6 +60,8 @@ export async function releaseHoldInTx(tx: SQL, requestId: string): Promise<HoldR
 
   const heldAtoms = BigInt(String(hold.held_atoms));
   const creditAtoms = BigInt(String(hold.credit_atoms));
+  const holdApiKeyId = hold.api_key_id ? String(hold.api_key_id) : null;
+  const keyReservedAtoms = BigInt(String(hold.key_reserved_atoms ?? "0"));
   let lotAllocs = (hold.lot_allocations ?? []) as HoldLotAllocation[];
   const supHolds = (hold.supplier_holds ?? []) as SupplierHoldEntry[];
   if (hold.wallet_lease_id || hold.supplier_lease_id) {
@@ -73,6 +82,7 @@ export async function releaseHoldInTx(tx: SQL, requestId: string): Promise<HoldR
     };
   }
 
+  await releaseKeyReservationInTx(tx, holdApiKeyId, keyReservedAtoms);
   const wRows = await tx`
           SELECT id, project_id, currency, policy,
             available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
@@ -233,7 +243,7 @@ export function createHoldTransitions(
         .begin(async (tx): Promise<SwitchSupplierResult> => {
           const nowMs = Date.now();
           const holdRows = await tx`
-          SELECT request_id, project_id, wallet_id, operation, model, held_atoms::text, credit_atoms::text,
+          SELECT request_id, project_id, wallet_id, api_key_id, key_reserved_atoms::text, operation, model, held_atoms::text, credit_atoms::text,
             lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state
           FROM public.billing_holds WHERE request_id = ${input.request_id} FOR NO KEY UPDATE
         `;
@@ -247,6 +257,8 @@ export function createHoldTransitions(
           const hold = holdRows[0]!;
           let heldAtoms = BigInt(String(hold.held_atoms));
           let creditAtoms = BigInt(String(hold.credit_atoms));
+          const holdApiKeyId = hold.api_key_id ? String(hold.api_key_id) : null;
+          let keyReservedAtoms = BigInt(String(hold.key_reserved_atoms ?? "0"));
           let lotAllocs = [...((hold.lot_allocations ?? []) as HoldLotAllocation[])];
           const supplierHolds = [...((hold.supplier_holds ?? []) as SupplierHoldEntry[])];
           if (hold.wallet_lease_id || hold.supplier_lease_id) {
@@ -265,6 +277,19 @@ export function createHoldTransitions(
               slId: det.detachedSupplierLeaseId,
               supAtoms: det.detachedSupplierAtoms,
             };
+          }
+
+          let lockedKeySpend: KeySpendRow | null = null;
+          if (reqCust !== null && reqCust > heldAtoms && holdApiKeyId && keyReservedAtoms > 0n) {
+            const kRows = await tx`
+              SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
+                spend_window_start, spent_atoms::text, reserved_atoms::text
+              FROM public.api_keys WHERE id = ${holdApiKeyId} FOR NO KEY UPDATE
+            `;
+            if (kRows.length > 0) {
+              lockedKeySpend = toKeySpendRow(kRows[0]!);
+              rolloverKeySpendInMemory(lockedKeySpend, nowMs);
+            }
           }
 
           const walletId = String(hold.wallet_id);
@@ -288,6 +313,18 @@ export function createHoldTransitions(
               });
             }
             const delta = reqCust - heldAtoms;
+            if (
+              lockedKeySpend &&
+              lockedKeySpend.spend_limit_atoms !== null &&
+              lockedKeySpend.spent_atoms + lockedKeySpend.reserved_atoms + delta >
+                lockedKeySpend.spend_limit_atoms
+            ) {
+              throw new SupplierSwitchRejected({
+                ok: false,
+                code: "key_spend_limit_exceeded",
+                message: "API key spend limit exceeded on fallback route top-up",
+              });
+            }
             const lotRowsRaw = await tx`
             SELECT id, wallet_id, kind, priority, models, operations, expires_at, created_at,
               issued_atoms::text, available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text
@@ -337,6 +374,12 @@ export function createHoldTransitions(
             wallet.dirty = true;
             heldAtoms += delta;
             creditAtoms += addCredit;
+            if (lockedKeySpend && lockedKeySpend.spend_limit_atoms !== null) {
+              lockedKeySpend.reserved_atoms += delta;
+              lockedKeySpend.dirty = true;
+              keyReservedAtoms += delta;
+              await flushDirtyKeySpends(tx, [lockedKeySpend]);
+            }
             await flushDirtyLots(tx, lots);
             await flushDirtyWallets(tx, [wallet]);
             await insertJournalLines(tx, journals);
@@ -430,6 +473,7 @@ export function createHoldTransitions(
           UPDATE public.billing_holds
           SET held_atoms = ${heldAtoms.toString()}::numeric,
               credit_atoms = ${creditAtoms.toString()}::numeric,
+              key_reserved_atoms = ${keyReservedAtoms.toString()}::numeric,
               lot_allocations = ${lotAllocs}::jsonb,
               supplier_holds = ${supplierHolds}::jsonb
           WHERE request_id = ${input.request_id}

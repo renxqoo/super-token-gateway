@@ -5,3 +5,5 @@ export * from "./catalog.ts";
 export * from "./plugin-releases.ts";
 export * from "./queries.ts";
 export * from "./engine.ts";
+export * from "./key-spend.ts";
+export * from "./async-tasks.ts";

@@ -28,7 +28,10 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, stg_data, stg_control,
 
 GRANT SELECT ON public.schema_migrations TO stg_data, stg_control, stg_worker, stg_audit;
 GRANT SELECT ON public.config_epoch, public.projects, public.api_keys, public.upstream_accounts,
-  public.plugins, public.channels, public.models, public.price_versions, public.routes TO stg_data, stg_control;
+  public.plugins, public.channels, public.models, public.price_versions, public.project_pricing_overrides, public.routes TO stg_data, stg_control;
+GRANT SELECT, INSERT, UPDATE ON public.async_tasks TO stg_data, stg_worker;
+GRANT SELECT, UPDATE ON public.async_tasks TO stg_control;
+GRANT SELECT ON public.async_tasks TO stg_audit;
 GRANT SELECT ON public.wallets, public.wallet_lots, public.supplier_cells, public.wallet_leases,
   public.supplier_leases, public.billing_holds, public.billing_charges, public.ledger_entries
   TO stg_data, stg_control, stg_worker;
@@ -56,7 +59,7 @@ GRANT UPDATE (state, remaining_atoms, lot_allocations, earliest_lot_expires_at, 
   ON public.wallet_leases TO stg_data, stg_control, stg_worker;
 GRANT UPDATE (state, remaining_atoms, expires_at, updated_at)
   ON public.supplier_leases TO stg_data, stg_control, stg_worker;
-GRANT UPDATE (state, held_atoms, credit_atoms, lot_allocations, supplier_holds, wallet_lease_id,
+GRANT UPDATE (state, held_atoms, credit_atoms, key_reserved_atoms, lot_allocations, supplier_holds, wallet_lease_id,
   supplier_lease_id, closed_at) ON public.billing_holds TO stg_data, stg_control;
 GRANT UPDATE (state, lot_allocations, wallet_lease_id, supplier_lease_id)
   ON public.billing_holds TO stg_worker;
@@ -71,8 +74,9 @@ GRANT INSERT (event_id, kind, request_id, project_id, payload) ON public.outbox_
 GRANT USAGE ON SEQUENCE public.outbox_events_seq_seq TO stg_data, stg_control;
 GRANT INSERT, UPDATE ON public.outbox_consumers, public.outbox_consumer_shards TO stg_control, stg_worker;
 
+GRANT UPDATE (spend_window_start, spent_atoms, reserved_atoms) ON public.api_keys TO stg_data, stg_worker;
 GRANT INSERT, UPDATE ON public.projects, public.api_keys, public.upstream_accounts, public.plugins,
-  public.channels, public.models, public.routes, public.wallets, public.wallet_lots,
+  public.channels, public.models, public.routes, public.project_pricing_overrides, public.wallets, public.wallet_lots,
   public.supplier_root_balances, public.supplier_cells TO stg_control;
 GRANT UPDATE ON public.config_epoch TO stg_control;
 GRANT INSERT ON public.price_versions, public.funding_operations, public.billing_resolutions, public.plugin_releases,

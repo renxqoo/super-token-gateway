@@ -8,6 +8,7 @@ export function createLedgerQueries(db: SQL) {
   return {
     async listCharges(input: {
       project_id?: string;
+      api_key_id?: string;
       outcome?: "SETTLED" | "RELEASED" | "DEBT" | "MODERATION_BLOCKED" | "UNKNOWN_RESOLVED";
       from?: string;
       to?: string;
@@ -18,6 +19,7 @@ export function createLedgerQueries(db: SQL) {
       const offset = Math.max(0, input.offset ?? 0);
       const conds: DrizzleSQL[] = [];
       if (input.project_id) conds.push(eq(billingCharges.projectId, input.project_id));
+      if (input.api_key_id) conds.push(eq(billingCharges.apiKeyId, input.api_key_id));
       if (input.outcome) conds.push(eq(billingCharges.outcome, input.outcome));
       if (input.from) conds.push(gte(billingCharges.createdAt, input.from));
       if (input.to) conds.push(lt(billingCharges.createdAt, input.to));

@@ -91,6 +91,22 @@ export type EndpointTemplate = {
   stream_query?: Record<string, string>;
 };
 
+export type SpendLimitWindow = "LIFETIME" | "DAILY" | "MONTHLY";
+
+export type AsyncTaskProviderConfig = {
+  query_path: string;
+  query_param?: string;
+  task_id_path?: string;
+  status_path?: string;
+  succeeded_values?: string[];
+  failed_values?: string[];
+  error_code_path?: string;
+  error_message_path?: string;
+  refundable_system_error_codes?: (string | number)[];
+  non_refundable_error_codes?: (string | number)[];
+  billed_indicator_path?: string;
+};
+
 export type DeclarativeProviderConfig = {
   base_dialect: WireDialect;
   usage_dialect: UsageDialect;
@@ -106,6 +122,7 @@ export type DeclarativeProviderConfig = {
   error_rules?: ErrorMatchRule[];
   usage_aliases?: UsageAliasRule[];
   reasoning_field?: string;
+  async_task_config?: AsyncTaskProviderConfig;
 };
 
 export type WasmProviderConfig = {
@@ -156,6 +173,72 @@ export type ApiKeyRecord = {
   operations: string[];
   enabled: boolean;
   expires_at: string | null;
+  spend_limit_atoms: string | null;
+  spend_limit_window: SpendLimitWindow;
+};
+
+export type ApiKeySpendSnapshot = {
+  id: string;
+  project_id: string;
+  spend_limit_atoms: string | null;
+  spend_limit_window: SpendLimitWindow;
+  spend_window_start: string;
+  spent_atoms: string;
+  reserved_atoms: string;
+  remaining_atoms: string | null;
+};
+
+export type ProjectPricingOverrideRecord = {
+  id: string;
+  project_id: string;
+  model_name: string;
+  operation: string;
+  override_kind: "EXACT_PRICE" | "MULTIPLIER";
+  billing_price_id: string | null;
+  multiplier_numerator: string | null;
+  multiplier_denominator: string | null;
+  enabled: boolean;
+};
+
+export type AsyncTaskStatus = "QUEUED" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+export type AsyncTaskFailureCategory =
+  | "UPSTREAM_SYSTEM"
+  | "CONTENT_POLICY"
+  | "INVALID_INPUT"
+  | "USER_CANCELLED"
+  | "UPSTREAM_BILLED"
+  | "TIMEOUT"
+  | "UNKNOWN";
+export type AsyncTaskRefundEligibility =
+  | "PENDING"
+  | "AUTO_REFUNDED"
+  | "DENIED_USER_CANCELLED"
+  | "DENIED_POLICY_OR_CLIENT"
+  | "DENIED_UPSTREAM_BILLED"
+  | "DENIED_ABUSE_LIMIT"
+  | "MANUAL_REVIEW"
+  | "NOT_APPLICABLE";
+
+export type AsyncTaskRecord = {
+  id: string;
+  request_id: string;
+  charge_id: string | null;
+  project_id: string;
+  api_key_id: string | null;
+  channel_id: string;
+  model: string;
+  operation: string;
+  upstream_task_id: string;
+  status: AsyncTaskStatus;
+  user_cancelled: boolean;
+  upstream_billed: boolean;
+  failure_category: AsyncTaskFailureCategory | null;
+  refund_eligibility: AsyncTaskRefundEligibility;
+  refund_id: string | null;
+  result_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 };
 
 export type UpstreamAccountRecord = {
@@ -299,6 +382,7 @@ export type ConfigSnapshot = {
   channels: Map<string, ChannelRecord>;
   models: Map<string, ModelRecord>;
   prices: Map<string, PriceVersionRecord>;
+  pricingOverridesByProject: Map<string, ProjectPricingOverrideRecord[]>;
   routesByModel: Map<string, RouteRecord[]>;
   plugins: Map<string, PluginRecord>;
   revokedPlugins: ReadonlySet<string>;
@@ -371,6 +455,11 @@ export type AcquireHoldInput = {
   request_id: string;
   attempt_id: string;
   project_id: string;
+  api_key_id?: string | null;
+  enforce_key_spend_limit?: boolean;
+  pricing_override_id?: string | null;
+  discount_numerator?: string | null;
+  discount_denominator?: string | null;
   currency: string;
   operation: Operation;
   model: string;
@@ -402,6 +491,7 @@ export type AcquireHoldResult =
         | "wallet_not_found"
         | "wallet_frozen"
         | "insufficient_balance"
+        | "key_spend_limit_exceeded"
         | "idempotency_conflict"
         | "supplier_unavailable"
         | "supplier_insufficient_balance"
@@ -433,6 +523,7 @@ export type SwitchSupplierResult =
       code:
         | "hold_not_active"
         | "insufficient_balance"
+        | "key_spend_limit_exceeded"
         | "wallet_frozen"
         | "supplier_unavailable"
         | "supplier_insufficient_balance";
@@ -445,6 +536,10 @@ export type CommitTerminalInput = {
   channel_id: string;
   billing_price_id: string;
   cost_version_id: string;
+  api_key_id?: string | null;
+  pricing_override_id?: string | null;
+  discount_numerator?: string | null;
+  discount_denominator?: string | null;
   usage: Usage;
   billing_pricing: Pricing;
   billing_basis: PriceBasis;

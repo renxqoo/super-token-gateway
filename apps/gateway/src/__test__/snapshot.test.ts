@@ -27,6 +27,7 @@ function emptySnapshot(
     channels: new Map(),
     models: new Map(),
     prices: new Map(),
+    pricingOverridesByProject: new Map(),
     routesByModel: new Map(),
     plugins: new Map(plugins.map((p) => [p.id, p])),
     revokedPlugins: new Set(revoked),

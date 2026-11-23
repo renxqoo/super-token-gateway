@@ -1,5 +1,6 @@
 import type { SQL } from "bun";
 import {
+  createAsyncTasksRepository,
   createGatewayConfigNodeRepository,
   createLedgerEngine,
   prepareLedgerMonth,
@@ -40,6 +41,7 @@ function currentAndNextMonths(now = new Date()): [string, string] {
 export function createWorkerRunner(options: WorkerRunnerOptions) {
   const db = options.db;
   const ledger = createLedgerEngine(db, { enableLeases: false });
+  const asyncTasks = createAsyncTasksRepository(db);
   const configNodes = createGatewayConfigNodeRepository(db);
   const leaseKey = options.leaseKey ?? 81442599;
   const consumerName = options.outboxConsumerName ?? "business_webhook";
@@ -212,6 +214,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
     const expired_wallets = await ledger.expireAllLots(100);
     const collected_debts = await ledger.collectAllDebts(100);
     const rebalanced_accounts = await rebalanceImbalancedSuppliers();
+    await asyncTasks.expireStaleTasks(2 * 3_600_000, 100);
     const delivered_outbox_events = await deliverOutboxBatch();
     const prepared_months = includePartitions ? await ensurePartitions() : [];
     return {
@@ -327,6 +330,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
           await ledger.expireAllLots(100);
           await ledger.collectAllDebts(100);
           await rebalanceImbalancedSuppliers();
+          await asyncTasks.expireStaleTasks(2 * 3_600_000, 100);
         }
       }, options.maintenanceIntervalMs ?? 15_000);
       if (options.businessWebhookUrl) {

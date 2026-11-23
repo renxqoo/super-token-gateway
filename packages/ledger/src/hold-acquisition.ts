@@ -18,6 +18,10 @@ export function createHoldAcquirer(
         request_id: x.input.request_id,
         project_id: x.input.project_id,
         wallet_id: x.walletLease.walletId,
+        api_key_id: x.input.api_key_id ?? null,
+        pricing_override_id: x.input.pricing_override_id ?? null,
+        discount_numerator: x.input.discount_numerator ?? null,
+        discount_denominator: x.input.discount_denominator ?? null,
         operation: x.input.operation,
         model: x.input.model,
         fingerprint: x.input.fingerprint,
@@ -56,6 +60,10 @@ export function createHoldAcquirer(
             request_id uuid,
             project_id uuid,
             wallet_id uuid,
+            api_key_id uuid,
+            pricing_override_id uuid,
+            discount_numerator numeric,
+            discount_denominator numeric,
             operation text,
             model text,
             fingerprint text,
@@ -86,11 +94,15 @@ export function createHoldAcquirer(
           ORDER BY l.id FOR KEY SHARE OF l
         )
         INSERT INTO public.billing_holds (
-          request_id, project_id, wallet_id, operation, model, idempotency_key, fingerprint,
+          request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
+          pricing_override_id, discount_numerator, discount_denominator,
+          operation, model, idempotency_key, fingerprint,
           held_atoms, credit_atoms, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state, expires_at
         )
         SELECT
-          u.request_id, u.project_id, u.wallet_id, u.operation, u.model, NULL, u.fingerprint,
+          u.request_id, u.project_id, u.wallet_id, u.api_key_id, 0,
+          u.pricing_override_id, u.discount_numerator, u.discount_denominator,
+          u.operation, u.model, NULL, u.fingerprint,
           u.held_atoms, 0, '[]'::jsonb, u.supplier_holds, u.wallet_lease_id, u.supplier_lease_id, 'HELD', u.expires_at
         FROM batch u
         JOIN active_wallet_leases w ON w.id = u.wallet_lease_id
@@ -116,6 +128,10 @@ export function createHoldAcquirer(
         supplierLeaseId: x.supplierLease.leaseId,
         walletId: x.walletLease.walletId,
         projectId: x.input.project_id,
+        apiKeyId: x.input.api_key_id ?? null,
+        pricingOverrideId: x.input.pricing_override_id ?? null,
+        discountNumerator: x.input.discount_numerator ?? null,
+        discountDenominator: x.input.discount_denominator ?? null,
         currency: x.input.currency,
         operation: x.input.operation,
         model: x.input.model,
@@ -153,7 +169,7 @@ export function createHoldAcquirer(
 
   return {
     acquireHold(input: AcquireHoldInput): Promise<AcquireHoldResult> {
-      if (leases.canAcquire() && input.idempotency_key === null) {
+      if (leases.canAcquire() && input.idempotency_key === null && !input.enforce_key_spend_limit) {
         const customerAtoms = parseAtoms(input.customer_atoms);
         const supplierAtoms = parseAtoms(input.supplier_atoms);
         if (customerAtoms !== null && supplierAtoms !== null) {
