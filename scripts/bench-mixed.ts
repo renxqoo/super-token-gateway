@@ -172,7 +172,7 @@ export async function runMixedSoak(options: {
         stderr: "ignore",
       },
     );
-    const output = await new Response(proc.stdout).text();
+    const [output] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
     for (const line of output.trim().split("\n")) {
       const [pid, rss, cpu] = line.trim().split(/\s+/).map(Number);
       const role = Object.keys(processes).find((name) => processes[name] === pid);
@@ -260,7 +260,7 @@ export async function runMixedSoak(options: {
       pending.add(task);
     }
     if (now - lastSample >= 60_000) sample(now);
-    await Bun.sleep(now - start > seconds * 1000 - 50 ? 1 : 5);
+    await Bun.sleep(1);
   }
   const { total, started, maxDebt } = schedule.status();
   const unsent = total - started;

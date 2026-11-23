@@ -62,6 +62,15 @@
           "checksum": "27ebcbee33e71f3eda097e0180b98e90e63615e9339719e5b73bdb4f371b68ab"
         }
       ]
+    },
+    {
+      "version": 2026112301,
+      "files": [
+        {
+          "path": "./migrations/0007_ledger_hot_path_perf.sql",
+          "checksum": "f8692059e0ffd6000fdea03f573d4075a36c01794a9f128fa86c52698195640e"
+        }
+      ]
     }
   ],
   "legacyBaselines": [

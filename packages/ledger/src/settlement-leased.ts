@@ -9,6 +9,25 @@ import type {
 import type { LeaseManager } from "./lease-manager.ts";
 import { sha256Hex, cellKey, type JournalLine } from "./funds.ts";
 
+const UUID_POOL = Buffer.allocUnsafe(4096);
+let uuidHex = "";
+let uuidHexOffset = 8192;
+
+function fastUuid(): string {
+  if (uuidHexOffset + 32 > 8192) {
+    crypto.getRandomValues(UUID_POOL);
+    for (let i = 0; i < 4096; i += 16) {
+      UUID_POOL[i + 6] = (UUID_POOL[i + 6]! & 0x0f) | 0x40;
+      UUID_POOL[i + 8] = (UUID_POOL[i + 8]! & 0x3f) | 0x80;
+    }
+    uuidHex = UUID_POOL.toString("hex");
+    uuidHexOffset = 0;
+  }
+  const o = uuidHexOffset;
+  uuidHexOffset += 32;
+  return `${uuidHex.slice(o, o + 8)}-${uuidHex.slice(o + 8, o + 12)}-${uuidHex.slice(o + 12, o + 16)}-${uuidHex.slice(o + 16, o + 20)}-${uuidHex.slice(o + 20, o + 32)}`;
+}
+
 export type FastCommitCandidate = {
   index: number;
   item: CommitTerminalInput;
@@ -35,8 +54,8 @@ export async function commitLeasedBatch(
 
   const serialized = candidates.map((cand) => ({
     cand,
-    chargeId: crypto.randomUUID(),
-    eventId: crypto.randomUUID(),
+    chargeId: fastUuid(),
+    eventId: fastUuid(),
     usageDigest: sha256Hex(cand.item.usage),
     customerAtomsText: cand.customerAtoms.toString(),
     supplierAtomsText: cand.supplierAtoms.toString(),

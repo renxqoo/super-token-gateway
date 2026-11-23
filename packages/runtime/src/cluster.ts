@@ -28,6 +28,14 @@ local n = #KEYS / 3
 local time = redis.call('TIME')
 local nowMs = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 local out = {}
+local concCount = {}
+local concAdds = {}
+local rpmCur = {}
+local rpmBase = {}
+local rpmDelta = {}
+local tpmCur = {}
+local tpmBase = {}
+local tpmDelta = {}
 for i = 1, n do
   local ki = (i - 1) * 3
   local ai = (i - 1) * 6
@@ -41,33 +49,71 @@ for i = 1, n do
   local leaseTtlMs = tonumber(ARGV[ai + 5])
   local member = ARGV[ai + 6]
 
-  redis.call('ZREMRANGEBYSCORE', concKey, '-inf', nowMs)
-  local active = redis.call('ZCARD', concKey)
+  local active = concCount[concKey]
+  if active == nil then
+    redis.call('ZREMRANGEBYSCORE', concKey, '-inf', nowMs)
+    active = redis.call('ZCARD', concKey)
+    concCount[concKey] = active
+  end
   if active >= concLimit then
     out[i] = 3
   else
-    local curRpm = tonumber(redis.call('GET', rpmKey) or '0')
+    local curRpm = rpmCur[rpmKey]
+    if curRpm == nil then
+      curRpm = tonumber(redis.call('GET', rpmKey) or '0')
+      rpmCur[rpmKey] = curRpm
+      rpmBase[rpmKey] = curRpm
+    end
     if curRpm >= rpmLimit then
       out[i] = 1
     else
-      local curTpm = tonumber(redis.call('GET', tpmKey) or '0')
+      local curTpm = tpmCur[tpmKey]
+      if curTpm == nil then
+        curTpm = tonumber(redis.call('GET', tpmKey) or '0')
+        tpmCur[tpmKey] = curTpm
+        tpmBase[tpmKey] = curTpm
+      end
       if curTpm + estTokens > tpmLimit then
         out[i] = 2
       else
-        local nextRpm = redis.call('INCR', rpmKey)
-        if nextRpm == 1 then
-          redis.call('PEXPIRE', rpmKey, 60000)
+        rpmCur[rpmKey] = curRpm + 1
+        rpmDelta[rpmKey] = (rpmDelta[rpmKey] or 0) + 1
+        tpmCur[tpmKey] = curTpm + estTokens
+        tpmDelta[tpmKey] = (tpmDelta[tpmKey] or 0) + estTokens
+        concCount[concKey] = active + 1
+        local exp = nowMs + leaseTtlMs
+        local adds = concAdds[concKey]
+        if adds == nil then
+          concAdds[concKey] = { exp, member }
+        else
+          local len = #adds
+          adds[len + 1] = exp
+          adds[len + 2] = member
         end
-        local nextTpm = redis.call('INCRBY', tpmKey, estTokens)
-        if nextTpm == estTokens then
-          redis.call('PEXPIRE', tpmKey, 60000)
-        end
-        redis.call('ZADD', concKey, nowMs + leaseTtlMs, member)
-        local latest = redis.call('ZREVRANGE', concKey, 0, 0, 'WITHSCORES')
-        redis.call('PEXPIREAT', concKey, math.ceil(tonumber(latest[2])))
         out[i] = 0
       end
     end
+  end
+end
+for k, delta in pairs(rpmDelta) do
+  local nextVal = redis.call('INCRBY', k, delta)
+  if nextVal == delta or rpmBase[k] == 0 then
+    redis.call('PEXPIRE', k, 60000)
+  end
+end
+for k, delta in pairs(tpmDelta) do
+  if delta > 0 then
+    local nextVal = redis.call('INCRBY', k, delta)
+    if nextVal == delta or tpmBase[k] == 0 then
+      redis.call('PEXPIRE', k, 60000)
+    end
+  end
+end
+for k, adds in pairs(concAdds) do
+  redis.call('ZADD', k, unpack(adds))
+  local latest = redis.call('ZREVRANGE', k, 0, 0, 'WITHSCORES')
+  if latest[2] then
+    redis.call('PEXPIREAT', k, math.ceil(tonumber(latest[2])))
   end
 end
 return out
@@ -90,17 +136,18 @@ return 1
 const batchAcquireSha = new Bun.CryptoHasher("sha1").update(BATCH_ACQUIRE_LUA).digest("hex");
 const renewSha = new Bun.CryptoHasher("sha1").update(RENEW_LUA).digest("hex");
 
-async function evalPermit(
+async function evalPermitPrepared(
   redis: RedisClient,
   script: string,
-  sha: string,
-  args: string[],
+  shaArgs: string[],
 ): Promise<unknown> {
   try {
-    return await redis.send("EVALSHA", [sha, ...args]);
+    return await redis.send("EVALSHA", shaArgs);
   } catch (error) {
     if (!(error instanceof Error) || !/^NOSCRIPT\b/.test(error.message)) throw error;
-    return redis.send("EVAL", [script, ...args]);
+    const evalArgs = shaArgs.slice();
+    evalArgs[0] = script;
+    return redis.send("EVAL", evalArgs);
   }
 }
 
@@ -117,11 +164,15 @@ async function withRedisDeadline<T>(work: Promise<T>, timeoutMs: number): Promis
   }
 }
 
-type PendingAcquire = {
-  redis: RedisClient;
+type KeyTriple = {
   rpmKey: string;
   tpmKey: string;
   concKey: string;
+};
+
+type PendingAcquire = {
+  redis: RedisClient;
+  keys: KeyTriple;
   rpm: string;
   tpm: string;
   concurrency: string;
@@ -129,7 +180,7 @@ type PendingAcquire = {
   leaseTtlMs: number;
   leaseTtlStr: string;
   member: string;
-  onRevoke?: () => void;
+  onRevoke: (() => void) | undefined;
   resolve: (result: RateLimitAcquireResult) => void;
 };
 
@@ -148,24 +199,27 @@ type SweepPermit = {
   nextRenewAtMs: number;
   renewing: boolean;
   released: boolean;
-  revoke: () => void;
+  onRevoke: (() => void) | undefined;
+  revoked: AbortController | null;
 };
 
 export type RateLimitAcquireResult =
   | { ok: true; release: () => void; signal?: AbortSignal }
   | { ok: false; reason: "rpm" | "tpm" | "concurrency" | "unavailable" };
 
-const ACQUIRE_BATCH_MAX = 64;
-const RELEASE_BATCH_MAX = 128;
+const ACQUIRE_BATCH_MAX = 96;
+const RELEASE_BATCH_MAX = 512;
+const KEY_CACHE_MAX = 8192;
 
 export class ClusterCoordinator {
   readonly nodeId: string;
-  private readonly instanceTag = crypto.randomUUID().slice(0, 8);
+  private readonly memberPrefix: string;
   private readonly ns: string;
   private readonly localLimiter = new LocalRateLimiter();
   private readonly redisUrl: string | undefined;
   private readonly onCircuitEvent: ClusterCoordinatorOptions["onCircuitEvent"];
   private readonly onConfigEpoch: ClusterCoordinatorOptions["onConfigEpoch"];
+  private readonly keyCache = new Map<string, KeyTriple>();
   private client: RedisClient | null = null;
   private subscriber: RedisClient | null = null;
   private connected = false;
@@ -173,13 +227,14 @@ export class ClusterCoordinator {
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private sentinelTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly sentinel: ClusterCoordinatorOptions["sentinel"];
-  private readonly permits = new Set<() => void>();
+  private readonly shortPermits = new Set<() => void>();
   private readonly sweepPermits = new Set<SweepPermit>();
   private sweepTimer: ReturnType<typeof setInterval> | undefined;
   private permitSeq = 0;
   private pendingAcquires: PendingAcquire[] = [];
   private acquireTimer: ReturnType<typeof setTimeout> | undefined;
   private acquireMicrotask = false;
+  private acquireInFlight = 0;
   private pendingReleases: PendingRelease[] = [];
   private releaseTimer: ReturnType<typeof setTimeout> | undefined;
   private releaseMicrotask = false;
@@ -189,8 +244,23 @@ export class ClusterCoordinator {
     this.sentinel = options.sentinel;
     this.ns = options.namespace ?? "stg";
     this.nodeId = options.nodeId ?? crypto.randomUUID();
+    this.memberPrefix = `${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}:`;
     this.onCircuitEvent = options.onCircuitEvent;
     this.onConfigEpoch = options.onConfigEpoch;
+  }
+
+  private getKeyTriple(key: string): KeyTriple {
+    let entry = this.keyCache.get(key);
+    if (!entry) {
+      if (this.keyCache.size >= KEY_CACHE_MAX) this.keyCache.clear();
+      entry = {
+        rpmKey: `${this.ns}:rl:rpm:${key}`,
+        tpmKey: `${this.ns}:rl:tpm:${key}`,
+        concKey: `${this.ns}:rl:conc:${key}`,
+      };
+      this.keyCache.set(key, entry);
+    }
+    return entry;
   }
 
   isRedisConnected(): boolean {
@@ -243,16 +313,31 @@ export class ClusterCoordinator {
     }
   }
 
+  private releaseSweepPermit(entry: SweepPermit): void {
+    if (entry.released) return;
+    entry.released = true;
+    this.sweepPermits.delete(entry);
+    this.enqueueRelease(entry.redis, entry.concKey, entry.member, false);
+  }
+
+  private revokeSweepPermit(entry: SweepPermit): void {
+    if (entry.released) return;
+    this.releaseSweepPermit(entry);
+    if (entry.onRevoke) entry.onRevoke();
+    else entry.revoked?.abort(new Error("Shared concurrency permit could not be renewed"));
+  }
+
   private ensureSweepTimer(): void {
     if (this.sweepTimer) return;
     this.sweepTimer = setInterval(() => {
       if (this.sweepPermits.size === 0) return;
-      const now = performance.now();
+      const now = Date.now();
       for (const permit of this.sweepPermits) {
         if (permit.released || permit.renewing || now < permit.nextRenewAtMs) continue;
         permit.renewing = true;
         void withRedisDeadline(
-          evalPermit(permit.redis, RENEW_LUA, renewSha, [
+          evalPermitPrepared(permit.redis, RENEW_LUA, [
+            renewSha,
             "1",
             permit.concKey,
             permit.member,
@@ -264,14 +349,14 @@ export class ClusterCoordinator {
             permit.renewing = false;
             if (permit.released) return;
             if (Number(renewed) !== 1) {
-              permit.revoke();
+              this.revokeSweepPermit(permit);
             } else {
-              permit.nextRenewAtMs = performance.now() + permit.renewEveryMs;
+              permit.nextRenewAtMs = Date.now() + permit.renewEveryMs;
             }
           })
           .catch(() => {
             permit.renewing = false;
-            if (!permit.released) permit.revoke();
+            if (!permit.released) this.revokeSweepPermit(permit);
           });
       }
     }, 500);
@@ -282,6 +367,7 @@ export class ClusterCoordinator {
     if (this.client !== client) return;
     this.connected = false;
     clearTimeout(this.sentinelTimer);
+    this.sentinelTimer = undefined;
     if (this.acquireTimer) {
       clearTimeout(this.acquireTimer);
       this.acquireTimer = undefined;
@@ -305,8 +391,11 @@ export class ClusterCoordinator {
     } catch {
       void 0;
     }
-    for (const revoke of this.permits) revoke();
+    for (const revoke of this.shortPermits) revoke();
+    this.shortPermits.clear();
+    const activeSweep = [...this.sweepPermits];
     this.sweepPermits.clear();
+    for (const entry of activeSweep) this.revokeSweepPermit(entry);
     this.scheduleReconnect();
   }
 
@@ -396,6 +485,13 @@ export class ClusterCoordinator {
           throw new Error("Discovered Redis node is not writable");
         }
       }
+      await withRedisDeadline(
+        Promise.all([
+          connecting.send("SCRIPT", ["LOAD", BATCH_ACQUIRE_LUA]),
+          connecting.send("SCRIPT", ["LOAD", RENEW_LUA]),
+        ]),
+        2000,
+      );
       sub = await withRedisDeadline(connecting.duplicate(), 2000);
       await withRedisDeadline(
         sub.subscribe(this.circuitTopic(), (message) => {
@@ -484,15 +580,19 @@ export class ClusterCoordinator {
       this.flushReleases();
       return;
     }
-    this.scheduleReleaseFlush(immediate || this.permits.size < 4);
+    this.scheduleReleaseFlush(immediate || this.sweepPermits.size + this.shortPermits.size < 4);
   }
 
   private flushReleases(): void {
-    if (this.pendingReleases.length === 0) return;
-    const batch = this.pendingReleases.splice(0, RELEASE_BATCH_MAX);
-    if (this.pendingReleases.length > 0) {
-      this.scheduleReleaseFlush(true);
-    }
+    const total = this.pendingReleases.length;
+    if (total === 0) return;
+    const batch =
+      total <= RELEASE_BATCH_MAX
+        ? this.pendingReleases
+        : this.pendingReleases.splice(0, RELEASE_BATCH_MAX);
+    if (total <= RELEASE_BATCH_MAX) this.pendingReleases = [];
+    else this.scheduleReleaseFlush(true);
+
     if (batch.length === 1) {
       const only = batch[0]!;
       if (only.redis.connected) {
@@ -500,6 +600,33 @@ export class ClusterCoordinator {
       }
       return;
     }
+
+    const firstRedis = batch[0]!.redis;
+    let sameClient = true;
+    for (let i = 1; i < batch.length; i++) {
+      if (batch[i]!.redis !== firstRedis) {
+        sameClient = false;
+        break;
+      }
+    }
+    if (sameClient) {
+      if (!firstRedis.connected) return;
+      const byKey = new Map<string, string[]>();
+      for (let i = 0; i < batch.length; i++) {
+        const item = batch[i]!;
+        let args = byKey.get(item.concKey);
+        if (!args) {
+          args = [item.concKey];
+          byKey.set(item.concKey, args);
+        }
+        args.push(item.member);
+      }
+      for (const args of byKey.values()) {
+        void firstRedis.send("ZREM", args).catch(() => undefined);
+      }
+      return;
+    }
+
     const byClient = new Map<RedisClient, Map<string, string[]>>();
     for (const item of batch) {
       if (!item.redis.connected) continue;
@@ -528,39 +655,27 @@ export class ClusterCoordinator {
     member: string,
     leaseTtlMs: number,
     leaseTtlStr: string,
-    onRevoke?: () => void,
+    onRevoke: (() => void) | undefined,
+    batchNowMs: number,
   ): RateLimitAcquireResult {
     const revoked = onRevoke ? null : new AbortController();
     const renewEveryMs = Math.max(1, Math.floor(leaseTtlMs / 3));
     if (leaseTtlMs >= 3000) {
-      let revokeFn: () => void = () => {};
       const entry: SweepPermit = {
         redis,
         concKey,
         member,
         leaseTtlStr,
         renewEveryMs,
-        nextRenewAtMs: performance.now() + renewEveryMs,
+        nextRenewAtMs: batchNowMs + renewEveryMs,
         renewing: false,
         released: false,
-        revoke: () => revokeFn(),
+        onRevoke,
+        revoked,
       };
-      const release = () => {
-        if (entry.released) return;
-        entry.released = true;
-        this.permits.delete(revokeFn);
-        this.sweepPermits.delete(entry);
-        this.enqueueRelease(redis, concKey, member, false);
-      };
-      revokeFn = () => {
-        if (entry.released) return;
-        release();
-        if (onRevoke) onRevoke();
-        else revoked!.abort(new Error("Shared concurrency permit could not be renewed"));
-      };
-      this.permits.add(revokeFn);
       this.sweepPermits.add(entry);
-      this.ensureSweepTimer();
+      if (!this.sweepTimer) this.ensureSweepTimer();
+      const release = () => this.releaseSweepPermit(entry);
       return revoked ? { ok: true, release, signal: revoked.signal } : { ok: true, release };
     }
     let released = false;
@@ -569,7 +684,7 @@ export class ClusterCoordinator {
       if (released) return;
       released = true;
       clearTimeout(timer);
-      this.permits.delete(revoke);
+      this.shortPermits.delete(revoke);
       this.enqueueRelease(redis, concKey, member, true);
     };
     const revoke = () => {
@@ -582,7 +697,7 @@ export class ClusterCoordinator {
       if (released) return;
       try {
         const renewed = await withRedisDeadline(
-          evalPermit(redis, RENEW_LUA, renewSha, ["1", concKey, member, leaseTtlStr]),
+          evalPermitPrepared(redis, RENEW_LUA, [renewSha, "1", concKey, member, leaseTtlStr]),
           Math.min(1000, renewEveryMs),
         );
         if (Number(renewed) !== 1) {
@@ -595,7 +710,7 @@ export class ClusterCoordinator {
         revoke();
       }
     };
-    this.permits.add(revoke);
+    this.shortPermits.add(revoke);
     timer = setTimeout(renew, renewEveryMs);
     timer.unref();
     return revoked ? { ok: true, release, signal: revoked.signal } : { ok: true, release };
@@ -625,7 +740,8 @@ export class ClusterCoordinator {
   }
 
   private flushAcquires(): void {
-    if (this.pendingAcquires.length === 0) return;
+    const total = this.pendingAcquires.length;
+    if (total === 0) return;
     if (this.pendingReleases.length > 0) {
       if (this.releaseTimer) {
         clearTimeout(this.releaseTimer);
@@ -635,10 +751,28 @@ export class ClusterCoordinator {
         this.flushReleases();
       }
     }
-    const batch = this.pendingAcquires.splice(0, ACQUIRE_BATCH_MAX);
-    if (this.pendingAcquires.length > 0) {
-      this.scheduleAcquireFlush(true);
+    const batch =
+      total <= ACQUIRE_BATCH_MAX
+        ? this.pendingAcquires
+        : this.pendingAcquires.splice(0, ACQUIRE_BATCH_MAX);
+    if (total <= ACQUIRE_BATCH_MAX) this.pendingAcquires = [];
+    else this.scheduleAcquireFlush(true);
+
+    const activeClient = this.client;
+    if (activeClient && !this.closed && this.connected && activeClient.connected) {
+      let allMatch = true;
+      for (let i = 0; i < batch.length; i++) {
+        if (batch[i]!.redis !== activeClient) {
+          allMatch = false;
+          break;
+        }
+      }
+      if (allMatch) {
+        void this.runAcquireBatch(activeClient, batch);
+        return;
+      }
     }
+
     const groups = new Map<RedisClient, PendingAcquire[]>();
     for (const item of batch) {
       if (this.closed || this.client !== item.redis || !this.connected || !item.redis.connected) {
@@ -658,25 +792,27 @@ export class ClusterCoordinator {
   }
 
   private async runAcquireBatch(redis: RedisClient, items: PendingAcquire[]): Promise<void> {
+    this.acquireInFlight++;
     const n = items.length;
-    const args: string[] = [String(n * 3)];
+    const shaArgs: string[] = [batchAcquireSha, String(n * 3)];
     for (let i = 0; i < n; i++) {
-      const it = items[i]!;
-      args.push(it.rpmKey, it.tpmKey, it.concKey);
+      const k = items[i]!.keys;
+      shaArgs.push(k.rpmKey, k.tpmKey, k.concKey);
     }
     for (let i = 0; i < n; i++) {
       const it = items[i]!;
-      args.push(it.rpm, it.tpm, it.concurrency, it.estimatedTokens, it.leaseTtlStr, it.member);
+      shaArgs.push(it.rpm, it.tpm, it.concurrency, it.estimatedTokens, it.leaseTtlStr, it.member);
     }
     try {
       const raw = await withRedisDeadline(
-        evalPermit(redis, BATCH_ACQUIRE_LUA, batchAcquireSha, args),
+        evalPermitPrepared(redis, BATCH_ACQUIRE_LUA, shaArgs),
         1000,
       );
       if (!Array.isArray(raw) || raw.length !== n) {
         throw new Error("Invalid Redis rate limit reply");
       }
       const disconnected = this.closed || this.client !== redis || !this.connected;
+      const batchNowMs = Date.now();
       for (let i = 0; i < n; i++) {
         const it = items[i]!;
         const code = Number(raw[i]);
@@ -689,17 +825,18 @@ export class ClusterCoordinator {
         } else if (code !== 0) {
           it.resolve({ ok: false, reason: "unavailable" });
         } else if (disconnected) {
-          void redis.send("ZREM", [it.concKey, it.member]).catch(() => undefined);
+          void redis.send("ZREM", [it.keys.concKey, it.member]).catch(() => undefined);
           it.resolve({ ok: false, reason: "unavailable" });
         } else {
           it.resolve(
             this.registerPermit(
               redis,
-              it.concKey,
+              it.keys.concKey,
               it.member,
               it.leaseTtlMs,
               it.leaseTtlStr,
               it.onRevoke,
+              batchNowMs,
             ),
           );
         }
@@ -707,6 +844,11 @@ export class ClusterCoordinator {
     } catch {
       this.disconnect(redis);
       for (const it of items) it.resolve({ ok: false, reason: "unavailable" });
+    } finally {
+      this.acquireInFlight--;
+      if (this.pendingAcquires.length > 0 && !this.closed) {
+        this.scheduleAcquireFlush(true);
+      }
     }
   }
 
@@ -724,17 +866,13 @@ export class ClusterCoordinator {
     if (!redis?.connected || !this.connected || this.closed) {
       return Promise.resolve({ ok: false, reason: "unavailable" });
     }
-    const rpmKey = `${this.ns}:rl:rpm:${key}`;
-    const tpmKey = `${this.ns}:rl:tpm:${key}`;
-    const concKey = `${this.ns}:rl:conc:${key}`;
-    const member = `${this.nodeId}:${this.instanceTag}:${++this.permitSeq}`;
+    const keys = this.getKeyTriple(key);
+    const member = `${this.memberPrefix}${++this.permitSeq}`;
     const safeTpmLimit = Math.min(limits.tpm, Number.MAX_SAFE_INTEGER);
     return new Promise<RateLimitAcquireResult>((resolve) => {
       this.pendingAcquires.push({
         redis,
-        rpmKey,
-        tpmKey,
-        concKey,
+        keys,
         rpm: String(limits.rpm),
         tpm: String(safeTpmLimit),
         concurrency: String(limits.concurrency),
@@ -742,7 +880,7 @@ export class ClusterCoordinator {
         leaseTtlMs,
         leaseTtlStr: String(leaseTtlMs),
         member,
-        ...(onRevoke ? { onRevoke } : {}),
+        onRevoke,
         resolve,
       });
       if (this.pendingAcquires.length >= ACQUIRE_BATCH_MAX) {
@@ -753,7 +891,11 @@ export class ClusterCoordinator {
         this.flushAcquires();
         return;
       }
-      this.scheduleAcquireFlush(leaseTtlMs < 3000 || this.permits.size < 4);
+      this.scheduleAcquireFlush(
+        this.acquireInFlight < 2 ||
+          leaseTtlMs < 3000 ||
+          this.sweepPermits.size + this.shortPermits.size < 4,
+      );
     });
   }
 
@@ -773,7 +915,9 @@ export class ClusterCoordinator {
     this.connected = false;
     this.closed = true;
     clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
     clearTimeout(this.sentinelTimer);
+    this.sentinelTimer = undefined;
     if (this.acquireTimer) {
       clearTimeout(this.acquireTimer);
       this.acquireTimer = undefined;
@@ -786,10 +930,13 @@ export class ClusterCoordinator {
     for (const item of this.pendingAcquires) item.resolve({ ok: false, reason: "unavailable" });
     this.pendingAcquires = [];
     this.pendingReleases = [];
-    for (const revoke of this.permits) revoke();
+    for (const revoke of this.shortPermits) revoke();
+    this.shortPermits.clear();
+    const activeSweep = [...this.sweepPermits];
     this.sweepPermits.clear();
+    for (const entry of activeSweep) this.revokeSweepPermit(entry);
     const sub = this.subscriber;
-    const cli = this.client;
+    const client = this.client;
     this.subscriber = null;
     this.client = null;
     try {
@@ -798,7 +945,7 @@ export class ClusterCoordinator {
       void 0;
     }
     try {
-      cli?.close();
+      client?.close();
     } catch {
       void 0;
     }

@@ -1,6 +1,23 @@
-import { calculateCost, type Usage } from "@gateway/kernel";
+import {
+  calculateCompiledCostAtoms,
+  compilePricing,
+  type CompiledPricing,
+  type Pricing,
+  type Usage,
+} from "@gateway/kernel";
 import { parseAtoms } from "./funds.ts";
 import type { CommitTerminalInput } from "./types.ts";
+
+const compiledPricingCache = new WeakMap<Pricing, CompiledPricing>();
+
+function getCompiledPricing(pricing: Pricing): CompiledPricing {
+  let compiled = compiledPricingCache.get(pricing);
+  if (!compiled) {
+    compiled = compilePricing(pricing);
+    compiledPricingCache.set(pricing, compiled);
+  }
+  return compiled;
+}
 
 function usageForSettlement(
   item: CommitTerminalInput,
@@ -16,14 +33,16 @@ export function priceSettlement(item: CommitTerminalInput): {
   customerAtoms: bigint;
   supplierAtoms: bigint;
 } {
-  const customerAtoms = BigInt(
-    calculateCost(usageForSettlement(item, item.billing_basis), item.billing_pricing),
+  const customerAtoms = calculateCompiledCostAtoms(
+    usageForSettlement(item, item.billing_basis),
+    getCompiledPricing(item.billing_pricing),
   );
   if (item.supplier_cost_atoms_override === undefined) {
     return {
       customerAtoms,
-      supplierAtoms: BigInt(
-        calculateCost(usageForSettlement(item, item.supplier_basis), item.supplier_pricing),
+      supplierAtoms: calculateCompiledCostAtoms(
+        usageForSettlement(item, item.supplier_basis),
+        getCompiledPricing(item.supplier_pricing),
       ),
     };
   }

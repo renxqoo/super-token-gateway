@@ -20,7 +20,7 @@ type BurstOptions = {
   quotaPattern: string;
   mockPort: number;
   mockToken: string;
-  readGatewayRss: () => number;
+  readGatewayRss: () => number | Promise<number>;
 };
 
 type StreamResult = {
@@ -183,7 +183,7 @@ async function sample(options: BurstOptions) {
     mock: mock.active,
     cancellations: mock.cancellations,
     attempts: mock.attempts["bprod-long-up"] ?? 0,
-    rss: options.readGatewayRss(),
+    rss: await options.readGatewayRss(),
   };
 }
 

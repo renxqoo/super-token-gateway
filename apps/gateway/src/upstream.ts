@@ -43,7 +43,7 @@ import {
   type ConversionMode,
   type SSEEvent,
 } from "@gateway/protocol";
-import { applyAuthToRequest, type VertexTokens } from "@gateway/runtime";
+import { applyAuthToRequest, isValidHttpHeaderValue, type VertexTokens } from "@gateway/runtime";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -126,8 +126,9 @@ export function mergeUsageSources(baseUsage?: Usage, aliasUsage?: Usage): Usage 
 
 export type PreparedUpstreamRequest = {
   url: URL;
-  headers: Headers;
-  body: Uint8Array;
+  headers: Headers | Record<string, string>;
+  headersValidated?: boolean;
+  body: string | Uint8Array;
   upstreamProtocol: Protocol | null;
   usageDialect: UsageDialect;
   isBedrockStream: boolean;
@@ -196,6 +197,7 @@ function buildPreparedPayload(options: {
   isStream: boolean;
   outputBound?: number;
   conversionMode?: ConversionMode;
+  canMutateClientBody?: boolean;
   onFieldDropped?: (source: Protocol, target: Protocol, field: string) => void;
   onFieldRejected?: (source: Protocol, target: Protocol, field: string) => void;
 }): { payload: Record<string, unknown>; droppedFields: string[] } {
@@ -205,7 +207,7 @@ function buildPreparedPayload(options: {
   let payload: Record<string, unknown>;
   if (isConversationalOperation(operation) && upstreamProtocol) {
     if (operation === upstreamProtocol) {
-      payload = copyExact(clientBody, { ...clientBody });
+      payload = options.canMutateClientBody ? clientBody : copyExact(clientBody, { ...clientBody });
     } else {
       const mode: ConversionMode = options.conversionMode ?? "strict";
       const normalized = decodeRequest(clientBody, operation, {
@@ -241,11 +243,12 @@ function buildPreparedPayload(options: {
       });
     }
   } else {
-    payload = copyExact(clientBody, { ...clientBody });
+    payload = options.canMutateClientBody ? clientBody : copyExact(clientBody, { ...clientBody });
   }
 
+  const hasTransforms = merged.request_transforms.length > 0;
   const protocol = upstreamProtocol ?? (isConversationalOperation(operation) ? operation : null);
-  if (options.outputBound !== undefined && protocol) {
+  if (options.outputBound !== undefined && protocol && (hasTransforms || !upstreamProtocol)) {
     capKnownOutput(payload, protocol, options.outputBound);
   }
   if (resolved.kind === "DECLARATIVE") {
@@ -266,10 +269,10 @@ function buildPreparedPayload(options: {
     if (cfg.include_stream_usage_option && isStream && upstreamProtocol === "chat") {
       payload.stream_options = { include_usage: true };
     }
-    if (merged.request_transforms.length > 0) {
+    if (hasTransforms) {
       payload = applyBodyTransforms(payload, merged.request_transforms);
     }
-  } else if (merged.request_transforms.length > 0) {
+  } else if (hasTransforms) {
     payload = applyBodyTransforms(payload, merged.request_transforms);
   }
 
@@ -286,21 +289,22 @@ function buildPreparedPayload(options: {
   return { payload, droppedFields };
 }
 
-const providerPlans = new WeakMap<
-  RouteRecord,
-  {
-    snapshot: Pick<ConfigSnapshot, "plugins" | "providerPluginsByName">;
-    channel: ChannelRecord;
-    resolved: ResolvedProvider;
-    overrides: MergedProviderOverrides;
-  }
->();
+type CachedProviderPlan = {
+  snapshot: Pick<ConfigSnapshot, "plugins" | "providerPluginsByName">;
+  channel: ChannelRecord;
+  resolved: ResolvedProvider;
+  overrides: MergedProviderOverrides;
+  extraHeaderEntries: readonly [string, string][];
+  staticEndpoints: Map<string, URL>;
+};
+
+const providerPlans = new WeakMap<RouteRecord, CachedProviderPlan>();
 
 function getProviderPlan(
   snapshot: Pick<ConfigSnapshot, "plugins" | "providerPluginsByName">,
   channel: ChannelRecord,
   route: RouteRecord,
-) {
+): CachedProviderPlan {
   const cached = providerPlans.get(route);
   if (cached && cached.channel === channel && cached.snapshot === snapshot) return cached;
   const resolved = channel.provider_plugin_id
@@ -313,11 +317,23 @@ function getProviderPlan(
       `Provider plugin unavailable for channel ${channel.kind}`,
     );
   }
-  const plan = {
+  const overrides = mergeOverridesForResolved(
+    resolved,
+    channel.adapter_config,
+    route.adapter_overrides,
+  );
+  const sanitized = sanitizeProviderHeaders(overrides.extra_headers);
+  const extraHeaderEntries: [string, string][] = [];
+  for (const [k, v] of Object.entries(sanitized)) {
+    extraHeaderEntries.push([k.toLowerCase(), v]);
+  }
+  const plan: CachedProviderPlan = {
     snapshot,
     channel,
     resolved,
-    overrides: mergeOverridesForResolved(resolved, channel.adapter_config, route.adapter_overrides),
+    overrides,
+    extraHeaderEntries,
+    staticEndpoints: new Map(),
   };
   providerPlans.set(route, plan);
   return plan;
@@ -337,7 +353,7 @@ export function resolveRouteUpstreamProtocol(
   }
 }
 
-export async function prepareUpstreamRequest(options: {
+export type PrepareUpstreamOptions = {
   channel: ChannelRecord;
   route: RouteRecord;
   snapshot: Pick<ConfigSnapshot, "plugins" | "providerPluginsByName">;
@@ -347,6 +363,7 @@ export async function prepareUpstreamRequest(options: {
   outputBound?: number;
   multipartEntries?: readonly [string, string | File][];
   isStream: boolean;
+  canMutateClientBody?: boolean;
   vertexTokens: VertexTokens;
   wasmExecutor: WasmRuntimeExecutor | null;
   signingPublicKeyPem?: string;
@@ -355,7 +372,106 @@ export async function prepareUpstreamRequest(options: {
   onFieldDropped?: (source: Protocol, target: Protocol, field: string) => void;
   onFieldRejected?: (source: Protocol, target: Protocol, field: string) => void;
   signal: AbortSignal;
-}): Promise<PreparedUpstreamRequest> {
+};
+
+export function tryPrepareUpstreamRequestSync(
+  options: Omit<PrepareUpstreamOptions, "signal">,
+): PreparedUpstreamRequest | null {
+  const { channel, route, snapshot, secret, operation, clientBody, multipartEntries, isStream } =
+    options;
+  if (multipartEntries) return null;
+  const plan = getProviderPlan(snapshot, channel, route);
+  const { resolved, overrides: mergedOverrides, extraHeaderEntries, staticEndpoints } = plan;
+  if (resolved.kind !== "DECLARATIVE") return null;
+  const auth = resolved.config.auth;
+  if (auth.scheme !== "none" && auth.scheme !== "bearer" && auth.scheme !== "header") {
+    return null;
+  }
+
+  if (route.request_policy && Object.keys(route.request_policy).length > 0) {
+    validateRequestPolicy(clientBody, route.request_policy);
+  }
+
+  const upstreamProtocol = upstreamProtocolFor(resolved, operation);
+  const usageDialect = resolved.config.usage_dialect;
+  const isBedrockStream = isStream && resolved.config.stream_framing === "bedrock_eventstream";
+
+  const conversionMode: ConversionMode =
+    route.request_policy?.conversion_mode === "compat" ? "compat" : "strict";
+  const payloadOpts: Parameters<typeof buildPreparedPayload>[0] = {
+    resolved,
+    merged: mergedOverrides,
+    operation,
+    upstreamProtocol,
+    upstreamModel: route.upstream_model,
+    clientBody,
+    isStream,
+    conversionMode,
+  };
+  if (options.canMutateClientBody) payloadOpts.canMutateClientBody = true;
+  if (options.onFieldDropped) payloadOpts.onFieldDropped = options.onFieldDropped;
+  if (options.onFieldRejected) payloadOpts.onFieldRejected = options.onFieldRejected;
+  if (options.outputBound !== undefined) payloadOpts.outputBound = options.outputBound;
+  const { payload, droppedFields } = buildPreparedPayload(payloadOpts);
+
+  const endpointKey = `${operation}:${isStream ? 1 : 0}`;
+  let url = staticEndpoints.get(endpointKey);
+  if (!url) {
+    try {
+      url = renderEndpointUrl({
+        baseUrl: channel.base_url,
+        config: resolved.config,
+        operation,
+        upstreamModel: route.upstream_model,
+        isStream,
+        ...(mergedOverrides.path_override ? { pathOverride: mergedOverrides.path_override } : {}),
+        extraQuery: mergedOverrides.query_params,
+      });
+    } catch (err) {
+      throw new GatewayError(
+        502,
+        "provider_adapter_failed",
+        err instanceof Error ? err.message : "Failed to render provider endpoint URL",
+      );
+    }
+    staticEndpoints.set(endpointKey, url);
+  }
+
+  const headers: Record<string, string> = {};
+  if (options.traceparent) headers.traceparent = options.traceparent;
+  if (isBedrockStream) headers.accept = "application/vnd.amazon.eventstream";
+  else if (isStream) headers.accept = "text/event-stream";
+  for (let i = 0; i < extraHeaderEntries.length; i++) {
+    const pair = extraHeaderEntries[i]!;
+    headers[pair[0]] = pair[1];
+  }
+  headers["content-type"] = "application/json";
+  let secretValid = true;
+  if (auth.scheme === "bearer" && secret) {
+    secretValid = isValidHttpHeaderValue(secret);
+    headers.authorization = `Bearer ${secret}`;
+  } else if (auth.scheme === "header" && secret) {
+    secretValid = isValidHttpHeaderValue(secret);
+    headers[auth.header_name.toLowerCase()] = `${auth.prefix ?? ""}${secret}`;
+  }
+
+  return {
+    url,
+    headers,
+    headersValidated: extraHeaderEntries.length === 0 && auth.scheme !== "header" && secretValid,
+    body: stringifyExact(payload),
+    upstreamProtocol,
+    usageDialect,
+    isBedrockStream,
+    resolvedProvider: resolved,
+    mergedOverrides,
+    droppedFields,
+  };
+}
+
+export async function prepareUpstreamRequest(
+  options: PrepareUpstreamOptions,
+): Promise<PreparedUpstreamRequest> {
   const {
     channel,
     route,

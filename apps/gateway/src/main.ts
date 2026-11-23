@@ -9,6 +9,7 @@ const publicServer = Bun.serve({
   hostname: config.host,
   port: config.port,
   idleTimeout: 120,
+  ...(config.reusePort ? { reusePort: true } : {}),
   fetch(req, server) {
     return runtime.fetchPublic(req, {
       getPeerAddress: () => server.requestIP(req)?.address,

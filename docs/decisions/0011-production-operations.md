@@ -50,6 +50,30 @@ Gateway 使用稳定的 PostgreSQL 写入口，切换前应隔离旧主连接。
 
 规则覆盖就绪、5xx、P99、快照、共享配额、结算失败、行政审计、Worker 选主、账务清扫、过期预扣与租约、未明账、Outbox 与采集缺样本。未明账按原预扣到期时间估算账龄。Outbox 以启用的业务 Webhook 消费者游标之后的首个事件时间作为积压指标。告警阈值是随仓库提供的初值，生产使用业务批准的 SLO 并在发布前验证 Alertmanager 接收端收到测试告警。 [规则](../../infra/monitoring/alerts.yml) · [行为测试](../../infra/monitoring/alerts.test.yml) · [Prometheus 告警规则文档](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/)
 
+## 容量配比与 PostgreSQL 存储调优
+
+### 在途并发与节点资源配比（`MAX_IN_FLIGHT`）
+
+单节点在真实 LLM 上游时延下的吞吐上限遵循 Little's Law：`吞吐上限 ≈ MAX_IN_FLIGHT / 平均上游时延（秒）`。默认 `MAX_IN_FLIGHT=2000` 适用于短时延或低并发起步，承载真实长时延请求或长 SSE 流时必须按目标吞吐、平均上游时延和突发系数（建议 `1.25–1.5×`）配置节点数与在途上限：
+
+| 目标集群吞吐 | 平均上游时延 / 流长 | 稳态集群总在途 | 推荐拓扑示例（每节点 `MAX_IN_FLIGHT`） | 单节点估算 RSS（基线 150 MiB + ~73 KiB/在途） | 单节点最低 FD（`ulimit -n`） |
+| ------------ | ------------------- | -------------: | -------------------------------------- | --------------------------------------------: | ---------------------------: |
+| 3,000 RPS    | 1 s                 |          3,000 | 2 节点 × 2,500                         |                                      ~330 MiB |                        8,192 |
+| 3,000 RPS    | 5 s                 |         15,000 | 4 节点 × 5,000（或 2 节点 × 10,000）   |                       ~515 MiB（或 ~880 MiB） |                       16,384 |
+| 3,000 RPS    | 30 s                |         90,000 | 8 节点 × 15,000                        |                                    ~1,245 MiB |                       65,536 |
+| 3,000 RPS    | 120 s               |        360,000 | 16 节点 × 30,000                       |                                    ~2,340 MiB |                      131,072 |
+
+- **上游连接池与临时端口**：Gateway 按 `clamp(MAX_IN_FLIGHT, 1024, 65535)` 分配上游连接池槽位。单机对同一 `(上游 IP, 端口)` 受 `ip_local_port_range` 限制（默认约 28,000 端口，建议调宽至 `10240 65535`）；单节点对单一上游并发超过 20,000 时应通过多节点或多上游 IP 分摊，并在压测时将负载发生器部署在独立主机，避免回环端口耗尽。
+- **慢速请求体与多租户隔离**：所有 JSON 与 multipart 请求体读取均受 `BODY_READ_TIMEOUT_MS`（默认 `15000` ms，超时返回 `408 request_timeout`）约束，并在读取请求体之前执行节点本地每项目 `concurrency` 预检（超限立即返回 `429 rate_limit_concurrency`），防止单个持有有效密钥的慢速上传租户耗尽全局 `MAX_IN_FLIGHT` 槽位。
+- **Linux 多进程端口复用**：在 Linux 生产主机上，若在同一监听端口启动多个 Gateway 进程，可显式开启 `GATEWAY_REUSE_PORT=true`（内核按连接哈希分发）。macOS XNU 的 `SO_REUSEPORT` 不会跨进程均衡分发，横向扩展应使用独立端口加前置负载均衡（如 Caddy / Envoy / Nginx）。
+
+### PostgreSQL WAL 与 Checkpoint 调优
+
+在保持 `fsync=on`、`synchronous_commit=on`、`full_page_writes=on` 全开的前提下，短请求每笔约产生 3.5–8.8 KiB WAL（3,000 RPS 对应约 13–26 MB/s，约 1.1–2.2 TB/天）。默认或过小的 `max_wal_size`（例如 1–4 GiB）会在持续高吞吐下每 1.5–3 分钟触发一次 WAL-driven checkpoint，引入全页写放大与刷盘尾延迟尖刺。
+
+- 生产 PostgreSQL 17 建议配置：`max_wal_size = 32GB`（高吞吐场景 `64GB`）、`min_wal_size = 8GB`、`checkpoint_timeout = 15min`、`checkpoint_completion_target = 0.9`、`wal_compression = lz4`（或 `zstd`），并启用 `log_checkpoints = on`。
+- 持续监控 `pg_stat_checkpointer` 的 `num_requested`、`write_time`、`sync_time`、`buffers_written`：稳态运行期间应以 timed checkpoint 为主，`num_requested` 接近 0，且 checkpoint 刷盘不引起 `commit_leased_batch` P99 明显劣化。
+
 ## TCP 建连突发
 
 TCP 监听队列先于 HTTP 准入。Bun 1.4.4 为 Gateway 请求 512 个监听队列槽位，内核会按上限截断。macOS 压测曾观察到两路监听均达到 128，客户端在收到 HTTP 响应之前得到 `ECONNRESET`。单独调整 `MAX_IN_FLIGHT` 无法改变该容量。 [Bun 监听实现](https://github.com/oven-sh/bun/blob/bun-v1.4.4/packages/bun-usockets/src/bsd.c#L1079-L1109) · [XNU 队列上限](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/uipc_socket.c#L841-L858)

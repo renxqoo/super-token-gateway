@@ -1,11 +1,21 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { openSync, closeSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { Agent } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDatabase } from "@gateway/ledger";
-import { benchmarkConcurrency, postJsonKeepAlive } from "./bench-http.ts";
+import {
+  benchmarkConcurrency,
+  buildPostRequest,
+  collectProvenance,
+  createFastHttp1BenchClient,
+  diffCheckpointerStats,
+  postJsonKeepAlive,
+  readCheckpointerStats,
+  readProcessStats,
+} from "./bench-http.ts";
 
 const baseDbUrl = process.env.DATABASE_URL;
 if (!baseDbUrl) throw new Error("DATABASE_URL is required");
@@ -17,6 +27,14 @@ const jsonConcurrency = benchmarkConcurrency(
 );
 const maxSockets = Math.max(2048, ...jsonConcurrency);
 const profileDir = process.env.BENCH_CPU_PROFILE_DIR;
+const upstreamDelayMs = Number(process.env.BENCH_UPSTREAM_DELAY_MS ?? 0);
+const maxInFlight = Number(process.env.BENCH_MAX_IN_FLIGHT ?? Math.max(4000, ...jsonConcurrency));
+const accessLog = process.env.BENCH_ACCESS_LOG === "1" || process.env.BENCH_ACCESS_LOG === "true";
+const gwLogPath = process.env.BENCH_GW_LOG;
+const upstreamTls =
+  process.env.BENCH_UPSTREAM_TLS === "1" || process.env.BENCH_UPSTREAM_TLS === "true";
+const useFastClient = process.env.BENCH_FAST_CLIENT !== "0";
+const projectCount = Number(process.env.BENCH_PROJECTS ?? 32);
 
 async function findFreePort(): Promise<number> {
   return new Promise((resolvePort, rejectPort) => {
@@ -54,15 +72,35 @@ function runSync(cwd: string, args: string[], env: Record<string, string>): Prom
   });
 }
 
-function getProcStats(pid: number): { rssMb: number; cpuPct: number } {
-  const out = spawnSync("ps", ["-o", "rss=,%cpu=", "-p", String(pid)], { encoding: "utf8" });
-  const parts = out.stdout.trim().split(/\s+/);
-  const rssKb = Number(parts[0] ?? 0);
-  const cpuPct = Number(parts[1] ?? 0);
-  return {
-    rssMb: Number.isFinite(rssKb) ? Number((rssKb / 1024).toFixed(1)) : 0,
-    cpuPct: Number.isFinite(cpuPct) ? Number(cpuPct.toFixed(1)) : 0,
-  };
+async function generateLocalTlsCert(dir: string): Promise<{ keyFile: string; certFile: string }> {
+  const keyFile = join(dir, "mock-tls.key");
+  const certFile = join(dir, "mock-tls.crt");
+  const proc = Bun.spawn(
+    [
+      "openssl",
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-keyout",
+      keyFile,
+      "-out",
+      certFile,
+      "-subj",
+      "/CN=localhost",
+      "-addext",
+      "subjectAltName=DNS:localhost,IP:127.0.0.1",
+      "-days",
+      "1",
+    ],
+    { stdout: "ignore", stderr: "pipe" },
+  );
+  const stderr = await new Response(proc.stderr).text();
+  if ((await proc.exited) !== 0) {
+    throw new Error(`Failed to generate local TLS cert: ${stderr}`);
+  }
+  return { keyFile, certFile };
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -72,6 +110,7 @@ function percentile(sorted: number[], p: number): number {
 }
 
 const tempDir = await mkdtemp(join(tmpdir(), "stg-bench-single-"));
+const distSrc = resolve(process.env.BENCH_DIST_DIR ?? "dist");
 const dbName = `gateway_v4_bsingle_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 const adminUrl = new URL(baseDbUrl);
 adminUrl.pathname = "/postgres";
@@ -80,14 +119,15 @@ targetUrl.pathname = `/${dbName}`;
 
 const adminDb = createDatabase(adminUrl.toString(), 2);
 const procs: ReturnType<typeof spawn>[] = [];
-const agent = new Agent({ keepAlive: true, maxSockets, maxFreeSockets: 1024 });
+const agent = new Agent({ keepAlive: true, maxSockets, maxFreeSockets: maxSockets });
+let fastClient: ReturnType<typeof createFastHttp1BenchClient> | undefined;
+let gwLogFd: number | undefined;
 
 try {
-  await cp(resolve(process.env.BENCH_DIST_DIR ?? "dist"), join(tempDir, "dist"), {
-    recursive: true,
-  });
+  await cp(distSrc, join(tempDir, "dist"), { recursive: true });
   await adminDb.unsafe(`CREATE DATABASE ${dbName}`);
 
+  const tlsCert = upstreamTls ? await generateLocalTlsCert(tempDir) : null;
   const [mockPort1, mockPort2, gwPort, intPort] = await Promise.all([
     findFreePort(),
     findFreePort(),
@@ -97,15 +137,15 @@ try {
 
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
-    BUN_CONFIG_MAX_HTTP_REQUESTS: "4096",
+    BUN_CONFIG_MAX_HTTP_REQUESTS: String(Math.max(4096, maxInFlight)),
     DATABASE_URL: targetUrl.toString(),
     KEY_PEPPER: "bsingle-pepper-0123456789abcdef01",
     ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     ADMIN_TOKEN: "bsingle-admin-token-0123456789abc",
     ALLOW_PRIVATE_UPSTREAMS: "true",
-    ACCESS_LOG: "false",
+    ACCESS_LOG: accessLog ? "true" : "false",
     SNAPSHOT_POLL_MS: "0",
-    MAX_IN_FLIGHT: "4000",
+    MAX_IN_FLIGHT: String(maxInFlight),
     DB_MAX_CONNECTIONS: "32",
     MICRO_BATCH_WINDOW_MS: process.env.BENCH_BATCH_WINDOW_MS ?? "2",
     MICRO_BATCH_MAX_SIZE: process.env.BENCH_BATCH_MAX_SIZE ?? "512",
@@ -116,39 +156,82 @@ try {
     MOCK_HOST: "127.0.0.1",
     MOCK_PORT: String(mockPort1),
     MOCK_CONTROL_TOKEN: "bsingle-mock-ctrl",
+    ...(tlsCert ? { NODE_EXTRA_CA_CERTS: tlsCert.certFile } : {}),
   };
 
   await runSync(tempDir, ["dist/tools/migrate.js"], env);
 
+  const mockEnvBase = {
+    ...env,
+    ...(tlsCert
+      ? { MOCK_TLS_KEY_FILE: tlsCert.keyFile, MOCK_TLS_CERT_FILE: tlsCert.certFile }
+      : {}),
+  };
   const mockProc1 = spawn(process.execPath, ["dist/mock-providers/main.js"], {
     cwd: tempDir,
-    env: { ...env, MOCK_PORT: String(mockPort1) },
+    env: { ...mockEnvBase, MOCK_PORT: String(mockPort1) },
     stdio: "ignore",
   });
   const mockProc2 = spawn(process.execPath, ["dist/mock-providers/main.js"], {
     cwd: tempDir,
-    env: { ...env, MOCK_PORT: String(mockPort2) },
+    env: { ...mockEnvBase, MOCK_PORT: String(mockPort2) },
     stdio: "ignore",
   });
   const profileFlags = profileDir
     ? ["--cpu-prof-md", `--cpu-prof-dir=${profileDir}`, "--cpu-prof-name=gateway"]
     : [];
+  if (gwLogPath) gwLogFd = openSync(gwLogPath, "w");
   const gwProc = spawn(
     process.execPath,
     [...profileFlags, "dist/gateway/main.js", "--mode=gateway"],
     {
       cwd: tempDir,
       env,
-      stdio: "ignore",
+      stdio: gwLogFd !== undefined ? ["ignore", gwLogFd, "ignore"] : "ignore",
     },
   );
   procs.push(mockProc1, mockProc2, gwProc);
 
+  const mockScheme = tlsCert ? "https" : "http";
+  const mockHost = tlsCert ? "localhost" : "127.0.0.1";
+  const fetchMock = async (port: number, path: string, init?: RequestInit) => {
+    const url = `${mockScheme}://${mockHost}:${port}${path}`;
+    const opts = tlsCert ? ({ ...init, tls: { rejectUnauthorized: false } } as RequestInit) : init;
+    return fetch(url, opts);
+  };
+  const waitForMock = async (port: number) => {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetchMock(port, "/healthz");
+        if (res.ok) return;
+      } catch {
+        void 0;
+      }
+      await Bun.sleep(100);
+    }
+    throw new Error(`Timed out waiting for mock on port ${port}`);
+  };
+
   await Promise.all([
-    waitForJson(`http://127.0.0.1:${mockPort1}/healthz`),
-    waitForJson(`http://127.0.0.1:${mockPort2}/healthz`),
+    waitForMock(mockPort1),
+    waitForMock(mockPort2),
     waitForJson(`http://127.0.0.1:${gwPort}/readyz`),
   ]);
+
+  if (upstreamDelayMs > 0) {
+    for (const port of [mockPort1, mockPort2]) {
+      const res = await fetchMock(port, "/__control/scenarios", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${env.MOCK_CONTROL_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "bsingle-up", scenario: { headerDelayMs: upstreamDelayMs } }),
+      });
+      if (!res.ok) throw new Error(`Could not set upstream delay on mock ${port}`);
+    }
+  }
 
   const adminHeaders = {
     authorization: `Bearer ${env.ADMIN_TOKEN}`,
@@ -174,19 +257,19 @@ try {
     account_id: acc.id,
     name: "bsingle-ch-1",
     kind: "openai",
-    base_url: `http://127.0.0.1:${mockPort1}/openai`,
+    base_url: `${mockScheme}://${mockHost}:${mockPort1}/openai`,
     api_key: "sk-bsingle-1",
     rpm: 10_000_000,
-    concurrency: 10_000,
+    concurrency: Math.max(10_000, maxInFlight),
   });
   const ch2 = await callInternal("PUT", "/internal/v1/channels", {
     account_id: acc.id,
     name: "bsingle-ch-2",
     kind: "openai",
-    base_url: `http://127.0.0.1:${mockPort2}/openai`,
+    base_url: `${mockScheme}://${mockHost}:${mockPort2}/openai`,
     api_key: "sk-bsingle-2",
     rpm: 10_000_000,
-    concurrency: 10_000,
+    concurrency: Math.max(10_000, maxInFlight),
   });
   await callInternal("PUT", "/internal/v1/models", {
     name: "bsingle-gpt",
@@ -232,13 +315,13 @@ try {
   });
 
   const keys: string[] = [];
-  for (let i = 0; i < 32; i++) {
+  for (let i = 0; i < projectCount; i++) {
     const p = await callInternal("PUT", "/internal/v1/projects", {
       name: `bsingle-p-${i}`,
       currency: "USD",
       rpm: 10_000_000,
       tpm: 1_000_000_000,
-      concurrency: 5000,
+      concurrency: Math.max(5000, maxInFlight),
     });
     const k = await callInternal("PUT", "/internal/v1/api-keys", {
       project_id: p.id,
@@ -277,6 +360,13 @@ try {
     }),
   );
 
+  const gwTarget = { host: "127.0.0.1", port: gwPort };
+  if (useFastClient) {
+    fastClient = createFastHttp1BenchClient([gwTarget], maxSockets);
+  }
+  const rawJsonByKey = new Map(keys.map((k) => [k, buildPostRequest(gwTarget, k, jsonPayload)]));
+  const rawSseByKey = new Map(keys.map((k) => [k, buildPostRequest(gwTarget, k, ssePayload)]));
+
   async function runPhase(
     label: string,
     keyPool: string[],
@@ -289,6 +379,9 @@ try {
     const sampleErrors: string[] = [];
     const latencies: number[] = [];
     const payload = stream ? ssePayload : jsonPayload;
+    const rawPool = stream
+      ? keyPool.map((k) => rawSseByKey.get(k)!)
+      : keyPool.map((k) => rawJsonByKey.get(k)!);
     const walBefore = await walLsnBytes();
     const started = performance.now();
     const stopAt = started + seconds * 1000;
@@ -299,9 +392,10 @@ try {
       if (rampDelay > 0) await Bun.sleep(rampDelay);
       while (performance.now() < stopAt) {
         const idx = cursor++;
-        const key = keyPool[idx % keyPool.length]!;
         const t0 = performance.now();
-        const res = await postJsonKeepAlive(agent, gwPort, key, payload, stream);
+        const res = fastClient
+          ? await fastClient.sendRaw(0, rawPool[idx % rawPool.length]!, stream)
+          : await postJsonKeepAlive(agent, gwPort, keyPool[idx % keyPool.length]!, payload, stream);
         if (res.ok) completed++;
         else {
           errors++;
@@ -316,9 +410,11 @@ try {
     await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)));
     const elapsedSec = (performance.now() - started) / 1000;
     const walAfter = await walLsnBytes();
-    const stats = getProcStats(gwProc.pid!);
-    const mock1Stats = getProcStats(mockProc1.pid!);
-    const clientStats = getProcStats(process.pid);
+    const procStats = await readProcessStats({
+      gw: gwProc.pid!,
+      mock1: mockProc1.pid!,
+      client: process.pid,
+    });
     latencies.sort((a, b) => a - b);
     return {
       phase: label,
@@ -332,10 +428,10 @@ try {
       p95_ms: percentile(latencies, 0.95),
       p99_ms: percentile(latencies, 0.99),
       wal_bytes_per_req: completed > 0 ? Number((walAfter - walBefore) / BigInt(completed)) : 0,
-      gw_rss_mb: stats.rssMb,
-      gw_cpu_pct: stats.cpuPct,
-      mock1_cpu_pct: mock1Stats.cpuPct,
-      client_cpu_pct: clientStats.cpuPct,
+      gw_rss_mb: procStats.gw!.rssMb,
+      gw_cpu_pct: procStats.gw!.cpuPct,
+      mock1_cpu_pct: procStats.mock1!.cpuPct,
+      client_cpu_pct: procStats.client!.cpuPct,
     };
   }
 
@@ -369,7 +465,9 @@ try {
     : undefined;
 
   try {
-    const warmup = await runPhase("warmup", keys, 128, 2, false);
+    const provenance = await collectProvenance(db, distSrc);
+    const ckptBefore = await readCheckpointerStats(db);
+    const warmup = await runPhase("warmup", keys, Math.min(128, ...jsonConcurrency), 2, false);
 
     const results: Awaited<ReturnType<typeof runPhase>>[] = [];
     for (const concurrency of jsonConcurrency) {
@@ -396,6 +494,8 @@ try {
       );
     }
 
+    const idleStarted = performance.now();
+    const leaseDrainBudgetMs = 5_000;
     await Bun.sleep(600);
     const metricsTxt = await (await fetch(`http://127.0.0.1:${gwPort}/metrics`)).text();
     const inFlight = Number(/gateway_in_flight (\d+)/.exec(metricsTxt)?.[1] ?? -1);
@@ -404,16 +504,23 @@ try {
       FROM public.billing_charges`;
     const totalCharges = Number(charges!.total);
     const totalSettledCharges = Number(charges!.settled);
-    const activeLeases = Number(
-      (
-        await db`
+    async function countActiveLeases() {
+      const [row] = await db<{ n: number }[]>`
           SELECT (
             (SELECT count(*) FROM public.wallet_leases WHERE state = 'ACTIVE') +
             (SELECT count(*) FROM public.supplier_leases WHERE state = 'ACTIVE')
           )::int AS n
-        `
-      )[0]!.n,
-    );
+        `;
+      return row!.n;
+    }
+    const firstLeaseProbe = await countActiveLeases();
+    let activeLeases = firstLeaseProbe;
+    while (activeLeases > 0 && performance.now() - idleStarted < leaseDrainBudgetMs) {
+      await Bun.sleep(100);
+      activeLeases = await countActiveLeases();
+    }
+    const idleElapsedMs = Number((performance.now() - idleStarted).toFixed(2));
+    const ckptAfter = await readCheckpointerStats(db);
     const pgSettings = await db`
       SELECT name, setting FROM pg_settings
       WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes')
@@ -428,7 +535,16 @@ try {
       JSON.stringify(
         {
           bun_version: Bun.version,
-          topology: `1x standalone dist/gateway + 2x standalone dist/mock-providers (ROUND_ROBIN) + keep-alive load client (maxSockets=${maxSockets}) + PG 17`,
+          provenance,
+          pg_checkpointer_delta: diffCheckpointerStats(ckptBefore, ckptAfter),
+          topology: `1x standalone dist/gateway + 2x standalone dist/mock-providers (ROUND_ROBIN, ${mockScheme.toUpperCase()}) + ${useFastClient ? "Bun native HTTP/1.1" : "node:http"} keep-alive client (maxSockets=${maxSockets}) + PG 17`,
+          options: {
+            projects: projectCount,
+            max_in_flight: maxInFlight,
+            upstream_delay_ms: upstreamDelayMs,
+            access_log: accessLog,
+            upstream_tls: upstreamTls,
+          },
           micro_batch: {
             window_ms: Number(env.MICRO_BATCH_WINDOW_MS),
             max_size: Number(env.MICRO_BATCH_MAX_SIZE),
@@ -444,6 +560,11 @@ try {
           total_settled_charges: totalSettledCharges,
           duplicate_request_charges: totalCharges - Number(charges!.unique),
           active_leases_after_idle: activeLeases,
+          lease_drain: {
+            active_at_first_probe: firstLeaseProbe,
+            elapsed_ms: idleElapsedMs,
+            budget_ms: leaseDrainBudgetMs,
+          },
           results,
           post_drain_in_flight: inFlight,
           conservation: audit,
@@ -471,19 +592,43 @@ try {
     await db.close();
   }
 } finally {
+  fastClient?.close();
   agent.destroy();
-  for (const p of procs) {
+  const running = procs.filter((p) => p.pid && p.exitCode === null && p.signalCode === null);
+  const exits = Promise.all(
+    running.map((p) => new Promise<void>((r) => p.once("exit", () => r()))),
+  );
+  for (const p of running) {
     try {
       p.kill("SIGTERM");
     } catch {
       void 0;
     }
   }
-  await Bun.sleep(300);
-  await adminDb.unsafe(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${dbName}' AND pid <> pg_backend_pid()`,
-  );
-  await adminDb.unsafe(`DROP DATABASE IF EXISTS ${dbName}`);
-  await adminDb.close();
+  await Promise.race([exits, Bun.sleep(5_000)]);
+  for (const p of running) {
+    if (p.exitCode === null && p.signalCode === null) {
+      try {
+        p.kill("SIGKILL");
+      } catch {
+        void 0;
+      }
+    }
+  }
+  await exits;
+  if (gwLogFd !== undefined) {
+    try {
+      closeSync(gwLogFd);
+    } catch {
+      void 0;
+    }
+  }
+  await adminDb
+    .unsafe(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${dbName}' AND pid <> pg_backend_pid()`,
+    )
+    .catch(() => undefined);
+  await adminDb.unsafe(`DROP DATABASE IF EXISTS ${dbName}`).catch(() => undefined);
+  await adminDb.close().catch(() => undefined);
   await rm(tempDir, { recursive: true, force: true });
 }

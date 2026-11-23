@@ -3,14 +3,14 @@ import type { AcquireHoldInput, AcquireHoldResult } from "./types.ts";
 import type { LeaseManager, FastHoldRequest } from "./lease-manager.ts";
 import { MicroBatchQueue } from "./micro-batch.ts";
 import { createTransactionalHoldBatch } from "./transactional-holds.ts";
-import { parseAtoms } from "./funds.ts";
+import { parseAtoms, SETTLEMENT_LANES, walletLane } from "./funds.ts";
 
 export function createHoldAcquirer(
   db: SQL,
   leases: LeaseManager,
   batchWindowMs: number,
   maxBatchSize: number,
-  maxBatchConcurrency: number,
+  _maxBatchConcurrency: number,
 ) {
   async function runFastHoldBatch(items: FastHoldRequest[]) {
     const batchPayload = JSON.stringify(
@@ -146,11 +146,9 @@ export function createHoldAcquirer(
     batchWindowMs,
     1,
   );
-  const fastHoldQueue = new MicroBatchQueue(
-    runFastHoldBatch,
-    Math.max(maxBatchSize, 512),
-    batchWindowMs,
-    Math.max(maxBatchConcurrency, 4),
+  const fastHoldQueues = Array.from(
+    { length: SETTLEMENT_LANES },
+    () => new MicroBatchQueue(runFastHoldBatch, Math.max(maxBatchSize, 512), batchWindowMs, 1),
   );
 
   return {
@@ -160,13 +158,13 @@ export function createHoldAcquirer(
         const supplierAtoms = parseAtoms(input.supplier_atoms);
         if (customerAtoms !== null && supplierAtoms !== null) {
           const reserved = leases.reserveHold(input, customerAtoms, supplierAtoms);
-          if (reserved) return fastHoldQueue.enqueue(reserved);
+          if (reserved) return fastHoldQueues[walletLane(input.project_id)]!.enqueue(reserved);
         }
       }
       return acquireQueue.enqueue(input);
     },
     async drain(): Promise<void> {
-      await fastHoldQueue.drain();
+      await Promise.all(fastHoldQueues.map((queue) => queue.drain()));
       await acquireQueue.drain();
     },
   };

@@ -11,14 +11,12 @@ export interface InferenceContext {
 import {
   canonical,
   normalizedNumber,
-  quoteReservation,
   type Operation,
   type Protocol,
   type Usage,
 } from "@gateway/kernel";
 import type {
   ApiKeyRecord,
-  ChannelRecord,
   CommitTerminalInput,
   ConfigSnapshot,
   createLedgerEngine,
@@ -27,7 +25,6 @@ import type {
   PriceVersionRecord,
   ProjectRecord,
   RouteRecord,
-  UpstreamAccountRecord,
 } from "@gateway/ledger";
 import {
   applyResponseTransforms,
@@ -69,10 +66,18 @@ import {
   UpstreamPreDispatchError,
   verifier,
   VertexTokens,
+  type CancelRegistrar,
   type ClusterCoordinator,
   type createTransport,
+  type FastUpstreamResult,
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
+import {
+  fastUuid,
+  ProxyRuntimeState,
+  type DeadlineWheel,
+  type HydratedCandidate,
+} from "./proxy-state.ts";
 import { createResponsesModeration } from "./responses-moderation.ts";
 import {
   createStreamChunkReader,
@@ -98,28 +103,11 @@ import {
   resolveRouteUpstreamProtocol,
   stripTextFromSseChunk,
   transformRequestTexts,
+  tryPrepareUpstreamRequestSync,
 } from "./upstream.ts";
 
 type LedgerEngine = ReturnType<typeof createLedgerEngine>;
 type Transport = ReturnType<typeof createTransport>;
-
-type HydratedCandidate = {
-  id: string;
-  channel_id: string;
-  account_id: string;
-  priority: number;
-  weight: number;
-  operations: readonly Operation[];
-  enabled: boolean;
-  channel_enabled: boolean;
-  account_active: boolean;
-  same_protocol: boolean;
-  route: RouteRecord;
-  channel: ChannelRecord;
-  account: UpstreamAccountRecord;
-  billingPrice: PriceVersionRecord;
-  costPrice: PriceVersionRecord;
-};
 
 export type ProxyDependencies = {
   config: GatewayConfig;
@@ -133,57 +121,142 @@ export type ProxyDependencies = {
   wasmExecutor: WasmRuntimeExecutor | null;
   lifecycle: Lifecycle;
   metrics: GatewayMetrics;
+  state?: ProxyRuntimeState;
 };
 
 const utf8FatalDecoder = new TextDecoder("utf-8", { fatal: true });
 const utf8Encoder = new TextEncoder();
+const fallbackStates = new WeakMap<ProxyDependencies, ProxyRuntimeState>();
 
-let authCacheEpoch = -1;
-let authCachePepper = "";
-const verifiedKeyCache = new Map<string, ApiKeyRecord>();
-const quoteCache = new Map<string, string>();
-
-function cachedVerifierLookup(
-  rawKey: string,
-  snap: ConfigSnapshot,
-  keyPepper: string,
-): ApiKeyRecord | undefined {
-  if (authCacheEpoch !== snap.epoch || authCachePepper !== keyPepper) {
-    authCacheEpoch = snap.epoch;
-    authCachePepper = keyPepper;
-    verifiedKeyCache.clear();
+function getProxyState(deps: ProxyDependencies): ProxyRuntimeState {
+  if (deps.state) return deps.state;
+  let state = fallbackStates.get(deps);
+  if (!state) {
+    state = new ProxyRuntimeState();
+    fallbackStates.set(deps, state);
   }
-  const hit = verifiedKeyCache.get(rawKey);
-  if (hit !== undefined) return hit;
-  const digest = verifier(rawKey, keyPepper);
-  const key = snap.keysByVerifier.get(digest);
-  if (key) {
-    if (verifiedKeyCache.size >= 4096) verifiedKeyCache.clear();
-    verifiedKeyCache.set(rawKey, key);
-  }
-  return key;
+  return state;
 }
 
-async function readRequestBytesFast(
+function getHeaderValue(headers: Headers | Record<string, string>, name: string): string | null {
+  if (headers instanceof Headers) return headers.get(name);
+  return headers[name] ?? null;
+}
+
+async function readRequestBytesBounded(
   req: Request,
   maxBytes: number,
-  signal: AbortSignal,
+  timeoutMs: number,
+  deadlines: DeadlineWheel,
+  isDraining: () => boolean,
+  setAbortNotify: (fn: ((reason: unknown) => void) | null) => void,
+  forceStream: boolean,
 ): Promise<Uint8Array> {
+  if (req.signal.aborted) {
+    throw new GatewayError(499, "client_aborted", "Client disconnected");
+  }
+  if (isDraining()) {
+    throw new GatewayError(503, "overloaded", "Gateway is draining");
+  }
   const clHeader = req.headers.get("content-length");
+  let parsedCl = -1;
   if (clHeader !== null && /^\d+$/.test(clHeader)) {
-    const cl = Number(clHeader);
-    if (cl > maxBytes) {
+    parsedCl = Number(clHeader);
+    if (parsedCl > maxBytes) {
       throw new GatewayError(413, "body_too_large", "Payload exceeds the configured size limit");
     }
-    if (!signal.aborted && cl <= 262_144) {
-      const bytes = await req.bytes();
-      if (bytes.byteLength > maxBytes) {
-        throw new GatewayError(413, "body_too_large", "Payload exceeds the configured size limit");
-      }
-      return bytes;
-    }
   }
-  return readBounded(req.body, maxBytes, signal);
+  const timeoutErr = () => new GatewayError(408, "request_timeout", "Request body read timed out");
+
+  if (!forceStream && parsedCl >= 0 && parsedCl <= 262_144) {
+    return new Promise<Uint8Array>((resolve, reject) => {
+      let settled = false;
+      let watchingSignal = false;
+      let cancelSignalWatch: (() => void) | null = null;
+      const onReqAbort = () =>
+        fail(new GatewayError(499, "client_aborted", "Client disconnected"), false);
+      const cleanup = () => {
+        cancelTimer();
+        if (cancelSignalWatch) {
+          cancelSignalWatch();
+          cancelSignalWatch = null;
+        }
+        if (watchingSignal) {
+          watchingSignal = false;
+          req.signal.removeEventListener("abort", onReqAbort);
+        }
+        setAbortNotify(null);
+      };
+      const fail = (err: unknown, cancelBody = true) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (cancelBody) void req.body?.cancel().catch(() => undefined);
+        reject(err);
+      };
+      setAbortNotify(() => fail(new GatewayError(503, "overloaded", "Gateway is draining")));
+      const cancelTimer = deadlines.schedule(timeoutMs, () => fail(timeoutErr()));
+      cancelSignalWatch = deadlines.schedule(Math.min(50, timeoutMs), () => {
+        cancelSignalWatch = null;
+        if (settled) return;
+        if (req.signal.aborted) {
+          onReqAbort();
+          return;
+        }
+        watchingSignal = true;
+        req.signal.addEventListener("abort", onReqAbort, { once: true });
+      });
+      req.bytes().then(
+        (bytes) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          if (bytes.byteLength > maxBytes) {
+            reject(
+              new GatewayError(413, "body_too_large", "Payload exceeds the configured size limit"),
+            );
+            return;
+          }
+          resolve(bytes);
+        },
+        (err) => {
+          if (settled) return;
+          if ((err instanceof Error && err.name === "AbortError") || req.signal.aborted) {
+            fail(new GatewayError(499, "client_aborted", "Client disconnected"), false);
+            return;
+          }
+          fail(err, false);
+        },
+      );
+    });
+  }
+
+  const controller = new AbortController();
+  let timedOut = false;
+  let drained = false;
+  const onSignalAbort = () => controller.abort(req.signal.reason);
+  req.signal.addEventListener("abort", onSignalAbort, { once: true });
+  setAbortNotify((reason) => {
+    drained = true;
+    controller.abort(reason);
+  });
+  const cancelTimer = deadlines.schedule(timeoutMs, () => {
+    timedOut = true;
+    controller.abort(timeoutErr());
+  });
+  try {
+    return await readBounded(req.body, maxBytes, controller.signal);
+  } catch (err) {
+    if (err instanceof GatewayError) throw err;
+    if (timedOut) throw timeoutErr();
+    if (req.signal.aborted) throw new GatewayError(499, "client_aborted", "Client disconnected");
+    if (drained || isDraining()) throw new GatewayError(503, "overloaded", "Gateway is draining");
+    throw err;
+  } finally {
+    cancelTimer();
+    req.signal.removeEventListener("abort", onSignalAbort);
+    setAbortNotify(null);
+  }
 }
 
 async function readResponseBytesFast(
@@ -241,10 +314,13 @@ export function authenticateRequest(
   config: GatewayConfig,
   operation?: Operation,
   peerAddress?: string | (() => string | undefined),
+  state?: ProxyRuntimeState,
 ): { key: ApiKeyRecord; project: ProjectRecord } {
   const rawKey = extractApiKey(c, operation);
   if (!rawKey) throw new GatewayError(401, "unauthorized", "Missing API key");
-  const key = cachedVerifierLookup(rawKey, snap, config.keyPepper);
+  const key = state
+    ? state.lookupVerifiedKey(rawKey, snap, config.keyPepper)
+    : snap.keysByVerifier.get(verifier(rawKey, config.keyPepper));
   if (!key || !key.enabled) throw new GatewayError(401, "unauthorized", "Invalid API key");
   if (key.expires_at && Date.parse(key.expires_at) <= Date.now()) {
     throw new GatewayError(401, "key_expired", "API key has expired");
@@ -281,53 +357,6 @@ function resolveOutputBound(body: Record<string, unknown>, model: ModelRecord): 
     return Math.min(raw, model.max_output_tokens);
   }
   return model.max_output_tokens;
-}
-
-function quoteForPrice(
-  price: PriceVersionRecord,
-  measurement: { inputCharacters?: string | undefined; images?: unknown },
-  outputBound: number,
-): string {
-  const cacheable = price.basis === "PROVIDER_USAGE" && measurement.images === undefined;
-  if (cacheable) {
-    const ck = `${price.id}:${outputBound}`;
-    const hit = quoteCache.get(ck);
-    if (hit !== undefined) return hit;
-    const quote = quoteReservation(
-      [
-        {
-          provider_id: price.id,
-          id: price.id,
-          currency: price.currency,
-          rates: price.rates,
-          ceilings: price.ceilings as Usage,
-          basis: price.basis,
-        },
-      ],
-      price.currency,
-      measurement,
-      outputBound,
-    );
-    if (quoteCache.size >= 4096) quoteCache.clear();
-    quoteCache.set(ck, quote.amount_atoms);
-    return quote.amount_atoms;
-  }
-  const quote = quoteReservation(
-    [
-      {
-        provider_id: price.id,
-        id: price.id,
-        currency: price.currency,
-        rates: price.rates,
-        ceilings: price.ceilings as Usage,
-        basis: price.basis,
-      },
-    ],
-    price.currency,
-    measurement,
-    outputBound,
-  );
-  return quote.amount_atoms;
 }
 
 function mapHoldError(code: string, message: string): GatewayError {
@@ -462,13 +491,15 @@ export async function handleInferenceRequest(
   pathOverride?: { model: string; stream: boolean },
   peerAddress?: string | (() => string | undefined),
 ): Promise<Response> {
-  const requestId = crypto.randomUUID();
+  const state = getProxyState(deps);
+  const requestId = fastUuid();
   const reqHeaders = c.req.raw.headers;
   const trace = parseOrCreateTrace(reqHeaders.get("traceparent") ?? undefined);
   const requestStart = performance.now();
   deps.metrics.requestsTotal++;
 
   let releaseGuard: (() => void) | undefined;
+  let releaseLocalProjectSlot: (() => void) | null = null;
   let streamOwnsGuard = false;
   let drainAborted = false;
   let projectPermitRevoked = false;
@@ -620,8 +651,21 @@ export async function handleInferenceRequest(
       throw new GatewayError(503, "config_unavailable", "Gateway configuration is stale");
     }
     const snap = deps.snapshot.get();
-    const { key, project } = authenticateRequest(c, snap, deps.config, operation, peerAddress);
+    const { key, project } = authenticateRequest(
+      c,
+      snap,
+      deps.config,
+      operation,
+      peerAddress,
+      state,
+    );
     logProjectId = project.id;
+
+    const localProjRelease = state.tryEnterProject(project.id, project.concurrency);
+    if (!localProjRelease) {
+      throw new GatewayError(429, "rate_limit_concurrency", "Project rate limit exceeded");
+    }
+    releaseLocalProjectSlot = localProjRelease;
 
     const contentType = reqHeaders.get("content-type") ?? "";
     const isMultipartOp =
@@ -630,22 +674,23 @@ export async function handleInferenceRequest(
         operation === "image_edits") &&
       contentType.toLowerCase().includes("multipart/form-data");
 
+    const bodyReadTimeoutMs =
+      deps.config.bodyReadTimeoutMs ?? Math.min(deps.config.attemptTimeoutMs, 15_000);
     let clientBody: Record<string, unknown>;
     let multipartEntries: [string, string | File][] | undefined;
 
     if (isMultipartOp) {
-      const mpLinked = createLinkedController([c.req.raw.signal]);
-      const mpTimer = setTimeout(
-        () => mpLinked.trigger(new Error("Request body read timed out")),
-        deps.config.attemptTimeoutMs,
+      const received = await readRequestBytesBounded(
+        c.req.raw,
+        deps.config.maxBodyBytes,
+        bodyReadTimeoutMs,
+        state.deadlines,
+        () => drainAborted,
+        (fn) => {
+          activeAbortNotify = fn;
+        },
+        true,
       );
-      let received: Uint8Array;
-      try {
-        received = await readBounded(c.req.raw.body, deps.config.maxBodyBytes, mpLinked.signal);
-      } finally {
-        clearTimeout(mpTimer);
-        mpLinked.dispose();
-      }
       const form = await new Response(received as BodyInit, {
         headers: { "content-type": contentType },
       })
@@ -668,10 +713,16 @@ export async function handleInferenceRequest(
         stream: meta.stream === "true" || meta.stream === true,
       };
     } else {
-      const rawBytes = await readRequestBytesFast(
+      const rawBytes = await readRequestBytesBounded(
         c.req.raw,
         deps.config.maxBodyBytes,
-        c.req.raw.signal,
+        bodyReadTimeoutMs,
+        state.deadlines,
+        () => drainAborted,
+        (fn) => {
+          activeAbortNotify = fn;
+        },
+        false,
       );
       const parsedRaw = object(parseClientJson(utf8FatalDecoder.decode(rawBytes)));
       clientBody = pathOverride
@@ -701,10 +752,10 @@ export async function handleInferenceRequest(
     logStream = isStream;
     const outputBound = resolveOutputBound(clientBody, model);
 
+    const initialChars = isMultipartOp ? undefined : requestCharacters(operation, clientBody);
     const estimatedTokens = Math.max(
       1,
-      Math.ceil((requestCharacters(operation, clientBody) ?? 200) / 4) +
-        Math.min(outputBound, 4096),
+      Math.ceil((initialChars ?? 200) / 4) + Math.min(outputBound, 4096),
     );
     const projAcq = await deps.cluster.acquireRateLimit(
       `project:${project.id}`,
@@ -728,48 +779,60 @@ export async function handleInferenceRequest(
     }
     releaseProjectLimit = projAcq.release;
 
-    const rawRoutes = snap.routesByModel.get(model.name) ?? [];
-    const hydrated: HydratedCandidate[] = [];
-    let revokedRoute: AbortSignal | undefined;
-    for (const r of rawRoutes) {
-      const channel = snap.channels.get(r.channel_id);
-      if (!channel) continue;
-      const account = snap.accounts.get(channel.account_id);
-      if (!account) continue;
-      const billingPrice = snap.prices.get(r.billing_price_id);
-      const costPrice = snap.prices.get(r.cost_version_id);
-      if (!billingPrice || !costPrice) continue;
-      if (billingPrice.currency !== project.currency) continue;
-      if (
-        snap.revokedPlugins.size &&
-        r.enabled &&
-        channel.enabled &&
-        r.operations.includes(operation)
-      ) {
-        const signal = deps.snapshot.pluginSignal(r, channel);
-        if (signal.aborted) {
-          revokedRoute = signal;
-          continue;
+    const baseHydrated = state.getHydratedCandidates(
+      snap,
+      model.name,
+      operation,
+      project.currency,
+      () => {
+        const rawRoutes = snap.routesByModel.get(model.name) ?? [];
+        const list: HydratedCandidate[] = [];
+        for (const r of rawRoutes) {
+          const channel = snap.channels.get(r.channel_id);
+          if (!channel) continue;
+          const account = snap.accounts.get(channel.account_id);
+          if (!account) continue;
+          const billingPrice = snap.prices.get(r.billing_price_id);
+          const costPrice = snap.prices.get(r.cost_version_id);
+          if (!billingPrice || !costPrice) continue;
+          if (billingPrice.currency !== project.currency) continue;
+          const candidateUpstreamProto = resolveRouteUpstreamProtocol(snap, channel, r, operation);
+          list.push({
+            id: r.id,
+            channel_id: channel.id,
+            account_id: account.id,
+            priority: r.priority,
+            weight: r.weight,
+            operations: r.operations,
+            enabled: r.enabled,
+            channel_enabled: channel.enabled,
+            account_active: account.state === "ACTIVE",
+            same_protocol: candidateUpstreamProto !== null && candidateUpstreamProto === operation,
+            route: r,
+            channel,
+            account,
+            billingPrice,
+            costPrice,
+          });
         }
+        return list;
+      },
+    );
+    let hydrated: readonly HydratedCandidate[] = baseHydrated;
+    let revokedRoute: AbortSignal | undefined;
+    if (snap.revokedPlugins.size > 0) {
+      const filtered: HydratedCandidate[] = [];
+      for (const item of baseHydrated) {
+        if (item.enabled && item.channel_enabled && item.operations.includes(operation)) {
+          const signal = deps.snapshot.pluginSignal(item.route, item.channel);
+          if (signal.aborted) {
+            revokedRoute = signal;
+            continue;
+          }
+        }
+        filtered.push(item);
       }
-      const candidateUpstreamProto = resolveRouteUpstreamProtocol(snap, channel, r, operation);
-      hydrated.push({
-        id: r.id,
-        channel_id: channel.id,
-        account_id: account.id,
-        priority: r.priority,
-        weight: r.weight,
-        operations: r.operations,
-        enabled: r.enabled,
-        channel_enabled: channel.enabled,
-        account_active: account.state === "ACTIVE",
-        same_protocol: candidateUpstreamProto !== null && candidateUpstreamProto === operation,
-        route: r,
-        channel,
-        account,
-        billingPrice,
-        costPrice,
-      });
+      hydrated = filtered;
     }
 
     const selected = deps.router.selectCandidates(
@@ -794,7 +857,8 @@ export async function handleInferenceRequest(
       }
     };
 
-    const preRequestCache = new Map<
+    const emptyAudit: PluginAuditEntry[] = [];
+    let preRequestCache: Map<
       string,
       {
         body: Record<string, unknown>;
@@ -802,19 +866,37 @@ export async function handleInferenceRequest(
         measurement: { inputCharacters?: string | undefined; images?: number | undefined };
         audit: PluginAuditEntry[];
       }
-    >();
-    const pipelineKeyOf = (steps: readonly RouteRecord["plugin_pipeline"][number][]) =>
-      steps
+    > | null = null;
+    const pipelineKeyOf = (steps: readonly RouteRecord["plugin_pipeline"][number][]) => {
+      if (steps.length === 0) return "";
+      return steps
         .filter((s) => s.enabled !== false)
         .map((s) => `${s.plugin_id}:${s.priority}:${s.charge_policy ?? ""}`)
         .join("|");
+    };
     const prepareRouteInput = async (candidate: HydratedCandidate) => {
       const pluginSignal = deps.snapshot.pluginSignal(candidate.route, candidate.channel);
       activePluginSignal = pluginSignal;
       pluginSignal.throwIfAborted();
       const steps = candidate.route.plugin_pipeline;
+      if (steps.length === 0 && !isMultipartOp) {
+        const measurement = {
+          inputCharacters: initialChars === undefined ? undefined : String(initialChars),
+          images:
+            operation === "images" || operation === "image_edits"
+              ? Number(clientBody.n ?? 1)
+              : undefined,
+        };
+        return {
+          body: clientBody,
+          chars: initialChars,
+          measurement,
+          audit: emptyAudit,
+          pluginSignal,
+        };
+      }
       const pipeKey = isMultipartOp ? "__multipart__" : pipelineKeyOf(steps);
-      const cached = preRequestCache.get(pipeKey);
+      const cached = preRequestCache?.get(pipeKey);
       if (cached) {
         return { ...cached, pluginSignal };
       }
@@ -909,17 +991,40 @@ export async function handleInferenceRequest(
         body = transformed.body;
       }
 
-      const chars = requestCharacters(operation, body);
+      const chars =
+        body === clientBody && !isMultipartOp ? initialChars : requestCharacters(operation, body);
       const measurement = {
         inputCharacters: chars === undefined ? undefined : String(chars),
         images:
           operation === "images" || operation === "image_edits" ? Number(body.n ?? 1) : undefined,
       };
       const entry = { body, chars, measurement, audit: localAudit };
+      if (!preRequestCache) preRequestCache = new Map();
       preRequestCache.set(pipeKey, entry);
       return { ...entry, pluginSignal };
     };
-    const firstInput = await prepareRouteInput(selected[0]!.route);
+    const firstCand = selected[0]!.route;
+    let firstInput: Awaited<ReturnType<typeof prepareRouteInput>>;
+    if (firstCand.route.plugin_pipeline.length === 0 && !isMultipartOp) {
+      const pluginSignal = deps.snapshot.pluginSignal(firstCand.route, firstCand.channel);
+      activePluginSignal = pluginSignal;
+      pluginSignal.throwIfAborted();
+      firstInput = {
+        body: clientBody,
+        chars: initialChars,
+        measurement: {
+          inputCharacters: initialChars === undefined ? undefined : String(initialChars),
+          images:
+            operation === "images" || operation === "image_edits"
+              ? Number(clientBody.n ?? 1)
+              : undefined,
+        },
+        audit: emptyAudit,
+        pluginSignal,
+      };
+    } else {
+      firstInput = await prepareRouteInput(firstCand);
+    }
     if (firstInput instanceof Response) return firstInput;
     let activeInput = firstInput;
 
@@ -960,9 +1065,9 @@ export async function handleInferenceRequest(
       );
     }
     const maxStreamDurationMs = deps.config.streamMaxDurationMs ?? 300_000;
-    const expiresAt = new Date(
-      Date.now() + deps.config.holdTtlMs + (isStream ? maxStreamDurationMs : 0),
-    ).toISOString();
+    const expiresAt = state.cachedExpiresAt(
+      deps.config.holdTtlMs + (isStream ? maxStreamDurationMs : 0),
+    );
 
     let activeIndex = -1;
     let activeAttemptId = "";
@@ -977,8 +1082,13 @@ export async function handleInferenceRequest(
       let customerAtoms: string;
       let supplierAtoms: string;
       try {
-        customerAtoms = quoteForPrice(cand.billingPrice, measurement, outputBound);
-        supplierAtoms = quoteForPrice(cand.costPrice, measurement, outputBound);
+        customerAtoms = state.quoteForPrice(
+          snap.epoch,
+          cand.billingPrice,
+          measurement,
+          outputBound,
+        );
+        supplierAtoms = state.quoteForPrice(snap.epoch, cand.costPrice, measurement, outputBound);
       } catch (err) {
         lastHoldErr =
           err instanceof GatewayError
@@ -995,7 +1105,7 @@ export async function handleInferenceRequest(
       if (c.req.raw.signal.aborted || drainAborted || projectPermitRevoked) {
         throw admissionError(projectPermitRevoked);
       }
-      const attemptId = crypto.randomUUID();
+      const attemptId = fastUuid();
       const holdRes = await deps.ledger.acquireHold({
         request_id: requestId,
         attempt_id: attemptId,
@@ -1091,8 +1201,18 @@ export async function handleInferenceRequest(
         let nextCustomerAtoms: string;
         let nextSupplierAtoms: string;
         try {
-          nextCustomerAtoms = quoteForPrice(cand.billingPrice, measurement, outputBound);
-          nextSupplierAtoms = quoteForPrice(cand.costPrice, measurement, outputBound);
+          nextCustomerAtoms = state.quoteForPrice(
+            snap.epoch,
+            cand.billingPrice,
+            measurement,
+            outputBound,
+          );
+          nextSupplierAtoms = state.quoteForPrice(
+            snap.epoch,
+            cand.costPrice,
+            measurement,
+            outputBound,
+          );
         } catch (err) {
           releaseProbeFor(cand.channel_id);
           lastErrorStatus = 422;
@@ -1100,7 +1220,7 @@ export async function handleInferenceRequest(
           lastErrorMessage = err instanceof Error ? err.message : "Fallback quote error";
           continue;
         }
-        const nextAttemptId = crypto.randomUUID();
+        const nextAttemptId = fastUuid();
         const sw = await deps.ledger.switchSupplierAttempt({
           request_id: requestId,
           failed_attempt_id: pendingSwitchFrom.attemptId,
@@ -1172,17 +1292,73 @@ export async function handleInferenceRequest(
 
       const attemptTimeoutMs =
         cand.route.retry_policy.attempt_timeout_ms ?? deps.config.attemptTimeoutMs;
-      const attemptLinked = createLinkedController([c.req.raw.signal, pluginSignal], true);
+      let attemptAborted = false;
+      let attemptAbortReason: unknown;
+      let attemptCancelCb: ((reason: unknown) => void) | null = null;
+      let lazyAttemptController: AbortController | null = null;
+      let attemptDisposed = false;
+      const triggerAttemptAbort = (reason: unknown) => {
+        if (attemptAborted) return;
+        attemptAborted = true;
+        attemptAbortReason = reason;
+        const cb = attemptCancelCb;
+        attemptCancelCb = null;
+        if (cb) cb(reason);
+        lazyAttemptController?.abort(reason);
+      };
+      if (drainAborted) {
+        triggerAttemptAbort(new Error("Gateway shutting down"));
+      } else if (projectPermitRevoked || channelPermitRevoked) {
+        triggerAttemptAbort(new Error("Shared concurrency permit could not be renewed"));
+      } else if (c.req.raw.signal.aborted) {
+        triggerAttemptAbort(c.req.raw.signal.reason);
+      } else if (pluginSignal.aborted) {
+        triggerAttemptAbort(pluginSignal.reason);
+      }
+      const onReqAbort = () => triggerAttemptAbort(c.req.raw.signal.reason);
+      const watchPlugin = !deps.snapshot.isNoopPluginSignal(pluginSignal);
+      const onPluginAbort = () => triggerAttemptAbort(pluginSignal.reason);
+      if (!attemptAborted) {
+        c.req.raw.signal.addEventListener("abort", onReqAbort, { once: true });
+        if (watchPlugin) pluginSignal.addEventListener("abort", onPluginAbort, { once: true });
+        activeAbortNotify = triggerAttemptAbort;
+      }
+      const ensureAttemptSignal = (): AbortSignal => {
+        if (!lazyAttemptController) {
+          lazyAttemptController = new AbortController();
+          if (attemptAborted) lazyAttemptController.abort(attemptAbortReason);
+        }
+        return lazyAttemptController.signal;
+      };
+      const attemptAbort = { abort: triggerAttemptAbort };
+      const attemptLinked = {
+        trigger: triggerAttemptAbort,
+        dispose() {
+          if (attemptDisposed) return;
+          attemptDisposed = true;
+          attemptCancelCb = null;
+          c.req.raw.signal.removeEventListener("abort", onReqAbort);
+          if (watchPlugin) pluginSignal.removeEventListener("abort", onPluginAbort);
+          if (activeAbortNotify === triggerAttemptAbort) activeAbortNotify = null;
+        },
+      };
       activeLinkedDispose = attemptLinked.dispose;
-      const attemptAbort = attemptLinked.controller;
-      const upstreamSignal = attemptLinked.signal;
-      const timeoutTimer = setTimeout(
-        () => attemptAbort.abort(new Error("attempt_timeout")),
-        attemptTimeoutMs,
+      const cancelTimeout = state.deadlines.schedule(attemptTimeoutMs, () =>
+        triggerAttemptAbort(new Error("attempt_timeout")),
       );
+      const onAttemptCancelRegister: CancelRegistrar = (fn) => {
+        if (attemptAborted) {
+          fn(attemptAbortReason);
+          return () => {};
+        }
+        attemptCancelCb = fn;
+        return () => {
+          if (attemptCancelCb === fn) attemptCancelCb = null;
+        };
+      };
 
       const startedAt = performance.now();
-      let upstreamResp: Response;
+      let fastResult: FastUpstreamResult;
       let prepared: Awaited<ReturnType<typeof prepareUpstreamRequest>>;
       try {
         pluginSignal.throwIfAborted();
@@ -1191,7 +1367,12 @@ export async function handleInferenceRequest(
           throw admissionError(quotaLostNow);
         }
         const secret = deps.snapshot.decryptChannelSecret(cand.channel);
-        prepared = await prepareUpstreamRequest({
+        const canMutateClientBody =
+          selected.length === 1 &&
+          cand.route.plugin_pipeline.length === 0 &&
+          idempotencyKey === null &&
+          !isMultipartOp;
+        const basePrepareOpts: Omit<Parameters<typeof prepareUpstreamRequest>[0], "signal"> = {
           channel: cand.channel,
           route: cand.route,
           snapshot: snap,
@@ -1199,25 +1380,34 @@ export async function handleInferenceRequest(
           operation,
           clientBody: attemptBody,
           outputBound,
-          ...(multipartEntries ? { multipartEntries } : {}),
           isStream,
+          canMutateClientBody,
           vertexTokens: deps.vertexTokens,
           wasmExecutor: deps.wasmExecutor,
           tenantId: project.id,
-          onFieldDropped(source, target, field) {
+          onFieldDropped(source: Protocol, target: Protocol, field: string) {
             deps.metrics.recordProtocolFieldDropped(source, target, field);
           },
-          onFieldRejected(source, target, field) {
+          onFieldRejected(source: Protocol, target: Protocol, field: string) {
             deps.metrics.recordProtocolFieldRejected(source, target, field);
           },
-          ...(deps.config.pluginSigningPublicKeyPem
-            ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
-            : {}),
           traceparent: trace.traceparent,
-          signal: upstreamSignal,
-        });
+        };
+        if (multipartEntries) basePrepareOpts.multipartEntries = multipartEntries;
+        if (deps.config.pluginSigningPublicKeyPem) {
+          basePrepareOpts.signingPublicKeyPem = deps.config.pluginSigningPublicKeyPem;
+        }
+        const syncPrepared = tryPrepareUpstreamRequestSync(basePrepareOpts);
+        if (syncPrepared) {
+          prepared = syncPrepared;
+        } else {
+          prepared = await prepareUpstreamRequest({
+            ...basePrepareOpts,
+            signal: ensureAttemptSignal(),
+          });
+        }
       } catch (err) {
-        clearTimeout(timeoutTimer);
+        cancelTimeout();
         attemptLinked.dispose();
         activeLinkedDispose = null;
         releaseChannelLimit();
@@ -1275,20 +1465,21 @@ export async function handleInferenceRequest(
       try {
         pluginSignal.throwIfAborted();
         currentAttemptDispatched = true;
-        upstreamResp = await deps.transport.fetch(
+        fastResult = await deps.transport.fetchFast(
           prepared.url,
           {
             method: "POST",
             headers: prepared.headers,
+            ...(prepared.headersValidated ? { headersValidated: true } : {}),
             body: prepared.body as BodyInit,
-            signal: upstreamSignal,
+            onCancelRegister: onAttemptCancelRegister,
             dispatchDeadline: performance.now() + attemptTimeoutMs,
           },
           deps.config.allowPrivateUpstreams,
           deps.config.privateUpstreamCidrs,
         );
       } catch (err) {
-        clearTimeout(timeoutTimer);
+        cancelTimeout();
         attemptLinked.dispose();
         activeLinkedDispose = null;
         releaseChannelLimit();
@@ -1333,37 +1524,44 @@ export async function handleInferenceRequest(
         throw new GatewayError(lastErrorStatus, lastErrorCode, lastErrorMessage);
       }
 
+      const upstreamResp = fastResult.fast ? null : fastResult.response;
+      const upstreamStatus = fastResult.fast ? fastResult.status : fastResult.response.status;
+      const upstreamOk = upstreamStatus >= 200 && upstreamStatus < 300;
+
       if (pluginSignal.aborted) {
-        clearTimeout(timeoutTimer);
+        cancelTimeout();
         attemptLinked.dispose();
         activeLinkedDispose = null;
-        void upstreamResp.body?.cancel(pluginSignal.reason).catch(() => undefined);
+        void upstreamResp?.body?.cancel(pluginSignal.reason).catch(() => undefined);
         throw pluginSignal.reason;
       }
       const latencyMs = performance.now() - startedAt;
       logTtftMs = latencyMs;
-      if (!upstreamResp.ok) {
-        clearTimeout(timeoutTimer);
+      if (!upstreamOk) {
+        cancelTimeout();
         attemptLinked.dispose();
         activeLinkedDispose = null;
-        void upstreamResp.body?.cancel().catch(() => undefined);
+        void upstreamResp?.body?.cancel().catch(() => undefined);
         releaseChannelLimit();
         releaseChannelLimit = null;
-        const retryKind = isRetryableStatus(upstreamResp.status);
+        const retryKind = isRetryableStatus(upstreamStatus);
         if (retryKind) {
-          const retryAfterMs = parseRetryAfterMs(upstreamResp.headers.get("retry-after"));
-          deps.metrics.recordUpstreamError(cand.channel.name, `http_${upstreamResp.status}`);
+          const retryAfterHdr = fastResult.fast
+            ? getHeaderValue(fastResult.headers, "retry-after")
+            : fastResult.response.headers.get("retry-after");
+          const retryAfterMs = parseRetryAfterMs(retryAfterHdr);
+          deps.metrics.recordUpstreamError(cand.channel.name, `http_${upstreamStatus}`);
           deps.router.recordFailure(cand.channel.id, retryKind, retryAfterMs, latencyMs);
           markProbeCompleted(cand.channel.id);
           pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
-          lastErrorStatus = upstreamResp.status === 429 ? 429 : 502;
+          lastErrorStatus = upstreamStatus === 429 ? 429 : 502;
           lastErrorCode =
             retryKind === "rate_limit"
               ? "upstream_rate_limited"
               : retryKind === "auth_error"
                 ? "upstream_auth_error"
                 : "upstream_error";
-          lastErrorMessage = `Upstream returned HTTP ${upstreamResp.status}`;
+          lastErrorMessage = `Upstream returned HTTP ${upstreamStatus}`;
           continue;
         }
         releaseProbeFor(cand.channel_id);
@@ -1371,21 +1569,24 @@ export async function handleInferenceRequest(
         holdFinalized = true;
         if (anyUnknownAttempt) await deps.ledger.markUnknown(requestId);
         else await deps.ledger.releaseHold(requestId);
-        emitAccessLog(upstreamResp.status, "upstream_client_error");
+        emitAccessLog(upstreamStatus, "upstream_client_error");
         return c.json(
           formatProtocolError(
             operation,
-            upstreamResp.status,
+            upstreamStatus,
             "upstream_client_error",
-            `Upstream rejected request with HTTP ${upstreamResp.status}`,
+            `Upstream rejected request with HTTP ${upstreamStatus}`,
             requestId,
           ),
-          upstreamResp.status as 400,
+          upstreamStatus as 400,
           responseHeaders(requestId, trace),
         );
       }
 
-      const upstreamContentType = upstreamResp.headers.get("content-type") ?? "application/json";
+      const upstreamContentType =
+        (fastResult.fast
+          ? fastResult.contentType || getHeaderValue(fastResult.headers, "content-type")
+          : fastResult.response.headers.get("content-type")) ?? "application/json";
       const isUpstreamSse = upstreamContentType.toLowerCase().includes("text/event-stream");
       const isUpstreamJson = upstreamContentType.toLowerCase().includes("application/json");
       const isFakeJsonOnStream =
@@ -1403,13 +1604,26 @@ export async function handleInferenceRequest(
           return postResponse.linked.signal;
         };
         try {
-          const respBytes = await readResponseBytesFast(
-            upstreamResp,
-            deps.config.maxBodyBytes,
-            upstreamSignal,
-            deps.transport.bufferedBody(upstreamResp),
-          );
-          clearTimeout(timeoutTimer);
+          let respBytes: Uint8Array;
+          if (fastResult.fast) {
+            if (attemptAborted) throw attemptAbortReason ?? new Error("Upstream request aborted");
+            if (fastResult.body.byteLength > deps.config.maxBodyBytes) {
+              throw new GatewayError(
+                413,
+                "body_too_large",
+                "Payload exceeds the configured size limit",
+              );
+            }
+            respBytes = fastResult.body;
+          } else {
+            respBytes = await readResponseBytesFast(
+              upstreamResp!,
+              deps.config.maxBodyBytes,
+              ensureAttemptSignal(),
+              deps.transport.bufferedBody(upstreamResp!),
+            );
+          }
+          cancelTimeout();
           attemptLinked.dispose();
           activeLinkedDispose = null;
           releaseChannelLimit?.();
@@ -1444,17 +1658,11 @@ export async function handleInferenceRequest(
               billing_price_id: cand.billingPrice.id,
               cost_version_id: cand.costPrice.id,
               usage,
-              billing_pricing: {
-                currency: cand.billingPrice.currency,
-                rates: cand.billingPrice.rates,
-              },
+              billing_pricing: state.pricingOf(cand.billingPrice),
               billing_basis: cand.billingPrice.basis,
               ...(chars !== undefined ? { input_characters: String(chars) } : {}),
               supplier_basis: cand.costPrice.basis,
-              supplier_pricing: {
-                currency: cand.costPrice.currency,
-                rates: cand.costPrice.rates,
-              },
+              supplier_pricing: state.pricingOf(cand.costPrice),
               supplier_currency: cand.costPrice.currency,
               plugin_audit: preRequestAudit,
               charge_policy: "CHARGE_CUSTOMER",
@@ -1483,9 +1691,14 @@ export async function handleInferenceRequest(
             prepared.resolvedProvider.config.hooks.includes("adapt_response")
           ) {
             const respHeadersObj: Record<string, string> = {};
-            upstreamResp.headers.forEach((v, k) => {
-              respHeadersObj[k] = v;
-            });
+            const srcHeaders = fastResult.fast ? fastResult.headers : upstreamResp!.headers;
+            if (srcHeaders instanceof Headers) {
+              srcHeaders.forEach((v, k) => {
+                respHeadersObj[k] = v;
+              });
+            } else {
+              for (const k in srcHeaders) respHeadersObj[k] = srcHeaders[k]!;
+            }
             let wasmResp: Awaited<ReturnType<typeof invokeWasmProviderResponse>>;
             try {
               wasmResp = await invokeWasmProviderResponse({
@@ -1501,7 +1714,7 @@ export async function handleInferenceRequest(
                   operation,
                   upstream_model: cand.route.upstream_model,
                   client_protocol: isConversationalOperation(operation) ? operation : null,
-                  status: upstreamResp.status,
+                  status: upstreamStatus,
                   headers: respHeadersObj,
                   body: rawJson,
                 },
@@ -1622,11 +1835,10 @@ export async function handleInferenceRequest(
               clientJson = {};
             }
           } else {
-            const matchedErr = evaluateErrorRules(
-              upstreamResp.status,
-              rawJson,
-              prepared.mergedOverrides.error_rules,
-            );
+            const matchedErr =
+              prepared.mergedOverrides.error_rules.length > 0
+                ? evaluateErrorRules(upstreamStatus, rawJson, prepared.mergedOverrides.error_rules)
+                : null;
             if (matchedErr) {
               if (matchedErr.retry_kind !== "client_error") {
                 deps.metrics.recordUpstreamError(
@@ -1692,11 +1904,14 @@ export async function handleInferenceRequest(
                   prepared.usageDialect === "custom"
                     ? undefined
                     : extractUsage(adaptedJson, prepared.usageDialect);
-                rawUsage = mergeUsageWithAliases(
-                  baseUsage,
-                  adaptedJson,
-                  prepared.mergedOverrides.usage_aliases,
-                );
+                rawUsage =
+                  prepared.mergedOverrides.usage_aliases.length > 0
+                    ? mergeUsageWithAliases(
+                        baseUsage,
+                        adaptedJson,
+                        prepared.mergedOverrides.usage_aliases,
+                      )
+                    : baseUsage;
               } catch (err) {
                 holdFinalized = true;
                 await deps.ledger.markUnknown(requestId);
@@ -1749,7 +1964,8 @@ export async function handleInferenceRequest(
             let blockStatus = 400;
             let blockMessage = "Content blocked";
             let blockExtraHeaders: Record<string, string> = {};
-            const allAudit: PluginAuditEntry[] = [...preRequestAudit];
+            const allAudit: PluginAuditEntry[] =
+              preRequestAudit.length > 0 ? [...preRequestAudit] : [];
 
             if (cand.route.plugin_pipeline.length > 0 && isConversationalOperation(operation)) {
               const respText = extractResponseText(clientJson, operation);
@@ -1792,17 +2008,11 @@ export async function handleInferenceRequest(
               billing_price_id: cand.billingPrice.id,
               cost_version_id: cand.costPrice.id,
               usage,
-              billing_pricing: {
-                currency: cand.billingPrice.currency,
-                rates: cand.billingPrice.rates,
-              },
+              billing_pricing: state.pricingOf(cand.billingPrice),
               billing_basis: cand.billingPrice.basis,
               ...(chars !== undefined ? { input_characters: String(chars) } : {}),
               supplier_basis: cand.costPrice.basis,
-              supplier_pricing: {
-                currency: cand.costPrice.currency,
-                rates: cand.costPrice.rates,
-              },
+              supplier_pricing: state.pricingOf(cand.costPrice),
               supplier_currency: cand.costPrice.currency,
               plugin_audit: allAudit,
               charge_policy: chargePolicy,
@@ -1852,7 +2062,7 @@ export async function handleInferenceRequest(
             });
           }
         } finally {
-          clearTimeout(timeoutTimer);
+          cancelTimeout();
           postResponse.linked?.dispose();
           attemptLinked.dispose();
           activeLinkedDispose = null;
@@ -1866,7 +2076,9 @@ export async function handleInferenceRequest(
         prepared.resolvedProvider.kind === "WASM" &&
         prepared.resolvedProvider.config.hooks.includes("adapt_stream_event") &&
         isConversationalOperation(operation);
-      let upstreamBody: ReadableStream<Uint8Array> | null = upstreamResp.body;
+      let upstreamBody: ReadableStream<Uint8Array> | null = fastResult.fast
+        ? new Response(fastResult.body as BodyInit).body
+        : upstreamResp!.body;
       let wasmPrelude:
         | {
             event: string;
@@ -1889,7 +2101,7 @@ export async function handleInferenceRequest(
               (bedrock ? bedrock.feed(chunk) : parser.feed(chunk)).find(
                 (frame) => frame.data !== "",
               ),
-            upstreamSignal,
+            ensureAttemptSignal(),
           );
           upstreamBody = peeked.body;
           const first = peeked.found;
@@ -1899,7 +2111,7 @@ export async function handleInferenceRequest(
               plugin: prepared.resolvedProvider.plugin,
               config: prepared.resolvedProvider.config,
               tenantId: project.id,
-              signal: upstreamSignal,
+              signal: ensureAttemptSignal(),
               ...(deps.config.pluginSigningPublicKeyPem
                 ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
                 : {}),
@@ -1924,13 +2136,13 @@ export async function handleInferenceRequest(
             }
           } else if (first && first.data !== "[DONE]") {
             logicalError = evaluateErrorRules(
-              upstreamResp.status,
+              upstreamStatus,
               parseProviderJson(first.data),
               prepared.mergedOverrides.error_rules,
             );
           }
         } catch (err) {
-          clearTimeout(timeoutTimer);
+          cancelTimeout();
           attemptLinked.dispose();
           activeLinkedDispose = null;
           await upstreamBody?.cancel().catch(() => undefined);
@@ -1951,7 +2163,7 @@ export async function handleInferenceRequest(
           );
         }
         if (logicalError) {
-          clearTimeout(timeoutTimer);
+          cancelTimeout();
           attemptLinked.dispose();
           activeLinkedDispose = null;
           await upstreamBody?.cancel().catch(() => undefined);
@@ -1986,7 +2198,7 @@ export async function handleInferenceRequest(
       }
 
       releaseUnusedProbes(cursor + 1);
-      clearTimeout(timeoutTimer);
+      cancelTimeout();
       holdFinalized = true;
       const streamProbeChannel = acquiredProbes.delete(cand.channel.id) ? cand.channel.id : null;
       const streamLinked = createLinkedController([c.req.raw.signal, pluginSignal], true, false);
@@ -2031,8 +2243,7 @@ export async function handleInferenceRequest(
         );
       const capturedProjectLimit = releaseProjectLimit;
       const capturedChannelLimit = releaseChannelLimit;
-      releaseProjectLimit = null;
-      releaseChannelLimit = null;
+      const capturedLocalProjectSlot = releaseLocalProjectSlot;
 
       let streamCleanupDone = false;
       let streamCounted = false;
@@ -2055,6 +2266,7 @@ export async function handleInferenceRequest(
         finishStreamProbe();
         capturedChannelLimit?.();
         capturedProjectLimit?.();
+        capturedLocalProjectSlot?.();
         guard.release();
       };
 
@@ -2070,6 +2282,9 @@ export async function handleInferenceRequest(
               : {}),
           }),
         });
+        releaseProjectLimit = null;
+        releaseChannelLimit = null;
+        releaseLocalProjectSlot = null;
         streamOwnsGuard = true;
         if (!streamCleanupDone) {
           streamCounted = true;
@@ -2160,17 +2375,11 @@ export async function handleInferenceRequest(
                 billing_price_id: cand.billingPrice.id,
                 cost_version_id: cand.costPrice.id,
                 usage,
-                billing_pricing: {
-                  currency: cand.billingPrice.currency,
-                  rates: cand.billingPrice.rates,
-                },
+                billing_pricing: state.pricingOf(cand.billingPrice),
                 billing_basis: cand.billingPrice.basis,
                 ...(chars !== undefined ? { input_characters: String(chars) } : {}),
                 supplier_basis: cand.costPrice.basis,
-                supplier_pricing: {
-                  currency: cand.costPrice.currency,
-                  rates: cand.costPrice.rates,
-                },
+                supplier_pricing: state.pricingOf(cand.costPrice),
                 supplier_currency: cand.costPrice.currency,
                 plugin_audit: preRequestAudit,
                 charge_policy: "CHARGE_CUSTOMER",
@@ -2443,17 +2652,11 @@ export async function handleInferenceRequest(
                     billing_price_id: cand.billingPrice.id,
                     cost_version_id: cand.costPrice.id,
                     usage: modUsage,
-                    billing_pricing: {
-                      currency: cand.billingPrice.currency,
-                      rates: cand.billingPrice.rates,
-                    },
+                    billing_pricing: state.pricingOf(cand.billingPrice),
                     billing_basis: cand.billingPrice.basis,
                     ...(chars !== undefined ? { input_characters: String(chars) } : {}),
                     supplier_basis: cand.costPrice.basis,
-                    supplier_pricing: {
-                      currency: cand.costPrice.currency,
-                      rates: cand.costPrice.rates,
-                    },
+                    supplier_pricing: state.pricingOf(cand.costPrice),
                     supplier_currency: cand.costPrice.currency,
                     plugin_audit: [...preRequestAudit, ...streamPluginAudit],
                     charge_policy: effectiveChargePolicy,
@@ -2535,17 +2738,11 @@ export async function handleInferenceRequest(
                 billing_price_id: cand.billingPrice.id,
                 cost_version_id: cand.costPrice.id,
                 usage,
-                billing_pricing: {
-                  currency: cand.billingPrice.currency,
-                  rates: cand.billingPrice.rates,
-                },
+                billing_pricing: state.pricingOf(cand.billingPrice),
                 billing_basis: cand.billingPrice.basis,
                 ...(chars !== undefined ? { input_characters: String(chars) } : {}),
                 supplier_basis: cand.costPrice.basis,
-                supplier_pricing: {
-                  currency: cand.costPrice.currency,
-                  rates: cand.costPrice.rates,
-                },
+                supplier_pricing: state.pricingOf(cand.costPrice),
                 supplier_currency: cand.costPrice.currency,
                 plugin_audit: [...preRequestAudit, ...streamPluginAudit],
                 charge_policy: "CHARGE_CUSTOMER",
@@ -2840,17 +3037,11 @@ export async function handleInferenceRequest(
                   billing_price_id: cand.billingPrice.id,
                   cost_version_id: cand.costPrice.id,
                   usage: modUsage,
-                  billing_pricing: {
-                    currency: cand.billingPrice.currency,
-                    rates: cand.billingPrice.rates,
-                  },
+                  billing_pricing: state.pricingOf(cand.billingPrice),
                   billing_basis: cand.billingPrice.basis,
                   ...(chars !== undefined ? { input_characters: String(chars) } : {}),
                   supplier_basis: cand.costPrice.basis,
-                  supplier_pricing: {
-                    currency: cand.costPrice.currency,
-                    rates: cand.costPrice.rates,
-                  },
+                  supplier_pricing: state.pricingOf(cand.costPrice),
                   supplier_currency: cand.costPrice.currency,
                   plugin_audit: [...preRequestAudit, ...streamPluginAudit],
                   charge_policy: effectiveChargePolicy,
@@ -2930,17 +3121,11 @@ export async function handleInferenceRequest(
               billing_price_id: cand.billingPrice.id,
               cost_version_id: cand.costPrice.id,
               usage,
-              billing_pricing: {
-                currency: cand.billingPrice.currency,
-                rates: cand.billingPrice.rates,
-              },
+              billing_pricing: state.pricingOf(cand.billingPrice),
               billing_basis: cand.billingPrice.basis,
               ...(chars !== undefined ? { input_characters: String(chars) } : {}),
               supplier_basis: cand.costPrice.basis,
-              supplier_pricing: {
-                currency: cand.costPrice.currency,
-                rates: cand.costPrice.rates,
-              },
+              supplier_pricing: state.pricingOf(cand.costPrice),
               supplier_currency: cand.costPrice.currency,
               plugin_audit: [...preRequestAudit, ...streamPluginAudit],
               charge_policy: "CHARGE_CUSTOMER",
@@ -3043,6 +3228,8 @@ export async function handleInferenceRequest(
     if (!streamOwnsGuard) {
       activeLinkedDispose?.();
       activeLinkedDispose = null;
+      releaseLocalProjectSlot?.();
+      releaseLocalProjectSlot = null;
       releaseGuard?.();
     }
   }

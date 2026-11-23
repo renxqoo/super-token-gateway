@@ -28,6 +28,8 @@ export type GatewayConfig = {
   trustedProxyCidrs: string[];
   maxInFlight: number;
   maxBodyBytes: number;
+  bodyReadTimeoutMs?: number;
+  reusePort?: boolean;
   holdTtlMs: number;
   attemptTimeoutMs: number;
   streamIdleTimeoutMs?: number;
@@ -192,6 +194,10 @@ export function loadConfigFromEnv(
     trustedProxyCidrs: parseCsv(env.TRUSTED_PROXY_CIDRS),
     maxInFlight: intFromEnv(env, "MAX_IN_FLIGHT", 2000),
     maxBodyBytes: intFromEnv(env, "MAX_BODY_BYTES", 10 * 1024 * 1024),
+    ...(env.BODY_READ_TIMEOUT_MS !== undefined
+      ? { bodyReadTimeoutMs: intFromEnv(env, "BODY_READ_TIMEOUT_MS", 15_000) }
+      : {}),
+    ...(env.GATEWAY_REUSE_PORT === "true" ? { reusePort: true } : {}),
     holdTtlMs: intFromEnv(env, "HOLD_TTL_MS", 60_000),
     attemptTimeoutMs: intFromEnv(env, "ATTEMPT_TIMEOUT_MS", 30_000),
     ...(env.STREAM_IDLE_TIMEOUT_MS !== undefined
@@ -200,7 +206,7 @@ export function loadConfigFromEnv(
     streamMaxDurationMs: intFromEnv(env, "STREAM_MAX_DURATION_MS", 300_000),
     snapshotPollMs: intFromEnv(env, "SNAPSHOT_POLL_MS", 2000, production ? 1 : 0),
     microBatchWindowMs: intFromEnv(env, "MICRO_BATCH_WINDOW_MS", 3, 0),
-    microBatchMaxSize: intFromEnv(env, "MICRO_BATCH_MAX_SIZE", 64),
+    microBatchMaxSize: intFromEnv(env, "MICRO_BATCH_MAX_SIZE", 256),
     ...(env.STG_WASMTIME_LIB ? { wasmLibPath: env.STG_WASMTIME_LIB } : {}),
     contentWasmPoolSize: intFromEnv(env, "CONTENT_WASM_POOL_SIZE", 4, 1, 16),
     providerWasmPoolSize: intFromEnv(env, "PROVIDER_WASM_POOL_SIZE", 4, 1, 16),

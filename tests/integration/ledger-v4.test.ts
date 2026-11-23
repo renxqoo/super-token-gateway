@@ -1207,6 +1207,7 @@ test.each([
           2026112202,
           2026112203,
           2026112204,
+          2026112205,
           SCHEMA_VERSION,
         ]);
       },
@@ -2045,5 +2046,155 @@ test("a temporarily locked sole funded cell does not falsely reject a supplier h
       unlock.resolve();
       await blocking;
       await f.ledger.drain();
+    }
+  }));
+
+test("symptom: commit_leased_batch succeeds under least-privilege stg_data outbox column grants", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+    const roleName = `stg_data_t_${suffix}`;
+    const rolePass = `pw_${suffix}`;
+    let dataDb: SQL | undefined;
+    let dataLedger: ReturnType<typeof createLedgerEngine> | undefined;
+    try {
+      await f.ledger.creditWallet({
+        project_id: f.project.id,
+        currency: "PTS",
+        kind: "CASH",
+        external_ref: `least-priv-${suffix}`,
+        amount_atoms: "100000000",
+      });
+      await db.unsafe(
+        `CREATE ROLE ${roleName} LOGIN PASSWORD '${rolePass}' NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE`,
+      );
+      await db.unsafe(`GRANT USAGE ON SCHEMA public TO ${roleName}`);
+      await db.unsafe(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${roleName}`);
+      await db.unsafe(
+        `GRANT INSERT ON public.billing_holds, public.billing_charges, public.wallet_leases, public.supplier_leases TO ${roleName}`,
+      );
+      await db.unsafe(
+        `GRANT UPDATE (available_atoms, reserved_atoms, spent_atoms, expired_atoms, debt_atoms, credit_reserved_atoms, evidence_disputed, freeze_reason) ON public.wallets TO ${roleName}`,
+      );
+      await db.unsafe(
+        `GRANT UPDATE (available_atoms, reserved_atoms, spent_atoms, expired_atoms) ON public.wallet_lots TO ${roleName}`,
+      );
+      await db.unsafe(
+        `GRANT UPDATE (balance_atoms, reserved_atoms, spent_atoms, revision) ON public.supplier_cells TO ${roleName}`,
+      );
+      await db.unsafe(
+        `GRANT UPDATE (state, remaining_atoms, lot_allocations, earliest_lot_expires_at, expires_at, updated_at) ON public.wallet_leases TO ${roleName}`,
+      );
+      await db.unsafe(
+        `GRANT UPDATE (state, remaining_atoms, expires_at, updated_at) ON public.supplier_leases TO ${roleName}`,
+      );
+      await db.unsafe(
+        `GRANT UPDATE (state, held_atoms, credit_atoms, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, closed_at) ON public.billing_holds TO ${roleName}`,
+      );
+      await db.unsafe(
+        `GRANT UPDATE (state, revision, updated_at) ON public.upstream_accounts TO ${roleName}`,
+      );
+      await db.unsafe(
+        `GRANT INSERT (journal_id, ordinal, side, entity_id, request_id, reference, kind, currency, account, atoms) ON public.ledger_entries TO ${roleName}`,
+      );
+      await db.unsafe(
+        `GRANT INSERT (event_id, kind, request_id, project_id, payload) ON public.outbox_events TO ${roleName}`,
+      );
+      await db.unsafe(`GRANT USAGE ON SEQUENCE public.outbox_events_seq_seq TO ${roleName}`);
+      await db.unsafe(`GRANT EXECUTE ON FUNCTION public.outbox_shard(UUID) TO ${roleName}`);
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION public.commit_leased_batch(JSONB, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) TO ${roleName}`,
+      );
+
+      const base = new URL(process.env.DATABASE_URL!);
+      const [dbRow] = await db<{ dbname: string }[]>`SELECT current_database() AS dbname`;
+      base.pathname = `/${dbRow!.dbname}`;
+      base.username = roleName;
+      base.password = rolePass;
+      dataDb = createDatabase(base.toString(), 8);
+      dataLedger = createLedgerEngine(dataDb, {
+        enableLeases: true,
+        batchWindowMs: 2,
+        maxBatchSize: 64,
+      });
+
+      const expiresAt = new Date(Date.now() + 60_000).toISOString();
+      const wave = async (count: number) => {
+        const items = Array.from({ length: count }, () => ({
+          requestId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+        }));
+        const holds = await Promise.all(
+          items.map((item) =>
+            dataLedger!.acquireHold({
+              request_id: item.requestId,
+              attempt_id: item.attemptId,
+              project_id: f.project.id,
+              currency: "PTS",
+              operation: "chat",
+              model: "gpt-4o",
+              idempotency_key: null,
+              fingerprint: "",
+              customer_atoms: "200",
+              supplier_account_id: f.accountA.id,
+              supplier_cost_version_id: f.costPrice.id,
+              supplier_channel_id: f.channelA.id,
+              supplier_currency: "USD",
+              supplier_atoms: "100",
+              expires_at: expiresAt,
+            }),
+          ),
+        );
+        expect(holds.every((h) => h.ok)).toBe(true);
+        return items;
+      };
+      const firstWave = await wave(20);
+      const secondWave = await wave(20);
+      const allItems = [...firstWave, ...secondWave];
+      const commits = await Promise.all(
+        allItems.map((item) =>
+          dataLedger!.commitTerminal({
+            request_id: item.requestId,
+            selected_attempt_id: item.attemptId,
+            channel_id: f.channelA.id,
+            billing_price_id: f.flatBillingPrice.id,
+            cost_version_id: f.costPrice.id,
+            usage: { input_tokens: "60", output_tokens: "40" },
+            billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+            billing_basis: "PROVIDER_USAGE",
+            supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+            supplier_currency: "USD",
+          }),
+        ),
+      );
+      expect(commits.every((c) => c.ok)).toBe(true);
+      const [outbox] = await db<
+        { count: number }[]
+      >`SELECT count(*)::int AS count FROM public.outbox_events`;
+      expect(outbox?.count).toBe(allItems.length);
+      const [leasedCount] = await db<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM public.billing_holds WHERE wallet_lease_id IS NOT NULL
+      `;
+      expect(leasedCount?.count ?? 0).toBeGreaterThanOrEqual(secondWave.length);
+      expect(await f.ledger.auditConservation()).toMatchObject({
+        ok: true,
+        open_holds: 0,
+        unknown_holds: 0,
+      });
+    } finally {
+      await dataLedger?.drain().catch(() => undefined);
+      await dataDb?.close({ timeout: 1 }).catch(() => undefined);
+      await f.ledger.drain().catch(() => undefined);
+      await db
+        .unsafe(`REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM ${roleName}`)
+        .catch(() => undefined);
+      await db
+        .unsafe(`REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM ${roleName}`)
+        .catch(() => undefined);
+      await db
+        .unsafe(`REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM ${roleName}`)
+        .catch(() => undefined);
+      await db.unsafe(`REVOKE USAGE ON SCHEMA public FROM ${roleName}`).catch(() => undefined);
+      await db.unsafe(`DROP ROLE IF EXISTS ${roleName}`).catch(() => undefined);
     }
   }));

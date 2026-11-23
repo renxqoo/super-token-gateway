@@ -1,100 +1,101 @@
 # 容量及对标契约
 
-2026-11-20 的目标覆盖正式 Gateway 的短 Chat JSON 和 Chat 流式响应（SSE），两者均要求均匀 1000 钱包下稳定完整完成至少 3000 请求/秒。每个负载独立验收。短流和持续 5、30、120 秒的流分别报告，见下方流式契约。按相同配置连续通过两轮 60 秒后，再执行 60 分钟长测。
+本文档定义 `super-token-gateway` 当前 v4 架构（`apps/gateway` + `apps/worker` + PostgreSQL 17 + 可选 Redis 7.4）的容量验收标准、强耐久边界、可复现压测入口与外部对标口径。历史三进程执行 Core、`scripts/bench-system.ts` 与 Redis AOF 证据队列（`QUEUE_REDIS_URL` / `QUEUE_REQUIRED_REPLICAS`）已随 v4 架构演进退役，历史报告见同目录按日期归档的文档，不再作为当前架构的达标依据。
 
-2026-11-11 的历史目标为完整链路 6000 RPS。11 月 16 日在短 JSON 实测 35 RPS 后，用户确定最低目标为 3000 RPS。该轮的主要开销包括供应账户余额单行竞争、每请求约 26 ms 的 PG CPU 和插件 helper 每次调用新建实例。[T17 实测](capacity-2026-11-16.md)
+## 架构与强耐久边界
 
-## 固定口径
+1. **PostgreSQL 17 强耐久账本**：
+   - `fsync = on`、`synchronous_commit = on`、`full_page_writes = on` 始终开启；禁止为压测成绩放宽耐久参数。
+   - 生产高可用与主备验收启用物理流式同步备库（`synchronous_standby_names` 非空且 `pg_stat_replication.sync_state = 'sync'`），事务提交在主库与同步备库均落盘后返回。
+   - 发送上游前必须持久化预扣（`billing_holds`）；终态在同一数据库事务内原子提交客户扣款与供应成本（`billing_charges`）、借贷平衡流水（`ledger_entries`）及 16 分片外发事件（`outbox_events`）。
+   - 压测结束后必须满足：`auditConservation().ok === true`（`unbalanced_journals = 0`、`broken_lots = 0`、`wallet_mismatches = 0`、`reservation_mismatches = 0`、`open_holds = 0`、`unknown_holds = 0`）、`duplicate_request_charges = 0`、`active_leases_after_idle = 0`、`post_drain_in_flight = 0`。
+2. **Redis 7.4 职责边界**：
+   - 仅承担多网关集群共享限流（RPM / TPM / 并发租约）、熔断状态广播与配置 epoch 推送；不承担资金证据队列职责。
+   - `--no-redis` 仅用于单节点或无跨节点共享限流场景的对照测量，报告中必须明确标注 `redis_enabled: false`。
+3. **资源保护与在途配比**：
+   - 网关在读取请求体前即执行单节点每项目并发保护（`429 rate_limit_concurrency`），并对 JSON 与 multipart 请求体读取强制执行有界超时（`BODY_READ_TIMEOUT_MS`，默认 `15000` ms，超时返回 `408 request_timeout`）。
+   - 真实上游时延下的吞吐上限受 `MAX_IN_FLIGHT / 平均上游时延` 约束，详细的内存、FD、端口与 `MAX_IN_FLIGHT` 规划见 [生产运维决策](../decisions/0011-production-operations.md)。
 
-基线沿用单机多实例、1000 钱包、正费率短 Chat JSON。报告硬件、OS、Bun/PG/Redis 版本、产物与源码哈希、实例/连接/批次预算、上游时延和响应尺寸。`bench-system` 的 `audit.json` 以 `environment` 记录 OS、CPU 型号与核数、内存、Bun 版本及被测产物（三进程入口、管理面模块、原生插件 helper、上游替身与 `dist/manifest.json`）的 SHA-256，运行前计算；PG 与 Redis 设置分别在 `databaseSettings`、`redisSettings`。PG fsync/synchronous_commit/full_page_writes 保持开启，证据 Redis AOF always/noeviction，至少一个 AOF 副本确认，worker 与外部消费者全程在线。
+## 标准压测入口与溯源字段
 
-60 秒固定到达窗口中，同一 request ID 必须同时满足有效 HTTP 完成、精确 PG 证据及账单已提交、外部实际 ACK。交集每秒平均至少达到被测档位目标（`--target-rps`），且包含末批收尾的 HTTP 成功吞吐至少达到该目标；不四舍五入。窗口末结算积压不得随档位持续增长。全部计划请求均发送且有效完成，漏发、传输/HTTP 错误、无效正文、额外上游尝试、账务差异、失败队列均为 0。结束后核对逐钱包资金、来源、流水、用量、ACK 和排空，不把排空后成绩算入窗口。
+仓库内所有正式基准均从独立构建产物 `dist/` 启动（`bun run build`），并在 JSON 报告中强制输出：
 
-基线延迟预算暂定端到端 P99 ≤ 1500 ms，仅适用于无延迟短 JSON 上游；作为本轮明确门槛，不推导真实供应商响应时间。报告 P50/P95/P99/P99.9、CPU/RSS、WAL、磁盘及队列峰值；超过延迟预算即失败。持续测试各分钟分别报告，不能靠整体平均掩盖某分钟退化。
+- `provenance`：`git_commit`、`dist_manifest_sha256`、`bun_version`、`host`（CPU 型号/核数、内存、OS/arch）、`pg_version`、`pg_settings`（`fsync`、`synchronous_commit`、`full_page_writes`、`shared_buffers`、`max_wal_size`、`checkpoint_completion_target`、`checkpoint_timeout`、`synchronous_standby_names`）。
+- `pg_checkpointer_delta`：压测前后 `pg_stat_checkpointer` 差分（`num_timed`、`num_requested`、`write_time_ms`、`sync_time_ms`、`buffers_written`）。
 
-## 持续验收
+### 脚本与参数
 
-先连续两轮同配置 60 秒达标，再执行 60 分钟。同一持续运行中分为60个分钟窗口；每分钟按上述 request ID 交集和延迟门槛验收，在线结算，禁止每分钟重启网关、worker 或清空数据库。发生器和审计必须有界，原始证据分窗口落盘；仅包含数字与技术身份。稳态队列不得持续增长，停止到达后120秒内排空，临时测试资源由创建者清理。
+| 脚本 / 命令                                             | 适用场景                                                                                                       | 关键环境变量 / 标志                                                                                                                                                                                                          |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun run bench:single`（`scripts/bench-single.ts`）     | 单网关节点极限吞吐、真实上游时延、HTTPS TLS + DNS、访问日志开销                                                | `BENCH_PROJECTS`、`BENCH_JSON_CONCURRENCY`、`BENCH_SECONDS`、`BENCH_MAX_IN_FLIGHT`、`BENCH_UPSTREAM_DELAY_MS`、`BENCH_UPSTREAM_TLS`、`BENCH_ACCESS_LOG`、`BENCH_GW_LOG`、`BENCH_FAST_CLIENT`                                 |
+| `bun run bench:prod --limit`（`scripts/bench-prod.ts`） | 多网关 + Worker + Redis 7.4 + PG 17 极限吞吐与同步备库压测                                                     | `BENCH_GATEWAY_NODES`（1–8）、`BENCH_MOCK_NODES`（1–8）、`BENCH_PROJECTS`（1–5000）、`BENCH_JSON_CONCURRENCY`、`BENCH_LIMIT_SECONDS`、`BENCH_TENANT_AFFINITY`、`BENCH_SYNC_STANDBY`、`BENCH_VERIFY_OUTBOX_ACK`、`--no-redis` |
+| `bun run bench:prod --mixed-soak`                       | 固定到达率混合负载（JSON 50% + SSE 25% + Wasm 插件 12.5% + Webhook 插件 12.5%）与逐笔账务/余额/Outbox ACK 验收 | `BENCH_PROJECTS=1000`、`BENCH_SOAK_SECONDS`、`BENCH_SOAK_RPS=3000`、`BENCH_SOAK_CONCURRENCY`、`BENCH_VERIFY_OUTBOX_ACK=1`、`BENCH_SYNC_STANDBY`                                                                              |
+| `bun run bench:prod --sse-burst` / `--sse-burst-fresh`  | 高并发 SSE 突发、客户端取消、Redis 并发租约回收与活跃租约归零                                                  | 需要 Redis，自动校验 `stg_bench:rl:conc:*` 归零                                                                                                                                                                              |
 
-bench-system 的严格在线入口支持60秒整数倍、最长3600秒；身份证据有背压落盘，运行后按固定排序预算逐行合并。每分钟按发出窗口统计延迟，包含该分钟尾批；整体尾批P99同样进入门槛。排空期限从计划到达窗口结束时计算，超过120秒不能因最终账务正确而判通过。若本机服务、磁盘或负载器不足，记录失败原因、已完成窗口和资源占用，禁止用缩短时长代替长测。
+## 验收门槛
 
-## 执行 Core 改造验收
+### 1. 均匀 1000 钱包混合固定到达验收（3000 RPS）
 
-[统一执行 Core](../../beyond-new-api/13-execution-core.md) 的候选链路以指定可晋升 PostgreSQL 备库的同步确认作为发权及终态成功边界。压测使用主备两个真实 PG 进程，并配置有 AOF 确认副本的独立恢复队列。终态证据、客户扣款、供应成本和待交付事件同事务提交；恢复任务在确认备库重放后才移除。记录主备配置、实际确认者、故障恢复队列和测试产物。固定到达、逐请求交集、正额预扣、延迟和长测门槛沿用本契约。现行三进程产物继续按上述证据 Redis AOF 成功路径记录。
+- 负载：均匀 1000 钱包（`BENCH_PROJECTS=1000`）、正费率混合工作负载（JSON + SSE + Wasm + Webhook）、外部消费者在线调用 `/internal/v1/events/claim` 与 `/internal/v1/events/ack`（`BENCH_VERIFY_OUTBOX_ACK=1`）。
+- 门槛：
+  - 目标到达率 `≥ 3000 RPS`，`errors = 0`，`unsent = 0`。
+  - 无延迟上游下端到端 `P99 ≤ 1500 ms`（含调度滞后与服务耗时）。
+  - `exact_ledger` 全部模型 `wrong_atoms_or_usage = 0`、`wrong_plugin = 0`；`exact_balances` 三项偏差均为 `0`；`conservation.ok = true`。
+  - `outbox_ack.acked_events` 覆盖全部结算事件且 `backlog_after_drain = 0`。
+  - 停发后活跃租约在 `5000 ms` 预算内归零，整轮排空在 `120 s` 内完成。
+- 60 分钟持续验收：在独立压测环境先连续两轮通过 60 s 同口径验收，再执行 `BENCH_SOAK_SECONDS=3600`；运行前按实测 WAL 速率（约 3.7–4.3 KiB/req）预检磁盘余量，并全量记录每分钟窗口与 `pg_checkpointer_delta`。禁止用缩短时长替代 60 分钟长测结论。
 
-`bench-system.ts --replicated-short-chat` 启动隔离主备，外部消费者通过管理 HTTP 领取和 ACK。容量夹具同时检查原证据与终态恢复队列。主备容量预检按每请求 80,000 字节估算，覆盖诊断样本中每个请求约 36 KB 的主库体积及物理备库，另计固定保留空间。2026-11-19 的 60 分钟预检需要约 873 GB，当时可用约 251 GB。各轮命令、版本与原始审计记录在 [短 Chat 验收证据](evidence-short-chat-2026-11-19/rounds.json)。
+### 2. 真实上游时延与长流验收
 
-2026-11-19 合批优化前的 60 秒轮发出 180,060 个请求，1952 个完成有效 HTTP 响应。窗口内有 1930 个请求同时满足 HTTP 成功、精确结算和外部 ACK，即 32.17 RPS。P99 为 5014.98 毫秒。排空期内累计 2938 笔精确落账和 5876 个事件 ACK，仍有未解除的客户和供应预扣。限流、无路由、负载器超时和本地连接错误也进入失败审计。PostgreSQL 语句统计中，资金组锁等待、资金准入和证据结算占主要耗时。3000 RPS 线未通过。
+- 真实 LLM 上游（平均时延 1–30 s，长流 5 / 30 / 120 s）容量按 `节点数 × MAX_IN_FLIGHT / 平均上游时延` 规划；零时延上游 RPS 仅反映网关与账本控制面极限，不得直接外推为长流在途容量。
+- 单机发生器受 `ulimit -n`、`kern.ipc.somaxconn` 与临时端口数限制；6000 以上并发在途验收必须在多机分离部署发生器、网关与数据库后执行。
 
-同日引入短 Chat 合批与已确认未发送的配额关闭后，60 秒复测发出 180,060 个请求，有效 HTTP 为 1932 笔，窗口内三项交集为 1916 笔，即 31.93 RPS，P99 为 5468.88 毫秒。排空期内累计 2869 笔精确成功结算和 5738 个外部 ACK，财务仍挂账。等待采样主要出现 CPU、同步复制（`SyncRep`）和事务锁（`transactionid`）。负载器记录 12,242 次 `EADDRNOTAVAIL`。60 分钟预检可用 246.99 GB，预算为 872.88 GB，未创建长测夹具。完整失败项与原始数据在[短 Chat 第 14 轮](evidence-short-chat-2026-11-19/rounds.json)。
+### 3. 外部项目对标规则
 
-修复客户端断开后已确认未发送的结算后，最终产物以每秒 301 个固定到达复测 300 RPS 中间档。18,060 个请求中 14,117 个有效 HTTP，60 秒内三项交集为 14,097 笔，即 234.95 RPS，P99 为 5014.98 毫秒。169 笔已准入但从未发送，期末双方预扣均为零。成功链路累计 15,938 笔精确结算和 31,876 个外部 ACK，恢复队列为空。该轮仍超过 120 秒排空预算且存在 3671 次请求超时，300 RPS 档未通过。[短 Chat 第 15 轮](evidence-short-chat-2026-11-19/rounds.json)
+- 外部对标必须如实记录测试硬件、版本、产物哈希与契约差异；若对标对象不具备强耐久预扣、复式账本、Outbox 或跨节点 Redis 限流，必须在表中显式单列契约差异，禁止隐瞒功能差距直接对比。
 
-## 独立工作负载
+## 2026-11-23 实测基线与对标结果
 
-均匀 1000 钱包、90% 热点、10 钱包和单钱包分别报告容量与尾延迟。
+### 环境溯源
 
-### Chat 流式响应
+- 硬件与 OS：Apple M6（12 核，24 GiB RAM），macOS `darwin arm64`（27.0.0）
+- 运行时与数据层：Bun `1.4.5`、PostgreSQL `17.11`（`fsync=on`、`synchronous_commit=on`、`full_page_writes=on`、`shared_buffers=2GB`、`max_wal_size=4GB`、`checkpoint_completion_target=0.9`）、Redis `7.4`
+- 资金核验：下表所有本轮实测均满足 `total_errors = 0`、`duplicate_request_charges = 0`、`conservation.ok = true`、`active_leases_after_idle = 0`、`post_drain_in_flight = 0`
 
-在物理 PG 主备环境，`bench:system --replicated-short-chat --replicated-stream-terminal --stream --online-capacity` 可验收短流同步终态。单次运行同时核对普通证据、短 JSON 恢复及 SSE 恢复三个队列。上游响应可使用未压缩的 HTTP 分块或固定长度消息，后者要读到 EOF 并核对完整字节数。启用条件和回退步骤见[执行 Core 的流式终态](../../beyond-new-api/13-execution-core.md#公开-chat-sse-的同步终态)。
+### 优化前后吞吐与延迟对比（零时延短 JSON，32 钱包，全量 PG 17 强耐久账本）
 
-通过公开 HTTP 入口发起 `stream: true` 请求。一次有效短流要求 SSE 响应类型正确、预期的内容增量完整有序、收到一次 `[DONE]` 并正常结束，且全程无错误帧。确定性文本上游按完整文本核对，允许在任意位置切分 UTF-8 字节和内容帧。报告首帧、首段非空文本（TTFT）、后续文本增量间隔、完整 HTTP 延迟及各项样本数。文本增量可以包含多个 token，间隔按客户端实际收到的增量记录。
+| 场景                                            | `1360133` 历史基线 | `fca0b08` 优化前 |              当前版本实测 | 延迟（P50 / P99）                 | WAL / req | 备注                                                 |
+| ----------------------------------------------- | -----------------: | ---------------: | ------------------------: | --------------------------------- | --------: | ---------------------------------------------------- |
+| 1 节点 @ 32c                                    |                  — |      4,365.0 RPS | **12,679.1–13,866.1 RPS** | 2.25–2.44 ms / 3.93–4.33 ms       |   5,421 B | 低并发延迟降幅 3×                                    |
+| 1 节点 @ 128c                                   |                  — |                — | **19,363.0–22,654.5 RPS** | 5.53–5.93 ms / 9.68–15.63 ms      |   4,641 B | 单节点 RSS ~215 MB                                   |
+| 1 节点 @ 512c                                   |                  — |     23,001.7 RPS | **25,366.1–26,924.0 RPS** | 18.55–19.49 ms / 27.75–29.73 ms   |   3,836 B |                                                      |
+| 1 节点 @ 1024c                                  |       14,214.7 RPS |     22,793.1 RPS | **26,601.8–29,111.2 RPS** | 34.26–37.41 ms / 48.35–54.60 ms   |   4,087 B | 较 `1360133` 提升 **2.0×**                           |
+| 2 节点 + Redis 7.4 @ 1024c                      |  12,180–16,302 RPS |     30,001.7 RPS |          **32,931.8 RPS** | 30.56 ms / 43.26 ms               |   3,905 B | 较 `1360133` 提升 **2.0–2.7×**                       |
+| 2 节点 + Redis 7.4 @ 2048c                      |                  — |                — |          **34,065.6 RPS** | 58.82 ms / 77.31 ms               |   3,745 B | 504.5 MB 双节点总 RSS                                |
+| 3 节点 + Redis 7.4 @ 2048c                      |                  — |                — |          **37,514.4 RPS** | 53.05 ms / 72.61 ms               |   3,856 B | 轮询分发，0 错误，全量守恒                           |
+| 3 节点 + Redis 7.4 @ 3072c                      |                  — |                — | **37,526.2–37,927.6 RPS** | 78.39–79.15 ms / 105.53–105.88 ms |   3,762 B | 轮询分发，0 错误，全量守恒                           |
+| 3 节点 `--no-redis` @ 2048c–3072c               |                  — |                — | **40,257.1–41,715.3 RPS** | 49.48–70.87 ms / 71.05–98.86 ms   |   3,758 B | PG 17 强耐久账本全开                                 |
+| 2 节点 + Redis + **PG 17 物理同步备库** @ 1024c |                  — |                — |          **27,969.4 RPS** | 35.81 ms / 51.73 ms               |   3,918 B | `synchronous_standby_names='*'`, `sync_state='sync'` |
 
-容量按完整请求数计。每个 request ID 都要有有效 HTTP 完成、该次选定 attempt 的已验证成功终态、客户与供应方精确的资金流水，以及该 attempt 所有正式事件的外部 ACK。取 HTTP 完成与外部终态审计完成两者中较晚的时间计入窗口。允许不同请求有不同数量的进度事件。另查上游仅发送一次、最终资金平衡和队列排空。无延迟短流的 HTTP P99 和从请求实际发起至 HTTP、双边资金与外部 ACK 全齐的 P99 均须在 1500 ms 内。后者按实际发起分钟统计每笔毫秒数，末批收尾计入原分钟，每分钟超出预算的比例最多为 1%。单独报告 TTFT。真实生成所耗时间计入长流生命周期。
+### 与 `agentgateway` 公开性能数据对标（契约透明对比）
 
-对持续 5、30、120 秒的流，分别验证每秒新建与完整结束至少 3000 路，稳态至少需要约 15,000、90,000、360,000 路在途。负载器须先填满时长对应的在途窗口，再在稳态观察完整抵达和离开，分别记录测量窗口和收尾期。长流另报首段、增量间隔、流长、终止原因和取消后的资源释放。[本轮流式证据](stream-2026-11-20.md)
+| 项目 / 形态                                          |     吞吐（RPS / QPS） | 持久预扣 & 复式账本    | Outbox 事件       | 跨节点 Redis 限流   | 说明                                                                |
+| ---------------------------------------------------- | --------------------: | ---------------------- | ----------------- | ------------------- | ------------------------------------------------------------------- |
+| `agentgateway`（公开基线 @ 32c，1 KiB mock JSON）    |            36,933 QPS | 否                     | 否                | 否                  | 多核 Rust 纯代理，无数据库与账务持久化                              |
+| `agentgateway`（公开基线 @ 512c）                    |            30,000 QPS | 否                     | 否                | 否                  | 多核 Rust 纯代理，无数据库与账务持久化                              |
+| `super-token-gateway`（3 节点 + Redis 7.4 + PG 17）  | **37,514–37,928 RPS** | **是（PG 17 强耐久）** | **是（16 分片）** | **是（Redis 7.4）** | 全量金融账本与集群限流下仍超越 `agentgateway` 峰值                  |
+| `super-token-gateway`（3 节点 `--no-redis` + PG 17） | **40,257–41,715 RPS** | **是（PG 17 强耐久）** | **是（16 分片）** | 否（本地限流）      | 较 `agentgateway` 32c 峰值高 **+9%–+13%**，较 512c 高 **+34%–+39%** |
 
-在同步终态的在线流式入口上用 `--stream-duration-seconds 5|30|120` 选择负载。上游按流长均匀发送确定性 SSE 帧，终止帧在指定时长之后发出。固定到达先连续填充流长加 2 秒，再测量 `--seconds` 个秒。每个测量分钟根据实际发起时间和实际联合完成时间分别计数。填充期的请求只能在测量窗内贡献完成数。所有已发请求仍参与逐笔资金与 ACK 检查，包括填充和尾批。测量开始时同时核对客户端逐请求在途数和前一秒内实际打开的上游流数，且每笔 HTTP 流长至少达到指定时长。沿用从计划到达窗口结束起算的 120 秒排空门槛，单列实际尾批耗时。短流的两项 1500 ms 门槛按短流口径执行。
+### 热路径专项与契约功能验证实测（2026-11-23）
 
-夹具在建库前检查实际配置下的插件槽位、每 Gateway 的上游连接预算、入口在途数、供应渠道额度和驱动并发。物理资源不足的档位在预检报错并记录所需在途数。
+| 专项验证                                        | 命令参数摘要                                                                                                                 | 实测结果                                                                                                                                           | 核验状态                                       |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| 1000 钱包 3000 RPS 混合 + 在线 Outbox ACK（F4） | `BENCH_PROJECTS=1000 BENCH_GATEWAY_NODES=2 BENCH_SOAK_SECONDS=15 BENCH_SOAK_RPS=3000 BENCH_VERIFY_OUTBOX_ACK=1 --mixed-soak` | `45,000/45,000` 完成，0 错误，0 漏发，**P99 56 ms**（JSON 47 ms / SSE 66 ms / Wasm 48 ms / Webhook 66 ms），`outbox_ack = 45,200`（`backlog = 0`） | 全部通过（短窗诊断；60 min 长测需独立环境）    |
+| 真实上游 1000 ms 时延（F2）                     | `BENCH_UPSTREAM_DELAY_MS=1000 BENCH_MAX_IN_FLIGHT=4000 BENCH_JSON_CONCURRENCY=1000,2000`                                     | 1000c：**949.2 RPS**（P50 1003.6 ms，P99 1042.6 ms）；2000c：**1,807.2 RPS**（P50 1002.45 ms，P99 1023.1 ms，RSS 237.3 MB）                        | 全部通过，控制面增量开销 `< 4 ms`              |
+| HTTPS TLS 复用池 + `localhost` DNS 缓存（F7）   | `BENCH_UPSTREAM_TLS=1 BENCH_JSON_CONCURRENCY=128,512`                                                                        | 128c：**20,307.4 RPS**（P99 14.34 ms）；512c：**25,123.7 RPS**（P50 19.96 ms，P99 28.31 ms，RSS 248.9 MB）                                         | 全部通过，达到明文 HTTP 同档吞吐的 **~95–99%** |
+| 访问日志落盘（F7）                              | `BENCH_ACCESS_LOG=1 BENCH_GW_LOG=... BENCH_JSON_CONCURRENCY=512`                                                             | 512c：**23,996.4 RPS**（P50 20.70 ms，P99 34.08 ms）                                                                                               | 全部通过，开销约 5–8%                          |
+| 租户亲和路由对照（3 节点）                      | `BENCH_TENANT_AFFINITY=1 BENCH_GATEWAY_NODES=3` @ 1024c                                                                      | +Redis：**30,000.7 RPS**（P99 **59.96 ms**，较轮询 97.95 ms 降低 39%）；`--no-redis`：**35,469.5 RPS**（P99 **49.66 ms**）                         | 全部通过，显著降低跨节点行锁尾延迟             |
 
-协议矩阵覆盖原生与转换的Chat、Responses、Messages、Gemini、Embeddings及媒体/异步任务。记录工具参数、错误、终态及usage完整性；Rerank与Realtime/Responses WebSocket等缺失能力明确列为未覆盖。CPU秒/千请求、峰值及稳态RSS、WAL/千请求、证据放大和连接数与吞吐同时比较。
+## 未执行项与局限
 
-按推荐运行档与实测字节/请求估算日请求量及索引、WAL、副本、备份、归档、幂等身份增长（历史 6000 RPS 约 5.184 亿请求/天），不把峰值当平均负载。长测前检查磁盘余量并设置中止预算；中止属于验收失败/未完成，不修改业务耐久性。
-
-2026-11-19 公开短 JSON 的入口重构和资金组驱动对照分别取得 215.10 和 258.43 完整 RPS，两轮 P99 均为 5014.98 毫秒。两轮均未通过 300 档。随后同一构建物内，真实 Gateway 按已认证项目固定 Core，默认分配和固定 Core 分别完成 200.05 和 262.93 RPS，两个 P99 仍超过门槛。最终产物在固定 Core 配置下连续两轮通过 175 档，完整吞吐分别为 175.67 和 175.52 RPS。200 档两轮中一轮通过。逐身份交集、同产物对照、SSE 首帧与完整结束分别记录在[入口和资金组实验](../../beyond-new-api/13-execution-core.md#公开入口发权排队和资金组实验)及[轮次清单](evidence-core-admission-2026-11-19/rounds.json)。
-
-2026-11-19 对短 Chat 的 300 档相邻对照，在 2 毫秒和 32 毫秒合批窗口下分别取得完整吞吐 300.17 和 299.83 RPS，P99 分别为 1725.70 和 1679.61 毫秒。两轮均未通过。独立联合原型采用真实插件、签名、紧凑资金主备和外部 ACK，在固定 3010 RPS 到达下连续两轮取得 3007.60 和 3007.50 完整 RPS。该原型只实现正常短 Chat，正式 Gateway 的 3000 RPS 验收仍待完成。[执行预算与原型实验](execution-budget-2026-11-19.md)
-
-## 故障和可用性
-
-本地进程/AOF恢复与生产跨故障域SLO分别报告。PG同步副本、主节点隔离、队列可晋升集合及成员变更、准入Redis状态丢失、Gateway/worker强杀均需验证。资金RPO、恢复时长、故障期间成功率和恢复后容量分别计量。未知证据保持资金责任；无法证明安全时停止准入。
-
-证据队列的启动就绪、首次发布和人工重投使用同一有界 AOF 确认循环。副本恢复后若第一次确认仍是旧偏移，循环继续请求确认；只有本地 AOF 与全部配置要求的副本均证实当前偏移时，操作才成功。
-
-99.99%继续作为部署目标，尚未由本轮本地测试证明。队列全候选副本确认导致副本故障关闭准入的代价必须计入停机；不得静默降低确认数或晋升落后节点换取成绩。
-
-## 参考项目与证据
-
-基线为本机 /Users/wrr/work/Tillgate 和 /Users/wrr/work/new-api，首次记录HEAD分别为1e1b1c1fe1dde82f9d28fda73def26c6e98c631b、dd50ee0a567b810ea60e74dcd9ea6a5786b37b91。每轮重新记录状态。只读研究源仓库，测试副本、数据库与Redis命名空间物理隔离。相同硬件、请求、上游、成功语义、正费率、预扣及耐久等级下比较；无法等同的契约明确列出，禁止直接排名。
-
-每轮保留命令、退出码、产物哈希、原始HTTP/账务审计和失败实验；本轮新证据写入独立目录并通过可检索清单关联。历史报告引用但当前路径缺失的审计不得作为当前达标证据。运行 verify、覆盖率、durability、artifact/container 的实际结果与容量结果分开报告。
-
-### Chat 固定 Core 路由实验
-
-`scripts/bench-system.ts` 可用 `--replicated-short-chat --project-core-routing` 比较同一公开入口的短 Chat JSON，也可叠加 `--stream --replicated-stream-terminal` 比较同步 SSE。客户端沿用 Gateway 轮询。Gateway 仍从原 Core 认证项目并取得路由票。有效路由票关联的首个合并准入及其后续执行查询、清理和同步终态，按项目 UUID 末位十六进制资金组的奇偶固定到 Core。同一资金组在该 Core 内串行提交，减少不同 Core 的数据库锁竞争。普通 SSE、资源请求和无票请求沿用默认目标。
-
-在每个 Gateway 的 `core.short_chat_peer` 中设置第二个 Core 的 `origin`、`servername`、`peer_sha256`、`subject_altname` 和 `funding_group_parity`（0 或 1）。默认 Core 承担另一种奇偶性。各 Gateway 要将相同奇偶性配置给同一 Core，两个 Core 共用同一部署的身份存储、票据密钥、资金主库和物理备库。需启用 `commit_short_chat`，并设置 `core.connections=4`。每个目标各占一条普通和一条终态连接，按需建连，单连接保留 32 条活动流和 256 个请求的上限。Gateway 只注册一次并用同一密钥签名。目标不可用时沿用原有状态查询和证据恢复流程，在线 RPC 始终使用固定目标。此开关仅分配流量，持久资金控制仍由 PostgreSQL 事务、epoch 和物理回放确认执行。
-
-单目标四连接对照有三条普通连接和一条终态连接，双目标改为普通、终态各两条。A/B 因此同时比较项目归属与连接分配。默认 Core 停机时，其 Gateway 的新请求无法认证。项目 Core 停机时，已进入准入的请求可能占用入口和终态预算，既有未知结果查询约持续 3.2 秒。
-
-### 2026-11-20 正式入口续测
-
-使用 Bun 1.4.4、正式构建产物、4 个 Gateway、2 个 Core、1000 个均匀钱包、PostgreSQL 物理主备、Redis AOF 主备及在线外部消费者。每秒计划到达 3001 笔，持续 60 秒。JSON 和短 SSE 均发出 180,060 笔，无发生器漏发。
-
-| 负载   | 有效 HTTP | 窗口内 HTTP、精确账务与外部 ACK 全齐 | 完整 RPS |   HTTP P99 | 容量 |
-| ------ | --------: | -----------------------------------: | -------: | ---------: | ---- |
-| JSON   |     3,655 |                                3,392 |    56.53 | 5014.98 ms | 失败 |
-| 短 SSE |     2,537 |                                2,327 |    38.78 | 5014.98 ms | 失败 |
-
-两轮均出现十余万笔过载响应及超过 23,000 笔客户端超时。JSON 的顶层 SQL 中，执行命令批、证据落账及资金组锁调用占主要累计耗时。逐笔数据、产物哈希、队列和进程采样见 [JSON 审计](../../.local/capacity/bench-4eebdf34ba63401a96d09367ad3ff63c/audit.json) 和 [短 SSE 审计](../../.local/capacity/bench-7b53573de23e45439a7f35e0cfd8ef83/audit.json)。
-
-修复 Redis AOF 启动就绪超时后，最终产物以同一负载启用项目固定 Core。JSON 轮有 8,110 笔取得有效 HTTP，窗口内完整吞吐为 134.28 RPS，HTTP P99 为 5014.98 ms。短 SSE 有 6,420 笔有效 HTTP，窗口内完整吞吐为 97.40 RPS，HTTP 和联合 P99 均为 5588.63 ms。短 SSE 有 850 笔漏发和 753 次连接重置，结束时仍有一笔发权未取得终态证据，客户与供应方预扣分别为 100 和 16,608 原子单位。两轮均未通过 3000 档。与初始基线相比，构建物和路由模式都发生变化。[固定 Core 的 JSON 审计](../../.local/capacity/bench-1285f4bd192f4e2bb2e97db2a3fd96b4/audit.json) · [固定 Core 的短 SSE 审计](../../.local/capacity/bench-72750a58f8044ec49258616063a6b32f/audit.json)
-
-5 秒负载按每秒 3 路发起并测量 60 秒。两轮的填充和测量各有 201 路，全部正常结束并完成逐笔核验。最终轮开启项目固定 Core，窗首前 181 ms 采到 15 路实际打开的上游流，窗口内发起和完整结束均为 180 路。HTTP P99 为 5152.62 ms，停发后 5176 ms 排空，低档诊断通过。[初始 5 秒诊断审计](../../.local/capacity/bench-46a5db9efe9a4a2e86b6a6dc7549c4f9/audit.json) · [最终 5 秒诊断审计](../../.local/capacity/bench-2c5291a1098d4078ad8a07dc84c1192b/audit.json)
-
-30 秒负载按每秒 3 路发起，填充和测量共 276 路，全部正常结束并完成逐笔核验。窗首前 53 ms 采到 90 路实际打开的上游流，窗口内发起和完整结束均为 180 路。首内容 P99 为 57.87 ms，增量间隔 P99 为 4309.42 ms，停发后 30,164 ms 排空，低档诊断通过。[30 秒诊断审计](../../.local/capacity/bench-9673bd8c57284f1d82e237825656f39c/audit.json)
-
-120 秒负载也按每秒 3 路发起。填充和测量共 546 路，全部正常结束并完成逐笔核验。窗首采到 360 路实际打开的上游流，窗口内发起和完整结束均为 180 路。实际排空耗时 120,159 ms。该轮原始日志使用了按名义流长偏移的诊断门槛，按本契约从停发起算重判为失败。现有发生器在窗末发出最后一批，单笔最短持续 120 秒并仍要完成核账和 ACK，120 秒流长与同为 120 秒的排空上限在这一时序下冲突。[120 秒诊断审计](../../.local/capacity/bench-08c41b943ec54cc29aa36f682bd23821/audit.json)
-
-3000 档长流以 3001 路/秒准备压测。5、30、120 秒的最低在途分别为 15,005、90,030、360,120 路。当前测量拓扑的发生器并发上限 10,000，8 个 Gateway 共 4096 个插件槽位及 8192 个上游连接，三个档位均在建立夹具前停止。短负载的 60 分钟磁盘预算为 872,877,934,592 字节，预检可用 240,025,600,000 字节，未创建长测夹具。
+- 本机单机 12 核同时运行全部网关、Worker、Mock 上游、Redis 7.4、PostgreSQL 17 及发生器，尚未执行 60 分钟持续长测、多机分机压测、真实外部 LLM 供应商 30 s / 120 s 满载长流以及跨故障域 Redis Sentinel / PG 备库晋升切换压测；相关结论不由此推导。

@@ -1,6 +1,6 @@
 import { chmod, mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-if (Bun.version !== "1.4.4") throw new Error("Use Bun 1.4.4");
+if (Bun.version !== "1.4.5") throw new Error("Use Bun 1.4.5");
 const file = new URL("../.env.local", import.meta.url);
 const random = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
 if (!(await Bun.file(file).exists())) {

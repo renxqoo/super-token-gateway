@@ -11,12 +11,16 @@ import {
   createZstdDecompress,
 } from "node:zlib";
 import { GatewayError } from "@gateway/contracts";
-import { createBunHttp1Pool } from "./bun-http1.ts";
+import { createBunHttp1Pool, type CancelRegistrar, type FastUpstreamResult } from "./bun-http1.ts";
+
+export type { CancelRegistrar, FastUpstreamResult };
 
 export interface PinnedRequestInit extends RequestInit {
   tls?: { serverName?: string; rejectUnauthorized: true };
   proxy?: false;
   dispatchDeadline?: number;
+  headersValidated?: boolean;
+  onCancelRegister?: CancelRegistrar;
 }
 
 export class UpstreamPreDispatchError extends GatewayError {
@@ -151,6 +155,390 @@ export function createHttpPool(maxConnections: number) {
     };
   }
 
+  async function sendInternal(
+    url: URL,
+    init: PinnedRequestInit,
+    fastMode: boolean,
+  ): Promise<FastUpstreamResult> {
+    if (closed) {
+      throw new GatewayError(503, "upstream_transport_closed", "Upstream transport is closed");
+    }
+    const expired = () =>
+      init.dispatchDeadline !== undefined && !(performance.now() < init.dispatchDeadline);
+    if (init.signal?.aborted || expired()) throw notDispatched();
+
+    const secureRequest = url.protocol === "https:";
+    const slots = secureRequest ? httpsSlots : httpSlots;
+    const release = () => {
+      const next = slots.waiting.values().next().value;
+      if (!closed && next) next();
+      else slots.inUse--;
+    };
+
+    if (slots.inUse < maxConnections) {
+      slots.inUse++;
+    } else {
+      if (slots.waiting.size >= maxConnections) {
+        throw new UpstreamPreDispatchError(
+          "upstream_capacity",
+          "Upstream connection wait queue is full",
+        );
+      }
+      await new Promise<void>((resolve, reject) => {
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        let detachCancel: (() => void) | undefined;
+        const remove = () => {
+          clearTimeout(deadline);
+          slots.waiting.delete(abort);
+          init.signal?.removeEventListener("abort", abort);
+          detachCancel?.();
+          detachCancel = undefined;
+        };
+        const abort = () => {
+          remove();
+          reject(notDispatched());
+        };
+        slots.waiting.set(abort, () => {
+          remove();
+          resolve();
+        });
+        init.signal?.addEventListener("abort", abort, { once: true });
+        if (init.onCancelRegister) detachCancel = init.onCancelRegister(() => abort());
+        if (init.dispatchDeadline !== undefined) {
+          deadline = setTimeout(abort, Math.max(0, init.dispatchDeadline - performance.now()));
+        }
+        if (init.signal?.aborted || expired()) abort();
+      });
+    }
+
+    let releaseOnClose = false;
+    try {
+      if (closed || init.signal?.aborted || expired()) throw notDispatched();
+      const method = (init.method ?? "GET").toUpperCase();
+      const headersValidated =
+        Boolean(init.headersValidated) &&
+        !(init.headers instanceof Headers) &&
+        !Array.isArray(init.headers) &&
+        typeof init.headers === "object" &&
+        init.headers !== null;
+      const plainHeaders = headersValidated
+        ? (init.headers as Record<string, string>)
+        : toPlainHeaders(init.headers);
+      const input = init.body;
+      let bytes: string | Uint8Array | undefined;
+      let streamBody: ReadableStream<Uint8Array> | null = null;
+      if (typeof input === "string") bytes = input;
+      else if (input instanceof URLSearchParams) bytes = input.toString();
+      else if (input instanceof ArrayBuffer) bytes = new Uint8Array(input);
+      else if (ArrayBuffer.isView(input)) {
+        bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      } else if (input instanceof Blob) {
+        bytes = new Uint8Array(await input.arrayBuffer());
+      } else if (input instanceof ReadableStream) {
+        streamBody = input;
+      }
+      if (!streamBody) {
+        if ("transfer-encoding" in plainHeaders) delete plainHeaders["transfer-encoding"];
+        if (bytes === undefined && "content-length" in plainHeaders) {
+          delete plainHeaders["content-length"];
+        }
+      }
+
+      const tls = init.tls;
+      const serverName = typeof tls === "object" && tls ? tls.serverName : undefined;
+      const rawHost = url.hostname;
+      const hostname = rawHost.charCodeAt(0) === 91 ? rawHost.slice(1, -1) : rawHost;
+      const port = url.port ? Number(url.port) : secureRequest ? 443 : 80;
+      const path = url.search ? `${url.pathname}${url.search}` : url.pathname;
+
+      if (!streamBody) {
+        const tlsOpts = secureRequest
+          ? { rejectUnauthorized: true as const, ...(serverName ? { serverName } : {}) }
+          : undefined;
+        const promise = fastMode
+          ? bunPlain.sendFast(
+              hostname,
+              port,
+              path,
+              method,
+              plainHeaders,
+              bytes,
+              init.signal ?? undefined,
+              init.dispatchDeadline,
+              release,
+              tlsOpts,
+              headersValidated,
+              init.onCancelRegister,
+            )
+          : bunPlain
+              .send(
+                hostname,
+                port,
+                path,
+                method,
+                plainHeaders,
+                bytes,
+                init.signal ?? undefined,
+                init.dispatchDeadline,
+                release,
+                tlsOpts,
+                headersValidated,
+                init.onCancelRegister,
+              )
+              .then((response): FastUpstreamResult => ({ fast: false, response }));
+        releaseOnClose = true;
+        return await promise;
+      }
+
+      if (bytes !== undefined) {
+        plainHeaders["content-length"] = String(
+          typeof bytes === "string" ? Buffer.byteLength(bytes) : bytes.byteLength,
+        );
+      }
+
+      const response = await new Promise<Response>((resolve, reject) => {
+        let canHaveDispatched = false;
+        let assigned: ClientRequest["socket"] | undefined;
+        const readyEvent = secureRequest ? "secureConnect" : "connect";
+        let dispatchTimer: ReturnType<typeof setTimeout> | undefined;
+        let detachCancel: (() => void) | undefined;
+
+        const sendBody = () => {
+          if (bytes !== undefined) request.end(bytes);
+          else if (streamBody) {
+            const body = Readable.fromWeb(
+              streamBody as unknown as Parameters<typeof Readable.fromWeb>[0],
+            );
+            body.once("error", (error) => request.destroy(error));
+            request.once("error", () => body.destroy());
+            body.pipe(request);
+          } else request.end();
+        };
+
+        const markConnected = () => {
+          if (canHaveDispatched) return;
+          if (dispatchTimer) {
+            clearTimeout(dispatchTimer);
+            dispatchTimer = undefined;
+          }
+          if (init.dispatchDeadline !== undefined && (expired() || init.signal?.aborted)) {
+            request.destroy(notDispatched());
+            return;
+          }
+          canHaveDispatched = true;
+          if (init.dispatchDeadline !== undefined) sendBody();
+        };
+
+        const reqOptions = {
+          protocol: url.protocol,
+          hostname,
+          port,
+          path,
+          method,
+          headers: plainHeaders,
+          agent: secureRequest ? secure : plain,
+          ...(secureRequest ? { rejectUnauthorized: true as const } : {}),
+          ...(secureRequest && serverName ? { servername: serverName } : {}),
+        };
+
+        const request = (secureRequest ? httpsRequest : httpRequest)(reqOptions, (response) => {
+          markConnected();
+          response.once("end", detachAbort);
+          try {
+            const status = response.statusCode ?? 502;
+            const rawHeaders = response.rawHeaders;
+            let contentEncoding = "";
+            let contentType = "";
+            let contentLengthStr: string | null = null;
+            let transferEncoding: string | null = null;
+            for (let i = 0; i < rawHeaders.length; i += 2) {
+              const k = rawHeaders[i]!.toLowerCase();
+              const v = rawHeaders[i + 1]!;
+              if (k === "content-encoding") {
+                contentEncoding = contentEncoding ? `${contentEncoding},${v}` : v;
+              } else if (k === "content-type") contentType = v;
+              else if (k === "content-length") contentLengthStr = v;
+              else if (k === "transfer-encoding") transferEncoding = v;
+            }
+
+            if (status === 204 || status === 205 || status === 304 || method === "HEAD") {
+              response.resume();
+              resolve(new Response(null, { status, headers: buildResponseHeaders(rawHeaders) }));
+              return;
+            }
+
+            const isSse = /^text\/event-stream(?:\s*;|$)/i.test(contentType);
+            const contentLen =
+              contentLengthStr !== null && /^\d+$/.test(contentLengthStr)
+                ? Number(contentLengthStr)
+                : -1;
+
+            if (!contentEncoding && !isSse && contentLen >= 0 && contentLen <= 65536) {
+              const chunks: Buffer[] = [];
+              let total = 0;
+              response.on("data", (chunk: Buffer) => {
+                chunks.push(chunk);
+                total += chunk.byteLength;
+              });
+              response.once("end", () => {
+                const buf =
+                  chunks.length === 1
+                    ? chunks[0]!
+                    : chunks.length === 0
+                      ? new Uint8Array(0)
+                      : Buffer.concat(chunks, total);
+                const res = new Response(buf as BodyInit, {
+                  status,
+                  headers: buildResponseHeaders(rawHeaders),
+                });
+                bufferedBodies.set(res, buf);
+                resolve(res);
+              });
+              response.once("error", (err) => reject(err));
+              return;
+            }
+
+            const output = new Headers();
+            for (let i = 0; i < rawHeaders.length; i += 2) {
+              output.append(rawHeaders[i]!, rawHeaders[i + 1]!);
+            }
+            const decompressors = {
+              gzip: createGunzip,
+              "x-gzip": createGunzip,
+              deflate: createInflate,
+              br: createBrotliDecompress,
+              zstd: createZstdDecompress,
+            };
+            const encodings = contentEncoding
+              .split(",")
+              .map((value) => value.trim().toLowerCase())
+              .filter((value) => value && value !== "identity");
+            let body: Readable = response;
+            if (
+              encodings.length &&
+              encodings.every((value) => Object.hasOwn(decompressors, value))
+            ) {
+              const streams = encodings
+                .reverse()
+                .map((value) => decompressors[value as keyof typeof decompressors]());
+              body = streams.at(-1)!;
+              pipeline([response, ...streams], () => {});
+              output.delete("content-encoding");
+              output.delete("content-length");
+            }
+            const result = new Response(
+              Readable.toWeb(body, {
+                strategy: {
+                  highWaterMark: 16384,
+                  size: (chunk: Uint8Array) => chunk.byteLength,
+                },
+              }) as unknown as ReadableStream<Uint8Array>,
+              { status, headers: output },
+            );
+            if (!encodings.length && isSse) {
+              if (contentLengthStr === null && transferEncoding?.toLowerCase() === "chunked") {
+                sseFraming.set(result, "chunked");
+              } else if (
+                transferEncoding === null &&
+                contentLengthStr !== null &&
+                /^\d+$/.test(contentLengthStr) &&
+                Number.isSafeInteger(Number(contentLengthStr))
+              ) {
+                sseFraming.set(result, Number(contentLengthStr));
+              }
+            }
+            resolve(result);
+          } catch (error) {
+            response.destroy();
+            reject(error);
+          }
+        });
+
+        const watchSocket = (socket: NonNullable<ClientRequest["socket"]>) => {
+          assigned = socket;
+          if (
+            request.reusedSocket ||
+            (secureRequest ? (socket as TLSSocket).authorized : !socket.connecting)
+          ) {
+            markConnected();
+          } else {
+            socket.once(readyEvent, markConnected);
+            if (init.dispatchDeadline !== undefined && !dispatchTimer) {
+              dispatchTimer = setTimeout(
+                () => request.destroy(notDispatched()),
+                Math.max(0, init.dispatchDeadline - performance.now()),
+              );
+            }
+          }
+        };
+
+        const preDispatch = () =>
+          !canHaveDispatched &&
+          (init.dispatchDeadline !== undefined ||
+            (!request.reusedSocket &&
+              !(secureRequest && (request.socket as TLSSocket | undefined)?.authorized)));
+
+        const abort = (reason?: unknown) => {
+          const error = preDispatch()
+            ? notDispatched()
+            : (reason ?? init.signal?.reason ?? new Error("Upstream request aborted"));
+          if (error instanceof UpstreamPreDispatchError) reject(error);
+          request.destroy(error instanceof Error ? error : new Error("Upstream request aborted"));
+        };
+        const detachAbort = () => {
+          init.signal?.removeEventListener("abort", abort);
+          detachCancel?.();
+          detachCancel = undefined;
+        };
+
+        active.add(request);
+        request.once("close", () => {
+          if (dispatchTimer) {
+            clearTimeout(dispatchTimer);
+            dispatchTimer = undefined;
+          }
+          active.delete(request);
+          detachAbort();
+          assigned?.removeListener(readyEvent, markConnected);
+          release();
+        });
+        releaseOnClose = true;
+        request.once("socket", watchSocket);
+        request.once("error", (error) => {
+          const local = ["EADDRNOTAVAIL", "EMFILE", "ENFILE"].includes(
+            String((error as NodeJS.ErrnoException).code),
+          );
+          reject(
+            preDispatch() && !local && !(error instanceof UpstreamPreDispatchError)
+              ? new UpstreamPreDispatchError(
+                  secureRequest ? "upstream_tls" : "upstream_connect",
+                  "Upstream connection failed before dispatch",
+                  error,
+                )
+              : error,
+          );
+        });
+        init.signal?.addEventListener("abort", abort, { once: true });
+        if (init.onCancelRegister) detachCancel = init.onCancelRegister((r) => abort(r));
+        if (init.signal?.aborted) abort();
+        request.once("upgrade", (_response, socket) => {
+          socket.destroy();
+          reject(
+            new GatewayError(
+              502,
+              "unsupported_upstream_upgrade",
+              "Upstream upgrade is unsupported",
+            ),
+          );
+        });
+        if (init.dispatchDeadline === undefined) sendBody();
+      });
+      return { fast: false, response };
+    } finally {
+      if (!releaseOnClose) release();
+    }
+  }
+
   return {
     sseFraming(response: Response) {
       return sseFraming.get(response);
@@ -161,338 +549,18 @@ export function createHttpPool(maxConnections: number) {
     },
 
     async send(url: URL, init: PinnedRequestInit): Promise<Response> {
-      if (closed) {
-        throw new GatewayError(503, "upstream_transport_closed", "Upstream transport is closed");
-      }
-      const expired = () =>
-        init.dispatchDeadline !== undefined && !(performance.now() < init.dispatchDeadline);
-      if (init.signal?.aborted || expired()) throw notDispatched();
+      const result = await sendInternal(url, init, false);
+      if (!result.fast) return result.response;
+      const res = new Response(result.body as BodyInit, {
+        status: result.status,
+        headers: result.headers,
+      });
+      bufferedBodies.set(res, result.body);
+      return res;
+    },
 
-      const secureRequest = url.protocol === "https:";
-      const slots = secureRequest ? httpsSlots : httpSlots;
-      const release = () => {
-        const next = slots.waiting.values().next().value;
-        if (!closed && next) next();
-        else slots.inUse--;
-      };
-
-      if (slots.inUse < maxConnections) {
-        slots.inUse++;
-      } else {
-        if (slots.waiting.size >= maxConnections) {
-          throw new UpstreamPreDispatchError(
-            "upstream_capacity",
-            "Upstream connection wait queue is full",
-          );
-        }
-        await new Promise<void>((resolve, reject) => {
-          let deadline: ReturnType<typeof setTimeout> | undefined;
-          const remove = () => {
-            clearTimeout(deadline);
-            slots.waiting.delete(abort);
-            init.signal?.removeEventListener("abort", abort);
-          };
-          const abort = () => {
-            remove();
-            reject(notDispatched());
-          };
-          slots.waiting.set(abort, () => {
-            remove();
-            resolve();
-          });
-          init.signal?.addEventListener("abort", abort, { once: true });
-          if (init.dispatchDeadline !== undefined) {
-            deadline = setTimeout(abort, Math.max(0, init.dispatchDeadline - performance.now()));
-          }
-          if (init.signal?.aborted || expired()) abort();
-        });
-      }
-
-      let releaseOnClose = false;
-      try {
-        if (closed || init.signal?.aborted || expired()) throw notDispatched();
-        const method = (init.method ?? "GET").toUpperCase();
-        const plainHeaders = toPlainHeaders(init.headers);
-        const input = init.body;
-        let bytes: string | Uint8Array | undefined;
-        let streamBody: ReadableStream<Uint8Array> | null = null;
-        if (typeof input === "string") bytes = input;
-        else if (input instanceof URLSearchParams) bytes = input.toString();
-        else if (input instanceof ArrayBuffer) bytes = new Uint8Array(input);
-        else if (ArrayBuffer.isView(input)) {
-          bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-        } else if (input instanceof Blob) {
-          bytes = new Uint8Array(await input.arrayBuffer());
-        } else if (input instanceof ReadableStream) {
-          streamBody = input;
-        }
-        if (!streamBody) {
-          delete plainHeaders["transfer-encoding"];
-          if (bytes === undefined) delete plainHeaders["content-length"];
-        }
-        if (bytes !== undefined) {
-          plainHeaders["content-length"] = String(
-            typeof bytes === "string" ? Buffer.byteLength(bytes) : bytes.byteLength,
-          );
-        }
-
-        const tls = init.tls;
-        const serverName = typeof tls === "object" && tls ? tls.serverName : undefined;
-        const rawHost = url.hostname;
-        const hostname = rawHost.charCodeAt(0) === 91 ? rawHost.slice(1, -1) : rawHost;
-        const port = url.port ? Number(url.port) : secureRequest ? 443 : 80;
-        const path = url.search ? `${url.pathname}${url.search}` : url.pathname;
-
-        if (!secureRequest && !streamBody) {
-          const promise = bunPlain.send(
-            hostname,
-            port,
-            path,
-            method,
-            plainHeaders,
-            bytes,
-            init.signal ?? undefined,
-            init.dispatchDeadline,
-            release,
-          );
-          releaseOnClose = true;
-          return await promise;
-        }
-
-        return await new Promise<Response>((resolve, reject) => {
-          let canHaveDispatched = false;
-          let assigned: ClientRequest["socket"] | undefined;
-          const readyEvent = secureRequest ? "secureConnect" : "connect";
-          let dispatchTimer: ReturnType<typeof setTimeout> | undefined;
-
-          const sendBody = () => {
-            if (bytes !== undefined) request.end(bytes);
-            else if (streamBody) {
-              const body = Readable.fromWeb(
-                streamBody as unknown as Parameters<typeof Readable.fromWeb>[0],
-              );
-              body.once("error", (error) => request.destroy(error));
-              request.once("error", () => body.destroy());
-              body.pipe(request);
-            } else request.end();
-          };
-
-          const markConnected = () => {
-            if (canHaveDispatched) return;
-            if (dispatchTimer) {
-              clearTimeout(dispatchTimer);
-              dispatchTimer = undefined;
-            }
-            if (init.dispatchDeadline !== undefined && (expired() || init.signal?.aborted)) {
-              request.destroy(notDispatched());
-              return;
-            }
-            canHaveDispatched = true;
-            if (init.dispatchDeadline !== undefined) sendBody();
-          };
-
-          const reqOptions = {
-            protocol: url.protocol,
-            hostname,
-            port,
-            path,
-            method,
-            headers: plainHeaders,
-            agent: secureRequest ? secure : plain,
-            ...(secureRequest ? { rejectUnauthorized: true as const } : {}),
-            ...(secureRequest && serverName ? { servername: serverName } : {}),
-          };
-
-          const request = (secureRequest ? httpsRequest : httpRequest)(reqOptions, (response) => {
-            markConnected();
-            response.once("end", detachAbort);
-            try {
-              const status = response.statusCode ?? 502;
-              const rawHeaders = response.rawHeaders;
-              let contentEncoding = "";
-              let contentType = "";
-              let contentLengthStr: string | null = null;
-              let transferEncoding: string | null = null;
-              for (let i = 0; i < rawHeaders.length; i += 2) {
-                const k = rawHeaders[i]!.toLowerCase();
-                const v = rawHeaders[i + 1]!;
-                if (k === "content-encoding") {
-                  contentEncoding = contentEncoding ? `${contentEncoding},${v}` : v;
-                } else if (k === "content-type") contentType = v;
-                else if (k === "content-length") contentLengthStr = v;
-                else if (k === "transfer-encoding") transferEncoding = v;
-              }
-
-              if (status === 204 || status === 205 || status === 304 || method === "HEAD") {
-                response.resume();
-                resolve(new Response(null, { status, headers: buildResponseHeaders(rawHeaders) }));
-                return;
-              }
-
-              const isSse = /^text\/event-stream(?:\s*;|$)/i.test(contentType);
-              const contentLen =
-                contentLengthStr !== null && /^\d+$/.test(contentLengthStr)
-                  ? Number(contentLengthStr)
-                  : -1;
-
-              if (!contentEncoding && !isSse && contentLen >= 0 && contentLen <= 65536) {
-                const chunks: Buffer[] = [];
-                let total = 0;
-                response.on("data", (chunk: Buffer) => {
-                  chunks.push(chunk);
-                  total += chunk.byteLength;
-                });
-                response.once("end", () => {
-                  const buf =
-                    chunks.length === 1
-                      ? chunks[0]!
-                      : chunks.length === 0
-                        ? new Uint8Array(0)
-                        : Buffer.concat(chunks, total);
-                  const res = new Response(buf as BodyInit, {
-                    status,
-                    headers: buildResponseHeaders(rawHeaders),
-                  });
-                  bufferedBodies.set(res, buf);
-                  resolve(res);
-                });
-                response.once("error", (err) => reject(err));
-                return;
-              }
-
-              const output = new Headers();
-              for (let i = 0; i < rawHeaders.length; i += 2) {
-                output.append(rawHeaders[i]!, rawHeaders[i + 1]!);
-              }
-              const decompressors = {
-                gzip: createGunzip,
-                "x-gzip": createGunzip,
-                deflate: createInflate,
-                br: createBrotliDecompress,
-                zstd: createZstdDecompress,
-              };
-              const encodings = contentEncoding
-                .split(",")
-                .map((value) => value.trim().toLowerCase())
-                .filter((value) => value && value !== "identity");
-              let body: Readable = response;
-              if (
-                encodings.length &&
-                encodings.every((value) => Object.hasOwn(decompressors, value))
-              ) {
-                const streams = encodings
-                  .reverse()
-                  .map((value) => decompressors[value as keyof typeof decompressors]());
-                body = streams.at(-1)!;
-                pipeline([response, ...streams], () => {});
-                output.delete("content-encoding");
-                output.delete("content-length");
-              }
-              const result = new Response(
-                Readable.toWeb(body, {
-                  strategy: {
-                    highWaterMark: 16384,
-                    size: (chunk: Uint8Array) => chunk.byteLength,
-                  },
-                }) as unknown as ReadableStream<Uint8Array>,
-                { status, headers: output },
-              );
-              if (!encodings.length && isSse) {
-                if (contentLengthStr === null && transferEncoding?.toLowerCase() === "chunked") {
-                  sseFraming.set(result, "chunked");
-                } else if (
-                  transferEncoding === null &&
-                  contentLengthStr !== null &&
-                  /^\d+$/.test(contentLengthStr) &&
-                  Number.isSafeInteger(Number(contentLengthStr))
-                ) {
-                  sseFraming.set(result, Number(contentLengthStr));
-                }
-              }
-              resolve(result);
-            } catch (error) {
-              response.destroy();
-              reject(error);
-            }
-          });
-
-          const watchSocket = (socket: NonNullable<ClientRequest["socket"]>) => {
-            assigned = socket;
-            if (
-              request.reusedSocket ||
-              (secureRequest ? (socket as TLSSocket).authorized : !socket.connecting)
-            ) {
-              markConnected();
-            } else {
-              socket.once(readyEvent, markConnected);
-              if (init.dispatchDeadline !== undefined && !dispatchTimer) {
-                dispatchTimer = setTimeout(
-                  () => request.destroy(notDispatched()),
-                  Math.max(0, init.dispatchDeadline - performance.now()),
-                );
-              }
-            }
-          };
-
-          const preDispatch = () =>
-            !canHaveDispatched &&
-            (init.dispatchDeadline !== undefined ||
-              (!request.reusedSocket &&
-                !(secureRequest && (request.socket as TLSSocket | undefined)?.authorized)));
-
-          const abort = () => {
-            const error = preDispatch()
-              ? notDispatched()
-              : (init.signal?.reason ?? new Error("Upstream request aborted"));
-            if (error instanceof UpstreamPreDispatchError) reject(error);
-            request.destroy(error instanceof Error ? error : new Error("Upstream request aborted"));
-          };
-          const detachAbort = () => init.signal?.removeEventListener("abort", abort);
-
-          active.add(request);
-          request.once("close", () => {
-            if (dispatchTimer) {
-              clearTimeout(dispatchTimer);
-              dispatchTimer = undefined;
-            }
-            active.delete(request);
-            detachAbort();
-            assigned?.removeListener(readyEvent, markConnected);
-            release();
-          });
-          releaseOnClose = true;
-          request.once("socket", watchSocket);
-          request.once("error", (error) => {
-            const local = ["EADDRNOTAVAIL", "EMFILE", "ENFILE"].includes(
-              String((error as NodeJS.ErrnoException).code),
-            );
-            reject(
-              preDispatch() && !local && !(error instanceof UpstreamPreDispatchError)
-                ? new UpstreamPreDispatchError(
-                    secureRequest ? "upstream_tls" : "upstream_connect",
-                    "Upstream connection failed before dispatch",
-                    error,
-                  )
-                : error,
-            );
-          });
-          init.signal?.addEventListener("abort", abort, { once: true });
-          if (init.signal?.aborted) abort();
-          request.once("upgrade", (_response, socket) => {
-            socket.destroy();
-            reject(
-              new GatewayError(
-                502,
-                "unsupported_upstream_upgrade",
-                "Upstream upgrade is unsupported",
-              ),
-            );
-          });
-          if (init.dispatchDeadline === undefined) sendBody();
-        });
-      } finally {
-        if (!releaseOnClose) release();
-      }
+    sendFast(url: URL, init: PinnedRequestInit): Promise<FastUpstreamResult> {
+      return sendInternal(url, init, true);
     },
 
     close() {

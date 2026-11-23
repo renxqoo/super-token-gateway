@@ -3,25 +3,183 @@ import { BlockList, isIP } from "node:net";
 import { inCidrs } from "./ip.ts";
 import { GatewayError } from "@gateway/contracts";
 import { isValidHttpHeaderName, isValidHttpHeaderValue } from "./bun-http1.ts";
-import { createHttpPool, UpstreamPreDispatchError } from "./http-pool.ts";
-import type { PinnedRequestInit } from "./http-pool.ts";
+import {
+  createHttpPool,
+  UpstreamPreDispatchError,
+  type CancelRegistrar,
+  type FastUpstreamResult,
+  type PinnedRequestInit,
+} from "./http-pool.ts";
 
-export { UpstreamPreDispatchError };
+export { UpstreamPreDispatchError, isValidHttpHeaderName, isValidHttpHeaderValue };
+export type { CancelRegistrar, FastUpstreamResult };
 
-export function createTransport(maxConnections = 1024) {
+export type DnsAddress = { address: string; family: number };
+export type DnsLookupFn = (hostname: string) => Promise<DnsAddress[]>;
+
+export type TransportOptions = {
+  dnsCacheTtlMs?: number;
+  dnsCacheMaxEntries?: number;
+  dnsLookup?: DnsLookupFn;
+};
+
+type CachedDnsEntry = {
+  addresses: DnsAddress[];
+  expiresAt: number;
+};
+
+function awaitDnsWithCancel(
+  pending: Promise<DnsAddress[]>,
+  signal?: AbortSignal | null,
+  onCancelRegister?: CancelRegistrar,
+  dispatchDeadline?: number,
+): Promise<DnsAddress[]> {
+  if (!signal && !onCancelRegister && dispatchDeadline === undefined) {
+    return pending.catch(() => {
+      throw new UpstreamPreDispatchError("upstream_dns", "Upstream address lookup failed");
+    });
+  }
+  return new Promise<DnsAddress[]>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let detachCancel: (() => void) | undefined;
+    const cleanup = () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      if (signal) signal.removeEventListener("abort", abort);
+      if (detachCancel) {
+        const detach = detachCancel;
+        detachCancel = undefined;
+        detach();
+      }
+    };
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(
+        new UpstreamPreDispatchError(
+          "upstream_not_dispatched",
+          "Upstream request cancelled before dispatch",
+        ),
+      );
+    };
+    if (signal) signal.addEventListener("abort", abort, { once: true });
+    if (onCancelRegister) detachCancel = onCancelRegister(abort);
+    if (settled) return;
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    if (dispatchDeadline !== undefined) {
+      const remaining = dispatchDeadline - performance.now();
+      if (!(remaining > 0)) {
+        abort();
+        return;
+      }
+      timer = setTimeout(abort, remaining);
+    }
+    pending.then(
+      (addresses) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(addresses);
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new UpstreamPreDispatchError("upstream_dns", "Upstream address lookup failed"));
+      },
+    );
+  });
+}
+
+function createDnsResolver(options: TransportOptions = {}) {
+  const ttlMs = options.dnsCacheTtlMs ?? 5_000;
+  const maxEntries = options.dnsCacheMaxEntries ?? 1024;
+  const lookupFn: DnsLookupFn =
+    options.dnsLookup ??
+    ((hostname: string) => lookup(hostname, { all: true }) as Promise<DnsAddress[]>);
+  const cache = new Map<string, CachedDnsEntry>();
+  const inFlight = new Map<string, Promise<DnsAddress[]>>();
+
+  return {
+    resolve(
+      hostname: string,
+      signal?: AbortSignal | null,
+      onCancelRegister?: CancelRegistrar,
+      dispatchDeadline?: number,
+    ): Promise<DnsAddress[]> {
+      if (ttlMs > 0) {
+        const now = performance.now();
+        const hit = cache.get(hostname);
+        if (hit) {
+          if (hit.expiresAt > now) {
+            cache.delete(hostname);
+            cache.set(hostname, hit);
+            return Promise.resolve(hit.addresses);
+          }
+          cache.delete(hostname);
+        }
+      }
+      let pending = inFlight.get(hostname);
+      if (!pending) {
+        pending = lookupFn(hostname)
+          .then((addresses) => {
+            if (ttlMs > 0 && addresses.length > 0) {
+              if (cache.size >= maxEntries) {
+                const oldest = cache.keys().next().value;
+                if (oldest !== undefined) cache.delete(oldest);
+              }
+              cache.set(hostname, { addresses, expiresAt: performance.now() + ttlMs });
+            }
+            return addresses;
+          })
+          .finally(() => {
+            inFlight.delete(hostname);
+          });
+        inFlight.set(hostname, pending);
+      }
+      return awaitDnsWithCancel(pending, signal, onCancelRegister, dispatchDeadline);
+    },
+    clear() {
+      cache.clear();
+    },
+  };
+}
+
+export function createTransport(maxConnections = 1024, options: TransportOptions = {}) {
   const pool = createHttpPool(maxConnections);
+  const dns = createDnsResolver(options);
   return {
     fetch(
       url: URL,
-      init: RequestInit & Pick<PinnedRequestInit, "dispatchDeadline">,
+      init: RequestInit &
+        Pick<PinnedRequestInit, "dispatchDeadline" | "headersValidated" | "onCancelRegister">,
       allowPrivate: boolean,
       privateCidrs: readonly string[] = [],
     ) {
-      return safeFetch(url, init, allowPrivate, privateCidrs, pool.send);
+      return safeFetch(url, init, allowPrivate, privateCidrs, pool.send, dns.resolve);
+    },
+    fetchFast(
+      url: URL,
+      init: RequestInit &
+        Pick<PinnedRequestInit, "dispatchDeadline" | "headersValidated" | "onCancelRegister">,
+      allowPrivate: boolean,
+      privateCidrs: readonly string[] = [],
+    ): Promise<FastUpstreamResult> {
+      return safeFetchGeneric(url, init, allowPrivate, privateCidrs, pool.sendFast, dns.resolve);
     },
     sseFraming: pool.sseFraming,
     bufferedBody: pool.bufferedBody,
-    close: pool.close,
+    close() {
+      dns.clear();
+      pool.close();
+    },
   };
 }
 
@@ -95,14 +253,46 @@ export function validateBaseUrl(
   return url;
 }
 
-export async function safeFetch(
+function defaultDnsResolve(
+  hostname: string,
+  signal?: AbortSignal | null,
+  onCancelRegister?: CancelRegistrar,
+  dispatchDeadline?: number,
+): Promise<DnsAddress[]> {
+  return awaitDnsWithCancel(
+    lookup(hostname, { all: true }) as Promise<DnsAddress[]>,
+    signal,
+    onCancelRegister,
+    dispatchDeadline,
+  );
+}
+
+const IP_FAMILY_CACHE = new Map<string, number>();
+
+function cachedIpFamily(hostname: string): number {
+  const hit = IP_FAMILY_CACHE.get(hostname);
+  if (hit !== undefined) return hit;
+  const fam = isIP(hostname);
+  if (IP_FAMILY_CACHE.size >= 512) IP_FAMILY_CACHE.clear();
+  IP_FAMILY_CACHE.set(hostname, fam);
+  return fam;
+}
+
+async function safeFetchGeneric<T>(
   url: URL,
-  init: RequestInit & Pick<PinnedRequestInit, "dispatchDeadline">,
+  init: RequestInit &
+    Pick<PinnedRequestInit, "dispatchDeadline" | "headersValidated" | "onCancelRegister">,
   allowPrivate: boolean,
-  privateCidrs: readonly string[] = [],
-  send: (url: URL, init: PinnedRequestInit) => Promise<Response> = fetch,
-): Promise<Response> {
-  if (url.username || url.password || !["https:", "http:"].includes(url.protocol))
+  privateCidrs: readonly string[],
+  send: (url: URL, init: PinnedRequestInit) => Promise<T>,
+  resolveDns: (
+    hostname: string,
+    signal?: AbortSignal | null,
+    onCancelRegister?: CancelRegistrar,
+    dispatchDeadline?: number,
+  ) => Promise<DnsAddress[]>,
+): Promise<T> {
+  if (url.username || url.password || (url.protocol !== "https:" && url.protocol !== "http:"))
     throw new UpstreamPreDispatchError("unsafe_upstream", "Unsafe upstream URL");
   const signal = init.signal;
   const cancelled = () =>
@@ -115,19 +305,10 @@ export async function safeFetch(
   if (signal?.aborted || expired()) throw cancelled();
   const rawHost = url.hostname;
   const hostname = rawHost.charCodeAt(0) === 91 ? rawHost.slice(1, -1) : rawHost;
-  const ipFamily = isIP(hostname);
+  const ipFamily = cachedIpFamily(hostname);
   const addresses = ipFamily
     ? [{ address: hostname, family: ipFamily }]
-    : await new Promise<{ address: string; family: number }[]>((resolve, reject) => {
-        const abort = () => reject(cancelled());
-        signal?.addEventListener("abort", abort, { once: true });
-        lookup(hostname, { all: true })
-          .then(resolve, () =>
-            reject(new UpstreamPreDispatchError("upstream_dns", "Upstream address lookup failed")),
-          )
-          .finally(() => signal?.removeEventListener("abort", abort));
-        if (signal?.aborted) abort();
-      });
+    : await resolveDns(hostname, signal, init.onCancelRegister, init.dispatchDeadline);
   if (signal?.aborted || expired()) throw cancelled();
   const chosen = addresses.find((entry) => entry.family === 4) ?? addresses[0];
   if (!chosen) throw new UpstreamPreDispatchError("upstream_dns", "Upstream address lookup failed");
@@ -145,11 +326,18 @@ export async function safeFetch(
   const pinned = pinnedHost === url.hostname ? url : new URL(url);
   if (pinned !== url) pinned.hostname = pinnedHost;
   let headers: HeadersInit;
+  let headersValidated = false;
   if (init.headers instanceof Headers || Array.isArray(init.headers)) {
     const h = new Headers(init.headers);
     if (pinned !== url || !h.has("host")) h.set("host", url.host);
     h.set("accept-encoding", "identity");
     headers = h;
+  } else if (init.headersValidated && init.headers) {
+    const plain = init.headers as Record<string, string>;
+    if (pinned !== url || !("host" in plain)) plain.host = url.host;
+    plain["accept-encoding"] = "identity";
+    headers = plain;
+    headersValidated = true;
   } else {
     const plain: Record<string, string> = {};
     if (init.headers) {
@@ -165,20 +353,42 @@ export async function safeFetch(
     if (pinned !== url || !("host" in plain)) plain.host = url.host;
     plain["accept-encoding"] = "identity";
     headers = plain;
+    headersValidated = true;
   }
-  return send(pinned, {
-    ...init,
+  const sendInit: PinnedRequestInit = {
     headers,
+    headersValidated,
     redirect: "manual",
     proxy: false,
-    ...(url.protocol === "https:"
-      ? {
-          tls: ipFamily
-            ? { rejectUnauthorized: true }
-            : { serverName: hostname, rejectUnauthorized: true },
-        }
-      : {}),
-  });
+  };
+  if (init.method !== undefined) sendInit.method = init.method;
+  if (init.body !== undefined) sendInit.body = init.body;
+  if (init.signal !== undefined) sendInit.signal = init.signal;
+  if (init.dispatchDeadline !== undefined) sendInit.dispatchDeadline = init.dispatchDeadline;
+  if (init.onCancelRegister !== undefined) sendInit.onCancelRegister = init.onCancelRegister;
+  if (url.protocol === "https:") {
+    sendInit.tls = ipFamily
+      ? { rejectUnauthorized: true }
+      : { serverName: hostname, rejectUnauthorized: true };
+  }
+  return send(pinned, sendInit);
+}
+
+export function safeFetch(
+  url: URL,
+  init: RequestInit &
+    Pick<PinnedRequestInit, "dispatchDeadline" | "headersValidated" | "onCancelRegister">,
+  allowPrivate: boolean,
+  privateCidrs: readonly string[] = [],
+  send: (url: URL, init: PinnedRequestInit) => Promise<Response> = fetch,
+  resolveDns: (
+    hostname: string,
+    signal?: AbortSignal | null,
+    onCancelRegister?: CancelRegistrar,
+    dispatchDeadline?: number,
+  ) => Promise<DnsAddress[]> = defaultDnsResolve,
+): Promise<Response> {
+  return safeFetchGeneric(url, init, allowPrivate, privateCidrs, send, resolveDns);
 }
 
 export async function readBounded(

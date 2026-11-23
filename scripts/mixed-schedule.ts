@@ -2,7 +2,7 @@ export function createMixedSchedule(seconds: number, rate: number, concurrency: 
   const total = seconds * rate;
   const intervalMs = 1000 / rate;
   const deadlineMs = seconds * 1000 + 50;
-  const catchUpPerTick = Math.max(1, Math.min(64, Math.ceil(rate * 0.015)));
+  const catchUpPerTick = Math.max(1, Math.min(256, Math.ceil(rate * 0.015)));
   let started = 0;
   let maxDebt = 0;
   return {

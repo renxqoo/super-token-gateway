@@ -2,7 +2,7 @@ import { createHmac, createPrivateKey, sign } from "node:crypto";
 import { GatewayError, providerObject, text } from "@gateway/contracts";
 import { sha256 } from "./crypto.ts";
 import type { ProviderKind } from "@gateway/kernel";
-import { readBounded, safeFetch } from "./network.ts";
+import { isValidHttpHeaderValue, readBounded, safeFetch } from "./network.ts";
 
 export interface AwsCredentials {
   accessKeyId: string;
@@ -77,6 +77,10 @@ export function hmacCredentials(secret: string): { keyId?: string; secretKey: st
 }
 
 export function validateAuthCredentials(auth: HostAuthScheme, secret: string): void {
+  if (auth.scheme === "bearer" || auth.scheme === "header") {
+    if (secret && !isValidHttpHeaderValue(secret)) throw invalid();
+    return;
+  }
   if (auth.scheme === "azure_key") {
     azureCredentials(secret, auth.default_api_version);
     return;

@@ -12,14 +12,19 @@ export type TraceContext = {
 };
 
 const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
-const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, "0"));
-const randBuf = new Uint8Array(24);
-const spanBuf = randBuf.subarray(0, 8);
+const TRACE_POOL = Buffer.allocUnsafe(4096);
+let traceHex = "";
+let traceHexOffset = 8192;
 
-function bytesToHex(buf: Uint8Array, start: number, end: number): string {
-  let out = "";
-  for (let i = start; i < end; i++) out += HEX[buf[i]!]!;
-  return out;
+function nextTraceHexOffset(chars: number): number {
+  if (traceHexOffset + chars > 8192) {
+    crypto.getRandomValues(TRACE_POOL);
+    traceHex = TRACE_POOL.toString("hex");
+    traceHexOffset = 0;
+  }
+  const offset = traceHexOffset;
+  traceHexOffset += chars;
+  return offset;
 }
 
 export function parseOrCreateTrace(headerValue: string | undefined): TraceContext {
@@ -28,12 +33,12 @@ export function parseOrCreateTrace(headerValue: string | undefined): TraceContex
   let spanId: string;
   if (match && match[1] !== "00000000000000000000000000000000") {
     traceId = match[1]!;
-    crypto.getRandomValues(spanBuf);
-    spanId = bytesToHex(spanBuf, 0, 8);
+    const offset = nextTraceHexOffset(16);
+    spanId = traceHex.slice(offset, offset + 16);
   } else {
-    crypto.getRandomValues(randBuf);
-    traceId = bytesToHex(randBuf, 0, 16);
-    spanId = bytesToHex(randBuf, 16, 24);
+    const offset = nextTraceHexOffset(48);
+    traceId = traceHex.slice(offset, offset + 32);
+    spanId = traceHex.slice(offset + 32, offset + 48);
   }
   const flags = match ? match[3]! : "01";
   return {
@@ -193,7 +198,12 @@ export class GatewayMetrics {
     const statusClass = statusClassOf(status);
     const ch = channel ?? "none";
     const key = `${operation}\0${statusClass}\0${ch}`;
-    bumpLabeled(this.httpCounters, key, () => [operation, statusClass, ch] as const);
+    const existing = this.httpCounters.get(key);
+    if (existing !== undefined) {
+      existing.count++;
+    } else if (this.httpCounters.size < 2048) {
+      this.httpCounters.set(key, { labels: [operation, statusClass, ch] as const, count: 1 });
+    }
     this.requestDuration.observe(durationMs);
     if (ttftMs !== null) {
       this.ttftDuration.observe(ttftMs);

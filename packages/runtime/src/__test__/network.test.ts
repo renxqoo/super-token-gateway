@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { validateAuthCredentials } from "../cloud-auth.ts";
 import { createTransport, isPublicAddress, validateBaseUrl } from "../network.ts";
 
 test("rejects private, mapped, metadata, reserved and ambiguous destinations", () => {
@@ -551,5 +556,228 @@ test("bun HTTP/1.1 transport tears down socket and releases slot when cancelling
   } finally {
     transport.close();
     server.close();
+  }
+});
+
+test("F7: transport DNS cache coalesces lookups within TTL while still enforcing per-call SSRF rules", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      return Response.json({ ok: true });
+    },
+  });
+  let lookups = 0;
+  const transport = createTransport(16, {
+    dnsCacheTtlMs: 80,
+    dnsLookup: async () => {
+      lookups++;
+      await Bun.sleep(10);
+      return [{ address: "127.0.0.1", family: 4 }];
+    },
+  });
+  const url = new URL(`http://cached-upstream.example:${server.port}/`);
+  try {
+    const burst = await Promise.all(
+      Array.from({ length: 8 }, () => transport.fetchFast(url, {}, true)),
+    );
+    expect(lookups).toBe(1);
+    for (const item of burst) {
+      expect(item.fast).toBe(true);
+      if (item.fast) {
+        expect(item.status).toBe(200);
+        expect(new TextDecoder().decode(item.body)).toBe('{"ok":true}');
+      }
+    }
+    await expect(transport.fetch(url, {}, false)).rejects.toMatchObject({
+      code: "unsafe_upstream",
+    });
+    expect(lookups).toBe(1);
+    await Bun.sleep(100);
+    const afterExpiry = await transport.fetchFast(url, {}, true);
+    expect(afterExpiry.fast).toBe(true);
+    expect(lookups).toBe(2);
+  } finally {
+    transport.close();
+    await server.stop(true);
+  }
+});
+
+test("symptom: slow DNS lookup honours onCancelRegister and dispatchDeadline without AbortSignal", async () => {
+  let resolveSlow!: (addrs: { address: string; family: number }[]) => void;
+  const transport = createTransport(4, {
+    dnsLookup: () =>
+      new Promise((resolve) => {
+        resolveSlow = resolve;
+      }),
+  });
+  const url = new URL("http://slow-dns.example/");
+  try {
+    const cancelHolder: { fn: ((reason: unknown) => void) | null } = { fn: null };
+    const p1 = transport.fetchFast(
+      url,
+      {
+        onCancelRegister: (cb) => {
+          cancelHolder.fn = cb;
+          return () => {
+            if (cancelHolder.fn === cb) cancelHolder.fn = null;
+          };
+        },
+      },
+      true,
+    );
+    await Bun.sleep(10);
+    cancelHolder.fn?.(new Error("client aborted"));
+    await expect(p1).rejects.toMatchObject({ code: "upstream_not_dispatched" });
+
+    const p2 = transport.fetchFast(url, { dispatchDeadline: performance.now() + 25 }, true);
+    await expect(p2).rejects.toMatchObject({ code: "upstream_not_dispatched" });
+    resolveSlow([{ address: "127.0.0.1", family: 4 }]);
+  } finally {
+    transport.close();
+  }
+});
+
+test("symptom: validateAuthCredentials rejects CRLF and Unicode-to-Latin1 bearer and header secrets", () => {
+  expect(() => validateAuthCredentials({ scheme: "bearer" }, "sk-ok-123")).not.toThrow();
+  expect(() =>
+    validateAuthCredentials({ scheme: "bearer" }, "sk-bad\r\nX-Injected: yes"),
+  ).toThrow();
+  expect(() =>
+    validateAuthCredentials({ scheme: "bearer" }, "sk-bad\u010d\u010aX-Injected: yes"),
+  ).toThrow();
+  expect(() =>
+    validateAuthCredentials(
+      { scheme: "header", header_name: "x-api-key" },
+      "key\r\nX-Injected: yes",
+    ),
+  ).toThrow();
+});
+
+test("symptom: native TLS handshake rejects CA-trusted mismatched DNS SAN and IP-literal against DNS-only cert", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "stg-tls-id-"));
+  try {
+    spawnSync(
+      "openssl",
+      [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        join(dir, "ca.key"),
+        "-out",
+        join(dir, "ca.crt"),
+        "-days",
+        "1",
+        "-subj",
+        "/CN=StgTestCA",
+      ],
+      { stdio: "pipe" },
+    );
+    spawnSync(
+      "openssl",
+      [
+        "req",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        join(dir, "srv.key"),
+        "-out",
+        join(dir, "srv.csr"),
+        "-subj",
+        "/CN=wrong.example",
+      ],
+      { stdio: "pipe" },
+    );
+    writeFileSync(join(dir, "ext.cnf"), "subjectAltName=DNS:wrong.example\n");
+    spawnSync(
+      "openssl",
+      [
+        "x509",
+        "-req",
+        "-in",
+        join(dir, "srv.csr"),
+        "-CA",
+        join(dir, "ca.crt"),
+        "-CAkey",
+        join(dir, "ca.key"),
+        "-CAcreateserial",
+        "-out",
+        join(dir, "srv.crt"),
+        "-days",
+        "1",
+        "-extfile",
+        join(dir, "ext.cnf"),
+      ],
+      { stdio: "pipe" },
+    );
+    const cert = readFileSync(join(dir, "srv.crt"), "utf8");
+    const key = readFileSync(join(dir, "srv.key"), "utf8");
+    const srv = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      tls: { cert, key },
+      fetch: () => Response.json({ ok: true }),
+    });
+    const probeScript = join(dir, "probe.ts");
+    const networkMod = new URL("../network.ts", import.meta.url).pathname;
+    writeFileSync(
+      probeScript,
+      `
+import { createTransport } from ${JSON.stringify(networkMod)};
+const port = Number(process.env.TEST_PORT);
+const t = createTransport(4, { dnsLookup: async () => [{ address: "127.0.0.1", family: 4 }] });
+const out: Record<string, string> = {};
+try {
+  await t.fetchFast(new URL("https://right.example:" + port + "/"), {}, true);
+  out.dnsMismatch = "ACCEPTED";
+} catch (e) {
+  out.dnsMismatch = (e as { code?: string }).code ?? String(e);
+}
+try {
+  await t.fetchFast(new URL("https://127.0.0.1:" + port + "/"), {}, true);
+  out.ipMismatch = "ACCEPTED";
+} catch (e) {
+  out.ipMismatch = (e as { code?: string }).code ?? String(e);
+}
+try {
+  const ok = await t.fetchFast(new URL("https://wrong.example:" + port + "/"), {}, true);
+  out.validMatch = ok.fast ? String(ok.status) : String(ok.response.status);
+} catch (e) {
+  out.validMatch = (e as { code?: string }).code ?? String(e);
+}
+t.close();
+console.log(JSON.stringify(out));
+`,
+    );
+    try {
+      const child = Bun.spawn([process.execPath, probeScript], {
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          NODE_EXTRA_CA_CERTS: join(dir, "ca.crt"),
+          TEST_PORT: String(srv.port),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [code, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+      expect(JSON.parse(stdout.trim())).toEqual({
+        dnsMismatch: "upstream_tls",
+        ipMismatch: "upstream_tls",
+        validMatch: "200",
+      });
+    } finally {
+      await srv.stop(true);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

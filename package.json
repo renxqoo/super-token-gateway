@@ -2,9 +2,9 @@
   "name": "super-token-gateway",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.4.4",
+  "packageManager": "bun@1.4.5",
   "engines": {
-    "bun": "1.4.4"
+    "bun": "1.4.5"
   },
   "workspaces": [
     "apps/*",
@@ -25,7 +25,7 @@
     "lint": "oxlint --deny-warnings",
     "fmt": "bun fmt --no-script",
     "fmt:check": "bun fmt --no-script --check",
-    "test": "bun test scripts/__test__ tests/unit packages/kernel/src/__test__ packages/contracts/src/__test__ packages/protocol/src/__test__ packages/runtime/src/__test__ packages/plugin-engine/src/__test__",
+    "test": "bun test scripts/__test__ tests/unit apps/gateway/src/__test__ packages/kernel/src/__test__ packages/contracts/src/__test__ packages/protocol/src/__test__ packages/runtime/src/__test__ packages/plugin-engine/src/__test__ packages/ledger/src/__test__",
     "test:integration": "bun --env-file=.env.local test tests/integration --timeout 30000",
     "build": "bun scripts/build.ts",
     "build:wasmtime": "cargo build --release --manifest-path native/plugin-wasmtime/Cargo.toml",

@@ -238,12 +238,26 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
       }
     }
 
-    for (const wl of wlToClose) {
+    async function closeInParallel<T>(items: T[], worker: (item: T) => Promise<void>) {
+      if (items.length === 0) return;
+      const concurrency = Math.min(8, items.length);
+      let cursor = 0;
+      await Promise.all(
+        Array.from({ length: concurrency }, async () => {
+          while (cursor < items.length) {
+            const item = items[cursor++]!;
+            await worker(item);
+          }
+        }),
+      );
+    }
+
+    await closeInParallel(wlToClose, async (wl) => {
       await closeWalletLeaseInPg(wl.leaseId).catch(() => undefined);
-    }
-    for (const sl of slToClose) {
+    });
+    await closeInParallel(slToClose, async (sl) => {
       await closeSupplierLeaseInPg(sl.leaseId).catch(() => undefined);
-    }
+    });
   }
 
   let maintenance: Promise<void> | undefined;

@@ -95,7 +95,99 @@ export function parseSignedAtoms(value: string): bigint | null {
   return n;
 }
 
+const usageDigestCache = new Map<string, string>();
+const SIMPLE_ASCII_KEY = /^[a-z0-9_]+$/;
+const SIMPLE_ASCII_VAL = /^[0-9.]+$/;
+
+function isSimpleAsciiNum(val: unknown): val is string {
+  if (typeof val !== "string" || val.length === 0) return false;
+  for (let i = 0; i < val.length; i++) {
+    const c = val.charCodeAt(i);
+    if ((c < 48 || c > 57) && c !== 46) return false;
+  }
+  return true;
+}
+
+function fastFlatCanonical(value: unknown): string | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const obj = value as Record<string, unknown>;
+  let count = 0;
+  let stdCount = 0;
+  for (const k in obj) {
+    count++;
+    if (
+      k === "cached_input_tokens" ||
+      k === "input_tokens" ||
+      k === "output_tokens" ||
+      k === "reasoning_tokens"
+    ) {
+      stdCount++;
+    }
+  }
+  if (count === 0) return "{}";
+  if (count === stdCount) {
+    let out = "{";
+    let first = true;
+    let stdSeen = 0;
+    const c = obj.cached_input_tokens;
+    if (c !== undefined) {
+      if (!isSimpleAsciiNum(c)) return null;
+      out += `"cached_input_tokens":"${c}"`;
+      first = false;
+      stdSeen++;
+    }
+    const i = obj.input_tokens;
+    if (i !== undefined) {
+      if (!isSimpleAsciiNum(i)) return null;
+      out += `${first ? "" : ","}"input_tokens":"${i}"`;
+      first = false;
+      stdSeen++;
+    }
+    const o = obj.output_tokens;
+    if (o !== undefined) {
+      if (!isSimpleAsciiNum(o)) return null;
+      out += `${first ? "" : ","}"output_tokens":"${o}"`;
+      first = false;
+      stdSeen++;
+    }
+    const r = obj.reasoning_tokens;
+    if (r !== undefined) {
+      if (!isSimpleAsciiNum(r)) return null;
+      out += `${first ? "" : ","}"reasoning_tokens":"${r}"`;
+      stdSeen++;
+    }
+    if (stdSeen !== stdCount) return null;
+    return `${out}}`;
+  }
+  if (count > 12) return null;
+  const keys = Object.keys(obj);
+  if (keys.length > 1) keys.sort();
+  let out = "{";
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i]!;
+    const v = obj[k];
+    if (typeof v !== "string" || !SIMPLE_ASCII_KEY.test(k) || !SIMPLE_ASCII_VAL.test(v)) {
+      return null;
+    }
+    if (i > 0) out += ",";
+    out += `"${k}":"${v}"`;
+  }
+  return `${out}}`;
+}
+
 export function sha256Hex(value: unknown): string {
+  const fast = fastFlatCanonical(value);
+  if (fast !== null) {
+    const hit = usageDigestCache.get(fast);
+    if (hit !== undefined) return hit;
+    const digest = new Bun.CryptoHasher("sha256").update(fast).digest("hex");
+    if (usageDigestCache.size >= 2048) {
+      const oldest = usageDigestCache.keys().next().value;
+      if (oldest !== undefined) usageDigestCache.delete(oldest);
+    }
+    usageDigestCache.set(fast, digest);
+    return digest;
+  }
   return new Bun.CryptoHasher("sha256").update(canonical(value)).digest("hex");
 }
 

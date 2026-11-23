@@ -297,24 +297,27 @@ export class SmartRouter {
     operation: Operation,
   ): { route: T; isProbe: boolean }[] {
     const eligible: { route: T; isProbe: boolean; st: InternalChannelState | undefined }[] = [];
-    for (const c of candidates) {
+    let firstPriority: number | undefined;
+    let samePriority = true;
+    let hasSameProto = false;
+    let hasCrossProto = false;
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i]!;
       if (!c.enabled || !c.channel_enabled || !c.account_active) continue;
       if (!c.operations.includes(operation)) continue;
       const avail = this.isAvailable(c.channel_id);
       if (!avail.available) continue;
+      if (firstPriority === undefined) firstPriority = c.priority;
+      else if (c.priority !== firstPriority) samePriority = false;
+      if (c.same_protocol === true) hasSameProto = true;
+      else hasCrossProto = true;
       eligible.push({ route: c, isProbe: avail.isProbe, st: this.channels.get(c.channel_id) });
     }
-    if (eligible.length <= 1) {
-      return eligible.map((e) => ({ route: e.route, isProbe: e.isProbe }));
+    if (eligible.length === 0) return [];
+    if (eligible.length === 1) {
+      return [{ route: eligible[0]!.route, isProbe: eligible[0]!.isProbe }];
     }
 
-    const byPriority = new Map<number, typeof eligible>();
-    for (const e of eligible) {
-      const group = byPriority.get(e.route.priority);
-      if (group) group.push(e);
-      else byPriority.set(e.route.priority, [e]);
-    }
-    const priorities = [...byPriority.keys()].sort((a, b) => b - a);
     const ordered: { route: T; isProbe: boolean }[] = [];
 
     const orderSubgroup = (
@@ -329,7 +332,10 @@ export class SmartRouter {
       }
       if (strategy === "LEAST_LATENCY") {
         group.sort((a, b) => (a.st?.ewmaLatencyMs ?? 100) - (b.st?.ewmaLatencyMs ?? 100));
-        for (const item of group) ordered.push({ route: item.route, isProbe: item.isProbe });
+        for (let i = 0; i < group.length; i++) {
+          const item = group[i]!;
+          ordered.push({ route: item.route, isProbe: item.isProbe });
+        }
       } else if (strategy === "ROUND_ROBIN") {
         const cursorKey = `${modelKey}:${p}${suffix}`;
         const cursor = this.rrCursors.get(cursorKey) ?? 0;
@@ -361,6 +367,31 @@ export class SmartRouter {
         }
       }
     };
+
+    if (samePriority) {
+      if (hasSameProto && hasCrossProto) {
+        const sameProto: typeof eligible = [];
+        const crossProto: typeof eligible = [];
+        for (let i = 0; i < eligible.length; i++) {
+          const item = eligible[i]!;
+          if (item.route.same_protocol === true) sameProto.push(item);
+          else crossProto.push(item);
+        }
+        orderSubgroup(firstPriority!, ":same", sameProto);
+        orderSubgroup(firstPriority!, ":cross", crossProto);
+      } else {
+        orderSubgroup(firstPriority!, "", eligible);
+      }
+      return ordered;
+    }
+
+    const byPriority = new Map<number, typeof eligible>();
+    for (const e of eligible) {
+      const group = byPriority.get(e.route.priority);
+      if (group) group.push(e);
+      else byPriority.set(e.route.priority, [e]);
+    }
+    const priorities = [...byPriority.keys()].sort((a, b) => b - a);
 
     for (const p of priorities) {
       const group = byPriority.get(p)!;

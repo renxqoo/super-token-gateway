@@ -37,6 +37,7 @@ import {
   type InferenceContext,
   type ProxyDependencies,
 } from "./proxy.ts";
+import { ProxyRuntimeState } from "./proxy-state.ts";
 import { SnapshotManager } from "./snapshot.ts";
 
 export type GatewayRuntimeOptions = {
@@ -67,7 +68,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   const nodeId = crypto.randomUUID();
   const metrics = new GatewayMetrics(config.accessLog ?? false);
 
-  const transport = createTransport(Math.max(1024, Math.min(16384, config.maxInFlight)));
+  const transport = createTransport(Math.max(1024, Math.min(65535, config.maxInFlight)));
   const vertexTokens = new VertexTokens((url, init) =>
     transport.fetch(url, init, config.allowPrivateUpstreams, config.privateUpstreamCidrs),
   );
@@ -211,6 +212,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       : {}),
   });
   const lifecycle = new Lifecycle(config.maxInFlight);
+  const proxyState = new ProxyRuntimeState();
 
   const proxyDeps: ProxyDependencies = {
     config,
@@ -224,6 +226,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     wasmExecutor: providerWasmExecutor,
     lifecycle,
     metrics,
+    state: proxyState,
   };
 
   const publicApp = new Hono();
@@ -295,7 +298,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   publicApp.get("/v1/models", (c) => {
     try {
       const snap = snapshot.get();
-      const { key } = authenticateRequest(c, snap, config, undefined, peerOf(c));
+      const { key } = authenticateRequest(c, snap, config, undefined, peerOf(c), proxyState);
       const data = [...snap.models.values()]
         .filter((m) => m.enabled && (key.models.length === 0 || key.models.includes(m.name)))
         .map((m) => ({ id: m.name, object: "model", owned_by: "gateway" }));
@@ -519,6 +522,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     async close(drainMs = 5000): Promise<void> {
       const draining = lifecycle.drain(drainMs);
       await draining;
+      proxyState.close();
       await snapshot.stop();
       await ledger.drain();
       if (controlDb !== db) {

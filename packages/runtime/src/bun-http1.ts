@@ -1,4 +1,5 @@
 import { PassThrough, Readable, pipeline } from "node:stream";
+import { checkServerIdentity } from "node:tls";
 import {
   createBrotliDecompress,
   createGunzip,
@@ -10,6 +11,7 @@ import { UpstreamPreDispatchError } from "./http-pool.ts";
 
 const HEADER_END = Buffer.from("\r\n\r\n");
 const CRLF = Buffer.from("\r\n");
+const EMPTY_BUF = Buffer.alloc(0);
 const MAX_HEADER_BYTES = 65536;
 const MAX_INFORMATIONAL = 5;
 const FAST_BUFFER_MAX = 65536;
@@ -20,6 +22,18 @@ const TCHAR_TABLE = new Uint8Array(128);
 for (const ch of "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") {
   TCHAR_TABLE[ch.charCodeAt(0)] = 1;
 }
+
+export type FastUpstreamResult =
+  | {
+      fast: true;
+      status: number;
+      contentType: string;
+      headers: Headers | Record<string, string>;
+      body: Uint8Array;
+    }
+  | { fast: false; response: Response };
+
+export type CancelRegistrar = (onCancel: (reason: unknown) => void) => () => void;
 
 export function isValidHttpHeaderName(name: string): boolean {
   const len = name.length;
@@ -96,6 +110,7 @@ type ActiveExchange = {
   informationalCount: number;
   headerBuf: Buffer | null;
   status: number;
+  contentType: string;
   headers: Headers | Record<string, string>;
   connectionClose: boolean;
   isChunked: boolean;
@@ -109,8 +124,12 @@ type ActiveExchange = {
   chunkState: ChunkState;
   dispatchTimer: ReturnType<typeof setTimeout> | undefined;
   abortHandler: (() => void) | undefined;
-  pendingWrite: Buffer | null;
+  cancelDetach: (() => void) | undefined;
+  pendingWrite: string | Buffer | null;
+  pendingWriteBytes: number;
+  fastMode: boolean;
   resolve: (res: Response) => void;
+  resolveFast: ((res: FastUpstreamResult) => void) | undefined;
   reject: (err: unknown) => void;
   releaseSlot: () => void;
   slotReleased: boolean;
@@ -118,12 +137,15 @@ type ActiveExchange = {
 
 type PooledConn = {
   origin: string;
+  isTls: boolean;
+  verifyHost: string;
   socket: Bun.Socket<PooledConn> | null;
   connected: boolean;
   closed: boolean;
   inUse: boolean;
   exchange: ActiveExchange | null;
-  writeBuf: Buffer | null;
+  writeBuf: string | Buffer | null;
+  writeBytes: number;
   writeOffset: number;
 };
 
@@ -139,7 +161,8 @@ function buildRequestBuffer(
   path: string,
   headers: Record<string, string>,
   body: string | Uint8Array | undefined,
-): Buffer {
+  headersValidated = false,
+): { payload: string | Buffer; byteLength: number } {
   if (!isValidHttpHeaderName(method)) {
     throw new TypeError("Invalid HTTP method");
   }
@@ -151,10 +174,10 @@ function buildRequestBuffer(
   for (const key in headers) {
     const val = headers[key];
     if (val === undefined) continue;
-    if (!isValidHttpHeaderName(key) || !isValidHttpHeaderValue(val)) {
+    if (!headersValidated && (!isValidHttpHeaderName(key) || !isValidHttpHeaderValue(val))) {
       throw new TypeError("Invalid HTTP header");
     }
-    const lower = key.toLowerCase();
+    const lower = headersValidated ? key : key.toLowerCase();
     if (lower === "transfer-encoding") {
       throw new TypeError("Transfer-Encoding is not permitted on buffered requests");
     }
@@ -181,19 +204,26 @@ function buildRequestBuffer(
   }
   if (!hasConnection) head += "connection: keep-alive\r\n";
   head += "\r\n";
-  if (body === undefined) return Buffer.from(head, "latin1");
+  if (body === undefined) {
+    const buf = Buffer.from(head, "latin1");
+    return { payload: buf, byteLength: buf.byteLength };
+  }
   if (typeof body === "string") {
+    const headUtf8Len = headersValidated ? Buffer.byteLength(head, "utf8") : -1;
+    if (headersValidated && headUtf8Len === head.length) {
+      return { payload: `${head}${body}`, byteLength: headUtf8Len + bodyByteLength };
+    }
     const headLen = Buffer.byteLength(head, "latin1");
     const out = Buffer.allocUnsafe(headLen + bodyByteLength);
     out.write(head, 0, headLen, "latin1");
     out.write(body, headLen, bodyByteLength, "utf8");
-    return out;
+    return { payload: out, byteLength: out.byteLength };
   }
   const headBuf = Buffer.from(head, "latin1");
   const out = Buffer.allocUnsafe(headBuf.byteLength + body.byteLength);
   headBuf.copy(out, 0);
   out.set(body, headBuf.byteLength);
-  return out;
+  return { payload: out, byteLength: out.byteLength };
 }
 
 function parseHeadersBlock(headStr: string): {
@@ -252,19 +282,38 @@ function parseHeadersBlock(headStr: string): {
     let next = headStr.indexOf("\r\n", pos);
     if (next === -1) next = headStr.length;
     const colon = headStr.indexOf(":", pos);
-    if (colon === -1 || colon >= next) {
+    if (colon === -1 || colon >= next || colon === pos) {
       throw new GatewayError(502, "invalid_upstream", "Malformed upstream HTTP header");
     }
+    let hasUpper = false;
+    for (let i = pos; i < colon; i++) {
+      const c = headStr.charCodeAt(i);
+      if (c >= 128 || TCHAR_TABLE[c] !== 1) {
+        throw new GatewayError(502, "invalid_upstream", "Invalid upstream HTTP header name");
+      }
+      if (c >= 65 && c <= 90) hasUpper = true;
+    }
     const rawName = headStr.slice(pos, colon);
-    if (!isValidHttpHeaderName(rawName)) {
-      throw new GatewayError(502, "invalid_upstream", "Invalid upstream HTTP header name");
+    const lower = hasUpper ? rawName.toLowerCase() : rawName;
+    let valStart = colon + 1;
+    let valEnd = next;
+    for (let i = valStart; i < valEnd; i++) {
+      const c = headStr.charCodeAt(i);
+      if (c > 255 || (c < 32 && c !== 9) || c === 127) {
+        throw new GatewayError(502, "invalid_upstream", "Invalid upstream HTTP header value");
+      }
     }
-    const lower = rawName.toLowerCase();
-    const rawVal = headStr.slice(colon + 1, next);
-    if (!isValidHttpHeaderValue(rawVal)) {
-      throw new GatewayError(502, "invalid_upstream", "Invalid upstream HTTP header value");
+    while (valStart < valEnd) {
+      const c = headStr.charCodeAt(valStart);
+      if (c !== 32 && c !== 9) break;
+      valStart++;
     }
-    const val = trimOws(rawVal);
+    while (valEnd > valStart) {
+      const c = headStr.charCodeAt(valEnd - 1);
+      if (c !== 32 && c !== 9) break;
+      valEnd--;
+    }
+    const val = headStr.slice(valStart, valEnd);
     if (lower === "content-encoding") {
       contentEncoding = contentEncoding ? `${contentEncoding},${val}` : val;
     } else if (lower === "content-type") {
@@ -398,6 +447,7 @@ export function createBunHttp1Pool(
     conn.closed = true;
     conn.inUse = false;
     conn.writeBuf = null;
+    conn.writeBytes = 0;
     conn.writeOffset = 0;
     const sock = conn.socket;
     conn.socket = null;
@@ -452,6 +502,10 @@ export function createBunHttp1Pool(
     if (ex.abortHandler) {
       ex.signal?.removeEventListener("abort", ex.abortHandler);
       ex.abortHandler = undefined;
+    }
+    if (ex.cancelDetach) {
+      ex.cancelDetach();
+      ex.cancelDetach = undefined;
     }
     if (!ex.slotReleased) {
       ex.slotReleased = true;
@@ -528,6 +582,40 @@ export function createBunHttp1Pool(
   const flushWrite = (conn: PooledConn) => {
     const sock = conn.socket;
     if (!sock || !conn.writeBuf) return;
+    if (typeof conn.writeBuf === "string") {
+      const payload = conn.writeBuf;
+      let written: number;
+      try {
+        written = sock.write(payload);
+      } catch (err) {
+        conn.writeBuf = null;
+        conn.writeBytes = 0;
+        conn.writeOffset = 0;
+        const ex = conn.exchange;
+        if (ex && !ex.finished) failExchange(conn, ex, err);
+        else destroyConn(conn);
+        return;
+      }
+      if (written < 0) {
+        conn.writeBuf = null;
+        conn.writeBytes = 0;
+        conn.writeOffset = 0;
+        const ex = conn.exchange;
+        const err = new Error("Upstream socket write failed");
+        if (ex && !ex.finished) failExchange(conn, ex, err);
+        else destroyConn(conn);
+        return;
+      }
+      if (written >= conn.writeBytes) {
+        conn.writeBuf = null;
+        conn.writeBytes = 0;
+        conn.writeOffset = 0;
+        return;
+      }
+      conn.writeBuf = Buffer.from(payload, "utf8");
+      conn.writeOffset = written;
+      if (written === 0) return;
+    }
     while (conn.writeOffset < conn.writeBuf.byteLength) {
       const slice =
         conn.writeOffset === 0 ? conn.writeBuf : conn.writeBuf.subarray(conn.writeOffset);
@@ -706,6 +794,40 @@ export function createBunHttp1Pool(
     ex.chunkBuf = offset < buf.byteLength ? Buffer.from(buf.subarray(offset)) : Buffer.alloc(0);
   };
 
+  const resolveNonFast = (ex: ActiveExchange, res: Response) => {
+    if (ex.fastMode && ex.resolveFast) {
+      ex.resolveFast({ fast: false, response: res });
+    } else {
+      ex.resolve(res);
+    }
+  };
+
+  const resolveFastBuffered = (
+    conn: PooledConn,
+    ex: ActiveExchange,
+    body: Uint8Array,
+    extra: boolean,
+  ) => {
+    if (ex.fastMode && ex.resolveFast) {
+      ex.settledHeader = true;
+      finishSuccess(conn, ex, !extra);
+      ex.resolveFast({
+        fast: true,
+        status: ex.status,
+        contentType: ex.contentType,
+        headers: ex.headers,
+        body,
+      });
+      return;
+    }
+    const res = createResponse(conn, ex, body as BodyInit, ex.status, ex.headers);
+    if (!res) return;
+    ex.settledHeader = true;
+    bufferedBodies.set(res, body);
+    finishSuccess(conn, ex, !extra);
+    ex.resolve(res);
+  };
+
   const feedBody = (conn: PooledConn, ex: ActiveExchange, data: Buffer) => {
     if (ex.finished || data.byteLength === 0) return;
     if (ex.bufferedChunks !== null) {
@@ -721,12 +843,7 @@ export function createBunHttp1Pool(
             ? ex.bufferedChunks[0]!
             : Buffer.concat(ex.bufferedChunks, ex.bufferedTotal);
         ex.bufferedChunks = null;
-        const res = createResponse(conn, ex, body as BodyInit, ex.status, ex.headers);
-        if (!res) return;
-        ex.settledHeader = true;
-        bufferedBodies.set(res, body);
-        finishSuccess(conn, ex, !extra);
-        ex.resolve(res);
+        resolveFastBuffered(conn, ex, body, extra);
       }
       return;
     }
@@ -816,6 +933,7 @@ export function createBunHttp1Pool(
     }
 
     ex.status = parsed.status;
+    ex.contentType = parsed.contentType;
     ex.headers = parsed.headers;
     ex.connectionClose = parsed.connectionClose;
     const isChunked = parsed.transferEncoding !== null;
@@ -835,7 +953,7 @@ export function createBunHttp1Pool(
       if (!res) return;
       ex.settledHeader = true;
       finishSuccess(conn, ex, rest.byteLength === 0);
-      ex.resolve(res);
+      resolveNonFast(ex, res);
       return;
     }
 
@@ -855,24 +973,12 @@ export function createBunHttp1Pool(
       contentLen <= FAST_BUFFER_MAX
     ) {
       if (contentLen === 0) {
-        const empty = new Uint8Array(0);
-        const res = createResponse(conn, ex, empty as BodyInit, parsed.status, parsed.headers);
-        if (!res) return;
-        ex.settledHeader = true;
-        bufferedBodies.set(res, empty);
-        finishSuccess(conn, ex, rest.byteLength === 0);
-        ex.resolve(res);
+        resolveFastBuffered(conn, ex, new Uint8Array(0), rest.byteLength !== 0);
         return;
       }
       if (rest.byteLength >= contentLen) {
         const copy = Buffer.from(rest.subarray(0, contentLen));
-        const extra = rest.byteLength > contentLen;
-        const res = createResponse(conn, ex, copy as BodyInit, parsed.status, parsed.headers);
-        if (!res) return;
-        ex.settledHeader = true;
-        bufferedBodies.set(res, copy);
-        finishSuccess(conn, ex, !extra);
-        ex.resolve(res);
+        resolveFastBuffered(conn, ex, copy, rest.byteLength > contentLen);
         return;
       }
       ex.bufferedChunks = [];
@@ -907,7 +1013,7 @@ export function createBunHttp1Pool(
         ex.settledHeader = true;
         bufferedBodies.set(res, empty);
         finishSuccess(conn, ex, rest.byteLength === 0);
-        ex.resolve(res);
+        resolveNonFast(ex, res);
         return;
       }
       const input = new PassThrough();
@@ -939,7 +1045,7 @@ export function createBunHttp1Pool(
       if (rest.byteLength > 0) {
         feedBody(conn, ex, rest);
       }
-      ex.resolve(res);
+      resolveNonFast(ex, res);
       return;
     }
 
@@ -975,7 +1081,35 @@ export function createBunHttp1Pool(
     } else if (rest.byteLength > 0) {
       feedBody(conn, ex, rest);
     }
-    ex.resolve(res);
+    resolveNonFast(ex, res);
+  };
+
+  const dispatchAfterReady = (conn: PooledConn) => {
+    const ex = conn.exchange;
+    if (!ex || ex.finished) {
+      returnToIdle(conn);
+      return;
+    }
+    if (ex.dispatchTimer) {
+      clearTimeout(ex.dispatchTimer);
+      ex.dispatchTimer = undefined;
+    }
+    const expired = ex.dispatchDeadline !== undefined && !(performance.now() < ex.dispatchDeadline);
+    if (ex.signal?.aborted || expired) {
+      failExchange(conn, ex, notDispatched());
+      return;
+    }
+    ex.canHaveDispatched = true;
+    const reqBuf = ex.pendingWrite;
+    const reqBytes = ex.pendingWriteBytes;
+    ex.pendingWrite = null;
+    ex.pendingWriteBytes = 0;
+    if (reqBuf) {
+      conn.writeBuf = reqBuf;
+      conn.writeBytes = reqBytes;
+      conn.writeOffset = 0;
+      flushWrite(conn);
+    }
   };
 
   const socketHandlers: Bun.SocketHandler<PooledConn> = {
@@ -986,30 +1120,45 @@ export function createBunHttp1Pool(
         return;
       }
       conn.socket = socket;
+      if (conn.isTls) return;
       conn.connected = true;
-      const ex = conn.exchange;
-      if (!ex || ex.finished) {
-        returnToIdle(conn);
+      dispatchAfterReady(conn);
+    },
+    handshake(socket, authorized, authorizationError) {
+      const conn = socket.data;
+      if (closed || conn.closed) {
+        terminateSocket(socket);
         return;
       }
-      if (ex.dispatchTimer) {
-        clearTimeout(ex.dispatchTimer);
-        ex.dispatchTimer = undefined;
+      conn.socket = socket;
+      let tlsErr: unknown = authorized ? null : authorizationError;
+      if (!tlsErr && conn.verifyHost) {
+        const peerCert = socket.getPeerCertificate?.();
+        if (!peerCert) {
+          tlsErr = new Error("Upstream peer certificate is missing");
+        } else {
+          const idErr = checkServerIdentity(
+            conn.verifyHost,
+            peerCert as Parameters<typeof checkServerIdentity>[1],
+          );
+          if (idErr) tlsErr = idErr;
+        }
       }
-      const expired =
-        ex.dispatchDeadline !== undefined && !(performance.now() < ex.dispatchDeadline);
-      if (ex.signal?.aborted || expired) {
-        failExchange(conn, ex, notDispatched());
+      if (tlsErr) {
+        const ex = conn.exchange;
+        if (ex && !ex.finished) {
+          failExchange(
+            conn,
+            ex,
+            new UpstreamPreDispatchError("upstream_tls", "Upstream TLS handshake failed", tlsErr),
+          );
+        } else {
+          destroyConn(conn);
+        }
         return;
       }
-      ex.canHaveDispatched = true;
-      const reqBuf = ex.pendingWrite;
-      ex.pendingWrite = null;
-      if (reqBuf) {
-        conn.writeBuf = reqBuf;
-        conn.writeOffset = 0;
-        flushWrite(conn);
-      }
+      conn.connected = true;
+      dispatchAfterReady(conn);
     },
     data(socket, chunk) {
       const conn = socket.data;
@@ -1019,7 +1168,7 @@ export function createBunHttp1Pool(
         return;
       }
       if (!ex.settledHeader && ex.bufferedChunks === null) {
-        const buf = ex.headerBuf ? Buffer.concat([ex.headerBuf, chunk]) : Buffer.from(chunk);
+        const buf = ex.headerBuf ? Buffer.concat([ex.headerBuf, chunk]) : chunk;
         const sep = buf.indexOf(HEADER_END);
         if (sep === -1) {
           if (buf.byteLength > MAX_HEADER_BYTES) {
@@ -1030,7 +1179,7 @@ export function createBunHttp1Pool(
             );
             return;
           }
-          ex.headerBuf = buf;
+          ex.headerBuf = ex.headerBuf ? buf : Buffer.from(buf);
           return;
         }
         ex.headerBuf = null;
@@ -1075,7 +1224,7 @@ export function createBunHttp1Pool(
       }
       const err = !ex.canHaveDispatched
         ? new UpstreamPreDispatchError(
-            "upstream_connect",
+            conn.isTls ? "upstream_tls" : "upstream_connect",
             "Upstream connection failed before dispatch",
           )
         : new Error("Upstream connection closed");
@@ -1092,7 +1241,7 @@ export function createBunHttp1Pool(
       const wrapped =
         !ex.canHaveDispatched && !LOCAL_ERRNOS.has(code)
           ? new UpstreamPreDispatchError(
-              "upstream_connect",
+              conn.isTls ? "upstream_tls" : "upstream_connect",
               "Upstream connection failed before dispatch",
               error,
             )
@@ -1109,7 +1258,7 @@ export function createBunHttp1Pool(
       const code = String((error as NodeJS.ErrnoException).code ?? "");
       const wrapped = !LOCAL_ERRNOS.has(code)
         ? new UpstreamPreDispatchError(
-            "upstream_connect",
+            conn.isTls ? "upstream_tls" : "upstream_connect",
             "Upstream connection failed before dispatch",
             error,
           )
@@ -1117,6 +1266,154 @@ export function createBunHttp1Pool(
       failExchange(conn, ex, wrapped);
     },
   };
+
+  function sendExchange<T>(
+    hostname: string,
+    port: number,
+    path: string,
+    method: string,
+    headers: Record<string, string>,
+    body: string | Uint8Array | undefined,
+    signal: AbortSignal | undefined,
+    dispatchDeadline: number | undefined,
+    releaseSlot: () => void,
+    fastMode: boolean,
+    tls?: { serverName?: string; rejectUnauthorized: true },
+    headersValidated = false,
+    onCancelRegister?: CancelRegistrar,
+  ): Promise<T> {
+    const built = buildRequestBuffer(method, path, headers, body, headersValidated);
+    const reqBuf = built.payload;
+    const reqBytes = built.byteLength;
+    const isTls = tls !== undefined;
+    const origin = isTls
+      ? `tls:${hostname}:${port}:${tls.serverName ?? ""}`
+      : `${hostname}:${port}`;
+    return new Promise<T>((resolve, reject) => {
+      const ex: ActiveExchange = {
+        method,
+        signal,
+        dispatchDeadline,
+        canHaveDispatched: false,
+        settledHeader: false,
+        finished: false,
+        informationalCount: 0,
+        headerBuf: null,
+        status: 502,
+        contentType: "",
+        headers: {},
+        connectionClose: false,
+        isChunked: false,
+        contentLength: -1,
+        bodyRemaining: -1,
+        bufferedChunks: null,
+        bufferedTotal: 0,
+        streamController: null,
+        zlibInput: null,
+        chunkBuf: EMPTY_BUF,
+        chunkState: { phase: "size" },
+        dispatchTimer: undefined,
+        abortHandler: undefined,
+        cancelDetach: undefined,
+        pendingWrite: null,
+        pendingWriteBytes: 0,
+        fastMode,
+        resolve: resolve as (res: Response) => void,
+        resolveFast: fastMode ? (resolve as (res: FastUpstreamResult) => void) : undefined,
+        reject,
+        releaseSlot,
+        slotReleased: false,
+      };
+
+      const reused = popIdle(origin);
+      const conn: PooledConn = reused ?? {
+        origin,
+        isTls,
+        verifyHost: isTls ? tls.serverName || hostname : "",
+        socket: null,
+        connected: false,
+        closed: false,
+        inUse: true,
+        exchange: null,
+        writeBuf: null,
+        writeBytes: 0,
+        writeOffset: 0,
+      };
+      conn.exchange = ex;
+      if (!reused) allConns.add(conn);
+
+      const triggerAbort = (reason: unknown) => {
+        const err = !ex.canHaveDispatched
+          ? notDispatched()
+          : (reason ?? new Error("Upstream request aborted"));
+        failExchange(conn, ex, err);
+      };
+      if (onCancelRegister) {
+        ex.cancelDetach = onCancelRegister(triggerAbort);
+        if (ex.finished) return;
+      }
+      if (signal) {
+        const onAbort = () => triggerAbort(signal.reason);
+        ex.abortHandler = onAbort;
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+      }
+
+      const expired = dispatchDeadline !== undefined && !(performance.now() < dispatchDeadline);
+      if (closed || expired) {
+        if (reused) {
+          conn.exchange = null;
+          cleanupExchange(ex);
+          returnToIdle(conn);
+          ex.finished = true;
+          ex.settledHeader = true;
+          reject(notDispatched());
+        } else {
+          failExchange(conn, ex, notDispatched());
+        }
+        return;
+      }
+
+      if (reused) {
+        ex.canHaveDispatched = true;
+        conn.writeBuf = reqBuf;
+        conn.writeBytes = reqBytes;
+        conn.writeOffset = 0;
+        flushWrite(conn);
+        return;
+      }
+
+      ex.pendingWrite = reqBuf;
+      ex.pendingWriteBytes = reqBytes;
+      if (dispatchDeadline !== undefined) {
+        ex.dispatchTimer = setTimeout(
+          () => failExchange(conn, ex, notDispatched()),
+          Math.max(0, dispatchDeadline - performance.now()),
+        );
+      }
+
+      void Bun.connect<PooledConn>({
+        hostname,
+        port,
+        ...(isTls ? { tls: { rejectUnauthorized: true, serverName: tls.serverName ?? "" } } : {}),
+        data: conn,
+        socket: socketHandlers,
+      }).catch((error) => {
+        const code = String((error as NodeJS.ErrnoException).code ?? "");
+        const wrapped = !LOCAL_ERRNOS.has(code)
+          ? new UpstreamPreDispatchError(
+              isTls ? "upstream_tls" : "upstream_connect",
+              "Upstream connection failed before dispatch",
+              error,
+            )
+          : error;
+        failExchange(conn, ex, wrapped);
+      });
+    });
+  }
 
   return {
     send(
@@ -1129,117 +1426,56 @@ export function createBunHttp1Pool(
       signal: AbortSignal | undefined,
       dispatchDeadline: number | undefined,
       releaseSlot: () => void,
+      tls?: { serverName?: string; rejectUnauthorized: true },
+      headersValidated = false,
+      onCancelRegister?: CancelRegistrar,
     ): Promise<Response> {
-      const reqBuf = buildRequestBuffer(method, path, headers, body);
-      const origin = `${hostname}:${port}`;
-      return new Promise<Response>((resolve, reject) => {
-        const ex: ActiveExchange = {
-          method,
-          signal,
-          dispatchDeadline,
-          canHaveDispatched: false,
-          settledHeader: false,
-          finished: false,
-          informationalCount: 0,
-          headerBuf: null,
-          status: 502,
-          headers: {},
-          connectionClose: false,
-          isChunked: false,
-          contentLength: -1,
-          bodyRemaining: -1,
-          bufferedChunks: null,
-          bufferedTotal: 0,
-          streamController: null,
-          zlibInput: null,
-          chunkBuf: Buffer.alloc(0),
-          chunkState: { phase: "size" },
-          dispatchTimer: undefined,
-          abortHandler: undefined,
-          pendingWrite: null,
-          resolve,
-          reject,
-          releaseSlot,
-          slotReleased: false,
-        };
+      return sendExchange<Response>(
+        hostname,
+        port,
+        path,
+        method,
+        headers,
+        body,
+        signal,
+        dispatchDeadline,
+        releaseSlot,
+        false,
+        tls,
+        headersValidated,
+        onCancelRegister,
+      );
+    },
 
-        const reused = popIdle(origin);
-        const conn: PooledConn = reused ?? {
-          origin,
-          socket: null,
-          connected: false,
-          closed: false,
-          inUse: true,
-          exchange: null,
-          writeBuf: null,
-          writeOffset: 0,
-        };
-        conn.exchange = ex;
-        if (!reused) allConns.add(conn);
-
-        const onAbort = () => {
-          const err = !ex.canHaveDispatched
-            ? notDispatched()
-            : (signal?.reason ?? new Error("Upstream request aborted"));
-          failExchange(conn, ex, err);
-        };
-        if (signal) {
-          ex.abortHandler = onAbort;
-          signal.addEventListener("abort", onAbort, { once: true });
-          if (signal.aborted) {
-            onAbort();
-            return;
-          }
-        }
-
-        const expired = dispatchDeadline !== undefined && !(performance.now() < dispatchDeadline);
-        if (closed || expired) {
-          if (reused) {
-            conn.exchange = null;
-            cleanupExchange(ex);
-            returnToIdle(conn);
-            ex.finished = true;
-            ex.settledHeader = true;
-            reject(notDispatched());
-          } else {
-            failExchange(conn, ex, notDispatched());
-          }
-          return;
-        }
-
-        if (reused) {
-          ex.canHaveDispatched = true;
-          conn.writeBuf = reqBuf;
-          conn.writeOffset = 0;
-          flushWrite(conn);
-          return;
-        }
-
-        ex.pendingWrite = reqBuf;
-        if (dispatchDeadline !== undefined) {
-          ex.dispatchTimer = setTimeout(
-            () => failExchange(conn, ex, notDispatched()),
-            Math.max(0, dispatchDeadline - performance.now()),
-          );
-        }
-
-        void Bun.connect<PooledConn>({
-          hostname,
-          port,
-          data: conn,
-          socket: socketHandlers,
-        }).catch((error) => {
-          const code = String((error as NodeJS.ErrnoException).code ?? "");
-          const wrapped = !LOCAL_ERRNOS.has(code)
-            ? new UpstreamPreDispatchError(
-                "upstream_connect",
-                "Upstream connection failed before dispatch",
-                error,
-              )
-            : error;
-          failExchange(conn, ex, wrapped);
-        });
-      });
+    sendFast(
+      hostname: string,
+      port: number,
+      path: string,
+      method: string,
+      headers: Record<string, string>,
+      body: string | Uint8Array | undefined,
+      signal: AbortSignal | undefined,
+      dispatchDeadline: number | undefined,
+      releaseSlot: () => void,
+      tls?: { serverName?: string; rejectUnauthorized: true },
+      headersValidated = false,
+      onCancelRegister?: CancelRegistrar,
+    ): Promise<FastUpstreamResult> {
+      return sendExchange<FastUpstreamResult>(
+        hostname,
+        port,
+        path,
+        method,
+        headers,
+        body,
+        signal,
+        dispatchDeadline,
+        releaseSlot,
+        true,
+        tls,
+        headersValidated,
+        onCancelRegister,
+      );
     },
 
     close() {

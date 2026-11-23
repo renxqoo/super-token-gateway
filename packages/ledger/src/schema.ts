@@ -494,12 +494,8 @@ export const billingHolds = pgTable(
   "billing_holds",
   {
     requestId: uuid("request_id").primaryKey(),
-    projectId: uuid("project_id")
-      .notNull()
-      .references(() => projects.id),
-    walletId: uuid("wallet_id")
-      .notNull()
-      .references(() => wallets.id),
+    projectId: uuid("project_id").notNull(),
+    walletId: uuid("wallet_id").notNull(),
     operation: text("operation").notNull(),
     model: text("model").notNull(),
     idempotencyKey: text("idempotency_key"),
@@ -512,8 +508,8 @@ export const billingHolds = pgTable(
     supplierHolds: pgJsonb<SupplierHoldEntry[]>("supplier_holds")
       .notNull()
       .default(sql`'[]'::jsonb`),
-    walletLeaseId: uuid("wallet_lease_id").references(() => walletLeases.id),
-    supplierLeaseId: uuid("supplier_lease_id").references(() => supplierLeases.id),
+    walletLeaseId: uuid("wallet_lease_id"),
+    supplierLeaseId: uuid("supplier_lease_id"),
     state: text("state")
       .$type<"HELD" | "SETTLED" | "RELEASED" | "UNKNOWN" | "CONFLICT">()
       .notNull()
@@ -538,23 +534,16 @@ export const billingCharges = pgTable(
   "billing_charges",
   {
     id: uuid("id").primaryKey(),
-    requestId: uuid("request_id")
-      .notNull()
-      .unique()
-      .references(() => billingHolds.requestId),
-    projectId: uuid("project_id")
-      .notNull()
-      .references(() => projects.id),
-    walletId: uuid("wallet_id")
-      .notNull()
-      .references(() => wallets.id),
+    requestId: uuid("request_id").notNull().unique(),
+    projectId: uuid("project_id").notNull(),
+    walletId: uuid("wallet_id").notNull(),
     selectedAttemptId: uuid("selected_attempt_id"),
-    channelId: uuid("channel_id").references(() => channels.id),
+    channelId: uuid("channel_id"),
     model: text("model").notNull(),
     operation: text("operation").notNull(),
     currency: text("currency").notNull(),
-    billingPriceId: uuid("billing_price_id").references(() => priceVersions.id),
-    costVersionId: uuid("cost_version_id").references(() => priceVersions.id),
+    billingPriceId: uuid("billing_price_id"),
+    costVersionId: uuid("cost_version_id"),
     usage: pgJsonb<Usage>("usage")
       .notNull()
       .default(sql`'{}'::jsonb`),
