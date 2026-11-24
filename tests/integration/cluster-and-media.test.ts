@@ -270,6 +270,15 @@ test("HTTP request size and the node body budget are enforced for JSON, multipar
     const transcription = new URL("/v1/audio/transcriptions", server.url);
     const post = (url: URL, body: BodyInit, headers: Record<string, string> = {}) =>
       fetch(url, { method: "POST", headers: { ...auth, ...headers }, body });
+    const compressed = await post(chat, Bun.gzipSync(new TextEncoder().encode(request)), {
+      "content-type": "application/json",
+      "content-encoding": "gzip",
+    });
+    expect(compressed.status).toBe(415);
+    expect(compressed.headers.get("accept-encoding")).toBe("identity");
+    expect(await compressed.json()).toMatchObject({
+      error: { code: "unsupported_content_encoding" },
+    });
     const plain = await post(chat, json, { "content-encoding": "identity" });
     expect(plain.status).toBe(404);
     expect(await plain.json()).toMatchObject({ error: { code: "model_not_found" } });

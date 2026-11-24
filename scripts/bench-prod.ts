@@ -17,6 +17,7 @@ import {
 } from "./bench-mixed.ts";
 import {
   benchmarkConcurrency,
+  benchmarkIngressEnvironment,
   buildPostRequest,
   collectProvenance,
   createFastHttp1BenchClient,
@@ -79,6 +80,7 @@ const verifyOutboxAck =
 const tenantAffinity =
   process.env.BENCH_TENANT_AFFINITY === "1" || process.env.BENCH_TENANT_AFFINITY === "true";
 const useFastClient = process.env.BENCH_FAST_CLIENT !== "0";
+const ingressEnv = benchmarkIngressEnvironment();
 
 async function findFreePort(): Promise<number> {
   return new Promise((resolvePort, rejectPort) => {
@@ -319,7 +321,8 @@ try {
     ACCESS_LOG: accessLog ? "true" : "false",
     SNAPSHOT_POLL_MS: "2000",
     MAX_IN_FLIGHT: String(maxInFlight),
-    DB_MAX_CONNECTIONS: "32",
+    DB_MAX_CONNECTIONS: process.env.BENCH_DB_MAX_CONNECTIONS ?? "32",
+    ...ingressEnv,
     MICRO_BATCH_WINDOW_MS: process.env.BENCH_BATCH_WINDOW_MS ?? "2",
     MICRO_BATCH_MAX_SIZE: process.env.BENCH_BATCH_MAX_SIZE ?? "256",
     MOCK_HOST: "127.0.0.1",
@@ -1033,6 +1036,8 @@ try {
             sync_standby: syncStandby,
             verify_outbox_ack: verifyOutboxAck,
             tenant_affinity: tenantAffinity,
+            db_max_connections_per_gateway: Number(baseEnv.DB_MAX_CONNECTIONS),
+            ingress: ingressEnv,
           },
           ...(replicationState ? { pg_sync_replication: replicationState } : {}),
           micro_batch: {

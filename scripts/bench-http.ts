@@ -7,6 +7,19 @@ import type { SQL } from "bun";
 
 export type BenchTarget = { host: string; port: number };
 
+export function benchmarkIngressEnvironment(env = process.env): Record<string, string> {
+  const settings: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (
+      value !== undefined &&
+      /^BENCH_(?:INGRESS_[A-Z_]+|MAX_BODY_BYTES|BODY_READ_TIMEOUT_MS)$/.test(name)
+    ) {
+      settings[name.slice("BENCH_".length)] = value;
+    }
+  }
+  return settings;
+}
+
 export function benchmarkConcurrency(raw: string | undefined, fallback: number[]): number[] {
   if (!raw) return fallback;
   const values = raw.split(",").map(Number);

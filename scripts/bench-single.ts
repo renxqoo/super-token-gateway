@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { createDatabase } from "@gateway/ledger";
 import {
   benchmarkConcurrency,
+  benchmarkIngressEnvironment,
   buildPostRequest,
   collectProvenance,
   createFastHttp1BenchClient,
@@ -27,6 +28,7 @@ const jsonConcurrency = benchmarkConcurrency(
 );
 const maxSockets = Math.max(2048, ...jsonConcurrency);
 const profileDir = process.env.BENCH_CPU_PROFILE_DIR;
+const ingressEnv = benchmarkIngressEnvironment();
 const upstreamDelayMs = Number(process.env.BENCH_UPSTREAM_DELAY_MS ?? 0);
 const maxInFlight = Number(process.env.BENCH_MAX_IN_FLIGHT ?? Math.max(4000, ...jsonConcurrency));
 const accessLog = process.env.BENCH_ACCESS_LOG === "1" || process.env.BENCH_ACCESS_LOG === "true";
@@ -146,7 +148,8 @@ try {
     ACCESS_LOG: accessLog ? "true" : "false",
     SNAPSHOT_POLL_MS: "0",
     MAX_IN_FLIGHT: String(maxInFlight),
-    DB_MAX_CONNECTIONS: "32",
+    DB_MAX_CONNECTIONS: process.env.BENCH_DB_MAX_CONNECTIONS ?? "32",
+    ...ingressEnv,
     MICRO_BATCH_WINDOW_MS: process.env.BENCH_BATCH_WINDOW_MS ?? "2",
     MICRO_BATCH_MAX_SIZE: process.env.BENCH_BATCH_MAX_SIZE ?? "512",
     GATEWAY_HOST: "127.0.0.1",
@@ -544,6 +547,8 @@ try {
             upstream_delay_ms: upstreamDelayMs,
             access_log: accessLog,
             upstream_tls: upstreamTls,
+            db_max_connections: Number(env.DB_MAX_CONNECTIONS),
+            ingress: ingressEnv,
           },
           micro_batch: {
             window_ms: Number(env.MICRO_BATCH_WINDOW_MS),
