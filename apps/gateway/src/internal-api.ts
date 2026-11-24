@@ -54,6 +54,8 @@ import {
 import {
   createKey,
   encrypt,
+  PROJECT_API_KEY_LENGTH,
+  PROJECT_API_KEY_PATTERN,
   validateAuthCredentials,
   validateBaseUrl,
   validateCidr,
@@ -393,6 +395,17 @@ const wasmProviderConfigSchema = z
 
 const sourceRevisionSchema = z.number().int().min(1).max(2_147_483_647).optional();
 
+const consoleOrganizationAdmissionSchema = z
+  .object({
+    suspended: z.boolean(),
+    source_revision: z.number().int().min(1).max(2_147_483_647),
+  })
+  .strict();
+
+const consoleProjectBindingSchema = z
+  .object({ organization_id: z.uuid(), console_project_id: z.uuid() })
+  .strict();
+
 const upsertProjectSchema = z
   .object({
     id: z.uuid().optional(),
@@ -412,7 +425,7 @@ const upsertApiKeySchema = z
     id: z.uuid().optional(),
     project_id: z.uuid(),
     name: z.string().min(1).max(120).default("default"),
-    raw_key: z.string().min(16).max(256).optional(),
+    raw_key: z.string().length(PROJECT_API_KEY_LENGTH).regex(PROJECT_API_KEY_PATTERN).optional(),
     role: z.enum(["ADMIN", "BILLING", "INVOKER", "VIEWER"]).default("INVOKER"),
     allowed_cidrs: z.array(z.string().min(2).max(64)).max(100).default([]),
     models: z.array(z.string().min(1).max(150)).max(1000).default([]),
@@ -1047,6 +1060,7 @@ export function createInternalApi(deps: {
         "plugin_revision_conflict",
         "plugin_release_conflict",
         "stale_revision",
+        "console_project_binding_conflict",
         "price_version_conflict",
         "reconcile_required_conflict",
         "insufficient_balance",
@@ -1085,7 +1099,7 @@ export function createInternalApi(deps: {
   jsonRoute("PUT", "/internal/v1/projects", "catalog", upsertProjectSchema, async (c, body) => {
     const rec = await deps.catalog.upsertProject({
       ...(body.id ? { id: body.id } : {}),
-      external_ref: body.external_ref ?? null,
+      ...(body.external_ref !== undefined ? { external_ref: body.external_ref } : {}),
       name: body.name,
       currency: body.currency,
       rpm: body.rpm,
@@ -1097,6 +1111,37 @@ export function createInternalApi(deps: {
     await onConfigUpdated(rec.config_epoch);
     return c.json(rec);
   });
+
+  jsonRoute(
+    "PUT",
+    "/internal/v1/console/organizations/:organizationId/admission",
+    "security",
+    consoleOrganizationAdmissionSchema,
+    async (c, body) => {
+      const id = parseUuid(c.req.param("organizationId"), "organizationId");
+      return c.json(
+        await deps.catalog.setConsoleOrganizationAdmission(
+          id,
+          body.suspended,
+          body.source_revision,
+        ),
+      );
+    },
+  );
+
+  jsonRoute(
+    "PUT",
+    "/internal/v1/console/projects/:projectId/binding",
+    "security",
+    consoleProjectBindingSchema,
+    async (c, body) => {
+      const id = parseUuid(c.req.param("projectId"), "projectId");
+      const ref = `console:org:${body.organization_id.toLowerCase()}:project:${body.console_project_id.toLowerCase()}`;
+      const result = await deps.catalog.bindConsoleProject(id, ref);
+      if (result.config_epoch !== undefined) await onConfigUpdated(result.config_epoch);
+      return c.json(result);
+    },
+  );
 
   jsonRoute("PUT", "/internal/v1/api-keys", "security", upsertApiKeySchema, async (c, body) => {
     const validatedCidrs = body.allowed_cidrs.map((cidr) => validateCidr(cidr));

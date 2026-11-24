@@ -128,6 +128,23 @@ test("GatewayClient sends least-privilege role tokens and maps timeout, auth, no
     code: "gateway_timeout",
   } satisfies Partial<GatewayError>);
 
+  const bodyTimeoutClient = new GatewayClient({
+    baseUrl: "http://gateway.internal",
+    tokens: { ops: "tok-ops" },
+    fetchImpl: async () =>
+      new Response(
+        new ReadableStream({
+          pull(controller) {
+            controller.error(new DOMException("Response timed out", "TimeoutError"));
+          },
+        }),
+      ),
+  });
+  await expect(bodyTimeoutClient.getHealth()).rejects.toMatchObject({
+    status: 504,
+    code: "gateway_timeout",
+  });
+
   const authErrorClient = new GatewayClient({
     baseUrl: "http://gateway.internal",
     tokens: { ops: "tok-ops" },
@@ -147,4 +164,10 @@ test("GatewayClient sends least-privilege role tokens and maps timeout, auth, no
     status: 502,
     code: "gateway_invalid_response",
   } satisfies Partial<GatewayError>);
+});
+
+test("disabling webhook delivery leaves alert evaluation enabled by default", () => {
+  const config = loadConsoleConfigFromEnv({ ...baseEnv, CONSOLE_ALERT_DELIVERY_INTERVAL_MS: "0" });
+  expect(config.alertDeliveryIntervalMs).toBe(0);
+  expect(config.alertEvaluationIntervalMs).toBeGreaterThan(0);
 });

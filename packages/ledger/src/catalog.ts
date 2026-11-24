@@ -111,6 +111,75 @@ export function createCatalogRepository(db: SQL) {
       };
     },
 
+    async setConsoleOrganizationAdmission(
+      organizationId: string,
+      suspended: boolean,
+      revision: number,
+    ) {
+      const rows = await db`
+        INSERT INTO public.console_organization_admission (organization_id, suspended, source_revision)
+        VALUES (${organizationId}, ${suspended}, ${revision})
+        ON CONFLICT (organization_id) DO UPDATE SET
+          suspended = EXCLUDED.suspended,
+          source_revision = EXCLUDED.source_revision
+        WHERE console_organization_admission.source_revision < EXCLUDED.source_revision
+           OR (console_organization_admission.source_revision = EXCLUDED.source_revision
+               AND console_organization_admission.suspended = EXCLUDED.suspended)
+        RETURNING source_revision
+      `;
+      if (!rows[0])
+        throw new DomainError(
+          "stale_revision",
+          "Organization admission revision conflicts with Gateway",
+        );
+      return { source_revision: revision };
+    },
+
+    async getConsoleAdmission(
+      organizationId: string,
+      externalRef: string,
+      projectId: string,
+      keyId: string,
+    ) {
+      const [row] = await db<
+        {
+          project_enabled: boolean;
+          key_enabled: boolean;
+          suspended: boolean;
+        }[]
+      >`SELECT p.enabled AS project_enabled,
+          k.enabled AND (k.expires_at IS NULL OR k.expires_at > now()) AS key_enabled,
+          coalesce(o.suspended, false) AS suspended
+        FROM public.projects p
+        JOIN public.api_keys k ON k.project_id = p.id AND k.id = ${keyId}
+        LEFT JOIN public.console_organization_admission o ON o.organization_id = ${organizationId}
+        WHERE p.id = ${projectId} AND p.external_ref = ${externalRef}`;
+      return row;
+    },
+
+    async bindConsoleProject(projectId: string, externalRef: string) {
+      return orm.transaction(async (tx) => {
+        const [project] = await tx
+          .select({ externalRef: projects.externalRef })
+          .from(projects)
+          .where(eq(projects.id, projectId))
+          .for("update");
+        if (!project) throw new DomainError("not_found", "Gateway project does not exist");
+        if (project.externalRef === externalRef) return { bound: false };
+        if (project.externalRef !== null) {
+          throw new DomainError(
+            "console_project_binding_conflict",
+            "Gateway project already has another external reference",
+          );
+        }
+        await tx
+          .update(projects)
+          .set({ externalRef, updatedAt: sql`now()` })
+          .where(eq(projects.id, projectId));
+        return { bound: true, config_epoch: await bumpEpoch(tx) };
+      });
+    },
+
     async upsertProject(input: {
       id?: string;
       external_ref?: string | null;
@@ -127,6 +196,13 @@ export function createCatalogRepository(db: SQL) {
       const externalRef = input.external_ref ?? null;
       const enabled = input.enabled ?? true;
       const sourceRev = input.source_revision;
+      const bindingChangeAllowed = sql`(${projects.externalRef} IS NULL
+        OR ${projects.externalRef} NOT LIKE 'console:org:%'
+        OR ${projects.externalRef} IS NOT DISTINCT FROM ${externalRef})`;
+      const canUpdate = and(
+        sourceRev !== undefined ? sql`${projects.sourceRevision} <= ${sourceRev}` : undefined,
+        input.external_ref !== undefined ? bindingChangeAllowed : undefined,
+      );
       return orm.transaction(async (tx) => {
         const rows = await tx
           .insert(projects)
@@ -143,11 +219,12 @@ export function createCatalogRepository(db: SQL) {
           })
           .onConflictDoUpdate({
             target: projects.id,
-            ...(sourceRev !== undefined
-              ? { setWhere: sql`${projects.sourceRevision} <= ${sourceRev}` }
-              : {}),
+            ...(canUpdate ? { setWhere: canUpdate } : {}),
             set: {
-              externalRef,
+              externalRef:
+                input.external_ref !== undefined
+                  ? externalRef
+                  : sql`CASE WHEN ${projects.externalRef} LIKE 'console:org:%' THEN ${projects.externalRef} ELSE NULL END`,
               name: input.name,
               currency,
               rpm: input.rpm,
@@ -160,6 +237,20 @@ export function createCatalogRepository(db: SQL) {
           })
           .returning();
         if (!rows[0]) {
+          const [existing] = await tx
+            .select({ externalRef: projects.externalRef })
+            .from(projects)
+            .where(eq(projects.id, id));
+          if (
+            input.external_ref !== undefined &&
+            existing?.externalRef?.startsWith("console:org:") &&
+            existing.externalRef !== externalRef
+          ) {
+            throw new DomainError(
+              "console_project_binding_conflict",
+              "Console project organization binding is immutable",
+            );
+          }
           throw new DomainError(
             "stale_revision",
             "Incoming project revision is older than current Gateway revision",

@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, eq, gt, isNull, sql } from "drizzle-orm";
 import { GatewayError } from "@gateway/contracts";
 import {
   consoleAuditLogs,
@@ -65,7 +65,8 @@ export async function burnDummyPasswordVerify(password: string): Promise<void> {
 export function maskSecret(secret: string): string {
   const trimmed = secret.trim();
   if (!trimmed) return "";
-  if (trimmed.length <= 8) return `${trimmed.slice(0, 2)}***`;
+  if (trimmed.length <= 2) return "***";
+  if (trimmed.length <= 12) return `${trimmed.slice(0, 2)}***`;
   return `${trimmed.slice(0, 6)}***${trimmed.slice(-4)}`;
 }
 
@@ -228,7 +229,8 @@ export function isSafePublicWebhookUrl(raw: string): boolean {
 
 export async function assertPublicWebhookDns(
   rawUrl: string,
-  lookupImpl: typeof lookup = lookup,
+  lookupImpl: (hostname: string) => Promise<{ address: string }[]> = (hostname) =>
+    lookup(hostname, { all: true }),
 ): Promise<string[]> {
   if (!isSafePublicWebhookUrl(rawUrl)) {
     throw new GatewayError(
@@ -249,7 +251,7 @@ export async function assertPublicWebhookDns(
     }
     return [normalizedIp];
   }
-  const records = await lookupImpl(host, { all: true, verbatim: true });
+  const records = await lookupImpl(host);
   if (!records || records.length === 0) {
     throw new GatewayError(502, "webhook_dns_failed", "Webhook hostname did not resolve");
   }
@@ -268,8 +270,48 @@ export async function assertPublicWebhookDns(
   return resolved;
 }
 
+export async function fetchPublicWebhook(
+  rawUrl: string,
+  init: RequestInit,
+  send: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch,
+  resolve: typeof assertPublicWebhookDns = assertPublicWebhookDns,
+): Promise<Response> {
+  const signal = init.signal;
+  signal?.throwIfAborted();
+  const pending = resolve(rawUrl);
+  const addresses = signal
+    ? await new Promise<string[]>((resolveAddresses, reject) => {
+        const abort = () => reject(signal.reason);
+        signal.addEventListener("abort", abort, { once: true });
+        pending
+          .then(resolveAddresses, reject)
+          .finally(() => signal.removeEventListener("abort", abort));
+      })
+    : await pending;
+  signal?.throwIfAborted();
+  const host = new URL(rawUrl);
+  const originalHostname = host.hostname.replace(/^\[|\]$/g, "");
+  const address = addresses.find((ip) => isIP(ip) === 4) ?? addresses[0]!;
+  const headers = new Headers(init.headers);
+  headers.set("host", host.host);
+  host.hostname = isIP(address) === 6 ? `[${address}]` : address;
+  const pinnedInit: BunFetchRequestInit = {
+    ...init,
+    headers,
+    redirect: "manual",
+    proxy: false,
+    tls: {
+      rejectUnauthorized: true,
+      ...(isIP(originalHostname) === 0 ? { serverName: originalHostname } : {}),
+    },
+  };
+  return send(host, pinnedInit);
+}
+
 export class LoginRateLimiter {
   private readonly buckets = new Map<string, number[]>();
+  private readonly activeAttempts = new Map<string, number>();
+  private activePasswordWork = 0;
 
   constructor(
     private readonly maxAttempts = 10,
@@ -301,7 +343,7 @@ export class LoginRateLimiter {
     this.pruneExpiredAll(now);
     if (this.buckets.size < this.maxKeys) return true;
     for (const [k, arr] of this.buckets) {
-      if (arr.length < this.maxAttempts) {
+      if (arr.length < this.maxAttempts && !this.activeAttempts.has(k)) {
         this.buckets.delete(k);
         return true;
       }
@@ -311,7 +353,7 @@ export class LoginRateLimiter {
 
   check(key: string, now = Date.now()): void {
     const kept = this.prune(key, now);
-    if (kept.length >= this.maxAttempts) {
+    if (kept.length + (this.activeAttempts.get(key) ?? 0) >= this.maxAttempts) {
       throw new GatewayError(429, "too_many_attempts", "Too many failed login attempts");
     }
     if (!this.buckets.has(key) && this.buckets.size >= this.maxKeys) {
@@ -333,6 +375,39 @@ export class LoginRateLimiter {
   reset(key: string): void {
     this.buckets.delete(key);
   }
+
+  async runPasswordWork<T>(work: () => Promise<T>): Promise<T> {
+    if (this.activePasswordWork >= 4) {
+      throw new GatewayError(429, "too_many_attempts", "Authentication is busy");
+    }
+    this.activePasswordWork++;
+    try {
+      return await work();
+    } finally {
+      this.activePasswordWork--;
+    }
+  }
+
+  async verifyAttempt<T>(
+    keys: string[],
+    verify: () => Promise<T | undefined>,
+  ): Promise<T | undefined> {
+    return this.runPasswordWork(async () => {
+      for (const key of keys) this.check(key);
+      for (const key of keys) this.activeAttempts.set(key, (this.activeAttempts.get(key) ?? 0) + 1);
+      try {
+        const result = await verify();
+        if (result === undefined) for (const key of keys) this.recordFailure(key);
+        return result;
+      } finally {
+        for (const key of keys) {
+          const remaining = this.activeAttempts.get(key)! - 1;
+          if (remaining === 0) this.activeAttempts.delete(key);
+          else this.activeAttempts.set(key, remaining);
+        }
+      }
+    });
+  }
 }
 
 export function extractBearerToken(headerValue: string | undefined): string | null {
@@ -340,6 +415,25 @@ export function extractBearerToken(headerValue: string | undefined): string | nu
   if (!headerValue.toLowerCase().startsWith("bearer ")) return null;
   const token = headerValue.slice(7).trim();
   return token || null;
+}
+
+export function assertAccountCanUseScope(
+  user: Pick<AuthUser, "status" | "isPlatformAdmin">,
+  scope: SessionScope,
+): void {
+  if (user.status !== "ACTIVE") {
+    throw new GatewayError(403, "account_suspended", "User account is suspended");
+  }
+  if (scope === "ADMIN" && !user.isPlatformAdmin) {
+    throw new GatewayError(403, "forbidden", "Platform administrator privileges required");
+  }
+  if (scope === "CLIENT" && user.isPlatformAdmin) {
+    throw new GatewayError(
+      403,
+      "forbidden",
+      "Platform administrator accounts must authenticate on the Admin API",
+    );
+  }
 }
 
 export async function authenticateSession(
@@ -374,12 +468,7 @@ export async function authenticateSession(
     .limit(1);
   const row = rows[0];
   if (!row) throw new GatewayError(401, "unauthorized", "Invalid or expired session");
-  if (row.status !== "ACTIVE") {
-    throw new GatewayError(403, "account_suspended", "User account is suspended");
-  }
-  if (expectedScope === "ADMIN" && !row.isPlatformAdmin) {
-    throw new GatewayError(403, "forbidden", "Platform administrator privileges required");
-  }
+  assertAccountCanUseScope(row, expectedScope);
   return {
     id: row.userId,
     email: row.email,
@@ -402,6 +491,7 @@ export async function requireOrgMember(
       role: orgMembers.role,
       orgKind: organizations.kind,
       orgStatus: organizations.status,
+      inferenceReady: sql<boolean>`${organizations.inferenceRevision} = ${organizations.inferenceSyncedRevision}`,
     })
     .from(orgMembers)
     .innerJoin(organizations, eq(organizations.id, orgMembers.orgId))
@@ -409,7 +499,7 @@ export async function requireOrgMember(
     .limit(1);
   const member = rows[0];
   if (!member) throw new GatewayError(404, "not_found", "Organization not found");
-  if (member.orgStatus !== "ACTIVE") {
+  if (member.orgStatus !== "ACTIVE" || !member.inferenceReady) {
     throw new GatewayError(403, "org_suspended", "Organization is suspended");
   }
   if (allowedRoles && !allowedRoles.includes(member.role)) {
@@ -430,6 +520,7 @@ export async function requireProjectAccess(
       role: orgMembers.role,
       orgKind: organizations.kind,
       orgStatus: organizations.status,
+      inferenceReady: sql<boolean>`${organizations.inferenceRevision} = ${organizations.inferenceSyncedRevision}`,
     })
     .from(projects)
     .innerJoin(organizations, eq(organizations.id, projects.orgId))
@@ -438,7 +529,7 @@ export async function requireProjectAccess(
     .limit(1);
   const row = rows[0];
   if (!row) throw new GatewayError(404, "not_found", "Project not found");
-  if (row.orgStatus !== "ACTIVE") {
+  if (row.orgStatus !== "ACTIVE" || !row.inferenceReady) {
     throw new GatewayError(403, "org_suspended", "Organization is suspended");
   }
   if (allowedRoles && !allowedRoles.includes(row.role)) {

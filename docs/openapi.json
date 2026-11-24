@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Super Token Gateway",
-    "version": "2026112303",
+    "version": "2026112401",
     "description": "Public and internal routes use separate listeners. Inference payloads and success responses depend on the endpoint protocol and provider adapter."
   },
   "paths": {
@@ -91,6 +91,18 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
+          },
           "default": {
             "description": "Gateway error",
             "content": {
@@ -174,6 +186,18 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
+          },
           "default": {
             "description": "Gateway error",
             "content": {
@@ -256,6 +280,18 @@
                 }
               }
             }
+          },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
           },
           "default": {
             "description": "Gateway error",
@@ -343,6 +379,18 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
+          },
           "default": {
             "description": "Gateway error",
             "content": {
@@ -425,6 +473,18 @@
                 }
               }
             }
+          },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
           },
           "default": {
             "description": "Gateway error",
@@ -509,6 +569,18 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
+          },
           "default": {
             "description": "Gateway error",
             "content": {
@@ -592,6 +664,18 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
+          },
           "default": {
             "description": "Gateway error",
             "content": {
@@ -674,6 +758,18 @@
                 }
               }
             }
+          },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
           },
           "default": {
             "description": "Gateway error",
@@ -764,6 +860,18 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
+          },
           "default": {
             "description": "Gateway error",
             "content": {
@@ -846,6 +954,18 @@
                 }
               }
             }
+          },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
           },
           "default": {
             "description": "Gateway error",
@@ -936,6 +1056,18 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
+          },
           "default": {
             "description": "Gateway error",
             "content": {
@@ -1025,6 +1157,18 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
+          },
           "default": {
             "description": "Gateway error",
             "content": {
@@ -1107,6 +1251,18 @@
                 }
               }
             }
+          },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
           },
           "default": {
             "description": "Gateway error",
@@ -1191,6 +1347,18 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
+          },
           "default": {
             "description": "Gateway error",
             "content": {
@@ -1246,6 +1414,18 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
+          },
           "default": {
             "description": "Gateway error",
             "content": {
@@ -1300,6 +1480,18 @@
                 "schema": {}
               }
             }
+          },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
           },
           "default": {
             "description": "Gateway error",
@@ -1392,6 +1584,18 @@
                 }
               }
             }
+          },
+          "413": {
+            "$ref": "#/components/responses/BodyTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedRequestEncoding"
+          },
+          "429": {
+            "$ref": "#/components/responses/IngressRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/IngressUnavailable"
           },
           "default": {
             "description": "Gateway error",
@@ -1626,6 +1830,166 @@
         }
       }
     },
+    "/internal/v1/console/organizations/{organizationId}/admission": {
+      "put": {
+        "x-stg-listener": "internal",
+        "x-stg-role": "security",
+        "security": [
+          {
+            "internalBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "organizationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "suspended": {
+                    "type": "boolean"
+                  },
+                  "source_revision": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  }
+                },
+                "required": ["suspended", "source_revision"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/console/projects/{projectId}/binding": {
+      "put": {
+        "x-stg-listener": "internal",
+        "x-stg-role": "security",
+        "security": [
+          {
+            "internalBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "organization_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "console_project_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": ["organization_id", "console_project_id"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/internal/v1/api-keys": {
       "put": {
         "x-stg-listener": "internal",
@@ -1660,8 +2024,9 @@
                   },
                   "raw_key": {
                     "type": "string",
-                    "minLength": 16,
-                    "maxLength": 256
+                    "minLength": 46,
+                    "maxLength": 46,
+                    "pattern": "^sk_[A-Za-z0-9_-]{43}$"
                   },
                   "role": {
                     "default": "INVOKER",
@@ -9127,6 +9492,44 @@
     }
   },
   "components": {
+    "responses": {
+      "BodyTooLarge": {
+        "description": "The request exceeds the configured body size limit"
+      },
+      "UnsupportedRequestEncoding": {
+        "description": "Unsupported request Content-Encoding",
+        "headers": {
+          "Accept-Encoding": {
+            "schema": {
+              "type": "string",
+              "const": "identity"
+            }
+          }
+        }
+      },
+      "IngressRateLimited": {
+        "description": "The IP, project, or upstream request quota is exhausted",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      },
+      "IngressUnavailable": {
+        "description": "An admission dependency or resource is unavailable",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
     "securitySchemes": {
       "projectBearer": {
         "type": "http",

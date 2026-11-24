@@ -8,6 +8,7 @@ import {
 } from "node:zlib";
 import { GatewayError } from "@gateway/contracts";
 import { UpstreamPreDispatchError } from "./http-pool.ts";
+import type { DialPermit, createDialScheduler } from "./dial-scheduler.ts";
 
 const HEADER_END = Buffer.from("\r\n\r\n");
 const CRLF = Buffer.from("\r\n");
@@ -34,6 +35,21 @@ export type FastUpstreamResult =
   | { fast: false; response: Response };
 
 export type CancelRegistrar = (onCancel: (reason: unknown) => void) => () => void;
+
+export function connectionFailure(tls: boolean, cause?: unknown): UpstreamPreDispatchError {
+  const code = (cause as NodeJS.ErrnoException | undefined)?.code ?? "";
+  return LOCAL_ERRNOS.has(code)
+    ? new UpstreamPreDispatchError(
+        "upstream_capacity",
+        "Local upstream socket capacity exceeded",
+        cause,
+      )
+    : new UpstreamPreDispatchError(
+        tls ? "upstream_tls" : "upstream_connect",
+        "Upstream connection failed before dispatch",
+        cause,
+      );
+}
 
 export function isValidHttpHeaderName(name: string): boolean {
   const len = name.length;
@@ -125,6 +141,7 @@ type ActiveExchange = {
   dispatchTimer: ReturnType<typeof setTimeout> | undefined;
   abortHandler: (() => void) | undefined;
   cancelDetach: (() => void) | undefined;
+  dialAbort?: AbortController;
   pendingWrite: string | Buffer | null;
   pendingWriteBytes: number;
   fastMode: boolean;
@@ -147,7 +164,17 @@ type PooledConn = {
   writeBuf: string | Buffer | null;
   writeBytes: number;
   writeOffset: number;
+  finishDial?: (() => void) | undefined;
 };
+
+export type OutboundReservation = {
+  take(): { idle: PooledConn | null; dial: DialPermit | null } | undefined;
+  release(): void;
+};
+
+function poolOrigin(host: string, port: number, tls?: { serverName?: string }) {
+  return tls ? `tls:${host}:${port}:${tls.serverName ?? ""}` : `${host}:${port}`;
+}
 
 function notDispatched(): UpstreamPreDispatchError {
   return new UpstreamPreDispatchError(
@@ -398,9 +425,11 @@ export function createBunHttp1Pool(
   maxIdle: number,
   sseFraming: WeakMap<Response, "chunked" | number>,
   bufferedBodies: WeakMap<Response, Uint8Array>,
+  dialScheduler: ReturnType<typeof createDialScheduler>,
 ) {
   const idleByOrigin = new Map<string, PooledConn[]>();
   const idleOrder = new Map<PooledConn, number>();
+  const reuseWaiters = new Map<string, Set<(connection: PooledConn) => boolean>>();
   const allConns = new Set<PooledConn>();
   let sweepTimer: ReturnType<typeof setInterval> | undefined;
   let closed = false;
@@ -459,6 +488,12 @@ export function createBunHttp1Pool(
       destroyConn(conn);
       return;
     }
+    const waiting = reuseWaiters.get(conn.origin);
+    if (waiting) {
+      for (const offer of waiting) {
+        if (offer(conn)) return;
+      }
+    }
     conn.inUse = false;
     conn.exchange = null;
     let list = idleByOrigin.get(conn.origin);
@@ -494,7 +529,83 @@ export function createBunHttp1Pool(
     return null;
   };
 
+  function reservation(idle: PooledConn | null, dial: DialPermit | null): OutboundReservation {
+    let available = true;
+    return {
+      take() {
+        if (!available) return undefined;
+        available = false;
+        return { idle, dial };
+      },
+      release() {
+        if (!available) return;
+        available = false;
+        if (idle) returnToIdle(idle);
+        dial?.release();
+      },
+    };
+  }
+
+  function reserve(
+    host: string,
+    port: number,
+    tls: { serverName?: string } | undefined,
+    bytes: number,
+    signal?: AbortSignal | null,
+    deadline?: number,
+  ): OutboundReservation | Promise<OutboundReservation> {
+    if (closed || signal?.aborted || (deadline !== undefined && performance.now() >= deadline)) {
+      throw notDispatched();
+    }
+    const origin = poolOrigin(host, port, tls);
+    const idle = popIdle(origin);
+    if (idle) return reservation(idle, null);
+    const reuse = new AbortController();
+    const waitSignal = signal ? AbortSignal.any([signal, reuse.signal]) : reuse.signal;
+    const dial = dialScheduler.acquire(JSON.stringify([host, port]), bytes, waitSignal, deadline);
+    if (!(dial instanceof Promise)) return reservation(null, dial);
+    return new Promise((resolve, reject) => {
+      let queue = reuseWaiters.get(origin);
+      if (!queue) {
+        queue = new Set();
+        reuseWaiters.set(origin, queue);
+      }
+      const waiting = queue;
+      const remove = () => {
+        if (!waiting.delete(offer)) return false;
+        if (!waiting.size) reuseWaiters.delete(origin);
+        return true;
+      };
+      const offer = (connection: PooledConn) => {
+        if (waitSignal.aborted || (deadline !== undefined && performance.now() >= deadline)) {
+          remove();
+          reject(notDispatched());
+          return false;
+        }
+        if (!remove()) return false;
+        connection.inUse = true;
+        resolve(reservation(connection, null));
+        reuse.abort();
+        return true;
+      };
+      waiting.add(offer);
+      void dial.then(
+        (permit) => {
+          if (remove()) resolve(reservation(null, permit));
+          else permit.release();
+        },
+        (error) => {
+          if (remove()) reject(error);
+        },
+      );
+    });
+  }
+
   const cleanupExchange = (ex: ActiveExchange) => {
+    ex.dialAbort?.abort();
+    delete ex.dialAbort;
+    ex.pendingWrite = null;
+    ex.pendingWriteBytes = 0;
     if (ex.dispatchTimer) {
       clearTimeout(ex.dispatchTimer);
       ex.dispatchTimer = undefined;
@@ -1115,6 +1226,7 @@ export function createBunHttp1Pool(
   const socketHandlers: Bun.SocketHandler<PooledConn> = {
     open(socket) {
       const conn = socket.data;
+      if (!conn.isTls) conn.finishDial?.();
       if (closed || conn.closed) {
         terminateSocket(socket);
         return;
@@ -1126,6 +1238,7 @@ export function createBunHttp1Pool(
     },
     handshake(socket, authorized, authorizationError) {
       const conn = socket.data;
+      conn.finishDial?.();
       if (closed || conn.closed) {
         terminateSocket(socket);
         return;
@@ -1212,6 +1325,7 @@ export function createBunHttp1Pool(
     },
     close(socket) {
       const conn = socket.data;
+      conn.finishDial?.();
       const ex = conn.exchange;
       if (!ex || ex.finished) {
         destroyConn(conn);
@@ -1223,10 +1337,7 @@ export function createBunHttp1Pool(
         return;
       }
       const err = !ex.canHaveDispatched
-        ? new UpstreamPreDispatchError(
-            conn.isTls ? "upstream_tls" : "upstream_connect",
-            "Upstream connection failed before dispatch",
-          )
+        ? connectionFailure(conn.isTls)
         : new Error("Upstream connection closed");
       failExchange(conn, ex, err);
     },
@@ -1237,33 +1348,18 @@ export function createBunHttp1Pool(
         destroyConn(conn);
         return;
       }
-      const code = String((error as NodeJS.ErrnoException).code ?? "");
-      const wrapped =
-        !ex.canHaveDispatched && !LOCAL_ERRNOS.has(code)
-          ? new UpstreamPreDispatchError(
-              conn.isTls ? "upstream_tls" : "upstream_connect",
-              "Upstream connection failed before dispatch",
-              error,
-            )
-          : error;
+      const wrapped = !ex.canHaveDispatched ? connectionFailure(conn.isTls, error) : error;
       failExchange(conn, ex, wrapped);
     },
     connectError(socket, error) {
       const conn = socket.data;
+      conn.finishDial?.();
       const ex = conn.exchange;
       if (!ex || ex.finished) {
         destroyConn(conn);
         return;
       }
-      const code = String((error as NodeJS.ErrnoException).code ?? "");
-      const wrapped = !LOCAL_ERRNOS.has(code)
-        ? new UpstreamPreDispatchError(
-            conn.isTls ? "upstream_tls" : "upstream_connect",
-            "Upstream connection failed before dispatch",
-            error,
-          )
-        : error;
-      failExchange(conn, ex, wrapped);
+      failExchange(conn, ex, connectionFailure(conn.isTls, error));
     },
   };
 
@@ -1281,14 +1377,13 @@ export function createBunHttp1Pool(
     tls?: { serverName?: string; rejectUnauthorized: true },
     headersValidated = false,
     onCancelRegister?: CancelRegistrar,
+    outbound?: OutboundReservation,
   ): Promise<T> {
     const built = buildRequestBuffer(method, path, headers, body, headersValidated);
     const reqBuf = built.payload;
     const reqBytes = built.byteLength;
     const isTls = tls !== undefined;
-    const origin = isTls
-      ? `tls:${hostname}:${port}:${tls.serverName ?? ""}`
-      : `${hostname}:${port}`;
+    const origin = poolOrigin(hostname, port, tls);
     return new Promise<T>((resolve, reject) => {
       const ex: ActiveExchange = {
         method,
@@ -1325,8 +1420,14 @@ export function createBunHttp1Pool(
         slotReleased: false,
       };
 
-      const reused = popIdle(origin);
-      const conn: PooledConn = reused ?? {
+      const taken = outbound?.take();
+      if (outbound && !taken) {
+        releaseSlot();
+        reject(notDispatched());
+        return;
+      }
+      const reused = taken?.idle && !taken.idle.closed ? taken.idle : popIdle(origin);
+      let conn: PooledConn = reused ?? {
         origin,
         isTls,
         verifyHost: isTls ? tls.serverName || hostname : "",
@@ -1341,6 +1442,15 @@ export function createBunHttp1Pool(
       };
       conn.exchange = ex;
       if (!reused) allConns.add(conn);
+      if (reused) taken?.dial?.release();
+      const dial = taken?.dial;
+      if (dial && !reused) {
+        const release = ex.releaseSlot;
+        ex.releaseSlot = () => {
+          dial.release();
+          release();
+        };
+      }
 
       const triggerAbort = (reason: unknown) => {
         const err = !ex.canHaveDispatched
@@ -1395,27 +1505,86 @@ export function createBunHttp1Pool(
         );
       }
 
-      void Bun.connect<PooledConn>({
-        hostname,
-        port,
-        ...(isTls ? { tls: { rejectUnauthorized: true, serverName: tls.serverName ?? "" } } : {}),
-        data: conn,
-        socket: socketHandlers,
-      }).catch((error) => {
-        const code = String((error as NodeJS.ErrnoException).code ?? "");
-        const wrapped = !LOCAL_ERRNOS.has(code)
-          ? new UpstreamPreDispatchError(
-              isTls ? "upstream_tls" : "upstream_connect",
-              "Upstream connection failed before dispatch",
-              error,
-            )
-          : error;
-        failExchange(conn, ex, wrapped);
-      });
+      const startDial = (permit: DialPermit) => {
+        delete ex.dialAbort;
+        if (ex.finished) {
+          permit.release();
+          return;
+        }
+        const finished = permit.start();
+        if (!finished) {
+          permit.release();
+          failExchange(conn, ex, notDispatched());
+          return;
+        }
+        conn.finishDial = () => {
+          delete conn.finishDial;
+          finished();
+        };
+        const onError = (error: unknown) => {
+          conn.finishDial?.();
+          failExchange(conn, ex, connectionFailure(isTls, error));
+        };
+        try {
+          void Bun.connect<PooledConn>({
+            hostname,
+            port,
+            ...(isTls
+              ? { tls: { rejectUnauthorized: true, serverName: tls.serverName ?? "" } }
+              : {}),
+            data: conn,
+            socket: socketHandlers,
+          }).catch(onError);
+        } catch (error) {
+          onError(error);
+        }
+      };
+      if (dial) {
+        startDial(dial);
+        return;
+      }
+      ex.dialAbort = new AbortController();
+      const onWaitFailure = (error: unknown) => failExchange(conn, ex, error);
+      const useReservation = (outbound: OutboundReservation) => {
+        if (ex.finished) {
+          outbound.release();
+          return;
+        }
+        const acquired = outbound.take()!;
+        if (acquired.dial) {
+          startDial(acquired.dial);
+        } else if (acquired.idle && !acquired.idle.closed) {
+          conn.exchange = null;
+          destroyConn(conn);
+          conn = acquired.idle;
+          conn.exchange = ex;
+          dispatchAfterReady(conn);
+        } else {
+          waitForConnection();
+        }
+      };
+      function waitForConnection() {
+        try {
+          const ticket = reserve(
+            hostname,
+            port,
+            tls,
+            reqBytes,
+            ex.dialAbort?.signal,
+            dispatchDeadline,
+          );
+          if (ticket instanceof Promise) void ticket.then(useReservation, onWaitFailure);
+          else useReservation(ticket);
+        } catch (error) {
+          onWaitFailure(error);
+        }
+      }
+      waitForConnection();
     });
   }
 
   return {
+    reserve,
     send(
       hostname: string,
       port: number,
@@ -1429,6 +1598,7 @@ export function createBunHttp1Pool(
       tls?: { serverName?: string; rejectUnauthorized: true },
       headersValidated = false,
       onCancelRegister?: CancelRegistrar,
+      outbound?: OutboundReservation,
     ): Promise<Response> {
       return sendExchange<Response>(
         hostname,
@@ -1444,6 +1614,7 @@ export function createBunHttp1Pool(
         tls,
         headersValidated,
         onCancelRegister,
+        outbound,
       );
     },
 
@@ -1460,6 +1631,7 @@ export function createBunHttp1Pool(
       tls?: { serverName?: string; rejectUnauthorized: true },
       headersValidated = false,
       onCancelRegister?: CancelRegistrar,
+      outbound?: OutboundReservation,
     ): Promise<FastUpstreamResult> {
       return sendExchange<FastUpstreamResult>(
         hostname,
@@ -1475,6 +1647,7 @@ export function createBunHttp1Pool(
         tls,
         headersValidated,
         onCancelRegister,
+        outbound,
       );
     },
 
@@ -1488,7 +1661,11 @@ export function createBunHttp1Pool(
       for (const conn of allConns) {
         const ex = conn.exchange;
         if (ex && !ex.finished) {
-          failExchange(conn, ex, new Error("Upstream transport closed"));
+          failExchange(
+            conn,
+            ex,
+            ex.canHaveDispatched ? new Error("Upstream transport closed") : notDispatched(),
+          );
         } else {
           destroyConn(conn);
         }

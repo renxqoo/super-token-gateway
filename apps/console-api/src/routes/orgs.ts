@@ -267,15 +267,28 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
     const rawToken = generateOpaqueToken("stg_inv_");
     const inviteId = crypto.randomUUID();
     const expiresAt = new Date(Date.now() + 7 * 24 * 3_600_000);
-    await deps.orm.insert(orgInvitations).values({
-      id: inviteId,
-      orgId,
-      email,
-      role: body.role,
-      tokenHash: sha256Hex(rawToken),
-      invitedBy: user.id,
-      status: "PENDING",
-      expiresAt,
+    await deps.orm.transaction(async (tx) => {
+      await tx
+        .update(orgInvitations)
+        .set({ status: "EXPIRED" })
+        .where(
+          and(
+            eq(orgInvitations.orgId, orgId),
+            sql`lower(${orgInvitations.email}) = ${email}`,
+            eq(orgInvitations.status, "PENDING"),
+            sql`${orgInvitations.expiresAt} <= now()`,
+          ),
+        );
+      await tx.insert(orgInvitations).values({
+        id: inviteId,
+        orgId,
+        email,
+        role: body.role,
+        tokenHash: sha256Hex(rawToken),
+        invitedBy: user.id,
+        status: "PENDING",
+        expiresAt,
+      });
     });
     await recordAuditLog(deps.orm, {
       actor: user,
@@ -356,11 +369,14 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
         );
       }
       const [org] = await tx
-        .select({ status: organizations.status })
+        .select({
+          status: organizations.status,
+          inferenceReady: sql<boolean>`${organizations.inferenceRevision} = ${organizations.inferenceSyncedRevision}`,
+        })
         .from(organizations)
         .where(eq(organizations.id, inv.orgId))
         .limit(1);
-      if (!org || org.status !== "ACTIVE") {
+      if (!org || org.status !== "ACTIVE" || !org.inferenceReady) {
         throw new GatewayError(403, "org_suspended", "Organization is suspended");
       }
       const existing = await tx

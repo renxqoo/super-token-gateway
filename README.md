@@ -1,6 +1,6 @@
 # Super Token Gateway
 
-企业级高性能 LLM Gateway 与微批核心账本系统，基于 **Bun 1.4.4 / TypeScript + Hono + PostgreSQL 17 + 极薄 Rust `wasmtime` 插件沙箱**，单一架构无双轨遗留。业务系统（未来 `apps/business`）与网关/账本物理分离，仅通过幂等内部 HTTP API 与异步 Outbox 协作。
+企业级高性能 LLM Gateway 与微批核心账本系统，基于 **Bun 1.4.5 / TypeScript + Hono + PostgreSQL 17 + 极薄 Rust `wasmtime` 插件沙箱**。控制台业务面使用独立 PostgreSQL 数据库，通过内部 HTTP API 与异步 Outbox 与网关协作。控制台能力、数据流和运行边界见 [Console API](docs/console-api.md)。
 
 架构与核心账本分片租约见 [ADR 0009](docs/decisions/0009-enterprise-gateway-worker-architecture.md)。插件定义、显式绑定、发布和迁移见 [ADR 0012](docs/decisions/0012-plugin-revisions-and-provider-verification.md)。
 
@@ -12,6 +12,7 @@
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `apps/gateway`                 | 高性能无状态公开网关（Chat/Responses/Messages/Gemini/Embeddings/Moderations/Images/Audio、`/livez`、`/readyz`、Prometheus 直方图 `/metrics`、`traceparent` 链路追踪、零明文 JSON 访问日志）+ Zod 严格校验 `/internal/v1/*` 管理与分页对账 API                  |
 | `apps/worker`                  | 后台账务与调度 Worker（PG Advisory Lease 选主、超时预扣与过期节点租约扫尾 `sweepExpiredLeases`、批次过期、自动收债、供应商分片再平衡、Outbox 推送）                                                                                                            |
+| `apps/console-api`             | 客户与平台管理 API、组织和项目权限、模型市场、账务查询、用量投影和告警，独立 PostgreSQL 持久化                                                                                                                                                                 |
 | `apps/mock-providers`          | 独立测试用上游替身（OpenAI / Anthropic / Gemini / Azure / Bedrock / Vertex / DeepSeek / Ollama）                                                                                                                                                               |
 | `packages/ledger`              | 精简 PG 核心账本：`drizzle-orm/bun-sql` 强类型 Schema（23 张表 1:1 零漂移）/目录 CRUD/Outbox/归档/分页对账查询 + 原生 `Bun.SQL` 自适应 PG 分片资金租约（`wallet_leases`/`supplier_leases`）、2 ms 微批与 9 表单 CTE 原子结算热路径                             |
 | `packages/protocol`            | 多协议无损透传、跨协议转换（含 `reasoning`/`thinking` 互通、strict/compat 策略表、`x-gateway-dropped-fields` 提示与协议原生错误封包）、有界 SSE 流解析、精确 JSON 快速路径与精确计量                                                                           |
@@ -38,7 +39,7 @@
    - 首字节前自动无感故障切换：原子释放失败通道供应商预扣、为更贵备选路由补足客户预扣、`retry_on_ambiguous` 超时切换保留旧渠道 `UNKNOWN` 风险占位；绝不重复向客户扣款；首字节后流式中断永不拼接其他模型输出，客户端主动断流不误伤上游健康度。
 3. **企业级内容处理与风控插件（`packages/plugin-engine` + 内置 `pii-guard`）**：
    - WASM 插件唯一运行于原生 Rust `wasmtime` FFI 池化沙箱（零 Host Import、`catch_unwind` FFI 边界、紧致 `PoolingAllocationConfig`、精确指令级 Fuel 与 `ResourceLimiter` 内存硬上限、`sha256` 完整性 + Ed25519 签名缓存校验；生产模式强制要求 `PLUGIN_SIGNING_PUBLIC_KEY_PEM` 并启动自检）。内容与渠道插件使用双隔离执行池、租户公平 `egress > ingress` 队列与长文本动态 Fuel/分段滑窗扫描。
-   - **内置完整可用插件 `pii-guard` v1.0.0**（`native/builtin-pii-guard` 以 `opt-level = 3` 编译为零导入 `.wasm`）：覆盖 `on_request` / `on_response` / `on_stream_chunk` / `on_stream_end` 全生命周期，单趟扫描阻断 PEM 私钥泄露与 Prompt 注入，原位脱敏 API Key（`sk-*`）、AWS Key（`AKIA*`）、GitHub Token（`ghp_`/`gho_`/`ghu_`/`ghs_`）、邮箱、中国 18 位身份证（GB 11643-1999 校验码）、中国 11 位手机号、美国 SSN 与 Luhn 有效银行卡号；支持 `/internal/v1/plugins/builtins` 发现、`POST /internal/v1/plugins/builtins/pii-guard/install` 创建草稿、`GET /internal/v1/plugins` 列表及 `POST /internal/v1/plugins/:id/test` 沙箱试跑。
+   - **内置完整可用插件 `pii-guard` v1.0.1**（`native/builtin-pii-guard` 以 `opt-level = 3` 编译为零导入 `.wasm`）：覆盖 `on_request` / `on_response` / `on_stream_chunk` / `on_stream_end` 全生命周期，单趟扫描阻断 PEM 私钥泄露与 Prompt 注入，原位脱敏 API Key（`sk_*`、`sk-*`）、AWS Key（`AKIA*`）、GitHub Token（`ghp_`/`gho_`/`ghu_`/`ghs_`）、邮箱、中国 18 位身份证（GB 11643-1999 校验码）、中国 11 位手机号、美国 SSN 与 Luhn 有效银行卡号；支持 `/internal/v1/plugins/builtins` 发现、`POST /internal/v1/plugins/builtins/pii-guard/install` 创建草稿、`GET /internal/v1/plugins` 列表及 `POST /internal/v1/plugins/:id/test` 沙箱试跑。
    - 外部 HTTP Webhook 风控支持 `HOLD_UNTIL_APPROVED`（零违规字节泄漏）与 `STREAM_AND_CUTOFF`（边推边检异步截断上游并精确按策略结算），支持 `manifest.hooks` 精准过滤、单插件并发上限、有界响应体上限、`HALF_OPEN` 单探针熔断恢复、注册与调用全链路 SSRF/DNS-Pinning 校验及 `FAIL_CLOSED` / `FAIL_OPEN` 降级策略。
    - 显式三分故障分类（`content_decision` / `plugin_fault` / `host_capacity`）：内容拦截按路由/插件配置执行 `CHARGE_CUSTOMER`（默认）或 `PLATFORM_ABSORB`；插件故障或容量耗尽在 `FAIL_CLOSED` 下绝不向客户扣费（上游后置场景自动 `PLATFORM_ABSORB` 且受每租户预算保护）且绝不触发上游渠道熔断；`FAIL_OPEN` 放行正文时正常计费并写入 `fail_open: true` 审计与指标。流式和非流式审计都写入 `billing_charges.plugin_audit`。
 
@@ -87,6 +88,10 @@ bun dist/worker/main.js
 ```
 
 Docker Compose 提供单主机验证环境，要求显式设置数据库密码及 Gateway 密钥。Systemd 和 Caddy 是主机内运行模板。生产拓扑需要独立故障域的入口与 Gateway、可写 PostgreSQL 主备切换地址、独立数据库角色及容灾演练。配置共享 Redis 时，Redis 不可用会影响准入和就绪检查。
+
+Console 的独立部署方式、数据库角色、Gateway 联动和发布验收见 [Console API 部署与验收](docs/console-api.md#部署与验收)。
+
+Gateway 项目 API Key 采用 `sk_` 加 43 位 Base64URL 字符。部署后旧格式 Key 会收到 HTTP 401，升级时须签发或轮换并更新客户端配置。部署中若路由依赖 `pii-guard` 脱敏，请在分发新 Key 前安装、发布并确认路由已应用 v1.0.1。发布沿用 [插件修订流程](docs/decisions/0012-plugin-revisions-and-provider-verification.md#已交付的管理操作)。
 
 旧 v4 账本先备份并停写，再运行 `bun run db:migrate` 或独立迁移产物。升级保留历史迁移记录，应用启动检查已应用的校验和。运行时只读副本无法通过就绪探测。跨 schema 版本的发布使用停写窗口。
 

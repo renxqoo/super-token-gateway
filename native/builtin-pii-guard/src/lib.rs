@@ -334,18 +334,20 @@ fn match_api_key(b: &[u8], i: usize) -> Option<(usize, &'static str)> {
     if i > 0 && is_word_byte(b[i - 1]) {
         return None;
     }
-    match b[i] {
-        b's' => {
-            if b[i..].starts_with(b"sk-") {
-                let mut end = i + 3;
-                while end < b.len() && is_token_byte(b[end]) {
-                    end += 1;
-                }
-                if end - (i + 3) >= 20 {
-                    return Some((end, "[REDACTED_API_KEY]"));
-                }
-            }
+    let api_key_min_len = match b.get(i..i + 3) {
+        Some(b"sk-") => Some(20),
+        Some(b"sk_") => Some(43),
+        _ => None,
+    };
+    if let Some(min_len) = api_key_min_len {
+        let start = i + 3;
+        let mut end = start;
+        while end < b.len() && is_token_byte(b[end]) {
+            end += 1;
         }
+        return (end - start >= min_len).then_some((end, "[REDACTED_API_KEY]"));
+    }
+    match b[i] {
         b'A' => {
             if b[i..].starts_with(b"AKIA") && i + 20 <= b.len() {
                 let valid = b[i + 4..i + 20]

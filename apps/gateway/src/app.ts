@@ -30,6 +30,7 @@ import {
 } from "@gateway/runtime";
 import { createWorkerRunner } from "@gateway/worker";
 import type { GatewayConfig } from "./config.ts";
+import { createConsoleAdmissionCheck } from "./console-admission.ts";
 import {
   handleCancelAsyncTask,
   handleGetAsyncTask,
@@ -44,6 +45,8 @@ import {
   type ProxyDependencies,
 } from "./proxy.ts";
 import { ProxyRuntimeState } from "./proxy-state.ts";
+import { createBodyBufferBudget, createPublicIngress } from "./public-ingress.ts";
+import { createPressureMonitor } from "./resource-pressure.ts";
 import { SnapshotManager } from "./snapshot.ts";
 
 export type GatewayRuntimeOptions = {
@@ -70,11 +73,17 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     ? createDatabase(config.internalDatabaseUrl, config.internalDbMaxConnections ?? 4)
     : db;
   const catalog = createCatalogRepository(snapshotDb);
+  const checkConsoleAdmission = createConsoleAdmissionCheck(
+    (snapshotDb === db ? catalog : createCatalogRepository(db)).getConsoleAdmission,
+  );
   const queries = createLedgerQueries(db);
   const nodeId = crypto.randomUUID();
   const metrics = new GatewayMetrics(config.accessLog ?? false);
 
-  const transport = createTransport(Math.max(1024, Math.min(65535, config.maxInFlight)));
+  const transport = createTransport(
+    Math.max(1024, Math.min(65535, config.maxInFlight)),
+    config.upstreamDial ? { dial: config.upstreamDial } : undefined,
+  );
   const vertexTokens = new VertexTokens((url, init) =>
     transport.fetch(url, init, config.allowPrivateUpstreams, config.privateUpstreamCidrs),
   );
@@ -149,12 +158,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     ...options.routerOptions,
     onStateChange(event) {
       externalOnStateChange?.(event);
-      clusterRef?.publishCircuitEvent({
-        channel_id: event.channel_id,
-        state: event.state,
-        open_duration_ms: event.open_duration_ms,
-        cooldown_duration_ms: event.cooldown_duration_ms,
-      });
+      clusterRef?.publishCircuitEvent(event);
     },
   });
 
@@ -164,12 +168,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     ...(config.redisNamespace ? { namespace: config.redisNamespace } : {}),
     ...(config.redisSentinel ? { sentinel: config.redisSentinel } : {}),
     onCircuitEvent(event) {
-      router.applyRemoteEvent({
-        channel_id: event.channel_id,
-        state: event.state,
-        open_duration_ms: event.open_duration_ms,
-        cooldown_duration_ms: event.cooldown_duration_ms,
-      });
+      router.applyRemoteEvent(event);
     },
     onConfigEpoch(event) {
       void snapshot.refreshTo(event.epoch).catch(() => {
@@ -219,6 +218,14 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   });
   const lifecycle = new Lifecycle(config.maxInFlight);
   const proxyState = new ProxyRuntimeState();
+  const pressure = config.ingressPressure
+    ? createPressureMonitor(config.ingressPressure)
+    : undefined;
+  const ingress = createPublicIngress(config, cluster, pressure);
+  const bodyBufferBudget =
+    config.ingressBodyBufferBytes === undefined
+      ? undefined
+      : createBodyBufferBudget(config.ingressBodyBufferBytes);
   const asyncTasks = createAsyncTasksRepository(db);
   const controlLedger =
     controlDb === db
@@ -231,6 +238,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
 
   const proxyDeps: ProxyDependencies = {
     config,
+    checkConsoleAdmission,
     snapshot,
     ledger,
     asyncTasks,
@@ -243,10 +251,12 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     lifecycle,
     metrics,
     state: proxyState,
+    ...(bodyBufferBudget ? { bodyBufferBudget } : {}),
   };
 
   const asyncTaskDeps: AsyncTaskHandlerDeps = {
     config,
+    checkConsoleAdmission,
     snapshot,
     asyncTasks,
     controlLedger,
@@ -261,7 +271,10 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
 
   publicApp.get("/livez", (c) => c.json({ status: "ok" }));
 
-  async function readiness(): Promise<string> {
+  let databaseProbe: Promise<string> | undefined;
+  let databaseReadiness: { status: string; expiresAt: number } | undefined;
+
+  function localReadinessFailure(): string | undefined {
     if (snapshot.isDiverged()) {
       return "config_diverged";
     }
@@ -271,6 +284,9 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     if (config.redisUrl && !cluster.isRedisConnected()) {
       return "rate_limit_unavailable";
     }
+  }
+
+  async function probeDatabase(): Promise<string> {
     try {
       const [database] = await db`SELECT NOT pg_is_in_recovery()
         AND current_setting('transaction_read_only') = 'off' AS writable`;
@@ -278,6 +294,24 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     } catch {
       return "db_unavailable";
     }
+  }
+
+  async function readiness(): Promise<string> {
+    const localFailure = localReadinessFailure();
+    if (localFailure) return localFailure;
+    if (databaseReadiness && databaseReadiness.expiresAt > performance.now()) {
+      return databaseReadiness.status;
+    }
+    databaseProbe ??= probeDatabase()
+      .then((status) => {
+        databaseReadiness = { status, expiresAt: performance.now() + 250 };
+        return status;
+      })
+      .finally(() => {
+        databaseProbe = undefined;
+      });
+    const status = await databaseProbe;
+    return localReadinessFailure() ?? status;
   }
 
   publicApp.get("/readyz", async (c) => {
@@ -311,7 +345,12 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
           : null,
       webhookStats: webhookExecutor.stats?.() ?? null,
     });
-    return new Response(text, {
+    const ingressMetrics = [
+      ...ingress.metrics(),
+      ...(pressure?.metrics() ?? []),
+      ...(bodyBufferBudget?.metrics() ?? []),
+    ];
+    return new Response(`${text.trimEnd()}\n${ingressMetrics.join("\n")}\n`, {
       headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
     });
   }
@@ -323,10 +362,19 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     return env?.peerAddress ?? env?.getPeerAddress;
   };
 
-  publicApp.get("/v1/models", (c) => {
+  publicApp.get("/v1/models", async (c) => {
     try {
       const snap = snapshot.get();
-      const { key } = authenticateRequest(c, snap, config, undefined, peerOf(c), proxyState);
+      const { key, project } = authenticateRequest(
+        c,
+        snap,
+        config,
+        undefined,
+        peerOf(c),
+        proxyState,
+      );
+      const check = checkConsoleAdmission(project, key);
+      if (check) await check;
       const data = [...snap.models.values()]
         .filter((m) => m.enabled && (key.models.length === 0 || key.models.includes(m.name)))
         .map((m) => ({ id: m.name, object: "model", owned_by: "gateway" }));
@@ -488,27 +536,33 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     req: Request,
     env?: { peerAddress?: string; getPeerAddress?: () => string | undefined },
   ): Response | Promise<Response> {
-    if (req.method === "POST") {
-      const url = req.url;
-      const schemeIdx = url.indexOf("://");
-      const pathStart = schemeIdx === -1 ? 0 : url.indexOf("/", schemeIdx + 3);
-      if (pathStart !== -1) {
-        const queryStart = url.indexOf("?", pathStart);
-        const pathname =
-          queryStart === -1 ? url.slice(pathStart) : url.slice(pathStart, queryStart);
-        const op = staticInferenceRoutes.get(pathname);
-        if (op) {
-          return handleInferenceRequest(
-            fastContext(req),
-            proxyDeps,
-            op,
-            undefined,
-            env?.peerAddress ?? env?.getPeerAddress,
-          );
-        }
-      }
+    const url = req.url;
+    const scheme = url.indexOf("://");
+    const pathStart = scheme === -1 ? 0 : url.indexOf("/", scheme + 3);
+    if (pathStart === -1) return publicApp.fetch(req, env);
+    const queryStart = url.indexOf("?", pathStart);
+    const pathname = queryStart === -1 ? url.slice(pathStart) : url.slice(pathStart, queryStart);
+    if (pathname === "/livez" || pathname === "/readyz" || pathname === "/metrics") {
+      return publicApp.fetch(req, env);
     }
-    return publicApp.fetch(req, env);
+    const operation = req.method === "POST" ? staticInferenceRoutes.get(pathname) : undefined;
+    const peer = env?.peerAddress ?? env?.getPeerAddress;
+    const requestPeer = config.ingressIp && typeof peer === "function" ? peer() : peer;
+    const denial = ingress.admit(
+      req,
+      operation ?? (pathname.startsWith("/v1beta/") ? "gemini" : "chat"),
+      requestPeer,
+    );
+    const dispatch = () =>
+      operation
+        ? handleInferenceRequest(fastContext(req), proxyDeps, operation, undefined, requestPeer)
+        : publicApp.fetch(
+            req,
+            typeof requestPeer === "string" ? { peerAddress: requestPeer } : env,
+          );
+    return denial instanceof Promise
+      ? denial.then((response) => response ?? dispatch())
+      : (denial ?? dispatch());
   }
 
   return {
@@ -552,9 +606,11 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       await cluster.start();
       await snapshot.start();
       if (worker) await worker.start();
+      pressure?.start();
     },
 
     async close(drainMs = 5000): Promise<void> {
+      pressure?.stop();
       const draining = lifecycle.drain(drainMs);
       await draining;
       proxyState.close();

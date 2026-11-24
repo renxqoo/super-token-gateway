@@ -1,5 +1,5 @@
 import { createPublicKey } from "node:crypto";
-import { validateCidr } from "@gateway/runtime";
+import { validateCidr, type TransportOptions } from "@gateway/runtime";
 import { loadInternalCredentials, type InternalCredentials } from "./internal-auth.ts";
 
 export type GatewayConfig = {
@@ -27,6 +27,28 @@ export type GatewayConfig = {
   privateUpstreamCidrs: string[];
   trustedProxyCidrs: string[];
   maxInFlight: number;
+  ingressIp?: {
+    mode: "observe" | "enforce";
+    windowMs: number;
+    maxRequests: number;
+    nodeMaxRequests: number;
+    maxPending: number;
+    timeoutMs: number;
+  };
+  ingressPressure?: {
+    mode: "observe" | "enforce";
+    sampleMs: number;
+    staleMs: number;
+    highSamples: number;
+    recoverySamples: number;
+    cpuHigh: number;
+    cpuRecovery: number;
+    memoryHigh: number;
+    memoryRecovery: number;
+    memoryCritical: number;
+  };
+  ingressBodyBufferBytes?: number;
+  upstreamDial?: TransportOptions["dial"];
   maxBodyBytes: number;
   bodyReadTimeoutMs?: number;
   reusePort?: boolean;
@@ -85,6 +107,67 @@ function intFromEnv(
     throw new Error(`${name} must be an integer between ${min} and ${max}`);
   }
   return value;
+}
+
+function loadIngressConfig(env: Record<string, string | undefined>, maxBodyBytes: number) {
+  const required = (name: string, max = 2_147_483_647) => {
+    if (env[name] === undefined)
+      throw new Error(`${name} is required when ingress protection is enabled`);
+    return intFromEnv(env, name, 0, 1, max);
+  };
+  function mode(name: string): "observe" | "enforce" | undefined {
+    const value = env[name];
+    if (value === undefined || value === "off") return undefined;
+    if (value === "observe" || value === "enforce") return value;
+    throw new Error(`${name} must be off, observe or enforce`);
+  }
+  const ipMode = mode("INGRESS_IP_MODE");
+  const pressureMode = mode("INGRESS_PRESSURE_MODE");
+  if (ipMode && !env.REDIS_URL) throw new Error("Ingress IP quota requires REDIS_URL");
+  const ingressIp = ipMode && {
+    mode: ipMode,
+    windowMs: required("INGRESS_IP_WINDOW_MS"),
+    maxRequests: required("INGRESS_IP_MAX_REQUESTS"),
+    nodeMaxRequests: required("INGRESS_IP_NODE_MAX_REQUESTS"),
+    maxPending: required("INGRESS_IP_MAX_PENDING"),
+    timeoutMs: required("INGRESS_IP_TIMEOUT_MS"),
+  };
+  const ingressPressure = pressureMode && {
+    mode: pressureMode,
+    sampleMs: required("INGRESS_PRESSURE_SAMPLE_MS"),
+    staleMs: required("INGRESS_PRESSURE_STALE_MS"),
+    highSamples: required("INGRESS_PRESSURE_HIGH_SAMPLES"),
+    recoverySamples: required("INGRESS_PRESSURE_RECOVERY_SAMPLES"),
+    cpuHigh: required("INGRESS_CPU_HIGH_PERCENT", 100),
+    cpuRecovery: required("INGRESS_CPU_RECOVERY_PERCENT", 100),
+    memoryHigh: required("INGRESS_MEMORY_HIGH_PERCENT", 100),
+    memoryRecovery: required("INGRESS_MEMORY_RECOVERY_PERCENT", 100),
+    memoryCritical: required("INGRESS_MEMORY_CRITICAL_PERCENT", 100),
+  };
+  if (
+    ingressPressure &&
+    (ingressPressure.staleMs <= ingressPressure.sampleMs ||
+      ingressPressure.cpuRecovery >= ingressPressure.cpuHigh ||
+      ingressPressure.memoryRecovery >= ingressPressure.memoryHigh ||
+      ingressPressure.memoryHigh >= ingressPressure.memoryCritical)
+  ) {
+    throw new Error("Ingress pressure thresholds or sampling intervals are out of order");
+  }
+  return {
+    ...(ingressIp ? { ingressIp } : {}),
+    ...(ingressPressure ? { ingressPressure } : {}),
+    ...(env.INGRESS_BODY_BUFFER_BYTES !== undefined
+      ? {
+          ingressBodyBufferBytes: intFromEnv(
+            env,
+            "INGRESS_BODY_BUFFER_BYTES",
+            0,
+            maxBodyBytes,
+            Number.MAX_SAFE_INTEGER,
+          ),
+        }
+      : {}),
+  };
 }
 
 export function loadConfigFromEnv(
@@ -167,6 +250,7 @@ export function loadConfigFromEnv(
   if (absorbAtoms !== undefined && !/^[1-9][0-9]{0,37}$/.test(absorbAtoms)) {
     throw new Error("PLATFORM_ABSORB_MAX_ATOMS_PER_MINUTE must be a positive integer");
   }
+  const maxBodyBytes = intFromEnv(env, "MAX_BODY_BYTES", 10 * 1024 * 1024);
   return {
     mode,
     host: env.GATEWAY_HOST ?? "0.0.0.0",
@@ -198,7 +282,14 @@ export function loadConfigFromEnv(
     privateUpstreamCidrs: parseCsv(env.PRIVATE_UPSTREAM_CIDRS),
     trustedProxyCidrs: parseCsv(env.TRUSTED_PROXY_CIDRS),
     maxInFlight: intFromEnv(env, "MAX_IN_FLIGHT", 2000),
-    maxBodyBytes: intFromEnv(env, "MAX_BODY_BYTES", 10 * 1024 * 1024),
+    upstreamDial: {
+      concurrency: intFromEnv(env, "UPSTREAM_DIAL_CONCURRENCY", 16, 1, 65_535),
+      startsPerSecond: intFromEnv(env, "UPSTREAM_DIAL_RPS", 400, 1, 65_535),
+      maxQueueWaitMs: intFromEnv(env, "UPSTREAM_DIAL_QUEUE_WAIT_MS", 10_000),
+      maxQueueBytes: intFromEnv(env, "UPSTREAM_DIAL_QUEUE_BYTES", 64 * 1024 * 1024),
+    },
+    maxBodyBytes,
+    ...loadIngressConfig(env, maxBodyBytes),
     ...(env.BODY_READ_TIMEOUT_MS !== undefined
       ? { bodyReadTimeoutMs: intFromEnv(env, "BODY_READ_TIMEOUT_MS", 15_000) }
       : {}),

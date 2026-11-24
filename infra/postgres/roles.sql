@@ -29,6 +29,8 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, stg_data, stg_control,
 GRANT SELECT ON public.schema_migrations TO stg_data, stg_control, stg_worker, stg_audit;
 GRANT SELECT ON public.config_epoch, public.projects, public.api_keys, public.upstream_accounts,
   public.plugins, public.channels, public.models, public.price_versions, public.project_pricing_overrides, public.routes TO stg_data, stg_control;
+GRANT SELECT ON public.console_organization_admission TO stg_data, stg_control;
+GRANT INSERT, UPDATE ON public.console_organization_admission TO stg_control;
 GRANT SELECT, INSERT, UPDATE ON public.async_tasks TO stg_data, stg_worker;
 GRANT SELECT, UPDATE ON public.async_tasks TO stg_control;
 GRANT SELECT ON public.async_tasks TO stg_audit;

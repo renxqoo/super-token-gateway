@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, count, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
 import { recordAuditLog } from "../auth.ts";
@@ -259,21 +259,38 @@ export function createAdminOpsRoutes(deps: ConsoleDeps) {
     const actor = c.get("user");
     const orgId = parseUuid(c.req.param("orgId"), "orgId");
     const body = await parseJsonBody(c, updateOrgStatusSchema);
-    const [updated] = await deps.orm
-      .update(organizations)
-      .set({ status: body.status, updatedAt: sql`now()` })
-      .where(eq(organizations.id, orgId))
-      .returning();
-    if (!updated) throw new GatewayError(404, "not_found", "Organization not found");
+    const { inferenceRevision, inferenceSyncedRevision, inferenceTargetStatus, ...organization } =
+      await deps.sync.changeOrganizationStatus(orgId, body.status);
+    const pending = inferenceRevision !== inferenceSyncedRevision;
     await recordAuditLog(deps.orm, {
       actor,
       orgId,
       action: "admin.org.update",
       targetType: "organization",
       targetId: orgId,
-      metadata: body,
+      metadata: {
+        status: body.status,
+        inference_revision: inferenceRevision,
+        inference_sync_pending: pending,
+      },
     });
-    return c.json(updated);
+    return c.json(
+      {
+        ...organization,
+        requested_status: inferenceTargetStatus,
+        inference_revision: inferenceRevision,
+        inference_sync_pending: pending,
+      },
+      pending ? 202 : 200,
+    );
+  });
+
+  app.get("/sync/organizations", async (c) => {
+    const [row] = await deps.orm
+      .select({ pending: count() })
+      .from(organizations)
+      .where(lt(organizations.inferenceSyncedRevision, organizations.inferenceRevision));
+    return c.json({ pending: row?.pending ?? 0 });
   });
 
   app.get("/projects", async (c) => {

@@ -48,7 +48,23 @@ Gateway 使用稳定的 PostgreSQL 写入口，切换前应隔离旧主连接。
 
 生产 Gateway 在私网管理监听提供 `/metrics`，公开监听提供业务 `/readyz`。Worker 在健康端口提供 `/metrics`。用相同的 `stg_cluster` 标签聚合共享一个账本的实例。采集所有 Gateway 和 Worker 实例，以独立外部探针检查负载均衡地址。 [Prometheus 配置](../../infra/monitoring/prometheus.yml)
 
+同一 Gateway 节点的就绪与指标请求共用一次在途的 PostgreSQL 写入口探测。探测结束后复用结果 250 毫秒，限制探针流量给数据库带来的查询压力。排空、配置快照不可用或 Redis 断连即时反映在就绪结果中。
+
 规则覆盖就绪、5xx、P99、快照、共享配额、结算失败、行政审计、Worker 选主、账务清扫、过期预扣与租约、未明账、Outbox 与采集缺样本。未明账按原预扣到期时间估算账龄。Outbox 以启用的业务 Webhook 消费者游标之后的首个事件时间作为积压指标。告警阈值是随仓库提供的初值，生产使用业务批准的 SLO 并在发布前验证 Alertmanager 接收端收到测试告警。 [规则](../../infra/monitoring/alerts.yml) · [行为测试](../../infra/monitoring/alerts.test.yml) · [Prometheus 告警规则文档](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/)
+
+## 公网路由和视频任务准入
+
+Caddy 公网模板按 HTTP 方法转发 Gateway 的公开路径，包括音乐生成和视频创建、查询、取消。管理接口和指标路径保持在私网监听。已有 `caddy:2-alpine` Docker 镜像时，运行 `bun --no-env-file scripts/verify-gateway-ingress.ts`，通过临时 Caddy 和本地上游夹具核对 OpenAPI 公开路径的转发及私网路径的拒绝。 [Caddy 配置](../../infra/Caddyfile)
+
+视频任务查询和取消验证项目凭证与组织状态后，在读取任务之前先取得项目配额。正常查询、未找到的查询、已完成任务的查询以及取消操作使用同一个项目的 RPM、TPM 和并发额度，与推理共享配额。超限返回 `429`，共享配额不可用返回 `503`。跨项目请求在取得配额后仍返回 `404`。
+
+公网业务入口在读取请求体前检查节点压力和 IP 配额。配置可信代理时，Gateway 从连接对端和可信转发链解析地址。生产仅应信任实际连接 Gateway 的代理及由它验证的上游转发链。健康路径和私网监听不消耗业务 IP 配额。
+
+IP 限流由 `INGRESS_IP_MODE` 控制，支持 `off`、`observe` 和 `enforce`。启用时需要配置 `REDIS_URL`、`INGRESS_IP_WINDOW_MS`、`INGRESS_IP_MAX_REQUESTS`、`INGRESS_IP_NODE_MAX_REQUESTS`、`INGRESS_IP_MAX_PENDING` 和 `INGRESS_IP_TIMEOUT_MS`。节点有界准入后，Redis 原子计数并返回窗口剩余时间。超额返回 `429 ip_rate_limited`，Redis 不可用、等待超时或节点入口饱和返回 `503`。观测模式只记录这些决策。入口配额使用独立连接，在等待超时时关闭该连接并释放待处理额度，后续请求可在已确认的主节点上重连。主备切换可能丢失尚未复制的计数。
+
+资源保护由 `INGRESS_PRESSURE_MODE` 控制，沿用相同的三个模式。启用时显式配置 `INGRESS_PRESSURE_SAMPLE_MS`、`INGRESS_PRESSURE_STALE_MS`、`INGRESS_PRESSURE_HIGH_SAMPLES`、`INGRESS_PRESSURE_RECOVERY_SAMPLES`、`INGRESS_CPU_HIGH_PERCENT`、`INGRESS_CPU_RECOVERY_PERCENT`、`INGRESS_MEMORY_HIGH_PERCENT`、`INGRESS_MEMORY_RECOVERY_PERCENT` 和 `INGRESS_MEMORY_CRITICAL_PERCENT`。从 Linux cgroup v2 采样。超限时阻止新业务准入，放行既有请求收尾。缺少有效限额时保留固定并发基线，已经触发的保护需要有效恢复样本才能解除。采样状态与拒绝原因可通过私网指标观察。
+
+公开业务仅接受未编码或单独标记为 `identity` 的请求体，其他 `Content-Encoding` 返回 `415 unsupported_content_encoding` 及 `Accept-Encoding: identity`。`MAX_BODY_BYTES` 和 `BODY_READ_TIMEOUT_MS` 继续负责单请求上限。设置 `INGRESS_BODY_BUFFER_BYTES` 后，推理请求在读取前按请求体字节数预留节点总缓冲额度，未知长度按单请求上限预留。超时或断连时取消读取，处理结束时归还额度。流式请求在流终态时释放。预算用尽返回 `503 request_body_capacity_unavailable`。预算衡量原始请求体字节，解析和派生对象的内存由资源压力监控覆盖。
 
 ## 容量配比与 PostgreSQL 存储调优
 
@@ -75,6 +91,16 @@ Gateway 使用稳定的 PostgreSQL 写入口，切换前应隔离旧主连接。
 - 持续监控 `pg_stat_checkpointer` 的 `num_requested`、`write_time`、`sync_time`、`buffers_written`：稳态运行期间应以 timed checkpoint 为主，`num_requested` 接近 0，且 checkpoint 刷盘不引起 `commit_leased_batch` P99 明显劣化。
 
 ## TCP 建连突发
+
+出口连接复用和新建连接分别管理。按已校验的物理目标 IP 与端口限制新建连接速率及并行握手，每节点默认 400 次/秒、16 个并行握手，分别由 `UPSTREAM_DIAL_RPS` 和 `UPSTREAM_DIAL_CONCURRENCY` 控制。TLS 连接复用仍按 SNI 隔离。等待同时受首字节预算、节点活跃交换容量、`UPSTREAM_DIAL_QUEUE_WAIT_MS` 和 `UPSTREAM_DIAL_QUEUE_BYTES` 限制。队列满或耗尽出口等待预算时返回 `503 upstream_capacity` 和 `Retry-After: 1`。多个节点指向同一端点时按端点合计拨号能力分配预算。
+
+交换槽队列与拨号队列分别应用等待时长和字节上限。推理出口准入还传入绝对截止时间，由首字节期限和本次尝试期限中较早的一项约束两个阶段。绝对请求期限先到时按未派发超时处理。
+
+同步适配后即可确定上游目标的推理请求在持久化资金预扣前取得出口准入，先完成资金预扣，再向上游写入请求。带幂等 Key 的首次尝试先通过账本的原子重放检查，保留进行中和已完成的 409 语义。幂等路径、需要异步适配的请求和控制面出站调用在发送阶段使用同一连接调度。取消待拨号的请求立即归还队列资源，已开始的底层握手保留名额至完成或明确关闭。已确认没有发送的请求可以释放预扣，发送不确定的请求仍按既有规则进入待对账。
+
+本地容量、未派发取消和单节点拨号失败不会广播渠道熔断。真正的上游 HTTP 故障和限流继续调用共享路由状态机。熔断和半开探测按代次处理，相同一轮的旧响应不会改写后继状态。
+
+滚动更新期间，新节点继续处理旧版广播的限流时长。旧版的无代次 OPEN/CLOSED 只由旧节点处理。完成所有 Gateway 节点更新后，集群统一使用带代次的熔断事件。
 
 TCP 监听队列先于 HTTP 准入。Bun 1.4.4 为 Gateway 请求 512 个监听队列槽位，内核会按上限截断。macOS 压测曾观察到两路监听均达到 128，客户端在收到 HTTP 响应之前得到 `ECONNRESET`。单独调整 `MAX_IN_FLIGHT` 无法改变该容量。 [Bun 监听实现](https://github.com/oven-sh/bun/blob/bun-v1.4.4/packages/bun-usockets/src/bsd.c#L1079-L1109) · [XNU 队列上限](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/uipc_socket.c#L841-L858)
 

@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { LocalRateLimiter, SmartRouter, type RoutableCandidate } from "../router.ts";
+import {
+  LocalRateLimiter,
+  SmartRouter,
+  type CircuitTransition,
+  type RoutableCandidate,
+} from "../router.ts";
 
 function makeCandidate(
   id: string,
@@ -19,6 +24,16 @@ function makeCandidate(
     account_active: true,
   };
 }
+
+test("symptom: late failures from one burst keep extending an open circuit", () => {
+  const durations: number[] = [];
+  const router = new SmartRouter({
+    now: () => 100,
+    onStateChange: (event) => durations.push(event.open_duration_ms),
+  });
+  for (let i = 0; i < 6; i++) router.recordFailure("burst", "retryable");
+  expect(durations).toEqual([15_000]);
+});
 
 test("SmartRouter enforces priority tiers, LEAST_LATENCY, ROUND_ROBIN, and WEIGHTED ordering", () => {
   let clock = 1000;
@@ -54,57 +69,106 @@ test("SmartRouter trips OPEN after failure threshold, isolates 429 cooldown and 
 
   router.recordFailure("ch1", "retryable");
   router.recordFailure("ch1", "retryable");
-  expect(router.isAvailable("ch1")).toEqual({ available: true, isProbe: false });
+  expect(router.isAvailable("ch1")).toEqual({ available: true });
   router.recordFailure("ch1", "retryable");
-  expect(router.isAvailable("ch1")).toEqual({ available: false, isProbe: false });
+  expect(router.isAvailable("ch1")).toEqual({ available: false });
 
   const duringOpen = router.selectCandidates("m1", [c1, c2], "WEIGHTED", "chat");
   expect(duringOpen.map((x) => x.route.channel_id)).toEqual(["ch2"]);
 
   clock += 10_001;
-  expect(router.isAvailable("ch1")).toEqual({ available: true, isProbe: true });
-  expect(router.isAvailable("ch1")).toEqual({ available: false, isProbe: false });
+  const probe = router.isAvailable("ch1").probe;
+  expect(probe).toBeDefined();
+  expect(router.isAvailable("ch1")).toEqual({ available: false });
 
-  router.recordSuccess("ch1", 50);
-  expect(router.isAvailable("ch1")).toEqual({ available: true, isProbe: false });
+  router.recordSuccess("ch1", 50, router.beginAttempt("ch1", probe));
+  expect(router.isAvailable("ch1")).toEqual({ available: true });
 
   router.recordFailure("ch1", "rate_limit", 5000);
-  expect(router.isAvailable("ch1")).toEqual({ available: false, isProbe: false });
+  expect(router.isAvailable("ch1")).toEqual({ available: false });
   clock += 5001;
-  expect(router.isAvailable("ch1")).toEqual({ available: true, isProbe: false });
+  expect(router.isAvailable("ch1")).toEqual({ available: true });
 
   router.recordFailure("ch1", "auth_error");
-  expect(router.isAvailable("ch1")).toEqual({ available: false, isProbe: false });
+  expect(router.isAvailable("ch1")).toEqual({ available: false });
 });
 
-test("SmartRouter auto-releases abandoned HALF_OPEN probe after probeTimeoutMs and resets backoff on remote CLOSED", () => {
+test("symptom: expired probe results can release a successor and close the newer circuit", () => {
   let clock = 1000;
+  const events: CircuitTransition[] = [];
   const router = new SmartRouter({
     now: () => clock,
     failureThreshold: 2,
     baseOpenMs: 5_000,
     probeTimeoutMs: 10_000,
+    onStateChange: (event) => events.push(event),
   });
 
+  const prior = router.beginAttempt("ch1");
   router.recordFailure("ch1", "retryable");
   router.recordFailure("ch1", "retryable");
-  expect(router.isAvailable("ch1")).toEqual({ available: false, isProbe: false });
+  router.recordSuccess("ch1", 50, prior);
+  expect(router.isAvailable("ch1")).toEqual({ available: false });
 
   clock += 5_001;
-  expect(router.isAvailable("ch1")).toEqual({ available: true, isProbe: true });
-  expect(router.isAvailable("ch1")).toEqual({ available: false, isProbe: false });
+  const first = router.isAvailable("ch1").probe!;
+  const firstAttempt = router.beginAttempt("ch1", first);
+  expect(router.isAvailable("ch1")).toEqual({ available: false });
 
   clock += 10_001;
-  expect(router.isAvailable("ch1")).toEqual({ available: true, isProbe: true });
+  const successor = router.isAvailable("ch1").probe;
+  expect(successor).toBeDefined();
+  expect(successor).not.toBe(first);
+  router.releaseProbe("ch1", first);
+  router.recordSuccess("ch1", 50, firstAttempt);
+  expect(router.isAvailable("ch1")).toEqual({ available: false });
+  expect(router.peekAvailable("ch1", successor)).toBe(true);
 
-  router.applyRemoteEvent({ channel_id: "ch1", state: "CLOSED" });
-  const snap = router.snapshot().find((c) => c.channel_id === "ch1");
-  expect(snap).toMatchObject({
+  router.applyRemoteEvent({ ...events[0]!, state: "CLOSED", open_duration_ms: 0 });
+  expect(router.snapshot().find((c) => c.channel_id === "ch1")).toMatchObject({
     state: "CLOSED",
     backoff_level: 0,
     probe_in_flight: false,
     consecutive_failures: 0,
   });
+});
+
+test("symptom: local connection failures can make the same route unavailable on another node", () => {
+  let clock = 10;
+  const peer = new SmartRouter({ now: () => clock });
+  const local = new SmartRouter({
+    now: () => clock,
+    onStateChange: (event) => peer.applyRemoteEvent(event),
+  });
+  for (let i = 0; i < 3; i++) local.recordDialFailure("channel", local.beginAttempt("channel"));
+  expect(local.peekAvailable("channel")).toBe(false);
+  expect(peer.peekAvailable("channel")).toBe(true);
+  clock += 251;
+  expect(local.peekAvailable("channel")).toBe(true);
+});
+
+test("symptom: reordered circuit events make peers disagree or reopen a completed probe", () => {
+  const at = Date.now();
+  const event: CircuitTransition = {
+    channel_id: "channel",
+    state: "OPEN",
+    circuit_id: "a",
+    issued_at_ms: at,
+    open_duration_ms: 15_000,
+    cooldown_duration_ms: 0,
+  };
+  const parallel = { ...event, circuit_id: "b" };
+  const done: CircuitTransition = { ...parallel, state: "CLOSED", open_duration_ms: 0 };
+  const first = new SmartRouter();
+  const second = new SmartRouter();
+  [event, parallel, done].forEach((item) => first.applyRemoteEvent(item));
+  [parallel, event, done].forEach((item) => second.applyRemoteEvent(item));
+  expect(first.peekAvailable("channel")).toBe(true);
+  expect(second.peekAvailable("channel")).toBe(true);
+
+  const late = new SmartRouter();
+  [done, parallel].forEach((item) => late.applyRemoteEvent(item));
+  expect(late.peekAvailable("channel")).toBe(true);
 });
 
 test("LocalRateLimiter enforces RPM, TPM, and active concurrency accurately", () => {
@@ -186,18 +250,19 @@ test("SmartRouter peekAvailable reflects live OPEN, cooldown, and HALF_OPEN owne
   expect(router.peekAvailable("ch-1")).toBe(true);
   router.recordFailure("ch-1", "retryable");
   expect(router.peekAvailable("ch-1")).toBe(false);
-  expect(router.peekAvailable("ch-1", true)).toBe(false);
 
   clock += 5_001;
   expect(router.peekAvailable("ch-1")).toBe(true);
   expect(router.snapshot().find((s) => s.channel_id === "ch-1")?.state).toBe("OPEN");
-  expect(router.isAvailable("ch-1")).toEqual({ available: true, isProbe: true });
+  const probe = router.isAvailable("ch-1").probe;
+  expect(probe).toBeDefined();
   expect(router.peekAvailable("ch-1")).toBe(false);
-  expect(router.peekAvailable("ch-1", true)).toBe(true);
+  expect(router.peekAvailable("ch-1", probe)).toBe(true);
 
-  router.recordFailure("ch-1", "rate_limit", 4_000);
+  router.recordFailure("ch-1", "rate_limit", 4_000, undefined, router.beginAttempt("ch-1", probe));
   expect(router.peekAvailable("ch-1")).toBe(false);
-  expect(router.peekAvailable("ch-1", true)).toBe(false);
+  expect(router.peekAvailable("ch-1", probe)).toBe(false);
   clock += 4_001;
-  expect(router.peekAvailable("ch-1", true)).toBe(true);
+  expect(router.peekAvailable("ch-1")).toBe(true);
+  expect(router.peekAvailable("ch-1", probe)).toBe(false);
 });

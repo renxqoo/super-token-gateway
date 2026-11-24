@@ -61,6 +61,7 @@ import {
   clientAddress,
   inCidrs,
   Lifecycle,
+  PROJECT_API_KEY_PATTERN,
   readBounded,
   sha256,
   SmartRouter,
@@ -71,8 +72,11 @@ import {
   type ClusterCoordinator,
   type createTransport,
   type FastUpstreamResult,
+  type PreparedDispatch,
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
+import { declaredRequestSize } from "./public-ingress.ts";
+import type { ConsoleAdmissionCheck } from "./console-admission.ts";
 import { extractUpstreamTaskId, getAsyncTaskConfig } from "./async-tasks.ts";
 import { resolveEffectiveCustomerPrice } from "./pricing.ts";
 import {
@@ -107,6 +111,8 @@ import {
   stripTextFromSseChunk,
   transformRequestTexts,
   tryPrepareUpstreamRequestSync,
+  type PreparedUpstreamRequest,
+  type PrepareUpstreamOptions,
 } from "./upstream.ts";
 
 type LedgerEngine = ReturnType<typeof createLedgerEngine>;
@@ -115,6 +121,7 @@ type Transport = ReturnType<typeof createTransport>;
 
 export type ProxyDependencies = {
   config: GatewayConfig;
+  checkConsoleAdmission: ConsoleAdmissionCheck;
   snapshot: SnapshotManager;
   ledger: LedgerEngine;
   asyncTasks?: AsyncTasksRepo;
@@ -127,6 +134,7 @@ export type ProxyDependencies = {
   lifecycle: Lifecycle;
   metrics: GatewayMetrics;
   state?: ProxyRuntimeState;
+  bodyBufferBudget?: { reserve(bytes: number): () => void };
 };
 
 const utf8FatalDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -163,14 +171,7 @@ async function readRequestBytesBounded(
   if (isDraining()) {
     throw new GatewayError(503, "overloaded", "Gateway is draining");
   }
-  const clHeader = req.headers.get("content-length");
-  let parsedCl = -1;
-  if (clHeader !== null && /^\d+$/.test(clHeader)) {
-    parsedCl = Number(clHeader);
-    if (parsedCl > maxBytes) {
-      throw new GatewayError(413, "body_too_large", "Payload exceeds the configured size limit");
-    }
-  }
+  const parsedCl = declaredRequestSize(req, maxBytes) ?? -1;
   const timeoutErr = () => new GatewayError(408, "request_timeout", "Request body read timed out");
 
   if (!forceStream && parsedCl >= 0 && parsedCl <= 262_144) {
@@ -323,6 +324,9 @@ export function authenticateRequest(
 ): { key: ApiKeyRecord; project: ProjectRecord } {
   const rawKey = extractApiKey(c, operation);
   if (!rawKey) throw new GatewayError(401, "unauthorized", "Missing API key");
+  if (!PROJECT_API_KEY_PATTERN.test(rawKey)) {
+    throw new GatewayError(401, "unauthorized", "Invalid API key");
+  }
   const key = state
     ? state.lookupVerifiedKey(rawKey, snap, config.keyPepper)
     : snap.keysByVerifier.get(verifier(rawKey, config.keyPepper));
@@ -436,7 +440,10 @@ function errorJson(
       ? err
       : new GatewayError(500, "internal_error", "Internal gateway error");
   const extraHeaders: Record<string, string> =
-    gw.code === "plugin_capacity_unavailable" || gw.code === "provider_capacity_unavailable"
+    gw.code === "plugin_capacity_unavailable" ||
+    gw.code === "provider_capacity_unavailable" ||
+    gw.code === "request_body_capacity_unavailable" ||
+    gw.code === "upstream_capacity"
       ? { "retry-after": "1" }
       : {};
   return c.json(
@@ -506,6 +513,7 @@ export async function handleInferenceRequest(
   deps.metrics.requestsTotal++;
 
   let releaseGuard: (() => void) | undefined;
+  let releaseBodyBuffer: (() => void) | undefined;
   let releaseLocalProjectSlot: (() => void) | null = null;
   let streamOwnsGuard = false;
   let drainAborted = false;
@@ -559,6 +567,7 @@ export async function handleInferenceRequest(
 
   let releaseProjectLimit: (() => void) | null = null;
   let releaseChannelLimit: (() => void) | null = null;
+  let activeDispatch: PreparedDispatch | undefined;
   const releaseLimiters = () => {
     releaseChannelLimit?.();
     releaseChannelLimit = null;
@@ -575,7 +584,7 @@ export async function handleInferenceRequest(
   let logModBlocked = false;
   let logTtftMs: number | null = null;
   let logged = false;
-  const acquiredProbes = new Set<string>();
+  const acquiredProbes = new Map<string, symbol>();
   let holdAcquired = false;
   let holdFinalized = false;
   let holdFinalizeAttempted = false;
@@ -612,16 +621,15 @@ export async function handleInferenceRequest(
   };
 
   const releaseAllPendingProbes = () => {
-    for (const chId of acquiredProbes) {
-      deps.router.releaseProbe(chId);
+    for (const [chId, probe] of acquiredProbes) {
+      deps.router.releaseProbe(chId, probe);
     }
     acquiredProbes.clear();
   };
 
   const releaseProbeFor = (channelId: string) => {
-    if (acquiredProbes.delete(channelId)) {
-      deps.router.releaseProbe(channelId);
-    }
+    const probe = acquiredProbes.get(channelId);
+    if (probe && acquiredProbes.delete(channelId)) deps.router.releaseProbe(channelId, probe);
   };
 
   const markProbeCompleted = (channelId: string) => {
@@ -686,6 +694,8 @@ export async function handleInferenceRequest(
       state,
     );
     logProjectId = project.id;
+    const check = deps.checkConsoleAdmission(project, key);
+    if (check) await check;
 
     const localProjRelease = state.tryEnterProject(project.id, project.concurrency);
     if (!localProjRelease) {
@@ -702,13 +712,18 @@ export async function handleInferenceRequest(
 
     const bodyReadTimeoutMs =
       deps.config.bodyReadTimeoutMs ?? Math.min(deps.config.attemptTimeoutMs, 15_000);
+    let bodyReadLimit = deps.config.maxBodyBytes;
+    if (deps.bodyBufferBudget) {
+      bodyReadLimit = declaredRequestSize(c.req.raw, bodyReadLimit) ?? bodyReadLimit;
+      releaseBodyBuffer = deps.bodyBufferBudget.reserve(bodyReadLimit);
+    }
     let clientBody: Record<string, unknown>;
     let multipartEntries: [string, string | File][] | undefined;
 
     if (isMultipartOp) {
       const received = await readRequestBytesBounded(
         c.req.raw,
-        deps.config.maxBodyBytes,
+        bodyReadLimit,
         bodyReadTimeoutMs,
         state.deadlines,
         () => drainAborted,
@@ -741,14 +756,14 @@ export async function handleInferenceRequest(
     } else {
       const rawBytes = await readRequestBytesBounded(
         c.req.raw,
-        deps.config.maxBodyBytes,
+        bodyReadLimit,
         bodyReadTimeoutMs,
         state.deadlines,
         () => drainAborted,
         (fn) => {
           activeAbortNotify = fn;
         },
-        false,
+        deps.bodyBufferBudget !== undefined,
       );
       const parsedRaw = object(parseClientJson(utf8FatalDecoder.decode(rawBytes)));
       clientBody = pathOverride
@@ -890,12 +905,12 @@ export async function handleInferenceRequest(
       throw new GatewayError(503, "no_route", "No healthy channel available for this model");
     }
     for (const entry of selected) {
-      if (entry.isProbe) acquiredProbes.add(entry.route.channel_id);
+      if (entry.probe) acquiredProbes.set(entry.route.channel_id, entry.probe);
     }
 
     const releaseUnusedProbes = (fromIndex: number) => {
       for (let i = fromIndex; i < selected.length; i++) {
-        if (selected[i]!.isProbe) {
+        if (selected[i]!.probe) {
           releaseProbeFor(selected[i]!.route.channel_id);
         }
       }
@@ -1071,6 +1086,57 @@ export async function handleInferenceRequest(
     }
     if (firstInput instanceof Response) return firstInput;
     let activeInput = firstInput;
+    let activePrepared: PreparedUpstreamRequest | null = null;
+
+    function upstreamOptions(
+      cand: HydratedCandidate,
+      body: Record<string, unknown>,
+      canMutateClientBody = false,
+    ): Omit<PrepareUpstreamOptions, "signal"> {
+      return {
+        channel: cand.channel,
+        route: cand.route,
+        snapshot: snap,
+        secret: deps.snapshot.decryptChannelSecret(cand.channel),
+        operation,
+        clientBody: body,
+        outputBound,
+        isStream,
+        canMutateClientBody,
+        vertexTokens: deps.vertexTokens,
+        wasmExecutor: deps.wasmExecutor,
+        tenantId: project.id,
+        onFieldDropped(source, target, field) {
+          deps.metrics.recordProtocolFieldDropped(source, target, field);
+        },
+        onFieldRejected(source, target, field) {
+          deps.metrics.recordProtocolFieldRejected(source, target, field);
+        },
+        traceparent: trace.traceparent,
+        ...(multipartEntries ? { multipartEntries } : {}),
+        ...(deps.config.pluginSigningPublicKeyPem
+          ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
+          : {}),
+      };
+    }
+
+    function prepareForReservation(
+      cand: HydratedCandidate,
+      body: Record<string, unknown>,
+      customerPrice: PriceVersionRecord,
+    ): PreparedUpstreamRequest | null {
+      try {
+        return tryPrepareUpstreamRequestSync({
+          ...upstreamOptions(cand, body),
+          estimateInputTokens:
+            operation === "chat" &&
+            cand.same_protocol &&
+            Boolean(customerPrice.rates.input_tokens || cand.costPrice.rates.input_tokens),
+        });
+      } catch {
+        return null;
+      }
+    }
 
     const idempotencyKey = reqHeaders.get("idempotency-key")?.trim() || null;
     let fingerprint = "";
@@ -1109,14 +1175,72 @@ export async function handleInferenceRequest(
       );
     }
     const maxStreamDurationMs = deps.config.streamMaxDurationMs ?? 300_000;
-    const expiresAt = state.cachedExpiresAt(
-      deps.config.holdTtlMs + (isStream ? maxStreamDurationMs : 0),
-    );
-
     const firstByteDeadlineMs =
       deps.config.firstByteTimeoutMs !== undefined
         ? requestStart + deps.config.firstByteTimeoutMs
         : null;
+    const reserveDispatch = async (
+      candidate: HydratedCandidate,
+      prepared: PreparedUpstreamRequest | null,
+      pluginSignal: AbortSignal,
+    ) => {
+      if (!prepared) return;
+      const linked = createLinkedController([c.req.raw.signal, pluginSignal]);
+      try {
+        activeDispatch = await deps.transport.prepareDispatch(
+          prepared.url,
+          typeof prepared.body === "string"
+            ? Buffer.byteLength(prepared.body)
+            : prepared.body.byteLength,
+          {
+            signal: linked.signal,
+            dispatchDeadline: Math.min(
+              firstByteDeadlineMs ?? Infinity,
+              performance.now() +
+                (candidate.route.retry_policy.attempt_timeout_ms ?? deps.config.attemptTimeoutMs),
+            ),
+          },
+          deps.config.allowPrivateUpstreams,
+          deps.config.privateUpstreamCidrs,
+        );
+      } finally {
+        linked.dispose();
+      }
+      pluginSignal.throwIfAborted();
+      if (c.req.raw.signal.aborted || drainAborted || projectPermitRevoked) {
+        throw admissionError(projectPermitRevoked);
+      }
+      if (!deps.snapshot.isFresh() || deps.snapshot.get().epoch !== snap.epoch) {
+        throw new GatewayError(
+          503,
+          "config_unavailable",
+          "Gateway configuration changed before dispatch",
+        );
+      }
+      const currentAdmission = deps.checkConsoleAdmission(project, key);
+      if (currentAdmission) await currentAdmission;
+      pluginSignal.throwIfAborted();
+    };
+    const releaseDispatch = () => {
+      activeDispatch?.release();
+      activeDispatch = undefined;
+    };
+    const preDispatchGatewayError = (error: UpstreamPreDispatchError) => {
+      if (error.code === "upstream_capacity") return error;
+      if (error.code === "upstream_not_dispatched") {
+        if (
+          c.req.raw.signal.aborted ||
+          drainAborted ||
+          projectPermitRevoked ||
+          channelPermitRevoked
+        ) {
+          return admissionError(projectPermitRevoked || channelPermitRevoked);
+        }
+        return new GatewayError(504, "upstream_timeout", error.message);
+      }
+      return new GatewayError(503, "upstream_unreachable", error.message);
+    };
+
     let activeIndex = -1;
     let activeAttemptId = "";
     let holdCustomerAtoms = "0";
@@ -1125,7 +1249,7 @@ export async function handleInferenceRequest(
     for (let idx = 0; idx < selected.length; idx++) {
       const entry = selected[idx]!;
       const cand = entry.route;
-      if (!deps.router.peekAvailable(cand.channel.id, entry.isProbe)) {
+      if (!deps.router.peekAvailable(cand.channel.id, entry.probe)) {
         releaseProbeFor(cand.channel_id);
         continue;
       }
@@ -1139,7 +1263,6 @@ export async function handleInferenceRequest(
       }
       const preparedInput = idx === 0 ? firstInput : await prepareRouteInput(cand);
       if (preparedInput instanceof Response) return preparedInput;
-      const { measurement } = preparedInput;
       const effectiveBilling = resolveEffectiveCustomerPrice(
         snap,
         project.id,
@@ -1147,6 +1270,11 @@ export async function handleInferenceRequest(
         operation,
         cand.billingPrice,
       );
+      const prepared = prepareForReservation(cand, preparedInput.body, effectiveBilling.price);
+      const measurement = {
+        ...preparedInput.measurement,
+        estimatedInputTokens: prepared?.estimatedInputTokens,
+      };
       let customerAtoms: string;
       let supplierAtoms: string;
       try {
@@ -1174,6 +1302,25 @@ export async function handleInferenceRequest(
       if (c.req.raw.signal.aborted || drainAborted || projectPermitRevoked) {
         throw admissionError(projectPermitRevoked);
       }
+      try {
+        if (idempotencyKey === null)
+          await reserveDispatch(cand, prepared, preparedInput.pluginSignal);
+      } catch (error) {
+        releaseDispatch();
+        preparedInput.pluginSignal.throwIfAborted();
+        if (!(error instanceof UpstreamPreDispatchError)) throw error;
+        lastHoldErr = preDispatchGatewayError(error);
+        releaseProbeFor(cand.channel.id);
+        continue;
+      }
+      if (!deps.router.peekAvailable(cand.channel.id, entry.probe)) {
+        releaseDispatch();
+        releaseProbeFor(cand.channel.id);
+        continue;
+      }
+      if (c.req.raw.signal.aborted || drainAborted || projectPermitRevoked) {
+        throw admissionError(projectPermitRevoked);
+      }
       const attemptId = fastUuid();
       const holdRes = await deps.ledger.acquireHold({
         request_id: requestId,
@@ -1195,7 +1342,9 @@ export async function handleInferenceRequest(
         supplier_channel_id: cand.channel.id,
         supplier_currency: cand.costPrice.currency,
         supplier_atoms: supplierAtoms,
-        expires_at: expiresAt,
+        expires_at: state.cachedExpiresAt(
+          deps.config.holdTtlMs + (isStream ? maxStreamDurationMs : 0),
+        ),
       });
       if (holdRes.ok) {
         if (holdRes.replayed) {
@@ -1215,10 +1364,12 @@ export async function handleInferenceRequest(
         holdAcquired = true;
         activeIndex = idx;
         activeInput = preparedInput;
+        activePrepared = prepared;
         activeAttemptId = attemptId;
         holdCustomerAtoms = holdRes.held_atoms;
         break;
       }
+      releaseDispatch();
       releaseProbeFor(cand.channel_id);
       if (
         holdRes.code === "supplier_unavailable" ||
@@ -1250,9 +1401,10 @@ export async function handleInferenceRequest(
       cursor < selected.length && attemptsMade < maxAttempts;
       cursor++
     ) {
+      if (cursor !== activeIndex) releaseDispatch();
       const entry = selected[cursor]!;
       const cand = entry.route;
-      if (!deps.router.peekAvailable(cand.channel.id, entry.isProbe)) {
+      if (!deps.router.peekAvailable(cand.channel.id, entry.probe)) {
         releaseProbeFor(cand.channel_id);
         if (cursor === activeIndex && !pendingSwitchFrom) {
           pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
@@ -1289,15 +1441,41 @@ export async function handleInferenceRequest(
       }
       const {
         body: attemptBody,
-        measurement,
+        measurement: inputMeasurement,
         chars,
         pluginSignal,
         audit: preRequestAudit,
       } = attemptInput;
       activePluginSignal = pluginSignal;
       pluginSignal.throwIfAborted();
+      const preparedAttempt =
+        cursor === activeIndex
+          ? activePrepared
+          : prepareForReservation(cand, attemptBody, candBilling.price);
 
       if (pendingSwitchFrom) {
+        try {
+          await reserveDispatch(cand, preparedAttempt, pluginSignal);
+        } catch (error) {
+          releaseDispatch();
+          pluginSignal.throwIfAborted();
+          if (!(error instanceof UpstreamPreDispatchError)) throw error;
+          const rejection = preDispatchGatewayError(error);
+          lastErrorStatus = rejection.status;
+          lastErrorCode = rejection.code;
+          lastErrorMessage = rejection.message;
+          releaseProbeFor(cand.channel.id);
+          continue;
+        }
+        if (!deps.router.peekAvailable(cand.channel.id, entry.probe)) {
+          releaseDispatch();
+          releaseProbeFor(cand.channel.id);
+          continue;
+        }
+        const measurement = {
+          ...inputMeasurement,
+          estimatedInputTokens: preparedAttempt?.estimatedInputTokens,
+        };
         let nextCustomerAtoms: string;
         let nextSupplierAtoms: string;
         try {
@@ -1417,7 +1595,7 @@ export async function handleInferenceRequest(
           j++
         ) {
           const nextEntry = selected[j]!;
-          if (deps.router.peekAvailable(nextEntry.route.channel.id, nextEntry.isProbe)) {
+          if (deps.router.peekAvailable(nextEntry.route.channel.id, nextEntry.probe)) {
             healthyBackupsLeft++;
           }
         }
@@ -1500,6 +1678,25 @@ export async function handleInferenceRequest(
       };
 
       const startedAt = performance.now();
+      let routingAttempt = deps.router.beginAttempt(cand.channel.id, entry.probe);
+      let upstreamSuccessObserved = false;
+      const observeAttemptFailure = (
+        kind: "retryable" | "rate_limit" | "auth_error",
+        retryAfterMs?: number,
+        latencyMs?: number,
+      ) =>
+        deps.router.recordFailure(cand.channel.id, kind, retryAfterMs, latencyMs, routingAttempt);
+      const observeAttemptSuccess = (latencyMs: number) => {
+        if (upstreamSuccessObserved) return;
+        upstreamSuccessObserved = deps.router.recordSuccess(
+          cand.channel.id,
+          latencyMs,
+          routingAttempt,
+        );
+        if (upstreamSuccessObserved && routingAttempt.probe) {
+          routingAttempt = deps.router.beginAttempt(cand.channel.id);
+        }
+      };
       let fastResult: FastUpstreamResult;
       let prepared: Awaited<ReturnType<typeof prepareUpstreamRequest>>;
       try {
@@ -1508,45 +1705,18 @@ export async function handleInferenceRequest(
         if (c.req.raw.signal.aborted || drainAborted || quotaLostNow) {
           throw admissionError(quotaLostNow);
         }
-        const secret = deps.snapshot.decryptChannelSecret(cand.channel);
-        const canMutateClientBody =
-          selected.length === 1 &&
-          cand.route.plugin_pipeline.length === 0 &&
-          idempotencyKey === null &&
-          !isMultipartOp;
-        const basePrepareOpts: Omit<Parameters<typeof prepareUpstreamRequest>[0], "signal"> = {
-          channel: cand.channel,
-          route: cand.route,
-          snapshot: snap,
-          secret,
-          operation,
-          clientBody: attemptBody,
-          outputBound,
-          isStream,
-          canMutateClientBody,
-          vertexTokens: deps.vertexTokens,
-          wasmExecutor: deps.wasmExecutor,
-          tenantId: project.id,
-          onFieldDropped(source: Protocol, target: Protocol, field: string) {
-            deps.metrics.recordProtocolFieldDropped(source, target, field);
-          },
-          onFieldRejected(source: Protocol, target: Protocol, field: string) {
-            deps.metrics.recordProtocolFieldRejected(source, target, field);
-          },
-          traceparent: trace.traceparent,
-        };
-        if (multipartEntries) basePrepareOpts.multipartEntries = multipartEntries;
-        if (deps.config.pluginSigningPublicKeyPem) {
-          basePrepareOpts.signingPublicKeyPem = deps.config.pluginSigningPublicKeyPem;
-        }
-        const syncPrepared = tryPrepareUpstreamRequestSync(basePrepareOpts);
-        if (syncPrepared) {
-          prepared = syncPrepared;
+        if (preparedAttempt) {
+          prepared = preparedAttempt;
         } else {
-          prepared = await prepareUpstreamRequest({
-            ...basePrepareOpts,
-            signal: ensureAttemptSignal(),
-          });
+          const canMutateClientBody =
+            selected.length === 1 &&
+            cand.route.plugin_pipeline.length === 0 &&
+            idempotencyKey === null &&
+            !isMultipartOp;
+          const options = upstreamOptions(cand, attemptBody, canMutateClientBody);
+          prepared =
+            tryPrepareUpstreamRequestSync(options) ??
+            (await prepareUpstreamRequest({ ...options, signal: ensureAttemptSignal() }));
         }
       } catch (err) {
         cancelTimeout();
@@ -1581,12 +1751,7 @@ export async function handleInferenceRequest(
           (err.code === "provider_plugin_unavailable" || err.code === "provider_adapter_failed")
         ) {
           deps.metrics.recordUpstreamError(cand.channel.name, err.code);
-          deps.router.recordFailure(
-            cand.channel.id,
-            "retryable",
-            undefined,
-            performance.now() - startedAt,
-          );
+          observeAttemptFailure("retryable", undefined, performance.now() - startedAt);
           markProbeCompleted(cand.channel.id);
           pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
           lastErrorStatus = err.status;
@@ -1602,34 +1767,45 @@ export async function handleInferenceRequest(
 
       try {
         pluginSignal.throwIfAborted();
+        if (!deps.router.peekAvailable(cand.channel.id, entry.probe)) {
+          throw new GatewayError(503, "no_route", "No healthy channel available for this model");
+        }
+        const request = {
+          method: "POST",
+          headers: prepared.headers,
+          ...(prepared.headersValidated ? { headersValidated: true } : {}),
+          body: prepared.body as BodyInit,
+          onCancelRegister: onAttemptCancelRegister,
+          dispatchDeadline: performance.now() + attemptTimeoutMs,
+        };
         currentAttemptDispatched = true;
-        fastResult = await deps.transport.fetchFast(
-          prepared.url,
-          {
-            method: "POST",
-            headers: prepared.headers,
-            ...(prepared.headersValidated ? { headersValidated: true } : {}),
-            body: prepared.body as BodyInit,
-            onCancelRegister: onAttemptCancelRegister,
-            dispatchDeadline: performance.now() + attemptTimeoutMs,
-          },
-          deps.config.allowPrivateUpstreams,
-          deps.config.privateUpstreamCidrs,
-        );
+        fastResult = activeDispatch
+          ? await activeDispatch.fetchFast(request)
+          : await deps.transport.fetchFast(
+              prepared.url,
+              request,
+              deps.config.allowPrivateUpstreams,
+              deps.config.privateUpstreamCidrs,
+            );
       } catch (err) {
         cancelTimeout();
         attemptLinked.dispose();
         activeLinkedDispose = null;
         releaseChannelLimit();
         releaseChannelLimit = null;
-        const latencyMs = performance.now() - startedAt;
         const isPreDispatch =
           err instanceof UpstreamPreDispatchError ||
           (err instanceof Error &&
             /ECONNREFUSED|ENOTFOUND|Unable to connect|ConnectionRefused/i.test(err.message));
-        if (pluginSignal.aborted) {
-          if (err instanceof UpstreamPreDispatchError) currentAttemptDispatched = false;
-          throw pluginSignal.reason;
+        if (isPreDispatch) currentAttemptDispatched = false;
+        if (pluginSignal.aborted) throw pluginSignal.reason;
+        if (err instanceof GatewayError && err.code === "no_route") {
+          releaseProbeFor(cand.channel.id);
+          pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
+          lastErrorStatus = err.status;
+          lastErrorCode = err.code;
+          lastErrorMessage = err.message;
+          continue;
         }
         const quotaLost = projectPermitRevoked || channelPermitRevoked;
         if (c.req.raw.signal.aborted || drainAborted || quotaLost) {
@@ -1638,12 +1814,20 @@ export async function handleInferenceRequest(
           await finalizeHold(isPreDispatch && !anyUnknownAttempt ? "release" : "unknown");
           throw admissionError(quotaLost);
         }
-        deps.metrics.recordUpstreamError(
-          cand.channel.name,
-          isPreDispatch ? "connect_error" : "timeout",
-        );
-        deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
-        markProbeCompleted(cand.channel.id);
+        const classified =
+          err instanceof UpstreamPreDispatchError ? preDispatchGatewayError(err) : null;
+        if (isPreDispatch) {
+          const kind = err instanceof UpstreamPreDispatchError ? err.code : "upstream_connect";
+          deps.metrics.recordUpstreamError(cand.channel.name, kind);
+          if (kind === "upstream_connect" || kind === "upstream_tls" || kind === "upstream_dns") {
+            deps.router.recordDialFailure(cand.channel.id, routingAttempt);
+          }
+          releaseProbeFor(cand.channel.id);
+        } else {
+          deps.metrics.recordUpstreamError(cand.channel.name, "timeout");
+          deps.router.recordDialFailure(cand.channel.id, routingAttempt);
+          releaseProbeFor(cand.channel.id);
+        }
         const failedOutcome: "FAILED" | "UNKNOWN" = isPreDispatch ? "FAILED" : "UNKNOWN";
         if (failedOutcome === "UNKNOWN") anyUnknownAttempt = true;
         const policyAllowsAmbiguous = Boolean(cand.route.retry_policy.retry_on_ambiguous);
@@ -1653,9 +1837,11 @@ export async function handleInferenceRequest(
           policyAllowsAmbiguous &&
           (maxAmbiguousPerMin === undefined ||
             deps.metrics.tryConsumeAmbiguousRetry(cand.channel.id, maxAmbiguousPerMin));
-        lastErrorStatus = isPreDispatch ? 503 : 504;
-        lastErrorCode = isPreDispatch ? "upstream_unreachable" : "upstream_timeout";
-        lastErrorMessage = err instanceof Error ? err.message : "Upstream request failed";
+        lastErrorStatus = classified?.status ?? (isPreDispatch ? 503 : 504);
+        lastErrorCode =
+          classified?.code ?? (isPreDispatch ? "upstream_unreachable" : "upstream_timeout");
+        lastErrorMessage =
+          classified?.message ?? (err instanceof Error ? err.message : "Upstream request failed");
         if (isPreDispatch || allowAmbiguousRetry) {
           pendingSwitchFrom = { attemptId: activeAttemptId, outcome: failedOutcome };
           continue;
@@ -1692,7 +1878,7 @@ export async function handleInferenceRequest(
             : fastResult.response.headers.get("retry-after");
           const retryAfterMs = parseRetryAfterMs(retryAfterHdr);
           deps.metrics.recordUpstreamError(cand.channel.name, `http_${upstreamStatus}`);
-          deps.router.recordFailure(cand.channel.id, retryKind, retryAfterMs, latencyMs);
+          observeAttemptFailure(retryKind, retryAfterMs, latencyMs);
           markProbeCompleted(cand.channel.id);
           pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
           lastErrorStatus = upstreamStatus === 429 ? 429 : 502;
@@ -1812,7 +1998,7 @@ export async function handleInferenceRequest(
               moderation_blocked: false,
             });
             pluginSignal.throwIfAborted();
-            deps.router.recordSuccess(cand.channel.id, latencyMs);
+            observeAttemptSuccess(latencyMs);
             markProbeCompleted(cand.channel.id);
             emitAccessLog(200, null);
             return new Response(respBytes as BodyInit, {
@@ -1877,7 +2063,7 @@ export async function handleInferenceRequest(
                 releaseProbeFor(cand.channel.id);
                 throw new GatewayError(502, "provider_plugin_fault", err.message);
               }
-              deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
+              observeAttemptFailure("retryable", undefined, latencyMs);
               markProbeCompleted(cand.channel.id);
               throw new GatewayError(
                 502,
@@ -1892,12 +2078,7 @@ export async function handleInferenceRequest(
                   cand.channel.name,
                   `logical_${wasmResp.retry_kind}`,
                 );
-                deps.router.recordFailure(
-                  cand.channel.id,
-                  wasmResp.retry_kind,
-                  wasmResp.retry_after_ms,
-                  latencyMs,
-                );
+                observeAttemptFailure(wasmResp.retry_kind, wasmResp.retry_after_ms, latencyMs);
                 markProbeCompleted(cand.channel.id);
                 pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
                 lastErrorStatus =
@@ -1949,7 +2130,7 @@ export async function handleInferenceRequest(
                 }
               } catch (err) {
                 await finalizeHold("unknown");
-                deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
+                observeAttemptFailure("retryable", undefined, latencyMs);
                 markProbeCompleted(cand.channel.id);
                 throw err;
               }
@@ -1982,12 +2163,7 @@ export async function handleInferenceRequest(
                   cand.channel.name,
                   `logical_${matchedErr.retry_kind}`,
                 );
-                deps.router.recordFailure(
-                  cand.channel.id,
-                  matchedErr.retry_kind,
-                  matchedErr.retry_after_ms,
-                  latencyMs,
-                );
+                observeAttemptFailure(matchedErr.retry_kind, matchedErr.retry_after_ms, latencyMs);
                 markProbeCompleted(cand.channel.id);
                 pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
                 lastErrorStatus =
@@ -2048,7 +2224,7 @@ export async function handleInferenceRequest(
                     : baseUsage;
               } catch (err) {
                 await finalizeHold("unknown");
-                deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
+                observeAttemptFailure("retryable", undefined, latencyMs);
                 markProbeCompleted(cand.channel.id);
                 throw err;
               }
@@ -2079,7 +2255,7 @@ export async function handleInferenceRequest(
             );
             if (!usage) {
               await finalizeHold("unknown");
-              deps.router.recordFailure(cand.channel.id, "retryable", undefined, latencyMs);
+              observeAttemptFailure("retryable", undefined, latencyMs);
               markProbeCompleted(cand.channel.id);
               throw new GatewayError(
                 502,
@@ -2190,7 +2366,7 @@ export async function handleInferenceRequest(
             }
 
             pluginSignal.throwIfAborted();
-            deps.router.recordSuccess(cand.channel.id, latencyMs);
+            observeAttemptSuccess(latencyMs);
             markProbeCompleted(cand.channel.id);
             if (responseBlocked) {
               emitAccessLog(blockStatus, blockRule);
@@ -2332,12 +2508,7 @@ export async function handleInferenceRequest(
           }
           if (attemptAborted) {
             deps.metrics.recordUpstreamError(cand.channel.name, "timeout");
-            deps.router.recordFailure(
-              cand.channel.id,
-              "retryable",
-              undefined,
-              performance.now() - startedAt,
-            );
+            observeAttemptFailure("retryable", undefined, performance.now() - startedAt);
             markProbeCompleted(cand.channel.id);
             anyUnknownAttempt = true;
             const policyAllowsAmbiguous = Boolean(cand.route.retry_policy.retry_on_ambiguous);
@@ -2382,8 +2553,7 @@ export async function handleInferenceRequest(
             );
           }
           deps.metrics.recordUpstreamError(cand.channel.name, `logical_${logicalError.retry_kind}`);
-          deps.router.recordFailure(
-            cand.channel.id,
+          observeAttemptFailure(
             logicalError.retry_kind,
             logicalError.retry_after_ms,
             performance.now() - startedAt,
@@ -2401,7 +2571,8 @@ export async function handleInferenceRequest(
 
       releaseUnusedProbes(cursor + 1);
       cancelTimeout();
-      const streamProbeChannel = acquiredProbes.delete(cand.channel.id) ? cand.channel.id : null;
+      const streamProbe = acquiredProbes.get(cand.channel.id);
+      acquiredProbes.delete(cand.channel.id);
       const streamLinked = createLinkedController([c.req.raw.signal, pluginSignal], true, false);
       const streamSignal = streamLinked.signal;
       activeAbortNotify = (reason) => {
@@ -2449,10 +2620,16 @@ export async function handleInferenceRequest(
       let streamCleanupDone = false;
       let streamCounted = false;
       let streamProbeDone = false;
-      const finishStreamProbe = () => {
-        if (!streamProbeDone && streamProbeChannel) {
+      const confirmStreamProbe = () => {
+        if (streamProbe && !streamProbeDone) {
           streamProbeDone = true;
-          deps.router.releaseProbe(streamProbeChannel);
+          observeAttemptSuccess(latencyMs);
+        }
+      };
+      const finishStreamProbe = () => {
+        if (!streamProbeDone && streamProbe) {
+          streamProbeDone = true;
+          deps.router.releaseProbe(cand.channel.id, streamProbe);
         }
       };
       const cleanupStream = () => {
@@ -2468,6 +2645,7 @@ export async function handleInferenceRequest(
         capturedChannelLimit?.();
         capturedProjectLimit?.();
         capturedLocalProjectSlot?.();
+        releaseBodyBuffer?.();
         guard.release();
       };
 
@@ -2592,7 +2770,7 @@ export async function handleInferenceRequest(
                 moderation_blocked: false,
               });
               streamProbeDone = true;
-              deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
+              observeAttemptSuccess(latencyMs);
               for (const ch of heldChunks) await controller.enqueue(ch);
               emitAccessLog(200, null);
               controller.close();
@@ -2607,12 +2785,7 @@ export async function handleInferenceRequest(
               if (code !== "ledger_commit_failed" && !streamSignal.aborted) {
                 deps.metrics.recordUpstreamError(cand.channel.name, "media_stream_error");
                 streamProbeDone = true;
-                deps.router.recordFailure(
-                  cand.channel.id,
-                  "retryable",
-                  undefined,
-                  performance.now() - startedAt,
-                );
+                observeAttemptFailure("retryable", undefined, performance.now() - startedAt);
               }
               emitAccessLog(err instanceof GatewayError ? err.status : 502, code);
               try {
@@ -2728,6 +2901,7 @@ export async function handleInferenceRequest(
                   out.error_message ?? "Upstream stream reported error",
                 );
               }
+              if (out.chunks?.length) confirmStreamProbe();
               if (out.usage !== undefined) {
                 const validated = validateUsageObject(out.usage);
                 wasmUsage = { ...wasmUsage, ...validated };
@@ -2877,7 +3051,7 @@ export async function handleInferenceRequest(
                     deps.metrics.recordPlatformAbsorb(project.id, commitRes.supplier_cost_atoms);
                   }
                   streamProbeDone = true;
-                  deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
+                  observeAttemptSuccess(latencyMs);
                   emitAccessLog(classified.status, finalMod.rule_code ?? classified.code);
                   await controller.enqueue(
                     formatProtocolSseError(
@@ -2921,12 +3095,7 @@ export async function handleInferenceRequest(
                 streamFailed = true;
                 deps.metrics.recordUpstreamError(cand.channel.name, "missing_usage");
                 streamProbeDone = true;
-                deps.router.recordFailure(
-                  cand.channel.id,
-                  "retryable",
-                  undefined,
-                  performance.now() - startedAt,
-                );
+                observeAttemptFailure("retryable", undefined, performance.now() - startedAt);
                 await finalizeHold("unknown");
                 emitAccessLog(502, "invalid_upstream_usage");
                 await controller.enqueue(
@@ -2966,7 +3135,7 @@ export async function handleInferenceRequest(
               });
 
               streamProbeDone = true;
-              deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
+              observeAttemptSuccess(latencyMs);
               for (const chunk of heldTerminalChunks) {
                 await controller.enqueue(responsesModeration?.rewrite(chunk, true) ?? chunk);
               }
@@ -2987,12 +3156,7 @@ export async function handleInferenceRequest(
                 ) {
                   deps.metrics.recordUpstreamError(cand.channel.name, "stream_interrupted");
                   streamProbeDone = true;
-                  deps.router.recordFailure(
-                    cand.channel.id,
-                    "retryable",
-                    undefined,
-                    performance.now() - startedAt,
-                  );
+                  observeAttemptFailure("retryable", undefined, performance.now() - startedAt);
                 }
               }
               if (abortedByClient) {
@@ -3190,6 +3354,7 @@ export async function handleInferenceRequest(
                   }
                 }
                 const translated = translator.consume(ev);
+                if (translated.chunks.length && ev.event !== "error") confirmStreamProbe();
                 const isTerminalChunk = translated.terminal || translator.holdTerminal;
                 for (const chunk of translated.chunks) {
                   await handleStreamChunk(chunk, isTerminalChunk);
@@ -3272,7 +3437,7 @@ export async function handleInferenceRequest(
                   deps.metrics.recordPlatformAbsorb(project.id, commitRes.supplier_cost_atoms);
                 }
                 streamProbeDone = true;
-                deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
+                observeAttemptSuccess(latencyMs);
                 emitAccessLog(classified.status, finalMod.rule_code ?? classified.code);
                 await controller.enqueue(
                   formatProtocolSseError(
@@ -3314,12 +3479,7 @@ export async function handleInferenceRequest(
               streamFailed = true;
               deps.metrics.recordUpstreamError(cand.channel.name, "missing_usage");
               streamProbeDone = true;
-              deps.router.recordFailure(
-                cand.channel.id,
-                "retryable",
-                undefined,
-                performance.now() - startedAt,
-              );
+              observeAttemptFailure("retryable", undefined, performance.now() - startedAt);
               await finalizeHold("unknown");
               emitAccessLog(502, "invalid_upstream_usage");
               await controller.enqueue(
@@ -3359,7 +3519,7 @@ export async function handleInferenceRequest(
             });
 
             streamProbeDone = true;
-            deps.router.recordSuccess(cand.channel.id, performance.now() - startedAt);
+            observeAttemptSuccess(latencyMs);
             for (const chunk of heldApprovedChunks) {
               await controller.enqueue(chunk);
             }
@@ -3380,12 +3540,7 @@ export async function handleInferenceRequest(
               ) {
                 deps.metrics.recordUpstreamError(cand.channel.name, "stream_interrupted");
                 streamProbeDone = true;
-                deps.router.recordFailure(
-                  cand.channel.id,
-                  "retryable",
-                  undefined,
-                  performance.now() - startedAt,
-                );
+                observeAttemptFailure("retryable", undefined, performance.now() - startedAt);
               }
             }
             if (abortedByClient) {
@@ -3434,9 +3589,7 @@ export async function handleInferenceRequest(
     releaseAllPendingProbes();
     const revocation = activePluginSignal?.aborted ? activePluginSignal.reason : undefined;
     if (holdAcquired && !holdFinalized && !holdFinalizeAttempted && !streamOwnsGuard) {
-      await finalizeHold(
-        revocation && !currentAttemptDispatched && !anyUnknownAttempt ? "release" : "unknown",
-      );
+      await finalizeHold(!currentAttemptDispatched && !anyUnknownAttempt ? "release" : "unknown");
     }
     const failure = revocation ?? err;
     const status = failure instanceof GatewayError ? failure.status : 500;
@@ -3444,6 +3597,7 @@ export async function handleInferenceRequest(
     emitAccessLog(status, code);
     return errorJson(c, operation, failure, requestId, trace);
   } finally {
+    activeDispatch?.release();
     releaseAllPendingProbes();
     releaseLimiters();
     if (!streamOwnsGuard) {
@@ -3451,6 +3605,7 @@ export async function handleInferenceRequest(
       activeLinkedDispose = null;
       releaseLocalProjectSlot?.();
       releaseLocalProjectSlot = null;
+      releaseBodyBuffer?.();
       releaseGuard?.();
     }
   }

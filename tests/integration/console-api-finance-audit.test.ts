@@ -429,6 +429,104 @@ test("platform default credit policy and batch unified credit updates work with 
   expect(extraWallet.data.credit_limit_decimal).toBe("0.000000000000000000");
 });
 
+test("a lost default-credit response leaves project initialization retryable and applies the policy once", async () => {
+  const defaults = await h.adminApi("PUT", "/admin/v1/finance/credit-policy/default", adminAccess, {
+    default_credit_limit_decimal: "3",
+    default_wallet_policy: "CASH_FIRST",
+  });
+  expect(defaults.status).toBe(200);
+  const project = await h.clientApi<{ id: string }>(
+    "POST",
+    `/api/v1/orgs/${orgId}/projects`,
+    customerAccess,
+    { name: "Retried Default Credit", currency: "USD" },
+  );
+  expect(project.status).toBe(201);
+  const path = `/internal/v1/wallets/${project.data.id}/credit-policy`;
+  let committedStatus = 0;
+  h.setGatewayInterceptor(async (url, init, forward) => {
+    if (init?.method === "POST" && new URL(url).pathname === path) {
+      const response = await forward();
+      committedStatus = response.status;
+      await response.body?.cancel();
+      return new Response("temporarily unavailable", { status: 503 });
+    }
+    return forward();
+  });
+  try {
+    const first = await h.consoleRuntime.sync
+      .ensureProjectSynced(project.data.id)
+      .catch((err: unknown) => err);
+    expect(committedStatus).toBe(200);
+    expect(first).toMatchObject({ status: 503 });
+  } finally {
+    h.setGatewayInterceptor(null);
+  }
+  expect(await h.consoleRuntime.sync.ensureProjectSynced(project.data.id)).toMatchObject({
+    gatewaySynced: true,
+  });
+  const wallet = await h.adminApi(
+    "GET",
+    `/admin/v1/finance/projects/${project.data.id}/wallet`,
+    adminAccess,
+  );
+  expect(wallet.data).toMatchObject({
+    credit_limit_decimal: "3.000000000000000000",
+    credit_policy_version: "1",
+    policy: "CASH_FIRST",
+  });
+  await h.adminApi("PUT", "/admin/v1/finance/credit-policy/default", adminAccess, {
+    default_credit_limit_decimal: "0",
+    default_wallet_policy: "GIFT_FIRST",
+  });
+});
+
+test("credit policy preview reports an unavailable wallet instead of assuming zero debt", async () => {
+  h.setGatewayInterceptor(async (url, init, forward) => {
+    if (init?.method === "GET" && new URL(url).pathname === `/internal/v1/wallets/${projectId}`) {
+      return new Response("unavailable", { status: 503 });
+    }
+    return forward();
+  });
+  try {
+    const preview = await h.adminApi("POST", "/admin/v1/finance/credit-policy/batch", adminAccess, {
+      scope: "PROJECTS",
+      project_ids: [projectId],
+      credit_limit_decimal: "0",
+      dry_run: true,
+      reason: "Preview project credit policy",
+    });
+    expect(preview.status).toBe(200);
+    expect(preview.data).toMatchObject({
+      failed_count: 1,
+      items: [{ project_id: projectId, ok: false }],
+    });
+  } finally {
+    h.setGatewayInterceptor(null);
+  }
+});
+
+test("batch credit updates reject a scope larger than the supported batch instead of silently truncating", async () => {
+  const user = await h.registerUser("wide-credit-scope@example.com");
+  try {
+    await h.conDb`
+      INSERT INTO public.projects (id, gateway_project_id, org_id, name)
+      SELECT id, id, ${user.defaultOrgId}, 'Credit scope ' || n::text
+      FROM (SELECT n, gen_random_uuid() AS id FROM generate_series(1, 500) AS n) fixtures
+    `;
+    const preview = await h.adminApi("POST", "/admin/v1/finance/credit-policy/batch", adminAccess, {
+      scope: "ORGANIZATION",
+      org_id: user.defaultOrgId,
+      credit_limit_atoms: "0",
+      dry_run: true,
+      reason: "Oversized credit scope",
+    });
+    expect(preview.status).toBe(400);
+  } finally {
+    await h.conDb`DELETE FROM public.projects WHERE org_id = ${user.defaultOrgId}`;
+  }
+});
+
 test("supplier adjustments, admin/client audit views, request drilldown, P&L summary, and 4-way conservation work end-to-end", async () => {
   const supPos = await h.adminApi<{
     delta_decimal: string;

@@ -157,6 +157,14 @@ try {
         responses: {
           "200": { description: "Successful response", content: responseContent },
           ...(internal || apiKeyRequired ? { default: jsonError } : {}),
+          ...(!internal && apiKeyRequired
+            ? {
+                "413": { $ref: "#/components/responses/BodyTooLarge" },
+                "415": { $ref: "#/components/responses/UnsupportedRequestEncoding" },
+                "429": { $ref: "#/components/responses/IngressRateLimited" },
+                "503": { $ref: "#/components/responses/IngressUnavailable" },
+              }
+            : {}),
           ...(path === "/readyz"
             ? {
                 "503": {
@@ -183,6 +191,21 @@ const spec = {
   },
   paths,
   components: {
+    responses: {
+      BodyTooLarge: { description: "The request exceeds the configured body size limit" },
+      UnsupportedRequestEncoding: {
+        description: "Unsupported request Content-Encoding",
+        headers: { "Accept-Encoding": { schema: { type: "string", const: "identity" } } },
+      },
+      IngressRateLimited: {
+        description: "The IP, project, or upstream request quota is exhausted",
+        headers: { "Retry-After": { schema: { type: "integer", minimum: 1 } } },
+      },
+      IngressUnavailable: {
+        description: "An admission dependency or resource is unavailable",
+        headers: { "Retry-After": { schema: { type: "integer", minimum: 1 } } },
+      },
+    },
     securitySchemes: {
       projectBearer: bearerAuth,
       internalBearer: bearerAuth,

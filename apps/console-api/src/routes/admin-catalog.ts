@@ -310,10 +310,12 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
       .offset(offset);
     const gwRes = await deps.gateway.listUpstreamAccounts().catch(() => null);
     const gwMap = new Map((gwRes?.items ?? []).map((a) => [a.id, a]));
-    const items = localItems.map((item) => {
-      const gw = gwMap.get(item.id);
-      return gw ? { ...item, state: gw.state, gateway_state: gw.state } : item;
-    });
+    const items = localItems.map(
+      ({ pendingState: _pendingState, expectedState: _expectedState, ...item }) => {
+        const gw = gwMap.get(item.id);
+        return gw ? { ...item, state: gw.state, gateway_state: gw.state } : item;
+      },
+    );
     return c.json({ items, limit, offset, gateway_state_available: gwRes !== null });
   });
 
@@ -328,7 +330,11 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
       syncStatus: "PENDING",
     });
     try {
-      const synced = await deps.sync.syncUpstreamAccount(id, { includeState: true });
+      const {
+        pendingState: _pendingState,
+        expectedState: _expectedState,
+        ...synced
+      } = await deps.sync.syncUpstreamAccount(id);
       await recordAuditLog(deps.orm, {
         actor,
         action: "admin.upstream_account.create",
@@ -348,58 +354,22 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
     const actor = c.get("user");
     const id = parseUuid(c.req.param("id"), "id");
     const body = await parseJsonBody(c, updateUpstreamAccountSchema);
-    const [existing] = await deps.orm
-      .select()
-      .from(upstreamAccounts)
-      .where(eq(upstreamAccounts.id, id))
-      .limit(1);
-    if (!existing) throw new GatewayError(404, "not_found", "Upstream account not found");
-
-    const explicitStateChange = body.state !== undefined;
-    await deps.orm
-      .update(upstreamAccounts)
-      .set({
-        ...(body.name !== undefined ? { name: body.name } : {}),
-        ...(explicitStateChange ? { state: body.state } : {}),
-        desiredRevision: sql`${upstreamAccounts.desiredRevision} + 1`,
-        syncStatus: "PENDING",
-        updatedAt: sql`now()`,
-      })
-      .where(eq(upstreamAccounts.id, id));
-
-    try {
-      const synced = await deps.sync.syncUpstreamAccount(id, {
-        force: true,
-        includeState: explicitStateChange,
-        ...(body.expected_state ? { expectedState: body.expected_state } : {}),
-      });
-      await recordAuditLog(deps.orm, {
-        actor,
-        action: "admin.upstream_account.update",
-        targetType: "upstream_account",
-        targetId: id,
-        metadata: {
-          ...(body.state ? { state: body.state } : {}),
-          ...(body.expected_state ? { expected_state: body.expected_state } : {}),
-        },
-      });
-      return c.json(synced);
-    } catch (err) {
-      if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
-        await deps.orm
-          .update(upstreamAccounts)
-          .set({
-            name: existing.name,
-            state: existing.state,
-            desiredRevision: existing.desiredRevision,
-            syncStatus: existing.syncStatus,
-            lastSyncError: existing.lastSyncError,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(upstreamAccounts.id, id));
-      }
-      throw err;
-    }
+    const {
+      pendingState: _pendingState,
+      expectedState: _expectedState,
+      ...account
+    } = await deps.sync.updateUpstreamAccount(id, body);
+    await recordAuditLog(deps.orm, {
+      actor,
+      action: "admin.upstream_account.update",
+      targetType: "upstream_account",
+      targetId: id,
+      metadata: {
+        ...(body.state ? { state: body.state } : {}),
+        ...(body.expected_state ? { expected_state: body.expected_state } : {}),
+      },
+    });
+    return c.json(account);
   });
 
   app.post("/upstream-accounts/:id/recharges", async (c) => {
@@ -411,7 +381,7 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
       allowNegative: false,
       allowZero: false,
     });
-    await deps.sync.syncUpstreamAccount(id, { force: false, includeState: false });
+    await deps.sync.syncUpstreamAccount(id);
     const res = await deps.gateway.rechargeSupplier(id, {
       currency: body.currency,
       external_ref: body.external_ref,
@@ -445,7 +415,7 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
       allowNegative: true,
       allowZero: false,
     });
-    await deps.sync.syncUpstreamAccount(id, { force: false, includeState: false });
+    await deps.sync.syncUpstreamAccount(id);
     const res = await deps.gateway.adjustSupplierBalance(id, {
       currency: body.currency,
       external_ref: body.external_ref,
@@ -528,7 +498,7 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
       kind: body.kind,
       providerPluginId: body.provider_plugin_id ?? null,
       baseUrl: body.base_url,
-      keyHint,
+      secretSyncPending: true,
       rpm: body.rpm,
       concurrency: body.concurrency,
       enabled: body.enabled,
@@ -558,63 +528,29 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
     const actor = c.get("user");
     const id = parseUuid(c.req.param("id"), "id");
     const body = await parseJsonBody(c, updateChannelSchema);
-    const [existing] = await deps.orm.select().from(channels).where(eq(channels.id, id)).limit(1);
-    if (!existing) throw new GatewayError(404, "not_found", "Channel not found");
-
-    const nextKeyHint = body.api_key !== undefined ? maskSecret(body.api_key) : undefined;
-    await deps.orm
-      .update(channels)
-      .set({
+    const synced = await deps.sync.updateChannel(
+      id,
+      {
         ...(body.account_id !== undefined ? { accountId: body.account_id } : {}),
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.kind !== undefined ? { kind: body.kind } : {}),
         ...(body.base_url !== undefined ? { baseUrl: body.base_url } : {}),
-        ...(nextKeyHint !== undefined ? { keyHint: nextKeyHint } : {}),
         ...(body.rpm !== undefined ? { rpm: body.rpm } : {}),
         ...(body.concurrency !== undefined ? { concurrency: body.concurrency } : {}),
         ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
         ...(body.routing_policy !== undefined ? { routingPolicy: body.routing_policy } : {}),
         ...(body.adapter_config !== undefined ? { adapterConfig: body.adapter_config } : {}),
-        desiredRevision: sql`${channels.desiredRevision} + 1`,
-        syncStatus: "PENDING",
-        updatedAt: sql`now()`,
-      })
-      .where(eq(channels.id, id));
-
-    try {
-      const synced = await deps.sync.syncChannel(id, body.api_key);
-      await recordAuditLog(deps.orm, {
-        actor,
-        action: "admin.channel.update",
-        targetType: "channel",
-        targetId: id,
-        metadata: { rotated_secret: body.api_key !== undefined },
-      });
-      return c.json(synced);
-    } catch (err) {
-      if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
-        await deps.orm
-          .update(channels)
-          .set({
-            accountId: existing.accountId,
-            name: existing.name,
-            kind: existing.kind,
-            baseUrl: existing.baseUrl,
-            keyHint: existing.keyHint,
-            rpm: existing.rpm,
-            concurrency: existing.concurrency,
-            enabled: existing.enabled,
-            routingPolicy: existing.routingPolicy,
-            adapterConfig: existing.adapterConfig,
-            desiredRevision: existing.desiredRevision,
-            syncStatus: existing.syncStatus,
-            lastSyncError: existing.lastSyncError,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(channels.id, id));
-      }
-      throw err;
-    }
+      },
+      body.api_key,
+    );
+    await recordAuditLog(deps.orm, {
+      actor,
+      action: "admin.channel.update",
+      targetType: "channel",
+      targetId: id,
+      metadata: { rotated_secret: body.api_key !== undefined },
+    });
+    return c.json(synced);
   });
 
   app.get("/pricing-templates", async (c) => {
@@ -860,9 +796,6 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
     const actor = c.get("user");
     const id = parseUuid(c.req.param("id"), "id");
     const body = await parseJsonBody(c, updateRouteSchema);
-    const [existing] = await deps.orm.select().from(routes).where(eq(routes.id, id)).limit(1);
-    if (!existing) throw new GatewayError(404, "not_found", "Route not found");
-
     let billingPriceId = body.billing_price_id;
     let costVersionId = body.cost_version_id;
     if (!billingPriceId && body.billing_template_id) {
@@ -873,62 +806,26 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
       const tpl = await resolveTemplatePriceId(body.cost_template_id, "SUPPLIER");
       costVersionId = tpl.currentPriceVersionId!;
     }
-    await deps.orm
-      .update(routes)
-      .set({
-        ...(body.channel_id !== undefined ? { channelId: body.channel_id } : {}),
-        ...(body.upstream_model !== undefined ? { upstreamModel: body.upstream_model } : {}),
-        ...(body.operations !== undefined ? { operations: body.operations } : {}),
-        ...(body.priority !== undefined ? { priority: body.priority } : {}),
-        ...(body.weight !== undefined ? { weight: body.weight } : {}),
-        ...(billingPriceId !== undefined ? { billingPriceId } : {}),
-        ...(costVersionId !== undefined ? { costVersionId } : {}),
-        ...(body.request_policy !== undefined ? { requestPolicy: body.request_policy } : {}),
-        ...(body.adapter_overrides !== undefined
-          ? { adapterOverrides: body.adapter_overrides }
-          : {}),
-        ...(body.retry_policy !== undefined ? { retryPolicy: body.retry_policy } : {}),
-        ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
-        desiredRevision: sql`${routes.desiredRevision} + 1`,
-        syncStatus: "PENDING",
-        updatedAt: sql`now()`,
-      })
-      .where(eq(routes.id, id));
-
-    try {
-      const synced = await deps.sync.syncRoute(id);
-      await recordAuditLog(deps.orm, {
-        actor,
-        action: "admin.route.update",
-        targetType: "route",
-        targetId: id,
-      });
-      return c.json(synced);
-    } catch (err) {
-      if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
-        await deps.orm
-          .update(routes)
-          .set({
-            channelId: existing.channelId,
-            upstreamModel: existing.upstreamModel,
-            operations: existing.operations,
-            priority: existing.priority,
-            weight: existing.weight,
-            billingPriceId: existing.billingPriceId,
-            costVersionId: existing.costVersionId,
-            requestPolicy: existing.requestPolicy,
-            adapterOverrides: existing.adapterOverrides,
-            retryPolicy: existing.retryPolicy,
-            enabled: existing.enabled,
-            desiredRevision: existing.desiredRevision,
-            syncStatus: existing.syncStatus,
-            lastSyncError: existing.lastSyncError,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(routes.id, id));
-      }
-      throw err;
-    }
+    const synced = await deps.sync.updateRoute(id, {
+      ...(body.channel_id !== undefined ? { channelId: body.channel_id } : {}),
+      ...(body.upstream_model !== undefined ? { upstreamModel: body.upstream_model } : {}),
+      ...(body.operations !== undefined ? { operations: body.operations } : {}),
+      ...(body.priority !== undefined ? { priority: body.priority } : {}),
+      ...(body.weight !== undefined ? { weight: body.weight } : {}),
+      ...(billingPriceId !== undefined ? { billingPriceId } : {}),
+      ...(costVersionId !== undefined ? { costVersionId } : {}),
+      ...(body.request_policy !== undefined ? { requestPolicy: body.request_policy } : {}),
+      ...(body.adapter_overrides !== undefined ? { adapterOverrides: body.adapter_overrides } : {}),
+      ...(body.retry_policy !== undefined ? { retryPolicy: body.retry_policy } : {}),
+      ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+    });
+    await recordAuditLog(deps.orm, {
+      actor,
+      action: "admin.route.update",
+      targetType: "route",
+      targetId: id,
+    });
+    return c.json(synced);
   });
 
   app.get("/pricing-overrides", async (c) => {
@@ -965,89 +862,30 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
       await ensureCustomerPriceSnapshot(billingPriceId);
     }
 
-    const [existing] = await deps.orm
-      .select()
-      .from(pricingOverrides)
-      .where(
-        sql`${pricingOverrides.projectId} = ${body.project_id}::uuid AND ${pricingOverrides.modelName} = ${body.model_name} AND ${pricingOverrides.operation} = ${body.operation}`,
-      )
-      .limit(1);
-
-    const id = crypto.randomUUID();
-    const [row] = await deps.orm
-      .insert(pricingOverrides)
-      .values({
-        id,
-        projectId: body.project_id,
-        modelName: body.model_name,
-        operation: body.operation,
-        overrideKind: body.override_kind,
-        billingPriceId: body.override_kind === "EXACT_PRICE" ? billingPriceId : null,
-        multiplierNumerator:
-          body.override_kind === "MULTIPLIER" ? (body.multiplier_numerator ?? null) : null,
-        multiplierDenominator:
-          body.override_kind === "MULTIPLIER" ? (body.multiplier_denominator ?? null) : null,
-        enabled: body.enabled,
-        syncStatus: "PENDING",
-      })
-      .onConflictDoUpdate({
-        target: [
-          pricingOverrides.projectId,
-          pricingOverrides.modelName,
-          pricingOverrides.operation,
-        ],
-        set: {
-          overrideKind: body.override_kind,
-          billingPriceId: body.override_kind === "EXACT_PRICE" ? billingPriceId : null,
-          multiplierNumerator:
-            body.override_kind === "MULTIPLIER" ? (body.multiplier_numerator ?? null) : null,
-          multiplierDenominator:
-            body.override_kind === "MULTIPLIER" ? (body.multiplier_denominator ?? null) : null,
-          enabled: body.enabled,
-          desiredRevision: sql`${pricingOverrides.desiredRevision} + 1`,
-          syncStatus: "PENDING",
-          updatedAt: sql`now()`,
-        },
-      })
-      .returning();
-
-    try {
-      const synced = await deps.sync.syncPricingOverride(row!.id);
-      await recordAuditLog(deps.orm, {
-        actor,
-        action: "admin.pricing_override.upsert",
-        targetType: "pricing_override",
-        targetId: synced.id,
-        metadata: {
-          project_id: body.project_id,
-          model_name: body.model_name,
-          override_kind: body.override_kind,
-        },
-      });
-      return c.json(synced);
-    } catch (err) {
-      if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
-        if (existing) {
-          await deps.orm
-            .update(pricingOverrides)
-            .set({
-              overrideKind: existing.overrideKind,
-              billingPriceId: existing.billingPriceId,
-              multiplierNumerator: existing.multiplierNumerator,
-              multiplierDenominator: existing.multiplierDenominator,
-              enabled: existing.enabled,
-              desiredRevision: existing.desiredRevision,
-              syncStatus: existing.syncStatus,
-              lastSyncError: existing.lastSyncError,
-              updatedAt: sql`now()`,
-            })
-            .where(eq(pricingOverrides.id, existing.id));
-        } else {
-          await deps.orm.delete(pricingOverrides).where(eq(pricingOverrides.id, row!.id));
-        }
-      }
-      throw err;
-    }
+    const synced = await deps.sync.upsertPricingOverride({
+      projectId: body.project_id,
+      modelName: body.model_name,
+      operation: body.operation,
+      overrideKind: body.override_kind,
+      billingPriceId: body.override_kind === "EXACT_PRICE" ? billingPriceId : null,
+      multiplierNumerator:
+        body.override_kind === "MULTIPLIER" ? (body.multiplier_numerator ?? null) : null,
+      multiplierDenominator:
+        body.override_kind === "MULTIPLIER" ? (body.multiplier_denominator ?? null) : null,
+      enabled: body.enabled,
+    });
+    await recordAuditLog(deps.orm, {
+      actor,
+      action: "admin.pricing_override.upsert",
+      targetType: "pricing_override",
+      targetId: synced.id,
+      metadata: {
+        project_id: body.project_id,
+        model_name: body.model_name,
+        override_kind: body.override_kind,
+      },
+    });
+    return c.json(synced);
   });
 
   app.post("/sync/reconcile", async (c) => {

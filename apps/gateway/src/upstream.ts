@@ -129,6 +129,7 @@ export type PreparedUpstreamRequest = {
   headers: Headers | Record<string, string>;
   headersValidated?: boolean;
   body: string | Uint8Array;
+  estimatedInputTokens?: number;
   upstreamProtocol: Protocol | null;
   usageDialect: UsageDialect;
   isBedrockStream: boolean;
@@ -298,6 +299,73 @@ type CachedProviderPlan = {
   staticEndpoints: Map<string, URL>;
 };
 
+const textChatFields = new Set([
+  "model",
+  "messages",
+  "stream",
+  "stream_options",
+  "max_tokens",
+  "max_completion_tokens",
+  "temperature",
+  "top_p",
+  "stop",
+  "n",
+  "frequency_penalty",
+  "presence_penalty",
+  "seed",
+  "tools",
+  "tool_choice",
+  "parallel_tool_calls",
+  "reasoning_effort",
+  "reasoning_split",
+  "response_format",
+  "user",
+]);
+const textMessageFields = new Set([
+  "role",
+  "content",
+  "name",
+  "tool_calls",
+  "tool_call_id",
+  "function_call",
+  "reasoning_content",
+]);
+
+function estimateTextChatInput(payload: Record<string, unknown>, body: string): number | undefined {
+  if (
+    !Array.isArray(payload.messages) ||
+    Object.keys(payload).some((key) => !textChatFields.has(key)) ||
+    (payload.n !== undefined && payload.n !== 1)
+  )
+    return undefined;
+  const tools = payload.tools ?? [];
+  if (!Array.isArray(tools) || tools.some((tool) => optionalObject(tool).type !== "function")) {
+    return undefined;
+  }
+  for (const value of payload.messages) {
+    const message = optionalObject(value);
+    if (
+      typeof message.role !== "string" ||
+      Object.keys(message).some((key) => !textMessageFields.has(key))
+    ) {
+      return undefined;
+    }
+    const content = message.content;
+    if (content === undefined || content === null || typeof content === "string") continue;
+    if (
+      !Array.isArray(content) ||
+      content.some((value) => {
+        const part = optionalObject(value);
+        return (
+          part.type !== "text" || typeof part.text !== "string" || Object.keys(part).length !== 2
+        );
+      })
+    )
+      return undefined;
+  }
+  return Buffer.byteLength(body) + 128 + 32 * (payload.messages.length + tools.length);
+}
+
 const providerPlans = new WeakMap<RouteRecord, CachedProviderPlan>();
 
 function getProviderPlan(
@@ -364,6 +432,7 @@ export type PrepareUpstreamOptions = {
   multipartEntries?: readonly [string, string | File][];
   isStream: boolean;
   canMutateClientBody?: boolean;
+  estimateInputTokens?: boolean;
   vertexTokens: VertexTokens;
   wasmExecutor: WasmRuntimeExecutor | null;
   signingPublicKeyPem?: string;
@@ -455,11 +524,17 @@ export function tryPrepareUpstreamRequestSync(
     headers[auth.header_name.toLowerCase()] = `${auth.prefix ?? ""}${secret}`;
   }
 
+  const body = stringifyExact(payload);
+  const estimatedInputTokens =
+    options.estimateInputTokens && upstreamProtocol === "chat" && usageDialect === "openai"
+      ? estimateTextChatInput(payload, body)
+      : undefined;
   return {
     url,
     headers,
     headersValidated: extraHeaderEntries.length === 0 && auth.scheme !== "header" && secretValid,
-    body: stringifyExact(payload),
+    body,
+    ...(estimatedInputTokens !== undefined ? { estimatedInputTokens } : {}),
     upstreamProtocol,
     usageDialect,
     isBedrockStream,

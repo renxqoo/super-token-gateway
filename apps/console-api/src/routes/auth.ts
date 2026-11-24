@@ -3,6 +3,7 @@ import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
 import {
+  assertAccountCanUseScope,
   burnDummyPasswordVerify,
   constantTimeEquals,
   generateOpaqueToken,
@@ -108,6 +109,26 @@ async function rotateSession(
 ) {
   const refreshHash = sha256Hex(refreshToken);
   return deps.orm.transaction(async (tx) => {
+    const [candidate] = await tx
+      .select({ userId: sessions.userId })
+      .from(sessions)
+      .where(
+        and(
+          eq(sessions.refreshTokenHash, refreshHash),
+          eq(sessions.scope, expectedScope),
+          isNull(sessions.revokedAt),
+          sql`${sessions.refreshExpiresAt} > now()`,
+        ),
+      );
+    if (!candidate)
+      throw new GatewayError(401, "invalid_refresh_token", "Invalid or expired refresh token");
+    const [user] = await tx
+      .select()
+      .from(users)
+      .where(eq(users.id, candidate.userId))
+      .for("update");
+    if (!user)
+      throw new GatewayError(401, "invalid_refresh_token", "Invalid or expired refresh token");
     const claimed = await tx
       .update(sessions)
       .set({ revokedAt: sql`now()` })
@@ -124,20 +145,7 @@ async function rotateSession(
     if (!row) {
       throw new GatewayError(401, "invalid_refresh_token", "Invalid or expired refresh token");
     }
-    const [user] = await tx.select().from(users).where(eq(users.id, row.userId)).limit(1);
-    if (!user || user.status !== "ACTIVE") {
-      throw new GatewayError(403, "account_suspended", "User account is suspended");
-    }
-    if (expectedScope === "ADMIN" && !user.isPlatformAdmin) {
-      throw new GatewayError(403, "forbidden", "Platform administrator privileges required");
-    }
-    if (expectedScope === "CLIENT" && user.isPlatformAdmin) {
-      throw new GatewayError(
-        403,
-        "forbidden",
-        "Platform administrator accounts must authenticate on the Admin API",
-      );
-    }
+    assertAccountCanUseScope(user, expectedScope);
     const next = await issueSessionInTx(deps, tx, user.id, expectedScope, userAgent, ip);
     return { user, next };
   });
@@ -151,15 +159,41 @@ async function changeUserPassword(
   action: string,
 ): Promise<void> {
   const [row] = await deps.orm.select().from(users).where(eq(users.id, user.id)).limit(1);
-  if (!row || !(await verifyPassword(currentPassword, row.passwordHash))) {
+  if (
+    !row ||
+    !(await deps.loginLimiter.runPasswordWork(() =>
+      verifyPassword(currentPassword, row.passwordHash),
+    ))
+  ) {
     throw new GatewayError(400, "invalid_password", "Current password is incorrect");
   }
-  const nextHash = await hashPassword(newPassword);
+  const nextHash = await deps.loginLimiter.runPasswordWork(() => hashPassword(newPassword));
   await deps.orm.transaction(async (tx) => {
-    await tx
+    const [changed] = await tx
       .update(users)
       .set({ passwordHash: nextHash, updatedAt: sql`now()` })
-      .where(eq(users.id, user.id));
+      .where(
+        and(
+          eq(users.id, user.id),
+          eq(users.passwordHash, row.passwordHash),
+          eq(users.status, "ACTIVE"),
+          eq(users.isPlatformAdmin, user.sessionScope === "ADMIN"),
+        ),
+      )
+      .returning({ id: users.id });
+    if (!changed) throw new GatewayError(400, "invalid_password", "Current password is incorrect");
+    const [activeSession] = await tx
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(
+        and(
+          eq(sessions.id, user.sessionId),
+          isNull(sessions.revokedAt),
+          sql`${sessions.expiresAt} > now()`,
+        ),
+      )
+      .for("update");
+    if (!activeSession) throw new GatewayError(401, "unauthorized", "Invalid or expired session");
     await tx
       .update(sessions)
       .set({ revokedAt: sql`now()` })
@@ -178,6 +212,50 @@ async function changeUserPassword(
     targetType: "user",
     targetId: user.id,
   });
+}
+
+async function loginWithPassword(
+  deps: ConsoleDeps,
+  scope: SessionScope,
+  email: string,
+  password: string,
+  userAgent: string | null,
+  ip: string | null,
+) {
+  const prefix = scope === "ADMIN" ? "admin-" : "";
+  const emailKey = `${prefix}email:${email}`;
+  const ipKey = ip ? `${prefix}ip:${ip}` : null;
+  const keys = ipKey ? [emailKey, ipKey] : [emailKey];
+  const user = await deps.loginLimiter.verifyAttempt(keys, async () => {
+    const [account] = await deps.orm.select().from(users).where(eq(users.email, email)).limit(1);
+    if (!account) {
+      await burnDummyPasswordVerify(password);
+      return undefined;
+    }
+    return (await verifyPassword(password, account.passwordHash)) ? account : undefined;
+  });
+  if (!user) throw new GatewayError(401, "invalid_credentials", "Invalid email or password");
+  const result = await deps.orm.transaction(async (tx) => {
+    const [current] = await tx
+      .select()
+      .from(users)
+      .where(and(eq(users.id, user.id), eq(users.passwordHash, user.passwordHash)))
+      .for("update");
+    if (!current) throw new GatewayError(401, "invalid_credentials", "Invalid email or password");
+    assertAccountCanUseScope(current, scope);
+    const session = await issueSessionInTx(deps, tx, user.id, scope, userAgent, ip);
+    return {
+      user: {
+        id: current.id,
+        email: current.email,
+        display_name: current.displayName,
+        is_platform_admin: current.isPlatformAdmin,
+      },
+      ...session,
+    };
+  });
+  deps.loginLimiter.reset(emailKey);
+  return result;
 }
 
 export function createClientAuthRoutes(deps: ConsoleDeps) {
@@ -202,7 +280,7 @@ export function createClientAuthRoutes(deps: ConsoleDeps) {
     const userId = crypto.randomUUID();
     const orgId = crypto.randomUUID();
     const projectId = crypto.randomUUID();
-    const passwordHash = await hashPassword(body.password);
+    const passwordHash = await deps.loginLimiter.runPasswordWork(() => hashPassword(body.password));
     const slug = `personal-${userId.replaceAll("-", "").slice(0, 16)}`;
 
     const session = await deps.orm.transaction(async (tx) => {
@@ -280,54 +358,16 @@ export function createClientAuthRoutes(deps: ConsoleDeps) {
 
   app.post("/login", async (c) => {
     const body = await parseJsonBody(c, loginSchema);
-    const email = body.email.trim().toLowerCase();
-    const ip = getClientIp(deps, c);
-    const emailKey = `email:${email}`;
-    const ipKey = ip ? `ip:${ip}` : null;
-    deps.loginLimiter.check(emailKey);
-    if (ipKey) deps.loginLimiter.check(ipKey);
-
-    const [user] = await deps.orm.select().from(users).where(eq(users.email, email)).limit(1);
-    if (!user) {
-      await burnDummyPasswordVerify(body.password);
-      deps.loginLimiter.recordFailure(emailKey);
-      if (ipKey) deps.loginLimiter.recordFailure(ipKey);
-      throw new GatewayError(401, "invalid_credentials", "Invalid email or password");
-    }
-    if (!(await verifyPassword(body.password, user.passwordHash))) {
-      deps.loginLimiter.recordFailure(emailKey);
-      if (ipKey) deps.loginLimiter.recordFailure(ipKey);
-      throw new GatewayError(401, "invalid_credentials", "Invalid email or password");
-    }
-    if (user.status !== "ACTIVE") {
-      throw new GatewayError(403, "account_suspended", "User account is suspended");
-    }
-    if (user.isPlatformAdmin) {
-      throw new GatewayError(
-        403,
-        "forbidden",
-        "Platform administrator accounts must authenticate on the Admin API",
-      );
-    }
-    deps.loginLimiter.reset(emailKey);
-
-    const session = await issueSessionInTx(
-      deps,
-      deps.orm,
-      user.id,
-      "CLIENT",
-      c.req.header("user-agent") ?? null,
-      ip,
+    return c.json(
+      await loginWithPassword(
+        deps,
+        "CLIENT",
+        body.email.trim().toLowerCase(),
+        body.password,
+        c.req.header("user-agent") ?? null,
+        getClientIp(deps, c),
+      ),
     );
-    return c.json({
-      user: {
-        id: user.id,
-        email: user.email,
-        display_name: user.displayName,
-        is_platform_admin: false,
-      },
-      ...session,
-    });
   });
 
   app.post("/refresh", async (c) => {
@@ -424,7 +464,7 @@ export function createAdminAuthRoutes(deps: ConsoleDeps) {
     deps.loginLimiter.reset(bootstrapKey);
 
     const userId = crypto.randomUUID();
-    const passwordHash = await hashPassword(body.password);
+    const passwordHash = await deps.loginLimiter.runPasswordWork(() => hashPassword(body.password));
 
     const session = await deps.orm.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(88421001)`);
@@ -490,50 +530,16 @@ export function createAdminAuthRoutes(deps: ConsoleDeps) {
 
   app.post("/login", async (c) => {
     const body = await parseJsonBody(c, loginSchema);
-    const email = body.email.trim().toLowerCase();
-    const ip = getClientIp(deps, c);
-    const emailKey = `admin-email:${email}`;
-    const ipKey = ip ? `admin-ip:${ip}` : null;
-    deps.loginLimiter.check(emailKey);
-    if (ipKey) deps.loginLimiter.check(ipKey);
-
-    const [user] = await deps.orm.select().from(users).where(eq(users.email, email)).limit(1);
-    if (!user) {
-      await burnDummyPasswordVerify(body.password);
-      deps.loginLimiter.recordFailure(emailKey);
-      if (ipKey) deps.loginLimiter.recordFailure(ipKey);
-      throw new GatewayError(401, "invalid_credentials", "Invalid email or password");
-    }
-    if (!(await verifyPassword(body.password, user.passwordHash))) {
-      deps.loginLimiter.recordFailure(emailKey);
-      if (ipKey) deps.loginLimiter.recordFailure(ipKey);
-      throw new GatewayError(401, "invalid_credentials", "Invalid email or password");
-    }
-    if (user.status !== "ACTIVE") {
-      throw new GatewayError(403, "account_suspended", "User account is suspended");
-    }
-    if (!user.isPlatformAdmin) {
-      throw new GatewayError(403, "forbidden", "Platform administrator privileges required");
-    }
-    deps.loginLimiter.reset(emailKey);
-
-    const session = await issueSessionInTx(
-      deps,
-      deps.orm,
-      user.id,
-      "ADMIN",
-      c.req.header("user-agent") ?? null,
-      ip,
+    return c.json(
+      await loginWithPassword(
+        deps,
+        "ADMIN",
+        body.email.trim().toLowerCase(),
+        body.password,
+        c.req.header("user-agent") ?? null,
+        getClientIp(deps, c),
+      ),
     );
-    return c.json({
-      user: {
-        id: user.id,
-        email: user.email,
-        display_name: user.displayName,
-        is_platform_admin: true,
-      },
-      ...session,
-    });
   });
 
   app.post("/refresh", async (c) => {

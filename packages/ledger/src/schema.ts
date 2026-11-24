@@ -112,6 +112,12 @@ export const projects = pgTable("projects", {
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
 
+export const consoleOrganizationAdmission = pgTable("console_organization_admission", {
+  organizationId: uuid("organization_id").primaryKey(),
+  suspended: boolean("suspended").notNull(),
+  sourceRevision: integer("source_revision").notNull(),
+});
+
 export const apiKeys = pgTable(
   "api_keys",
   {
@@ -857,6 +863,7 @@ export const ledgerSchema = {
   schemaMigrations,
   configEpoch,
   projects,
+  consoleOrganizationAdmission,
   apiKeys,
   upstreamAccounts,
   channels,

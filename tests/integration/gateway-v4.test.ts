@@ -2897,7 +2897,7 @@ test("G3.4 Built-in pii-guard plugin full lifecycle: discovery, draft install, r
     );
     expect(bStatus).toBe(200);
     const builtinItems = builtinsRes.items as { name: string; version: string; digest: string }[];
-    expect(builtinItems.some((b) => b.name === "pii-guard" && b.version === "1.0.0")).toBe(true);
+    expect(builtinItems.some((b) => b.name === "pii-guard" && b.version === "1.0.1")).toBe(true);
 
     const { status: iStatus, data: installed } = await internalCall(
       runtime.internalApp,

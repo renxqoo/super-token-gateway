@@ -26,7 +26,6 @@ import {
   apiKeyRecords,
   modelCatalog,
   priceVersionSnapshots,
-  pricingOverrides,
   usageDailyRollups,
   usageHourlyRollups,
 } from "../db/schema.ts";
@@ -155,20 +154,28 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     if (!rawProjectId) return { overrides: [], exactPrices: new Map() };
     const projectId = parseUuid(rawProjectId, "project_id");
     const user = await authenticateSession(deps.orm, authHeader, "CLIENT");
-    await requireProjectAccess(deps.orm, user.id, projectId);
-    const rows = await deps.orm
-      .select()
-      .from(pricingOverrides)
-      .where(
-        and(
-          eq(pricingOverrides.projectId, projectId),
-          eq(pricingOverrides.enabled, true),
-          gt(pricingOverrides.syncedRevision, 0),
+    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    if (!project.gatewaySynced) return { overrides: [], exactPrices: new Map() };
+    const { items } = await deps.gateway.listPricingOverrides(project.gatewayProjectId);
+    const overrides = items
+      .filter((row) => row.enabled)
+      .map((row) => ({
+        id: row.id,
+        modelName: row.model_name,
+        operation: row.operation,
+        overrideKind: row.override_kind,
+        billingPriceId: row.billing_price_id,
+        multiplierNumerator: row.multiplier_numerator,
+        multiplierDenominator: row.multiplier_denominator,
+        enabled: row.enabled,
+      }));
+    const exactPriceIds = [
+      ...new Set(
+        overrides.flatMap((row) =>
+          row.overrideKind === "EXACT_PRICE" && row.billingPriceId ? [row.billingPriceId] : [],
         ),
-      );
-    const exactPriceIds = rows
-      .filter((r) => r.overrideKind === "EXACT_PRICE" && r.billingPriceId)
-      .map((r) => r.billingPriceId!);
+      ),
+    ];
     const exactPrices = new Map<string, MarketplacePriceSnapshot>();
     if (exactPriceIds.length > 0) {
       const snaps = await deps.orm
@@ -183,8 +190,11 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
       for (const s of snaps) {
         exactPrices.set(s.id, { side: s.side, currency: s.currency, rates: s.rates });
       }
+      for (const id of exactPriceIds) {
+        if (!exactPrices.has(id)) exactPrices.set(id, await deps.gateway.getPriceVersion(id));
+      }
     }
-    return { overrides: rows, exactPrices };
+    return { overrides, exactPrices };
   }
 
   app.get("/models", async (c) => {

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createConsoleRuntime } from "@gateway/console-api";
 import { createConsoleTestHarness } from "./helpers/console-harness.ts";
 
 let h: Awaited<ReturnType<typeof createConsoleTestHarness>>;
@@ -316,6 +317,35 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
   });
   expect(quoteMult.data.pricing.effective_rates.output_tokens).toEqual({
     numerator: "16",
+    denominator: "1",
+  });
+
+  h.setGatewayInterceptor(async (url, init, forward) => {
+    if (init?.method === "PUT" && new URL(url).pathname === "/internal/v1/pricing-overrides") {
+      return new Response("down", { status: 503 });
+    }
+    return forward();
+  });
+  try {
+    const rejectedEdit = await h.adminApi("PUT", "/admin/v1/pricing-overrides", adminAccess, {
+      project_id: usdProjectId,
+      model_name: "bill-gpt",
+      operation: "chat",
+      override_kind: "MULTIPLIER",
+      multiplier_numerator: "1",
+      multiplier_denominator: "2",
+    });
+    expect(rejectedEdit.status).toBe(503);
+  } finally {
+    h.setGatewayInterceptor(null);
+  }
+  const effective = await h.clientApi<typeof quoteMult.data>(
+    "GET",
+    `/api/v1/models/bill-gpt?project_id=${usdProjectId}`,
+    customerAccess,
+  );
+  expect(effective.data.pricing.effective_rates.input_tokens).toEqual({
+    numerator: "8",
     denominator: "1",
   });
 
@@ -638,6 +668,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
   ).toBe(400);
 
   h.setWebhookStatus(500);
+  expect(await h.consoleRuntime.flushAlertsOnce()).toBe(2);
   const firstAttempt = await h.consoleRuntime.deliverAlertWebhooksOnce();
   expect(firstAttempt.attempted).toBe(2);
   expect(firstAttempt.delivered).toBe(0);
@@ -679,10 +710,226 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
   expect(h.webhookDeliveries.length).toBe(4);
 
   await h.conDb`
-    INSERT INTO public.alert_eval_queue (project_id, latest_wallet_available_atoms, currency, dirty_at)
-    VALUES (${usdProjectId}::uuid, 100, 'USD', now())
+    INSERT INTO public.alert_eval_queue (project_id)
+    VALUES (${usdProjectId}::uuid)
     ON CONFLICT (project_id) DO UPDATE SET dirty_at = now()
   `;
   const cooldownRun = await h.consoleRuntime.flushAlertsOnce();
   expect(cooldownRun).toBe(0);
+});
+
+test("a temporary wallet read error keeps an ingested alert eligible for retry without another event", async () => {
+  const rule = await h.clientApi<{ id: string }>(
+    "POST",
+    `/api/v1/projects/${eurProjectId}/alerts`,
+    customerAccess,
+    { kind: "LOW_BALANCE", threshold_atoms: "99999999999999999999999999999999999999" },
+  );
+  expect(rule.status).toBe(201);
+  const event = {
+    event_id: crypto.randomUUID(),
+    kind: "billing.settled",
+    project_id: eurProjectId,
+    payload: { currency: "EUR" },
+  };
+  let walletUnavailable = false;
+  h.setGatewayInterceptor(async (url, init, forward) => {
+    if (
+      init?.method === "GET" &&
+      new URL(url).pathname === `/internal/v1/wallets/${eurProjectId}`
+    ) {
+      walletUnavailable = true;
+      return new Response("temporarily unavailable", { status: 503 });
+    }
+    return forward();
+  });
+  try {
+    const push = await h.adminApi("POST", "/internal/outbox/events", h.outboxToken, {
+      events: [event],
+    });
+    expect(push.data).toMatchObject({ ingested: 1 });
+    expect(await h.consoleRuntime.flushAlertsOnce()).toBe(0);
+    expect(walletUnavailable).toBe(true);
+  } finally {
+    h.setGatewayInterceptor(null);
+  }
+  await h.conDb`UPDATE public.alert_eval_queue SET next_attempt_at = now() - interval '1 second' WHERE project_id = ${eurProjectId}`;
+  expect(await h.consoleRuntime.flushAlertsOnce()).toBe(1);
+  expect(await h.consoleRuntime.flushAlertsOnce()).toBe(0);
+});
+
+test("a late failed webhook attempt cannot overwrite a newer successful delivery", async () => {
+  const rule = await h.clientApi<{ id: string }>(
+    "POST",
+    `/api/v1/projects/${eurProjectId}/alerts`,
+    customerAccess,
+    { kind: "DAILY_SPEND", threshold_atoms: "1", webhook_url: h.webhookUrl },
+  );
+  expect(rule.status).toBe(201);
+  const push = await h.adminApi("POST", "/internal/outbox/events", h.outboxToken, {
+    events: [
+      {
+        event_id: crypto.randomUUID(),
+        kind: "billing.settled",
+        project_id: eurProjectId,
+        payload: { currency: "EUR", customer_atoms: "1", model: "bill-gpt", operation: "chat" },
+      },
+    ],
+  });
+  expect(push.data).toMatchObject({ ingested: 1 });
+  expect(await h.consoleRuntime.flushAlertsOnce()).toBe(1);
+
+  const started = Promise.withResolvers<void>();
+  const firstResponse = Promise.withResolvers<Response>();
+  const runtime = createConsoleRuntime({
+    config: h.consoleConfig,
+    db: h.conDb,
+    alertFetch: async () => {
+      started.resolve();
+      return firstResponse.promise;
+    },
+  });
+  const first = runtime.deliverAlertWebhooksOnce();
+  try {
+    await Promise.race([started.promise, first]);
+    await h.conDb`UPDATE public.alert_deliveries SET next_attempt_at = now() - interval '1 second' WHERE rule_id = ${rule.data.id}`;
+    const second = await h.consoleRuntime.deliverAlertWebhooksOnce();
+    expect(second.delivered).toBe(1);
+  } finally {
+    firstResponse.resolve(new Response(null, { status: 503 }));
+    await first;
+  }
+  const [delivery] =
+    await h.conDb`SELECT status, attempts, last_http_status FROM public.alert_deliveries WHERE rule_id = ${rule.data.id}`;
+  expect(delivery).toEqual({ status: "DELIVERED", attempts: 2, last_http_status: 200 });
+});
+
+test("low-balance alerts use the current wallet instead of a delayed settlement snapshot", async () => {
+  const project = await h.clientApi<{ id: string }>(
+    "POST",
+    `/api/v1/orgs/${orgId}/projects`,
+    customerAccess,
+    {
+      name: "Wallet Snapshot Recovery",
+      currency: "USD",
+    },
+  );
+  const id = project.data.id;
+  expect(project.status).toBe(201);
+  expect(
+    (
+      await h.adminApi("POST", `/admin/v1/finance/projects/${id}/topups`, adminAccess, {
+        external_ref: "alert-wallet-current",
+        amount_atoms: "10000",
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await h.clientApi("POST", `/api/v1/projects/${id}/alerts`, customerAccess, {
+        kind: "LOW_BALANCE",
+        threshold_atoms: "5",
+      })
+    ).status,
+  ).toBe(201);
+  const event = await h.adminApi("POST", "/internal/outbox/events", h.outboxToken, {
+    events: [
+      {
+        event_id: crypto.randomUUID(),
+        kind: "billing.settled",
+        project_id: id,
+        payload: { currency: "USD", wallet_available_atoms: "0" },
+      },
+    ],
+  });
+  expect(event.data).toMatchObject({ ingested: 1 });
+  expect(await h.consoleRuntime.flushAlertsOnce()).toBe(0);
+});
+
+test("Outbox push acknowledges persisted billing before any slow alert wallet read", async () => {
+  const project = await h.clientApi<{ id: string }>(
+    "POST",
+    `/api/v1/orgs/${orgId}/projects`,
+    customerAccess,
+    {
+      name: "Deferred Alert Evaluation",
+      currency: "USD",
+    },
+  );
+  expect(project.status).toBe(201);
+  const id = project.data.id;
+  expect(
+    (
+      await h.clientApi("POST", `/api/v1/projects/${id}/alerts`, customerAccess, {
+        kind: "LOW_BALANCE",
+        threshold_atoms: "5",
+      })
+    ).status,
+  ).toBe(201);
+  const release = Promise.withResolvers<Response>();
+  h.setGatewayInterceptor(async (url, init, forward) => {
+    if (init?.method === "GET" && new URL(url).pathname === `/internal/v1/wallets/${id}`)
+      return release.promise;
+    return forward();
+  });
+  const push = h.adminApi("POST", "/internal/outbox/events", h.outboxToken, {
+    events: [
+      {
+        event_id: crypto.randomUUID(),
+        kind: "billing.settled",
+        project_id: id,
+        payload: { currency: "USD" },
+      },
+    ],
+  });
+  try {
+    const ack = await Promise.race([push, Bun.sleep(500).then(() => null)]);
+    expect(ack).toMatchObject({ status: 200, data: { ingested: 1 } });
+    const evaluation = h.consoleRuntime.flushAlertsOnce();
+    release.resolve(Response.json({ available_atoms: "0" }));
+    expect(await evaluation).toBe(1);
+  } finally {
+    release.resolve(Response.json({ available_atoms: "0" }));
+    await push;
+    h.setGatewayInterceptor(null);
+  }
+});
+
+test("shutdown during the last available webhook attempt leaves the alert eligible for delivery", async () => {
+  const rule = await h.clientApi<{ id: string }>(
+    "POST",
+    `/api/v1/projects/${eurProjectId}/alerts`,
+    customerAccess,
+    { kind: "DAILY_SPEND", threshold_atoms: "1", webhook_url: h.webhookUrl },
+  );
+  expect(rule.status).toBe(201);
+  const deliveryId = crypto.randomUUID();
+  await h.conDb`
+    INSERT INTO public.alert_deliveries (id, rule_id, project_id, status, webhook_url, attempts)
+    VALUES (${deliveryId}, ${rule.data.id}, ${eurProjectId}, 'PENDING', ${h.webhookUrl}, 4)
+  `;
+  const started = Promise.withResolvers<void>();
+  const runtime = createConsoleRuntime({
+    config: { ...h.consoleConfig, alertEvaluationIntervalMs: 0, alertDeliveryIntervalMs: 10 },
+    db: h.conDb,
+    alertFetch: async (_input, init) => {
+      const request = Promise.withResolvers<Response>();
+      const signal = init!.signal!;
+      signal.addEventListener("abort", () => request.reject(signal.reason), { once: true });
+      started.resolve();
+      return request.promise;
+    },
+  });
+  try {
+    await runtime.start();
+    expect(
+      await Promise.race([started.promise.then(() => true), Bun.sleep(1000).then(() => false)]),
+    ).toBe(true);
+  } finally {
+    await runtime.close();
+  }
+  expect((await h.consoleRuntime.deliverAlertWebhooksOnce()).delivered).toBe(1);
+  const [delivery] =
+    await h.conDb`SELECT status, attempts FROM public.alert_deliveries WHERE id = ${deliveryId}`;
+  expect(delivery).toEqual({ status: "DELIVERED", attempts: 5 });
 });

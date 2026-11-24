@@ -6,6 +6,7 @@ import type {
   AsyncTaskRefundEligibility,
   ChannelRecord,
   ConfigSnapshot,
+  ProjectRecord,
   createAsyncTasksRepository,
   createLedgerEngine,
   createLedgerQueries,
@@ -24,17 +25,19 @@ import {
   type VertexTokens,
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
+import type { ConsoleAdmissionCheck } from "./console-admission.ts";
 import { authenticateRequest, type InferenceContext } from "./proxy.ts";
 import type { ProxyRuntimeState } from "./proxy-state.ts";
 import type { SnapshotManager } from "./snapshot.ts";
 
 export type AsyncTaskHandlerDeps = {
   config: GatewayConfig;
+  checkConsoleAdmission: ConsoleAdmissionCheck;
   snapshot: SnapshotManager;
   asyncTasks: ReturnType<typeof createAsyncTasksRepository>;
   controlLedger: ReturnType<typeof createLedgerEngine>;
   queries: ReturnType<typeof createLedgerQueries>;
-  cluster?: ClusterCoordinator;
+  cluster: ClusterCoordinator;
   transport: ReturnType<typeof createTransport>;
   vertexTokens: VertexTokens;
   state?: ProxyRuntimeState;
@@ -367,6 +370,23 @@ async function pollUpstreamTaskOnce(
   );
 }
 
+async function acquireVideoTaskQuota(
+  deps: AsyncTaskHandlerDeps,
+  project: ProjectRecord,
+): Promise<() => void> {
+  const permit = await deps.cluster.acquireRateLimit(
+    `project:${project.id}`,
+    { rpm: project.rpm, tpm: project.tpm, concurrency: project.concurrency },
+    1,
+    deps.config.attemptTimeoutMs,
+  );
+  if (permit.ok) return permit.release;
+  if (permit.reason === "unavailable") {
+    throw new GatewayError(503, "rate_limit_unavailable", "Shared request quota unavailable");
+  }
+  throw new GatewayError(429, `rate_limit_${permit.reason}`, "Project rate limit exceeded");
+}
+
 export async function handleGetAsyncTask(
   c: InferenceContext,
   deps: AsyncTaskHandlerDeps,
@@ -395,6 +415,9 @@ export async function handleGetAsyncTask(
       peerAddress,
       deps.state,
     );
+    const check = deps.checkConsoleAdmission(project, key);
+    if (check) await check;
+    releaseLimit = await acquireVideoTaskQuota(deps, project);
     const task = await deps.asyncTasks.getTask(taskId);
     if (!task || task.project_id !== project.id) {
       throw new GatewayError(404, "not_found", "Async task not found");
@@ -404,22 +427,6 @@ export async function handleGetAsyncTask(
     }
     if (task.status === "SUCCEEDED" || task.status === "FAILED" || task.status === "CANCELLED") {
       return c.json(formatTaskPayload(task), 200, { "x-request-id": requestId });
-    }
-
-    if (deps.cluster) {
-      const acq = await deps.cluster.acquireRateLimit(
-        `project:${project.id}`,
-        { rpm: project.rpm, tpm: project.tpm, concurrency: project.concurrency },
-        1,
-        deps.config.attemptTimeoutMs,
-      );
-      if (!acq.ok) {
-        if (acq.reason === "unavailable") {
-          throw new GatewayError(503, "rate_limit_unavailable", "Shared request quota unavailable");
-        }
-        throw new GatewayError(429, `rate_limit_${acq.reason}`, "Project rate limit exceeded");
-      }
-      releaseLimit = acq.release;
     }
 
     const coalescer = getPollCoalescer(deps.asyncTasks);
@@ -446,6 +453,7 @@ export async function handleCancelAsyncTask(
   peerAddress?: string | (() => string | undefined),
 ): Promise<Response> {
   const requestId = crypto.randomUUID();
+  let releaseLimit: (() => void) | null = null;
   try {
     if (deps.snapshot.isDiverged()) {
       throw new GatewayError(
@@ -466,6 +474,9 @@ export async function handleCancelAsyncTask(
       peerAddress,
       deps.state,
     );
+    const check = deps.checkConsoleAdmission(project, key);
+    if (check) await check;
+    releaseLimit = await acquireVideoTaskQuota(deps, project);
     const existing = await deps.asyncTasks.getTask(taskId);
     if (!existing || existing.project_id !== project.id) {
       throw new GatewayError(404, "not_found", "Async task not found");
@@ -480,5 +491,7 @@ export async function handleCancelAsyncTask(
     return c.json(formatTaskPayload(updated), 200, { "x-request-id": requestId });
   } catch (err) {
     return taskErrorResponse(c, err, requestId);
+  } finally {
+    releaseLimit?.();
   }
 }

@@ -21,7 +21,8 @@ import {
   SUPPLIER_CELLS_PER_LANE,
   walletLane,
   parseAtoms,
-  computeFreezeReason,
+  walletAdmissionError,
+  canReserveWalletCredit,
   sortLots,
   lotEligible,
   preferredCell,
@@ -90,20 +91,20 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
     const createdSupplierLeases: ActiveSupplierLease[] = [];
 
     await db.begin(async (tx) => {
-      const nowMs = Date.now();
-      if (nowMs >= pruneDemandAt) {
+      const batchStartedAt = Date.now();
+      if (batchStartedAt >= pruneDemandAt) {
         for (const demand of [recentWalletHits, recentSupplierHits]) {
           for (const [key, hit] of demand) {
-            if (nowMs - hit.windowStart > DEMAND_WINDOW_MS) demand.delete(key);
+            if (batchStartedAt - hit.windowStart > DEMAND_WINDOW_MS) demand.delete(key);
           }
         }
-        pruneDemandAt = nowMs + DEMAND_WINDOW_MS;
+        pruneDemandAt = batchStartedAt + DEMAND_WINDOW_MS;
       }
 
       const keySpendsById = new Map<string, KeySpendRow>();
       if (limitedKeyIds.length > 0) {
         const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
-        const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : nowMs;
+        const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : batchStartedAt;
         const lockedKeys = await tx`
           SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
             spend_window_start, spent_atoms::text, reserved_atoms::text
@@ -239,6 +240,7 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
         }
       }
 
+      const nowMs = Date.now();
       const journals: JournalLine[] = [];
       for (const w of walletsById.values()) {
         const wLots = lotsByWallet.get(w.id);
@@ -318,9 +320,9 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
           results[i] = { ok: false, code: "wallet_not_found", message: "Project wallet not found" };
           continue;
         }
-        const freeze = wallet.freeze_reason ?? computeFreezeReason(wallet);
-        if (freeze !== null) {
-          results[i] = { ok: false, code: "wallet_frozen", message: `Wallet frozen: ${freeze}` };
+        const admissionError = walletAdmissionError(wallet);
+        if (admissionError) {
+          results[i] = { ok: false, ...admissionError };
           continue;
         }
 
@@ -394,10 +396,7 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
         }
         const creditPart = remaining;
         const fundedPart = customerAtoms - creditPart;
-        if (
-          wallet.debt_atoms + wallet.credit_reserved_atoms + creditPart >
-          wallet.credit_limit_atoms
-        ) {
+        if (!canReserveWalletCredit(wallet, creditPart)) {
           results[i] = {
             ok: false,
             code: "insufficient_balance",

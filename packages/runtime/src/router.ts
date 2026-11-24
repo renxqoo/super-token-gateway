@@ -37,15 +37,19 @@ export type SmartRouterOptions = {
   probeTimeoutMs?: number;
   now?: () => number;
   random?: () => number;
-  onStateChange?: (event: {
-    channel_id: string;
-    state: CircuitState;
-    open_until_ms: number;
-    cooldown_until_ms: number;
-    open_duration_ms: number;
-    cooldown_duration_ms: number;
-  }) => void;
+  onStateChange?: (event: CircuitTransition) => void;
 };
+
+export type CircuitTransition = {
+  channel_id: string;
+  state: CircuitState;
+  circuit_id: string | null;
+  issued_at_ms: number;
+  open_duration_ms: number;
+  cooldown_duration_ms: number;
+};
+
+export type RoutingAttempt = { generation: number; probe: symbol | undefined };
 
 type InternalChannelState = {
   state: CircuitState;
@@ -55,7 +59,13 @@ type InternalChannelState = {
   ewmaLatencyMs: number;
   openUntilMs: number;
   cooldownUntilMs: number;
-  probeInFlight: boolean;
+  probe: symbol | undefined;
+  generation: number;
+  circuitId: string | null;
+  circuitAt: number;
+  closedCircuits?: Set<string>;
+  dialFailures: number;
+  dialUntilMs: number;
   probeStartedAtMs: number;
   backoffLevel: number;
 };
@@ -100,7 +110,12 @@ export class SmartRouter {
         ewmaLatencyMs: 100,
         openUntilMs: 0,
         cooldownUntilMs: 0,
-        probeInFlight: false,
+        probe: undefined,
+        generation: 0,
+        circuitId: null,
+        circuitAt: 0,
+        dialFailures: 0,
+        dialUntilMs: 0,
         probeStartedAtMs: 0,
         backoffLevel: 0,
       };
@@ -125,73 +140,113 @@ export class SmartRouter {
     return Math.max(0.1, ok / st.window.length);
   }
 
-  isAvailable(channelId: string): { available: boolean; isProbe: boolean } {
-    const st = this.channels.get(channelId);
-    if (!st) return { available: true, isProbe: false };
-    const t = this.now();
-    if (st.cooldownUntilMs > t) return { available: false, isProbe: false };
-    if (st.probeInFlight && t - st.probeStartedAtMs >= this.probeTimeoutMs) {
-      st.probeInFlight = false;
-      st.probeStartedAtMs = 0;
-    }
-    if (st.state === "OPEN") {
-      if (st.openUntilMs > t) return { available: false, isProbe: false };
-      if (st.probeInFlight) return { available: false, isProbe: false };
-      st.state = "HALF_OPEN";
-      st.probeInFlight = true;
-      st.probeStartedAtMs = t;
-      return { available: true, isProbe: true };
-    }
-    if (st.state === "HALF_OPEN") {
-      if (st.probeInFlight) return { available: false, isProbe: false };
-      st.probeInFlight = true;
-      st.probeStartedAtMs = t;
-      return { available: true, isProbe: true };
-    }
-    return { available: true, isProbe: false };
+  private probeIsCurrent(st: InternalChannelState, probe: symbol | undefined): boolean {
+    return Boolean(
+      probe && st.probe === probe && this.now() - st.probeStartedAtMs < this.probeTimeoutMs,
+    );
   }
 
-  peekAvailable(channelId: string, ownsProbe = false): boolean {
+  isAvailable(channelId: string): { available: boolean; probe?: symbol } {
+    const st = this.channels.get(channelId);
+    if (!st) return { available: true };
+    if (!this.peekAvailable(channelId)) return { available: false };
+    if (st.state === "CLOSED") return { available: true };
+    st.state = "HALF_OPEN";
+    st.probe = Symbol();
+    st.probeStartedAtMs = this.now();
+    return { available: true, probe: st.probe };
+  }
+
+  peekAvailable(channelId: string, probe?: symbol): boolean {
     const st = this.channels.get(channelId);
     if (!st) return true;
     const t = this.now();
-    if (st.cooldownUntilMs > t) return false;
-    if (st.state === "OPEN") return st.openUntilMs <= t && (ownsProbe || !st.probeInFlight);
-    if (st.state === "HALF_OPEN") {
-      return ownsProbe || !st.probeInFlight || t - st.probeStartedAtMs >= this.probeTimeoutMs;
-    }
-    return true;
+    if (st.cooldownUntilMs > t || st.dialUntilMs > t) return false;
+    if (probe) return st.state === "HALF_OPEN" && this.probeIsCurrent(st, probe);
+    if (st.state === "OPEN") return st.openUntilMs <= t;
+    return st.state === "CLOSED" || !this.probeIsCurrent(st, st.probe);
   }
 
-  releaseProbe(channelId: string): void {
+  releaseProbe(channelId: string, probe: symbol): void {
     const st = this.channels.get(channelId);
-    if (st && st.probeInFlight) {
-      st.probeInFlight = false;
-      st.probeStartedAtMs = 0;
-    }
+    if (st?.probe === probe) st.probe = undefined;
   }
 
-  recordSuccess(channelId: string, latencyMs: number): void {
-    const st = this.getOrCreate(channelId);
-    const prevState = st.state;
+  beginAttempt(channelId: string, probe?: symbol): RoutingAttempt {
+    return { generation: this.channels.get(channelId)?.generation ?? 0, probe };
+  }
+
+  private accepts(st: InternalChannelState, attempt?: RoutingAttempt): boolean {
+    if (attempt && attempt.generation !== st.generation) return false;
+    if (st.state === "CLOSED") return !attempt?.probe;
+    return st.state === "HALF_OPEN" && this.probeIsCurrent(st, attempt?.probe);
+  }
+
+  private closeCircuit(st: InternalChannelState) {
+    st.generation++;
     st.state = "CLOSED";
+    st.openUntilMs = 0;
     st.consecutiveFailures = 0;
     st.backoffLevel = 0;
-    st.openUntilMs = 0;
-    st.probeInFlight = false;
-    st.probeStartedAtMs = 0;
-    st.ewmaLatencyMs = st.ewmaLatencyMs * 0.8 + Math.max(1, latencyMs) * 0.2;
-    this.pushWindow(st, true);
-    if (prevState !== "CLOSED") {
-      const t = this.now();
+    st.probe = undefined;
+    st.window.length = 0;
+    st.windowCursor = 0;
+  }
+
+  private rememberClosed(st: InternalChannelState, circuitId: string) {
+    const closed = (st.closedCircuits ??= new Set());
+    closed.add(circuitId);
+    if (closed.size > 16) closed.delete(closed.values().next().value!);
+  }
+
+  private openCircuit(channelId: string, st: InternalChannelState, duration: number) {
+    st.generation++;
+    st.state = "OPEN";
+    st.openUntilMs = this.now() + duration;
+    st.probe = undefined;
+    st.circuitId = crypto.randomUUID();
+    st.circuitAt = Date.now();
+    this.onStateChange?.({
+      channel_id: channelId,
+      state: "OPEN",
+      circuit_id: st.circuitId,
+      issued_at_ms: st.circuitAt,
+      open_duration_ms: duration,
+      cooldown_duration_ms: 0,
+    });
+  }
+
+  recordSuccess(channelId: string, latencyMs: number, attempt?: RoutingAttempt): boolean {
+    const st = this.getOrCreate(channelId);
+    if (!this.accepts(st, attempt)) return false;
+    if (st.state === "HALF_OPEN") {
+      this.closeCircuit(st);
+      if (st.circuitId) this.rememberClosed(st, st.circuitId);
       this.onStateChange?.({
         channel_id: channelId,
         state: "CLOSED",
-        open_until_ms: 0,
-        cooldown_until_ms: st.cooldownUntilMs,
+        circuit_id: st.circuitId,
+        issued_at_ms: Date.now(),
         open_duration_ms: 0,
-        cooldown_duration_ms: Math.max(0, st.cooldownUntilMs - t),
+        cooldown_duration_ms: 0,
       });
+    }
+    st.consecutiveFailures = 0;
+    st.dialFailures = 0;
+    st.ewmaLatencyMs = st.ewmaLatencyMs * 0.8 + Math.max(1, latencyMs) * 0.2;
+    this.pushWindow(st, true);
+    return true;
+  }
+
+  recordDialFailure(channelId: string, attempt?: RoutingAttempt): void {
+    const st = this.getOrCreate(channelId);
+    if (!this.accepts(st, attempt)) return;
+    if (attempt?.probe) this.releaseProbe(channelId, attempt.probe);
+    const now = this.now();
+    if (st.dialUntilMs > now) return;
+    if (++st.dialFailures >= this.failureThreshold) {
+      st.dialFailures = 0;
+      st.dialUntilMs = now + 250;
     }
   }
 
@@ -200,10 +255,12 @@ export class SmartRouter {
     kind: "retryable" | "rate_limit" | "auth_error",
     retryAfterMs?: number,
     latencyMs?: number,
+    attempt?: RoutingAttempt,
   ): void {
     const st = this.getOrCreate(channelId);
+    if (!this.accepts(st, attempt)) return;
     const t = this.now();
-    st.probeInFlight = false;
+    st.probe = undefined;
     if (latencyMs !== undefined && latencyMs > 0) {
       st.ewmaLatencyMs = st.ewmaLatencyMs * 0.8 + latencyMs * 0.2;
     }
@@ -215,27 +272,17 @@ export class SmartRouter {
       st.cooldownUntilMs = t + cd;
       this.onStateChange?.({
         channel_id: channelId,
-        state: st.state,
-        open_until_ms: st.openUntilMs,
-        cooldown_until_ms: st.cooldownUntilMs,
-        open_duration_ms: Math.max(0, st.openUntilMs - t),
+        state: "HALF_OPEN",
+        circuit_id: null,
+        issued_at_ms: Date.now(),
+        open_duration_ms: 0,
         cooldown_duration_ms: cd,
       });
       return;
     }
     if (kind === "auth_error") {
-      const dur = Math.min(this.maxOpenMs, 60_000);
-      st.state = "OPEN";
       st.consecutiveFailures = this.failureThreshold;
-      st.openUntilMs = t + dur;
-      this.onStateChange?.({
-        channel_id: channelId,
-        state: "OPEN",
-        open_until_ms: st.openUntilMs,
-        cooldown_until_ms: st.cooldownUntilMs,
-        open_duration_ms: dur,
-        cooldown_duration_ms: Math.max(0, st.cooldownUntilMs - t),
-      });
+      this.openCircuit(channelId, st, Math.min(this.maxOpenMs, 60_000));
       return;
     }
 
@@ -253,52 +300,37 @@ export class SmartRouter {
     ) {
       const duration = Math.min(this.maxOpenMs, this.baseOpenMs * 2 ** st.backoffLevel);
       st.backoffLevel = Math.min(st.backoffLevel + 1, 5);
-      st.state = "OPEN";
-      st.openUntilMs = t + duration;
-      this.onStateChange?.({
-        channel_id: channelId,
-        state: "OPEN",
-        open_until_ms: st.openUntilMs,
-        cooldown_until_ms: st.cooldownUntilMs,
-        open_duration_ms: duration,
-        cooldown_duration_ms: Math.max(0, st.cooldownUntilMs - t),
-      });
+      this.openCircuit(channelId, st, duration);
     }
   }
 
-  applyRemoteEvent(event: {
-    channel_id: string;
-    state: CircuitState;
-    open_until_ms?: number;
-    cooldown_until_ms?: number;
-    open_duration_ms?: number;
-    cooldown_duration_ms?: number;
-  }): void {
+  applyRemoteEvent(event: CircuitTransition): void {
     const st = this.getOrCreate(event.channel_id);
-    const t = this.now();
-    const targetOpen =
-      event.open_duration_ms !== undefined
-        ? t + event.open_duration_ms
-        : (event.open_until_ms ?? 0);
-    const targetCooldown =
-      event.cooldown_duration_ms !== undefined
-        ? t + event.cooldown_duration_ms
-        : (event.cooldown_until_ms ?? 0);
-    if (event.state === "OPEN" && targetOpen > st.openUntilMs) {
-      st.state = "OPEN";
-      st.openUntilMs = targetOpen;
-      st.probeInFlight = false;
-      st.probeStartedAtMs = 0;
-    } else if (event.state === "CLOSED") {
-      st.state = "CLOSED";
-      st.openUntilMs = 0;
-      st.consecutiveFailures = 0;
-      st.backoffLevel = 0;
-      st.probeInFlight = false;
-      st.probeStartedAtMs = 0;
+    const elapsed = Number.isFinite(event.issued_at_ms)
+      ? Math.max(0, Date.now() - event.issued_at_ms)
+      : 0;
+    const now = this.now();
+    if (event.cooldown_duration_ms > elapsed) {
+      st.cooldownUntilMs = Math.max(st.cooldownUntilMs, now + event.cooldown_duration_ms - elapsed);
     }
-    if (targetCooldown > st.cooldownUntilMs) {
-      st.cooldownUntilMs = targetCooldown;
+    if (!event.circuit_id || !Number.isFinite(event.issued_at_ms)) return;
+    if (event.state === "CLOSED") {
+      this.rememberClosed(st, event.circuit_id);
+      if (event.circuit_id === st.circuitId && st.state !== "CLOSED") this.closeCircuit(st);
+    } else if (
+      event.state === "OPEN" &&
+      event.circuit_id !== st.circuitId &&
+      !st.closedCircuits?.has(event.circuit_id) &&
+      (event.issued_at_ms > st.circuitAt ||
+        (event.issued_at_ms === st.circuitAt && event.circuit_id > (st.circuitId ?? ""))) &&
+      event.open_duration_ms > elapsed
+    ) {
+      st.generation++;
+      st.state = "OPEN";
+      st.openUntilMs = now + event.open_duration_ms - elapsed;
+      st.probe = undefined;
+      st.circuitId = event.circuit_id;
+      st.circuitAt = event.issued_at_ms;
     }
   }
 
@@ -307,8 +339,12 @@ export class SmartRouter {
     candidates: readonly T[],
     strategy: "WEIGHTED" | "ROUND_ROBIN" | "LEAST_LATENCY",
     operation: Operation,
-  ): { route: T; isProbe: boolean }[] {
-    const eligible: { route: T; isProbe: boolean; st: InternalChannelState | undefined }[] = [];
+  ): { route: T; probe?: symbol | undefined }[] {
+    const eligible: {
+      route: T;
+      probe?: symbol | undefined;
+      st: InternalChannelState | undefined;
+    }[] = [];
     let firstPriority: number | undefined;
     let samePriority = true;
     let hasSameProto = false;
@@ -323,30 +359,30 @@ export class SmartRouter {
       else if (c.priority !== firstPriority) samePriority = false;
       if (c.same_protocol === true) hasSameProto = true;
       else hasCrossProto = true;
-      eligible.push({ route: c, isProbe: avail.isProbe, st: this.channels.get(c.channel_id) });
+      eligible.push({ route: c, probe: avail.probe, st: this.channels.get(c.channel_id) });
     }
     if (eligible.length === 0) return [];
     if (eligible.length === 1) {
-      return [{ route: eligible[0]!.route, isProbe: eligible[0]!.isProbe }];
+      return [{ route: eligible[0]!.route, probe: eligible[0]!.probe }];
     }
 
-    const ordered: { route: T; isProbe: boolean }[] = [];
+    const ordered: { route: T; probe?: symbol | undefined }[] = [];
 
     const orderSubgroup = (
       p: number,
       suffix: string,
-      group: { route: T; isProbe: boolean; st: InternalChannelState | undefined }[],
+      group: { route: T; probe?: symbol | undefined; st: InternalChannelState | undefined }[],
     ) => {
       if (group.length === 0) return;
       if (group.length === 1) {
-        ordered.push({ route: group[0]!.route, isProbe: group[0]!.isProbe });
+        ordered.push({ route: group[0]!.route, probe: group[0]!.probe });
         return;
       }
       if (strategy === "LEAST_LATENCY") {
         group.sort((a, b) => (a.st?.ewmaLatencyMs ?? 100) - (b.st?.ewmaLatencyMs ?? 100));
         for (let i = 0; i < group.length; i++) {
           const item = group[i]!;
-          ordered.push({ route: item.route, isProbe: item.isProbe });
+          ordered.push({ route: item.route, probe: item.probe });
         }
       } else if (strategy === "ROUND_ROBIN") {
         const cursorKey = `${modelKey}:${p}${suffix}`;
@@ -354,7 +390,7 @@ export class SmartRouter {
         this.rrCursors.set(cursorKey, (cursor + 1) % group.length);
         for (let i = 0; i < group.length; i++) {
           const item = group[(cursor + i) % group.length]!;
-          ordered.push({ route: item.route, isProbe: item.isProbe });
+          ordered.push({ route: item.route, probe: item.probe });
         }
       } else {
         const remaining = [...group];
@@ -375,7 +411,7 @@ export class SmartRouter {
             }
           }
           const [chosen] = remaining.splice(chosenIdx, 1);
-          ordered.push({ route: chosen!.route, isProbe: chosen!.isProbe });
+          ordered.push({ route: chosen!.route, probe: chosen!.probe });
         }
       }
     };
@@ -429,7 +465,7 @@ export class SmartRouter {
         ewma_latency_ms: st.ewmaLatencyMs,
         open_until_ms: st.openUntilMs,
         cooldown_until_ms: st.cooldownUntilMs,
-        probe_in_flight: st.probeInFlight,
+        probe_in_flight: this.probeIsCurrent(st, st.probe),
         backoff_level: st.backoffLevel,
       });
     }

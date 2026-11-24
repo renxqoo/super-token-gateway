@@ -173,6 +173,82 @@ function realServer(runtime: ReturnType<typeof createGatewayRuntime>) {
   return Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: runtime.publicApp.fetch });
 }
 
+test("symptom: fixed input ceilings reject short text on a Key that can pay for the request", async () => {
+  const mock = createMockApp("adv-ctrl");
+  const mockServer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: mock.app.fetch,
+  });
+  const runtime = createGatewayRuntime({ config: makeConfig(), db });
+  try {
+    await runtime.start();
+    const { projectId, channel, supplier, call } = await seed(runtime, mockServer.url.origin);
+    const model = "adv-dynamic-reservation";
+    const customer = await call("POST", "/internal/v1/prices", {
+      side: "CUSTOMER",
+      currency: "USD",
+      rates: {
+        input_tokens: { numerator: "1", denominator: "1" },
+        cached_input_tokens: { numerator: "1", denominator: "2" },
+      },
+      ceilings: { input_tokens: "100000", cached_input_tokens: "100000" },
+    });
+    await call("PUT", "/internal/v1/models", {
+      name: model,
+      operations: ["chat"],
+      max_output_tokens: 50,
+    });
+    await call("PUT", "/internal/v1/routes", {
+      model_name: model,
+      channel_id: channel.id,
+      upstream_model: model,
+      operations: ["chat"],
+      billing_price_id: customer.id,
+      cost_version_id: supplier.id,
+    });
+    const createKey = (name: string, limit: string) =>
+      call("PUT", "/internal/v1/api-keys", {
+        project_id: projectId,
+        name,
+        spend_limit_atoms: limit,
+      });
+    const budget = await createKey("adv-small-budget", "1000");
+    const tinyBudget = await createKey("adv-tiny-budget", "1");
+    const request = (key: unknown, content: unknown) =>
+      runtime.publicApp.fetch(
+        chatRequest(String(key), model, {
+          stream: false,
+          messages: [{ role: "user", content }],
+        }),
+      );
+    const short = await request(budget.key, "Hello");
+    const output = await short.json();
+    expect(short.status, JSON.stringify(output)).toBe(200);
+    const shortId = short.headers.get("x-request-id")!;
+    const [charge] = await db`
+      SELECT h.held_atoms::text, c.customer_atoms::text
+      FROM public.billing_holds h JOIN public.billing_charges c USING (request_id)
+      WHERE h.request_id = ${shortId}
+    `;
+    expect(charge?.customer_atoms).toBe("9");
+    expect(BigInt(charge?.held_atoms)).toBeLessThan(1000n);
+
+    for (const [key, content] of [
+      [budget.key, "a".repeat(2000)],
+      [tinyBudget.key, "Hello"],
+      [budget.key, [{ type: "image_url", image_url: { url: "https://example.invalid/image" } }]],
+    ]) {
+      const denied = await request(key, content);
+      expect(denied.status).toBe(402);
+      expect(await denied.json()).toMatchObject({ error: { code: "key_spend_limit_exceeded" } });
+    }
+  } finally {
+    await runtime.close(1000);
+    mockServer.stop(true);
+  }
+});
+
 test("symptom: client cancels SSE mid-stream after consuming output -> hold is UNKNOWN, nothing spent, nothing refunded, funds fully reserved", async () => {
   const mock = createMockApp("adv-ctrl");
   const mockServer = Bun.serve({

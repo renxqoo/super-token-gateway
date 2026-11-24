@@ -1,0 +1,51 @@
+services:
+  console-migrate:
+    image: oven/bun:1.4.5-alpine
+    pull_policy: never
+    profiles: [migration]
+    working_dir: /app
+    volumes:
+      - ../dist:/app/dist:ro
+    environment:
+      CONSOLE_MIGRATION_DATABASE_URL: ${CONSOLE_MIGRATION_DATABASE_URL:-}
+    command: [bun, --no-env-file, dist/tools/console-migrate.js]
+    read_only: true
+    user: "1000:1000"
+    security_opt: [no-new-privileges:true]
+
+  console-api:
+    image: oven/bun:1.4.5-alpine
+    pull_policy: never
+    working_dir: /app
+    volumes:
+      - ../dist:/app/dist:ro
+    env_file:
+      - path: ${CONSOLE_ENV_FILE:?Set CONSOLE_ENV_FILE to the protected runtime environment file}
+        format: raw
+    environment:
+      CONSOLE_HOST: 0.0.0.0
+      CONSOLE_ADMIN_HOST: 0.0.0.0
+      CONSOLE_PORT: "8092"
+      CONSOLE_ADMIN_PORT: "8093"
+    command: [bun, --no-env-file, dist/console-api/main.js]
+    ports:
+      - "127.0.0.1:${CONSOLE_PUBLISH_CLIENT_PORT:-8092}:8092"
+      - "127.0.0.1:${CONSOLE_PUBLISH_ADMIN_PORT:-8093}:8093"
+    healthcheck:
+      test:
+        [
+          CMD,
+          bun,
+          -e,
+          "const r = await fetch('http://127.0.0.1:8092/readyz', { signal: AbortSignal.timeout(2000) }); process.exit(r.ok ? 0 : 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    init: true
+    read_only: true
+    user: "1000:1000"
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 15s
+    restart: unless-stopped

@@ -24,6 +24,11 @@ const targets = [
   },
   { entry: "scripts/migrate.ts", outdir: "dist/tools", name: "migrate" },
   { entry: "scripts/console-migrate.ts", outdir: "dist/tools", name: "console-migrate" },
+  {
+    entry: "scripts/verify-console-deployment.ts",
+    outdir: "dist/tools",
+    name: "verify-console-deployment",
+  },
   { entry: "scripts/archive.ts", outdir: "dist/tools", name: "archive" },
 ];
 

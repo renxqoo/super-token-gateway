@@ -6,7 +6,130 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { validateAuthCredentials } from "../cloud-auth.ts";
-import { createTransport, isPublicAddress, validateBaseUrl } from "../network.ts";
+import { createTransport, isPublicAddress, safeFetch, validateBaseUrl } from "../network.ts";
+
+test("symptom: fast handshakes can start a new dial burst before the rate budget refills", async () => {
+  const arrivals: number[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      arrivals.push(performance.now());
+      return new Response("ok", { headers: { connection: "close" } });
+    },
+  });
+  const transport = createTransport(8, {
+    dial: { concurrency: 1, startsPerSecond: 10, maxQueueWaitMs: 1000 },
+  });
+  try {
+    const replies = await Promise.all(
+      Array.from({ length: 3 }, () => transport.fetch(server.url, {}, true)),
+    );
+    expect(await Promise.all(replies.map((response) => response.text()))).toEqual([
+      "ok",
+      "ok",
+      "ok",
+    ]);
+    expect(arrivals[2]! - arrivals[0]!).toBeGreaterThanOrEqual(160);
+  } finally {
+    transport.close();
+    server.stop(true);
+  }
+});
+
+test("symptom: streamed request bodies can bypass the upstream dial rate limit", async () => {
+  const arrivals: number[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      arrivals.push(performance.now());
+      return new Response(await request.text(), { headers: { connection: "close" } });
+    },
+  });
+  const transport = createTransport(4, {
+    dial: { concurrency: 1, startsPerSecond: 10, maxQueueWaitMs: 1000 },
+  });
+  try {
+    const calls = Array.from({ length: 3 }, () =>
+      transport.fetch(
+        server.url,
+        {
+          method: "POST",
+          body: new Blob(["upload"]).stream(),
+        },
+        true,
+      ),
+    );
+    expect(await Promise.all(calls.map(async (call) => (await call).text()))).toEqual([
+      "upload",
+      "upload",
+      "upload",
+    ]);
+    expect(arrivals[2]! - arrivals[0]!).toBeGreaterThanOrEqual(160);
+  } finally {
+    transport.close();
+    server.stop(true);
+  }
+});
+
+test("symptom: an ordinary exchange can block a prepared dispatch while holding its pool slot", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response("ok", { headers: { connection: "close" } }),
+  });
+  const transport = createTransport(1, {
+    dial: { concurrency: 1, startsPerSecond: 1000, maxQueueWaitMs: 100 },
+  });
+  try {
+    const prepared = await transport.prepareDispatch(server.url, 0, {}, true);
+    const ordinary = transport.fetch(server.url, {}, true);
+    await Bun.sleep(5);
+    const replies = await Promise.all([prepared.fetchFast({}), ordinary]);
+    expect(
+      replies.map((reply) => ("status" in reply ? reply.status : reply.response.status)),
+    ).toEqual([200, 200]);
+  } finally {
+    transport.close();
+    server.stop(true);
+  }
+});
+
+test("symptom: a queued preflight times out despite a reusable upstream socket returning", async () => {
+  const entered = Promise.withResolvers<void>();
+  const returnFirst = Promise.withResolvers<void>();
+  let arrivals = 0;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch() {
+      if (++arrivals === 1) {
+        entered.resolve();
+        await returnFirst.promise;
+      }
+      return new Response("ok");
+    },
+  });
+  const transport = createTransport(4, {
+    dial: { concurrency: 1, startsPerSecond: 1, maxQueueWaitMs: 200 },
+  });
+  try {
+    const first = transport.fetch(server.url, {}, true);
+    await entered.promise;
+    const second = transport.prepareDispatch(server.url, 0, {}, true);
+    await Bun.sleep(10);
+    returnFirst.resolve();
+    expect(await (await first).text()).toBe("ok");
+    const ready = await second;
+    expect(await ready.fetchFast({})).toMatchObject({ fast: true, status: 200 });
+    expect(arrivals).toBe(2);
+  } finally {
+    returnFirst.resolve();
+    transport.close();
+    server.stop(true);
+  }
+});
 
 test("rejects private, mapped, metadata, reserved and ambiguous destinations", () => {
   for (const address of [
@@ -35,6 +158,27 @@ test("rejects private, mapped, metadata, reserved and ambiguous destinations", (
     "https://[::1]",
   ])
     expect(() => validateBaseUrl(url, false)).toThrow();
+});
+
+test("mixed public IPv4 and reserved IPv6 answers are rejected before dispatch", async () => {
+  const url = new URL("https://provider.example/v1/models");
+  const publicAddress = { address: "1.1.1.1", family: 4 };
+  const dispatched: string[] = [];
+  const send = async (target: URL) => {
+    dispatched.push(target.hostname);
+    return new Response("fixture");
+  };
+  await expect(
+    safeFetch(url, {}, false, [], send, async () => [
+      publicAddress,
+      { address: "2001:2::45", family: 6 },
+    ]),
+  ).rejects.toMatchObject({ code: "unsafe_upstream" });
+  expect(dispatched).toEqual([]);
+
+  const response = await safeFetch(url, {}, false, [], send, async () => [publicAddress]);
+  expect(await response.text()).toBe("fixture");
+  expect(dispatched).toEqual([publicAddress.address]);
 });
 
 test("repeated upstream bursts reuse sockets instead of exhausting local ports", async () => {

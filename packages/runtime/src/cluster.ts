@@ -1,13 +1,7 @@
 import { RedisClient } from "bun";
-import { LocalRateLimiter, type CircuitState } from "./router.ts";
+import { LocalRateLimiter, type CircuitTransition } from "./router.ts";
 
-export type ClusterCircuitEvent = {
-  node_id: string;
-  channel_id: string;
-  state: CircuitState;
-  open_duration_ms: number;
-  cooldown_duration_ms: number;
-};
+export type ClusterCircuitEvent = CircuitTransition & { node_id: string };
 
 export type ClusterEpochEvent = {
   node_id: string;
@@ -168,6 +162,27 @@ const batchAcquireSha = new Bun.CryptoHasher("sha1").update(BATCH_ACQUIRE_LUA).d
 const renewSha = new Bun.CryptoHasher("sha1").update(RENEW_LUA).digest("hex");
 const batchRenewSha = new Bun.CryptoHasher("sha1").update(BATCH_RENEW_LUA).digest("hex");
 
+const INGRESS_WINDOW_LUA = `
+local key = KEYS[1]
+local limit = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local count = tonumber(redis.call('GET', key) or '0')
+if not count or count < 0 or count ~= math.floor(count) then return -1 end
+if count == 0 then
+  redis.call('SET', key, 1, 'PX', window)
+  return 0
+end
+local ttl = redis.call('PTTL', key)
+if ttl < 0 then
+  redis.call('PEXPIRE', key, window)
+  ttl = window
+end
+if count >= limit then return math.max(1, ttl) end
+redis.call('INCR', key)
+return 0
+`;
+const ingressWindowSha = new Bun.CryptoHasher("sha1").update(INGRESS_WINDOW_LUA).digest("hex");
+
 async function evalPermitPrepared(
   redis: RedisClient,
   script: string,
@@ -280,6 +295,8 @@ export class ClusterCoordinator {
   private client: RedisClient | null = null;
   private maintClient: RedisClient | null = null;
   private subscriber: RedisClient | null = null;
+  private primary: string | undefined;
+  private ingressConnection: { client: RedisClient; ready: Promise<unknown> } | undefined;
   private connected = false;
   private closed = false;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -725,6 +742,8 @@ export class ClusterCoordinator {
     this.subscriber = null;
     this.maintClient = null;
     this.client = null;
+    this.primary = undefined;
+    this.closeIngressConnection();
     this.failPendingFor(client);
     try {
       subscriber?.close();
@@ -899,6 +918,7 @@ export class ClusterCoordinator {
       this.client = client;
       this.maintClient = maint;
       this.subscriber = sub;
+      this.primary = primary;
       this.connected = true;
       this.reconnectAttempt = 0;
       this.consecutiveAcquireErrors = 0;
@@ -1309,6 +1329,54 @@ export class ClusterCoordinator {
     });
   }
 
+  private closeIngressConnection(): void {
+    const connection = this.ingressConnection;
+    this.ingressConnection = undefined;
+    connection?.client.close();
+  }
+
+  async takeIngressWindow(
+    ip: string,
+    limit: number,
+    windowMs: number,
+    timeoutMs: number,
+  ): Promise<number | null> {
+    if (!this.primary || !this.isRedisConnected() || this.closed) return null;
+    if (!this.ingressConnection) {
+      const client = new RedisClient(this.primary, {
+        connectionTimeout: timeoutMs,
+        autoReconnect: false,
+        enableOfflineQueue: false,
+      });
+      this.ingressConnection = { client, ready: client.connect() };
+    }
+    const connection = this.ingressConnection;
+    try {
+      const wait = await withRedisDeadline(
+        connection.ready.then(() =>
+          evalPermitPrepared(connection.client, INGRESS_WINDOW_LUA, [
+            ingressWindowSha,
+            "1",
+            `${this.ns}:ingress:ip:${ip}`,
+            String(limit),
+            String(windowMs),
+          ]),
+        ),
+        timeoutMs,
+      );
+      return this.ingressConnection === connection &&
+        this.connected &&
+        typeof wait === "number" &&
+        Number.isSafeInteger(wait) &&
+        wait >= 0
+        ? wait
+        : null;
+    } catch {
+      if (this.ingressConnection === connection) this.closeIngressConnection();
+      return null;
+    }
+  }
+
   publishCircuitEvent(event: Omit<ClusterCircuitEvent, "node_id">): void {
     if (!this.client || !this.connected) return;
     const payload: ClusterCircuitEvent = { node_id: this.nodeId, ...event };
@@ -1353,6 +1421,8 @@ export class ClusterCoordinator {
     this.subscriber = null;
     this.maintClient = null;
     this.client = null;
+    this.primary = undefined;
+    this.closeIngressConnection();
     try {
       sub?.close();
     } catch {

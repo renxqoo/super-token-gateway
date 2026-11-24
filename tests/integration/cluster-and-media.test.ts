@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SQL } from "bun";
 import { ClusterCoordinator } from "@gateway/runtime";
-import { createDatabase, migrate } from "@gateway/ledger";
+import { createAsyncTasksRepository, createDatabase, migrate } from "@gateway/ledger";
 import { getBuiltinPlugin, type WasmRuntimeExecutor } from "@gateway/plugin-engine";
 import { createGatewayRuntime, type GatewayConfig } from "@gateway/gateway";
 import { createMockApp } from "../../apps/mock-providers/src/app.ts";
@@ -161,6 +161,314 @@ async function internalCall(
   const data = (await res.json()) as Record<string, unknown>;
   return { status: res.status, data };
 }
+
+test("public IP quota is atomic across gateways and fails closed when the Redis connection is lost", async () => {
+  const config = makeConfig({
+    redisNamespace: `stg_ip_${crypto.randomUUID()}`,
+    trustedProxyCidrs: ["127.0.0.1/32"],
+    ingressIp: {
+      mode: "enforce",
+      windowMs: 10_000,
+      maxRequests: 2,
+      nodeMaxRequests: 32,
+      maxPending: 16,
+      timeoutMs: 200,
+    },
+  });
+  const first = createGatewayRuntime({ config, db, wasmExecutor: null });
+  const second = createGatewayRuntime({ config, db, wasmExecutor: null });
+  const models = (forwarded: string) =>
+    new Request("http://gateway.test/v1/models", {
+      headers: { "x-forwarded-for": forwarded },
+    });
+  try {
+    await Promise.all([first.start(), second.start()]);
+    await waitForRedisState(true, first.cluster, second.cluster);
+    const burst = await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        (index % 2 ? first : second).fetchPublic(models(`198.51.100.${index + 1}`), {
+          peerAddress: index % 2 ? "192.0.2.1" : "::ffff:c000:201",
+        }),
+      ),
+    );
+    expect(burst.map((response) => response.status).sort()).toEqual([
+      401, 401, 429, 429, 429, 429, 429, 429,
+    ]);
+    const limited = burst.find((response) => response.status === 429)!;
+    expect(Number(limited.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(await limited.json()).toMatchObject({ error: { code: "ip_rate_limited" } });
+    expect(
+      (await first.fetchPublic(models("192.0.2.2"), { peerAddress: "127.0.0.1" })).status,
+    ).toBe(401);
+    expect((await first.fetchPublic(new Request("http://gateway.test/livez"))).status).toBe(200);
+
+    const control = new Bun.RedisClient(redisUrl);
+    try {
+      expect(await control.send("CLIENT", ["PAUSE", "600", "ALL"])).toBe("OK");
+      const paused = await first.fetchPublic(models("192.0.2.4"), { peerAddress: "127.0.0.1" });
+      expect(paused.status).toBe(503);
+      expect(await paused.json()).toMatchObject({ error: { code: "ingress_quota_unavailable" } });
+      expect(first.cluster.isRedisConnected()).toBe(true);
+      expect(await control.send("PING", [])).toBe("PONG");
+      expect(
+        (await first.fetchPublic(models("192.0.2.5"), { peerAddress: "127.0.0.1" })).status,
+      ).toBe(401);
+    } finally {
+      control.close();
+    }
+
+    await first.cluster.close();
+    const unavailable = await first.fetchPublic(models("192.0.2.3"), { peerAddress: "127.0.0.1" });
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toMatchObject({
+      error: { code: "ingress_quota_unavailable" },
+    });
+  } finally {
+    await Promise.all([first.close(), second.close()]);
+  }
+});
+
+test("HTTP request size and the node body budget are enforced for JSON, multipart and streamed uploads", async () => {
+  const boundary = "gateway-ingress-fixture";
+  const contentType = `multipart/form-data; boundary=${boundary}`;
+  const multipart = new TextEncoder().encode(
+    `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nfixture-missing\r\n` +
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="clip.wav"\r\n` +
+      `Content-Type: audio/wav\r\n\r\nfixture\r\n--${boundary}--\r\n`,
+  );
+  const maxBodyBytes = multipart.byteLength;
+  const config = makeConfig({
+    maxBodyBytes,
+    ingressBodyBufferBytes: maxBodyBytes,
+    bodyReadTimeoutMs: 1000,
+  });
+  const runtime = createGatewayRuntime({ config, db, wasmExecutor: null });
+  const abort = new AbortController();
+  let server: ReturnType<typeof Bun.serve> | undefined;
+  try {
+    await runtime.start();
+    const project = await internalCall(runtime.internalApp, "PUT", "/internal/v1/projects", {
+      name: "body-budget",
+    });
+    expect(project.status).toBe(200);
+    const key = await internalCall(runtime.internalApp, "PUT", "/internal/v1/api-keys", {
+      name: "body-budget",
+      project_id: project.data.id,
+    });
+    expect(key.status).toBe(200);
+    const auth = { authorization: `Bearer ${key.data.key}` };
+    const request = JSON.stringify({ model: "fixture-missing" });
+    const json = request + " ".repeat(maxBodyBytes - request.length);
+    server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, listener) {
+        return runtime.fetchPublic(req, { getPeerAddress: () => listener.requestIP(req)?.address });
+      },
+    });
+    const chat = new URL("/v1/chat/completions", server.url);
+    const transcription = new URL("/v1/audio/transcriptions", server.url);
+    const post = (url: URL, body: BodyInit, headers: Record<string, string> = {}) =>
+      fetch(url, { method: "POST", headers: { ...auth, ...headers }, body });
+    const plain = await post(chat, json, { "content-encoding": "identity" });
+    expect(plain.status).toBe(404);
+    expect(await plain.json()).toMatchObject({ error: { code: "model_not_found" } });
+    expect((await post(chat, json + " ")).status).toBe(413);
+    const transcribed = await post(transcription, multipart, { "content-type": contentType });
+    expect(transcribed.status).toBe(404);
+    expect(await transcribed.json()).toMatchObject({ error: { code: "model_not_found" } });
+    const large = new Uint8Array(maxBodyBytes + 1);
+    large.set(multipart);
+    expect((await post(transcription, large, { "content-type": contentType })).status).toBe(413);
+    const chunked = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(json + " "));
+        controller.close();
+      },
+    });
+    expect((await post(chat, chunked)).status).toBe(413);
+
+    const reading = Promise.withResolvers<void>();
+    const pending = runtime.fetchPublic(
+      new Request(chat, {
+        method: "POST",
+        headers: auth,
+        signal: abort.signal,
+        body: new ReadableStream(
+          {
+            pull() {
+              reading.resolve();
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+      }),
+    );
+    await reading.promise;
+    const full = await post(chat, request);
+    expect(full.status).toBe(503);
+    expect(await full.json()).toMatchObject({
+      error: { code: "request_body_capacity_unavailable" },
+    });
+    abort.abort();
+    expect((await pending).status).toBe(499);
+    expect((await post(chat, json)).status).toBe(404);
+    let cancelled = false;
+    const timedOut = await runtime.fetchPublic(
+      new Request(chat, {
+        method: "POST",
+        headers: { ...auth, "content-length": String(maxBodyBytes) },
+        body: new ReadableStream({
+          cancel() {
+            cancelled = true;
+          },
+        }),
+      }),
+    );
+    expect(timedOut.status).toBe(408);
+    expect(cancelled).toBe(true);
+    expect((await post(chat, json)).status).toBe(404);
+    expect(
+      (await (await runtime.metricsResponse()).text()).match(
+        /^gateway_ingress_body_buffer_reserved_bytes 0$/m,
+      ),
+    ).not.toBeNull();
+  } finally {
+    abort.abort();
+    await server?.stop(true);
+    await runtime.close();
+  }
+});
+
+test("symptom: bursts of readiness and metrics checks each open a PostgreSQL probe", async () => {
+  const config = makeConfig({ redisNamespace: `stg_readiness_${crypto.randomUUID()}` });
+  let observe = false;
+  let probes = 0;
+  let databaseUnavailable = false;
+  const observedDatabase = new Proxy(db, {
+    apply(target, receiver, args) {
+      if (observe) {
+        probes++;
+        if (databaseUnavailable) return Promise.reject(new Error("Database unavailable"));
+      }
+      return Reflect.apply(target, receiver, args);
+    },
+  });
+  const runtime = createGatewayRuntime({ config, db: observedDatabase, wasmExecutor: null });
+  try {
+    await runtime.start();
+    await waitForRedisState(true, runtime.cluster);
+    observe = true;
+    const [metrics, ...responses] = await Promise.all([
+      runtime.metricsResponse(),
+      ...Array.from({ length: 12 }, () => runtime.publicApp.request("/readyz")),
+    ]);
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(await metrics.text()).toContain("gateway_ready 1");
+    expect(probes).toBe(1);
+    expect((await runtime.publicApp.request("/readyz")).status).toBe(200);
+    expect(probes).toBe(1);
+
+    databaseUnavailable = true;
+    await Bun.sleep(300);
+    const unavailable = await runtime.publicApp.request("/readyz");
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toEqual({ status: "db_unavailable" });
+    expect((await runtime.publicApp.request("/readyz")).status).toBe(503);
+    expect(probes).toBe(2);
+    runtime.lifecycle.accepting = false;
+    const draining = await runtime.publicApp.request("/readyz");
+    expect(await draining.json()).toEqual({ status: "not_ready" });
+    expect(probes).toBe(2);
+  } finally {
+    observe = false;
+    await runtime.close();
+  }
+});
+
+test("symptom: missing and completed video queries and cancellations bypass the shared project rate limit", async () => {
+  const config = makeConfig({ redisNamespace: `stg_video_quota_${crypto.randomUUID()}` });
+  const first = createGatewayRuntime({ config, db, wasmExecutor: null });
+  const second = createGatewayRuntime({ config, db, wasmExecutor: null });
+  try {
+    await first.start();
+    async function configure(path: string, body: Record<string, unknown>) {
+      const { status, data } = await internalCall(first.internalApp, "PUT", path, body);
+      expect(status).toBe(200);
+      return data;
+    }
+    const project = await configure("/internal/v1/projects", { name: "video-quota", rpm: 3 });
+    const other = await configure("/internal/v1/projects", { name: "other-video-quota", rpm: 1 });
+    const primaryKey = await configure("/internal/v1/api-keys", {
+      name: "video-quota",
+      project_id: project.id,
+      operations: ["videos"],
+    });
+    const otherKey = await configure("/internal/v1/api-keys", {
+      name: "other-video-quota",
+      project_id: other.id,
+      operations: ["videos"],
+    });
+    const account = await configure("/internal/v1/upstream-accounts", { name: "video-quota" });
+    const channel = await configure("/internal/v1/channels", {
+      name: "video-quota",
+      account_id: account.id,
+      kind: "openai",
+      base_url: "http://127.0.0.1:1",
+      api_key: "local-fixture",
+    });
+    const repository = createAsyncTasksRepository(db);
+    const task = (projectId: unknown, status: "QUEUED" | "SUCCEEDED") =>
+      repository.createTask({
+        id: `vid_${crypto.randomUUID().replaceAll("-", "")}`,
+        request_id: crypto.randomUUID(),
+        project_id: String(projectId),
+        charge_id: null,
+        api_key_id: null,
+        channel_id: String(channel.id),
+        model: "fixture-video",
+        operation: "videos",
+        upstream_task_id: "fixture-task",
+        status,
+      });
+    const [completed, queued, otherQueued] = await Promise.all([
+      task(project.id, "SUCCEEDED"),
+      task(project.id, "QUEUED"),
+      task(other.id, "QUEUED"),
+    ]);
+    await second.start();
+    await waitForRedisState(true, first.cluster, second.cluster);
+    const call = (node: typeof first, key: unknown, id: string, method: "GET" | "POST" = "GET") =>
+      node.publicApp.request(`/v1/videos/${id}${method === "POST" ? "/cancel" : ""}`, {
+        method,
+        headers: { authorization: `Bearer ${key}` },
+      });
+
+    const missing = `vid_${crypto.randomUUID().replaceAll("-", "")}`;
+    expect((await call(first, primaryKey.key, missing)).status).toBe(404);
+    expect((await call(first, primaryKey.key, otherQueued.id)).status).toBe(404);
+    const own = await call(second, primaryKey.key, completed.id);
+    expect(own.status).toBe(200);
+    expect(await own.json()).toMatchObject({ status: "SUCCEEDED" });
+
+    const limited = await Promise.all([
+      call(first, primaryKey.key, completed.id),
+      call(second, primaryKey.key, queued.id, "POST"),
+    ]);
+    expect(limited.map((response) => response.status)).toEqual([429, 429]);
+    for (const response of limited) {
+      expect(await response.json()).toMatchObject({ error: { code: "rate_limit_rpm" } });
+    }
+    expect((await repository.getTask(queued.id))?.status).toBe("QUEUED");
+
+    const cancelled = await call(second, otherKey.key, otherQueued.id, "POST");
+    expect(cancelled.status).toBe(200);
+    expect(await cancelled.json()).toMatchObject({ status: "CANCELLED" });
+    expect((await call(first, otherKey.key, otherQueued.id)).status).toBe(429);
+  } finally {
+    await Promise.all([first.close(), second.close()]);
+  }
+});
 
 test("Redis cluster syncs rate limits, circuit breaker OPEN state, and config epochs across Node A and Node B in real time", async () => {
   let primaryCalls = 0;

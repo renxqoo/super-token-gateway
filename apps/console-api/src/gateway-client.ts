@@ -81,26 +81,22 @@ export class GatewayClient {
     if (body !== undefined) {
       headers["content-type"] = "application/json";
     }
-    let resp: Response;
     try {
-      resp = await this.fetchImpl(url, {
+      const resp = await this.fetchImpl(url, {
         method,
         headers,
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         signal: AbortSignal.timeout(this.timeoutMs),
+        redirect: "manual",
       });
+      const text = await resp.text();
+      return { status: resp.status, ok: resp.ok, text };
     } catch (err) {
       if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
         throw new GatewayError(504, "gateway_timeout", "Gateway internal API timed out");
       }
-      throw new GatewayError(
-        502,
-        "gateway_unavailable",
-        err instanceof Error ? err.message : "Gateway internal API unavailable",
-      );
+      throw new GatewayError(502, "gateway_unavailable", "Gateway internal API unavailable");
     }
-    const text = await resp.text();
-    return { status: resp.status, ok: resp.ok, text };
   }
 
   async request<T = Record<string, unknown>>(
@@ -150,6 +146,24 @@ export class GatewayClient {
     return this.request<Record<string, unknown>>("ops", "GET", "/internal/v1/health");
   }
 
+  setOrganizationAdmission(organizationId: string, suspended: boolean, revision: number) {
+    return this.request<{ source_revision: number }>(
+      "security",
+      "PUT",
+      `/internal/v1/console/organizations/${organizationId}/admission`,
+      { suspended, source_revision: revision },
+    );
+  }
+
+  bindConsoleProject(gatewayProjectId: string, organizationId: string, consoleProjectId: string) {
+    return this.request<{ bound: boolean }>(
+      "security",
+      "PUT",
+      `/internal/v1/console/projects/${gatewayProjectId}/binding`,
+      { organization_id: organizationId, console_project_id: consoleProjectId },
+    );
+  }
+
   getChannelHealth() {
     return this.request<{ channels: unknown[] }>("ops", "GET", "/internal/v1/health/channels");
   }
@@ -177,7 +191,6 @@ export class GatewayClient {
     id: string;
     project_id: string;
     name: string;
-    raw_key?: string;
     role: "ADMIN" | "BILLING" | "INVOKER" | "VIEWER";
     allowed_cidrs: string[];
     models: string[];
@@ -402,11 +415,18 @@ export class GatewayClient {
 
   listPricingOverrides(projectId?: string) {
     const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
-    return this.request<{ items: unknown[] }>(
-      "auditor",
-      "GET",
-      `/internal/v1/pricing-overrides${qs}`,
-    );
+    return this.request<{
+      items: {
+        id: string;
+        model_name: string;
+        operation: string;
+        override_kind: "EXACT_PRICE" | "MULTIPLIER";
+        billing_price_id: string | null;
+        multiplier_numerator: string | null;
+        multiplier_denominator: string | null;
+        enabled: boolean;
+      }[];
+    }>("auditor", "GET", `/internal/v1/pricing-overrides${qs}`);
   }
 
   creditWallet(

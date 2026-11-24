@@ -7,7 +7,7 @@ import type {
   RouteRecord,
   UpstreamAccountRecord,
 } from "@gateway/ledger";
-import { quoteReservation, type Usage } from "@gateway/kernel";
+import { quoteReservation, type ReservationMeasurement, type Usage } from "@gateway/kernel";
 import { verifier } from "@gateway/runtime";
 
 const UUID_POOL = Buffer.allocUnsafe(4096);
@@ -202,7 +202,7 @@ export class ProxyRuntimeState {
   quoteForPrice(
     snapEpoch: number,
     price: PriceVersionRecord,
-    measurement: { inputCharacters?: string | undefined; images?: unknown },
+    measurement: ReservationMeasurement,
     outputBound: number,
     cacheKey?: string,
   ): string {
@@ -212,7 +212,7 @@ export class ProxyRuntimeState {
     }
     const cacheable = price.basis === "PROVIDER_USAGE" && measurement.images === undefined;
     if (cacheable) {
-      const ck = `${cacheKey ?? price.id}:${outputBound}`;
+      const ck = `${cacheKey ?? price.id}:${outputBound}:${measurement.estimatedInputTokens ?? ""}`;
       const hit = this.quoteCache.get(ck);
       if (hit !== undefined) return hit;
       const quote = quoteReservation(

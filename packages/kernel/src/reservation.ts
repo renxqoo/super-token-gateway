@@ -11,10 +11,45 @@ export interface ReservationPrice {
   basis: "PROVIDER_USAGE" | "INPUT_CHARACTERS" | "REQUEST_COMPLETION";
 }
 
+export type ReservationMeasurement = {
+  inputCharacters?: string | undefined;
+  estimatedInputTokens?: number | undefined;
+  images?: unknown;
+};
+
+function quoteTextInput(
+  row: ReservationPrice,
+  estimatedInputTokens: number | undefined,
+  usage: Usage,
+): void {
+  if (
+    row.basis !== "PROVIDER_USAGE" ||
+    estimatedInputTokens === undefined ||
+    !Number.isSafeInteger(estimatedInputTokens) ||
+    estimatedInputTokens <= 0 ||
+    BigInt(estimatedInputTokens) > BigInt(usage.input_tokens ?? "0") ||
+    row.rates.cache_write_tokens ||
+    row.rates.cache_write_5m_tokens ||
+    row.rates.cache_write_1h_tokens
+  )
+    return;
+  const uncached = row.rates.input_tokens;
+  const cached = row.rates.cached_input_tokens;
+  if (
+    !uncached ||
+    (cached &&
+      BigInt(cached.numerator) * BigInt(uncached.denominator) >
+        BigInt(uncached.numerator) * BigInt(cached.denominator))
+  )
+    return;
+  usage.input_tokens = String(estimatedInputTokens);
+  delete usage.cached_input_tokens;
+}
+
 export function quoteReservation(
   rows: ReservationPrice[],
   currency: string,
-  measurement: { inputCharacters?: string | undefined; images?: unknown },
+  measurement: ReservationMeasurement,
   outputBound: number,
 ): BillingQuote {
   if (!rows.length)
@@ -30,6 +65,7 @@ export function quoteReservation(
   let amount = 0n;
   for (const row of rows) {
     const usage: Usage = { ...row.ceilings };
+    quoteTextInput(row, measurement.estimatedInputTokens, usage);
     if (row.rates.requests) {
       if (BigInt(usage.requests ?? "0") < 1n)
         throw new DomainError(

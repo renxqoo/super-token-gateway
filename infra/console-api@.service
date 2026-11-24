@@ -1,0 +1,23 @@
+[Unit]
+Description=Super Token Gateway Console API %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=llm-console
+Group=llm-console
+WorkingDirectory=/opt/super-token-gateway
+EnvironmentFile=/etc/super-token-gateway/console-%i.env
+ExecStart=/usr/local/bin/bun --no-env-file dist/console-api/main.js
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+LimitNOFILE=16384
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

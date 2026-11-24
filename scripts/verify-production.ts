@@ -3,6 +3,11 @@ import { createServer, connect, type Socket } from "node:net";
 import { once } from "node:events";
 import { appendFile, cp, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import {
+  createConsoleRuntime,
+  loadConsoleConfigFromEnv,
+  migrateConsoleDb,
+} from "@gateway/console-api";
 import { createDatabase, createLedgerEngine, migrate } from "@gateway/ledger";
 import { createGatewayRuntime } from "../apps/gateway/src/app.ts";
 import { loadConfigFromEnv } from "../apps/gateway/src/config.ts";
@@ -156,6 +161,7 @@ async function redisProcess(name: string, args: string[]) {
 }
 
 let gateway: ReturnType<typeof createGatewayRuntime> | undefined;
+let consoleRuntime: ReturnType<typeof createConsoleRuntime> | undefined;
 let writer: Awaited<ReturnType<typeof tcpWriter>> | undefined;
 let upstream: ReturnType<typeof Bun.serve> | undefined;
 const workers: ReturnType<typeof createWorkerRunner>[] = [];
@@ -243,6 +249,26 @@ synchronous_commit = on
     CREATE ROLE drill_audit LOGIN IN ROLE stg_audit;
   `);
 
+  const consoleDatabase = "stg_console_drill";
+  await owner.unsafe(`CREATE DATABASE ${consoleDatabase} OWNER drill_migration`);
+  await migrateConsoleDb(database(pgUrl(primaryPort, "drill_migration", consoleDatabase)));
+  const roleScript = resolve("infra/postgres/console-roles.sql");
+  await runPg("psql", [
+    "-X",
+    "-d",
+    pgUrl(primaryPort, "drill_admin", consoleDatabase),
+    "-f",
+    roleScript,
+  ]);
+  await owner.unsafe("CREATE ROLE drill_console LOGIN IN ROLE stg_console");
+  await runPg("psql", [
+    "-X",
+    "-d",
+    pgUrl(primaryPort, "drill_admin", consoleDatabase),
+    "-f",
+    roleScript,
+  ]);
+
   const redisPrimary = await redisProcess("redis-primary", [
     "--bind",
     "127.0.0.1",
@@ -318,6 +344,103 @@ synchronous_commit = on
   gateway = createGatewayRuntime({ config });
   await gateway.start();
   const gw = gateway;
+  const consoleDb = database(pgUrl(writer.port, "drill_console", consoleDatabase));
+  const consoleConfig = loadConsoleConfigFromEnv({
+    CONSOLE_DATABASE_URL: pgUrl(writer.port, "drill_console", consoleDatabase),
+    GATEWAY_CATALOG_TOKEN: tokens.catalog!,
+    GATEWAY_SECURITY_TOKEN: tokens.security!,
+    GATEWAY_FINANCE_TOKEN: tokens.finance!,
+    GATEWAY_AUDITOR_TOKEN: tokens.auditor!,
+    GATEWAY_OPS_TOKEN: tokens.ops!,
+    OUTBOX_WEBHOOK_TOKEN: crypto.randomUUID(),
+    BOOTSTRAP_ADMIN_EMAIL: "console-operator@example.test",
+    BOOTSTRAP_ADMIN_TOKEN: crypto.randomUUID(),
+  });
+  consoleRuntime = createConsoleRuntime({
+    config: consoleConfig,
+    db: consoleDb,
+    gatewayFetch: async (input, init) => gw.internalApp.fetch(new Request(input, init)),
+  });
+  await consoleRuntime.start();
+  const consoleRequest = (path: string, method: string, body: unknown, token?: string) =>
+    new Request(`http://console.test${path}`, {
+      method,
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  const consoleBootstrap = await consoleRuntime.fetchAdmin(
+    consoleRequest("/admin/v1/auth/bootstrap", "POST", {
+      email: consoleConfig.bootstrapAdminEmail,
+      bootstrap_token: consoleConfig.bootstrapAdminToken,
+      password: crypto.randomUUID(),
+      display_name: "Release operator",
+    }),
+  );
+  verify(
+    consoleBootstrap.status === 201,
+    `Console runtime role bootstrap returned ${consoleBootstrap.status}`,
+  );
+  const { access_token: consoleAdminToken } = (await consoleBootstrap.json()) as {
+    access_token: string;
+  };
+  const consoleRegistration = await consoleRuntime.fetchClient(
+    consoleRequest("/api/v1/auth/register", "POST", {
+      email: "console-admission-drill@example.test",
+      password: crypto.randomUUID(),
+      display_name: "Release tenant",
+    }),
+  );
+  verify(
+    consoleRegistration.status === 201,
+    `Console runtime role registration returned ${consoleRegistration.status}`,
+  );
+  const consoleUser = (await consoleRegistration.json()) as {
+    access_token: string;
+    default_org_id: string;
+    default_project_id: string;
+  };
+  const consoleKeyResult = await consoleRuntime.fetchClient(
+    consoleRequest(
+      `/api/v1/projects/${consoleUser.default_project_id}/api-keys`,
+      "POST",
+      { name: "Release key" },
+      consoleUser.access_token,
+    ),
+  );
+  verify(
+    consoleKeyResult.status === 201,
+    `Console runtime role API key creation returned ${consoleKeyResult.status}`,
+  );
+  const { key: consoleKey } = (await consoleKeyResult.json()) as { key: string };
+  const consoleKeyModels = () =>
+    gw.fetchPublic(
+      new Request("http://gateway.test/v1/models", {
+        headers: { authorization: `Bearer ${consoleKey}` },
+      }),
+    );
+  verify(
+    (await consoleKeyModels()).status === 200,
+    "Console key was rejected before organization suspension",
+  );
+  const consoleSuspended = await consoleRuntime.fetchAdmin(
+    consoleRequest(
+      `/admin/v1/orgs/${consoleUser.default_org_id}`,
+      "PATCH",
+      { status: "SUSPENDED" },
+      consoleAdminToken,
+    ),
+  );
+  verify(
+    consoleSuspended.status === 200,
+    `Console runtime role organization suspension returned ${consoleSuspended.status}`,
+  );
+  verify(
+    (await consoleKeyModels()).status === 403,
+    "Gateway data role did not enforce organization suspension",
+  );
   const api = (role: string, route: string, method = "GET", body?: unknown) =>
     gw.internalApp.request(`/internal/v1/${route}`, {
       method,
@@ -408,6 +531,10 @@ synchronous_commit = on
       limitedWorker`UPDATE public.billing_charges SET customer_atoms = 3`,
       data`UPDATE public.wallets SET credit_limit_atoms = 99`,
       data`SELECT public.prepare_ledger_month(date_trunc('month', now())::date)`,
+      data`UPDATE public.console_organization_admission SET suspended = false`,
+      consoleDb`UPDATE public.console_schema_migrations SET checksum = checksum`,
+      consoleDb`DELETE FROM public.console_audit_logs`,
+      consoleDb`CREATE TABLE public.unauthorized (id integer)`,
     ].map(async (query) => {
       try {
         await query;
@@ -588,6 +715,17 @@ recovery_target_action = 'promote'
     "PITR cutoff does not match confirmed credits",
   );
   verify((await restoreLedger.auditConservation()).ok, "Restored ledger conservation failed");
+  const restoredConsole = database(pgUrl(restoredPort, "drill_console", consoleDatabase));
+  const [restoredOrganization] =
+    await restoredConsole`SELECT status, inference_synced_revision FROM public.organizations WHERE id = ${consoleUser.default_org_id}`;
+  const [restoredAdmission] =
+    await restoredAdmin`SELECT suspended, source_revision FROM public.console_organization_admission WHERE organization_id = ${consoleUser.default_org_id}`;
+  verify(
+    restoredOrganization?.status === "SUSPENDED" &&
+      restoredAdmission?.suspended &&
+      restoredOrganization.inference_synced_revision === restoredAdmission.source_revision,
+    "PITR lost confirmed Console organization admission",
+  );
   const restoreWrite = await restoreLedger.creditWallet({
     project_id: String(project.id),
     currency: "USD",
@@ -644,6 +782,18 @@ recovery_target_action = 'promote'
   await credit("pg-after-failover", "29");
   const pgRto = ms(performance.now() - pgFailure);
   verify((await infer()).status === 200, "Inference failed after writer promotion");
+  const consoleRto = await until(async () => {
+    const [readiness, denied] = await Promise.all([
+      consoleRuntime!.fetchClient(new Request("http://console.test/readyz")),
+      consoleKeyModels(),
+    ]);
+    const policy = (await denied.json()) as { error?: { code?: string } };
+    return readiness.status === 200 &&
+      denied.status === 403 &&
+      policy.error?.code === "org_suspended"
+      ? ms(performance.now() - pgFailure)
+      : undefined;
+  }, "Console readiness and suspended key denial after writer promotion");
   const pgInferenceRto = ms(performance.now() - pgFailure);
   const promoted = database(pgUrl(standbyPort));
   const [retained] =
@@ -665,9 +815,14 @@ recovery_target_action = 'promote'
   verify((await admin("auditor", "audit/conservation")).ok, "Promoted ledger conservation failed");
 
   await redisCommand(redisPort, "SET", ["drill:replicated", "retained"]);
+  verify(
+    (await gw.cluster.takeIngressWindow("192.0.2.21", 1, 60_000, 1000)) === 0,
+    "Redis ingress quota could not admit the test IP before failover",
+  );
   await until(
     async () =>
-      (await redisCommand(replicaPort, "GET", ["drill:replicated"])) === "retained"
+      (await redisCommand(replicaPort, "GET", ["drill:replicated"])) === "retained" &&
+      (await redisCommand(replicaPort, "GET", ["stg:ingress:ip:192.0.2.21"])) === "1"
         ? true
         : undefined,
     "Initial Redis marker replication",
@@ -694,7 +849,14 @@ recovery_target_action = 'promote'
     async () => (!gw.cluster.isRedisConnected() ? true : undefined),
     "Redis permit revocation after primary loss",
   );
-  verify(permit.signal?.aborted, "Old primary permit remained active");
+  verify(
+    (await gw.cluster.takeIngressWindow("192.0.2.22", 1, 60_000, 1000)) === null,
+    "Redis ingress quota admitted a request while the primary was unavailable",
+  );
+  await until(
+    async () => (permit.signal?.aborted ? true : undefined),
+    "Unreplicated permit revocation after reconnect",
+  );
   await until(async () => {
     const primary = (await redisCommand(sentinelPorts[0]!, "SENTINEL", [
       "get-master-addr-by-name",
@@ -716,6 +878,11 @@ recovery_target_action = 'promote'
     }
   }, "Sentinel promotion and Gateway quota write");
   const redisQuotaRto = ms(performance.now() - redisFailure);
+  verify(
+    ((await gw.cluster.takeIngressWindow("192.0.2.21", 1, 60_000, 1000)) ?? 0) > 0 &&
+      (await gw.cluster.takeIngressWindow("192.0.2.22", 1, 60_000, 1000)) === 0,
+    "Redis ingress quota did not recover with the replicated window",
+  );
   verify(
     (await redisCommand(replicaPort, "GET", ["drill:replicated"])) === "retained",
     "Redis lost replicated marker",
@@ -745,6 +912,7 @@ recovery_target_action = 'promote'
           scoped_consumers: true,
           audit_actor: true,
           plugin_release_ack_and_revocation: true,
+          console_role_and_inference_admission: true,
           data_role_atoms: "13",
         },
         postgres_failover: {
@@ -755,6 +923,7 @@ recovery_target_action = 'promote'
           rto_ms: pgRto,
           inference_rto_ms: pgInferenceRto,
           worker_rto_ms: workerRto,
+          console_rto_ms: consoleRto,
         },
         redis_sentinel_failover: {
           sentinels: sentinelPorts.length,
@@ -763,9 +932,10 @@ recovery_target_action = 'promote'
           rpo_ms: ms(redisFailure - retainedAt),
           oldest_lost_ack_age_ms: ms(redisFailure - quotaAcknowledgedAt),
           quota_rto_ms: redisQuotaRto,
+          ingress_quota_recovered: true,
           rto_ms: redisRto,
         },
-        postgres_pitr: pitr,
+        postgres_pitr: { ...pitr, console_organization_admission_preserved: true },
       },
       null,
       2,
@@ -777,6 +947,7 @@ recovery_target_action = 'promote'
   throw error;
 } finally {
   await Promise.allSettled(workers.map((worker) => worker.stop()));
+  if (consoleRuntime) await consoleRuntime.close().catch(() => undefined);
   if (gateway) await gateway.close().catch(() => undefined);
   if (upstream) await upstream.stop(true);
   await Promise.allSettled(pools.map((db) => db.close()));

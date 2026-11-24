@@ -64,6 +64,12 @@ export const organizations = pgTable("organizations", {
     .notNull()
     .references(() => users.id),
   status: text("status").$type<"ACTIVE" | "SUSPENDED">().notNull().default("ACTIVE"),
+  inferenceTargetStatus: text("inference_target_status")
+    .$type<"ACTIVE" | "SUSPENDED">()
+    .notNull()
+    .default("ACTIVE"),
+  inferenceRevision: integer("inference_revision").notNull().default(0),
+  inferenceSyncedRevision: integer("inference_synced_revision").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
@@ -171,6 +177,8 @@ export const upstreamAccounts = pgTable("upstream_accounts", {
     .$type<"ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED">()
     .notNull()
     .default("ACTIVE"),
+  pendingState: text("pending_state").$type<"ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED">(),
+  expectedState: text("expected_state").$type<"ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED">(),
   desiredRevision: integer("desired_revision").notNull().default(1),
   syncedRevision: integer("synced_revision").notNull().default(0),
   syncStatus: text("sync_status").$type<SyncStatus>().notNull().default("PENDING"),
@@ -189,6 +197,7 @@ export const channels = pgTable("channels", {
   providerPluginId: uuid("provider_plugin_id"),
   baseUrl: text("base_url").notNull(),
   keyHint: text("key_hint").notNull().default(""),
+  secretSyncPending: boolean("secret_sync_pending").notNull().default(false),
   rpm: integer("rpm").notNull().default(1_000_000),
   concurrency: integer("concurrency").notNull().default(1000),
   enabled: boolean("enabled").notNull().default(true),
@@ -421,12 +430,11 @@ export const alertEvalQueue = pgTable("alert_eval_queue", {
   projectId: uuid("project_id")
     .primaryKey()
     .references(() => projects.id, { onDelete: "cascade" }),
-  latestWalletAvailableAtoms: numeric("latest_wallet_available_atoms", {
-    precision: 38,
-    scale: 0,
-  }),
-  currency: text("currency").notNull().default("USD"),
   dirtyAt: timestamp("dirty_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  generation: uuid("generation").notNull().defaultRandom(),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true, mode: "date" })
+    .notNull()
+    .defaultNow(),
 });
 
 export const alertDeliveries = pgTable("alert_deliveries", {

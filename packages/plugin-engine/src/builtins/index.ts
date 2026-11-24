@@ -61,7 +61,7 @@ const PII_GUARD_MANIFEST: WasmPluginManifest = {
 const CONTENT_BUILTINS: readonly Extract<BuiltinPluginSummary, { capability: "CONTENT" }>[] = [
   {
     name: "pii-guard",
-    version: "1.0.0",
+    version: "1.0.1",
     capability: "CONTENT",
     kind: "WASM",
     description:

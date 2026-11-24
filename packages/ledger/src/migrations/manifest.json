@@ -89,6 +89,15 @@
           "checksum": "12c4bf231bb519e51991739582e2674e9825d6c7003281da51416d012da2b340"
         }
       ]
+    },
+    {
+      "version": 2026112401,
+      "files": [
+        {
+          "path": "./migrations/0010_console_organization_admission.sql",
+          "checksum": "a15bf4406dcc344bc94ad1d4ba712bf8e8a47c386e271bc49543a239b070019e"
+        }
+      ]
     }
   ],
   "legacyBaselines": [

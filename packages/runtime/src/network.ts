@@ -2,6 +2,7 @@ import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 import { inCidrs } from "./ip.ts";
 import { GatewayError } from "@gateway/contracts";
+import type { DialLimits } from "./dial-scheduler.ts";
 import { isValidHttpHeaderName, isValidHttpHeaderValue } from "./bun-http1.ts";
 import {
   createHttpPool,
@@ -21,6 +22,17 @@ export type TransportOptions = {
   dnsCacheTtlMs?: number;
   dnsCacheMaxEntries?: number;
   dnsLookup?: DnsLookupFn;
+  dial?: DialLimits;
+};
+
+type DispatchInit = Pick<PinnedRequestInit, "signal" | "dispatchDeadline" | "onCancelRegister">;
+type FetchInit = RequestInit &
+  Pick<PinnedRequestInit, "dispatchDeadline" | "headersValidated" | "onCancelRegister">;
+type PinnedTarget = { original: URL; pinned: URL; tls: PinnedRequestInit["tls"] };
+
+export type PreparedDispatch = {
+  fetchFast(init: FetchInit): Promise<FastUpstreamResult>;
+  release(): void;
 };
 
 type CachedDnsEntry = {
@@ -153,9 +165,64 @@ function createDnsResolver(options: TransportOptions = {}) {
 }
 
 export function createTransport(maxConnections = 1024, options: TransportOptions = {}) {
-  const pool = createHttpPool(maxConnections);
+  const pool = createHttpPool(maxConnections, options.dial);
   const dns = createDnsResolver(options);
   return {
+    async prepareDispatch(
+      url: URL,
+      bytes: number,
+      init: DispatchInit,
+      allowPrivate: boolean,
+      privateCidrs: readonly string[] = [],
+    ): Promise<PreparedDispatch> {
+      const cancel = init.onCancelRegister ? new AbortController() : null;
+      const detach = cancel && init.onCancelRegister?.((reason) => cancel.abort(reason));
+      const admission = cancel
+        ? {
+            ...(init.dispatchDeadline === undefined
+              ? {}
+              : { dispatchDeadline: init.dispatchDeadline }),
+            signal: init.signal ? AbortSignal.any([init.signal, cancel.signal]) : cancel.signal,
+          }
+        : init;
+      const { target, outbound } = await (async () => {
+        try {
+          const target = await resolvePinnedTarget(
+            url,
+            admission,
+            allowPrivate,
+            privateCidrs,
+            dns.resolve,
+          );
+          const outbound = await pool.reserve(target.pinned, target.tls, bytes, admission);
+          if (admission.signal?.aborted) {
+            outbound.release();
+            throw new UpstreamPreDispatchError(
+              "upstream_not_dispatched",
+              "Upstream dispatch cancelled",
+            );
+          }
+          return { target, outbound };
+        } finally {
+          detach?.();
+        }
+      })();
+      return {
+        async fetchFast(request: FetchInit) {
+          try {
+            if (request.body instanceof ReadableStream) {
+              throw new TypeError("Prepared dispatch requires a buffered request body");
+            }
+            return await sendPinned(target, request, (pinned, pinnedInit) =>
+              pool.sendFast(pinned, { ...pinnedInit, outbound }),
+            );
+          } finally {
+            outbound.release();
+          }
+        },
+        release: outbound.release,
+      };
+    },
     fetch(
       url: URL,
       init: RequestInit &
@@ -278,20 +345,21 @@ function cachedIpFamily(hostname: string): number {
   return fam;
 }
 
-async function safeFetchGeneric<T>(
+type ResolveDns = (
+  hostname: string,
+  signal?: AbortSignal | null,
+  onCancelRegister?: CancelRegistrar,
+  dispatchDeadline?: number,
+) => Promise<DnsAddress[]>;
+
+async function resolvePinnedTarget(
   url: URL,
-  init: RequestInit &
-    Pick<PinnedRequestInit, "dispatchDeadline" | "headersValidated" | "onCancelRegister">,
+  init: DispatchInit,
   allowPrivate: boolean,
   privateCidrs: readonly string[],
-  send: (url: URL, init: PinnedRequestInit) => Promise<T>,
-  resolveDns: (
-    hostname: string,
-    signal?: AbortSignal | null,
-    onCancelRegister?: CancelRegistrar,
-    dispatchDeadline?: number,
-  ) => Promise<DnsAddress[]>,
-): Promise<T> {
+  resolveDns: ResolveDns,
+): Promise<PinnedTarget> {
+  url = new URL(url);
   if (url.username || url.password || (url.protocol !== "https:" && url.protocol !== "http:"))
     throw new UpstreamPreDispatchError("unsafe_upstream", "Unsafe upstream URL");
   const signal = init.signal;
@@ -325,6 +393,19 @@ async function safeFetchGeneric<T>(
   const pinnedHost = chosen.family === 6 ? `[${chosen.address}]` : chosen.address;
   const pinned = pinnedHost === url.hostname ? url : new URL(url);
   if (pinned !== url) pinned.hostname = pinnedHost;
+  const tls =
+    url.protocol === "https:"
+      ? { rejectUnauthorized: true as const, ...(!ipFamily && { serverName: hostname }) }
+      : undefined;
+  return { original: url, pinned, tls };
+}
+
+function sendPinned<T>(
+  target: PinnedTarget,
+  init: FetchInit,
+  send: (url: URL, init: PinnedRequestInit) => Promise<T>,
+): Promise<T> {
+  const { original: url, pinned, tls } = target;
   let headers: HeadersInit;
   let headersValidated = false;
   if (init.headers instanceof Headers || Array.isArray(init.headers)) {
@@ -366,12 +447,23 @@ async function safeFetchGeneric<T>(
   if (init.signal !== undefined) sendInit.signal = init.signal;
   if (init.dispatchDeadline !== undefined) sendInit.dispatchDeadline = init.dispatchDeadline;
   if (init.onCancelRegister !== undefined) sendInit.onCancelRegister = init.onCancelRegister;
-  if (url.protocol === "https:") {
-    sendInit.tls = ipFamily
-      ? { rejectUnauthorized: true }
-      : { serverName: hostname, rejectUnauthorized: true };
-  }
+  if (tls) sendInit.tls = tls;
   return send(pinned, sendInit);
+}
+
+async function safeFetchGeneric<T>(
+  url: URL,
+  init: FetchInit,
+  allowPrivate: boolean,
+  privateCidrs: readonly string[],
+  send: (url: URL, init: PinnedRequestInit) => Promise<T>,
+  resolveDns: ResolveDns,
+): Promise<T> {
+  return sendPinned(
+    await resolvePinnedTarget(url, init, allowPrivate, privateCidrs, resolveDns),
+    init,
+    send,
+  );
 }
 
 export function safeFetch(

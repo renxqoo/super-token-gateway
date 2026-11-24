@@ -1,10 +1,12 @@
 import type { SQL } from "bun";
-import { and, eq, gt, inArray, lt, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, lt, or, sql } from "drizzle-orm";
 import { GatewayError } from "@gateway/contracts";
+import { maskSecret } from "./auth.ts";
 import {
   apiKeyRecords,
   channels,
   modelCatalog,
+  organizations,
   platformCreditDefaults,
   priceVersionSnapshots,
   pricingOverrides,
@@ -12,6 +14,7 @@ import {
   projects,
   routes,
   upstreamAccounts,
+  createConsoleDrizzle,
   type ConsoleDrizzle,
 } from "./db/schema.ts";
 import type { GatewayClient } from "./gateway-client.ts";
@@ -26,6 +29,7 @@ const LOCK_NS = {
   model: 88421106,
   route: 88421107,
   override: 88421108,
+  organization: 88421109,
 } as const;
 
 function errMsg(err: unknown): string {
@@ -46,14 +50,14 @@ export class ConsoleSyncEngine {
   private async withEntityLock<T>(
     namespace: number,
     entityKey: string,
-    fn: () => Promise<T>,
+    fn: (orm: ConsoleDrizzle) => Promise<T>,
   ): Promise<T> {
     const conn = await this.db.reserve();
     let locked = false;
     try {
       await conn`SELECT pg_advisory_lock(${namespace}::int, hashtext(${entityKey}))`;
       locked = true;
-      return await fn();
+      return await fn(createConsoleDrizzle(conn));
     } finally {
       if (locked) {
         await conn`SELECT pg_advisory_unlock(${namespace}::int, hashtext(${entityKey}))`.catch(
@@ -65,12 +69,8 @@ export class ConsoleSyncEngine {
   }
 
   async ensureProjectSynced(projectId: string) {
-    return this.withEntityLock(LOCK_NS.project, projectId, async () => {
-      const [proj] = await this.orm
-        .select()
-        .from(projects)
-        .where(eq(projects.id, projectId))
-        .limit(1);
+    return this.withEntityLock(LOCK_NS.project, projectId, async (orm) => {
+      const [proj] = await orm.select().from(projects).where(eq(projects.id, projectId)).limit(1);
       if (!proj) throw new GatewayError(404, "not_found", "Project not found");
       if (
         proj.gatewaySynced &&
@@ -92,9 +92,30 @@ export class ConsoleSyncEngine {
           enabled: proj.enabled,
           source_revision: targetRev,
         });
-        const wasSynced = proj.gatewaySynced;
+        if (!proj.gatewaySynced) {
+          const [defaults] = await orm
+            .select()
+            .from(platformCreditDefaults)
+            .where(eq(platformCreditDefaults.id, 1))
+            .limit(1);
+          if (
+            defaults &&
+            (defaults.defaultCreditLimitAtoms !== "0" ||
+              defaults.defaultWalletPolicy !== "GIFT_FIRST")
+          ) {
+            const wallet = await this.gateway.getWallet(proj.gatewayProjectId, proj.currency);
+            if (wallet.credit_policy_version === "0") {
+              await this.gateway.configureCreditPolicy(proj.gatewayProjectId, {
+                currency: proj.currency,
+                expected_version: "0",
+                credit_limit_atoms: defaults.defaultCreditLimitAtoms,
+                policy: defaults.defaultWalletPolicy,
+              });
+            }
+          }
+        }
         const acceptedRev = Math.max(targetRev, res.source_revision ?? targetRev);
-        const [updated] = await this.orm
+        const [updated] = await orm
           .update(projects)
           .set({
             gatewaySynced: true,
@@ -105,38 +126,17 @@ export class ConsoleSyncEngine {
           })
           .where(eq(projects.id, proj.id))
           .returning();
-        if (!wasSynced) {
-          const [defaults] = await this.orm
-            .select()
-            .from(platformCreditDefaults)
-            .where(eq(platformCreditDefaults.id, 1))
-            .limit(1);
-          if (
-            defaults &&
-            (defaults.defaultCreditLimitAtoms !== "0" ||
-              defaults.defaultWalletPolicy !== "GIFT_FIRST")
-          ) {
-            await this.gateway
-              .configureCreditPolicy(proj.gatewayProjectId, {
-                currency: proj.currency,
-                expected_version: "0",
-                credit_limit_atoms: defaults.defaultCreditLimitAtoms,
-                policy: defaults.defaultWalletPolicy,
-              })
-              .catch(() => undefined);
-          }
-        }
         return updated ?? proj;
       } catch (err) {
         if (isStaleRevisionError(err)) {
-          const [latest] = await this.orm
+          const [latest] = await orm
             .select()
             .from(projects)
             .where(eq(projects.id, proj.id))
             .limit(1);
           return latest ?? proj;
         }
-        await this.orm
+        await orm
           .update(projects)
           .set({
             syncStatus: sql`CASE WHEN ${projects.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
@@ -149,7 +149,60 @@ export class ConsoleSyncEngine {
     });
   }
 
-  async syncApiKey(keyId: string, rawKey?: string) {
+  async changeOrganizationStatus(organizationId: string, status: "ACTIVE" | "SUSPENDED") {
+    return this.withEntityLock(LOCK_NS.organization, organizationId.toLowerCase(), async (orm) => {
+      const [organization] = await orm
+        .update(organizations)
+        .set({
+          inferenceTargetStatus: status,
+          inferenceRevision: sql`CASE WHEN ${organizations.inferenceTargetStatus} <> ${status}
+          THEN ${organizations.inferenceRevision} + 1 ELSE ${organizations.inferenceRevision} END`,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(organizations.id, organizationId))
+        .returning();
+      if (!organization) throw new GatewayError(404, "not_found", "Organization not found");
+      return this.applyOrganizationAdmission(orm, organization).catch(() => organization);
+    });
+  }
+
+  private async applyOrganizationAdmission(
+    orm: ConsoleDrizzle,
+    organization: typeof organizations.$inferSelect,
+  ) {
+    const revision = organization.inferenceRevision;
+    if (revision === organization.inferenceSyncedRevision) return organization;
+    try {
+      const applied = await this.gateway.setOrganizationAdmission(
+        organization.id,
+        organization.inferenceTargetStatus === "SUSPENDED",
+        revision,
+      );
+      if (applied?.source_revision !== revision) {
+        throw new GatewayError(
+          502,
+          "gateway_invalid_response",
+          "Gateway did not confirm organization admission",
+        );
+      }
+    } catch (err) {
+      await orm
+        .update(organizations)
+        .set({ updatedAt: sql`now()` })
+        .where(eq(organizations.id, organization.id));
+      throw err;
+    }
+    const [confirmed] = await orm
+      .update(organizations)
+      .set({ status: organization.inferenceTargetStatus, inferenceSyncedRevision: revision })
+      .where(
+        and(eq(organizations.id, organization.id), eq(organizations.inferenceRevision, revision)),
+      )
+      .returning();
+    return confirmed ?? organization;
+  }
+
+  async syncApiKey(keyId: string) {
     const [initial] = await this.orm
       .select({ projectId: apiKeyRecords.projectId })
       .from(apiKeyRecords)
@@ -158,8 +211,8 @@ export class ConsoleSyncEngine {
     if (!initial) throw new GatewayError(404, "not_found", "API key not found");
     const proj = await this.ensureProjectSynced(initial.projectId);
 
-    return this.withEntityLock(LOCK_NS.apiKey, keyId, async () => {
-      const [rec] = await this.orm
+    return this.withEntityLock(LOCK_NS.apiKey, keyId, async (orm) => {
+      const [rec] = await orm
         .select()
         .from(apiKeyRecords)
         .where(eq(apiKeyRecords.id, keyId))
@@ -173,7 +226,6 @@ export class ConsoleSyncEngine {
           id: rec.id,
           project_id: proj.gatewayProjectId,
           name: rec.name,
-          ...(rawKey ? { raw_key: rawKey } : {}),
           role: rec.role,
           allowed_cidrs: isRevoked ? [] : rec.allowedCidrs,
           models: rec.models,
@@ -185,7 +237,7 @@ export class ConsoleSyncEngine {
           source_revision: targetRev,
         });
         const acceptedRev = Math.max(targetRev, gwRes.source_revision ?? targetRev);
-        const [updated] = await this.orm
+        const [updated] = await orm
           .update(apiKeyRecords)
           .set({
             keyPrefix: gwRes.prefix || rec.keyPrefix,
@@ -199,14 +251,14 @@ export class ConsoleSyncEngine {
         return { record: updated ?? rec, key: gwRes.key };
       } catch (err) {
         if (isStaleRevisionError(err)) {
-          const [latest] = await this.orm
+          const [latest] = await orm
             .select()
             .from(apiKeyRecords)
             .where(eq(apiKeyRecords.id, rec.id))
             .limit(1);
           return { record: latest ?? rec, key: undefined };
         }
-        await this.orm
+        await orm
           .update(apiKeyRecords)
           .set({
             syncStatus: sql`CASE WHEN ${apiKeyRecords.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
@@ -219,71 +271,129 @@ export class ConsoleSyncEngine {
     });
   }
 
-  async syncUpstreamAccount(
+  async updateUpstreamAccount(
     accountId: string,
-    options?: {
-      force?: boolean;
-      includeState?: boolean;
-      expectedState?: "ACTIVE" | "DISABLED" | "RECONCILE_REQUIRED";
+    body: {
+      name?: string | undefined;
+      state?: (typeof upstreamAccounts.$inferSelect)["state"] | undefined;
+      expected_state?: (typeof upstreamAccounts.$inferSelect)["state"] | undefined;
     },
   ) {
-    return this.withEntityLock(LOCK_NS.account, accountId, async () => {
-      const [acc] = await this.orm
+    return this.withEntityLock(LOCK_NS.account, accountId, async (orm) => {
+      const [existing] = await orm
         .select()
         .from(upstreamAccounts)
+        .where(eq(upstreamAccounts.id, accountId));
+      if (!existing) throw new GatewayError(404, "not_found", "Upstream account not found");
+      const [changed] = await orm
+        .update(upstreamAccounts)
+        .set({
+          ...(body.name !== undefined ? { name: body.name } : {}),
+          ...(body.state !== undefined ? { pendingState: body.state } : {}),
+          ...(body.expected_state !== undefined || body.state !== undefined
+            ? { expectedState: body.expected_state ?? null }
+            : {}),
+          desiredRevision: existing.desiredRevision + 1,
+          syncStatus: "PENDING",
+          updatedAt: sql`now()`,
+        })
         .where(eq(upstreamAccounts.id, accountId))
-        .limit(1);
-      if (!acc) throw new GatewayError(404, "not_found", "Upstream account not found");
-      if (
-        !options?.force &&
-        acc.syncStatus === "SYNCED" &&
-        acc.syncedRevision >= acc.desiredRevision
-      ) {
-        return acc;
-      }
-      const targetRev = acc.desiredRevision;
-      const shouldSendState = options?.includeState ?? acc.syncedRevision === 0;
+        .returning();
       try {
-        const res = await this.gateway.upsertUpstreamAccount({
-          id: acc.id,
-          name: acc.name,
-          ...(shouldSendState ? { state: acc.state } : {}),
-          ...(options?.expectedState ? { expected_state: options.expectedState } : {}),
-          source_revision: targetRev,
-        });
-        const acceptedRev = Math.max(targetRev, res.source_revision ?? targetRev);
-        const [updated] = await this.orm
-          .update(upstreamAccounts)
-          .set({
-            state: res.state,
-            syncedRevision: sql`GREATEST(${upstreamAccounts.syncedRevision}, ${acceptedRev})`,
-            syncStatus: sql`CASE WHEN ${upstreamAccounts.desiredRevision} <= ${acceptedRev} THEN 'SYNCED' ELSE 'PENDING' END`,
-            lastSyncError: sql`CASE WHEN ${upstreamAccounts.desiredRevision} <= ${acceptedRev} THEN NULL ELSE ${upstreamAccounts.lastSyncError} END`,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(upstreamAccounts.id, acc.id))
-          .returning();
-        return updated ?? acc;
+        return await this.applyUpstreamAccount(orm, changed!);
       } catch (err) {
-        if (isStaleRevisionError(err)) {
-          const [latest] = await this.orm
-            .select()
-            .from(upstreamAccounts)
-            .where(eq(upstreamAccounts.id, acc.id))
-            .limit(1);
-          return latest ?? acc;
+        if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
+          await orm
+            .update(upstreamAccounts)
+            .set({
+              name: existing.name,
+              pendingState: existing.pendingState,
+              expectedState: existing.expectedState,
+              desiredRevision: existing.desiredRevision,
+              syncStatus: existing.syncStatus,
+              lastSyncError: existing.lastSyncError,
+              updatedAt: sql`now()`,
+            })
+            .where(eq(upstreamAccounts.id, accountId));
         }
-        await this.orm
-          .update(upstreamAccounts)
-          .set({
-            syncStatus: sql`CASE WHEN ${upstreamAccounts.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
-            lastSyncError: errMsg(err),
-            updatedAt: sql`now()`,
-          })
-          .where(eq(upstreamAccounts.id, acc.id));
         throw err;
       }
     });
+  }
+
+  async syncUpstreamAccount(accountId: string) {
+    return this.withEntityLock(LOCK_NS.account, accountId, async (orm) => {
+      const [account] = await orm
+        .select()
+        .from(upstreamAccounts)
+        .where(eq(upstreamAccounts.id, accountId));
+      if (!account) throw new GatewayError(404, "not_found", "Upstream account not found");
+      if (account.syncStatus === "SYNCED" && account.syncedRevision >= account.desiredRevision) {
+        return account;
+      }
+      return this.applyUpstreamAccount(orm, account);
+    });
+  }
+
+  private async applyUpstreamAccount(
+    orm: ConsoleDrizzle,
+    account: typeof upstreamAccounts.$inferSelect,
+  ) {
+    const targetRev = account.desiredRevision;
+    const state =
+      account.pendingState ?? (account.syncedRevision === 0 ? account.state : undefined);
+    try {
+      const res = await this.gateway
+        .upsertUpstreamAccount({
+          id: account.id,
+          name: account.name,
+          ...(state !== undefined ? { state } : {}),
+          ...(account.expectedState ? { expected_state: account.expectedState } : {}),
+          source_revision: targetRev,
+        })
+        .catch(async (err: unknown) => {
+          if (
+            err instanceof GatewayError &&
+            err.code === "reconcile_required_conflict" &&
+            state !== undefined
+          ) {
+            const remote = await this.gateway.listUpstreamAccounts();
+            const applied = remote.items.find((item) => item.id === account.id);
+            if (
+              applied?.source_revision === targetRev &&
+              applied.state === state &&
+              applied.name === account.name
+            ) {
+              return applied;
+            }
+          }
+          throw err;
+        });
+      const [updated] = await orm
+        .update(upstreamAccounts)
+        .set({
+          state: res.state,
+          pendingState: null,
+          expectedState: null,
+          syncedRevision: targetRev,
+          syncStatus: "SYNCED",
+          lastSyncError: null,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(upstreamAccounts.id, account.id))
+        .returning();
+      return updated ?? account;
+    } catch (err) {
+      await orm
+        .update(upstreamAccounts)
+        .set({
+          syncStatus: "FAILED",
+          lastSyncError: errMsg(err),
+          updatedAt: sql`now()`,
+        })
+        .where(eq(upstreamAccounts.id, account.id));
+      throw err;
+    }
   }
 
   async syncChannel(channelId: string, plainApiKey?: string) {
@@ -293,71 +403,150 @@ export class ConsoleSyncEngine {
       .where(eq(channels.id, channelId))
       .limit(1);
     if (!initial) throw new GatewayError(404, "not_found", "Channel not found");
-    await this.syncUpstreamAccount(initial.accountId, { force: false, includeState: false });
+    await this.syncUpstreamAccount(initial.accountId);
 
-    return this.withEntityLock(LOCK_NS.channel, channelId, async () => {
-      const [ch] = await this.orm
-        .select()
-        .from(channels)
-        .where(eq(channels.id, channelId))
-        .limit(1);
+    return this.withEntityLock(LOCK_NS.channel, channelId, async (orm) => {
+      const [ch] = await orm.select().from(channels).where(eq(channels.id, channelId)).limit(1);
       if (!ch) throw new GatewayError(404, "not_found", "Channel not found");
-      const targetRev = ch.desiredRevision;
-      const isCreate = ch.syncedRevision === 0;
+      return this.applyChannel(orm, ch, plainApiKey);
+    });
+  }
+
+  async updateChannel(
+    channelId: string,
+    changes: Partial<
+      Pick<
+        typeof channels.$inferSelect,
+        | "accountId"
+        | "name"
+        | "kind"
+        | "baseUrl"
+        | "rpm"
+        | "concurrency"
+        | "enabled"
+        | "routingPolicy"
+        | "adapterConfig"
+      >
+    >,
+    plainApiKey?: string,
+  ) {
+    const [initial] = await this.orm
+      .select({ accountId: channels.accountId })
+      .from(channels)
+      .where(eq(channels.id, channelId));
+    if (!initial) throw new GatewayError(404, "not_found", "Channel not found");
+    await this.syncUpstreamAccount(changes.accountId ?? initial.accountId);
+    return this.withEntityLock(LOCK_NS.channel, channelId, async (orm) => {
+      const [existing] = await orm.select().from(channels).where(eq(channels.id, channelId));
+      if (!existing) throw new GatewayError(404, "not_found", "Channel not found");
+      if (
+        (existing.secretSyncPending || existing.syncedRevision === 0) &&
+        plainApiKey === undefined
+      ) {
+        throw new GatewayError(
+          409,
+          "channel_secret_pending",
+          "Retry this channel update with the API key",
+        );
+      }
+      const [changed] = await orm
+        .update(channels)
+        .set({
+          ...changes,
+          secretSyncPending: plainApiKey !== undefined,
+          desiredRevision: existing.desiredRevision + 1,
+          syncStatus: "PENDING",
+          updatedAt: sql`now()`,
+        })
+        .where(eq(channels.id, channelId))
+        .returning();
       try {
-        const gwCh = await this.gateway.upsertChannel({
-          id: ch.id,
-          account_id: ch.accountId,
-          name: ch.name,
-          kind: ch.kind,
-          ...(isCreate && ch.providerPluginId ? { provider_plugin_id: ch.providerPluginId } : {}),
-          base_url: ch.baseUrl,
-          ...(plainApiKey !== undefined ? { api_key: plainApiKey } : {}),
-          rpm: ch.rpm,
-          concurrency: ch.concurrency,
-          enabled: ch.enabled,
-          routing_policy: ch.routingPolicy,
-          adapter_config: ch.adapterConfig,
-          source_revision: targetRev,
-        });
-        const acceptedRev = Math.max(targetRev, gwCh.source_revision ?? targetRev);
-        const [updated] = await this.orm
-          .update(channels)
-          .set({
-            providerPluginId: gwCh.provider_plugin_id ?? ch.providerPluginId,
-            syncedRevision: sql`GREATEST(${channels.syncedRevision}, ${acceptedRev})`,
-            syncStatus: sql`CASE WHEN ${channels.desiredRevision} <= ${acceptedRev} THEN 'SYNCED' ELSE 'PENDING' END`,
-            lastSyncError: sql`CASE WHEN ${channels.desiredRevision} <= ${acceptedRev} THEN NULL ELSE ${channels.lastSyncError} END`,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(channels.id, ch.id))
-          .returning();
-        return updated ?? ch;
+        return await this.applyChannel(orm, changed!, plainApiKey);
       } catch (err) {
-        if (isStaleRevisionError(err)) {
-          const [latest] = await this.orm
-            .select()
-            .from(channels)
-            .where(eq(channels.id, ch.id))
-            .limit(1);
-          return latest ?? ch;
+        if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
+          const {
+            id: _id,
+            createdAt: _createdAt,
+            providerPluginId: _providerPluginId,
+            syncedRevision: _syncedRevision,
+            ...previous
+          } = existing;
+          await orm
+            .update(channels)
+            .set({ ...previous, updatedAt: sql`now()` })
+            .where(eq(channels.id, channelId));
         }
-        await this.orm
-          .update(channels)
-          .set({
-            syncStatus: sql`CASE WHEN ${channels.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
-            lastSyncError: errMsg(err),
-            updatedAt: sql`now()`,
-          })
-          .where(eq(channels.id, ch.id));
         throw err;
       }
     });
   }
 
+  private async applyChannel(
+    orm: ConsoleDrizzle,
+    ch: typeof channels.$inferSelect,
+    plainApiKey?: string,
+  ) {
+    if (ch.secretSyncPending && plainApiKey === undefined) {
+      throw new GatewayError(
+        409,
+        "channel_secret_pending",
+        "Retry this channel update with the API key",
+      );
+    }
+    const targetRev = ch.desiredRevision;
+    const isCreate = ch.syncedRevision === 0;
+    try {
+      const gwCh = await this.gateway.upsertChannel({
+        id: ch.id,
+        account_id: ch.accountId,
+        name: ch.name,
+        kind: ch.kind,
+        ...(isCreate && ch.providerPluginId ? { provider_plugin_id: ch.providerPluginId } : {}),
+        base_url: ch.baseUrl,
+        ...(plainApiKey !== undefined ? { api_key: plainApiKey } : {}),
+        rpm: ch.rpm,
+        concurrency: ch.concurrency,
+        enabled: ch.enabled,
+        routing_policy: ch.routingPolicy,
+        adapter_config: ch.adapterConfig,
+        source_revision: targetRev,
+      });
+      const acceptedRev = Math.max(targetRev, gwCh.source_revision ?? targetRev);
+      const [updated] = await orm
+        .update(channels)
+        .set({
+          ...(plainApiKey !== undefined
+            ? { keyHint: maskSecret(plainApiKey), secretSyncPending: false }
+            : {}),
+          providerPluginId: gwCh.provider_plugin_id ?? ch.providerPluginId,
+          syncedRevision: sql`GREATEST(${channels.syncedRevision}, ${acceptedRev})`,
+          syncStatus: sql`CASE WHEN ${channels.desiredRevision} <= ${acceptedRev} THEN 'SYNCED' ELSE 'PENDING' END`,
+          lastSyncError: sql`CASE WHEN ${channels.desiredRevision} <= ${acceptedRev} THEN NULL ELSE ${channels.lastSyncError} END`,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(channels.id, ch.id))
+        .returning();
+      return updated ?? ch;
+    } catch (err) {
+      if (isStaleRevisionError(err)) {
+        const [latest] = await orm.select().from(channels).where(eq(channels.id, ch.id)).limit(1);
+        return latest ?? ch;
+      }
+      await orm
+        .update(channels)
+        .set({
+          syncStatus: sql`CASE WHEN ${channels.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
+          lastSyncError: errMsg(err),
+          updatedAt: sql`now()`,
+        })
+        .where(eq(channels.id, ch.id));
+      throw err;
+    }
+  }
+
   async syncPricingTemplate(templateId: string) {
-    return this.withEntityLock(LOCK_NS.template, templateId, async () => {
-      const [tpl] = await this.orm
+    return this.withEntityLock(LOCK_NS.template, templateId, async (orm) => {
+      const [tpl] = await orm
         .select()
         .from(pricingTemplates)
         .where(eq(pricingTemplates.id, templateId))
@@ -377,7 +566,7 @@ export class ConsoleSyncEngine {
           : null;
       if (!priceId) {
         priceId = crypto.randomUUID();
-        await this.orm
+        await orm
           .update(pricingTemplates)
           .set({ pendingPriceVersionId: priceId, pendingPriceRevision: targetRev })
           .where(eq(pricingTemplates.id, tpl.id));
@@ -392,7 +581,7 @@ export class ConsoleSyncEngine {
           ceilings: tpl.ceilings,
         });
         const resolvedId = created.id;
-        const updated = await this.orm.transaction(async (tx) => {
+        const updated = await orm.transaction(async (tx) => {
           await tx
             .insert(priceVersionSnapshots)
             .values({
@@ -422,7 +611,7 @@ export class ConsoleSyncEngine {
         });
         return updated ?? tpl;
       } catch (err) {
-        await this.orm
+        await orm
           .update(pricingTemplates)
           .set({
             syncStatus: sql`CASE WHEN ${pricingTemplates.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
@@ -436,8 +625,8 @@ export class ConsoleSyncEngine {
   }
 
   async syncModel(modelName: string) {
-    return this.withEntityLock(LOCK_NS.model, modelName, async () => {
-      const [m] = await this.orm
+    return this.withEntityLock(LOCK_NS.model, modelName, async (orm) => {
+      const [m] = await orm
         .select()
         .from(modelCatalog)
         .where(eq(modelCatalog.name, modelName))
@@ -454,7 +643,7 @@ export class ConsoleSyncEngine {
           source_revision: targetRev,
         });
         const acceptedRev = Math.max(targetRev, res.source_revision ?? targetRev);
-        const [updated] = await this.orm
+        const [updated] = await orm
           .update(modelCatalog)
           .set({
             syncedRevision: sql`GREATEST(${modelCatalog.syncedRevision}, ${acceptedRev})`,
@@ -467,14 +656,14 @@ export class ConsoleSyncEngine {
         return updated ?? m;
       } catch (err) {
         if (isStaleRevisionError(err)) {
-          const [latest] = await this.orm
+          const [latest] = await orm
             .select()
             .from(modelCatalog)
             .where(eq(modelCatalog.name, m.name))
             .limit(1);
           return latest ?? m;
         }
-        await this.orm
+        await orm
           .update(modelCatalog)
           .set({
             syncStatus: sql`CASE WHEN ${modelCatalog.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
@@ -488,119 +677,250 @@ export class ConsoleSyncEngine {
   }
 
   async syncRoute(routeId: string) {
-    return this.withEntityLock(LOCK_NS.route, routeId, async () => {
-      const [r] = await this.orm.select().from(routes).where(eq(routes.id, routeId)).limit(1);
-      if (!r) throw new GatewayError(404, "not_found", "Route not found");
-      const targetRev = r.desiredRevision;
+    return this.withEntityLock(LOCK_NS.route, routeId, async (orm) => {
+      const [route] = await orm.select().from(routes).where(eq(routes.id, routeId));
+      if (!route) throw new GatewayError(404, "not_found", "Route not found");
+      return this.applyRoute(orm, route);
+    });
+  }
+
+  async updateRoute(
+    routeId: string,
+    changes: Partial<
+      Pick<
+        typeof routes.$inferSelect,
+        | "channelId"
+        | "upstreamModel"
+        | "operations"
+        | "priority"
+        | "weight"
+        | "billingPriceId"
+        | "costVersionId"
+        | "requestPolicy"
+        | "adapterOverrides"
+        | "retryPolicy"
+        | "enabled"
+      >
+    >,
+  ) {
+    return this.withEntityLock(LOCK_NS.route, routeId, async (orm) => {
+      const [existing] = await orm.select().from(routes).where(eq(routes.id, routeId));
+      if (!existing) throw new GatewayError(404, "not_found", "Route not found");
+      const [changed] = await orm
+        .update(routes)
+        .set({
+          ...changes,
+          desiredRevision: existing.desiredRevision + 1,
+          syncStatus: "PENDING",
+          updatedAt: sql`now()`,
+        })
+        .where(eq(routes.id, routeId))
+        .returning();
       try {
-        const res = await this.gateway.upsertRoute({
-          id: r.id,
-          model_name: r.modelName,
-          channel_id: r.channelId,
-          upstream_model: r.upstreamModel,
-          operations: r.operations,
-          priority: r.priority,
-          weight: r.weight,
-          billing_price_id: r.billingPriceId,
-          cost_version_id: r.costVersionId,
-          request_policy: r.requestPolicy,
-          adapter_overrides: r.adapterOverrides,
-          retry_policy: r.retryPolicy,
-          enabled: r.enabled,
-          source_revision: targetRev,
-        });
-        const acceptedRev = Math.max(targetRev, res.source_revision ?? targetRev);
-        const [updated] = await this.orm
-          .update(routes)
-          .set({
-            syncedRevision: sql`GREATEST(${routes.syncedRevision}, ${acceptedRev})`,
-            syncStatus: sql`CASE WHEN ${routes.desiredRevision} <= ${acceptedRev} THEN 'SYNCED' ELSE 'PENDING' END`,
-            lastSyncError: sql`CASE WHEN ${routes.desiredRevision} <= ${acceptedRev} THEN NULL ELSE ${routes.lastSyncError} END`,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(routes.id, r.id))
-          .returning();
-        return updated ?? r;
+        return await this.applyRoute(orm, changed!);
       } catch (err) {
-        if (isStaleRevisionError(err)) {
-          const [latest] = await this.orm.select().from(routes).where(eq(routes.id, r.id)).limit(1);
-          return latest ?? r;
+        if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
+          const {
+            id: _id,
+            createdAt: _createdAt,
+            syncedRevision: _syncedRevision,
+            ...previous
+          } = existing;
+          await orm
+            .update(routes)
+            .set({ ...previous, updatedAt: sql`now()` })
+            .where(eq(routes.id, routeId));
         }
-        await this.orm
-          .update(routes)
-          .set({
-            syncStatus: sql`CASE WHEN ${routes.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
-            lastSyncError: errMsg(err),
-            updatedAt: sql`now()`,
-          })
-          .where(eq(routes.id, r.id));
         throw err;
       }
     });
   }
 
+  private async applyRoute(orm: ConsoleDrizzle, r: typeof routes.$inferSelect) {
+    const targetRev = r.desiredRevision;
+    try {
+      const res = await this.gateway.upsertRoute({
+        id: r.id,
+        model_name: r.modelName,
+        channel_id: r.channelId,
+        upstream_model: r.upstreamModel,
+        operations: r.operations,
+        priority: r.priority,
+        weight: r.weight,
+        billing_price_id: r.billingPriceId,
+        cost_version_id: r.costVersionId,
+        request_policy: r.requestPolicy,
+        adapter_overrides: r.adapterOverrides,
+        retry_policy: r.retryPolicy,
+        enabled: r.enabled,
+        source_revision: targetRev,
+      });
+      const acceptedRev = Math.max(targetRev, res.source_revision ?? targetRev);
+      const [updated] = await orm
+        .update(routes)
+        .set({
+          syncedRevision: sql`GREATEST(${routes.syncedRevision}, ${acceptedRev})`,
+          syncStatus: sql`CASE WHEN ${routes.desiredRevision} <= ${acceptedRev} THEN 'SYNCED' ELSE 'PENDING' END`,
+          lastSyncError: sql`CASE WHEN ${routes.desiredRevision} <= ${acceptedRev} THEN NULL ELSE ${routes.lastSyncError} END`,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(routes.id, r.id))
+        .returning();
+      return updated ?? r;
+    } catch (err) {
+      if (isStaleRevisionError(err)) {
+        const [latest] = await orm.select().from(routes).where(eq(routes.id, r.id)).limit(1);
+        return latest ?? r;
+      }
+      await orm
+        .update(routes)
+        .set({
+          syncStatus: sql`CASE WHEN ${routes.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
+          lastSyncError: errMsg(err),
+          updatedAt: sql`now()`,
+        })
+        .where(eq(routes.id, r.id));
+      throw err;
+    }
+  }
+
   async syncPricingOverride(overrideId: string) {
     const [initial] = await this.orm
-      .select({ projectId: pricingOverrides.projectId })
+      .select({
+        projectId: pricingOverrides.projectId,
+        modelName: pricingOverrides.modelName,
+        operation: pricingOverrides.operation,
+      })
       .from(pricingOverrides)
-      .where(eq(pricingOverrides.id, overrideId))
-      .limit(1);
+      .where(eq(pricingOverrides.id, overrideId));
     if (!initial) throw new GatewayError(404, "not_found", "Pricing override not found");
     const proj = await this.ensureProjectSynced(initial.projectId);
-
-    return this.withEntityLock(LOCK_NS.override, overrideId, async () => {
-      const [o] = await this.orm
+    const lockKey = JSON.stringify([initial.projectId, initial.modelName, initial.operation]);
+    return this.withEntityLock(LOCK_NS.override, lockKey, async (orm) => {
+      const [override] = await orm
         .select()
         .from(pricingOverrides)
-        .where(eq(pricingOverrides.id, overrideId))
-        .limit(1);
-      if (!o) throw new GatewayError(404, "not_found", "Pricing override not found");
-      const targetRev = o.desiredRevision;
+        .where(eq(pricingOverrides.id, overrideId));
+      if (!override) throw new GatewayError(404, "not_found", "Pricing override not found");
+      return this.applyPricingOverride(orm, proj.gatewayProjectId, override);
+    });
+  }
+
+  async upsertPricingOverride(
+    input: Pick<
+      typeof pricingOverrides.$inferSelect,
+      | "projectId"
+      | "modelName"
+      | "operation"
+      | "overrideKind"
+      | "billingPriceId"
+      | "multiplierNumerator"
+      | "multiplierDenominator"
+      | "enabled"
+    >,
+  ) {
+    const proj = await this.ensureProjectSynced(input.projectId);
+    const lockKey = JSON.stringify([input.projectId, input.modelName, input.operation]);
+    return this.withEntityLock(LOCK_NS.override, lockKey, async (orm) => {
+      const [previous] = await orm
+        .select()
+        .from(pricingOverrides)
+        .where(
+          and(
+            eq(pricingOverrides.projectId, input.projectId),
+            eq(pricingOverrides.modelName, input.modelName),
+            eq(pricingOverrides.operation, input.operation),
+          ),
+        );
+      const [changed] = previous
+        ? await orm
+            .update(pricingOverrides)
+            .set({
+              ...input,
+              desiredRevision: previous.desiredRevision + 1,
+              syncStatus: "PENDING",
+              updatedAt: sql`now()`,
+            })
+            .where(eq(pricingOverrides.id, previous.id))
+            .returning()
+        : await orm
+            .insert(pricingOverrides)
+            .values({ ...input, id: crypto.randomUUID() })
+            .returning();
       try {
-        const res = await this.gateway.upsertPricingOverride({
-          id: o.id,
-          project_id: proj.gatewayProjectId,
-          model_name: o.modelName,
-          operation: o.operation,
-          override_kind: o.overrideKind,
-          billing_price_id: o.billingPriceId,
-          multiplier_numerator: o.multiplierNumerator,
-          multiplier_denominator: o.multiplierDenominator,
-          enabled: o.enabled,
-          source_revision: targetRev,
-        });
-        const acceptedRev = Math.max(targetRev, res.source_revision ?? targetRev);
-        const [updated] = await this.orm
-          .update(pricingOverrides)
-          .set({
-            syncedRevision: sql`GREATEST(${pricingOverrides.syncedRevision}, ${acceptedRev})`,
-            syncStatus: sql`CASE WHEN ${pricingOverrides.desiredRevision} <= ${acceptedRev} THEN 'SYNCED' ELSE 'PENDING' END`,
-            lastSyncError: sql`CASE WHEN ${pricingOverrides.desiredRevision} <= ${acceptedRev} THEN NULL ELSE ${pricingOverrides.lastSyncError} END`,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(pricingOverrides.id, o.id))
-          .returning();
-        return updated ?? o;
+        return await this.applyPricingOverride(orm, proj.gatewayProjectId, changed!);
       } catch (err) {
-        if (isStaleRevisionError(err)) {
-          const [latest] = await this.orm
-            .select()
-            .from(pricingOverrides)
-            .where(eq(pricingOverrides.id, o.id))
-            .limit(1);
-          return latest ?? o;
+        if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
+          if (previous) {
+            const {
+              id: _id,
+              createdAt: _createdAt,
+              syncedRevision: _syncedRevision,
+              ...snapshot
+            } = previous;
+            await orm
+              .update(pricingOverrides)
+              .set({ ...snapshot, updatedAt: sql`now()` })
+              .where(eq(pricingOverrides.id, previous.id));
+          } else {
+            await orm.delete(pricingOverrides).where(eq(pricingOverrides.id, changed!.id));
+          }
         }
-        await this.orm
-          .update(pricingOverrides)
-          .set({
-            syncStatus: sql`CASE WHEN ${pricingOverrides.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
-            lastSyncError: errMsg(err),
-            updatedAt: sql`now()`,
-          })
-          .where(eq(pricingOverrides.id, o.id));
         throw err;
       }
     });
+  }
+
+  private async applyPricingOverride(
+    orm: ConsoleDrizzle,
+    gatewayProjectId: string,
+    o: typeof pricingOverrides.$inferSelect,
+  ) {
+    const targetRev = o.desiredRevision;
+    try {
+      const res = await this.gateway.upsertPricingOverride({
+        id: o.id,
+        project_id: gatewayProjectId,
+        model_name: o.modelName,
+        operation: o.operation,
+        override_kind: o.overrideKind,
+        billing_price_id: o.billingPriceId,
+        multiplier_numerator: o.multiplierNumerator,
+        multiplier_denominator: o.multiplierDenominator,
+        enabled: o.enabled,
+        source_revision: targetRev,
+      });
+      const acceptedRev = Math.max(targetRev, res.source_revision ?? targetRev);
+      const [updated] = await orm
+        .update(pricingOverrides)
+        .set({
+          syncedRevision: sql`GREATEST(${pricingOverrides.syncedRevision}, ${acceptedRev})`,
+          syncStatus: sql`CASE WHEN ${pricingOverrides.desiredRevision} <= ${acceptedRev} THEN 'SYNCED' ELSE 'PENDING' END`,
+          lastSyncError: sql`CASE WHEN ${pricingOverrides.desiredRevision} <= ${acceptedRev} THEN NULL ELSE ${pricingOverrides.lastSyncError} END`,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(pricingOverrides.id, o.id))
+        .returning();
+      return updated ?? o;
+    } catch (err) {
+      if (isStaleRevisionError(err)) {
+        const [latest] = await orm
+          .select()
+          .from(pricingOverrides)
+          .where(eq(pricingOverrides.id, o.id))
+          .limit(1);
+        return latest ?? o;
+      }
+      await orm
+        .update(pricingOverrides)
+        .set({
+          syncStatus: sql`CASE WHEN ${pricingOverrides.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
+          lastSyncError: errMsg(err),
+          updatedAt: sql`now()`,
+        })
+        .where(eq(pricingOverrides.id, o.id));
+      throw err;
+    }
   }
 
   async reconcilePending(signal?: AbortSignal): Promise<{ synced: number; failed: number }> {
@@ -616,6 +936,28 @@ export class ConsoleSyncEngine {
       const states: ("PENDING" | "FAILED")[] = ["PENDING", "FAILED"];
       const batchLimit = 100;
 
+      const pendingOrganizations = await this.orm
+        .select({ id: organizations.id })
+        .from(organizations)
+        .where(lt(organizations.inferenceSyncedRevision, organizations.inferenceRevision))
+        .orderBy(asc(organizations.updatedAt), asc(organizations.id))
+        .limit(batchLimit);
+      for (const { id } of pendingOrganizations) {
+        if (signal?.aborted) return { synced, failed };
+        try {
+          await this.withEntityLock(LOCK_NS.organization, id, async (orm) => {
+            const [organization] = await orm
+              .select()
+              .from(organizations)
+              .where(eq(organizations.id, id));
+            if (organization) await this.applyOrganizationAdmission(orm, organization);
+          });
+          synced++;
+        } catch {
+          failed++;
+        }
+      }
+
       const accs = await this.orm
         .select({ id: upstreamAccounts.id })
         .from(upstreamAccounts)
@@ -629,7 +971,7 @@ export class ConsoleSyncEngine {
       for (const a of accs) {
         if (signal?.aborted) return { synced, failed };
         try {
-          await this.syncUpstreamAccount(a.id, { force: false, includeState: false });
+          await this.syncUpstreamAccount(a.id);
           synced++;
         } catch {
           failed++;
@@ -642,6 +984,7 @@ export class ConsoleSyncEngine {
         .where(
           and(
             gt(channels.syncedRevision, 0),
+            eq(channels.secretSyncPending, false),
             or(
               inArray(channels.syncStatus, states),
               lt(channels.syncedRevision, channels.desiredRevision),
@@ -767,7 +1110,7 @@ export class ConsoleSyncEngine {
         .from(apiKeyRecords)
         .where(
           and(
-            gt(apiKeyRecords.syncedRevision, 0),
+            or(gt(apiKeyRecords.syncedRevision, 0), isNotNull(apiKeyRecords.revokedAt)),
             or(
               inArray(apiKeyRecords.syncStatus, states),
               lt(apiKeyRecords.syncedRevision, apiKeyRecords.desiredRevision),

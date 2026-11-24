@@ -3,7 +3,7 @@ import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
 import { recordAuditLog, requireProjectAccess } from "../auth.ts";
-import { apiKeyRecords, type SpendLimitWindow } from "../db/schema.ts";
+import { apiKeyRecords, type ConsoleDrizzle, type SpendLimitWindow } from "../db/schema.ts";
 import {
   cidrSchema,
   nonNegativeAtomsSchema,
@@ -42,6 +42,21 @@ const updateApiKeySchema = z
     spend_limit_window: z.enum(["LIFETIME", "DAILY", "MONTHLY"]).optional(),
   })
   .strict();
+
+function revokeKeyFields() {
+  return {
+    enabled: false,
+    allowedCidrs: [],
+    revokedAt: sql`COALESCE(${apiKeyRecords.revokedAt}, now())`,
+    desiredRevision: sql`${apiKeyRecords.desiredRevision} + 1`,
+    syncStatus: "PENDING" as const,
+    updatedAt: sql`now()`,
+  };
+}
+
+async function abandonKey(orm: ConsoleDrizzle, keyId: string): Promise<void> {
+  await orm.update(apiKeyRecords).set(revokeKeyFields()).where(eq(apiKeyRecords.id, keyId));
+}
 
 export function createApiKeyRoutes(deps: ConsoleDeps) {
   const app = new Hono<ConsoleEnv>();
@@ -143,6 +158,12 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
 
     try {
       const synced = await deps.sync.syncApiKey(keyId);
+      if (!synced.key)
+        throw new GatewayError(
+          502,
+          "gateway_invalid_response",
+          "Gateway did not return the new key",
+        );
       await recordAuditLog(deps.orm, {
         actor: user,
         orgId: project.orgId,
@@ -162,14 +183,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
       if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
         await deps.orm.delete(apiKeyRecords).where(eq(apiKeyRecords.id, keyId));
       } else {
-        await deps.orm
-          .update(apiKeyRecords)
-          .set({
-            enabled: false,
-            revokedAt: sql`COALESCE(${apiKeyRecords.revokedAt}, now())`,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(apiKeyRecords.id, keyId));
+        await abandonKey(deps.orm, keyId);
       }
       throw err;
     }
@@ -222,7 +236,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
       }
     }
 
-    await deps.orm
+    const [updated] = await deps.orm
       .update(apiKeyRecords)
       .set({
         ...(body.name !== undefined ? { name: body.name } : {}),
@@ -243,7 +257,15 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
         syncStatus: "PENDING",
         updatedAt: sql`now()`,
       })
-      .where(eq(apiKeyRecords.id, keyId));
+      .where(
+        and(
+          eq(apiKeyRecords.id, keyId),
+          eq(apiKeyRecords.desiredRevision, existing.desiredRevision),
+          isNull(apiKeyRecords.revokedAt),
+        ),
+      )
+      .returning({ revision: apiKeyRecords.desiredRevision });
+    if (!updated) throw new GatewayError(409, "key_changed", "API key changed during update");
 
     try {
       const synced = await deps.sync.syncApiKey(keyId);
@@ -273,7 +295,13 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
             lastSyncError: existing.lastSyncError,
             updatedAt: sql`now()`,
           })
-          .where(eq(apiKeyRecords.id, keyId));
+          .where(
+            and(
+              eq(apiKeyRecords.id, keyId),
+              eq(apiKeyRecords.desiredRevision, updated.revision),
+              isNull(apiKeyRecords.revokedAt),
+            ),
+          );
       }
       throw err;
     }
@@ -331,7 +359,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     ]);
 
     const newKeyId = crypto.randomUUID();
-    await deps.orm.transaction(async (tx) => {
+    const previousRevision = await deps.orm.transaction(async (tx) => {
       const [existing] = await tx
         .select()
         .from(apiKeyRecords)
@@ -366,42 +394,46 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
         operations: existing.operations,
         spendLimitAtoms: existing.spendLimitAtoms,
         spendLimitWindow: existing.spendLimitWindow,
-        enabled: true,
+        enabled: existing.enabled,
         expiresAt: existing.expiresAt,
         syncStatus: "PENDING",
       });
+      return existing.desiredRevision;
     });
 
     let syncedNew: Awaited<ReturnType<typeof deps.sync.syncApiKey>>;
     try {
       syncedNew = await deps.sync.syncApiKey(newKeyId);
+      if (!syncedNew.key)
+        throw new GatewayError(
+          502,
+          "gateway_invalid_response",
+          "Gateway did not return the new key",
+        );
     } catch (err) {
       if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
         await deps.orm.delete(apiKeyRecords).where(eq(apiKeyRecords.id, newKeyId));
       } else {
-        await deps.orm
-          .update(apiKeyRecords)
-          .set({
-            enabled: false,
-            revokedAt: sql`COALESCE(${apiKeyRecords.revokedAt}, now())`,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(apiKeyRecords.id, newKeyId));
+        await abandonKey(deps.orm, newKeyId);
       }
       throw err;
     }
 
-    await deps.orm
+    const [revoked] = await deps.orm
       .update(apiKeyRecords)
-      .set({
-        enabled: false,
-        allowedCidrs: [],
-        revokedAt: sql`COALESCE(${apiKeyRecords.revokedAt}, now())`,
-        desiredRevision: sql`${apiKeyRecords.desiredRevision} + 1`,
-        syncStatus: "PENDING",
-        updatedAt: sql`now()`,
-      })
-      .where(and(eq(apiKeyRecords.id, keyId), isNull(apiKeyRecords.revokedAt)));
+      .set(revokeKeyFields())
+      .where(
+        and(
+          eq(apiKeyRecords.id, keyId),
+          isNull(apiKeyRecords.revokedAt),
+          eq(apiKeyRecords.desiredRevision, previousRevision),
+        ),
+      )
+      .returning({ id: apiKeyRecords.id });
+    if (!revoked) {
+      await abandonKey(deps.orm, newKeyId);
+      throw new GatewayError(409, "key_changed", "API key changed during rotation");
+    }
 
     let oldKeyRevokePending = false;
     try {
@@ -457,20 +489,8 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
       }
     }
 
-    await deps.orm
-      .update(apiKeyRecords)
-      .set({
-        enabled: false,
-        allowedCidrs: [],
-        revokedAt: sql`COALESCE(${apiKeyRecords.revokedAt}, now())`,
-        desiredRevision: sql`${apiKeyRecords.desiredRevision} + 1`,
-        syncStatus: "PENDING",
-        updatedAt: sql`now()`,
-      })
-      .where(eq(apiKeyRecords.id, keyId));
-    if (existing.syncedRevision > 0) {
-      await deps.sync.syncApiKey(keyId);
-    }
+    await abandonKey(deps.orm, keyId);
+    await deps.sync.syncApiKey(keyId);
 
     await recordAuditLog(deps.orm, {
       actor: user,

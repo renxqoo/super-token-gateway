@@ -47,6 +47,16 @@ async function runPiiGuardMatrix(executor: WasmRuntimeExecutor) {
     '请联\n系 "张三" 邮箱 [REDACTED_EMAIL]，手机 [REDACTED_PHONE]，身份证 [REDACTED_CN_ID]，SSN [REDACTED_SSN]，卡号 [REDACTED_CARD]，密钥 [REDACTED_API_KEY]，AWS [REDACTED_AWS_KEY]，GH [REDACTED_GH_TOKEN] 🎉',
   );
 
+  const currentKey = "sk_A1b2C3d4E5-f6G7_H8I9J0K1L2M3N4O5P6Q7R8S9xyA";
+  const keys = await engine.runUnary(
+    "on_request",
+    steps,
+    plugins,
+    meta,
+    `Key ${currentKey}, reference sk_item.`,
+  );
+  expect(keys.text).toBe("Key [REDACTED_API_KEY], reference sk_item.");
+
   const leadingBoundaryEmail = await engine.runUnary(
     "on_request",
     steps,
@@ -102,8 +112,9 @@ async function runPiiGuardMatrix(executor: WasmRuntimeExecutor) {
     "345678，",
     "邮箱 bob.",
     "chen@corp.io，",
-    "令牌 sk-proj-abcde",
-    "fghij0123456789xyz 结束！",
+    "令牌 sk",
+    currentKey.slice(2, 19),
+    `${currentKey.slice(19)} 结束！`,
   ]) {
     const out = await session.push(piece);
     expect(out.blocked).toBe(false);
@@ -119,7 +130,7 @@ async function runPiiGuardMatrix(executor: WasmRuntimeExecutor) {
 
 test("Built-in pii-guard WASM plugin passes full DLP/PII/streaming matrix on native Rust wasmtime", async () => {
   const catalog = listBuiltinPlugins();
-  expect(catalog.some((p) => p.name === "pii-guard" && p.version === "1.0.0")).toBe(true);
+  expect(catalog.some((p) => p.name === "pii-guard" && p.version === "1.0.1")).toBe(true);
 
   const ffiExec = createWasmtimeExecutor({ poolSize: 2 });
   try {

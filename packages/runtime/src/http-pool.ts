@@ -11,7 +11,14 @@ import {
   createZstdDecompress,
 } from "node:zlib";
 import { GatewayError } from "@gateway/contracts";
-import { createBunHttp1Pool, type CancelRegistrar, type FastUpstreamResult } from "./bun-http1.ts";
+import {
+  connectionFailure,
+  createBunHttp1Pool,
+  type CancelRegistrar,
+  type FastUpstreamResult,
+  type OutboundReservation,
+} from "./bun-http1.ts";
+import { createDialScheduler, type DialLimits, type DialPermit } from "./dial-scheduler.ts";
 
 export type { CancelRegistrar, FastUpstreamResult };
 
@@ -21,7 +28,14 @@ export interface PinnedRequestInit extends RequestInit {
   dispatchDeadline?: number;
   headersValidated?: boolean;
   onCancelRegister?: CancelRegistrar;
+  outbound?: PreparedExchange;
 }
+
+type PreparedExchange = {
+  connection: OutboundReservation;
+  takeSlot(): (() => void) | undefined;
+  release(): void;
+};
 
 export class UpstreamPreDispatchError extends GatewayError {
   constructor(
@@ -79,8 +93,14 @@ function buildResponseHeaders(rawHeaders: string[]): Headers | Record<string, st
 
 const IDLE_TTL_MS = 30_000;
 const IDLE_SWEEP_MS = 5_000;
+type NodeDial = {
+  target: string;
+  bytes: number;
+  signal: AbortSignal;
+  deadline: number | undefined;
+};
 
-export function createHttpPool(maxConnections: number) {
+export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) {
   if (!Number.isSafeInteger(maxConnections) || maxConnections < 1 || maxConnections > 65535) {
     throw new RangeError("Invalid upstream connection capacity");
   }
@@ -98,10 +118,14 @@ export function createHttpPool(maxConnections: number) {
   const watched = new WeakSet<Duplex>();
   const sseFraming = new WeakMap<Response, "chunked" | number>();
   const bufferedBodies = new WeakMap<Response, Uint8Array>();
-  const bunPlain = createBunHttp1Pool(maxIdle, sseFraming, bufferedBodies);
+  const dialScheduler = createDialScheduler(maxConnections, dialLimits);
+  const bunPlain = createBunHttp1Pool(maxIdle, sseFraming, bufferedBodies, dialScheduler);
   const active = new Set<ClientRequest>();
   const httpSlots = { inUse: 0, waiting: new Map<() => void, () => void>() };
   const httpsSlots = { inUse: 0, waiting: new Map<() => void, () => void>() };
+  const maxSlotQueueBytes = dialLimits?.maxQueueBytes ?? 64 * 1024 * 1024;
+  const maxSlotQueueWait = dialLimits?.maxQueueWaitMs ?? 10_000;
+  let slotQueueBytes = 0;
   let idleSweepTimer: ReturnType<typeof setInterval> | undefined;
   let closed = false;
 
@@ -129,6 +153,66 @@ export function createHttpPool(maxConnections: number) {
     idle.delete(socket);
   };
 
+  function limitNodeDials(agent: Agent, isTls: boolean) {
+    const connect = agent.createConnection.bind(agent);
+    agent.createConnection = (options, complete) => {
+      const context = (options as typeof options & { upstreamDial?: NodeDial }).upstreamDial;
+      if (!context || !complete) return connect(options, complete);
+      const reject = complete as (error: Error) => void;
+      const start = (permit: DialPermit): Duplex => {
+        if (context.signal.aborted) {
+          permit.release();
+          throw notDispatched();
+        }
+        const finish = permit.start();
+        if (!finish) {
+          permit.release();
+          throw notDispatched();
+        }
+        try {
+          const socket = connect(options);
+          if (!socket) throw connectionFailure(isTls);
+          socket.once(isTls ? "secureConnect" : "connect", finish);
+          socket.once("close", finish);
+          return socket;
+        } catch (error) {
+          finish();
+          throw error;
+        }
+      };
+      const asError = (error: unknown) =>
+        error instanceof Error ? error : connectionFailure(isTls, error);
+      try {
+        const permit = dialScheduler.acquire(
+          context.target,
+          context.bytes,
+          context.signal,
+          context.deadline,
+        );
+        if (!(permit instanceof Promise)) return start(permit);
+        void permit.then(
+          (ticket) => {
+            let socket: Duplex;
+            try {
+              socket = start(ticket);
+            } catch (error) {
+              reject(asError(error));
+              return;
+            }
+            complete(null, socket);
+          },
+          (error) => reject(asError(error)),
+        );
+      } catch (error) {
+        reject(asError(error));
+      }
+      return undefined;
+    };
+  }
+
+  limitNodeDials(plain, false);
+  limitNodeDials(secure, true);
+
   for (const agent of [plain, secure]) {
     const keep = agent.keepSocketAlive.bind(agent) as (socket: Duplex) => boolean;
     const reuse = agent.reuseSocket.bind(agent);
@@ -155,19 +239,11 @@ export function createHttpPool(maxConnections: number) {
     };
   }
 
-  async function sendInternal(
-    url: URL,
-    init: PinnedRequestInit,
-    fastMode: boolean,
-  ): Promise<FastUpstreamResult> {
-    if (closed) {
-      throw new GatewayError(503, "upstream_transport_closed", "Upstream transport is closed");
-    }
-    const expired = () =>
-      init.dispatchDeadline !== undefined && !(performance.now() < init.dispatchDeadline);
-    if (init.signal?.aborted || expired()) throw notDispatched();
+  const expired = (init: PinnedRequestInit) =>
+    init.dispatchDeadline !== undefined && performance.now() >= init.dispatchDeadline;
 
-    const secureRequest = url.protocol === "https:";
+  async function acquireSlot(secureRequest: boolean, init: PinnedRequestInit, bytes: number) {
+    if (closed || init.signal?.aborted || expired(init)) throw notDispatched();
     const slots = secureRequest ? httpsSlots : httpSlots;
     const release = () => {
       const next = slots.waiting.values().next().value;
@@ -178,42 +254,85 @@ export function createHttpPool(maxConnections: number) {
     if (slots.inUse < maxConnections) {
       slots.inUse++;
     } else {
-      if (slots.waiting.size >= maxConnections) {
-        throw new UpstreamPreDispatchError(
+      const capacity = () =>
+        new UpstreamPreDispatchError(
           "upstream_capacity",
-          "Upstream connection wait queue is full",
+          "Upstream connection wait queue capacity exceeded",
         );
+      if (slots.waiting.size >= maxConnections || bytes > maxSlotQueueBytes - slotQueueBytes) {
+        throw capacity();
       }
       await new Promise<void>((resolve, reject) => {
         let deadline: ReturnType<typeof setTimeout> | undefined;
         let detachCancel: (() => void) | undefined;
         const remove = () => {
+          if (!slots.waiting.delete(abort)) return false;
+          slotQueueBytes -= bytes;
           clearTimeout(deadline);
-          slots.waiting.delete(abort);
           init.signal?.removeEventListener("abort", abort);
           detachCancel?.();
           detachCancel = undefined;
+          return true;
         };
         const abort = () => {
-          remove();
-          reject(notDispatched());
+          if (remove()) reject(notDispatched());
         };
         slots.waiting.set(abort, () => {
           remove();
           resolve();
         });
+        slotQueueBytes += bytes;
         init.signal?.addEventListener("abort", abort, { once: true });
-        if (init.onCancelRegister) detachCancel = init.onCancelRegister(() => abort());
-        if (init.dispatchDeadline !== undefined) {
-          deadline = setTimeout(abort, Math.max(0, init.dispatchDeadline - performance.now()));
+        if (init.onCancelRegister) {
+          detachCancel = init.onCancelRegister(abort);
+          if (!slots.waiting.has(abort)) {
+            detachCancel();
+            return;
+          }
         }
-        if (init.signal?.aborted || expired()) abort();
+        const remaining = (init.dispatchDeadline ?? Infinity) - performance.now();
+        deadline = setTimeout(
+          () => {
+            if (remaining <= maxSlotQueueWait) abort();
+            else if (remove()) reject(capacity());
+          },
+          Math.min(maxSlotQueueWait, Math.max(0, remaining)),
+        );
+        deadline.unref();
+        if (init.signal?.aborted || expired(init)) abort();
       });
     }
 
+    return release;
+  }
+
+  async function sendInternal(
+    url: URL,
+    init: PinnedRequestInit,
+    fastMode: boolean,
+  ): Promise<FastUpstreamResult> {
+    if (closed) {
+      throw new GatewayError(503, "upstream_transport_closed", "Upstream transport is closed");
+    }
+    if (init.signal?.aborted || expired(init)) throw notDispatched();
+    const secureRequest = url.protocol === "https:";
+    const body = init.body;
+    const bytes =
+      typeof body === "string"
+        ? Buffer.byteLength(body)
+        : body instanceof Blob
+          ? body.size
+          : body instanceof ArrayBuffer || ArrayBuffer.isView(body)
+            ? body.byteLength
+            : 0;
+    const release = init.outbound
+      ? init.outbound.takeSlot()
+      : await acquireSlot(secureRequest, init, bytes);
+    if (!release) throw notDispatched();
+
     let releaseOnClose = false;
     try {
-      if (closed || init.signal?.aborted || expired()) throw notDispatched();
+      if (closed || init.signal?.aborted || expired(init)) throw notDispatched();
       const method = (init.method ?? "GET").toUpperCase();
       const headersValidated =
         Boolean(init.headersValidated) &&
@@ -269,6 +388,7 @@ export function createHttpPool(maxConnections: number) {
               tlsOpts,
               headersValidated,
               init.onCancelRegister,
+              init.outbound?.connection,
             )
           : bunPlain
               .send(
@@ -284,6 +404,7 @@ export function createHttpPool(maxConnections: number) {
                 tlsOpts,
                 headersValidated,
                 init.onCancelRegister,
+                init.outbound?.connection,
               )
               .then((response): FastUpstreamResult => ({ fast: false, response }));
         releaseOnClose = true;
@@ -297,6 +418,7 @@ export function createHttpPool(maxConnections: number) {
       }
 
       const response = await new Promise<Response>((resolve, reject) => {
+        const dialAbort = new AbortController();
         let canHaveDispatched = false;
         let assigned: ClientRequest["socket"] | undefined;
         const readyEvent = secureRequest ? "secureConnect" : "connect";
@@ -321,7 +443,7 @@ export function createHttpPool(maxConnections: number) {
             clearTimeout(dispatchTimer);
             dispatchTimer = undefined;
           }
-          if (init.dispatchDeadline !== undefined && (expired() || init.signal?.aborted)) {
+          if (init.dispatchDeadline !== undefined && (expired(init) || init.signal?.aborted)) {
             request.destroy(notDispatched());
             return;
           }
@@ -337,6 +459,12 @@ export function createHttpPool(maxConnections: number) {
           method,
           headers: plainHeaders,
           agent: secureRequest ? secure : plain,
+          upstreamDial: {
+            target: JSON.stringify([hostname, port]),
+            bytes: Math.max(0, Number(plainHeaders["content-length"] ?? 0) || 0),
+            signal: dialAbort.signal,
+            deadline: init.dispatchDeadline,
+          } satisfies NodeDial,
           ...(secureRequest ? { rejectUnauthorized: true as const } : {}),
           ...(secureRequest && serverName ? { servername: serverName } : {}),
         };
@@ -479,6 +607,7 @@ export function createHttpPool(maxConnections: number) {
               !(secureRequest && (request.socket as TLSSocket | undefined)?.authorized)));
 
         const abort = (reason?: unknown) => {
+          dialAbort.abort();
           const error = preDispatch()
             ? notDispatched()
             : (reason ?? init.signal?.reason ?? new Error("Upstream request aborted"));
@@ -493,6 +622,7 @@ export function createHttpPool(maxConnections: number) {
 
         active.add(request);
         request.once("close", () => {
+          dialAbort.abort();
           if (dispatchTimer) {
             clearTimeout(dispatchTimer);
             dispatchTimer = undefined;
@@ -505,16 +635,9 @@ export function createHttpPool(maxConnections: number) {
         releaseOnClose = true;
         request.once("socket", watchSocket);
         request.once("error", (error) => {
-          const local = ["EADDRNOTAVAIL", "EMFILE", "ENFILE"].includes(
-            String((error as NodeJS.ErrnoException).code),
-          );
           reject(
-            preDispatch() && !local && !(error instanceof UpstreamPreDispatchError)
-              ? new UpstreamPreDispatchError(
-                  secureRequest ? "upstream_tls" : "upstream_connect",
-                  "Upstream connection failed before dispatch",
-                  error,
-                )
+            preDispatch() && !(error instanceof UpstreamPreDispatchError)
+              ? connectionFailure(secureRequest, error)
               : error,
           );
         });
@@ -540,6 +663,46 @@ export function createHttpPool(maxConnections: number) {
   }
 
   return {
+    async reserve(
+      url: URL,
+      tls: PinnedRequestInit["tls"],
+      bytes: number,
+      init: PinnedRequestInit,
+    ): Promise<PreparedExchange> {
+      const secureRequest = url.protocol === "https:";
+      const release = await acquireSlot(secureRequest, init, bytes);
+      try {
+        const host = url.hostname.replace(/^\[|\]$/g, "");
+        const port = url.port ? Number(url.port) : secureRequest ? 443 : 80;
+        const connection = await bunPlain.reserve(
+          host,
+          port,
+          tls,
+          bytes,
+          init.signal,
+          init.dispatchDeadline,
+        );
+        let available = true;
+        return {
+          connection,
+          takeSlot() {
+            if (!available) return undefined;
+            available = false;
+            return release;
+          },
+          release() {
+            connection.release();
+            if (!available) return;
+            available = false;
+            release();
+          },
+        };
+      } catch (error) {
+        release();
+        throw error;
+      }
+    },
+
     sseFraming(response: Response) {
       return sseFraming.get(response);
     },
@@ -566,6 +729,7 @@ export function createHttpPool(maxConnections: number) {
     close() {
       if (closed) return;
       closed = true;
+      dialScheduler.close();
       for (const slots of [httpSlots, httpsSlots]) {
         for (const abort of slots.waiting.keys()) abort();
       }

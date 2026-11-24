@@ -56,13 +56,14 @@ const outboxBatchSchema = z
   .strict();
 
 function logStructuredError(event: string, err: unknown): void {
-  const message = err instanceof Error ? err.message : String(err);
+  const sqlstate = extractPgErrno(err);
   console.error(
     JSON.stringify({
       service: "console-api",
       level: "error",
       event,
-      message,
+      ...(sqlstate ? { sqlstate } : {}),
+      ...(err instanceof GatewayError ? { code: err.code, status: err.status } : {}),
     }),
   );
 }
@@ -121,7 +122,8 @@ function attachCommonHandlers(
 
   app.get("/readyz", async (c) => {
     try {
-      await db`SELECT 1`;
+      const [row] = await db`SELECT current_setting('transaction_read_only') = 'off' AS writable`;
+      if (!row?.writable) return c.json({ status: "db_unavailable" }, 503);
       return c.json({ status: "ready" });
     } catch {
       return c.json({ status: "db_unavailable" }, 503);
@@ -188,7 +190,7 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
       return c.json({ error: { code: "unauthorized", message: "Invalid webhook token" } }, 401);
     }
     const body = await parseJsonBody(c, outboxBatchSchema);
-    const result = await ingestOutboxEvents(db, orm, gateway, body.events as IncomingOutboxEvent[]);
+    const result = await ingestOutboxEvents(db, orm, body.events as IncomingOutboxEvent[]);
     return c.json({ ok: true, ...result });
   });
 
@@ -198,9 +200,7 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
   const timers: ReturnType<typeof setInterval>[] = [];
   let running = false;
   let stopController = new AbortController();
-  let activeReconcile: Promise<unknown> | null = null;
-  let activePull: Promise<unknown> | null = null;
-  let activeAlerts: Promise<unknown> | null = null;
+  const activeJobs = new Set<Promise<unknown>>();
 
   const webhookDeliveryOpts = {
     ...(options.alertFetch ? { fetchImpl: options.alertFetch } : {}),
@@ -208,6 +208,24 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
       ? { allowPrivateWebhooks: config.allowPrivateAlertWebhooks }
       : {}),
   };
+
+  function schedule(intervalMs: number, event: string, work: () => Promise<unknown>): void {
+    if (intervalMs <= 0) return;
+    let active = false;
+    const timer = setInterval(() => {
+      if (!running || active) return;
+      active = true;
+      const task = work()
+        .catch((err) => logStructuredError(event, err))
+        .finally(() => {
+          active = false;
+          activeJobs.delete(task);
+        });
+      activeJobs.add(task);
+    }, intervalMs);
+    timer.unref();
+    timers.push(timer);
+  }
 
   return {
     clientApp,
@@ -244,64 +262,42 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
       await assertConsoleSchemaVersion(db);
       stopController = new AbortController();
       running = true;
-      if (config.reconcileIntervalMs > 0) {
-        const t = setInterval(() => {
-          if (!running || activeReconcile) return;
-          activeReconcile = sync
-            .reconcilePending(stopController.signal)
-            .catch((err) => {
-              logStructuredError("reconcile_failed", err);
-            })
-            .finally(() => {
-              activeReconcile = null;
-            });
-        }, config.reconcileIntervalMs);
-        t.unref();
-        timers.push(t);
-      }
-      if (config.outboxPullIntervalMs > 0) {
-        const t = setInterval(() => {
-          if (!running || activePull) return;
-          activePull = pullOutboxBatch(db, orm, gateway, config.outboxConsumerName)
-            .catch((err) => {
-              logStructuredError("outbox_pull_failed", err);
-            })
-            .finally(() => {
-              activePull = null;
-            });
-        }, config.outboxPullIntervalMs);
-        t.unref();
-        timers.push(t);
-      }
-      if (config.alertDeliveryIntervalMs > 0) {
-        const t = setInterval(() => {
-          if (!running || activeAlerts) return;
-          activeAlerts = processPendingAlertEvaluations(db, orm, gateway)
-            .then(() => processPendingWebhookDeliveries(db, webhookDeliveryOpts))
-            .catch((err) => {
-              logStructuredError("alert_delivery_failed", err);
-            })
-            .finally(() => {
-              activeAlerts = null;
-            });
-        }, config.alertDeliveryIntervalMs);
-        t.unref();
-        timers.push(t);
-      }
+      schedule(config.reconcileIntervalMs, "reconcile_failed", () =>
+        sync.reconcilePending(stopController.signal),
+      );
+      schedule(config.outboxPullIntervalMs, "outbox_pull_failed", () =>
+        pullOutboxBatch(db, orm, gateway, config.outboxConsumerName),
+      );
+      schedule(
+        config.alertEvaluationIntervalMs ?? config.alertDeliveryIntervalMs,
+        "alert_evaluation_failed",
+        () => processPendingAlertEvaluations(db, orm, gateway),
+      );
+      schedule(config.alertDeliveryIntervalMs, "alert_delivery_failed", () =>
+        processPendingWebhookDeliveries(db, {
+          ...webhookDeliveryOpts,
+          signal: stopController.signal,
+        }),
+      );
     },
 
     async close(timeoutMs = 5_000): Promise<void> {
+      const deadline = performance.now() + timeoutMs;
       running = false;
       stopController.abort();
       for (const t of timers) clearInterval(t);
       timers.length = 0;
-      const pending = [activeReconcile, activePull, activeAlerts].filter(
-        (p): p is Promise<unknown> => p !== null,
-      );
+      const pending = [...activeJobs];
       if (pending.length > 0) {
-        await Promise.race([Promise.allSettled(pending), Bun.sleep(timeoutMs)]);
+        const timeout = Promise.withResolvers<void>();
+        const timer = setTimeout(timeout.resolve, timeoutMs);
+        try {
+          await Promise.race([Promise.allSettled(pending), timeout.promise]);
+        } finally {
+          clearTimeout(timer);
+        }
       }
-      if (ownsDb) await db.close();
+      if (ownsDb) await db.close({ timeout: Math.max(0, (deadline - performance.now()) / 1_000) });
     },
   };
 }

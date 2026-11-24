@@ -1,6 +1,6 @@
 import type { SQL } from "bun";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { assertPublicWebhookDns } from "./auth.ts";
+import { fetchPublicWebhook } from "./auth.ts";
 import {
   alertDeliveries,
   alertRules,
@@ -58,7 +58,6 @@ type ParsedEvent = {
   cachedInputTokens: number;
   reasoningTokens: number;
   pricingOverrideId: string | null;
-  walletAvailableAtoms: bigint | null;
   payload: Record<string, unknown>;
   occurredAt: string;
   hasProjectRecord: boolean;
@@ -86,7 +85,7 @@ function parseIntSafe(value: unknown): number {
 function asNullableUuid(value: unknown): string | null {
   if (typeof value !== "string") return null;
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
-    ? value
+    ? value.toLowerCase()
     : null;
 }
 
@@ -124,11 +123,9 @@ function addRollupDelta(
 export async function ingestOutboxEvents(
   db: SQL,
   orm: ConsoleDrizzle,
-  gateway: GatewayClient,
   events: readonly IncomingOutboxEvent[],
-  options?: { evaluateAlertsInline?: boolean },
-): Promise<{ received: number; ingested: number; alertsTriggered: number }> {
-  if (events.length === 0) return { received: 0, ingested: 0, alertsTriggered: 0 };
+): Promise<{ received: number; ingested: number }> {
+  if (events.length === 0) return { received: 0, ingested: 0 };
 
   const projectIds = [
     ...new Set(
@@ -219,18 +216,15 @@ export async function ingestOutboxEvents(
       cachedInputTokens,
       reasoningTokens,
       pricingOverrideId: asNullableUuid(payload.pricing_override_id),
-      walletAvailableAtoms: parseNullableBigInt(payload.wallet_available_atoms),
       payload,
       occurredAt,
       hasProjectRecord: Boolean(projMeta),
     });
   }
 
-  if (parsedEvents.length === 0)
-    return { received: events.length, ingested: 0, alertsTriggered: 0 };
+  if (parsedEvents.length === 0) return { received: events.length, ingested: 0 };
 
   let ingested = 0;
-  let queuedAlerts = 0;
 
   await db.begin(async (tx) => {
     const insertedRows = await tx<{ event_id: string }[]>`
@@ -284,7 +278,7 @@ export async function ingestOutboxEvents(
 
     const hourlyMap = new Map<string, RollupAgg>();
     const dailyMap = new Map<string, RollupAgg>();
-    const alertQueueMap = new Map<string, { currency: string; walletAvailable: bigint | null }>();
+    const alertProjectIds = new Set<string>();
 
     for (const ev of parsedEvents) {
       if (!insertedSet.has(ev.eventId)) continue;
@@ -296,11 +290,7 @@ export async function ingestOutboxEvents(
         continue;
       }
       if (ev.effectiveProjectId && ev.hasProjectRecord) {
-        const prev = alertQueueMap.get(ev.effectiveProjectId);
-        alertQueueMap.set(ev.effectiveProjectId, {
-          currency: ev.currency,
-          walletAvailable: ev.walletAvailableAtoms ?? prev?.walletAvailable ?? null,
-        });
+        alertProjectIds.add(ev.effectiveProjectId);
       }
       if (!ev.effectiveProjectId || !ev.model || !ev.operation) continue;
 
@@ -397,35 +387,21 @@ export async function ingestOutboxEvents(
       `;
     }
 
-    const alertEntries = [...alertQueueMap.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-    queuedAlerts = alertEntries.length;
+    const alertEntries = [...alertProjectIds].sort();
     if (alertEntries.length > 0) {
       await tx`
-        INSERT INTO public.alert_eval_queue (project_id, latest_wallet_available_atoms, currency, dirty_at)
-        SELECT u.project_id, u.latest_wallet_available_atoms, u.currency, now()
-        FROM unnest(
-          ${alertEntries.map(([id]) => id)}::uuid[],
-          ${alertEntries.map(([, v]) => (v.walletAvailable !== null ? v.walletAvailable.toString() : null))}::numeric[],
-          ${alertEntries.map(([, v]) => v.currency)}::text[]
-        ) AS u(project_id, latest_wallet_available_atoms, currency)
+        INSERT INTO public.alert_eval_queue (project_id)
+        SELECT unnest(${alertEntries}::uuid[])
         ON CONFLICT (project_id)
         DO UPDATE SET
-          latest_wallet_available_atoms = COALESCE(
-            EXCLUDED.latest_wallet_available_atoms,
-            public.alert_eval_queue.latest_wallet_available_atoms
-          ),
-          currency = EXCLUDED.currency,
-          dirty_at = now()
+          dirty_at = EXCLUDED.dirty_at,
+          generation = EXCLUDED.generation,
+          next_attempt_at = EXCLUDED.next_attempt_at
       `;
     }
   });
 
-  let alertsTriggered = 0;
-  if (queuedAlerts > 0 && options?.evaluateAlertsInline !== false) {
-    alertsTriggered = await processPendingAlertEvaluations(db, orm, gateway).catch(() => 0);
-  }
-
-  return { received: events.length, ingested, alertsTriggered };
+  return { received: events.length, ingested };
 }
 
 async function claimAndRecordAlert(
@@ -464,37 +440,37 @@ export async function processPendingAlertEvaluations(
   db: SQL,
   orm: ConsoleDrizzle,
   gateway: GatewayClient,
-  limit = 100,
+  limit = 20,
 ): Promise<number> {
   const claimed = await db<
-    { project_id: string; latest_wallet_available_atoms: string | null; currency: string }[]
+    {
+      project_id: string;
+      generation: string;
+    }[]
   >`
-    WITH batch AS (
+    WITH due AS (
       SELECT project_id
       FROM public.alert_eval_queue
-      ORDER BY dirty_at ASC
+      WHERE next_attempt_at <= now()
+      ORDER BY next_attempt_at, dirty_at, project_id
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
     )
-    DELETE FROM public.alert_eval_queue q
-    USING batch b
-    WHERE q.project_id = b.project_id
-    RETURNING
-      q.project_id::text AS project_id,
-      q.latest_wallet_available_atoms::text AS latest_wallet_available_atoms,
-      q.currency
+    UPDATE public.alert_eval_queue q
+    SET next_attempt_at = now() + interval '60 seconds',
+        generation = gen_random_uuid()
+    FROM due
+    WHERE q.project_id = due.project_id
+    RETURNING q.project_id, q.generation
   `;
   if (claimed.length === 0) return 0;
 
   const projectIds = claimed.map((c) => c.project_id);
-  const queueByProject = new Map(claimed.map((c) => [c.project_id, c]));
 
   const rules = await orm
     .select()
     .from(alertRules)
     .where(and(inArray(alertRules.projectId, projectIds), eq(alertRules.enabled, true)));
-  if (rules.length === 0) return 0;
-
   const projRows = await orm
     .select({
       id: projects.id,
@@ -525,33 +501,34 @@ export async function processPendingAlertEvaluations(
     dailySpendByProjCurr.set(`${r.projectId}\0${r.currency}`, parseBigIntSafe(r.total));
   }
 
-  const fetchedWalletByProj = new Map<string, bigint | null>();
+  const walletProjectIds = new Set(
+    rules.filter((rule) => rule.kind === "LOW_BALANCE").map((rule) => rule.projectId),
+  );
+  const fetchedWalletByProj = new Map(
+    await Promise.all(
+      projRows
+        .filter((proj) => walletProjectIds.has(proj.id))
+        .map(async (proj) => {
+          const wallet = await gateway
+            .getWallet(proj.gatewayProjectId, proj.currency)
+            .catch(() => null);
+          return [proj.id, wallet ? parseNullableBigInt(wallet.available_atoms) : null] as const;
+        }),
+    ),
+  );
   let triggered = 0;
-
+  const retryProjects = new Set<string>();
   for (const rule of rules) {
     const proj = projById.get(rule.projectId);
     if (!proj) continue;
     const threshold = BigInt(rule.thresholdAtoms);
 
     if (rule.kind === "LOW_BALANCE") {
-      const q = queueByProject.get(rule.projectId);
-      let available: bigint | null =
-        q && q.currency === proj.currency && q.latest_wallet_available_atoms !== null
-          ? parseNullableBigInt(q.latest_wallet_available_atoms)
-          : null;
+      const available = fetchedWalletByProj.get(proj.id) ?? null;
       if (available === null) {
-        if (!fetchedWalletByProj.has(proj.id)) {
-          const wallet = await gateway
-            .getWallet(proj.gatewayProjectId, proj.currency)
-            .catch(() => null);
-          fetchedWalletByProj.set(
-            proj.id,
-            wallet ? parseNullableBigInt(wallet.available_atoms) : null,
-          );
-        }
-        available = fetchedWalletByProj.get(proj.id) ?? null;
+        retryProjects.add(proj.id);
+        continue;
       }
-      if (available === null) continue;
       if (available <= threshold) {
         const recorded = await claimAndRecordAlert(orm, rule, {
           kind: "LOW_BALANCE",
@@ -577,6 +554,30 @@ export async function processPendingAlertEvaluations(
       }
     }
   }
+
+  await db`
+    WITH processed AS (
+      SELECT * FROM unnest(
+        ${claimed.map((item) => item.project_id)}::uuid[],
+        ${claimed.map((item) => item.generation)}::uuid[],
+        ${claimed.map((item) => retryProjects.has(item.project_id))}::boolean[]
+      ) AS p(project_id, generation, retry)
+    ), locked AS (
+      SELECT q.project_id, q.generation, p.retry
+      FROM public.alert_eval_queue q
+      JOIN processed p USING (project_id, generation)
+      ORDER BY q.project_id
+      FOR UPDATE OF q
+    ), deferred AS (
+      UPDATE public.alert_eval_queue q
+      SET next_attempt_at = now() + interval '15 seconds'
+      FROM locked l
+      WHERE q.project_id = l.project_id AND q.generation = l.generation AND l.retry
+    )
+    DELETE FROM public.alert_eval_queue q
+    USING locked l
+    WHERE q.project_id = l.project_id AND q.generation = l.generation AND NOT l.retry
+  `;
   return triggered;
 }
 
@@ -588,6 +589,7 @@ export async function processPendingWebhookDeliveries(
     maxAttempts?: number;
     batchLimit?: number;
     timeoutMs?: number;
+    signal?: AbortSignal;
   },
 ): Promise<{ attempted: number; delivered: number; failed: number }> {
   const fetchImpl = options?.fetchImpl ?? fetch;
@@ -595,48 +597,51 @@ export async function processPendingWebhookDeliveries(
   const batchLimit = options?.batchLimit ?? 50;
   const timeoutMs = options?.timeoutMs ?? 5_000;
 
-  const claimed = await db<
-    {
-      id: string;
-      rule_id: string;
-      project_id: string;
-      webhook_url: string | null;
-      attempts: number;
-      payload: Record<string, unknown>;
-    }[]
-  >`
-    WITH due AS (
-      SELECT id
-      FROM public.alert_deliveries
-      WHERE status = 'PENDING' AND next_attempt_at <= now()
-      ORDER BY next_attempt_at ASC
-      LIMIT ${batchLimit}
-      FOR UPDATE SKIP LOCKED
-    )
-    UPDATE public.alert_deliveries d
-    SET attempts = d.attempts + 1,
-        next_attempt_at = now() + interval '60 seconds'
-    FROM due
-    WHERE d.id = due.id
-    RETURNING
-      d.id::text AS id,
-      d.rule_id::text AS rule_id,
-      d.project_id::text AS project_id,
-      d.webhook_url,
-      d.attempts,
-      d.payload
-  `;
-
+  let attempted = 0;
   let delivered = 0;
   let failed = 0;
 
-  for (const item of claimed) {
+  while (attempted < batchLimit && !options?.signal?.aborted) {
+    const [item] = await db<
+      {
+        id: string;
+        rule_id: string;
+        project_id: string;
+        webhook_url: string | null;
+        attempts: number;
+        payload: Record<string, unknown>;
+      }[]
+    >`
+      WITH due AS (
+        SELECT id
+        FROM public.alert_deliveries
+        WHERE status = 'PENDING' AND next_attempt_at <= now()
+        ORDER BY next_attempt_at ASC, id
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE public.alert_deliveries d
+      SET attempts = d.attempts + 1,
+          next_attempt_at = now() + interval '60 seconds'
+      FROM due
+      WHERE d.id = due.id
+      RETURNING
+        d.id::text AS id,
+        d.rule_id::text AS rule_id,
+        d.project_id::text AS project_id,
+        d.webhook_url,
+        d.attempts,
+        d.payload
+    `;
+
+    if (!item) break;
+    attempted++;
     const url = item.webhook_url;
     if (!url) {
       await db`
         UPDATE public.alert_deliveries
         SET status = 'RECORDED'
-        WHERE id = ${item.id}::uuid
+        WHERE id = ${item.id}::uuid AND attempts = ${item.attempts} AND status = 'PENDING'
       `;
       continue;
     }
@@ -647,10 +652,8 @@ export async function processPendingWebhookDeliveries(
     let permanentFailure = false;
 
     try {
-      if (!options?.allowPrivateWebhooks) {
-        await assertPublicWebhookDns(url);
-      }
-      const res = await fetchImpl(url, {
+      const timeout = AbortSignal.timeout(timeoutMs);
+      const init: RequestInit = {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -664,8 +667,11 @@ export async function processPendingWebhookDeliveries(
           ...item.payload,
         }),
         redirect: "manual",
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+        signal: options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
+      };
+      const res = options?.allowPrivateWebhooks
+        ? await fetchImpl(url, init)
+        : await fetchPublicWebhook(url, init, fetchImpl);
       httpStatus = res.status;
       await res.body?.cancel().catch(() => undefined);
       if (res.status >= 200 && res.status < 300) {
@@ -677,6 +683,15 @@ export async function processPendingWebhookDeliveries(
         }
       }
     } catch (err) {
+      if (options?.signal?.aborted) {
+        await db`
+          UPDATE public.alert_deliveries
+          SET attempts = attempts - 1,
+              next_attempt_at = now()
+          WHERE id = ${item.id}::uuid AND attempts = ${item.attempts} AND status = 'PENDING'
+        `;
+        break;
+      }
       errorMessage = err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
       if (err instanceof Error && "code" in err && err.code === "unsafe_webhook_url") {
         permanentFailure = true;
@@ -684,24 +699,26 @@ export async function processPendingWebhookDeliveries(
     }
 
     if (ok) {
-      delivered++;
-      await db`
+      const rows = await db`
         UPDATE public.alert_deliveries
         SET status = 'DELIVERED',
             last_http_status = ${httpStatus},
             last_error = NULL,
             delivered_at = now()
-        WHERE id = ${item.id}::uuid
+        WHERE id = ${item.id}::uuid AND attempts = ${item.attempts} AND status = 'PENDING'
+        RETURNING id
       `;
+      delivered += rows.length;
     } else if (permanentFailure || item.attempts >= maxAttempts) {
-      failed++;
-      await db`
+      const rows = await db`
         UPDATE public.alert_deliveries
         SET status = 'FAILED',
             last_http_status = ${httpStatus},
             last_error = ${errorMessage}
-        WHERE id = ${item.id}::uuid
+        WHERE id = ${item.id}::uuid AND attempts = ${item.attempts} AND status = 'PENDING'
+        RETURNING id
       `;
+      failed += rows.length;
     } else {
       const backoffSec = Math.min(3600, 15 * 2 ** (item.attempts - 1));
       await db`
@@ -710,12 +727,12 @@ export async function processPendingWebhookDeliveries(
             last_http_status = ${httpStatus},
             last_error = ${errorMessage},
             next_attempt_at = now() + (${backoffSec}::text || ' seconds')::interval
-        WHERE id = ${item.id}::uuid
+        WHERE id = ${item.id}::uuid AND attempts = ${item.attempts} AND status = 'PENDING'
       `;
     }
   }
 
-  return { attempted: claimed.length, delivered, failed };
+  return { attempted, delivered, failed };
 }
 
 export async function pullOutboxBatch(
@@ -731,7 +748,7 @@ export async function pullOutboxBatch(
   for (let round = 0; round < 10; round++) {
     const claimed = await gateway.claimOutboxEvents(consumerName, limit);
     if (claimed.events.length === 0) break;
-    const res = await ingestOutboxEvents(db, orm, gateway, claimed.events);
+    const res = await ingestOutboxEvents(db, orm, claimed.events);
     const lastSeq = claimed.events.at(-1)!.seq;
     const ack = await gateway.ackOutboxEvents(consumerName, claimed.lease_token, lastSeq);
     totalClaimed += claimed.events.length;

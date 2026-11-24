@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import type { LookupAddress } from "node:dns";
 import { GatewayError } from "@gateway/contracts";
 import {
   assertPublicWebhookDns,
   constantTimeEquals,
+  fetchPublicWebhook,
   isSafePublicWebhookUrl,
   isValidCidr,
   LoginRateLimiter,
@@ -17,7 +17,8 @@ test("maskSecret handles empty, whitespace, short boundary, and standard keys", 
   expect(maskSecret("   ")).toBe("");
   expect(maskSecret("short")).toBe("sh***");
   expect(maskSecret("12345678")).toBe("12***");
-  expect(maskSecret("123456789")).toBe("123456***6789");
+  expect(maskSecret("a")).toBe("***");
+  expect(maskSecret("123456789")).toBe("12***");
   expect(maskSecret("  sk-proj-1234567890abcdef  ")).toBe("sk-pro***cdef");
 });
 
@@ -75,27 +76,43 @@ test("isSafePublicWebhookUrl blocks SSRF private ranges, IPv6 encodings, trailin
 });
 
 test("assertPublicWebhookDns validates resolved addresses and rejects private DNS rebinding targets", async () => {
-  const publicLookup = (async () => [
-    { address: "93.184.216.34", family: 4 },
-  ]) as unknown as Parameters<typeof assertPublicWebhookDns>[1];
+  const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
   expect(await assertPublicWebhookDns("https://hooks.example.com/a", publicLookup)).toEqual([
     "93.184.216.34",
   ]);
 
-  const privateLookup = (async () => [
+  const privateLookup = async () => [
     { address: "93.184.216.34", family: 4 },
     { address: "::ffff:10.0.0.8", family: 6 },
-  ]) as unknown as Parameters<typeof assertPublicWebhookDns>[1];
+  ];
   await expect(
     assertPublicWebhookDns("https://rebind.example.com/a", privateLookup),
   ).rejects.toThrow(GatewayError);
 
-  const emptyLookup = (async () => [] as LookupAddress[]) as unknown as Parameters<
-    typeof assertPublicWebhookDns
-  >[1];
+  const emptyLookup = async () => [];
   await expect(assertPublicWebhookDns("https://empty.example.com/a", emptyLookup)).rejects.toThrow(
     /did not resolve/,
   );
+});
+
+test("public webhook sends to the validated address while preserving HTTPS identity and refusing redirects", async () => {
+  const rawUrl = "https://hooks.example.com:8443/alerts";
+  const response = await fetchPublicWebhook(
+    rawUrl,
+    { method: "POST" },
+    async (url, init) => {
+      expect(String(url)).toBe("https://93.184.216.34:8443/alerts");
+      expect(new Headers(init?.headers).get("host")).toBe("hooks.example.com:8443");
+      expect(init).toMatchObject({
+        redirect: "manual",
+        proxy: false,
+        tls: { serverName: "hooks.example.com", rejectUnauthorized: true },
+      });
+      return new Response(null, { status: 204 });
+    },
+    (url) => assertPublicWebhookDns(url, async () => [{ address: "93.184.216.34" }]),
+  );
+  expect(response.status).toBe(204);
 });
 
 test("resolveClientIp strips only trusted right-to-left proxy hops and ignores untrusted X-Forwarded-For", () => {

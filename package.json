@@ -33,6 +33,7 @@
     "build:wasmtime": "cargo build --release --manifest-path native/plugin-wasmtime/Cargo.toml",
     "build:plugins": "bun scripts/build-builtin-plugins.ts",
     "test:artifact": "bun --env-file=.env.local scripts/verify-artifact.ts",
+    "test:console:deployment": "bun --no-env-file scripts/verify-console-deployment.ts",
     "test:durability": "bun --env-file=.env.local scripts/verify-durability.ts",
     "test:production": "bun --no-env-file scripts/verify-production.ts",
     "test:alerts": "bun --no-env-file scripts/verify-alert-delivery.ts",

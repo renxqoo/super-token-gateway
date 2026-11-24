@@ -10,6 +10,7 @@ import type {
 } from "@gateway/ledger";
 import {
   ClusterCoordinator,
+  createKey,
   createTransport,
   Lifecycle,
   SmartRouter,
@@ -126,6 +127,7 @@ function makeFakeDeps(snap: ConfigSnapshot, config: GatewayConfig): ProxyDepende
   const state = new ProxyRuntimeState();
   return {
     config,
+    checkConsoleAdmission: () => undefined,
     snapshot,
     ledger,
     router,
@@ -204,7 +206,7 @@ function sendSlowJsonUpload(
 
 test("F1 symptom: slow JSON upload times out with 408 and frees admission slot instead of hanging indefinitely", async () => {
   const proj = makeProject("11111111-1111-4111-8111-111111111111", 4);
-  const rawKey = "sk-slow-upload-key-1";
+  const rawKey = createKey();
   const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
   const config = makeConfig({
     maxInFlight: 4,
@@ -251,7 +253,7 @@ test("F1 symptom: slow JSON upload times out with 408 and frees admission slot i
 
 test("F1 symptom: slow chunked JSON upload times out with 408 and frees admission slot", async () => {
   const proj = makeProject("11111111-1111-4111-8111-111111111111", 4);
-  const rawKey = "sk-slow-chunked-key-1";
+  const rawKey = createKey();
   const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
   const config = makeConfig({
     maxInFlight: 4,
@@ -299,8 +301,8 @@ test("F1 symptom: slow chunked JSON upload times out with 408 and frees admissio
 test("F1 symptom: single tenant slow uploads are capped at project concurrency before body read and cannot starve other tenants", async () => {
   const projA = makeProject("11111111-1111-4111-8111-111111111111", 2);
   const projB = makeProject("22222222-2222-4222-8222-222222222222", 2);
-  const keyA = "sk-tenant-a-slow";
-  const keyB = "sk-tenant-b-healthy";
+  const keyA = createKey();
+  const keyB = createKey();
   const snap = makeSnapshot(
     1,
     [projA, projB],
@@ -365,7 +367,7 @@ test("F1 symptom: single tenant slow uploads are capped at project concurrency b
 test("F8 symptom: distinct runtime instances isolate auth caches instead of sharing module globals", () => {
   const projA = makeProject("11111111-1111-4111-8111-111111111111", 10);
   const projB = makeProject("22222222-2222-4222-8222-222222222222", 10);
-  const rawKey = "sk-shared-key-token";
+  const rawKey = createKey();
   const snapA = makeSnapshot(1, [projA], [makeApiKey(rawKey, projA.id)]);
   const snapB = makeSnapshot(1, [projB], [makeApiKey(rawKey, projB.id)]);
   const config = makeConfig();
@@ -395,20 +397,23 @@ test("F8 symptom: distinct runtime instances isolate auth caches instead of shar
 
 test("F8: ProxyRuntimeState LRU evicts least-recently-used key instead of wiping entire cache", () => {
   const proj = makeProject("11111111-1111-4111-8111-111111111111", 10);
-  const k0 = makeApiKey("sk-lru-0", proj.id);
-  const k1 = makeApiKey("sk-lru-1", proj.id);
-  const k2 = makeApiKey("sk-lru-2", proj.id);
+  const key0 = createKey();
+  const key1 = createKey();
+  const key2 = createKey();
+  const k0 = makeApiKey(key0, proj.id);
+  const k1 = makeApiKey(key1, proj.id);
+  const k2 = makeApiKey(key2, proj.id);
   const snap = makeSnapshot(1, [proj], [k0, k1, k2]);
   const state = new ProxyRuntimeState(2);
   try {
-    expect(state.lookupVerifiedKey("sk-lru-0", snap, TEST_PEPPER)?.id).toBe(k0.id);
-    expect(state.lookupVerifiedKey("sk-lru-1", snap, TEST_PEPPER)?.id).toBe(k1.id);
-    expect(state.lookupVerifiedKey("sk-lru-0", snap, TEST_PEPPER)?.id).toBe(k0.id);
-    expect(state.lookupVerifiedKey("sk-lru-2", snap, TEST_PEPPER)?.id).toBe(k2.id);
+    expect(state.lookupVerifiedKey(key0, snap, TEST_PEPPER)?.id).toBe(k0.id);
+    expect(state.lookupVerifiedKey(key1, snap, TEST_PEPPER)?.id).toBe(k1.id);
+    expect(state.lookupVerifiedKey(key0, snap, TEST_PEPPER)?.id).toBe(k0.id);
+    expect(state.lookupVerifiedKey(key2, snap, TEST_PEPPER)?.id).toBe(k2.id);
     snap.keysByVerifier.clear();
-    expect(state.lookupVerifiedKey("sk-lru-0", snap, TEST_PEPPER)?.id).toBe(k0.id);
-    expect(state.lookupVerifiedKey("sk-lru-2", snap, TEST_PEPPER)?.id).toBe(k2.id);
-    expect(state.lookupVerifiedKey("sk-lru-1", snap, TEST_PEPPER)).toBeUndefined();
+    expect(state.lookupVerifiedKey(key0, snap, TEST_PEPPER)?.id).toBe(k0.id);
+    expect(state.lookupVerifiedKey(key2, snap, TEST_PEPPER)?.id).toBe(k2.id);
+    expect(state.lookupVerifiedKey(key1, snap, TEST_PEPPER)).toBeUndefined();
   } finally {
     state.close();
   }
@@ -533,7 +538,7 @@ test("symptom: tryPrepareUpstreamRequestSync never marks unsafe bearer secrets h
 
 test("failover skips newly-OPEN backup channels without redundant switchSupplierAttempt or upstream dispatch, and honors firstByteTimeoutMs and maxAmbiguousRetriesPerMinute", async () => {
   const proj = makeProject("11111111-1111-4111-8111-111111111111", 10);
-  const rawKey = "sk-failover-budget-key";
+  const rawKey = createKey();
   const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
   const preset = getBuiltinProvider("openai")!;
   const pluginId = "88888888-8888-4888-8888-888888888888";
@@ -792,7 +797,7 @@ test("failover skips newly-OPEN backup channels without redundant switchSupplier
 
 test("proxy retries transient hold finalization failures and preserves upstream error status instead of returning 500", async () => {
   const proj = makeProject("11111111-1111-4111-8111-111111111199", 10);
-  const rawKey = "sk-hold-finalize-retry-key";
+  const rawKey = createKey();
   const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
   const preset = getBuiltinProvider("openai")!;
   const pluginId = "88888888-8888-4888-8888-888888888899";

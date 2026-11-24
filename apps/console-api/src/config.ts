@@ -29,6 +29,7 @@ export type ConsoleConfig = {
   refreshTtlMs: number;
   reconcileIntervalMs: number;
   outboxPullIntervalMs: number;
+  alertEvaluationIntervalMs?: number;
   alertDeliveryIntervalMs: number;
   allowPrivateAlertWebhooks?: boolean;
   clientCorsOrigins: string[];
@@ -68,6 +69,7 @@ export function loadConsoleConfigFromEnv(
   );
   const gatewayPublicUrl = (env.GATEWAY_PUBLIC_URL ?? "http://127.0.0.1:8080").replace(/\/+$/, "");
   const outboxPullIntervalMs = intEnv(env, "CONSOLE_OUTBOX_PULL_INTERVAL_MS", 0, 0);
+  const alertDeliveryIntervalMs = intEnv(env, "CONSOLE_ALERT_DELIVERY_INTERVAL_MS", 5_000, 0);
 
   const gatewayTokens: GatewayRoleTokens = {
     ...(env.GATEWAY_ADMIN_TOKEN ? { admin: env.GATEWAY_ADMIN_TOKEN } : {}),
@@ -135,7 +137,12 @@ export function loadConsoleConfigFromEnv(
     refreshTtlMs: intEnv(env, "CONSOLE_REFRESH_TTL_MS", 30 * 24 * 3_600_000, 300_000),
     reconcileIntervalMs: intEnv(env, "CONSOLE_RECONCILE_INTERVAL_MS", 10_000, 0),
     outboxPullIntervalMs,
-    alertDeliveryIntervalMs: intEnv(env, "CONSOLE_ALERT_DELIVERY_INTERVAL_MS", 5_000, 0),
+    alertEvaluationIntervalMs: intEnv(
+      env,
+      "CONSOLE_ALERT_EVALUATION_INTERVAL_MS",
+      alertDeliveryIntervalMs || 5_000,
+    ),
+    alertDeliveryIntervalMs,
     clientCorsOrigins: parseList(env.CONSOLE_CLIENT_CORS_ORIGINS),
     adminCorsOrigins: parseList(env.CONSOLE_ADMIN_CORS_ORIGINS),
   };

@@ -114,9 +114,10 @@ test("deployment units match build script targets and expose zero internal admin
       if (match) (fields[match[1]!] ??= []).push(match[2]!);
     }
     units[file] = fields;
-    const entry = /^\/usr\/local\/bin\/bun (dist\/([a-z-]+)\/([a-z-]+)\.js)(?:\s|$)/.exec(
-      fields.ExecStart?.[0] ?? "",
-    );
+    const entry =
+      /^\/usr\/local\/bin\/bun (?:--no-env-file )?(dist\/([a-z-]+)\/([a-z-]+)\.js)(?:\s|$)/.exec(
+        fields.ExecStart?.[0] ?? "",
+      );
     expect(entry).not.toBeNull();
     const source = `apps/${entry![2]}/src/${entry![3]}.ts`;
     expect(await Bun.file(source).exists()).toBe(true);
@@ -126,11 +127,21 @@ test("deployment units match build script targets and expose zero internal admin
     expect(fields.NoNewPrivileges).toEqual(["true"]);
     expect(fields.ProtectSystem).toEqual(["strict"]);
   }
-  expect(Object.keys(units).sort()).toEqual(["gateway@.service", "worker.service"]);
+  expect(Object.keys(units).sort()).toEqual([
+    "console-api@.service",
+    "gateway@.service",
+    "worker.service",
+  ]);
   const caddy = await Bun.file("infra/Caddyfile").text();
   expect(caddy).not.toMatch(/\/internal|\/admin|8081|8093/);
   expect(caddy).toContain("/v1/chat/completions");
   expect(caddy).toContain("flush_interval -1");
+  const consoleCaddy = await Bun.file("infra/console.Caddyfile").text();
+  expect(consoleCaddy).toMatch(/path \/api\/v1\/\* \/livez \/readyz/);
+  expect(consoleCaddy).not.toMatch(/\/internal|\/admin|8093/);
+  const consoleCompose = await Bun.file("infra/console.compose.yml").text();
+  expect(consoleCompose).toMatch(/127\.0\.0\.1:.*:8092/);
+  expect(consoleCompose).toMatch(/127\.0\.0\.1:.*:8093/);
 });
 
 test("G7.1 provider plugin architecture eliminates hardcoded vendor enums and channel.kind switches", async () => {

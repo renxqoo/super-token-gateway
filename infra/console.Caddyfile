@@ -1,0 +1,12 @@
+{$CONSOLE_PUBLIC_HOST} {
+	@console_client path /api/v1/* /livez /readyz
+	handle @console_client {
+		reverse_proxy {$CONSOLE_CLIENT_UPSTREAMS:127.0.0.1:8092} {
+			health_uri /readyz
+			health_interval 5s
+		}
+	}
+	handle {
+		respond "Not found" 404
+	}
+}

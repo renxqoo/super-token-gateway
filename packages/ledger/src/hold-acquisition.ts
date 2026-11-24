@@ -54,61 +54,95 @@ export function createHoldAcquirer(
     };
     let admitted: Set<string>;
     try {
-      const rows = await db<{ request_id: string }[]>`
-        WITH batch AS MATERIALIZED (
-          SELECT * FROM jsonb_to_recordset(${batchPayload}::text::jsonb) AS u(
-            request_id uuid,
-            project_id uuid,
-            wallet_id uuid,
-            api_key_id uuid,
-            pricing_override_id uuid,
-            discount_numerator numeric,
-            discount_denominator numeric,
-            operation text,
-            model text,
-            fingerprint text,
-            held_atoms numeric,
-            supplier_holds jsonb,
-            wallet_lease_id uuid,
-            supplier_lease_id uuid,
-            expires_at timestamptz
+      const rows = await db.begin(async (tx) => {
+        const [locked] = await tx<{ wallet_lease_ids: string[]; supplier_lease_ids: string[] }[]>`
+          WITH local_wallet_leases AS MATERIALIZED (
+            SELECT l.id, l.wallet_id
+            FROM public.wallet_leases l
+            WHERE l.id = ANY(${items.map((item) => item.walletLease.leaseId)}::uuid[])
+              AND l.node_id = ${leases.nodeId}
+              AND l.state = 'ACTIVE' AND l.expires_at > clock_timestamp()
+              AND (l.earliest_lot_expires_at IS NULL OR l.earliest_lot_expires_at > clock_timestamp())
+            ORDER BY l.id FOR KEY SHARE OF l
+          ), active_supplier_leases AS MATERIALIZED (
+            SELECT l.id
+            FROM public.supplier_leases l
+            JOIN public.upstream_accounts a ON a.id = l.account_id
+            WHERE EXISTS (SELECT id FROM local_wallet_leases)
+              AND l.id = ANY(${items.map((item) => item.supplierLease.leaseId)}::uuid[])
+              AND l.node_id = ${leases.nodeId}
+              AND l.state = 'ACTIVE' AND l.expires_at > clock_timestamp() AND a.state = 'ACTIVE'
+            ORDER BY l.id FOR KEY SHARE OF l
+          ), locked_wallet_leases AS MATERIALIZED (
+            SELECT l.id
+            FROM local_wallet_leases l
+            JOIN public.wallets w ON w.id = l.wallet_id
+            WHERE EXISTS (SELECT id FROM active_supplier_leases)
+            ORDER BY w.id FOR SHARE OF w
           )
-        ), active_wallet_leases AS MATERIALIZED (
-          SELECT l.id
-          FROM public.wallet_leases l
-          JOIN public.wallets w ON w.id = l.wallet_id
-          WHERE l.id = ANY(ARRAY(SELECT DISTINCT wallet_lease_id FROM batch))
-            AND l.node_id = ${leases.nodeId}
-            AND l.state = 'ACTIVE' AND l.expires_at > clock_timestamp()
-            AND (l.earliest_lot_expires_at IS NULL OR l.earliest_lot_expires_at > clock_timestamp())
-            AND w.freeze_reason IS NULL
-          ORDER BY l.id FOR KEY SHARE OF l
-        ), active_supplier_leases AS MATERIALIZED (
-          SELECT l.id
-          FROM public.supplier_leases l
-          JOIN public.upstream_accounts a ON a.id = l.account_id
-          WHERE (SELECT count(*) FROM active_wallet_leases) > 0
-            AND l.id = ANY(ARRAY(SELECT DISTINCT supplier_lease_id FROM batch))
-            AND l.node_id = ${leases.nodeId}
-            AND l.state = 'ACTIVE' AND l.expires_at > clock_timestamp() AND a.state = 'ACTIVE'
-          ORDER BY l.id FOR KEY SHARE OF l
-        )
-        INSERT INTO public.billing_holds (
-          request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
-          pricing_override_id, discount_numerator, discount_denominator,
-          operation, model, idempotency_key, fingerprint,
-          held_atoms, credit_atoms, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state, expires_at
-        )
-        SELECT
-          u.request_id, u.project_id, u.wallet_id, u.api_key_id, 0,
-          u.pricing_override_id, u.discount_numerator, u.discount_denominator,
-          u.operation, u.model, NULL, u.fingerprint,
-          u.held_atoms, 0, '[]'::jsonb, u.supplier_holds, u.wallet_lease_id, u.supplier_lease_id, 'HELD', u.expires_at
-        FROM batch u
-        JOIN active_wallet_leases w ON w.id = u.wallet_lease_id
-        JOIN active_supplier_leases s ON s.id = u.supplier_lease_id
-        RETURNING request_id
-      `;
+          SELECT ARRAY(SELECT id FROM locked_wallet_leases) AS wallet_lease_ids,
+                 ARRAY(SELECT id FROM active_supplier_leases) AS supplier_lease_ids
+        `;
+        if (!locked?.wallet_lease_ids.length || !locked.supplier_lease_ids.length) return [];
+        return tx<{ request_id: string }[]>`
+          WITH batch AS MATERIALIZED (
+            SELECT * FROM jsonb_to_recordset(${batchPayload}::text::jsonb) AS u(
+              request_id uuid,
+              project_id uuid,
+              wallet_id uuid,
+              api_key_id uuid,
+              pricing_override_id uuid,
+              discount_numerator numeric,
+              discount_denominator numeric,
+              operation text,
+              model text,
+              fingerprint text,
+              held_atoms numeric,
+              supplier_holds jsonb,
+              wallet_lease_id uuid,
+              supplier_lease_id uuid,
+              expires_at timestamptz
+            )
+          ), active_wallet_leases AS MATERIALIZED (
+            SELECT l.id
+            FROM public.wallet_leases l
+            JOIN public.wallets w ON w.id = l.wallet_id
+            WHERE l.id = ANY(${locked.wallet_lease_ids}::uuid[])
+              AND l.state = 'ACTIVE' AND l.expires_at > statement_timestamp()
+              AND (l.earliest_lot_expires_at IS NULL OR l.earliest_lot_expires_at > statement_timestamp())
+              AND w.freeze_reason IS NULL
+              AND CASE WHEN w.reserved_atoms >= w.debt_atoms THEN true
+                ELSE w.available_atoms + w.reserved_atoms - w.debt_atoms >= (
+                  SELECT COALESCE(SUM(lot.available_atoms), 0)
+                  FROM public.wallet_lots lot
+                  WHERE lot.wallet_id = w.id AND lot.available_atoms > 0
+                    AND lot.expires_at <= statement_timestamp()
+                )
+              END
+          ), active_supplier_leases AS MATERIALIZED (
+            SELECT l.id
+            FROM public.supplier_leases l
+            JOIN public.upstream_accounts a ON a.id = l.account_id
+            WHERE l.id = ANY(${locked.supplier_lease_ids}::uuid[])
+              AND l.state = 'ACTIVE' AND l.expires_at > statement_timestamp() AND a.state = 'ACTIVE'
+          )
+          INSERT INTO public.billing_holds (
+            request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
+            pricing_override_id, discount_numerator, discount_denominator,
+            operation, model, idempotency_key, fingerprint,
+            held_atoms, credit_atoms, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state, expires_at
+          )
+          SELECT
+            u.request_id, u.project_id, u.wallet_id, u.api_key_id, 0,
+            u.pricing_override_id, u.discount_numerator, u.discount_denominator,
+            u.operation, u.model, NULL, u.fingerprint,
+            u.held_atoms, 0, '[]'::jsonb, u.supplier_holds, u.wallet_lease_id, u.supplier_lease_id, 'HELD', u.expires_at
+          FROM batch u
+          JOIN active_wallet_leases w ON w.id = u.wallet_lease_id
+          JOIN active_supplier_leases s ON s.id = u.supplier_lease_id
+          RETURNING request_id
+        `;
+      });
       admitted = new Set(rows.map((row) => String(row.request_id)));
     } catch (err) {
       for (const item of items) retireLeases(item);

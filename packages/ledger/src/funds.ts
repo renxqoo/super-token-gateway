@@ -224,6 +224,26 @@ export function computeFreezeReason(w: WalletRow): string | null {
   return null;
 }
 
+export function walletAdmissionError(
+  w: WalletRow,
+): { code: "wallet_frozen" | "insufficient_balance"; message: string } | null {
+  const freeze = w.freeze_reason ?? computeFreezeReason(w);
+  if (freeze !== null) {
+    return { code: "wallet_frozen", message: `Wallet frozen: ${freeze}` };
+  }
+  if (w.available_atoms + w.reserved_atoms < w.debt_atoms) {
+    return { code: "insufficient_balance", message: "Wallet has a negative settled balance" };
+  }
+  return null;
+}
+
+export function canReserveWalletCredit(w: WalletRow, additional: bigint, existing = 0n): boolean {
+  return (
+    w.debt_atoms + w.credit_reserved_atoms + additional <= w.credit_limit_atoms &&
+    (additional === 0n || w.credit_reserved_atoms === existing)
+  );
+}
+
 export function sortLots(lots: LotRow[], policy: WalletPolicy): LotRow[] {
   return [...lots].sort((a, b) => {
     if (policy === "GIFT_FIRST") {

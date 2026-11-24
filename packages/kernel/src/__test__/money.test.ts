@@ -62,6 +62,35 @@ test("music reservations enforce an explicit music ceiling and request rate", ()
   ).toMatchObject({ amount_atoms: "2", prices: { channel: "price" } });
 });
 
+test("text reservations price estimated input once and keep ceilings for unmeasured or premium cached input", () => {
+  const price = {
+    provider_id: "channel",
+    id: "price",
+    currency: "USD",
+    basis: "PROVIDER_USAGE",
+    rates: {
+      input_tokens: { numerator: "2", denominator: "1" },
+      cached_input_tokens: { numerator: "1", denominator: "1" },
+      output_tokens: { numerator: "3", denominator: "1" },
+    },
+    ceilings: { input_tokens: "1000", cached_input_tokens: "1000", output_tokens: "100" },
+  } as const;
+  expect(quoteReservation([price], "USD", { estimatedInputTokens: 100 }, 10).amount_atoms).toBe(
+    "230",
+  );
+  expect(quoteReservation([price], "USD", {}, 10).amount_atoms).toBe("3030");
+  expect(quoteReservation([price], "USD", { estimatedInputTokens: 1001 }, 10).amount_atoms).toBe(
+    "3030",
+  );
+  const premium = {
+    ...price,
+    rates: { ...price.rates, cached_input_tokens: { numerator: "5", denominator: "2" } },
+  };
+  expect(quoteReservation([premium], "USD", { estimatedInputTokens: 100 }, 10).amount_atoms).toBe(
+    "4530",
+  );
+});
+
 test("integral tariff terms and fractional duration share one final rounding", () => {
   expect(
     calculateCost(

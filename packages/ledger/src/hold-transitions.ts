@@ -21,6 +21,8 @@ import {
   parseAtoms,
   withPgConcurrencyRetry,
   computeFreezeReason,
+  walletAdmissionError,
+  canReserveWalletCredit,
   sortLots,
   lotEligible,
   preferredCell,
@@ -289,7 +291,6 @@ export function createHoldTransitions(
       } | null = null;
       const result = await db
         .begin(async (tx): Promise<SwitchSupplierResult> => {
-          const nowMs = Date.now();
           const holdRows = await tx`
             SELECT request_id, project_id, wallet_id, api_key_id, key_reserved_atoms::text, operation, model, held_atoms::text, credit_atoms::text,
               lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state
@@ -386,7 +387,7 @@ export function createHoldTransitions(
             if (holdApiKeyId) {
               const [pgNowRow] =
                 await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
-              const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : nowMs;
+              const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : Date.now();
               const kRows = await tx`
                   SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
                     spend_window_start, spent_atoms::text, reserved_atoms::text
@@ -411,14 +412,6 @@ export function createHoldTransitions(
             const wallet = toWalletRow(wRows[0]!);
             const journals: JournalLine[] = [];
 
-            const freeze = wallet.freeze_reason ?? computeFreezeReason(wallet);
-            if (freeze !== null) {
-              throw new SupplierSwitchRejected({
-                ok: false,
-                code: "wallet_frozen",
-                message: `Wallet frozen: ${freeze}`,
-              });
-            }
             const delta = reqCust! - heldAtoms;
             if (
               lockedKeySpend &&
@@ -442,7 +435,10 @@ export function createHoldTransitions(
               lotRowsRaw.map((r: Record<string, unknown>) => toLotRow(r)),
               wallet.policy,
             );
+            const nowMs = Date.now();
             expireLotsInMemory(wallet, lots, nowMs, journals);
+            const admissionError = walletAdmissionError(wallet);
+            if (admissionError) throw new SupplierSwitchRejected({ ok: false, ...admissionError });
             let rem = delta;
             const addPlan: { lot: LotRow; take: bigint }[] = [];
             for (const lot of lots) {
@@ -454,10 +450,7 @@ export function createHoldTransitions(
             }
             const addCredit = rem;
             const addFunded = delta - addCredit;
-            if (
-              wallet.debt_atoms + wallet.credit_reserved_atoms + addCredit >
-              wallet.credit_limit_atoms
-            ) {
+            if (!canReserveWalletCredit(wallet, addCredit, creditAtoms)) {
               throw new SupplierSwitchRejected({
                 ok: false,
                 code: "insufficient_balance",

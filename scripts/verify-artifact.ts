@@ -112,19 +112,6 @@ try {
   await waitForJson("http://127.0.0.1:18092/readyz");
   await waitForJson("http://127.0.0.1:18093/readyz");
 
-  const consoleClientAdminProbe = await fetch("http://127.0.0.1:18092/admin/v1/users");
-  if (consoleClientAdminProbe.status !== 404) {
-    throw new Error(
-      `Expected client listener to return 404 for /admin/v1/users, got ${consoleClientAdminProbe.status}`,
-    );
-  }
-  const consoleAdminClientProbe = await fetch("http://127.0.0.1:18093/api/v1/models");
-  if (consoleAdminClientProbe.status !== 404) {
-    throw new Error(
-      `Expected admin listener to return 404 for /api/v1/models, got ${consoleAdminClientProbe.status}`,
-    );
-  }
-
   const bootstrapRes = await fetch("http://127.0.0.1:18093/admin/v1/auth/bootstrap", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -141,6 +128,13 @@ try {
     );
   }
   const bootstrapJson = (await bootstrapRes.json()) as { access_token: string };
+  await runSync(tempDir, ["dist/tools/verify-console-deployment.js"], {
+    PATH: env.PATH!,
+    CONSOLE_ACCEPTANCE_PUBLIC_URL: "http://127.0.0.1:18092",
+    CONSOLE_ACCEPTANCE_ADMIN_URL: "http://127.0.0.1:18093",
+    CONSOLE_ACCEPTANCE_ADMIN_TOKEN: bootstrapJson.access_token,
+    CONSOLE_ACCEPTANCE_ALLOW_PUBLIC_LOOPBACK_HTTP: "1",
+  });
   const crossPortRes = await fetch("http://127.0.0.1:18092/api/v1/auth/me", {
     headers: { authorization: `Bearer ${bootstrapJson.access_token}` },
   });
@@ -148,6 +142,73 @@ try {
     throw new Error(
       `Expected admin token to be rejected on client listener, got ${crossPortRes.status}`,
     );
+  }
+
+  const consoleRegistration = await fetch("http://127.0.0.1:18092/api/v1/auth/register", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "artifact-tenant@example.test",
+      password: crypto.randomUUID(),
+      display_name: "Artifact Tenant",
+    }),
+  });
+  if (consoleRegistration.status !== 201)
+    throw new Error(`Console artifact registration returned ${consoleRegistration.status}`);
+  const tenant = (await consoleRegistration.json()) as {
+    access_token: string;
+    default_org_id: string;
+    default_project_id: string;
+  };
+  const issueKey = await fetch(
+    `http://127.0.0.1:18092/api/v1/projects/${tenant.default_project_id}/api-keys`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${tenant.access_token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "Artifact Console Key" }),
+    },
+  );
+  if (issueKey.status !== 201)
+    throw new Error(`Console artifact API key creation returned ${issueKey.status}`);
+  const { key: consoleKey } = (await issueKey.json()) as { key: string };
+  const gatewayDb = createDatabase(targetUrl.toString(), 2);
+  try {
+    await gatewayDb`UPDATE public.projects SET external_ref = NULL WHERE id = ${tenant.default_project_id}`;
+    await runSync(tempDir, ["dist/tools/console-migrate.js", "--bind-projects"], consoleEnv);
+    await runSync(tempDir, ["dist/tools/console-migrate.js", "--bind-projects"], consoleEnv);
+    const [bound] =
+      await gatewayDb`SELECT external_ref FROM public.projects WHERE id = ${tenant.default_project_id}`;
+    if (
+      bound?.external_ref !==
+      `console:org:${tenant.default_org_id}:project:${tenant.default_project_id}`
+    ) {
+      throw new Error("Console artifact did not repair a legacy project binding");
+    }
+  } finally {
+    await gatewayDb.close();
+  }
+  const suspendTenant = await fetch(
+    `http://127.0.0.1:18093/admin/v1/orgs/${tenant.default_org_id}`,
+    {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${bootstrapJson.access_token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ status: "SUSPENDED" }),
+    },
+  );
+  if (suspendTenant.status !== 200)
+    throw new Error(`Console artifact tenant suspension returned ${suspendTenant.status}`);
+  const modelsAfterSuspend = await fetch("http://127.0.0.1:18080/v1/models", {
+    headers: { authorization: `Bearer ${consoleKey}` },
+  });
+  const denial = (await modelsAfterSuspend.json()) as { error?: { code?: string } };
+  if (modelsAfterSuspend.status !== 403 || denial.error?.code !== "org_suspended") {
+    throw new Error("Gateway artifact did not reject the suspended Console API key");
   }
 
   const adminHeaders = {
@@ -260,7 +321,7 @@ try {
     body: JSON.stringify({
       model: "art-gpt-up",
       scenario: {
-        output: "Support phone 13812345678 key sk-proj-0123456789abcdefghij",
+        output: "Support phone 13812345678 key sk_A1b2C3d4E5-f6G7_H8I9J0K1L2M3N4O5P6Q7R8S9xyA",
       },
     }),
   });

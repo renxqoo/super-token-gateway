@@ -44,11 +44,21 @@ let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  await Promise.allSettled([
-    clientServer ? clientServer.stop() : Promise.resolve(),
-    adminServer ? adminServer.stop() : Promise.resolve(),
-  ]);
-  await runtime.close(5_000);
+  const servers = [clientServer, adminServer];
+  const deadline = setTimeout(() => process.exit(1), 10_000);
+  const grace = Promise.withResolvers<void>();
+  const drainTimer = setTimeout(grace.resolve, 4_000);
+  try {
+    await Promise.race([
+      Promise.allSettled(servers.map((server) => server?.stop())),
+      grace.promise,
+    ]);
+    await Promise.allSettled(servers.map((server) => server?.stop(true)));
+    await runtime.close(5_000);
+  } finally {
+    clearTimeout(drainTimer);
+    clearTimeout(deadline);
+  }
   process.exit(0);
 }
 

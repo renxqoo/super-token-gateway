@@ -443,13 +443,14 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
     );
     const nextLimitBig = BigInt(creditLimitAtoms);
 
+    const maxBatchSize = 500;
     let targets: (typeof projects.$inferSelect)[] = [];
     if (body.scope === "ALL_PROJECTS") {
       targets = await deps.orm
         .select()
         .from(projects)
         .orderBy(asc(projects.createdAt), asc(projects.id))
-        .limit(500);
+        .limit(maxBatchSize + 1);
     } else if (body.scope === "ORGANIZATION") {
       if (!body.org_id) {
         throw new GatewayError(
@@ -463,7 +464,7 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
         .from(projects)
         .where(eq(projects.orgId, body.org_id))
         .orderBy(asc(projects.createdAt), asc(projects.id))
-        .limit(500);
+        .limit(maxBatchSize + 1);
     } else if (body.scope === "USER") {
       if (!body.user_id) {
         throw new GatewayError(400, "validation_error", "user_id is required for USER scope");
@@ -474,20 +475,24 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
         .where(eq(organizations.ownerUserId, body.user_id));
       const orgIds = ownedOrgs.map((o) => o.id);
       if (orgIds.length > 0) {
-        const allUserProjects = await deps.orm
-          .select()
-          .from(projects)
-          .where(inArray(projects.orgId, orgIds))
-          .orderBy(asc(projects.createdAt), asc(projects.id))
-          .limit(500);
-        if (body.only_default_project) {
-          const personalOrg = ownedOrgs.find((o) => o.kind === "PERSONAL");
-          const defaultProj =
-            (personalOrg && allUserProjects.find((p) => p.orgId === personalOrg.id)) ??
-            allUserProjects[0];
-          targets = defaultProj ? [defaultProj] : [];
-        } else {
-          targets = allUserProjects;
+        const personalOrg = body.only_default_project
+          ? ownedOrgs.find((o) => o.kind === "PERSONAL")
+          : undefined;
+        if (personalOrg) {
+          targets = await deps.orm
+            .select()
+            .from(projects)
+            .where(eq(projects.orgId, personalOrg.id))
+            .orderBy(asc(projects.createdAt), asc(projects.id))
+            .limit(1);
+        }
+        if (targets.length === 0) {
+          targets = await deps.orm
+            .select()
+            .from(projects)
+            .where(inArray(projects.orgId, orgIds))
+            .orderBy(asc(projects.createdAt), asc(projects.id))
+            .limit(body.only_default_project ? 1 : maxBatchSize + 1);
         }
       }
     } else if (body.scope === "PROJECTS") {
@@ -505,6 +510,14 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
         .orderBy(asc(projects.createdAt), asc(projects.id));
     }
 
+    if (targets.length > maxBatchSize) {
+      throw new GatewayError(
+        400,
+        "validation_error",
+        "Credit policy batch matches more than 500 projects; select a smaller scope",
+      );
+    }
+
     const items: Record<string, unknown>[] = [];
     let updatedCount = 0;
     let failedCount = 0;
@@ -516,14 +529,10 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
           let currentDebt = "0";
           let currentPolicy = "GIFT_FIRST";
           if (target.gatewaySynced) {
-            const w = await deps.gateway
-              .getWallet(target.gatewayProjectId, target.currency)
-              .catch(() => null);
-            if (w) {
-              currentLimit = String(w.credit_limit_atoms ?? "0");
-              currentDebt = String(w.debt_atoms ?? "0");
-              currentPolicy = String(w.policy ?? "GIFT_FIRST");
-            }
+            const w = await deps.gateway.getWallet(target.gatewayProjectId, target.currency);
+            currentLimit = String(w.credit_limit_atoms);
+            currentDebt = String(w.debt_atoms);
+            currentPolicy = String(w.policy);
           }
           items.push({
             project_id: target.id,

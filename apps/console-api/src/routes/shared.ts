@@ -136,7 +136,11 @@ export function enrichAdminChargeDecimals(raw: Record<string, unknown>) {
   const refundedAtoms = String(raw.refundedAtoms ?? raw.refunded_atoms ?? "0");
   const supplierCostAtoms = String(raw.supplierCostAtoms ?? raw.supplier_cost_atoms ?? "0");
   const netRevenue = BigInt(customerAtoms) - BigInt(refundedAtoms);
-  const grossMargin = netRevenue - BigInt(supplierCostAtoms);
+  const supplierCurrency = raw.supplierCurrency ?? raw.supplier_currency ?? null;
+  const grossMargin =
+    supplierCurrency === null || supplierCurrency === raw.currency
+      ? netRevenue - BigInt(supplierCostAtoms)
+      : null;
   return {
     id: raw.id,
     request_id: raw.requestId ?? raw.request_id,
@@ -147,7 +151,7 @@ export function enrichAdminChargeDecimals(raw: Record<string, unknown>) {
     model: raw.model,
     operation: raw.operation,
     currency: raw.currency,
-    supplier_currency: raw.supplierCurrency ?? raw.supplier_currency ?? null,
+    supplier_currency: supplierCurrency,
     billing_price_id: raw.billingPriceId ?? raw.billing_price_id,
     cost_version_id: raw.costVersionId ?? raw.cost_version_id ?? null,
     pricing_override_id: raw.pricingOverrideId ?? raw.pricing_override_id ?? null,
@@ -165,8 +169,8 @@ export function enrichAdminChargeDecimals(raw: Record<string, unknown>) {
     net_revenue_decimal: safeFormatAtoms(netRevenue),
     supplier_cost_atoms: supplierCostAtoms,
     supplier_cost_decimal: safeFormatAtoms(supplierCostAtoms),
-    gross_margin_atoms: grossMargin.toString(),
-    gross_margin_decimal: safeFormatAtoms(grossMargin),
+    gross_margin_atoms: grossMargin?.toString() ?? null,
+    gross_margin_decimal: grossMargin === null ? null : safeFormatAtoms(grossMargin),
     outcome: raw.outcome,
     customer_journal_id: raw.customerJournalId ?? raw.customer_journal_id ?? null,
     supplier_journal_id: raw.supplierJournalId ?? raw.supplier_journal_id ?? null,

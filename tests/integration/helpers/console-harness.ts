@@ -345,6 +345,7 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
       gwDb,
       conDb,
       gateway,
+      gatewayConfig: gwConfig,
       worker,
       consoleRuntime,
       consoleConfig,
