@@ -1,3 +1,4 @@
+import { writeLocalInternalAuth } from "./local-internal-auth.ts";
 import { spawn, spawnSync } from "node:child_process";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -73,12 +74,15 @@ try {
     findFreePort(),
   ]);
 
+  const operatorToken = crypto.randomUUID() + crypto.randomUUID();
+  const internalAuthFile = join(tempDir, "internal-auth.json");
+  await writeLocalInternalAuth(internalAuthFile, operatorToken);
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     DATABASE_URL: targetUrl.toString(),
     KEY_PEPPER: "durability-pepper-0123456789abcde",
     ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    ADMIN_TOKEN: "durability-admin-0123456789abcdef",
+    INTERNAL_AUTH_FILE: internalAuthFile,
     ALLOW_PRIVATE_UPSTREAMS: "true",
     ACCESS_LOG: "false",
     HOLD_TTL_MS: "1500",
@@ -120,7 +124,7 @@ try {
   ]);
 
   const adminHeaders = {
-    authorization: `Bearer ${env.ADMIN_TOKEN}`,
+    authorization: `Bearer ${operatorToken}`,
     "content-type": "application/json",
   };
   const callInternal = async (method: string, path: string, body?: unknown) => {
@@ -133,15 +137,15 @@ try {
     return (await res.json()) as Record<string, unknown>;
   };
 
-  const project = await callInternal("PUT", "/internal/v1/projects", {
+  const billingAccount = await callInternal("PUT", "/internal/v1/billing-accounts", {
     name: "dur-proj",
     currency: "USD",
   });
   const key = await callInternal("PUT", "/internal/v1/api-keys", {
-    project_id: project.id,
+    billing_account_id: billingAccount.id,
     name: "dur-key",
   });
-  await callInternal("POST", `/internal/v1/wallets/${project.id}/credits`, {
+  await callInternal("POST", `/internal/v1/wallets/${billingAccount.id}/credits`, {
     currency: "USD",
     external_ref: "dur-credit-1",
     amount_atoms: "100000000",
@@ -281,7 +285,6 @@ try {
         await callInternal("POST", `/internal/v1/requests/${reqId}/resolve`, {
           action: "RELEASE",
           reason: "sigkill_verified_unbilled",
-          actor: "durability-bot",
         });
       } else {
         await callInternal("POST", `/internal/v1/requests/${reqId}/resolve`, {
@@ -290,7 +293,6 @@ try {
           usage: { input_tokens: "10", output_tokens: "5" },
           supplier_cost_atoms: "40",
           reason: "sigkill_verified_billed",
-          actor: "durability-bot",
         });
       }
     }
@@ -304,7 +306,10 @@ try {
       throw new Error(`Post-SIGKILL conservation failed: ${JSON.stringify(auditBeforeDump)}`);
     }
 
-    const walletOrig = await callInternal("GET", `/internal/v1/wallets/${project.id}?currency=USD`);
+    const walletOrig = await callInternal(
+      "GET",
+      `/internal/v1/wallets/${billingAccount.id}?currency=USD`,
+    );
     if (
       walletOrig.reserved_atoms !== "0" ||
       walletOrig.spent_atoms !== String(8 * (10 * 10 + 5 * 20))
@@ -337,7 +342,7 @@ try {
     try {
       const restoredLedger = createLedgerEngine(restoredDb);
       const restoredAudit = await restoredLedger.auditConservation();
-      const restoredWallet = await restoredLedger.getWallet(String(project.id), "USD");
+      const restoredWallet = await restoredLedger.getWallet(String(billingAccount.id), "USD");
       if (
         !restoredAudit.ok ||
         restoredAudit.open_holds !== 0 ||

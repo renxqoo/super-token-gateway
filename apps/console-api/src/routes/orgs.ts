@@ -1,19 +1,20 @@
 import { Hono } from "hono";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, sql } from "drizzle-orm";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
 import {
+  defaultBillingAccountId,
   generateOpaqueToken,
   recordAuditLog,
   requireOrgMember,
-  requireProjectAccess,
+  requireBillingAccountAccess,
   sha256Hex,
 } from "../auth.ts";
 import {
   organizations,
   orgInvitations,
   orgMembers,
-  projects,
+  billingAccounts,
   users,
   type OrgRole,
 } from "../db/schema.ts";
@@ -24,7 +25,7 @@ import {
   parseLimitOffset,
   parseUuid,
   requireClientAuth,
-  sanitizeProjectForClient,
+  sanitizeBillingAccountForClient,
   type ConsoleDeps,
   type ConsoleEnv,
 } from "./shared.ts";
@@ -32,6 +33,7 @@ import {
 const createOrgSchema = z
   .object({
     name: z.string().trim().min(1).max(120),
+    billing_currency: currencySchema.default("USD"),
     slug: z
       .string()
       .trim()
@@ -58,16 +60,7 @@ const updateMemberRoleSchema = z
   })
   .strict();
 
-const createProjectSchema = z
-  .object({
-    name: z.string().trim().min(1).max(120),
-    currency: currencySchema.default("USD"),
-    developer_key_spend_limit_atoms: nonNegativeAtomsSchema.nullable().optional(),
-    developer_max_active_keys: z.number().int().min(1).max(1000).nullable().optional(),
-  })
-  .strict();
-
-const updateProjectSchema = z
+const updateBillingAccountSchema = z
   .object({
     name: z.string().trim().min(1).max(120).optional(),
     developer_key_spend_limit_atoms: nonNegativeAtomsSchema.nullable().optional(),
@@ -75,13 +68,13 @@ const updateProjectSchema = z
   })
   .strict();
 
-export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
+export function createOrgAndBillingAccountRoutes(deps: ConsoleDeps) {
   const app = new Hono<ConsoleEnv>();
   const auth = requireClientAuth(deps);
   app.use("/orgs", auth);
   app.use("/orgs/*", auth);
   app.use("/invitations/*", auth);
-  app.use("/projects/*", auth);
+  app.use("/billing-accounts/*", auth);
 
   app.get("/orgs", async (c) => {
     const user = c.get("user");
@@ -94,6 +87,7 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
         kind: organizations.kind,
         status: organizations.status,
         role: orgMembers.role,
+        default_billing_account_id: defaultBillingAccountId,
         created_at: organizations.createdAt,
       })
       .from(orgMembers)
@@ -109,7 +103,7 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
     const user = c.get("user");
     const body = await parseJsonBody(c, createOrgSchema);
     const orgId = crypto.randomUUID();
-    const projectId = crypto.randomUUID();
+    const billingAccountId = crypto.randomUUID();
 
     await deps.orm.transaction(async (tx) => {
       await tx.insert(organizations).values({
@@ -125,12 +119,12 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
         userId: user.id,
         role: "OWNER",
       });
-      await tx.insert(projects).values({
-        id: projectId,
+      await tx.insert(billingAccounts).values({
+        id: billingAccountId,
         orgId,
-        gatewayProjectId: projectId,
-        name: "Production",
-        currency: "USD",
+        gatewayBillingAccountId: billingAccountId,
+        name: body.name,
+        currency: body.billing_currency,
         gatewaySynced: false,
         syncStatus: "PENDING",
       });
@@ -152,7 +146,7 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
         name: body.name,
         kind: "ENTERPRISE",
         role: "OWNER",
-        default_project_id: projectId,
+        default_billing_account_id: billingAccountId,
       },
       201,
     );
@@ -163,7 +157,10 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
     const orgId = parseUuid(c.req.param("orgId"), "orgId");
     const { role } = await requireOrgMember(deps.orm, user.id, orgId);
     const [org] = await deps.orm
-      .select()
+      .select({
+        ...getTableColumns(organizations),
+        default_billing_account_id: defaultBillingAccountId,
+      })
       .from(organizations)
       .where(eq(organizations.id, orgId))
       .limit(1);
@@ -519,76 +516,48 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
     return c.json({ ok: true });
   });
 
-  app.get("/orgs/:orgId/projects", async (c) => {
+  app.get("/orgs/:orgId/billing-accounts", async (c) => {
     const user = c.get("user");
     const orgId = parseUuid(c.req.param("orgId"), "orgId");
     await requireOrgMember(deps.orm, user.id, orgId);
     const { limit, offset } = parseLimitOffset(c, 50, 200);
     const items = await deps.orm
       .select()
-      .from(projects)
-      .where(eq(projects.orgId, orgId))
-      .orderBy(desc(projects.createdAt))
+      .from(billingAccounts)
+      .where(eq(billingAccounts.orgId, orgId))
+      .orderBy(asc(billingAccounts.createdAt), asc(billingAccounts.id))
       .limit(limit)
       .offset(offset);
-    return c.json({ items: items.map(sanitizeProjectForClient), limit, offset });
+    return c.json({ items: items.map(sanitizeBillingAccountForClient), limit, offset });
   });
 
-  app.post("/orgs/:orgId/projects", async (c) => {
+  app.get("/billing-accounts/:billingAccountId", async (c) => {
     const user = c.get("user");
-    const orgId = parseUuid(c.req.param("orgId"), "orgId");
-    await requireOrgMember(deps.orm, user.id, orgId, ["OWNER", "ADMIN"]);
-    const body = await parseJsonBody(c, createProjectSchema);
-    const projectId = crypto.randomUUID();
-    const [created] = await deps.orm
-      .insert(projects)
-      .values({
-        id: projectId,
-        orgId,
-        gatewayProjectId: projectId,
-        name: body.name,
-        currency: body.currency,
-        developerKeySpendLimitAtoms: body.developer_key_spend_limit_atoms ?? null,
-        developerMaxActiveKeys: body.developer_max_active_keys ?? null,
-        enabled: true,
-        gatewaySynced: false,
-        syncStatus: "PENDING",
-      })
-      .returning();
-
-    await recordAuditLog(deps.orm, {
-      actor: user,
-      orgId,
-      action: "project.create",
-      targetType: "project",
-      targetId: projectId,
-      metadata: { name: body.name, currency: body.currency },
-    });
-    return c.json(sanitizeProjectForClient(created!), 201);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount, role } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+    );
+    return c.json({ ...sanitizeBillingAccountForClient(billingAccount), role });
   });
 
-  app.get("/projects/:projectId", async (c) => {
+  app.patch("/billing-accounts/:billingAccountId", async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project, role } = await requireProjectAccess(deps.orm, user.id, projectId);
-    return c.json({ ...sanitizeProjectForClient(project), role });
-  });
-
-  app.patch("/projects/:projectId", async (c) => {
-    const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project, role } = await requireProjectAccess(deps.orm, user.id, projectId, [
-      "OWNER",
-      "ADMIN",
-      "FINANCE",
-    ]);
-    const body = await parseJsonBody(c, updateProjectSchema);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount, role } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+      ["OWNER", "ADMIN", "FINANCE"],
+    );
+    const body = await parseJsonBody(c, updateBillingAccountSchema);
     if (role === "FINANCE" && body.name !== undefined) {
       throw new GatewayError(403, "forbidden", "FINANCE role can only update developer key limits");
     }
     const touchesGateway = body.name !== undefined;
     const [updated] = await deps.orm
-      .update(projects)
+      .update(billingAccounts)
       .set({
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.developer_key_spend_limit_atoms !== undefined
@@ -598,26 +567,26 @@ export function createOrgAndProjectRoutes(deps: ConsoleDeps) {
           ? { developerMaxActiveKeys: body.developer_max_active_keys }
           : {}),
         ...(touchesGateway
-          ? { desiredRevision: sql`${projects.desiredRevision} + 1`, syncStatus: "PENDING" }
+          ? { desiredRevision: sql`${billingAccounts.desiredRevision} + 1`, syncStatus: "PENDING" }
           : {}),
         updatedAt: sql`now()`,
       })
-      .where(eq(projects.id, projectId))
+      .where(eq(billingAccounts.id, billingAccountId))
       .returning();
 
-    const finalProject =
+    const finalBillingAccount =
       touchesGateway && updated!.gatewaySynced
-        ? await deps.sync.ensureProjectSynced(projectId)
+        ? await deps.sync.ensureBillingAccountSynced(billingAccountId)
         : updated!;
 
     await recordAuditLog(deps.orm, {
       actor: user,
-      orgId: project.orgId,
-      action: "project.update",
-      targetType: "project",
-      targetId: projectId,
+      orgId: billingAccount.orgId,
+      action: "billing_account.update",
+      targetType: "billing_account",
+      targetId: billingAccountId,
     });
-    return c.json(sanitizeProjectForClient(finalProject));
+    return c.json(sanitizeBillingAccountForClient(finalBillingAccount));
   });
 
   return app;

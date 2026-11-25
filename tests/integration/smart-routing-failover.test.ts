@@ -1,3 +1,4 @@
+import { localInternalCredentials } from "../../scripts/local-internal-auth.ts";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { SQL } from "bun";
 import { createDatabase, migrate, type AdapterOverrides } from "@gateway/ledger";
@@ -12,7 +13,7 @@ const adminUrl = new URL(baseDbUrl);
 adminUrl.pathname = "/postgres";
 const targetUrl = new URL(baseDbUrl);
 targetUrl.pathname = `/${testDbName}`;
-const ADMIN_TOKEN = "sr-admin-token-0123456789abcdef";
+const OPERATOR_TOKEN = "sr-admin-token-0123456789abcdef000000000000000";
 
 let adminDb: SQL;
 let db: SQL;
@@ -44,7 +45,7 @@ function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     dbMaxConnections: 16,
     keyPepper: "sr-pepper-secret-0123456789abcdef",
     encryptionKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    adminToken: ADMIN_TOKEN,
+    internalCredentials: localInternalCredentials(OPERATOR_TOKEN),
     allowPrivateUpstreams: true,
     privateUpstreamCidrs: ["127.0.0.0/8"],
     trustedProxyCidrs: [],
@@ -68,7 +69,7 @@ async function internalCall(
   const res = await app.fetch(
     new Request(`http://internal.local${path}`, {
       method,
-      headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${OPERATOR_TOKEN}`, "content-type": "application/json" },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     }),
   );
@@ -171,21 +172,24 @@ async function setup(
     return r.data as Record<string, unknown>;
   };
   const tag = crypto.randomUUID().slice(0, 6);
-  const project = await call("PUT", "/internal/v1/projects", {
+  const billingAccount = await call("PUT", "/internal/v1/billing-accounts", {
     name: `sr-${tag}`,
     currency: "USD",
     rpm: 10_000_000,
     tpm: 100_000_000,
     concurrency: 5000,
   });
-  const projectId = String(project.id);
-  await call("POST", `/internal/v1/wallets/${projectId}/credits`, {
+  const billingAccountId = String(billingAccount.id);
+  await call("POST", `/internal/v1/wallets/${billingAccountId}/credits`, {
     currency: "USD",
     external_ref: `sr-${tag}`,
     amount_atoms: "1000000000",
     kind: "CASH",
   });
-  const key = await call("PUT", "/internal/v1/api-keys", { project_id: projectId, name: "sr" });
+  const key = await call("PUT", "/internal/v1/api-keys", {
+    billing_account_id: billingAccountId,
+    name: "sr",
+  });
   const account = await call("PUT", "/internal/v1/upstream-accounts", { name: `sr-${tag}` });
   await call("POST", `/internal/v1/upstream-accounts/${account.id}/recharges`, {
     currency: "USD",
@@ -254,7 +258,11 @@ async function setup(
     });
   }
   const wallet = async (): Promise<Wallet> => {
-    const r = await internalCall(runtime.internalApp, "GET", `/internal/v1/wallets/${projectId}`);
+    const r = await internalCall(
+      runtime.internalApp,
+      "GET",
+      `/internal/v1/wallets/${billingAccountId}`,
+    );
     expect(r.status).toBe(200);
     return r.data as unknown as Wallet;
   };
@@ -306,18 +314,18 @@ async function setup(
   };
   const charges = async () => {
     const rows =
-      await db`SELECT count(*)::int AS n, count(DISTINCT request_id)::int AS u, coalesce(sum(customer_atoms),0)::text AS atoms FROM public.billing_charges WHERE project_id = ${projectId}`;
+      await db`SELECT count(*)::int AS n, count(DISTINCT request_id)::int AS u, coalesce(sum(customer_atoms),0)::text AS atoms FROM public.billing_charges WHERE billing_account_id = ${billingAccountId}`;
     return rows[0] as unknown as { n: number; u: number; atoms: string };
   };
   const holdsByState = async () => {
     const rows = await db<
       { state: string; n: number }[]
-    >`SELECT state, count(*)::int AS n FROM public.billing_holds WHERE project_id = ${projectId} GROUP BY state`;
+    >`SELECT state, count(*)::int AS n FROM public.billing_holds WHERE billing_account_id = ${billingAccountId} GROUP BY state`;
     return Object.fromEntries(rows.map((r: { state: string; n: number }) => [r.state, r.n]));
   };
   const resolveUnknownHolds = async () => {
     const rows = await db<{ request_id: string }[]>`
-      SELECT request_id FROM public.billing_holds WHERE project_id = ${projectId} AND state = 'UNKNOWN'
+      SELECT request_id FROM public.billing_holds WHERE billing_account_id = ${billingAccountId} AND state = 'UNKNOWN'
     `;
     for (const { request_id } of rows) {
       expect(
@@ -336,7 +344,7 @@ async function setup(
     for (let i = 0; i < 100 && runtime.lifecycle.size > 0; i++) await Bun.sleep(10);
   };
   return {
-    projectId,
+    billingAccountId,
     channels,
     model,
     wallet,
@@ -669,7 +677,7 @@ test("channel diagnostics retain failures through JSON and SSE retries and class
         errorBodyMaxBytes: 1024,
         maxRecords: 16,
         maxBytes: 65_536,
-        maxPerProject: 8,
+        maxPerBillingAccount: 8,
         priorityReserve: 4,
         batchSize: 4,
         batchDeadlineMs: 2000,
@@ -834,7 +842,6 @@ test("channel diagnostics retain failures through JSON and SSE retries and class
           {
             action: "RELEASE",
             reason: "Isolated test provider confirmed no billable usage",
-            actor: "test",
           },
         );
         expect(cleanup.status).toBe(200);
@@ -883,7 +890,7 @@ test("latency: a slow-failing primary near the attempt timeout adds at most one 
     const during = await ctx.wallet();
     expect(BigInt(during.spent_atoms)).toBe(BigInt(before2.spent_atoms));
     const unk =
-      await db`SELECT held_atoms::text AS h FROM public.billing_holds WHERE project_id = ${ctx.projectId} AND state = 'UNKNOWN'`;
+      await db`SELECT held_atoms::text AS h FROM public.billing_holds WHERE billing_account_id = ${ctx.billingAccountId} AND state = 'UNKNOWN'`;
     expect(unk.length).toBe(1);
     expect(BigInt(during.reserved_atoms) - BigInt(before2.reserved_atoms)).toBe(
       BigInt(unk[0]!.h as string),
@@ -970,20 +977,23 @@ test("dead channel: ECONNREFUSED on primary switches before dispatch, the custom
       expect(r.status, JSON.stringify(r.data)).toBe(path === "/internal/v1/prices" ? 201 : 200);
       return r.data as Record<string, unknown>;
     };
-    const project = await call("PUT", "/internal/v1/projects", {
+    const billingAccount = await call("PUT", "/internal/v1/billing-accounts", {
       name: `sr-dead-${tag}`,
       currency: "USD",
       rpm: 10_000_000,
       tpm: 100_000_000,
       concurrency: 5000,
     });
-    await call("POST", `/internal/v1/wallets/${project.id}/credits`, {
+    await call("POST", `/internal/v1/wallets/${billingAccount.id}/credits`, {
       currency: "USD",
       external_ref: `d-${tag}`,
       amount_atoms: "1000000000",
       kind: "CASH",
     });
-    const key = await call("PUT", "/internal/v1/api-keys", { project_id: project.id, name: "k" });
+    const key = await call("PUT", "/internal/v1/api-keys", {
+      billing_account_id: billingAccount.id,
+      name: "k",
+    });
     const account = await call("PUT", "/internal/v1/upstream-accounts", { name: `d-${tag}` });
     await call("POST", `/internal/v1/upstream-accounts/${account.id}/recharges`, {
       currency: "USD",
@@ -1074,17 +1084,18 @@ test("dead channel: ECONNREFUSED on primary switches before dispatch, the custom
     await res.text();
     for (let i = 0; i < 100 && runtime.lifecycle.size > 0; i++) await Bun.sleep(10);
     const charges =
-      await db`SELECT count(*)::int AS n FROM public.billing_charges WHERE project_id = ${project.id}`;
+      await db`SELECT count(*)::int AS n FROM public.billing_charges WHERE billing_account_id = ${billingAccount.id}`;
     expect(charges[0]!.n).toBe(1);
     const hold =
-      await db`SELECT supplier_holds FROM public.billing_holds WHERE project_id = ${project.id}`;
+      await db`SELECT supplier_holds FROM public.billing_holds WHERE billing_account_id = ${billingAccount.id}`;
     const sup = hold[0]!.supplier_holds as { channel_id: string; state: string }[];
     expect(sup.some((x) => x.channel_id === String(deadCh.id) && x.state === "RELEASED")).toBe(
       true,
     );
     expect(sup.some((x) => x.channel_id === String(liveCh.id) && x.state === "SETTLED")).toBe(true);
-    const w = (await internalCall(runtime.internalApp, "GET", `/internal/v1/wallets/${project.id}`))
-      .data as { spent_atoms: string; reserved_atoms: string };
+    const w = (
+      await internalCall(runtime.internalApp, "GET", `/internal/v1/wallets/${billingAccount.id}`)
+    ).data as { spent_atoms: string; reserved_atoms: string };
     expect(BigInt(w.spent_atoms)).toBe(15n);
     expect(BigInt(w.reserved_atoms)).toBe(0n);
   } finally {

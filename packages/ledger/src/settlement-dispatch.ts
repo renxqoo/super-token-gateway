@@ -137,8 +137,9 @@ export function createSettlementQueue(
   return {
     commitTerminal(input: CommitTerminalInput): Promise<CommitTerminalResult> {
       const hold = leases.holdById(input.request_id);
-      if (hold) return queues[walletLane(hold.projectId)]!.enqueue(input);
-      if (input.project_id) return directQueues[walletLane(input.project_id)]!.enqueue(input);
+      if (hold) return queues[walletLane(hold.billingAccountId)]!.enqueue(input);
+      if (input.billing_account_id)
+        return directQueues[walletLane(input.billing_account_id)]!.enqueue(input);
       return directFallback.enqueue(input);
     },
     async drain(): Promise<void> {

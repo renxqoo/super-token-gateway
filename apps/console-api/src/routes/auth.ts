@@ -11,17 +11,19 @@ import {
   recordAuditLog,
   sha256Hex,
   verifyPassword,
+  defaultBillingAccountId,
 } from "../auth.ts";
 import {
   organizations,
   orgMembers,
-  projects,
+  billingAccounts,
   sessions,
   users,
   type SessionScope,
 } from "../db/schema.ts";
 import {
   getClientIp,
+  currencySchema,
   parseJsonBody,
   requireClientAuth,
   requirePlatformAdmin,
@@ -34,6 +36,7 @@ const registerSchema = z
     email: z.email().max(200),
     password: z.string().min(8).max(128),
     display_name: z.string().trim().min(1).max(120),
+    billing_currency: currencySchema.default("USD"),
   })
   .strict();
 
@@ -279,7 +282,7 @@ export function createClientAuthRoutes(deps: ConsoleDeps) {
 
     const userId = crypto.randomUUID();
     const orgId = crypto.randomUUID();
-    const projectId = crypto.randomUUID();
+    const billingAccountId = crypto.randomUUID();
     const passwordHash = await deps.loginLimiter.runPasswordWork(() => hashPassword(body.password));
     const slug = `personal-${userId.replaceAll("-", "").slice(0, 16)}`;
 
@@ -305,12 +308,12 @@ export function createClientAuthRoutes(deps: ConsoleDeps) {
         userId,
         role: "OWNER",
       });
-      await tx.insert(projects).values({
-        id: projectId,
+      await tx.insert(billingAccounts).values({
+        id: billingAccountId,
         orgId,
-        gatewayProjectId: projectId,
-        name: "Default Project",
-        currency: "USD",
+        gatewayBillingAccountId: billingAccountId,
+        name: body.display_name,
+        currency: body.billing_currency,
         gatewaySynced: false,
         syncStatus: "PENDING",
       });
@@ -349,7 +352,7 @@ export function createClientAuthRoutes(deps: ConsoleDeps) {
           is_platform_admin: false,
         },
         default_org_id: orgId,
-        default_project_id: projectId,
+        default_billing_account_id: billingAccountId,
         ...session,
       },
       201,
@@ -408,6 +411,7 @@ export function createClientAuthRoutes(deps: ConsoleDeps) {
         name: organizations.name,
         kind: organizations.kind,
         role: orgMembers.role,
+        default_billing_account_id: defaultBillingAccountId,
       })
       .from(orgMembers)
       .innerJoin(organizations, eq(organizations.id, orgMembers.orgId))

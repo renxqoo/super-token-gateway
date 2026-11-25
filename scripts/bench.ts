@@ -1,3 +1,4 @@
+import { localInternalCredentials } from "./local-internal-auth.ts";
 import { createDatabase, migrate } from "@gateway/ledger";
 import { createGatewayRuntime, type GatewayConfig } from "@gateway/gateway";
 import { createMockApp } from "../apps/mock-providers/src/app.ts";
@@ -19,6 +20,7 @@ await migrate(db);
 const mock = createMockApp("bench-ctrl");
 const mockServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: mock.app.fetch });
 
+const operatorToken = "bench-operator-token-0123456789abcdef01234567";
 const config: GatewayConfig = {
   mode: "gateway",
   host: "127.0.0.1",
@@ -29,7 +31,7 @@ const config: GatewayConfig = {
   dbMaxConnections: 32,
   keyPepper: "bench-pepper-0123456789abcdef0123",
   encryptionKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  adminToken: "bench-admin-token-0123456789abcdef",
+  internalCredentials: localInternalCredentials(operatorToken),
   allowPrivateUpstreams: true,
   privateUpstreamCidrs: ["127.0.0.0/8"],
   trustedProxyCidrs: [],
@@ -52,7 +54,7 @@ const internalServer = Bun.serve({
 });
 
 const adminHeaders = {
-  authorization: `Bearer ${config.adminToken}`,
+  authorization: `Bearer ${operatorToken}`,
   "content-type": "application/json",
 };
 async function postInternal(method: string, path: string, body?: unknown) {
@@ -187,7 +189,7 @@ try {
 
   const multiKeys: string[] = [];
   for (let i = 0; i < 32; i++) {
-    const p = await postInternal("PUT", "/internal/v1/projects", {
+    const p = await postInternal("PUT", "/internal/v1/billing-accounts", {
       name: `bench-p-${i}`,
       currency: "USD",
       rpm: 10_000_000,
@@ -195,7 +197,7 @@ try {
       concurrency: 1000,
     });
     const k = await postInternal("PUT", "/internal/v1/api-keys", {
-      project_id: p.id,
+      billing_account_id: p.id,
       name: `k-${i}`,
     });
     await postInternal("POST", `/internal/v1/wallets/${p.id}/credits`, {

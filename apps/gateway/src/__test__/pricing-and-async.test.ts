@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type {
   ConfigSnapshot,
   PriceVersionRecord,
-  ProjectPricingOverrideRecord,
+  BillingAccountPricingOverrideRecord,
 } from "@gateway/ledger";
 import { computeSpendWindowStartMs, rolloverKeySpendInMemory } from "@gateway/ledger";
 import { extractByDotPath, extractUpstreamTaskId } from "../async-tasks.ts";
@@ -25,23 +25,23 @@ function makeBasePrice(id: string, currency = "USD"): PriceVersionRecord {
 
 function makeSnap(
   prices: PriceVersionRecord[],
-  overrides: ProjectPricingOverrideRecord[],
+  overrides: BillingAccountPricingOverrideRecord[],
 ): ConfigSnapshot {
-  const byProj = new Map<string, ProjectPricingOverrideRecord[]>();
+  const byProj = new Map<string, BillingAccountPricingOverrideRecord[]>();
   for (const o of overrides) {
-    const list = byProj.get(o.project_id);
+    const list = byProj.get(o.billing_account_id);
     if (list) list.push(o);
-    else byProj.set(o.project_id, [o]);
+    else byProj.set(o.billing_account_id, [o]);
   }
   return {
     epoch: 1,
-    projects: new Map(),
+    billingAccounts: new Map(),
     keysByVerifier: new Map(),
     accounts: new Map(),
     channels: new Map(),
     models: new Map(),
     prices: new Map(prices.map((p) => [p.id, p])),
-    pricingOverridesByProject: byProj,
+    pricingOverridesByBillingAccount: byProj,
     routesByModel: new Map(),
     plugins: new Map(),
     revokedPlugins: new Set(),
@@ -68,7 +68,7 @@ test("resolveEffectiveCustomerPrice obeys 6-level specificity order and exact ra
     [
       {
         id: "ovr-wild-all",
-        project_id: projId,
+        billing_account_id: projId,
         model_name: "*",
         operation: "*",
         override_kind: "MULTIPLIER",
@@ -79,7 +79,7 @@ test("resolveEffectiveCustomerPrice obeys 6-level specificity order and exact ra
       },
       {
         id: "ovr-wild-chat",
-        project_id: projId,
+        billing_account_id: projId,
         model_name: "*",
         operation: "chat",
         override_kind: "MULTIPLIER",
@@ -90,7 +90,7 @@ test("resolveEffectiveCustomerPrice obeys 6-level specificity order and exact ra
       },
       {
         id: "ovr-model-wild-mult",
-        project_id: projId,
+        billing_account_id: projId,
         model_name: "gpt-4o",
         operation: "*",
         override_kind: "MULTIPLIER",
@@ -101,7 +101,7 @@ test("resolveEffectiveCustomerPrice obeys 6-level specificity order and exact ra
       },
       {
         id: "ovr-model-op-mult",
-        project_id: projId,
+        billing_account_id: projId,
         model_name: "gpt-4o",
         operation: "responses",
         override_kind: "MULTIPLIER",
@@ -112,7 +112,7 @@ test("resolveEffectiveCustomerPrice obeys 6-level specificity order and exact ra
       },
       {
         id: "ovr-exact-wild",
-        project_id: projId,
+        billing_account_id: projId,
         model_name: "claude-3",
         operation: "*",
         override_kind: "EXACT_PRICE",
@@ -123,7 +123,7 @@ test("resolveEffectiveCustomerPrice obeys 6-level specificity order and exact ra
       },
       {
         id: "ovr-exact-op",
-        project_id: projId,
+        billing_account_id: projId,
         model_name: "claude-3",
         operation: "messages",
         override_kind: "EXACT_PRICE",
@@ -185,7 +185,7 @@ test("key spend UTC DAILY and MONTHLY window rollover resets spent_atoms without
 
   const row = {
     id: "k1",
-    project_id: "p1",
+    billing_account_id: "p1",
     spend_limit_atoms: 1000n,
     spend_limit_window: "DAILY" as const,
     spend_window_start_ms: Date.UTC(2026, 0, 15, 0, 0, 0),

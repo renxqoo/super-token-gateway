@@ -1,7 +1,21 @@
 import type { SQL } from "bun";
-import { and, desc, eq, inArray, isNull, lt, or, sql, type SQL as DrizzleSQL } from "drizzle-orm";
-import { asyncTasks, createDrizzle } from "./schema.ts";
+import {
+  and,
+  desc,
+  eq,
+  getTableColumns,
+  inArray,
+  isNull,
+  lt,
+  ne,
+  or,
+  sql,
+  type SQL as DrizzleSQL,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { apiKeys, asyncTasks, createDrizzle, type LedgerDrizzle } from "./schema.ts";
 import type {
+  ApiKeyRecord,
   AsyncTaskFailureCategory,
   AsyncTaskRecord,
   AsyncTaskRefundEligibility,
@@ -13,7 +27,7 @@ function mapTaskRow(r: typeof asyncTasks.$inferSelect): AsyncTaskRecord {
     id: r.id,
     request_id: r.requestId,
     charge_id: r.chargeId,
-    project_id: r.projectId,
+    billing_account_id: r.billingAccountId,
     api_key_id: r.apiKeyId,
     channel_id: r.channelId,
     model: r.model,
@@ -32,6 +46,57 @@ function mapTaskRow(r: typeof asyncTasks.$inferSelect): AsyncTaskRecord {
   };
 }
 
+type CheckTaskKeyPolicy = (
+  task: Pick<AsyncTaskRecord, "model" | "operation">,
+  key: Pick<ApiKeyRecord, "allowed_cidrs" | "models" | "operations">,
+) => void;
+
+const taskOwner = alias(apiKeys, "task_owner");
+
+async function findTaskForKey(
+  orm: Pick<LedgerDrizzle, "select">,
+  scope: DrizzleSQL,
+  keyId: string,
+  checkPolicy: CheckTaskKeyPolicy,
+) {
+  const [row] = await orm
+    .select({
+      task: getTableColumns(asyncTasks),
+      key: {
+        allowed_cidrs: apiKeys.allowedCidrs,
+        models: apiKeys.models,
+        operations: apiKeys.operations,
+      },
+    })
+    .from(asyncTasks)
+    .innerJoin(
+      apiKeys,
+      and(eq(apiKeys.id, keyId), eq(apiKeys.billingAccountId, asyncTasks.billingAccountId)),
+    )
+    .leftJoin(
+      taskOwner,
+      and(
+        eq(taskOwner.id, asyncTasks.apiKeyId),
+        eq(taskOwner.billingAccountId, apiKeys.billingAccountId),
+      ),
+    )
+    .where(
+      and(
+        scope,
+        eq(apiKeys.enabled, true),
+        ne(apiKeys.role, "VIEWER"),
+        or(isNull(apiKeys.expiresAt), sql`${apiKeys.expiresAt} > clock_timestamp()`),
+        or(
+          eq(apiKeys.role, "ADMIN"),
+          sql`COALESCE(${taskOwner.resourceScopeId}, ${taskOwner.id}) = COALESCE(${apiKeys.resourceScopeId}, ${apiKeys.id})`,
+        ),
+      ),
+    );
+  if (!row) return null;
+  checkPolicy(row.task, row.key);
+  return row.task;
+}
+
 export function createAsyncTasksRepository(db: SQL) {
   const orm = createDrizzle(db);
 
@@ -40,7 +105,7 @@ export function createAsyncTasksRepository(db: SQL) {
       id: string;
       request_id: string;
       charge_id: string | null;
-      project_id: string;
+      billing_account_id: string;
       api_key_id: string | null;
       channel_id: string;
       model: string;
@@ -55,7 +120,7 @@ export function createAsyncTasksRepository(db: SQL) {
           id: input.id,
           requestId: input.request_id,
           chargeId: input.charge_id,
-          projectId: input.project_id,
+          billingAccountId: input.billing_account_id,
           apiKeyId: input.api_key_id,
           channelId: input.channel_id,
           model: input.model,
@@ -79,11 +144,22 @@ export function createAsyncTasksRepository(db: SQL) {
       return row ? mapTaskRow(row) : null;
     },
 
-    async countActiveTasks(projectId: string, cancelCooldownMs = 0): Promise<number> {
+    async getTaskForKey(
+      id: string,
+      billingAccountId: string,
+      keyId: string,
+      checkPolicy: CheckTaskKeyPolicy,
+    ) {
+      const scope = and(eq(asyncTasks.id, id), eq(asyncTasks.billingAccountId, billingAccountId))!;
+      const row = await findTaskForKey(orm, scope, keyId, checkPolicy);
+      return row ? mapTaskRow(row) : null;
+    },
+
+    async countActiveTasks(billingAccountId: string, cancelCooldownMs = 0): Promise<number> {
       const where =
         cancelCooldownMs > 0
           ? and(
-              eq(asyncTasks.projectId, projectId),
+              eq(asyncTasks.billingAccountId, billingAccountId),
               or(
                 inArray(asyncTasks.status, ["QUEUED", "PROCESSING"]),
                 and(
@@ -94,7 +170,7 @@ export function createAsyncTasksRepository(db: SQL) {
               ),
             )
           : and(
-              eq(asyncTasks.projectId, projectId),
+              eq(asyncTasks.billingAccountId, billingAccountId),
               inArray(asyncTasks.status, ["QUEUED", "PROCESSING"]),
             );
       const [row] = await orm
@@ -104,14 +180,14 @@ export function createAsyncTasksRepository(db: SQL) {
       return Number(row?.count ?? 0);
     },
 
-    async countRecentAutoRefunds(projectId: string, windowHours = 24): Promise<number> {
+    async countRecentAutoRefunds(billingAccountId: string, windowHours = 24): Promise<number> {
       const since = new Date(Date.now() - windowHours * 3_600_000).toISOString();
       const [row] = await orm
         .select({ count: sql<number>`count(*)::int` })
         .from(asyncTasks)
         .where(
           and(
-            eq(asyncTasks.projectId, projectId),
+            eq(asyncTasks.billingAccountId, billingAccountId),
             eq(asyncTasks.refundEligibility, "AUTO_REFUNDED"),
             sql`${asyncTasks.completedAt} >= ${since}::timestamptz`,
           ),
@@ -119,20 +195,44 @@ export function createAsyncTasksRepository(db: SQL) {
       return Number(row?.count ?? 0);
     },
 
-    async markUserCancelled(id: string, projectId: string): Promise<AsyncTaskRecord | null> {
-      const [row] = await orm
-        .update(asyncTasks)
-        .set({
-          userCancelled: true,
-          status: sql`CASE WHEN ${asyncTasks.status} IN ('QUEUED', 'PROCESSING') THEN 'CANCELLED' ELSE ${asyncTasks.status} END`,
-          failureCategory: sql`CASE WHEN ${asyncTasks.status} IN ('QUEUED', 'PROCESSING') THEN 'USER_CANCELLED' ELSE ${asyncTasks.failureCategory} END`,
-          refundEligibility: sql`CASE WHEN ${asyncTasks.refundEligibility} = 'PENDING' THEN 'DENIED_USER_CANCELLED' ELSE ${asyncTasks.refundEligibility} END`,
-          completedAt: sql`COALESCE(${asyncTasks.completedAt}, now())`,
-          updatedAt: sql`now()`,
-        })
-        .where(and(eq(asyncTasks.id, id), eq(asyncTasks.projectId, projectId)))
-        .returning();
-      return row ? mapTaskRow(row) : null;
+    async markUserCancelled(
+      id: string,
+      billingAccountId: string,
+      keyId: string,
+      checkPolicy: CheckTaskKeyPolicy,
+    ): Promise<AsyncTaskRecord | null> {
+      const scope = and(eq(asyncTasks.id, id), eq(asyncTasks.billingAccountId, billingAccountId))!;
+      if (!(await findTaskForKey(orm, scope, keyId, checkPolicy))) return null;
+      return orm.transaction(
+        async (tx) => {
+          const [task] = await tx
+            .select({ id: asyncTasks.id })
+            .from(asyncTasks)
+            .where(scope)
+            .for("no key update");
+          if (!task) return null;
+          const [key] = await tx
+            .select({ id: apiKeys.id })
+            .from(apiKeys)
+            .where(and(eq(apiKeys.id, keyId), eq(apiKeys.billingAccountId, billingAccountId)))
+            .for("share");
+          if (!key || !(await findTaskForKey(tx, scope, keyId, checkPolicy))) return null;
+          const [row] = await tx
+            .update(asyncTasks)
+            .set({
+              userCancelled: true,
+              status: sql`CASE WHEN ${asyncTasks.status} IN ('QUEUED', 'PROCESSING') THEN 'CANCELLED' ELSE ${asyncTasks.status} END`,
+              failureCategory: sql`CASE WHEN ${asyncTasks.status} IN ('QUEUED', 'PROCESSING') THEN 'USER_CANCELLED' ELSE ${asyncTasks.failureCategory} END`,
+              refundEligibility: sql`CASE WHEN ${asyncTasks.refundEligibility} = 'PENDING' THEN 'DENIED_USER_CANCELLED' ELSE ${asyncTasks.refundEligibility} END`,
+              completedAt: sql`COALESCE(${asyncTasks.completedAt}, clock_timestamp())`,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(scope)
+            .returning();
+          return row ? mapTaskRow(row) : null;
+        },
+        { isolationLevel: "read committed" },
+      );
     },
 
     async updateFromPoll(input: {
@@ -212,7 +312,7 @@ export function createAsyncTasksRepository(db: SQL) {
     > {
       return db.begin(async (tx) => {
         const rows = await tx`
-          SELECT id, request_id, charge_id, project_id, api_key_id, channel_id, model, operation,
+          SELECT id, request_id, charge_id, billing_account_id, api_key_id, channel_id, model, operation,
             upstream_task_id, status, user_cancelled, upstream_billed, failure_category,
             refund_eligibility, refund_id, result_json, created_at, updated_at, completed_at
           FROM public.async_tasks
@@ -225,7 +325,7 @@ export function createAsyncTasksRepository(db: SQL) {
           id: String(r.id),
           request_id: String(r.request_id),
           charge_id: r.charge_id ? String(r.charge_id) : null,
-          project_id: String(r.project_id),
+          billing_account_id: String(r.billing_account_id),
           api_key_id: r.api_key_id ? String(r.api_key_id) : null,
           channel_id: String(r.channel_id),
           model: String(r.model),
@@ -268,12 +368,12 @@ export function createAsyncTasksRepository(db: SQL) {
         ) {
           return { outcome: "already_terminal", task: toRec(raw) };
         }
-        const projectId = String(raw.project_id);
-        await tx`SELECT pg_advisory_xact_lock(hashtext('async_refund:' || ${projectId}))`;
+        const billingAccountId = String(raw.billing_account_id);
+        await tx`SELECT pg_advisory_xact_lock(hashtext('async_refund:' || ${billingAccountId}))`;
         const [cntRow] = await tx`
           SELECT count(*)::int AS cnt
           FROM public.async_tasks
-          WHERE project_id = ${projectId}
+          WHERE billing_account_id = ${billingAccountId}
             AND refund_eligibility = 'AUTO_REFUNDED'
             AND completed_at >= now() - interval '24 hours'
         `;
@@ -360,7 +460,7 @@ export function createAsyncTasksRepository(db: SQL) {
     },
 
     async listTasks(input: {
-      project_id?: string;
+      billing_account_id?: string;
       status?: AsyncTaskStatus;
       refund_eligibility?: AsyncTaskRefundEligibility;
       limit?: number;
@@ -369,7 +469,8 @@ export function createAsyncTasksRepository(db: SQL) {
       const limit = Math.min(200, Math.max(1, input.limit ?? 50));
       const offset = Math.max(0, input.offset ?? 0);
       const conds: DrizzleSQL[] = [];
-      if (input.project_id) conds.push(eq(asyncTasks.projectId, input.project_id));
+      if (input.billing_account_id)
+        conds.push(eq(asyncTasks.billingAccountId, input.billing_account_id));
       if (input.status) conds.push(eq(asyncTasks.status, input.status));
       if (input.refund_eligibility) {
         conds.push(eq(asyncTasks.refundEligibility, input.refund_eligibility));

@@ -1,3 +1,7 @@
+import {
+  localConsoleTokens,
+  localInternalCredentials,
+} from "../../../scripts/local-internal-auth.ts";
 import type { SQL } from "bun";
 import { createDatabase, migrate } from "@gateway/ledger";
 import { createGatewayRuntime, type GatewayConfig } from "@gateway/gateway";
@@ -70,7 +74,7 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
 
   const keyPepper = `console-e2e-pepper-${suffix}-0123456789`;
   const encryptionKey = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-  const adminToken = `console-e2e-gw-admin-${suffix}-0123`;
+  const adminToken = `console-e2e-gateway-operator-${suffix}-0123456789abcdef`;
   const outboxToken = `console-e2e-outbox-${suffix}-012345`;
   const bootstrapAdminEmail = "admin@platform.test";
   const bootstrapAdminToken = "bootstrap-secret-token-1234";
@@ -167,7 +171,11 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
       dbMaxConnections: 16,
       keyPepper,
       encryptionKey,
-      adminToken,
+      internalCredentials: localInternalCredentials(adminToken, [
+        "default",
+        "console_e2e_" + suffix,
+        "console_e2e_wh_" + suffix,
+      ]),
       allowPrivateUpstreams: true,
       privateUpstreamCidrs: [],
       trustedProxyCidrs: [],
@@ -209,7 +217,7 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
       dbMaxConnections: 16,
       gatewayInternalUrl,
       gatewayPublicUrl,
-      gatewayTokens: { admin: adminToken },
+      gatewayTokens: localConsoleTokens(adminToken),
       outboxWebhookToken: outboxToken,
       outboxConsumerName: `console_e2e_${suffix}`,
       bootstrapAdminEmail,
@@ -315,7 +323,7 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
         refresh_token: string;
         user: { id: string; email: string };
         default_org_id: string;
-        default_project_id: string;
+        default_billing_account_id: string;
       }>("POST", "/api/v1/auth/register", undefined, {
         email,
         password,
@@ -329,8 +337,18 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
         refreshToken: res.data.refresh_token,
         user: res.data.user,
         defaultOrgId: res.data.default_org_id,
-        defaultProjectId: res.data.default_project_id,
+        defaultBillingAccountId: res.data.default_billing_account_id,
       };
+    };
+
+    const consoleDb = conDb;
+    const seedLegacyBillingAccount = async (orgId: string, name: string) => {
+      const id = crypto.randomUUID();
+      await consoleDb`
+        INSERT INTO public.billing_accounts (id, gateway_billing_account_id, org_id, name)
+        VALUES (${id}, ${id}, ${orgId}, ${name})
+      `;
+      return id;
     };
 
     return {
@@ -369,6 +387,7 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
       gatewayInternalApi,
       bootstrapAdmin,
       registerUser,
+      seedLegacyBillingAccount,
       async close() {
         const steps: (() => Promise<unknown> | unknown)[] = [
           () => worker?.stop(),

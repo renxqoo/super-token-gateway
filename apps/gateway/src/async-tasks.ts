@@ -1,12 +1,13 @@
 import { GatewayError, object } from "@gateway/contracts";
 import type {
+  ApiKeyRecord,
   AsyncTaskFailureCategory,
   AsyncTaskProviderConfig,
   AsyncTaskRecord,
   AsyncTaskRefundEligibility,
   ChannelRecord,
   ConfigSnapshot,
-  ProjectRecord,
+  BillingAccountRecord,
   createAsyncTasksRepository,
   createLedgerEngine,
   createLedgerQueries,
@@ -26,7 +27,12 @@ import {
 } from "@gateway/runtime";
 import type { GatewayConfig } from "./config.ts";
 import type { ConsoleAdmissionCheck } from "./console-admission.ts";
-import { authenticateRequest, type InferenceContext } from "./proxy.ts";
+import {
+  assertKeyNetworkAndOperation,
+  authenticateRequest,
+  billingAccountQuotaScope,
+  type InferenceContext,
+} from "./proxy.ts";
 import type { ProxyRuntimeState } from "./proxy-state.ts";
 import type { SnapshotManager } from "./snapshot.ts";
 
@@ -304,7 +310,7 @@ async function pollUpstreamTaskOnce(
     }
 
     if (codeStr !== null && refundableSet.has(codeStr) && task.charge_id) {
-      const maxPer24h = deps.config.maxAutoRefundsPerProject24h ?? 5;
+      const maxPer24h = deps.config.maxAutoRefundsPerBillingAccount24h ?? 5;
       const claim = await deps.asyncTasks.claimAutoRefund({
         id: task.id,
         max_per_24h: maxPer24h,
@@ -373,11 +379,11 @@ async function pollUpstreamTaskOnce(
 
 async function acquireVideoTaskQuota(
   deps: AsyncTaskHandlerDeps,
-  project: ProjectRecord,
+  billingAccount: BillingAccountRecord,
 ): Promise<() => void> {
   const permit = await deps.cluster.acquireRateLimit(
-    `project:${project.id}`,
-    { rpm: project.rpm, tpm: project.tpm, concurrency: project.concurrency },
+    billingAccountQuotaScope(billingAccount.id),
+    { rpm: billingAccount.rpm, tpm: billingAccount.tpm, concurrency: billingAccount.concurrency },
     1,
     deps.config.attemptTimeoutMs,
   );
@@ -385,7 +391,23 @@ async function acquireVideoTaskQuota(
   if (permit.reason === "unavailable") {
     throw new GatewayError(503, "rate_limit_unavailable", "Shared request quota unavailable");
   }
-  throw new GatewayError(429, `rate_limit_${permit.reason}`, "Project rate limit exceeded");
+  throw new GatewayError(429, `rate_limit_${permit.reason}`, "Billing account rate limit exceeded");
+}
+
+function taskKeyPolicy(
+  c: InferenceContext,
+  config: GatewayConfig,
+  peerAddress?: string | (() => string | undefined),
+) {
+  return (
+    task: Pick<AsyncTaskRecord, "model" | "operation">,
+    key: Pick<ApiKeyRecord, "allowed_cidrs" | "models" | "operations">,
+  ) => {
+    assertKeyNetworkAndOperation(c, key, config, task.operation, peerAddress);
+    if (key.models.length > 0 && !key.models.includes(task.model)) {
+      throw new GatewayError(403, "model_not_allowed", "API key cannot access this model");
+    }
+  };
 }
 
 export async function handleGetAsyncTask(
@@ -408,7 +430,7 @@ export async function handleGetAsyncTask(
       throw new GatewayError(503, "config_unavailable", "Gateway configuration is stale");
     }
     const snap = deps.snapshot.get();
-    const { key, project } = authenticateRequest(
+    const { key, billingAccount } = authenticateRequest(
       c,
       snap,
       deps.config,
@@ -416,15 +438,17 @@ export async function handleGetAsyncTask(
       peerAddress,
       deps.state,
     );
-    const check = deps.checkConsoleAdmission(project, key);
+    const check = deps.checkConsoleAdmission(billingAccount, key);
     if (check) await check;
-    releaseLimit = await acquireVideoTaskQuota(deps, project);
-    const task = await deps.asyncTasks.getTask(taskId);
-    if (!task || task.project_id !== project.id) {
+    releaseLimit = await acquireVideoTaskQuota(deps, billingAccount);
+    const task = await deps.asyncTasks.getTaskForKey(
+      taskId,
+      billingAccount.id,
+      key.id,
+      taskKeyPolicy(c, deps.config, peerAddress),
+    );
+    if (!task) {
       throw new GatewayError(404, "not_found", "Async task not found");
-    }
-    if (key.models.length > 0 && !key.models.includes(task.model)) {
-      throw new GatewayError(403, "model_not_allowed", "API key cannot access this model");
     }
     if (task.status === "SUCCEEDED" || task.status === "FAILED" || task.status === "CANCELLED") {
       return c.json(formatTaskPayload(task), 200, { "x-request-id": requestId });
@@ -467,7 +491,7 @@ export async function handleCancelAsyncTask(
       throw new GatewayError(503, "config_unavailable", "Gateway configuration is stale");
     }
     const snap = deps.snapshot.get();
-    const { key, project } = authenticateRequest(
+    const { key, billingAccount } = authenticateRequest(
       c,
       snap,
       deps.config,
@@ -475,17 +499,15 @@ export async function handleCancelAsyncTask(
       peerAddress,
       deps.state,
     );
-    const check = deps.checkConsoleAdmission(project, key);
+    const check = deps.checkConsoleAdmission(billingAccount, key);
     if (check) await check;
-    releaseLimit = await acquireVideoTaskQuota(deps, project);
-    const existing = await deps.asyncTasks.getTask(taskId);
-    if (!existing || existing.project_id !== project.id) {
-      throw new GatewayError(404, "not_found", "Async task not found");
-    }
-    if (key.models.length > 0 && !key.models.includes(existing.model)) {
-      throw new GatewayError(403, "model_not_allowed", "API key cannot access this model");
-    }
-    const updated = await deps.asyncTasks.markUserCancelled(taskId, project.id);
+    releaseLimit = await acquireVideoTaskQuota(deps, billingAccount);
+    const updated = await deps.asyncTasks.markUserCancelled(
+      taskId,
+      billingAccount.id,
+      key.id,
+      taskKeyPolicy(c, deps.config, peerAddress),
+    );
     if (!updated) {
       throw new GatewayError(404, "not_found", "Async task not found");
     }

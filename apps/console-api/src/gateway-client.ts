@@ -56,7 +56,7 @@ export class GatewayClient {
   }
 
   private tokenFor(role: GatewayInternalRole): string {
-    const token = this.tokens[role] ?? this.tokens.admin;
+    const token = this.tokens[role];
     if (!token) {
       throw new GatewayError(
         502,
@@ -155,20 +155,11 @@ export class GatewayClient {
     );
   }
 
-  bindConsoleProject(gatewayProjectId: string, organizationId: string, consoleProjectId: string) {
-    return this.request<{ bound: boolean }>(
-      "security",
-      "PUT",
-      `/internal/v1/console/projects/${gatewayProjectId}/binding`,
-      { organization_id: organizationId, console_project_id: consoleProjectId },
-    );
-  }
-
   getChannelHealth() {
     return this.request<{ channels: unknown[] }>("ops", "GET", "/internal/v1/health/channels");
   }
 
-  upsertProject(input: {
+  upsertBillingAccount(input: {
     id: string;
     external_ref?: string | null;
     name: string;
@@ -182,14 +173,15 @@ export class GatewayClient {
     return this.request<{ id: string; config_epoch: number; source_revision: number }>(
       "catalog",
       "PUT",
-      "/internal/v1/projects",
+      "/internal/v1/billing-accounts",
       input,
     );
   }
 
   upsertApiKey(input: {
     id: string;
-    project_id: string;
+    billing_account_id: string;
+    rotated_from_key_id?: string;
     name: string;
     role: "ADMIN" | "BILLING" | "INVOKER" | "VIEWER";
     allowed_cidrs: string[];
@@ -203,7 +195,7 @@ export class GatewayClient {
   }) {
     return this.request<{
       id: string;
-      project_id: string;
+      billing_account_id: string;
       prefix: string;
       key?: string;
       config_epoch: number;
@@ -214,7 +206,7 @@ export class GatewayClient {
   getApiKeySpend(keyId: string) {
     return this.request<{
       id: string;
-      project_id: string;
+      billing_account_id: string;
       spend_limit_atoms: string | null;
       spend_limit_window: "LIFETIME" | "DAILY" | "MONTHLY";
       spend_window_start: string;
@@ -276,7 +268,6 @@ export class GatewayClient {
       delta_atoms: string;
       allow_negative?: boolean;
       reason: string;
-      actor?: string;
     },
   ) {
     return this.request<{
@@ -395,7 +386,7 @@ export class GatewayClient {
 
   upsertPricingOverride(input: {
     id: string;
-    project_id: string;
+    billing_account_id: string;
     model_name: string;
     operation: string;
     override_kind: "EXACT_PRICE" | "MULTIPLIER";
@@ -413,8 +404,10 @@ export class GatewayClient {
     );
   }
 
-  listPricingOverrides(projectId?: string) {
-    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  listPricingOverrides(billingAccountId?: string) {
+    const qs = billingAccountId
+      ? `?billing_account_id=${encodeURIComponent(billingAccountId)}`
+      : "";
     return this.request<{
       items: {
         id: string;
@@ -430,7 +423,7 @@ export class GatewayClient {
   }
 
   creditWallet(
-    projectId: string,
+    billingAccountId: string,
     input: {
       currency: string;
       external_ref: string;
@@ -446,13 +439,13 @@ export class GatewayClient {
     return this.request<Record<string, unknown>>(
       "finance",
       "POST",
-      `/internal/v1/wallets/${projectId}/credits`,
+      `/internal/v1/wallets/${billingAccountId}/credits`,
       input,
     );
   }
 
   configureCreditPolicy(
-    projectId: string,
+    billingAccountId: string,
     input: {
       currency: string;
       expected_version: string;
@@ -463,13 +456,13 @@ export class GatewayClient {
     return this.request<Record<string, unknown>>(
       "finance",
       "POST",
-      `/internal/v1/wallets/${projectId}/credit-policy`,
+      `/internal/v1/wallets/${billingAccountId}/credit-policy`,
       input,
     );
   }
 
   adjustWallet(
-    projectId: string,
+    billingAccountId: string,
     input: {
       currency: string;
       external_ref: string;
@@ -477,41 +470,39 @@ export class GatewayClient {
       lot_kind?: "CASH" | "GRANT";
       force_debt?: boolean;
       reason: string;
-      actor?: string;
     },
   ) {
     return this.request<Record<string, unknown>>(
       "finance",
       "POST",
-      `/internal/v1/wallets/${projectId}/adjustments`,
+      `/internal/v1/wallets/${billingAccountId}/adjustments`,
       input,
     );
   }
 
   setWalletFreeze(
-    projectId: string,
+    billingAccountId: string,
     input: {
       currency: string;
       frozen: boolean;
       reason: string;
-      actor?: string;
     },
   ) {
     return this.request<Record<string, unknown>>(
       "finance",
       "POST",
-      `/internal/v1/wallets/${projectId}/freeze`,
+      `/internal/v1/wallets/${billingAccountId}/freeze`,
       input,
     );
   }
 
-  getWallet(projectId: string, currency = "USD", includeLots = false) {
+  getWallet(billingAccountId: string, currency = "USD", includeLots = false) {
     const qs = new URLSearchParams({ currency });
     if (includeLots) qs.set("include_lots", "true");
     return this.request<Record<string, unknown>>(
       "auditor",
       "GET",
-      `/internal/v1/wallets/${projectId}?${qs.toString()}`,
+      `/internal/v1/wallets/${billingAccountId}?${qs.toString()}`,
     );
   }
 
@@ -751,7 +742,7 @@ export class GatewayClient {
         event_id: string;
         kind: string;
         request_id: string | null;
-        project_id: string | null;
+        billing_account_id: string | null;
         payload: Record<string, unknown>;
         created_at: string;
       }[];

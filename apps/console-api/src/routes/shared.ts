@@ -1,7 +1,7 @@
 import type { SQL } from "bun";
 import type { Context, MiddlewareHandler } from "hono";
 import { z } from "zod";
-import { GatewayError } from "@gateway/contracts";
+import { assertKnownQueryParameters, GatewayError } from "@gateway/contracts";
 import {
   AMOUNT_DECIMALS,
   formatAtomsToDecimal,
@@ -16,7 +16,7 @@ import {
   type LoginRateLimiter,
 } from "../auth.ts";
 import type { ConsoleConfig } from "../config.ts";
-import type { apiKeyRecords, ConsoleDrizzle, projects } from "../db/schema.ts";
+import type { apiKeyRecords, ConsoleDrizzle, billingAccounts } from "../db/schema.ts";
 import type { GatewayClient } from "../gateway-client.ts";
 import type { ConsoleSyncEngine } from "../sync.ts";
 
@@ -103,12 +103,22 @@ export function enrichWalletLotDecimals(lot: Record<string, unknown>) {
   };
 }
 
+export function toBillingAccountScope<T extends Record<string, unknown>>(
+  raw: T,
+  accountId?: string,
+) {
+  const { billing_account_id, billingAccountId, ...fields } = raw;
+  const id =
+    accountId ?? (billing_account_id === undefined ? billingAccountId : billing_account_id);
+  return { ...fields, ...(id === undefined ? {} : { billing_account_id: id }) };
+}
+
 export function enrichWalletDecimals(wallet: Record<string, unknown>) {
   const lots = Array.isArray(wallet.lots)
     ? (wallet.lots as Record<string, unknown>[]).map(enrichWalletLotDecimals)
     : undefined;
   return {
-    ...wallet,
+    ...toBillingAccountScope(wallet),
     scale: AMOUNT_DECIMALS,
     available_decimal: safeFormatAtoms(wallet.available_atoms),
     reserved_decimal: safeFormatAtoms(wallet.reserved_atoms),
@@ -123,7 +133,7 @@ export function enrichWalletDecimals(wallet: Record<string, unknown>) {
 
 export function enrichFundingOperationDecimals(op: Record<string, unknown>) {
   return {
-    ...op,
+    ...toBillingAccountScope(op),
     scale: AMOUNT_DECIMALS,
     amount_decimal: safeFormatAtoms(op.amount_atoms),
   };
@@ -144,7 +154,7 @@ export function enrichAdminChargeDecimals(raw: Record<string, unknown>) {
   return {
     id: raw.id,
     request_id: raw.requestId ?? raw.request_id,
-    project_id: raw.projectId ?? raw.project_id,
+    billing_account_id: raw.billing_account_id,
     wallet_id: raw.walletId ?? raw.wallet_id,
     api_key_id: raw.apiKeyId ?? raw.api_key_id ?? null,
     channel_id: raw.channelId ?? raw.channel_id ?? null,
@@ -197,7 +207,11 @@ export function enrichLedgerEntryDecimals(raw: Record<string, unknown>) {
   };
 }
 
-export function enrichFinanceSummaryDecimals(report: Record<string, unknown>) {
+export function enrichFinanceSummaryDecimals(
+  report: Record<string, unknown>,
+  accountIds: ReadonlyMap<string, string>,
+) {
+  const { billing_account_id, by_billing_account, ...fields } = report;
   const byCurrency = Array.isArray(report.by_currency)
     ? (report.by_currency as Record<string, unknown>[]).map((r) => ({
         ...r,
@@ -216,10 +230,11 @@ export function enrichFinanceSummaryDecimals(report: Record<string, unknown>) {
         supplier_adjustment_net_decimal: safeFormatAtoms(r.supplier_adjustment_net_atoms),
       }))
     : [];
-  const enrichDim = (list: unknown) =>
+  const enrichDim = (list: unknown, ids?: ReadonlyMap<string, string>) =>
     Array.isArray(list)
       ? (list as Record<string, unknown>[]).map((r) => ({
           ...r,
+          ...(ids && typeof r.key === "string" ? { key: ids.get(r.key) ?? r.key } : {}),
           scale: AMOUNT_DECIMALS,
           customer_billed_decimal: safeFormatAtoms(r.customer_billed_atoms),
           customer_refunded_decimal: safeFormatAtoms(r.customer_refunded_atoms),
@@ -229,11 +244,15 @@ export function enrichFinanceSummaryDecimals(report: Record<string, unknown>) {
         }))
       : [];
   return {
-    ...report,
+    ...fields,
+    billing_account_id:
+      typeof billing_account_id === "string"
+        ? (accountIds.get(billing_account_id) ?? billing_account_id)
+        : billing_account_id,
     scale: AMOUNT_DECIMALS,
     by_currency: byCurrency,
     by_model: enrichDim(report.by_model),
-    by_project: enrichDim(report.by_project),
+    by_billing_account: enrichDim(by_billing_account, accountIds),
     by_channel: enrichDim(report.by_channel),
   };
 }
@@ -271,6 +290,15 @@ export function parseUuid(value: string | undefined, label: string): string {
   const res = uuidSchema.safeParse(value);
   if (!res.success) throw new GatewayError(400, "validation_error", `Invalid UUID for ${label}`);
   return res.data;
+}
+
+export function parseBillingAccountFilter(
+  c: Context,
+  ...otherFilters: string[]
+): string | undefined {
+  assertKnownQueryParameters(c.req.query(), ["billing_account_id", ...otherFilters]);
+  const accountId = c.req.query("billing_account_id");
+  return accountId === undefined ? undefined : parseUuid(accountId.trim(), "billing_account_id");
 }
 
 export function parseLimitOffset(
@@ -398,7 +426,7 @@ export function requirePlatformAdmin(deps: ConsoleDeps): MiddlewareHandler<Conso
   };
 }
 
-export function sanitizeProjectForClient(row: typeof projects.$inferSelect) {
+export function sanitizeBillingAccountForClient(row: typeof billingAccounts.$inferSelect) {
   return {
     id: row.id,
     orgId: row.orgId,
@@ -420,7 +448,7 @@ export function sanitizeProjectForClient(row: typeof projects.$inferSelect) {
 export function sanitizeApiKeyForClient(row: typeof apiKeyRecords.$inferSelect) {
   return {
     id: row.id,
-    projectId: row.projectId,
+    billingAccountId: row.billingAccountId,
     createdBy: row.createdBy,
     rotatedFromKeyId: row.rotatedFromKeyId,
     name: row.name,

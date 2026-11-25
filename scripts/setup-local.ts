@@ -1,10 +1,16 @@
+import { localConsoleTokenEnvironment, writeLocalInternalAuth } from "./local-internal-auth.ts";
 import { chmod, mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 if (Bun.version !== "1.4.5") throw new Error("Use Bun 1.4.5");
 const file = new URL("../.env.local", import.meta.url);
+const localDir = new URL("../.local/", import.meta.url);
+const authFile = new URL("internal-auth.json", localDir);
+await mkdir(localDir, { recursive: true });
 const random = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
 if (!(await Bun.file(file).exists())) {
   const password = random();
+  const token = random();
+  await writeLocalInternalAuth(authFile, token);
   await Bun.write(
     file,
     [
@@ -12,7 +18,10 @@ if (!(await Bun.file(file).exists())) {
       "REDIS_URL=redis://127.0.0.1:56382",
       `PG_TOOLS_DIRECTORY=${process.env.PG_TOOLS_DIRECTORY ?? fileURLToPath(new URL("../.local/toolchain/pg17/bin", import.meta.url))}`,
       `DURABILITY_REDIS_SERVER=${process.env.DURABILITY_REDIS_SERVER ?? fileURLToPath(new URL("../.local/toolchain/redis74/bin/redis-server", import.meta.url))}`,
-      `ADMIN_TOKEN=${random()}`,
+      "INTERNAL_AUTH_FILE=" + fileURLToPath(authFile),
+      ...Object.entries(localConsoleTokenEnvironment(token)).map(
+        ([name, value]) => name + "=" + value,
+      ),
       `ENCRYPTION_KEY=${random()}`,
       `KEY_PEPPER=${random()}`,
       `MOCK_CONTROL_TOKEN=${random()}`,
@@ -30,7 +39,7 @@ if (!(await Bun.file(file).exists())) {
   const required = [
     "DATABASE_URL",
     "REDIS_URL",
-    "ADMIN_TOKEN",
+    "INTERNAL_AUTH_FILE",
     "KEY_PEPPER",
     "ENCRYPTION_KEY",
     "MOCK_CONTROL_TOKEN",
@@ -44,5 +53,4 @@ if (!(await Bun.file(file).exists())) {
     );
 }
 await chmod(file, 0o600);
-await mkdir(new URL("../.local/", import.meta.url), { recursive: true });
 console.log("Private local configuration is ready; existing credentials were preserved");

@@ -66,7 +66,7 @@ export async function commitLeasedBatch(
       charge_id: s.chargeId,
       event_id: s.eventId,
       request_id: s.cand.item.request_id,
-      project_id: s.cand.meta.projectId,
+      billing_account_id: s.cand.meta.billingAccountId,
       wallet_id: s.cand.meta.walletId,
       api_key_id: s.cand.item.api_key_id ?? s.cand.meta.apiKeyId,
       pricing_override_id: s.cand.item.pricing_override_id ?? s.cand.meta.pricingOverrideId,
@@ -599,7 +599,7 @@ export async function commitLeasedBatch(
           ),
           ins_ch AS (
             INSERT INTO public.billing_charges (
-              id, request_id, project_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
+              id, request_id, billing_account_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
               model, operation, currency, billing_price_id, cost_version_id,
               pricing_override_id, discount_numerator, discount_denominator,
               usage, usage_digest,
@@ -607,7 +607,7 @@ export async function commitLeasedBatch(
               lot_allocations, plugin_audit, charge_policy, outcome, customer_journal_id, supplier_journal_id
             )
             SELECT
-              u.id, u.request_id, u.project_id, u.wallet_id, u.api_key_id, u.selected_attempt_id, u.channel_id,
+              u.id, u.request_id, u.billing_account_id, u.wallet_id, u.api_key_id, u.selected_attempt_id, u.channel_id,
               u.model, u.operation, u.currency, u.billing_price_id, u.cost_version_id,
               u.pricing_override_id, u.discount_numerator, u.discount_denominator,
               u.usage::jsonb, u.usage_digest,
@@ -617,7 +617,7 @@ export async function commitLeasedBatch(
             FROM unnest(
               ${prepared.map((p) => p.chargeId)}::uuid[],
               ${prepared.map((p) => p.cand.item.request_id)}::uuid[],
-              ${prepared.map((p) => p.cand.meta.projectId)}::uuid[],
+              ${prepared.map((p) => p.cand.meta.billingAccountId)}::uuid[],
               ${prepared.map((p) => p.cand.meta.walletId)}::uuid[],
               ${prepared.map((p) => p.cand.item.api_key_id ?? p.cand.meta.apiKeyId)}::uuid[],
               ${prepared.map((p) => p.cand.item.selected_attempt_id)}::uuid[],
@@ -641,7 +641,7 @@ export async function commitLeasedBatch(
               ${prepared.map((p) => p.customerJournalId)}::uuid[],
               ${prepared.map((p) => p.supplierJournalId)}::uuid[]
             ) AS u(
-              id, request_id, project_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
+              id, request_id, billing_account_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
               model, operation, currency, billing_price_id, cost_version_id,
               pricing_override_id, discount_numerator, discount_denominator,
               usage, usage_digest,
@@ -679,7 +679,7 @@ export async function commitLeasedBatch(
       prepared.map((p) => ({
         event_id: p.eventId,
         request_id: p.cand.item.request_id,
-        project_id: p.cand.meta.projectId,
+        billing_account_id: p.cand.meta.billingAccountId,
         payload: {
           charge_id: p.chargeId,
           request_id: p.cand.item.request_id,
@@ -701,12 +701,12 @@ export async function commitLeasedBatch(
       })),
     );
     await tx`
-            INSERT INTO public.outbox_events (event_id, kind, request_id, project_id, payload)
-            SELECT u.event_id, 'billing.settled', u.request_id, u.project_id, u.payload
+            INSERT INTO public.outbox_events (event_id, kind, request_id, billing_account_id, payload)
+            SELECT u.event_id, 'billing.settled', u.request_id, u.billing_account_id, u.payload
             FROM jsonb_to_recordset(${slowOutboxJson}::text::jsonb) AS u(
-              event_id uuid, request_id uuid, project_id uuid, payload jsonb
+              event_id uuid, request_id uuid, billing_account_id uuid, payload jsonb
             )
-            ORDER BY public.outbox_shard(u.project_id) ASC, u.request_id ASC
+            ORDER BY public.outbox_shard(u.billing_account_id) ASC, u.request_id ASC
       `;
 
     for (const p of prepared) {

@@ -29,7 +29,12 @@ async function runPiiGuardMatrix(executor: WasmRuntimeExecutor) {
   const plugins = new Map([[plugin.id, plugin]]);
   const steps = [{ plugin_id: plugin.id, priority: 1 }];
   const engine = new PluginPipelineEngine({ wasmExecutor: executor });
-  const meta = { request_id: "r-pii", project_id: "p1", model: "gpt-4o", operation: "chat" };
+  const meta = {
+    request_id: "r-pii",
+    billing_account_id: "p1",
+    model: "gpt-4o",
+    operation: "chat",
+  };
 
   const cleanText =
     "普通对话😀 订单号 999999999999999999 追踪号 4111-1111-1111-1112 与普通数字 1234567890。";
@@ -163,7 +168,12 @@ test("Built-in pii-guard handles 4KB, 16KB, 64KB, and 128KB inputs including seg
   const steps = [{ plugin_id: plugin.id, priority: 1 }];
   const executor = createWasmtimeExecutor({ poolSize: 2 });
   const engine = new PluginPipelineEngine({ wasmExecutor: executor });
-  const meta = { request_id: "r-large", project_id: "p1", model: "gpt-4o", operation: "chat" };
+  const meta = {
+    request_id: "r-large",
+    billing_account_id: "p1",
+    model: "gpt-4o",
+    operation: "chat",
+  };
 
   try {
     for (const sizeKb of [4, 16, 64, 128]) {

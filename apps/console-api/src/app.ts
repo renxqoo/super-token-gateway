@@ -20,7 +20,7 @@ import { createAdminRoutes } from "./routes/admin.ts";
 import { createApiKeyRoutes } from "./routes/api-keys.ts";
 import { createAdminAuthRoutes, createClientAuthRoutes } from "./routes/auth.ts";
 import { createMarketplaceAndBillingRoutes } from "./routes/marketplace-billing.ts";
-import { createOrgAndProjectRoutes } from "./routes/orgs.ts";
+import { createOrgAndBillingAccountRoutes } from "./routes/orgs.ts";
 import {
   extractPgErrno,
   parseJsonBody,
@@ -41,15 +41,17 @@ const outboxBatchSchema = z
     consumer: z.string().min(1).max(120).optional(),
     events: z
       .array(
-        z.object({
-          seq: z.union([z.string(), z.number()]).nullable().optional(),
-          event_id: z.uuid(),
-          kind: z.string().min(1).max(120),
-          request_id: z.string().nullable().optional(),
-          project_id: z.string().nullable().optional(),
-          payload: z.record(z.string(), z.unknown()).optional(),
-          created_at: z.string().optional(),
-        }),
+        z
+          .object({
+            seq: z.union([z.string(), z.number()]).nullable().optional(),
+            event_id: z.uuid(),
+            kind: z.string().min(1).max(120),
+            request_id: z.string().nullable().optional(),
+            billing_account_id: z.string().nullable().optional(),
+            payload: z.record(z.string(), z.unknown()).optional(),
+            created_at: z.string().optional(),
+          })
+          .strict(),
       )
       .max(2000),
   })
@@ -167,7 +169,7 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
   }
   attachCommonHandlers(clientApp, db, peerIpMap);
   clientApp.route("/api/v1/auth", createClientAuthRoutes(deps));
-  clientApp.route("/api/v1", createOrgAndProjectRoutes(deps));
+  clientApp.route("/api/v1", createOrgAndBillingAccountRoutes(deps));
   clientApp.route("/api/v1", createApiKeyRoutes(deps));
   clientApp.route("/api/v1", createMarketplaceAndBillingRoutes(deps));
 

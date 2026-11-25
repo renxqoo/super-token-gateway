@@ -212,16 +212,6 @@ synchronous_commit = on
   await bootstrap`CREATE ROLE drill_migration LOGIN`;
   await bootstrap`CREATE DATABASE stg_drill OWNER drill_migration`;
   const owner = database(pgUrl(primaryPort));
-  await migrate(owner);
-  await runPg("psql", [
-    "-X",
-    "-d",
-    pgUrl(primaryPort),
-    "-v",
-    "migration_role=drill_migration",
-    "-f",
-    resolve("infra/postgres/adopt-ownership.sql"),
-  ]);
   await migrate(database(pgUrl(primaryPort, "drill_migration")));
   const fnOwners = await owner<{ proname: string; owner: string }[]>`
     SELECT p.proname, pg_get_userbyid(p.proowner) AS owner
@@ -400,11 +390,11 @@ synchronous_commit = on
   const consoleUser = (await consoleRegistration.json()) as {
     access_token: string;
     default_org_id: string;
-    default_project_id: string;
+    default_billing_account_id: string;
   };
   const consoleKeyResult = await consoleRuntime.fetchClient(
     consoleRequest(
-      `/api/v1/projects/${consoleUser.default_project_id}/api-keys`,
+      `/api/v1/billing-accounts/${consoleUser.default_billing_account_id}/api-keys`,
       "POST",
       { name: "Release key" },
       consoleUser.access_token,
@@ -456,8 +446,11 @@ synchronous_commit = on
     );
     return result;
   }
-  const project = await admin("catalog", "projects", "PUT", { name: "drill", currency: "USD" });
-  const creditPath = `wallets/${project.id}/credits`;
+  const billingAccount = await admin("catalog", "billing-accounts", "PUT", {
+    name: "drill",
+    currency: "USD",
+  });
+  const creditPath = `wallets/${billingAccount.id}/credits`;
   const credit = (ref: string, amount = "1000") =>
     admin("finance", creditPath, "POST", { external_ref: ref, amount_atoms: amount });
   verify(
@@ -479,7 +472,7 @@ synchronous_commit = on
   );
   await credit("initial-wallet", "100000");
   const [auditRow] = await owner`SELECT actor, target FROM public.admin_audit_events
-    WHERE phase = 'COMPLETED' AND action = 'POST /internal/v1/wallets/:projectId/credits' AND status = 200`;
+    WHERE phase = 'COMPLETED' AND action = 'POST /internal/v1/wallets/:billingAccountId/credits' AND status = 200`;
   verify(auditRow?.actor === "drill-finance", "Audit actor is not the credential identity");
   verify(
     auditRow?.target === `/internal/v1/${creditPath}`,
@@ -552,7 +545,10 @@ synchronous_commit = on
     external_ref: "recharge",
     amount_atoms: "100000",
   });
-  const key = await admin("security", "api-keys", "PUT", { name: "drill", project_id: project.id });
+  const key = await admin("security", "api-keys", "PUT", {
+    name: "drill",
+    billing_account_id: billingAccount.id,
+  });
   let upstreamReceiptId: string | null = null;
   upstream = Bun.serve({
     port: 0,
@@ -782,7 +778,7 @@ recovery_target_action = 'promote'
     "PITR lost confirmed Console organization admission",
   );
   const restoreWrite = await restoreLedger.creditWallet({
-    project_id: String(project.id),
+    billing_account_id: String(billingAccount.id),
     currency: "USD",
     kind: "CASH",
     external_ref: "pitr-write-probe",

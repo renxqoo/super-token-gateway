@@ -17,6 +17,7 @@ import {
   currencySchema,
   nonNegativeAtomsSchema,
   operationEnum,
+  parseBillingAccountFilter,
   parseJsonBody,
   parseLimitOffset,
   parseUuid,
@@ -203,7 +204,7 @@ const multiplierIntSchema = z.string().regex(/^[1-9][0-9]{0,12}$/);
 
 const upsertPricingOverrideSchema = z
   .object({
-    project_id: z.uuid(),
+    billing_account_id: z.uuid(),
     model_name: z.union([z.literal("*"), z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,149}$/)]),
     operation: z.union([z.literal("*"), operationEnum]).default("*"),
     override_kind: z.enum(["EXACT_PRICE", "MULTIPLIER"]),
@@ -422,7 +423,6 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
       delta_atoms: deltaAtoms,
       ...(body.allow_negative !== undefined ? { allow_negative: body.allow_negative } : {}),
       reason: body.reason,
-      actor: actor.email.slice(0, 120),
     });
     await deps.orm
       .update(upstreamAccounts)
@@ -829,13 +829,18 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
   });
 
   app.get("/pricing-overrides", async (c) => {
-    const projectId = c.req.query("project_id");
+    const billingAccountId = parseBillingAccountFilter(c, "limit", "offset");
     const { limit, offset } = parseLimitOffset(c, 100, 200);
-    const items = projectId
+    const items = billingAccountId
       ? await deps.orm
           .select()
           .from(pricingOverrides)
-          .where(eq(pricingOverrides.projectId, parseUuid(projectId, "project_id")))
+          .where(
+            eq(
+              pricingOverrides.billingAccountId,
+              parseUuid(billingAccountId, "billing_account_id"),
+            ),
+          )
           .limit(limit)
           .offset(offset)
       : await deps.orm
@@ -863,7 +868,7 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
     }
 
     const synced = await deps.sync.upsertPricingOverride({
-      projectId: body.project_id,
+      billingAccountId: body.billing_account_id,
       modelName: body.model_name,
       operation: body.operation,
       overrideKind: body.override_kind,
@@ -880,7 +885,7 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
       targetType: "pricing_override",
       targetId: synced.id,
       metadata: {
-        project_id: body.project_id,
+        billing_account_id: body.billing_account_id,
         model_name: body.model_name,
         override_kind: body.override_kind,
       },

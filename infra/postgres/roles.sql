@@ -27,8 +27,8 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, stg_data, stg_control,
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, stg_data, stg_control, stg_worker, stg_audit;
 
 GRANT SELECT ON public.schema_migrations TO stg_data, stg_control, stg_worker, stg_audit;
-GRANT SELECT ON public.config_epoch, public.projects, public.api_keys, public.upstream_accounts,
-  public.plugins, public.channels, public.models, public.price_versions, public.project_pricing_overrides, public.routes TO stg_data, stg_control;
+GRANT SELECT ON public.config_epoch, public.billing_accounts, public.api_keys, public.upstream_accounts,
+  public.plugins, public.channels, public.models, public.price_versions, public.billing_account_pricing_overrides, public.routes TO stg_data, stg_control;
 GRANT SELECT ON public.console_organization_admission TO stg_data, stg_control;
 GRANT INSERT, UPDATE ON public.console_organization_admission TO stg_control;
 GRANT SELECT, INSERT, UPDATE ON public.async_tasks TO stg_data, stg_worker;
@@ -72,13 +72,13 @@ GRANT UPDATE (funded_atoms, debt_atoms, lot_allocations, outcome) ON public.bill
 GRANT INSERT ON public.billing_charges TO stg_data, stg_control;
 GRANT INSERT (journal_id, ordinal, side, entity_id, request_id, reference, kind, currency, account, atoms)
   ON public.ledger_entries TO stg_data, stg_control, stg_worker;
-GRANT INSERT (event_id, kind, request_id, project_id, payload) ON public.outbox_events TO stg_data, stg_control;
+GRANT INSERT (event_id, kind, request_id, billing_account_id, payload) ON public.outbox_events TO stg_data, stg_control;
 GRANT USAGE ON SEQUENCE public.outbox_events_seq_seq TO stg_data, stg_control;
 GRANT INSERT, UPDATE ON public.outbox_consumers, public.outbox_consumer_shards TO stg_control, stg_worker;
 
 GRANT UPDATE (spend_window_start, spent_atoms, reserved_atoms) ON public.api_keys TO stg_data;
-GRANT INSERT, UPDATE ON public.projects, public.api_keys, public.upstream_accounts, public.plugins,
-  public.channels, public.models, public.routes, public.project_pricing_overrides, public.wallets, public.wallet_lots,
+GRANT INSERT, UPDATE ON public.billing_accounts, public.api_keys, public.upstream_accounts, public.plugins,
+  public.channels, public.models, public.routes, public.billing_account_pricing_overrides, public.wallets, public.wallet_lots,
   public.supplier_root_balances, public.supplier_cells TO stg_control;
 GRANT UPDATE ON public.config_epoch TO stg_control;
 GRANT INSERT ON public.price_versions, public.funding_operations, public.billing_resolutions, public.plugin_releases,
@@ -111,6 +111,6 @@ GRANT UPDATE (supplier_holds, closed_at) ON public.billing_holds TO stg_worker;
 GRANT UPDATE (reconciliation_started_at) ON public.billing_holds TO stg_data, stg_worker;
 GRANT UPDATE (spend_window_start, spent_atoms, reserved_atoms) ON public.api_keys TO stg_worker;
 GRANT INSERT ON public.billing_charges TO stg_worker;
-GRANT INSERT (event_id, kind, request_id, project_id, payload) ON public.outbox_events TO stg_worker;
+GRANT INSERT (event_id, kind, request_id, billing_account_id, payload) ON public.outbox_events TO stg_worker;
 GRANT USAGE ON SEQUENCE public.outbox_events_seq_seq TO stg_worker;
 COMMIT;

@@ -1,39 +1,9 @@
 {
   "migrations": [
     {
-      "version": 2026112301,
-      "path": "./migrations/0000_console_baseline.sql",
-      "checksum": "15c5b5c875373440a6fe07c72bf51a1db97f1668e5afef02eb72dd1f7963ad4e"
-    },
-    {
-      "version": 2026112302,
-      "path": "./migrations/0001_console_hardening.sql",
-      "checksum": "69321234df44e790650b55e22077658741cecd5d89e39c0f905254ee6f38de8b"
-    },
-    {
-      "version": 2026112303,
-      "path": "./migrations/0002_platform_credit_defaults.sql",
-      "checksum": "7873fd8d934f79a58cf00f0299fdb9ee4a9ab181380cbde40daae264de04d99d"
-    },
-    {
-      "version": 2026112401,
-      "path": "./migrations/0003_alert_evaluation_retry.sql",
-      "checksum": "58d125ef4dee91a9f5308b3f7d82c70ca0a89102029cfd8596eb9f810c1006d9"
-    },
-    {
-      "version": 2026112402,
-      "path": "./migrations/0004_upstream_state_retry.sql",
-      "checksum": "3215a0f7bd0130ad80c6fb03e2bbff3e657dea503cad1e9f094687cb4594eec2"
-    },
-    {
-      "version": 2026112403,
-      "path": "./migrations/0005_channel_secret_sync.sql",
-      "checksum": "46f0c39345176c3c3f97af54c188d3e0a320851f71497d7044e3b9c8e95d0245"
-    },
-    {
-      "version": 2026112404,
-      "path": "./migrations/0006_organization_admission.sql",
-      "checksum": "53f3a0ecc6b10ceaea3233dc177493ec9381414ccb19144e8d7ffead8af7fcd2"
+      "version": 2026112501,
+      "path": "./migrations/0000_billing_accounts.sql",
+      "checksum": "07934442bcf73d7ede06c760aea95ef5dc38d4baf9e6acd44e2e17482c06db87"
     }
   ]
 }

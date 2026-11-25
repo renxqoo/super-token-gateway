@@ -1,3 +1,4 @@
+import { localInternalCredentials } from "../../scripts/local-internal-auth.ts";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { generateKeyPairSync, sign } from "node:crypto";
 import type { SQL } from "bun";
@@ -19,7 +20,7 @@ targetUrl.pathname = `/${testDbName}`;
 
 const KEY_PEPPER = "e2e-pepper-secret-0123456789abcdef";
 const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const ADMIN_TOKEN = "e2e-admin-token-0123456789abcdef";
+const OPERATOR_TOKEN = "e2e-admin-token-0123456789abcdef00000000000000";
 
 let adminDb: SQL;
 let db: SQL;
@@ -53,7 +54,7 @@ function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     dbMaxConnections: 16,
     keyPepper: KEY_PEPPER,
     encryptionKey: ENCRYPTION_KEY,
-    adminToken: ADMIN_TOKEN,
+    internalCredentials: localInternalCredentials(OPERATOR_TOKEN),
     allowPrivateUpstreams: true,
     privateUpstreamCidrs: ["127.0.0.0/8"],
     trustedProxyCidrs: [],
@@ -78,7 +79,7 @@ async function internalCall(
     new Request(`http://internal.local${path}`, {
       method,
       headers: {
-        authorization: `Bearer ${ADMIN_TOKEN}`,
+        authorization: `Bearer ${OPERATOR_TOKEN}`,
         "content-type": "application/json",
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -218,21 +219,21 @@ test("G7 Cross-node publication confirms applied snapshots and revokes pending a
     await admin.start();
     await peer.start();
     const seenNodes = [admin.cluster.nodeId, peer.cluster.nodeId].sort();
-    const project = await call("PUT", "/internal/v1/projects", {
-      name: "revoke-project",
+    const billingAccount = await call("PUT", "/internal/v1/billing-accounts", {
+      name: "revoke-billingAccount",
       currency: "USD",
       rpm: 500,
       tpm: 100_000,
       concurrency: 20,
     });
-    await call("POST", `/internal/v1/wallets/${project.id}/credits`, {
+    await call("POST", `/internal/v1/wallets/${billingAccount.id}/credits`, {
       currency: "USD",
       external_ref: "revoke-credit",
       amount_atoms: "1000000",
       kind: "CASH",
     });
     const key = await call("PUT", "/internal/v1/api-keys", {
-      project_id: project.id,
+      billing_account_id: billingAccount.id,
       name: "revoke-test",
     });
     const account = await call("PUT", "/internal/v1/upstream-accounts", {
@@ -425,7 +426,6 @@ test("G7 Cross-node publication confirms applied snapshots and revokes pending a
     await call("POST", `${requestPath}/resolve`, {
       action: "RELEASE",
       reason: "synthetic upstream stopped",
-      actor: "test",
     });
     expect((await request("revoke-after", true)).status).toBe(503);
     expect((await request("revoke-unrelated")).status).toBe(200);
@@ -593,33 +593,38 @@ test("G2.1 + G2.2 SmartRouter pre-first-byte dynamic failover (503, 429, 401, EC
 
   try {
     await runtime.start();
-    const { data: project } = await internalCall(
+    const { data: billingAccount } = await internalCall(
       runtime.internalApp,
       "PUT",
-      "/internal/v1/projects",
+      "/internal/v1/billing-accounts",
       {
-        name: "failover-project",
+        name: "failover-billingAccount",
         currency: "PTS",
       },
     );
-    const projectId = String(project.id);
+    const billingAccountId = String(billingAccount.id);
     const { data: keyRes } = await internalCall(
       runtime.internalApp,
       "PUT",
       "/internal/v1/api-keys",
       {
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         name: "invoker",
       },
     );
     const apiKey = String(keyRes.key);
 
-    await internalCall(runtime.internalApp, "POST", `/internal/v1/wallets/${projectId}/credits`, {
-      currency: "PTS",
-      external_ref: "credit-failover-1",
-      amount_atoms: "1000000",
-      kind: "CASH",
-    });
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/wallets/${billingAccountId}/credits`,
+      {
+        currency: "PTS",
+        external_ref: "credit-failover-1",
+        amount_atoms: "1000000",
+        kind: "CASH",
+      },
+    );
 
     const { data: accPrimary } = await internalCall(
       runtime.internalApp,
@@ -786,7 +791,7 @@ test("G2.1 + G2.2 SmartRouter pre-first-byte dynamic failover (503, 429, 401, EC
     const { data: wallet } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=PTS`,
+      `/internal/v1/wallets/${billingAccountId}?currency=PTS`,
     );
     expect(wallet.reserved_atoms).toBe("0");
     expect(wallet.spent_atoms).toBe(String(4 * (10 * 15 + 5 * 30) + 1 * (10 * 10 + 5 * 20)));
@@ -887,33 +892,38 @@ test("G2.3 + G3.1 + G3.2 SSE streaming atomic [DONE], HOLD_UNTIL_APPROVED zero-l
 
   try {
     await runtime.start();
-    const { data: project } = await internalCall(
+    const { data: billingAccount } = await internalCall(
       runtime.internalApp,
       "PUT",
-      "/internal/v1/projects",
+      "/internal/v1/billing-accounts",
       {
-        name: "moderation-project",
+        name: "moderation-billingAccount",
         currency: "USD",
       },
     );
-    const projectId = String(project.id);
+    const billingAccountId = String(billingAccount.id);
     const { data: keyRes } = await internalCall(
       runtime.internalApp,
       "PUT",
       "/internal/v1/api-keys",
       {
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         name: "mod-key",
       },
     );
     const apiKey = String(keyRes.key);
 
-    await internalCall(runtime.internalApp, "POST", `/internal/v1/wallets/${projectId}/credits`, {
-      currency: "USD",
-      external_ref: "credit-mod-1",
-      amount_atoms: "1000000",
-      kind: "CASH",
-    });
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/wallets/${billingAccountId}/credits`,
+      {
+        currency: "USD",
+        external_ref: "credit-mod-1",
+        amount_atoms: "1000000",
+        kind: "CASH",
+      },
+    );
 
     const { data: acc } = await internalCall(
       runtime.internalApp,
@@ -1096,7 +1106,7 @@ test("G2.3 + G3.1 + G3.2 SSE streaming atomic [DONE], HOLD_UNTIL_APPROVED zero-l
     const { data: walletBeforeBlock } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=USD`,
+      `/internal/v1/wallets/${billingAccountId}?currency=USD`,
     );
 
     mock.scenarios.set("mod-absorb-up", { output: "Here is FORBIDDEN_SECRET data" });
@@ -1121,7 +1131,7 @@ test("G2.3 + G3.1 + G3.2 SSE streaming atomic [DONE], HOLD_UNTIL_APPROVED zero-l
     const { data: walletAfterAbsorb } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=USD`,
+      `/internal/v1/wallets/${billingAccountId}?currency=USD`,
     );
     expect(walletAfterAbsorb.spent_atoms).toBe(walletBeforeBlock.spent_atoms);
     expect(walletAfterAbsorb.reserved_atoms).toBe("0");
@@ -1142,7 +1152,7 @@ test("G2.3 + G3.1 + G3.2 SSE streaming atomic [DONE], HOLD_UNTIL_APPROVED zero-l
     const { data: walletAfterChargeBlock } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=USD`,
+      `/internal/v1/wallets/${billingAccountId}?currency=USD`,
     );
     const expectedSingleCost = 7 * 10 + 3 * 5 + 5 * 20;
     expect(BigInt(String(walletAfterChargeBlock.spent_atoms))).toBe(
@@ -1173,7 +1183,6 @@ test("G2.3 + G3.1 + G3.2 SSE streaming atomic [DONE], HOLD_UNTIL_APPROVED zero-l
     await internalCall(runtime.internalApp, "POST", `/internal/v1/requests/${reqId}/resolve`, {
       action: "RELEASE",
       reason: "truncated_upstream_stream",
-      actor: "ops",
     });
 
     const rawDump = await db`
@@ -1413,23 +1422,23 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
 
   try {
     await runtime.start();
-    const { data: project } = await internalCall(
+    const { data: billingAccount } = await internalCall(
       runtime.internalApp,
       "PUT",
-      "/internal/v1/projects",
+      "/internal/v1/billing-accounts",
       {
-        name: "hardening-project",
+        name: "hardening-billingAccount",
         currency: "USD",
       },
     );
-    const projectId = String(project.id);
+    const billingAccountId = String(billingAccount.id);
 
     const { data: unrestrictedKey } = await internalCall(
       runtime.internalApp,
       "PUT",
       "/internal/v1/api-keys",
       {
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         name: "hardening-open",
       },
     );
@@ -1440,19 +1449,24 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
       "PUT",
       "/internal/v1/api-keys",
       {
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         name: "hardening-cidr",
         allowed_cidrs: ["10.20.30.0/24"],
       },
     );
     const restrictedApiKey = String(cidrKey.key);
 
-    await internalCall(runtime.internalApp, "POST", `/internal/v1/wallets/${projectId}/credits`, {
-      currency: "USD",
-      external_ref: "credit-hardening-1",
-      amount_atoms: "1000000",
-      kind: "CASH",
-    });
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/wallets/${billingAccountId}/credits`,
+      {
+        currency: "USD",
+        external_ref: "credit-hardening-1",
+        amount_atoms: "1000000",
+        kind: "CASH",
+      },
+    );
 
     const { data: accPrimary } = await internalCall(
       runtime.internalApp,
@@ -1630,7 +1644,7 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
     const { data: walletAfterIdem } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=USD`,
+      `/internal/v1/wallets/${billingAccountId}?currency=USD`,
     );
     const singleCustCost = 10 * 10 + 5 * 20;
     expect(walletAfterIdem.spent_atoms).toBe(String(singleCustCost));
@@ -1658,7 +1672,7 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
     const { data: walletAfterAmbig } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=USD`,
+      `/internal/v1/wallets/${billingAccountId}?currency=USD`,
     );
     expect(walletAfterAmbig.spent_atoms).toBe(String(2 * singleCustCost));
     expect(walletAfterAmbig.reserved_atoms).toBe("0");
@@ -1682,13 +1696,15 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
           `http://internal.local/internal/v1/requests/${ambigRequestId}/attempts/${supplierAttempt.attempt_id}/resolve`,
           {
             method: "POST",
-            headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" },
+            headers: {
+              authorization: `Bearer ${OPERATOR_TOKEN}`,
+              "content-type": "application/json",
+            },
             body: JSON.stringify({
               action: "SETTLE",
               supplier_cost_atoms: "17",
               evidence_ref: "provider-invoice-item-17",
               reason: "supplier confirmed usage after failover",
-              actor: "ops",
             }),
           },
         ),
@@ -1772,7 +1788,6 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
     await internalCall(runtime.internalApp, "POST", `/internal/v1/requests/${sseReqId}/resolve`, {
       action: "RELEASE",
       reason: "client_aborted_sse",
-      actor: "ops",
     });
 
     const stalled = await runtime.publicApp.fetch(
@@ -1805,7 +1820,6 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
       {
         action: "RELEASE",
         reason: "stalled_upstream_sse",
-        actor: "ops",
       },
     );
 
@@ -1902,7 +1916,6 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
       {
         action: "RELEASE",
         reason: "shutdown_recovery",
-        actor: "ops",
       },
     );
   } finally {
@@ -2327,27 +2340,32 @@ test("G3.3 Full E2E real plugin mechanism (zero mocks): real Bun WASM Worker on_
 
   try {
     await runtime.start();
-    const { data: project } = await internalCall(
+    const { data: billingAccount } = await internalCall(
       runtime.internalApp,
       "PUT",
-      "/internal/v1/projects",
-      { name: "real-plugin-project", currency: "USD" },
+      "/internal/v1/billing-accounts",
+      { name: "real-plugin-billingAccount", currency: "USD" },
     );
-    const projectId = String(project.id);
+    const billingAccountId = String(billingAccount.id);
     const { data: keyRes } = await internalCall(
       runtime.internalApp,
       "PUT",
       "/internal/v1/api-keys",
-      { project_id: projectId, name: "real-plugin-key" },
+      { billing_account_id: billingAccountId, name: "real-plugin-key" },
     );
     const apiKey = String(keyRes.key);
 
-    await internalCall(runtime.internalApp, "POST", `/internal/v1/wallets/${projectId}/credits`, {
-      currency: "USD",
-      external_ref: "credit-real-plugin-1",
-      amount_atoms: "1000000",
-      kind: "CASH",
-    });
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/wallets/${billingAccountId}/credits`,
+      {
+        currency: "USD",
+        external_ref: "credit-real-plugin-1",
+        amount_atoms: "1000000",
+        kind: "CASH",
+      },
+    );
 
     const { data: acc } = await internalCall(
       runtime.internalApp,
@@ -2644,7 +2662,7 @@ test("G3.3 Full E2E real plugin mechanism (zero mocks): real Bun WASM Worker on_
     const { data: walletBeforeLoop } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=USD`,
+      `/internal/v1/wallets/${billingAccountId}?currency=USD`,
     );
     const loopResp = await runtime.publicApp.fetch(
       new Request("http://gateway.local/v1/chat/completions", {
@@ -2665,7 +2683,7 @@ test("G3.3 Full E2E real plugin mechanism (zero mocks): real Bun WASM Worker on_
     const { data: walletAfterLoop } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=USD`,
+      `/internal/v1/wallets/${billingAccountId}?currency=USD`,
     );
     expect(walletAfterLoop.available_atoms).toBe(walletBeforeLoop.available_atoms);
     const loopCharge = await runtime.queries.getRequestBilling(loopReqId);
@@ -2688,7 +2706,7 @@ test("G3.3 Full E2E real plugin mechanism (zero mocks): real Bun WASM Worker on_
     const { data: walletBeforeCutoff } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=USD`,
+      `/internal/v1/wallets/${billingAccountId}?currency=USD`,
     );
 
     const cutoffResp = await runtime.publicApp.fetch(
@@ -2726,7 +2744,7 @@ test("G3.3 Full E2E real plugin mechanism (zero mocks): real Bun WASM Worker on_
     const { data: walletAfterCutoff } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=USD`,
+      `/internal/v1/wallets/${billingAccountId}?currency=USD`,
     );
     expect(walletAfterCutoff.spent_atoms).toBe(walletBeforeCutoff.spent_atoms);
     expect(walletAfterCutoff.reserved_atoms).toBe("0");
@@ -2950,27 +2968,32 @@ test("G3.4 Built-in pii-guard plugin full lifecycle: discovery, draft install, r
     expect(dryBlock.blocked).toBe(true);
     expect(dryBlock.rule_code).toBe("PROMPT_INJECTION");
 
-    const { data: project } = await internalCall(
+    const { data: billingAccount } = await internalCall(
       runtime.internalApp,
       "PUT",
-      "/internal/v1/projects",
+      "/internal/v1/billing-accounts",
       { name: "pii-guard-proj", currency: "USD" },
     );
-    const projectId = String(project.id);
+    const billingAccountId = String(billingAccount.id);
     const { data: keyRes } = await internalCall(
       runtime.internalApp,
       "PUT",
       "/internal/v1/api-keys",
-      { project_id: projectId, name: "pii-guard-key" },
+      { billing_account_id: billingAccountId, name: "pii-guard-key" },
     );
     const apiKey = String(keyRes.key);
 
-    await internalCall(runtime.internalApp, "POST", `/internal/v1/wallets/${projectId}/credits`, {
-      currency: "USD",
-      external_ref: "credit-pii-guard-1",
-      amount_atoms: "1000000",
-      kind: "CASH",
-    });
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/wallets/${billingAccountId}/credits`,
+      {
+        currency: "USD",
+        external_ref: "credit-pii-guard-1",
+        amount_atoms: "1000000",
+        kind: "CASH",
+      },
+    );
 
     const { data: acc } = await internalCall(
       runtime.internalApp,
@@ -3464,32 +3487,37 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
     expect(provNames).toContain("moonshot");
     expect(provNames).toContain("openrouter");
 
-    const { data: project } = await internalCall(
+    const { data: billingAccount } = await internalCall(
       runtime.internalApp,
       "PUT",
-      "/internal/v1/projects",
+      "/internal/v1/billing-accounts",
       {
         name: "g7-proj",
         currency: "USD",
       },
     );
-    const projectId = String(project.id);
+    const billingAccountId = String(billingAccount.id);
     const { data: keyRes } = await internalCall(
       runtime.internalApp,
       "PUT",
       "/internal/v1/api-keys",
       {
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         name: "g7-key",
       },
     );
     const apiKey = String(keyRes.key);
-    await internalCall(runtime.internalApp, "POST", `/internal/v1/wallets/${projectId}/credits`, {
-      currency: "USD",
-      external_ref: "g7-credit-1",
-      amount_atoms: "10000000",
-      kind: "CASH",
-    });
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/wallets/${billingAccountId}/credits`,
+      {
+        currency: "USD",
+        external_ref: "g7-credit-1",
+        amount_atoms: "10000000",
+        kind: "CASH",
+      },
+    );
     const { data: acc } = await internalCall(
       runtime.internalApp,
       "PUT",
@@ -4345,7 +4373,6 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
     await internalCall(runtime.internalApp, "POST", `/internal/v1/requests/${evilReqId}/resolve`, {
       action: "RELEASE",
       reason: "test cleanup after rejected negative usage",
-      actor: "g7-test",
     });
     acmeWasmMode = "ok";
 
@@ -4434,7 +4461,6 @@ test("G7.2-G7.7 Provider Plugin Architecture: 15 builtins, online unknown vendor
       {
         action: "RELEASE",
         reason: "test cleanup after ungranted usage rejection",
-        actor: "g7-test",
       },
     );
 
@@ -4569,11 +4595,17 @@ test("all builtin provider presets complete JSON and SSE requests through indepe
       expect(result.status, JSON.stringify(result.data.error)).toBe(200);
       return result.data;
     };
-    const project = await put("/internal/v1/projects", { name: "builtin-matrix", currency: "USD" });
-    const key = await put("/internal/v1/api-keys", { project_id: project.id, name: "fixture" });
+    const billingAccount = await put("/internal/v1/billing-accounts", {
+      name: "builtin-matrix",
+      currency: "USD",
+    });
+    const key = await put("/internal/v1/api-keys", {
+      billing_account_id: billingAccount.id,
+      name: "fixture",
+    });
     const account = await put("/internal/v1/upstream-accounts", { name: "builtin-matrix" });
     await runtime.ledger.creditWallet({
-      project_id: String(project.id),
+      billing_account_id: String(billingAccount.id),
       kind: "CASH",
       currency: "USD",
       external_ref: "builtin-matrix-credit",
@@ -4810,20 +4842,20 @@ test("Hardened plugin billing, FAIL_OPEN audit, reasoning cross-protocol, compat
   });
   await runtime.start();
   try {
-    const project = (
-      await internalCall(runtime.internalApp, "PUT", "/internal/v1/projects", {
+    const billingAccount = (
+      await internalCall(runtime.internalApp, "PUT", "/internal/v1/billing-accounts", {
         name: "hardened-proj",
         currency: "USD",
       })
     ).data;
     const key = (
       await internalCall(runtime.internalApp, "PUT", "/internal/v1/api-keys", {
-        project_id: project.id,
+        billing_account_id: billingAccount.id,
         name: "hardened-key",
       })
     ).data;
     await runtime.ledger.creditWallet({
-      project_id: String(project.id),
+      billing_account_id: String(billingAccount.id),
       currency: "USD",
       external_ref: "hardened-credit",
       amount_atoms: "1000000",
@@ -5010,8 +5042,8 @@ test("Hardened plugin billing, FAIL_OPEN audit, reasoning cross-protocol, compat
     expect(metricsText).toContain("gateway_plugin_fail_open_total");
     expect(metricsText).toContain("gateway_protocol_field_dropped_total");
 
-    const epochAfter = await runtime.catalog.upsertProject({
-      id: String(project.id),
+    const epochAfter = await runtime.catalog.upsertBillingAccount({
+      id: String(billingAccount.id),
       name: "hardened-proj-2",
       rpm: 6000,
       tpm: 10_000_000,

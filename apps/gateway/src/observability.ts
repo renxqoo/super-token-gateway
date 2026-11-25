@@ -136,7 +136,7 @@ function statusClassOf(status: number): string {
 export type AccessLogRecord = {
   trace_id: string;
   request_id: string;
-  project_id: string | null;
+  billing_account_id: string | null;
   model: string | null;
   operation: string;
   stream: boolean;
@@ -380,14 +380,14 @@ export class GatewayMetrics {
   }
 
   isTenantPlatformAbsorbExceeded(
-    projectId: string,
+    billingAccountId: string,
     maxCountPerMinute: number,
     maxAtomsPerMinute?: string,
   ): boolean {
-    const entry = this.tenantAbsorbWindows.get(projectId);
+    const entry = this.tenantAbsorbWindows.get(billingAccountId);
     if (!entry) return false;
     if (performance.now() - entry.windowStartMs >= 60_000) {
-      this.tenantAbsorbWindows.delete(projectId);
+      this.tenantAbsorbWindows.delete(billingAccountId);
       return false;
     }
     if (entry.count >= maxCountPerMinute) return true;
@@ -395,15 +395,15 @@ export class GatewayMetrics {
     return false;
   }
 
-  recordPlatformAbsorb(projectId: string, supplierAtoms: string): void {
+  recordPlatformAbsorb(billingAccountId: string, supplierAtoms: string): void {
     const atoms = BigInt(supplierAtoms || "0");
     this.pluginPlatformAbsorbTotal++;
     this.pluginPlatformAbsorbAtoms += atoms;
     const now = performance.now();
-    const existing = this.tenantAbsorbWindows.get(projectId);
+    const existing = this.tenantAbsorbWindows.get(billingAccountId);
     if (!existing || now - existing.windowStartMs >= 60_000) {
       if (this.tenantAbsorbWindows.size >= 4096) this.tenantAbsorbWindows.clear();
-      this.tenantAbsorbWindows.set(projectId, { windowStartMs: now, count: 1, atoms });
+      this.tenantAbsorbWindows.set(billingAccountId, { windowStartMs: now, count: 1, atoms });
     } else {
       existing.count++;
       existing.atoms += atoms;

@@ -8,7 +8,7 @@ export type TraceExportConfig = {
   errorBodyMaxBytes?: number;
   maxRecords: number;
   maxBytes: number;
-  maxPerProject: number;
+  maxPerBillingAccount: number;
   priorityReserve: number;
   batchSize: number;
   batchDeadlineMs: number;
@@ -28,8 +28,8 @@ export type TraceWriterReply =
 export function createTraceQueue(config: TraceExportConfig, samplingKey: string) {
   const ordinary = new Set<PendingTrace>();
   const priority = new Set<PendingTrace>();
-  const projectCounts = new Map<string, number>();
-  const projectOrdinary = new Map<string, Set<PendingTrace>>();
+  const billingAccountCounts = new Map<string, number>();
+  const billingAccountOrdinary = new Map<string, Set<PendingTrace>>();
   let inFlight: PendingTrace[] = [];
   let worker: Worker | undefined;
   let batchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -55,10 +55,10 @@ export function createTraceQueue(config: TraceExportConfig, samplingKey: string)
     queuedBytes -= entry.bytes;
     queuedCount--;
     if (!entry.priority) normalCount--;
-    const project = entry.record.projectId;
-    const count = projectCounts.get(project)! - 1;
-    if (count === 0) projectCounts.delete(project);
-    else projectCounts.set(project, count);
+    const billingAccount = entry.record.billingAccountId;
+    const count = billingAccountCounts.get(billingAccount)! - 1;
+    if (count === 0) billingAccountCounts.delete(billingAccount);
+    else billingAccountCounts.set(billingAccount, count);
   }
 
   function finish(success: boolean, spans: number) {
@@ -76,10 +76,10 @@ export function createTraceQueue(config: TraceExportConfig, samplingKey: string)
 
   function removeOrdinary(entry: PendingTrace) {
     ordinary.delete(entry);
-    const project = entry.record.projectId;
-    const waiting = projectOrdinary.get(project)!;
+    const billingAccount = entry.record.billingAccountId;
+    const waiting = billingAccountOrdinary.get(billingAccount)!;
     waiting.delete(entry);
-    if (!waiting.size) projectOrdinary.delete(project);
+    if (!waiting.size) billingAccountOrdinary.delete(billingAccount);
   }
 
   function evictOrdinary(entry: PendingTrace) {
@@ -178,8 +178,8 @@ export function createTraceQueue(config: TraceExportConfig, samplingKey: string)
         dropped(critical);
         return;
       }
-      if ((projectCounts.get(record.projectId) ?? 0) >= config.maxPerProject) {
-        const evicted = projectOrdinary.get(record.projectId)?.values().next().value;
+      if ((billingAccountCounts.get(record.billingAccountId) ?? 0) >= config.maxPerBillingAccount) {
+        const evicted = billingAccountOrdinary.get(record.billingAccountId)?.values().next().value;
         if (!critical || !evicted) {
           dropped(critical);
           return;
@@ -199,14 +199,18 @@ export function createTraceQueue(config: TraceExportConfig, samplingKey: string)
       }
       queuedCount++;
       queuedBytes += bytes;
-      projectCounts.set(record.projectId, (projectCounts.get(record.projectId) ?? 0) + 1);
+      billingAccountCounts.set(
+        record.billingAccountId,
+        (billingAccountCounts.get(record.billingAccountId) ?? 0) + 1,
+      );
       const entry = { record, bytes, priority: critical };
       if (critical) priority.add(entry);
       else {
         ordinary.add(entry);
-        const waiting = projectOrdinary.get(record.projectId) ?? new Set<PendingTrace>();
+        const waiting =
+          billingAccountOrdinary.get(record.billingAccountId) ?? new Set<PendingTrace>();
         waiting.add(entry);
-        projectOrdinary.set(record.projectId, waiting);
+        billingAccountOrdinary.set(record.billingAccountId, waiting);
         normalCount++;
       }
     },
@@ -242,8 +246,8 @@ export function createTraceQueue(config: TraceExportConfig, samplingKey: string)
       droppedPriority += queuedCount - normalCount;
       ordinary.clear();
       priority.clear();
-      projectCounts.clear();
-      projectOrdinary.clear();
+      billingAccountCounts.clear();
+      billingAccountOrdinary.clear();
       queuedCount = queuedBytes = normalCount = 0;
     },
   };

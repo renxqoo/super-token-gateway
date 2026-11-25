@@ -1,18 +1,19 @@
+import { localConsoleTokenEnvironment } from "../../scripts/local-internal-auth.ts";
 import { SQL } from "bun";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   CONSOLE_SCHEMA_VERSION,
+  assertConsoleSchemaVersion,
   createConsoleDatabase,
   createConsoleRuntime,
   migrateConsoleDb,
 } from "@gateway/console-api";
-import consoleMigrations from "../../apps/console-api/src/db/migrations/manifest.json";
 import { createConsoleTestHarness } from "./helpers/console-harness.ts";
 
 let h: Awaited<ReturnType<typeof createConsoleTestHarness>>;
 let adminAccess = "";
 let customerAccess = "";
-let projectId = "";
+let billingAccountId = "";
 let accountId = "";
 let channelId = "";
 let customerPriceId = "";
@@ -24,11 +25,11 @@ beforeAll(async () => {
   adminAccess = boot.accessToken;
   const user = await h.registerUser("sync-owner@example.com");
   customerAccess = user.accessToken;
-  projectId = user.defaultProjectId;
+  billingAccountId = user.defaultBillingAccountId;
 
   const topup = await h.adminApi(
     "POST",
-    `/admin/v1/finance/projects/${projectId}/topups`,
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/topups`,
     adminAccess,
     {
       external_ref: "sync-topup-1",
@@ -140,55 +141,30 @@ test("a read-only Console database remains live but is not ready for traffic", a
   }
 });
 
-test("upgrading an existing Console database preserves queued alerts and catalog data", async () => {
-  const databaseName = `stg_console_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
+test("Console initializes an empty database and rejects an incompatible target", async () => {
+  const databaseName = "stg_console_fresh_" + crypto.randomUUID().replaceAll("-", "");
   const url = new URL(h.conDbUrl);
   url.pathname = "/postgres";
   const manager = new SQL(url.toString(), { max: 1 });
-  url.pathname = `/${databaseName}`;
+  url.pathname = "/" + databaseName;
   const db = createConsoleDatabase(url.toString(), 2);
   try {
-    await manager.unsafe(`CREATE DATABASE ${databaseName}`);
-    const base = new URL("../../apps/console-api/src/db/", import.meta.url);
-    await db.begin(async (tx) => {
-      for (const migration of consoleMigrations.migrations.filter(
-        (entry) => entry.version <= 2026112303,
-      )) {
-        await tx.unsafe(await Bun.file(new URL(migration.path, base)).text());
-        await tx`INSERT INTO public.console_schema_migrations (version, checksum) VALUES (${migration.version}, ${migration.checksum})`;
-      }
-      await tx`INSERT INTO public.users (id, email, password_hash, display_name) VALUES (${projectId}, 'upgrade@example.com', 'fixture', 'Upgrade')`;
-      await tx`INSERT INTO public.organizations (id, slug, name, kind, owner_user_id, status) VALUES (${projectId}, 'upgrade-org', 'Upgrade', 'PERSONAL', ${projectId}, 'SUSPENDED')`;
-      await tx`INSERT INTO public.projects (id, gateway_project_id, org_id, name) VALUES (${projectId}, ${projectId}, ${projectId}, 'Upgrade project')`;
-      await tx`INSERT INTO public.alert_eval_queue (project_id, latest_wallet_available_atoms) VALUES (${projectId}, 15)`;
-      await tx`INSERT INTO public.upstream_accounts (id, name, state) VALUES (${accountId}, 'Upgrade account', 'DISABLED')`;
-      await tx`INSERT INTO public.channels (id, account_id, name, kind, base_url, desired_revision, synced_revision, sync_status) VALUES (${channelId}, ${accountId}, 'Upgrade channel', 'openai', ${h.mockUrl}, 2, 1, 'FAILED')`;
-    });
+    await manager.unsafe("CREATE DATABASE " + databaseName);
+    await db.unsafe("CREATE SCHEMA existing_data");
+    await expect(migrateConsoleDb(db)).rejects.toThrow(/nonempty database/);
+    expect(
+      await db.unsafe("SELECT nspname FROM pg_namespace WHERE nspname = 'existing_data'"),
+    ).toEqual([{ nspname: "existing_data" }]);
+    await db.unsafe("DROP SCHEMA existing_data");
     expect(await migrateConsoleDb(db)).toBe(CONSOLE_SCHEMA_VERSION);
     expect(await migrateConsoleDb(db)).toBe(CONSOLE_SCHEMA_VERSION);
-    const [organization] =
-      await db`SELECT status, inference_revision, inference_synced_revision FROM public.organizations WHERE id = ${projectId}`;
-    expect(organization).toEqual({
-      status: "SUSPENDED",
-      inference_revision: 1,
-      inference_synced_revision: 0,
-    });
-    const [alert] =
-      await db`SELECT project_id, next_attempt_at <= now() AS due FROM public.alert_eval_queue`;
-    expect(alert).toEqual({ project_id: projectId, due: true });
-    const [account] =
-      await db`SELECT state, pending_state FROM public.upstream_accounts WHERE id = ${accountId}`;
-    expect(account).toEqual({ state: "DISABLED", pending_state: null });
-    const [channel] =
-      await db`SELECT account_id, secret_sync_pending FROM public.channels WHERE id = ${channelId}`;
-    expect(channel).toEqual({ account_id: accountId, secret_sync_pending: true });
+    expect(await assertConsoleSchemaVersion(db)).toBe(CONSOLE_SCHEMA_VERSION);
+    await db.unsafe("UPDATE public.console_schema_migrations SET version = 1");
+    await expect(migrateConsoleDb(db)).rejects.toThrow(/checksum mismatch/);
   } finally {
     await db.close({ timeout: 0 });
-    try {
-      await manager.unsafe(`DROP DATABASE IF EXISTS ${databaseName}`);
-    } finally {
-      await manager.close();
-    }
+    await manager.unsafe("DROP DATABASE IF EXISTS " + databaseName);
+    await manager.close();
   }
 });
 
@@ -214,7 +190,7 @@ test("Console SIGTERM finishes even while a slow Gateway request is in flight", 
       CONSOLE_RECONCILE_INTERVAL_MS: "0",
       CONSOLE_ALERT_DELIVERY_INTERVAL_MS: "0",
       GATEWAY_INTERNAL_URL: upstream.url.toString(),
-      GATEWAY_ADMIN_TOKEN: h.adminToken,
+      ...localConsoleTokenEnvironment(h.adminToken),
       OUTBOX_WEBHOOK_TOKEN: h.outboxToken,
     },
   });
@@ -224,7 +200,7 @@ test("Console SIGTERM finishes even while a slow Gateway request is in flight", 
     const { value } = await reader.read();
     const { client_port } = JSON.parse(new TextDecoder().decode(value)) as { client_port: number };
     pending = fetch(
-      `http://127.0.0.1:${client_port}/api/v1/models/sync-gpt?project_id=${projectId}`,
+      `http://127.0.0.1:${client_port}/api/v1/models/sync-gpt?billing_account_id=${billingAccountId}`,
       {
         headers: { authorization: `Bearer ${customerAccess}` },
       },
@@ -293,7 +269,7 @@ test("reconcile retains a disabled account and retries an explicit state update 
 test("API key expires_at serializes UTC ISO cleanly across create, patch, and revoke", async () => {
   const created = await h.clientApi<{ id: string; expiresAt: string; syncStatus: string }>(
     "POST",
-    `/api/v1/projects/${projectId}/api-keys`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
     customerAccess,
     {
       name: "expiring-key",
@@ -306,7 +282,7 @@ test("API key expires_at serializes UTC ISO cleanly across create, patch, and re
 
   const updated = await h.clientApi<{ expiresAt: string; syncStatus: string }>(
     "PATCH",
-    `/api/v1/projects/${projectId}/api-keys/${created.data.id}`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys/${created.data.id}`,
     customerAccess,
     { expires_at: "2031-01-01T00:00:00.000Z" },
   );
@@ -316,14 +292,14 @@ test("API key expires_at serializes UTC ISO cleanly across create, patch, and re
 
   const revoked = await h.clientApi(
     "DELETE",
-    `/api/v1/projects/${projectId}/api-keys/${created.data.id}`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys/${created.data.id}`,
     customerAccess,
   );
   expect(revoked.status).toBe(200);
 });
 
 test("concurrent API key rotation issues one successor and keeps a disabled key disabled", async () => {
-  const path = `/api/v1/projects/${projectId}/api-keys`;
+  const path = `/api/v1/billing-accounts/${billingAccountId}/api-keys`;
   const created = await h.clientApi<{ id: string }>("POST", path, customerAccess, {
     name: "Rotation once",
   });
@@ -345,7 +321,7 @@ test("concurrent API key rotation issues one successor and keeps a disabled key 
 });
 
 test("a rejected key update preserves a concurrent revocation for reconciliation", async () => {
-  const keys = `/api/v1/projects/${projectId}/api-keys`;
+  const keys = `/api/v1/billing-accounts/${billingAccountId}/api-keys`;
   const key = await h.clientApi<{ id: string }>("POST", keys, customerAccess, {
     name: "Revocation recovery",
   });
@@ -505,20 +481,25 @@ test("route PATCH preserves unsubmitted fields in both Console and Gateway and r
 });
 
 test("Gateway rejects stale source_revision writes without overwriting newer state", async () => {
-  const upd = await h.clientApi("PATCH", `/api/v1/projects/${projectId}`, customerAccess, {
-    name: "Fresh Project Name",
-  });
+  const upd = await h.clientApi(
+    "PATCH",
+    `/api/v1/billing-accounts/${billingAccountId}`,
+    customerAccess,
+    {
+      name: "Fresh BillingAccount Name",
+    },
+  );
   expect(upd.status).toBe(200);
 
   const gwRow = await h.gwDb<{ name: string; source_revision: number }[]>`
-    SELECT name, source_revision FROM public.projects WHERE id = ${projectId}::uuid
+    SELECT name, source_revision FROM public.billing_accounts WHERE id = ${billingAccountId}::uuid
   `;
-  expect(gwRow[0]?.name).toBe("Fresh Project Name");
+  expect(gwRow[0]?.name).toBe("Fresh BillingAccount Name");
   const currentRev = gwRow[0]!.source_revision;
   expect(currentRev).toBeGreaterThanOrEqual(2);
 
-  const staleReplay = await h.gatewayInternalApi("PUT", "/internal/v1/projects", {
-    id: projectId,
+  const staleReplay = await h.gatewayInternalApi("PUT", "/internal/v1/billing-accounts", {
+    id: billingAccountId,
     name: "Stale Overwrite Attempt",
     currency: "USD",
     rpm: 100,
@@ -530,9 +511,9 @@ test("Gateway rejects stale source_revision writes without overwriting newer sta
   expect(staleReplay.status).toBe(409);
 
   const afterRow = await h.gwDb<{ name: string; source_revision: number }[]>`
-    SELECT name, source_revision FROM public.projects WHERE id = ${projectId}::uuid
+    SELECT name, source_revision FROM public.billing_accounts WHERE id = ${billingAccountId}::uuid
   `;
-  expect(afterRow[0]?.name).toBe("Fresh Project Name");
+  expect(afterRow[0]?.name).toBe("Fresh BillingAccount Name");
   expect(afterRow[0]?.source_revision).toBe(currentRev);
 });
 
@@ -617,7 +598,7 @@ test("pricing template recovers after lost Gateway commit response and isolates 
 test("two-phase API key rotation keeps old key active on Gateway failure and revokes it only after new key succeeds", async () => {
   const k1 = await h.clientApi<{ id: string; key: string }>(
     "POST",
-    `/api/v1/projects/${projectId}/api-keys`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
     customerAccess,
     { name: "rot-key-1" },
   );
@@ -645,7 +626,7 @@ test("two-phase API key rotation keeps old key active on Gateway failure and rev
 
   const failedRotate = await h.clientApi(
     "POST",
-    `/api/v1/projects/${projectId}/api-keys/${k1.data.id}/rotate`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys/${k1.data.id}/rotate`,
     customerAccess,
   );
   expect(failedRotate.status).toBeGreaterThanOrEqual(500);
@@ -656,7 +637,7 @@ test("two-phase API key rotation keeps old key active on Gateway failure and rev
 
   const okRotate = await h.clientApi<{ id: string; key: string; rotatedFromKeyId: string }>(
     "POST",
-    `/api/v1/projects/${projectId}/api-keys/${k1.data.id}/rotate`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys/${k1.data.id}/rotate`,
     customerAccess,
   );
   expect(okRotate.status).toBe(201);
@@ -811,35 +792,39 @@ test("plugin release channel binding stays consistent with Console channel listi
 
 test("background reconcile recovers failed syncs, runtime timers close cleanly, and migration refuses nonempty unversioned DB", async () => {
   h.setGatewayInterceptor(async (url, init, forward) => {
-    if (init?.method === "PUT" && new URL(url).pathname === "/internal/v1/projects") {
+    if (init?.method === "PUT" && new URL(url).pathname === "/internal/v1/billing-accounts") {
       return new Response("down", { status: 503 });
     }
     return forward();
   });
 
-  const org = await h.clientApi<{ id: string }>("POST", "/api/v1/orgs", customerAccess, {
-    name: "Recovery Org",
-    slug: "recovery-org",
-  });
+  const org = await h.clientApi<{ default_billing_account_id: string }>(
+    "POST",
+    "/api/v1/orgs",
+    customerAccess,
+    {
+      name: "Recovery Org",
+      slug: "recovery-org",
+    },
+  );
   expect(org.status).toBe(201);
   const proj = await h.clientApi<{ id: string; syncStatus: string; gatewaySynced: boolean }>(
-    "POST",
-    `/api/v1/orgs/${org.data.id}/projects`,
+    "GET",
+    `/api/v1/billing-accounts/${org.data.default_billing_account_id}`,
     customerAccess,
-    { name: "Delayed Sync Project", currency: "USD" },
   );
-  expect(proj.status).toBe(201);
+  expect(proj.status).toBe(200);
   expect(proj.data.syncStatus).toBe("PENDING");
   expect(proj.data.gatewaySynced).toBe(false);
 
   const failAttempt = await h.consoleRuntime.sync
-    .ensureProjectSynced(proj.data.id)
+    .ensureBillingAccountSynced(proj.data.id)
     .catch(() => null);
   expect(failAttempt).toBeNull();
   h.setGatewayInterceptor(null);
 
   const failedRow = await h.conDb<{ sync_status: string; gateway_synced: boolean }[]>`
-    SELECT sync_status, gateway_synced FROM public.projects WHERE id = ${proj.data.id}::uuid
+    SELECT sync_status, gateway_synced FROM public.billing_accounts WHERE id = ${proj.data.id}::uuid
   `;
   expect(failedRow[0]).toEqual({ sync_status: "FAILED", gateway_synced: false });
 
@@ -857,7 +842,7 @@ test("background reconcile recovers failed syncs, runtime timers close cleanly, 
   await timerRuntime.close(2000);
 
   const gwProj = await h.gwDb<{ id: string }[]>`
-    SELECT id::text AS id FROM public.projects WHERE id = ${proj.data.id}::uuid
+    SELECT id::text AS id FROM public.billing_accounts WHERE id = ${proj.data.id}::uuid
   `;
   expect(gwProj.length).toBe(1);
 

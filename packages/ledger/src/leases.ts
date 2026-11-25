@@ -15,7 +15,7 @@ import {
 export type ActiveWalletLease = {
   leaseId: string;
   walletId: string;
-  projectId: string;
+  billingAccountId: string;
   currency: string;
   remainingInPg: bigint;
   freeInMemory: bigint;
@@ -45,7 +45,7 @@ export type LeasedHoldMeta = {
   walletLeaseId: string;
   supplierLeaseId: string;
   walletId: string;
-  projectId: string;
+  billingAccountId: string;
   apiKeyId: string | null;
   pricingOverrideId: string | null;
   discountNumerator: string | null;
@@ -274,7 +274,7 @@ export async function closeWalletLease(
 
       const nowMs = Date.now();
       const wRows = await tx`
-          SELECT id, project_id, currency, policy,
+          SELECT id, billing_account_id, currency, policy,
             available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
             debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
             credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason

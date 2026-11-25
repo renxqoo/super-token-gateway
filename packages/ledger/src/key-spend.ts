@@ -3,7 +3,7 @@ import type { ApiKeySpendSnapshot, SpendLimitWindow } from "./types.ts";
 
 export type KeySpendRow = {
   id: string;
-  project_id: string;
+  billing_account_id: string;
   spend_limit_atoms: bigint | null;
   spend_limit_window: SpendLimitWindow;
   spend_window_start_ms: number;
@@ -41,7 +41,7 @@ export function rolloverKeySpendInMemory(row: KeySpendRow, nowMs: number): void 
 export function toKeySpendRow(raw: Record<string, unknown>): KeySpendRow {
   return {
     id: String(raw.id),
-    project_id: String(raw.project_id),
+    billing_account_id: String(raw.billing_account_id),
     spend_limit_atoms:
       raw.spend_limit_atoms === null || raw.spend_limit_atoms === undefined
         ? null
@@ -94,7 +94,7 @@ export async function getApiKeySpend(
   nowMs = Date.now(),
 ): Promise<ApiKeySpendSnapshot | null> {
   const rows = await db`
-    SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
+    SELECT id, billing_account_id, spend_limit_atoms::text, spend_limit_window,
       spend_window_start, spent_atoms::text, reserved_atoms::text
     FROM public.api_keys
     WHERE id = ${keyId}
@@ -110,7 +110,7 @@ export async function getApiKeySpend(
         : "0";
   return {
     id: row.id,
-    project_id: row.project_id,
+    billing_account_id: row.billing_account_id,
     spend_limit_atoms: row.spend_limit_atoms === null ? null : row.spend_limit_atoms.toString(),
     spend_limit_window: row.spend_limit_window,
     spend_window_start: new Date(row.spend_window_start_ms).toISOString(),
@@ -128,7 +128,7 @@ export async function resetApiKeySpend(
     UPDATE public.api_keys
     SET spent_atoms = 0, spend_window_start = now()
     WHERE id = ${keyId}
-    RETURNING id, project_id, spend_limit_atoms::text, spend_limit_window,
+    RETURNING id, billing_account_id, spend_limit_atoms::text, spend_limit_window,
       spend_window_start, spent_atoms::text, reserved_atoms::text
   `;
   if (!rows.length) return null;
@@ -141,7 +141,7 @@ export async function resetApiKeySpend(
         : "0";
   return {
     id: row.id,
-    project_id: row.project_id,
+    billing_account_id: row.billing_account_id,
     spend_limit_atoms: row.spend_limit_atoms === null ? null : row.spend_limit_atoms.toString(),
     spend_limit_window: row.spend_limit_window,
     spend_window_start: new Date(row.spend_window_start_ms).toISOString(),

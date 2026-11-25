@@ -29,7 +29,7 @@ export type PluginDecision =
 export type PluginHookInput = {
   hook: PluginHook;
   request_id: string;
-  project_id: string;
+  billing_account_id: string;
   model: string;
   operation: string;
   text: string;

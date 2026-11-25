@@ -50,7 +50,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
 
   function retireWalletLease(lease: ActiveWalletLease): void {
     lease.closing = true;
-    const wk = walletKey(lease.projectId, lease.currency);
+    const wk = walletKey(lease.billingAccountId, lease.currency);
     if (activeWalletLeases.get(wk) === lease) {
       activeWalletLeases.delete(wk);
     }
@@ -68,8 +68,8 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
     closingSupplierLeases.add(lease);
   }
 
-  function invalidateWallet(projectId: string, currency: string): void {
-    const existing = activeWalletLeases.get(walletKey(projectId, currency));
+  function invalidateWallet(billingAccountId: string, currency: string): void {
+    const existing = activeWalletLeases.get(walletKey(billingAccountId, currency));
     if (existing) retireWalletLease(existing);
   }
 
@@ -307,10 +307,10 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
 
   function reserveHold(input: AcquireHoldInput, cust: bigint, sup: bigint): FastHoldRequest | null {
     const nowMs = Date.now();
-    const wk = walletKey(input.project_id, input.currency);
+    const wk = walletKey(input.billing_account_id, input.currency);
     const sk = supplierLeaseKey(
       supplierKey(input.supplier_account_id, input.supplier_currency),
-      walletLane(input.project_id),
+      walletLane(input.billing_account_id),
     );
     const wl = activeWalletLeases.get(wk);
     const sl = activeSupplierLeases.get(sk);
@@ -409,7 +409,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
   }
 
   function registerWallet(lease: ActiveWalletLease) {
-    const key = walletKey(lease.projectId, lease.currency);
+    const key = walletKey(lease.billingAccountId, lease.currency);
     const previous = activeWalletLeases.get(key);
     if (previous) retireWalletLease(previous);
     walletLeasesById.set(lease.leaseId, lease);

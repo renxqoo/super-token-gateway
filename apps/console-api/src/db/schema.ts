@@ -108,12 +108,12 @@ export const orgInvitations = pgTable("org_invitations", {
   createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
-export const projects = pgTable("projects", {
+export const billingAccounts = pgTable("billing_accounts", {
   id: uuid("id").primaryKey(),
   orgId: uuid("org_id")
     .notNull()
     .references(() => organizations.id, { onDelete: "cascade" }),
-  gatewayProjectId: uuid("gateway_project_id").notNull().unique(),
+  gatewayBillingAccountId: uuid("gateway_billing_account_id").notNull().unique(),
   name: text("name").notNull(),
   currency: text("currency").notNull().default("USD"),
   rpm: integer("rpm").notNull().default(6000),
@@ -136,9 +136,9 @@ export const projects = pgTable("projects", {
 
 export const apiKeyRecords = pgTable("api_key_records", {
   id: uuid("id").primaryKey(),
-  projectId: uuid("project_id")
+  billingAccountId: uuid("billing_account_id")
     .notNull()
-    .references(() => projects.id, { onDelete: "cascade" }),
+    .references(() => billingAccounts.id, { onDelete: "cascade" }),
   createdBy: uuid("created_by")
     .notNull()
     .references(() => users.id),
@@ -307,9 +307,9 @@ export const pricingOverrides = pgTable(
   "pricing_overrides",
   {
     id: uuid("id").primaryKey(),
-    projectId: uuid("project_id")
+    billingAccountId: uuid("billing_account_id")
       .notNull()
-      .references(() => projects.id, { onDelete: "cascade" }),
+      .references(() => billingAccounts.id, { onDelete: "cascade" }),
     modelName: text("model_name").notNull(),
     operation: text("operation").notNull().default("*"),
     overrideKind: text("override_kind").$type<"EXACT_PRICE" | "MULTIPLIER">().notNull(),
@@ -325,8 +325,8 @@ export const pricingOverrides = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
   },
   (t) => [
-    unique("pricing_overrides_project_id_model_name_operation_key").on(
-      t.projectId,
+    unique("pricing_overrides_billing_account_id_model_name_operation_key").on(
+      t.billingAccountId,
       t.modelName,
       t.operation,
     ),
@@ -339,7 +339,7 @@ export const usageEvents = pgTable("usage_events", {
   kind: text("kind").notNull(),
   requestId: uuid("request_id"),
   chargeId: uuid("charge_id"),
-  projectId: uuid("project_id"),
+  billingAccountId: uuid("billing_account_id"),
   orgId: uuid("org_id"),
   apiKeyId: uuid("api_key_id"),
   model: text("model"),
@@ -364,7 +364,7 @@ export const usageHourlyRollups = pgTable(
   "usage_hourly_rollups",
   {
     bucketHour: timestamp("bucket_hour", { withTimezone: true, mode: "date" }).notNull(),
-    projectId: uuid("project_id").notNull(),
+    billingAccountId: uuid("billing_account_id").notNull(),
     apiKeyId: text("api_key_id").notNull(),
     model: text("model").notNull(),
     operation: text("operation").notNull(),
@@ -381,7 +381,7 @@ export const usageHourlyRollups = pgTable(
   },
   (t) => [
     primaryKey({
-      columns: [t.bucketHour, t.projectId, t.apiKeyId, t.model, t.operation, t.currency],
+      columns: [t.bucketHour, t.billingAccountId, t.apiKeyId, t.model, t.operation, t.currency],
     }),
   ],
 );
@@ -390,7 +390,7 @@ export const usageDailyRollups = pgTable(
   "usage_daily_rollups",
   {
     bucketDay: date("bucket_day", { mode: "string" }).notNull(),
-    projectId: uuid("project_id").notNull(),
+    billingAccountId: uuid("billing_account_id").notNull(),
     apiKeyId: text("api_key_id").notNull(),
     model: text("model").notNull(),
     operation: text("operation").notNull(),
@@ -407,16 +407,16 @@ export const usageDailyRollups = pgTable(
   },
   (t) => [
     primaryKey({
-      columns: [t.bucketDay, t.projectId, t.apiKeyId, t.model, t.operation, t.currency],
+      columns: [t.bucketDay, t.billingAccountId, t.apiKeyId, t.model, t.operation, t.currency],
     }),
   ],
 );
 
 export const alertRules = pgTable("alert_rules", {
   id: uuid("id").primaryKey(),
-  projectId: uuid("project_id")
+  billingAccountId: uuid("billing_account_id")
     .notNull()
-    .references(() => projects.id, { onDelete: "cascade" }),
+    .references(() => billingAccounts.id, { onDelete: "cascade" }),
   kind: text("kind").$type<"LOW_BALANCE" | "DAILY_SPEND">().notNull(),
   thresholdAtoms: numeric("threshold_atoms", { precision: 38, scale: 0 }).notNull(),
   webhookUrl: text("webhook_url"),
@@ -427,9 +427,9 @@ export const alertRules = pgTable("alert_rules", {
 });
 
 export const alertEvalQueue = pgTable("alert_eval_queue", {
-  projectId: uuid("project_id")
+  billingAccountId: uuid("billing_account_id")
     .primaryKey()
-    .references(() => projects.id, { onDelete: "cascade" }),
+    .references(() => billingAccounts.id, { onDelete: "cascade" }),
   dirtyAt: timestamp("dirty_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
   generation: uuid("generation").notNull().defaultRandom(),
   nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true, mode: "date" })
@@ -442,7 +442,7 @@ export const alertDeliveries = pgTable("alert_deliveries", {
   ruleId: uuid("rule_id")
     .notNull()
     .references(() => alertRules.id, { onDelete: "cascade" }),
-  projectId: uuid("project_id").notNull(),
+  billingAccountId: uuid("billing_account_id").notNull(),
   status: text("status").$type<"RECORDED" | "PENDING" | "DELIVERED" | "FAILED">().notNull(),
   webhookUrl: text("webhook_url"),
   attempts: integer("attempts").notNull().default(0),
@@ -490,7 +490,7 @@ export const consoleSchema = {
   organizations,
   orgMembers,
   orgInvitations,
-  projects,
+  billingAccounts,
   apiKeyRecords,
   upstreamAccounts,
   channels,

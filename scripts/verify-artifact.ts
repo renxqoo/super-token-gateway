@@ -1,3 +1,4 @@
+import { localConsoleTokenEnvironment, writeLocalInternalAuth } from "./local-internal-auth.ts";
 import { spawn } from "node:child_process";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -53,13 +54,15 @@ try {
   await adminDb.unsafe(`CREATE DATABASE ${dbName}`);
   await adminDb.unsafe(`CREATE DATABASE ${consoleDbName}`);
 
-  const adminToken = "artifact-admin-token-0123456789ab";
+  const operatorToken = crypto.randomUUID() + crypto.randomUUID();
+  const internalAuthFile = join(tempDir, "internal-auth.json");
+  await writeLocalInternalAuth(internalAuthFile, operatorToken);
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     DATABASE_URL: targetUrl.toString(),
     KEY_PEPPER: "artifact-pepper-0123456789abcdef",
     ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    ADMIN_TOKEN: adminToken,
+    INTERNAL_AUTH_FILE: internalAuthFile,
     ALLOW_PRIVATE_UPSTREAMS: "true",
     GATEWAY_HOST: "127.0.0.1",
     GATEWAY_PORT: "18080",
@@ -81,7 +84,7 @@ try {
     CONSOLE_ADMIN_PORT: "18093",
     GATEWAY_INTERNAL_URL: "http://127.0.0.1:18081",
     GATEWAY_PUBLIC_URL: "http://127.0.0.1:18080",
-    GATEWAY_ADMIN_TOKEN: adminToken,
+    ...localConsoleTokenEnvironment(operatorToken),
     OUTBOX_WEBHOOK_TOKEN: "artifact-outbox-webhook-token-1234",
     BOOTSTRAP_ADMIN_EMAIL: "root@artifact.test",
     BOOTSTRAP_ADMIN_TOKEN: "artifact-bootstrap-token-1234",
@@ -158,10 +161,10 @@ try {
   const tenant = (await consoleRegistration.json()) as {
     access_token: string;
     default_org_id: string;
-    default_project_id: string;
+    default_billing_account_id: string;
   };
   const issueKey = await fetch(
-    `http://127.0.0.1:18092/api/v1/projects/${tenant.default_project_id}/api-keys`,
+    `http://127.0.0.1:18092/api/v1/billing-accounts/${tenant.default_billing_account_id}/api-keys`,
     {
       method: "POST",
       headers: {
@@ -173,19 +176,29 @@ try {
   );
   if (issueKey.status !== 201)
     throw new Error(`Console artifact API key creation returned ${issueKey.status}`);
-  const { key: consoleKey } = (await issueKey.json()) as { key: string };
+  const issued = (await issueKey.json()) as { id: string };
+  const rotated = await fetch(
+    `http://127.0.0.1:18092/api/v1/billing-accounts/${tenant.default_billing_account_id}/api-keys/${issued.id}/rotate`,
+    { method: "POST", headers: { authorization: `Bearer ${tenant.access_token}` } },
+  );
+  if (rotated.status !== 201)
+    throw new Error(`Console artifact Key rotation returned ${rotated.status}`);
+  const rotatedKey = (await rotated.json()) as { id: string; key: string };
+  const consoleKey = rotatedKey.key;
   const gatewayDb = createDatabase(targetUrl.toString(), 2);
   try {
-    await gatewayDb`UPDATE public.projects SET external_ref = NULL WHERE id = ${tenant.default_project_id}`;
-    await runSync(tempDir, ["dist/tools/console-migrate.js", "--bind-projects"], consoleEnv);
-    await runSync(tempDir, ["dist/tools/console-migrate.js", "--bind-projects"], consoleEnv);
     const [bound] =
-      await gatewayDb`SELECT external_ref FROM public.projects WHERE id = ${tenant.default_project_id}`;
+      await gatewayDb`SELECT external_ref FROM public.billing_accounts WHERE id = ${tenant.default_billing_account_id}`;
     if (
       bound?.external_ref !==
-      `console:org:${tenant.default_org_id}:project:${tenant.default_project_id}`
+      `console:org:${tenant.default_org_id}:billing-account:${tenant.default_billing_account_id}`
     ) {
-      throw new Error("Console artifact did not repair a legacy project binding");
+      throw new Error("Console artifact did not bind the billing account at signup");
+    }
+    const [scope] =
+      await gatewayDb`SELECT resource_scope_id FROM public.api_keys WHERE id = ${rotatedKey.id}`;
+    if (scope?.resource_scope_id !== issued.id) {
+      throw new Error("Console artifact did not record the resource scope at rotation");
     }
   } finally {
     await gatewayDb.close();
@@ -212,7 +225,7 @@ try {
   }
 
   const adminHeaders = {
-    authorization: `Bearer ${env.ADMIN_TOKEN}`,
+    authorization: `Bearer ${operatorToken}`,
     "content-type": "application/json",
   };
   const postInternal = async (method: string, path: string, body?: unknown) => {
@@ -225,15 +238,15 @@ try {
     return (await res.json()) as Record<string, unknown>;
   };
 
-  const project = await postInternal("PUT", "/internal/v1/projects", {
+  const billingAccount = await postInternal("PUT", "/internal/v1/billing-accounts", {
     name: "artifact-proj",
     currency: "USD",
   });
   const key = await postInternal("PUT", "/internal/v1/api-keys", {
-    project_id: project.id,
+    billing_account_id: billingAccount.id,
     name: "artifact-key",
   });
-  await postInternal("POST", `/internal/v1/wallets/${project.id}/credits`, {
+  await postInternal("POST", `/internal/v1/wallets/${billingAccount.id}/credits`, {
     currency: "USD",
     external_ref: "art-credit-1",
     amount_atoms: "100000",

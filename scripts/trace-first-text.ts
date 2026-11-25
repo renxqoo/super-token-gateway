@@ -44,7 +44,7 @@ const traceDb = process.env.TRACE_DATABASE_URL;
 if (values.persist && !traceDb) throw new Error("TRACE_DATABASE_URL is required when persisting");
 const key: unknown = keyPath ? (await Bun.file(keyPath).json()).key : process.env.GATEWAY_API_KEY;
 if (typeof key !== "string" || !/^sk_[A-Za-z0-9_-]{43}$/.test(key))
-  throw new Error("Expected a Gateway project API Key");
+  throw new Error("Expected a Gateway billingAccount API Key");
 const input: unknown = await Bun.file(values.request).json();
 if (typeof input !== "object" || input === null || Array.isArray(input))
   throw new Error("Expected a request object");
@@ -175,7 +175,7 @@ if (values.persist && traceDb && requestId && gatewayTraceId === traceId) {
               trace_id: traceId,
               span_id: clientSpanId,
               request_id: requestId,
-              project_id: gateway.project_id,
+              billing_account_id: gateway.billing_account_id,
               source: "client",
               start_ms: performance.timeOrigin + startedAt,
               span: {

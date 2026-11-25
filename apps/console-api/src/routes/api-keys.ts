@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
-import { recordAuditLog, requireProjectAccess } from "../auth.ts";
+import { recordAuditLog, requireBillingAccountAccess } from "../auth.ts";
 import { apiKeyRecords, type ConsoleDrizzle, type SpendLimitWindow } from "../db/schema.ts";
 import {
   cidrSchema,
@@ -13,6 +13,7 @@ import {
   parseUuid,
   requireClientAuth,
   sanitizeApiKeyForClient,
+  toBillingAccountScope,
   type ConsoleDeps,
   type ConsoleEnv,
 } from "./shared.ts";
@@ -61,32 +62,33 @@ async function abandonKey(orm: ConsoleDrizzle, keyId: string): Promise<void> {
 export function createApiKeyRoutes(deps: ConsoleDeps) {
   const app = new Hono<ConsoleEnv>();
   const auth = requireClientAuth(deps);
-  app.use("/projects/:projectId/api-keys", auth);
-  app.use("/projects/:projectId/api-keys/*", auth);
+  app.use("/billing-accounts/:billingAccountId/api-keys", auth);
+  app.use("/billing-accounts/:billingAccountId/api-keys/*", auth);
 
-  app.get("/projects/:projectId/api-keys", async (c) => {
+  app.get("/billing-accounts/:billingAccountId/api-keys", async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    await requireProjectAccess(deps.orm, user.id, projectId);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    await requireBillingAccountAccess(deps.orm, user.id, billingAccountId);
     const { limit, offset } = parseLimitOffset(c, 50, 200);
     const items = await deps.orm
       .select()
       .from(apiKeyRecords)
-      .where(eq(apiKeyRecords.projectId, projectId))
+      .where(eq(apiKeyRecords.billingAccountId, billingAccountId))
       .orderBy(desc(apiKeyRecords.createdAt))
       .limit(limit)
       .offset(offset);
     return c.json({ items: items.map(sanitizeApiKeyForClient), limit, offset });
   });
 
-  app.post("/projects/:projectId/api-keys", async (c) => {
+  app.post("/billing-accounts/:billingAccountId/api-keys", async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project, role } = await requireProjectAccess(deps.orm, user.id, projectId, [
-      "OWNER",
-      "ADMIN",
-      "DEVELOPER",
-    ]);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount, role } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+      ["OWNER", "ADMIN", "DEVELOPER"],
+    );
     const body = await parseJsonBody(c, createApiKeySchema);
 
     let effectiveSpendLimit = body.spend_limit_atoms ?? null;
@@ -98,17 +100,17 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
           "DEVELOPER role can only create INVOKER or VIEWER API keys",
         );
       }
-      if (project.developerKeySpendLimitAtoms !== null) {
+      if (billingAccount.developerKeySpendLimitAtoms !== null) {
         if (body.spend_limit_atoms === undefined) {
-          effectiveSpendLimit = project.developerKeySpendLimitAtoms;
+          effectiveSpendLimit = billingAccount.developerKeySpendLimitAtoms;
         } else if (
           body.spend_limit_atoms === null ||
-          BigInt(body.spend_limit_atoms) > BigInt(project.developerKeySpendLimitAtoms)
+          BigInt(body.spend_limit_atoms) > BigInt(billingAccount.developerKeySpendLimitAtoms)
         ) {
           throw new GatewayError(
             403,
             "forbidden",
-            "API key spend limit exceeds project policy for DEVELOPER role",
+            "API key spend limit exceeds the billing account policy for DEVELOPER role",
           );
         }
       }
@@ -116,31 +118,31 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
 
     const keyId = crypto.randomUUID();
     await deps.orm.transaction(async (tx) => {
-      if (role === "DEVELOPER" && project.developerMaxActiveKeys !== null) {
+      if (role === "DEVELOPER" && billingAccount.developerMaxActiveKeys !== null) {
         await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(88421201, hashtext(${`${projectId}:${user.id}`}))`,
+          sql`SELECT pg_advisory_xact_lock(88421201, hashtext(${`${billingAccountId}:${user.id}`}))`,
         );
         const [cnt] = await tx
           .select({ total: sql<number>`count(*)::int` })
           .from(apiKeyRecords)
           .where(
             and(
-              eq(apiKeyRecords.projectId, projectId),
+              eq(apiKeyRecords.billingAccountId, billingAccountId),
               eq(apiKeyRecords.createdBy, user.id),
               isNull(apiKeyRecords.revokedAt),
             ),
           );
-        if (Number(cnt?.total ?? 0) >= project.developerMaxActiveKeys) {
+        if (Number(cnt?.total ?? 0) >= billingAccount.developerMaxActiveKeys) {
           throw new GatewayError(
             403,
             "key_limit_exceeded",
-            "Active API key limit reached for DEVELOPER role in this project",
+            "Active API key limit reached for DEVELOPER role in this billing account",
           );
         }
       }
       await tx.insert(apiKeyRecords).values({
         id: keyId,
-        projectId,
+        billingAccountId,
         createdBy: user.id,
         name: body.name,
         keyPrefix: "pending",
@@ -166,12 +168,12 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
         );
       await recordAuditLog(deps.orm, {
         actor: user,
-        orgId: project.orgId,
+        orgId: billingAccount.orgId,
         action: "api_key.create",
         targetType: "api_key",
         targetId: keyId,
         metadata: {
-          project_id: projectId,
+          billing_account_id: billingAccountId,
           name: body.name,
           allowed_cidrs: body.allowed_cidrs,
           spend_limit_atoms: effectiveSpendLimit,
@@ -189,20 +191,20 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     }
   });
 
-  app.patch("/projects/:projectId/api-keys/:keyId", async (c) => {
+  app.patch("/billing-accounts/:billingAccountId/api-keys/:keyId", async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const keyId = parseUuid(c.req.param("keyId"), "keyId");
-    const { project, role } = await requireProjectAccess(deps.orm, user.id, projectId, [
-      "OWNER",
-      "ADMIN",
-      "FINANCE",
-      "DEVELOPER",
-    ]);
+    const { billingAccount, role } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+      ["OWNER", "ADMIN", "FINANCE", "DEVELOPER"],
+    );
     const [existing] = await deps.orm
       .select()
       .from(apiKeyRecords)
-      .where(and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.projectId, projectId)))
+      .where(and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.billingAccountId, billingAccountId)))
       .limit(1);
     if (!existing) throw new GatewayError(404, "not_found", "API key not found");
     if (existing.revokedAt) {
@@ -271,7 +273,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
       const synced = await deps.sync.syncApiKey(keyId);
       await recordAuditLog(deps.orm, {
         actor: user,
-        orgId: project.orgId,
+        orgId: billingAccount.orgId,
         action: "api_key.update",
         targetType: "api_key",
         targetId: keyId,
@@ -307,63 +309,67 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     }
   });
 
-  app.get("/projects/:projectId/api-keys/:keyId/spend", async (c) => {
+  app.get("/billing-accounts/:billingAccountId/api-keys/:keyId/spend", async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const keyId = parseUuid(c.req.param("keyId"), "keyId");
-    await requireProjectAccess(deps.orm, user.id, projectId);
+    await requireBillingAccountAccess(deps.orm, user.id, billingAccountId);
     const [existing] = await deps.orm
       .select({ id: apiKeyRecords.id })
       .from(apiKeyRecords)
-      .where(and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.projectId, projectId)))
+      .where(and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.billingAccountId, billingAccountId)))
       .limit(1);
     if (!existing) throw new GatewayError(404, "not_found", "API key not found");
     const spend = await deps.gateway.getApiKeySpend(keyId);
-    return c.json(spend);
+    return c.json(toBillingAccountScope(spend, billingAccountId));
   });
 
-  app.post("/projects/:projectId/api-keys/:keyId/reset-spend", async (c) => {
+  app.post("/billing-accounts/:billingAccountId/api-keys/:keyId/reset-spend", async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const keyId = parseUuid(c.req.param("keyId"), "keyId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId, [
-      "OWNER",
-      "ADMIN",
-      "FINANCE",
-    ]);
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+      ["OWNER", "ADMIN", "FINANCE"],
+    );
     const [existing] = await deps.orm
       .select({ id: apiKeyRecords.id })
       .from(apiKeyRecords)
-      .where(and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.projectId, projectId)))
+      .where(and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.billingAccountId, billingAccountId)))
       .limit(1);
     if (!existing) throw new GatewayError(404, "not_found", "API key not found");
     const spend = await deps.gateway.resetApiKeySpend(keyId, `reset by ${user.email}`);
     await recordAuditLog(deps.orm, {
       actor: user,
-      orgId: project.orgId,
+      orgId: billingAccount.orgId,
       action: "api_key.reset_spend",
       targetType: "api_key",
       targetId: keyId,
     });
-    return c.json(spend);
+    return c.json(toBillingAccountScope(spend, billingAccountId));
   });
 
-  app.post("/projects/:projectId/api-keys/:keyId/rotate", async (c) => {
+  app.post("/billing-accounts/:billingAccountId/api-keys/:keyId/rotate", async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const keyId = parseUuid(c.req.param("keyId"), "keyId");
-    const { project, role } = await requireProjectAccess(deps.orm, user.id, projectId, [
-      "OWNER",
-      "ADMIN",
-      "DEVELOPER",
-    ]);
+    const { billingAccount, role } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+      ["OWNER", "ADMIN", "DEVELOPER"],
+    );
 
     const newKeyId = crypto.randomUUID();
     const previousRevision = await deps.orm.transaction(async (tx) => {
       const [existing] = await tx
         .select()
         .from(apiKeyRecords)
-        .where(and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.projectId, projectId)))
+        .where(
+          and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.billingAccountId, billingAccountId)),
+        )
         .for("update");
       if (!existing) throw new GatewayError(404, "not_found", "API key not found");
       if (existing.revokedAt) {
@@ -383,7 +389,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
       }
       await tx.insert(apiKeyRecords).values({
         id: newKeyId,
-        projectId,
+        billingAccountId,
         createdBy: user.id,
         rotatedFromKeyId: keyId,
         name: existing.name,
@@ -444,7 +450,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
 
     await recordAuditLog(deps.orm, {
       actor: user,
-      orgId: project.orgId,
+      orgId: billingAccount.orgId,
       action: "api_key.rotate",
       targetType: "api_key",
       targetId: newKeyId,
@@ -461,19 +467,20 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     );
   });
 
-  app.delete("/projects/:projectId/api-keys/:keyId", async (c) => {
+  app.delete("/billing-accounts/:billingAccountId/api-keys/:keyId", async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const keyId = parseUuid(c.req.param("keyId"), "keyId");
-    const { project, role } = await requireProjectAccess(deps.orm, user.id, projectId, [
-      "OWNER",
-      "ADMIN",
-      "DEVELOPER",
-    ]);
+    const { billingAccount, role } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+      ["OWNER", "ADMIN", "DEVELOPER"],
+    );
     const [existing] = await deps.orm
       .select()
       .from(apiKeyRecords)
-      .where(and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.projectId, projectId)))
+      .where(and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.billingAccountId, billingAccountId)))
       .limit(1);
     if (!existing) throw new GatewayError(404, "not_found", "API key not found");
     if (role === "DEVELOPER") {
@@ -494,7 +501,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
 
     await recordAuditLog(deps.orm, {
       actor: user,
-      orgId: project.orgId,
+      orgId: billingAccount.orgId,
       action: "api_key.revoke",
       targetType: "api_key",
       targetId: keyId,

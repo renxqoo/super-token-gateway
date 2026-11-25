@@ -1,3 +1,4 @@
+import { writeLocalInternalAuth } from "./local-internal-auth.ts";
 import { spawn } from "node:child_process";
 import { openSync, closeSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
@@ -36,7 +37,7 @@ const gwLogPath = process.env.BENCH_GW_LOG;
 const upstreamTls =
   process.env.BENCH_UPSTREAM_TLS === "1" || process.env.BENCH_UPSTREAM_TLS === "true";
 const useFastClient = process.env.BENCH_FAST_CLIENT !== "0";
-const projectCount = Number(process.env.BENCH_PROJECTS ?? 32);
+const billingAccountCount = Number(process.env.BENCH_BILLING_ACCOUNTS ?? 32);
 
 async function findFreePort(): Promise<number> {
   return new Promise((resolvePort, rejectPort) => {
@@ -137,13 +138,16 @@ try {
     findFreePort(),
   ]);
 
+  const operatorToken = crypto.randomUUID() + crypto.randomUUID();
+  const internalAuthFile = join(tempDir, "internal-auth.json");
+  await writeLocalInternalAuth(internalAuthFile, operatorToken);
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     BUN_CONFIG_MAX_HTTP_REQUESTS: String(Math.max(4096, maxInFlight)),
     DATABASE_URL: targetUrl.toString(),
     KEY_PEPPER: "bsingle-pepper-0123456789abcdef01",
     ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    ADMIN_TOKEN: "bsingle-admin-token-0123456789abc",
+    INTERNAL_AUTH_FILE: internalAuthFile,
     ALLOW_PRIVATE_UPSTREAMS: "true",
     ACCESS_LOG: accessLog ? "true" : "false",
     SNAPSHOT_POLL_MS: "0",
@@ -237,7 +241,7 @@ try {
   }
 
   const adminHeaders = {
-    authorization: `Bearer ${env.ADMIN_TOKEN}`,
+    authorization: `Bearer ${operatorToken}`,
     "content-type": "application/json",
   };
   const callInternal = async (method: string, path: string, body?: unknown) => {
@@ -318,8 +322,8 @@ try {
   });
 
   const keys: string[] = [];
-  for (let i = 0; i < projectCount; i++) {
-    const p = await callInternal("PUT", "/internal/v1/projects", {
+  for (let i = 0; i < billingAccountCount; i++) {
+    const p = await callInternal("PUT", "/internal/v1/billing-accounts", {
       name: `bsingle-p-${i}`,
       currency: "USD",
       rpm: 10_000_000,
@@ -327,7 +331,7 @@ try {
       concurrency: Math.max(5000, maxInFlight),
     });
     const k = await callInternal("PUT", "/internal/v1/api-keys", {
-      project_id: p.id,
+      billing_account_id: p.id,
       name: `k-${i}`,
     });
     await callInternal("POST", `/internal/v1/wallets/${p.id}/credits`, {
@@ -542,7 +546,7 @@ try {
           pg_checkpointer_delta: diffCheckpointerStats(ckptBefore, ckptAfter),
           topology: `1x standalone dist/gateway + 2x standalone dist/mock-providers (ROUND_ROBIN, ${mockScheme.toUpperCase()}) + ${useFastClient ? "Bun native HTTP/1.1" : "node:http"} keep-alive client (maxSockets=${maxSockets}) + PG 17`,
           options: {
-            projects: projectCount,
+            billingAccounts: billingAccountCount,
             max_in_flight: maxInFlight,
             upstream_delay_ms: upstreamDelayMs,
             access_log: accessLog,

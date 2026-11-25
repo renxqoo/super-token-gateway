@@ -16,8 +16,8 @@ import {
   plugins,
   pluginRevocations,
   priceVersions,
-  projectPricingOverrides,
-  projects,
+  billingAccountPricingOverrides,
+  billingAccounts,
   routes,
   upstreamAccounts,
   wallets,
@@ -38,8 +38,8 @@ import type {
   PriceBasis,
   PriceSide,
   PriceVersionRecord,
-  ProjectPricingOverrideRecord,
-  ProjectRecord,
+  BillingAccountPricingOverrideRecord,
+  BillingAccountRecord,
   ProviderPluginConfig,
   RouteRecord,
   RouteRetryPolicy,
@@ -138,49 +138,26 @@ export function createCatalogRepository(db: SQL) {
     async getConsoleAdmission(
       organizationId: string,
       externalRef: string,
-      projectId: string,
+      billingAccountId: string,
       keyId: string,
     ) {
       const [row] = await db<
         {
-          project_enabled: boolean;
+          billing_account_enabled: boolean;
           key_enabled: boolean;
           suspended: boolean;
         }[]
-      >`SELECT p.enabled AS project_enabled,
+      >`SELECT p.enabled AS billing_account_enabled,
           k.enabled AND (k.expires_at IS NULL OR k.expires_at > now()) AS key_enabled,
           coalesce(o.suspended, false) AS suspended
-        FROM public.projects p
-        JOIN public.api_keys k ON k.project_id = p.id AND k.id = ${keyId}
+        FROM public.billing_accounts p
+        JOIN public.api_keys k ON k.billing_account_id = p.id AND k.id = ${keyId}
         LEFT JOIN public.console_organization_admission o ON o.organization_id = ${organizationId}
-        WHERE p.id = ${projectId} AND p.external_ref = ${externalRef}`;
+        WHERE p.id = ${billingAccountId} AND p.external_ref = ${externalRef}`;
       return row;
     },
 
-    async bindConsoleProject(projectId: string, externalRef: string) {
-      return orm.transaction(async (tx) => {
-        const [project] = await tx
-          .select({ externalRef: projects.externalRef })
-          .from(projects)
-          .where(eq(projects.id, projectId))
-          .for("update");
-        if (!project) throw new DomainError("not_found", "Gateway project does not exist");
-        if (project.externalRef === externalRef) return { bound: false };
-        if (project.externalRef !== null) {
-          throw new DomainError(
-            "console_project_binding_conflict",
-            "Gateway project already has another external reference",
-          );
-        }
-        await tx
-          .update(projects)
-          .set({ externalRef, updatedAt: sql`now()` })
-          .where(eq(projects.id, projectId));
-        return { bound: true, config_epoch: await bumpEpoch(tx) };
-      });
-    },
-
-    async upsertProject(input: {
+    async upsertBillingAccount(input: {
       id?: string;
       external_ref?: string | null;
       name: string;
@@ -190,22 +167,24 @@ export function createCatalogRepository(db: SQL) {
       concurrency: number;
       enabled?: boolean;
       source_revision?: number;
-    }): Promise<ProjectRecord & { config_epoch: number; source_revision: number }> {
+    }): Promise<BillingAccountRecord & { config_epoch: number; source_revision: number }> {
       const id = input.id ?? crypto.randomUUID();
       const currency = input.currency ?? "USD";
       const externalRef = input.external_ref ?? null;
       const enabled = input.enabled ?? true;
       const sourceRev = input.source_revision;
-      const bindingChangeAllowed = sql`(${projects.externalRef} IS NULL
-        OR ${projects.externalRef} NOT LIKE 'console:org:%'
-        OR ${projects.externalRef} IS NOT DISTINCT FROM ${externalRef})`;
+      const bindingChangeAllowed = sql`(${billingAccounts.externalRef} IS NULL
+        OR ${billingAccounts.externalRef} NOT LIKE 'console:org:%'
+        OR ${billingAccounts.externalRef} IS NOT DISTINCT FROM ${externalRef})`;
       const canUpdate = and(
-        sourceRev !== undefined ? sql`${projects.sourceRevision} <= ${sourceRev}` : undefined,
+        sourceRev !== undefined
+          ? sql`${billingAccounts.sourceRevision} <= ${sourceRev}`
+          : undefined,
         input.external_ref !== undefined ? bindingChangeAllowed : undefined,
       );
       return orm.transaction(async (tx) => {
         const rows = await tx
-          .insert(projects)
+          .insert(billingAccounts)
           .values({
             id,
             externalRef,
@@ -218,13 +197,13 @@ export function createCatalogRepository(db: SQL) {
             ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
           })
           .onConflictDoUpdate({
-            target: projects.id,
+            target: billingAccounts.id,
             ...(canUpdate ? { setWhere: canUpdate } : {}),
             set: {
               externalRef:
                 input.external_ref !== undefined
                   ? externalRef
-                  : sql`CASE WHEN ${projects.externalRef} LIKE 'console:org:%' THEN ${projects.externalRef} ELSE NULL END`,
+                  : sql`CASE WHEN ${billingAccounts.externalRef} LIKE 'console:org:%' THEN ${billingAccounts.externalRef} ELSE NULL END`,
               name: input.name,
               currency,
               rpm: input.rpm,
@@ -238,32 +217,32 @@ export function createCatalogRepository(db: SQL) {
           .returning();
         if (!rows[0]) {
           const [existing] = await tx
-            .select({ externalRef: projects.externalRef })
-            .from(projects)
-            .where(eq(projects.id, id));
+            .select({ externalRef: billingAccounts.externalRef })
+            .from(billingAccounts)
+            .where(eq(billingAccounts.id, id));
           if (
             input.external_ref !== undefined &&
             existing?.externalRef?.startsWith("console:org:") &&
             existing.externalRef !== externalRef
           ) {
             throw new DomainError(
-              "console_project_binding_conflict",
-              "Console project organization binding is immutable",
+              "console_billing_account_binding_conflict",
+              "Console billing account organization binding is immutable",
             );
           }
           throw new DomainError(
             "stale_revision",
-            "Incoming project revision is older than current Gateway revision",
+            "Incoming billing account revision is older than current Gateway revision",
           );
         }
         await tx
           .insert(wallets)
           .values({
             id: crypto.randomUUID(),
-            projectId: id,
+            billingAccountId: id,
             currency,
           })
-          .onConflictDoNothing({ target: [wallets.projectId, wallets.currency] });
+          .onConflictDoNothing({ target: [wallets.billingAccountId, wallets.currency] });
         const epoch = await bumpEpoch(tx);
         const r = rows[0]!;
         return {
@@ -283,7 +262,8 @@ export function createCatalogRepository(db: SQL) {
 
     async upsertApiKey(input: {
       id?: string;
-      project_id: string;
+      billing_account_id: string;
+      rotated_from_key_id?: string;
       name: string;
       verifier: string;
       prefix: string;
@@ -299,7 +279,8 @@ export function createCatalogRepository(db: SQL) {
     }): Promise<
       ApiKeyRecord & { config_epoch: number; created: boolean; source_revision: number }
     > {
-      const id = input.id ?? crypto.randomUUID();
+      const id = input.id?.toLowerCase() ?? crypto.randomUUID();
+      const billingAccountId = input.billing_account_id.toLowerCase();
       const role = input.role ?? "INVOKER";
       const allowedCidrs = input.allowed_cidrs ?? [];
       const keyModels = input.models ?? [];
@@ -312,7 +293,12 @@ export function createCatalogRepository(db: SQL) {
       const sourceRev = input.source_revision;
       return orm.transaction(async (tx) => {
         const [existed] = await tx
-          .select({ id: apiKeys.id, sourceRevision: apiKeys.sourceRevision })
+          .select({
+            id: apiKeys.id,
+            billingAccountId: apiKeys.billingAccountId,
+            scope: apiKeys.resourceScopeId,
+            sourceRevision: apiKeys.sourceRevision,
+          })
           .from(apiKeys)
           .where(eq(apiKeys.id, id))
           .for("update");
@@ -322,11 +308,45 @@ export function createCatalogRepository(db: SQL) {
             "Incoming API key revision is older than current Gateway revision",
           );
         }
+        if (existed && existed.billingAccountId !== billingAccountId) {
+          throw new DomainError("api_key_scope_conflict", "API key billing account is immutable");
+        }
+        let resourceScopeId = existed?.scope ?? null;
+        if (input.rotated_from_key_id) {
+          const [parent] = await tx
+            .select({
+              id: apiKeys.id,
+              scope: apiKeys.resourceScopeId,
+              billingAccountId: apiKeys.billingAccountId,
+            })
+            .from(apiKeys)
+            .where(eq(apiKeys.id, input.rotated_from_key_id))
+            .for("share");
+          const parentScope = parent?.scope ?? parent?.id;
+          if (
+            !parent ||
+            parent.billingAccountId !== billingAccountId ||
+            parent.id === id ||
+            parentScope === id ||
+            (existed && resourceScopeId !== parentScope)
+          ) {
+            throw new DomainError("api_key_scope_conflict", "Invalid API key rotation scope");
+          }
+          resourceScopeId = parentScope!;
+        }
+        const sameScope =
+          resourceScopeId === null ? undefined : eq(apiKeys.resourceScopeId, resourceScopeId);
+        const canUpdate = and(
+          eq(apiKeys.billingAccountId, billingAccountId),
+          sameScope,
+          sourceRev === undefined ? undefined : sql`${apiKeys.sourceRevision} <= ${sourceRev}`,
+        );
         const rows = await tx
           .insert(apiKeys)
           .values({
             id,
-            projectId: input.project_id,
+            billingAccountId,
+            resourceScopeId,
             name: input.name,
             verifier: input.verifier,
             prefix: input.prefix,
@@ -342,9 +362,7 @@ export function createCatalogRepository(db: SQL) {
           })
           .onConflictDoUpdate({
             target: apiKeys.id,
-            ...(sourceRev !== undefined
-              ? { setWhere: sql`${apiKeys.sourceRevision} <= ${sourceRev}` }
-              : {}),
+            setWhere: canUpdate!,
             set: {
               name: input.name,
               role,
@@ -369,7 +387,7 @@ export function createCatalogRepository(db: SQL) {
         const r = rows[0]!;
         return {
           id: r.id,
-          project_id: r.projectId,
+          billing_account_id: r.billingAccountId,
           name: r.name,
           verifier: r.verifier,
           prefix: r.prefix,
@@ -1055,7 +1073,7 @@ export function createCatalogRepository(db: SQL) {
     async loadSnapshot(previous?: ConfigSnapshot): Promise<ConfigSnapshot> {
       const {
         epochRows,
-        projectRows,
+        billingAccountRows,
         keyRows,
         accountRows,
         channelRows,
@@ -1070,7 +1088,7 @@ export function createCatalogRepository(db: SQL) {
         async (tx) => {
           const [
             epochRows,
-            projectRows,
+            billingAccountRows,
             keyRows,
             accountRows,
             channelRows,
@@ -1085,7 +1103,7 @@ export function createCatalogRepository(db: SQL) {
               .select({ version: configEpoch.version, lineageToken: configEpoch.lineageToken })
               .from(configEpoch)
               .where(eq(configEpoch.id, 1)),
-            tx.select().from(projects),
+            tx.select().from(billingAccounts),
             tx.select().from(apiKeys),
             tx.select().from(upstreamAccounts),
             tx.select().from(channels),
@@ -1093,8 +1111,8 @@ export function createCatalogRepository(db: SQL) {
             tx.select().from(priceVersions),
             tx
               .select()
-              .from(projectPricingOverrides)
-              .where(eq(projectPricingOverrides.enabled, true)),
+              .from(billingAccountPricingOverrides)
+              .where(eq(billingAccountPricingOverrides.enabled, true)),
             tx
               .select()
               .from(routes)
@@ -1142,7 +1160,7 @@ export function createCatalogRepository(db: SQL) {
           }
           return {
             epochRows,
-            projectRows,
+            billingAccountRows,
             keyRows,
             accountRows,
             channelRows,
@@ -1158,9 +1176,9 @@ export function createCatalogRepository(db: SQL) {
         { isolationLevel: "repeatable read", accessMode: "read only" },
       );
 
-      const projectMap = new Map<string, ProjectRecord>();
-      for (const r of projectRows) {
-        projectMap.set(r.id, {
+      const billingAccountMap = new Map<string, BillingAccountRecord>();
+      for (const r of billingAccountRows) {
+        billingAccountMap.set(r.id, {
           id: r.id,
           external_ref: r.externalRef,
           name: r.name,
@@ -1176,7 +1194,7 @@ export function createCatalogRepository(db: SQL) {
       for (const r of keyRows) {
         keysByVerifier.set(r.verifier, {
           id: r.id,
-          project_id: r.projectId,
+          billing_account_id: r.billingAccountId,
           name: r.name,
           verifier: r.verifier,
           prefix: r.prefix,
@@ -1297,11 +1315,14 @@ export function createCatalogRepository(db: SQL) {
         }
       }
 
-      const pricingOverridesByProject = new Map<string, ProjectPricingOverrideRecord[]>();
+      const pricingOverridesByBillingAccount = new Map<
+        string,
+        BillingAccountPricingOverrideRecord[]
+      >();
       for (const r of overrideRows) {
-        const rec: ProjectPricingOverrideRecord = {
+        const rec: BillingAccountPricingOverrideRecord = {
           id: r.id,
-          project_id: r.projectId,
+          billing_account_id: r.billingAccountId,
           model_name: r.modelName,
           operation: r.operation,
           override_kind: r.overrideKind,
@@ -1310,21 +1331,21 @@ export function createCatalogRepository(db: SQL) {
           multiplier_denominator: r.multiplierDenominator,
           enabled: r.enabled,
         };
-        const list = pricingOverridesByProject.get(rec.project_id);
+        const list = pricingOverridesByBillingAccount.get(rec.billing_account_id);
         if (list) list.push(rec);
-        else pricingOverridesByProject.set(rec.project_id, [rec]);
+        else pricingOverridesByBillingAccount.set(rec.billing_account_id, [rec]);
       }
 
       return {
         epoch: epochRows[0]?.version ?? 0,
         lineageToken: epochRows[0]?.lineageToken ?? "",
-        projects: projectMap,
+        billingAccounts: billingAccountMap,
         keysByVerifier,
         accounts: accountMap,
         channels: channelMap,
         models: modelMap,
         prices: priceMap,
-        pricingOverridesByProject,
+        pricingOverridesByBillingAccount,
         routesByModel,
         plugins: pluginMap,
         revokedPlugins: new Set(revokedRows.map(({ id }) => id)),
@@ -1334,7 +1355,7 @@ export function createCatalogRepository(db: SQL) {
 
     async upsertPricingOverride(input: {
       id?: string;
-      project_id: string;
+      billing_account_id: string;
       model_name: string;
       operation?: string;
       override_kind: "EXACT_PRICE" | "MULTIPLIER";
@@ -1343,7 +1364,9 @@ export function createCatalogRepository(db: SQL) {
       multiplier_denominator?: string | null;
       enabled?: boolean;
       source_revision?: number;
-    }): Promise<ProjectPricingOverrideRecord & { config_epoch: number; source_revision: number }> {
+    }): Promise<
+      BillingAccountPricingOverrideRecord & { config_epoch: number; source_revision: number }
+    > {
       const id = input.id ?? crypto.randomUUID();
       const operation = input.operation ?? "*";
       const enabled = input.enabled ?? true;
@@ -1368,10 +1391,10 @@ export function createCatalogRepository(db: SQL) {
           }
         }
         const rows = await tx
-          .insert(projectPricingOverrides)
+          .insert(billingAccountPricingOverrides)
           .values({
             id,
-            projectId: input.project_id,
+            billingAccountId: input.billing_account_id,
             modelName: input.model_name,
             operation,
             overrideKind: input.override_kind,
@@ -1383,12 +1406,12 @@ export function createCatalogRepository(db: SQL) {
           })
           .onConflictDoUpdate({
             target: [
-              projectPricingOverrides.projectId,
-              projectPricingOverrides.modelName,
-              projectPricingOverrides.operation,
+              billingAccountPricingOverrides.billingAccountId,
+              billingAccountPricingOverrides.modelName,
+              billingAccountPricingOverrides.operation,
             ],
             ...(sourceRev !== undefined
-              ? { setWhere: sql`${projectPricingOverrides.sourceRevision} <= ${sourceRev}` }
+              ? { setWhere: sql`${billingAccountPricingOverrides.sourceRevision} <= ${sourceRev}` }
               : {}),
             set: {
               overrideKind: input.override_kind,
@@ -1411,7 +1434,7 @@ export function createCatalogRepository(db: SQL) {
         const r = rows[0]!;
         return {
           id: r.id,
-          project_id: r.projectId,
+          billing_account_id: r.billingAccountId,
           model_name: r.modelName,
           operation: r.operation,
           override_kind: r.overrideKind,
@@ -1425,24 +1448,29 @@ export function createCatalogRepository(db: SQL) {
       });
     },
 
-    async listPricingOverrides(projectId?: string): Promise<ProjectPricingOverrideRecord[]> {
-      const rows = projectId
+    async listPricingOverrides(
+      billingAccountId?: string,
+    ): Promise<BillingAccountPricingOverrideRecord[]> {
+      const rows = billingAccountId
         ? await orm
             .select()
-            .from(projectPricingOverrides)
-            .where(eq(projectPricingOverrides.projectId, projectId))
-            .orderBy(asc(projectPricingOverrides.modelName), asc(projectPricingOverrides.operation))
+            .from(billingAccountPricingOverrides)
+            .where(eq(billingAccountPricingOverrides.billingAccountId, billingAccountId))
+            .orderBy(
+              asc(billingAccountPricingOverrides.modelName),
+              asc(billingAccountPricingOverrides.operation),
+            )
         : await orm
             .select()
-            .from(projectPricingOverrides)
+            .from(billingAccountPricingOverrides)
             .orderBy(
-              asc(projectPricingOverrides.projectId),
-              asc(projectPricingOverrides.modelName),
-              asc(projectPricingOverrides.operation),
+              asc(billingAccountPricingOverrides.billingAccountId),
+              asc(billingAccountPricingOverrides.modelName),
+              asc(billingAccountPricingOverrides.operation),
             );
       return rows.map((r) => ({
         id: r.id,
-        project_id: r.projectId,
+        billing_account_id: r.billingAccountId,
         model_name: r.modelName,
         operation: r.operation,
         override_kind: r.overrideKind,

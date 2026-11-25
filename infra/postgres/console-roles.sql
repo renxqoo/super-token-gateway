@@ -26,7 +26,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, stg_console;
 
 GRANT SELECT ON public.console_schema_migrations TO stg_console;
 GRANT SELECT, INSERT, UPDATE ON public.users, public.organizations, public.org_invitations,
-  public.projects, public.usage_hourly_rollups, public.usage_daily_rollups,
+  public.billing_accounts, public.usage_hourly_rollups, public.usage_daily_rollups,
   public.alert_deliveries, public.platform_credit_defaults TO stg_console;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.sessions, public.org_members, public.api_key_records,
   public.upstream_accounts, public.channels, public.pricing_templates, public.model_catalog,

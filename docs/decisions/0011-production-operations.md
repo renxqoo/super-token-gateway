@@ -13,13 +13,13 @@ Gateway 使用稳定的 PostgreSQL 写入口，切换前应隔离旧主连接。
 | 管理角色   | 控制面权限                                         |
 | ---------- | -------------------------------------------------- |
 | `ops`      | 内部健康及渠道状态                                 |
-| `catalog`  | 项目、模型、渠道、路由、上游账号及渠道预览         |
+| `catalog`  | 计费账户、模型、渠道、路由、上游账号及渠道预览     |
 | `security` | API Key、内容和供应商插件的管理与试运行            |
 | `finance`  | 客户和供应商价目、充值、授信、退款、调账和人工核账 |
 | `auditor`  | 余额、收费、分录、预扣、请求账务与守恒检查         |
 | `events`   | 指定消费者的 Outbox claim 和 ACK                   |
 
-每个身份持有独立的至少 32 字节随机令牌，编码为无填充 Base64URL 或十六进制。使用私网 HTTPS 管理入口。将令牌保存在调用方密钥存储，Gateway 的 `INTERNAL_AUTH_FILE` 只包含令牌的 SHA-256 十六进制散列。多个角色可以赋予同一身份。替换或撤销凭证后滚动重启 Gateway。生产模式禁用共享 `ADMIN_TOKEN`，需要明确配置两个 PostgreSQL 登录、共享 Redis 和插件验签公钥 `PLUGIN_SIGNING_PUBLIC_KEY_PEM`（启动期校验公钥合法性及原生 `wasmtime` 沙箱自检）。
+每个身份持有独立的至少 32 字节随机令牌，编码为无填充 Base64URL 或十六进制。使用私网 HTTPS 管理入口。将令牌保存在调用方密钥存储，Gateway 的 `INTERNAL_AUTH_FILE` 只包含令牌的 SHA-256 十六进制散列。多个角色可以赋予同一身份。替换或撤销凭证后滚动重启 Gateway。所有环境使用 `INTERNAL_AUTH_FILE`。生产环境还需配置两个 PostgreSQL 登录、共享 Redis 和插件验签公钥 `PLUGIN_SIGNING_PUBLIC_KEY_PEM`（启动期校验公钥合法性及原生 `wasmtime` 沙箱自检）。
 
 ```json
 [
@@ -42,9 +42,9 @@ Gateway 使用稳定的 PostgreSQL 写入口，切换前应隔离旧主连接。
 ### 建库和迁移顺序
 
 1. 为账本使用独立数据库。用部署管理员创建专用迁移登录 `stg_migration` 和四个新的无额外权限的运行登录。迁移登录持有数据库应用对象。使用数据库管理员或秘密管理系统为登录设置密码。
-2. 新库由迁移登录建对象。存量库先做可恢复备份并停止写入，再以部署管理员运行 `psql -X "$DBA_URL" -v migration_role=stg_migration -f infra/postgres/adopt-ownership.sql`，仅转移 Gateway 应用对象。以迁移身份执行 `bun dist/tools/migrate.js`，确认 schema 版本与构建产物清单一致。插件绑定升级见 [ADR 0012](0012-plugin-revisions-and-provider-verification.md)。
+2. 由迁移登录连接新建空库，执行 `bun dist/tools/migrate.js` 初始化对象并校验版本与构建产物清单一致。
 3. 在专用数据库执行 `psql -X "$DBA_URL" -f infra/postgres/roles.sql`。此脚本收回 `PUBLIC` 对当前数据库和公共 schema 的默认访问，按实际 SQL 授予权限。将 `stg_data`、`stg_control`、`stg_worker`、`stg_audit` 分别授给对应的专用登录。表权限集中授予父分区表。Worker 只可通过限定月份的函数建分区。
-4. 配置生产 Gateway 的 `DATABASE_URL` 和 `INTERNAL_DATABASE_URL` 指向同一个写入口和数据库，分别使用数据和控制登录。独立 Worker 使用自己的登录。归档使用只读审计登录。运行身份须为独立登录，Gateway 和 Worker 启动会检查当前身份与所属角色。生产网络还应限制运行登录来源与 SQL 入口。 [角色授权](../../infra/postgres/roles.sql) · [对象转属](../../infra/postgres/adopt-ownership.sql) · [Gateway 样例](../../infra/gateway.example.env) · [Worker 样例](../../infra/worker.example.env)
+4. 配置生产 Gateway 的 `DATABASE_URL` 和 `INTERNAL_DATABASE_URL` 指向同一个写入口和数据库，分别使用数据和控制登录。独立 Worker 使用自己的登录。归档使用只读审计登录。运行身份须为独立登录，Gateway 和 Worker 启动会检查当前身份与所属角色。生产网络还应限制运行登录来源与 SQL 入口。 [角色授权](../../infra/postgres/roles.sql) · [Gateway 样例](../../infra/gateway.example.env) · [Worker 样例](../../infra/worker.example.env)
 
 ## 监控与告警
 

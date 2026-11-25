@@ -371,7 +371,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   publicApp.get("/v1/models", async (c) => {
     try {
       const snap = snapshot.get();
-      const { key, project } = authenticateRequest(
+      const { key, billingAccount } = authenticateRequest(
         c,
         snap,
         config,
@@ -379,7 +379,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
         peerOf(c),
         proxyState,
       );
-      const check = checkConsoleAdmission(project, key);
+      const check = checkConsoleAdmission(billingAccount, key);
       if (check) await check;
       const data = [...snap.models.values()]
         .filter((m) => m.enabled && (key.models.length === 0 || key.models.includes(m.name)))

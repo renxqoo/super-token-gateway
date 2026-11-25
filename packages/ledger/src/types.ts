@@ -168,7 +168,7 @@ export type AdapterOverrides = {
   media_stream_terminal?: MediaStreamTerminalRule;
 };
 
-export type ProjectRecord = {
+export type BillingAccountRecord = {
   id: string;
   external_ref: string | null;
   name: string;
@@ -181,7 +181,7 @@ export type ProjectRecord = {
 
 export type ApiKeyRecord = {
   id: string;
-  project_id: string;
+  billing_account_id: string;
   name: string;
   verifier: string;
   prefix: string;
@@ -197,7 +197,7 @@ export type ApiKeyRecord = {
 
 export type ApiKeySpendSnapshot = {
   id: string;
-  project_id: string;
+  billing_account_id: string;
   spend_limit_atoms: string | null;
   spend_limit_window: SpendLimitWindow;
   spend_window_start: string;
@@ -206,9 +206,9 @@ export type ApiKeySpendSnapshot = {
   remaining_atoms: string | null;
 };
 
-export type ProjectPricingOverrideRecord = {
+export type BillingAccountPricingOverrideRecord = {
   id: string;
-  project_id: string;
+  billing_account_id: string;
   model_name: string;
   operation: string;
   override_kind: "EXACT_PRICE" | "MULTIPLIER";
@@ -241,7 +241,7 @@ export type AsyncTaskRecord = {
   id: string;
   request_id: string;
   charge_id: string | null;
-  project_id: string;
+  billing_account_id: string;
   api_key_id: string | null;
   channel_id: string;
   model: string;
@@ -394,13 +394,13 @@ export type EpochStamp = {
 export type ConfigSnapshot = {
   epoch: number;
   lineageToken?: string;
-  projects: Map<string, ProjectRecord>;
+  billingAccounts: Map<string, BillingAccountRecord>;
   keysByVerifier: Map<string, ApiKeyRecord>;
   accounts: Map<string, UpstreamAccountRecord>;
   channels: Map<string, ChannelRecord>;
   models: Map<string, ModelRecord>;
   prices: Map<string, PriceVersionRecord>;
-  pricingOverridesByProject: Map<string, ProjectPricingOverrideRecord[]>;
+  pricingOverridesByBillingAccount: Map<string, BillingAccountPricingOverrideRecord[]>;
   routesByModel: Map<string, RouteRecord[]>;
   plugins: Map<string, PluginRecord>;
   revokedPlugins: ReadonlySet<string>;
@@ -479,7 +479,7 @@ export type PluginAuditEntry = {
 export type AcquireHoldInput = {
   request_id: string;
   attempt_id: string;
-  project_id: string;
+  billing_account_id: string;
   api_key_id?: string | null;
   enforce_key_spend_limit?: boolean;
   pricing_override_id?: string | null;
@@ -562,7 +562,7 @@ export type SwitchSupplierResult =
 
 export type CommitTerminalInput = {
   request_id: string;
-  project_id?: string;
+  billing_account_id?: string;
   selected_attempt_id: string;
   channel_id: string;
   billing_price_id: string;
@@ -602,7 +602,7 @@ export type CommitTerminalResult =
     };
 
 export type CreditWalletInput = {
-  project_id: string;
+  billing_account_id: string;
   currency: string;
   external_ref: string;
   amount_atoms: string;
@@ -629,7 +629,7 @@ export type AdjustChargeInput = {
 };
 
 export type AdjustWalletInput = {
-  project_id: string;
+  billing_account_id: string;
   currency: string;
   external_ref: string;
   delta_atoms: string;
@@ -654,7 +654,7 @@ export type AdjustWalletResult = {
 };
 
 export type SetWalletFreezeInput = {
-  project_id: string;
+  billing_account_id: string;
   currency: string;
   frozen: boolean;
   reason: string;
@@ -716,7 +716,7 @@ export type ReconciliationReceipt = {
 );
 
 export type ReconciliationPolicy = {
-  project_id: string;
+  billing_account_id: string;
   channel_id: string;
   supplier_currency: string;
   enabled: boolean;
@@ -728,7 +728,7 @@ export type ReconciliationPolicy = {
 
 export type WalletSnapshot = {
   id: string;
-  project_id: string;
+  billing_account_id: string;
   currency: string;
   policy: WalletPolicy;
   available_atoms: string;
@@ -769,7 +769,7 @@ export type FundingOperationRecord = {
   id: string;
   side: "CUSTOMER" | "SUPPLIER";
   entity_id: string;
-  project_id: string | null;
+  billing_account_id: string | null;
   wallet_id: string | null;
   charge_id: string | null;
   account_id: string | null;
@@ -815,11 +815,11 @@ export type FinanceSummaryDimensionRow = {
 export type FinanceSummaryReport = {
   from: string | null;
   to: string | null;
-  project_id: string | null;
+  billing_account_id: string | null;
   currency: string | null;
   by_currency: FinanceSummaryCurrencyRow[];
   by_model: FinanceSummaryDimensionRow[];
-  by_project: FinanceSummaryDimensionRow[];
+  by_billing_account: FinanceSummaryDimensionRow[];
   by_channel: FinanceSummaryDimensionRow[];
 };
 
@@ -828,7 +828,7 @@ export type OutboxEventRecord = {
   event_id: string;
   kind: string;
   request_id: string | null;
-  project_id: string | null;
+  billing_account_id: string | null;
   payload: Record<string, unknown>;
   created_at: string;
 };

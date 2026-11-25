@@ -5,7 +5,11 @@ import { GatewayClient } from "../gateway-client.ts";
 
 const baseEnv = {
   CONSOLE_DATABASE_URL: "postgres://u:p@127.0.0.1:5432/console_db",
-  GATEWAY_ADMIN_TOKEN: "0123456789abcdef0123456789abcdef",
+  GATEWAY_CATALOG_TOKEN: "fixture-catalog",
+  GATEWAY_SECURITY_TOKEN: "fixture-security",
+  GATEWAY_FINANCE_TOKEN: "fixture-finance",
+  GATEWAY_AUDITOR_TOKEN: "fixture-auditor",
+  GATEWAY_OPS_TOKEN: "fixture-ops",
   OUTBOX_WEBHOOK_TOKEN: "webhook-token-0123456789abcdef",
 };
 

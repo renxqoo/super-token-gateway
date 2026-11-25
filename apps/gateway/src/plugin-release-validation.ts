@@ -208,7 +208,7 @@ export async function validatePluginRelease(options: {
             JSON.stringify({
               hook,
               request_id: "validation",
-              project_id: "validation",
+              billing_account_id: "validation",
               model: route.model_name,
               operation: route.operations[0],
               text: sample.text,

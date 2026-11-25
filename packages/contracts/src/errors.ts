@@ -10,6 +10,15 @@ export class GatewayError extends Error {
   }
 }
 
+export function assertKnownQueryParameters(
+  query: Readonly<Record<string, string>>,
+  allowed: readonly string[],
+): void {
+  if (Object.keys(query).some((key) => !allowed.includes(key))) {
+    throw new GatewayError(400, "validation_error", "Unknown query parameter");
+  }
+}
+
 export function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new GatewayError(400, "invalid_request", "Expected a JSON object");

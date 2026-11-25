@@ -18,9 +18,10 @@ if (action === "migrate") {
   try {
     await sql.begin(async (tx) => {
       const [guard] = await tx`SELECT current_database()=${targetDatabase} AS expected,
-        to_regclass('public.billing_holds') IS NULL AS isolated`;
+        to_regclass('public.billing_holds') IS NULL
+          AND to_regclass('public.console_schema_migrations') IS NULL AS isolated`;
       if (!guard?.expected || !guard.isolated)
-        throw new Error("Refusing to migrate a ledger database");
+        throw new Error("Use a database dedicated to traces");
       const path = import.meta.path.endsWith(".ts")
         ? "../infra/postgres/trace-schema.sql"
         : "./trace-schema.sql";

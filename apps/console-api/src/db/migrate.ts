@@ -25,22 +25,16 @@ export function createConsoleDatabase(url: string, maxConnections = 16): SQL {
 }
 
 async function readMigrationSql(relativePath: string): Promise<string> {
-  const candidates = [
-    new URL(relativePath, import.meta.url),
-    new URL(relativePath.replace("./migrations/", "./console-migrations/"), import.meta.url),
-    new URL(relativePath.replace("./migrations/", "../tools/console-migrations/"), import.meta.url),
-  ];
-  for (const url of candidates) {
-    const file = Bun.file(url);
-    if (await file.exists()) return file.text();
-  }
-  throw new Error(`Console migration file not found: ${relativePath}`);
+  const path = import.meta.path.endsWith(".ts")
+    ? relativePath
+    : relativePath.replace("./migrations/", "./console-migrations/");
+  return Bun.file(new URL(path, import.meta.url)).text();
 }
 
 type AppliedRow = { version: number; checksum: string };
 
 function validateAppliedHistory(rows: AppliedRow[]): number {
-  if (rows.length > manifest.migrations.length) {
+  if (!rows.length || rows.length > manifest.migrations.length) {
     throw new Error("Incompatible console database schema migration history");
   }
   for (let i = 0; i < rows.length; i++) {
@@ -91,6 +85,14 @@ export async function migrateConsoleDb(db: SQL): Promise<number> {
       const objects = await tx`
         SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+        UNION ALL
+        SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'
+        UNION ALL
+        SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'public'
+        UNION ALL
+        SELECT 1 FROM pg_extension WHERE extname <> 'plpgsql'
+        UNION ALL
+        SELECT 1 FROM pg_namespace WHERE nspname NOT IN ('public', 'information_schema') AND nspname !~ '^pg_'
         LIMIT 1
       `;
       if (objects.length > 0) {

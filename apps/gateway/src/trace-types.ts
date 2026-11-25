@@ -59,7 +59,7 @@ export type TraceRecord = {
   spanId: string;
   parentSpanId?: string;
   requestId: string;
-  projectId: string;
+  billingAccountId: string;
   model: string | null;
   operation: string;
   status: number;
@@ -82,7 +82,7 @@ export type StoredSpan = {
   trace_id: string;
   span_id: string;
   request_id: string;
-  project_id: string | null;
+  billing_account_id: string | null;
   source: "gateway" | "client";
   start_ms: number;
   span: {

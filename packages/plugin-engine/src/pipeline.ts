@@ -195,7 +195,7 @@ export class PluginPipelineEngine {
       fuelBudget: this.computeFuelBudget(manifest, textBytes),
       maxMemoryBytes: manifest.max_memory_bytes ?? 32 * 1024 * 1024,
       priority,
-      tenantId: input.project_id,
+      tenantId: input.billing_account_id,
       ...(signal ? { signal } : {}),
     });
     signal?.throwIfAborted();
@@ -391,7 +391,7 @@ export class PluginPipelineEngine {
     let cacheKey = "";
     if (useCache) {
       const textHash = new Bun.CryptoHasher("sha256").update(input.text).digest("hex");
-      cacheKey = `${plugin.digest}:${input.project_id}:${input.hook}:${textHash}`;
+      cacheKey = `${plugin.digest}:${input.billing_account_id}:${input.hook}:${textHash}`;
       const cached = this.getCachedDecision(cacheKey);
       if (cached) return finish(cached);
     }
@@ -443,7 +443,7 @@ export class PluginPipelineEngine {
     hook: PluginHook,
     steps: readonly PluginPipelineStep[],
     plugins: ReadonlyMap<string, PluginRecord>,
-    meta: { request_id: string; project_id: string; model: string; operation: string },
+    meta: { request_id: string; billing_account_id: string; model: string; operation: string },
     text: string,
     signal?: AbortSignal,
   ): Promise<PipelineExecutionResult> {
@@ -457,7 +457,7 @@ export class PluginPipelineEngine {
         {
           hook,
           request_id: meta.request_id,
-          project_id: meta.project_id,
+          billing_account_id: meta.billing_account_id,
           model: meta.model,
           operation: meta.operation,
           text: currentText,
@@ -511,7 +511,7 @@ export class PluginPipelineEngine {
   createStreamSession(
     steps: readonly PluginPipelineStep[],
     plugins: ReadonlyMap<string, PluginRecord>,
-    meta: { request_id: string; project_id: string; model: string; operation: string },
+    meta: { request_id: string; billing_account_id: string; model: string; operation: string },
     onAbortUpstream: () => void,
     signal?: AbortSignal,
   ) {
@@ -570,7 +570,7 @@ export class PluginPipelineEngine {
           {
             hook,
             request_id: meta.request_id,
-            project_id: meta.project_id,
+            billing_account_id: meta.billing_account_id,
             model: meta.model,
             operation: meta.operation,
             text: current,

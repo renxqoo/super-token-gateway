@@ -1,0 +1,8 @@
+[
+  {
+    "id": "fixture",
+    "token_sha256": "c5cc3c240e394e29ae4a0ad254f9ff463a09d7754c9b19d17e55bd026ef87736",
+    "roles": ["ops"],
+    "consumers": []
+  }
+]

@@ -1,7 +1,6 @@
 import { normalizeAndValidateCidr } from "./auth.ts";
 
 export type GatewayRoleTokens = {
-  admin?: string;
   catalog?: string;
   security?: string;
   finance?: string;
@@ -72,7 +71,6 @@ export function loadConsoleConfigFromEnv(
   const alertDeliveryIntervalMs = intEnv(env, "CONSOLE_ALERT_DELIVERY_INTERVAL_MS", 5_000, 0);
 
   const gatewayTokens: GatewayRoleTokens = {
-    ...(env.GATEWAY_ADMIN_TOKEN ? { admin: env.GATEWAY_ADMIN_TOKEN } : {}),
     ...(env.GATEWAY_CATALOG_TOKEN ? { catalog: env.GATEWAY_CATALOG_TOKEN } : {}),
     ...(env.GATEWAY_SECURITY_TOKEN ? { security: env.GATEWAY_SECURITY_TOKEN } : {}),
     ...(env.GATEWAY_FINANCE_TOKEN ? { finance: env.GATEWAY_FINANCE_TOKEN } : {}),
@@ -81,21 +79,16 @@ export function loadConsoleConfigFromEnv(
     ...(env.GATEWAY_EVENTS_TOKEN ? { events: env.GATEWAY_EVENTS_TOKEN } : {}),
   };
   if (
-    !gatewayTokens.admin &&
-    (!gatewayTokens.catalog ||
-      !gatewayTokens.security ||
-      !gatewayTokens.finance ||
-      !gatewayTokens.auditor ||
-      !gatewayTokens.ops)
+    !gatewayTokens.catalog ||
+    !gatewayTokens.security ||
+    !gatewayTokens.finance ||
+    !gatewayTokens.auditor ||
+    !gatewayTokens.ops
   ) {
-    throw new Error(
-      "Provide GATEWAY_ADMIN_TOKEN or role-scoped GATEWAY_{CATALOG,SECURITY,FINANCE,AUDITOR,OPS}_TOKEN credentials",
-    );
+    throw new Error("Provide GATEWAY_{CATALOG,SECURITY,FINANCE,AUDITOR,OPS}_TOKEN credentials");
   }
-  if (outboxPullIntervalMs > 0 && !gatewayTokens.admin && !gatewayTokens.events) {
-    throw new Error(
-      "Provide GATEWAY_ADMIN_TOKEN or GATEWAY_EVENTS_TOKEN when CONSOLE_OUTBOX_PULL_INTERVAL_MS > 0",
-    );
+  if (outboxPullIntervalMs > 0 && !gatewayTokens.events) {
+    throw new Error("GATEWAY_EVENTS_TOKEN is required when CONSOLE_OUTBOX_PULL_INTERVAL_MS > 0");
   }
   const outboxWebhookToken = env.OUTBOX_WEBHOOK_TOKEN;
   if (!outboxWebhookToken || outboxWebhookToken.length < 16) {
