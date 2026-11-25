@@ -45,15 +45,11 @@ function validateAppliedMigrations(rows: AppliedMigration[]): number {
     throw new Error("Incompatible database schema migration history");
   }
   for (const [index, row] of rows.entries()) {
-    const canonical = manifest.migrations[index]!;
-    const candidates = index === 0 ? [canonical, ...manifest.legacyBaselines] : [canonical];
-    const expected = candidates.find(
-      (candidate) =>
-        candidate.version === row.version && migrationDigest(candidate) === row.checksum,
-    );
+    const expected = manifest.migrations[index]!;
     const stored = row.manifest;
     if (
-      !expected ||
+      row.version !== expected.version ||
+      row.checksum !== migrationDigest(expected) ||
       stored?.version !== expected.version ||
       !Array.isArray(stored.files) ||
       stored.files.length !== expected.files.length ||
@@ -129,11 +125,11 @@ export async function migrate(db: SQL): Promise<void> {
     const existing = await tx`SELECT to_regclass('public.schema_migrations') AS relation`;
     let applied = 0;
     if (existing[0]?.relation) {
-      await tx`LOCK TABLE schema_migrations IN ACCESS EXCLUSIVE MODE`;
+      await tx`LOCK TABLE public.schema_migrations IN ACCESS EXCLUSIVE MODE`;
       const columns =
         await tx`SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='schema_migrations'`;
       if (!columns.some((row: { column_name: string }) => row.column_name === "checksum"))
-        throw new Error("Incompatible database schema; initialize a new empty v4 database");
+        throw new Error("Incompatible Gateway schema; initialize an empty database");
       const versions = await tx<AppliedMigration[]>`
         SELECT version, checksum, manifest FROM public.schema_migrations ORDER BY version
       `;
@@ -145,7 +141,7 @@ export async function migrate(db: SQL): Promise<void> {
     }
     for (const entry of plan.slice(applied)) {
       for (const file of entry.files) await tx.unsafe(file.source);
-      await tx`INSERT INTO schema_migrations(version,checksum,manifest) VALUES(${entry.migration.version},${entry.checksum},${entry.migration}::jsonb)`;
+      await tx`INSERT INTO public.schema_migrations(version,checksum,manifest) VALUES(${entry.migration.version},${entry.checksum},${entry.migration}::jsonb)`;
     }
   });
 }

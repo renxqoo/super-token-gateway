@@ -1,10 +1,10 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { asc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
-import { GatewayError } from "@gateway/contracts";
+import { assertKnownQueryParameters, GatewayError } from "@gateway/contracts";
 import { AMOUNT_DECIMALS } from "@gateway/kernel";
 import { recordAuditLog } from "../auth.ts";
-import { organizations, platformCreditDefaults, projects } from "../db/schema.ts";
+import { organizations, platformCreditDefaults, billingAccounts } from "../db/schema.ts";
 import {
   currencySchema,
   enrichAdminChargeDecimals,
@@ -14,6 +14,7 @@ import {
   enrichWalletDecimals,
   nonNegativeAtomsSchema,
   operationEnum,
+  parseBillingAccountFilter,
   parseJsonBody,
   parseLimitOffset,
   parseUuid,
@@ -21,6 +22,7 @@ import {
   positiveDecimalSchema,
   resolveAtomsAmount,
   safeFormatAtoms,
+  toBillingAccountScope,
   signedAtomsSchema,
   signedDecimalSchema,
   type ConsoleDeps,
@@ -93,11 +95,11 @@ const defaultCreditPolicySchema = z
 
 const batchCreditPolicySchema = z
   .object({
-    scope: z.enum(["ALL_PROJECTS", "ORGANIZATION", "USER", "PROJECTS"]),
+    scope: z.enum(["ALL_BILLING_ACCOUNTS", "ORGANIZATION", "USER", "BILLING_ACCOUNTS"]),
     org_id: z.uuid().optional(),
     user_id: z.uuid().optional(),
-    project_ids: z.array(z.uuid()).min(1).max(500).optional(),
-    only_default_project: z.boolean().optional(),
+    billing_account_ids: z.array(z.uuid()).min(1).max(500).optional(),
+    only_default_billing_account: z.boolean().optional(),
     credit_limit_atoms: nonNegativeAtomsSchema.optional(),
     credit_limit_decimal: positiveDecimalSchema.optional(),
     policy: walletPolicyEnum.optional(),
@@ -126,13 +128,16 @@ const adjustmentSchema = z
 
 const jsonObjectSchema = z.record(z.string(), z.unknown());
 
-function resolveProjectCurrency(requested: string | undefined, projectCurrency: string): string {
-  const effective = requested ?? projectCurrency;
-  if (effective !== projectCurrency) {
+function resolveBillingAccountCurrency(
+  requested: string | undefined,
+  billingAccountCurrency: string,
+): string {
+  const effective = requested ?? billingAccountCurrency;
+  if (effective !== billingAccountCurrency) {
     throw new GatewayError(
       400,
       "currency_mismatch",
-      `Project currency is ${projectCurrency}; received ${effective}`,
+      `Billing account currency is ${billingAccountCurrency}; received ${effective}`,
     );
   }
   return effective;
@@ -141,20 +146,53 @@ function resolveProjectCurrency(requested: string | undefined, projectCurrency: 
 export function createAdminFinanceRoutes(deps: ConsoleDeps) {
   const app = new Hono<ConsoleEnv>();
 
-  app.get("/finance/projects/:projectId/wallet", async (c) => {
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const [proj] = await deps.orm
-      .select()
-      .from(projects)
-      .where(eq(projects.id, projectId))
+  async function gatewayBillingAccountFilter(c: Context, ...otherFilters: string[]) {
+    const id = parseBillingAccountFilter(c, ...otherFilters);
+    if (id === undefined) return undefined;
+    const [account] = await deps.orm
+      .select({ id: billingAccounts.gatewayBillingAccountId })
+      .from(billingAccounts)
+      .where(eq(billingAccounts.id, id))
       .limit(1);
-    if (!proj) throw new GatewayError(404, "not_found", "Project not found");
+    return account?.id ?? id;
+  }
+
+  async function billingAccountIdsFor(gatewayIds: unknown[]) {
+    const ids = Array.from(
+      new Set(gatewayIds.filter((id): id is string => typeof id === "string")),
+    );
+    if (ids.length === 0) return new Map<string, string>();
+    const rows = await deps.orm
+      .select({ id: billingAccounts.id, gatewayId: billingAccounts.gatewayBillingAccountId })
+      .from(billingAccounts)
+      .where(inArray(billingAccounts.gatewayBillingAccountId, ids));
+    return new Map(rows.map((row) => [row.gatewayId, row.id]));
+  }
+
+  async function mapBillingAccounts(items: Record<string, unknown>[]) {
+    const accountIds = await billingAccountIdsFor(
+      items.map((item) => item.billing_account_id ?? item.billingAccountId),
+    );
+    return items.map((item) => {
+      const id = item.billing_account_id ?? item.billingAccountId;
+      return toBillingAccountScope(item, typeof id === "string" ? accountIds.get(id) : undefined);
+    });
+  }
+
+  app.get("/finance/billing-accounts/:billingAccountId/wallet", async (c) => {
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const [billingAccount] = await deps.orm
+      .select()
+      .from(billingAccounts)
+      .where(eq(billingAccounts.id, billingAccountId))
+      .limit(1);
+    if (!billingAccount) throw new GatewayError(404, "not_found", "Billing account not found");
     const includeLots = c.req.query("include_lots") !== "false";
-    if (!proj.gatewaySynced) {
+    if (!billingAccount.gatewaySynced) {
       return c.json(
         enrichWalletDecimals({
-          project_id: proj.id,
-          currency: proj.currency,
+          billing_account_id: billingAccount.id,
+          currency: billingAccount.currency,
           synced: false,
           policy: "GIFT_FIRST",
           available_atoms: "0",
@@ -172,22 +210,28 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
         }),
       );
     }
-    const wallet = await deps.gateway.getWallet(proj.gatewayProjectId, proj.currency, includeLots);
-    return c.json(enrichWalletDecimals({ ...wallet, synced: true }));
+    const wallet = await deps.gateway.getWallet(
+      billingAccount.gatewayBillingAccountId,
+      billingAccount.currency,
+      includeLots,
+    );
+    return c.json(
+      enrichWalletDecimals({ ...toBillingAccountScope(wallet, billingAccountId), synced: true }),
+    );
   });
 
-  app.post("/finance/projects/:projectId/topups", async (c) => {
+  app.post("/finance/billing-accounts/:billingAccountId/topups", async (c) => {
     const actor = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const body = await parseJsonBody(c, topupSchema);
     const amountAtoms = resolveAtomsAmount(body.amount_atoms, body.amount_decimal, {
       field: "amount",
       allowNegative: false,
       allowZero: false,
     });
-    const proj = await deps.sync.ensureProjectSynced(projectId);
-    const currency = resolveProjectCurrency(body.currency, proj.currency);
-    const res = await deps.gateway.creditWallet(proj.gatewayProjectId, {
+    const billingAccount = await deps.sync.ensureBillingAccountSynced(billingAccountId);
+    const currency = resolveBillingAccountCurrency(body.currency, billingAccount.currency);
+    const res = await deps.gateway.creditWallet(billingAccount.gatewayBillingAccountId, {
       currency,
       external_ref: body.external_ref,
       amount_atoms: amountAtoms,
@@ -196,31 +240,31 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
     });
     await recordAuditLog(deps.orm, {
       actor,
-      orgId: proj.orgId,
+      orgId: billingAccount.orgId,
       action: "admin.finance.topup",
-      targetType: "project",
-      targetId: projectId,
+      targetType: "billing_account",
+      targetId: billingAccountId,
       metadata: { currency, amount_atoms: amountAtoms, external_ref: body.external_ref },
     });
     return c.json({
-      ...res,
+      ...toBillingAccountScope(res, billingAccountId),
       scale: AMOUNT_DECIMALS,
       available_decimal: safeFormatAtoms(res.available_atoms),
     });
   });
 
-  app.post("/finance/projects/:projectId/grants", async (c) => {
+  app.post("/finance/billing-accounts/:billingAccountId/grants", async (c) => {
     const actor = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const body = await parseJsonBody(c, grantSchema);
     const amountAtoms = resolveAtomsAmount(body.amount_atoms, body.amount_decimal, {
       field: "amount",
       allowNegative: false,
       allowZero: false,
     });
-    const proj = await deps.sync.ensureProjectSynced(projectId);
-    const currency = resolveProjectCurrency(body.currency, proj.currency);
-    const res = await deps.gateway.creditWallet(proj.gatewayProjectId, {
+    const billingAccount = await deps.sync.ensureBillingAccountSynced(billingAccountId);
+    const currency = resolveBillingAccountCurrency(body.currency, billingAccount.currency);
+    const res = await deps.gateway.creditWallet(billingAccount.gatewayBillingAccountId, {
       currency,
       external_ref: body.external_ref,
       amount_atoms: amountAtoms,
@@ -235,45 +279,44 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
     });
     await recordAuditLog(deps.orm, {
       actor,
-      orgId: proj.orgId,
+      orgId: billingAccount.orgId,
       action: "admin.finance.grant",
-      targetType: "project",
-      targetId: projectId,
+      targetType: "billing_account",
+      targetId: billingAccountId,
       metadata: { currency, amount_atoms: amountAtoms, external_ref: body.external_ref },
     });
     return c.json({
-      ...res,
+      ...toBillingAccountScope(res, billingAccountId),
       scale: AMOUNT_DECIMALS,
       available_decimal: safeFormatAtoms(res.available_atoms),
     });
   });
 
-  app.post("/finance/projects/:projectId/adjustments", async (c) => {
+  app.post("/finance/billing-accounts/:billingAccountId/adjustments", async (c) => {
     const actor = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const body = await parseJsonBody(c, walletAdjustmentSchema);
     const deltaAtoms = resolveAtomsAmount(body.delta_atoms, body.delta_decimal, {
       field: "delta",
       allowNegative: true,
       allowZero: false,
     });
-    const proj = await deps.sync.ensureProjectSynced(projectId);
-    const currency = resolveProjectCurrency(body.currency, proj.currency);
-    const res = await deps.gateway.adjustWallet(proj.gatewayProjectId, {
+    const billingAccount = await deps.sync.ensureBillingAccountSynced(billingAccountId);
+    const currency = resolveBillingAccountCurrency(body.currency, billingAccount.currency);
+    const res = await deps.gateway.adjustWallet(billingAccount.gatewayBillingAccountId, {
       currency,
       external_ref: body.external_ref,
       delta_atoms: deltaAtoms,
       ...(body.lot_kind ? { lot_kind: body.lot_kind } : {}),
       ...(body.force_debt !== undefined ? { force_debt: body.force_debt } : {}),
       reason: body.reason,
-      actor: actor.email.slice(0, 120),
     });
     await recordAuditLog(deps.orm, {
       actor,
-      orgId: proj.orgId,
+      orgId: billingAccount.orgId,
       action: "admin.finance.wallet_adjustment",
-      targetType: "project",
-      targetId: projectId,
+      targetType: "billing_account",
+      targetId: billingAccountId,
       metadata: {
         currency,
         delta_atoms: deltaAtoms,
@@ -293,32 +336,31 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
     });
   });
 
-  app.post("/finance/projects/:projectId/freeze", async (c) => {
+  app.post("/finance/billing-accounts/:billingAccountId/freeze", async (c) => {
     const actor = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const body = await parseJsonBody(c, walletFreezeSchema);
-    const proj = await deps.sync.ensureProjectSynced(projectId);
-    const currency = resolveProjectCurrency(body.currency, proj.currency);
-    const res = await deps.gateway.setWalletFreeze(proj.gatewayProjectId, {
+    const billingAccount = await deps.sync.ensureBillingAccountSynced(billingAccountId);
+    const currency = resolveBillingAccountCurrency(body.currency, billingAccount.currency);
+    const res = await deps.gateway.setWalletFreeze(billingAccount.gatewayBillingAccountId, {
       currency,
       frozen: body.frozen,
       reason: body.reason,
-      actor: actor.email.slice(0, 120),
     });
     await recordAuditLog(deps.orm, {
       actor,
-      orgId: proj.orgId,
+      orgId: billingAccount.orgId,
       action: body.frozen ? "admin.finance.wallet_freeze" : "admin.finance.wallet_unfreeze",
-      targetType: "project",
-      targetId: projectId,
+      targetType: "billing_account",
+      targetId: billingAccountId,
       metadata: { currency, frozen: body.frozen, reason: body.reason },
     });
-    return c.json(enrichWalletDecimals(res));
+    return c.json(enrichWalletDecimals(toBillingAccountScope(res, billingAccountId)));
   });
 
-  app.post("/finance/projects/:projectId/credit-policy", async (c) => {
+  app.post("/finance/billing-accounts/:billingAccountId/credit-policy", async (c) => {
     const actor = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const body = await parseJsonBody(c, creditPolicySchema);
     const creditLimitAtoms = resolveAtomsAmount(
       body.credit_limit_atoms,
@@ -329,9 +371,9 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
         allowZero: true,
       },
     );
-    const proj = await deps.sync.ensureProjectSynced(projectId);
-    const currency = resolveProjectCurrency(body.currency, proj.currency);
-    const res = await deps.gateway.configureCreditPolicy(proj.gatewayProjectId, {
+    const billingAccount = await deps.sync.ensureBillingAccountSynced(billingAccountId);
+    const currency = resolveBillingAccountCurrency(body.currency, billingAccount.currency);
+    const res = await deps.gateway.configureCreditPolicy(billingAccount.gatewayBillingAccountId, {
       currency,
       expected_version: body.expected_version,
       credit_limit_atoms: creditLimitAtoms,
@@ -339,17 +381,17 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
     });
     await recordAuditLog(deps.orm, {
       actor,
-      orgId: proj.orgId,
+      orgId: billingAccount.orgId,
       action: "admin.finance.credit_policy",
-      targetType: "project",
-      targetId: projectId,
+      targetType: "billing_account",
+      targetId: billingAccountId,
       metadata: {
         currency,
         credit_limit_atoms: creditLimitAtoms,
         ...(body.policy ? { policy: body.policy } : {}),
       },
     });
-    return c.json(enrichWalletDecimals(res));
+    return c.json(enrichWalletDecimals(toBillingAccountScope(res, billingAccountId)));
   });
 
   app.get("/finance/credit-policy/default", async (c) => {
@@ -444,12 +486,12 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
     const nextLimitBig = BigInt(creditLimitAtoms);
 
     const maxBatchSize = 500;
-    let targets: (typeof projects.$inferSelect)[] = [];
-    if (body.scope === "ALL_PROJECTS") {
+    let targets: (typeof billingAccounts.$inferSelect)[] = [];
+    if (body.scope === "ALL_BILLING_ACCOUNTS") {
       targets = await deps.orm
         .select()
-        .from(projects)
-        .orderBy(asc(projects.createdAt), asc(projects.id))
+        .from(billingAccounts)
+        .orderBy(asc(billingAccounts.createdAt), asc(billingAccounts.id))
         .limit(maxBatchSize + 1);
     } else if (body.scope === "ORGANIZATION") {
       if (!body.org_id) {
@@ -461,9 +503,9 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
       }
       targets = await deps.orm
         .select()
-        .from(projects)
-        .where(eq(projects.orgId, body.org_id))
-        .orderBy(asc(projects.createdAt), asc(projects.id))
+        .from(billingAccounts)
+        .where(eq(billingAccounts.orgId, body.org_id))
+        .orderBy(asc(billingAccounts.createdAt), asc(billingAccounts.id))
         .limit(maxBatchSize + 1);
     } else if (body.scope === "USER") {
       if (!body.user_id) {
@@ -475,46 +517,46 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
         .where(eq(organizations.ownerUserId, body.user_id));
       const orgIds = ownedOrgs.map((o) => o.id);
       if (orgIds.length > 0) {
-        const personalOrg = body.only_default_project
+        const personalOrg = body.only_default_billing_account
           ? ownedOrgs.find((o) => o.kind === "PERSONAL")
           : undefined;
         if (personalOrg) {
           targets = await deps.orm
             .select()
-            .from(projects)
-            .where(eq(projects.orgId, personalOrg.id))
-            .orderBy(asc(projects.createdAt), asc(projects.id))
+            .from(billingAccounts)
+            .where(eq(billingAccounts.orgId, personalOrg.id))
+            .orderBy(asc(billingAccounts.createdAt), asc(billingAccounts.id))
             .limit(1);
         }
         if (targets.length === 0) {
           targets = await deps.orm
             .select()
-            .from(projects)
-            .where(inArray(projects.orgId, orgIds))
-            .orderBy(asc(projects.createdAt), asc(projects.id))
-            .limit(body.only_default_project ? 1 : maxBatchSize + 1);
+            .from(billingAccounts)
+            .where(inArray(billingAccounts.orgId, orgIds))
+            .orderBy(asc(billingAccounts.createdAt), asc(billingAccounts.id))
+            .limit(body.only_default_billing_account ? 1 : maxBatchSize + 1);
         }
       }
-    } else if (body.scope === "PROJECTS") {
-      if (!body.project_ids || body.project_ids.length === 0) {
+    } else if (body.scope === "BILLING_ACCOUNTS") {
+      if (!body.billing_account_ids || body.billing_account_ids.length === 0) {
         throw new GatewayError(
           400,
           "validation_error",
-          "project_ids is required for PROJECTS scope",
+          "billing_account_ids is required for BILLING_ACCOUNTS scope",
         );
       }
       targets = await deps.orm
         .select()
-        .from(projects)
-        .where(inArray(projects.id, body.project_ids))
-        .orderBy(asc(projects.createdAt), asc(projects.id));
+        .from(billingAccounts)
+        .where(inArray(billingAccounts.id, body.billing_account_ids))
+        .orderBy(asc(billingAccounts.createdAt), asc(billingAccounts.id));
     }
 
     if (targets.length > maxBatchSize) {
       throw new GatewayError(
         400,
         "validation_error",
-        "Credit policy batch matches more than 500 projects; select a smaller scope",
+        "Credit policy batch matches more than 500 billing accounts; select a smaller scope",
       );
     }
 
@@ -529,13 +571,13 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
           let currentDebt = "0";
           let currentPolicy = "GIFT_FIRST";
           if (target.gatewaySynced) {
-            const w = await deps.gateway.getWallet(target.gatewayProjectId, target.currency);
+            const w = await deps.gateway.getWallet(target.gatewayBillingAccountId, target.currency);
             currentLimit = String(w.credit_limit_atoms);
             currentDebt = String(w.debt_atoms);
             currentPolicy = String(w.policy);
           }
           items.push({
-            project_id: target.id,
+            billing_account_id: target.id,
             org_id: target.orgId,
             name: target.name,
             currency: target.currency,
@@ -552,17 +594,23 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
           continue;
         }
 
-        const syncedProj = await deps.sync.ensureProjectSynced(target.id);
+        const syncedAccount = await deps.sync.ensureBillingAccountSynced(target.id);
         let applied: Record<string, unknown> | null = null;
         for (let attempt = 0; attempt < 2; attempt++) {
-          const w = await deps.gateway.getWallet(syncedProj.gatewayProjectId, syncedProj.currency);
+          const w = await deps.gateway.getWallet(
+            syncedAccount.gatewayBillingAccountId,
+            syncedAccount.currency,
+          );
           try {
-            applied = await deps.gateway.configureCreditPolicy(syncedProj.gatewayProjectId, {
-              currency: syncedProj.currency,
-              expected_version: String(w.credit_policy_version ?? "0"),
-              credit_limit_atoms: creditLimitAtoms,
-              ...(body.policy ? { policy: body.policy } : {}),
-            });
+            applied = await deps.gateway.configureCreditPolicy(
+              syncedAccount.gatewayBillingAccountId,
+              {
+                currency: syncedAccount.currency,
+                expected_version: String(w.credit_policy_version ?? "0"),
+                credit_limit_atoms: creditLimitAtoms,
+                ...(body.policy ? { policy: body.policy } : {}),
+              },
+            );
             break;
           } catch (err) {
             if (attempt === 0 && err instanceof GatewayError && err.status === 400) {
@@ -573,10 +621,10 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
         }
         updatedCount++;
         items.push({
-          project_id: syncedProj.id,
-          org_id: syncedProj.orgId,
-          name: syncedProj.name,
-          currency: syncedProj.currency,
+          billing_account_id: syncedAccount.id,
+          org_id: syncedAccount.orgId,
+          name: syncedAccount.name,
+          currency: syncedAccount.currency,
           ok: true,
           credit_limit_atoms: String(applied?.credit_limit_atoms ?? creditLimitAtoms),
           credit_limit_decimal: safeFormatAtoms(applied?.credit_limit_atoms ?? creditLimitAtoms),
@@ -587,7 +635,7 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
       } catch (err) {
         failedCount++;
         items.push({
-          project_id: target.id,
+          billing_account_id: target.id,
           org_id: target.orgId,
           name: target.name,
           currency: target.currency,
@@ -687,7 +735,15 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
   app.get("/finance/charges", async (c) => {
     const { limit, offset } = parseLimitOffset(c, 50, 200);
     const raw = (await deps.gateway.listCharges({
-      project_id: c.req.query("project_id"),
+      billing_account_id: await gatewayBillingAccountFilter(
+        c,
+        "api_key_id",
+        "outcome",
+        "from",
+        "to",
+        "limit",
+        "offset",
+      ),
       api_key_id: c.req.query("api_key_id"),
       outcome: c.req.query("outcome"),
       from: c.req.query("from"),
@@ -697,7 +753,7 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
     })) as { items?: Record<string, unknown>[]; total?: number; limit?: number; offset?: number };
     return c.json({
       scale: AMOUNT_DECIMALS,
-      items: (raw.items ?? []).map(enrichAdminChargeDecimals),
+      items: (await mapBillingAccounts(raw.items ?? [])).map(enrichAdminChargeDecimals),
       total: raw.total ?? 0,
       limit: raw.limit ?? limit,
       offset: raw.offset ?? offset,
@@ -709,7 +765,18 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
     const raw = (await deps.gateway.listFundingOperations({
       side: c.req.query("side"),
       entity_id: c.req.query("entity_id"),
-      project_id: c.req.query("project_id"),
+      billing_account_id: await gatewayBillingAccountFilter(
+        c,
+        "side",
+        "entity_id",
+        "account_id",
+        "kind",
+        "currency",
+        "from",
+        "to",
+        "limit",
+        "offset",
+      ),
       account_id: c.req.query("account_id"),
       kind: c.req.query("kind"),
       currency: c.req.query("currency"),
@@ -720,7 +787,7 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
     })) as { items?: Record<string, unknown>[]; total?: number; limit?: number; offset?: number };
     return c.json({
       scale: AMOUNT_DECIMALS,
-      items: (raw.items ?? []).map(enrichFundingOperationDecimals),
+      items: (await mapBillingAccounts(raw.items ?? [])).map(enrichFundingOperationDecimals),
       total: raw.total ?? 0,
       limit: raw.limit ?? limit,
       offset: raw.offset ?? offset,
@@ -728,6 +795,16 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
   });
 
   app.get("/finance/ledger-entries", async (c) => {
+    assertKnownQueryParameters(c.req.query(), [
+      "side",
+      "entity_id",
+      "request_id",
+      "kind",
+      "from",
+      "to",
+      "limit",
+      "offset",
+    ]);
     const { limit, offset } = parseLimitOffset(c, 50, 200);
     const raw = (await deps.gateway.listLedgerEntries({
       side: c.req.query("side"),
@@ -755,10 +832,11 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
       charge?: Record<string, unknown> | null;
       entries?: Record<string, unknown>[];
     };
+    const [hold, charge] = await mapBillingAccounts([raw.hold ?? {}, raw.charge ?? {}]);
     return c.json({
       scale: AMOUNT_DECIMALS,
-      hold: raw.hold ?? null,
-      charge: raw.charge ? enrichAdminChargeDecimals(raw.charge) : null,
+      hold: raw.hold ? hold : null,
+      charge: raw.charge ? enrichAdminChargeDecimals(charge!) : null,
       entries: (raw.entries ?? []).map(enrichLedgerEntryDecimals),
     });
   });
@@ -767,31 +845,32 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
     const report = await deps.gateway.getFinanceSummary({
       from: c.req.query("from"),
       to: c.req.query("to"),
-      project_id: c.req.query("project_id"),
+      billing_account_id: await gatewayBillingAccountFilter(c, "from", "to", "currency"),
       currency: c.req.query("currency"),
     });
-    return c.json(enrichFinanceSummaryDecimals(report));
+    const byAccount = Array.isArray(report.by_billing_account) ? report.by_billing_account : [];
+    const ids = await billingAccountIdsFor([
+      report.billing_account_id,
+      ...byAccount.map((row) => row.key),
+    ]);
+    return c.json(enrichFinanceSummaryDecimals(report, ids));
   });
 
   app.get("/finance/holds", async (c) => {
-    return c.json(
-      await deps.gateway.listHolds({
-        state: c.req.query("state"),
-        project_id: c.req.query("project_id"),
-        limit: c.req.query("limit"),
-        offset: c.req.query("offset"),
-      }),
-    );
+    const raw = (await deps.gateway.listHolds({
+      state: c.req.query("state"),
+      billing_account_id: await gatewayBillingAccountFilter(c, "state", "limit", "offset"),
+      limit: c.req.query("limit"),
+      offset: c.req.query("offset"),
+    })) as { items: Record<string, unknown>[] };
+    return c.json({ ...raw, items: await mapBillingAccounts(raw.items) });
   });
 
   app.post("/finance/requests/:requestId/resolve", async (c) => {
     const actor = c.get("user");
     const requestId = parseUuid(c.req.param("requestId"), "requestId");
     const body = await parseJsonBody(c, jsonObjectSchema);
-    const res = await deps.gateway.resolveRequest(requestId, {
-      ...body,
-      actor: actor.email.slice(0, 120),
-    });
+    const res = await deps.gateway.resolveRequest(requestId, body);
     await recordAuditLog(deps.orm, {
       actor,
       action: "admin.finance.resolve_request",
@@ -806,10 +885,7 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
     const requestId = parseUuid(c.req.param("requestId"), "requestId");
     const attemptId = parseUuid(c.req.param("attemptId"), "attemptId");
     const body = await parseJsonBody(c, jsonObjectSchema);
-    const res = await deps.gateway.resolveSupplierAttempt(requestId, attemptId, {
-      ...body,
-      actor: actor.email.slice(0, 120),
-    });
+    const res = await deps.gateway.resolveSupplierAttempt(requestId, attemptId, body);
     await recordAuditLog(deps.orm, {
       actor,
       action: "admin.finance.resolve_supplier_attempt",
@@ -820,15 +896,20 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
   });
 
   app.get("/finance/async-tasks", async (c) => {
-    return c.json(
-      await deps.gateway.listAsyncTasks({
-        project_id: c.req.query("project_id"),
-        status: c.req.query("status"),
-        refund_eligibility: c.req.query("refund_eligibility"),
-        limit: c.req.query("limit"),
-        offset: c.req.query("offset"),
-      }),
-    );
+    const raw = (await deps.gateway.listAsyncTasks({
+      billing_account_id: await gatewayBillingAccountFilter(
+        c,
+        "status",
+        "refund_eligibility",
+        "limit",
+        "offset",
+      ),
+      status: c.req.query("status"),
+      refund_eligibility: c.req.query("refund_eligibility"),
+      limit: c.req.query("limit"),
+      offset: c.req.query("offset"),
+    })) as { items: Record<string, unknown>[] };
+    return c.json({ ...raw, items: await mapBillingAccounts(raw.items) });
   });
 
   app.get("/finance/conservation", async (c) => {

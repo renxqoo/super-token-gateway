@@ -102,7 +102,7 @@ export function createTransactionalHoldBatch(
       supplierAtoms: parseAtoms(item.supplier_atoms),
     }));
 
-    const projectIds = [...new Set(items.map((i) => i.project_id))];
+    const billingAccountIds = [...new Set(items.map((i) => i.billing_account_id))];
     const limitedKeyIds = [
       ...new Set(
         items.filter((i) => i.enforce_key_spend_limit && i.api_key_id).map((i) => i.api_key_id!),
@@ -132,7 +132,7 @@ export function createTransactionalHoldBatch(
         const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
         const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : batchStartedAt;
         const lockedKeys = await tx`
-          SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
+          SELECT id, billing_account_id, spend_limit_atoms::text, spend_limit_window,
             spend_window_start, spent_atoms::text, reserved_atoms::text
           FROM public.api_keys
           WHERE id = ANY(${limitedKeyIds}::uuid[])
@@ -147,12 +147,12 @@ export function createTransactionalHoldBatch(
       }
 
       const lockedWallets = await tx`
-        SELECT id, project_id, currency, policy,
+        SELECT id, billing_account_id, currency, policy,
           available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
           debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
           credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
         FROM public.wallets
-        WHERE project_id = ANY(${projectIds}::uuid[])
+        WHERE billing_account_id = ANY(${billingAccountIds}::uuid[])
         ORDER BY id
         FOR NO KEY UPDATE
       `;
@@ -160,7 +160,7 @@ export function createTransactionalHoldBatch(
       const walletsById = new Map<string, WalletRow>();
       for (const r of lockedWallets) {
         const w = toWalletRow(r);
-        walletsByKey.set(walletKey(w.project_id, w.currency), w);
+        walletsByKey.set(walletKey(w.billing_account_id, w.currency), w);
         walletsById.set(w.id, w);
       }
 
@@ -210,7 +210,7 @@ export function createTransactionalHoldBatch(
           ((cellOffsets[lane]! + cursor) % SUPPLIER_CELLS_PER_LANE),
       );
       const targetCells = [
-        ...new Set(items.map((item) => targetCellsByLane[walletLane(item.project_id)]!)),
+        ...new Set(items.map((item) => targetCellsByLane[walletLane(item.billing_account_id)]!)),
       ];
       const cellRowsRaw = retryContended
         ? await lockFundedSupplierCell(tx, parsed[0]!.item, parsed[0]!.supplierAtoms)
@@ -247,14 +247,14 @@ export function createTransactionalHoldBatch(
       >();
       if (idempotencyKeys.length > 0) {
         const rows = await tx`
-          SELECT request_id, project_id, operation, idempotency_key, wallet_id, fingerprint,
+          SELECT request_id, billing_account_id, operation, idempotency_key, wallet_id, fingerprint,
             held_atoms::text, credit_atoms::text, state, supplier_holds
           FROM public.billing_holds
-          WHERE project_id = ANY(${projectIds}::uuid[])
+          WHERE billing_account_id = ANY(${billingAccountIds}::uuid[])
             AND idempotency_key = ANY(${idempotencyKeys}::text[])
         `;
         for (const r of rows) {
-          existingIdem.set(`${r.project_id}:${r.operation}:${r.idempotency_key}`, {
+          existingIdem.set(`${r.billing_account_id}:${r.operation}:${r.idempotency_key}`, {
             request_id: String(r.request_id),
             wallet_id: String(r.wallet_id),
             fingerprint: String(r.fingerprint),
@@ -275,7 +275,7 @@ export function createTransactionalHoldBatch(
 
       const newHolds: {
         request_id: string;
-        project_id: string;
+        billing_account_id: string;
         wallet_id: string;
         api_key_id: string | null;
         key_reserved_atoms: string;
@@ -315,7 +315,7 @@ export function createTransactionalHoldBatch(
           continue;
         }
         if (item.idempotency_key !== null) {
-          const ik = `${item.project_id}:${item.operation}:${item.idempotency_key}`;
+          const ik = `${item.billing_account_id}:${item.operation}:${item.idempotency_key}`;
           const prev = existingIdem.get(ik);
           if (prev) {
             if (prev.fingerprint !== item.fingerprint) {
@@ -340,10 +340,14 @@ export function createTransactionalHoldBatch(
           }
         }
 
-        const wk = walletKey(item.project_id, item.currency);
+        const wk = walletKey(item.billing_account_id, item.currency);
         const wallet = walletsByKey.get(wk);
         if (!wallet) {
-          results[i] = { ok: false, code: "wallet_not_found", message: "Project wallet not found" };
+          results[i] = {
+            ok: false,
+            code: "wallet_not_found",
+            message: "BillingAccount wallet not found",
+          };
           continue;
         }
         const admissionError = walletAdmissionError(wallet);
@@ -370,7 +374,7 @@ export function createTransactionalHoldBatch(
         }
 
         const acctCurKey = supplierKey(item.supplier_account_id, item.supplier_currency);
-        const lane = walletLane(item.project_id);
+        const lane = walletLane(item.billing_account_id);
         const firstCell = lane * SUPPLIER_CELLS_PER_LANE;
         const sameLane = (cell: SupplierCellRow) =>
           cell.cell >= firstCell && cell.cell < firstCell + SUPPLIER_CELLS_PER_LANE;
@@ -519,7 +523,7 @@ export function createTransactionalHoldBatch(
 
         newHolds.push({
           request_id: item.request_id,
-          project_id: item.project_id,
+          billing_account_id: item.billing_account_id,
           wallet_id: wallet.id,
           api_key_id: item.api_key_id ?? null,
           key_reserved_atoms: keyReservedAtoms.toString(),
@@ -538,7 +542,7 @@ export function createTransactionalHoldBatch(
         });
 
         if (item.idempotency_key !== null) {
-          existingIdem.set(`${item.project_id}:${item.operation}:${item.idempotency_key}`, {
+          existingIdem.set(`${item.billing_account_id}:${item.operation}:${item.idempotency_key}`, {
             request_id: item.request_id,
             wallet_id: wallet.id,
             fingerprint: item.fingerprint,
@@ -673,7 +677,7 @@ export function createTransactionalHoldBatch(
         createdWalletLeases.push({
           leaseId,
           walletId: w.id,
-          projectId: w.project_id,
+          billingAccountId: w.billing_account_id,
           currency: w.currency,
           remainingInPg: reserved,
           freeInMemory: reserved,
@@ -804,19 +808,19 @@ export function createTransactionalHoldBatch(
             ),
             ins_h AS (
               INSERT INTO public.billing_holds (
-                request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
+                request_id, billing_account_id, wallet_id, api_key_id, key_reserved_atoms,
                 pricing_override_id, discount_numerator, discount_denominator,
                 operation, model, idempotency_key, fingerprint,
                 held_atoms, credit_atoms, lot_allocations, supplier_holds, state, expires_at
               )
               SELECT
-                u.request_id, u.project_id, u.wallet_id, u.api_key_id, u.key_reserved_atoms,
+                u.request_id, u.billing_account_id, u.wallet_id, u.api_key_id, u.key_reserved_atoms,
                 u.pricing_override_id, u.discount_numerator, u.discount_denominator,
                 u.operation, u.model, u.idempotency_key, u.fingerprint,
                 u.held_atoms, u.credit_atoms, u.lot_allocations::jsonb, u.supplier_holds::jsonb, 'HELD', u.expires_at
               FROM unnest(
                 ${newHolds.map((h) => h.request_id)}::uuid[],
-                ${newHolds.map((h) => h.project_id)}::uuid[],
+                ${newHolds.map((h) => h.billing_account_id)}::uuid[],
                 ${newHolds.map((h) => h.wallet_id)}::uuid[],
                 ${newHolds.map((h) => h.api_key_id)}::uuid[],
                 ${newHolds.map((h) => h.key_reserved_atoms)}::numeric[],
@@ -833,7 +837,7 @@ export function createTransactionalHoldBatch(
                 ${newHolds.map((h) => JSON.stringify(h.supplier_holds))}::text[],
                 ${newHolds.map((h) => h.expires_at)}::timestamptz[]
               ) AS u(
-                request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
+                request_id, billing_account_id, wallet_id, api_key_id, key_reserved_atoms,
                 pricing_override_id, discount_numerator, discount_denominator,
                 operation, model, idempotency_key, fingerprint,
                 held_atoms, credit_atoms, lot_allocations, supplier_holds, expires_at

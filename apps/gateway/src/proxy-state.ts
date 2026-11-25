@@ -165,7 +165,7 @@ export class ProxyRuntimeState {
   private authCacheEpoch = -1;
   private authCachePepper = "";
   private quoteCacheEpoch = -1;
-  private readonly localProjectInFlight = new Map<string, number>();
+  private readonly localBillingAccountInFlight = new Map<string, number>();
   private readonly hydratedBySnapshot = new WeakMap<
     ConfigSnapshot,
     Map<string, HydratedCandidate[]>
@@ -251,22 +251,22 @@ export class ProxyRuntimeState {
     return quote.amount_atoms;
   }
 
-  tryEnterProject(projectId: string, concurrency: number): (() => void) | null {
-    const cur = this.localProjectInFlight.get(projectId) ?? 0;
+  tryEnterBillingAccount(billingAccountId: string, concurrency: number): (() => void) | null {
+    const cur = this.localBillingAccountInFlight.get(billingAccountId) ?? 0;
     if (cur >= concurrency) return null;
-    this.localProjectInFlight.set(projectId, cur + 1);
+    this.localBillingAccountInFlight.set(billingAccountId, cur + 1);
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      const next = (this.localProjectInFlight.get(projectId) ?? 1) - 1;
-      if (next <= 0) this.localProjectInFlight.delete(projectId);
-      else this.localProjectInFlight.set(projectId, next);
+      const next = (this.localBillingAccountInFlight.get(billingAccountId) ?? 1) - 1;
+      if (next <= 0) this.localBillingAccountInFlight.delete(billingAccountId);
+      else this.localBillingAccountInFlight.set(billingAccountId, next);
     };
   }
 
-  projectInFlight(projectId: string): number {
-    return this.localProjectInFlight.get(projectId) ?? 0;
+  billingAccountInFlight(billingAccountId: string): number {
+    return this.localBillingAccountInFlight.get(billingAccountId) ?? 0;
   }
 
   getHydratedCandidates(
@@ -317,6 +317,6 @@ export class ProxyRuntimeState {
     this.deadlines.close();
     this.verifiedKeyCache.clear();
     this.quoteCache.clear();
-    this.localProjectInFlight.clear();
+    this.localBillingAccountInFlight.clear();
   }
 }

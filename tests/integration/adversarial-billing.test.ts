@@ -1,3 +1,4 @@
+import { localInternalCredentials } from "../../scripts/local-internal-auth.ts";
 import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { SQL } from "bun";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -18,7 +19,7 @@ const adminUrl = new URL(baseDbUrl);
 adminUrl.pathname = "/postgres";
 const targetUrl = new URL(baseDbUrl);
 targetUrl.pathname = `/${testDbName}`;
-const ADMIN_TOKEN = "adv-admin-token-0123456789abcdef";
+const OPERATOR_TOKEN = "adv-admin-token-0123456789abcdef00000000000000";
 
 let adminDb: SQL;
 let db: SQL;
@@ -51,7 +52,7 @@ function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     dbMaxConnections: 16,
     keyPepper: "adv-pepper-secret-0123456789abcdef",
     encryptionKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    adminToken: ADMIN_TOKEN,
+    internalCredentials: localInternalCredentials(OPERATOR_TOKEN),
     allowPrivateUpstreams: true,
     privateUpstreamCidrs: ["127.0.0.0/8"],
     trustedProxyCidrs: [],
@@ -71,7 +72,7 @@ async function internalCall(
   method: string,
   path: string,
   body?: unknown,
-  token = ADMIN_TOKEN,
+  token = OPERATOR_TOKEN,
 ) {
   const res = await app.fetch(
     new Request(`http://internal.local${path}`, {
@@ -96,8 +97,12 @@ type Wallet = {
   spent_atoms: string;
 };
 
-async function wallet(runtime: ReturnType<typeof createGatewayRuntime>, projectId: string) {
-  const r = await internalCall(runtime.internalApp, "GET", `/internal/v1/wallets/${projectId}`);
+async function wallet(runtime: ReturnType<typeof createGatewayRuntime>, billingAccountId: string) {
+  const r = await internalCall(
+    runtime.internalApp,
+    "GET",
+    `/internal/v1/wallets/${billingAccountId}`,
+  );
   expect(r.status).toBe(200);
   return r.data as unknown as Wallet;
 }
@@ -116,21 +121,24 @@ async function seed(runtime: ReturnType<typeof createGatewayRuntime>, mockOrigin
     expect(r.status, JSON.stringify(r.data)).toBe(path === "/internal/v1/prices" ? 201 : 200);
     return r.data as Record<string, unknown>;
   };
-  const project = await call("PUT", "/internal/v1/projects", {
+  const billingAccount = await call("PUT", "/internal/v1/billing-accounts", {
     name: `adv-${crypto.randomUUID().slice(0, 8)}`,
     currency: "USD",
     rpm: 1_000_000,
     tpm: 100_000_000,
     concurrency: 1000,
   });
-  const projectId = String(project.id);
-  await call("POST", `/internal/v1/wallets/${projectId}/credits`, {
+  const billingAccountId = String(billingAccount.id);
+  await call("POST", `/internal/v1/wallets/${billingAccountId}/credits`, {
     currency: "USD",
     external_ref: `adv-credit-${crypto.randomUUID()}`,
     amount_atoms: "1000000000",
     kind: "CASH",
   });
-  const key = await call("PUT", "/internal/v1/api-keys", { project_id: projectId, name: "adv" });
+  const key = await call("PUT", "/internal/v1/api-keys", {
+    billing_account_id: billingAccountId,
+    name: "adv",
+  });
   const account = await call("PUT", "/internal/v1/upstream-accounts", {
     name: `adv-up-${crypto.randomUUID().slice(0, 8)}`,
   });
@@ -158,7 +166,7 @@ async function seed(runtime: ReturnType<typeof createGatewayRuntime>, mockOrigin
     rates: { input_tokens: { numerator: "1", denominator: "1" } },
     ceilings: { input_tokens: "100" },
   });
-  return { projectId, key: String(key.key), channel, customer, supplier, call };
+  return { billingAccountId, key: String(key.key), channel, customer, supplier, call };
 }
 
 function chatRequest(key: string, model: string, extra: Record<string, unknown> = {}) {
@@ -205,7 +213,7 @@ test.each(["lock", "statement"])(
         cost_version_id: fixture.supplier.id,
       });
       transaction = db.begin(async (tx) => {
-        await tx`SELECT id FROM public.wallets WHERE project_id=${fixture.projectId}::uuid FOR UPDATE`;
+        await tx`SELECT id FROM public.wallets WHERE billing_account_id=${fixture.billingAccountId}::uuid FOR UPDATE`;
         locked.resolve();
         await unlock.promise;
       });
@@ -226,7 +234,7 @@ test.each(["lock", "statement"])(
       const succeeded = await runtime.publicApp.fetch(retry);
       expect(succeeded.status).toBe(200);
       const [charged] =
-        await db`SELECT count(*)::int AS n FROM public.billing_charges WHERE project_id=${fixture.projectId}::uuid`;
+        await db`SELECT count(*)::int AS n FROM public.billing_charges WHERE billing_account_id=${fixture.billingAccountId}::uuid`;
       expect(charged?.n).toBe(1);
     } finally {
       unlock.resolve();
@@ -330,7 +338,7 @@ test("symptom: an open fail-closed output Webhook still dispatches paid upstream
     expect(calls).toBe(1);
     const [charge] =
       await db`SELECT count(*)::int AS entries, sum(customer_atoms)::text AS customer,
-      sum(supplier_cost_atoms)::text AS supplier FROM public.billing_charges WHERE project_id=${fixture.projectId}::uuid`;
+      sum(supplier_cost_atoms)::text AS supplier FROM public.billing_charges WHERE billing_account_id=${fixture.billingAccountId}::uuid`;
     expect(charge).toEqual({ entries: 1, customer: "0", supplier: "5" });
     await Bun.sleep(1100);
     webhookHealthy = true;
@@ -359,7 +367,7 @@ test("symptom: an open fail-closed output Webhook still dispatches paid upstream
     expect(calls).toBe(3);
     const [recovered] =
       await db`SELECT count(*)::int AS entries, sum(customer_atoms)::text AS customer,
-      sum(supplier_cost_atoms)::text AS supplier FROM public.billing_charges WHERE project_id=${fixture.projectId}::uuid`;
+      sum(supplier_cost_atoms)::text AS supplier FROM public.billing_charges WHERE billing_account_id=${fixture.billingAccountId}::uuid`;
     expect(recovered).toEqual({ entries: 3, customer: "10", supplier: "15" });
     expect((await runtime.ledger.auditConservation()).ok).toBe(true);
   } finally {
@@ -435,7 +443,7 @@ test("symptom: a saturated fail-closed output WASM queue still dispatches paid u
       expect(upstreamCalls).toBe(0);
     }
     const [before] = await db`
-      SELECT count(*)::int AS holds FROM public.billing_holds WHERE project_id=${fixture.projectId}::uuid`;
+      SELECT count(*)::int AS holds FROM public.billing_holds WHERE billing_account_id=${fixture.billingAccountId}::uuid`;
     expect(before?.holds).toBe(0);
     full = false;
     const accepted = await runtime.publicApp.fetch(request(false));
@@ -451,7 +459,7 @@ test("symptom: a saturated fail-closed output WASM queue still dispatches paid u
     const [after] = await db`
       SELECT count(*)::int AS charges, sum(customer_atoms)::text AS customer,
         sum(supplier_cost_atoms)::text AS supplier
-      FROM public.billing_charges WHERE project_id=${fixture.projectId}::uuid`;
+      FROM public.billing_charges WHERE billing_account_id=${fixture.billingAccountId}::uuid`;
     expect(after).toEqual({ charges: 1, customer: "5", supplier: "5" });
     expect(await runtime.ledger.auditConservation()).toMatchObject({
       ok: true,
@@ -461,6 +469,65 @@ test("symptom: a saturated fail-closed output WASM queue still dispatches paid u
   } finally {
     await runtime.close();
     upstream.stop(true);
+  }
+});
+
+test("Trace setup and expiration require the current billing account column", async () => {
+  const traceDbName = `trace_init_${testDbName}`;
+  const traceUrl = new URL(adminUrl);
+  traceUrl.pathname = `/${traceDbName}`;
+  const initialize = async () => {
+    const processResult = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        new URL("../../scripts/trace-db.ts", import.meta.url).pathname,
+        "migrate",
+      ],
+      {
+        env: { ...process.env, TRACE_DATABASE_URL: traceUrl.toString() },
+        stdout: "ignore",
+        stderr: "pipe",
+      },
+    );
+    const [exit, stderr] = await Promise.all([
+      processResult.exited,
+      new Response(processResult.stderr).text(),
+    ]);
+    return { exit, stderr };
+  };
+  await adminDb.unsafe(`CREATE DATABASE ${traceDbName}`);
+  const traceDb = createDatabase(traceUrl.toString(), 1);
+  const traceStore = createTraceStore(traceUrl.toString(), 1000);
+  try {
+    await traceDb.unsafe(
+      "CREATE TABLE public.console_schema_migrations (version integer PRIMARY KEY)",
+    );
+    expect((await initialize()).exit).toBe(1);
+    await traceDb.unsafe("DROP TABLE public.console_schema_migrations");
+    expect(await initialize()).toEqual({ exit: 0, stderr: "" });
+    expect(await initialize()).toEqual({ exit: 0, stderr: "" });
+    const traceId = "a".repeat(32);
+    await traceDb.unsafe(
+      "CREATE TABLE public.console_schema_migrations (version integer PRIMARY KEY)",
+    );
+    await expect(traceStore.read(traceId)).rejects.toThrow("Invalid telemetry database");
+    await traceDb.unsafe("DROP TABLE public.console_schema_migrations");
+    await traceDb`
+      INSERT INTO telemetry.spans (trace_id, span_id, request_id, billing_account_id, source, started_at, expires_at, span)
+      VALUES (${traceId}, ${"b".repeat(16)}, ${crypto.randomUUID()}, ${crypto.randomUUID()},
+        'gateway', now() - interval '2 seconds', now() - interval '1 second', '{}'::jsonb)
+    `;
+    await traceDb`ALTER TABLE telemetry.spans RENAME COLUMN billing_account_id TO project_id`;
+    const rejected = await initialize();
+    expect(rejected.exit).toBe(1);
+    expect(rejected.stderr).toContain("billing_account_id");
+    await expect(traceStore.expire(1)).rejects.toThrow(/billing_account_id/);
+    expect(await traceDb`SELECT trace_id FROM telemetry.spans`).toEqual([{ trace_id: traceId }]);
+  } finally {
+    await traceStore.close();
+    await traceDb.close();
+    await adminDb.unsafe(`DROP DATABASE ${traceDbName} WITH (FORCE)`);
   }
 });
 
@@ -522,7 +589,7 @@ test("first text traces link the delayed SSE text to the client and skip reasoni
         maxAttempts: 3,
         maxRecords: 4,
         maxBytes: 32_768,
-        maxPerProject: 3,
+        maxPerBillingAccount: 3,
         priorityReserve: 1,
         batchSize: 2,
         batchDeadlineMs: 700,
@@ -541,7 +608,10 @@ test("first text traces link the delayed SSE text to the client and skip reasoni
   let server: ReturnType<typeof realServer> | undefined;
   try {
     await runtime.start();
-    const { key, channel, customer, supplier, call } = await seed(runtime, upstream.url.origin);
+    const { key, billingAccountId, channel, customer, supplier, call } = await seed(
+      runtime,
+      upstream.url.origin,
+    );
     const model = "first-text-trace";
     await call("PUT", "/internal/v1/models", {
       name: model,
@@ -611,6 +681,11 @@ test("first text traces link the delayed SSE text to the client and skip reasoni
     expect(JSON.stringify(access)).not.toContain("visible");
     expect(client.trace_persisted).toBe(true);
     const stored = await traceStore.read(client.request_id);
+    expect(stored.map(({ billing_account_id }) => billing_account_id)).toEqual([
+      billingAccountId,
+      billingAccountId,
+      billingAccountId,
+    ]);
     expect(stored.map(({ span }) => span.name).sort()).toEqual([
       "client.inference",
       "gateway.inference",
@@ -691,14 +766,19 @@ test("symptom: a freshly issued Key is rejected as expired when Gateway runs out
   try {
     process.env.TZ = "Asia/Singapore";
     await runtime.start();
-    const project = await internalCall(runtime.internalApp, "PUT", "/internal/v1/projects", {
-      name: "key-expiration-timezone",
-    });
-    expect(project.status).toBe(200);
+    const billingAccount = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/billing-accounts",
+      {
+        name: "key-expiration-timezone",
+      },
+    );
+    expect(billingAccount.status).toBe(200);
     const now = Date.now();
     const issue = (expiresAt: string) =>
       internalCall(runtime.internalApp, "PUT", "/internal/v1/api-keys", {
-        project_id: project.data.id,
+        billing_account_id: billingAccount.data.id,
         expires_at: expiresAt,
       });
     const listModels = (key: unknown) =>
@@ -739,7 +819,10 @@ test("symptom: fixed input ceilings reject short text on a Key that can pay for 
   const runtime = createGatewayRuntime({ config: makeConfig(), db });
   try {
     await runtime.start();
-    const { projectId, channel, supplier, call } = await seed(runtime, mockServer.url.origin);
+    const { billingAccountId, channel, supplier, call } = await seed(
+      runtime,
+      mockServer.url.origin,
+    );
     const model = "adv-dynamic-reservation";
     const customer = await call("POST", "/internal/v1/prices", {
       side: "CUSTOMER",
@@ -765,7 +848,7 @@ test("symptom: fixed input ceilings reject short text on a Key that can pay for 
     });
     const createKey = (name: string, limit: string) =>
       call("PUT", "/internal/v1/api-keys", {
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         name,
         spend_limit_atoms: limit,
       });
@@ -815,7 +898,7 @@ test("symptom: client cancels SSE mid-stream after consuming output -> hold is U
   const runtime = createGatewayRuntime({ config: makeConfig(), db });
   try {
     await runtime.start();
-    const { projectId, key, channel, customer, supplier, call } = await seed(
+    const { billingAccountId, key, channel, customer, supplier, call } = await seed(
       runtime,
       mockServer.url.origin,
     );
@@ -835,7 +918,7 @@ test("symptom: client cancels SSE mid-stream after consuming output -> hold is U
     });
     mock.scenarios.set("adv-slow", { chunkDelayMs: 40, repeat: 20 });
 
-    const before = await wallet(runtime, projectId);
+    const before = await wallet(runtime, billingAccountId);
     const ac = new AbortController();
     const res = await runtime.publicApp.fetch(chatRequest(key, model), {
       signal: ac.signal,
@@ -859,7 +942,7 @@ test("symptom: client cancels SSE mid-stream after consuming output -> hold is U
     });
     expect(runtime.lifecycle.size).toBe(0);
 
-    const during = await wallet(runtime, projectId);
+    const during = await wallet(runtime, billingAccountId);
     const holdRow = (
       await db`SELECT held_atoms::text AS h FROM public.billing_holds WHERE request_id = ${requestId}`
     )[0]!;
@@ -883,11 +966,10 @@ test("symptom: client cancels SSE mid-stream after consuming output -> hold is U
         usage: { input_tokens: "10", output_tokens: "5" },
         supplier_cost_atoms: "15",
         reason: "ops-measured-actual-usage",
-        actor: "ops",
       },
     );
     expect(resolve.status, JSON.stringify(resolve.data)).toBe(200);
-    const after = await wallet(runtime, projectId);
+    const after = await wallet(runtime, billingAccountId);
     expect(BigInt(after.available_atoms)).toBe(BigInt(before.available_atoms) - 10n);
     expect(BigInt(after.spent_atoms) - BigInt(before.spent_atoms)).toBe(10n);
     expect(BigInt(after.reserved_atoms)).toBe(BigInt(before.reserved_atoms));
@@ -911,7 +993,7 @@ test("symptom: RELEASE on a cancelled request refunds exactly the hold and never
   const runtime = createGatewayRuntime({ config: makeConfig(), db });
   try {
     await runtime.start();
-    const { projectId, key, channel, customer, supplier, call } = await seed(
+    const { billingAccountId, key, channel, customer, supplier, call } = await seed(
       runtime,
       mockServer.url.origin,
     );
@@ -930,7 +1012,7 @@ test("symptom: RELEASE on a cancelled request refunds exactly the hold and never
       cost_version_id: supplier.id,
     });
     mock.scenarios.set("adv-slow", { chunkDelayMs: 150, repeat: 20 });
-    const before = await wallet(runtime, projectId);
+    const before = await wallet(runtime, billingAccountId);
     const res = await runtime.publicApp.fetch(chatRequest(key, model));
     const requestId = res.headers.get("x-request-id")!;
     const reader = res.body!.getReader();
@@ -947,11 +1029,10 @@ test("symptom: RELEASE on a cancelled request refunds exactly the hold and never
       {
         action: "RELEASE",
         reason: "no-output-confirmed",
-        actor: "ops",
       },
     );
     expect(resolve.status, JSON.stringify(resolve.data)).toBe(200);
-    const after = await wallet(runtime, projectId);
+    const after = await wallet(runtime, billingAccountId);
     expect(after).toEqual(before);
     const again = await internalCall(
       runtime.internalApp,
@@ -961,11 +1042,10 @@ test("symptom: RELEASE on a cancelled request refunds exactly the hold and never
         action: "SETTLE",
         usage: { input_tokens: "10", output_tokens: "5" },
         reason: "double-resolve-attack",
-        actor: "ops",
       },
     );
     expect(again.data).toMatchObject({ replayed: true, state: "RELEASE" });
-    const after2 = await wallet(runtime, projectId);
+    const after2 = await wallet(runtime, billingAccountId);
     expect(after2).toEqual(before);
   } finally {
     await runtime.close();
@@ -979,7 +1059,7 @@ test("symptom: a cancel storm of 100 concurrent SSE requests leaves funds exactl
   const runtime = createGatewayRuntime({ config: makeConfig({ maxInFlight: 2000 }), db });
   try {
     await runtime.start();
-    const { projectId, key, channel, customer, supplier, call } = await seed(
+    const { billingAccountId, key, channel, customer, supplier, call } = await seed(
       runtime,
       mockServer.url.origin,
     );
@@ -998,7 +1078,7 @@ test("symptom: a cancel storm of 100 concurrent SSE requests leaves funds exactl
       cost_version_id: supplier.id,
     });
     mock.scenarios.set("adv-storm", { streamDurationMs: 6000, repeat: 30 });
-    const before = await wallet(runtime, projectId);
+    const before = await wallet(runtime, billingAccountId);
     const publicServer = realServer(runtime);
     const N = 100;
     const results = await Promise.all(
@@ -1043,7 +1123,7 @@ test("symptom: a cancel storm of 100 concurrent SSE requests leaves funds exactl
     >`SELECT state, held_atoms::text AS h FROM public.billing_holds WHERE request_id = ANY(${ids})`;
     const totalHeld = holds.reduce((acc: bigint, h) => acc + BigInt(h.h), 0n);
     await waitFor(async () => {
-      const w = await wallet(runtime, projectId);
+      const w = await wallet(runtime, billingAccountId);
       return BigInt(w.reserved_atoms) - BigInt(before.reserved_atoms) === totalHeld;
     }, 8000);
     expect(holds.length).toBe(N);
@@ -1063,7 +1143,7 @@ test("symptom: a cancel storm of 100 concurrent SSE requests leaves funds exactl
     ).find((health) => health.channel_id === channel.id);
     expect(channelHealth?.state ?? "CLOSED").toBe("CLOSED");
     expect(channelHealth?.consecutive_failures ?? 0).toBe(0);
-    const during = await wallet(runtime, projectId);
+    const during = await wallet(runtime, billingAccountId);
     expect(BigInt(during.reserved_atoms) - BigInt(before.reserved_atoms)).toBe(totalHeld);
     expect(BigInt(during.spent_atoms)).toBe(BigInt(before.spent_atoms));
     expect(BigInt(during.available_atoms) >= 0n).toBe(true);
@@ -1074,9 +1154,8 @@ test("symptom: a cancel storm of 100 concurrent SSE requests leaves funds exactl
       await internalCall(runtime.internalApp, "POST", `/internal/v1/requests/${id}/resolve`, {
         action: "RELEASE",
         reason: "storm-cleanup",
-        actor: "ops",
       });
-    const after = await wallet(runtime, projectId);
+    const after = await wallet(runtime, billingAccountId);
     expect(after).toEqual(before);
     const audit2 = await internalCall(
       runtime.internalApp,
@@ -1097,7 +1176,7 @@ test("symptom: replaying the same Idempotency-Key returns one charge, not two", 
   const runtime = createGatewayRuntime({ config: makeConfig(), db });
   try {
     await runtime.start();
-    const { projectId, key, channel, customer, supplier, call } = await seed(
+    const { billingAccountId, key, channel, customer, supplier, call } = await seed(
       runtime,
       mockServer.url.origin,
     );
@@ -1115,7 +1194,7 @@ test("symptom: replaying the same Idempotency-Key returns one charge, not two", 
       billing_price_id: customer.id,
       cost_version_id: supplier.id,
     });
-    const before = await wallet(runtime, projectId);
+    const before = await wallet(runtime, billingAccountId);
     const idem = crypto.randomUUID();
     const send = () =>
       runtime.publicApp.fetch(
@@ -1151,10 +1230,10 @@ test("symptom: replaying the same Idempotency-Key returns one charge, not two", 
       "idempotency_replayed",
     );
     const charges =
-      await db`SELECT count(*)::int AS n, count(DISTINCT request_id)::int AS u FROM public.billing_charges WHERE api_key_id = (SELECT id FROM public.api_keys WHERE project_id = ${projectId})`;
+      await db`SELECT count(*)::int AS n, count(DISTINCT request_id)::int AS u FROM public.billing_charges WHERE api_key_id = (SELECT id FROM public.api_keys WHERE billing_account_id = ${billingAccountId})`;
     expect(charges[0]!.n).toBe(1);
     expect(charges[0]!.u).toBe(1);
-    const after = await wallet(runtime, projectId);
+    const after = await wallet(runtime, billingAccountId);
     expect(BigInt(after.reserved_atoms)).toBe(BigInt(before.reserved_atoms));
     const audit = await internalCall(runtime.internalApp, "GET", "/internal/v1/audit/conservation");
     expect(audit.data.ok).toBe(true);
@@ -1170,8 +1249,8 @@ test("symptom: invalid auth, unknown model, oversized body and malformed JSON ne
   const runtime = createGatewayRuntime({ config: makeConfig({ maxBodyBytes: 64 * 1024 }), db });
   try {
     await runtime.start();
-    const { projectId, key } = await seed(runtime, mockServer.url.origin);
-    const before = await wallet(runtime, projectId);
+    const { billingAccountId, key } = await seed(runtime, mockServer.url.origin);
+    const before = await wallet(runtime, billingAccountId);
     const badAuth = await runtime.publicApp.fetch(
       new Request("http://gateway.local/v1/chat/completions", {
         method: "POST",
@@ -1245,10 +1324,10 @@ test("symptom: invalid auth, unknown model, oversized body and malformed JSON ne
       }),
     );
     expect(sqlInjection.status).toBe(401);
-    const after = await wallet(runtime, projectId);
+    const after = await wallet(runtime, billingAccountId);
     expect(after).toEqual(before);
     const holds =
-      await db`SELECT count(*)::int AS n FROM public.billing_holds WHERE project_id = ${projectId}`;
+      await db`SELECT count(*)::int AS n FROM public.billing_holds WHERE billing_account_id = ${billingAccountId}`;
     expect(holds[0]!.n).toBe(0);
   } finally {
     await runtime.close();
@@ -1262,7 +1341,7 @@ test("symptom: client disconnects before the upstream answers -> hold becomes UN
   const runtime = createGatewayRuntime({ config: makeConfig(), db });
   try {
     await runtime.start();
-    const { projectId, key, channel, customer, supplier, call } = await seed(
+    const { billingAccountId, key, channel, customer, supplier, call } = await seed(
       runtime,
       mockServer.url.origin,
     );
@@ -1281,7 +1360,7 @@ test("symptom: client disconnects before the upstream answers -> hold becomes UN
       cost_version_id: supplier.id,
     });
     mock.scenarios.set("adv-prehdr", { headerDelayMs: 3000 });
-    const before = await wallet(runtime, projectId);
+    const before = await wallet(runtime, billingAccountId);
     const publicServer = realServer(runtime);
     const t0 = performance.now();
     const ac = new AbortController();
@@ -1297,13 +1376,13 @@ test("symptom: client disconnects before the upstream answers -> hold becomes UN
       signal: ac.signal,
     }).catch(() => undefined);
     await waitFor(async () => {
-      const w = await wallet(runtime, projectId);
+      const w = await wallet(runtime, billingAccountId);
       return BigInt(w.reserved_atoms) > BigInt(before.reserved_atoms);
     });
     ac.abort();
     await pending;
     const [holdRow] =
-      await db`SELECT request_id FROM public.billing_holds WHERE project_id = ${projectId} ORDER BY created_at DESC LIMIT 1`;
+      await db`SELECT request_id FROM public.billing_holds WHERE billing_account_id = ${billingAccountId} ORDER BY created_at DESC LIMIT 1`;
     await waitFor(async () => {
       const rows =
         await db`SELECT state FROM public.billing_holds WHERE request_id = ${holdRow!.request_id}`;
@@ -1312,11 +1391,11 @@ test("symptom: client disconnects before the upstream answers -> hold becomes UN
     const settledWithinMs = performance.now() - t0;
     expect(settledWithinMs).toBeLessThan(2500);
     expect(runtime.lifecycle.size).toBe(0);
-    const during = await wallet(runtime, projectId);
+    const during = await wallet(runtime, billingAccountId);
     expect(BigInt(during.spent_atoms)).toBe(BigInt(before.spent_atoms));
     expect(BigInt(during.reserved_atoms) - BigInt(before.reserved_atoms)).toBe(100n);
     const charges =
-      await db`SELECT count(*)::int AS n FROM public.billing_charges WHERE project_id = ${projectId}`;
+      await db`SELECT count(*)::int AS n FROM public.billing_charges WHERE billing_account_id = ${billingAccountId}`;
     expect(charges[0]!.n).toBe(0);
     const audit = await internalCall(runtime.internalApp, "GET", "/internal/v1/audit/conservation");
     expect(audit.data.ok).toBe(true);
@@ -1326,10 +1405,10 @@ test("symptom: client disconnects before the upstream answers -> hold becomes UN
       runtime.internalApp,
       "POST",
       `/internal/v1/requests/${holdRow!.request_id}/resolve`,
-      { action: "RELEASE", reason: "client-gone-before-upstream-headers", actor: "ops" },
+      { action: "RELEASE", reason: "client-gone-before-upstream-headers" },
     );
     expect(resolve.status, JSON.stringify(resolve.data)).toBe(200);
-    const after = await wallet(runtime, projectId);
+    const after = await wallet(runtime, billingAccountId);
     expect(after).toEqual(before);
     publicServer.stop(true);
   } finally {
@@ -1345,7 +1424,7 @@ test("symptom: wallet with insufficient funds is rejected before any upstream ca
   try {
     await runtime.start();
     const { key, channel, customer, supplier, call } = await seed(runtime, mockServer.url.origin);
-    const poor = await call("PUT", "/internal/v1/projects", {
+    const poor = await call("PUT", "/internal/v1/billing-accounts", {
       name: `adv-poor-${crypto.randomUUID().slice(0, 6)}`,
       currency: "USD",
       rpm: 10,
@@ -1353,7 +1432,7 @@ test("symptom: wallet with insufficient funds is rejected before any upstream ca
       concurrency: 1,
     });
     const poorKey = await call("PUT", "/internal/v1/api-keys", {
-      project_id: poor.id,
+      billing_account_id: poor.id,
       name: "poor",
     });
     const model = `adv-poor-${crypto.randomUUID().slice(0, 6)}`;
@@ -1386,7 +1465,7 @@ test("symptom: wallet with insufficient funds is rejected before any upstream ca
     expect([402, 403]).toContain(res.status);
     expect(mock.stats.requests).toBe(requestsBefore);
     const holds =
-      await db`SELECT count(*)::int AS n FROM public.billing_holds WHERE project_id = ${poor.id}`;
+      await db`SELECT count(*)::int AS n FROM public.billing_holds WHERE billing_account_id = ${poor.id}`;
     expect(holds[0]!.n).toBe(0);
     void key;
   } finally {
@@ -1445,7 +1524,7 @@ test("symptom: an upstream business error prematurely releases an evidence-requi
   const runtime = createGatewayRuntime({ config: makeConfig(), db });
   try {
     await runtime.start();
-    const { projectId, key, channel, customer, supplier, call } = await seed(
+    const { billingAccountId, key, channel, customer, supplier, call } = await seed(
       runtime,
       `http://127.0.0.1:${upstream.port}`,
     );
@@ -1505,12 +1584,12 @@ test("symptom: an upstream business error prematurely releases an evidence-requi
       runtime.internalApp,
       "POST",
       "/internal/v1/reconciliation/receipts",
-      { actor: "fixture-finance", receipts: [wrongReceipt] },
+      { receipts: [wrongReceipt] },
     );
     expect(rejected.data).toEqual({
       results: [{ attempt_id: wrongReceipt.attempt_id, status: "identity_conflict" }],
     });
-    expect(BigInt((await wallet(runtime, projectId)).reserved_atoms)).toBeGreaterThan(0n);
+    expect(BigInt((await wallet(runtime, billingAccountId)).reserved_atoms)).toBeGreaterThan(0n);
 
     await putRoute(true);
     const certain = await runtime.publicApp.fetch(chatRequest(key, model, { stream: false }));
@@ -1525,7 +1604,6 @@ test("symptom: an upstream business error prematurely releases an evidence-requi
       "POST",
       "/internal/v1/reconciliation/receipts",
       {
-        actor: "fixture-finance",
         receipts: [{ ...wrongReceipt, provider_request_id: "vendor-throttle-reconciliation" }],
       },
     );
@@ -1533,7 +1611,7 @@ test("symptom: an upstream business error prematurely releases an evidence-requi
       results: [{ attempt_id: wrongReceipt.attempt_id, status: "accepted" }],
     });
     expect(await runtime.ledger.processReconciliation(5)).toEqual({ receipts: 1, waivers: 0 });
-    expect(await wallet(runtime, projectId)).toMatchObject({
+    expect(await wallet(runtime, billingAccountId)).toMatchObject({
       reserved_atoms: "0",
       spent_atoms: "0",
     });

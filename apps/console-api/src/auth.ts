@@ -7,7 +7,7 @@ import {
   consoleAuditLogs,
   organizations,
   orgMembers,
-  projects,
+  billingAccounts,
   sessions,
   users,
   type ConsoleDrizzle,
@@ -508,34 +508,45 @@ export async function requireOrgMember(
   return { role: member.role, orgKind: member.orgKind };
 }
 
-export async function requireProjectAccess(
+export const defaultBillingAccountId = sql<string | null>`(
+  SELECT ${billingAccounts.id}
+  FROM ${billingAccounts}
+  WHERE ${billingAccounts.orgId} = ${organizations.id}
+  ORDER BY ${billingAccounts.createdAt}, ${billingAccounts.id}
+  LIMIT 1
+)`;
+
+export async function requireBillingAccountAccess(
   orm: ConsoleDrizzle,
   userId: string,
-  projectId: string,
+  billingAccountId: string,
   allowedRoles?: readonly OrgRole[],
 ) {
   const rows = await orm
     .select({
-      project: projects,
+      billingAccount: billingAccounts,
       role: orgMembers.role,
       orgKind: organizations.kind,
       orgStatus: organizations.status,
       inferenceReady: sql<boolean>`${organizations.inferenceRevision} = ${organizations.inferenceSyncedRevision}`,
     })
-    .from(projects)
-    .innerJoin(organizations, eq(organizations.id, projects.orgId))
-    .innerJoin(orgMembers, and(eq(orgMembers.orgId, projects.orgId), eq(orgMembers.userId, userId)))
-    .where(eq(projects.id, projectId))
+    .from(billingAccounts)
+    .innerJoin(organizations, eq(organizations.id, billingAccounts.orgId))
+    .innerJoin(
+      orgMembers,
+      and(eq(orgMembers.orgId, billingAccounts.orgId), eq(orgMembers.userId, userId)),
+    )
+    .where(eq(billingAccounts.id, billingAccountId))
     .limit(1);
   const row = rows[0];
-  if (!row) throw new GatewayError(404, "not_found", "Project not found");
+  if (!row) throw new GatewayError(404, "not_found", "Billing account not found");
   if (row.orgStatus !== "ACTIVE" || !row.inferenceReady) {
     throw new GatewayError(403, "org_suspended", "Organization is suspended");
   }
   if (allowedRoles && !allowedRoles.includes(row.role)) {
-    throw new GatewayError(403, "forbidden", "Insufficient role for project operation");
+    throw new GatewayError(403, "forbidden", "Insufficient role for billing account operation");
   }
-  return { project: row.project, role: row.role, orgKind: row.orgKind };
+  return { billingAccount: row.billingAccount, role: row.role, orgKind: row.orgKind };
 }
 
 export async function recordAuditLog(

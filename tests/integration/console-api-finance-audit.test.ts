@@ -6,8 +6,8 @@ let adminAccess = "";
 let customerAccess = "";
 let customerUserId = "";
 let orgId = "";
-let projectId = "";
-let extraProjectId = "";
+let billingAccountId = "";
+let extraBillingAccountId = "";
 let accountId = "";
 let channelId = "";
 let apiKeyRaw = "";
@@ -21,16 +21,9 @@ beforeAll(async () => {
   customerAccess = user.accessToken;
   customerUserId = user.user.id;
   orgId = user.defaultOrgId;
-  projectId = user.defaultProjectId;
+  billingAccountId = user.defaultBillingAccountId;
 
-  const p2 = await h.clientApi<{ id: string }>(
-    "POST",
-    `/api/v1/orgs/${orgId}/projects`,
-    customerAccess,
-    { name: "Secondary Project", currency: "USD" },
-  );
-  expect(p2.status).toBe(201);
-  extraProjectId = p2.data.id;
+  extraBillingAccountId = await h.seedLegacyBillingAccount(orgId, "Legacy separate account");
 
   const acc = await h.adminApi<{ id: string }>("POST", "/admin/v1/upstream-accounts", adminAccess, {
     name: "audit-sup-acc",
@@ -123,7 +116,7 @@ beforeAll(async () => {
 
   const keyRes = await h.clientApi<{ key: string }>(
     "POST",
-    `/api/v1/projects/${projectId}/api-keys`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
     customerAccess,
     { name: "audit-key" },
   );
@@ -138,7 +131,7 @@ afterAll(async () => {
 test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt freeze, automatic debt collection, and manual freeze", async () => {
   const badMismatch = await h.adminApi(
     "POST",
-    `/admin/v1/finance/projects/${projectId}/topups`,
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/topups`,
     adminAccess,
     {
       external_ref: "bad-mismatch",
@@ -150,7 +143,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
 
   const bad19Dec = await h.adminApi(
     "POST",
-    `/admin/v1/finance/projects/${projectId}/topups`,
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/topups`,
     adminAccess,
     {
       external_ref: "bad-19dec",
@@ -163,7 +156,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
     available_atoms: string;
     available_decimal: string;
     scale: number;
-  }>("POST", `/admin/v1/finance/projects/${projectId}/topups`, adminAccess, {
+  }>("POST", `/admin/v1/finance/billing-accounts/${billingAccountId}/topups`, adminAccess, {
     external_ref: "topup-18dec-1",
     amount_decimal: "12.345",
     reason: "Initial wire transfer",
@@ -177,7 +170,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
     replayed: boolean;
     available_decimal: string;
     delta_decimal: string;
-  }>("POST", `/admin/v1/finance/projects/${projectId}/adjustments`, adminAccess, {
+  }>("POST", `/admin/v1/finance/billing-accounts/${billingAccountId}/adjustments`, adminAccess, {
     external_ref: "wadj-pos-1",
     delta_decimal: "1.5",
     reason: "Manual credit bonus",
@@ -188,7 +181,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
 
   const posAdjReplay = await h.adminApi<{ replayed: boolean }>(
     "POST",
-    `/admin/v1/finance/projects/${projectId}/adjustments`,
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/adjustments`,
     adminAccess,
     {
       external_ref: "wadj-pos-1",
@@ -201,7 +194,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
 
   const posAdjConflict = await h.adminApi(
     "POST",
-    `/admin/v1/finance/projects/${projectId}/adjustments`,
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/adjustments`,
     adminAccess,
     {
       external_ref: "wadj-pos-1",
@@ -213,7 +206,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
 
   const negWithin = await h.adminApi<{ available_decimal: string; debt_decimal: string }>(
     "POST",
-    `/admin/v1/finance/projects/${projectId}/adjustments`,
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/adjustments`,
     adminAccess,
     {
       external_ref: "wadj-neg-1",
@@ -227,7 +220,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
 
   const negOverZeroCredit = await h.adminApi(
     "POST",
-    `/admin/v1/finance/projects/${projectId}/adjustments`,
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/adjustments`,
     adminAccess,
     {
       external_ref: "wadj-over-zero",
@@ -241,14 +234,14 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
     credit_policy_version: string;
     available_decimal: string;
     lots: { id: string; available_decimal: string }[];
-  }>("GET", `/admin/v1/finance/projects/${projectId}/wallet`, adminAccess);
+  }>("GET", `/admin/v1/finance/billing-accounts/${billingAccountId}/wallet`, adminAccess);
   expect(adminWallet1.status).toBe(200);
   expect(adminWallet1.data.available_decimal).toBe("10.000000000000000000");
   expect(adminWallet1.data.lots.length).toBe(2);
 
   const setCredit = await h.adminApi<{ credit_limit_decimal: string }>(
     "POST",
-    `/admin/v1/finance/projects/${projectId}/credit-policy`,
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/credit-policy`,
     adminAccess,
     {
       expected_version: adminWallet1.data.credit_policy_version,
@@ -262,7 +255,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
     available_decimal: string;
     debt_decimal: string;
     freeze_reason: string | null;
-  }>("POST", `/admin/v1/finance/projects/${projectId}/adjustments`, adminAccess, {
+  }>("POST", `/admin/v1/finance/billing-accounts/${billingAccountId}/adjustments`, adminAccess, {
     external_ref: "wadj-within-credit",
     delta_decimal: "-13",
     reason: "Debit using 10 available + 3 credit",
@@ -274,7 +267,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
 
   const negExceedCredit = await h.adminApi(
     "POST",
-    `/admin/v1/finance/projects/${projectId}/adjustments`,
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/adjustments`,
     adminAccess,
     {
       external_ref: "wadj-exceed-credit",
@@ -287,7 +280,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
   const forcedDebt = await h.adminApi<{
     debt_decimal: string;
     freeze_reason: string | null;
-  }>("POST", `/admin/v1/finance/projects/${projectId}/adjustments`, adminAccess, {
+  }>("POST", `/admin/v1/finance/billing-accounts/${billingAccountId}/adjustments`, adminAccess, {
     external_ref: "wadj-chargeback-force",
     delta_decimal: "-4",
     force_debt: true,
@@ -313,7 +306,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
   const repayTopup = await h.adminApi<{
     available_decimal: string;
     debt_collected_charges: number;
-  }>("POST", `/admin/v1/finance/projects/${projectId}/topups`, adminAccess, {
+  }>("POST", `/admin/v1/finance/billing-accounts/${billingAccountId}/topups`, adminAccess, {
     external_ref: "topup-repay-debt",
     amount_decimal: "10",
     reason: "Customer repays chargeback",
@@ -325,13 +318,13 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
   const walletAfterRepay = await h.adminApi<{
     debt_decimal: string;
     freeze_reason: string | null;
-  }>("GET", `/admin/v1/finance/projects/${projectId}/wallet`, adminAccess);
+  }>("GET", `/admin/v1/finance/billing-accounts/${billingAccountId}/wallet`, adminAccess);
   expect(walletAfterRepay.data.debt_decimal).toBe("0.000000000000000000");
   expect(walletAfterRepay.data.freeze_reason).toBeNull();
 
   const freezeRes = await h.adminApi<{ manual_frozen: boolean; freeze_reason: string | null }>(
     "POST",
-    `/admin/v1/finance/projects/${projectId}/freeze`,
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/freeze`,
     adminAccess,
     { frozen: true, reason: "Temporary fraud hold" },
   );
@@ -342,7 +335,7 @@ test("18-decimal wallet adjustments obey zero-overdraft credit rules, force_debt
 
   const unfreezeRes = await h.adminApi<{ manual_frozen: boolean; freeze_reason: string | null }>(
     "POST",
-    `/admin/v1/finance/projects/${projectId}/freeze`,
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/freeze`,
     adminAccess,
     { frozen: false, reason: "Verified clean" },
   );
@@ -364,19 +357,13 @@ test("platform default credit policy and batch unified credit updates work with 
   expect(setDef.data.default_credit_limit_decimal).toBe("2.000000000000000000");
   expect(setDef.data.default_wallet_policy).toBe("CASH_FIRST");
 
-  const inheritedProj = await h.clientApi<{ id: string }>(
-    "POST",
-    `/api/v1/orgs/${orgId}/projects`,
-    customerAccess,
-    { name: "Inherited Default Project", currency: "USD" },
-  );
-  expect(inheritedProj.status).toBe(201);
-  await h.consoleRuntime.sync.ensureProjectSynced(inheritedProj.data.id);
+  const inheritedId = await h.seedLegacyBillingAccount(orgId, "Inherited credit limits");
+  await h.consoleRuntime.sync.ensureBillingAccountSynced(inheritedId);
 
   const inheritedWallet = await h.adminApi<{
     credit_limit_decimal: string;
     policy: string;
-  }>("GET", `/admin/v1/finance/projects/${inheritedProj.data.id}/wallet`, adminAccess);
+  }>("GET", `/admin/v1/finance/billing-accounts/${inheritedId}/wallet`, adminAccess);
   expect(inheritedWallet.status).toBe(200);
   expect(inheritedWallet.data.credit_limit_decimal).toBe("2.000000000000000000");
   expect(inheritedWallet.data.policy).toBe("CASH_FIRST");
@@ -405,44 +392,45 @@ test("platform default credit policy and batch unified credit updates work with 
   const userDefaultBatch = await h.adminApi<{
     matched_count: number;
     updated_count: number;
-    items: { project_id: string; credit_limit_decimal: string }[];
+    items: { billing_account_id: string; credit_limit_decimal: string }[];
   }>("POST", "/admin/v1/finance/credit-policy/batch", adminAccess, {
     scope: "USER",
     user_id: customerUserId,
-    only_default_project: true,
+    only_default_billing_account: true,
     credit_limit_decimal: "1.25",
     policy: "EARLIEST_EXPIRY",
     dry_run: false,
-    reason: "Enterprise default project credit line",
+    reason: "Enterprise default billingAccount credit line",
   });
   expect(userDefaultBatch.status).toBe(200);
   expect(userDefaultBatch.data.matched_count).toBe(1);
   expect(userDefaultBatch.data.updated_count).toBe(1);
-  expect(userDefaultBatch.data.items[0]?.project_id).toBe(projectId);
+  expect(userDefaultBatch.data.items[0]?.billing_account_id).toBe(billingAccountId);
   expect(userDefaultBatch.data.items[0]?.credit_limit_decimal).toBe("1.250000000000000000");
 
   const extraWallet = await h.adminApi<{ credit_limit_decimal: string }>(
     "GET",
-    `/admin/v1/finance/projects/${extraProjectId}/wallet`,
+    `/admin/v1/finance/billing-accounts/${extraBillingAccountId}/wallet`,
     adminAccess,
   );
   expect(extraWallet.data.credit_limit_decimal).toBe("0.000000000000000000");
 });
 
-test("a lost default-credit response leaves project initialization retryable and applies the policy once", async () => {
+test("a lost default-credit response leaves billingAccount initialization retryable and applies the policy once", async () => {
   const defaults = await h.adminApi("PUT", "/admin/v1/finance/credit-policy/default", adminAccess, {
     default_credit_limit_decimal: "3",
     default_wallet_policy: "CASH_FIRST",
   });
   expect(defaults.status).toBe(200);
-  const project = await h.clientApi<{ id: string }>(
+  const team = await h.clientApi<{ default_billing_account_id: string }>(
     "POST",
-    `/api/v1/orgs/${orgId}/projects`,
+    "/api/v1/orgs",
     customerAccess,
-    { name: "Retried Default Credit", currency: "USD" },
+    { name: "Retried Default Credit", slug: "retry-default-credit" },
   );
-  expect(project.status).toBe(201);
-  const path = `/internal/v1/wallets/${project.data.id}/credit-policy`;
+  expect(team.status).toBe(201);
+  const id = team.data.default_billing_account_id;
+  const path = `/internal/v1/wallets/${id}/credit-policy`;
   let committedStatus = 0;
   h.setGatewayInterceptor(async (url, init, forward) => {
     if (init?.method === "POST" && new URL(url).pathname === path) {
@@ -455,19 +443,19 @@ test("a lost default-credit response leaves project initialization retryable and
   });
   try {
     const first = await h.consoleRuntime.sync
-      .ensureProjectSynced(project.data.id)
+      .ensureBillingAccountSynced(id)
       .catch((err: unknown) => err);
     expect(committedStatus).toBe(200);
     expect(first).toMatchObject({ status: 503 });
   } finally {
     h.setGatewayInterceptor(null);
   }
-  expect(await h.consoleRuntime.sync.ensureProjectSynced(project.data.id)).toMatchObject({
+  expect(await h.consoleRuntime.sync.ensureBillingAccountSynced(id)).toMatchObject({
     gatewaySynced: true,
   });
   const wallet = await h.adminApi(
     "GET",
-    `/admin/v1/finance/projects/${project.data.id}/wallet`,
+    `/admin/v1/finance/billing-accounts/${id}/wallet`,
     adminAccess,
   );
   expect(wallet.data).toMatchObject({
@@ -483,23 +471,26 @@ test("a lost default-credit response leaves project initialization retryable and
 
 test("credit policy preview reports an unavailable wallet instead of assuming zero debt", async () => {
   h.setGatewayInterceptor(async (url, init, forward) => {
-    if (init?.method === "GET" && new URL(url).pathname === `/internal/v1/wallets/${projectId}`) {
+    if (
+      init?.method === "GET" &&
+      new URL(url).pathname === `/internal/v1/wallets/${billingAccountId}`
+    ) {
       return new Response("unavailable", { status: 503 });
     }
     return forward();
   });
   try {
     const preview = await h.adminApi("POST", "/admin/v1/finance/credit-policy/batch", adminAccess, {
-      scope: "PROJECTS",
-      project_ids: [projectId],
+      scope: "BILLING_ACCOUNTS",
+      billing_account_ids: [billingAccountId],
       credit_limit_decimal: "0",
       dry_run: true,
-      reason: "Preview project credit policy",
+      reason: "Preview billingAccount credit policy",
     });
     expect(preview.status).toBe(200);
     expect(preview.data).toMatchObject({
       failed_count: 1,
-      items: [{ project_id: projectId, ok: false }],
+      items: [{ billing_account_id: billingAccountId, ok: false }],
     });
   } finally {
     h.setGatewayInterceptor(null);
@@ -510,7 +501,7 @@ test("batch credit updates reject a scope larger than the supported batch instea
   const user = await h.registerUser("wide-credit-scope@example.com");
   try {
     await h.conDb`
-      INSERT INTO public.projects (id, gateway_project_id, org_id, name)
+      INSERT INTO public.billing_accounts (id, gateway_billing_account_id, org_id, name)
       SELECT id, id, ${user.defaultOrgId}, 'Credit scope ' || n::text
       FROM (SELECT n, gen_random_uuid() AS id FROM generate_series(1, 500) AS n) fixtures
     `;
@@ -523,7 +514,7 @@ test("batch credit updates reject a scope larger than the supported batch instea
     });
     expect(preview.status).toBe(400);
   } finally {
-    await h.conDb`DELETE FROM public.projects WHERE org_id = ${user.defaultOrgId}`;
+    await h.conDb`DELETE FROM public.billing_accounts WHERE org_id = ${user.defaultOrgId}`;
   }
 });
 
@@ -603,7 +594,7 @@ test("supplier adjustments, admin/client audit views, request drilldown, P&L sum
       gross_margin_atoms: string;
       gross_margin_decimal: string;
     }[];
-  }>("GET", `/admin/v1/finance/charges?project_id=${projectId}`, adminAccess);
+  }>("GET", `/admin/v1/finance/charges?billing_account_id=${billingAccountId}`, adminAccess);
   expect(adminCharges.status).toBe(200);
   expect(adminCharges.data.items.length).toBe(1);
   const charge = adminCharges.data.items[0]!;
@@ -659,7 +650,7 @@ test("supplier adjustments, admin/client audit views, request drilldown, P&L sum
     available_decimal: string;
     credit_limit_decimal: string;
     lots: { issued_decimal: string; available_decimal: string }[];
-  }>("GET", `/api/v1/projects/${projectId}/wallet`, customerAccess);
+  }>("GET", `/api/v1/billing-accounts/${billingAccountId}/wallet`, customerAccess);
   expect(clientWallet.status).toBe(200);
   expect(clientWallet.data.scale).toBe(18);
   expect(clientWallet.data.available_decimal).toBe("2.800000000000000000");
@@ -669,7 +660,7 @@ test("supplier adjustments, admin/client audit views, request drilldown, P&L sum
   const clientTxns = await h.clientApi<{
     scale: number;
     items: Record<string, unknown>[];
-  }>("GET", `/api/v1/projects/${projectId}/transactions`, customerAccess);
+  }>("GET", `/api/v1/billing-accounts/${billingAccountId}/transactions`, customerAccess);
   expect(clientTxns.status).toBe(200);
   expect(clientTxns.data.items.length).toBeGreaterThanOrEqual(5);
   for (const item of clientTxns.data.items) {
@@ -716,4 +707,169 @@ test("supplier adjustments, admin/client audit views, request drilldown, P&L sum
   expect(tamperedConservation.status).toBe(500);
   expect(tamperedConservation.data.ok).toBe(false);
   expect(tamperedConservation.data.supplier_ledger_mismatches).toBe(1);
+  expect(
+    (
+      await h.adminApi("PATCH", `/admin/v1/upstream-accounts/${accountId}`, adminAccess, {
+        state: "ACTIVE",
+        expected_state: "RECONCILE_REQUIRED",
+      })
+    ).status,
+  ).toBe(200);
+});
+
+test("a personal Key and two team Keys debit the accounts that issued them", async () => {
+  const user = await h.registerUser(
+    "billing-account-owner@example.com",
+    undefined,
+    "A".repeat(120),
+  );
+  const team = await h.clientApi<{ id: string; default_billing_account_id: string }>(
+    "POST",
+    "/api/v1/orgs",
+    user.accessToken,
+    { name: "Shared Billing Team", slug: "shared-billing-team" },
+  );
+  expect(team.status).toBe(201);
+  const personalId = user.defaultBillingAccountId;
+  const teamId = team.data.default_billing_account_id;
+  const extraAccount = await h.clientApi(
+    "POST",
+    `/api/v1/orgs/${team.data.id}/billing-accounts`,
+    user.accessToken,
+    { name: "Another account in the same team" },
+  );
+  expect(extraAccount.status).toBe(404);
+
+  const teamGatewayId = crypto.randomUUID();
+  await h.conDb`UPDATE public.billing_accounts SET gateway_billing_account_id = ${teamGatewayId} WHERE id = ${teamId}`;
+  const me = await h.clientApi("GET", "/api/v1/auth/me", user.accessToken);
+  expect(me.status).toBe(200);
+  expect(me.data.organizations).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ kind: "PERSONAL", default_billing_account_id: personalId }),
+      expect.objectContaining({ kind: "ENTERPRISE", default_billing_account_id: teamId }),
+    ]),
+  );
+
+  const issueKey = async (id: string, name: string) => {
+    const result = await h.clientApi<{ key: string }>(
+      "POST",
+      `/api/v1/billing-accounts/${id}/api-keys`,
+      user.accessToken,
+      { name },
+    );
+    expect(result.status).toBe(201);
+    return result.data.key;
+  };
+  const personalKey = await issueKey(personalId, "Personal");
+  const teamKey = await issueKey(teamId, "Team application");
+  const secondTeamKey = await issueKey(teamId, "Team background jobs");
+  const teamSummary = () =>
+    h.adminApi("GET", `/admin/v1/finance/summary?billing_account_id=${teamId}`, adminAccess);
+  const emptySummary = await teamSummary();
+
+  for (const [id, amount] of [
+    [personalId, "1"],
+    [teamId, "2"],
+  ] as const) {
+    const credit = await h.adminApi(
+      "POST",
+      `/admin/v1/finance/billing-accounts/${id}/topups`,
+      adminAccess,
+      { external_ref: "account-test-topup", amount_decimal: amount },
+    );
+    expect(credit.status).toBe(200);
+  }
+
+  for (const key of [personalKey, teamKey, secondTeamKey]) {
+    const response = await fetch(`${h.gatewayPublicUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "audit-gpt",
+        messages: [{ role: "user", content: "Confirm account attribution" }],
+        max_tokens: 75,
+      }),
+    });
+    const body = await response.json();
+    expect({ status: response.status, body }).toMatchObject({
+      status: 200,
+      body: { choices: [{ message: { content: "hello from upstream" } }] },
+    });
+  }
+
+  const personal = await h.clientApi<{ billing_account_id: string; available_decimal: string }>(
+    "GET",
+    `/api/v1/billing-accounts/${personalId}/wallet`,
+    user.accessToken,
+  );
+  const shared = await h.clientApi<typeof personal.data>(
+    "GET",
+    `/api/v1/billing-accounts/${teamId}/wallet`,
+    user.accessToken,
+  );
+  expect(personal.data).toMatchObject({
+    billing_account_id: personalId,
+    available_decimal: "0.800000000000000000",
+  });
+  expect(shared.data).toMatchObject({
+    billing_account_id: teamId,
+    available_decimal: "1.600000000000000000",
+  });
+  const charges = await h.adminApi<{ items: { billing_account_id: string }[] }>(
+    "GET",
+    `/admin/v1/finance/charges?billing_account_id=${teamId}`,
+    adminAccess,
+  );
+  expect(charges.status).toBe(200);
+  expect(charges.data.items.map((item) => item.billing_account_id)).toEqual([teamId, teamId]);
+  expect([emptySummary, await teamSummary()]).toMatchObject([
+    { status: 200, data: { billing_account_id: teamId, by_billing_account: [] } },
+    { status: 200, data: { billing_account_id: teamId, by_billing_account: [{ key: teamId }] } },
+  ]);
+  const retiredFilter = await h.adminApi(
+    "GET",
+    `/admin/v1/finance/charges?project_id=${teamId}`,
+    adminAccess,
+  );
+  expect(retiredFilter.status).toBe(400);
+  const ledgerEntries = await h.adminApi(
+    "GET",
+    `/admin/v1/finance/ledger-entries?billing_account_id=${teamId}`,
+    adminAccess,
+  );
+  expect(ledgerEntries.status).toBe(400);
+  const gatewayEntries = await h.gatewayInternalApi(
+    "GET",
+    `/internal/v1/ledger-entries?billing_account_id=${teamGatewayId}`,
+  );
+  expect(gatewayEntries.status).toBe(400);
+});
+
+test("finance can filter transactions by a standalone Gateway billing account", async () => {
+  const id = crypto.randomUUID();
+  const account = await h.gatewayInternalApi("PUT", "/internal/v1/billing-accounts", {
+    id,
+    name: "Standalone account",
+    currency: "USD",
+    rpm: 100,
+    tpm: 1000,
+    concurrency: 1,
+    enabled: true,
+  });
+  expect(account.status).toBe(200);
+  const credit = await h.gatewayInternalApi("POST", `/internal/v1/wallets/${id}/credits`, {
+    currency: "USD",
+    external_ref: "standalone-topup",
+    amount_atoms: "5000",
+    kind: "CASH",
+  });
+  expect(credit.status).toBe(200);
+  const transactions = await h.adminApi<{ items: Record<string, unknown>[] }>(
+    "GET",
+    `/admin/v1/finance/transactions?billing_account_id=${id}`,
+    adminAccess,
+  );
+  expect(transactions.status).toBe(200);
+  expect(transactions.data.items).toMatchObject([{ billing_account_id: id, amount_atoms: "5000" }]);
 });

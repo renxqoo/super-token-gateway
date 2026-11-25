@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
 import { createGatewayRuntime } from "../app.ts";
 import { loadConfigFromEnv } from "../config.ts";
@@ -7,7 +8,9 @@ import { createCgroupPressureSampler, createPressureMonitor } from "../resource-
 const baseEnv = {
   GATEWAY_MODE: "gateway",
   DATABASE_URL: "postgres://fixture@127.0.0.1:1/fixture",
-  ADMIN_TOKEN: "fixture-admin-token",
+  INTERNAL_AUTH_FILE: fileURLToPath(
+    new URL("../../../../tests/fixtures/internal-auth.json", import.meta.url),
+  ),
   KEY_PEPPER: "fixture-key-pepper",
   ENCRYPTION_KEY: "00".repeat(32),
 };
@@ -34,6 +37,20 @@ const pressureEnv = {
   INGRESS_MEMORY_RECOVERY_PERCENT: "70",
   INGRESS_MEMORY_CRITICAL_PERCENT: "94",
 };
+
+test("Gateway startup requires a role credentials file", () => {
+  expect(() => loadConfigFromEnv({ ...baseEnv, INTERNAL_AUTH_FILE: undefined }, [])).toThrow(
+    "INTERNAL_AUTH_FILE is required",
+  );
+});
+
+test("video concurrency reads the billing account environment setting", () => {
+  const config = loadConfigFromEnv(
+    { ...baseEnv, MAX_ACTIVE_ASYNC_TASKS_PER_BILLING_ACCOUNT: "5" },
+    [],
+  );
+  expect(config.maxActiveAsyncTasksPerBillingAccount).toBe(5);
+});
 
 test("ingress enforcement requires explicit limits and ordered pressure thresholds", () => {
   expect(() => loadConfigFromEnv({ ...baseEnv, INGRESS_IP_MODE: "enforce" }, [])).toThrow(

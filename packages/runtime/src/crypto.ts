@@ -26,8 +26,8 @@ export function secureEqual(a: string, b: string): boolean {
   return left.byteLength === right.byteLength && timingSafeEqual(left, right);
 }
 
-export const PROJECT_API_KEY_LENGTH = 46;
-export const PROJECT_API_KEY_PATTERN = /^sk_[A-Za-z0-9_-]{43}$/;
+export const BILLING_ACCOUNT_API_KEY_LENGTH = 46;
+export const BILLING_ACCOUNT_API_KEY_PATTERN = /^sk_[A-Za-z0-9_-]{43}$/;
 
 export function createKey(): string {
   return `sk_${randomBytes(32).toString("base64url")}`;

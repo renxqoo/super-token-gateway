@@ -18,7 +18,7 @@ import {
   authenticateSession,
   isSafePublicWebhookUrl,
   recordAuditLog,
-  requireProjectAccess,
+  requireBillingAccountAccess,
 } from "../auth.ts";
 import {
   alertDeliveries,
@@ -40,16 +40,18 @@ import {
   nonNegativeAtomsSchema,
   parseIsoDateParam,
   parseIsoDatetimeParam,
+  parseBillingAccountFilter,
   parseJsonBody,
   parseLimitOffset,
   parseUuid,
   requireClientAuth,
   safeFormatAtoms,
+  toBillingAccountScope,
   type ConsoleDeps,
   type ConsoleEnv,
 } from "./shared.ts";
 
-function sanitizeCustomerCharge(raw: Record<string, unknown>) {
+function sanitizeCustomerCharge(raw: Record<string, unknown>, billingAccountId: string) {
   const customerAtoms = String(raw.customerAtoms ?? raw.customer_atoms ?? "0");
   const fundedAtoms = String(raw.fundedAtoms ?? raw.funded_atoms ?? "0");
   const debtAtoms = String(raw.debtAtoms ?? raw.debt_atoms ?? "0");
@@ -57,7 +59,7 @@ function sanitizeCustomerCharge(raw: Record<string, unknown>) {
   return {
     id: raw.id,
     request_id: raw.requestId ?? raw.request_id,
-    project_id: raw.projectId ?? raw.project_id,
+    billing_account_id: billingAccountId,
     api_key_id: raw.apiKeyId ?? raw.api_key_id ?? null,
     model: raw.model,
     operation: raw.operation,
@@ -81,7 +83,7 @@ function sanitizeCustomerCharge(raw: Record<string, unknown>) {
   };
 }
 
-function sanitizeCustomerTransaction(raw: Record<string, unknown>) {
+function sanitizeCustomerTransaction(raw: Record<string, unknown>, billingAccountId: string) {
   const amountAtoms = String(raw.amount_atoms ?? "0");
   const payload =
     raw.payload && typeof raw.payload === "object" ? (raw.payload as Record<string, unknown>) : {};
@@ -89,7 +91,7 @@ function sanitizeCustomerTransaction(raw: Record<string, unknown>) {
     raw.receipt && typeof raw.receipt === "object" ? (raw.receipt as Record<string, unknown>) : {};
   return {
     id: raw.id,
-    project_id: raw.project_id ?? null,
+    billing_account_id: billingAccountId,
     charge_id: raw.charge_id ?? null,
     kind: raw.kind,
     lot_kind: payload.kind ?? payload.lot_kind ?? receipt.kind ?? null,
@@ -103,12 +105,12 @@ function sanitizeCustomerTransaction(raw: Record<string, unknown>) {
   };
 }
 
-function sanitizeCustomerAsyncTask(raw: Record<string, unknown>) {
+function sanitizeCustomerAsyncTask(raw: Record<string, unknown>, billingAccountId: string) {
   return {
     id: raw.id,
     request_id: raw.request_id ?? raw.requestId,
     charge_id: raw.charge_id ?? raw.chargeId ?? null,
-    project_id: raw.project_id ?? raw.projectId,
+    billing_account_id: billingAccountId,
     api_key_id: raw.api_key_id ?? raw.apiKeyId ?? null,
     model: raw.model,
     operation: raw.operation,
@@ -144,19 +146,25 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     })
     .strict();
 
-  async function loadProjectOverridesIfAuthorized(
+  async function loadBillingAccountOverridesIfAuthorized(
     authHeader: string | undefined,
-    rawProjectId: string | undefined,
+    rawBillingAccountId: string | undefined,
   ): Promise<{
     overrides: MarketplaceOverrideRow[];
     exactPrices: Map<string, MarketplacePriceSnapshot>;
   }> {
-    if (!rawProjectId) return { overrides: [], exactPrices: new Map() };
-    const projectId = parseUuid(rawProjectId, "project_id");
+    if (!rawBillingAccountId) return { overrides: [], exactPrices: new Map() };
+    const billingAccountId = parseUuid(rawBillingAccountId, "billing_account_id");
     const user = await authenticateSession(deps.orm, authHeader, "CLIENT");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
-    if (!project.gatewaySynced) return { overrides: [], exactPrices: new Map() };
-    const { items } = await deps.gateway.listPricingOverrides(project.gatewayProjectId);
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+    );
+    if (!billingAccount.gatewaySynced) return { overrides: [], exactPrices: new Map() };
+    const { items } = await deps.gateway.listPricingOverrides(
+      billingAccount.gatewayBillingAccountId,
+    );
     const overrides = items
       .filter((row) => row.enabled)
       .map((row) => ({
@@ -201,11 +209,11 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     const category = c.req.query("category")?.trim();
     const operation = c.req.query("operation")?.trim();
     const search = c.req.query("search")?.trim().toLowerCase();
-    const projectIdParam = c.req.query("project_id")?.trim();
+    const billingAccountIdParam = parseBillingAccountFilter(c, "category", "operation", "search");
 
-    const { overrides, exactPrices } = await loadProjectOverridesIfAuthorized(
+    const { overrides, exactPrices } = await loadBillingAccountOverridesIfAuthorized(
       c.req.header("authorization"),
-      projectIdParam,
+      billingAccountIdParam,
     );
 
     const rows = await deps.orm
@@ -268,7 +276,7 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     } catch {
       throw new GatewayError(400, "validation_error", "Malformed model name encoding");
     }
-    const projectIdParam = c.req.query("project_id")?.trim();
+    const billingAccountIdParam = parseBillingAccountFilter(c);
     const [m] = await deps.orm
       .select()
       .from(modelCatalog)
@@ -282,9 +290,9 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
       .limit(1);
     if (!m || !m.isPublic) throw new GatewayError(404, "not_found", "Model not found");
 
-    const { overrides, exactPrices } = await loadProjectOverridesIfAuthorized(
+    const { overrides, exactPrices } = await loadBillingAccountOverridesIfAuthorized(
       c.req.header("authorization"),
-      projectIdParam,
+      billingAccountIdParam,
     );
     const pricingByOperation: Record<string, ReturnType<typeof resolveMarketplacePricing>> = {};
     for (const op of m.operations) {
@@ -314,15 +322,19 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     });
   });
 
-  app.get("/projects/:projectId/wallet", auth, async (c) => {
+  app.get("/billing-accounts/:billingAccountId/wallet", auth, async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
-    if (!project.gatewaySynced) {
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+    );
+    if (!billingAccount.gatewaySynced) {
       return c.json(
         enrichWalletDecimals({
-          project_id: project.id,
-          currency: project.currency,
+          billing_account_id: billingAccount.id,
+          currency: billingAccount.currency,
           synced: false,
           policy: "GIFT_FIRST",
           available_atoms: "0",
@@ -338,16 +350,26 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
         }),
       );
     }
-    const wallet = await deps.gateway.getWallet(project.gatewayProjectId, project.currency, true);
-    return c.json(enrichWalletDecimals({ ...wallet, synced: true }));
+    const wallet = await deps.gateway.getWallet(
+      billingAccount.gatewayBillingAccountId,
+      billingAccount.currency,
+      true,
+    );
+    return c.json(
+      enrichWalletDecimals({ ...toBillingAccountScope(wallet, billingAccountId), synced: true }),
+    );
   });
 
-  app.get("/projects/:projectId/transactions", auth, async (c) => {
+  app.get("/billing-accounts/:billingAccountId/transactions", auth, async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+    );
     const { limit, offset } = parseLimitOffset(c, 50, 200);
-    if (!project.gatewaySynced) {
+    if (!billingAccount.gatewaySynced) {
       return c.json({ scale: AMOUNT_DECIMALS, items: [], total: 0, limit, offset });
     }
     const rawKind = c.req.query("kind");
@@ -356,7 +378,7 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     }
     const raw = (await deps.gateway.listFundingOperations({
       side: "CUSTOMER",
-      project_id: project.gatewayProjectId,
+      billing_account_id: billingAccount.gatewayBillingAccountId,
       kind: rawKind,
       from: c.req.query("from"),
       to: c.req.query("to"),
@@ -365,23 +387,27 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     })) as { items?: Record<string, unknown>[]; total?: number; limit?: number; offset?: number };
     return c.json({
       scale: AMOUNT_DECIMALS,
-      items: (raw.items ?? []).map(sanitizeCustomerTransaction),
+      items: (raw.items ?? []).map((item) => sanitizeCustomerTransaction(item, billingAccountId)),
       total: raw.total ?? 0,
       limit: raw.limit ?? limit,
       offset: raw.offset ?? offset,
     });
   });
 
-  app.get("/projects/:projectId/charges", auth, async (c) => {
+  app.get("/billing-accounts/:billingAccountId/charges", auth, async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+    );
     const { limit, offset } = parseLimitOffset(c, 50, 200);
-    if (!project.gatewaySynced) {
+    if (!billingAccount.gatewaySynced) {
       return c.json({ items: [], total: 0, limit, offset });
     }
     const raw = (await deps.gateway.listCharges({
-      project_id: project.gatewayProjectId,
+      billing_account_id: billingAccount.gatewayBillingAccountId,
       api_key_id: c.req.query("api_key_id"),
       outcome: c.req.query("outcome"),
       from: c.req.query("from"),
@@ -390,45 +416,53 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
       offset: String(offset),
     })) as { items?: Record<string, unknown>[]; total?: number; limit?: number; offset?: number };
     return c.json({
-      items: (raw.items ?? []).map(sanitizeCustomerCharge),
+      items: (raw.items ?? []).map((item) => sanitizeCustomerCharge(item, billingAccountId)),
       total: raw.total ?? 0,
       limit: raw.limit ?? limit,
       offset: raw.offset ?? offset,
     });
   });
 
-  app.get("/projects/:projectId/tasks", auth, async (c) => {
+  app.get("/billing-accounts/:billingAccountId/tasks", auth, async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+    );
     const { limit, offset } = parseLimitOffset(c, 50, 200);
-    if (!project.gatewaySynced) {
+    if (!billingAccount.gatewaySynced) {
       return c.json({ items: [], total: 0, limit, offset });
     }
     const raw = (await deps.gateway.listAsyncTasks({
-      project_id: project.gatewayProjectId,
+      billing_account_id: billingAccount.gatewayBillingAccountId,
       status: c.req.query("status"),
       refund_eligibility: c.req.query("refund_eligibility"),
       limit: String(limit),
       offset: String(offset),
     })) as { items?: Record<string, unknown>[]; total?: number; limit?: number; offset?: number };
     return c.json({
-      items: (raw.items ?? []).map(sanitizeCustomerAsyncTask),
+      items: (raw.items ?? []).map((item) => sanitizeCustomerAsyncTask(item, billingAccountId)),
       total: raw.total ?? 0,
       limit: raw.limit ?? limit,
       offset: raw.offset ?? offset,
     });
   });
 
-  app.get("/projects/:projectId/usage/summary", auth, async (c) => {
+  app.get("/billing-accounts/:billingAccountId/usage/summary", auth, async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+    );
     const from = parseIsoDateParam(c.req.query("from"), "from");
     const to = parseIsoDateParam(c.req.query("to"), "to");
     const conds: DrizzleSQL[] = [
-      eq(usageDailyRollups.projectId, projectId),
-      eq(usageDailyRollups.currency, project.currency),
+      eq(usageDailyRollups.billingAccountId, billingAccountId),
+      eq(usageDailyRollups.currency, billingAccount.currency),
     ];
     if (from) conds.push(gte(usageDailyRollups.bucketDay, from));
     if (to) conds.push(lte(usageDailyRollups.bucketDay, to));
@@ -446,7 +480,7 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
       .where(and(...conds));
 
     return c.json({
-      currency: project.currency,
+      currency: billingAccount.currency,
       request_count: Number(row?.request_count ?? 0),
       customer_atoms: row?.customer_atoms ?? "0",
       input_tokens: Number(row?.input_tokens ?? 0),
@@ -456,18 +490,22 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     });
   });
 
-  app.get("/projects/:projectId/usage/timeseries", auth, async (c) => {
+  app.get("/billing-accounts/:billingAccountId/usage/timeseries", auth, async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+    );
     const granularity = c.req.query("granularity") === "hour" ? "hour" : "day";
 
     if (granularity === "hour") {
       const from = parseIsoDatetimeParam(c.req.query("from"), "from");
       const to = parseIsoDatetimeParam(c.req.query("to"), "to");
       const conds: DrizzleSQL[] = [
-        eq(usageHourlyRollups.projectId, projectId),
-        eq(usageHourlyRollups.currency, project.currency),
+        eq(usageHourlyRollups.billingAccountId, billingAccountId),
+        eq(usageHourlyRollups.currency, billingAccount.currency),
       ];
       if (from) conds.push(gte(usageHourlyRollups.bucketHour, from));
       if (to) conds.push(lte(usageHourlyRollups.bucketHour, to));
@@ -486,7 +524,7 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
         .limit(744);
       return c.json({
         granularity,
-        currency: project.currency,
+        currency: billingAccount.currency,
         items: rows.map((r) => ({
           bucket: r.bucket.toISOString(),
           request_count: Number(r.request_count),
@@ -500,8 +538,8 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     const from = parseIsoDateParam(c.req.query("from"), "from");
     const to = parseIsoDateParam(c.req.query("to"), "to");
     const conds: DrizzleSQL[] = [
-      eq(usageDailyRollups.projectId, projectId),
-      eq(usageDailyRollups.currency, project.currency),
+      eq(usageDailyRollups.billingAccountId, billingAccountId),
+      eq(usageDailyRollups.currency, billingAccount.currency),
     ];
     if (from) conds.push(gte(usageDailyRollups.bucketDay, from));
     if (to) conds.push(lte(usageDailyRollups.bucketDay, to));
@@ -520,7 +558,7 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
       .limit(366);
     return c.json({
       granularity,
-      currency: project.currency,
+      currency: billingAccount.currency,
       items: rows.map((r) => ({
         bucket: r.bucket,
         request_count: Number(r.request_count),
@@ -531,16 +569,20 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     });
   });
 
-  app.get("/projects/:projectId/usage/by-key", auth, async (c) => {
+  app.get("/billing-accounts/:billingAccountId/usage/by-key", auth, async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+    );
     const from = parseIsoDateParam(c.req.query("from"), "from");
     const to = parseIsoDateParam(c.req.query("to"), "to");
     const { limit, offset } = parseLimitOffset(c, 100, 500);
     const conds: DrizzleSQL[] = [
-      eq(usageDailyRollups.projectId, projectId),
-      eq(usageDailyRollups.currency, project.currency),
+      eq(usageDailyRollups.billingAccountId, billingAccountId),
+      eq(usageDailyRollups.currency, billingAccount.currency),
     ];
     if (from) conds.push(gte(usageDailyRollups.bucketDay, from));
     if (to) conds.push(lte(usageDailyRollups.bucketDay, to));
@@ -569,11 +611,16 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
               keyPrefix: apiKeyRecords.keyPrefix,
             })
             .from(apiKeyRecords)
-            .where(and(eq(apiKeyRecords.projectId, projectId), inArray(apiKeyRecords.id, keyIds)))
+            .where(
+              and(
+                eq(apiKeyRecords.billingAccountId, billingAccountId),
+                inArray(apiKeyRecords.id, keyIds),
+              ),
+            )
         : [];
     const keyMap = new Map(keys.map((k) => [k.id, k]));
     return c.json({
-      currency: project.currency,
+      currency: billingAccount.currency,
       items: rows.map((r) => ({
         api_key_id: r.api_key_id || null,
         request_count: Number(r.request_count),
@@ -588,16 +635,20 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     });
   });
 
-  app.get("/projects/:projectId/usage/by-model", auth, async (c) => {
+  app.get("/billing-accounts/:billingAccountId/usage/by-model", auth, async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+    );
     const from = parseIsoDateParam(c.req.query("from"), "from");
     const to = parseIsoDateParam(c.req.query("to"), "to");
     const { limit, offset } = parseLimitOffset(c, 100, 500);
     const conds: DrizzleSQL[] = [
-      eq(usageDailyRollups.projectId, projectId),
-      eq(usageDailyRollups.currency, project.currency),
+      eq(usageDailyRollups.billingAccountId, billingAccountId),
+      eq(usageDailyRollups.currency, billingAccount.currency),
     ];
     if (from) conds.push(gte(usageDailyRollups.bucketDay, from));
     if (to) conds.push(lte(usageDailyRollups.bucketDay, to));
@@ -618,7 +669,7 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
       .limit(limit)
       .offset(offset);
     return c.json({
-      currency: project.currency,
+      currency: billingAccount.currency,
       items: rows.map((r) => ({
         model: r.model,
         operation: r.operation,
@@ -632,41 +683,48 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     });
   });
 
-  app.get("/projects/:projectId/alerts", auth, async (c) => {
+  app.get("/billing-accounts/:billingAccountId/alerts", auth, async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    await requireProjectAccess(deps.orm, user.id, projectId);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    await requireBillingAccountAccess(deps.orm, user.id, billingAccountId);
     const [rules, deliveries] = await Promise.all([
       deps.orm
         .select()
         .from(alertRules)
-        .where(eq(alertRules.projectId, projectId))
+        .where(eq(alertRules.billingAccountId, billingAccountId))
         .orderBy(desc(alertRules.createdAt)),
       deps.orm
         .select()
         .from(alertDeliveries)
-        .where(eq(alertDeliveries.projectId, projectId))
+        .where(eq(alertDeliveries.billingAccountId, billingAccountId))
         .orderBy(desc(alertDeliveries.createdAt))
         .limit(50),
     ]);
-    return c.json({ rules, recent_deliveries: deliveries });
+    return c.json({
+      rules,
+      recent_deliveries: deliveries.map((delivery) => ({
+        ...delivery,
+        payload: toBillingAccountScope(delivery.payload, billingAccountId),
+      })),
+    });
   });
 
-  app.post("/projects/:projectId/alerts", auth, async (c) => {
+  app.post("/billing-accounts/:billingAccountId/alerts", auth, async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId, [
-      "OWNER",
-      "ADMIN",
-      "FINANCE",
-    ]);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+      ["OWNER", "ADMIN", "FINANCE"],
+    );
     const body = await parseJsonBody(c, createAlertSchema);
     const ruleId = crypto.randomUUID();
     const [created] = await deps.orm
       .insert(alertRules)
       .values({
         id: ruleId,
-        projectId,
+        billingAccountId,
         kind: body.kind,
         thresholdAtoms: body.threshold_atoms,
         webhookUrl: body.webhook_url ?? null,
@@ -675,7 +733,7 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
       .returning();
     await recordAuditLog(deps.orm, {
       actor: user,
-      orgId: project.orgId,
+      orgId: billingAccount.orgId,
       action: "alert.create",
       targetType: "alert_rule",
       targetId: ruleId,
@@ -683,23 +741,24 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     return c.json(created, 201);
   });
 
-  app.delete("/projects/:projectId/alerts/:ruleId", auth, async (c) => {
+  app.delete("/billing-accounts/:billingAccountId/alerts/:ruleId", auth, async (c) => {
     const user = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const ruleId = parseUuid(c.req.param("ruleId"), "ruleId");
-    const { project } = await requireProjectAccess(deps.orm, user.id, projectId, [
-      "OWNER",
-      "ADMIN",
-      "FINANCE",
-    ]);
+    const { billingAccount } = await requireBillingAccountAccess(
+      deps.orm,
+      user.id,
+      billingAccountId,
+      ["OWNER", "ADMIN", "FINANCE"],
+    );
     const deleted = await deps.orm
       .delete(alertRules)
-      .where(and(eq(alertRules.id, ruleId), eq(alertRules.projectId, projectId)))
+      .where(and(eq(alertRules.id, ruleId), eq(alertRules.billingAccountId, billingAccountId)))
       .returning({ id: alertRules.id });
     if (deleted.length === 0) throw new GatewayError(404, "not_found", "Alert rule not found");
     await recordAuditLog(deps.orm, {
       actor: user,
-      orgId: project.orgId,
+      orgId: billingAccount.orgId,
       action: "alert.delete",
       targetType: "alert_rule",
       targetId: ruleId,

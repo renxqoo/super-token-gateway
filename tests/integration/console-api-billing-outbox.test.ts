@@ -1,18 +1,30 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createConsoleRuntime } from "@gateway/console-api";
+import { createGatewayRuntime } from "@gateway/gateway";
+import { createAsyncTasksRepository } from "@gateway/ledger";
 import { createConsoleTestHarness } from "./helpers/console-harness.ts";
 
 let h: Awaited<ReturnType<typeof createConsoleTestHarness>>;
 let adminAccess = "";
 let customerAccess = "";
-let orgId = "";
-let usdProjectId = "";
-let eurProjectId = "";
+let usdBillingAccountId = "";
+let eurBillingAccountId = "";
 let accountId = "";
 let channelId = "";
 let videoChannelId = "";
 let customerPriceId = "";
 let supplierPriceId = "";
+
+async function createTeamBillingAccount(name: string, slug: string, currency = "USD") {
+  const team = await h.clientApi<{ default_billing_account_id: string }>(
+    "POST",
+    "/api/v1/orgs",
+    customerAccess,
+    { name, slug, billing_currency: currency },
+  );
+  expect(team.status).toBe(201);
+  return team.data.default_billing_account_id;
+}
 
 beforeAll(async () => {
   h = await createConsoleTestHarness({
@@ -26,17 +38,9 @@ beforeAll(async () => {
 
   const user = await h.registerUser("billing-owner@example.com");
   customerAccess = user.accessToken;
-  orgId = user.defaultOrgId;
-  usdProjectId = user.defaultProjectId;
+  usdBillingAccountId = user.defaultBillingAccountId;
 
-  const eurProj = await h.clientApi<{ id: string }>(
-    "POST",
-    `/api/v1/orgs/${orgId}/projects`,
-    customerAccess,
-    { name: "EU Billing Project", currency: "EUR" },
-  );
-  expect(eurProj.status).toBe(201);
-  eurProjectId = eurProj.data.id;
+  eurBillingAccountId = await createTeamBillingAccount("EU Billing", "eu-billing", "EUR");
 
   const acc = await h.adminApi<{ id: string }>("POST", "/admin/v1/upstream-accounts", adminAccess, {
     name: "bill-acc",
@@ -218,10 +222,10 @@ afterAll(async () => {
   await h?.close();
 });
 
-test("non-USD project finance defaults to project currency and rejects currency mismatch", async () => {
+test("non-USD billingAccount finance defaults to billingAccount currency and rejects currency mismatch", async () => {
   const mismatch = await h.adminApi(
     "POST",
-    `/admin/v1/finance/projects/${eurProjectId}/topups`,
+    `/admin/v1/finance/billing-accounts/${eurBillingAccountId}/topups`,
     adminAccess,
     { currency: "USD", external_ref: "eur-mismatch-1", amount_atoms: "5000" },
   );
@@ -229,7 +233,7 @@ test("non-USD project finance defaults to project currency and rejects currency 
 
   const topup = await h.adminApi(
     "POST",
-    `/admin/v1/finance/projects/${eurProjectId}/topups`,
+    `/admin/v1/finance/billing-accounts/${eurBillingAccountId}/topups`,
     adminAccess,
     { external_ref: "eur-default-1", amount_atoms: "25000" },
   );
@@ -237,7 +241,7 @@ test("non-USD project finance defaults to project currency and rejects currency 
 
   const grant = await h.adminApi(
     "POST",
-    `/admin/v1/finance/projects/${eurProjectId}/grants`,
+    `/admin/v1/finance/billing-accounts/${eurBillingAccountId}/grants`,
     adminAccess,
     { external_ref: "eur-grant-1", amount_atoms: "5000" },
   );
@@ -245,7 +249,7 @@ test("non-USD project finance defaults to project currency and rejects currency 
 
   const wallet = await h.clientApi<{ currency: string; available_atoms: string }>(
     "GET",
-    `/api/v1/projects/${eurProjectId}/wallet`,
+    `/api/v1/billing-accounts/${eurBillingAccountId}/wallet`,
     customerAccess,
   );
   expect(wallet.status).toBe(200);
@@ -254,14 +258,19 @@ test("non-USD project finance defaults to project currency and rejects currency 
 });
 
 test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact prices, and matches real Gateway settlement", async () => {
-  await h.adminApi("POST", `/admin/v1/finance/projects/${usdProjectId}/topups`, adminAccess, {
-    external_ref: "usd-topup-1",
-    amount_atoms: "50000",
-  });
+  await h.adminApi(
+    "POST",
+    `/admin/v1/finance/billing-accounts/${usdBillingAccountId}/topups`,
+    adminAccess,
+    {
+      external_ref: "usd-topup-1",
+      amount_atoms: "50000",
+    },
+  );
 
   const keyRes = await h.clientApi<{ id: string; key: string }>(
     "POST",
-    `/api/v1/projects/${usdProjectId}/api-keys`,
+    `/api/v1/billing-accounts/${usdBillingAccountId}/api-keys`,
     customerAccess,
     { name: "bill-key", spend_limit_atoms: "1600" },
   );
@@ -274,7 +283,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
     return forward();
   });
   const failedOvr = await h.adminApi("PUT", "/admin/v1/pricing-overrides", adminAccess, {
-    project_id: usdProjectId,
+    billing_account_id: usdBillingAccountId,
     model_name: "bill-gpt",
     operation: "chat",
     override_kind: "MULTIPLIER",
@@ -286,7 +295,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
 
   const quoteBeforeSync = await h.clientApi<{
     pricing: { effective_rates: { input_tokens: { numerator: string; denominator: string } } };
-  }>("GET", `/api/v1/models/bill-gpt?project_id=${usdProjectId}`, customerAccess);
+  }>("GET", `/api/v1/models/bill-gpt?billing_account_id=${usdBillingAccountId}`, customerAccess);
   expect(quoteBeforeSync.status).toBe(200);
   expect(quoteBeforeSync.data.pricing.effective_rates.input_tokens).toEqual({
     numerator: "10",
@@ -294,7 +303,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
   });
 
   const multOvr = await h.adminApi("PUT", "/admin/v1/pricing-overrides", adminAccess, {
-    project_id: usdProjectId,
+    billing_account_id: usdBillingAccountId,
     model_name: "bill-gpt",
     operation: "chat",
     override_kind: "MULTIPLIER",
@@ -310,7 +319,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
         output_tokens: { numerator: string; denominator: string };
       };
     };
-  }>("GET", `/api/v1/models/bill-gpt?project_id=${usdProjectId}`, customerAccess);
+  }>("GET", `/api/v1/models/bill-gpt?billing_account_id=${usdBillingAccountId}`, customerAccess);
   expect(quoteMult.data.pricing.effective_rates.input_tokens).toEqual({
     numerator: "8",
     denominator: "1",
@@ -328,7 +337,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
   });
   try {
     const rejectedEdit = await h.adminApi("PUT", "/admin/v1/pricing-overrides", adminAccess, {
-      project_id: usdProjectId,
+      billing_account_id: usdBillingAccountId,
       model_name: "bill-gpt",
       operation: "chat",
       override_kind: "MULTIPLIER",
@@ -341,7 +350,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
   }
   const effective = await h.clientApi<typeof quoteMult.data>(
     "GET",
-    `/api/v1/models/bill-gpt?project_id=${usdProjectId}`,
+    `/api/v1/models/bill-gpt?billing_account_id=${usdBillingAccountId}`,
     customerAccess,
   );
   expect(effective.data.pricing.effective_rates.input_tokens).toEqual({
@@ -363,7 +372,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
   expect((await callChat()).status).toBe(200);
   const walletAfter1 = await h.clientApi<{ available_atoms: string }>(
     "GET",
-    `/api/v1/projects/${usdProjectId}/wallet`,
+    `/api/v1/billing-accounts/${usdBillingAccountId}/wallet`,
     customerAccess,
   );
   expect(walletAfter1.data.available_atoms).toBe("48400");
@@ -374,7 +383,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
     (
       await h.clientApi(
         "POST",
-        `/api/v1/projects/${usdProjectId}/api-keys/${keyRes.data.id}/reset-spend`,
+        `/api/v1/billing-accounts/${usdBillingAccountId}/api-keys/${keyRes.data.id}/reset-spend`,
         customerAccess,
         { reason: "raise" },
       )
@@ -394,7 +403,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
   expect(rawPrice.status).toBe(201);
 
   const exactOvr = await h.adminApi("PUT", "/admin/v1/pricing-overrides", adminAccess, {
-    project_id: usdProjectId,
+    billing_account_id: usdBillingAccountId,
     model_name: "bill-gpt",
     operation: "chat",
     override_kind: "EXACT_PRICE",
@@ -409,7 +418,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
         output_tokens: { numerator: string; denominator: string };
       };
     };
-  }>("GET", `/api/v1/models/bill-gpt?project_id=${usdProjectId}`, customerAccess);
+  }>("GET", `/api/v1/models/bill-gpt?billing_account_id=${usdBillingAccountId}`, customerAccess);
   expect(quoteExact.data.pricing.effective_rates.input_tokens).toEqual({
     numerator: "5",
     denominator: "1",
@@ -422,14 +431,14 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
   expect((await callChat()).status).toBe(200);
   const walletAfter2 = await h.clientApi<{ available_atoms: string }>(
     "GET",
-    `/api/v1/projects/${usdProjectId}/wallet`,
+    `/api/v1/billing-accounts/${usdBillingAccountId}/wallet`,
     customerAccess,
   );
   expect(walletAfter2.data.available_atoms).toBe("47400");
 
   const videoKeyRes = await h.clientApi<{ id: string; key: string }>(
     "POST",
-    `/api/v1/projects/${usdProjectId}/api-keys`,
+    `/api/v1/billing-accounts/${usdBillingAccountId}/api-keys`,
     customerAccess,
     { name: "bill-video-key" },
   );
@@ -447,7 +456,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
 
   const clientCharges = await h.clientApi<{ items: Record<string, unknown>[] }>(
     "GET",
-    `/api/v1/projects/${usdProjectId}/charges`,
+    `/api/v1/billing-accounts/${usdBillingAccountId}/charges`,
     customerAccess,
   );
   expect(clientCharges.status).toBe(200);
@@ -460,7 +469,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
 
   const clientTasks = await h.clientApi<{ items: Record<string, unknown>[] }>(
     "GET",
-    `/api/v1/projects/${usdProjectId}/tasks`,
+    `/api/v1/billing-accounts/${usdBillingAccountId}/tasks`,
     customerAccess,
   );
   expect(clientTasks.status).toBe(200);
@@ -501,7 +510,7 @@ test("marketplace pricing hides unsynced overrides, resolves raw Gateway exact p
 test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usage analytics, and async alert webhook delivery work end-to-end", async () => {
   const lowBalanceRule = await h.clientApi<{ id: string }>(
     "POST",
-    `/api/v1/projects/${usdProjectId}/alerts`,
+    `/api/v1/billing-accounts/${usdBillingAccountId}/alerts`,
     customerAccess,
     {
       kind: "LOW_BALANCE",
@@ -513,7 +522,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
 
   const dailySpendRule = await h.clientApi<{ id: string }>(
     "POST",
-    `/api/v1/projects/${usdProjectId}/alerts`,
+    `/api/v1/billing-accounts/${usdBillingAccountId}/alerts`,
     customerAccess,
     {
       kind: "DAILY_SPEND",
@@ -539,7 +548,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
       event_id: string;
       kind: string;
       request_id: string | null;
-      project_id: string | null;
+      billing_account_id: string | null;
       payload: Record<string, unknown>;
       created_at: Date;
     }[]
@@ -549,11 +558,11 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
       event_id::text AS event_id,
       kind,
       request_id::text AS request_id,
-      project_id::text AS project_id,
+      billing_account_id::text AS billing_account_id,
       payload,
       created_at
     FROM public.outbox_events
-    WHERE project_id = ${usdProjectId}::uuid
+    WHERE billing_account_id = ${usdBillingAccountId}::uuid
     ORDER BY seq ASC
   `;
   expect(rawEvents.length).toBeGreaterThanOrEqual(2);
@@ -563,7 +572,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
     event_id: e.event_id,
     kind: e.kind,
     request_id: e.request_id,
-    project_id: e.project_id,
+    billing_account_id: e.billing_account_id,
     payload: e.payload,
     created_at: e.created_at.toISOString(),
   }));
@@ -586,7 +595,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
     customer_atoms: string;
     input_tokens: number;
     output_tokens: number;
-  }>("GET", `/api/v1/projects/${usdProjectId}/usage/summary`, customerAccess);
+  }>("GET", `/api/v1/billing-accounts/${usdBillingAccountId}/usage/summary`, customerAccess);
   expect(settledSummary.status).toBe(200);
   expect(settledSummary.data.request_count).toBe(3);
   expect(settledSummary.data.customer_atoms).toBe("7600");
@@ -604,22 +613,23 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
         {
           event_id: refundEventId,
           kind: "billing.refunded",
-          project_id: usdProjectId,
+          billing_account_id: usdBillingAccountId,
           payload: {
-            project_id: usdProjectId,
+            billing_account_id: usdBillingAccountId,
             model: "bill-gpt",
             operation: "chat",
             currency: "USD",
             refunded_atoms: "300",
+            delta_atoms: "-300",
           },
           created_at: new Date().toISOString(),
         },
         {
           event_id: adjustEventId,
           kind: "billing.adjusted",
-          project_id: usdProjectId,
+          billing_account_id: usdBillingAccountId,
           payload: {
-            project_id: usdProjectId,
+            billing_account_id: usdBillingAccountId,
             model: "bill-gpt",
             operation: "chat",
             currency: "USD",
@@ -635,7 +645,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
 
   const summaryAfterAdj = await h.clientApi<{ request_count: number; customer_atoms: string }>(
     "GET",
-    `/api/v1/projects/${usdProjectId}/usage/summary`,
+    `/api/v1/billing-accounts/${usdBillingAccountId}/usage/summary`,
     customerAccess,
   );
   expect(summaryAfterAdj.data.request_count).toBe(3);
@@ -643,7 +653,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
 
   const byModel = await h.clientApi<{ items: { model: string; customer_atoms: string }[] }>(
     "GET",
-    `/api/v1/projects/${usdProjectId}/usage/by-model`,
+    `/api/v1/billing-accounts/${usdBillingAccountId}/usage/by-model`,
     customerAccess,
   );
   expect(byModel.data.items.find((m) => m.model === "bill-gpt")?.customer_atoms).toBe("2400");
@@ -651,7 +661,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
 
   const timeseries = await h.clientApi<{ items: unknown[] }>(
     "GET",
-    `/api/v1/projects/${usdProjectId}/usage/timeseries?granularity=hour`,
+    `/api/v1/billing-accounts/${usdBillingAccountId}/usage/timeseries?granularity=hour`,
     customerAccess,
   );
   expect(timeseries.status).toBe(200);
@@ -661,7 +671,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
     (
       await h.clientApi(
         "GET",
-        `/api/v1/projects/${usdProjectId}/usage/summary?from=not-a-date`,
+        `/api/v1/billing-accounts/${usdBillingAccountId}/usage/summary?from=not-a-date`,
         customerAccess,
       )
     ).status,
@@ -678,7 +688,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
   >`
     SELECT status, attempts, last_http_status
     FROM public.alert_deliveries
-    WHERE project_id = ${usdProjectId}::uuid
+    WHERE billing_account_id = ${usdBillingAccountId}::uuid
   `;
   expect(pendingRows.length).toBe(2);
   for (const row of pendingRows) {
@@ -690,7 +700,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
   await h.conDb`
     UPDATE public.alert_deliveries
     SET next_attempt_at = now() - interval '1 second'
-    WHERE project_id = ${usdProjectId}::uuid
+    WHERE billing_account_id = ${usdBillingAccountId}::uuid
   `;
   h.setWebhookStatus(200);
   const secondAttempt = await h.consoleRuntime.deliverAlertWebhooksOnce();
@@ -702,7 +712,7 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
   >`
     SELECT status, attempts, last_http_status
     FROM public.alert_deliveries
-    WHERE project_id = ${usdProjectId}::uuid
+    WHERE billing_account_id = ${usdBillingAccountId}::uuid
   `;
   expect(deliveredRows.every((r) => r.status === "DELIVERED" && r.last_http_status === 200)).toBe(
     true,
@@ -710,18 +720,26 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
   expect(h.webhookDeliveries.length).toBe(4);
 
   await h.conDb`
-    INSERT INTO public.alert_eval_queue (project_id)
-    VALUES (${usdProjectId}::uuid)
-    ON CONFLICT (project_id) DO UPDATE SET dirty_at = now()
+    INSERT INTO public.alert_eval_queue (billing_account_id)
+    VALUES (${usdBillingAccountId}::uuid)
+    ON CONFLICT (billing_account_id) DO UPDATE SET dirty_at = now()
   `;
   const cooldownRun = await h.consoleRuntime.flushAlertsOnce();
   expect(cooldownRun).toBe(0);
 });
 
 test("a temporary wallet read error keeps an ingested alert eligible for retry without another event", async () => {
+  const retryAccountId = await createTeamBillingAccount("Alert Retry", "alert-retry", "EUR");
+  const funded = await h.adminApi(
+    "POST",
+    "/admin/v1/finance/billing-accounts/" + retryAccountId + "/topups",
+    adminAccess,
+    { external_ref: "alert-retry-seed", amount_atoms: "1" },
+  );
+  expect(funded.status).toBe(200);
   const rule = await h.clientApi<{ id: string }>(
     "POST",
-    `/api/v1/projects/${eurProjectId}/alerts`,
+    `/api/v1/billing-accounts/${retryAccountId}/alerts`,
     customerAccess,
     { kind: "LOW_BALANCE", threshold_atoms: "99999999999999999999999999999999999999" },
   );
@@ -729,14 +747,24 @@ test("a temporary wallet read error keeps an ingested alert eligible for retry w
   const event = {
     event_id: crypto.randomUUID(),
     kind: "billing.settled",
-    project_id: eurProjectId,
+    billing_account_id: retryAccountId,
     payload: { currency: "EUR" },
   };
   let walletUnavailable = false;
+  const obsolete = await h.adminApi("POST", "/internal/outbox/events", h.outboxToken, {
+    events: [
+      {
+        event_id: crypto.randomUUID(),
+        kind: "billing.settled",
+        project_id: retryAccountId,
+      },
+    ],
+  });
+  expect(obsolete.status).toBe(400);
   h.setGatewayInterceptor(async (url, init, forward) => {
     if (
       init?.method === "GET" &&
-      new URL(url).pathname === `/internal/v1/wallets/${eurProjectId}`
+      new URL(url).pathname === `/internal/v1/wallets/${retryAccountId}`
     ) {
       walletUnavailable = true;
       return new Response("temporarily unavailable", { status: 503 });
@@ -753,7 +781,7 @@ test("a temporary wallet read error keeps an ingested alert eligible for retry w
   } finally {
     h.setGatewayInterceptor(null);
   }
-  await h.conDb`UPDATE public.alert_eval_queue SET next_attempt_at = now() - interval '1 second' WHERE project_id = ${eurProjectId}`;
+  await h.conDb`UPDATE public.alert_eval_queue SET next_attempt_at = now() - interval '1 second' WHERE billing_account_id = ${retryAccountId}`;
   expect(await h.consoleRuntime.flushAlertsOnce()).toBe(1);
   expect(await h.consoleRuntime.flushAlertsOnce()).toBe(0);
 });
@@ -761,7 +789,7 @@ test("a temporary wallet read error keeps an ingested alert eligible for retry w
 test("a late failed webhook attempt cannot overwrite a newer successful delivery", async () => {
   const rule = await h.clientApi<{ id: string }>(
     "POST",
-    `/api/v1/projects/${eurProjectId}/alerts`,
+    `/api/v1/billing-accounts/${eurBillingAccountId}/alerts`,
     customerAccess,
     { kind: "DAILY_SPEND", threshold_atoms: "1", webhook_url: h.webhookUrl },
   );
@@ -771,7 +799,7 @@ test("a late failed webhook attempt cannot overwrite a newer successful delivery
       {
         event_id: crypto.randomUUID(),
         kind: "billing.settled",
-        project_id: eurProjectId,
+        billing_account_id: eurBillingAccountId,
         payload: { currency: "EUR", customer_atoms: "1", model: "bill-gpt", operation: "chat" },
       },
     ],
@@ -805,20 +833,10 @@ test("a late failed webhook attempt cannot overwrite a newer successful delivery
 });
 
 test("low-balance alerts use the current wallet instead of a delayed settlement snapshot", async () => {
-  const project = await h.clientApi<{ id: string }>(
-    "POST",
-    `/api/v1/orgs/${orgId}/projects`,
-    customerAccess,
-    {
-      name: "Wallet Snapshot Recovery",
-      currency: "USD",
-    },
-  );
-  const id = project.data.id;
-  expect(project.status).toBe(201);
+  const id = await createTeamBillingAccount("Wallet Snapshot Recovery", "wallet-snapshot-recovery");
   expect(
     (
-      await h.adminApi("POST", `/admin/v1/finance/projects/${id}/topups`, adminAccess, {
+      await h.adminApi("POST", `/admin/v1/finance/billing-accounts/${id}/topups`, adminAccess, {
         external_ref: "alert-wallet-current",
         amount_atoms: "10000",
       })
@@ -826,7 +844,7 @@ test("low-balance alerts use the current wallet instead of a delayed settlement 
   ).toBe(200);
   expect(
     (
-      await h.clientApi("POST", `/api/v1/projects/${id}/alerts`, customerAccess, {
+      await h.clientApi("POST", `/api/v1/billing-accounts/${id}/alerts`, customerAccess, {
         kind: "LOW_BALANCE",
         threshold_atoms: "5",
       })
@@ -837,7 +855,7 @@ test("low-balance alerts use the current wallet instead of a delayed settlement 
       {
         event_id: crypto.randomUUID(),
         kind: "billing.settled",
-        project_id: id,
+        billing_account_id: id,
         payload: { currency: "USD", wallet_available_atoms: "0" },
       },
     ],
@@ -847,20 +865,13 @@ test("low-balance alerts use the current wallet instead of a delayed settlement 
 });
 
 test("Outbox push acknowledges persisted billing before any slow alert wallet read", async () => {
-  const project = await h.clientApi<{ id: string }>(
-    "POST",
-    `/api/v1/orgs/${orgId}/projects`,
-    customerAccess,
-    {
-      name: "Deferred Alert Evaluation",
-      currency: "USD",
-    },
+  const id = await createTeamBillingAccount(
+    "Deferred Alert Evaluation",
+    "deferred-alert-evaluation",
   );
-  expect(project.status).toBe(201);
-  const id = project.data.id;
   expect(
     (
-      await h.clientApi("POST", `/api/v1/projects/${id}/alerts`, customerAccess, {
+      await h.clientApi("POST", `/api/v1/billing-accounts/${id}/alerts`, customerAccess, {
         kind: "LOW_BALANCE",
         threshold_atoms: "5",
       })
@@ -877,7 +888,7 @@ test("Outbox push acknowledges persisted billing before any slow alert wallet re
       {
         event_id: crypto.randomUUID(),
         kind: "billing.settled",
-        project_id: id,
+        billing_account_id: id,
         payload: { currency: "USD" },
       },
     ],
@@ -898,15 +909,16 @@ test("Outbox push acknowledges persisted billing before any slow alert wallet re
 test("shutdown during the last available webhook attempt leaves the alert eligible for delivery", async () => {
   const rule = await h.clientApi<{ id: string }>(
     "POST",
-    `/api/v1/projects/${eurProjectId}/alerts`,
+    `/api/v1/billing-accounts/${eurBillingAccountId}/alerts`,
     customerAccess,
     { kind: "DAILY_SPEND", threshold_atoms: "1", webhook_url: h.webhookUrl },
   );
   expect(rule.status).toBe(201);
   const deliveryId = crypto.randomUUID();
   await h.conDb`
-    INSERT INTO public.alert_deliveries (id, rule_id, project_id, status, webhook_url, attempts)
-    VALUES (${deliveryId}, ${rule.data.id}, ${eurProjectId}, 'PENDING', ${h.webhookUrl}, 4)
+    INSERT INTO public.alert_deliveries (id, rule_id, billing_account_id, status, webhook_url, attempts, payload)
+    VALUES (${deliveryId}, ${rule.data.id}, ${eurBillingAccountId}, 'PENDING', ${h.webhookUrl}, 4,
+      jsonb_build_object('billing_account_id', ${eurBillingAccountId}::uuid, 'currency', 'EUR'))
   `;
   const started = Promise.withResolvers<void>();
   const runtime = createConsoleRuntime({
@@ -932,4 +944,130 @@ test("shutdown during the last available webhook attempt leaves the alert eligib
   const [delivery] =
     await h.conDb`SELECT status, attempts FROM public.alert_deliveries WHERE id = ${deliveryId}`;
   expect(delivery).toEqual({ status: "DELIVERED", attempts: 5 });
+  const sent = h.webhookDeliveries.find((item) => item.deliveryId === deliveryId);
+  expect(sent?.body).toMatchObject({ billing_account_id: eurBillingAccountId, currency: "EUR" });
+  expect(sent?.body).not.toHaveProperty("project_id");
+});
+
+test("video tasks stay private to the issuing Key and accessible after rotation", async () => {
+  const accountId = await createTeamBillingAccount("Video Task Access", "video-task-access");
+  const keysPath = `/api/v1/billing-accounts/${accountId}/api-keys`;
+  const topup = await h.adminApi(
+    "POST",
+    `/admin/v1/finance/billing-accounts/${accountId}/topups`,
+    adminAccess,
+    { external_ref: "video-task-access", amount_atoms: "10000" },
+  );
+  expect(topup.status).toBe(200);
+  async function newKey(name: string, role: "ADMIN" | "INVOKER" = "INVOKER") {
+    const result = await h.clientApi<{ id: string; key: string }>(
+      "POST",
+      keysPath,
+      customerAccess,
+      { name, role, operations: ["videos"] },
+    );
+    expect(result.status).toBe(201);
+    return result.data;
+  }
+  const owner = await newKey("Creator");
+  const sibling = await newKey("Other application");
+  const admin = await newKey("Account administrator", "ADMIN");
+  const submitted = await fetch(`${h.gatewayPublicUrl}/v1/videos`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${owner.key}`, "content-type": "application/json" },
+    body: JSON.stringify({ model: "bill-video", prompt: "clouds" }),
+  });
+  expect(submitted.status).toBe(200);
+  const { gateway_task_id: taskId } = (await submitted.json()) as { gateway_task_id: string };
+  expect(taskId).toMatch(/^vid_/);
+  const tasksPath = `${h.gatewayPublicUrl}/v1/videos/${taskId}`;
+  async function requestTask(key: string, cancel = false) {
+    const response = await fetch(tasksPath + (cancel ? "/cancel" : ""), {
+      method: cancel ? "POST" : "GET",
+      headers: { authorization: `Bearer ${key}` },
+    });
+    await response.body?.cancel();
+    return response.status;
+  }
+  expect(await requestTask(sibling.key)).toBe(404);
+  expect(await requestTask(sibling.key, true)).toBe(404);
+  expect(await requestTask(admin.key)).toBe(200);
+
+  const rotated = await h.clientApi<{ key: string }>(
+    "POST",
+    `${keysPath}/${owner.id}/rotate`,
+    customerAccess,
+  );
+  expect(rotated.status).toBe(201);
+  expect(await requestTask(owner.key)).toBe(401);
+  expect(await requestTask(rotated.data.key)).toBe(200);
+  expect(await requestTask(rotated.data.key, true)).toBe(200);
+});
+
+test("symptom: a stale Gateway can read or cancel video tasks after a Key policy is tightened", async () => {
+  const accountId = await createTeamBillingAccount("Video Task Policies", "video-task-policies");
+  const keysPath = `/api/v1/billing-accounts/${accountId}/api-keys`;
+  const cases = [
+    { policy: { models: ["different-model"] }, method: "GET", error: "model_not_allowed" },
+    { policy: { operations: ["chat"] }, method: "GET", error: "operation_not_allowed" },
+    { policy: { allowed_cidrs: ["192.0.2.0/24"] }, method: "POST", error: "ip_not_allowed" },
+  ];
+  const repository = createAsyncTasksRepository(h.gwDb);
+  const requests = await Promise.all(
+    cases.map(async ({ policy, method, error }) => {
+      const key = await h.clientApi<{ id: string; key: string }>("POST", keysPath, customerAccess, {
+        name: error,
+      });
+      expect(key.status).toBe(201);
+      const taskId = `vid_${key.data.id}`;
+      await repository.createTask({
+        id: taskId,
+        request_id: crypto.randomUUID(),
+        charge_id: null,
+        billing_account_id: accountId,
+        api_key_id: key.data.id,
+        channel_id: videoChannelId,
+        model: "bill-video",
+        operation: "videos",
+        upstream_task_id: taskId,
+        status: method === "POST" ? "QUEUED" : "SUCCEEDED",
+      });
+      return { policy, method, error, key: key.data, taskId };
+    }),
+  );
+  const replica = createGatewayRuntime({
+    config: { ...h.gatewayConfig, snapshotPollMs: 0 },
+    db: h.gwDb,
+    wasmExecutor: null,
+  });
+  try {
+    await replica.start();
+    const epoch = replica.snapshot.get().epoch;
+    for (const { key, policy } of requests) {
+      const updated = await h.clientApi("PATCH", `${keysPath}/${key.id}`, customerAccess, policy);
+      expect(updated.status).toBe(200);
+    }
+    expect(replica.snapshot.get().epoch).toBe(epoch);
+    const results = [];
+    for (const { key, taskId, method } of requests) {
+      const suffix = method === "POST" ? "/cancel" : "";
+      const response = await replica.fetchPublic(
+        new Request(`http://test/v1/videos/${taskId}${suffix}`, {
+          method,
+          headers: { authorization: `Bearer ${key.key}` },
+        }),
+        { getPeerAddress: () => "127.0.0.1" },
+      );
+      results.push({ status: response.status, body: await response.json() });
+    }
+    expect(results).toMatchObject(
+      requests.map(({ error }) => ({ status: 403, body: { error: { code: error } } })),
+    );
+    expect(await repository.getTask(requests[2]!.taskId)).toMatchObject({
+      status: "QUEUED",
+      user_cancelled: false,
+    });
+  } finally {
+    await replica.close();
+  }
 });

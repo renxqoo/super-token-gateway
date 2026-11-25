@@ -22,7 +22,6 @@ export type InternalPrincipal = {
   id: string;
   roles: readonly InternalRole[];
   consumers: readonly string[];
-  legacy: boolean;
 };
 
 export function loadInternalCredentials(file: string): InternalCredentials {
@@ -31,9 +30,7 @@ export function loadInternalCredentials(file: string): InternalCredentials {
     if (
       new Set(credentials.map((c) => c.id)).size !== credentials.length ||
       new Set(credentials.map((c) => c.token_sha256)).size !== credentials.length ||
-      credentials.some(
-        (c) => c.id === "legacy-admin" || c.roles.includes("events") !== c.consumers.length > 0,
-      )
+      credentials.some((c) => c.roles.includes("events") !== c.consumers.length > 0)
     ) {
       throw new Error("Invalid credential assignment");
     }
@@ -48,16 +45,9 @@ export function loadInternalCredentials(file: string): InternalCredentials {
 export function authenticateInternal(
   authorization: string | undefined,
   credentials: InternalCredentials | undefined,
-  legacyToken: string | undefined,
 ): InternalPrincipal | undefined {
   const token = /^Bearer ([^\s,]+)$/i.exec(authorization ?? "")?.[1];
-  if (!token || token.length > 256) return;
-  if (!credentials) {
-    if (legacyToken && secureEqual(token, legacyToken)) {
-      return { id: "legacy-admin", roles, consumers: [], legacy: true };
-    }
-    return;
-  }
+  if (!token || !credentials) return;
   if (!/^[A-Za-z0-9_-]{43,128}$/.test(token)) return;
   const hash = new Bun.CryptoHasher("sha256").update(token).digest("hex");
   let principal: InternalPrincipal | undefined;
@@ -67,7 +57,6 @@ export function authenticateInternal(
         id: credential.id,
         roles: credential.roles,
         consumers: credential.consumers,
-        legacy: false,
       };
     }
   }

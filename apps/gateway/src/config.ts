@@ -22,7 +22,6 @@ export type GatewayConfig = {
   requireDbRoles?: boolean;
   keyPepper: string;
   encryptionKey: string;
-  adminToken?: string;
   internalCredentials?: InternalCredentials;
   internalDatabaseUrl?: string;
   internalDbMaxConnections?: number;
@@ -73,8 +72,8 @@ export type GatewayConfig = {
   platformAbsorbMaxAtomsPerMinute?: string;
   businessWebhookUrl?: string;
   businessWebhookToken?: string;
-  maxActiveAsyncTasksPerProject?: number;
-  maxAutoRefundsPerProject24h?: number;
+  maxActiveAsyncTasksPerBillingAccount?: number;
+  maxAutoRefundsPerBillingAccount24h?: number;
   asyncTaskCancelCooldownMs?: number;
 };
 
@@ -201,7 +200,7 @@ function loadTraceExport(
     errorBodyMaxBytes: intFromEnv(env, "TRACE_ERROR_BODY_BYTES", 8192, 0, 65_536),
     maxRecords,
     maxBytes: required("TRACE_QUEUE_BYTES"),
-    maxPerProject: required("TRACE_QUEUE_PER_PROJECT", 1, maxRecords),
+    maxPerBillingAccount: required("TRACE_QUEUE_PER_BILLING_ACCOUNT", 1, maxRecords),
     priorityReserve: required("TRACE_QUEUE_PRIORITY_RESERVE", 1, maxRecords - 1),
     batchSize: required("TRACE_BATCH_RECORDS", 1, maxRecords),
     batchDeadlineMs: required("TRACE_BATCH_DEADLINE_MS"),
@@ -228,13 +227,8 @@ export function loadConfigFromEnv(
   if (!encryptionKey || !/^[0-9a-fA-F]{64}$/.test(encryptionKey)) {
     throw new Error("ENCRYPTION_KEY must be a 64-character hex string");
   }
-  const internalCredentials = env.INTERNAL_AUTH_FILE
-    ? loadInternalCredentials(env.INTERNAL_AUTH_FILE)
-    : undefined;
-  const adminToken = internalCredentials ? undefined : env.ADMIN_TOKEN;
-  if (!internalCredentials && (!adminToken || adminToken.length < 16)) {
-    throw new Error("ADMIN_TOKEN must be at least 16 characters");
-  }
+  if (!env.INTERNAL_AUTH_FILE) throw new Error("INTERNAL_AUTH_FILE is required");
+  const internalCredentials = loadInternalCredentials(env.INTERNAL_AUTH_FILE);
   const mode = parseMode(env, argv);
   const production = env.NODE_ENV === "production";
   const sentinelUrls = env.REDIS_SENTINEL_URLS?.split(",").map((url) => url.trim());
@@ -254,10 +248,7 @@ export function loadConfigFromEnv(
       );
     }
   }
-  if (
-    production &&
-    (!internalCredentials || !env.INTERNAL_DATABASE_URL || mode !== "gateway" || !env.REDIS_URL)
-  ) {
+  if (production && (!env.INTERNAL_DATABASE_URL || mode !== "gateway" || !env.REDIS_URL)) {
     throw new Error(
       "Production requires standalone Gateway, INTERNAL_AUTH_FILE, INTERNAL_DATABASE_URL and REDIS_URL",
     );
@@ -323,8 +314,7 @@ export function loadConfigFromEnv(
     requireDbRoles: production,
     keyPepper,
     encryptionKey,
-    ...(adminToken ? { adminToken } : {}),
-    ...(internalCredentials ? { internalCredentials } : {}),
+    internalCredentials,
     ...(env.INTERNAL_DATABASE_URL
       ? {
           internalDatabaseUrl: env.INTERNAL_DATABASE_URL,
@@ -378,14 +368,20 @@ export function loadConfigFromEnv(
     ...(absorbAtoms ? { platformAbsorbMaxAtomsPerMinute: absorbAtoms } : {}),
     ...(env.BUSINESS_WEBHOOK_URL ? { businessWebhookUrl: env.BUSINESS_WEBHOOK_URL } : {}),
     ...(env.BUSINESS_WEBHOOK_TOKEN ? { businessWebhookToken: env.BUSINESS_WEBHOOK_TOKEN } : {}),
-    maxActiveAsyncTasksPerProject: intFromEnv(
+    maxActiveAsyncTasksPerBillingAccount: intFromEnv(
       env,
-      "MAX_ACTIVE_ASYNC_TASKS_PER_PROJECT",
+      "MAX_ACTIVE_ASYNC_TASKS_PER_BILLING_ACCOUNT",
       10,
       1,
       1000,
     ),
-    maxAutoRefundsPerProject24h: intFromEnv(env, "MAX_AUTO_REFUNDS_PER_PROJECT_24H", 5, 0, 1000),
+    maxAutoRefundsPerBillingAccount24h: intFromEnv(
+      env,
+      "MAX_AUTO_REFUNDS_PER_BILLING_ACCOUNT_24H",
+      5,
+      0,
+      1000,
+    ),
     asyncTaskCancelCooldownMs: intFromEnv(
       env,
       "ASYNC_TASK_CANCEL_COOLDOWN_MS",

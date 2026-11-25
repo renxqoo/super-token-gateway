@@ -2,7 +2,7 @@ import type { Operation, Pricing } from "@gateway/kernel";
 import type {
   ConfigSnapshot,
   PriceVersionRecord,
-  ProjectPricingOverrideRecord,
+  BillingAccountPricingOverrideRecord,
 } from "@gateway/ledger";
 import { LruMap } from "./proxy-state.ts";
 
@@ -31,7 +31,7 @@ function gcd(a: bigint, b: bigint): bigint {
 }
 
 function matchPriority(
-  override: ProjectPricingOverrideRecord,
+  override: BillingAccountPricingOverrideRecord,
   modelName: string,
   operation: Operation,
 ): number {
@@ -72,12 +72,12 @@ function multiplyRates(rates: Pricing["rates"], num: bigint, den: bigint): Prici
 
 export function resolveEffectiveCustomerPrice(
   snap: ConfigSnapshot,
-  projectId: string,
+  billingAccountId: string,
   modelName: string,
   operation: Operation,
   basePrice: PriceVersionRecord,
 ): EffectiveCustomerPrice {
-  const overrides = snap.pricingOverridesByProject.get(projectId);
+  const overrides = snap.pricingOverridesByBillingAccount.get(billingAccountId);
   if (!overrides || overrides.length === 0) {
     return {
       price: basePrice,
@@ -93,7 +93,7 @@ export function resolveEffectiveCustomerPrice(
     snapCache = new LruMap<string, EffectiveCustomerPrice>(8192);
     resolvedCacheBySnapshot.set(snap, snapCache);
   }
-  const lookupKey = `${projectId}\0${basePrice.id}\0${modelName}\0${operation}`;
+  const lookupKey = `${billingAccountId}\0${basePrice.id}\0${modelName}\0${operation}`;
   const cached = snapCache.get(lookupKey);
   if (cached) return cached;
 

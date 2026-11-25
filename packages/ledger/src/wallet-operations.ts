@@ -54,7 +54,7 @@ async function lockChargeContext(
   let keySpend: KeySpendRow | null = null;
   if (apiKeyId) {
     const kRows = await tx`
-      SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
+      SELECT id, billing_account_id, spend_limit_atoms::text, spend_limit_window,
         spend_window_start, spent_atoms::text, reserved_atoms::text
       FROM public.api_keys
       WHERE id = ${apiKeyId} AND spend_limit_atoms IS NOT NULL
@@ -66,7 +66,7 @@ async function lockChargeContext(
     }
   }
   const [wallet] = await tx`
-    SELECT id, project_id, currency, policy,
+    SELECT id, billing_account_id, currency, policy,
       available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
       debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
       credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
@@ -80,7 +80,7 @@ async function lockChargeContext(
 
 async function collectDebtInTx(tx: SQL, walletId: string, nowMs: number): Promise<number> {
   const wRows = await tx`
-      SELECT id, project_id, currency, policy,
+      SELECT id, billing_account_id, currency, policy,
         available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
         debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
         credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
@@ -260,7 +260,7 @@ export function createWalletOperations(
       const nowMs = pgNowRow ? Number(pgNowRow.ms) : Date.now();
       const { wallet, keySpend } = await lockChargeContext(tx, input.charge_id, nowMs);
       const chRows = await tx`
-          SELECT id, request_id, project_id, wallet_id, api_key_id, model, operation, currency,
+          SELECT id, request_id, billing_account_id, wallet_id, api_key_id, model, operation, currency,
             customer_atoms::text, funded_atoms::text, debt_atoms::text, refunded_atoms::text,
             debt_refunded_atoms::text, lot_allocations, created_at
           FROM public.billing_charges WHERE id = ${input.charge_id} FOR UPDATE
@@ -401,7 +401,7 @@ export function createWalletOperations(
         operation_id: opId,
         charge_id: String(ch.id),
         request_id: String(ch.request_id),
-        project_id: String(ch.project_id),
+        billing_account_id: String(ch.billing_account_id),
         api_key_id: ch.api_key_id ? String(ch.api_key_id) : null,
         model: String(ch.model),
         operation: String(ch.operation),
@@ -411,8 +411,8 @@ export function createWalletOperations(
         reason: input.reason,
       };
       await tx`
-          INSERT INTO public.outbox_events (event_id, kind, request_id, project_id, payload)
-          VALUES (${crypto.randomUUID()}::uuid, 'billing.refunded', ${ch.request_id}::uuid, ${ch.project_id}::uuid, ${outboxPayload}::jsonb)
+          INSERT INTO public.outbox_events (event_id, kind, request_id, billing_account_id, payload)
+          VALUES (${crypto.randomUUID()}::uuid, 'billing.refunded', ${ch.request_id}::uuid, ${ch.billing_account_id}::uuid, ${outboxPayload}::jsonb)
         `;
 
       if (availBack > 0n && wallet.debt_atoms > 0n) {
@@ -440,9 +440,9 @@ export function createWalletOperations(
       if (atoms === null || atoms <= 0n) {
         throw new Error("Credit amount must be a positive integer");
       }
-      invalidateWallet(input.project_id, input.currency);
+      invalidateWallet(input.billing_account_id, input.currency);
       const fingerprint = sha256Hex({
-        project_id: input.project_id,
+        billing_account_id: input.billing_account_id,
         currency: input.currency,
         amount_atoms: input.amount_atoms,
         kind: input.kind,
@@ -454,17 +454,17 @@ export function createWalletOperations(
       return db.begin(async (tx) => {
         const nowMs = Date.now();
         await tx`
-          INSERT INTO public.wallets (id, project_id, currency)
-          VALUES (${crypto.randomUUID()}, ${input.project_id}, ${input.currency})
-          ON CONFLICT (project_id, currency) DO NOTHING
+          INSERT INTO public.wallets (id, billing_account_id, currency)
+          VALUES (${crypto.randomUUID()}, ${input.billing_account_id}, ${input.currency})
+          ON CONFLICT (billing_account_id, currency) DO NOTHING
         `;
         const wRows = await tx`
-          SELECT id, project_id, currency, policy,
+          SELECT id, billing_account_id, currency, policy,
             available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
             debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
             credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
           FROM public.wallets
-          WHERE project_id = ${input.project_id} AND currency = ${input.currency}
+          WHERE billing_account_id = ${input.billing_account_id} AND currency = ${input.currency}
           FOR NO KEY UPDATE
         `;
         const wallet = toWalletRow(wRows[0]!);
@@ -540,7 +540,7 @@ export function createWalletOperations(
         };
         const payload = {
           kind: input.kind,
-          project_id: input.project_id,
+          billing_account_id: input.billing_account_id,
           priority,
           expires_at: expiresAt,
         };
@@ -588,7 +588,7 @@ export function createWalletOperations(
         const nowMs = pgNowRow ? Number(pgNowRow.ms) : Date.now();
         const { wallet, keySpend } = await lockChargeContext(tx, input.charge_id, nowMs);
         const chRows = await tx`
-          SELECT id, request_id, project_id, wallet_id, api_key_id, model, operation, currency,
+          SELECT id, request_id, billing_account_id, wallet_id, api_key_id, model, operation, currency,
             customer_atoms::text, debt_atoms::text, created_at
           FROM public.billing_charges WHERE id = ${input.charge_id} FOR UPDATE
         `;
@@ -659,7 +659,7 @@ export function createWalletOperations(
           operation_id: opId,
           charge_id: String(ch.id),
           request_id: String(ch.request_id),
-          project_id: String(ch.project_id),
+          billing_account_id: String(ch.billing_account_id),
           api_key_id: ch.api_key_id ? String(ch.api_key_id) : null,
           model: String(ch.model),
           operation: String(ch.operation),
@@ -668,8 +668,8 @@ export function createWalletOperations(
           reason: input.reason,
         };
         await tx`
-          INSERT INTO public.outbox_events (event_id, kind, request_id, project_id, payload)
-          VALUES (${crypto.randomUUID()}::uuid, 'billing.adjusted', ${ch.request_id}::uuid, ${ch.project_id}::uuid, ${adjustPayload}::jsonb)
+          INSERT INTO public.outbox_events (event_id, kind, request_id, billing_account_id, payload)
+          VALUES (${crypto.randomUUID()}::uuid, 'billing.adjusted', ${ch.request_id}::uuid, ${ch.billing_account_id}::uuid, ${adjustPayload}::jsonb)
         `;
         await collectDebtInTx(tx, wallet.id, nowMs);
         return { operation_id: opId, replayed: false, delta_atoms: delta.toString() };
@@ -677,7 +677,7 @@ export function createWalletOperations(
     },
 
     async configureWalletCredit(input: {
-      project_id: string;
+      billing_account_id: string;
       currency: string;
       expected_version: string;
       credit_limit_atoms: string;
@@ -685,15 +685,15 @@ export function createWalletOperations(
     }): Promise<WalletSnapshot> {
       const limit = parseAtoms(input.credit_limit_atoms);
       if (limit === null) throw new Error("Invalid credit_limit_atoms");
-      invalidateWallet(input.project_id, input.currency);
+      invalidateWallet(input.billing_account_id, input.currency);
       return db.begin(async (tx) => {
         const rows = await tx`
-          SELECT id, project_id, currency, policy,
+          SELECT id, billing_account_id, currency, policy,
             available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
             debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
             credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
           FROM public.wallets
-          WHERE project_id = ${input.project_id} AND currency = ${input.currency}
+          WHERE billing_account_id = ${input.billing_account_id} AND currency = ${input.currency}
           FOR NO KEY UPDATE
         `;
         if (!rows.length) throw new Error("Wallet not found");
@@ -715,7 +715,7 @@ export function createWalletOperations(
         `;
         return {
           id: w.id,
-          project_id: w.project_id,
+          billing_account_id: w.billing_account_id,
           currency: w.currency,
           policy: w.policy,
           available_atoms: w.available_atoms.toString(),
@@ -744,7 +744,7 @@ export function createWalletOperations(
         const wid = String(row.wallet_id);
         await db.begin(async (tx) => {
           const wRows = await tx`
-            SELECT id, project_id, currency, policy,
+            SELECT id, billing_account_id, currency, policy,
               available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
               debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
               credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
@@ -792,9 +792,9 @@ export function createWalletOperations(
       }
       const lotKind = input.lot_kind ?? "CASH";
       const forceDebt = Boolean(input.force_debt);
-      invalidateWallet(input.project_id, input.currency);
+      invalidateWallet(input.billing_account_id, input.currency);
       const fingerprint = sha256Hex({
-        project_id: input.project_id,
+        billing_account_id: input.billing_account_id,
         currency: input.currency,
         delta_atoms: input.delta_atoms,
         lot_kind: lotKind,
@@ -806,17 +806,17 @@ export function createWalletOperations(
         const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
         const nowMs = pgNowRow ? Number(pgNowRow.ms) : Date.now();
         await tx`
-          INSERT INTO public.wallets (id, project_id, currency)
-          VALUES (${crypto.randomUUID()}, ${input.project_id}::uuid, ${input.currency})
-          ON CONFLICT (project_id, currency) DO NOTHING
+          INSERT INTO public.wallets (id, billing_account_id, currency)
+          VALUES (${crypto.randomUUID()}, ${input.billing_account_id}::uuid, ${input.currency})
+          ON CONFLICT (billing_account_id, currency) DO NOTHING
         `;
         const wRows = await tx`
-          SELECT id, project_id, currency, policy,
+          SELECT id, billing_account_id, currency, policy,
             available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
             debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
             credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
           FROM public.wallets
-          WHERE project_id = ${input.project_id}::uuid AND currency = ${input.currency}
+          WHERE billing_account_id = ${input.billing_account_id}::uuid AND currency = ${input.currency}
           FOR NO KEY UPDATE
         `;
         if (!wRows.length) throw new DomainError("wallet_not_found", "Wallet not found");
@@ -921,7 +921,7 @@ export function createWalletOperations(
           };
           const payload = {
             actor: input.actor ?? null,
-            project_id: input.project_id,
+            billing_account_id: input.billing_account_id,
             lot_kind: lotKind,
             force_debt: false,
           };
@@ -1043,7 +1043,7 @@ export function createWalletOperations(
         };
         const payload = {
           actor: input.actor ?? null,
-          project_id: input.project_id,
+          billing_account_id: input.billing_account_id,
           lot_kind: lotKind,
           force_debt: forceDebt,
         };
@@ -1075,15 +1075,15 @@ export function createWalletOperations(
     },
 
     async setWalletFreeze(input: SetWalletFreezeInput): Promise<WalletSnapshot> {
-      invalidateWallet(input.project_id, input.currency);
+      invalidateWallet(input.billing_account_id, input.currency);
       return db.begin(async (tx) => {
         const rows = await tx`
-          SELECT id, project_id, currency, policy,
+          SELECT id, billing_account_id, currency, policy,
             available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
             debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
             credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
           FROM public.wallets
-          WHERE project_id = ${input.project_id}::uuid AND currency = ${input.currency}
+          WHERE billing_account_id = ${input.billing_account_id}::uuid AND currency = ${input.currency}
           FOR NO KEY UPDATE
         `;
         if (!rows.length) throw new DomainError("wallet_not_found", "Wallet not found");
@@ -1098,7 +1098,7 @@ export function createWalletOperations(
         `;
         return {
           id: w.id,
-          project_id: w.project_id,
+          billing_account_id: w.billing_account_id,
           currency: w.currency,
           policy: w.policy,
           available_atoms: w.available_atoms.toString(),
@@ -1116,16 +1116,16 @@ export function createWalletOperations(
       });
     },
 
-    async getWallet(projectId: string, currency: string): Promise<WalletSnapshot | null> {
+    async getWallet(billingAccountId: string, currency: string): Promise<WalletSnapshot | null> {
       const rows = await orm
         .select()
         .from(wallets)
-        .where(and(eq(wallets.projectId, projectId), eq(wallets.currency, currency)));
+        .where(and(eq(wallets.billingAccountId, billingAccountId), eq(wallets.currency, currency)));
       const w = rows[0];
       if (!w) return null;
       return {
         id: w.id,
-        project_id: w.projectId,
+        billing_account_id: w.billingAccountId,
         currency: w.currency,
         policy: w.policy,
         available_atoms: w.availableAtoms,
@@ -1143,13 +1143,13 @@ export function createWalletOperations(
     },
 
     async getWalletWithLots(
-      projectId: string,
+      billingAccountId: string,
       currency: string,
     ): Promise<WalletWithLotsSnapshot | null> {
       const rows = await orm
         .select()
         .from(wallets)
-        .where(and(eq(wallets.projectId, projectId), eq(wallets.currency, currency)));
+        .where(and(eq(wallets.billingAccountId, billingAccountId), eq(wallets.currency, currency)));
       const w = rows[0];
       if (!w) return null;
       const lotRows = await orm
@@ -1176,7 +1176,7 @@ export function createWalletOperations(
       }));
       return {
         id: w.id,
-        project_id: w.projectId,
+        billing_account_id: w.billingAccountId,
         currency: w.currency,
         policy: w.policy,
         available_atoms: w.availableAtoms,

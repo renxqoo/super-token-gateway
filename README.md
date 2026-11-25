@@ -12,7 +12,7 @@
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `apps/gateway`                 | 高性能无状态公开网关（Chat/Responses/Messages/Gemini/Embeddings/Moderations/Images/Audio、`/livez`、`/readyz`、Prometheus 直方图 `/metrics`、`traceparent` 链路追踪、零明文 JSON 访问日志）+ Zod 严格校验 `/internal/v1/*` 管理与分页对账 API                  |
 | `apps/worker`                  | 后台账务与调度 Worker（PG Advisory Lease 选主、超时预扣与过期节点租约扫尾 `sweepExpiredLeases`、批次过期、自动收债、供应商分片再平衡、Outbox 推送）                                                                                                            |
-| `apps/console-api`             | 客户与平台管理 API、组织和项目权限、模型市场、账务查询、用量投影和告警，独立 PostgreSQL 持久化                                                                                                                                                                 |
+| `apps/console-api`             | 客户与平台管理 API、组织和账户权限、模型市场、账务查询、用量投影和告警，独立 PostgreSQL 持久化                                                                                                                                                                 |
 | `apps/mock-providers`          | 独立测试用上游替身（OpenAI / Anthropic / Gemini / Azure / Bedrock / Vertex / DeepSeek / Ollama）                                                                                                                                                               |
 | `packages/ledger`              | 精简 PG 核心账本：`drizzle-orm/bun-sql` 强类型 Schema（23 张表 1:1 零漂移）/目录 CRUD/Outbox/归档/分页对账查询 + 原生 `Bun.SQL` 自适应 PG 分片资金租约（`wallet_leases`/`supplier_leases`）、2 ms 微批与 9 表单 CTE 原子结算热路径                             |
 | `packages/protocol`            | 多协议无损透传、跨协议转换（含 `reasoning`/`thinking` 互通、strict/compat 策略表、`x-gateway-dropped-fields` 提示与协议原生错误封包）、有界 SSE 流解析、精确 JSON 快速路径与精确计量                                                                           |
@@ -60,7 +60,7 @@ Bun 1.4.5、PostgreSQL 17.11 和 Mock 上游。数据库开启 `fsync`、`synchr
 
 ## 快速开始与部署
 
-需要 Bun **1.4.4**、PostgreSQL 17 与 Redis 7.4 的本地工具。没有使用仓库的本地工具目录时，先设置 `PG_TOOLS_DIRECTORY`、`DURABILITY_REDIS_SERVER`，再生成配置。
+需要 Bun **1.4.5**、PostgreSQL 17 与 Redis 7.4 的本地工具。没有使用仓库的本地工具目录时，先设置 `PG_TOOLS_DIRECTORY`、`DURABILITY_REDIS_SERVER`，再生成配置。
 
 ```sh
 bun run setup:local
@@ -91,9 +91,9 @@ Docker Compose 提供单主机验证环境，要求显式设置数据库密码�
 
 Console 的独立部署方式、数据库角色、Gateway 联动和发布验收见 [Console API 部署与验收](docs/console-api.md#部署与验收)。
 
-Gateway 项目 API Key 采用 `sk_` 加 43 位 Base64URL 字符。部署后旧格式 Key 会收到 HTTP 401，升级时须签发或轮换并更新客户端配置。部署中若路由依赖 `pii-guard` 脱敏，请在分发新 Key 前安装、发布并确认路由已应用 v1.0.1。发布沿用 [插件修订流程](docs/decisions/0012-plugin-revisions-and-provider-verification.md#已交付的管理操作)。
+Gateway 计费账户的 API Key 采用 `sk_` 加 43 位 Base64URL 字符。从 Console 签发 Key 后配置客户端。部署中若路由依赖 `pii-guard` 脱敏，请在分发新 Key 前安装、发布并确认路由已应用 v1.0.1。发布沿用 [插件修订流程](docs/decisions/0012-plugin-revisions-and-provider-verification.md#已交付的管理操作)。
 
-旧 v4 账本先备份并停写，再运行 `bun run db:migrate` 或独立迁移产物。升级保留历史迁移记录，应用启动检查已应用的校验和。运行时只读副本无法通过就绪探测。跨 schema 版本的发布使用停写窗口。
+Gateway 和 Console 从各自的空 PostgreSQL 数据库初始化。运行 `bun run db:migrate`、`bun run console:migrate` 或对应的独立产物。应用启动核对现行基线校验和，运行时就绪探测要求可写连接。
 
 生产身份与角色配置、监控和主备恢复流程见 [ADR 0011](docs/decisions/0011-production-operations.md)。本机生产演练覆盖实际 PostgreSQL 主备提升、Redis Sentinel 选举与 WAL 指定时间点恢复。
 

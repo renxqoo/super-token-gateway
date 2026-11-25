@@ -28,8 +28,8 @@ const PROTECTED_PREFIXES = [
   "/users",
   "/users/*",
   "/orgs/*",
-  "/projects",
-  "/projects/*",
+  "/billing-accounts",
+  "/billing-accounts/*",
 ];
 
 export function createAdminRoutes(deps: ConsoleDeps) {

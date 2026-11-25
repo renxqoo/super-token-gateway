@@ -98,7 +98,7 @@ export const configEpoch = pgTable("config_epoch", {
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
 
-export const projects = pgTable("projects", {
+export const billingAccounts = pgTable("billing_accounts", {
   id: uuid("id").primaryKey(),
   externalRef: text("external_ref").unique(),
   name: text("name").notNull(),
@@ -122,10 +122,11 @@ export const apiKeys = pgTable(
   "api_keys",
   {
     id: uuid("id").primaryKey(),
-    projectId: uuid("project_id")
+    billingAccountId: uuid("billing_account_id")
       .notNull()
-      .references(() => projects.id),
+      .references(() => billingAccounts.id),
     name: text("name").notNull(),
+    resourceScopeId: uuid("resource_scope_id"),
     verifier: text("verifier").notNull().unique(),
     prefix: text("prefix").notNull(),
     role: text("role")
@@ -161,7 +162,7 @@ export const apiKeys = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [index("api_keys_project_idx").on(t.projectId)],
+  (t) => [index("api_keys_billing_account_idx").on(t.billingAccountId)],
 );
 
 export const upstreamAccounts = pgTable("upstream_accounts", {
@@ -359,9 +360,9 @@ export const wallets = pgTable(
   "wallets",
   {
     id: uuid("id").primaryKey(),
-    projectId: uuid("project_id")
+    billingAccountId: uuid("billing_account_id")
       .notNull()
-      .references(() => projects.id),
+      .references(() => billingAccounts.id),
     currency: text("currency").notNull(),
     policy: text("policy").$type<WalletPolicy>().notNull().default("GIFT_FIRST"),
     availableAtoms: numeric("available_atoms", { precision: 38, scale: 0 }).notNull().default("0"),
@@ -385,7 +386,7 @@ export const wallets = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [unique("wallets_project_id_currency_key").on(t.projectId, t.currency)],
+  (t) => [unique("wallets_billing_account_id_currency_key").on(t.billingAccountId, t.currency)],
 );
 
 export const walletLots = pgTable(
@@ -516,7 +517,7 @@ export const billingHolds = pgTable(
   "billing_holds",
   {
     requestId: uuid("request_id").primaryKey(),
-    projectId: uuid("project_id").notNull(),
+    billingAccountId: uuid("billing_account_id").notNull(),
     walletId: uuid("wallet_id").notNull(),
     apiKeyId: uuid("api_key_id"),
     keyReservedAtoms: numeric("key_reserved_atoms", { precision: 38, scale: 0 })
@@ -555,7 +556,7 @@ export const billingHolds = pgTable(
   },
   (t) => [
     uniqueIndex("billing_holds_idempotency_idx")
-      .on(t.projectId, t.operation, t.idempotencyKey)
+      .on(t.billingAccountId, t.operation, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} IS NOT NULL`),
     index("billing_holds_open_idx").on(t.expiresAt),
     index("billing_reconciliation_unknown_idx")
@@ -576,7 +577,7 @@ export const billingCharges = pgTable(
   {
     id: uuid("id").primaryKey(),
     requestId: uuid("request_id").notNull().unique(),
-    projectId: uuid("project_id").notNull(),
+    billingAccountId: uuid("billing_account_id").notNull(),
     walletId: uuid("wallet_id").notNull(),
     apiKeyId: uuid("api_key_id"),
     selectedAttemptId: uuid("selected_attempt_id"),
@@ -621,7 +622,7 @@ export const billingCharges = pgTable(
       .defaultNow(),
   },
   (t) => [
-    index("billing_charges_project_created_idx").on(t.projectId, t.createdAt),
+    index("billing_charges_billing_account_created_idx").on(t.billingAccountId, t.createdAt),
     index("billing_charges_wallet_debt_idx").on(t.walletId, t.createdAt),
   ],
 );
@@ -705,7 +706,7 @@ export const outboxEvents = pgTable(
     eventId: uuid("event_id").notNull().unique(),
     kind: text("kind").notNull(),
     requestId: uuid("request_id"),
-    projectId: uuid("project_id"),
+    billingAccountId: uuid("billing_account_id"),
     shard: smallint("shard").notNull().default(0),
     payload: pgJsonb<Record<string, unknown>>("payload").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -713,20 +714,13 @@ export const outboxEvents = pgTable(
       .defaultNow(),
   },
   (t) => [
-    index("outbox_events_project_idx").on(t.projectId, t.seq),
+    index("outbox_events_billing_account_idx").on(t.billingAccountId, t.seq),
     index("outbox_events_shard_seq_idx").on(t.shard, t.seq),
   ],
 );
 
 export const outboxConsumers = pgTable("outbox_consumers", {
   name: text("name").primaryKey(),
-  ackedSeq: bigint("acked_seq", { mode: "bigint" })
-    .notNull()
-    .default(sql`0`),
-  leaseToken: uuid("lease_token"),
-  leasedThroughSeq: bigint("leased_through_seq", { mode: "bigint" }),
-  leasedUntil: timestamp("leased_until", { withTimezone: true, mode: "string" }),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
 
 export const outboxConsumerShards = pgTable(
@@ -774,13 +768,13 @@ export const adminAuditPending = pgTable(
   (t) => [index("admin_audit_pending_created_idx").on(t.createdAt)],
 );
 
-export const projectPricingOverrides = pgTable(
-  "project_pricing_overrides",
+export const billingAccountPricingOverrides = pgTable(
+  "billing_account_pricing_overrides",
   {
     id: uuid("id").primaryKey(),
-    projectId: uuid("project_id")
+    billingAccountId: uuid("billing_account_id")
       .notNull()
-      .references(() => projects.id),
+      .references(() => billingAccounts.id),
     modelName: text("model_name").notNull(),
     operation: text("operation").notNull().default("*"),
     overrideKind: text("override_kind").$type<"EXACT_PRICE" | "MULTIPLIER">().notNull(),
@@ -797,8 +791,12 @@ export const projectPricingOverrides = pgTable(
       .defaultNow(),
   },
   (t) => [
-    uniqueIndex("project_pricing_overrides_scope_uniq").on(t.projectId, t.modelName, t.operation),
-    index("project_pricing_overrides_project_idx").on(t.projectId),
+    uniqueIndex("billing_account_pricing_overrides_scope_uniq").on(
+      t.billingAccountId,
+      t.modelName,
+      t.operation,
+    ),
+    index("billing_account_pricing_overrides_billing_account_idx").on(t.billingAccountId),
   ],
 );
 
@@ -808,9 +806,9 @@ export const asyncTasks = pgTable(
     id: text("id").primaryKey(),
     requestId: uuid("request_id").notNull().unique(),
     chargeId: uuid("charge_id").references(() => billingCharges.id),
-    projectId: uuid("project_id")
+    billingAccountId: uuid("billing_account_id")
       .notNull()
-      .references(() => projects.id),
+      .references(() => billingAccounts.id),
     apiKeyId: uuid("api_key_id"),
     channelId: uuid("channel_id")
       .notNull()
@@ -859,12 +857,12 @@ export const asyncTasks = pgTable(
     completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
   },
   (t) => [
-    index("async_tasks_project_status_idx").on(t.projectId, t.status),
+    index("async_tasks_billing_account_status_idx").on(t.billingAccountId, t.status),
     index("async_tasks_active_idx")
       .on(t.status, t.updatedAt)
       .where(sql`${t.status} IN ('QUEUED', 'PROCESSING')`),
     index("async_tasks_auto_refund_idx")
-      .on(t.projectId, t.refundEligibility, t.completedAt)
+      .on(t.billingAccountId, t.refundEligibility, t.completedAt)
       .where(sql`${t.refundEligibility} = 'AUTO_REFUNDED'`),
   ],
 );
@@ -921,9 +919,9 @@ export const billingReconciliationBudgets = pgTable("billing_reconciliation_budg
 export const billingReconciliationPolicies = pgTable(
   "billing_reconciliation_policies",
   {
-    projectId: uuid("project_id")
+    billingAccountId: uuid("billing_account_id")
       .notNull()
-      .references(() => projects.id),
+      .references(() => billingAccounts.id),
     channelId: uuid("channel_id")
       .notNull()
       .references(() => channels.id),
@@ -940,7 +938,7 @@ export const billingReconciliationPolicies = pgTable(
     limitAtoms: numeric("limit_atoms", { precision: 38, scale: 0 }).notNull(),
     usedAtoms: numeric("used_atoms", { precision: 38, scale: 0 }).notNull().default("0"),
   },
-  (t) => [primaryKey({ columns: [t.projectId, t.channelId, t.supplierCurrency] })],
+  (t) => [primaryKey({ columns: [t.billingAccountId, t.channelId, t.supplierCurrency] })],
 );
 
 export const billingReconciliationWaivers = pgTable(
@@ -950,7 +948,7 @@ export const billingReconciliationWaivers = pgTable(
       .primaryKey()
       .references(() => billingHolds.requestId),
     attemptId: uuid("attempt_id").notNull(),
-    projectId: uuid("project_id").notNull(),
+    billingAccountId: uuid("billing_account_id").notNull(),
     channelId: uuid("channel_id").notNull(),
     supplierCurrency: text("supplier_currency").notNull(),
     supplierRiskAtoms: numeric("supplier_risk_atoms", { precision: 38, scale: 0 }).notNull(),
@@ -962,9 +960,9 @@ export const billingReconciliationWaivers = pgTable(
   },
   (t) => [
     foreignKey({
-      columns: [t.projectId, t.channelId, t.supplierCurrency],
+      columns: [t.billingAccountId, t.channelId, t.supplierCurrency],
       foreignColumns: [
-        billingReconciliationPolicies.projectId,
+        billingReconciliationPolicies.billingAccountId,
         billingReconciliationPolicies.channelId,
         billingReconciliationPolicies.supplierCurrency,
       ],
@@ -986,14 +984,14 @@ export const ledgerSchema = {
   adminAuditPending,
   schemaMigrations,
   configEpoch,
-  projects,
+  billingAccounts,
   consoleOrganizationAdmission,
   apiKeys,
   upstreamAccounts,
   channels,
   models,
   priceVersions,
-  projectPricingOverrides,
+  billingAccountPricingOverrides,
   asyncTasks,
   plugins,
   pluginReleases,

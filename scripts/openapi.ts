@@ -11,7 +11,9 @@ const { publicApp, internalApp, internalRequestBodies, internalRouteRoles, close
         GATEWAY_MODE: "gateway",
         DATABASE_URL: "postgres://openapi@127.0.0.1:1/openapi",
         KEY_PEPPER: "openapi-generation-only",
-        ADMIN_TOKEN: "openapi-generation-only",
+        INTERNAL_AUTH_FILE: fileURLToPath(
+          new URL("../tests/fixtures/internal-auth.json", import.meta.url),
+        ),
         ENCRYPTION_KEY: "0".repeat(64),
       },
       [],
@@ -44,11 +46,25 @@ const multipartPaths = new Set([
 const queryParameters: Record<string, string[]> = {
   "/internal/v1/plugins": ["capability"],
   "/internal/v1/plugins/builtins": ["capability"],
-  "/internal/v1/pricing-overrides": ["project_id"],
-  "/internal/v1/wallets/:projectId": ["currency"],
+  "/internal/v1/pricing-overrides": ["billing_account_id"],
+  "/internal/v1/wallets/:billingAccountId": ["currency"],
   "/internal/v1/upstream-accounts/:accountId/balance": ["currency"],
-  "/internal/v1/charges": ["project_id", "api_key_id", "outcome", "from", "to", "limit", "offset"],
-  "/internal/v1/async-tasks": ["project_id", "status", "refund_eligibility", "limit", "offset"],
+  "/internal/v1/charges": [
+    "billing_account_id",
+    "api_key_id",
+    "outcome",
+    "from",
+    "to",
+    "limit",
+    "offset",
+  ],
+  "/internal/v1/async-tasks": [
+    "billing_account_id",
+    "status",
+    "refund_eligibility",
+    "limit",
+    "offset",
+  ],
   "/internal/v1/ledger-entries": [
     "side",
     "entity_id",
@@ -59,7 +75,20 @@ const queryParameters: Record<string, string[]> = {
     "limit",
     "offset",
   ],
-  "/internal/v1/holds": ["state", "project_id", "limit", "offset"],
+  "/internal/v1/holds": ["state", "billing_account_id", "limit", "offset"],
+  "/internal/v1/funding-operations": [
+    "side",
+    "entity_id",
+    "billing_account_id",
+    "account_id",
+    "kind",
+    "currency",
+    "from",
+    "to",
+    "limit",
+    "offset",
+  ],
+  "/internal/v1/finance/summary": ["billing_account_id", "currency", "from", "to"],
 };
 
 const paths: Record<string, Record<string, unknown>> = {};
@@ -76,7 +105,7 @@ try {
         inference || path === "/v1/models" || path.startsWith("/v1/videos/:taskId");
       const security: Record<string, string[]>[] = [];
       if (internal) security.push({ internalBearer: [] });
-      if (apiKeyRequired) security.push({ projectBearer: [] });
+      if (apiKeyRequired) security.push({ billingAccountBearer: [] });
       if (path === "/v1/messages" || path === "/v1/models") security.push({ anthropicKey: [] });
       if (path === "/v1beta/models/:action" || path === "/v1/models") {
         security.push({ geminiHeaderKey: [] }, { geminiQueryKey: [] });
@@ -198,7 +227,7 @@ const spec = {
         headers: { "Accept-Encoding": { schema: { type: "string", const: "identity" } } },
       },
       IngressRateLimited: {
-        description: "The IP, project, or upstream request quota is exhausted",
+        description: "The IP, billing account, or upstream request quota is exhausted",
         headers: { "Retry-After": { schema: { type: "integer", minimum: 1 } } },
       },
       IngressUnavailable: {
@@ -207,7 +236,7 @@ const spec = {
       },
     },
     securitySchemes: {
-      projectBearer: bearerAuth,
+      billingAccountBearer: bearerAuth,
       internalBearer: bearerAuth,
       anthropicKey: { type: "apiKey", in: "header", name: "x-api-key" },
       geminiHeaderKey: { type: "apiKey", in: "header", name: "x-goog-api-key" },

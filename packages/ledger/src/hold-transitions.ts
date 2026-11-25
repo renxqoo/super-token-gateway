@@ -134,7 +134,7 @@ export async function releaseHoldInTx(
 
   await releaseKeyReservationInTx(tx, holdApiKeyId, keyReservedAtoms);
   const wRows = await tx`
-          SELECT id, project_id, currency, policy,
+          SELECT id, billing_account_id, currency, policy,
             available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
             debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
             credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
@@ -293,7 +293,7 @@ export function createHoldTransitions(
       const result = await db
         .begin(async (tx): Promise<SwitchSupplierResult> => {
           const holdRows = await tx`
-            SELECT request_id, project_id, wallet_id, api_key_id, key_reserved_atoms::text, operation, model, held_atoms::text, credit_atoms::text,
+            SELECT request_id, billing_account_id, wallet_id, api_key_id, key_reserved_atoms::text, operation, model, held_atoms::text, credit_atoms::text,
               lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state
             FROM public.billing_holds WHERE request_id = ${input.request_id} FOR NO KEY UPDATE
           `;
@@ -398,7 +398,7 @@ export function createHoldTransitions(
                 await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
               const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : Date.now();
               const kRows = await tx`
-                  SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
+                  SELECT id, billing_account_id, spend_limit_atoms::text, spend_limit_window,
                     spend_window_start, spent_atoms::text, reserved_atoms::text
                   FROM public.api_keys
                   WHERE id = ${holdApiKeyId} AND (spend_limit_atoms IS NOT NULL OR reserved_atoms > 0)
@@ -412,7 +412,7 @@ export function createHoldTransitions(
 
             const walletId = String(hold.wallet_id);
             const wRows = await tx`
-                SELECT id, project_id, currency, policy,
+                SELECT id, billing_account_id, currency, policy,
                   available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
                   debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
                   credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason

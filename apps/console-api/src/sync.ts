@@ -11,7 +11,7 @@ import {
   priceVersionSnapshots,
   pricingOverrides,
   pricingTemplates,
-  projects,
+  billingAccounts,
   routes,
   upstreamAccounts,
   createConsoleDrizzle,
@@ -21,7 +21,7 @@ import type { GatewayClient } from "./gateway-client.ts";
 
 const RECONCILE_LEADER_LOCK = 88421002;
 const LOCK_NS = {
-  project: 88421101,
+  billingAccount: 88421101,
   apiKey: 88421102,
   account: 88421103,
   channel: 88421104,
@@ -68,31 +68,35 @@ export class ConsoleSyncEngine {
     }
   }
 
-  async ensureProjectSynced(projectId: string) {
-    return this.withEntityLock(LOCK_NS.project, projectId, async (orm) => {
-      const [proj] = await orm.select().from(projects).where(eq(projects.id, projectId)).limit(1);
-      if (!proj) throw new GatewayError(404, "not_found", "Project not found");
+  async ensureBillingAccountSynced(billingAccountId: string) {
+    return this.withEntityLock(LOCK_NS.billingAccount, billingAccountId, async (orm) => {
+      const [billingAccount] = await orm
+        .select()
+        .from(billingAccounts)
+        .where(eq(billingAccounts.id, billingAccountId))
+        .limit(1);
+      if (!billingAccount) throw new GatewayError(404, "not_found", "Billing account not found");
       if (
-        proj.gatewaySynced &&
-        proj.syncStatus === "SYNCED" &&
-        proj.syncedRevision >= proj.desiredRevision
+        billingAccount.gatewaySynced &&
+        billingAccount.syncStatus === "SYNCED" &&
+        billingAccount.syncedRevision >= billingAccount.desiredRevision
       ) {
-        return proj;
+        return billingAccount;
       }
-      const targetRev = proj.desiredRevision;
+      const targetRev = billingAccount.desiredRevision;
       try {
-        const res = await this.gateway.upsertProject({
-          id: proj.gatewayProjectId,
-          external_ref: `console:org:${proj.orgId}:project:${proj.id}`,
-          name: proj.name,
-          currency: proj.currency,
-          rpm: proj.rpm,
-          tpm: proj.tpm,
-          concurrency: proj.concurrency,
-          enabled: proj.enabled,
+        const res = await this.gateway.upsertBillingAccount({
+          id: billingAccount.gatewayBillingAccountId,
+          external_ref: `console:org:${billingAccount.orgId}:billing-account:${billingAccount.id}`,
+          name: billingAccount.name,
+          currency: billingAccount.currency,
+          rpm: billingAccount.rpm,
+          tpm: billingAccount.tpm,
+          concurrency: billingAccount.concurrency,
+          enabled: billingAccount.enabled,
           source_revision: targetRev,
         });
-        if (!proj.gatewaySynced) {
+        if (!billingAccount.gatewaySynced) {
           const [defaults] = await orm
             .select()
             .from(platformCreditDefaults)
@@ -103,10 +107,13 @@ export class ConsoleSyncEngine {
             (defaults.defaultCreditLimitAtoms !== "0" ||
               defaults.defaultWalletPolicy !== "GIFT_FIRST")
           ) {
-            const wallet = await this.gateway.getWallet(proj.gatewayProjectId, proj.currency);
+            const wallet = await this.gateway.getWallet(
+              billingAccount.gatewayBillingAccountId,
+              billingAccount.currency,
+            );
             if (wallet.credit_policy_version === "0") {
-              await this.gateway.configureCreditPolicy(proj.gatewayProjectId, {
-                currency: proj.currency,
+              await this.gateway.configureCreditPolicy(billingAccount.gatewayBillingAccountId, {
+                currency: billingAccount.currency,
                 expected_version: "0",
                 credit_limit_atoms: defaults.defaultCreditLimitAtoms,
                 policy: defaults.defaultWalletPolicy,
@@ -116,34 +123,34 @@ export class ConsoleSyncEngine {
         }
         const acceptedRev = Math.max(targetRev, res.source_revision ?? targetRev);
         const [updated] = await orm
-          .update(projects)
+          .update(billingAccounts)
           .set({
             gatewaySynced: true,
-            syncedRevision: sql`GREATEST(${projects.syncedRevision}, ${acceptedRev})`,
-            syncStatus: sql`CASE WHEN ${projects.desiredRevision} <= ${acceptedRev} THEN 'SYNCED' ELSE 'PENDING' END`,
-            lastSyncError: sql`CASE WHEN ${projects.desiredRevision} <= ${acceptedRev} THEN NULL ELSE ${projects.lastSyncError} END`,
+            syncedRevision: sql`GREATEST(${billingAccounts.syncedRevision}, ${acceptedRev})`,
+            syncStatus: sql`CASE WHEN ${billingAccounts.desiredRevision} <= ${acceptedRev} THEN 'SYNCED' ELSE 'PENDING' END`,
+            lastSyncError: sql`CASE WHEN ${billingAccounts.desiredRevision} <= ${acceptedRev} THEN NULL ELSE ${billingAccounts.lastSyncError} END`,
             updatedAt: sql`now()`,
           })
-          .where(eq(projects.id, proj.id))
+          .where(eq(billingAccounts.id, billingAccount.id))
           .returning();
-        return updated ?? proj;
+        return updated ?? billingAccount;
       } catch (err) {
         if (isStaleRevisionError(err)) {
           const [latest] = await orm
             .select()
-            .from(projects)
-            .where(eq(projects.id, proj.id))
+            .from(billingAccounts)
+            .where(eq(billingAccounts.id, billingAccount.id))
             .limit(1);
-          return latest ?? proj;
+          return latest ?? billingAccount;
         }
         await orm
-          .update(projects)
+          .update(billingAccounts)
           .set({
-            syncStatus: sql`CASE WHEN ${projects.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
+            syncStatus: sql`CASE WHEN ${billingAccounts.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
             lastSyncError: errMsg(err),
             updatedAt: sql`now()`,
           })
-          .where(eq(projects.id, proj.id));
+          .where(eq(billingAccounts.id, billingAccount.id));
         throw err;
       }
     });
@@ -204,12 +211,12 @@ export class ConsoleSyncEngine {
 
   async syncApiKey(keyId: string) {
     const [initial] = await this.orm
-      .select({ projectId: apiKeyRecords.projectId })
+      .select({ billingAccountId: apiKeyRecords.billingAccountId })
       .from(apiKeyRecords)
       .where(eq(apiKeyRecords.id, keyId))
       .limit(1);
     if (!initial) throw new GatewayError(404, "not_found", "API key not found");
-    const proj = await this.ensureProjectSynced(initial.projectId);
+    const billingAccount = await this.ensureBillingAccountSynced(initial.billingAccountId);
 
     return this.withEntityLock(LOCK_NS.apiKey, keyId, async (orm) => {
       const [rec] = await orm
@@ -224,7 +231,10 @@ export class ConsoleSyncEngine {
       try {
         const gwRes = await this.gateway.upsertApiKey({
           id: rec.id,
-          project_id: proj.gatewayProjectId,
+          billing_account_id: billingAccount.gatewayBillingAccountId,
+          ...(rec.rotatedFromKeyId && !isRevoked
+            ? { rotated_from_key_id: rec.rotatedFromKeyId }
+            : {}),
           name: rec.name,
           role: rec.role,
           allowed_cidrs: isRevoked ? [] : rec.allowedCidrs,
@@ -787,29 +797,33 @@ export class ConsoleSyncEngine {
   async syncPricingOverride(overrideId: string) {
     const [initial] = await this.orm
       .select({
-        projectId: pricingOverrides.projectId,
+        billingAccountId: pricingOverrides.billingAccountId,
         modelName: pricingOverrides.modelName,
         operation: pricingOverrides.operation,
       })
       .from(pricingOverrides)
       .where(eq(pricingOverrides.id, overrideId));
     if (!initial) throw new GatewayError(404, "not_found", "Pricing override not found");
-    const proj = await this.ensureProjectSynced(initial.projectId);
-    const lockKey = JSON.stringify([initial.projectId, initial.modelName, initial.operation]);
+    const billingAccount = await this.ensureBillingAccountSynced(initial.billingAccountId);
+    const lockKey = JSON.stringify([
+      initial.billingAccountId,
+      initial.modelName,
+      initial.operation,
+    ]);
     return this.withEntityLock(LOCK_NS.override, lockKey, async (orm) => {
       const [override] = await orm
         .select()
         .from(pricingOverrides)
         .where(eq(pricingOverrides.id, overrideId));
       if (!override) throw new GatewayError(404, "not_found", "Pricing override not found");
-      return this.applyPricingOverride(orm, proj.gatewayProjectId, override);
+      return this.applyPricingOverride(orm, billingAccount.gatewayBillingAccountId, override);
     });
   }
 
   async upsertPricingOverride(
     input: Pick<
       typeof pricingOverrides.$inferSelect,
-      | "projectId"
+      | "billingAccountId"
       | "modelName"
       | "operation"
       | "overrideKind"
@@ -819,15 +833,15 @@ export class ConsoleSyncEngine {
       | "enabled"
     >,
   ) {
-    const proj = await this.ensureProjectSynced(input.projectId);
-    const lockKey = JSON.stringify([input.projectId, input.modelName, input.operation]);
+    const billingAccount = await this.ensureBillingAccountSynced(input.billingAccountId);
+    const lockKey = JSON.stringify([input.billingAccountId, input.modelName, input.operation]);
     return this.withEntityLock(LOCK_NS.override, lockKey, async (orm) => {
       const [previous] = await orm
         .select()
         .from(pricingOverrides)
         .where(
           and(
-            eq(pricingOverrides.projectId, input.projectId),
+            eq(pricingOverrides.billingAccountId, input.billingAccountId),
             eq(pricingOverrides.modelName, input.modelName),
             eq(pricingOverrides.operation, input.operation),
           ),
@@ -848,7 +862,11 @@ export class ConsoleSyncEngine {
             .values({ ...input, id: crypto.randomUUID() })
             .returning();
       try {
-        return await this.applyPricingOverride(orm, proj.gatewayProjectId, changed!);
+        return await this.applyPricingOverride(
+          orm,
+          billingAccount.gatewayBillingAccountId,
+          changed!,
+        );
       } catch (err) {
         if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
           if (previous) {
@@ -873,14 +891,14 @@ export class ConsoleSyncEngine {
 
   private async applyPricingOverride(
     orm: ConsoleDrizzle,
-    gatewayProjectId: string,
+    gatewayBillingAccountId: string,
     o: typeof pricingOverrides.$inferSelect,
   ) {
     const targetRev = o.desiredRevision;
     try {
       const res = await this.gateway.upsertPricingOverride({
         id: o.id,
-        project_id: gatewayProjectId,
+        billing_account_id: gatewayBillingAccountId,
         model_name: o.modelName,
         operation: o.operation,
         override_kind: o.overrideKind,
@@ -1059,26 +1077,26 @@ export class ConsoleSyncEngine {
         }
       }
 
-      const projs = await this.orm
-        .select({ id: projects.id })
-        .from(projects)
+      const pendingBillingAccounts = await this.orm
+        .select({ id: billingAccounts.id })
+        .from(billingAccounts)
         .where(
           or(
-            eq(projects.syncStatus, "FAILED"),
+            eq(billingAccounts.syncStatus, "FAILED"),
             and(
-              eq(projects.gatewaySynced, true),
+              eq(billingAccounts.gatewaySynced, true),
               or(
-                inArray(projects.syncStatus, states),
-                lt(projects.syncedRevision, projects.desiredRevision),
+                inArray(billingAccounts.syncStatus, states),
+                lt(billingAccounts.syncedRevision, billingAccounts.desiredRevision),
               ),
             ),
           ),
         )
         .limit(batchLimit);
-      for (const p of projs) {
+      for (const p of pendingBillingAccounts) {
         if (signal?.aborted) return { synced, failed };
         try {
-          await this.ensureProjectSynced(p.id);
+          await this.ensureBillingAccountSynced(p.id);
           synced++;
         } catch {
           failed++;

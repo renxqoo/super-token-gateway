@@ -2,7 +2,7 @@
 
 ## 本地环境
 
-`bun run setup:local` 生成并保护配置；`bun run infra:up` 用 `PG_TOOLS_DIRECTORY` 与 `DURABILITY_REDIS_SERVER` 指定的本机工具，在 `.local/native-services/` 启动此项目专用 PG/Redis，或直接使用配置好的本机实例。它不安装软件、不使用 Docker、不清空共享服务，端口被其他进程占用时拒绝启动。开发库与测试库隔离；生产（`NODE_ENV=production`）禁止运行开发栈 `bun run dev`。
+`bun run setup:local` 生成并保护配置；`bun run infra:up` 用 `PG_TOOLS_DIRECTORY` 与 `DURABILITY_REDIS_SERVER` 指定的本机工具，在 `.local/native-services/` 启动此计费账户专用 PG/Redis，或直接使用配置好的本机实例。它不安装软件、不使用 Docker、不清空共享服务，端口被其他进程占用时拒绝启动。开发库与测试库隔离；生产（`NODE_ENV=production`）禁止运行开发栈 `bun run dev`。
 
 开发端口：PG 55442、准入 Redis 56382、耐久队列 Redis 56383、独立 mock 9088、worker health 8099；`bun run dev` 的 Gateway、Core 与上游替身使用随机端口，Gateway 地址写入 `.local/client.env`。`.local/native-services/` 是本地依赖数据，不是跨主机 HA 集群。不要删除仍有用途的 usage 证据目录。
 
@@ -19,7 +19,7 @@
 3. 发布 dist 到 `/opt/llm-gateway/releases/<版本>/`，将 current 指向该目录。进程必须只读。密钥与配置放在 `/etc/llm-gateway/` 或由外部 secret manager 注入，文件权限 0600 且只属于对应进程用户，禁止打入镜像：Core API 读取 `core-api.json`（含 pepper、加密主密钥、管理 key，参考 `infra/core-api.example.json`：这三项在样例中留空，不填写时拒绝启动），worker 读取 `core-worker.env`（参考 `infra/core-worker.example.env`），v2 Gateway 实例读取 `gateway-<实例>.json`（只有 mTLS 客户端证书、Core 证书指纹与证据队列地址，参考 `infra/gateway.example.json`）。三个样例的 audience、Core 内部地址与证书 SAN、队列 namespace 及 Caddy 指向的 Core 公开端口互相一致，替换时成组修改。
 4. 安装 `infra/core-api.service`（内部 RPC、管理监听 127.0.0.1:8096 与公开监听 127.0.0.1:8095 同一进程）、`infra/core-worker.service`、`infra/gateway@.service`（v2，实例 1/2 监听 127.0.0.1:8090/8091）。Core API、Core worker、v2 Gateway 分别使用 `llm-core`、`llm-core-worker`、`llm-gateway` 三个低权限用户，互相读不到对方的配置与密钥（v2 Gateway 尤其不能读到数据库地址、Core 的 pepper 与加密主密钥）。v2 Gateway 的内部 mTLS 身份先用 `dist/tools/identity-provision.js` 登记。v2 Gateway 启动时向 Core 建立 session，须在 Core API 就绪后启动（同机部署时单元已声明 `After=core-api.service`，Core 不可达时启动失败并由 systemd 重试）；worker 只依赖 PG 与耐久队列。
 5. v2 Gateway 配置 `production: true`、`allow_private_upstream: false`，证据队列 `required_replicas` 等于所有可晋升 AOF 副本数且至少 1，`queue.namespace` 必须与 Core worker 的 `REDIS_NAMESPACE`（默认 `stg`）相同，`core.audience` 形如 `<部署名>/core-api` 且与 Core API 的 `audience` 一致。PG/Redis 使用已验证的 TLS 连接，供应商为公网 HTTPS 地址。配置业务系统与 Gateway 的独立访问凭证。
-6. 修改 `infra/Caddyfile` 的真实域名和实例地址，运行 `caddy validate`，切入已通过 `/readyz` 的新实例，再逐个 SIGTERM 旧实例。`@chat`、`@resources` 列出的推理与资源路径只代理到 v2 Gateway；`@account`、`@request` 列出的钱包、模型列表、用量、项目 Key、请求证据与 `/openapi.json` 代理到 Core 公开监听；未列出的路径由 Caddy 直接返回 404。Core 管理监听与内部 RPC 不暴露公网。
+6. 修改 `infra/Caddyfile` 的真实域名和实例地址，运行 `caddy validate`，切入已通过 `/readyz` 的新实例，再逐个 SIGTERM 旧实例。`@chat`、`@resources` 列出的推理与资源路径只代理到 v2 Gateway；`@account`、`@request` 列出的钱包、模型列表、用量、计费账户 Key、请求证据与 `/openapi.json` 代理到 Core 公开监听；未列出的路径由 Caddy 直接返回 404。Core 管理监听与内部 RPC 不暴露公网。
 
 发布成品是 `dist/` 下的独立 bundle、`dist/tools` 运维工具与 `dist/native/plugin-host`，生产不安装 node_modules；`bun run test:artifact` 在独立空目录启动编译产物，检查真实依赖、三进程 JSON/SSE、双方精确记账、SIGTERM 与输出不含正文。只读根、非 root 与能力收紧由 systemd 单元提供，单元需在 Linux 部署机用 `systemd-analyze verify` 检查。
 
@@ -58,7 +58,7 @@ RPM 和 active 集合按剩余 TTL 合并过期时间写入，保留至少完整
 
 容量测试记录实际窗口、作业大小、worker 并发和数据库合批上限。
 
-TPM 是按输入字节/输出上限保守估算的准入，完成后用最终 token 事实修正；多模态、远端文件与异步任务不能依靠它获得精确财务上限，应配合供应商配额和项目并发。财务硬约束由 PG 预扣与钱包承担，不能由技术窗口代替。
+TPM 是按输入字节/输出上限保守估算的准入，完成后用最终 token 事实修正；多模态、远端文件与异步任务不能依靠它获得精确财务上限，应配合供应商配额和计费账户并发。财务硬约束由 PG 预扣与钱包承担，不能由技术窗口代替。
 
 ## 智能路由与尝试预算
 

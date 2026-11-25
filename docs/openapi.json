@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Super Token Gateway",
-    "version": "2026112501",
+    "version": "2026112502",
     "description": "Public and internal routes use separate listeners. Inference payloads and success responses depend on the endpoint protocol and provider adapter."
   },
   "paths": {
@@ -70,7 +70,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           },
           {
             "anthropicKey": []
@@ -136,7 +136,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -231,7 +231,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -326,7 +326,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           },
           {
             "anthropicKey": []
@@ -424,7 +424,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -519,7 +519,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -614,7 +614,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -709,7 +709,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -804,7 +804,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -905,7 +905,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -1000,7 +1000,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -1101,7 +1101,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -1202,7 +1202,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -1297,7 +1297,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -1392,7 +1392,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -1459,7 +1459,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           }
         ],
         "parameters": [
@@ -1526,7 +1526,7 @@
         "x-stg-listener": "public",
         "security": [
           {
-            "projectBearer": []
+            "billingAccountBearer": []
           },
           {
             "geminiHeaderKey": []
@@ -1717,7 +1717,7 @@
         }
       }
     },
-    "/internal/v1/projects": {
+    "/internal/v1/billing-accounts": {
       "put": {
         "x-stg-listener": "internal",
         "x-stg-role": "catalog",
@@ -1909,87 +1909,6 @@
         }
       }
     },
-    "/internal/v1/console/projects/{projectId}/binding": {
-      "put": {
-        "x-stg-listener": "internal",
-        "x-stg-role": "security",
-        "security": [
-          {
-            "internalBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "projectId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "organization_id": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "console_project_id": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  }
-                },
-                "required": ["organization_id", "console_project_id"],
-                "additionalProperties": false
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "default": {
-            "description": "Gateway error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "required": ["error"],
-                  "properties": {
-                    "error": {
-                      "type": "object",
-                      "required": ["code", "message"],
-                      "properties": {
-                        "code": {
-                          "type": "string"
-                        },
-                        "message": {
-                          "type": "string"
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/internal/v1/api-keys": {
       "put": {
         "x-stg-listener": "internal",
@@ -2011,7 +1930,12 @@
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
-                  "project_id": {
+                  "billing_account_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "rotated_from_key_id": {
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
@@ -2117,7 +2041,7 @@
                     "maximum": 2147483647
                   }
                 },
-                "required": ["project_id"],
+                "required": ["billing_account_id"],
                 "additionalProperties": false
               }
             }
@@ -3341,7 +3265,7 @@
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                   },
-                  "project_id": {
+                  "billing_account_id": {
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
@@ -3436,7 +3360,7 @@
                     "maximum": 2147483647
                   }
                 },
-                "required": ["project_id", "model_name", "override_kind"],
+                "required": ["billing_account_id", "model_name", "override_kind"],
                 "additionalProperties": false
               }
             }
@@ -3488,7 +3412,7 @@
         ],
         "parameters": [
           {
-            "name": "project_id",
+            "name": "billing_account_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -8153,7 +8077,7 @@
         }
       }
     },
-    "/internal/v1/wallets/{projectId}/credits": {
+    "/internal/v1/wallets/{billingAccountId}/credits": {
       "post": {
         "x-stg-listener": "internal",
         "x-stg-role": "finance",
@@ -8164,7 +8088,7 @@
         ],
         "parameters": [
           {
-            "name": "projectId",
+            "name": "billingAccountId",
             "in": "path",
             "required": true,
             "schema": {
@@ -8298,7 +8222,7 @@
         }
       }
     },
-    "/internal/v1/wallets/{projectId}/credit-policy": {
+    "/internal/v1/wallets/{billingAccountId}/credit-policy": {
       "post": {
         "x-stg-listener": "internal",
         "x-stg-role": "finance",
@@ -8309,7 +8233,7 @@
         ],
         "parameters": [
           {
-            "name": "projectId",
+            "name": "billingAccountId",
             "in": "path",
             "required": true,
             "schema": {
@@ -8386,7 +8310,7 @@
         }
       }
     },
-    "/internal/v1/wallets/{projectId}/adjustments": {
+    "/internal/v1/wallets/{billingAccountId}/adjustments": {
       "post": {
         "x-stg-listener": "internal",
         "x-stg-role": "finance",
@@ -8397,7 +8321,7 @@
         ],
         "parameters": [
           {
-            "name": "projectId",
+            "name": "billingAccountId",
             "in": "path",
             "required": true,
             "schema": {
@@ -8438,11 +8362,6 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 500
-                  },
-                  "actor": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 120
                   }
                 },
                 "required": ["external_ref", "delta_atoms", "reason"],
@@ -8488,7 +8407,7 @@
         }
       }
     },
-    "/internal/v1/wallets/{projectId}/freeze": {
+    "/internal/v1/wallets/{billingAccountId}/freeze": {
       "post": {
         "x-stg-listener": "internal",
         "x-stg-role": "finance",
@@ -8499,7 +8418,7 @@
         ],
         "parameters": [
           {
-            "name": "projectId",
+            "name": "billingAccountId",
             "in": "path",
             "required": true,
             "schema": {
@@ -8527,11 +8446,6 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 500
-                  },
-                  "actor": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 120
                   }
                 },
                 "required": ["frozen", "reason"],
@@ -8577,7 +8491,7 @@
         }
       }
     },
-    "/internal/v1/wallets/{projectId}": {
+    "/internal/v1/wallets/{billingAccountId}": {
       "get": {
         "x-stg-listener": "internal",
         "x-stg-role": "auditor",
@@ -8588,7 +8502,7 @@
         ],
         "parameters": [
           {
-            "name": "projectId",
+            "name": "billingAccountId",
             "in": "path",
             "required": true,
             "schema": {
@@ -8949,11 +8863,6 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 500
-                  },
-                  "actor": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 120
                   }
                 },
                 "required": ["external_ref", "delta_atoms", "reason"],
@@ -9140,11 +9049,6 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 500
-                  },
-                  "actor": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 120
                   }
                 },
                 "required": ["action", "reason"],
@@ -9233,11 +9137,6 @@
                         "minLength": 1,
                         "maxLength": 500
                       },
-                      "actor": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 120
-                      },
                       "evidence_ref": {
                         "type": "string",
                         "minLength": 1,
@@ -9258,11 +9157,6 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 500
-                      },
-                      "actor": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 120
                       },
                       "evidence_ref": {
                         "type": "string",
@@ -9495,11 +9389,6 @@
                         }
                       ]
                     }
-                  },
-                  "actor": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 120
                   }
                 },
                 "required": ["receipts"],
@@ -9693,11 +9582,6 @@
                         "type": "null"
                       }
                     ]
-                  },
-                  "actor": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 120
                   }
                 },
                 "required": ["action", "review_evidence_ref", "reason"],
@@ -9759,7 +9643,7 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "project_id": {
+                  "billing_account_id": {
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
@@ -9796,7 +9680,7 @@
                   }
                 },
                 "required": [
-                  "project_id",
+                  "billing_account_id",
                   "channel_id",
                   "supplier_currency",
                   "age_seconds",
@@ -9902,7 +9786,7 @@
         ],
         "parameters": [
           {
-            "name": "project_id",
+            "name": "billing_account_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -10008,7 +9892,7 @@
         ],
         "parameters": [
           {
-            "name": "project_id",
+            "name": "billing_account_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -10095,6 +9979,91 @@
             "internalBearer": []
           }
         ],
+        "parameters": [
+          {
+            "name": "side",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "entity_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "billing_account_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "account_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "currency",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful response",
@@ -10139,6 +10108,41 @@
         "security": [
           {
             "internalBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "billing_account_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "currency",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -10311,7 +10315,7 @@
             }
           },
           {
-            "name": "project_id",
+            "name": "billing_account_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -10640,7 +10644,7 @@
         }
       },
       "IngressRateLimited": {
-        "description": "The IP, project, or upstream request quota is exhausted",
+        "description": "The IP, billing account, or upstream request quota is exhausted",
         "headers": {
           "Retry-After": {
             "schema": {
@@ -10663,7 +10667,7 @@
       }
     },
     "securitySchemes": {
-      "projectBearer": {
+      "billingAccountBearer": {
         "type": "http",
         "scheme": "bearer"
       },

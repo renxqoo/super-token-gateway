@@ -1,3 +1,4 @@
+import { localInternalCredentials } from "../../scripts/local-internal-auth.ts";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { SQL } from "bun";
 import { createAsyncTasksRepository, createDatabase, migrate } from "@gateway/ledger";
@@ -14,7 +15,7 @@ targetUrl.pathname = `/${testDbName}`;
 
 const KEY_PEPPER = "foundation-pepper-0123456789abcdef";
 const ENCRYPTION_KEY = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
-const ADMIN_TOKEN = "foundation-admin-token-0123456789";
+const OPERATOR_TOKEN = "foundation-admin-token-01234567890000000000000";
 
 let adminDb: SQL;
 let db: SQL;
@@ -28,7 +29,7 @@ let videoSubmitCount = 0;
 
 function adminHeaders() {
   return {
-    authorization: `Bearer ${ADMIN_TOKEN}`,
+    authorization: `Bearer ${OPERATOR_TOKEN}`,
     "content-type": "application/json",
   };
 }
@@ -106,7 +107,7 @@ beforeAll(async () => {
     dbMaxConnections: 16,
     keyPepper: KEY_PEPPER,
     encryptionKey: ENCRYPTION_KEY,
-    adminToken: ADMIN_TOKEN,
+    internalCredentials: localInternalCredentials(OPERATOR_TOKEN),
     allowPrivateUpstreams: true,
     privateUpstreamCidrs: [],
     trustedProxyCidrs: [],
@@ -117,8 +118,8 @@ beforeAll(async () => {
     snapshotPollMs: 0,
     microBatchWindowMs: 2,
     microBatchMaxSize: 32,
-    maxActiveAsyncTasksPerProject: 2,
-    maxAutoRefundsPerProject24h: 2,
+    maxActiveAsyncTasksPerBillingAccount: 2,
+    maxAutoRefundsPerBillingAccount24h: 2,
   };
   gateway = createGatewayRuntime({ config, db, wasmExecutor: null });
   await gateway.start();
@@ -274,20 +275,28 @@ test("Phase 1: channel secret preservation, api_key attribution & LIFETIME/DAILY
     cost_version_id: videoSupPrice.id,
   });
 
-  const { data: projA } = await internalCall<{ id: string }>("PUT", "/internal/v1/projects", {
-    name: "enterprise-a",
-    currency: "USD",
-    rpm: 10000,
-    tpm: 10000000,
-    concurrency: 100,
-  });
-  const { data: projB } = await internalCall<{ id: string }>("PUT", "/internal/v1/projects", {
-    name: "tenant-b",
-    currency: "USD",
-    rpm: 10000,
-    tpm: 10000000,
-    concurrency: 100,
-  });
+  const { data: projA } = await internalCall<{ id: string }>(
+    "PUT",
+    "/internal/v1/billing-accounts",
+    {
+      name: "enterprise-a",
+      currency: "USD",
+      rpm: 10000,
+      tpm: 10000000,
+      concurrency: 100,
+    },
+  );
+  const { data: projB } = await internalCall<{ id: string }>(
+    "PUT",
+    "/internal/v1/billing-accounts",
+    {
+      name: "tenant-b",
+      currency: "USD",
+      rpm: 10000,
+      tpm: 10000000,
+      concurrency: 100,
+    },
+  );
   await internalCall("POST", `/internal/v1/wallets/${projA.id}/credits`, {
     currency: "USD",
     external_ref: "projA-fund",
@@ -305,7 +314,7 @@ test("Phase 1: channel secret preservation, api_key attribution & LIFETIME/DAILY
     "PUT",
     "/internal/v1/pricing-overrides",
     {
-      project_id: projA.id,
+      billing_account_id: projA.id,
       model_name: "p1-chat",
       operation: "*",
       override_kind: "MULTIPLIER",
@@ -320,7 +329,7 @@ test("Phase 1: channel secret preservation, api_key attribution & LIFETIME/DAILY
     key?: string;
     verifier?: string;
   }>("PUT", "/internal/v1/api-keys", {
-    project_id: projA.id,
+    billing_account_id: projA.id,
     name: "limited-key",
     spend_limit_atoms: "40000",
     spend_limit_window: "LIFETIME",
@@ -333,7 +342,7 @@ test("Phase 1: channel secret preservation, api_key attribution & LIFETIME/DAILY
     "/internal/v1/api-keys",
     {
       id: keyLimited.id,
-      project_id: projA.id,
+      billing_account_id: projA.id,
       name: "limited-key-renamed",
       spend_limit_atoms: "40000",
       spend_limit_window: "LIFETIME",
@@ -344,12 +353,12 @@ test("Phase 1: channel secret preservation, api_key attribution & LIFETIME/DAILY
   const { data: keyUnlimited } = await internalCall<{ id: string; key?: string }>(
     "PUT",
     "/internal/v1/api-keys",
-    { project_id: projA.id, name: "unlimited-key" },
+    { billing_account_id: projA.id, name: "unlimited-key" },
   );
   const { data: keyB } = await internalCall<{ id: string; key?: string }>(
     "PUT",
     "/internal/v1/api-keys",
-    { project_id: projB.id, name: "projB-key" },
+    { billing_account_id: projB.id, name: "projB-key" },
   );
 
   const chatResp1 = await gateway.fetchPublic(
@@ -377,7 +386,7 @@ test("Phase 1: channel secret preservation, api_key attribution & LIFETIME/DAILY
       discountNumerator: string | null;
       discountDenominator: string | null;
     }[];
-  }>("GET", `/internal/v1/charges?project_id=${projA.id}&api_key_id=${keyLimited.id}`);
+  }>("GET", `/internal/v1/charges?billing_account_id=${projA.id}&api_key_id=${keyLimited.id}`);
   expect(keyCharges.items.length).toBe(1);
   expect(keyCharges.items[0]!.apiKeyId).toBe(keyLimited.id);
   expect(keyCharges.items[0]!.customerAtoms).toBe("1600");
@@ -387,7 +396,7 @@ test("Phase 1: channel secret preservation, api_key attribution & LIFETIME/DAILY
 
   await internalCall("PUT", "/internal/v1/api-keys", {
     id: keyLimited.id,
-    project_id: projA.id,
+    billing_account_id: projA.id,
     name: "limited-key-tight",
     spend_limit_atoms: "13000",
     spend_limit_window: "LIFETIME",
@@ -590,7 +599,7 @@ test("Phase 1: channel secret preservation, api_key attribution & LIFETIME/DAILY
 
   const { data: listedTasks } = await internalCall<{ total: number }>(
     "GET",
-    `/internal/v1/async-tasks?project_id=${projA.id}`,
+    `/internal/v1/async-tasks?billing_account_id=${projA.id}`,
   );
   expect(listedTasks.total).toBe(9);
 

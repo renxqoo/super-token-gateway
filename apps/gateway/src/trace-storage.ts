@@ -22,7 +22,7 @@ function fields(values: Record<string, string | boolean | number | undefined>) {
 }
 
 export function gatewaySpans(record: TraceRecord): StoredSpan[] {
-  const { traceId, spanId, requestId, projectId, origin, start, end, status } = record;
+  const { traceId, spanId, requestId, billingAccountId, origin, start, end, status } = record;
   const make = (
     id: string,
     parent: string | undefined,
@@ -37,7 +37,7 @@ export function gatewaySpans(record: TraceRecord): StoredSpan[] {
     trace_id: traceId,
     span_id: id,
     request_id: requestId,
-    project_id: projectId,
+    billing_account_id: billingAccountId,
     source: "gateway",
     start_ms: origin + from,
     span: {
@@ -146,7 +146,9 @@ export function createTraceStore(url: string, timeoutMs: number) {
     if (verified) return;
     const [target] =
       await db`SELECT current_database()= ${decodeURIComponent(new URL(url).pathname.slice(1))} AS target,
-      to_regclass('public.billing_holds') IS NULL AS isolated, to_regclass('telemetry.spans') IS NOT NULL AS initialized`;
+      to_regclass('public.billing_holds') IS NULL
+        AND to_regclass('public.console_schema_migrations') IS NULL AS isolated,
+      to_regclass('telemetry.spans') IS NOT NULL AS initialized`;
     if (!target?.target || !target.isolated || !target.initialized)
       throw new Error("Invalid telemetry database");
     verified = true;
@@ -157,10 +159,10 @@ export function createTraceStore(url: string, timeoutMs: number) {
       await ready();
       await db.begin(async (tx) => {
         await tx`SELECT set_config('statement_timeout', ${String(timeoutMs)}, true)`;
-        await tx`INSERT INTO telemetry.spans (trace_id,span_id,request_id,project_id,source,started_at,expires_at,span)
-          SELECT s.trace_id,s.span_id,s.request_id,s.project_id,s.source,to_timestamp(s.start_ms/1000.0),
+        await tx`INSERT INTO telemetry.spans (trace_id,span_id,request_id,billing_account_id,source,started_at,expires_at,span)
+          SELECT s.trace_id,s.span_id,s.request_id,s.billing_account_id,s.source,to_timestamp(s.start_ms/1000.0),
             now()+${retentionSeconds} * interval '1 second',s.span
-          FROM jsonb_to_recordset(${JSON.stringify(spans)}::text::jsonb) AS s(trace_id text,span_id text,request_id uuid,project_id uuid,source text,start_ms double precision,span jsonb)
+          FROM jsonb_to_recordset(${JSON.stringify(spans)}::text::jsonb) AS s(trace_id text,span_id text,request_id uuid,billing_account_id uuid,source text,start_ms double precision,span jsonb)
           ON CONFLICT (trace_id,span_id) DO NOTHING`;
       });
     },
@@ -171,23 +173,23 @@ export function createTraceStore(url: string, timeoutMs: number) {
         const [result] = await tx<{ removed: number }[]>`WITH deleted AS (
           DELETE FROM telemetry.spans WHERE expires_at < now() AND (trace_id,span_id) IN (
             SELECT trace_id,span_id FROM telemetry.spans WHERE expires_at < now() ORDER BY expires_at LIMIT ${limit}
-          ) RETURNING 1
+          ) RETURNING billing_account_id
         ) SELECT count(*)::integer AS removed FROM deleted`;
         return result?.removed ?? 0;
       });
     },
     async read(id: string) {
       await ready();
-      type Row = Pick<StoredSpan, "request_id" | "project_id" | "source" | "span">;
+      type Row = Pick<StoredSpan, "request_id" | "billing_account_id" | "source" | "span">;
       return db.begin(async (tx) => {
         await tx`SELECT set_config('statement_timeout', ${String(timeoutMs)}, true)`;
         return /^[0-9a-f]{32}$/.test(id)
           ? tx<
               Row[]
-            >`SELECT request_id,project_id,source,span FROM telemetry.spans WHERE trace_id=${id} AND expires_at > now() ORDER BY started_at,span_id LIMIT 1000`
+            >`SELECT request_id,billing_account_id,source,span FROM telemetry.spans WHERE trace_id=${id} AND expires_at > now() ORDER BY started_at,span_id LIMIT 1000`
           : tx<
               Row[]
-            >`SELECT request_id,project_id,source,span FROM telemetry.spans WHERE request_id=${id}::uuid AND expires_at > now() ORDER BY started_at,span_id LIMIT 1000`;
+            >`SELECT request_id,billing_account_id,source,span FROM telemetry.spans WHERE request_id=${id}::uuid AND expires_at > now() ORDER BY started_at,span_id LIMIT 1000`;
       });
     },
     close: () => db.close(),

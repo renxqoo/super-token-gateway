@@ -210,7 +210,7 @@ test("session refresh concurrency, password change revocation, brute-force IP gu
   expect(suspendOrg.status).toBe(200);
   const deniedOrg = await h.clientApi(
     "GET",
-    `/api/v1/orgs/${orgOwner.defaultOrgId}/projects`,
+    `/api/v1/orgs/${orgOwner.defaultOrgId}/billing-accounts`,
     orgOwner.accessToken,
   );
   expect(deniedOrg.status).toBe(403);
@@ -309,31 +309,32 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
   const viewer = await h.registerUser("team-view@example.com");
   const outsider = await h.registerUser("outsider@example.com");
 
-  const orgRes = await h.clientApi<{ id: string }>("POST", "/api/v1/orgs", owner.accessToken, {
-    name: "Acme Enterprise",
-    slug: "acme-enterprise",
-  });
+  const orgRes = await h.clientApi<{ id: string; default_billing_account_id: string }>(
+    "POST",
+    "/api/v1/orgs",
+    owner.accessToken,
+    { name: "Acme Enterprise", slug: "acme-enterprise" },
+  );
   expect(orgRes.status).toBe(201);
   const orgId = orgRes.data.id;
-
-  const projRes = await h.clientApi<{ id: string }>(
-    "POST",
-    `/api/v1/orgs/${orgId}/projects`,
+  const billingAccountId = orgRes.data.default_billing_account_id;
+  const limits = await h.clientApi(
+    "PATCH",
+    `/api/v1/billing-accounts/${billingAccountId}`,
     owner.accessToken,
+    { developer_key_spend_limit_atoms: "5000", developer_max_active_keys: 2 },
+  );
+  expect(limits.status).toBe(200);
+
+  await h.adminApi(
+    "POST",
+    `/admin/v1/finance/billing-accounts/${billingAccountId}/topups`,
+    adminAccess,
     {
-      name: "Prod API",
-      currency: "USD",
-      developer_key_spend_limit_atoms: "5000",
-      developer_max_active_keys: 2,
+      external_ref: "rbac-topup-1",
+      amount_atoms: "100000",
     },
   );
-  expect(projRes.status).toBe(201);
-  const projectId = projRes.data.id;
-
-  await h.adminApi("POST", `/admin/v1/finance/projects/${projectId}/topups`, adminAccess, {
-    external_ref: "rbac-topup-1",
-    amount_atoms: "100000",
-  });
 
   const invite = async (email: string, role: string) => {
     const r = await h.clientApi<{ id: string; token: string }>(
@@ -402,32 +403,55 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
   ).toBe(200);
 
   expect(
-    (await h.clientApi("GET", `/api/v1/orgs/${orgId}/projects`, outsider.accessToken)).status,
-  ).toBe(404);
-  expect(
-    (await h.clientApi("GET", `/api/v1/projects/${projectId}/wallet`, outsider.accessToken)).status,
+    (await h.clientApi("GET", `/api/v1/orgs/${orgId}/billing-accounts`, outsider.accessToken))
+      .status,
   ).toBe(404);
   expect(
     (
-      await h.clientApi("POST", `/api/v1/projects/${projectId}/api-keys`, viewer.accessToken, {
-        name: "viewer-nope",
-      })
+      await h.clientApi(
+        "GET",
+        `/api/v1/billing-accounts/${billingAccountId}/wallet`,
+        outsider.accessToken,
+      )
+    ).status,
+  ).toBe(404);
+  expect(
+    (
+      await h.clientApi(
+        "POST",
+        `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
+        viewer.accessToken,
+        {
+          name: "viewer-nope",
+        },
+      )
     ).status,
   ).toBe(403);
   expect(
     (
-      await h.clientApi("POST", `/api/v1/projects/${projectId}/api-keys`, finance.accessToken, {
-        name: "finance-nope",
-      })
+      await h.clientApi(
+        "POST",
+        `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
+        finance.accessToken,
+        {
+          name: "finance-nope",
+        },
+      )
     ).status,
   ).toBe(403);
   expect(
-    (await h.clientApi("GET", `/api/v1/projects/${projectId}/wallet`, finance.accessToken)).status,
+    (
+      await h.clientApi(
+        "GET",
+        `/api/v1/billing-accounts/${billingAccountId}/wallet`,
+        finance.accessToken,
+      )
+    ).status,
   ).toBe(200);
 
   const ownerKey = await h.clientApi<{ id: string; key: string }>(
     "POST",
-    `/api/v1/projects/${projectId}/api-keys`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
     owner.accessToken,
     { name: "owner-master", role: "INVOKER" },
   );
@@ -435,37 +459,52 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
 
   expect(
     (
-      await h.clientApi("POST", `/api/v1/projects/${projectId}/api-keys`, dev.accessToken, {
-        name: "dev-admin-attempt",
-        role: "ADMIN",
-        spend_limit_atoms: "1000",
-      })
+      await h.clientApi(
+        "POST",
+        `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
+        dev.accessToken,
+        {
+          name: "dev-admin-attempt",
+          role: "ADMIN",
+          spend_limit_atoms: "1000",
+        },
+      )
     ).status,
   ).toBe(403);
 
   expect(
     (
-      await h.clientApi("POST", `/api/v1/projects/${projectId}/api-keys`, dev.accessToken, {
-        name: "dev-unbounded-attempt",
-        role: "INVOKER",
-        spend_limit_atoms: null,
-      })
+      await h.clientApi(
+        "POST",
+        `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
+        dev.accessToken,
+        {
+          name: "dev-unbounded-attempt",
+          role: "INVOKER",
+          spend_limit_atoms: null,
+        },
+      )
     ).status,
   ).toBe(403);
 
   expect(
     (
-      await h.clientApi("POST", `/api/v1/projects/${projectId}/api-keys`, dev.accessToken, {
-        name: "dev-overcap-attempt",
-        role: "INVOKER",
-        spend_limit_atoms: "6000",
-      })
+      await h.clientApi(
+        "POST",
+        `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
+        dev.accessToken,
+        {
+          name: "dev-overcap-attempt",
+          role: "INVOKER",
+          spend_limit_atoms: "6000",
+        },
+      )
     ).status,
   ).toBe(403);
 
   const devKey1 = await h.clientApi<{ id: string; key: string; allowedCidrs: string[] }>(
     "POST",
-    `/api/v1/projects/${projectId}/api-keys`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
     dev.accessToken,
     {
       name: "dev-ip-key-1",
@@ -493,7 +532,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
 
   const patchIp = await h.clientApi<{ allowedCidrs: string[] }>(
     "PATCH",
-    `/api/v1/projects/${projectId}/api-keys/${devKey1.data.id}`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys/${devKey1.data.id}`,
     dev.accessToken,
     { allowed_cidrs: [" 127.0.0.1 "] },
   );
@@ -518,7 +557,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
     (
       await h.clientApi(
         "PATCH",
-        `/api/v1/projects/${projectId}/api-keys/${devKey1.data.id}`,
+        `/api/v1/billing-accounts/${billingAccountId}/api-keys/${devKey1.data.id}`,
         dev.accessToken,
         { spend_limit_atoms: "5000" },
       )
@@ -529,7 +568,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
     (
       await h.clientApi(
         "DELETE",
-        `/api/v1/projects/${projectId}/api-keys/${devKey1.data.id}`,
+        `/api/v1/billing-accounts/${billingAccountId}/api-keys/${devKey1.data.id}`,
         dev.accessToken,
       )
     ).status,
@@ -539,7 +578,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
     (
       await h.clientApi(
         "POST",
-        `/api/v1/projects/${projectId}/api-keys/${devKey1.data.id}/rotate`,
+        `/api/v1/billing-accounts/${billingAccountId}/api-keys/${devKey1.data.id}/rotate`,
         dev.accessToken,
       )
     ).status,
@@ -549,7 +588,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
     (
       await h.clientApi(
         "PATCH",
-        `/api/v1/projects/${projectId}/api-keys/${ownerKey.data.id}`,
+        `/api/v1/billing-accounts/${billingAccountId}/api-keys/${ownerKey.data.id}`,
         dev.accessToken,
         { enabled: false },
       )
@@ -558,7 +597,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
 
   const devKey2 = await h.clientApi<{ spendLimitAtoms: string }>(
     "POST",
-    `/api/v1/projects/${projectId}/api-keys`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
     dev.accessToken,
     {
       name: "dev-key-2-auto-capped",
@@ -570,7 +609,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
 
   const devKey3 = await h.clientApi(
     "POST",
-    `/api/v1/projects/${projectId}/api-keys`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
     dev.accessToken,
     {
       name: "dev-key-3-over-limit",
@@ -584,7 +623,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
     (
       await h.clientApi(
         "PATCH",
-        `/api/v1/projects/${projectId}/api-keys/${devKey1.data.id}`,
+        `/api/v1/billing-accounts/${billingAccountId}/api-keys/${devKey1.data.id}`,
         dev.accessToken,
         { enabled: false },
       )
@@ -604,27 +643,24 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
     return { status: response.status, code: body.error?.code };
   };
   expect((await invoke(ownerKey.data.key)).status).toBe(200);
-  const otherProject = await h.clientApi<{ id: string }>(
-    "POST",
-    `/api/v1/orgs/${orgId}/projects`,
-    owner.accessToken,
-    {
-      name: "Disabled Project",
-    },
-  );
-  expect(otherProject.status).toBe(201);
+  const otherBillingAccountId = await h.seedLegacyBillingAccount(orgId, "Disabled legacy account");
   const otherKey = await h.clientApi<{ key: string }>(
     "POST",
-    `/api/v1/projects/${otherProject.data.id}/api-keys`,
+    `/api/v1/billing-accounts/${otherBillingAccountId}/api-keys`,
     owner.accessToken,
-    { name: "Active Key on Disabled Project" },
+    { name: "Active Key on Disabled BillingAccount" },
   );
   expect(otherKey.status).toBe(201);
   expect(
     (
-      await h.adminApi("PATCH", `/admin/v1/projects/${otherProject.data.id}`, adminAccess, {
-        enabled: false,
-      })
+      await h.adminApi(
+        "PATCH",
+        `/admin/v1/billing-accounts/${otherBillingAccountId}`,
+        adminAccess,
+        {
+          enabled: false,
+        },
+      )
     ).status,
   ).toBe(200);
 
@@ -635,7 +671,10 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
   expect((await setOrgStatus("ACTIVE")).status).toBe(200);
   expect((await invoke(ownerKey.data.key)).status).toBe(200);
   expect(await invoke(devKey1.data.key)).toEqual({ status: 401, code: "unauthorized" });
-  expect(await invoke(otherKey.data.key)).toEqual({ status: 403, code: "project_disabled" });
+  expect(await invoke(otherKey.data.key)).toEqual({
+    status: 403,
+    code: "billing_account_disabled",
+  });
 });
 
 test("an expired invitation no longer blocks the organization from issuing a replacement", async () => {
@@ -678,9 +717,9 @@ test("an expired invitation no longer blocks the organization from issuing a rep
   ).toBe(200);
 });
 
-test("only sk_ project keys are accepted by authentication, import, and issuance", async () => {
+test("only sk_ billingAccount keys are accepted by authentication, import, and issuance", async () => {
   const owner = await h.registerUser("key-format-owner@example.com");
-  const keyPath = `/api/v1/projects/${owner.defaultProjectId}/api-keys`;
+  const keyPath = `/api/v1/billing-accounts/${owner.defaultBillingAccountId}/api-keys`;
   const modelsStatus = async (key: string) => {
     const response = await fetch(`${h.gatewayPublicUrl}/v1/models`, {
       headers: { authorization: `Bearer ${key}` },
@@ -701,14 +740,14 @@ test("only sk_ project keys are accepted by authentication, import, and issuance
   const legacyKey = `gw_${"A".repeat(43)}`;
   const legacyId = crypto.randomUUID();
   await h.gwDb`
-    INSERT INTO public.api_keys (id, project_id, name, verifier, prefix)
-    VALUES (${legacyId}, ${owner.defaultProjectId}, 'Retired key',
+    INSERT INTO public.api_keys (id, billing_account_id, name, verifier, prefix)
+    VALUES (${legacyId}, ${owner.defaultBillingAccountId}, 'Retired key',
       ${verifier(legacyKey, h.gatewayConfig.keyPepper)}, ${legacyKey.slice(0, 12)})
   `;
   const importedKey = `sk_${"B".repeat(42)}A`;
   const importKey = (key: string) =>
     h.gatewayInternalApi<{ key: string }>("PUT", "/internal/v1/api-keys", {
-      project_id: owner.defaultProjectId,
+      billing_account_id: owner.defaultBillingAccountId,
       name: "Imported key",
       raw_key: key,
     });
@@ -734,12 +773,53 @@ test("only sk_ project keys are accepted by authentication, import, and issuance
   expect(await modelsStatus(created.data.key)).toBe(401);
 });
 
+test("symptom: uppercase UUID spelling rejects valid Key updates and allows self-rotation", async () => {
+  const accountId = "abcedf00-0000-4000-8000-000000000001";
+  const rootId = "abcedf00-0000-4000-8000-000000000002";
+  const keyId = "abcedf00-0000-4000-8000-000000000003";
+  const account = await h.gatewayInternalApi("PUT", "/internal/v1/billing-accounts", {
+    id: accountId,
+    name: "Key scope normalization",
+  });
+  expect(account.status).toBe(200);
+  const create = await h.gatewayInternalApi("PUT", "/internal/v1/api-keys", {
+    id: rootId,
+    billing_account_id: accountId,
+  });
+  expect(create.status).toBe(200);
+  const update = await h.gatewayInternalApi("PUT", "/internal/v1/api-keys", {
+    id: rootId.toUpperCase(),
+    billing_account_id: accountId.toUpperCase(),
+    name: "Updated Key",
+  });
+  const selfRotation = await h.gatewayInternalApi("PUT", "/internal/v1/api-keys", {
+    id: rootId.toUpperCase(),
+    billing_account_id: accountId.toUpperCase(),
+    rotated_from_key_id: rootId,
+  });
+  expect([update, selfRotation]).toMatchObject([
+    { status: 200, data: { id: rootId, billing_account_id: accountId, name: "Updated Key" } },
+    { status: 409 },
+  ]);
+  const rotation = await h.gatewayInternalApi("PUT", "/internal/v1/api-keys", {
+    id: keyId.toUpperCase(),
+    billing_account_id: accountId.toUpperCase(),
+    rotated_from_key_id: rootId.toUpperCase(),
+  });
+  expect(rotation).toMatchObject({ status: 200, data: { id: keyId } });
+  const [stored] = await h.gwDb.unsafe(
+    "SELECT resource_scope_id FROM public.api_keys WHERE id = $1",
+    [keyId],
+  );
+  expect(stored?.resource_scope_id).toBe(rootId);
+});
+
 test("organization admission retries an unavailable Gateway and applies to a replica with a stale snapshot", async () => {
   const user = await h.registerUser("admission-retry@example.com");
-  const { defaultOrgId: orgId, defaultProjectId: projectId } = user;
+  const { defaultOrgId: orgId, defaultBillingAccountId: billingAccountId } = user;
   const key = await h.clientApi<{ key: string }>(
     "POST",
-    `/api/v1/projects/${projectId}/api-keys`,
+    `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
     user.accessToken,
     { name: "Replica admission" },
   );
@@ -759,7 +839,7 @@ test("organization admission retries an unavailable Gateway and applies to a rep
     h.adminApi("PATCH", `/admin/v1/orgs/${orgId.toUpperCase()}`, adminAccess, { status });
   const pending = () => h.adminApi("GET", "/admin/v1/sync/organizations", adminAccess);
   const allowedAtConsole = () =>
-    h.clientApi("GET", `/api/v1/projects/${projectId}`, user.accessToken);
+    h.clientApi("GET", `/api/v1/billing-accounts/${billingAccountId}`, user.accessToken);
   try {
     await replica.start();
     const epoch = replica.snapshot.get().epoch;
@@ -792,16 +872,16 @@ test("organization admission retries an unavailable Gateway and applies to a rep
     expect(await denied.json()).toMatchObject({ error: { code: "org_suspended" } });
     expect(
       (
-        await h.gatewayInternalApi("PUT", "/internal/v1/projects", {
-          id: projectId,
+        await h.gatewayInternalApi("PUT", "/internal/v1/billing-accounts", {
+          id: billingAccountId,
           name: "Catalog update without organization reference",
         })
       ).status,
     ).toBe(200);
     expect(
       (
-        await h.gatewayInternalApi("PUT", "/internal/v1/projects", {
-          id: projectId,
+        await h.gatewayInternalApi("PUT", "/internal/v1/billing-accounts", {
+          id: billingAccountId,
           name: "Catalog must preserve binding",
           external_ref: null,
         })

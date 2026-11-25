@@ -1,3 +1,4 @@
+import { writeLocalInternalAuth } from "./local-internal-auth.ts";
 import { spawn } from "node:child_process";
 import { appendFile, cp, mkdtemp, rm } from "node:fs/promises";
 import { Agent } from "node:http";
@@ -48,9 +49,13 @@ const mockNodes = Number(
 if (!Number.isSafeInteger(mockNodes) || mockNodes < 1 || mockNodes > 8) {
   throw new Error("BENCH_MOCK_NODES must be an integer from 1 to 8");
 }
-const projectCount = Number(process.env.BENCH_PROJECTS ?? 32);
-if (!Number.isSafeInteger(projectCount) || projectCount < 1 || projectCount > 5000) {
-  throw new Error("BENCH_PROJECTS must be an integer from 1 to 5000");
+const billingAccountCount = Number(process.env.BENCH_BILLING_ACCOUNTS ?? 32);
+if (
+  !Number.isSafeInteger(billingAccountCount) ||
+  billingAccountCount < 1 ||
+  billingAccountCount > 5000
+) {
+  throw new Error("BENCH_BILLING_ACCOUNTS must be an integer from 1 to 5000");
 }
 const soakSeconds = Number(process.env.BENCH_SOAK_SECONDS ?? 1800);
 const soakRps = Number(process.env.BENCH_SOAK_RPS ?? 500);
@@ -309,6 +314,9 @@ try {
     }
   }
 
+  const operatorToken = crypto.randomUUID() + crypto.randomUUID();
+  const internalAuthFile = join(tempDir, "internal-auth.json");
+  await writeLocalInternalAuth(internalAuthFile, operatorToken);
   const baseEnv: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     BUN_CONFIG_MAX_HTTP_REQUESTS: String(Math.max(4096, maxInFlight)),
@@ -316,7 +324,7 @@ try {
     ...(redisUrl ? { REDIS_URL: redisUrl, REDIS_NAMESPACE: "stg_bench" } : {}),
     KEY_PEPPER: "bprod-pepper-0123456789abcdef0123",
     ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    ADMIN_TOKEN: "bprod-admin-token-0123456789abcdef",
+    INTERNAL_AUTH_FILE: internalAuthFile,
     ALLOW_PRIVATE_UPSTREAMS: "true",
     ACCESS_LOG: accessLog ? "true" : "false",
     SNAPSHOT_POLL_MS: "2000",
@@ -368,7 +376,7 @@ try {
   ]);
 
   const adminHeaders = {
-    authorization: `Bearer ${baseEnv.ADMIN_TOKEN}`,
+    authorization: `Bearer ${operatorToken}`,
     "content-type": "application/json",
   };
   const callInternal = async (method: string, path: string, body?: unknown) => {
@@ -534,8 +542,8 @@ try {
     : null;
 
   const keys: string[] = [];
-  for (let i = 0; i < projectCount; i++) {
-    const p = await callInternal("PUT", "/internal/v1/projects", {
+  for (let i = 0; i < billingAccountCount; i++) {
+    const p = await callInternal("PUT", "/internal/v1/billing-accounts", {
       name: `bprod-p-${i}`,
       currency: "USD",
       rpm: 10_000_000,
@@ -543,7 +551,7 @@ try {
       concurrency: Math.max(5000, maxInFlight),
     });
     const k = await callInternal("PUT", "/internal/v1/api-keys", {
-      project_id: p.id,
+      billing_account_id: p.id,
       name: `k-${i}`,
     });
     await callInternal("POST", `/internal/v1/wallets/${p.id}/credits`, {
@@ -1029,7 +1037,7 @@ try {
           options: {
             gateway_nodes: gatewayNodes,
             mock_nodes: mockNodes,
-            projects: projectCount,
+            billingAccounts: billingAccountCount,
             max_in_flight: maxInFlight,
             upstream_delay_ms: upstreamDelayMs,
             access_log: accessLog,

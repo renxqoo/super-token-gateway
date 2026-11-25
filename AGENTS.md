@@ -7,7 +7,6 @@
 - `scripts`：迁移、构建、基准与验收脚本；`tests/integration`：真实 PG/Redis/HTTP 集成测试；`tests/unit`：只放跨模块架构约束；`tests/fixtures`：历史 schema 升级夹具。
 - `infra`：部署与服务配置；`docs`：ADR、OpenAPI 与性能证据。
 
-
 ## 重要的事
 
 - 组件化是核心要求：基础组件、布局组件和业务功能组件分层组织，优先复用仓库已有实现。

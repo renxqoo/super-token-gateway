@@ -4,7 +4,7 @@ import { fetchPublicWebhook } from "./auth.ts";
 import {
   alertDeliveries,
   alertRules,
-  projects,
+  billingAccounts,
   usageDailyRollups,
   type ConsoleDrizzle,
 } from "./db/schema.ts";
@@ -15,14 +15,14 @@ export type IncomingOutboxEvent = {
   event_id: string;
   kind: string;
   request_id?: string | null;
-  project_id?: string | null;
+  billing_account_id?: string | null;
   payload?: Record<string, unknown>;
   created_at?: string;
 };
 
 type RollupAgg = {
   bucket: string;
-  projectId: string;
+  billingAccountId: string;
   apiKeyId: string;
   model: string;
   operation: string;
@@ -42,7 +42,7 @@ type ParsedEvent = {
   kind: string;
   requestId: string | null;
   chargeId: string | null;
-  effectiveProjectId: string | null;
+  effectiveBillingAccountId: string | null;
   orgId: string | null;
   apiKeyId: string | null;
   model: string | null;
@@ -60,7 +60,7 @@ type ParsedEvent = {
   pricingOverrideId: string | null;
   payload: Record<string, unknown>;
   occurredAt: string;
-  hasProjectRecord: boolean;
+  hasBillingAccountRecord: boolean;
 };
 
 function parseBigIntSafe(value: unknown): bigint {
@@ -92,7 +92,7 @@ function asNullableUuid(value: unknown): string | null {
 function compareRollupKey(a: RollupAgg, b: RollupAgg): number {
   return (
     a.bucket.localeCompare(b.bucket) ||
-    a.projectId.localeCompare(b.projectId) ||
+    a.billingAccountId.localeCompare(b.billingAccountId) ||
     a.apiKeyId.localeCompare(b.apiKeyId) ||
     a.model.localeCompare(b.model) ||
     a.operation.localeCompare(b.operation) ||
@@ -105,7 +105,7 @@ function addRollupDelta(
   bucket: string,
   delta: Omit<RollupAgg, "bucket">,
 ): void {
-  const key = `${bucket}\0${delta.projectId}\0${delta.apiKeyId}\0${delta.model}\0${delta.operation}\0${delta.currency}`;
+  const key = `${bucket}\0${delta.billingAccountId}\0${delta.apiKeyId}\0${delta.model}\0${delta.operation}\0${delta.currency}`;
   const existing = map.get(key);
   if (existing) {
     existing.requestCount += delta.requestCount;
@@ -127,26 +127,33 @@ export async function ingestOutboxEvents(
 ): Promise<{ received: number; ingested: number }> {
   if (events.length === 0) return { received: 0, ingested: 0 };
 
-  const projectIds = [
+  const billingAccountIds = [
     ...new Set(
       events
-        .map((e) => asNullableUuid(e.project_id ?? e.payload?.project_id))
+        .map((e) => asNullableUuid(e.billing_account_id))
         .filter((id): id is string => id !== null),
     ),
   ];
-  const projOrgMap = new Map<string, { id: string; orgId: string; currency: string }>();
-  if (projectIds.length > 0) {
-    const projRows = await orm
+  const billingAccountByGatewayId = new Map<
+    string,
+    { id: string; orgId: string; currency: string }
+  >();
+  if (billingAccountIds.length > 0) {
+    const accountRows = await orm
       .select({
-        id: projects.id,
-        gatewayProjectId: projects.gatewayProjectId,
-        orgId: projects.orgId,
-        currency: projects.currency,
+        id: billingAccounts.id,
+        gatewayBillingAccountId: billingAccounts.gatewayBillingAccountId,
+        orgId: billingAccounts.orgId,
+        currency: billingAccounts.currency,
       })
-      .from(projects)
-      .where(inArray(projects.gatewayProjectId, projectIds));
-    for (const r of projRows) {
-      projOrgMap.set(r.gatewayProjectId, { id: r.id, orgId: r.orgId, currency: r.currency });
+      .from(billingAccounts)
+      .where(inArray(billingAccounts.gatewayBillingAccountId, billingAccountIds));
+    for (const r of accountRows) {
+      billingAccountByGatewayId.set(r.gatewayBillingAccountId, {
+        id: r.id,
+        orgId: r.orgId,
+        currency: r.currency,
+      });
     }
   }
 
@@ -158,10 +165,14 @@ export async function ingestOutboxEvents(
     seenEventIds.add(eventId);
     const payload = (ev.payload ?? {}) as Record<string, unknown>;
     const usage = (payload.usage ?? {}) as Record<string, unknown>;
-    const gwProjId = asNullableUuid(ev.project_id ?? payload.project_id);
-    const projMeta = gwProjId ? projOrgMap.get(gwProjId) : undefined;
+    const gatewayAccountId = asNullableUuid(ev.billing_account_id);
+    const accountMetadata = gatewayAccountId
+      ? billingAccountByGatewayId.get(gatewayAccountId)
+      : undefined;
     const currency =
-      typeof payload.currency === "string" ? payload.currency : (projMeta?.currency ?? "USD");
+      typeof payload.currency === "string"
+        ? payload.currency
+        : (accountMetadata?.currency ?? "USD");
 
     let customerAtoms = 0n;
     let supplierCostAtoms = 0n;
@@ -171,12 +182,7 @@ export async function ingestOutboxEvents(
     let cachedInputTokens = 0;
     let reasoningTokens = 0;
 
-    if (ev.kind === "billing.refunded") {
-      customerAtoms =
-        payload.delta_atoms !== undefined
-          ? parseBigIntSafe(payload.delta_atoms)
-          : -parseBigIntSafe(payload.refunded_atoms);
-    } else if (ev.kind === "billing.adjusted") {
+    if (ev.kind === "billing.refunded" || ev.kind === "billing.adjusted") {
       customerAtoms = parseBigIntSafe(payload.delta_atoms);
     } else if (ev.kind === "billing.settled") {
       reqCountDelta = 1;
@@ -198,10 +204,10 @@ export async function ingestOutboxEvents(
       eventId,
       seqNum,
       kind: ev.kind,
-      requestId: asNullableUuid(ev.request_id ?? payload.request_id),
+      requestId: asNullableUuid(ev.request_id),
       chargeId: asNullableUuid(payload.charge_id),
-      effectiveProjectId: projMeta?.id ?? gwProjId,
-      orgId: projMeta?.orgId ?? null,
+      effectiveBillingAccountId: accountMetadata?.id ?? gatewayAccountId,
+      orgId: accountMetadata?.orgId ?? null,
       apiKeyId: asNullableUuid(payload.api_key_id),
       model: typeof payload.model === "string" ? payload.model : null,
       operation: typeof payload.operation === "string" ? payload.operation : null,
@@ -218,7 +224,7 @@ export async function ingestOutboxEvents(
       pricingOverrideId: asNullableUuid(payload.pricing_override_id),
       payload,
       occurredAt,
-      hasProjectRecord: Boolean(projMeta),
+      hasBillingAccountRecord: Boolean(accountMetadata),
     });
   }
 
@@ -229,13 +235,13 @@ export async function ingestOutboxEvents(
   await db.begin(async (tx) => {
     const insertedRows = await tx<{ event_id: string }[]>`
       INSERT INTO public.usage_events (
-        event_id, seq, kind, request_id, charge_id, project_id, org_id, api_key_id,
+        event_id, seq, kind, request_id, charge_id, billing_account_id, org_id, api_key_id,
         model, operation, channel_id, outcome, currency, customer_atoms, supplier_cost_atoms,
         input_tokens, output_tokens, cached_input_tokens, reasoning_tokens,
         pricing_override_id, payload, occurred_at
       )
       SELECT
-        u.event_id, u.seq, u.kind, u.request_id, u.charge_id, u.project_id, u.org_id, u.api_key_id,
+        u.event_id, u.seq, u.kind, u.request_id, u.charge_id, u.billing_account_id, u.org_id, u.api_key_id,
         u.model, u.operation, u.channel_id, u.outcome, u.currency, u.customer_atoms, u.supplier_cost_atoms,
         u.input_tokens, u.output_tokens, u.cached_input_tokens, u.reasoning_tokens,
         u.pricing_override_id, u.payload, u.occurred_at
@@ -245,7 +251,7 @@ export async function ingestOutboxEvents(
         ${parsedEvents.map((e) => e.kind)}::text[],
         ${parsedEvents.map((e) => e.requestId)}::uuid[],
         ${parsedEvents.map((e) => e.chargeId)}::uuid[],
-        ${parsedEvents.map((e) => e.effectiveProjectId)}::uuid[],
+        ${parsedEvents.map((e) => e.effectiveBillingAccountId)}::uuid[],
         ${parsedEvents.map((e) => e.orgId)}::uuid[],
         ${parsedEvents.map((e) => e.apiKeyId)}::uuid[],
         ${parsedEvents.map((e) => e.model)}::text[],
@@ -263,7 +269,7 @@ export async function ingestOutboxEvents(
         ${parsedEvents.map((e) => JSON.stringify(e.payload))}::jsonb[],
         ${parsedEvents.map((e) => e.occurredAt)}::timestamptz[]
       ) AS u(
-        event_id, seq, kind, request_id, charge_id, project_id, org_id, api_key_id,
+        event_id, seq, kind, request_id, charge_id, billing_account_id, org_id, api_key_id,
         model, operation, channel_id, outcome, currency, customer_atoms, supplier_cost_atoms,
         input_tokens, output_tokens, cached_input_tokens, reasoning_tokens,
         pricing_override_id, payload, occurred_at
@@ -278,7 +284,7 @@ export async function ingestOutboxEvents(
 
     const hourlyMap = new Map<string, RollupAgg>();
     const dailyMap = new Map<string, RollupAgg>();
-    const alertProjectIds = new Set<string>();
+    const alertBillingAccountIds = new Set<string>();
 
     for (const ev of parsedEvents) {
       if (!insertedSet.has(ev.eventId)) continue;
@@ -289,10 +295,10 @@ export async function ingestOutboxEvents(
       ) {
         continue;
       }
-      if (ev.effectiveProjectId && ev.hasProjectRecord) {
-        alertProjectIds.add(ev.effectiveProjectId);
+      if (ev.effectiveBillingAccountId && ev.hasBillingAccountRecord) {
+        alertBillingAccountIds.add(ev.effectiveBillingAccountId);
       }
-      if (!ev.effectiveProjectId || !ev.model || !ev.operation) continue;
+      if (!ev.effectiveBillingAccountId || !ev.model || !ev.operation) continue;
 
       const dt = new Date(ev.occurredAt);
       const bucketHour = new Date(
@@ -300,7 +306,7 @@ export async function ingestOutboxEvents(
       ).toISOString();
       const bucketDay = bucketHour.slice(0, 10);
       const delta = {
-        projectId: ev.effectiveProjectId,
+        billingAccountId: ev.effectiveBillingAccountId,
         apiKeyId: ev.apiKeyId ?? "",
         model: ev.model,
         operation: ev.operation,
@@ -321,13 +327,13 @@ export async function ingestOutboxEvents(
     if (hourlySorted.length > 0) {
       await tx`
         INSERT INTO public.usage_hourly_rollups (
-          bucket_hour, project_id, api_key_id, model, operation, currency,
+          bucket_hour, billing_account_id, api_key_id, model, operation, currency,
           request_count, customer_atoms, supplier_cost_atoms,
           input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
         )
         SELECT * FROM unnest(
           ${hourlySorted.map((r) => r.bucket)}::timestamptz[],
-          ${hourlySorted.map((r) => r.projectId)}::uuid[],
+          ${hourlySorted.map((r) => r.billingAccountId)}::uuid[],
           ${hourlySorted.map((r) => r.apiKeyId)}::text[],
           ${hourlySorted.map((r) => r.model)}::text[],
           ${hourlySorted.map((r) => r.operation)}::text[],
@@ -340,7 +346,7 @@ export async function ingestOutboxEvents(
           ${hourlySorted.map((r) => r.cachedInputTokens)}::bigint[],
           ${hourlySorted.map((r) => r.reasoningTokens)}::bigint[]
         )
-        ON CONFLICT (bucket_hour, project_id, api_key_id, model, operation, currency)
+        ON CONFLICT (bucket_hour, billing_account_id, api_key_id, model, operation, currency)
         DO UPDATE SET
           request_count = public.usage_hourly_rollups.request_count + EXCLUDED.request_count,
           customer_atoms = public.usage_hourly_rollups.customer_atoms + EXCLUDED.customer_atoms,
@@ -356,13 +362,13 @@ export async function ingestOutboxEvents(
     if (dailySorted.length > 0) {
       await tx`
         INSERT INTO public.usage_daily_rollups (
-          bucket_day, project_id, api_key_id, model, operation, currency,
+          bucket_day, billing_account_id, api_key_id, model, operation, currency,
           request_count, customer_atoms, supplier_cost_atoms,
           input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
         )
         SELECT * FROM unnest(
           ${dailySorted.map((r) => r.bucket)}::date[],
-          ${dailySorted.map((r) => r.projectId)}::uuid[],
+          ${dailySorted.map((r) => r.billingAccountId)}::uuid[],
           ${dailySorted.map((r) => r.apiKeyId)}::text[],
           ${dailySorted.map((r) => r.model)}::text[],
           ${dailySorted.map((r) => r.operation)}::text[],
@@ -375,7 +381,7 @@ export async function ingestOutboxEvents(
           ${dailySorted.map((r) => r.cachedInputTokens)}::bigint[],
           ${dailySorted.map((r) => r.reasoningTokens)}::bigint[]
         )
-        ON CONFLICT (bucket_day, project_id, api_key_id, model, operation, currency)
+        ON CONFLICT (bucket_day, billing_account_id, api_key_id, model, operation, currency)
         DO UPDATE SET
           request_count = public.usage_daily_rollups.request_count + EXCLUDED.request_count,
           customer_atoms = public.usage_daily_rollups.customer_atoms + EXCLUDED.customer_atoms,
@@ -387,12 +393,12 @@ export async function ingestOutboxEvents(
       `;
     }
 
-    const alertEntries = [...alertProjectIds].sort();
+    const alertEntries = [...alertBillingAccountIds].sort();
     if (alertEntries.length > 0) {
       await tx`
-        INSERT INTO public.alert_eval_queue (project_id)
+        INSERT INTO public.alert_eval_queue (billing_account_id)
         SELECT unnest(${alertEntries}::uuid[])
-        ON CONFLICT (project_id)
+        ON CONFLICT (billing_account_id)
         DO UPDATE SET
           dirty_at = EXCLUDED.dirty_at,
           generation = EXCLUDED.generation,
@@ -406,7 +412,7 @@ export async function ingestOutboxEvents(
 
 async function claimAndRecordAlert(
   orm: ConsoleDrizzle,
-  rule: { id: string; projectId: string; webhookUrl: string | null },
+  rule: { id: string; billingAccountId: string; webhookUrl: string | null },
   payload: Record<string, unknown>,
 ): Promise<boolean> {
   return orm.transaction(async (tx) => {
@@ -425,7 +431,7 @@ async function claimAndRecordAlert(
     await tx.insert(alertDeliveries).values({
       id: crypto.randomUUID(),
       ruleId: rule.id,
-      projectId: rule.projectId,
+      billingAccountId: rule.billingAccountId,
       status: rule.webhookUrl ? "PENDING" : "RECORDED",
       webhookUrl: rule.webhookUrl ?? null,
       attempts: 0,
@@ -444,15 +450,15 @@ export async function processPendingAlertEvaluations(
 ): Promise<number> {
   const claimed = await db<
     {
-      project_id: string;
+      billing_account_id: string;
       generation: string;
     }[]
   >`
     WITH due AS (
-      SELECT project_id
+      SELECT billing_account_id
       FROM public.alert_eval_queue
       WHERE next_attempt_at <= now()
-      ORDER BY next_attempt_at, dirty_at, project_id
+      ORDER BY next_attempt_at, dirty_at, billing_account_id
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
     )
@@ -460,94 +466,104 @@ export async function processPendingAlertEvaluations(
     SET next_attempt_at = now() + interval '60 seconds',
         generation = gen_random_uuid()
     FROM due
-    WHERE q.project_id = due.project_id
-    RETURNING q.project_id, q.generation
+    WHERE q.billing_account_id = due.billing_account_id
+    RETURNING q.billing_account_id, q.generation
   `;
   if (claimed.length === 0) return 0;
 
-  const projectIds = claimed.map((c) => c.project_id);
+  const billingAccountIds = claimed.map((c) => c.billing_account_id);
 
   const rules = await orm
     .select()
     .from(alertRules)
-    .where(and(inArray(alertRules.projectId, projectIds), eq(alertRules.enabled, true)));
-  const projRows = await orm
+    .where(
+      and(inArray(alertRules.billingAccountId, billingAccountIds), eq(alertRules.enabled, true)),
+    );
+  const accountRows = await orm
     .select({
-      id: projects.id,
-      gatewayProjectId: projects.gatewayProjectId,
-      currency: projects.currency,
+      id: billingAccounts.id,
+      gatewayBillingAccountId: billingAccounts.gatewayBillingAccountId,
+      currency: billingAccounts.currency,
     })
-    .from(projects)
-    .where(inArray(projects.id, projectIds));
-  const projById = new Map(projRows.map((p) => [p.id, p]));
+    .from(billingAccounts)
+    .where(inArray(billingAccounts.id, billingAccountIds));
+  const accountsById = new Map(accountRows.map((p) => [p.id, p]));
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const dailyRows = await orm
     .select({
-      projectId: usageDailyRollups.projectId,
+      billingAccountId: usageDailyRollups.billingAccountId,
       currency: usageDailyRollups.currency,
       total: sql<string>`COALESCE(sum(${usageDailyRollups.customerAtoms}), 0)::text`,
     })
     .from(usageDailyRollups)
     .where(
       and(
-        inArray(usageDailyRollups.projectId, projectIds),
+        inArray(usageDailyRollups.billingAccountId, billingAccountIds),
         eq(usageDailyRollups.bucketDay, todayStr),
       ),
     )
-    .groupBy(usageDailyRollups.projectId, usageDailyRollups.currency);
-  const dailySpendByProjCurr = new Map<string, bigint>();
+    .groupBy(usageDailyRollups.billingAccountId, usageDailyRollups.currency);
+  const dailySpendByAccountCurrency = new Map<string, bigint>();
   for (const r of dailyRows) {
-    dailySpendByProjCurr.set(`${r.projectId}\0${r.currency}`, parseBigIntSafe(r.total));
+    dailySpendByAccountCurrency.set(
+      `${r.billingAccountId}\0${r.currency}`,
+      parseBigIntSafe(r.total),
+    );
   }
 
-  const walletProjectIds = new Set(
-    rules.filter((rule) => rule.kind === "LOW_BALANCE").map((rule) => rule.projectId),
+  const walletBillingAccountIds = new Set(
+    rules.filter((rule) => rule.kind === "LOW_BALANCE").map((rule) => rule.billingAccountId),
   );
-  const fetchedWalletByProj = new Map(
+  const fetchedWalletByAccount = new Map(
     await Promise.all(
-      projRows
-        .filter((proj) => walletProjectIds.has(proj.id))
-        .map(async (proj) => {
+      accountRows
+        .filter((billingAccount) => walletBillingAccountIds.has(billingAccount.id))
+        .map(async (billingAccount) => {
           const wallet = await gateway
-            .getWallet(proj.gatewayProjectId, proj.currency)
+            .getWallet(billingAccount.gatewayBillingAccountId, billingAccount.currency)
             .catch(() => null);
-          return [proj.id, wallet ? parseNullableBigInt(wallet.available_atoms) : null] as const;
+          return [
+            billingAccount.id,
+            wallet ? parseNullableBigInt(wallet.available_atoms) : null,
+          ] as const;
         }),
     ),
   );
   let triggered = 0;
-  const retryProjects = new Set<string>();
+  const retryBillingAccounts = new Set<string>();
   for (const rule of rules) {
-    const proj = projById.get(rule.projectId);
-    if (!proj) continue;
+    const billingAccount = accountsById.get(rule.billingAccountId);
+    if (!billingAccount) continue;
     const threshold = BigInt(rule.thresholdAtoms);
 
     if (rule.kind === "LOW_BALANCE") {
-      const available = fetchedWalletByProj.get(proj.id) ?? null;
+      const available = fetchedWalletByAccount.get(billingAccount.id) ?? null;
       if (available === null) {
-        retryProjects.add(proj.id);
+        retryBillingAccounts.add(billingAccount.id);
         continue;
       }
       if (available <= threshold) {
         const recorded = await claimAndRecordAlert(orm, rule, {
           kind: "LOW_BALANCE",
-          project_id: rule.projectId,
+          billing_account_id: rule.billingAccountId,
           available_atoms: available.toString(),
           threshold_atoms: threshold.toString(),
-          currency: proj.currency,
+          currency: billingAccount.currency,
         });
         if (recorded) triggered++;
       }
     } else if (rule.kind === "DAILY_SPEND") {
-      const spentToday = dailySpendByProjCurr.get(`${rule.projectId}\0${proj.currency}`) ?? 0n;
+      const spentToday =
+        dailySpendByAccountCurrency.get(`${rule.billingAccountId}\0${billingAccount.currency}`) ??
+        0n;
       if (spentToday >= threshold) {
         const recorded = await claimAndRecordAlert(orm, rule, {
           kind: "DAILY_SPEND",
-          project_id: rule.projectId,
+          billing_account_id: rule.billingAccountId,
           spent_atoms: spentToday.toString(),
           threshold_atoms: threshold.toString(),
-          currency: proj.currency,
+          currency: billingAccount.currency,
           day: todayStr,
         });
         if (recorded) triggered++;
@@ -558,25 +574,25 @@ export async function processPendingAlertEvaluations(
   await db`
     WITH processed AS (
       SELECT * FROM unnest(
-        ${claimed.map((item) => item.project_id)}::uuid[],
+        ${claimed.map((item) => item.billing_account_id)}::uuid[],
         ${claimed.map((item) => item.generation)}::uuid[],
-        ${claimed.map((item) => retryProjects.has(item.project_id))}::boolean[]
-      ) AS p(project_id, generation, retry)
+        ${claimed.map((item) => retryBillingAccounts.has(item.billing_account_id))}::boolean[]
+      ) AS p(billing_account_id, generation, retry)
     ), locked AS (
-      SELECT q.project_id, q.generation, p.retry
+      SELECT q.billing_account_id, q.generation, p.retry
       FROM public.alert_eval_queue q
-      JOIN processed p USING (project_id, generation)
-      ORDER BY q.project_id
+      JOIN processed p USING (billing_account_id, generation)
+      ORDER BY q.billing_account_id
       FOR UPDATE OF q
     ), deferred AS (
       UPDATE public.alert_eval_queue q
       SET next_attempt_at = now() + interval '15 seconds'
       FROM locked l
-      WHERE q.project_id = l.project_id AND q.generation = l.generation AND l.retry
+      WHERE q.billing_account_id = l.billing_account_id AND q.generation = l.generation AND l.retry
     )
     DELETE FROM public.alert_eval_queue q
     USING locked l
-    WHERE q.project_id = l.project_id AND q.generation = l.generation AND NOT l.retry
+    WHERE q.billing_account_id = l.billing_account_id AND q.generation = l.generation AND NOT l.retry
   `;
   return triggered;
 }
@@ -606,7 +622,7 @@ export async function processPendingWebhookDeliveries(
       {
         id: string;
         rule_id: string;
-        project_id: string;
+        billing_account_id: string;
         webhook_url: string | null;
         attempts: number;
         payload: Record<string, unknown>;
@@ -628,7 +644,7 @@ export async function processPendingWebhookDeliveries(
       RETURNING
         d.id::text AS id,
         d.rule_id::text AS rule_id,
-        d.project_id::text AS project_id,
+        d.billing_account_id::text AS billing_account_id,
         d.webhook_url,
         d.attempts,
         d.payload
@@ -663,8 +679,8 @@ export async function processPendingWebhookDeliveries(
         body: JSON.stringify({
           delivery_id: item.id,
           rule_id: item.rule_id,
-          project_id: item.project_id,
           ...item.payload,
+          billing_account_id: item.billing_account_id,
         }),
         redirect: "manual",
         signal: options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout,

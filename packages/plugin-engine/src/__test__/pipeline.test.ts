@@ -502,7 +502,7 @@ test("G3.1 WASM sliding window catches cross-chunk PII and redacts cleanly while
   const session = engine.createStreamSession(
     [{ plugin_id: plugin.id, priority: 1 }],
     plugins,
-    { request_id: "r1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "r1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     () => {
       aborted = true;
     },
@@ -525,7 +525,7 @@ test("G3.1 WASM sliding window catches cross-chunk PII and redacts cleanly while
     "on_response",
     [{ plugin_id: forged.id, priority: 1 }],
     new Map([[forged.id, forged]]),
-    { request_id: "r2", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "r2", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     "hello",
   );
   expect(forgedResult).toMatchObject({ blocked: true, rule_code: "plugin_signature_invalid" });
@@ -582,7 +582,7 @@ test("G3.2 external HTTP Webhook HOLD_UNTIL_APPROVED leaks zero banned bytes and
   const holdSession = engine.createStreamSession(
     [{ plugin_id: holdPlugin.id, priority: 1 }],
     new Map([[holdPlugin.id, holdPlugin]]),
-    { request_id: "r3", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "r3", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     () => {
       holdAborted = true;
     },
@@ -613,7 +613,7 @@ test("G3.2 external HTTP Webhook HOLD_UNTIL_APPROVED leaks zero banned bytes and
   const cutoffSession = engine.createStreamSession(
     [{ plugin_id: cutoffPlugin.id, priority: 1 }],
     new Map([[cutoffPlugin.id, cutoffPlugin]]),
-    { request_id: "r4", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "r4", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     () => {
       cutoffAborted = true;
     },
@@ -639,7 +639,7 @@ test("G3.2 external HTTP Webhook HOLD_UNTIL_APPROVED leaks zero banned bytes and
   const slowSession = slowEngine.createStreamSession(
     [{ plugin_id: cutoffPlugin.id, priority: 1 }],
     new Map([[cutoffPlugin.id, cutoffPlugin]]),
-    { request_id: "slow-webhook", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "slow-webhook", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     () => undefined,
   );
   expect((await slowSession.push("Safe first sentence.")).emit).toBe("Safe first sentence.");
@@ -664,7 +664,7 @@ test("symptom: a successful Webhook callback from before the failure incorrectly
   const input = {
     hook: "on_response" as const,
     request_id: "old",
-    project_id: "p",
+    billing_account_id: "p",
     model: "m",
     operation: "chat",
     text: "fixture",
@@ -715,21 +715,21 @@ test("G3.2 webhook FAIL_CLOSED blocks and trips circuit while FAIL_OPEN passes t
     "on_response",
     [{ plugin_id: closedPlugin.id, priority: 1 }],
     new Map([[closedPlugin.id, closedPlugin]]),
-    { request_id: "r5", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "r5", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     "hi",
   );
   const r2 = await engine.runUnary(
     "on_response",
     [{ plugin_id: closedPlugin.id, priority: 1 }],
     new Map([[closedPlugin.id, closedPlugin]]),
-    { request_id: "r6", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "r6", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     "hi",
   );
   const r3 = await engine.runUnary(
     "on_response",
     [{ plugin_id: closedPlugin.id, priority: 1 }],
     new Map([[closedPlugin.id, closedPlugin]]),
-    { request_id: "r7", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "r7", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     "hi",
   );
   expect(r1.blocked).toBe(true);
@@ -749,7 +749,7 @@ test("G3.2 webhook FAIL_CLOSED blocks and trips circuit while FAIL_OPEN passes t
     "on_response",
     [{ plugin_id: openPlugin.id, priority: 1 }],
     new Map([[openPlugin.id, openPlugin]]),
-    { request_id: "r8", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "r8", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     "hello",
   );
   expect(r4).toMatchObject({ blocked: false, text: "hello" });
@@ -854,7 +854,7 @@ test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tena
       "on_response",
       [{ plugin_id: filterPlugin.id, priority: 1 }],
       new Map([[filterPlugin.id, filterPlugin]]),
-      { request_id: "rw-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "rw-1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "clean text",
     );
     expect(okRes).toMatchObject({ blocked: false, text: "clean text" });
@@ -863,7 +863,7 @@ test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tena
       "on_response",
       [{ plugin_id: filterPlugin.id, priority: 1 }],
       new Map([[filterPlugin.id, filterPlugin]]),
-      { request_id: "rw-2", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "rw-2", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "has SECRET_42 inside",
     );
     expect(transformRes).toMatchObject({ blocked: false, text: "[CLEANSED_BY_WASM]" });
@@ -871,7 +871,7 @@ test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tena
     const streamSession = engine.createStreamSession(
       [{ plugin_id: filterPlugin.id, priority: 1 }],
       new Map([[filterPlugin.id, filterPlugin]]),
-      { request_id: "rw-3", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "rw-3", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       () => undefined,
     );
     let streamOut = "";
@@ -905,14 +905,14 @@ test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tena
       "on_response",
       [{ plugin_id: probePlugin.id, priority: 1 }],
       probeMap,
-      { request_id: "p1", project_id: "tenant-a", model: "gpt-4o", operation: "chat" },
+      { request_id: "p1", billing_account_id: "tenant-a", model: "gpt-4o", operation: "chat" },
       "tenant a",
     );
     const probe2 = await engine.runUnary(
       "on_response",
       [{ plugin_id: probePlugin.id, priority: 1 }],
       probeMap,
-      { request_id: "p2", project_id: "tenant-b", model: "gpt-4o", operation: "chat" },
+      { request_id: "p2", billing_account_id: "tenant-b", model: "gpt-4o", operation: "chat" },
       "tenant b",
     );
     expect(probe1.blocked).toBe(false);
@@ -939,7 +939,7 @@ test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tena
       "on_response",
       [{ plugin_id: loopPlugin.id, priority: 1 }],
       new Map([[loopPlugin.id, loopPlugin]]),
-      { request_id: "loop-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "loop-1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "hang",
     );
     expect(loopRes).toMatchObject({
@@ -955,7 +955,7 @@ test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tena
       "on_response",
       [{ plugin_id: loopPlugin.id, priority: 1 }],
       new Map([[loopPlugin.id, loopPlugin]]),
-      { request_id: "loop-2", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "loop-2", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "hang again",
     );
     expect(loopRes2).toMatchObject({
@@ -969,7 +969,7 @@ test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tena
       "on_response",
       [{ plugin_id: filterPlugin.id, priority: 1 }],
       new Map([[filterPlugin.id, filterPlugin]]),
-      { request_id: "rw-recover", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "rw-recover", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "still healthy",
     );
     expect(afterLoopRes).toMatchObject({ blocked: false, text: "still healthy" });
@@ -988,7 +988,7 @@ test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tena
       "on_response",
       [{ plugin_id: bigInitPlugin.id, priority: 1 }],
       new Map([[bigInitPlugin.id, bigInitPlugin]]),
-      { request_id: "mem-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "mem-1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "mem",
     );
     expect(bigInitRes).toMatchObject({
@@ -1012,7 +1012,7 @@ test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tena
       "on_response",
       [{ plugin_id: growBombPlugin.id, priority: 1 }],
       new Map([[growBombPlugin.id, growBombPlugin]]),
-      { request_id: "mem-2", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "mem-2", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "mem-grow",
     );
     expect(growBombRes).toMatchObject({
@@ -1036,7 +1036,7 @@ test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tena
       "on_response",
       [{ plugin_id: wasiPlugin.id, priority: 1 }],
       new Map([[wasiPlugin.id, wasiPlugin]]),
-      { request_id: "wasi-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "wasi-1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "escape",
     );
     expect(wasiRes).toMatchObject({
@@ -1057,7 +1057,7 @@ test("G3.1 Native Wasmtime Worker pool executes signed WASM, isolates cross-tena
       "on_response",
       [{ plugin_id: tamperedPlugin.id, priority: 1 }],
       new Map([[tamperedPlugin.id, tamperedPlugin]]),
-      { request_id: "tamper-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "tamper-1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "hello",
     );
     expect(tamperedRes).toMatchObject({
@@ -1133,7 +1133,7 @@ test("G3.2 combined HOLD + CUTOFF webhooks keep separate buffers, respect manife
       { plugin_id: cutoffWh.id, priority: 2 },
     ],
     plugins,
-    { request_id: "hook-filter", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "hook-filter", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     "prompt text",
   );
   expect(preReq.blocked).toBe(false);
@@ -1145,7 +1145,7 @@ test("G3.2 combined HOLD + CUTOFF webhooks keep separate buffers, respect manife
       { plugin_id: holdWh.id, priority: 2 },
     ],
     plugins,
-    { request_id: "combo-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "combo-1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     () => undefined,
   );
   let emitted = "";
@@ -1177,21 +1177,21 @@ test("G3.2 combined HOLD + CUTOFF webhooks keep separate buffers, respect manife
     "on_response",
     [{ plugin_id: flakyWh.id, priority: 1 }],
     flakyMap,
-    { request_id: "fl-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "fl-1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     "x",
   );
   const f2 = await engine.runUnary(
     "on_response",
     [{ plugin_id: flakyWh.id, priority: 1 }],
     flakyMap,
-    { request_id: "fl-2", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "fl-2", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     "x",
   );
   const f3 = await engine.runUnary(
     "on_response",
     [{ plugin_id: flakyWh.id, priority: 1 }],
     flakyMap,
-    { request_id: "fl-3", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "fl-3", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     "x",
   );
   expect(f1.blocked).toBe(true);
@@ -1204,7 +1204,7 @@ test("G3.2 combined HOLD + CUTOFF webhooks keep separate buffers, respect manife
     "on_response",
     [{ plugin_id: flakyWh.id, priority: 1 }],
     flakyMap,
-    { request_id: "fl-4", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+    { request_id: "fl-4", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
     "recovered",
   );
   expect(f4).toMatchObject({ blocked: false, text: "recovered" });
@@ -1262,7 +1262,7 @@ test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross
       "on_response",
       [{ plugin_id: filterPlugin.id, priority: 1 }],
       new Map([[filterPlugin.id, filterPlugin]]),
-      { request_id: "ffi-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "ffi-1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "clean text",
     );
     expect(passRes).toMatchObject({ blocked: false, text: "clean text" });
@@ -1271,7 +1271,7 @@ test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross
       "on_response",
       [{ plugin_id: filterPlugin.id, priority: 1 }],
       new Map([[filterPlugin.id, filterPlugin]]),
-      { request_id: "ffi-2", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "ffi-2", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "payload SECRET_42 here",
     );
     expect(transformRes).toMatchObject({ blocked: false, text: "[CLEANSED_BY_WASMTIME]" });
@@ -1279,7 +1279,7 @@ test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross
     const streamSession = engine.createStreamSession(
       [{ plugin_id: filterPlugin.id, priority: 1 }],
       new Map([[filterPlugin.id, filterPlugin]]),
-      { request_id: "ffi-3", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "ffi-3", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       () => undefined,
     );
     let streamOut = "";
@@ -1315,7 +1315,7 @@ test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross
           "on_response",
           [{ plugin_id: probePlugin.id, priority: 1 }],
           probeMap,
-          { request_id: "fp-1", project_id: "t1", model: "gpt-4o", operation: "chat" },
+          { request_id: "fp-1", billing_account_id: "t1", model: "gpt-4o", operation: "chat" },
           "t1",
         )
       ).blocked,
@@ -1326,7 +1326,7 @@ test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross
           "on_response",
           [{ plugin_id: probePlugin.id, priority: 1 }],
           probeMap,
-          { request_id: "fp-2", project_id: "t2", model: "gpt-4o", operation: "chat" },
+          { request_id: "fp-2", billing_account_id: "t2", model: "gpt-4o", operation: "chat" },
           "t2",
         )
       ).blocked,
@@ -1354,7 +1354,7 @@ test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross
       "on_response",
       [{ plugin_id: loopPlugin.id, priority: 1 }],
       new Map([[loopPlugin.id, loopPlugin]]),
-      { request_id: "floop-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+      { request_id: "floop-1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
       "hang",
     );
     expect(loopRes).toMatchObject({ blocked: true, rule_code: "wasm_execution_failed" });
@@ -1375,7 +1375,7 @@ test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross
         "on_response",
         [{ plugin_id: bigInitPlugin.id, priority: 1 }],
         new Map([[bigInitPlugin.id, bigInitPlugin]]),
-        { request_id: "fmem-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+        { request_id: "fmem-1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
         "mem",
       ),
     ).toMatchObject({
@@ -1400,7 +1400,7 @@ test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross
         "on_response",
         [{ plugin_id: wasiPlugin.id, priority: 1 }],
         new Map([[wasiPlugin.id, wasiPlugin]]),
-        { request_id: "fwasi-1", project_id: "pr1", model: "gpt-4o", operation: "chat" },
+        { request_id: "fwasi-1", billing_account_id: "pr1", model: "gpt-4o", operation: "chat" },
         "escape",
       ),
     ).toMatchObject({
@@ -1412,6 +1412,36 @@ test("G3.1 Native Rust wasmtime FFI sandbox executes signed WASM, isolates cross
   } finally {
     executor.close();
   }
+});
+
+test("a content Webhook applies policy based on the billing account field", async () => {
+  const executor = new WebhookPluginExecutor({
+    fetchImpl: async (_url, init) => {
+      const payload = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return Response.json(
+        payload.billing_account_id === "configured-account" && !("project_id" in payload)
+          ? { action: "BLOCK", rule_code: "configured_account_policy" }
+          : { action: "PASS" },
+      );
+    },
+  });
+  expect(
+    await executor.invoke(
+      "account-policy",
+      {
+        url: "https://policy.example.test/hook",
+        failure_policy: "FAIL_CLOSED",
+      },
+      {
+        hook: "on_request",
+        request_id: "request",
+        billing_account_id: "configured-account",
+        model: "model",
+        operation: "chat",
+        text: "input",
+      },
+    ),
+  ).toMatchObject({ action: "BLOCK", rule_code: "configured_account_policy" });
 });
 
 test("D3/D6/D2b webhook invalid-200 tripping, half-open probe, bounded response, concurrency limit, egress priority, ingress shedding, and on_request cache", async () => {
@@ -1431,7 +1461,7 @@ test("D3/D6/D2b webhook invalid-200 tripping, half-open probe, bounded response,
   const sampleInput = {
     hook: "on_response" as const,
     request_id: "r",
-    project_id: "p1",
+    billing_account_id: "p1",
     model: "m",
     operation: "chat",
     text: "hi",
@@ -1552,14 +1582,14 @@ test("D3/D6/D2b webhook invalid-200 tripping, half-open probe, bounded response,
     "on_request",
     [{ plugin_id: detPlugin.id, priority: 1 }],
     new Map([[detPlugin.id, detPlugin]]),
-    { request_id: "c1", project_id: "proj-1", model: "m", operation: "chat" },
+    { request_id: "c1", billing_account_id: "proj-1", model: "m", operation: "chat" },
     "hello",
   );
   const c2 = await cacheEngine.runUnary(
     "on_request",
     [{ plugin_id: detPlugin.id, priority: 1 }],
     new Map([[detPlugin.id, detPlugin]]),
-    { request_id: "c2", project_id: "proj-1", model: "m", operation: "chat" },
+    { request_id: "c2", billing_account_id: "proj-1", model: "m", operation: "chat" },
     "hello",
   );
   expect(c1.text).toBe("HELLO");
@@ -1625,7 +1655,7 @@ test("Invalid plugin http_status is clamped to 400 and WeakMap integrity cache r
     {
       hook: "on_request",
       request_id: "r-st-1",
-      project_id: "p1",
+      billing_account_id: "p1",
       model: "m",
       operation: "chat",
       text: "hi",
@@ -1669,7 +1699,7 @@ test("Invalid plugin http_status is clamped to 400 and WeakMap integrity cache r
     "on_request",
     [{ plugin_id: plugin.id, priority: 1 }],
     new Map([[plugin.id, plugin]]),
-    { request_id: "r-st-2", project_id: "p1", model: "m", operation: "chat" },
+    { request_id: "r-st-2", billing_account_id: "p1", model: "m", operation: "chat" },
     "hi",
   );
   expect(first).toMatchObject({
@@ -1686,7 +1716,7 @@ test("Invalid plugin http_status is clamped to 400 and WeakMap integrity cache r
     "on_request",
     [{ plugin_id: tamperedPlugin.id, priority: 1 }],
     new Map([[tamperedPlugin.id, tamperedPlugin]]),
-    { request_id: "r-st-3", project_id: "p1", model: "m", operation: "chat" },
+    { request_id: "r-st-3", billing_account_id: "p1", model: "m", operation: "chat" },
     "hi",
   );
   expect(second).toMatchObject({

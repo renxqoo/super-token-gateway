@@ -13,7 +13,7 @@ export function createLedgerQueries(db: SQL) {
 
   return {
     async listCharges(input: {
-      project_id?: string;
+      billing_account_id?: string;
       api_key_id?: string;
       outcome?: "SETTLED" | "RELEASED" | "DEBT" | "MODERATION_BLOCKED" | "UNKNOWN_RESOLVED";
       from?: string;
@@ -24,7 +24,8 @@ export function createLedgerQueries(db: SQL) {
       const limit = Math.min(200, Math.max(1, input.limit ?? 50));
       const offset = Math.max(0, input.offset ?? 0);
       const conds: DrizzleSQL[] = [];
-      if (input.project_id) conds.push(eq(billingCharges.projectId, input.project_id));
+      if (input.billing_account_id)
+        conds.push(eq(billingCharges.billingAccountId, input.billing_account_id));
       if (input.api_key_id) conds.push(eq(billingCharges.apiKeyId, input.api_key_id));
       if (input.outcome) conds.push(eq(billingCharges.outcome, input.outcome));
       if (input.from) conds.push(gte(billingCharges.createdAt, input.from));
@@ -50,7 +51,7 @@ export function createLedgerQueries(db: SQL) {
     async listFundingOperations(input: {
       side?: "CUSTOMER" | "SUPPLIER";
       entity_id?: string;
-      project_id?: string;
+      billing_account_id?: string;
       account_id?: string;
       kind?: "CREDIT" | "REFUND" | "ADJUST" | "SUPPLIER_RECHARGE" | "SUPPLIER_ADJUST";
       currency?: string;
@@ -68,7 +69,7 @@ export function createLedgerQueries(db: SQL) {
       const offset = Math.max(0, input.offset ?? 0);
       const side = input.side ?? null;
       const entityId = input.entity_id ?? null;
-      const projectId = input.project_id ?? null;
+      const billingAccountId = input.billing_account_id ?? null;
       const accountId = input.account_id ?? null;
       const kind = input.kind ?? null;
       const currency = input.currency ?? null;
@@ -81,7 +82,7 @@ export function createLedgerQueries(db: SQL) {
             id: string;
             side: "CUSTOMER" | "SUPPLIER";
             entity_id: string;
-            project_id: string | null;
+            billing_account_id: string | null;
             wallet_id: string | null;
             charge_id: string | null;
             account_id: string | null;
@@ -99,7 +100,7 @@ export function createLedgerQueries(db: SQL) {
             f.id::text AS id,
             f.side,
             f.entity_id::text AS entity_id,
-            coalesce(w.project_id, bc.project_id)::text AS project_id,
+            coalesce(w.billing_account_id, bc.billing_account_id)::text AS billing_account_id,
             coalesce(w.id, bc.wallet_id)::text AS wallet_id,
             bc.id::text AS charge_id,
             CASE WHEN f.side = 'SUPPLIER' THEN f.entity_id::text ELSE NULL END AS account_id,
@@ -116,7 +117,7 @@ export function createLedgerQueries(db: SQL) {
           LEFT JOIN public.billing_charges bc ON f.side = 'CUSTOMER' AND bc.id = f.entity_id
           WHERE (${side}::text IS NULL OR f.side = ${side}::text)
             AND (${entityId}::uuid IS NULL OR f.entity_id = ${entityId}::uuid)
-            AND (${projectId}::uuid IS NULL OR coalesce(w.project_id, bc.project_id) = ${projectId}::uuid)
+            AND (${billingAccountId}::uuid IS NULL OR coalesce(w.billing_account_id, bc.billing_account_id) = ${billingAccountId}::uuid)
             AND (${accountId}::uuid IS NULL OR (f.side = 'SUPPLIER' AND f.entity_id = ${accountId}::uuid))
             AND (${kind}::text IS NULL OR f.kind = ${kind}::text)
             AND (${currency}::text IS NULL OR f.currency = ${currency}::text)
@@ -133,7 +134,7 @@ export function createLedgerQueries(db: SQL) {
           LEFT JOIN public.billing_charges bc ON f.side = 'CUSTOMER' AND bc.id = f.entity_id
           WHERE (${side}::text IS NULL OR f.side = ${side}::text)
             AND (${entityId}::uuid IS NULL OR f.entity_id = ${entityId}::uuid)
-            AND (${projectId}::uuid IS NULL OR coalesce(w.project_id, bc.project_id) = ${projectId}::uuid)
+            AND (${billingAccountId}::uuid IS NULL OR coalesce(w.billing_account_id, bc.billing_account_id) = ${billingAccountId}::uuid)
             AND (${accountId}::uuid IS NULL OR (f.side = 'SUPPLIER' AND f.entity_id = ${accountId}::uuid))
             AND (${kind}::text IS NULL OR f.kind = ${kind}::text)
             AND (${currency}::text IS NULL OR f.currency = ${currency}::text)
@@ -147,7 +148,7 @@ export function createLedgerQueries(db: SQL) {
           id: r.id,
           side: r.side,
           entity_id: r.entity_id,
-          project_id: r.project_id,
+          billing_account_id: r.billing_account_id,
           wallet_id: r.wallet_id,
           charge_id: r.charge_id,
           account_id: r.account_id,
@@ -170,27 +171,28 @@ export function createLedgerQueries(db: SQL) {
     async getFinanceSummary(input: {
       from?: string;
       to?: string;
-      project_id?: string;
+      billing_account_id?: string;
       currency?: string;
     }): Promise<FinanceSummaryReport> {
       const from = input.from ?? null;
       const to = input.to ?? null;
-      const projectId = input.project_id ?? null;
+      const billingAccountId = input.billing_account_id ?? null;
       const currency = input.currency ?? null;
 
-      const [chargeByCurr, fundingByCurr, modelRows, projectRows, channelRows] = await Promise.all([
-        db<
-          {
-            currency: string;
-            charge_count: number;
-            moderation_absorbed_count: number;
-            customer_billed_atoms: string;
-            customer_funded_atoms: string;
-            customer_debt_atoms: string;
-            customer_refunded_atoms: string;
-            supplier_cost_atoms: string;
-          }[]
-        >`
+      const [chargeByCurr, fundingByCurr, modelRows, billingAccountRows, channelRows] =
+        await Promise.all([
+          db<
+            {
+              currency: string;
+              charge_count: number;
+              moderation_absorbed_count: number;
+              customer_billed_atoms: string;
+              customer_funded_atoms: string;
+              customer_debt_atoms: string;
+              customer_refunded_atoms: string;
+              supplier_cost_atoms: string;
+            }[]
+          >`
           SELECT
             currency,
             count(*)::int AS charge_count,
@@ -201,23 +203,23 @@ export function createLedgerQueries(db: SQL) {
             coalesce(sum(refunded_atoms), 0)::text AS customer_refunded_atoms,
             coalesce(sum(supplier_cost_atoms) FILTER (WHERE supplier_currency IS NULL OR supplier_currency = currency), 0)::text AS supplier_cost_atoms
           FROM public.billing_charges
-          WHERE (${projectId}::uuid IS NULL OR project_id = ${projectId}::uuid)
+          WHERE (${billingAccountId}::uuid IS NULL OR billing_account_id = ${billingAccountId}::uuid)
             AND (${currency}::text IS NULL OR currency = ${currency}::text)
             AND (${from}::timestamptz IS NULL OR created_at >= ${from}::timestamptz)
             AND (${to}::timestamptz IS NULL OR created_at < ${to}::timestamptz)
           GROUP BY currency
           ORDER BY currency ASC
         `,
-        db<
-          {
-            currency: string;
-            cash_topup_atoms: string;
-            grant_issued_atoms: string;
-            customer_adjustment_net_atoms: string;
-            supplier_recharge_atoms: string;
-            supplier_adjustment_net_atoms: string;
-          }[]
-        >`
+          db<
+            {
+              currency: string;
+              cash_topup_atoms: string;
+              grant_issued_atoms: string;
+              customer_adjustment_net_atoms: string;
+              supplier_recharge_atoms: string;
+              supplier_adjustment_net_atoms: string;
+            }[]
+          >`
           SELECT
             f.currency,
             coalesce(sum(f.amount_atoms) FILTER (
@@ -247,23 +249,23 @@ export function createLedgerQueries(db: SQL) {
               THEN (f.receipt->>'lot_id')::uuid
               ELSE NULL
             END
-          WHERE (${projectId}::uuid IS NULL OR (f.side = 'CUSTOMER' AND coalesce(w.project_id, bc.project_id) = ${projectId}::uuid))
+          WHERE (${billingAccountId}::uuid IS NULL OR (f.side = 'CUSTOMER' AND coalesce(w.billing_account_id, bc.billing_account_id) = ${billingAccountId}::uuid))
             AND (${currency}::text IS NULL OR f.currency = ${currency}::text)
             AND (${from}::timestamptz IS NULL OR f.created_at >= ${from}::timestamptz)
             AND (${to}::timestamptz IS NULL OR f.created_at < ${to}::timestamptz)
           GROUP BY f.currency
           ORDER BY f.currency ASC
         `,
-        db<
-          {
-            key: string;
-            currency: string;
-            charge_count: number;
-            customer_billed_atoms: string;
-            customer_refunded_atoms: string;
-            supplier_cost_atoms: string;
-          }[]
-        >`
+          db<
+            {
+              key: string;
+              currency: string;
+              charge_count: number;
+              customer_billed_atoms: string;
+              customer_refunded_atoms: string;
+              supplier_cost_atoms: string;
+            }[]
+          >`
           SELECT
             model AS key,
             currency,
@@ -272,7 +274,7 @@ export function createLedgerQueries(db: SQL) {
             coalesce(sum(refunded_atoms), 0)::text AS customer_refunded_atoms,
             coalesce(sum(supplier_cost_atoms) FILTER (WHERE supplier_currency IS NULL OR supplier_currency = currency), 0)::text AS supplier_cost_atoms
           FROM public.billing_charges
-          WHERE (${projectId}::uuid IS NULL OR project_id = ${projectId}::uuid)
+          WHERE (${billingAccountId}::uuid IS NULL OR billing_account_id = ${billingAccountId}::uuid)
             AND (${currency}::text IS NULL OR currency = ${currency}::text)
             AND (${from}::timestamptz IS NULL OR created_at >= ${from}::timestamptz)
             AND (${to}::timestamptz IS NULL OR created_at < ${to}::timestamptz)
@@ -280,42 +282,42 @@ export function createLedgerQueries(db: SQL) {
           ORDER BY sum(customer_atoms) DESC, model ASC
           LIMIT 50
         `,
-        db<
-          {
-            key: string;
-            currency: string;
-            charge_count: number;
-            customer_billed_atoms: string;
-            customer_refunded_atoms: string;
-            supplier_cost_atoms: string;
-          }[]
-        >`
+          db<
+            {
+              key: string;
+              currency: string;
+              charge_count: number;
+              customer_billed_atoms: string;
+              customer_refunded_atoms: string;
+              supplier_cost_atoms: string;
+            }[]
+          >`
           SELECT
-            project_id::text AS key,
+            billing_account_id::text AS key,
             currency,
             count(*)::int AS charge_count,
             coalesce(sum(customer_atoms), 0)::text AS customer_billed_atoms,
             coalesce(sum(refunded_atoms), 0)::text AS customer_refunded_atoms,
             coalesce(sum(supplier_cost_atoms) FILTER (WHERE supplier_currency IS NULL OR supplier_currency = currency), 0)::text AS supplier_cost_atoms
           FROM public.billing_charges
-          WHERE (${projectId}::uuid IS NULL OR project_id = ${projectId}::uuid)
+          WHERE (${billingAccountId}::uuid IS NULL OR billing_account_id = ${billingAccountId}::uuid)
             AND (${currency}::text IS NULL OR currency = ${currency}::text)
             AND (${from}::timestamptz IS NULL OR created_at >= ${from}::timestamptz)
             AND (${to}::timestamptz IS NULL OR created_at < ${to}::timestamptz)
-          GROUP BY project_id, currency
-          ORDER BY sum(customer_atoms) DESC, project_id ASC
+          GROUP BY billing_account_id, currency
+          ORDER BY sum(customer_atoms) DESC, billing_account_id ASC
           LIMIT 50
         `,
-        db<
-          {
-            key: string;
-            currency: string;
-            charge_count: number;
-            customer_billed_atoms: string;
-            customer_refunded_atoms: string;
-            supplier_cost_atoms: string;
-          }[]
-        >`
+          db<
+            {
+              key: string;
+              currency: string;
+              charge_count: number;
+              customer_billed_atoms: string;
+              customer_refunded_atoms: string;
+              supplier_cost_atoms: string;
+            }[]
+          >`
           SELECT
             coalesce(channel_id::text, 'unknown') AS key,
             currency,
@@ -324,7 +326,7 @@ export function createLedgerQueries(db: SQL) {
             coalesce(sum(refunded_atoms), 0)::text AS customer_refunded_atoms,
             coalesce(sum(supplier_cost_atoms) FILTER (WHERE supplier_currency IS NULL OR supplier_currency = currency), 0)::text AS supplier_cost_atoms
           FROM public.billing_charges
-          WHERE (${projectId}::uuid IS NULL OR project_id = ${projectId}::uuid)
+          WHERE (${billingAccountId}::uuid IS NULL OR billing_account_id = ${billingAccountId}::uuid)
             AND (${currency}::text IS NULL OR currency = ${currency}::text)
             AND (${from}::timestamptz IS NULL OR created_at >= ${from}::timestamptz)
             AND (${to}::timestamptz IS NULL OR created_at < ${to}::timestamptz)
@@ -332,7 +334,7 @@ export function createLedgerQueries(db: SQL) {
           ORDER BY sum(supplier_cost_atoms) DESC, key ASC
           LIMIT 50
         `,
-      ]);
+        ]);
 
       const currencies = new Set<string>([
         ...chargeByCurr.map((r) => r.currency),
@@ -394,11 +396,11 @@ export function createLedgerQueries(db: SQL) {
       return {
         from,
         to,
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         currency,
         by_currency,
         by_model: modelRows.map(toDimRow),
-        by_project: projectRows.map(toDimRow),
+        by_billing_account: billingAccountRows.map(toDimRow),
         by_channel: channelRows.map(toDimRow),
       };
     },
@@ -468,7 +470,7 @@ export function createLedgerQueries(db: SQL) {
 
     async listHolds(input: {
       state?: "HELD" | "SETTLED" | "RELEASED" | "UNKNOWN" | "CONFLICT";
-      project_id?: string;
+      billing_account_id?: string;
       limit?: number;
       offset?: number;
     }) {
@@ -476,7 +478,8 @@ export function createLedgerQueries(db: SQL) {
       const offset = Math.max(0, input.offset ?? 0);
       const conds: DrizzleSQL[] = [];
       if (input.state) conds.push(eq(billingHolds.state, input.state));
-      if (input.project_id) conds.push(eq(billingHolds.projectId, input.project_id));
+      if (input.billing_account_id)
+        conds.push(eq(billingHolds.billingAccountId, input.billing_account_id));
       const where = conds.length > 0 ? and(...conds) : undefined;
 
       const [items, countRows] = await Promise.all([

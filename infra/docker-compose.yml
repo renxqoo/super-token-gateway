@@ -32,6 +32,7 @@ services:
     working_dir: /app
     volumes:
       - ..:/app:ro
+      - ${INTERNAL_AUTH_FILE:?Set INTERNAL_AUTH_FILE}:/run/secrets/gateway-internal-auth.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -44,7 +45,7 @@ services:
       DATABASE_URL: postgres://gateway:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/gateway_prod
       KEY_PEPPER: ${KEY_PEPPER:?Set KEY_PEPPER}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY}
-      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN}
+      INTERNAL_AUTH_FILE: /run/secrets/gateway-internal-auth.json
     command: ["sh", "-c", "bun dist/tools/migrate.js && bun dist/gateway/main.js --mode=all-in-one"]
     ports:
       - "127.0.0.1:8080:8080"

@@ -5,6 +5,7 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { createWorkerRunner } from "@gateway/worker";
 import {
   assertSchemaVersion,
+  createAsyncTasksRepository,
   createCatalogRepository,
   createDatabase,
   createLedgerEngine,
@@ -43,7 +44,7 @@ async function withLedgerDb(
 async function seedFixture(db: SQL) {
   const catalog = createCatalogRepository(db);
   const ledger = createLedgerEngine(db, { batchWindowMs: 2, maxBatchSize: 64 });
-  const project = await catalog.upsertProject({
+  const billingAccount = await catalog.upsertBillingAccount({
     name: "ledger-fixture",
     currency: "PTS",
     rpm: 10000,
@@ -134,7 +135,7 @@ async function seedFixture(db: SQL) {
   return {
     catalog,
     ledger,
-    project,
+    billingAccount,
     accountA,
     accountB,
     accountC,
@@ -157,7 +158,7 @@ test("G1.1 exact rational pricing, multi-lot priority, and expired hold surplus 
 
     const expiryIso = new Date(Date.now() + 60_000).toISOString();
     const grant = await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "grant-expiring",
       amount_atoms: "50",
@@ -168,7 +169,7 @@ test("G1.1 exact rational pricing, multi-lot priority, and expired hold surplus 
       operations: ["chat"],
     });
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "cash-permanent",
       amount_atoms: "100",
@@ -181,7 +182,7 @@ test("G1.1 exact rational pricing, multi-lot priority, and expired hold surplus 
     const held = await f.ledger.acquireHold({
       request_id: reqId,
       attempt_id: attId,
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       operation: "chat",
       model: "gpt-4o",
@@ -199,7 +200,7 @@ test("G1.1 exact rational pricing, multi-lot priority, and expired hold surplus 
     const replay = await f.ledger.acquireHold({
       request_id: crypto.randomUUID(),
       attempt_id: crypto.randomUUID(),
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       operation: "chat",
       model: "gpt-4o",
@@ -217,7 +218,7 @@ test("G1.1 exact rational pricing, multi-lot priority, and expired hold surplus 
     const conflict = await f.ledger.acquireHold({
       request_id: crypto.randomUUID(),
       attempt_id: crypto.randomUUID(),
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       operation: "chat",
       model: "gpt-4o",
@@ -256,7 +257,7 @@ test("G1.1 exact rational pricing, multi-lot priority, and expired hold surplus 
       supplier_cost_atoms: "1",
     });
 
-    const wallet = await f.ledger.getWallet(f.project.id, "PTS");
+    const wallet = await f.ledger.getWallet(f.billingAccount.id, "PTS");
     expect(wallet).toMatchObject({
       available_atoms: "100",
       reserved_atoms: "0",
@@ -283,36 +284,36 @@ test("G1.2 refund and debt collection share wallet-first lock order and preserve
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     await f.ledger.configureWalletCredit({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       expected_version: "0",
       credit_limit_atoms: "1000",
     });
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "cash-1",
       amount_atoms: "9007199254740993",
       kind: "CASH",
     });
-    const wBig = await f.ledger.getWallet(f.project.id, "PTS");
+    const wBig = await f.ledger.getWallet(f.billingAccount.id, "PTS");
     expect(wBig?.available_atoms).toBe("9007199254740993");
 
-    const proj2 = await f.catalog.upsertProject({
-      name: "debt-project",
+    const proj2 = await f.catalog.upsertBillingAccount({
+      name: "debt-billingAccount",
       currency: "PTS",
       rpm: 1000,
       tpm: 1000000,
       concurrency: 100,
     });
     await f.ledger.configureWalletCredit({
-      project_id: proj2.id,
+      billing_account_id: proj2.id,
       currency: "PTS",
       expected_version: "0",
       credit_limit_atoms: "50",
     });
     await f.ledger.creditWallet({
-      project_id: proj2.id,
+      billing_account_id: proj2.id,
       currency: "PTS",
       external_ref: "small-cash",
       amount_atoms: "100",
@@ -324,7 +325,7 @@ test("G1.2 refund and debt collection share wallet-first lock order and preserve
     const hold = await f.ledger.acquireHold({
       request_id: reqId,
       attempt_id: attId,
-      project_id: proj2.id,
+      billing_account_id: proj2.id,
       currency: "PTS",
       operation: "chat",
       model: "gpt-4o",
@@ -373,7 +374,7 @@ test("G1.2 refund and debt collection share wallet-first lock order and preserve
       Promise<Awaited<ReturnType<typeof f.ledger.refundCharge>> | Error> | undefined;
     const walletLock = await db
       .begin(async (tx) => {
-        await tx`SELECT id FROM public.wallets WHERE project_id = ${proj2.id} FOR NO KEY UPDATE`;
+        await tx`SELECT id FROM public.wallets WHERE billing_account_id = ${proj2.id} FOR NO KEY UPDATE`;
         pendingRefund = f.ledger.refundCharge(refundInput).catch((error: Error) => error);
         await Bun.sleep(50);
         await tx`SELECT id FROM public.billing_charges
@@ -391,7 +392,7 @@ test("G1.2 refund and debt collection share wallet-first lock order and preserve
     });
 
     const topup = await f.ledger.creditWallet({
-      project_id: proj2.id,
+      billing_account_id: proj2.id,
       currency: "PTS",
       external_ref: "pay-debt",
       amount_atoms: "100",
@@ -410,12 +411,20 @@ test("G1.2 refund and debt collection share wallet-first lock order and preserve
 
 test("symptom: concurrent requests with zero settled balance can all draw new credit", () =>
   withLedgerDb(async (db) => {
-    const { ledger, project, accountA, accountB, channelA, channelB, flatBillingPrice, costPrice } =
-      await seedFixture(db);
+    const {
+      ledger,
+      billingAccount,
+      accountA,
+      accountB,
+      channelA,
+      channelB,
+      flatBillingPrice,
+      costPrice,
+    } = await seedFixture(db);
     const otherNode = createLedgerEngine(db, { batchWindowMs: 2, maxBatchSize: 64 });
     try {
       await ledger.configureWalletCredit({
-        project_id: project.id,
+        billing_account_id: billingAccount.id,
         currency: "PTS",
         expected_version: "0",
         credit_limit_atoms: "100",
@@ -423,7 +432,7 @@ test("symptom: concurrent requests with zero settled balance can all draw new cr
       const reservation = () => ({
         request_id: crypto.randomUUID(),
         attempt_id: crypto.randomUUID(),
-        project_id: project.id,
+        billing_account_id: billingAccount.id,
         currency: "PTS",
         operation: "chat" as const,
         model: "gpt-4o",
@@ -446,7 +455,7 @@ test("symptom: concurrent requests with zero settled balance can all draw new cr
         Array.from({ length: 3 }, () => expect.objectContaining({ code: "insufficient_balance" })),
       );
       const winner = inputs[results.findIndex((result) => result.ok)]!;
-      expect(await ledger.getWallet(project.id, "PTS")).toMatchObject({
+      expect(await ledger.getWallet(billingAccount.id, "PTS")).toMatchObject({
         available_atoms: "0",
         debt_atoms: "0",
         credit_reserved_atoms: "20",
@@ -480,7 +489,7 @@ test("symptom: concurrent requests with zero settled balance can all draw new cr
         reason: "Confirmed upstream usage",
       });
       expect(settled).toEqual({ replayed: false, state: "UNKNOWN_RESOLVED" });
-      expect(await ledger.getWallet(project.id, "PTS")).toMatchObject({
+      expect(await ledger.getWallet(billingAccount.id, "PTS")).toMatchObject({
         available_atoms: "0",
         debt_atoms: "20",
         credit_reserved_atoms: "0",
@@ -490,13 +499,13 @@ test("symptom: concurrent requests with zero settled balance can all draw new cr
         code: "insufficient_balance",
       });
       await ledger.creditWallet({
-        project_id: project.id,
+        billing_account_id: billingAccount.id,
         currency: "PTS",
         amount_atoms: "20",
         external_ref: "repay-to-zero",
         kind: "CASH",
       });
-      expect(await ledger.getWallet(project.id, "PTS")).toMatchObject({
+      expect(await ledger.getWallet(billingAccount.id, "PTS")).toMatchObject({
         available_atoms: "0",
         debt_atoms: "0",
       });
@@ -514,7 +523,7 @@ test.each(["transient wallet lock", "wallet statement timeout"])(
   (scenario) =>
     withLedgerDb(async (db, dbUrl) => {
       const fixture = await seedFixture(db);
-      const { project, accountA, channelA } = fixture;
+      const { billingAccount, accountA, channelA } = fixture;
       const statementTimeout = scenario === "wallet statement timeout";
       const limitedDb = statementTimeout
         ? new SQL(dbUrl, { max: 8, connection: { lock_timeout: 5000, statement_timeout: 200 } })
@@ -522,7 +531,7 @@ test.each(["transient wallet lock", "wallet statement timeout"])(
       const ledger = limitedDb ? createLedgerEngine(limitedDb) : fixture.ledger;
       try {
         await ledger.creditWallet({
-          project_id: project.id,
+          billing_account_id: billingAccount.id,
           currency: "PTS",
           external_ref: "lease-competition-fund",
           amount_atoms: "100000000",
@@ -538,7 +547,7 @@ test.each(["transient wallet lock", "wallet statement timeout"])(
           ledger.acquireHold({
             request_id: crypto.randomUUID(),
             attempt_id: crypto.randomUUID(),
-            project_id: project.id,
+            billing_account_id: billingAccount.id,
             currency: "PTS",
             operation: "chat",
             model: "gpt-4o",
@@ -554,14 +563,16 @@ test.each(["transient wallet lock", "wallet statement timeout"])(
         const first = await Promise.all(Array.from({ length: 16 }, () => hold()));
         expect(first.every((result) => result.ok)).toBe(true);
         expect(await hold()).toMatchObject({ ok: true });
-        const wallet = (await ledger.getWallet(project.id, "PTS"))!;
+        const wallet = (await ledger.getWallet(billingAccount.id, "PTS"))!;
         expect(await hold(wallet.available_atoms, "earmark-free-funds")).toMatchObject({
           ok: true,
         });
-        expect(await ledger.getWallet(project.id, "PTS")).toMatchObject({ available_atoms: "0" });
+        expect(await ledger.getWallet(billingAccount.id, "PTS")).toMatchObject({
+          available_atoms: "0",
+        });
         const locked = Promise.withResolvers<void>();
         const lock = db.begin(async (tx) => {
-          await tx`SELECT id FROM public.wallets WHERE project_id = ${project.id} FOR NO KEY UPDATE`;
+          await tx`SELECT id FROM public.wallets WHERE billing_account_id = ${billingAccount.id} FOR NO KEY UPDATE`;
           locked.resolve();
           await Bun.sleep(statementTimeout ? 260 : 160);
         });
@@ -581,19 +592,19 @@ test.each(["transient wallet lock", "wallet statement timeout"])(
 
 test("symptom: expired unused credit grants must not hide negative wallet balance on leased holds", () =>
   withLedgerDb(async (db) => {
-    const { ledger, project, accountA, channelA, flatBillingPrice, costPrice } =
+    const { ledger, billingAccount, accountA, channelA, flatBillingPrice, costPrice } =
       await seedFixture(db);
     const otherNode = createLedgerEngine(db);
     try {
       await ledger.creditWallet({
-        project_id: project.id,
+        billing_account_id: billingAccount.id,
         currency: "PTS",
         external_ref: "lease-expiry-cash",
         amount_atoms: "100000000",
         kind: "CASH",
       });
       await ledger.configureWalletCredit({
-        project_id: project.id,
+        billing_account_id: billingAccount.id,
         currency: "PTS",
         expected_version: "0",
         credit_limit_atoms: "100000000",
@@ -607,7 +618,7 @@ test("symptom: expired unused credit grants must not hide negative wallet balanc
       const request = (amount = "200", idempotencyKey: string | null = null) => ({
         request_id: crypto.randomUUID(),
         attempt_id: crypto.randomUUID(),
-        project_id: project.id,
+        billing_account_id: billingAccount.id,
         currency: "PTS",
         operation: "chat" as const,
         model: "gpt-4o",
@@ -629,10 +640,10 @@ test("symptom: expired unused credit grants must not hide negative wallet balanc
       const [hold] =
         await db`SELECT wallet_lease_id FROM public.billing_holds WHERE request_id = ${leased.request_id}`;
       expect(hold?.wallet_lease_id).toBeTruthy();
-      const cash = (await ledger.getWallet(project.id, "PTS"))!.available_atoms;
+      const cash = (await ledger.getWallet(billingAccount.id, "PTS"))!.available_atoms;
       const grantExpiresAt = Date.now() + 1000;
       await otherNode.creditWallet({
-        project_id: project.id,
+        billing_account_id: billingAccount.id,
         currency: "PTS",
         external_ref: "lease-expiry-restricted-grant",
         amount_atoms: "100",
@@ -657,7 +668,7 @@ test("symptom: expired unused credit grants must not hide negative wallet balanc
         },
         supplier_currency: "USD",
       });
-      const wallet = (await ledger.getWallet(project.id, "PTS"))!;
+      const wallet = (await ledger.getWallet(billingAccount.id, "PTS"))!;
       expect(wallet.available_atoms).toBe("100");
       expect(BigInt(wallet.reserved_atoms) - BigInt(wallet.debt_atoms)).toBe(-50n);
       expect(await ledger.acquireHold(request())).toMatchObject({ ok: true, credit_atoms: "0" });
@@ -676,7 +687,7 @@ test.each(["wallet", "supplier"])(
   "symptom: a grant that expires while waiting for a %s lock cannot fund a new hold",
   (resource) =>
     withLedgerDb(async (db) => {
-      const { ledger, project, accountA, channelA } = await seedFixture(db);
+      const { ledger, billingAccount, accountA, channelA } = await seedFixture(db);
       const lockAcquired = Promise.withResolvers<void>();
       const unlock = Promise.withResolvers<void>();
       let lock: Promise<unknown> | undefined;
@@ -684,7 +695,7 @@ test.each(["wallet", "supplier"])(
       try {
         const expiry = Date.now() + 1000;
         await ledger.creditWallet({
-          project_id: project.id,
+          billing_account_id: billingAccount.id,
           currency: "PTS",
           external_ref: "grant-expires-during-lock",
           amount_atoms: "20",
@@ -693,7 +704,7 @@ test.each(["wallet", "supplier"])(
         });
         lock = db.begin(async (tx) => {
           if (resource === "wallet") {
-            await tx`SELECT id FROM public.wallets WHERE project_id = ${project.id} FOR NO KEY UPDATE`;
+            await tx`SELECT id FROM public.wallets WHERE billing_account_id = ${billingAccount.id} FOR NO KEY UPDATE`;
           } else {
             await tx`SELECT cell FROM public.supplier_cells WHERE account_id = ${accountA.id} AND currency = 'USD' ORDER BY cell FOR NO KEY UPDATE`;
           }
@@ -704,7 +715,7 @@ test.each(["wallet", "supplier"])(
         const hold = ledger.acquireHold({
           request_id: crypto.randomUUID(),
           attempt_id: crypto.randomUUID(),
-          project_id: project.id,
+          billing_account_id: billingAccount.id,
           currency: "PTS",
           operation: "chat",
           model: "gpt-4o",
@@ -746,7 +757,7 @@ test("G1.3 100 concurrent micro-batched holds on one single hot wallet have zero
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "hot-wallet-fund",
       amount_atoms: "5000",
@@ -764,7 +775,7 @@ test("G1.3 100 concurrent micro-batched holds on one single hot wallet have zero
         f.ledger.acquireHold({
           request_id: r.reqId,
           attempt_id: r.attId,
-          project_id: f.project.id,
+          billing_account_id: f.billingAccount.id,
           currency: "PTS",
           operation: "chat",
           model: "gpt-4o",
@@ -788,7 +799,7 @@ test("G1.3 100 concurrent micro-batched holds on one single hot wallet have zero
     expect(rejected).toHaveLength(50);
     for (const r of rejected) expect(r).toMatchObject({ ok: false, code: "insufficient_balance" });
 
-    const midWallet = await f.ledger.getWallet(f.project.id, "PTS");
+    const midWallet = await f.ledger.getWallet(f.billingAccount.id, "PTS");
     expect(midWallet).toMatchObject({ available_atoms: "0", reserved_atoms: "5000" });
 
     const commits = await Promise.all(
@@ -809,7 +820,7 @@ test("G1.3 100 concurrent micro-batched holds on one single hot wallet have zero
     );
     expect(commits.every((c) => c.ok && !c.replayed && c.customer_atoms === "70")).toBe(true);
 
-    const endWallet = await f.ledger.getWallet(f.project.id, "PTS");
+    const endWallet = await f.ledger.getWallet(f.billingAccount.id, "PTS");
     expect(endWallet).toMatchObject({
       available_atoms: "1500",
       reserved_atoms: "0",
@@ -851,7 +862,7 @@ test("G1.4 failed fallback cannot strand a customer top-up, and successful failo
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "failover-fund",
       amount_atoms: "500",
@@ -866,7 +877,7 @@ test("G1.4 failed fallback cannot strand a customer top-up, and successful failo
     const hold = await f.ledger.acquireHold({
       request_id: reqId,
       attempt_id: attA,
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       operation: "chat",
       model: "gpt-4o",
@@ -893,7 +904,7 @@ test("G1.4 failed fallback cannot strand a customer top-up, and successful failo
       required_customer_atoms: "150",
     });
     expect(rejected).toMatchObject({ ok: false, code: "supplier_insufficient_balance" });
-    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+    expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
       available_atoms: "400",
       reserved_atoms: "100",
     });
@@ -946,7 +957,7 @@ test("G1.4 failed fallback cannot strand a customer top-up, and successful failo
       supplier_cost_atoms: "60",
     });
 
-    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+    expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
       available_atoms: "380",
       reserved_atoms: "0",
       spent_atoms: "120",
@@ -970,10 +981,10 @@ test("G1.4 failed fallback cannot strand a customer top-up, and successful failo
 
     await db.begin(async (tx) => {
       await tx`UPDATE public.wallets SET available_atoms = available_atoms - 1,
-        reserved_atoms = reserved_atoms + 1 WHERE project_id = ${f.project.id}`;
+        reserved_atoms = reserved_atoms + 1 WHERE billing_account_id = ${f.billingAccount.id}`;
       await tx`UPDATE public.wallet_lots SET available_atoms = available_atoms - 1,
         reserved_atoms = reserved_atoms + 1
-        WHERE wallet_id = (SELECT id FROM public.wallets WHERE project_id = ${f.project.id})`;
+        WHERE wallet_id = (SELECT id FROM public.wallets WHERE billing_account_id = ${f.billingAccount.id})`;
     });
     expect((await f.ledger.auditConservation()).ok).toBe(false);
   }));
@@ -982,7 +993,7 @@ test("G1.5 moderation PLATFORM_ABSORB, DB immutability/balance triggers, and mon
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "mod-fund",
       amount_atoms: "300",
@@ -994,7 +1005,7 @@ test("G1.5 moderation PLATFORM_ABSORB, DB immutability/balance triggers, and mon
     await f.ledger.acquireHold({
       request_id: reqId,
       attempt_id: attId,
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       operation: "chat",
       model: "gpt-4o",
@@ -1039,7 +1050,7 @@ test("G1.5 moderation PLATFORM_ABSORB, DB immutability/balance triggers, and mon
       funded_atoms: "0",
       supplier_cost_atoms: "30",
     });
-    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+    expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
       available_atoms: "300",
       reserved_atoms: "0",
       spent_atoms: "0",
@@ -1051,7 +1062,7 @@ test("G1.5 moderation PLATFORM_ABSORB, DB immutability/balance triggers, and mon
       db.begin(async (tx) => {
         await tx`
           INSERT INTO public.ledger_entries (journal_id, ordinal, side, entity_id, reference, kind, currency, account, atoms)
-          VALUES (${badJournal}, 0, 'CUSTOMER', ${f.project.id}, 'bad-1', 'ADJUST', 'PTS', 'system:revenue', 100)
+          VALUES (${badJournal}, 0, 'CUSTOMER', ${f.billingAccount.id}, 'bad-1', 'ADJUST', 'PTS', 'system:revenue', 100)
         `;
       }),
     ).rejects.toThrow("unbalanced ledger journal");
@@ -1118,7 +1129,7 @@ test("symptom: a wallet lease is recreated between bursts inside the configured 
     const f = await seedFixture(db);
     const ledger = createLedgerEngine(db, { walletLeaseIdleReleaseMs: 1500 });
     const wallet = await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "retained-wallet-funding",
       amount_atoms: "100000000",
@@ -1131,7 +1142,7 @@ test("symptom: a wallet lease is recreated between bursts inside the configured 
         await ledger.acquireHold({
           request_id: requestId,
           attempt_id: attemptId,
-          project_id: f.project.id,
+          billing_account_id: f.billingAccount.id,
           currency: "PTS",
           operation: "chat",
           model: "gpt-4o",
@@ -1148,7 +1159,7 @@ test("symptom: a wallet lease is recreated between bursts inside the configured 
       return {
         request_id: requestId,
         selected_attempt_id: attemptId,
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         channel_id: f.channelA.id,
         billing_price_id: f.flatBillingPrice.id,
         cost_version_id: f.costPrice.id,
@@ -1183,7 +1194,7 @@ test("symptom: a wallet lease is recreated between bursts inside the configured 
       await f.ledger.drain();
     }
     expect((await walletLeaseRows()).map((row) => row.state)).toEqual(["CLOSED"]);
-    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+    expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
       available_atoms: "99996800",
       reserved_atoms: "0",
       spent_atoms: "3200",
@@ -1196,9 +1207,9 @@ test("idle wallet lease batch returns unused funds and preserves a concurrent op
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     const ledger = createLedgerEngine(db, { leaseIdleReleaseMs: 5000 });
-    const projects = await Promise.all(
+    const billingAccounts = await Promise.all(
       [0, 1, 2].map((i) =>
-        f.catalog.upsertProject({
+        f.catalog.upsertBillingAccount({
           name: `batch-close-${i}`,
           currency: "PTS",
           rpm: 100,
@@ -1208,9 +1219,9 @@ test("idle wallet lease batch returns unused funds and preserves a concurrent op
       ),
     );
     const walletIds = [];
-    for (const project of projects) {
+    for (const billingAccount of billingAccounts) {
       const wallet = await f.ledger.creditWallet({
-        project_id: project.id,
+        billing_account_id: billingAccount.id,
         currency: "PTS",
         external_ref: "batch-close-funding",
         amount_atoms: "100000000",
@@ -1219,13 +1230,13 @@ test("idle wallet lease batch returns unused funds and preserves a concurrent op
       walletIds.push(wallet.wallet_id);
     }
 
-    async function hold(projectId: string): Promise<string> {
+    async function hold(billingAccountId: string): Promise<string> {
       const requestId = crypto.randomUUID();
       expect(
         await ledger.acquireHold({
           request_id: requestId,
           attempt_id: crypto.randomUUID(),
-          project_id: projectId,
+          billing_account_id: billingAccountId,
           currency: "PTS",
           operation: "chat",
           model: "gpt-4o",
@@ -1243,11 +1254,13 @@ test("idle wallet lease batch returns unused funds and preserves a concurrent op
     }
 
     try {
-      for (const project of projects) {
-        const requests = await Promise.all(Array.from({ length: 16 }, () => hold(project.id)));
+      for (const billingAccount of billingAccounts) {
+        const requests = await Promise.all(
+          Array.from({ length: 16 }, () => hold(billingAccount.id)),
+        );
         for (const requestId of requests) await ledger.releaseHold(requestId);
       }
-      const open = await hold(projects[2]!.id);
+      const open = await hold(billingAccounts[2]!.id);
       const [before] = await db`
         SELECT wallet_lease_id FROM public.billing_holds WHERE request_id = ${open}
       `;
@@ -1292,7 +1305,7 @@ test("G1.7 sharded wallet & supplier leases settle 200 concurrent requests via f
     const f = await seedFixture(db);
     const queries = createLedgerQueries(db);
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "lease-fund-1",
       amount_atoms: "100000000",
@@ -1317,7 +1330,7 @@ test("G1.7 sharded wallet & supplier leases settle 200 concurrent requests via f
         f.ledger.acquireHold({
           request_id: r.reqId,
           attempt_id: r.attId,
-          project_id: f.project.id,
+          billing_account_id: f.billingAccount.id,
           currency: "PTS",
           operation: "chat",
           model: "gpt-4o",
@@ -1350,7 +1363,7 @@ test("G1.7 sharded wallet & supplier leases settle 200 concurrent requests via f
         f.ledger.acquireHold({
           request_id: r.reqId,
           attempt_id: r.attId,
-          project_id: f.project.id,
+          billing_account_id: f.billingAccount.id,
           currency: "PTS",
           operation: "chat",
           model: "gpt-4o",
@@ -1417,7 +1430,7 @@ test("G1.7 sharded wallet & supplier leases settle 200 concurrent requests via f
     );
     expect(remainingActiveLeases).toBe(0);
 
-    const wallet = await f.ledger.getWallet(f.project.id, "PTS");
+    const wallet = await f.ledger.getWallet(f.billingAccount.id, "PTS");
     expect(wallet).toMatchObject({
       available_atoms: String(100_000_000 - totalReqs * 100),
       reserved_atoms: "0",
@@ -1448,7 +1461,7 @@ for (const action of ["RELEASE", "SETTLE"] as const) {
       const f = await seedFixture(db);
       try {
         await f.ledger.creditWallet({
-          project_id: f.project.id,
+          billing_account_id: f.billingAccount.id,
           currency: "PTS",
           external_ref: "manual-resolution-credit",
           amount_atoms: "100",
@@ -1459,7 +1472,7 @@ for (const action of ["RELEASE", "SETTLE"] as const) {
           await f.ledger.acquireHold({
             request_id: requestId,
             attempt_id: crypto.randomUUID(),
-            project_id: f.project.id,
+            billing_account_id: f.billingAccount.id,
             currency: "PTS",
             operation: "chat",
             model: "gpt-4o",
@@ -1490,7 +1503,7 @@ for (const action of ["RELEASE", "SETTLE"] as const) {
         const afterFailure = await createLedgerQueries(db).getRequestBilling(requestId);
         expect(afterFailure.hold?.state).toBe("UNKNOWN");
         expect(afterFailure.charge).toBeNull();
-        expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+        expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
           available_atoms: "0",
           reserved_atoms: "100",
           spent_atoms: "0",
@@ -1509,7 +1522,7 @@ for (const action of ["RELEASE", "SETTLE"] as const) {
         expect(
           await db`SELECT action, actor FROM public.billing_resolutions WHERE request_id = ${requestId}`,
         ).toEqual([{ action, actor: "finance" }]);
-        expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+        expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
           available_atoms: action === "SETTLE" ? "70" : "100",
           reserved_atoms: "0",
           spent_atoms: action === "SETTLE" ? "30" : "0",
@@ -1525,7 +1538,7 @@ test("G1.8 expired lot inside lease never resurrects and Worker recovers dead no
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     const shortGrant = await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "lease-grant-expiring",
       amount_atoms: "1000000",
@@ -1534,7 +1547,7 @@ test("G1.8 expired lot inside lease never resurrects and Worker recovers dead no
       expires_at: new Date(Date.now() + 60_000).toISOString(),
     });
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "lease-cash-perm",
       amount_atoms: "50000000",
@@ -1557,7 +1570,7 @@ test("G1.8 expired lot inside lease never resurrects and Worker recovers dead no
         f.ledger.acquireHold({
           request_id: r.reqId,
           attempt_id: r.attId,
-          project_id: f.project.id,
+          billing_account_id: f.billingAccount.id,
           currency: "PTS",
           operation: "chat",
           model: "gpt-4o",
@@ -1583,7 +1596,7 @@ test("G1.8 expired lot inside lease never resurrects and Worker recovers dead no
         f.ledger.acquireHold({
           request_id: r.reqId,
           attempt_id: r.attId,
-          project_id: f.project.id,
+          billing_account_id: f.billingAccount.id,
           currency: "PTS",
           operation: "chat",
           model: "gpt-4o",
@@ -1613,7 +1626,7 @@ test("G1.8 expired lot inside lease never resurrects and Worker recovers dead no
     expect(sweptLeases).toBe(2);
     expect(expiredLotWallets).toBe(1);
 
-    const midWallet = await workerLedger.getWallet(f.project.id, "PTS");
+    const midWallet = await workerLedger.getWallet(f.billingAccount.id, "PTS");
     expect(midWallet?.reserved_atoms).toBe("800");
     expect(BigInt(midWallet!.expired_atoms)).toBeGreaterThan(0n);
 
@@ -1649,7 +1662,7 @@ test("G1.8 expired lot inside lease never resurrects and Worker recovers dead no
       f.costPrice.id,
     ]);
 
-    const endWallet = await workerLedger.getWallet(f.project.id, "PTS");
+    const endWallet = await workerLedger.getWallet(f.billingAccount.id, "PTS");
     expect(endWallet?.reserved_atoms).toBe("0");
     expect(endWallet?.spent_atoms).toBe("200");
     expect(endWallet?.expired_atoms).toBe("999800");
@@ -1672,88 +1685,104 @@ test("G1.8 expired lot inside lease never resurrects and Worker recovers dead no
     await f.ledger.drain();
   }));
 
-test.each([
-  ["v4-before-fund-leases.sql", 2026112101],
-  ["v4-before-provider-plugins.sql", 1],
-] as const)(
-  "migrates existing %s without changing wallet balances or channel identities",
-  (file, version) =>
-    withLedgerDb(
-      async (db) => {
-        const accountId = crypto.randomUUID();
-        const channelId = crypto.randomUUID();
-        const projectId = crypto.randomUUID();
-        const walletId = crypto.randomUUID();
-        await db`INSERT INTO public.upstream_accounts(id, name) VALUES(${accountId}, 'old account')`;
-        await db`INSERT INTO public.channels(id, account_id, name, kind, base_url, secret_ciphertext, rpm, concurrency)
-        VALUES (${channelId}, ${accountId}, 'old channel', 'openai', 'https://old.invalid', 'cipher', 50, 5)`;
-        await db`INSERT INTO public.projects(id, name, currency, rpm, tpm, concurrency)
-        VALUES (${projectId}, 'old project', 'USD', 10, 1000, 5)`;
-        await db`INSERT INTO public.wallets(id, project_id, currency, available_atoms)
-        VALUES (${walletId}, ${projectId}, 'USD', 123)`;
-        await expect(assertSchemaVersion(db)).rejects.toThrow(/Schema/);
-        await migrate(db);
-        await migrate(db);
-        expect(await assertSchemaVersion(db)).toBe(SCHEMA_VERSION);
-        const snapshot = await createCatalogRepository(db).loadSnapshot();
-        const channel = snapshot.channels.get(channelId);
-        expect(channel).toMatchObject({
-          id: channelId,
-          account_id: accountId,
-          kind: "openai",
-          base_url: "https://old.invalid",
-          secret_ciphertext: "cipher",
-          adapter_config: {},
-        });
-        expect(snapshot.plugins.get(channel?.provider_plugin_id ?? "")).toMatchObject({
-          name: "openai",
-          capability: "PROVIDER",
-          builtin: true,
-          provider_config: { endpoints: { chat: { path: "/v1/chat/completions" } } },
-        });
-        expect(
-          await createLedgerEngine(db, { enableLeases: false }).getWallet(projectId, "USD"),
-        ).toMatchObject({ id: walletId, available_atoms: "123" });
-        const versions = await db<
-          { version: number }[]
-        >`SELECT version FROM public.schema_migrations ORDER BY version`;
-        expect(versions.map((r) => Number(r.version))).toEqual([
-          version,
-          2026112102,
-          2026112201,
-          2026112202,
-          2026112203,
-          2026112204,
-          2026112205,
-          2026112301,
-          2026112302,
-          2026112303,
-          2026112401,
-          SCHEMA_VERSION,
-        ]);
-      },
-      async (db) => {
-        const sql = await Bun.file(new URL(`../fixtures/${file}`, import.meta.url)).text();
-        const spec = {
-          version,
-          files: [
-            {
-              path: "./migrations/0000_v4_baseline.sql",
-              checksum: new Bun.CryptoHasher("sha256").update(sql).digest("hex"),
-            },
-          ],
-        };
-        await db.begin(async (tx) => {
-          await tx.unsafe(sql);
-          const checksum = new Bun.CryptoHasher("sha256")
-            .update(JSON.stringify(spec))
-            .digest("hex");
-          await tx`INSERT INTO public.schema_migrations(version,checksum,manifest)
-          VALUES(${version},${checksum},${spec}::jsonb)`;
-        });
-      },
-    ),
-);
+test("symptom: a demoted Key can cancel a task while waiting for its row lock", () =>
+  withLedgerDb(async (db) => {
+    const { catalog, ledger, billingAccount, channelA } = await seedFixture(db);
+    const locked = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let blocker: Promise<unknown> | undefined;
+    let unauthorized: Promise<unknown> | undefined;
+    let cancellation: Promise<unknown> | undefined;
+    try {
+      const baseKey = { billing_account_id: billingAccount.id, prefix: "sk_fixture" };
+      const owner = await catalog.upsertApiKey({
+        ...baseKey,
+        name: "Task owner",
+        verifier: "test-task-owner",
+      });
+      const caller = await catalog.upsertApiKey({
+        ...baseKey,
+        name: "Account admin",
+        verifier: "test-task-admin",
+        role: "ADMIN",
+      });
+      const sibling = await catalog.upsertApiKey({
+        ...baseKey,
+        name: "Another task owner",
+        verifier: "test-task-sibling",
+      });
+      const repository = createAsyncTasksRepository(db);
+      const taskId = "vid_revoked_admin_scope";
+      await repository.createTask({
+        id: taskId,
+        request_id: crypto.randomUUID(),
+        charge_id: null,
+        billing_account_id: billingAccount.id,
+        api_key_id: owner.id,
+        channel_id: channelA.id,
+        model: "video-fixture",
+        operation: "videos",
+        upstream_task_id: "upstream-fixture",
+      });
+      blocker = db.begin(async (tx) => {
+        await tx`SELECT id FROM public.async_tasks WHERE id = ${taskId} FOR UPDATE`;
+        locked.resolve();
+        await release.promise;
+      });
+      await Promise.race([locked.promise, blocker]);
+      unauthorized = repository.markUserCancelled(taskId, billingAccount.id, sibling.id, () => {});
+      expect(await Promise.race([unauthorized, Bun.sleep(1000).then(() => "blocked")])).toBeNull();
+      cancellation = repository.markUserCancelled(taskId, billingAccount.id, caller.id, () => {});
+      const deadline = Date.now() + 2000;
+      let waiting = false;
+      while (!waiting && Date.now() < deadline) {
+        const [activity] = await db`
+          SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database() AND pid <> pg_backend_pid()
+              AND wait_event_type = 'Lock' AND query LIKE '%async_tasks%'
+          ) AS waiting
+        `;
+        waiting = activity?.waiting === true;
+        if (!waiting) await Bun.sleep(10);
+      }
+      expect(waiting).toBe(true);
+      await catalog.upsertApiKey({
+        ...baseKey,
+        id: caller.id,
+        name: "Former admin",
+        verifier: "test-task-admin",
+        role: "INVOKER",
+      });
+      release.resolve();
+      expect(await cancellation).toBeNull();
+      expect(await repository.getTask(taskId)).toMatchObject({
+        status: "QUEUED",
+        user_cancelled: false,
+      });
+    } finally {
+      release.resolve();
+      await Promise.allSettled([blocker, unauthorized, cancellation]);
+      await ledger.drain();
+    }
+  }));
+
+test("Gateway accepts an empty database and preserves an unrelated database on rejection", () =>
+  withLedgerDb(
+    async (db) => {
+      await db.unsafe("CREATE TABLE public.existing_data (value integer NOT NULL)");
+      await db.unsafe("INSERT INTO public.existing_data VALUES (41)");
+      await expect(migrate(db)).rejects.toThrow(/nonempty database/);
+      expect(await db.unsafe("SELECT value FROM public.existing_data")).toEqual([{ value: 41 }]);
+      await db.unsafe("DROP TABLE public.existing_data");
+      await migrate(db);
+      await migrate(db);
+      expect(await assertSchemaVersion(db)).toBe(SCHEMA_VERSION);
+      await db.unsafe("UPDATE public.schema_migrations SET version = 1");
+      await expect(migrate(db)).rejects.toThrow(/manifest checksum mismatch/);
+    },
+    async () => {},
+  ));
 
 test("a live node cannot admit new holds against wallet and supplier leases reaped by a Worker", () =>
   withLedgerDb(async (db) => {
@@ -1769,7 +1798,7 @@ test("a live node cannot admit new holds against wallet and supplier leases reap
     let sweep: Promise<number> | undefined;
     try {
       await f.ledger.creditWallet({
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         external_ref: "fencing-seed",
         amount_atoms: "100000000",
@@ -1779,7 +1808,7 @@ test("a live node cannot admit new holds against wallet and supplier leases reap
         node.acquireHold({
           request_id: crypto.randomUUID(),
           attempt_id: crypto.randomUUID(),
-          project_id: f.project.id,
+          billing_account_id: f.billingAccount.id,
           currency: "PTS",
           operation: "chat",
           model: "gpt-4o",
@@ -1861,7 +1890,7 @@ test("a live node cannot admit new holds against wallet and supplier leases reap
         expect(await node.releaseHold(result.request_id)).toBe(true);
       }
       await node.releaseIdleLeases();
-      expect(await node.getWallet(f.project.id, "PTS")).toMatchObject({
+      expect(await node.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
         available_atoms: "100000000",
         reserved_atoms: "0",
       });
@@ -1916,7 +1945,7 @@ test("outbox acknowledgement cannot skip a late commit or advance beyond a claim
     expect(await ledger.ackOutboxEvents(consumer, batch.lease_token, last)).toBe(true);
   }));
 
-test("sharded outbox inserts proceed concurrently across distinct projects without skipping late commits", () =>
+test("sharded outbox inserts proceed concurrently across distinct billingAccounts without skipping late commits", () =>
   withLedgerDb(async (db) => {
     const ledger = createLedgerEngine(db, { enableLeases: false });
     const projShardA = "00000000-0000-4000-8000-000000000001";
@@ -1927,14 +1956,14 @@ test("sharded outbox inserts proceed concurrently across distinct projects witho
     const releaseA = Promise.withResolvers<void>();
 
     const txA = db.begin(async (tx) => {
-      await tx`INSERT INTO public.outbox_events(event_id, kind, project_id, payload)
+      await tx`INSERT INTO public.outbox_events(event_id, kind, billing_account_id, payload)
         VALUES (${eventA}, 'billing.settled', ${projShardA}::uuid, '{"k":"a"}'::jsonb)`;
       enteredA.resolve();
       await releaseA.promise;
     });
     await enteredA.promise;
 
-    const txB = db`INSERT INTO public.outbox_events(event_id, kind, project_id, payload)
+    const txB = db`INSERT INTO public.outbox_events(event_id, kind, billing_account_id, payload)
       VALUES (${eventB}, 'billing.settled', ${projShardB}::uuid, '{"k":"b"}'::jsonb)`.then(
       () => true,
     );
@@ -1964,23 +1993,23 @@ test("sharded outbox inserts proceed concurrently across distinct projects witho
 test("same-shard outbox inserts assign seq after acquiring shard lock so late commits are never skipped", () =>
   withLedgerDb(async (db) => {
     const ledger = createLedgerEngine(db, { enableLeases: false });
-    const sameProject = "00000000-0000-4000-8000-000000000003";
+    const sameBillingAccount = "00000000-0000-4000-8000-000000000003";
     const event1 = crypto.randomUUID();
     const event2 = crypto.randomUUID();
     const tx1Locked = Promise.withResolvers<void>();
     const tx1Commit = Promise.withResolvers<void>();
 
     const tx1 = db.begin(async (tx) => {
-      await tx`INSERT INTO public.outbox_events(event_id, kind, project_id, payload)
-        VALUES (${event1}, 'billing.settled', ${sameProject}::uuid, '{"order":1}'::jsonb)`;
+      await tx`INSERT INTO public.outbox_events(event_id, kind, billing_account_id, payload)
+        VALUES (${event1}, 'billing.settled', ${sameBillingAccount}::uuid, '{"order":1}'::jsonb)`;
       tx1Locked.resolve();
       await tx1Commit.promise;
     });
     await tx1Locked.promise;
 
     let tx2Finished = false;
-    const tx2 = db`INSERT INTO public.outbox_events(event_id, kind, project_id, payload)
-      VALUES (${event2}, 'billing.settled', ${sameProject}::uuid, '{"order":2}'::jsonb)`.then(
+    const tx2 = db`INSERT INTO public.outbox_events(event_id, kind, billing_account_id, payload)
+      VALUES (${event2}, 'billing.settled', ${sameBillingAccount}::uuid, '{"order":2}'::jsonb)`.then(
       () => {
         tx2Finished = true;
       },
@@ -1992,7 +2021,7 @@ test("same-shard outbox inserts assign seq after acquiring shard lock so late co
 
     const rows = await db<{ event_id: string; seq: string }[]>`
       SELECT event_id, seq::text FROM public.outbox_events
-      WHERE project_id = ${sameProject}::uuid
+      WHERE billing_account_id = ${sameBillingAccount}::uuid
       ORDER BY seq ASC
     `;
     expect(rows.map((r) => r.event_id)).toEqual([event1, event2]);
@@ -2021,27 +2050,24 @@ test("check_ledger_journal_balance rejects unbalanced journals even after GUC ma
     ).rejects.toThrow(/unbalanced ledger journal/);
   }));
 
-test("concurrent claimOutboxEvents and ackOutboxEvents avoid deadlocks and preserve pre-upgrade active leases", () =>
+test("concurrent Outbox claims and acknowledgements preserve the active shard lease", () =>
   withLedgerDb(async (db) => {
     const ledger = createLedgerEngine(db, { enableLeases: false });
     const proj = "00000000-0000-4000-8000-000000000004";
-    const [ev] = await db<{ seq: string }[]>`
-      INSERT INTO public.outbox_events(event_id, kind, project_id, payload)
-      VALUES (${crypto.randomUUID()}::uuid, 'billing.settled', ${proj}::uuid, '{}'::jsonb)
-      RETURNING seq::text
-    `;
-    const legacyToken = crypto.randomUUID();
-    await db`
-      INSERT INTO public.outbox_consumers(name, acked_seq, lease_token, leased_through_seq, leased_until)
-      VALUES ('legacy-consumer', 0, ${legacyToken}::uuid, ${ev!.seq}::bigint, clock_timestamp() + interval '30 seconds')
-    `;
-    expect((await ledger.claimOutboxEvents("legacy-consumer")).events).toEqual([]);
-    expect(await ledger.ackOutboxEvents("legacy-consumer", legacyToken, ev!.seq)).toBe(true);
-    expect((await ledger.claimOutboxEvents("legacy-consumer")).events).toEqual([]);
+    await db.unsafe(
+      "INSERT INTO public.outbox_events (event_id, kind, payload) VALUES (gen_random_uuid(), 'billing.settled', '{}')",
+    );
+    const active = await ledger.claimOutboxEvents("active-consumer");
+    expect(active.events).toHaveLength(1);
+    expect((await ledger.claimOutboxEvents("active-consumer")).events).toEqual([]);
+    expect(
+      await ledger.ackOutboxEvents("active-consumer", active.lease_token, active.events[0]!.seq),
+    ).toBe(true);
+    expect((await ledger.claimOutboxEvents("active-consumer")).events).toEqual([]);
 
     for (let i = 0; i < 20; i++) {
       await db`
-        INSERT INTO public.outbox_events(event_id, kind, project_id, payload)
+        INSERT INTO public.outbox_events(event_id, kind, billing_account_id, payload)
         VALUES (${crypto.randomUUID()}::uuid, 'billing.settled', ${proj}::uuid, '{}'::jsonb)
       `;
     }
@@ -2077,11 +2103,11 @@ test("symptom: an unused Outbox consumer shard lock stalls claim and acknowledge
     try {
       expect((await ledger.claimOutboxEvents(name)).events).toEqual([]);
       const eventIds: [string, string] = [crypto.randomUUID(), crypto.randomUUID()];
-      const projectId = crypto.randomUUID();
+      const billingAccountId = crypto.randomUUID();
       const [event] = await db`
-        INSERT INTO public.outbox_events(event_id, kind, project_id, payload)
-        VALUES (${eventIds[0]}::uuid, 'billing.settled', ${projectId}::uuid, '{}'::jsonb),
-               (${eventIds[1]}::uuid, 'billing.settled', ${projectId}::uuid, '{}'::jsonb)
+        INSERT INTO public.outbox_events(event_id, kind, billing_account_id, payload)
+        VALUES (${eventIds[0]}::uuid, 'billing.settled', ${billingAccountId}::uuid, '{}'::jsonb),
+               (${eventIds[1]}::uuid, 'billing.settled', ${billingAccountId}::uuid, '{}'::jsonb)
         RETURNING shard`;
       const locked = Promise.withResolvers<void>();
       blocker = db.begin(async (tx) => {
@@ -2113,11 +2139,11 @@ test("symptom: an unused Outbox consumer shard lock stalls claim and acknowledge
     }
   }));
 
-test("configuration snapshots cannot label stale project state with the new epoch", () =>
+test("configuration snapshots cannot label stale billingAccount state with the new epoch", () =>
   withLedgerDb(async (db) => {
     const catalog = createCatalogRepository(db);
-    const project = await catalog.upsertProject({
-      name: "snapshot-project",
+    const billingAccount = await catalog.upsertBillingAccount({
+      name: "snapshot-billingAccount",
       currency: "USD",
       rpm: 10,
       tpm: 1000,
@@ -2129,7 +2155,7 @@ test("configuration snapshots cannot label stale project state with the new epoc
       await tx`LOCK TABLE public.config_epoch IN ACCESS EXCLUSIVE MODE`;
       lock.resolve();
       await update.promise;
-      await tx`UPDATE public.projects SET enabled = false WHERE id = ${project.id}`;
+      await tx`UPDATE public.billing_accounts SET enabled = false WHERE id = ${billingAccount.id}`;
       await tx`UPDATE public.config_epoch SET version = version + 1`;
     });
     await lock.promise;
@@ -2142,8 +2168,10 @@ test("configuration snapshots cannot label stale project state with the new epoc
     }
     const snapshot = await reading;
     const current = await catalog.loadSnapshot();
-    expect(current.projects.get(project.id)?.enabled).toBe(false);
-    expect(snapshot.projects.get(project.id)?.enabled).toBe(snapshot.epoch < current.epoch);
+    expect(current.billingAccounts.get(billingAccount.id)?.enabled).toBe(false);
+    expect(snapshot.billingAccounts.get(billingAccount.id)?.enabled).toBe(
+      snapshot.epoch < current.epoch,
+    );
   }));
 
 test("the timeout sweep leaves an expired hold alone when it was released concurrently", () =>
@@ -2151,7 +2179,7 @@ test("the timeout sweep leaves an expired hold alone when it was released concur
     const f = await seedFixture(db);
     const requestId = crypto.randomUUID();
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "sweep-race-fund",
       amount_atoms: "500",
@@ -2160,7 +2188,7 @@ test("the timeout sweep leaves an expired hold alone when it was released concur
     const hold = await f.ledger.acquireHold({
       request_id: requestId,
       attempt_id: crypto.randomUUID(),
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       operation: "chat",
       model: "gpt-4o",
@@ -2207,7 +2235,7 @@ test("a settlement constraint error does not roll back another request in the sa
     await db`ALTER TABLE public.billing_charges
       ADD CONSTRAINT test_bad_charge CHECK (request_id <> '00000000-0000-4000-8000-000000000012')`;
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "batch-isolation-fund",
       amount_atoms: "500",
@@ -2220,7 +2248,7 @@ test("a settlement constraint error does not roll back another request in the sa
     for (const item of items) {
       const hold = await f.ledger.acquireHold({
         ...item,
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         operation: "chat",
         model: "gpt-4o",
@@ -2257,7 +2285,7 @@ test("a settlement constraint error does not roll back another request in the sa
       value: { ok: true, customer_atoms: "80", supplier_cost_atoms: "40" },
     });
     expect(await f.ledger.releaseHold(badRequest)).toBe(true);
-    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+    expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
       available_atoms: "420",
       reserved_atoms: "0",
       spent_atoms: "80",
@@ -2291,7 +2319,7 @@ test("funds recovery continues while the business webhook is waiting for a respo
       await worker.start();
       await entered.promise;
       await f.ledger.creditWallet({
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         external_ref: "sweep-independent-fund",
         amount_atoms: "500",
@@ -2301,7 +2329,7 @@ test("funds recovery continues while the business webhook is waiting for a respo
       const hold = await f.ledger.acquireHold({
         request_id: requestId,
         attempt_id: crypto.randomUUID(),
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         operation: "chat",
         model: "gpt-4o",
@@ -2337,7 +2365,7 @@ test("a locked supplier lease cannot stall settlement for a wallet on another fu
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     const ledger = createLedgerEngine(db, { leaseIdleReleaseMs: 60_000, batchWindowMs: 1 });
-    const projectIds = [
+    const billingAccountIds = [
       "e01e6e75-7ad7-45de-87c4-000000000001",
       "e01e6e75-7ad7-45de-87c4-000000000002",
     ];
@@ -2347,13 +2375,13 @@ test("a locked supplier lease cannot stall settlement for a wallet on another fu
     const remaining: string[] = [];
     const expiry = new Date(Date.now() + 30_000).toISOString();
 
-    async function acquire(projectId: string) {
+    async function acquire(billingAccountId: string) {
       const requestId = crypto.randomUUID();
       const attemptId = crypto.randomUUID();
       const hold = await ledger.acquireHold({
         request_id: requestId,
         attempt_id: attemptId,
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         currency: "PTS",
         operation: "chat",
         model: "gpt-4o",
@@ -2392,8 +2420,8 @@ test("a locked supplier lease cannot stall settlement for a wallet on another fu
         external_ref: "shared-supplier-cells",
         amount_atoms: "500000000",
       });
-      for (const [i, id] of projectIds.entries()) {
-        await f.catalog.upsertProject({
+      for (const [i, id] of billingAccountIds.entries()) {
+        await f.catalog.upsertBillingAccount({
           id,
           name: `lease-lane-${i}`,
           currency: "PTS",
@@ -2402,15 +2430,17 @@ test("a locked supplier lease cannot stall settlement for a wallet on another fu
           concurrency: 500,
         });
         await ledger.creditWallet({
-          project_id: id,
+          billing_account_id: id,
           currency: "PTS",
           kind: "CASH",
           external_ref: `lane-cash-${i}`,
           amount_atoms: "100000000",
         });
       }
-      await Promise.all(projectIds.flatMap((id) => Array.from({ length: 16 }, () => acquire(id))));
-      const [one, two] = await Promise.all(projectIds.map(acquire));
+      await Promise.all(
+        billingAccountIds.flatMap((id) => Array.from({ length: 16 }, () => acquire(id))),
+      );
+      const [one, two] = await Promise.all(billingAccountIds.map(acquire));
       const [row] =
         await db`SELECT supplier_lease_id FROM public.billing_holds WHERE request_id = ${one!.requestId}`;
       expect(row?.supplier_lease_id).toBeTruthy();
@@ -2457,7 +2487,7 @@ test("a wallet row lock timeout does not lose a measured settlement", () =>
       const hold = await ledger.acquireHold({
         request_id: requestId,
         attempt_id: attemptId,
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         operation: "chat",
         model: "gpt-4o",
@@ -2477,7 +2507,7 @@ test("a wallet row lock timeout does not lose a measured settlement", () =>
 
     try {
       await ledger.creditWallet({
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         kind: "CASH",
         external_ref: "lock-retry-cash",
@@ -2560,7 +2590,7 @@ test("symptom: a hold waiting for the sole funded cell blocks a settlement on an
     const id = "e01e6e75-7ad7-45de-87c4-000000000001";
     const requestId = crypto.randomUUID();
     try {
-      await f.catalog.upsertProject({
+      await f.catalog.upsertBillingAccount({
         id,
         name: "only-funded-cell",
         currency: "PTS",
@@ -2569,7 +2599,7 @@ test("symptom: a hold waiting for the sole funded cell blocks a settlement on an
         concurrency: 500,
       });
       await f.ledger.creditWallet({
-        project_id: id,
+        billing_account_id: id,
         currency: "PTS",
         kind: "CASH",
         external_ref: "only-funded-cell-cash",
@@ -2590,7 +2620,7 @@ test("symptom: a hold waiting for the sole funded cell blocks a settlement on an
       const pending = f.ledger.acquireHold({
         request_id: requestId,
         attempt_id: crypto.randomUUID(),
-        project_id: id,
+        billing_account_id: id,
         currency: "PTS",
         operation: "chat",
         model: "gpt-4o",
@@ -2640,7 +2670,7 @@ test("symptom: commit_leased_batch succeeds under least-privilege stg_data outbo
     let dataLedger: ReturnType<typeof createLedgerEngine> | undefined;
     try {
       await f.ledger.creditWallet({
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         kind: "CASH",
         external_ref: `least-priv-${suffix}`,
@@ -2679,7 +2709,7 @@ test("symptom: commit_leased_batch succeeds under least-privilege stg_data outbo
         `GRANT INSERT (journal_id, ordinal, side, entity_id, request_id, reference, kind, currency, account, atoms) ON public.ledger_entries TO ${roleName}`,
       );
       await db.unsafe(
-        `GRANT INSERT (event_id, kind, request_id, project_id, payload) ON public.outbox_events TO ${roleName}`,
+        `GRANT INSERT (event_id, kind, request_id, billing_account_id, payload) ON public.outbox_events TO ${roleName}`,
       );
       await db.unsafe(`GRANT USAGE ON SEQUENCE public.outbox_events_seq_seq TO ${roleName}`);
       await db.unsafe(`GRANT EXECUTE ON FUNCTION public.outbox_shard(UUID) TO ${roleName}`);
@@ -2710,7 +2740,7 @@ test("symptom: commit_leased_batch succeeds under least-privilege stg_data outbo
             dataLedger!.acquireHold({
               request_id: item.requestId,
               attempt_id: item.attemptId,
-              project_id: f.project.id,
+              billing_account_id: f.billingAccount.id,
               currency: "PTS",
               operation: "chat",
               model: "gpt-4o",
@@ -2793,7 +2823,7 @@ test("same-account confirmed-FAILED switchSupplierAttempt preserves active lease
       concurrency: 1000,
     });
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "fast-switch-fund",
       amount_atoms: "100000",
@@ -2810,7 +2840,7 @@ test("same-account confirmed-FAILED switchSupplierAttempt preserves active lease
         f.ledger.acquireHold({
           request_id: item.reqId,
           attempt_id: item.attId,
-          project_id: f.project.id,
+          billing_account_id: f.billingAccount.id,
           currency: "PTS",
           operation: "chat",
           model: "gpt-4o",
@@ -2831,7 +2861,7 @@ test("same-account confirmed-FAILED switchSupplierAttempt preserves active lease
       warmup.map((item) =>
         f.ledger.commitTerminal({
           request_id: item.reqId,
-          project_id: f.project.id,
+          billing_account_id: f.billingAccount.id,
           selected_attempt_id: item.attId,
           channel_id: f.channelA.id,
           billing_price_id: f.flatBillingPrice.id,
@@ -2863,7 +2893,7 @@ test("same-account confirmed-FAILED switchSupplierAttempt preserves active lease
       const h = await f.ledger.acquireHold({
         request_id: reqId,
         attempt_id: attId,
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         operation: "chat",
         model: "gpt-4o",
@@ -2943,7 +2973,7 @@ test("same-account confirmed-FAILED switchSupplierAttempt preserves active lease
 
     const commitFast = await f.ledger.commitTerminal({
       request_id: reqCommit,
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       selected_attempt_id: attCommit2,
       channel_id: channelA2.id,
       billing_price_id: f.flatBillingPrice.id,
@@ -2960,7 +2990,7 @@ test("same-account confirmed-FAILED switchSupplierAttempt preserves active lease
 
     const commitCross = await f.ledger.commitTerminal({
       request_id: reqCross,
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       selected_attempt_id: attCross2,
       channel_id: f.channelB.id,
       billing_price_id: f.flatBillingPrice.id,
@@ -2978,7 +3008,7 @@ test("same-account confirmed-FAILED switchSupplierAttempt preserves active lease
     });
 
     await f.ledger.drain();
-    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+    expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
       available_atoms: "99570",
       reserved_atoms: "0",
       spent_atoms: "430",
@@ -3010,7 +3040,7 @@ test("sweepTimedOutHolds detaches active wallet and supplier leases so swept UNK
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "sweep-detach-fund",
       amount_atoms: "100000",
@@ -3030,7 +3060,7 @@ test("sweepTimedOutHolds detaches active wallet and supplier leases so swept UNK
       const reqLive = crypto.randomUUID();
       const attLive = crypto.randomUUID();
       const baseHold = {
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         operation: "chat" as const,
         model: "gpt-4o",
@@ -3087,7 +3117,7 @@ test("sweepTimedOutHolds detaches active wallet and supplier leases so swept UNK
 
       const liveCommit = await nodeLedger.commitTerminal({
         request_id: reqLive,
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         selected_attempt_id: attLive,
         channel_id: f.channelA.id,
         billing_price_id: f.flatBillingPrice.id,
@@ -3141,7 +3171,7 @@ test("worker periodic sweep drains a large expired-hold backlog in one tick inst
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "worker-drain-fund",
       amount_atoms: "1000000",
@@ -3150,7 +3180,7 @@ test("worker periodic sweep drains a large expired-hold backlog in one tick inst
 
     const total = 620;
     const base = {
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       operation: "chat" as const,
       model: "gpt-4o",
@@ -3216,7 +3246,7 @@ test("symptom: a settlement statement timeout discards measured usage for other 
     try {
       await limitedDb`SELECT 1`;
       await f.ledger.creditWallet({
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         external_ref: "settlement-statement-timeout",
         amount_atoms: "1000",
@@ -3230,7 +3260,7 @@ test("symptom: a settlement statement timeout discards measured usage for other 
           await f.ledger.acquireHold({
             request_id: requestId,
             attempt_id: attemptId,
-            project_id: f.project.id,
+            billing_account_id: f.billingAccount.id,
             currency: "PTS",
             operation: "chat",
             model: "gpt-4o",
@@ -3246,7 +3276,7 @@ test("symptom: a settlement statement timeout discards measured usage for other 
         ).toMatchObject({ ok: true });
         measured.push({
           request_id: requestId,
-          project_id: f.project.id,
+          billing_account_id: f.billingAccount.id,
           selected_attempt_id: attemptId,
           channel_id: f.channelA.id,
           billing_price_id: f.flatBillingPrice.id,
@@ -3307,7 +3337,7 @@ test("direct settlement microbatch isolates lock-timeout holds and releaseHold/m
   withLedgerDb(async (db, dbUrl) => {
     const f = await seedFixture(db);
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "lock-retry-fund",
       amount_atoms: "100000",
@@ -3336,7 +3366,7 @@ test("direct settlement microbatch isolates lock-timeout holds and releaseHold/m
       const reqRetry = crypto.randomUUID();
       const attRetry = crypto.randomUUID();
       const base = {
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         operation: "chat" as const,
         model: "gpt-4o",
@@ -3368,7 +3398,7 @@ test("direct settlement microbatch isolates lock-timeout holds and releaseHold/m
 
       const makeCommit = (request_id: string, selected_attempt_id: string) => ({
         request_id,
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         selected_attempt_id,
         channel_id: f.channelA.id,
         billing_price_id: f.flatBillingPrice.id,
@@ -3430,7 +3460,7 @@ test("symptom: unknown holds stay pending without evidence and duplicate receipt
   await withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "reconciliation-credit",
       amount_atoms: "1000",
@@ -3442,7 +3472,7 @@ test("symptom: unknown holds stay pending without evidence and duplicate receipt
       const result = await f.ledger.acquireHold({
         request_id: requestId,
         attempt_id: attemptId,
-        project_id: f.project.id,
+        billing_account_id: f.billingAccount.id,
         currency: "PTS",
         operation: "chat",
         model: "gpt-4o",
@@ -3482,7 +3512,7 @@ test("symptom: unknown holds stay pending without evidence and duplicate receipt
       );
     }
     expect(await f.ledger.processReconciliation(10)).toEqual({ receipts: 0, waivers: 0 });
-    expect((await f.ledger.getWallet(f.project.id, "PTS"))?.reserved_atoms).toBe("300");
+    expect((await f.ledger.getWallet(f.billingAccount.id, "PTS"))?.reserved_atoms).toBe("300");
 
     expect(
       await f.ledger.submitReconciliationReceipt({ ...receipt(legacy), verdict: "NOT_EXECUTED" }),
@@ -3511,7 +3541,7 @@ test("symptom: unknown holds stay pending without evidence and duplicate receipt
       status: "replayed",
       state: "APPLIED",
     });
-    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+    expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
       reserved_atoms: "100",
       spent_atoms: "13",
     });
@@ -3564,7 +3594,7 @@ test("symptom: unknown holds stay pending without evidence and duplicate receipt
       await worker.stop();
     }
     expect((await f.ledger.getSupplierBalance(f.accountA.id, "USD")).spent_atoms).toBe("38");
-    expect((await f.ledger.getWallet(f.project.id, "PTS"))?.spent_atoms).toBe("13");
+    expect((await f.ledger.getWallet(f.billingAccount.id, "PTS"))?.spent_atoms).toBe("13");
     expect(
       (
         await f.ledger.submitReconciliationReceipt({
@@ -3575,7 +3605,7 @@ test("symptom: unknown holds stay pending without evidence and duplicate receipt
     ).toBe("accepted");
     expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 1, waivers: 0 });
     expect((await f.ledger.getSupplierBalance(f.accountA.id, "USD")).spent_atoms).toBe("38");
-    expect((await f.ledger.getWallet(f.project.id, "PTS"))?.spent_atoms).toBe("26");
+    expect((await f.ledger.getWallet(f.billingAccount.id, "PTS"))?.spent_atoms).toBe("26");
     const [linked] = await db`SELECT c.supplier_journal_id IS NOT NULL AS linked,
       EXISTS (SELECT 1 FROM public.ledger_entries e WHERE e.journal_id=c.supplier_journal_id) AS present
       FROM public.billing_charges c WHERE c.request_id=${supplierFirst.requestId}`;
@@ -3633,7 +3663,7 @@ test("symptom: a late supplier receipt after a bounded customer waiver never reo
   await withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     await f.ledger.creditWallet({
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       external_ref: "waiver-credit",
       amount_atoms: "500",
@@ -3644,7 +3674,7 @@ test("symptom: a late supplier receipt after a bounded customer waiver never reo
     const held = await f.ledger.acquireHold({
       request_id: requestId,
       attempt_id: attemptId,
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       currency: "PTS",
       operation: "chat",
       model: "gpt-4o",
@@ -3665,7 +3695,7 @@ test("symptom: a late supplier receipt after a bounded customer waiver never reo
     expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 0, waivers: 0 });
     await f.ledger.putReconciliationBudget("USD", "39");
     const policy = {
-      project_id: f.project.id,
+      billing_account_id: f.billingAccount.id,
       channel_id: f.channelA.id,
       supplier_currency: "USD",
       enabled: true,
@@ -3679,7 +3709,7 @@ test("symptom: a late supplier receipt after a bounded customer waiver never reo
     await f.ledger.putReconciliationBudget("USD", "40");
     expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 0, waivers: 1 });
     expect(await f.ledger.putReconciliationBudget("USD", "39")).toBeNull();
-    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+    expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
       available_atoms: "500",
       reserved_atoms: "0",
       spent_atoms: "0",
@@ -3710,7 +3740,7 @@ test("symptom: a late supplier receipt after a bounded customer waiver never reo
     ).toBe("accepted");
     expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 1, waivers: 0 });
     expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 0, waivers: 0 });
-    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+    expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
       available_atoms: "500",
       reserved_atoms: "0",
       spent_atoms: "0",

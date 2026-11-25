@@ -145,13 +145,15 @@ test("deployment units match build script targets and expose zero internal admin
 });
 
 test("G7.1 provider plugin architecture eliminates hardcoded vendor enums and channel.kind switches", async () => {
-  const baselineSql = await Bun.file("packages/ledger/src/migrations/0000_v4_baseline.sql").text();
-  expect(baselineSql).not.toMatch(
-    /kind\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*kind\s+IN\s*\(\s*'openai'/,
+  const baselineSql = await Bun.file(
+    "packages/ledger/src/migrations/0000_billing_accounts.sql",
+  ).text();
+  expect(baselineSql).not.toMatch(/CHECK\s*\(.*\bkind\b.*(?:IN|ANY).*'openai'/i);
+  expect(baselineSql).toMatch(
+    /FOREIGN KEY \(provider_plugin_id\) REFERENCES public\.plugins\(id\)/,
   );
-  expect(baselineSql).toContain("provider_plugin_id UUID REFERENCES public.plugins(id)");
-  expect(baselineSql).toContain("adapter_config JSONB NOT NULL DEFAULT '{}'");
-  expect(baselineSql).toContain("adapter_overrides JSONB NOT NULL DEFAULT '{}'");
+  expect(baselineSql).toMatch(/adapter_config jsonb DEFAULT '{}'::jsonb NOT NULL/);
+  expect(baselineSql).toMatch(/adapter_overrides jsonb DEFAULT '{}'::jsonb NOT NULL/);
 
   const upstreamSrc = await Bun.file("apps/gateway/src/upstream.ts").text();
   expect(upstreamSrc).not.toMatch(/switch\s*\(\s*channel\.kind\s*\)/);

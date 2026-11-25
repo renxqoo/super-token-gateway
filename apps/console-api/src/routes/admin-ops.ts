@@ -7,7 +7,7 @@ import {
   channels,
   consoleAuditLogs,
   organizations,
-  projects,
+  billingAccounts,
   sessions,
   users,
 } from "../db/schema.ts";
@@ -36,7 +36,7 @@ const updateOrgStatusSchema = z
   })
   .strict();
 
-const adminUpdateProjectSchema = z
+const adminUpdateBillingAccountSchema = z
   .object({
     name: z.string().trim().min(1).max(120).optional(),
     rpm: z.number().int().min(1).max(10_000_000).optional(),
@@ -293,27 +293,27 @@ export function createAdminOpsRoutes(deps: ConsoleDeps) {
     return c.json({ pending: row?.pending ?? 0 });
   });
 
-  app.get("/projects", async (c) => {
+  app.get("/billing-accounts", async (c) => {
     const { limit, offset } = parseLimitOffset(c, 50, 200);
     const items = await deps.orm
       .select()
-      .from(projects)
-      .orderBy(desc(projects.createdAt))
+      .from(billingAccounts)
+      .orderBy(desc(billingAccounts.createdAt))
       .limit(limit)
       .offset(offset);
     return c.json({ items, limit, offset });
   });
 
-  app.patch("/projects/:projectId", async (c) => {
+  app.patch("/billing-accounts/:billingAccountId", async (c) => {
     const actor = c.get("user");
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
-    const body = await parseJsonBody(c, adminUpdateProjectSchema);
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
+    const body = await parseJsonBody(c, adminUpdateBillingAccountSchema);
     const [existing] = await deps.orm
       .select()
-      .from(projects)
-      .where(eq(projects.id, projectId))
+      .from(billingAccounts)
+      .where(eq(billingAccounts.id, billingAccountId))
       .limit(1);
-    if (!existing) throw new GatewayError(404, "not_found", "Project not found");
+    if (!existing) throw new GatewayError(404, "not_found", "Billing account not found");
     const touchesGateway =
       body.name !== undefined ||
       body.rpm !== undefined ||
@@ -321,7 +321,7 @@ export function createAdminOpsRoutes(deps: ConsoleDeps) {
       body.concurrency !== undefined ||
       body.enabled !== undefined;
     const [updated] = await deps.orm
-      .update(projects)
+      .update(billingAccounts)
       .set({
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.rpm !== undefined ? { rpm: body.rpm } : {}),
@@ -335,22 +335,22 @@ export function createAdminOpsRoutes(deps: ConsoleDeps) {
           : {}),
         ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
         ...(touchesGateway
-          ? { desiredRevision: sql`${projects.desiredRevision} + 1`, syncStatus: "PENDING" }
+          ? { desiredRevision: sql`${billingAccounts.desiredRevision} + 1`, syncStatus: "PENDING" }
           : {}),
         updatedAt: sql`now()`,
       })
-      .where(eq(projects.id, projectId))
+      .where(eq(billingAccounts.id, billingAccountId))
       .returning();
     const synced =
       touchesGateway && updated!.gatewaySynced
-        ? await deps.sync.ensureProjectSynced(projectId)
+        ? await deps.sync.ensureBillingAccountSynced(billingAccountId)
         : updated!;
     await recordAuditLog(deps.orm, {
       actor,
       orgId: existing.orgId,
-      action: "admin.project.update",
-      targetType: "project",
-      targetId: projectId,
+      action: "admin.billing_account.update",
+      targetType: "billing_account",
+      targetId: billingAccountId,
       metadata: body,
     });
     return c.json(synced);

@@ -26,7 +26,7 @@ export function createHoldAcquirer(
     const batchPayload = JSON.stringify(
       items.map((x) => ({
         request_id: x.input.request_id,
-        project_id: x.input.project_id,
+        billing_account_id: x.input.billing_account_id,
         wallet_id: x.walletLease.walletId,
         api_key_id: x.input.api_key_id ?? null,
         pricing_override_id: x.input.pricing_override_id ?? null,
@@ -119,7 +119,7 @@ export function createHoldAcquirer(
           WITH batch AS MATERIALIZED (
             SELECT * FROM jsonb_to_recordset(${batchPayload}::text::jsonb) AS u(
               request_id uuid,
-              project_id uuid,
+              billing_account_id uuid,
               wallet_id uuid,
               api_key_id uuid,
               pricing_override_id uuid,
@@ -163,13 +163,13 @@ export function createHoldAcquirer(
               AND l.state = 'ACTIVE' AND l.expires_at > statement_timestamp() AND a.state = 'ACTIVE'
           )
           INSERT INTO public.billing_holds (
-            request_id, project_id, wallet_id, api_key_id, key_reserved_atoms,
+            request_id, billing_account_id, wallet_id, api_key_id, key_reserved_atoms,
             pricing_override_id, discount_numerator, discount_denominator,
             operation, model, idempotency_key, fingerprint,
             held_atoms, credit_atoms, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state, expires_at
           )
           SELECT
-            u.request_id, u.project_id, u.wallet_id, u.api_key_id, 0,
+            u.request_id, u.billing_account_id, u.wallet_id, u.api_key_id, 0,
             u.pricing_override_id, u.discount_numerator, u.discount_denominator,
             u.operation, u.model, NULL, u.fingerprint,
             u.held_atoms, 0, '[]'::jsonb, u.supplier_holds, u.wallet_lease_id, u.supplier_lease_id, 'HELD', u.expires_at
@@ -197,7 +197,7 @@ export function createHoldAcquirer(
     for (const x of items) {
       if (!admitted.has(x.input.request_id)) {
         retireLeases(x);
-        out.push(acquireQueues[walletLane(x.input.project_id)]!.enqueue(x.input));
+        out.push(acquireQueues[walletLane(x.input.billing_account_id)]!.enqueue(x.input));
         continue;
       }
       leases.trackHold({
@@ -205,7 +205,7 @@ export function createHoldAcquirer(
         walletLeaseId: x.walletLease.leaseId,
         supplierLeaseId: x.supplierLease.leaseId,
         walletId: x.walletLease.walletId,
-        projectId: x.input.project_id,
+        billingAccountId: x.input.billing_account_id,
         apiKeyId: x.input.api_key_id ?? null,
         pricingOverrideId: x.input.pricing_override_id ?? null,
         discountNumerator: x.input.discount_numerator ?? null,
@@ -271,18 +271,18 @@ export function createHoldAcquirer(
 
   return {
     async findIdempotentHold(
-      projectId: string,
+      billingAccountId: string,
       operation: AcquireHoldInput["operation"],
       key: string,
     ) {
       const [hold] = await db<{ request_id: string; fingerprint: string; state: string }[]>`
         SELECT request_id, fingerprint, state FROM public.billing_holds
-        WHERE project_id=${projectId}::uuid AND operation=${operation} AND idempotency_key=${key}
+        WHERE billing_account_id=${billingAccountId}::uuid AND operation=${operation} AND idempotency_key=${key}
       `;
       return hold;
     },
     acquireHold(input: AcquireHoldInput): Promise<AcquireHoldResult> {
-      const lane = walletLane(input.project_id);
+      const lane = walletLane(input.billing_account_id);
       if (leases.canAcquire() && input.idempotency_key === null && !input.enforce_key_spend_limit) {
         const customerAtoms = parseAtoms(input.customer_atoms);
         const supplierAtoms = parseAtoms(input.supplier_atoms);

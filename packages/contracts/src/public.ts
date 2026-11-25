@@ -56,7 +56,7 @@ export const requestPolicySchema = z
   })
   .strict();
 export type RequestPolicy = z.infer<typeof requestPolicySchema>;
-export const projectSchema = z
+export const billingAccountSchema = z
   .object({
     name: z.string().min(1).max(100),
     external_ref: z.string().max(200).optional(),
@@ -188,7 +188,7 @@ export const routePatchSchema = z
     }
   });
 
-export interface Project {
+export interface BillingAccount {
   id: string;
   name: string;
   enabled: boolean;
@@ -203,7 +203,7 @@ export interface Project {
 }
 export interface Credential {
   id: string;
-  project_id: string;
+  billing_account_id: string;
   principal_id?: string | null;
   role?: string;
   allowed_cidrs?: string[];
@@ -250,7 +250,7 @@ export const principalPatchSchema = z
     ...quotaFields,
   })
   .strict();
-export const projectPatchSchema = z
+export const billingAccountPatchSchema = z
   .object({
     enabled: z.boolean().optional(),
     name: z.string().min(1).max(100).optional(),

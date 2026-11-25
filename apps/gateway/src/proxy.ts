@@ -24,7 +24,7 @@ import type {
   ModelRecord,
   PluginAuditEntry,
   PriceVersionRecord,
-  ProjectRecord,
+  BillingAccountRecord,
   RouteRecord,
 } from "@gateway/ledger";
 import {
@@ -63,7 +63,7 @@ import {
   clientAddress,
   inCidrs,
   Lifecycle,
-  PROJECT_API_KEY_PATTERN,
+  BILLING_ACCOUNT_API_KEY_PATTERN,
   readBounded,
   sha256,
   SmartRouter,
@@ -320,6 +320,10 @@ function extractApiKey(c: InferenceContext, operation?: Operation): string | nul
   return null;
 }
 
+export function billingAccountQuotaScope(id: string): string {
+  return `billing-account:${id}`;
+}
+
 export function authenticateRequest(
   c: InferenceContext,
   snap: ConfigSnapshot,
@@ -327,10 +331,10 @@ export function authenticateRequest(
   operation?: Operation,
   peerAddress?: string | (() => string | undefined),
   state?: ProxyRuntimeState,
-): { key: ApiKeyRecord; project: ProjectRecord } {
+): { key: ApiKeyRecord; billingAccount: BillingAccountRecord } {
   const rawKey = extractApiKey(c, operation);
   if (!rawKey) throw new GatewayError(401, "unauthorized", "Missing API key");
-  if (!PROJECT_API_KEY_PATTERN.test(rawKey)) {
+  if (!BILLING_ACCOUNT_API_KEY_PATTERN.test(rawKey)) {
     throw new GatewayError(401, "unauthorized", "Invalid API key");
   }
   const key = state
@@ -343,6 +347,21 @@ export function authenticateRequest(
   if (operation !== undefined && key.role === "VIEWER") {
     throw new GatewayError(403, "forbidden", "API key role cannot invoke models");
   }
+  assertKeyNetworkAndOperation(c, key, config, operation, peerAddress);
+  const billingAccount = snap.billingAccounts.get(key.billing_account_id);
+  if (!billingAccount || !billingAccount.enabled) {
+    throw new GatewayError(403, "billing_account_disabled", "Billing account is disabled");
+  }
+  return { key, billingAccount };
+}
+
+export function assertKeyNetworkAndOperation(
+  c: InferenceContext,
+  key: Pick<ApiKeyRecord, "allowed_cidrs" | "operations">,
+  config: GatewayConfig,
+  operation?: string,
+  peerAddress?: string | (() => string | undefined),
+): void {
   if (key.allowed_cidrs.length > 0) {
     const resolvedPeer = typeof peerAddress === "function" ? peerAddress() : peerAddress;
     const addr = clientAddress(
@@ -357,11 +376,6 @@ export function authenticateRequest(
   if (operation !== undefined && key.operations.length > 0 && !key.operations.includes(operation)) {
     throw new GatewayError(403, "operation_not_allowed", "API key cannot invoke this operation");
   }
-  const project = snap.projects.get(key.project_id);
-  if (!project || !project.enabled) {
-    throw new GatewayError(403, "project_disabled", "Project is disabled");
-  }
-  return { key, project };
 }
 
 function resolveOutputBound(body: Record<string, unknown>, model: ModelRecord): number {
@@ -629,10 +643,10 @@ export async function handleInferenceRequest(
 
   let releaseGuard: (() => void) | undefined;
   let releaseBodyBuffer: (() => void) | undefined;
-  let releaseLocalProjectSlot: (() => void) | null = null;
+  let releaseLocalBillingAccountSlot: (() => void) | null = null;
   let streamOwnsGuard = false;
   let drainAborted = false;
-  let projectPermitRevoked = false;
+  let billingAccountPermitRevoked = false;
   let channelPermitRevoked = false;
   let activeAbortNotify: ((reason: unknown) => void) | null = null;
   let activeLinkedDispose: (() => void) | null = null;
@@ -649,7 +663,7 @@ export async function handleInferenceRequest(
     };
     if (drainAborted) {
       trigger(new Error("Gateway shutting down"));
-    } else if (projectPermitRevoked || (includeChannelPermit && channelPermitRevoked)) {
+    } else if (billingAccountPermitRevoked || (includeChannelPermit && channelPermitRevoked)) {
       trigger(new Error("Shared concurrency permit could not be renewed"));
     }
     let singleExtra: AbortSignal | undefined;
@@ -680,18 +694,18 @@ export async function handleInferenceRequest(
     return { controller, signal, trigger, dispose };
   };
 
-  let releaseProjectLimit: (() => void) | null = null;
+  let releaseBillingAccountLimit: (() => void) | null = null;
   let releaseChannelLimit: (() => void) | null = null;
   let activeDispatch: PreparedDispatch | undefined;
   let activeDispatchTiming: ReturnType<typeof createTransportTiming> | undefined;
   const releaseLimiters = () => {
     releaseChannelLimit?.();
     releaseChannelLimit = null;
-    releaseProjectLimit?.();
-    releaseProjectLimit = null;
+    releaseBillingAccountLimit?.();
+    releaseBillingAccountLimit = null;
   };
 
-  let logProjectId: string | null = null;
+  let logBillingAccountId: string | null = null;
   let logModel: string | null = null;
   let logStream = false;
   let logChannel: string | null = null;
@@ -818,13 +832,13 @@ export async function handleInferenceRequest(
         const measurement = requestTrace.measurement;
         if (traceProtocol && deps.config.traceMetrics)
           deps.metrics.observeStreamPhases(operation, status, measurement);
-        if (deps.traceQueue && logProjectId)
+        if (deps.traceQueue && logBillingAccountId)
           deps.traceQueue.offer({
             traceId: trace.traceId,
             spanId: trace.spanId,
             ...(trace.parentSpanId ? { parentSpanId: trace.parentSpanId } : {}),
             requestId,
-            projectId: logProjectId,
+            billingAccountId: logBillingAccountId,
             model: logModel,
             operation,
             status,
@@ -853,7 +867,7 @@ export async function handleInferenceRequest(
     deps.metrics.observeRequest({
       trace_id: trace.traceId,
       request_id: requestId,
-      project_id: logProjectId,
+      billing_account_id: logBillingAccountId,
       model: logModel,
       operation,
       stream: logStream,
@@ -894,7 +908,7 @@ export async function handleInferenceRequest(
       throw new GatewayError(503, "config_unavailable", "Gateway configuration is stale");
     }
     const snap = deps.snapshot.get();
-    const { key, project } = authenticateRequest(
+    const { key, billingAccount } = authenticateRequest(
       c,
       snap,
       deps.config,
@@ -902,15 +916,18 @@ export async function handleInferenceRequest(
       peerAddress,
       state,
     );
-    logProjectId = project.id;
-    const check = deps.checkConsoleAdmission(project, key);
+    logBillingAccountId = billingAccount.id;
+    const check = deps.checkConsoleAdmission(billingAccount, key);
     if (check) await check;
 
-    const localProjRelease = state.tryEnterProject(project.id, project.concurrency);
-    if (!localProjRelease) {
-      throw new GatewayError(429, "rate_limit_concurrency", "Project rate limit exceeded");
+    const localAccountRelease = state.tryEnterBillingAccount(
+      billingAccount.id,
+      billingAccount.concurrency,
+    );
+    if (!localAccountRelease) {
+      throw new GatewayError(429, "rate_limit_concurrency", "Billing account rate limit exceeded");
     }
-    releaseLocalProjectSlot = localProjRelease;
+    releaseLocalBillingAccountSlot = localAccountRelease;
 
     const contentType = reqHeaders.get("content-type") ?? "";
     const isMultipartOp =
@@ -997,18 +1014,18 @@ export async function handleInferenceRequest(
 
     if (operation === "videos" && deps.asyncTasks) {
       const activeTasks = await deps.asyncTasks.countActiveTasks(
-        project.id,
+        billingAccount.id,
         deps.config.asyncTaskCancelCooldownMs ?? 0,
       );
       const maxActive = Math.min(
-        project.concurrency,
-        deps.config.maxActiveAsyncTasksPerProject ?? 10,
+        billingAccount.concurrency,
+        deps.config.maxActiveAsyncTasksPerBillingAccount ?? 10,
       );
       if (activeTasks >= maxActive) {
         throw new GatewayError(
           429,
           "rate_limit_async_tasks",
-          "Too many concurrent active async video tasks for this project",
+          "Too many concurrent active async video tasks for this billingAccount",
         );
       }
     }
@@ -1042,12 +1059,12 @@ export async function handleInferenceRequest(
       Math.ceil((initialChars ?? 200) / 4) + Math.min(outputBound, 4096),
     );
     const projAcq = await deps.cluster.acquireRateLimit(
-      `project:${project.id}`,
-      { rpm: project.rpm, tpm: project.tpm, concurrency: project.concurrency },
+      billingAccountQuotaScope(billingAccount.id),
+      { rpm: billingAccount.rpm, tpm: billingAccount.tpm, concurrency: billingAccount.concurrency },
       estimatedTokens,
       deps.config.holdTtlMs,
       () => {
-        projectPermitRevoked = true;
+        billingAccountPermitRevoked = true;
         activeAbortNotify?.(new Error("Shared concurrency permit could not be renewed"));
       },
     );
@@ -1059,15 +1076,19 @@ export async function handleInferenceRequest(
           "Shared request quota is unavailable",
         );
       }
-      throw new GatewayError(429, `rate_limit_${projAcq.reason}`, "Project rate limit exceeded");
+      throw new GatewayError(
+        429,
+        `rate_limit_${projAcq.reason}`,
+        "Billing account rate limit exceeded",
+      );
     }
-    releaseProjectLimit = projAcq.release;
+    releaseBillingAccountLimit = projAcq.release;
 
     const baseHydrated = state.getHydratedCandidates(
       snap,
       model.name,
       operation,
-      project.currency,
+      billingAccount.currency,
       () => {
         const rawRoutes = snap.routesByModel.get(model.name) ?? [];
         const list: HydratedCandidate[] = [];
@@ -1079,7 +1100,7 @@ export async function handleInferenceRequest(
           const billingPrice = snap.prices.get(r.billing_price_id);
           const costPrice = snap.prices.get(r.cost_version_id);
           if (!billingPrice || !costPrice) continue;
-          if (billingPrice.currency !== project.currency) continue;
+          if (billingPrice.currency !== billingAccount.currency) continue;
           const candidateUpstreamProto = resolveRouteUpstreamProtocol(snap, channel, r, operation);
           list.push({
             id: r.id,
@@ -1189,7 +1210,7 @@ export async function handleInferenceRequest(
       if (steps.length > 0 && !isMultipartOp) {
         if (
           deps.metrics.isTenantPlatformAbsorbExceeded(
-            project.id,
+            billingAccount.id,
             deps.config.platformAbsorbMaxCountPerMinute ?? 100,
             deps.config.platformAbsorbMaxAtomsPerMinute,
           )
@@ -1222,7 +1243,12 @@ export async function handleInferenceRequest(
               "on_request",
               steps,
               snap.plugins,
-              { request_id: requestId, project_id: project.id, model: model.name, operation },
+              {
+                request_id: requestId,
+                billing_account_id: billingAccount.id,
+                model: model.name,
+                operation,
+              },
               partText,
               policyLinked.signal,
             );
@@ -1330,7 +1356,7 @@ export async function handleInferenceRequest(
         canMutateClientBody,
         vertexTokens: deps.vertexTokens,
         wasmExecutor: deps.wasmExecutor,
-        tenantId: project.id,
+        tenantId: billingAccount.id,
         onFieldDropped(source, target, field) {
           deps.metrics.recordProtocolFieldDropped(source, target, field);
         },
@@ -1383,20 +1409,23 @@ export async function handleInferenceRequest(
           )
         : firstInput.body;
       fingerprint = sha256(
-        canonical({ project_id: project.id, operation, model: model.name, body }, (parent, key) => {
-          const literal = numberLiteral(parent, key);
-          if (!literal) return undefined;
-          const rounded = String(Number(literal));
-          if (literal === rounded) return undefined;
-          if (!Number.isFinite(Number(literal))) return literal;
-          const exact = normalizedNumber(literal);
-          const value = normalizedNumber(rounded);
-          return exact.digits === value.digits &&
-            exact.exponent === value.exponent &&
-            exact.negative === value.negative
-            ? undefined
-            : literal;
-        }),
+        canonical(
+          { billing_account_id: billingAccount.id, operation, model: model.name, body },
+          (parent, key) => {
+            const literal = numberLiteral(parent, key);
+            if (!literal) return undefined;
+            const rounded = String(Number(literal));
+            if (literal === rounded) return undefined;
+            if (!Number.isFinite(Number(literal))) return literal;
+            const exact = normalizedNumber(literal);
+            const value = normalizedNumber(rounded);
+            return exact.digits === value.digits &&
+              exact.exponent === value.exponent &&
+              exact.negative === value.negative
+              ? undefined
+              : literal;
+          },
+        ),
       );
     }
     const maxStreamDurationMs = deps.config.streamMaxDurationMs ?? 300_000;
@@ -1502,8 +1531,8 @@ export async function handleInferenceRequest(
         linked.dispose();
       }
       pluginSignal.throwIfAborted();
-      if (c.req.raw.signal.aborted || drainAborted || projectPermitRevoked) {
-        throw admissionError(projectPermitRevoked);
+      if (c.req.raw.signal.aborted || drainAborted || billingAccountPermitRevoked) {
+        throw admissionError(billingAccountPermitRevoked);
       }
       if (!deps.snapshot.isFresh() || deps.snapshot.get().epoch !== snap.epoch) {
         throw new GatewayError(
@@ -1512,7 +1541,7 @@ export async function handleInferenceRequest(
           "Gateway configuration changed before dispatch",
         );
       }
-      const currentAdmission = deps.checkConsoleAdmission(project, key);
+      const currentAdmission = deps.checkConsoleAdmission(billingAccount, key);
       if (currentAdmission) await currentAdmission;
       pluginSignal.throwIfAborted();
     };
@@ -1527,10 +1556,10 @@ export async function handleInferenceRequest(
         if (
           c.req.raw.signal.aborted ||
           drainAborted ||
-          projectPermitRevoked ||
+          billingAccountPermitRevoked ||
           channelPermitRevoked
         ) {
-          return admissionError(projectPermitRevoked || channelPermitRevoked);
+          return admissionError(billingAccountPermitRevoked || channelPermitRevoked);
         }
         return new GatewayError(504, "upstream_timeout", error.message);
       }
@@ -1562,7 +1591,11 @@ export async function handleInferenceRequest(
       const unavailablePolicy = admitOutputPolicy(cand);
       if (unavailablePolicy) {
         if (idempotencyKey !== null) {
-          const prior = await deps.ledger.findIdempotentHold(project.id, operation, idempotencyKey);
+          const prior = await deps.ledger.findIdempotentHold(
+            billingAccount.id,
+            operation,
+            idempotencyKey,
+          );
           if (prior) {
             if (prior.fingerprint !== fingerprint)
               throw mapHoldError(
@@ -1576,7 +1609,7 @@ export async function handleInferenceRequest(
       }
       const effectiveBilling = resolveEffectiveCustomerPrice(
         snap,
-        project.id,
+        billingAccount.id,
         model.name,
         operation,
         cand.billingPrice,
@@ -1610,8 +1643,8 @@ export async function handleInferenceRequest(
         continue;
       }
       preparedInput.pluginSignal.throwIfAborted();
-      if (c.req.raw.signal.aborted || drainAborted || projectPermitRevoked) {
-        throw admissionError(projectPermitRevoked);
+      if (c.req.raw.signal.aborted || drainAborted || billingAccountPermitRevoked) {
+        throw admissionError(billingAccountPermitRevoked);
       }
       try {
         if (idempotencyKey === null)
@@ -1629,20 +1662,20 @@ export async function handleInferenceRequest(
         releaseProbeFor(cand.channel.id);
         continue;
       }
-      if (c.req.raw.signal.aborted || drainAborted || projectPermitRevoked) {
-        throw admissionError(projectPermitRevoked);
+      if (c.req.raw.signal.aborted || drainAborted || billingAccountPermitRevoked) {
+        throw admissionError(billingAccountPermitRevoked);
       }
       const attemptId = fastUuid();
       const holdRes = await deps.ledger.acquireHold({
         request_id: requestId,
         attempt_id: attemptId,
-        project_id: project.id,
+        billing_account_id: billingAccount.id,
         api_key_id: key.id,
         enforce_key_spend_limit: key.spend_limit_atoms !== null,
         pricing_override_id: effectiveBilling.overrideId,
         discount_numerator: effectiveBilling.discountNumerator,
         discount_denominator: effectiveBilling.discountDenominator,
-        currency: project.currency,
+        currency: billingAccount.currency,
         operation,
         model: model.name,
         idempotency_key: idempotencyKey,
@@ -1755,7 +1788,7 @@ export async function handleInferenceRequest(
       }
       const candBilling = resolveEffectiveCustomerPrice(
         snap,
-        project.id,
+        billingAccount.id,
         model.name,
         operation,
         cand.billingPrice,
@@ -1983,7 +2016,7 @@ export async function handleInferenceRequest(
       };
       if (drainAborted) {
         triggerAttemptAbort(new Error("Gateway shutting down"));
-      } else if (projectPermitRevoked || channelPermitRevoked) {
+      } else if (billingAccountPermitRevoked || channelPermitRevoked) {
         triggerAttemptAbort(new Error("Shared concurrency permit could not be renewed"));
       } else if (c.req.raw.signal.aborted) {
         triggerAttemptAbort(c.req.raw.signal.reason);
@@ -2068,7 +2101,7 @@ export async function handleInferenceRequest(
       let prepared: Awaited<ReturnType<typeof prepareUpstreamRequest>>;
       try {
         pluginSignal.throwIfAborted();
-        const quotaLostNow = projectPermitRevoked || channelPermitRevoked;
+        const quotaLostNow = billingAccountPermitRevoked || channelPermitRevoked;
         if (c.req.raw.signal.aborted || drainAborted || quotaLostNow) {
           throw admissionError(quotaLostNow);
         }
@@ -2186,7 +2219,7 @@ export async function handleInferenceRequest(
           lastErrorMessage = err.message;
           continue;
         }
-        const quotaLost = projectPermitRevoked || channelPermitRevoked;
+        const quotaLost = billingAccountPermitRevoked || channelPermitRevoked;
         if (c.req.raw.signal.aborted || drainAborted || quotaLost) {
           releaseProbeFor(cand.channel_id);
           releaseUnusedProbes(cursor + 1);
@@ -2446,7 +2479,7 @@ export async function handleInferenceRequest(
             }
             await commitMeasured({
               request_id: requestId,
-              project_id: project.id,
+              billing_account_id: billingAccount.id,
               selected_attempt_id: activeAttemptId,
               channel_id: cand.channel.id,
               billing_price_id: candBilling.price.id,
@@ -2508,7 +2541,7 @@ export async function handleInferenceRequest(
                 executor: deps.wasmExecutor,
                 plugin: prepared.resolvedProvider.plugin,
                 config: prepared.resolvedProvider.config,
-                tenantId: project.id,
+                tenantId: billingAccount.id,
                 signal: getPostResponseSignal(),
                 ...(deps.config.pluginSigningPublicKeyPem
                   ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
@@ -2526,9 +2559,9 @@ export async function handleInferenceRequest(
               pluginSignal.throwIfAborted();
               releaseUnusedProbes(cursor + 1);
               await finalizeHold("unknown");
-              if (c.req.raw.signal.aborted || drainAborted || projectPermitRevoked) {
+              if (c.req.raw.signal.aborted || drainAborted || billingAccountPermitRevoked) {
                 releaseProbeFor(cand.channel.id);
-                throw admissionError(projectPermitRevoked);
+                throw admissionError(billingAccountPermitRevoked);
               }
               if (err instanceof WasmCapacityError) {
                 releaseProbeFor(cand.channel.id);
@@ -2773,7 +2806,12 @@ export async function handleInferenceRequest(
                 "on_response",
                 cand.route.plugin_pipeline,
                 snap.plugins,
-                { request_id: requestId, project_id: project.id, model: model.name, operation },
+                {
+                  request_id: requestId,
+                  billing_account_id: billingAccount.id,
+                  model: model.name,
+                  operation,
+                },
                 respText,
                 getPostResponseSignal(),
               );
@@ -2803,7 +2841,7 @@ export async function handleInferenceRequest(
 
             const commitRes = await commitMeasured({
               request_id: requestId,
-              project_id: project.id,
+              billing_account_id: billingAccount.id,
               selected_attempt_id: activeAttemptId,
               channel_id: cand.channel.id,
               billing_price_id: candBilling.price.id,
@@ -2824,7 +2862,7 @@ export async function handleInferenceRequest(
               moderation_blocked: responseBlocked,
             });
             if (responseBlocked && !isContentDecision) {
-              deps.metrics.recordPlatformAbsorb(project.id, commitRes.supplier_cost_atoms);
+              deps.metrics.recordPlatformAbsorb(billingAccount.id, commitRes.supplier_cost_atoms);
             }
 
             if (operation === "videos" && deps.asyncTasks && !responseBlocked) {
@@ -2837,7 +2875,7 @@ export async function handleInferenceRequest(
                     id: taskId,
                     request_id: requestId,
                     charge_id: commitRes.charge_id,
-                    project_id: project.id,
+                    billing_account_id: billingAccount.id,
                     api_key_id: key.id,
                     channel_id: cand.channel.id,
                     model: model.name,
@@ -2955,7 +2993,7 @@ export async function handleInferenceRequest(
               executor: deps.wasmExecutor,
               plugin: prepared.resolvedProvider.plugin,
               config: prepared.resolvedProvider.config,
-              tenantId: project.id,
+              tenantId: billingAccount.id,
               signal: ensureAttemptSignal(),
               ...(deps.config.pluginSigningPublicKeyPem
                 ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
@@ -3001,7 +3039,7 @@ export async function handleInferenceRequest(
           releaseChannelLimit?.();
           releaseChannelLimit = null;
           pluginSignal.throwIfAborted();
-          const quotaLost = projectPermitRevoked || channelPermitRevoked;
+          const quotaLost = billingAccountPermitRevoked || channelPermitRevoked;
           if (c.req.raw.signal.aborted || drainAborted || quotaLost) {
             releaseProbeFor(cand.channel_id);
             releaseUnusedProbes(cursor + 1);
@@ -3111,7 +3149,7 @@ export async function handleInferenceRequest(
             requestId,
           );
         }
-        const quotaLost = projectPermitRevoked || channelPermitRevoked;
+        const quotaLost = billingAccountPermitRevoked || channelPermitRevoked;
         return formatProtocolSseError(
           operation,
           503,
@@ -3131,9 +3169,9 @@ export async function handleInferenceRequest(
           },
           streamSignal,
         );
-      const capturedProjectLimit = releaseProjectLimit;
+      const capturedBillingAccountLimit = releaseBillingAccountLimit;
       const capturedChannelLimit = releaseChannelLimit;
-      const capturedLocalProjectSlot = releaseLocalProjectSlot;
+      const capturedLocalBillingAccountSlot = releaseLocalBillingAccountSlot;
 
       let streamCleanupDone = false;
       let streamCounted = false;
@@ -3163,8 +3201,8 @@ export async function handleInferenceRequest(
         activeLinkedDispose = null;
         finishStreamProbe();
         capturedChannelLimit?.();
-        capturedProjectLimit?.();
-        capturedLocalProjectSlot?.();
+        capturedBillingAccountLimit?.();
+        capturedLocalBillingAccountSlot?.();
         releaseBodyBuffer?.();
         guard.release();
       };
@@ -3181,9 +3219,9 @@ export async function handleInferenceRequest(
               : {}),
           }),
         });
-        releaseProjectLimit = null;
+        releaseBillingAccountLimit = null;
         releaseChannelLimit = null;
-        releaseLocalProjectSlot = null;
+        releaseLocalBillingAccountSlot = null;
         streamOwnsGuard = true;
         if (!streamCleanupDone) {
           streamCounted = true;
@@ -3345,7 +3383,7 @@ export async function handleInferenceRequest(
               }
               await commitMeasured({
                 request_id: requestId,
-                project_id: project.id,
+                billing_account_id: billingAccount.id,
                 selected_attempt_id: activeAttemptId,
                 channel_id: cand.channel.id,
                 billing_price_id: candBilling.price.id,
@@ -3441,7 +3479,12 @@ export async function handleInferenceRequest(
         deps.pluginEngine.createStreamSession(
           cand.route.plugin_pipeline,
           snap.plugins,
-          { request_id: requestId, project_id: project.id, model: model.name, operation },
+          {
+            request_id: requestId,
+            billing_account_id: billingAccount.id,
+            model: model.name,
+            operation,
+          },
           () => attemptAbort.abort(new Error("moderation_blocked")),
           streamSignal,
         );
@@ -3486,7 +3529,7 @@ export async function handleInferenceRequest(
                   executor: deps.wasmExecutor,
                   plugin: wasmProvider.plugin,
                   config: wasmProvider.config,
-                  tenantId: project.id,
+                  tenantId: billingAccount.id,
                   signal: streamSignal,
                   ...(deps.config.pluginSigningPublicKeyPem
                     ? { signingPublicKeyPem: deps.config.pluginSigningPublicKeyPem }
@@ -3642,7 +3685,7 @@ export async function handleInferenceRequest(
                   );
                   const commitRes = await commitMeasured({
                     request_id: requestId,
-                    project_id: project.id,
+                    billing_account_id: billingAccount.id,
                     selected_attempt_id: activeAttemptId,
                     channel_id: cand.channel.id,
                     billing_price_id: candBilling.price.id,
@@ -3663,7 +3706,10 @@ export async function handleInferenceRequest(
                     moderation_blocked: true,
                   });
                   if (!classified.isContentDecision) {
-                    deps.metrics.recordPlatformAbsorb(project.id, commitRes.supplier_cost_atoms);
+                    deps.metrics.recordPlatformAbsorb(
+                      billingAccount.id,
+                      commitRes.supplier_cost_atoms,
+                    );
                   }
                   streamProbeDone = true;
                   observeAttemptSuccess(latencyMs);
@@ -3728,7 +3774,7 @@ export async function handleInferenceRequest(
 
               await commitMeasured({
                 request_id: requestId,
-                project_id: project.id,
+                billing_account_id: billingAccount.id,
                 selected_attempt_id: activeAttemptId,
                 channel_id: cand.channel.id,
                 billing_price_id: candBilling.price.id,
@@ -4043,7 +4089,7 @@ export async function handleInferenceRequest(
                 );
                 const commitRes = await commitMeasured({
                   request_id: requestId,
-                  project_id: project.id,
+                  billing_account_id: billingAccount.id,
                   selected_attempt_id: activeAttemptId,
                   channel_id: cand.channel.id,
                   billing_price_id: candBilling.price.id,
@@ -4064,7 +4110,10 @@ export async function handleInferenceRequest(
                   moderation_blocked: true,
                 });
                 if (!classified.isContentDecision) {
-                  deps.metrics.recordPlatformAbsorb(project.id, commitRes.supplier_cost_atoms);
+                  deps.metrics.recordPlatformAbsorb(
+                    billingAccount.id,
+                    commitRes.supplier_cost_atoms,
+                  );
                 }
                 streamProbeDone = true;
                 observeAttemptSuccess(latencyMs);
@@ -4127,7 +4176,7 @@ export async function handleInferenceRequest(
 
             await commitMeasured({
               request_id: requestId,
-              project_id: project.id,
+              billing_account_id: billingAccount.id,
               selected_attempt_id: activeAttemptId,
               channel_id: cand.channel.id,
               billing_price_id: candBilling.price.id,
@@ -4237,8 +4286,8 @@ export async function handleInferenceRequest(
       releaseOutputAdmission = undefined;
       activeLinkedDispose?.();
       activeLinkedDispose = null;
-      releaseLocalProjectSlot?.();
-      releaseLocalProjectSlot = null;
+      releaseLocalBillingAccountSlot?.();
+      releaseLocalBillingAccountSlot = null;
       releaseBodyBuffer?.();
       releaseGuard?.();
     }

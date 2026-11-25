@@ -2,7 +2,12 @@ import { Hono, type Context, type Handler, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { SQL } from "bun";
 import { z } from "zod";
-import { GatewayError, pricingSchema, usageSchema } from "@gateway/contracts";
+import {
+  assertKnownQueryParameters,
+  GatewayError,
+  pricingSchema,
+  usageSchema,
+} from "@gateway/contracts";
 import {
   canonical,
   DomainError,
@@ -54,8 +59,8 @@ import {
 import {
   createKey,
   encrypt,
-  PROJECT_API_KEY_LENGTH,
-  PROJECT_API_KEY_PATTERN,
+  BILLING_ACCOUNT_API_KEY_LENGTH,
+  BILLING_ACCOUNT_API_KEY_PATTERN,
   validateAuthCredentials,
   validateBaseUrl,
   validateCidr,
@@ -468,11 +473,7 @@ const consoleOrganizationAdmissionSchema = z
   })
   .strict();
 
-const consoleProjectBindingSchema = z
-  .object({ organization_id: z.uuid(), console_project_id: z.uuid() })
-  .strict();
-
-const upsertProjectSchema = z
+const upsertBillingAccountSchema = z
   .object({
     id: z.uuid().optional(),
     external_ref: z.string().max(200).nullable().optional(),
@@ -489,9 +490,14 @@ const upsertProjectSchema = z
 const upsertApiKeySchema = z
   .object({
     id: z.uuid().optional(),
-    project_id: z.uuid(),
+    billing_account_id: z.uuid(),
+    rotated_from_key_id: z.uuid().optional(),
     name: z.string().min(1).max(120).default("default"),
-    raw_key: z.string().length(PROJECT_API_KEY_LENGTH).regex(PROJECT_API_KEY_PATTERN).optional(),
+    raw_key: z
+      .string()
+      .length(BILLING_ACCOUNT_API_KEY_LENGTH)
+      .regex(BILLING_ACCOUNT_API_KEY_PATTERN)
+      .optional(),
     role: z.enum(["ADMIN", "BILLING", "INVOKER", "VIEWER"]).default("INVOKER"),
     allowed_cidrs: z.array(z.string().min(2).max(64)).max(100).default([]),
     models: z.array(z.string().min(1).max(150)).max(1000).default([]),
@@ -513,7 +519,7 @@ const resetApiKeySpendSchema = z
 const upsertPricingOverrideSchema = z
   .object({
     id: z.uuid().optional(),
-    project_id: z.uuid(),
+    billing_account_id: z.uuid(),
     model_name: z.union([z.literal("*"), z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,149}$/)]),
     operation: z.union([z.literal("*"), operationEnum]).default("*"),
     override_kind: z.enum(["EXACT_PRICE", "MULTIPLIER"]),
@@ -838,7 +844,6 @@ const adjustWalletSchema = z
     lot_kind: z.enum(["CASH", "GRANT"]).optional(),
     force_debt: z.boolean().optional(),
     reason: z.string().min(1).max(500),
-    actor: z.string().min(1).max(120).optional(),
   })
   .strict();
 
@@ -847,7 +852,6 @@ const setWalletFreezeSchema = z
     currency: currencySchema.default("USD"),
     frozen: z.boolean(),
     reason: z.string().min(1).max(500),
-    actor: z.string().min(1).max(120).optional(),
   })
   .strict();
 
@@ -867,7 +871,6 @@ const adjustSupplierBalanceSchema = z
     delta_atoms: signedAtomsSchema,
     allow_negative: z.boolean().optional(),
     reason: z.string().min(1).max(500),
-    actor: z.string().min(1).max(120).optional(),
   })
   .strict();
 
@@ -879,13 +882,11 @@ const resolveRequestSchema = z
     supplier_cost_atoms: nonNegativeAtomsSchema.optional(),
     supplier_cost_version_id: z.uuid().optional(),
     reason: z.string().min(1).max(500),
-    actor: z.string().min(1).max(120).optional(),
   })
   .strict();
 
 const supplierResolutionFields = {
   reason: resolveRequestSchema.shape.reason,
-  actor: resolveRequestSchema.shape.actor,
   evidence_ref: z.string().trim().min(1).max(512),
 };
 
@@ -925,7 +926,7 @@ const reconciliationReceiptSchema = z.discriminatedUnion("verdict", [
 
 const reconciliationPolicySchema = z
   .object({
-    project_id: z.uuid(),
+    billing_account_id: z.uuid(),
     channel_id: z.uuid(),
     supplier_currency: currencySchema,
     enabled: z.boolean().default(false),
@@ -975,19 +976,17 @@ function parseUuid(value: string | undefined, label: string): string {
 type AdminEnv = { Variables: { principal: InternalPrincipal } };
 type AdminContext = Context<AdminEnv>;
 
-function resolutionActor(c: AdminContext, value?: string): string {
-  const principal = c.get("principal");
-  if (!principal.legacy) return principal.id;
-  if (!value)
-    throw new GatewayError(400, "validation_error", "actor is required for legacy credentials");
-  return value;
-}
-
 function requireConsumer(c: AdminContext, consumer: string): void {
   const principal = c.get("principal");
-  if (!principal.legacy && !principal.consumers.includes(consumer)) {
+  if (!principal.consumers.includes(consumer)) {
     throw new GatewayError(403, "forbidden", "Consumer is outside the credential scope");
   }
+}
+
+function billingAccountFilter(c: Context, ...otherFilters: string[]) {
+  assertKnownQueryParameters(c.req.query(), ["billing_account_id", ...otherFilters]);
+  const id = c.req.query("billing_account_id");
+  return id === undefined ? undefined : parseUuid(id, "billing_account_id");
 }
 
 export function createInternalApi(deps: {
@@ -1029,7 +1028,6 @@ export function createInternalApi(deps: {
       const principal = authenticateInternal(
         c.req.header("authorization"),
         deps.config.internalCredentials,
-        deps.config.adminToken,
       );
       if (!principal)
         return c.json(
@@ -1162,7 +1160,8 @@ export function createInternalApi(deps: {
         "plugin_revision_conflict",
         "plugin_release_conflict",
         "stale_revision",
-        "console_project_binding_conflict",
+        "console_billing_account_binding_conflict",
+        "api_key_scope_conflict",
         "price_version_conflict",
         "reconcile_required_conflict",
         "insufficient_balance",
@@ -1198,21 +1197,27 @@ export function createInternalApi(deps: {
     c.json({ channels: deps.router.snapshot() }),
   );
 
-  jsonRoute("PUT", "/internal/v1/projects", "catalog", upsertProjectSchema, async (c, body) => {
-    const rec = await deps.catalog.upsertProject({
-      ...(body.id ? { id: body.id } : {}),
-      ...(body.external_ref !== undefined ? { external_ref: body.external_ref } : {}),
-      name: body.name,
-      currency: body.currency,
-      rpm: body.rpm,
-      tpm: body.tpm,
-      concurrency: body.concurrency,
-      enabled: body.enabled,
-      ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),
-    });
-    await onConfigUpdated(rec.config_epoch);
-    return c.json(rec);
-  });
+  jsonRoute(
+    "PUT",
+    "/internal/v1/billing-accounts",
+    "catalog",
+    upsertBillingAccountSchema,
+    async (c, body) => {
+      const rec = await deps.catalog.upsertBillingAccount({
+        ...(body.id ? { id: body.id } : {}),
+        ...(body.external_ref !== undefined ? { external_ref: body.external_ref } : {}),
+        name: body.name,
+        currency: body.currency,
+        rpm: body.rpm,
+        tpm: body.tpm,
+        concurrency: body.concurrency,
+        enabled: body.enabled,
+        ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),
+      });
+      await onConfigUpdated(rec.config_epoch);
+      return c.json(rec);
+    },
+  );
 
   jsonRoute(
     "PUT",
@@ -1231,26 +1236,13 @@ export function createInternalApi(deps: {
     },
   );
 
-  jsonRoute(
-    "PUT",
-    "/internal/v1/console/projects/:projectId/binding",
-    "security",
-    consoleProjectBindingSchema,
-    async (c, body) => {
-      const id = parseUuid(c.req.param("projectId"), "projectId");
-      const ref = `console:org:${body.organization_id.toLowerCase()}:project:${body.console_project_id.toLowerCase()}`;
-      const result = await deps.catalog.bindConsoleProject(id, ref);
-      if (result.config_epoch !== undefined) await onConfigUpdated(result.config_epoch);
-      return c.json(result);
-    },
-  );
-
   jsonRoute("PUT", "/internal/v1/api-keys", "security", upsertApiKeySchema, async (c, body) => {
     const validatedCidrs = body.allowed_cidrs.map((cidr) => validateCidr(cidr));
     const rawKey = body.raw_key ?? createKey();
     const rec = await deps.catalog.upsertApiKey({
       ...(body.id ? { id: body.id } : {}),
-      project_id: body.project_id,
+      billing_account_id: body.billing_account_id,
+      ...(body.rotated_from_key_id ? { rotated_from_key_id: body.rotated_from_key_id } : {}),
       name: body.name,
       verifier: verifier(rawKey, deps.config.keyPepper),
       prefix: rawKey.slice(0, 12),
@@ -1414,7 +1406,7 @@ export function createInternalApi(deps: {
     async (c, body) => {
       const rec = await deps.catalog.upsertPricingOverride({
         ...(body.id ? { id: body.id } : {}),
-        project_id: body.project_id,
+        billing_account_id: body.billing_account_id,
         model_name: body.model_name,
         operation: body.operation,
         override_kind: body.override_kind,
@@ -1430,10 +1422,8 @@ export function createInternalApi(deps: {
   );
 
   route("GET", "/internal/v1/pricing-overrides", "auditor", async (c) => {
-    const projectId = c.req.query("project_id");
-    const items = await deps.catalog.listPricingOverrides(
-      projectId ? parseUuid(projectId, "project_id") : undefined,
-    );
+    const billingAccountId = billingAccountFilter(c);
+    const items = await deps.catalog.listPricingOverrides(billingAccountId);
     return c.json({ items });
   });
 
@@ -1888,7 +1878,7 @@ export function createInternalApi(deps: {
         snap.plugins,
         {
           request_id: crypto.randomUUID(),
-          project_id: "dry-run",
+          billing_account_id: "dry-run",
           model: body.model,
           operation: body.operation,
         },
@@ -1901,13 +1891,13 @@ export function createInternalApi(deps: {
 
   jsonRoute(
     "POST",
-    "/internal/v1/wallets/:projectId/credits",
+    "/internal/v1/wallets/:billingAccountId/credits",
     "finance",
     creditWalletSchema,
     async (c, body) => {
-      const projectId = parseUuid(c.req.param("projectId"), "projectId");
+      const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
       const res = await deps.ledger.creditWallet({
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         currency: body.currency,
         external_ref: body.external_ref,
         amount_atoms: body.amount_atoms,
@@ -1924,13 +1914,13 @@ export function createInternalApi(deps: {
 
   jsonRoute(
     "POST",
-    "/internal/v1/wallets/:projectId/credit-policy",
+    "/internal/v1/wallets/:billingAccountId/credit-policy",
     "finance",
     creditPolicySchema,
     async (c, body) => {
-      const projectId = parseUuid(c.req.param("projectId"), "projectId");
+      const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
       const res = await deps.ledger.configureWalletCredit({
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         currency: body.currency,
         expected_version: body.expected_version,
         credit_limit_atoms: body.credit_limit_atoms,
@@ -1942,20 +1932,20 @@ export function createInternalApi(deps: {
 
   jsonRoute(
     "POST",
-    "/internal/v1/wallets/:projectId/adjustments",
+    "/internal/v1/wallets/:billingAccountId/adjustments",
     "finance",
     adjustWalletSchema,
     async (c, body) => {
-      const projectId = parseUuid(c.req.param("projectId"), "projectId");
+      const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
       const res = await deps.ledger.adjustWallet({
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         currency: body.currency,
         external_ref: body.external_ref,
         delta_atoms: body.delta_atoms,
         ...(body.lot_kind ? { lot_kind: body.lot_kind as LotKind } : {}),
         ...(body.force_debt !== undefined ? { force_debt: body.force_debt } : {}),
         reason: body.reason,
-        actor: resolutionActor(c, body.actor),
+        actor: c.get("principal").id,
       });
       return c.json(res);
     },
@@ -1963,29 +1953,29 @@ export function createInternalApi(deps: {
 
   jsonRoute(
     "POST",
-    "/internal/v1/wallets/:projectId/freeze",
+    "/internal/v1/wallets/:billingAccountId/freeze",
     "finance",
     setWalletFreezeSchema,
     async (c, body) => {
-      const projectId = parseUuid(c.req.param("projectId"), "projectId");
+      const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
       const res = await deps.ledger.setWalletFreeze({
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         currency: body.currency,
         frozen: body.frozen,
         reason: body.reason,
-        actor: resolutionActor(c, body.actor),
+        actor: c.get("principal").id,
       });
       return c.json(res);
     },
   );
 
-  route("GET", "/internal/v1/wallets/:projectId", "auditor", async (c) => {
-    const projectId = parseUuid(c.req.param("projectId"), "projectId");
+  route("GET", "/internal/v1/wallets/:billingAccountId", "auditor", async (c) => {
+    const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const currency = parseBody(currencySchema, c.req.query("currency") ?? "USD");
     const includeLots = c.req.query("include_lots") === "true";
     const wallet = includeLots
-      ? await deps.ledger.getWalletWithLots(projectId, currency)
-      : await deps.ledger.getWallet(projectId, currency);
+      ? await deps.ledger.getWalletWithLots(billingAccountId, currency)
+      : await deps.ledger.getWallet(billingAccountId, currency);
     if (!wallet) return c.json({ error: { code: "not_found", message: "Wallet not found" } }, 404);
     return c.json(wallet);
   });
@@ -2056,7 +2046,7 @@ export function createInternalApi(deps: {
         delta_atoms: body.delta_atoms,
         ...(body.allow_negative !== undefined ? { allow_negative: body.allow_negative } : {}),
         reason: body.reason,
-        actor: resolutionActor(c, body.actor),
+        actor: c.get("principal").id,
       });
       if (res.config_epoch !== undefined) {
         await onConfigUpdated(res.config_epoch);
@@ -2089,7 +2079,7 @@ export function createInternalApi(deps: {
           ? { supplier_cost_version_id: body.supplier_cost_version_id }
           : {}),
         reason: body.reason,
-        actor: resolutionActor(c, body.actor),
+        actor: c.get("principal").id,
       });
       return c.json(res);
     },
@@ -2105,7 +2095,7 @@ export function createInternalApi(deps: {
       const attemptId = parseUuid(c.req.param("attemptId"), "attemptId");
       const result = await deps.ledger.resolveSupplierAttempt({
         ...body,
-        actor: resolutionActor(c, body.actor),
+        actor: c.get("principal").id,
         request_id: requestId,
         attempt_id: attemptId,
       });
@@ -2130,11 +2120,10 @@ export function createInternalApi(deps: {
     z
       .object({
         receipts: z.array(reconciliationReceiptSchema).min(1).max(100),
-        actor: z.string().min(1).max(120).optional(),
       })
       .strict(),
     async (c, body) => {
-      const actor = resolutionActor(c, body.actor);
+      const actor = c.get("principal").id;
       const results = [];
       for (const receipt of body.receipts) {
         const result = await deps.ledger.submitReconciliationReceipt({
@@ -2182,7 +2171,6 @@ export function createInternalApi(deps: {
         review_evidence_ref: z.string().trim().min(1).max(512),
         reason: z.string().trim().min(1).max(500),
         customer_usage: usageSchema.nullable().optional(),
-        actor: z.string().min(1).max(120).optional(),
       })
       .strict(),
     async (c, body) => {
@@ -2190,7 +2178,7 @@ export function createInternalApi(deps: {
         ...body,
         attempt_id: parseUuid(c.req.param("attemptId"), "attemptId"),
         customer_usage: body.customer_usage as Usage | null | undefined,
-        actor: resolutionActor(c, body.actor),
+        actor: c.get("principal").id,
       });
       return result
         ? c.json(result)
@@ -2237,7 +2225,15 @@ export function createInternalApi(deps: {
   });
 
   route("GET", "/internal/v1/charges", "auditor", async (c) => {
-    const projectId = c.req.query("project_id");
+    const billingAccountId = billingAccountFilter(
+      c,
+      "api_key_id",
+      "outcome",
+      "from",
+      "to",
+      "limit",
+      "offset",
+    );
     const apiKeyId = c.req.query("api_key_id");
     const outcome = c.req.query("outcome");
     const from = c.req.query("from");
@@ -2245,7 +2241,7 @@ export function createInternalApi(deps: {
     const limit = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
     const offset = c.req.query("offset") ? Number(c.req.query("offset")) : undefined;
     const res = await deps.queries.listCharges({
-      ...(projectId ? { project_id: parseUuid(projectId, "project_id") } : {}),
+      ...(billingAccountId ? { billing_account_id: billingAccountId } : {}),
       ...(apiKeyId ? { api_key_id: parseUuid(apiKeyId, "api_key_id") } : {}),
       ...(outcome
         ? {
@@ -2264,13 +2260,19 @@ export function createInternalApi(deps: {
   });
 
   route("GET", "/internal/v1/async-tasks", "auditor", async (c) => {
-    const projectId = c.req.query("project_id");
+    const billingAccountId = billingAccountFilter(
+      c,
+      "status",
+      "refund_eligibility",
+      "limit",
+      "offset",
+    );
     const status = c.req.query("status");
     const eligibility = c.req.query("refund_eligibility");
     const limit = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
     const offset = c.req.query("offset") ? Number(c.req.query("offset")) : undefined;
     const res = await deps.asyncTasks.listTasks({
-      ...(projectId ? { project_id: parseUuid(projectId, "project_id") } : {}),
+      ...(billingAccountId ? { billing_account_id: billingAccountId } : {}),
       ...(status
         ? {
             status: parseBody(
@@ -2305,7 +2307,18 @@ export function createInternalApi(deps: {
   route("GET", "/internal/v1/funding-operations", "auditor", async (c) => {
     const side = c.req.query("side");
     const entityId = c.req.query("entity_id");
-    const projectId = c.req.query("project_id");
+    const billingAccountId = billingAccountFilter(
+      c,
+      "side",
+      "entity_id",
+      "account_id",
+      "kind",
+      "currency",
+      "from",
+      "to",
+      "limit",
+      "offset",
+    );
     const accountId = c.req.query("account_id");
     const kind = c.req.query("kind");
     const currency = c.req.query("currency");
@@ -2316,7 +2329,7 @@ export function createInternalApi(deps: {
     const res = await deps.queries.listFundingOperations({
       ...(side ? { side: parseBody(z.enum(["CUSTOMER", "SUPPLIER"]), side) } : {}),
       ...(entityId ? { entity_id: parseUuid(entityId, "entity_id") } : {}),
-      ...(projectId ? { project_id: parseUuid(projectId, "project_id") } : {}),
+      ...(billingAccountId ? { billing_account_id: billingAccountId } : {}),
       ...(accountId ? { account_id: parseUuid(accountId, "account_id") } : {}),
       ...(kind
         ? {
@@ -2336,12 +2349,12 @@ export function createInternalApi(deps: {
   });
 
   route("GET", "/internal/v1/finance/summary", "auditor", async (c) => {
-    const projectId = c.req.query("project_id");
+    const billingAccountId = billingAccountFilter(c, "currency", "from", "to");
     const currency = c.req.query("currency");
     const from = c.req.query("from");
     const to = c.req.query("to");
     const res = await deps.queries.getFinanceSummary({
-      ...(projectId ? { project_id: parseUuid(projectId, "project_id") } : {}),
+      ...(billingAccountId ? { billing_account_id: billingAccountId } : {}),
       ...(currency ? { currency: parseBody(currencySchema, currency) } : {}),
       ...(from ? { from } : {}),
       ...(to ? { to } : {}),
@@ -2350,6 +2363,16 @@ export function createInternalApi(deps: {
   });
 
   route("GET", "/internal/v1/ledger-entries", "auditor", async (c) => {
+    assertKnownQueryParameters(c.req.query(), [
+      "side",
+      "entity_id",
+      "request_id",
+      "kind",
+      "from",
+      "to",
+      "limit",
+      "offset",
+    ]);
     const side = c.req.query("side");
     const entityId = c.req.query("entity_id");
     const requestId = c.req.query("request_id");
@@ -2373,7 +2396,7 @@ export function createInternalApi(deps: {
 
   route("GET", "/internal/v1/holds", "auditor", async (c) => {
     const state = c.req.query("state");
-    const projectId = c.req.query("project_id");
+    const billingAccountId = billingAccountFilter(c, "state", "limit", "offset");
     const limit = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
     const offset = c.req.query("offset") ? Number(c.req.query("offset")) : undefined;
     const res = await deps.queries.listHolds({
@@ -2382,7 +2405,7 @@ export function createInternalApi(deps: {
             state: parseBody(z.enum(["HELD", "SETTLED", "RELEASED", "UNKNOWN", "CONFLICT"]), state),
           }
         : {}),
-      ...(projectId ? { project_id: parseUuid(projectId, "project_id") } : {}),
+      ...(billingAccountId ? { billing_account_id: billingAccountId } : {}),
       ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
       ...(offset !== undefined && Number.isFinite(offset) ? { offset } : {}),
     });

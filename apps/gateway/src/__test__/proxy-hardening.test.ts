@@ -5,7 +5,7 @@ import type {
   ApiKeyRecord,
   ChannelRecord,
   PluginRecord,
-  ProjectRecord,
+  BillingAccountRecord,
   RouteRecord,
 } from "@gateway/ledger";
 import {
@@ -38,7 +38,6 @@ function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     dbMaxConnections: 4,
     keyPepper: TEST_PEPPER,
     encryptionKey: "ab".repeat(32),
-    adminToken: "admin-token-0123456789abcdef",
     allowPrivateUpstreams: true,
     privateUpstreamCidrs: [],
     trustedProxyCidrs: [],
@@ -53,7 +52,7 @@ function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   };
 }
 
-function makeProject(id: string, concurrency: number): ProjectRecord {
+function makeBillingAccount(id: string, concurrency: number): BillingAccountRecord {
   return {
     id,
     name: id,
@@ -66,10 +65,10 @@ function makeProject(id: string, concurrency: number): ProjectRecord {
   };
 }
 
-function makeApiKey(rawKey: string, projectId: string, pepper = TEST_PEPPER): ApiKeyRecord {
+function makeApiKey(rawKey: string, billingAccountId: string, pepper = TEST_PEPPER): ApiKeyRecord {
   return {
     id: `key-${rawKey}`,
-    project_id: projectId,
+    billing_account_id: billingAccountId,
     name: rawKey,
     prefix: rawKey.slice(0, 8),
     verifier: verifier(rawKey, pepper),
@@ -86,19 +85,19 @@ function makeApiKey(rawKey: string, projectId: string, pepper = TEST_PEPPER): Ap
 
 function makeSnapshot(
   epoch: number,
-  projects: ProjectRecord[],
+  billingAccounts: BillingAccountRecord[],
   keys: ApiKeyRecord[],
 ): ConfigSnapshot {
   return {
     epoch,
     lineageToken: "11111111-1111-4111-8111-111111111111",
-    projects: new Map(projects.map((p) => [p.id, p])),
+    billingAccounts: new Map(billingAccounts.map((p) => [p.id, p])),
     keysByVerifier: new Map(keys.map((k) => [k.verifier, k])),
     accounts: new Map(),
     channels: new Map(),
     models: new Map(),
     prices: new Map(),
-    pricingOverridesByProject: new Map(),
+    pricingOverridesByBillingAccount: new Map(),
     routesByModel: new Map(),
     plugins: new Map(),
     revokedPlugins: new Set(),
@@ -205,7 +204,7 @@ function sendSlowJsonUpload(
 }
 
 test("F1 symptom: slow JSON upload times out with 408 and frees admission slot instead of hanging indefinitely", async () => {
-  const proj = makeProject("11111111-1111-4111-8111-111111111111", 4);
+  const proj = makeBillingAccount("11111111-1111-4111-8111-111111111111", 4);
   const rawKey = createKey();
   const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
   const config = makeConfig({
@@ -252,7 +251,7 @@ test("F1 symptom: slow JSON upload times out with 408 and frees admission slot i
 });
 
 test("F1 symptom: slow chunked JSON upload times out with 408 and frees admission slot", async () => {
-  const proj = makeProject("11111111-1111-4111-8111-111111111111", 4);
+  const proj = makeBillingAccount("11111111-1111-4111-8111-111111111111", 4);
   const rawKey = createKey();
   const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
   const config = makeConfig({
@@ -298,9 +297,9 @@ test("F1 symptom: slow chunked JSON upload times out with 408 and frees admissio
   }
 });
 
-test("F1 symptom: single tenant slow uploads are capped at project concurrency before body read and cannot starve other tenants", async () => {
-  const projA = makeProject("11111111-1111-4111-8111-111111111111", 2);
-  const projB = makeProject("22222222-2222-4222-8222-222222222222", 2);
+test("F1 symptom: single tenant slow uploads are capped at billingAccount concurrency before body read and cannot starve other tenants", async () => {
+  const projA = makeBillingAccount("11111111-1111-4111-8111-111111111111", 2);
+  const projB = makeBillingAccount("22222222-2222-4222-8222-222222222222", 2);
   const keyA = createKey();
   const keyB = createKey();
   const snap = makeSnapshot(
@@ -365,8 +364,8 @@ test("F1 symptom: single tenant slow uploads are capped at project concurrency b
 });
 
 test("F8 symptom: distinct runtime instances isolate auth caches instead of sharing module globals", () => {
-  const projA = makeProject("11111111-1111-4111-8111-111111111111", 10);
-  const projB = makeProject("22222222-2222-4222-8222-222222222222", 10);
+  const projA = makeBillingAccount("11111111-1111-4111-8111-111111111111", 10);
+  const projB = makeBillingAccount("22222222-2222-4222-8222-222222222222", 10);
   const rawKey = createKey();
   const snapA = makeSnapshot(1, [projA], [makeApiKey(rawKey, projA.id)]);
   const snapB = makeSnapshot(1, [projB], [makeApiKey(rawKey, projB.id)]);
@@ -384,11 +383,11 @@ test("F8 symptom: distinct runtime instances isolate auth caches instead of shar
   const stateB = new ProxyRuntimeState(2);
   try {
     const resA = authenticateRequest(makeCtx(), snapA, config, "chat", undefined, stateA);
-    expect(resA.project.id).toBe(projA.id);
+    expect(resA.billingAccount.id).toBe(projA.id);
     const resB = authenticateRequest(makeCtx(), snapB, config, "chat", undefined, stateB);
-    expect(resB.project.id).toBe(projB.id);
+    expect(resB.billingAccount.id).toBe(projB.id);
     const resNoState = authenticateRequest(makeCtx(), snapB, config, "chat");
-    expect(resNoState.project.id).toBe(projB.id);
+    expect(resNoState.billingAccount.id).toBe(projB.id);
   } finally {
     stateA.close();
     stateB.close();
@@ -396,7 +395,7 @@ test("F8 symptom: distinct runtime instances isolate auth caches instead of shar
 });
 
 test("F8: ProxyRuntimeState LRU evicts least-recently-used key instead of wiping entire cache", () => {
-  const proj = makeProject("11111111-1111-4111-8111-111111111111", 10);
+  const proj = makeBillingAccount("11111111-1111-4111-8111-111111111111", 10);
   const key0 = createKey();
   const key1 = createKey();
   const key2 = createKey();
@@ -420,7 +419,7 @@ test("F8: ProxyRuntimeState LRU evicts least-recently-used key instead of wiping
 });
 
 test("symptom: tryPrepareUpstreamRequestSync never marks unsafe bearer secrets headersValidated and preserves content-type", () => {
-  const proj = makeProject("11111111-1111-4111-8111-111111111111", 10);
+  const proj = makeBillingAccount("11111111-1111-4111-8111-111111111111", 10);
   const snap = makeSnapshot(1, [proj], []);
   const preset = getBuiltinProvider("openai")!;
   const pluginId = "88888888-8888-4888-8888-888888888888";
@@ -537,7 +536,7 @@ test("symptom: tryPrepareUpstreamRequestSync never marks unsafe bearer secrets h
 });
 
 test("failover skips newly-OPEN backup channels without redundant switchSupplierAttempt or upstream dispatch, and honors firstByteTimeoutMs and maxAmbiguousRetriesPerMinute", async () => {
-  const proj = makeProject("11111111-1111-4111-8111-111111111111", 10);
+  const proj = makeBillingAccount("11111111-1111-4111-8111-111111111111", 10);
   const rawKey = createKey();
   const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
   const preset = getBuiltinProvider("openai")!;
@@ -796,7 +795,7 @@ test("failover skips newly-OPEN backup channels without redundant switchSupplier
 });
 
 test("proxy retries transient hold finalization failures and preserves upstream error status instead of returning 500", async () => {
-  const proj = makeProject("11111111-1111-4111-8111-111111111199", 10);
+  const proj = makeBillingAccount("11111111-1111-4111-8111-111111111199", 10);
   const rawKey = createKey();
   const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
   const preset = getBuiltinProvider("openai")!;

@@ -6,7 +6,7 @@ export const MAX_ATOMS = 10n ** 38n - 1n;
 export const CELL_COUNT = 16;
 export type WalletRow = {
   id: string;
-  project_id: string;
+  billing_account_id: string;
   currency: string;
   policy: WalletPolicy;
   available_atoms: bigint;
@@ -323,24 +323,24 @@ function hexNibble(code: number): number {
   return -1;
 }
 
-export function outboxShard(projectId: string | null | undefined): number {
-  if (!projectId || projectId.length < 36) return 0;
-  const first = hexNibble(projectId.charCodeAt(0));
-  const last = hexNibble(projectId.charCodeAt(35));
+export function outboxShard(billingAccountId: string | null | undefined): number {
+  if (!billingAccountId || billingAccountId.length < 36) return 0;
+  const first = hexNibble(billingAccountId.charCodeAt(0));
+  const last = hexNibble(billingAccountId.charCodeAt(35));
   if (first < 0 || last < 0) return 0;
   return (first ^ last) & (OUTBOX_SHARDS - 1);
 }
 
-export function walletLane(projectId: string): number {
-  return outboxShard(projectId) % SETTLEMENT_LANES;
+export function walletLane(billingAccountId: string): number {
+  return outboxShard(billingAccountId) % SETTLEMENT_LANES;
 }
 
 export function cellKey(accountId: string, currency: string, cell: number): string {
   return `${accountId}:${currency}:${cell}`;
 }
 
-export function walletKey(projectId: string, currency: string): string {
-  return `${projectId}:${currency}`;
+export function walletKey(billingAccountId: string, currency: string): string {
+  return `${billingAccountId}:${currency}`;
 }
 
 export function supplierKey(accountId: string, currency: string): string {
@@ -350,7 +350,7 @@ export function supplierKey(accountId: string, currency: string): string {
 export function toWalletRow(r: Record<string, unknown>): WalletRow {
   return {
     id: String(r.id),
-    project_id: String(r.project_id),
+    billing_account_id: String(r.billing_account_id),
     currency: String(r.currency),
     policy: r.policy as WalletPolicy,
     available_atoms: BigInt(String(r.available_atoms)),

@@ -1,3 +1,4 @@
+import { localInternalCredentials } from "../../scripts/local-internal-auth.ts";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
@@ -23,7 +24,7 @@ targetUrl.pathname = `/${testDbName}`;
 
 const KEY_PEPPER = "cluster-pepper-0123456789abcdef01";
 const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const ADMIN_TOKEN = "cluster-admin-token-0123456789ab";
+const OPERATOR_TOKEN = "cluster-admin-token-0123456789ab00000000000000";
 
 let adminDb: SQL;
 let db: SQL;
@@ -127,7 +128,7 @@ function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     accessLog: false,
     keyPepper: KEY_PEPPER,
     encryptionKey: ENCRYPTION_KEY,
-    adminToken: ADMIN_TOKEN,
+    internalCredentials: localInternalCredentials(OPERATOR_TOKEN),
     allowPrivateUpstreams: true,
     privateUpstreamCidrs: ["127.0.0.0/8"],
     trustedProxyCidrs: [],
@@ -152,7 +153,7 @@ async function internalCall(
     new Request(`http://internal.local${path}`, {
       method,
       headers: {
-        authorization: `Bearer ${ADMIN_TOKEN}`,
+        authorization: `Bearer ${OPERATOR_TOKEN}`,
         "content-type": "application/json",
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -247,13 +248,18 @@ test("HTTP request size and the node body budget are enforced for JSON, multipar
   let server: ReturnType<typeof Bun.serve> | undefined;
   try {
     await runtime.start();
-    const project = await internalCall(runtime.internalApp, "PUT", "/internal/v1/projects", {
-      name: "body-budget",
-    });
-    expect(project.status).toBe(200);
+    const billingAccount = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/billing-accounts",
+      {
+        name: "body-budget",
+      },
+    );
+    expect(billingAccount.status).toBe(200);
     const key = await internalCall(runtime.internalApp, "PUT", "/internal/v1/api-keys", {
       name: "body-budget",
-      project_id: project.data.id,
+      billing_account_id: billingAccount.data.id,
     });
     expect(key.status).toBe(200);
     const auth = { authorization: `Bearer ${key.data.key}` };
@@ -395,7 +401,7 @@ test("symptom: bursts of readiness and metrics checks each open a PostgreSQL pro
   }
 });
 
-test("symptom: missing and completed video queries and cancellations bypass the shared project rate limit", async () => {
+test("symptom: missing and completed video queries and cancellations bypass the shared billingAccount rate limit", async () => {
   const config = makeConfig({ redisNamespace: `stg_video_quota_${crypto.randomUUID()}` });
   const first = createGatewayRuntime({ config, db, wasmExecutor: null });
   const second = createGatewayRuntime({ config, db, wasmExecutor: null });
@@ -406,16 +412,22 @@ test("symptom: missing and completed video queries and cancellations bypass the 
       expect(status).toBe(200);
       return data;
     }
-    const project = await configure("/internal/v1/projects", { name: "video-quota", rpm: 3 });
-    const other = await configure("/internal/v1/projects", { name: "other-video-quota", rpm: 1 });
+    const billingAccount = await configure("/internal/v1/billing-accounts", {
+      name: "video-quota",
+      rpm: 3,
+    });
+    const other = await configure("/internal/v1/billing-accounts", {
+      name: "other-video-quota",
+      rpm: 1,
+    });
     const primaryKey = await configure("/internal/v1/api-keys", {
       name: "video-quota",
-      project_id: project.id,
+      billing_account_id: billingAccount.id,
       operations: ["videos"],
     });
     const otherKey = await configure("/internal/v1/api-keys", {
       name: "other-video-quota",
-      project_id: other.id,
+      billing_account_id: other.id,
       operations: ["videos"],
     });
     const account = await configure("/internal/v1/upstream-accounts", { name: "video-quota" });
@@ -427,13 +439,13 @@ test("symptom: missing and completed video queries and cancellations bypass the 
       api_key: "local-fixture",
     });
     const repository = createAsyncTasksRepository(db);
-    const task = (projectId: unknown, status: "QUEUED" | "SUCCEEDED") =>
+    const task = (billingAccountId: unknown, keyId: unknown, status: "QUEUED" | "SUCCEEDED") =>
       repository.createTask({
         id: `vid_${crypto.randomUUID().replaceAll("-", "")}`,
         request_id: crypto.randomUUID(),
-        project_id: String(projectId),
+        billing_account_id: String(billingAccountId),
         charge_id: null,
-        api_key_id: null,
+        api_key_id: String(keyId),
         channel_id: String(channel.id),
         model: "fixture-video",
         operation: "videos",
@@ -441,9 +453,9 @@ test("symptom: missing and completed video queries and cancellations bypass the 
         status,
       });
     const [completed, queued, otherQueued] = await Promise.all([
-      task(project.id, "SUCCEEDED"),
-      task(project.id, "QUEUED"),
-      task(other.id, "QUEUED"),
+      task(billingAccount.id, primaryKey.id, "SUCCEEDED"),
+      task(billingAccount.id, primaryKey.id, "QUEUED"),
+      task(other.id, otherKey.id, "QUEUED"),
     ]);
     await second.start();
     await waitForRedisState(true, first.cluster, second.cluster);
@@ -525,10 +537,10 @@ test("Redis cluster syncs rate limits, circuit breaker OPEN state, and config ep
     expect(nodeA.cluster.isRedisConnected()).toBe(true);
     expect(nodeB.cluster.isRedisConnected()).toBe(true);
 
-    const { data: project } = await internalCall(
+    const { data: billingAccount } = await internalCall(
       nodeA.internalApp,
       "PUT",
-      "/internal/v1/projects",
+      "/internal/v1/billing-accounts",
       {
         name: "cluster-proj",
         currency: "USD",
@@ -537,19 +549,24 @@ test("Redis cluster syncs rate limits, circuit breaker OPEN state, and config ep
         concurrency: 10,
       },
     );
-    const projectId = String(project.id);
+    const billingAccountId = String(billingAccount.id);
     const { data: keyRes } = await internalCall(nodeA.internalApp, "PUT", "/internal/v1/api-keys", {
-      project_id: projectId,
+      billing_account_id: billingAccountId,
       name: "cluster-key",
     });
     const apiKey = String(keyRes.key);
 
-    await internalCall(nodeA.internalApp, "POST", `/internal/v1/wallets/${projectId}/credits`, {
-      currency: "USD",
-      external_ref: "cluster-credit-1",
-      amount_atoms: "1000000",
-      kind: "CASH",
-    });
+    await internalCall(
+      nodeA.internalApp,
+      "POST",
+      `/internal/v1/wallets/${billingAccountId}/credits`,
+      {
+        currency: "USD",
+        external_ref: "cluster-credit-1",
+        amount_atoms: "1000000",
+        kind: "CASH",
+      },
+    );
     const { data: acc } = await internalCall(
       nodeA.internalApp,
       "PUT",
@@ -812,39 +829,49 @@ test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcrip
   try {
     await runtime.start();
 
-    const badProject = await internalCall(runtime.internalApp, "PUT", "/internal/v1/projects", {
-      name: "",
-      currency: "invalid",
-    });
-    expect(badProject.status).toBe(400);
-    expect((badProject.data.error as { code: string }).code).toBe("validation_error");
-
-    const { data: project } = await internalCall(
+    const badBillingAccount = await internalCall(
       runtime.internalApp,
       "PUT",
-      "/internal/v1/projects",
+      "/internal/v1/billing-accounts",
+      {
+        name: "",
+        currency: "invalid",
+      },
+    );
+    expect(badBillingAccount.status).toBe(400);
+    expect((badBillingAccount.data.error as { code: string }).code).toBe("validation_error");
+
+    const { data: billingAccount } = await internalCall(
+      runtime.internalApp,
+      "PUT",
+      "/internal/v1/billing-accounts",
       {
         name: "media-proj",
         currency: "USD",
       },
     );
-    const projectId = String(project.id);
+    const billingAccountId = String(billingAccount.id);
     const { data: keyRes } = await internalCall(
       runtime.internalApp,
       "PUT",
       "/internal/v1/api-keys",
       {
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         name: "media-key",
       },
     );
     const apiKey = String(keyRes.key);
-    await internalCall(runtime.internalApp, "POST", `/internal/v1/wallets/${projectId}/credits`, {
-      currency: "USD",
-      external_ref: "media-credit-1",
-      amount_atoms: "1000000",
-      kind: "CASH",
-    });
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/wallets/${billingAccountId}/credits`,
+      {
+        currency: "USD",
+        external_ref: "media-credit-1",
+        amount_atoms: "1000000",
+        kind: "CASH",
+      },
+    );
     const { data: acc } = await internalCall(
       runtime.internalApp,
       "PUT",
@@ -1113,7 +1140,7 @@ test("on_request TRANSFORM, multimodal endpoints (moderations, speech, transcrip
     const { data: chargesList } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/charges?project_id=${projectId}&limit=10`,
+      `/internal/v1/charges?billing_account_id=${billingAccountId}&limit=10`,
     );
     expect(chargesList.total).toBe(5);
     expect((chargesList.items as unknown[]).length).toBe(5);
@@ -1211,11 +1238,11 @@ test.each([60_000, 90])(
     try {
       await nodeA.start();
       await nodeB.start();
-      const first = await nodeA.acquireRateLimit("active-project", limits, 1, leaseMs);
+      const first = await nodeA.acquireRateLimit("active-billingAccount", limits, 1, leaseMs);
       if (!first.ok) throw new Error("First concurrency permit rejected");
       try {
         await Bun.sleep(150);
-        expect(await nodeB.acquireRateLimit("active-project", limits, 1, leaseMs)).toEqual({
+        expect(await nodeB.acquireRateLimit("active-billingAccount", limits, 1, leaseMs)).toEqual({
           ok: false,
           reason: "concurrency",
         });
@@ -1464,32 +1491,37 @@ test("declarative MiniMax-style routes cover Anthropic, OpenAI, speech, transcri
 
   try {
     await runtime.start();
-    const { data: project } = await internalCall(
+    const { data: billingAccount } = await internalCall(
       runtime.internalApp,
       "PUT",
-      "/internal/v1/projects",
+      "/internal/v1/billing-accounts",
       {
         name: "mm-mock-proj",
         currency: "USD",
       },
     );
-    const projectId = String(project.id);
+    const billingAccountId = String(billingAccount.id);
     const { data: keyRes } = await internalCall(
       runtime.internalApp,
       "PUT",
       "/internal/v1/api-keys",
       {
-        project_id: projectId,
+        billing_account_id: billingAccountId,
         name: "mm-mock-key",
       },
     );
     const apiKey = String(keyRes.key);
-    await internalCall(runtime.internalApp, "POST", `/internal/v1/wallets/${projectId}/credits`, {
-      currency: "USD",
-      external_ref: "mm-mock-credit",
-      amount_atoms: "10000000",
-      kind: "CASH",
-    });
+    await internalCall(
+      runtime.internalApp,
+      "POST",
+      `/internal/v1/wallets/${billingAccountId}/credits`,
+      {
+        currency: "USD",
+        external_ref: "mm-mock-credit",
+        amount_atoms: "10000000",
+        kind: "CASH",
+      },
+    );
     const { data: acc } = await internalCall(
       runtime.internalApp,
       "PUT",
@@ -1864,7 +1896,7 @@ test("declarative MiniMax-style routes cover Anthropic, OpenAI, speech, transcri
     const { data: walletBeforeErr } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=USD`,
+      `/internal/v1/wallets/${billingAccountId}?currency=USD`,
     );
 
     const errRes = await postJson("/v1/chat/completions", {
@@ -1880,7 +1912,7 @@ test("declarative MiniMax-style routes cover Anthropic, OpenAI, speech, transcri
     const { data: walletAfterErr } = await internalCall(
       runtime.internalApp,
       "GET",
-      `/internal/v1/wallets/${projectId}?currency=USD`,
+      `/internal/v1/wallets/${billingAccountId}?currency=USD`,
     );
     expect(walletAfterErr.available_atoms).toBe(walletBeforeErr.available_atoms);
     expect(walletAfterErr.spent_atoms).toBe("3355");

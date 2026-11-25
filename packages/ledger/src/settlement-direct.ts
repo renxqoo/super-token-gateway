@@ -102,7 +102,7 @@ export async function applyDirectSettlements(
   const detachedNotifications: DetachedHold[] = [];
   const nowMs = Date.now();
   const holdRows = await tx`
-        SELECT request_id, project_id, wallet_id, api_key_id, key_reserved_atoms::text,
+        SELECT request_id, billing_account_id, wallet_id, api_key_id, key_reserved_atoms::text,
           pricing_override_id, discount_numerator::text, discount_denominator::text,
           operation, model, held_atoms::text, credit_atoms::text,
           lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state, created_at
@@ -115,7 +115,7 @@ export async function applyDirectSettlements(
     string,
     {
       request_id: string;
-      project_id: string;
+      billing_account_id: string;
       wallet_id: string;
       api_key_id: string | null;
       key_reserved_atoms: bigint;
@@ -137,7 +137,7 @@ export async function applyDirectSettlements(
   for (const r of holdRows) {
     holdsByReq.set(String(r.request_id), {
       request_id: String(r.request_id),
-      project_id: String(r.project_id),
+      billing_account_id: String(r.billing_account_id),
       wallet_id: String(r.wallet_id),
       api_key_id: r.api_key_id ? String(r.api_key_id) : null,
       key_reserved_atoms: BigInt(String(r.key_reserved_atoms ?? "0")),
@@ -234,7 +234,7 @@ export async function applyDirectSettlements(
   const keySpendsById = new Map<string, KeySpendRow>();
   if (keyIdsWithTracking.length > 0) {
     const lockedKeys = await tx`
-      SELECT id, project_id, spend_limit_atoms::text, spend_limit_window,
+      SELECT id, billing_account_id, spend_limit_atoms::text, spend_limit_window,
         spend_window_start, spent_atoms::text, reserved_atoms::text,
         floor(extract(epoch from now()) * 1000)::bigint AS pg_now_ms
       FROM public.api_keys
@@ -254,7 +254,7 @@ export async function applyDirectSettlements(
   const walletIds = [...new Set([...holdsByReq.values()].map((h) => h.wallet_id))].sort();
   const lockedWallets = walletIds.length
     ? await tx`
-            SELECT id, project_id, currency, policy,
+            SELECT id, billing_account_id, currency, policy,
               available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
               debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
               credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
@@ -344,7 +344,7 @@ export async function applyDirectSettlements(
   const newCharges: {
     id: string;
     request_id: string;
-    project_id: string;
+    billing_account_id: string;
     wallet_id: string;
     api_key_id: string | null;
     selected_attempt_id: string;
@@ -375,7 +375,7 @@ export async function applyDirectSettlements(
     event_id: string;
     kind: string;
     request_id: string;
-    project_id: string;
+    billing_account_id: string;
     payload: Record<string, unknown>;
   }[] = [];
 
@@ -688,7 +688,7 @@ export async function applyDirectSettlements(
     newCharges.push({
       id: chargeId,
       request_id: item.request_id,
-      project_id: hold.project_id,
+      billing_account_id: hold.billing_account_id,
       wallet_id: wallet.id,
       api_key_id: effectiveApiKeyId,
       selected_attempt_id: item.selected_attempt_id,
@@ -719,7 +719,7 @@ export async function applyDirectSettlements(
       event_id: crypto.randomUUID(),
       kind: "billing.settled",
       request_id: item.request_id,
-      project_id: hold.project_id,
+      billing_account_id: hold.billing_account_id,
       payload: {
         charge_id: chargeId,
         request_id: item.request_id,
@@ -775,7 +775,7 @@ export async function applyDirectSettlements(
             event_id: o.event_id,
             kind: o.kind,
             request_id: o.request_id,
-            project_id: o.project_id,
+            billing_account_id: o.billing_account_id,
             payload: o.payload,
           })),
         )
@@ -875,7 +875,7 @@ export async function applyDirectSettlements(
         ),
         ins_ch AS (
           INSERT INTO public.billing_charges (
-            id, request_id, project_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
+            id, request_id, billing_account_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
             model, operation, currency, billing_price_id, cost_version_id,
             pricing_override_id, discount_numerator, discount_denominator,
             usage, usage_digest,
@@ -883,7 +883,7 @@ export async function applyDirectSettlements(
             lot_allocations, plugin_audit, charge_policy, outcome, customer_journal_id, supplier_journal_id
           )
           SELECT
-            u.id, u.request_id, u.project_id, u.wallet_id, u.api_key_id, u.selected_attempt_id, u.channel_id,
+            u.id, u.request_id, u.billing_account_id, u.wallet_id, u.api_key_id, u.selected_attempt_id, u.channel_id,
             u.model, u.operation, u.currency, u.billing_price_id, u.cost_version_id,
             u.pricing_override_id, u.discount_numerator, u.discount_denominator,
             u.usage::jsonb, u.usage_digest,
@@ -893,7 +893,7 @@ export async function applyDirectSettlements(
           FROM unnest(
             ${newCharges.map((c) => c.id)}::uuid[],
             ${newCharges.map((c) => c.request_id)}::uuid[],
-            ${newCharges.map((c) => c.project_id)}::uuid[],
+            ${newCharges.map((c) => c.billing_account_id)}::uuid[],
             ${newCharges.map((c) => c.wallet_id)}::uuid[],
             ${newCharges.map((c) => c.api_key_id)}::uuid[],
             ${newCharges.map((c) => c.selected_attempt_id)}::uuid[],
@@ -920,7 +920,7 @@ export async function applyDirectSettlements(
             ${newCharges.map((c) => c.customer_journal_id)}::uuid[],
             ${newCharges.map((c) => c.supplier_journal_id)}::uuid[]
           ) AS u(
-            id, request_id, project_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
+            id, request_id, billing_account_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
             model, operation, currency, billing_price_id, cost_version_id,
             pricing_override_id, discount_numerator, discount_denominator,
             usage, usage_digest,
@@ -929,12 +929,12 @@ export async function applyDirectSettlements(
           )
         ),
         ins_ob AS (
-          INSERT INTO public.outbox_events (event_id, kind, request_id, project_id, payload)
-          SELECT u.event_id, u.kind, u.request_id, u.project_id, u.payload
+          INSERT INTO public.outbox_events (event_id, kind, request_id, billing_account_id, payload)
+          SELECT u.event_id, u.kind, u.request_id, u.billing_account_id, u.payload
           FROM jsonb_to_recordset(${outboxJson}::text::jsonb) AS u(
-            event_id uuid, kind text, request_id uuid, project_id uuid, payload jsonb
+            event_id uuid, kind text, request_id uuid, billing_account_id uuid, payload jsonb
           )
-          ORDER BY public.outbox_shard(u.project_id) ASC, u.request_id ASC
+          ORDER BY public.outbox_shard(u.billing_account_id) ASC, u.request_id ASC
         )
       SELECT 1
     `;
