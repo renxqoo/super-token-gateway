@@ -10,6 +10,7 @@ await mkdir(distDir, { recursive: true });
 
 const targets = [
   { entry: "apps/gateway/src/main.ts", outdir: "dist/gateway", name: "gateway" },
+  { entry: "apps/gateway/src/trace-writer.ts", outdir: "dist/gateway", name: "trace-writer" },
   {
     entry: "packages/plugin-engine/src/wasmtime-worker.ts",
     outdir: "dist/gateway",
@@ -23,6 +24,7 @@ const targets = [
     name: "mock-providers",
   },
   { entry: "scripts/migrate.ts", outdir: "dist/tools", name: "migrate" },
+  { entry: "scripts/trace-db.ts", outdir: "dist/tools", name: "trace-db" },
   { entry: "scripts/console-migrate.ts", outdir: "dist/tools", name: "console-migrate" },
   {
     entry: "scripts/verify-console-deployment.ts",
@@ -60,6 +62,7 @@ for (const target of targets) {
 }
 
 await cp("packages/ledger/src/migrations", join(distDir, "tools/migrations"), { recursive: true });
+await cp("infra/postgres/trace-schema.sql", join(distDir, "tools/trace-schema.sql"));
 await cp("apps/console-api/src/db/migrations", join(distDir, "tools/console-migrations"), {
   recursive: true,
 });

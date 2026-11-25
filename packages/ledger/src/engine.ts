@@ -7,6 +7,7 @@ import { createWalletOperations } from "./wallet-operations.ts";
 import { createSupplierFunds } from "./supplier-funds.ts";
 import { createHoldTransitions } from "./hold-transitions.ts";
 import { createReconciliation } from "./reconciliation.ts";
+import { createEvidenceReconciliation } from "./reconciliation-evidence.ts";
 import { createOutbox } from "./outbox.ts";
 import { auditConservation } from "./conservation.ts";
 
@@ -33,14 +34,17 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
 
   return {
     acquireHold: acquisition.acquireHold,
+    findIdempotentHold: acquisition.findIdempotentHold,
     commitTerminal: settlement.commitTerminal,
     switchSupplierAttempt: holds.switchSupplierAttempt,
     releaseHold: holds.releaseHold,
     markUnknown: holds.markUnknown,
+    rememberProviderRequestId: holds.rememberProviderRequestId,
     sweepTimedOutHolds: holds.sweepTimedOutHolds,
     ...createWalletOperations(db, orm, leases.invalidateWallet),
     ...createSupplierFunds(db, orm),
     ...createReconciliation(db, leases.notifyDetachedLocal),
+    ...createEvidenceReconciliation(db, leases.notifyDetachedLocal),
     ...createOutbox(orm),
     sweepExpiredLeases: leases.sweepExpiredLeases,
     releaseIdleLeases: leases.releaseIdleLeases,

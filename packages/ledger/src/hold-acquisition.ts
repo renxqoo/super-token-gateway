@@ -3,16 +3,25 @@ import type { AcquireHoldInput, AcquireHoldResult } from "./types.ts";
 import type { LeaseManager, FastHoldRequest } from "./lease-manager.ts";
 import { MicroBatchQueue } from "./micro-batch.ts";
 import { createTransactionalHoldBatch } from "./transactional-holds.ts";
-import { parseAtoms, SETTLEMENT_LANES, walletLane } from "./funds.ts";
+import {
+  holdTemporarilyUnavailable,
+  isTransientPgConcurrencyError,
+  parseAtoms,
+  SETTLEMENT_LANES,
+  walletLane,
+} from "./funds.ts";
 
 export function createHoldAcquirer(
   db: SQL,
   leases: LeaseManager,
   batchWindowMs: number,
   maxBatchSize: number,
-  _maxBatchConcurrency: number,
+  maxBatchConcurrency: number,
 ) {
-  async function runFastHoldBatch(items: FastHoldRequest[]) {
+  async function runFastHoldBatch(
+    items: FastHoldRequest[],
+    retry = false,
+  ): Promise<(AcquireHoldResult | Promise<AcquireHoldResult>)[]> {
     const batchPayload = JSON.stringify(
       items.map((x) => ({
         request_id: x.input.request_id,
@@ -31,6 +40,16 @@ export function createHoldAcquirer(
             attempt_id: x.input.attempt_id,
             ...(x.input.supplier_cost_version_id
               ? { cost_version_id: x.input.supplier_cost_version_id }
+              : {}),
+            ...(x.input.customer_price_version_id
+              ? {
+                  customer_price_version_id: x.input.customer_price_version_id,
+                  customer_price_adjustment: {
+                    override_id: x.input.pricing_override_id ?? null,
+                    discount_numerator: x.input.discount_numerator ?? null,
+                    discount_denominator: x.input.discount_denominator ?? null,
+                  },
+                }
               : {}),
             account_id: x.input.supplier_account_id,
             channel_id: x.input.supplier_channel_id,
@@ -52,10 +71,21 @@ export function createHoldAcquirer(
       leases.retireWalletLease(item.walletLease);
       leases.retireSupplierLease(item.supplierLease);
     };
+    const restorePendingReservation = (item: FastHoldRequest) => {
+      item.walletLease.inFlightHolds--;
+      item.supplierLease.inFlightHolds--;
+      item.walletLease.freeInMemory += item.customerAtoms;
+      item.supplierLease.freeInMemory += item.supplierAtoms;
+    };
     let admitted: Set<string>;
     try {
       const rows = await db.begin(async (tx) => {
-        const [locked] = await tx<{ wallet_lease_ids: string[]; supplier_lease_ids: string[] }[]>`
+        const [locked] = await tx<
+          {
+            wallet_lease_ids: string[];
+            supplier_lease_ids: string[];
+          }[]
+        >`
           WITH local_wallet_leases AS MATERIALIZED (
             SELECT l.id, l.wallet_id
             FROM public.wallet_leases l
@@ -145,6 +175,13 @@ export function createHoldAcquirer(
       });
       admitted = new Set(rows.map((row) => String(row.request_id)));
     } catch (err) {
+      if (isTransientPgConcurrencyError(err)) {
+        if (!retry) return items.map((item) => contendedFastQueue.enqueue(item));
+        return items.map((item) => {
+          restorePendingReservation(item);
+          return holdTemporarilyUnavailable();
+        });
+      }
       for (const item of items) retireLeases(item);
       throw err;
     }
@@ -190,17 +227,51 @@ export function createHoldAcquirer(
     return out;
   }
 
+  const contendedQueue = new MicroBatchQueue(
+    createTransactionalHoldBatch(db, leases),
+    1,
+    batchWindowMs,
+    maxBatchConcurrency,
+  );
+  const contendedFastQueue = new MicroBatchQueue<FastHoldRequest, AcquireHoldResult>(
+    (items) => runFastHoldBatch(items, true),
+    1,
+    batchWindowMs,
+    maxBatchConcurrency,
+  );
   const acquireQueues = Array.from(
     { length: SETTLEMENT_LANES },
     () =>
-      new MicroBatchQueue(createTransactionalHoldBatch(db, leases), maxBatchSize, batchWindowMs, 1),
+      new MicroBatchQueue(
+        createTransactionalHoldBatch(db, leases, (input) => contendedQueue.enqueue(input)),
+        maxBatchSize,
+        batchWindowMs,
+        1,
+      ),
   );
   const fastHoldQueues = Array.from(
     { length: SETTLEMENT_LANES },
-    () => new MicroBatchQueue(runFastHoldBatch, Math.max(maxBatchSize, 512), batchWindowMs, 1),
+    () =>
+      new MicroBatchQueue(
+        (items: FastHoldRequest[]) => runFastHoldBatch(items),
+        Math.max(maxBatchSize, 512),
+        batchWindowMs,
+        1,
+      ),
   );
 
   return {
+    async findIdempotentHold(
+      projectId: string,
+      operation: AcquireHoldInput["operation"],
+      key: string,
+    ) {
+      const [hold] = await db<{ request_id: string; fingerprint: string; state: string }[]>`
+        SELECT request_id, fingerprint, state FROM public.billing_holds
+        WHERE project_id=${projectId}::uuid AND operation=${operation} AND idempotency_key=${key}
+      `;
+      return hold;
+    },
     acquireHold(input: AcquireHoldInput): Promise<AcquireHoldResult> {
       const lane = walletLane(input.project_id);
       if (leases.canAcquire() && input.idempotency_key === null && !input.enforce_key_spend_limit) {
@@ -214,10 +285,10 @@ export function createHoldAcquirer(
       return acquireQueues[lane]!.enqueue(input);
     },
     async drain(): Promise<void> {
-      await Promise.all([
-        ...fastHoldQueues.map((queue) => queue.drain()),
-        ...acquireQueues.map((queue) => queue.drain()),
-      ]);
+      await Promise.all(fastHoldQueues.map((queue) => queue.drain()));
+      await contendedFastQueue.drain();
+      await Promise.all(acquireQueues.map((queue) => queue.drain()));
+      await contendedQueue.drain();
     },
   };
 }

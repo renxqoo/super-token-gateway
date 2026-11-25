@@ -18,7 +18,13 @@ import {
   type FastUpstreamResult,
   type OutboundReservation,
 } from "./bun-http1.ts";
-import { createDialScheduler, type DialLimits, type DialPermit } from "./dial-scheduler.ts";
+import {
+  createDialScheduler,
+  DEFAULT_DIAL_QUEUE_WAIT_MS,
+  type DialLimits,
+  type DialPermit,
+} from "./dial-scheduler.ts";
+import { markUpstream, type UpstreamTimingObserver } from "./transport-timing.ts";
 
 export type { CancelRegistrar, FastUpstreamResult };
 
@@ -28,6 +34,7 @@ export interface PinnedRequestInit extends RequestInit {
   dispatchDeadline?: number;
   headersValidated?: boolean;
   onCancelRegister?: CancelRegistrar;
+  onTiming?: UpstreamTimingObserver;
   outbound?: PreparedExchange;
 }
 
@@ -98,6 +105,7 @@ type NodeDial = {
   bytes: number;
   signal: AbortSignal;
   deadline: number | undefined;
+  timing: UpstreamTimingObserver | undefined;
 };
 
 export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) {
@@ -124,7 +132,7 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
   const httpSlots = { inUse: 0, waiting: new Map<() => void, () => void>() };
   const httpsSlots = { inUse: 0, waiting: new Map<() => void, () => void>() };
   const maxSlotQueueBytes = dialLimits?.maxQueueBytes ?? 64 * 1024 * 1024;
-  const maxSlotQueueWait = dialLimits?.maxQueueWaitMs ?? 10_000;
+  const maxSlotQueueWait = dialLimits?.maxQueueWaitMs ?? DEFAULT_DIAL_QUEUE_WAIT_MS;
   let slotQueueBytes = 0;
   let idleSweepTimer: ReturnType<typeof setInterval> | undefined;
   let closed = false;
@@ -169,10 +177,13 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
           permit.release();
           throw notDispatched();
         }
+        markUpstream(context.timing, "dial_start");
         try {
           const socket = connect(options);
           if (!socket) throw connectionFailure(isTls);
           socket.once(isTls ? "secureConnect" : "connect", finish);
+          if (context.timing)
+            socket.once("connect", () => markUpstream(context.timing, "tcp_ready"));
           socket.once("close", finish);
           return socket;
         } catch (error) {
@@ -190,8 +201,10 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
           context.deadline,
         );
         if (!(permit instanceof Promise)) return start(permit);
+        markUpstream(context.timing, "wait_start");
         void permit.then(
           (ticket) => {
+            markUpstream(context.timing, "wait_end");
             let socket: Duplex;
             try {
               socket = start(ticket);
@@ -201,7 +214,10 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
             }
             complete(null, socket);
           },
-          (error) => reject(asError(error)),
+          (error) => {
+            markUpstream(context.timing, "wait_end");
+            reject(asError(error));
+          },
         );
       } catch (error) {
         reject(asError(error));
@@ -262,6 +278,7 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
       if (slots.waiting.size >= maxConnections || bytes > maxSlotQueueBytes - slotQueueBytes) {
         throw capacity();
       }
+      markUpstream(init.onTiming, "wait_start");
       await new Promise<void>((resolve, reject) => {
         let deadline: ReturnType<typeof setTimeout> | undefined;
         let detachCancel: (() => void) | undefined;
@@ -300,7 +317,7 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
         );
         deadline.unref();
         if (init.signal?.aborted || expired(init)) abort();
-      });
+      }).finally(() => markUpstream(init.onTiming, "wait_end"));
     }
 
     return release;
@@ -389,6 +406,7 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
               headersValidated,
               init.onCancelRegister,
               init.outbound?.connection,
+              init.onTiming,
             )
           : bunPlain
               .send(
@@ -405,6 +423,7 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
                 headersValidated,
                 init.onCancelRegister,
                 init.outbound?.connection,
+                init.onTiming,
               )
               .then((response): FastUpstreamResult => ({ fast: false, response }));
         releaseOnClose = true;
@@ -448,6 +467,9 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
             return;
           }
           canHaveDispatched = true;
+          if (request.reusedSocket) markUpstream(init.onTiming, "connection_reused");
+          else if (secureRequest) markUpstream(init.onTiming, "tls_ready");
+          markUpstream(init.onTiming, "connection_ready");
           if (init.dispatchDeadline !== undefined) sendBody();
         };
 
@@ -464,12 +486,14 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
             bytes: Math.max(0, Number(plainHeaders["content-length"] ?? 0) || 0),
             signal: dialAbort.signal,
             deadline: init.dispatchDeadline,
+            timing: init.onTiming,
           } satisfies NodeDial,
           ...(secureRequest ? { rejectUnauthorized: true as const } : {}),
           ...(secureRequest && serverName ? { servername: serverName } : {}),
         };
 
         const request = (secureRequest ? httpsRequest : httpRequest)(reqOptions, (response) => {
+          markUpstream(init.onTiming, "response_headers");
           markConnected();
           response.once("end", detachAbort);
           try {
@@ -634,6 +658,8 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
         });
         releaseOnClose = true;
         request.once("socket", watchSocket);
+        if (init.onTiming)
+          request.once("finish", () => markUpstream(init.onTiming, "request_written"));
         request.once("error", (error) => {
           reject(
             preDispatch() && !(error instanceof UpstreamPreDispatchError)
@@ -674,14 +700,20 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
       try {
         const host = url.hostname.replace(/^\[|\]$/g, "");
         const port = url.port ? Number(url.port) : secureRequest ? 443 : 80;
-        const connection = await bunPlain.reserve(
-          host,
-          port,
-          tls,
-          bytes,
-          init.signal,
-          init.dispatchDeadline,
-        );
+        let connection: OutboundReservation;
+        markUpstream(init.onTiming, "wait_start");
+        try {
+          connection = await bunPlain.reserve(
+            host,
+            port,
+            tls,
+            bytes,
+            init.signal,
+            init.dispatchDeadline,
+          );
+        } finally {
+          markUpstream(init.onTiming, "wait_end");
+        }
         let available = true;
         return {
           connection,

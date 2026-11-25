@@ -145,7 +145,7 @@ export const apiKeys = pgTable(
       .notNull()
       .default(sql`'{}'::text[]`),
     enabled: boolean("enabled").notNull().default(true),
-    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }),
     spendLimitAtoms: numeric("spend_limit_atoms", { precision: 38, scale: 0 }),
     spendLimitWindow: text("spend_limit_window")
       .$type<"LIFETIME" | "DAILY" | "MONTHLY">()
@@ -548,12 +548,24 @@ export const billingHolds = pgTable(
       .notNull()
       .defaultNow(),
     closedAt: timestamp("closed_at", { withTimezone: true, mode: "string" }),
+    reconciliationStartedAt: timestamp("reconciliation_started_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
   },
   (t) => [
     uniqueIndex("billing_holds_idempotency_idx")
       .on(t.projectId, t.operation, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} IS NOT NULL`),
     index("billing_holds_open_idx").on(t.expiresAt),
+    index("billing_reconciliation_unknown_idx")
+      .on(t.createdAt, t.requestId)
+      .where(sql`${t.state} = 'UNKNOWN'`),
+    index("billing_reconciliation_supplier_pending_idx")
+      .on(t.createdAt, t.requestId)
+      .where(
+        sql`${t.state} IN ('SETTLED', 'RELEASED') AND ${t.supplierHolds} @> '[{"state":"UNKNOWN"}]'`,
+      ),
     index("billing_holds_wallet_lease_idx").on(t.walletLeaseId),
     index("billing_holds_supplier_lease_idx").on(t.supplierLeaseId),
   ],
@@ -857,6 +869,118 @@ export const asyncTasks = pgTable(
   ],
 );
 
+export const billingReconciliationReceipts = pgTable(
+  "billing_reconciliation_receipts",
+  {
+    attemptId: uuid("attempt_id").primaryKey(),
+    requestId: uuid("request_id")
+      .notNull()
+      .references(() => billingHolds.requestId),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => upstreamAccounts.id),
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id),
+    currency: text("currency").notNull(),
+    providerRequestId: text("provider_request_id").notNull(),
+    evidenceRef: text("evidence_ref").notNull(),
+    matchReason: text("match_reason"),
+    actor: text("actor").notNull(),
+    verdict: text("verdict").$type<"NOT_EXECUTED" | "FINAL">().notNull(),
+    supplierCostAtoms: numeric("supplier_cost_atoms", { precision: 38, scale: 0 }),
+    customerUsage: pgJsonb<Usage>("customer_usage"),
+    customerActor: text("customer_actor"),
+    state: text("state")
+      .$type<"PENDING" | "APPLIED" | "REVIEW" | "DISMISSED">()
+      .notNull()
+      .default("PENDING"),
+    result: text("result"),
+    reviewHistory: pgJsonb<Record<string, unknown>[]>("review_history")
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true, mode: "date" }),
+  },
+  (t) => [
+    unique().on(t.accountId, t.providerRequestId),
+    unique().on(t.accountId, t.evidenceRef),
+    index("billing_reconciliation_receipts_due_idx")
+      .on(t.createdAt, t.attemptId)
+      .where(sql`${t.state} = 'PENDING'`),
+    index("billing_reconciliation_receipts_request_idx").on(t.requestId, t.createdAt, t.attemptId),
+  ],
+);
+
+export const billingReconciliationBudgets = pgTable("billing_reconciliation_budgets", {
+  currency: text("currency").primaryKey(),
+  limitAtoms: numeric("limit_atoms", { precision: 38, scale: 0 }).notNull(),
+  usedAtoms: numeric("used_atoms", { precision: 38, scale: 0 }).notNull().default("0"),
+});
+
+export const billingReconciliationPolicies = pgTable(
+  "billing_reconciliation_policies",
+  {
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id),
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id),
+    supplierCurrency: text("supplier_currency")
+      .notNull()
+      .references(() => billingReconciliationBudgets.currency),
+    enabled: boolean("enabled").notNull(),
+    includeHistorical: boolean("include_historical").notNull(),
+    eligibleSince: timestamp("eligible_since", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    ageSeconds: integer("age_seconds").notNull(),
+    maxCustomerAtoms: numeric("max_customer_atoms", { precision: 38, scale: 0 }).notNull(),
+    limitAtoms: numeric("limit_atoms", { precision: 38, scale: 0 }).notNull(),
+    usedAtoms: numeric("used_atoms", { precision: 38, scale: 0 }).notNull().default("0"),
+  },
+  (t) => [primaryKey({ columns: [t.projectId, t.channelId, t.supplierCurrency] })],
+);
+
+export const billingReconciliationWaivers = pgTable(
+  "billing_reconciliation_waivers",
+  {
+    requestId: uuid("request_id")
+      .primaryKey()
+      .references(() => billingHolds.requestId),
+    attemptId: uuid("attempt_id").notNull(),
+    projectId: uuid("project_id").notNull(),
+    channelId: uuid("channel_id").notNull(),
+    supplierCurrency: text("supplier_currency").notNull(),
+    supplierRiskAtoms: numeric("supplier_risk_atoms", { precision: 38, scale: 0 }).notNull(),
+    customerReleasedAtoms: numeric("customer_released_atoms", {
+      precision: 38,
+      scale: 0,
+    }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.projectId, t.channelId, t.supplierCurrency],
+      foreignColumns: [
+        billingReconciliationPolicies.projectId,
+        billingReconciliationPolicies.channelId,
+        billingReconciliationPolicies.supplierCurrency,
+      ],
+    }),
+  ],
+);
+
+export const billingReconciliationPolls = pgTable("billing_reconciliation_polls", {
+  attemptId: uuid("attempt_id").primaryKey(),
+  requestId: uuid("request_id")
+    .notNull()
+    .references(() => billingHolds.requestId),
+  pollCount: integer("poll_count").notNull().default(1),
+  nextAt: timestamp("next_at", { withTimezone: true, mode: "date" }).notNull(),
+});
+
 export const ledgerSchema = {
   adminAuditEvents,
   adminAuditPending,
@@ -888,6 +1012,11 @@ export const ledgerSchema = {
   ledgerEntries,
   fundingOperations,
   billingResolutions,
+  billingReconciliationReceipts,
+  billingReconciliationBudgets,
+  billingReconciliationPolicies,
+  billingReconciliationWaivers,
+  billingReconciliationPolls,
   outboxEvents,
   outboxConsumers,
   outboxConsumerShards,

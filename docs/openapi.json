@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Super Token Gateway",
-    "version": "2026112401",
+    "version": "2026112501",
     "description": "Public and internal routes use separate listeners. Inference payloads and success responses depend on the endpoint protocol and provider adapter."
   },
   "paths": {
@@ -2829,6 +2829,10 @@
                               "type": "string",
                               "enum": ["retryable", "rate_limit", "auth_error", "client_error"]
                             },
+                            "execution": {
+                              "type": "string",
+                              "const": "NOT_EXECUTED"
+                            },
                             "http_status": {
                               "type": "integer",
                               "minimum": 400,
@@ -2848,6 +2852,40 @@
                           "required": ["path", "retry_kind"],
                           "additionalProperties": false
                         }
+                      },
+                      "error_diagnostics": {
+                        "type": "object",
+                        "properties": {
+                          "code_path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "code_header": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^(?:[a-z0-9]+-)*(?:error-code|errorcode|error-type|errortype)$"
+                          },
+                          "request_id_header": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^(?:[a-z0-9]+-)*(?:request-id|requestid|correlation-id|trace-id)$"
+                          },
+                          "summaries": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+                            },
+                            "additionalProperties": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 160,
+                              "pattern": "^[^\\p{Cc}\\p{Cf}]+$"
+                            }
+                          }
+                        },
+                        "additionalProperties": false
                       },
                       "usage_aliases": {
                         "maxItems": 32,
@@ -2884,6 +2922,59 @@
                           "required": ["target", "source_path"],
                           "additionalProperties": false
                         }
+                      },
+                      "media_stream_terminal": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "event": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[^\\r\\n\\0]+$"
+                              }
+                            },
+                            "required": ["event"],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                              },
+                              "equals": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 128
+                                  },
+                                  {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": ["path", "equals"],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "reconciliation_evidence_required": {
+                        "type": "boolean"
+                      },
+                      "reconciliation_response_id_header": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^(?:[A-Za-z0-9-]*-)?(?:request-id|requestid|correlation-id|trace-id)$"
                       }
                     },
                     "additionalProperties": false
@@ -3821,6 +3912,10 @@
                               "type": "string",
                               "enum": ["retryable", "rate_limit", "auth_error", "client_error"]
                             },
+                            "execution": {
+                              "type": "string",
+                              "const": "NOT_EXECUTED"
+                            },
                             "http_status": {
                               "type": "integer",
                               "minimum": 400,
@@ -3840,6 +3935,40 @@
                           "required": ["path", "retry_kind"],
                           "additionalProperties": false
                         }
+                      },
+                      "error_diagnostics": {
+                        "type": "object",
+                        "properties": {
+                          "code_path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "code_header": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^(?:[a-z0-9]+-)*(?:error-code|errorcode|error-type|errortype)$"
+                          },
+                          "request_id_header": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^(?:[a-z0-9]+-)*(?:request-id|requestid|correlation-id|trace-id)$"
+                          },
+                          "summaries": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+                            },
+                            "additionalProperties": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 160,
+                              "pattern": "^[^\\p{Cc}\\p{Cf}]+$"
+                            }
+                          }
+                        },
+                        "additionalProperties": false
                       },
                       "usage_aliases": {
                         "maxItems": 32,
@@ -3876,6 +4005,59 @@
                           "required": ["target", "source_path"],
                           "additionalProperties": false
                         }
+                      },
+                      "media_stream_terminal": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "event": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[^\\r\\n\\0]+$"
+                              }
+                            },
+                            "required": ["event"],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                              },
+                              "equals": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 128
+                                  },
+                                  {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": ["path", "equals"],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "reconciliation_evidence_required": {
+                        "type": "boolean"
+                      },
+                      "reconciliation_response_id_header": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^(?:[A-Za-z0-9-]*-)?(?:request-id|requestid|correlation-id|trace-id)$"
                       }
                     },
                     "additionalProperties": false
@@ -4618,6 +4800,10 @@
                                         "client_error"
                                       ]
                                     },
+                                    "execution": {
+                                      "type": "string",
+                                      "const": "NOT_EXECUTED"
+                                    },
                                     "http_status": {
                                       "type": "integer",
                                       "minimum": 400,
@@ -4637,6 +4823,40 @@
                                   "required": ["path", "retry_kind"],
                                   "additionalProperties": false
                                 }
+                              },
+                              "error_diagnostics": {
+                                "type": "object",
+                                "properties": {
+                                  "code_path": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 128
+                                  },
+                                  "code_header": {
+                                    "type": "string",
+                                    "maxLength": 64,
+                                    "pattern": "^(?:[a-z0-9]+-)*(?:error-code|errorcode|error-type|errortype)$"
+                                  },
+                                  "request_id_header": {
+                                    "type": "string",
+                                    "maxLength": 64,
+                                    "pattern": "^(?:[a-z0-9]+-)*(?:request-id|requestid|correlation-id|trace-id)$"
+                                  },
+                                  "summaries": {
+                                    "type": "object",
+                                    "propertyNames": {
+                                      "type": "string",
+                                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+                                    },
+                                    "additionalProperties": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 160,
+                                      "pattern": "^[^\\p{Cc}\\p{Cf}]+$"
+                                    }
+                                  }
+                                },
+                                "additionalProperties": false
                               },
                               "usage_aliases": {
                                 "maxItems": 32,
@@ -4673,6 +4893,51 @@
                                   "required": ["target", "source_path"],
                                   "additionalProperties": false
                                 }
+                              },
+                              "media_stream_terminal": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "properties": {
+                                      "event": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 128,
+                                        "pattern": "^[^\\r\\n\\0]+$"
+                                      }
+                                    },
+                                    "required": ["event"],
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "properties": {
+                                      "path": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 128
+                                      },
+                                      "equals": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string",
+                                            "maxLength": 128
+                                          },
+                                          {
+                                            "type": "integer",
+                                            "minimum": -9007199254740991,
+                                            "maximum": 9007199254740991
+                                          },
+                                          {
+                                            "type": "boolean"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "required": ["path", "equals"],
+                                    "additionalProperties": false
+                                  }
+                                ]
                               },
                               "reasoning_field": {
                                 "type": "string",
@@ -4924,6 +5189,40 @@
                                   "maxLength": 2048,
                                   "pattern": "^[\\t\\x20-\\x7e]*$"
                                 }
+                              },
+                              "error_diagnostics": {
+                                "type": "object",
+                                "properties": {
+                                  "code_path": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 128
+                                  },
+                                  "code_header": {
+                                    "type": "string",
+                                    "maxLength": 64,
+                                    "pattern": "^(?:[a-z0-9]+-)*(?:error-code|errorcode|error-type|errortype)$"
+                                  },
+                                  "request_id_header": {
+                                    "type": "string",
+                                    "maxLength": 64,
+                                    "pattern": "^(?:[a-z0-9]+-)*(?:request-id|requestid|correlation-id|trace-id)$"
+                                  },
+                                  "summaries": {
+                                    "type": "object",
+                                    "propertyNames": {
+                                      "type": "string",
+                                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+                                    },
+                                    "additionalProperties": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 160,
+                                      "pattern": "^[^\\p{Cc}\\p{Cf}]+$"
+                                    }
+                                  }
+                                },
+                                "additionalProperties": false
                               },
                               "hooks": {
                                 "minItems": 1,
@@ -6462,6 +6761,10 @@
                               "type": "string",
                               "enum": ["retryable", "rate_limit", "auth_error", "client_error"]
                             },
+                            "execution": {
+                              "type": "string",
+                              "const": "NOT_EXECUTED"
+                            },
                             "http_status": {
                               "type": "integer",
                               "minimum": 400,
@@ -6481,6 +6784,40 @@
                           "required": ["path", "retry_kind"],
                           "additionalProperties": false
                         }
+                      },
+                      "error_diagnostics": {
+                        "type": "object",
+                        "properties": {
+                          "code_path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "code_header": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^(?:[a-z0-9]+-)*(?:error-code|errorcode|error-type|errortype)$"
+                          },
+                          "request_id_header": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^(?:[a-z0-9]+-)*(?:request-id|requestid|correlation-id|trace-id)$"
+                          },
+                          "summaries": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+                            },
+                            "additionalProperties": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 160,
+                              "pattern": "^[^\\p{Cc}\\p{Cf}]+$"
+                            }
+                          }
+                        },
+                        "additionalProperties": false
                       },
                       "usage_aliases": {
                         "maxItems": 32,
@@ -6517,6 +6854,51 @@
                           "required": ["target", "source_path"],
                           "additionalProperties": false
                         }
+                      },
+                      "media_stream_terminal": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "event": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[^\\r\\n\\0]+$"
+                              }
+                            },
+                            "required": ["event"],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                              },
+                              "equals": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 128
+                                  },
+                                  {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": ["path", "equals"],
+                            "additionalProperties": false
+                          }
+                        ]
                       },
                       "reasoning_field": {
                         "type": "string",
@@ -7005,6 +7387,10 @@
                               "type": "string",
                               "enum": ["retryable", "rate_limit", "auth_error", "client_error"]
                             },
+                            "execution": {
+                              "type": "string",
+                              "const": "NOT_EXECUTED"
+                            },
                             "http_status": {
                               "type": "integer",
                               "minimum": 400,
@@ -7024,6 +7410,40 @@
                           "required": ["path", "retry_kind"],
                           "additionalProperties": false
                         }
+                      },
+                      "error_diagnostics": {
+                        "type": "object",
+                        "properties": {
+                          "code_path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "code_header": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^(?:[a-z0-9]+-)*(?:error-code|errorcode|error-type|errortype)$"
+                          },
+                          "request_id_header": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^(?:[a-z0-9]+-)*(?:request-id|requestid|correlation-id|trace-id)$"
+                          },
+                          "summaries": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+                            },
+                            "additionalProperties": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 160,
+                              "pattern": "^[^\\p{Cc}\\p{Cf}]+$"
+                            }
+                          }
+                        },
+                        "additionalProperties": false
                       },
                       "usage_aliases": {
                         "maxItems": 32,
@@ -7060,6 +7480,59 @@
                           "required": ["target", "source_path"],
                           "additionalProperties": false
                         }
+                      },
+                      "media_stream_terminal": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "event": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[^\\r\\n\\0]+$"
+                              }
+                            },
+                            "required": ["event"],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                              },
+                              "equals": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 128
+                                  },
+                                  {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": ["path", "equals"],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "reconciliation_evidence_required": {
+                        "type": "boolean"
+                      },
+                      "reconciliation_response_id_header": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^(?:[A-Za-z0-9-]*-)?(?:request-id|requestid|correlation-id|trace-id)$"
                       }
                     },
                     "additionalProperties": false
@@ -7350,6 +7823,10 @@
                               "type": "string",
                               "enum": ["retryable", "rate_limit", "auth_error", "client_error"]
                             },
+                            "execution": {
+                              "type": "string",
+                              "const": "NOT_EXECUTED"
+                            },
                             "http_status": {
                               "type": "integer",
                               "minimum": 400,
@@ -7369,6 +7846,40 @@
                           "required": ["path", "retry_kind"],
                           "additionalProperties": false
                         }
+                      },
+                      "error_diagnostics": {
+                        "type": "object",
+                        "properties": {
+                          "code_path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "code_header": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^(?:[a-z0-9]+-)*(?:error-code|errorcode|error-type|errortype)$"
+                          },
+                          "request_id_header": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^(?:[a-z0-9]+-)*(?:request-id|requestid|correlation-id|trace-id)$"
+                          },
+                          "summaries": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+                            },
+                            "additionalProperties": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 160,
+                              "pattern": "^[^\\p{Cc}\\p{Cf}]+$"
+                            }
+                          }
+                        },
+                        "additionalProperties": false
                       },
                       "usage_aliases": {
                         "maxItems": 32,
@@ -7405,6 +7916,59 @@
                           "required": ["target", "source_path"],
                           "additionalProperties": false
                         }
+                      },
+                      "media_stream_terminal": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "event": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[^\\r\\n\\0]+$"
+                              }
+                            },
+                            "required": ["event"],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                              },
+                              "equals": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 128
+                                  },
+                                  {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": ["path", "equals"],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "reconciliation_evidence_required": {
+                        "type": "boolean"
+                      },
+                      "reconciliation_response_id_header": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^(?:[A-Za-z0-9-]*-)?(?:request-id|requestid|correlation-id|trace-id)$"
                       }
                     },
                     "additionalProperties": false
@@ -8722,6 +9286,574 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/reconciliation/receipts": {
+      "post": {
+        "x-stg-listener": "internal",
+        "x-stg-role": "finance",
+        "security": [
+          {
+            "internalBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "receipts": {
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "request_id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "attempt_id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "account_id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "channel_id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "currency": {
+                              "type": "string",
+                              "pattern": "^[A-Z]{3,8}$"
+                            },
+                            "provider_request_id": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9._:/-]{1,256}$"
+                            },
+                            "evidence_ref": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 512
+                            },
+                            "match_reason": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            },
+                            "verdict": {
+                              "type": "string",
+                              "const": "NOT_EXECUTED"
+                            }
+                          },
+                          "required": [
+                            "request_id",
+                            "attempt_id",
+                            "account_id",
+                            "channel_id",
+                            "currency",
+                            "provider_request_id",
+                            "evidence_ref",
+                            "verdict"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "request_id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "attempt_id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "account_id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "channel_id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "currency": {
+                              "type": "string",
+                              "pattern": "^[A-Z]{3,8}$"
+                            },
+                            "provider_request_id": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9._:/-]{1,256}$"
+                            },
+                            "evidence_ref": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 512
+                            },
+                            "match_reason": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            },
+                            "verdict": {
+                              "type": "string",
+                              "const": "FINAL"
+                            },
+                            "supplier_cost_atoms": {
+                              "type": "string",
+                              "pattern": "^(0|[1-9][0-9]{0,37})$"
+                            },
+                            "customer_usage": {
+                              "type": "object",
+                              "propertyNames": {
+                                "type": "string",
+                                "enum": [
+                                  "input_tokens",
+                                  "output_tokens",
+                                  "cached_input_tokens",
+                                  "cache_write_tokens",
+                                  "cache_write_5m_tokens",
+                                  "cache_write_1h_tokens",
+                                  "requests",
+                                  "images",
+                                  "audio_ms",
+                                  "music_ms",
+                                  "video_ms",
+                                  "audio_seconds",
+                                  "video_seconds",
+                                  "characters",
+                                  "reasoning_tokens"
+                                ]
+                              },
+                              "additionalProperties": {
+                                "type": "string",
+                                "pattern": "^(0|[1-9][0-9]{0,37})(\\.[0-9]{1,18})?$"
+                              }
+                            }
+                          },
+                          "required": [
+                            "request_id",
+                            "attempt_id",
+                            "account_id",
+                            "channel_id",
+                            "currency",
+                            "provider_request_id",
+                            "evidence_ref",
+                            "verdict",
+                            "supplier_cost_atoms"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "actor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  }
+                },
+                "required": ["receipts"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/reconciliation/budgets/{currency}": {
+      "put": {
+        "x-stg-listener": "internal",
+        "x-stg-role": "finance",
+        "security": [
+          {
+            "internalBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "currency",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "limit_atoms": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,37})$"
+                  }
+                },
+                "required": ["limit_atoms"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/reconciliation/receipts/{attemptId}/review": {
+      "post": {
+        "x-stg-listener": "internal",
+        "x-stg-role": "finance",
+        "security": [
+          {
+            "internalBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "attemptId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": ["RESUME", "DISMISS"]
+                  },
+                  "review_evidence_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "customer_usage": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string",
+                          "enum": [
+                            "input_tokens",
+                            "output_tokens",
+                            "cached_input_tokens",
+                            "cache_write_tokens",
+                            "cache_write_5m_tokens",
+                            "cache_write_1h_tokens",
+                            "requests",
+                            "images",
+                            "audio_ms",
+                            "music_ms",
+                            "video_ms",
+                            "audio_seconds",
+                            "video_seconds",
+                            "characters",
+                            "reasoning_tokens"
+                          ]
+                        },
+                        "additionalProperties": {
+                          "type": "string",
+                          "pattern": "^(0|[1-9][0-9]{0,37})(\\.[0-9]{1,18})?$"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "actor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  }
+                },
+                "required": ["action", "review_evidence_ref", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/reconciliation/policies": {
+      "put": {
+        "x-stg-listener": "internal",
+        "x-stg-role": "finance",
+        "security": [
+          {
+            "internalBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "project_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "channel_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "supplier_currency": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3,8}$"
+                  },
+                  "enabled": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "include_historical": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "age_seconds": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 2147483647
+                  },
+                  "max_customer_atoms": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,37}$"
+                  },
+                  "limit_atoms": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,37}$"
+                  }
+                },
+                "required": [
+                  "project_id",
+                  "channel_id",
+                  "supplier_currency",
+                  "age_seconds",
+                  "max_customer_atoms",
+                  "limit_atoms"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "default": {
+            "description": "Gateway error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": ["code", "message"],
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/reconciliation/cases": {
+      "get": {
+        "x-stg-listener": "internal",
+        "x-stg-role": "auditor",
+        "security": [
+          {
+            "internalBearer": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful response",

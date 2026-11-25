@@ -33,7 +33,11 @@ import {
   type KeySpendRow,
 } from "./key-spend.ts";
 
-type DirectSettlementEntry = { index: number; item: CommitTerminalInput };
+type DirectSettlementEntry = {
+  index: number;
+  item: CommitTerminalInput;
+  previouslySettledSupplierJournal?: string | null;
+};
 type DetachedHold = {
   requestId: string;
   wlId: string | null;
@@ -371,7 +375,7 @@ export async function applyDirectSettlements(
     payload: Record<string, unknown>;
   }[] = [];
 
-  for (const { index: i, item } of directEntries) {
+  for (const { index: i, item, previouslySettledSupplierJournal } of directEntries) {
     const existing = existingCharges.get(item.request_id);
     if (existing) {
       results[i] = {
@@ -558,7 +562,7 @@ export async function applyDirectSettlements(
       );
     }
 
-    let supplierJournalId: string | null = null;
+    let supplierJournalId = previouslySettledSupplierJournal ?? null;
     const updatedSupplierHolds: SupplierHoldEntry[] = [];
     for (const sh of hold.supplier_holds) {
       const canSettleAttempt =
@@ -663,9 +667,14 @@ export async function applyDirectSettlements(
     }
 
     const effectiveApiKeyId = item.api_key_id ?? hold.api_key_id;
-    const effectiveOverrideId = item.pricing_override_id ?? hold.pricing_override_id;
-    const effectiveDiscNum = item.discount_numerator ?? hold.discount_numerator;
-    const effectiveDiscDen = item.discount_denominator ?? hold.discount_denominator;
+    const effectiveOverrideId =
+      item.pricing_override_id === undefined ? hold.pricing_override_id : item.pricing_override_id;
+    const effectiveDiscNum =
+      item.discount_numerator === undefined ? hold.discount_numerator : item.discount_numerator;
+    const effectiveDiscDen =
+      item.discount_denominator === undefined
+        ? hold.discount_denominator
+        : item.discount_denominator;
 
     holdUpdates.push({
       request_id: item.request_id,

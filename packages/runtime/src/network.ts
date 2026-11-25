@@ -2,7 +2,8 @@ import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 import { inCidrs } from "./ip.ts";
 import { GatewayError } from "@gateway/contracts";
-import type { DialLimits } from "./dial-scheduler.ts";
+import { DEFAULT_DIAL_QUEUE_WAIT_MS, type DialLimits } from "./dial-scheduler.ts";
+import { markUpstream } from "./transport-timing.ts";
 import { isValidHttpHeaderName, isValidHttpHeaderValue } from "./bun-http1.ts";
 import {
   createHttpPool,
@@ -25,10 +26,21 @@ export type TransportOptions = {
   dial?: DialLimits;
 };
 
-type DispatchInit = Pick<PinnedRequestInit, "signal" | "dispatchDeadline" | "onCancelRegister">;
+type DispatchInit = Pick<
+  PinnedRequestInit,
+  "signal" | "dispatchDeadline" | "onCancelRegister" | "onTiming"
+>;
 type FetchInit = RequestInit &
-  Pick<PinnedRequestInit, "dispatchDeadline" | "headersValidated" | "onCancelRegister">;
-type PinnedTarget = { original: URL; pinned: URL; tls: PinnedRequestInit["tls"] };
+  Pick<
+    PinnedRequestInit,
+    "dispatchDeadline" | "headersValidated" | "onCancelRegister" | "onTiming"
+  >;
+type UpstreamOrigin = {
+  url: URL;
+  addresses: DnsAddress[];
+  tls: PinnedRequestInit["tls"];
+  ipLiteral: boolean;
+};
 
 export type PreparedDispatch = {
   fetchFast(init: FetchInit): Promise<FastUpstreamResult>;
@@ -167,6 +179,7 @@ function createDnsResolver(options: TransportOptions = {}) {
 export function createTransport(maxConnections = 1024, options: TransportOptions = {}) {
   const pool = createHttpPool(maxConnections, options.dial);
   const dns = createDnsResolver(options);
+  const fallbackBudget = options.dial?.maxQueueWaitMs ?? DEFAULT_DIAL_QUEUE_WAIT_MS;
   return {
     async prepareDispatch(
       url: URL,
@@ -183,18 +196,27 @@ export function createTransport(maxConnections = 1024, options: TransportOptions
               ? {}
               : { dispatchDeadline: init.dispatchDeadline }),
             signal: init.signal ? AbortSignal.any([init.signal, cancel.signal]) : cancel.signal,
+            ...(init.onTiming ? { onTiming: init.onTiming } : {}),
           }
         : init;
-      const { target, outbound } = await (async () => {
+      const { origin, outbound, selectedIndex } = await (async () => {
         try {
-          const target = await resolvePinnedTarget(
+          const origin = await resolveUpstreamOrigin(
             url,
             admission,
             allowPrivate,
             privateCidrs,
             dns.resolve,
           );
-          const outbound = await pool.reserve(target.pinned, target.tls, bytes, admission);
+          const { outbound, index } = await useAddresses(
+            origin,
+            admission,
+            fallbackBudget,
+            async (target, attempt, index) => ({
+              outbound: await pool.reserve(target, origin.tls, bytes, attempt),
+              index,
+            }),
+          );
           if (admission.signal?.aborted) {
             outbound.release();
             throw new UpstreamPreDispatchError(
@@ -202,44 +224,74 @@ export function createTransport(maxConnections = 1024, options: TransportOptions
               "Upstream dispatch cancelled",
             );
           }
-          return { target, outbound };
+          return { origin, outbound, selectedIndex: index };
         } finally {
           detach?.();
         }
       })();
+      let available = true;
       return {
         async fetchFast(request: FetchInit) {
+          if (!available)
+            throw new UpstreamPreDispatchError("upstream_not_dispatched", "Dispatch unavailable");
+          available = false;
           try {
             if (request.body instanceof ReadableStream) {
               throw new TypeError("Prepared dispatch requires a buffered request body");
             }
-            return await sendPinned(target, request, (pinned, pinnedInit) =>
-              pool.sendFast(pinned, { ...pinnedInit, outbound }),
+            return await useAddresses(
+              origin,
+              pinnedRequest(origin, request),
+              fallbackBudget,
+              async (pinned, init, index) => {
+                if (index !== selectedIndex) return pool.sendFast(pinned, init);
+                try {
+                  return await pool.sendFast(pinned, { ...init, outbound });
+                } finally {
+                  outbound.release();
+                }
+              },
+              selectedIndex,
             );
           } finally {
             outbound.release();
           }
         },
-        release: outbound.release,
+        release() {
+          available = false;
+          outbound.release();
+        },
       };
     },
-    fetch(
+    async fetch(
       url: URL,
-      init: RequestInit &
-        Pick<PinnedRequestInit, "dispatchDeadline" | "headersValidated" | "onCancelRegister">,
+      init: FetchInit,
       allowPrivate: boolean,
       privateCidrs: readonly string[] = [],
     ) {
-      return safeFetch(url, init, allowPrivate, privateCidrs, pool.send, dns.resolve);
+      const origin = await resolveUpstreamOrigin(
+        url,
+        init,
+        allowPrivate,
+        privateCidrs,
+        dns.resolve,
+      );
+      return useAddresses(origin, pinnedRequest(origin, init), fallbackBudget, pool.send);
     },
-    fetchFast(
+    async fetchFast(
       url: URL,
-      init: RequestInit &
-        Pick<PinnedRequestInit, "dispatchDeadline" | "headersValidated" | "onCancelRegister">,
+      init: FetchInit,
       allowPrivate: boolean,
       privateCidrs: readonly string[] = [],
     ): Promise<FastUpstreamResult> {
-      return safeFetchGeneric(url, init, allowPrivate, privateCidrs, pool.sendFast, dns.resolve);
+      const origin = await resolveUpstreamOrigin(
+        url,
+        init,
+        allowPrivate,
+        privateCidrs,
+        dns.resolve,
+      );
+      return useAddresses(origin, pinnedRequest(origin, init), fallbackBudget, pool.sendFast);
     },
     sseFraming: pool.sseFraming,
     bufferedBody: pool.bufferedBody,
@@ -352,13 +404,13 @@ type ResolveDns = (
   dispatchDeadline?: number,
 ) => Promise<DnsAddress[]>;
 
-async function resolvePinnedTarget(
+async function resolveUpstreamOrigin(
   url: URL,
   init: DispatchInit,
   allowPrivate: boolean,
   privateCidrs: readonly string[],
   resolveDns: ResolveDns,
-): Promise<PinnedTarget> {
+): Promise<UpstreamOrigin> {
   url = new URL(url);
   if (url.username || url.password || (url.protocol !== "https:" && url.protocol !== "http:"))
     throw new UpstreamPreDispatchError("unsafe_upstream", "Unsafe upstream URL");
@@ -374,12 +426,25 @@ async function resolvePinnedTarget(
   const rawHost = url.hostname;
   const hostname = rawHost.charCodeAt(0) === 91 ? rawHost.slice(1, -1) : rawHost;
   const ipFamily = cachedIpFamily(hostname);
-  const addresses = ipFamily
-    ? [{ address: hostname, family: ipFamily }]
-    : await resolveDns(hostname, signal, init.onCancelRegister, init.dispatchDeadline);
+  let addresses: DnsAddress[];
+  if (ipFamily) addresses = [{ address: hostname, family: ipFamily }];
+  else {
+    markUpstream(init.onTiming, "dns_start");
+    try {
+      addresses = await resolveDns(hostname, signal, init.onCancelRegister, init.dispatchDeadline);
+    } finally {
+      markUpstream(init.onTiming, "dns_end");
+    }
+  }
   if (signal?.aborted || expired()) throw cancelled();
-  const chosen = addresses.find((entry) => entry.family === 4) ?? addresses[0];
-  if (!chosen) throw new UpstreamPreDispatchError("upstream_dns", "Upstream address lookup failed");
+  if (
+    !addresses.length ||
+    addresses.some(
+      (entry) =>
+        !entry.family || entry.address.includes("%") || isIP(entry.address) !== entry.family,
+    )
+  )
+    throw new UpstreamPreDispatchError("upstream_dns", "Upstream address lookup failed");
   if (
     !allowPrivate &&
     (addresses.some(
@@ -390,32 +455,44 @@ async function resolvePinnedTarget(
   ) {
     throw new UpstreamPreDispatchError("unsafe_upstream", "Upstream address is not permitted");
   }
-  const pinnedHost = chosen.family === 6 ? `[${chosen.address}]` : chosen.address;
-  const pinned = pinnedHost === url.hostname ? url : new URL(url);
-  if (pinned !== url) pinned.hostname = pinnedHost;
   const tls =
     url.protocol === "https:"
       ? { rejectUnauthorized: true as const, ...(!ipFamily && { serverName: hostname }) }
       : undefined;
-  return { original: url, pinned, tls };
+  const ordered =
+    addresses.length === 1
+      ? addresses
+      : [
+          ...new Map(
+            addresses
+              .filter((entry) => entry.family === 4)
+              .concat(addresses.filter((entry) => entry.family === 6))
+              .map((entry) => [entry.address, entry]),
+          ).values(),
+        ];
+  return { url, addresses: ordered, tls, ipLiteral: Boolean(ipFamily) };
 }
 
-function sendPinned<T>(
-  target: PinnedTarget,
-  init: FetchInit,
-  send: (url: URL, init: PinnedRequestInit) => Promise<T>,
-): Promise<T> {
-  const { original: url, pinned, tls } = target;
+function pinAddress(origin: UpstreamOrigin, address: DnsAddress): URL {
+  const host = address.family === 6 ? `[${address.address}]` : address.address;
+  if (host === origin.url.hostname) return origin.url;
+  const pinned = new URL(origin.url);
+  pinned.hostname = host;
+  return pinned;
+}
+
+function pinnedRequest(origin: UpstreamOrigin, init: FetchInit): PinnedRequestInit {
+  const { url, tls, ipLiteral } = origin;
   let headers: HeadersInit;
   let headersValidated = false;
   if (init.headers instanceof Headers || Array.isArray(init.headers)) {
     const h = new Headers(init.headers);
-    if (pinned !== url || !h.has("host")) h.set("host", url.host);
+    if (!ipLiteral || !h.has("host")) h.set("host", url.host);
     h.set("accept-encoding", "identity");
     headers = h;
   } else if (init.headersValidated && init.headers) {
     const plain = init.headers as Record<string, string>;
-    if (pinned !== url || !("host" in plain)) plain.host = url.host;
+    if (!ipLiteral || !("host" in plain)) plain.host = url.host;
     plain["accept-encoding"] = "identity";
     headers = plain;
     headersValidated = true;
@@ -431,7 +508,7 @@ function sendPinned<T>(
         plain[k.toLowerCase()] = v;
       }
     }
-    if (pinned !== url || !("host" in plain)) plain.host = url.host;
+    if (!ipLiteral || !("host" in plain)) plain.host = url.host;
     plain["accept-encoding"] = "identity";
     headers = plain;
     headersValidated = true;
@@ -447,26 +524,79 @@ function sendPinned<T>(
   if (init.signal !== undefined) sendInit.signal = init.signal;
   if (init.dispatchDeadline !== undefined) sendInit.dispatchDeadline = init.dispatchDeadline;
   if (init.onCancelRegister !== undefined) sendInit.onCancelRegister = init.onCancelRegister;
+  if (init.onTiming) sendInit.onTiming = init.onTiming;
   if (tls) sendInit.tls = tls;
-  return send(pinned, sendInit);
+  return sendInit;
 }
 
-async function safeFetchGeneric<T>(
-  url: URL,
-  init: FetchInit,
-  allowPrivate: boolean,
-  privateCidrs: readonly string[],
-  send: (url: URL, init: PinnedRequestInit) => Promise<T>,
-  resolveDns: ResolveDns,
-): Promise<T> {
-  return sendPinned(
-    await resolvePinnedTarget(url, init, allowPrivate, privateCidrs, resolveDns),
-    init,
-    send,
+function canTryAnotherAddress(error: unknown) {
+  if (!(error instanceof UpstreamPreDispatchError)) return false;
+  if (error.code === "upstream_connect" || error.code === "upstream_not_dispatched") return true;
+  if (error.code !== "upstream_tls") return false;
+  const cause = error.cause as { code?: string } | undefined;
+  return (
+    !cause ||
+    /^(ECONNRESET|ECONNREFUSED|ECONNABORTED|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT|EPIPE)$/.test(
+      cause.code ?? "",
+    )
   );
 }
 
-export function safeFetch(
+async function useAddresses<T>(
+  origin: UpstreamOrigin,
+  init: PinnedRequestInit,
+  fallbackBudget: number,
+  tryAddress: (url: URL, init: PinnedRequestInit, index: number) => Promise<T>,
+  firstIndex = 0,
+): Promise<T> {
+  const { addresses } = origin;
+  if (addresses.length - firstIndex === 1)
+    return tryAddress(pinAddress(origin, addresses[firstIndex]!), init, firstIndex);
+
+  const deadline = init.dispatchDeadline ?? performance.now() + fallbackBudget;
+  const register = init.onCancelRegister;
+  let cancelled = false;
+  const onCancelRegister: CancelRegistrar | undefined = register
+    ? (cancel) =>
+        register((reason) => {
+          cancelled = true;
+          cancel(reason);
+        })
+    : undefined;
+  for (let index = firstIndex; ; index++) {
+    const now = performance.now();
+    const remaining = addresses.length - index;
+    const addressDeadline =
+      remaining === 1
+        ? deadline
+        : Math.min(
+            now + fallbackBudget,
+            now + (deadline - now) / (index === firstIndex ? 2 : remaining),
+          );
+    try {
+      return await tryAddress(
+        pinAddress(origin, addresses[index]!),
+        {
+          ...init,
+          dispatchDeadline: addressDeadline,
+          ...(onCancelRegister ? { onCancelRegister } : {}),
+        },
+        index,
+      );
+    } catch (error) {
+      if (
+        remaining === 1 ||
+        cancelled ||
+        init.signal?.aborted ||
+        performance.now() >= deadline ||
+        !canTryAnotherAddress(error)
+      )
+        throw error;
+    }
+  }
+}
+
+export async function safeFetch(
   url: URL,
   init: RequestInit &
     Pick<PinnedRequestInit, "dispatchDeadline" | "headersValidated" | "onCancelRegister">,
@@ -480,7 +610,9 @@ export function safeFetch(
     dispatchDeadline?: number,
   ) => Promise<DnsAddress[]> = defaultDnsResolve,
 ): Promise<Response> {
-  return safeFetchGeneric(url, init, allowPrivate, privateCidrs, send, resolveDns);
+  const origin = await resolveUpstreamOrigin(url, init, allowPrivate, privateCidrs, resolveDns);
+  const first = pinAddress(origin, origin.addresses[0]!);
+  return send(first, pinnedRequest(origin, init));
 }
 
 export async function readBounded(

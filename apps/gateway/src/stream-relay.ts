@@ -13,10 +13,12 @@ export function createStreamRelay(
     fail: () => Promise<unknown>;
     abortedFrame: () => Uint8Array | undefined;
     finish: () => void;
+    onEnqueued?: (chunk: Uint8Array) => boolean;
   },
 ): ReadableStream<Uint8Array> {
   let resume: (() => void) | undefined;
   let cancelled = false;
+  let onEnqueued = options.onEnqueued;
   let running: Promise<void>;
   const wake = () => {
     const unblock = resume;
@@ -52,6 +54,13 @@ export function createStreamRelay(
               throw options.signal.reason ?? new Error("Client cancelled the stream");
             }
             controller.enqueue(chunk);
+            if (onEnqueued) {
+              try {
+                if (onEnqueued(chunk)) onEnqueued = undefined;
+              } catch {
+                onEnqueued = undefined;
+              }
+            }
           },
           close,
         })

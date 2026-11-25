@@ -9,6 +9,7 @@ import {
 import { GatewayError } from "@gateway/contracts";
 import { UpstreamPreDispatchError } from "./http-pool.ts";
 import type { DialPermit, createDialScheduler } from "./dial-scheduler.ts";
+import { markUpstream, type UpstreamTimingObserver } from "./transport-timing.ts";
 
 const HEADER_END = Buffer.from("\r\n\r\n");
 const CRLF = Buffer.from("\r\n");
@@ -118,6 +119,8 @@ type ChunkState =
 
 type ActiveExchange = {
   method: string;
+  timing: UpstreamTimingObserver | undefined;
+  dialWaiting?: boolean;
   signal: AbortSignal | undefined;
   dispatchDeadline: number | undefined;
   canHaveDispatched: boolean;
@@ -601,7 +604,14 @@ export function createBunHttp1Pool(
     });
   }
 
+  const stopDialWait = (ex: ActiveExchange) => {
+    if (!ex.dialWaiting) return;
+    ex.dialWaiting = false;
+    markUpstream(ex.timing, "wait_end");
+  };
+
   const cleanupExchange = (ex: ActiveExchange) => {
+    stopDialWait(ex);
     ex.dialAbort?.abort();
     delete ex.dialAbort;
     ex.pendingWrite = null;
@@ -718,6 +728,7 @@ export function createBunHttp1Pool(
         return;
       }
       if (written >= conn.writeBytes) {
+        markUpstream(conn.exchange?.timing, "request_written");
         conn.writeBuf = null;
         conn.writeBytes = 0;
         conn.writeOffset = 0;
@@ -753,6 +764,7 @@ export function createBunHttp1Pool(
       if (written === 0) return;
       conn.writeOffset += written;
     }
+    markUpstream(conn.exchange?.timing, "request_written");
     conn.writeBuf = null;
     conn.writeOffset = 0;
   };
@@ -1043,6 +1055,7 @@ export function createBunHttp1Pool(
       break;
     }
 
+    markUpstream(ex.timing, "response_headers");
     ex.status = parsed.status;
     ex.contentType = parsed.contentType;
     ex.headers = parsed.headers;
@@ -1211,6 +1224,7 @@ export function createBunHttp1Pool(
       return;
     }
     ex.canHaveDispatched = true;
+    markUpstream(ex.timing, "connection_ready");
     const reqBuf = ex.pendingWrite;
     const reqBytes = ex.pendingWriteBytes;
     ex.pendingWrite = null;
@@ -1232,6 +1246,7 @@ export function createBunHttp1Pool(
         return;
       }
       conn.socket = socket;
+      markUpstream(conn.exchange?.timing, "tcp_ready");
       if (conn.isTls) return;
       conn.connected = true;
       dispatchAfterReady(conn);
@@ -1270,6 +1285,7 @@ export function createBunHttp1Pool(
         }
         return;
       }
+      markUpstream(conn.exchange?.timing, "tls_ready");
       conn.connected = true;
       dispatchAfterReady(conn);
     },
@@ -1321,7 +1337,10 @@ export function createBunHttp1Pool(
         finishSuccess(conn, ex, false);
         return;
       }
-      failExchange(conn, ex, new Error("Upstream closed connection prematurely"));
+      const error = ex.canHaveDispatched
+        ? new Error("Upstream closed connection prematurely")
+        : connectionFailure(conn.isTls);
+      failExchange(conn, ex, error);
     },
     close(socket) {
       const conn = socket.data;
@@ -1359,7 +1378,7 @@ export function createBunHttp1Pool(
         destroyConn(conn);
         return;
       }
-      failExchange(conn, ex, connectionFailure(conn.isTls, error));
+      failExchange(conn, ex, ex.canHaveDispatched ? error : connectionFailure(conn.isTls, error));
     },
   };
 
@@ -1378,6 +1397,7 @@ export function createBunHttp1Pool(
     headersValidated = false,
     onCancelRegister?: CancelRegistrar,
     outbound?: OutboundReservation,
+    timing?: UpstreamTimingObserver,
   ): Promise<T> {
     const built = buildRequestBuffer(method, path, headers, body, headersValidated);
     const reqBuf = built.payload;
@@ -1387,6 +1407,7 @@ export function createBunHttp1Pool(
     return new Promise<T>((resolve, reject) => {
       const ex: ActiveExchange = {
         method,
+        timing,
         signal,
         dispatchDeadline,
         canHaveDispatched: false,
@@ -1489,6 +1510,8 @@ export function createBunHttp1Pool(
 
       if (reused) {
         ex.canHaveDispatched = true;
+        markUpstream(timing, "connection_reused");
+        markUpstream(timing, "connection_ready");
         conn.writeBuf = reqBuf;
         conn.writeBytes = reqBytes;
         conn.writeOffset = 0;
@@ -1517,13 +1540,14 @@ export function createBunHttp1Pool(
           failExchange(conn, ex, notDispatched());
           return;
         }
+        markUpstream(timing, "dial_start");
         conn.finishDial = () => {
           delete conn.finishDial;
           finished();
         };
         const onError = (error: unknown) => {
           conn.finishDial?.();
-          failExchange(conn, ex, connectionFailure(isTls, error));
+          failExchange(conn, ex, ex.canHaveDispatched ? error : connectionFailure(isTls, error));
         };
         try {
           void Bun.connect<PooledConn>({
@@ -1546,6 +1570,7 @@ export function createBunHttp1Pool(
       ex.dialAbort = new AbortController();
       const onWaitFailure = (error: unknown) => failExchange(conn, ex, error);
       const useReservation = (outbound: OutboundReservation) => {
+        stopDialWait(ex);
         if (ex.finished) {
           outbound.release();
           return;
@@ -1558,6 +1583,7 @@ export function createBunHttp1Pool(
           destroyConn(conn);
           conn = acquired.idle;
           conn.exchange = ex;
+          markUpstream(timing, "connection_reused");
           dispatchAfterReady(conn);
         } else {
           waitForConnection();
@@ -1565,6 +1591,10 @@ export function createBunHttp1Pool(
       };
       function waitForConnection() {
         try {
+          if (timing) {
+            ex.dialWaiting = true;
+            markUpstream(timing, "wait_start");
+          }
           const ticket = reserve(
             hostname,
             port,
@@ -1599,6 +1629,7 @@ export function createBunHttp1Pool(
       headersValidated = false,
       onCancelRegister?: CancelRegistrar,
       outbound?: OutboundReservation,
+      timing?: UpstreamTimingObserver,
     ): Promise<Response> {
       return sendExchange<Response>(
         hostname,
@@ -1615,6 +1646,7 @@ export function createBunHttp1Pool(
         headersValidated,
         onCancelRegister,
         outbound,
+        timing,
       );
     },
 
@@ -1632,6 +1664,7 @@ export function createBunHttp1Pool(
       headersValidated = false,
       onCancelRegister?: CancelRegistrar,
       outbound?: OutboundReservation,
+      timing?: UpstreamTimingObserver,
     ): Promise<FastUpstreamResult> {
       return sendExchange<FastUpstreamResult>(
         hostname,
@@ -1648,6 +1681,7 @@ export function createBunHttp1Pool(
         headersValidated,
         onCancelRegister,
         outbound,
+        timing,
       );
     },
 

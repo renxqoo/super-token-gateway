@@ -1,4 +1,5 @@
 export * from "./network.ts";
+export type { UpstreamPhase, UpstreamTimingObserver } from "./transport-timing.ts";
 export * from "./lifecycle.ts";
 export * from "./ip.ts";
 export * from "./cloud-auth.ts";

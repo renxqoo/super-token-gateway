@@ -88,6 +88,14 @@ export function isTransientPgConcurrencyError(error: unknown): boolean {
   return code !== undefined && TRANSIENT_PG_STATES.has(code);
 }
 
+export function holdTemporarilyUnavailable() {
+  return {
+    ok: false,
+    code: "ledger_busy",
+    message: "Funds reservation is temporarily busy",
+  } as const;
+}
+
 export async function withPgConcurrencyRetry<T>(
   run: () => Promise<T>,
   maxAttempts = 4,

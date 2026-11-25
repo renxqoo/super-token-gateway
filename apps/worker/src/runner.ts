@@ -5,6 +5,7 @@ import {
   createLedgerEngine,
   prepareLedgerMonth,
 } from "@gateway/ledger";
+import { createReconciliationPoller } from "./reconciliation-poll.ts";
 
 export type WorkerTickStats = {
   is_leader: boolean;
@@ -46,6 +47,14 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
   const leaseKey = options.leaseKey ?? 81442599;
   const consumerName = options.outboxConsumerName ?? "business_webhook";
   const fetchImpl = options.fetchImpl ?? fetch;
+  const reconciliationInterval = Number(process.env.WORKER_RECONCILIATION_MS ?? 5000);
+  const reconciliationBatch = Number(process.env.WORKER_RECONCILIATION_BATCH ?? 16);
+  if (
+    ![reconciliationInterval, reconciliationBatch].every(
+      (value) => Number.isSafeInteger(value) && value > 0,
+    )
+  )
+    throw new Error("Worker reconciliation interval and batch must be positive integers");
 
   let reservedConn: Awaited<ReturnType<SQL["reserve"]>> | null = null;
   let hasLeadership = false;
@@ -56,6 +65,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
     ledger: Promise.resolve(),
     outbox: Promise.resolve(),
     monitoring: Promise.resolve(),
+    reconciliation: Promise.resolve(),
   };
   let leadershipCheck: Promise<boolean> | null = null;
   let lastSuccessfulSweep: string | null = null;
@@ -65,6 +75,25 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
   let deliveryFailures = 0;
   let sweptHoldsTotal = 0;
   let sweptLeasesTotal = 0;
+  let reconciledReceiptsTotal = 0;
+  let reconciledWaiversTotal = 0;
+  let reconciliationLookupsTotal = 0;
+  let reconciliationImportsTotal = 0;
+  let reconciliationStop = new AbortController();
+  let receiptPoller = createReconciliationPoller(ledger);
+
+  async function reconcileEvidence() {
+    const { requested, imported } = await receiptPoller.run(
+      reconciliationBatch,
+      reconciliationStop.signal,
+    );
+    reconciliationLookupsTotal += requested;
+    reconciliationImportsTotal += imported;
+    if (reconciliationStop.signal.aborted) return;
+    const { receipts, waivers } = await ledger.processReconciliation(reconciliationBatch);
+    reconciledReceiptsTotal += receipts;
+    reconciledWaiversTotal += waivers;
+  }
 
   function ensureLeadership(): Promise<boolean> {
     leadershipCheck ??= checkLeadership().finally(() => {
@@ -241,6 +270,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
     const swept_holds = swept.holds;
     const swept_leases = swept.leases;
     lastSuccessfulSweep = new Date().toISOString();
+    await reconcileEvidence();
     const expired_wallets = await ledger.expireAllLots(100);
     const collected_debts = await ledger.collectAllDebts(100);
     const rebalanced_accounts = await rebalanceImbalancedSuppliers();
@@ -315,6 +345,10 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
         outbox_delivery_failures_total: deliveryFailures,
         swept_holds_total: sweptHoldsTotal,
         swept_leases_total: sweptLeasesTotal,
+        reconciliation_receipts_processed_total: reconciledReceiptsTotal,
+        reconciliation_waivers_total: reconciledWaiversTotal,
+        reconciliation_lookups_total: reconciliationLookupsTotal,
+        reconciliation_imports_total: reconciliationImportsTotal,
         operations_sample_timestamp_seconds: lastOperationsSample,
         ...operationsSample,
       };
@@ -327,6 +361,10 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
 
     async start(): Promise<void> {
       if (running) return;
+      if (reconciliationStop.signal.aborted) {
+        reconciliationStop = new AbortController();
+        receiptPoller = createReconciliationPoller(ledger);
+      }
       running = true;
       stopped = false;
       const leader = await ensureLeadership();
@@ -341,6 +379,13 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
           if (hasLeadership) lastSuccessfulSweep = new Date().toISOString();
         }
       }, sweepIntervalMs);
+      scheduleTask(
+        async () => {
+          if (await ensureLeadership()) await reconcileEvidence();
+        },
+        reconciliationInterval,
+        "reconciliation",
+      );
       scheduleTask(
         async () => {
           if (!hasLeadership) return;
@@ -395,9 +440,11 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
     async stop(): Promise<void> {
       stopped = true;
       running = false;
+      reconciliationStop.abort();
       for (const t of timers) clearInterval(t);
       timers.length = 0;
       await Promise.all(Object.values(lanes));
+      receiptPoller.close();
       await ledger.drain();
       await releaseLeadership();
     },

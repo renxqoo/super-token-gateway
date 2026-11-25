@@ -24,7 +24,7 @@ function gcdBigInt(a: bigint, b: bigint): bigint {
   return x === 0n ? 1n : x;
 }
 
-function scalePricingRates(
+export function scalePricingRates(
   rates: Pricing["rates"],
   numStr: string | null,
   denStr: string | null,
@@ -54,6 +54,92 @@ async function recordResolution(tx: SQL, input: ResolveRequestInput): Promise<vo
   `;
 }
 
+export async function resolveSupplierAttemptInTx(
+  tx: SQL,
+  input: ResolveSupplierAttemptInput,
+  allowHistoricalHeld = false,
+): Promise<ResolveSupplierAttemptResult> {
+  const cost = input.action === "SETTLE" ? parseAtoms(input.supplier_cost_atoms) : 0n;
+  if (cost === null) return { ok: false, code: "invalid_supplier_cost" };
+  const state = input.action === "SETTLE" ? "SETTLED" : "RELEASED";
+  const [hold] = await tx`
+      SELECT supplier_holds, supplier_lease_id, state FROM public.billing_holds
+      WHERE request_id = ${input.request_id} FOR NO KEY UPDATE
+    `;
+  const attempts = (hold?.supplier_holds ?? []) as SupplierHoldEntry[];
+  const attempt = attempts.find((entry) => entry.attempt_id === input.attempt_id);
+  if (!attempt) return { ok: false, code: "supplier_attempt_not_found" };
+  if (attempt.resolution) {
+    if (
+      attempt.resolution.action === input.action &&
+      attempt.resolution.evidence_ref === input.evidence_ref &&
+      attempt.resolution.supplier_cost_atoms === cost.toString()
+    )
+      return { ok: true, replayed: true, state };
+    return { ok: false, code: "supplier_attempt_conflict" };
+  }
+  if (
+    (attempt.state !== "UNKNOWN" &&
+      !(allowHistoricalHeld && hold!.state === "UNKNOWN" && attempt.state === "HELD")) ||
+    hold!.state === "HELD" ||
+    hold!.supplier_lease_id
+  ) {
+    return { ok: false, code: "supplier_attempt_conflict" };
+  }
+  await tx`
+      SELECT id FROM public.upstream_accounts
+      WHERE id = ${attempt.account_id}
+      FOR NO KEY UPDATE
+    `;
+  const [cell] = await tx`
+      UPDATE public.supplier_cells
+      SET reserved_atoms = reserved_atoms - ${attempt.held_atoms}::numeric,
+        balance_atoms = balance_atoms - ${cost.toString()}::numeric,
+        spent_atoms = spent_atoms + ${cost.toString()}::numeric,
+        revision = revision + 1
+      WHERE account_id = ${attempt.account_id} AND currency = ${attempt.currency}
+        AND cell = ${attempt.cell} AND reserved_atoms >= ${attempt.held_atoms}::numeric
+      RETURNING balance_atoms::text
+    `;
+  if (!cell) return { ok: false, code: "supplier_attempt_conflict" };
+  if (cost > 0n) {
+    const journal = {
+      journal_id: crypto.randomUUID(),
+      side: "SUPPLIER",
+      entity_id: attempt.account_id,
+      request_id: input.request_id,
+      reference: `supplier_attempt_resolution:${input.attempt_id}`,
+      kind: "SUPPLIER_COST",
+      currency: attempt.currency,
+    } as const;
+    await insertJournalLines(tx, [
+      { ...journal, ordinal: 0, account: "upstream:available", atoms: -cost },
+      { ...journal, ordinal: 1, account: "upstream:expense", atoms: cost },
+    ]);
+  }
+  if (cost > BigInt(attempt.held_atoms) || BigInt(String(cell.balance_atoms)) < 0n) {
+    await tx`
+        UPDATE public.upstream_accounts
+        SET state = 'RECONCILE_REQUIRED', revision = revision + 1, updated_at = now()
+        WHERE id = ${attempt.account_id} AND state = 'ACTIVE'
+      `;
+    await tx`UPDATE public.config_epoch SET version = version + 1 WHERE id = 1`;
+  }
+  attempt.state = state;
+  attempt.resolution = {
+    action: input.action,
+    supplier_cost_atoms: cost.toString(),
+    evidence_ref: input.evidence_ref,
+    reason: input.reason,
+    actor: input.actor,
+  };
+  await tx`
+      UPDATE public.billing_holds SET supplier_holds = ${attempts}::jsonb
+      WHERE request_id = ${input.request_id}
+    `;
+  return { ok: true, replayed: false, state };
+}
+
 export function createReconciliation(
   db: SQL,
   notifyDetachedLocal: LeaseManager["notifyDetachedLocal"],
@@ -62,81 +148,15 @@ export function createReconciliation(
     async resolveSupplierAttempt(
       input: ResolveSupplierAttemptInput,
     ): Promise<ResolveSupplierAttemptResult> {
-      const cost = input.action === "SETTLE" ? parseAtoms(input.supplier_cost_atoms) : 0n;
-      if (cost === null) return { ok: false, code: "invalid_supplier_cost" };
-      const state = input.action === "SETTLE" ? "SETTLED" : "RELEASED";
       return db.begin(async (tx) => {
-        const [hold] = await tx`
-          SELECT supplier_holds, supplier_lease_id, state FROM public.billing_holds
-          WHERE request_id = ${input.request_id} FOR NO KEY UPDATE
-        `;
-        const attempts = (hold?.supplier_holds ?? []) as SupplierHoldEntry[];
-        const attempt = attempts.find((entry) => entry.attempt_id === input.attempt_id);
-        if (!attempt) return { ok: false, code: "supplier_attempt_not_found" };
-        if (attempt.resolution) {
-          if (
-            attempt.resolution.action === input.action &&
-            attempt.resolution.evidence_ref === input.evidence_ref &&
-            attempt.resolution.supplier_cost_atoms === cost.toString()
-          )
-            return { ok: true, replayed: true, state };
-          return { ok: false, code: "supplier_attempt_conflict" };
-        }
-        if (attempt.state !== "UNKNOWN" || hold!.state === "HELD" || hold!.supplier_lease_id) {
-          return { ok: false, code: "supplier_attempt_conflict" };
-        }
-        await tx`
-          SELECT id FROM public.upstream_accounts
-          WHERE id = ${attempt.account_id}
-          FOR NO KEY UPDATE
-        `;
-        const [cell] = await tx`
-          UPDATE public.supplier_cells
-          SET reserved_atoms = reserved_atoms - ${attempt.held_atoms}::numeric,
-            balance_atoms = balance_atoms - ${cost.toString()}::numeric,
-            spent_atoms = spent_atoms + ${cost.toString()}::numeric,
-            revision = revision + 1
-          WHERE account_id = ${attempt.account_id} AND currency = ${attempt.currency}
-            AND cell = ${attempt.cell} AND reserved_atoms >= ${attempt.held_atoms}::numeric
-          RETURNING balance_atoms::text
-        `;
-        if (!cell) return { ok: false, code: "supplier_attempt_conflict" };
-        if (cost > 0n) {
-          const journal = {
-            journal_id: crypto.randomUUID(),
-            side: "SUPPLIER",
-            entity_id: attempt.account_id,
-            request_id: input.request_id,
-            reference: `supplier_attempt_resolution:${input.attempt_id}`,
-            kind: "SUPPLIER_COST",
-            currency: attempt.currency,
-          } as const;
-          await insertJournalLines(tx, [
-            { ...journal, ordinal: 0, account: "upstream:available", atoms: -cost },
-            { ...journal, ordinal: 1, account: "upstream:expense", atoms: cost },
-          ]);
-        }
-        if (cost > BigInt(attempt.held_atoms) || BigInt(String(cell.balance_atoms)) < 0n) {
-          await tx`
-            UPDATE public.upstream_accounts
-            SET state = 'RECONCILE_REQUIRED', revision = revision + 1, updated_at = now()
-            WHERE id = ${attempt.account_id} AND state = 'ACTIVE'
-          `;
-          await tx`UPDATE public.config_epoch SET version = version + 1 WHERE id = 1`;
-        }
-        attempt.state = state;
-        attempt.resolution = {
-          action: input.action,
-          supplier_cost_atoms: cost.toString(),
-          evidence_ref: input.evidence_ref,
-          reason: input.reason,
-          actor: input.actor,
-        };
-        await tx`
-          UPDATE public.billing_holds SET supplier_holds = ${attempts}::jsonb
-          WHERE request_id = ${input.request_id}
-        `;
-        return { ok: true, replayed: false, state };
+        await tx`SELECT request_id FROM public.billing_holds
+          WHERE request_id=${input.request_id} FOR NO KEY UPDATE`;
+        const [pending] = await tx`SELECT 1 FROM public.billing_reconciliation_receipts
+          WHERE request_id=${input.request_id} AND attempt_id=${input.attempt_id}
+            AND state<>'DISMISSED'
+            AND (state<>'APPLIED' OR (verdict='FINAL' AND ${input.action}='RELEASE'))`;
+        if (pending) return { ok: false, code: "supplier_attempt_conflict" };
+        return resolveSupplierAttemptInTx(tx, input);
       });
     },
 
@@ -159,6 +179,9 @@ export function createReconciliation(
         if (hold.state !== "HELD" && hold.state !== "UNKNOWN") {
           throw new Error(`Hold already finalized in state ${hold.state}`);
         }
+        const [queued] = await tx`SELECT 1 FROM public.billing_reconciliation_receipts
+          WHERE request_id=${input.request_id} AND state<>'DISMISSED' LIMIT 1`;
+        if (queued) throw new Error("Request already has a reconciliation receipt");
 
         if (input.action === "RELEASE") {
           const release = await releaseHoldInTx(tx, input.request_id);

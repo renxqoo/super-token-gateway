@@ -16,6 +16,7 @@ import type {
   DeclarativeProviderConfig,
   ErrorMatchRule,
   PluginRecord,
+  ProviderErrorDiagnostics,
   ResponseTransformRule,
   UsageAliasRule,
   WasmProviderConfig,
@@ -297,7 +298,10 @@ export function mergeAdapterOverrides(
   request_transforms: BodyTransformRule[];
   response_transforms: ResponseTransformRule[];
   error_rules: ErrorMatchRule[];
+  error_diagnostics?: ProviderErrorDiagnostics;
   usage_aliases: UsageAliasRule[];
+  media_stream_terminal?:
+    { event: string } | { parts: string[]; equals: string | number | boolean };
 } {
   const extra_headers: Record<string, string> = {
     ...base.extra_headers,
@@ -324,11 +328,17 @@ export function mergeAdapterOverrides(
     ...(channelConfig?.error_rules ?? []),
     ...(routeOverrides?.error_rules ?? []),
   ];
+  const errorDiagnostics =
+    routeOverrides?.error_diagnostics ?? channelConfig?.error_diagnostics ?? base.error_diagnostics;
   const usage_aliases: UsageAliasRule[] = [
     ...(base.usage_aliases ?? []),
     ...(channelConfig?.usage_aliases ?? []),
     ...(routeOverrides?.usage_aliases ?? []),
   ];
+  const mediaTerminal =
+    routeOverrides?.media_stream_terminal ??
+    channelConfig?.media_stream_terminal ??
+    base.media_stream_terminal;
   return {
     extra_headers,
     query_params,
@@ -336,7 +346,16 @@ export function mergeAdapterOverrides(
     request_transforms,
     response_transforms,
     error_rules,
+    ...(errorDiagnostics ? { error_diagnostics: errorDiagnostics } : {}),
     usage_aliases,
+    ...(mediaTerminal
+      ? {
+          media_stream_terminal:
+            "event" in mediaTerminal
+              ? mediaTerminal
+              : { parts: assertSafeFieldPath(mediaTerminal.path), equals: mediaTerminal.equals },
+        }
+      : {}),
   };
 }
 
@@ -462,10 +481,28 @@ export function renderEndpointUrl(options: {
 
 export type MatchedProviderError = {
   retry_kind: ProviderRetryKind;
+  execution?: "NOT_EXECUTED";
   http_status?: number;
   message?: string;
   retry_after_ms?: number;
 };
+
+export function describeProviderError(
+  config: ProviderErrorDiagnostics | undefined,
+  headerCode: unknown,
+  body: unknown,
+) {
+  if (!config?.summaries) return undefined;
+  const summaries = config.summaries;
+  const lookup = (code: string) =>
+    Object.hasOwn(summaries, code) ? { code, summary: summaries[code]! } : undefined;
+  const fromHeader = typeof headerCode === "string" ? lookup(headerCode) : undefined;
+  if (fromHeader || !config.code_path) return fromHeader;
+  const value = getAtPath(body, assertSafeFieldPath(config.code_path));
+  if (typeof value === "string") return lookup(value);
+  if (typeof value === "number" && Number.isSafeInteger(value)) return lookup(String(value));
+  return undefined;
+}
 
 export function evaluateErrorRules(
   httpStatus: number,
@@ -500,6 +537,12 @@ export function evaluateErrorRules(
           : undefined;
     return {
       retry_kind: rule.retry_kind,
+      ...(rule.execution === "NOT_EXECUTED" &&
+      rule.regex === undefined &&
+      rule.not_equals === undefined &&
+      (rule.equals !== undefined || rule.in?.length)
+        ? { execution: rule.execution }
+        : {}),
       ...(rule.http_status !== undefined ? { http_status: rule.http_status } : {}),
       ...(typeof msgVal === "string" && msgVal.length > 0 ? { message: msgVal } : {}),
       ...(retryAfterMs !== undefined ? { retry_after_ms: retryAfterMs } : {}),

@@ -176,6 +176,14 @@ test("mixed public IPv4 and reserved IPv6 answers are rejected before dispatch",
   ).rejects.toMatchObject({ code: "unsafe_upstream" });
   expect(dispatched).toEqual([]);
 
+  await expect(
+    safeFetch(url, {}, true, [], send, async () => [
+      publicAddress,
+      { address: "fe80::1%lo0", family: 6 },
+    ]),
+  ).rejects.toMatchObject({ code: "upstream_dns" });
+  expect(dispatched).toEqual([]);
+
   const response = await safeFetch(url, {}, false, [], send, async () => [publicAddress]);
   expect(await response.text()).toBe("fixture");
   expect(dispatched).toEqual([publicAddress.address]);
@@ -923,5 +931,154 @@ console.log(JSON.stringify(out));
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("symptom: a stalled TLS address prevents dispatch to a healthy DNS answer", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "stg-tls-addresses-"));
+  const certPath = join(dir, "cert.pem");
+  const keyPath = join(dir, "key.pem");
+  const generated = spawnSync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "rsa:2048",
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    "/CN=fallback.example",
+    "-addext",
+    "subjectAltName=DNS:fallback.example",
+    "-keyout",
+    keyPath,
+    "-out",
+    certPath,
+  ]);
+  expect(generated.status).toBe(0);
+  const sockets = new Set<import("node:net").Socket>();
+  let hellos = 0;
+  const stalled = createServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    socket.once("data", () => {
+      hellos++;
+    });
+  });
+  await new Promise<void>((resolve) => stalled.listen(0, "127.0.0.1", resolve));
+  const address = stalled.address();
+  if (!address || typeof address === "string") throw new Error("TLS fixture did not bind");
+  const requests: { host: string | null; payload: string }[] = [];
+  const healthy = Bun.serve({
+    hostname: "::1",
+    port: address.port,
+    tls: { key: readFileSync(keyPath), cert: readFileSync(certPath) },
+    async fetch(request) {
+      requests.push({ host: request.headers.get("host"), payload: await request.text() });
+      return new Response("ok", { headers: { connection: "close" } });
+    },
+  });
+  try {
+    const run = join(dir, "probe.ts");
+    const networkMod = new URL("../network.ts", import.meta.url).pathname;
+    writeFileSync(
+      run,
+      `
+import { createTransport } from ${JSON.stringify(networkMod)};
+const t = createTransport(2, { dial: { concurrency: 1, maxQueueWaitMs: 150 }, dnsLookup: async () => [
+  { address: "127.0.0.1", family: 4 }, { address: "::1", family: 6 },
+] });
+const url = new URL("https://fallback.example:${address.port}/");
+try {
+  const prepared = await t.prepareDispatch(url, 8, {}, true);
+  const a = await prepared.fetchFast({method: "POST", body: "prepared", dispatchDeadline: performance.now() + 800});
+  console.log(a.fast ? a.status : a.response.status);
+  const b = await t.fetch(url, {method: "POST", body: new Blob(["streamed"]).stream(), dispatchDeadline: performance.now() + 800}, true);
+  console.log(await b.text());
+  const c = await t.fetchFast(url, {method: "POST", body: "buffered", dispatchDeadline: performance.now() + 800}, true);
+  console.log(c.fast ? c.status : c.response.status);
+  const reserved = await t.prepareDispatch(url, 0, {}, true);
+  try {
+    const fallback = await t.prepareDispatch(url, 5, {dispatchDeadline: performance.now() + 800}, true);
+    const d = await fallback.fetchFast({method: "POST", body: "queued", dispatchDeadline: performance.now() + 800});
+    console.log(d.fast ? d.status : d.response.status);
+  } finally { reserved.release(); }
+} finally { t.close(); }
+`,
+    );
+    const child = Bun.spawn([process.execPath, run], {
+      env: { ...process.env, NODE_EXTRA_CA_CERTS: certPath },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect({ code, stdout, stderr }).toEqual({
+      code: 0,
+      stdout: "200\nok\n200\n200\n",
+      stderr: "",
+    });
+    expect(hellos).toBe(3);
+    expect(requests).toEqual([
+      { host: `fallback.example:${address.port}`, payload: "prepared" },
+      { host: `fallback.example:${address.port}`, payload: "streamed" },
+      { host: `fallback.example:${address.port}`, payload: "buffered" },
+      { host: `fallback.example:${address.port}`, payload: "queued" },
+    ]);
+  } finally {
+    await healthy.stop(true);
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => stalled.close(() => resolve()));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a write followed by an upstream disconnect does not replay the request to another address", async () => {
+  let received = Buffer.alloc(0);
+  const primary = createServer((socket) => {
+    socket.on("data", (bytes) => {
+      received = Buffer.concat([received, typeof bytes === "string" ? Buffer.from(bytes) : bytes]);
+      if (received.includes("one authorized request")) socket.destroy();
+    });
+  });
+  await new Promise<void>((resolve) => primary.listen(0, "127.0.0.1", resolve));
+  const address = primary.address();
+  if (!address || typeof address === "string") throw new Error("HTTP fixture did not bind");
+  let backupCalls = 0;
+  const backup = Bun.serve({
+    hostname: "::1",
+    port: address.port,
+    fetch() {
+      backupCalls++;
+      return new Response("duplicate");
+    },
+  });
+  const transport = createTransport(1, {
+    dnsLookup: async () => [
+      { address: "127.0.0.1", family: 4 },
+      { address: "::1", family: 6 },
+    ],
+  });
+  try {
+    await expect(
+      transport.fetchFast(
+        new URL(`http://fallback.example:${address.port}/`),
+        {
+          method: "POST",
+          body: "one authorized request",
+          signal: AbortSignal.timeout(1000),
+        },
+        true,
+      ),
+    ).rejects.toThrow(/Upstream (closed|connection closed)/);
+    expect(received.toString()).toEndWith("one authorized request");
+    expect(backupCalls).toBe(0);
+  } finally {
+    transport.close();
+    await backup.stop(true);
+    await new Promise<void>((resolve) => primary.close(() => resolve()));
   }
 });

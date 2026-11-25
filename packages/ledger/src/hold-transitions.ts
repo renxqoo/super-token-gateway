@@ -92,7 +92,11 @@ async function lockExactCells(tx: SQL, targets: CellTarget[]): Promise<SupplierC
   return rows.map((r: Record<string, unknown>) => toCellRow(r));
 }
 
-export async function releaseHoldInTx(tx: SQL, requestId: string): Promise<HoldRelease> {
+export async function releaseHoldInTx(
+  tx: SQL,
+  requestId: string,
+  scope: "ALL" | "CUSTOMER" = "ALL",
+): Promise<HoldRelease> {
   let detachment: HoldRelease["detachment"];
   const nowMs = Date.now();
   const rows = await tx`
@@ -202,17 +206,14 @@ export async function releaseHoldInTx(tx: SQL, requestId: string): Promise<HoldR
   wallet.freeze_reason = computeFreezeReason(wallet);
   wallet.dirty = true;
 
-  const cellTargets: CellTarget[] = [];
-  for (const sh of supHolds) {
-    if (sh.state === "HELD" || sh.state === "UNKNOWN") {
-      cellTargets.push({ account_id: sh.account_id, currency: sh.currency, cell: sh.cell });
-    }
-  }
+  const cellTargets =
+    scope === "ALL" ? supHolds.filter((sh) => sh.state === "HELD" || sh.state === "UNKNOWN") : [];
   const cells = await lockExactCells(tx, cellTargets);
   const cellsByKey = new Map<string, SupplierCellRow>();
   for (const c of cells) cellsByKey.set(cellKey(c.account_id, c.currency, c.cell), c);
   const updatedSup = supHolds.map((sh) => {
     if (sh.state === "HELD" || sh.state === "UNKNOWN") {
+      if (scope === "CUSTOMER") return { ...sh, state: "UNKNOWN" as const };
       const c = cellsByKey.get(cellKey(sh.account_id, sh.currency, sh.cell));
       if (c) {
         c.reserved_atoms -= BigInt(sh.held_atoms);
@@ -338,6 +339,14 @@ export function createHoldTransitions(
                 attempt_id: input.next_attempt_id,
                 ...(input.next_supplier_cost_version_id
                   ? { cost_version_id: input.next_supplier_cost_version_id }
+                  : {}),
+                ...(input.next_customer_price_version_id
+                  ? {
+                      customer_price_version_id: input.next_customer_price_version_id,
+                      ...(input.next_customer_price_adjustment
+                        ? { customer_price_adjustment: input.next_customer_price_adjustment }
+                        : {}),
+                    }
                   : {}),
                 account_id: input.next_account_id,
                 channel_id: input.next_channel_id,
@@ -538,7 +547,13 @@ export function createHoldTransitions(
               }
               supplierHolds[failedIdx] = { ...sh, state: "RELEASED" };
             } else {
-              supplierHolds[failedIdx] = { ...sh, state: "UNKNOWN" };
+              supplierHolds[failedIdx] = {
+                ...sh,
+                ...(input.failed_provider_request_id
+                  ? { provider_request_id: input.failed_provider_request_id }
+                  : {}),
+                state: "UNKNOWN",
+              };
             }
           }
 
@@ -599,6 +614,14 @@ export function createHoldTransitions(
             attempt_id: input.next_attempt_id,
             ...(input.next_supplier_cost_version_id
               ? { cost_version_id: input.next_supplier_cost_version_id }
+              : {}),
+            ...(input.next_customer_price_version_id
+              ? {
+                  customer_price_version_id: input.next_customer_price_version_id,
+                  ...(input.next_customer_price_adjustment
+                    ? { customer_price_adjustment: input.next_customer_price_adjustment }
+                    : {}),
+                }
               : {}),
             account_id: input.next_account_id,
             channel_id: input.next_channel_id,
@@ -759,6 +782,14 @@ export function createHoldTransitions(
               attempt_id: input.next_attempt_id,
               ...(input.next_supplier_cost_version_id
                 ? { cost_version_id: input.next_supplier_cost_version_id }
+                : {}),
+              ...(input.next_customer_price_version_id
+                ? {
+                    customer_price_version_id: input.next_customer_price_version_id,
+                    ...(input.next_customer_price_adjustment
+                      ? { customer_price_adjustment: input.next_customer_price_adjustment }
+                      : {}),
+                  }
                 : {}),
               account_id: input.next_account_id,
               channel_id: input.next_channel_id,
@@ -994,7 +1025,13 @@ export function createHoldTransitions(
             }
 
             if (failedIdx >= 0) {
-              supplierHolds[failedIdx] = { ...supplierHolds[failedIdx]!, state: "UNKNOWN" };
+              supplierHolds[failedIdx] = {
+                ...supplierHolds[failedIdx]!,
+                ...(input.failed_provider_request_id
+                  ? { provider_request_id: input.failed_provider_request_id }
+                  : {}),
+                state: "UNKNOWN",
+              };
             }
             chosen.reserved_atoms += nextSup;
             chosen.revision += 1n;
@@ -1003,6 +1040,14 @@ export function createHoldTransitions(
               attempt_id: input.next_attempt_id,
               ...(input.next_supplier_cost_version_id
                 ? { cost_version_id: input.next_supplier_cost_version_id }
+                : {}),
+              ...(input.next_customer_price_version_id
+                ? {
+                    customer_price_version_id: input.next_customer_price_version_id,
+                    ...(input.next_customer_price_adjustment
+                      ? { customer_price_adjustment: input.next_customer_price_adjustment }
+                      : {}),
+                  }
                 : {}),
               account_id: input.next_account_id,
               channel_id: input.next_channel_id,
@@ -1120,7 +1165,25 @@ export function createHoldTransitions(
       return result.released;
     },
 
-    async markUnknown(requestId: string): Promise<boolean> {
+    async rememberProviderRequestId(
+      requestId: string,
+      attemptId: string,
+      providerId: string,
+    ): Promise<void> {
+      await db`UPDATE public.billing_holds h
+        SET supplier_holds=(SELECT jsonb_agg(
+            CASE WHEN a.entry->>'attempt_id'=${attemptId} AND a.entry->>'provider_request_id' IS NULL
+              THEN a.entry || jsonb_build_object('provider_request_id', ${providerId}::text) ELSE a.entry END
+            ORDER BY a.ordinal)
+          FROM jsonb_array_elements(h.supplier_holds) WITH ORDINALITY a(entry, ordinal))
+        WHERE h.request_id=${requestId} AND h.state IN ('HELD','UNKNOWN')
+          AND h.supplier_holds @> jsonb_build_array(jsonb_build_object('attempt_id', ${attemptId}::text))`;
+    },
+
+    async markUnknown(
+      requestId: string,
+      providerRequestIds?: ReadonlyMap<string, string>,
+    ): Promise<boolean> {
       let detached: {
         wlId: string | null;
         heldCust: bigint;
@@ -1134,7 +1197,12 @@ export function createHoldTransitions(
             SELECT request_id, held_atoms::text, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state
             FROM public.billing_holds WHERE request_id = ${requestId} FOR NO KEY UPDATE
           `;
-          if (!rows.length || rows[0]!.state !== "HELD") return false;
+          if (
+            !rows.length ||
+            (rows[0]!.state !== "HELD" &&
+              (rows[0]!.state !== "UNKNOWN" || !providerRequestIds?.size))
+          )
+            return false;
           const h = rows[0]!;
           const heldAtoms = BigInt(String(h.held_atoms));
           const supHolds = (h.supplier_holds ?? []) as SupplierHoldEntry[];
@@ -1154,9 +1222,21 @@ export function createHoldTransitions(
               supAtoms: det.detachedSupplierAtoms,
             };
           }
+          const unknown = supHolds.map((attempt) => {
+            if (attempt.state !== "HELD" && attempt.state !== "UNKNOWN") return attempt;
+            const providerRequestId = providerRequestIds?.get(attempt.attempt_id);
+            return {
+              ...attempt,
+              ...(providerRequestId && !attempt.provider_request_id
+                ? { provider_request_id: providerRequestId }
+                : {}),
+              state: "UNKNOWN",
+            };
+          });
           await tx`
-            UPDATE public.billing_holds SET state = 'UNKNOWN'
-            WHERE request_id = ${requestId} AND state = 'HELD'
+            UPDATE public.billing_holds SET state = 'UNKNOWN', supplier_holds = ${unknown}::jsonb,
+              reconciliation_started_at = COALESCE(reconciliation_started_at, now())
+            WHERE request_id = ${requestId} AND state IN ('HELD','UNKNOWN')
           `;
           return true;
         }),
@@ -1189,7 +1269,7 @@ export function createHoldTransitions(
           FOR NO KEY UPDATE SKIP LOCKED
         )
         UPDATE public.billing_holds AS h
-        SET state = 'UNKNOWN'
+        SET state = 'UNKNOWN', reconciliation_started_at = now()
         FROM expired
         WHERE h.request_id = expired.request_id AND h.state = 'HELD'
         RETURNING h.request_id
@@ -1276,7 +1356,7 @@ export function createHoldTransitions(
               }
               await tx`
                 UPDATE public.billing_holds
-                SET state = 'UNKNOWN'
+                SET state = 'UNKNOWN', reconciliation_started_at = now()
                 WHERE request_id = ${requestId} AND state = 'HELD'
               `;
               return true;

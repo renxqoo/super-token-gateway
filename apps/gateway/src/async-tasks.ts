@@ -196,6 +196,7 @@ async function pollUpstreamTaskOnce(
     headers.set(k, v);
   }
   const secret = deps.snapshot.decryptChannelSecret(channel);
+  const dispatchDeadline = performance.now() + deps.config.attemptTimeoutMs;
   const signal = AbortSignal.timeout(deps.config.attemptTimeoutMs);
   await applyAuthToRequest({
     auth: resolved.config.auth,
@@ -209,7 +210,7 @@ async function pollUpstreamTaskOnce(
 
   const resp = await deps.transport.fetch(
     url,
-    { method: "GET", headers, signal },
+    { method: "GET", headers, signal, dispatchDeadline },
     deps.config.allowPrivateUpstreams,
     deps.config.privateUpstreamCidrs,
   );

@@ -38,6 +38,7 @@ import {
 } from "./async-tasks.ts";
 import { createInternalApi } from "./internal-api.ts";
 import { GatewayMetrics } from "./observability.ts";
+import { createTraceQueue } from "./trace-queue.ts";
 import {
   authenticateRequest,
   handleInferenceRequest,
@@ -79,6 +80,9 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   const queries = createLedgerQueries(db);
   const nodeId = crypto.randomUUID();
   const metrics = new GatewayMetrics(config.accessLog ?? false);
+  const traceQueue = config.traceExport
+    ? createTraceQueue(config.traceExport, config.keyPepper)
+    : undefined;
 
   const transport = createTransport(
     Math.max(1024, Math.min(65535, config.maxInFlight)),
@@ -251,6 +255,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     lifecycle,
     metrics,
     state: proxyState,
+    ...(traceQueue ? { traceQueue } : {}),
     ...(bodyBufferBudget ? { bodyBufferBudget } : {}),
   };
 
@@ -349,6 +354,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       ...ingress.metrics(),
       ...(pressure?.metrics() ?? []),
       ...(bodyBufferBudget?.metrics() ?? []),
+      ...(traceQueue?.metrics() ?? []),
     ];
     return new Response(`${text.trimEnd()}\n${ingressMetrics.join("\n")}\n`, {
       headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
@@ -613,6 +619,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       pressure?.stop();
       const draining = lifecycle.drain(drainMs);
       await draining;
+      await traceQueue?.close();
       proxyState.close();
       await snapshot.stop();
       await ledger.drain();

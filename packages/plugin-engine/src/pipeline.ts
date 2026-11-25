@@ -221,6 +221,36 @@ export class PluginPipelineEngine {
     throw new WasmPluginFaultError("wasm_execution_failed", "Invalid WASM plugin reply");
   }
 
+  admitOutputWebhooks(
+    steps: readonly PluginPipelineStep[],
+    plugins: ReadonlyMap<string, PluginRecord>,
+    requestId: string,
+    stream: boolean,
+  ): { ok: true; release?: () => void } | { ok: false; code: string; message: string } {
+    let releases: (() => void)[] | undefined;
+    const release = () => {
+      for (const dispose of releases ?? []) dispose();
+    };
+    for (const { plugin } of this.resolveSteps(steps, plugins)) {
+      if (plugin.kind !== "WEBHOOK" || !plugin.webhook_config) continue;
+      const hooks = (plugin.manifest as Partial<WasmPluginManifest>).hooks;
+      if (
+        hooks?.length &&
+        !(stream
+          ? hooks.includes("on_stream_chunk") || hooks.includes("on_stream_end")
+          : hooks.includes("on_response"))
+      )
+        continue;
+      const admission = this.webhook.admitOutput(plugin.id, plugin.webhook_config, requestId);
+      if (!admission.ok) {
+        release();
+        return admission;
+      }
+      if (admission.release) (releases ??= []).push(admission.release);
+    }
+    return releases ? { ok: true, release } : { ok: true };
+  }
+
   private async invokeWasmSegmented(
     plugin: PluginRecord,
     manifest: Partial<WasmPluginManifest>,

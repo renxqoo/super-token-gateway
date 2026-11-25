@@ -98,6 +98,15 @@
           "checksum": "a15bf4406dcc344bc94ad1d4ba712bf8e8a47c386e271bc49543a239b070019e"
         }
       ]
+    },
+    {
+      "version": 2026112501,
+      "files": [
+        {
+          "path": "./migrations/0011_reconciliation_evidence.sql",
+          "checksum": "c8c6db82a262580c52a618cfcbbe396e97b9f0f050e48f4e4c8ddbe38325749a"
+        }
+      ]
     }
   ],
   "legacyBaselines": [

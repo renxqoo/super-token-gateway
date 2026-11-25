@@ -305,7 +305,8 @@ export function createCatalogRepository(db: SQL) {
       const keyModels = input.models ?? [];
       const keyOperations = input.operations ?? [];
       const enabled = input.enabled ?? true;
-      const expiresAt = input.expires_at ?? null;
+      const expiry = input.expires_at ?? null;
+      const expiresAt = expiry === null ? null : new Date(expiry);
       const spendLimitAtoms = input.spend_limit_atoms ?? null;
       const spendLimitWindow = input.spend_limit_window ?? "LIFETIME";
       const sourceRev = input.source_revision;
@@ -377,7 +378,7 @@ export function createCatalogRepository(db: SQL) {
           models: r.models,
           operations: r.operations,
           enabled: r.enabled,
-          expires_at: r.expiresAt ? new Date(r.expiresAt).toISOString() : null,
+          expires_at: r.expiresAt?.toISOString() ?? null,
           spend_limit_atoms: r.spendLimitAtoms,
           spend_limit_window: r.spendLimitWindow,
           source_revision: r.sourceRevision,
@@ -1184,7 +1185,7 @@ export function createCatalogRepository(db: SQL) {
           models: r.models,
           operations: r.operations,
           enabled: r.enabled,
-          expires_at: r.expiresAt ? new Date(r.expiresAt).toISOString() : null,
+          expires_at: r.expiresAt?.toISOString() ?? null,
           spend_limit_atoms: r.spendLimitAtoms,
           spend_limit_window: r.spendLimitWindow,
         });

@@ -5,6 +5,8 @@ type WebhookCircuitState = {
   failures: number;
   openUntilMs: number;
   probeInFlight: boolean;
+  probeOwner: string | undefined;
+  generation: number;
   inFlight: number;
 };
 
@@ -72,7 +74,14 @@ export class WebhookPluginExecutor {
   private getState(pluginId: string): WebhookCircuitState {
     let st = this.circuits.get(pluginId);
     if (!st) {
-      st = { failures: 0, openUntilMs: 0, probeInFlight: false, inFlight: 0 };
+      st = {
+        failures: 0,
+        openUntilMs: 0,
+        probeInFlight: false,
+        probeOwner: undefined,
+        generation: 0,
+        inFlight: 0,
+      };
       this.circuits.set(pluginId, st);
     }
     return st;
@@ -105,22 +114,58 @@ export class WebhookPluginExecutor {
     st: WebhookCircuitState,
     cfg: WebhookPluginConfig,
     isProbe: boolean,
+    generation: number,
     outcomeKind: PluginOutcomeKind,
     reason: string,
   ): PluginDecision {
+    if (st.generation !== generation)
+      return this.failDecision(cfg, outcomeKind, reason, "Content moderation service unavailable");
     const threshold = cfg.circuit_failure_threshold ?? 5;
     const openMs = cfg.circuit_open_ms ?? 15_000;
-    if (isProbe) {
+    st.failures++;
+    if (isProbe || st.failures >= threshold) {
       st.probeInFlight = false;
-      st.failures = Math.max(st.failures + 1, threshold);
+      st.probeOwner = undefined;
+      st.generation++;
       st.openUntilMs = this.now() + openMs;
-    } else {
-      st.failures++;
-      if (st.failures >= threshold) {
-        st.openUntilMs = this.now() + openMs;
-      }
     }
     return this.failDecision(cfg, outcomeKind, reason, "Content moderation service unavailable");
+  }
+
+  private unavailable(st: WebhookCircuitState, cfg: WebhookPluginConfig, requestId: string) {
+    if (
+      st.openUntilMs > this.now() ||
+      (st.openUntilMs > 0 && (st.probeInFlight || (st.probeOwner && st.probeOwner !== requestId)))
+    )
+      return {
+        code: "webhook_circuit_open",
+        message: "Content moderation service temporarily unavailable",
+      };
+    if (st.inFlight >= (cfg.max_concurrency ?? DEFAULT_WEBHOOK_MAX_CONCURRENCY))
+      return {
+        code: "webhook_concurrency_limit",
+        message: "Content moderation service capacity exceeded",
+      };
+    return undefined;
+  }
+
+  admitOutput(
+    pluginId: string,
+    cfg: WebhookPluginConfig,
+    requestId: string,
+  ): { ok: true; release?: () => void } | { ok: false; code: string; message: string } {
+    const st = this.circuits.get(pluginId);
+    if (!st || cfg.failure_policy === "FAIL_OPEN") return { ok: true };
+    const unavailable = this.unavailable(st, cfg, requestId);
+    if (unavailable) return { ok: false, ...unavailable };
+    if (st.openUntilMs === 0) return { ok: true };
+    st.probeOwner = requestId;
+    return {
+      ok: true,
+      release() {
+        if (st.probeOwner === requestId) st.probeOwner = undefined;
+      },
+    };
   }
 
   stats(): WebhookExecutorStats {
@@ -145,42 +190,22 @@ export class WebhookPluginExecutor {
   ): Promise<PluginDecision> {
     signal?.throwIfAborted();
     const st = this.getState(pluginId);
-    const now = this.now();
-    let isProbe = false;
-
-    if (st.openUntilMs > now) {
-      return this.failDecision(
-        cfg,
-        "host_capacity",
-        "webhook_circuit_open",
-        "Content moderation service temporarily unavailable",
-      );
-    }
-    if (st.openUntilMs > 0) {
-      if (st.probeInFlight) {
-        return this.failDecision(
-          cfg,
-          "host_capacity",
-          "webhook_circuit_open",
-          "Content moderation service temporarily unavailable",
-        );
-      }
-      st.probeInFlight = true;
-      isProbe = true;
-    }
-
-    const maxConcurrency = cfg.max_concurrency ?? DEFAULT_WEBHOOK_MAX_CONCURRENCY;
-    if (st.inFlight >= maxConcurrency) {
-      if (isProbe) st.probeInFlight = false;
-      return this.failDecision(
-        cfg,
-        "host_capacity",
-        "webhook_concurrency_limit",
-        "Content moderation service capacity exceeded",
-      );
-    }
-
+    const unavailable = this.unavailable(st, cfg, input.request_id);
+    if (unavailable)
+      return this.failDecision(cfg, "host_capacity", unavailable.code, unavailable.message);
+    const isProbe = st.openUntilMs > 0;
+    const generation = st.generation;
+    if (isProbe) st.probeInFlight = true;
     st.inFlight++;
+    const recordFailure = (kind: PluginOutcomeKind, code: string) =>
+      this.recordFailure(st, cfg, isProbe, generation, kind, code);
+    const recordSuccess = () => {
+      if (st.generation !== generation) return;
+      st.failures = 0;
+      st.openUntilMs = 0;
+      st.probeOwner = undefined;
+      st.probeInFlight = false;
+    };
     const timeoutMs = cfg.timeout_ms ?? DEFAULT_WEBHOOK_TIMEOUT_MS;
     const maxResponseBytes = cfg.max_response_bytes ?? DEFAULT_WEBHOOK_MAX_RESPONSE_BYTES;
     const controller = new AbortController();
@@ -221,28 +246,22 @@ export class WebhookPluginExecutor {
         void response.body?.cancel().catch(() => undefined);
         const kind: PluginOutcomeKind =
           response.status >= 500 || response.status === 429 ? "host_capacity" : "plugin_fault";
-        return this.recordFailure(st, cfg, isProbe, kind, `webhook_http_${response.status}`);
+        return recordFailure(kind, `webhook_http_${response.status}`);
       }
       const rawText = await readBoundedResponseText(response, maxResponseBytes);
       signal?.throwIfAborted();
       const body = JSON.parse(rawText) as Record<string, unknown>;
       const action = body?.action;
       if (action === "PASS") {
-        st.failures = 0;
-        st.openUntilMs = 0;
-        st.probeInFlight = false;
+        recordSuccess();
         return { action: "PASS", outcome_kind: "content_decision" };
       }
       if (action === "TRANSFORM" && typeof body.text === "string") {
-        st.failures = 0;
-        st.openUntilMs = 0;
-        st.probeInFlight = false;
+        recordSuccess();
         return { action: "TRANSFORM", text: body.text, outcome_kind: "content_decision" };
       }
       if (action === "BLOCK") {
-        st.failures = 0;
-        st.openUntilMs = 0;
-        st.probeInFlight = false;
+        recordSuccess();
         const safeStatus =
           typeof body.http_status === "number" &&
           Number.isInteger(body.http_status) &&
@@ -261,30 +280,24 @@ export class WebhookPluginExecutor {
           outcome_kind: "content_decision",
         };
       }
-      return this.recordFailure(st, cfg, isProbe, "plugin_fault", "webhook_invalid_reply");
+      return recordFailure("plugin_fault", "webhook_invalid_reply");
     } catch (error) {
       signal?.throwIfAborted();
       const msg = error instanceof Error ? error.message : String(error);
       if (msg === "webhook_response_too_large") {
-        return this.recordFailure(st, cfg, isProbe, "plugin_fault", "webhook_response_too_large");
+        return recordFailure("plugin_fault", "webhook_response_too_large");
       }
       if (error instanceof SyntaxError) {
-        return this.recordFailure(st, cfg, isProbe, "plugin_fault", "webhook_invalid_reply");
+        return recordFailure("plugin_fault", "webhook_invalid_reply");
       }
       const isTimeout =
         controller.signal.aborted &&
         controller.signal.reason instanceof Error &&
         controller.signal.reason.message === "webhook_timeout";
-      return this.recordFailure(
-        st,
-        cfg,
-        isProbe,
-        "host_capacity",
-        isTimeout ? "webhook_timeout" : "webhook_error",
-      );
+      return recordFailure("host_capacity", isTimeout ? "webhook_timeout" : "webhook_error");
     } finally {
       st.inFlight = Math.max(0, st.inFlight - 1);
-      if (isProbe && st.probeInFlight) st.probeInFlight = false;
+      if (isProbe && st.generation === generation) st.probeInFlight = false;
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
     }

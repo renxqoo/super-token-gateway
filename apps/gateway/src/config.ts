@@ -1,6 +1,7 @@
 import { createPublicKey } from "node:crypto";
 import { validateCidr, type TransportOptions } from "@gateway/runtime";
 import { loadInternalCredentials, type InternalCredentials } from "./internal-auth.ts";
+import type { TraceExportConfig } from "./trace-queue.ts";
 
 export type GatewayConfig = {
   mode: "all-in-one" | "gateway";
@@ -15,6 +16,8 @@ export type GatewayConfig = {
   redisNamespace?: string;
   redisSentinel?: { urls: string[]; master: string };
   accessLog?: boolean;
+  traceMetrics?: boolean;
+  traceExport?: TraceExportConfig;
   privateMetrics?: boolean;
   requireDbRoles?: boolean;
   keyPepper: string;
@@ -170,6 +173,46 @@ function loadIngressConfig(env: Record<string, string | undefined>, maxBodyBytes
   };
 }
 
+function loadTraceExport(
+  env: Record<string, string | undefined>,
+  ledgerUrl: string,
+): TraceExportConfig | undefined {
+  if (!env.TRACE_DATABASE_URL) return undefined;
+  const url = new URL(env.TRACE_DATABASE_URL);
+  if (
+    !/^postgres(?:ql)?:$/.test(url.protocol) ||
+    !url.hostname ||
+    url.pathname.length < 2 ||
+    decodeURIComponent(url.pathname) === decodeURIComponent(new URL(ledgerUrl).pathname)
+  ) {
+    throw new Error("TRACE_DATABASE_URL must reference a separate PostgreSQL database");
+  }
+  const required = (name: string, min = 1, max = 2_147_483_647) => {
+    if (env[name] === undefined) throw new Error(`${name} is required with TRACE_DATABASE_URL`);
+    return intFromEnv(env, name, 0, min, max);
+  };
+  const maxRecords = required("TRACE_QUEUE_RECORDS", 2);
+  return {
+    databaseUrl: url.toString(),
+    sampleBasisPoints: required("TRACE_SAMPLE_BPS", 0, 10_000),
+    slowFirstTextMs: required("TRACE_SLOW_FIRST_TEXT_MS"),
+    maxAttempts: required("TRACE_ATTEMPTS_PER_REQUEST", 2, maxRecords),
+    errorBodyMaxBytes: intFromEnv(env, "TRACE_ERROR_BODY_BYTES", 8192, 0, 65_536),
+    maxRecords,
+    maxBytes: required("TRACE_QUEUE_BYTES"),
+    maxPerProject: required("TRACE_QUEUE_PER_PROJECT", 1, maxRecords),
+    priorityReserve: required("TRACE_QUEUE_PRIORITY_RESERVE", 1, maxRecords - 1),
+    batchSize: required("TRACE_BATCH_RECORDS", 1, maxRecords),
+    batchDeadlineMs: required("TRACE_BATCH_DEADLINE_MS"),
+    flushMs: required("TRACE_FLUSH_MS"),
+    timeoutMs: required("TRACE_DB_TIMEOUT_MS"),
+    retryLimit: required("TRACE_RETRY_LIMIT", 0),
+    retentionSeconds: required("TRACE_RETENTION_SECONDS"),
+    cleanupIntervalMs: required("TRACE_CLEANUP_INTERVAL_MS"),
+    cleanupBatch: required("TRACE_CLEANUP_BATCH_SPANS"),
+  };
+}
+
 export function loadConfigFromEnv(
   env: Record<string, string | undefined> = process.env,
   argv: readonly string[] = process.argv.slice(2),
@@ -251,6 +294,13 @@ export function loadConfigFromEnv(
     throw new Error("PLATFORM_ABSORB_MAX_ATOMS_PER_MINUTE must be a positive integer");
   }
   const maxBodyBytes = intFromEnv(env, "MAX_BODY_BYTES", 10 * 1024 * 1024);
+  const traceExport = loadTraceExport(env, databaseUrl);
+  if (
+    env.TRACE_METRICS !== undefined &&
+    env.TRACE_METRICS !== "true" &&
+    env.TRACE_METRICS !== "false"
+  )
+    throw new Error("TRACE_METRICS must be true or false");
   return {
     mode,
     host: env.GATEWAY_HOST ?? "0.0.0.0",
@@ -266,6 +316,8 @@ export function loadConfigFromEnv(
       ? { redisSentinel: { urls: sentinelUrls, master: sentinelMaster } }
       : {}),
     accessLog: env.ACCESS_LOG !== "false",
+    traceMetrics: env.TRACE_METRICS !== "false",
+    ...(traceExport ? { traceExport } : {}),
     privateMetrics: production || env.PRIVATE_METRICS === "true",
     requireDbRoles: production,
     keyPepper,

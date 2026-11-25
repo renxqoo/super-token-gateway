@@ -32,6 +32,8 @@ import {
   toLotRow,
   toCellRow,
   insertJournalLines,
+  holdTemporarilyUnavailable,
+  isTransientPgConcurrencyError,
   expireLotsInMemory,
   type WalletRow,
   type LotRow,
@@ -59,7 +61,30 @@ function recordHit(
   return prev.count;
 }
 
-export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
+async function lockFundedSupplierCell(
+  tx: SQL,
+  item: AcquireHoldInput,
+  supplierAtoms: bigint | null,
+) {
+  if (supplierAtoms === null) return [];
+  const select = tx`
+    SELECT account_id, currency, cell, balance_atoms::text, reserved_atoms::text,
+      spent_atoms::text, revision::text
+    FROM public.supplier_cells
+    WHERE account_id = ${item.supplier_account_id} AND currency = ${item.supplier_currency}
+      AND balance_atoms - reserved_atoms >= ${supplierAtoms.toString()}::numeric
+    ORDER BY (cell - ${preferredCell(item.attempt_id)} + ${CELL_COUNT}) % ${CELL_COUNT}
+    LIMIT 1 FOR NO KEY UPDATE
+  `;
+  const available = await tx`${select} SKIP LOCKED`;
+  return available.length ? available : await select;
+}
+
+export function createTransactionalHoldBatch(
+  db: SQL,
+  leases: LeaseManager,
+  enqueueContended?: (input: AcquireHoldInput) => Promise<AcquireHoldResult>,
+) {
   const cellOffsets = new Bun.CryptoHasher("sha256").update(leases.nodeId).digest();
   let batchCellCursor = 0;
   const recentWalletHits = new Map<string, { count: number; windowStart: number }>();
@@ -67,7 +92,7 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
 
   let pruneDemandAt = 0;
 
-  async function acquireBatch(items: AcquireHoldInput[], lockAllCells: boolean) {
+  async function acquireBatch(items: AcquireHoldInput[], retryContended: boolean) {
     const retry: number[] = [];
     const results = Array.from<AcquireHoldResult>({ length: items.length });
     const parsed = items.map((item) => ({
@@ -183,21 +208,21 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
           lane * SUPPLIER_CELLS_PER_LANE +
           ((cellOffsets[lane]! + cursor) % SUPPLIER_CELLS_PER_LANE),
       );
-      const targetCells = lockAllCells
-        ? Array.from({ length: CELL_COUNT }, (_, cell) => cell)
-        : [...new Set(items.map((item) => targetCellsByLane[walletLane(item.project_id)]!))];
-      const cellRowsRaw = supplierAccounts.length
-        ? await tx`
+      const targetCells = [
+        ...new Set(items.map((item) => targetCellsByLane[walletLane(item.project_id)]!)),
+      ];
+      const cellRowsRaw = retryContended
+        ? await lockFundedSupplierCell(tx, parsed[0]!.item, parsed[0]!.supplierAtoms)
+        : await tx`
             SELECT account_id, currency, cell, balance_atoms::text, reserved_atoms::text, spent_atoms::text, revision::text
             FROM public.supplier_cells
             WHERE account_id = ANY(${supplierAccounts}::uuid[]) AND cell = ANY(${targetCells}::smallint[])
             ORDER BY account_id, currency, cell
             FOR NO KEY UPDATE
-          `
-        : [];
+          `;
       const cellsByAcctCur = new Map<string, SupplierCellRow[]>();
       const allCells: SupplierCellRow[] = [];
-      const expandedAcctCur = new Set<string>();
+      const smallestUnfundedQuote = new Map<string, bigint>();
       for (const r of cellRowsRaw) {
         const c = toCellRow(r);
         allCells.push(c);
@@ -334,13 +359,21 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
           };
           continue;
         }
+        if (
+          item.enforce_key_spend_limit &&
+          item.api_key_id &&
+          !keySpendsById.has(item.api_key_id)
+        ) {
+          results[i] = holdTemporarilyUnavailable();
+          continue;
+        }
 
         const acctCurKey = supplierKey(item.supplier_account_id, item.supplier_currency);
         const lane = walletLane(item.project_id);
         const firstCell = lane * SUPPLIER_CELLS_PER_LANE;
         const sameLane = (cell: SupplierCellRow) =>
           cell.cell >= firstCell && cell.cell < firstCell + SUPPLIER_CELLS_PER_LANE;
-        let acctCells = cellsByAcctCur.get(acctCurKey) ?? [];
+        const acctCells = cellsByAcctCur.get(acctCurKey) ?? [];
         const pickCell = (list: SupplierCellRow[]): SupplierCellRow | undefined => {
           if (list.length === 0) return undefined;
           const start = preferredCell(item.attempt_id);
@@ -353,29 +386,32 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
           return undefined;
         };
         let chosenCell = pickCell(acctCells.filter(sameLane)) ?? pickCell(acctCells);
-        if (!chosenCell && !lockAllCells && !expandedAcctCur.has(acctCurKey)) {
-          expandedAcctCur.add(acctCurKey);
-          const extraRows = await tx`
+        const priorUnfundedQuote = smallestUnfundedQuote.get(acctCurKey);
+        if (
+          !chosenCell &&
+          !retryContended &&
+          (priorUnfundedQuote === undefined || supplierAtoms < priorUnfundedQuote)
+        ) {
+          const [extra] = await tx`
             SELECT account_id, currency, cell, balance_atoms::text, reserved_atoms::text, spent_atoms::text, revision::text
             FROM public.supplier_cells
-            WHERE account_id = ${item.supplier_account_id} AND currency = ${item.supplier_currency} AND cell <> ALL(${targetCells}::smallint[])
-            ORDER BY cell
-            FOR NO KEY UPDATE SKIP LOCKED
+            WHERE account_id = ${item.supplier_account_id} AND currency = ${item.supplier_currency}
+              AND cell <> ALL(${[...targetCells, ...acctCells.map((cell) => cell.cell)]}::smallint[])
+              AND balance_atoms - reserved_atoms >= ${supplierAtoms.toString()}::numeric
+            ORDER BY (cell < ${firstCell} OR cell >= ${firstCell + SUPPLIER_CELLS_PER_LANE}), cell
+            LIMIT 1 FOR NO KEY UPDATE SKIP LOCKED
           `;
-          if (extraRows.length > 0) {
-            const nextList = [...acctCells];
-            for (const r of extraRows) {
-              const c = toCellRow(r);
-              allCells.push(c);
-              nextList.push(c);
-            }
-            cellsByAcctCur.set(acctCurKey, nextList);
-            acctCells = nextList;
-            chosenCell = pickCell(acctCells.filter(sameLane)) ?? pickCell(acctCells);
+          if (extra) {
+            chosenCell = toCellRow(extra);
+            allCells.push(chosenCell);
+            acctCells.push(chosenCell);
+            cellsByAcctCur.set(acctCurKey, acctCells);
+          } else {
+            smallestUnfundedQuote.set(acctCurKey, supplierAtoms);
           }
         }
         if (!chosenCell) {
-          if (!lockAllCells && acctCells.length < CELL_COUNT) retry.push(i);
+          if (!retryContended && acctCells.length < CELL_COUNT) retry.push(i);
           results[i] = {
             ok: false,
             code: "supplier_insufficient_balance",
@@ -461,6 +497,16 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
           attempt_id: item.attempt_id,
           ...(item.supplier_cost_version_id
             ? { cost_version_id: item.supplier_cost_version_id }
+            : {}),
+          ...(item.customer_price_version_id
+            ? {
+                customer_price_version_id: item.customer_price_version_id,
+                customer_price_adjustment: {
+                  override_id: item.pricing_override_id ?? null,
+                  discount_numerator: item.discount_numerator ?? null,
+                  discount_denominator: item.discount_denominator ?? null,
+                },
+              }
             : {}),
           account_id: item.supplier_account_id,
           channel_id: item.supplier_channel_id,
@@ -841,20 +887,20 @@ export function createTransactionalHoldBatch(db: SQL, leases: LeaseManager) {
     return { results, retry };
   }
 
-  return async (items: AcquireHoldInput[]) => {
-    const { results, retry } = await acquireBatch(items, false);
-    if (!retry.length) return results;
+  return async (
+    items: AcquireHoldInput[],
+  ): Promise<(AcquireHoldResult | Promise<AcquireHoldResult>)[]> => {
     try {
-      const retried = await acquireBatch(
-        retry.map((index) => items[index]!),
-        true,
-      );
-      for (const [index, result] of retried.results.entries()) results[retry[index]!] = result;
-      return results;
-    } catch (error) {
-      const retriedIndexes = new Set(retry);
+      const { results, retry } = await acquireBatch(items, !enqueueContended);
+      if (!enqueueContended || !retry.length) return results;
+      const deferred = new Set(retry);
       return results.map((result, index) =>
-        retriedIndexes.has(index) ? Promise.reject(error) : result,
+        deferred.has(index) ? enqueueContended(items[index]!) : result,
+      );
+    } catch (error) {
+      if (!isTransientPgConcurrencyError(error)) throw error;
+      return items.map((item) =>
+        enqueueContended ? enqueueContended(item) : holdTemporarilyUnavailable(),
       );
     }
   };

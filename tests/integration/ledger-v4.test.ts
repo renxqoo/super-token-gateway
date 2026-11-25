@@ -656,68 +656,75 @@ test("symptom: expired unused credit grants must not hide negative wallet balanc
     }
   }));
 
-test("symptom: a grant that expires while waiting for the wallet lock cannot fund a new hold", () =>
-  withLedgerDb(async (db) => {
-    const { ledger, project, accountA, channelA } = await seedFixture(db);
-    const lockAcquired = Promise.withResolvers<void>();
-    const unlock = Promise.withResolvers<void>();
-    let lock: Promise<unknown> | undefined;
-    let admission: Promise<unknown> | undefined;
-    try {
-      const expiry = Date.now() + 1000;
-      await ledger.creditWallet({
-        project_id: project.id,
-        currency: "PTS",
-        external_ref: "grant-expires-during-lock",
-        amount_atoms: "20",
-        kind: "GRANT",
-        expires_at: new Date(expiry).toISOString(),
-      });
-      lock = db.begin(async (tx) => {
-        await tx`SELECT id FROM public.wallets WHERE project_id = ${project.id} FOR NO KEY UPDATE`;
-        lockAcquired.resolve();
-        await unlock.promise;
-      });
-      await lockAcquired.promise;
-      const hold = ledger.acquireHold({
-        request_id: crypto.randomUUID(),
-        attempt_id: crypto.randomUUID(),
-        project_id: project.id,
-        currency: "PTS",
-        operation: "chat",
-        model: "gpt-4o",
-        idempotency_key: "grant-expires-during-lock",
-        fingerprint: "grant-expires-during-lock",
-        customer_atoms: "20",
-        supplier_account_id: accountA.id,
-        supplier_channel_id: channelA.id,
-        supplier_currency: "USD",
-        supplier_atoms: "10",
-        expires_at: new Date(Date.now() + 30000).toISOString(),
-      });
-      admission = hold;
-      let blocked = false;
-      while (Date.now() < expiry && !blocked) {
-        const [waiting] = await db`
+test.each(["wallet", "supplier"])(
+  "symptom: a grant that expires while waiting for a %s lock cannot fund a new hold",
+  (resource) =>
+    withLedgerDb(async (db) => {
+      const { ledger, project, accountA, channelA } = await seedFixture(db);
+      const lockAcquired = Promise.withResolvers<void>();
+      const unlock = Promise.withResolvers<void>();
+      let lock: Promise<unknown> | undefined;
+      let admission: Promise<unknown> | undefined;
+      try {
+        const expiry = Date.now() + 1000;
+        await ledger.creditWallet({
+          project_id: project.id,
+          currency: "PTS",
+          external_ref: "grant-expires-during-lock",
+          amount_atoms: "20",
+          kind: "GRANT",
+          expires_at: new Date(expiry).toISOString(),
+        });
+        lock = db.begin(async (tx) => {
+          if (resource === "wallet") {
+            await tx`SELECT id FROM public.wallets WHERE project_id = ${project.id} FOR NO KEY UPDATE`;
+          } else {
+            await tx`SELECT cell FROM public.supplier_cells WHERE account_id = ${accountA.id} AND currency = 'USD' ORDER BY cell FOR NO KEY UPDATE`;
+          }
+          lockAcquired.resolve();
+          await unlock.promise;
+        });
+        await lockAcquired.promise;
+        const hold = ledger.acquireHold({
+          request_id: crypto.randomUUID(),
+          attempt_id: crypto.randomUUID(),
+          project_id: project.id,
+          currency: "PTS",
+          operation: "chat",
+          model: "gpt-4o",
+          idempotency_key: "grant-expires-during-lock",
+          fingerprint: "grant-expires-during-lock",
+          customer_atoms: "20",
+          supplier_account_id: accountA.id,
+          supplier_channel_id: channelA.id,
+          supplier_currency: "USD",
+          supplier_atoms: "10",
+          expires_at: new Date(Date.now() + 30000).toISOString(),
+        });
+        admission = hold;
+        let blocked = false;
+        while (Date.now() < expiry && !blocked) {
+          const [waiting] = await db`
           SELECT EXISTS (
             SELECT 1 FROM pg_stat_activity
             WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0
           ) AS blocked
         `;
-        blocked = waiting?.blocked === true;
-        if (!blocked) await Bun.sleep(10);
+          blocked = waiting?.blocked === true;
+          if (!blocked) await Bun.sleep(10);
+        }
+        expect(blocked).toBe(true);
+        await Bun.sleep(Math.max(0, expiry - Date.now() + 20));
+        unlock.resolve();
+        await lock;
+        expect(await hold).toMatchObject({ ok: false, code: "insufficient_balance" });
+      } finally {
+        unlock.resolve();
+        await Promise.allSettled([lock, admission]);
+        await ledger.drain();
       }
-      expect(blocked).toBe(true);
-      await Bun.sleep(Math.max(0, expiry - Date.now() + 20));
-      unlock.resolve();
-      await lock;
-      expect(await hold).toMatchObject({ ok: false, code: "insufficient_balance" });
-    } finally {
-      unlock.resolve();
-      await Promise.allSettled([lock, admission]);
-      await ledger.drain();
-    }
-  }));
+    }),
+);
 
 test("G1.3 100 concurrent micro-batched holds on one single hot wallet have zero 55P03 errors and exact conservation", () =>
   withLedgerDb(async (db) => {
@@ -1531,6 +1538,7 @@ test.each([
           2026112301,
           2026112302,
           2026112303,
+          2026112401,
           SCHEMA_VERSION,
         ]);
       },
@@ -2306,10 +2314,10 @@ test("a wallet row lock timeout does not lose a measured settlement", () =>
     });
   }));
 
-test("a temporarily locked sole funded cell does not falsely reject a supplier hold", () =>
+test("symptom: a hold waiting for the sole funded cell blocks a settlement on another cell", () =>
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
-    const locked = Promise.withResolvers<void>();
+    const locked = Promise.withResolvers<number>();
     const unlock = Promise.withResolvers<void>();
     let blocking: Promise<unknown> | undefined;
     const id = "e01e6e75-7ad7-45de-87c4-000000000001";
@@ -2335,10 +2343,13 @@ test("a temporarily locked sole funded cell does not falsely reject a supplier h
       blocking = db.begin(async (tx) => {
         await tx`SELECT cell FROM public.supplier_cells WHERE account_id = ${f.accountA.id}
           AND currency = 'USD' AND cell = 0 FOR NO KEY UPDATE`;
-        locked.resolve();
+        const [backend] = await tx`SELECT pg_backend_pid() AS pid`;
+        locked.resolve(Number(backend!.pid));
         await unlock.promise;
+        await tx`SELECT cell FROM public.supplier_cells WHERE account_id = ${f.accountA.id}
+          AND currency = 'USD' AND cell = 1 FOR NO KEY UPDATE NOWAIT`;
       });
-      await locked.promise;
+      const blockerPid = await locked.promise;
       const pending = f.ledger.acquireHold({
         request_id: requestId,
         attempt_id: crypto.randomUUID(),
@@ -2355,7 +2366,17 @@ test("a temporarily locked sole funded cell does not falsely reject a supplier h
         supplier_atoms: "100",
         expires_at: new Date(Date.now() + 30_000).toISOString(),
       });
-      await Promise.race([pending, Bun.sleep(150)]);
+      const waitDeadline = Date.now() + 2000;
+      let waiting = false;
+      while (!waiting && Date.now() < waitDeadline) {
+        const [row] = await db`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+            AND ${blockerPid} = ANY(pg_blocking_pids(pid))
+        ) AS blocked`;
+        waiting = row?.blocked === true;
+        if (!waiting) await Bun.sleep(10);
+      }
+      expect(waiting).toBe(true);
       unlock.resolve();
       await blocking;
       expect(await pending).toMatchObject({ ok: true, supplier_cell: 0, held_atoms: "200" });
@@ -3067,3 +3088,304 @@ test("direct settlement microbatch isolates lock-timeout holds and releaseHold/m
       await f.ledger.drain();
     }
   }));
+
+test("symptom: unknown holds stay pending without evidence and duplicate receipts can settle or release only once", async () => {
+  await withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    await f.ledger.creditWallet({
+      project_id: f.project.id,
+      currency: "PTS",
+      external_ref: "reconciliation-credit",
+      amount_atoms: "1000",
+      kind: "CASH",
+    });
+    const acquire = async (persistedPrice = true) => {
+      const requestId = crypto.randomUUID();
+      const attemptId = crypto.randomUUID();
+      const result = await f.ledger.acquireHold({
+        request_id: requestId,
+        attempt_id: attemptId,
+        project_id: f.project.id,
+        currency: "PTS",
+        operation: "chat",
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: requestId,
+        customer_atoms: "100",
+        supplier_account_id: f.accountA.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "40",
+        supplier_cost_version_id: f.costPrice.id,
+        ...(persistedPrice ? { customer_price_version_id: f.billingPrice.id } : {}),
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      });
+      expect(result.ok).toBe(true);
+      return { requestId, attemptId };
+    };
+    const receipt = (request: Awaited<ReturnType<typeof acquire>>) => ({
+      request_id: request.requestId,
+      attempt_id: request.attemptId,
+      provider_request_id: "vendor-" + request.attemptId,
+      account_id: f.accountA.id,
+      channel_id: f.channelA.id,
+      currency: "USD",
+      evidence_ref: "receipt-" + request.attemptId,
+      actor: "finance-test",
+    });
+    const customer = await acquire();
+    const legs = await acquire();
+    const legacy = await acquire(false);
+    for (const current of [customer, legs, legacy]) {
+      await f.ledger.markUnknown(
+        current.requestId,
+        current === legacy
+          ? undefined
+          : new Map([[current.attemptId, "vendor-" + current.attemptId]]),
+      );
+    }
+    expect(await f.ledger.processReconciliation(10)).toEqual({ receipts: 0, waivers: 0 });
+    expect((await f.ledger.getWallet(f.project.id, "PTS"))?.reserved_atoms).toBe("300");
+
+    expect(
+      await f.ledger.submitReconciliationReceipt({ ...receipt(legacy), verdict: "NOT_EXECUTED" }),
+    ).toEqual({ status: "match_evidence_required" });
+    expect(
+      await f.ledger.submitReconciliationReceipt({
+        ...receipt(customer),
+        provider_request_id: "another-request",
+        verdict: "NOT_EXECUTED",
+      }),
+    ).toEqual({ status: "identity_conflict" });
+
+    const verified = {
+      ...receipt(customer),
+      verdict: "FINAL" as const,
+      supplier_cost_atoms: "19",
+      customer_usage: { input_tokens: "30", output_tokens: "9" },
+    };
+    expect((await f.ledger.submitReconciliationReceipt(verified)).status).toBe("accepted");
+    expect((await f.ledger.submitReconciliationReceipt(verified)).status).toBe("replayed");
+    const noExecution = { ...receipt(legs), verdict: "NOT_EXECUTED" as const };
+    expect((await f.ledger.submitReconciliationReceipt(noExecution)).status).toBe("accepted");
+    expect(await f.ledger.processReconciliation(10)).toEqual({ receipts: 2, waivers: 0 });
+    expect(await f.ledger.processReconciliation(10)).toEqual({ receipts: 0, waivers: 0 });
+    expect(await f.ledger.submitReconciliationReceipt(verified)).toEqual({
+      status: "replayed",
+      state: "APPLIED",
+    });
+    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+      reserved_atoms: "100",
+      spent_atoms: "13",
+    });
+    const [charge] =
+      await db`SELECT count(*)::int AS n, sum(supplier_cost_atoms)::text AS supplier FROM public.billing_charges`;
+    expect(charge).toEqual({ n: 1, supplier: "19" });
+    expect(await f.ledger.auditConservation()).toMatchObject({
+      ok: true,
+      open_holds: 0,
+      unknown_holds: 1,
+    });
+
+    const supplierFirst = await acquire();
+    await f.ledger.rememberProviderRequestId(
+      supplierFirst.requestId,
+      supplierFirst.attemptId,
+      "vendor-" + supplierFirst.attemptId,
+    );
+    await f.ledger.markUnknown(supplierFirst.requestId);
+    const pollScope = { account_id: f.accountA.id, channel_id: f.channelA.id, currency: "USD" };
+    expect(
+      await f.ledger.claimReconciliationPoll({ ...pollScope, account_id: f.accountB.id }, 60_000),
+    ).toBeNull();
+    expect(await f.ledger.claimReconciliationPoll(pollScope, 60_000)).toEqual({
+      request_id: supplierFirst.requestId,
+      attempt_id: supplierFirst.attemptId,
+      provider_request_id: "vendor-" + supplierFirst.attemptId,
+    });
+    expect(await f.ledger.claimReconciliationPoll(pollScope, 60_000)).toBeNull();
+    const supplierReceipt = {
+      ...receipt(supplierFirst),
+      verdict: "FINAL" as const,
+      supplier_cost_atoms: "19",
+    };
+    expect((await f.ledger.submitReconciliationReceipt(supplierReceipt)).status).toBe("accepted");
+    expect(
+      await f.ledger
+        .resolveRequest({
+          request_id: supplierFirst.requestId,
+          action: "RELEASE",
+          reason: "conflicts with final receipt",
+          actor: "finance-test",
+        })
+        .catch((error: Error) => error.message),
+    ).toBe("Request already has a reconciliation receipt");
+    const worker = createWorkerRunner({ db });
+    try {
+      await worker.runOnce(false);
+    } finally {
+      await worker.stop();
+    }
+    expect((await f.ledger.getSupplierBalance(f.accountA.id, "USD")).spent_atoms).toBe("38");
+    expect((await f.ledger.getWallet(f.project.id, "PTS"))?.spent_atoms).toBe("13");
+    expect(
+      (
+        await f.ledger.submitReconciliationReceipt({
+          ...supplierReceipt,
+          customer_usage: { input_tokens: "30", output_tokens: "9" },
+        })
+      ).status,
+    ).toBe("accepted");
+    expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 1, waivers: 0 });
+    expect((await f.ledger.getSupplierBalance(f.accountA.id, "USD")).spent_atoms).toBe("38");
+    expect((await f.ledger.getWallet(f.project.id, "PTS"))?.spent_atoms).toBe("26");
+    const [linked] = await db`SELECT c.supplier_journal_id IS NOT NULL AS linked,
+      EXISTS (SELECT 1 FROM public.ledger_entries e WHERE e.journal_id=c.supplier_journal_id) AS present
+      FROM public.billing_charges c WHERE c.request_id=${supplierFirst.requestId}`;
+    expect(linked).toEqual({ linked: true, present: true });
+    expect((await f.ledger.auditConservation()).ok).toBe(true);
+
+    const other = await acquire();
+    await f.ledger.markUnknown(
+      other.requestId,
+      new Map([[other.attemptId, "vendor-" + other.attemptId]]),
+    );
+    const old = {
+      ...receipt(legacy),
+      match_reason: "matched to a supplier case",
+      verdict: "NOT_EXECUTED" as const,
+    };
+    expect((await f.ledger.submitReconciliationReceipt(old)).status).toBe("accepted");
+    expect(
+      (
+        await f.ledger.submitReconciliationReceipt({
+          ...receipt(other),
+          evidence_ref: old.evidence_ref,
+          verdict: "NOT_EXECUTED",
+        })
+      ).status,
+    ).toBe("receipt_conflict");
+    expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 0, waivers: 0 });
+    expect(
+      (await f.ledger.listReconciliationCases(10, 0)).find(
+        (entry) => entry.request_id === legacy.requestId,
+      )?.receipts,
+    ).toMatchObject([{ state: "REVIEW", result: "conflicting_receipt" }]);
+    expect(
+      await f.ledger.reviewReconciliationReceipt({
+        attempt_id: legacy.attemptId,
+        action: "DISMISS",
+        review_evidence_ref: "supplier-correction",
+        reason: "original reference was duplicated",
+        actor: "finance-review",
+      }),
+    ).toMatchObject({ state: "DISMISSED" });
+    expect(
+      await f.ledger.resolveRequest({
+        request_id: legacy.requestId,
+        action: "RELEASE",
+        reason: "supplier correction confirmed no execution",
+        actor: "finance-review",
+      }),
+    ).toMatchObject({ state: "RELEASED" });
+    expect(await f.ledger.auditConservation()).toMatchObject({ ok: true, unknown_holds: 1 });
+  });
+});
+
+test("symptom: a late supplier receipt after a bounded customer waiver never reopens the customer charge", async () => {
+  await withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    await f.ledger.creditWallet({
+      project_id: f.project.id,
+      currency: "PTS",
+      external_ref: "waiver-credit",
+      amount_atoms: "500",
+      kind: "CASH",
+    });
+    const requestId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const held = await f.ledger.acquireHold({
+      request_id: requestId,
+      attempt_id: attemptId,
+      project_id: f.project.id,
+      currency: "PTS",
+      operation: "chat",
+      model: "gpt-4o",
+      idempotency_key: null,
+      fingerprint: requestId,
+      customer_atoms: "100",
+      supplier_account_id: f.accountA.id,
+      supplier_channel_id: f.channelA.id,
+      supplier_currency: "USD",
+      supplier_atoms: "40",
+      supplier_cost_version_id: f.costPrice.id,
+      customer_price_version_id: f.billingPrice.id,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    expect(held.ok).toBe(true);
+    await f.ledger.markUnknown(requestId, new Map([[attemptId, "late-vendor-id"]]));
+    await db`UPDATE public.billing_holds SET reconciliation_started_at=now()-interval '1 hour' WHERE request_id=${requestId}`;
+    expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 0, waivers: 0 });
+    await f.ledger.putReconciliationBudget("USD", "39");
+    const policy = {
+      project_id: f.project.id,
+      channel_id: f.channelA.id,
+      supplier_currency: "USD",
+      enabled: true,
+      include_historical: true,
+      age_seconds: 1800,
+      max_customer_atoms: "100",
+      limit_atoms: "40",
+    };
+    await f.ledger.putReconciliationPolicy(policy);
+    expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 0, waivers: 0 });
+    await f.ledger.putReconciliationBudget("USD", "40");
+    expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 0, waivers: 1 });
+    expect(await f.ledger.putReconciliationBudget("USD", "39")).toBeNull();
+    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+      available_atoms: "500",
+      reserved_atoms: "0",
+      spent_atoms: "0",
+    });
+    expect(await f.ledger.getSupplierBalance(f.accountA.id, "USD")).toMatchObject({
+      reserved_atoms: "40",
+    });
+    expect(
+      (await f.ledger.listReconciliationCases(10, 0)).map((entry) => entry.request_id),
+    ).toEqual([requestId]);
+
+    expect(
+      (
+        await f.ledger.submitReconciliationReceipt({
+          request_id: requestId,
+          attempt_id: attemptId,
+          account_id: f.accountA.id,
+          channel_id: f.channelA.id,
+          currency: "USD",
+          provider_request_id: "late-vendor-id",
+          evidence_ref: "vendor-invoice-row-1",
+          actor: "finance-test",
+          verdict: "FINAL",
+          supplier_cost_atoms: "16",
+          customer_usage: { input_tokens: "30", output_tokens: "6" },
+        })
+      ).status,
+    ).toBe("accepted");
+    expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 1, waivers: 0 });
+    expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 0, waivers: 0 });
+    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+      available_atoms: "500",
+      reserved_atoms: "0",
+      spent_atoms: "0",
+    });
+    expect(await f.ledger.getSupplierBalance(f.accountA.id, "USD")).toMatchObject({
+      reserved_atoms: "0",
+      spent_atoms: "16",
+    });
+    expect(await f.ledger.auditConservation()).toMatchObject({
+      ok: true,
+      open_holds: 0,
+      unknown_holds: 0,
+    });
+  });
+});

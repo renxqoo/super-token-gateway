@@ -89,4 +89,28 @@ GRANT EXECUTE ON FUNCTION public.prepare_ledger_month(DATE) TO stg_worker;
 GRANT EXECUTE ON FUNCTION public.operations_health(TEXT) TO stg_worker;
 GRANT EXECUTE ON FUNCTION public.outbox_shard(UUID) TO stg_data, stg_control, stg_worker;
 GRANT EXECUTE ON FUNCTION public.commit_leased_batch(JSONB, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) TO stg_data;
+
+GRANT SELECT ON public.billing_reconciliation_receipts, public.billing_reconciliation_budgets,
+  public.billing_reconciliation_policies, public.billing_reconciliation_waivers TO stg_control, stg_worker;
+GRANT INSERT ON public.billing_reconciliation_receipts, public.billing_reconciliation_budgets,
+  public.billing_reconciliation_policies TO stg_control;
+GRANT INSERT ON public.billing_reconciliation_receipts TO stg_worker;
+GRANT SELECT, INSERT ON public.billing_reconciliation_polls TO stg_worker;
+GRANT UPDATE (next_at, poll_count) ON public.billing_reconciliation_polls TO stg_worker;
+GRANT UPDATE (state, result, reviewed_at) ON public.billing_reconciliation_receipts TO stg_control, stg_worker;
+GRANT UPDATE (customer_usage, customer_actor, review_history) ON public.billing_reconciliation_receipts TO stg_control;
+GRANT UPDATE (limit_atoms) ON public.billing_reconciliation_budgets TO stg_control;
+GRANT UPDATE (enabled, include_historical, eligible_since, age_seconds, max_customer_atoms, limit_atoms)
+  ON public.billing_reconciliation_policies TO stg_control;
+GRANT INSERT ON public.billing_reconciliation_waivers TO stg_worker;
+GRANT UPDATE (used_atoms) ON public.billing_reconciliation_budgets, public.billing_reconciliation_policies TO stg_worker;
+GRANT SELECT ON public.price_versions, public.api_keys, public.upstream_accounts, public.config_epoch TO stg_worker;
+GRANT UPDATE (state, revision, updated_at) ON public.upstream_accounts TO stg_worker;
+GRANT UPDATE (version) ON public.config_epoch TO stg_worker;
+GRANT UPDATE (supplier_holds, closed_at) ON public.billing_holds TO stg_worker;
+GRANT UPDATE (reconciliation_started_at) ON public.billing_holds TO stg_data, stg_worker;
+GRANT UPDATE (spend_window_start, spent_atoms, reserved_atoms) ON public.api_keys TO stg_worker;
+GRANT INSERT ON public.billing_charges TO stg_worker;
+GRANT INSERT (event_id, kind, request_id, project_id, payload) ON public.outbox_events TO stg_worker;
+GRANT USAGE ON SEQUENCE public.outbox_events_seq_seq TO stg_worker;
 COMMIT;

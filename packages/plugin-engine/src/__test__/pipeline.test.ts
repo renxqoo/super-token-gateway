@@ -654,6 +654,31 @@ test("G3.2 external HTTP Webhook HOLD_UNTIL_APPROVED leaks zero banned bytes and
   expect(audit[0]).toMatchObject({ hook: "on_stream_chunk", action: "PASS", executions: 2 });
 });
 
+test("symptom: a successful Webhook callback from before the failure incorrectly closes the circuit", async () => {
+  const stale = Promise.withResolvers<Response>();
+  let calls = 0;
+  const executor = new WebhookPluginExecutor({
+    fetchImpl: async () => (++calls === 1 ? stale.promise : new Response(null, { status: 503 })),
+  });
+  const config = { url: "http://fixture.local", circuit_failure_threshold: 1 };
+  const input = {
+    hook: "on_response" as const,
+    request_id: "old",
+    project_id: "p",
+    model: "m",
+    operation: "chat",
+    text: "fixture",
+  };
+  const old = executor.invoke("webhook", config, input);
+  const opening = await executor.invoke("webhook", config, { ...input, request_id: "open" });
+  expect(opening).toMatchObject({ action: "BLOCK", rule_code: "webhook_http_503" });
+  stale.resolve(Response.json({ action: "PASS" }));
+  expect(await old).toMatchObject({ action: "PASS" });
+  const after = await executor.invoke("webhook", config, { ...input, request_id: "after" });
+  expect(after).toMatchObject({ action: "BLOCK", rule_code: "webhook_circuit_open" });
+  expect(calls).toBe(2);
+});
+
 test("G3.2 webhook FAIL_CLOSED blocks and trips circuit while FAIL_OPEN passes through on outage", async () => {
   let calls = 0;
   const failingFetch = (async () => {

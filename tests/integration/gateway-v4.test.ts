@@ -1864,6 +1864,15 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
     expect(audit.unknown_holds).toBe(0);
 
     primaryMode = "sse_hang";
+    const streamFailureMetrics = async () =>
+      (await (await runtime.metricsResponse()).text())
+        .split("\n")
+        .filter(
+          (line) =>
+            line.startsWith("gateway_channel_failures_total{") && line.includes('stage="stream"'),
+        );
+    const beforeDrain = await streamFailureMetrics();
+    expect(beforeDrain.some((line) => line.includes('kind="timeout"'))).toBe(true);
     const drainingStream = await runtime.publicApp.fetch(
       new Request("http://gateway.local/v1/chat/completions", {
         method: "POST",
@@ -1882,6 +1891,7 @@ test("G2.4 Production hardening: webhook SSRF block, /v1/models CIDR check, conc
     expect(new TextDecoder().decode((await drainingReader.read()).value)).toContain("event: error");
     expect((await drainingReader.read()).done).toBe(true);
     expect(await draining).toBe(true);
+    expect(await streamFailureMetrics()).toEqual(beforeDrain);
     const stateAfterDrain = await db`SELECT state FROM public.billing_holds
       WHERE request_id = ${drainingStream.headers.get("x-request-id")}`;
     expect(stateAfterDrain[0]?.state).toBe("UNKNOWN");

@@ -244,11 +244,20 @@ const errorMatchRuleSchema = z
       .optional(),
     regex: safeRegexSchema.optional(),
     retry_kind: z.enum(["retryable", "rate_limit", "auth_error", "client_error"]),
+    execution: z.literal("NOT_EXECUTED").optional(),
     http_status: z.number().int().min(400).max(599).optional(),
     message_path: safeFieldPathSchema.optional(),
     retry_after_path: safeFieldPathSchema.optional(),
   })
   .strict()
+  .refine(
+    (r) =>
+      r.execution === undefined ||
+      (r.regex === undefined &&
+        r.not_equals === undefined &&
+        (r.equals !== undefined || r.in !== undefined)),
+    { message: "An execution assertion requires exact provider error code matching" },
+  )
   .refine(
     (r) =>
       r.equals !== undefined ||
@@ -292,6 +301,52 @@ const endpointTemplateSchema = z
   })
   .strict();
 
+const mediaStreamTerminalSchema = z.union([
+  z
+    .object({
+      event: z
+        .string()
+        .min(1)
+        .max(128)
+        .regex(/^[^\r\n\0]+$/),
+    })
+    .strict(),
+  z
+    .object({
+      path: safeFieldPathSchema,
+      equals: z.union([z.string().max(128), z.number().int(), z.boolean()]),
+    })
+    .strict(),
+]);
+
+const providerErrorDiagnosticsSchema = z
+  .object({
+    code_path: safeFieldPathSchema.optional(),
+    code_header: z
+      .string()
+      .max(64)
+      .regex(/^(?:[a-z0-9]+-)*(?:error-code|errorcode|error-type|errortype)$/i)
+      .optional(),
+    request_id_header: z
+      .string()
+      .max(64)
+      .regex(/^(?:[a-z0-9]+-)*(?:request-id|requestid|correlation-id|trace-id)$/i)
+      .optional(),
+    summaries: z
+      .record(
+        z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/),
+        z
+          .string()
+          .min(1)
+          .max(160)
+          .regex(/^[^\p{Cc}\p{Cf}]+$/u),
+      )
+      .refine((values) => Object.keys(values).length <= 64)
+      .optional(),
+  })
+  .strict()
+  .refine((value) => value.code_path || value.code_header || value.request_id_header);
+
 const adapterOverridesSchema = z
   .object({
     extra_headers: z.record(headerNameSchema, headerValueSchema).optional(),
@@ -300,7 +355,15 @@ const adapterOverridesSchema = z
     request_transforms: z.array(bodyTransformRuleSchema).max(64).optional(),
     response_transforms: z.array(responseTransformRuleSchema).max(64).optional(),
     error_rules: z.array(errorMatchRuleSchema).max(64).optional(),
+    error_diagnostics: providerErrorDiagnosticsSchema.optional(),
     usage_aliases: z.array(usageAliasRuleSchema).max(32).optional(),
+    media_stream_terminal: mediaStreamTerminalSchema.optional(),
+    reconciliation_evidence_required: z.boolean().optional(),
+    reconciliation_response_id_header: z
+      .string()
+      .max(64)
+      .regex(/^(?:[A-Za-z0-9-]*-)?(?:request-id|requestid|correlation-id|trace-id)$/i)
+      .optional(),
   })
   .strict();
 
@@ -361,7 +424,9 @@ const declarativeProviderConfigSchema = z
     request_transforms: z.array(bodyTransformRuleSchema).max(64).optional(),
     response_transforms: z.array(responseTransformRuleSchema).max(64).optional(),
     error_rules: z.array(errorMatchRuleSchema).max(64).optional(),
+    error_diagnostics: providerErrorDiagnosticsSchema.optional(),
     usage_aliases: z.array(usageAliasRuleSchema).max(32).optional(),
+    media_stream_terminal: mediaStreamTerminalSchema.optional(),
     reasoning_field: safeFieldPathSchema.optional(),
     async_task_config: asyncTaskProviderConfigSchema.optional(),
   })
@@ -374,6 +439,7 @@ const wasmProviderConfigSchema = z
     stream_framing: streamFramingSchema.optional(),
     auth: authSchemeSchema,
     extra_headers: z.record(headerNameSchema, headerValueSchema).optional(),
+    error_diagnostics: providerErrorDiagnosticsSchema.optional(),
     hooks: z
       .array(z.enum(["adapt_request", "adapt_response", "adapt_stream_event"]))
       .min(1)
@@ -833,6 +899,42 @@ const resolveSupplierAttemptSchema = z.discriminatedUnion("action", [
     })
     .strict(),
 ]);
+
+const reconciliationReceiptFields = {
+  request_id: z.uuid(),
+  attempt_id: z.uuid(),
+  account_id: z.uuid(),
+  channel_id: z.uuid(),
+  currency: currencySchema,
+  provider_request_id: z.string().regex(/^[A-Za-z0-9._:/-]{1,256}$/),
+  evidence_ref: z.string().trim().min(1).max(512),
+  match_reason: z.string().trim().min(1).max(500).optional(),
+};
+
+const reconciliationReceiptSchema = z.discriminatedUnion("verdict", [
+  z.object({ ...reconciliationReceiptFields, verdict: z.literal("NOT_EXECUTED") }).strict(),
+  z
+    .object({
+      ...reconciliationReceiptFields,
+      verdict: z.literal("FINAL"),
+      supplier_cost_atoms: nonNegativeAtomsSchema,
+      customer_usage: usageSchema.optional(),
+    })
+    .strict(),
+]);
+
+const reconciliationPolicySchema = z
+  .object({
+    project_id: z.uuid(),
+    channel_id: z.uuid(),
+    supplier_currency: currencySchema,
+    enabled: z.boolean().default(false),
+    include_historical: z.boolean().default(false),
+    age_seconds: z.number().int().positive().max(2_147_483_647),
+    max_customer_atoms: positiveAtomsSchema,
+    limit_atoms: positiveAtomsSchema,
+  })
+  .strict();
 
 const claimEventsSchema = z
   .object({
@@ -2020,6 +2122,119 @@ export function createInternalApi(deps: {
       );
     },
   );
+
+  jsonRoute(
+    "POST",
+    "/internal/v1/reconciliation/receipts",
+    "finance",
+    z
+      .object({
+        receipts: z.array(reconciliationReceiptSchema).min(1).max(100),
+        actor: z.string().min(1).max(120).optional(),
+      })
+      .strict(),
+    async (c, body) => {
+      const actor = resolutionActor(c, body.actor);
+      const results = [];
+      for (const receipt of body.receipts) {
+        const result = await deps.ledger.submitReconciliationReceipt({
+          ...receipt,
+          ...(receipt.verdict === "FINAL" && receipt.customer_usage !== undefined
+            ? { customer_usage: receipt.customer_usage as Usage }
+            : {}),
+          actor,
+        });
+        results.push({ attempt_id: receipt.attempt_id, ...result });
+      }
+      return c.json({ results });
+    },
+  );
+
+  jsonRoute(
+    "PUT",
+    "/internal/v1/reconciliation/budgets/:currency",
+    "finance",
+    z.object({ limit_atoms: nonNegativeAtomsSchema }).strict(),
+    async (c, body) => {
+      const currency = parseBody(currencySchema, c.req.param("currency"));
+      const result = await deps.ledger.putReconciliationBudget(currency, body.limit_atoms);
+      return result
+        ? c.json(result)
+        : c.json(
+            {
+              error: {
+                code: "reconciliation_budget_conflict",
+                message: "Budget is below recorded commitments",
+              },
+            },
+            409,
+          );
+    },
+  );
+
+  jsonRoute(
+    "POST",
+    "/internal/v1/reconciliation/receipts/:attemptId/review",
+    "finance",
+    z
+      .object({
+        action: z.enum(["RESUME", "DISMISS"]),
+        review_evidence_ref: z.string().trim().min(1).max(512),
+        reason: z.string().trim().min(1).max(500),
+        customer_usage: usageSchema.nullable().optional(),
+        actor: z.string().min(1).max(120).optional(),
+      })
+      .strict(),
+    async (c, body) => {
+      const result = await deps.ledger.reviewReconciliationReceipt({
+        ...body,
+        attempt_id: parseUuid(c.req.param("attemptId"), "attemptId"),
+        customer_usage: body.customer_usage as Usage | null | undefined,
+        actor: resolutionActor(c, body.actor),
+      });
+      return result
+        ? c.json(result)
+        : c.json(
+            {
+              error: {
+                code: "reconciliation_review_conflict",
+                message: "Only receipts awaiting review can be decided",
+              },
+            },
+            409,
+          );
+    },
+  );
+
+  jsonRoute(
+    "PUT",
+    "/internal/v1/reconciliation/policies",
+    "finance",
+    reconciliationPolicySchema,
+    async (c, body) => {
+      const result = await deps.ledger.putReconciliationPolicy(body);
+      return result
+        ? c.json(result)
+        : c.json(
+            {
+              error: {
+                code: "reconciliation_policy_conflict",
+                message: "Policy scope or available budget is invalid",
+              },
+            },
+            409,
+          );
+    },
+  );
+
+  route("GET", "/internal/v1/reconciliation/cases", "auditor", async (c) => {
+    const limit = parseBody(z.coerce.number().int().min(1).max(500), c.req.query("limit") ?? "100");
+    const days = parseBody(
+      z.coerce.number().int().min(0).max(36500),
+      c.req.query("min_age_days") ?? "0",
+    );
+    return c.json({ data: await deps.ledger.listReconciliationCases(limit, days) });
+  });
 
   route("GET", "/internal/v1/charges", "auditor", async (c) => {
     const projectId = c.req.query("project_id");

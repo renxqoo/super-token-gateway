@@ -3,10 +3,18 @@ import type {
   WasmExecutorStats,
   WebhookExecutorStats,
 } from "@gateway/plugin-engine";
+import type { FirstTextTraceRecord } from "./first-text-trace.ts";
+import type {
+  ChannelFailureKind,
+  ChannelFailureStage,
+  TraceAttempt,
+  TransportTiming,
+} from "./trace-types.ts";
 
 export type TraceContext = {
   traceId: string;
   spanId: string;
+  parentSpanId?: string;
   flags: string;
   traceparent: string;
 };
@@ -31,8 +39,12 @@ export function parseOrCreateTrace(headerValue: string | undefined): TraceContex
   const match = headerValue ? TRACEPARENT_RE.exec(headerValue.trim().toLowerCase()) : null;
   let traceId: string;
   let spanId: string;
-  if (match && match[1] !== "00000000000000000000000000000000") {
-    traceId = match[1]!;
+  const parent =
+    match && match[1] !== "00000000000000000000000000000000" && match[2] !== "0000000000000000"
+      ? match
+      : null;
+  if (parent) {
+    traceId = parent[1]!;
     const offset = nextTraceHexOffset(16);
     spanId = traceHex.slice(offset, offset + 16);
   } else {
@@ -40,10 +52,11 @@ export function parseOrCreateTrace(headerValue: string | undefined): TraceContex
     traceId = traceHex.slice(offset, offset + 32);
     spanId = traceHex.slice(offset + 32, offset + 48);
   }
-  const flags = match ? match[3]! : "01";
+  const flags = parent ? parent[3]! : "01";
   return {
     traceId,
     spanId,
+    ...(parent ? { parentSpanId: parent[2]! } : {}),
     flags,
     traceparent: `00-${traceId}-${spanId}-${flags}`,
   };
@@ -51,6 +64,9 @@ export function parseOrCreateTrace(headerValue: string | undefined): TraceContex
 
 const DEFAULT_BUCKETS_MS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 15000];
 const PLUGIN_BUCKETS_MS = [0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 2000];
+const STREAM_BUCKETS_SECONDS = [
+  0.0001, 0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120,
+];
 
 class Histogram {
   private readonly counts: number[];
@@ -70,14 +86,17 @@ class Histogram {
     }
   }
 
-  render(name: string, help: string): string[] {
+  render(name: string, help: string, labels = ""): string[] {
     const lines = [`# HELP ${name} ${help}`, `# TYPE ${name} histogram`];
     for (let i = 0; i < this.buckets.length; i++) {
-      lines.push(`${name}_bucket{le="${this.buckets[i]}"} ${this.counts[i]}`);
+      lines.push(
+        `${name}_bucket{${labels ? labels + "," : ""}le="${this.buckets[i]}"} ${this.counts[i]}`,
+      );
     }
-    lines.push(`${name}_bucket{le="+Inf"} ${this.count}`);
-    lines.push(`${name}_sum ${this.sum.toFixed(3)}`);
-    lines.push(`${name}_count ${this.count}`);
+    lines.push(`${name}_bucket{${labels ? labels + "," : ""}le="+Inf"} ${this.count}`);
+    const series = labels ? `{${labels}}` : "";
+    lines.push(`${name}_sum${series} ${this.sum.toFixed(labels ? 9 : 3)}`);
+    lines.push(`${name}_count${series} ${this.count}`);
     return lines;
   }
 }
@@ -96,14 +115,15 @@ function bumpLabeled<T extends readonly string[]>(
   key: string,
   labels: () => T,
   maxEntries = 2048,
-): void {
+): boolean {
   const existing = map.get(key);
   if (existing !== undefined) {
     existing.count++;
-    return;
+    return true;
   }
-  if (map.size >= maxEntries) return;
+  if (map.size >= maxEntries) return false;
   map.set(key, { labels: labels(), count: 1 });
+  return true;
 }
 
 function statusClassOf(status: number): string {
@@ -127,6 +147,7 @@ export type AccessLogRecord = {
   moderation_blocked: boolean;
   duration_ms: number;
   ttft_ms: number | null;
+  first_text_trace?: FirstTextTraceRecord;
   error_code: string | null;
 };
 
@@ -150,6 +171,9 @@ export class GatewayMetrics {
   leaseRenewalFailures = 0;
   adminAuditFailures = 0;
   activeStreams = 0;
+  waitingFirstText = 0;
+  traceCaptureFailures = 0;
+  webhookAdmissionRejections = 0;
   pluginIntegrityFailures = 0;
   pluginPlatformAbsorbTotal = 0;
   pluginPlatformAbsorbAtoms = 0n;
@@ -161,6 +185,14 @@ export class GatewayMetrics {
   private readonly upstreamErrorCounters = new Map<
     string,
     LabeledCounter<readonly [string, string]>
+  >();
+  private readonly channelFailureCounters = new Map<
+    string,
+    LabeledCounter<readonly [string, ChannelFailureStage, ChannelFailureKind]>
+  >();
+  private readonly channelFailureOverflow = new Map<
+    string,
+    LabeledCounter<readonly [ChannelFailureStage, ChannelFailureKind]>
   >();
   private readonly pluginInvocations = new Map<
     string,
@@ -188,11 +220,60 @@ export class GatewayMetrics {
   private readonly requestDuration = new Histogram();
   private readonly ttftDuration = new Histogram();
   private readonly pluginDuration = new Histogram(PLUGIN_BUCKETS_MS);
+  private readonly streamPhases = new Map<string, Histogram>();
+  private readonly firstTextOutcomes = new Map<string, LabeledCounter<readonly [string, string]>>();
 
   constructor(private readonly accessLogEnabled: boolean) {}
 
   get isAccessLogEnabled(): boolean {
     return this.accessLogEnabled;
+  }
+
+  observeStreamPhases(
+    operation: string,
+    status: number,
+    point: {
+      requestStart: number;
+      attempt: TraceAttempt | undefined;
+      enqueued: number | undefined;
+      admission: TransportTiming | undefined;
+    },
+  ): void {
+    const { requestStart, attempt, enqueued, admission } = point;
+    const transport = attempt?.transport ?? admission;
+    const sample = (stage: string, from: number | undefined, to: number | undefined) => {
+      if (from === undefined || to === undefined || to < from) return;
+      const key = `${operation}\0${stage}`;
+      let histogram = this.streamPhases.get(key);
+      if (!histogram) {
+        histogram = new Histogram(STREAM_BUCKETS_SECONDS);
+        this.streamPhases.set(key, histogram);
+      }
+      histogram.observe((to - from) / 1000);
+    };
+    const outcome =
+      enqueued !== undefined
+        ? "sent"
+        : status === 499
+          ? "cancelled"
+          : status >= 400
+            ? "failed"
+            : "no_text";
+    bumpLabeled(
+      this.firstTextOutcomes,
+      `${operation}\0${outcome}`,
+      () => [operation, outcome] as const,
+    );
+    sample("gateway_prepare", requestStart, attempt?.start);
+    sample("dns", transport?.dns_start, transport?.dns_end);
+    if (transport?.first_wait !== undefined) sample("connection_wait", 0, transport.wait_ms);
+    sample("tcp", transport?.dial_start, transport?.tcp_ready);
+    sample("tls", transport?.tcp_ready, transport?.tls_ready);
+    sample("request_write", transport?.connection_ready, transport?.request_written);
+    sample("upstream_headers", transport?.request_written, transport?.response_headers);
+    sample("upstream_first_text", transport?.response_headers, attempt?.firstText);
+    sample("gateway_first_text_relay", attempt?.firstText, enqueued);
+    sample("gateway_first_text", requestStart, enqueued);
   }
 
   observeRequestFast(
@@ -242,6 +323,20 @@ export class GatewayMetrics {
   recordUpstreamError(channel: string, kind: string): void {
     const key = `${channel}\0${kind}`;
     bumpLabeled(this.upstreamErrorCounters, key, () => [channel, kind] as const);
+  }
+
+  recordChannelFailure(
+    channel: string,
+    stage: ChannelFailureStage,
+    kind: ChannelFailureKind,
+  ): void {
+    const recorded = bumpLabeled(
+      this.channelFailureCounters,
+      `${channel}\0${stage}\0${kind}`,
+      () => [channel, stage, kind] as const,
+    );
+    if (!recorded)
+      bumpLabeled(this.channelFailureOverflow, `${stage}\0${kind}`, () => [stage, kind] as const);
   }
 
   observePlugin(event: PluginObservation): void {
@@ -473,6 +568,24 @@ export class GatewayMetrics {
         `gateway_upstream_errors_total{channel="${escapeLabel(channel)}",kind="${escapeLabel(kind)}"} ${entry.count}`,
       );
     }
+    lines.push("# TYPE gateway_channel_failures_total counter");
+    for (const {
+      labels: [channel, stage, kind],
+      count,
+    } of this.channelFailureCounters.values()) {
+      lines.push(
+        `gateway_channel_failures_total{channel="${escapeLabel(channel)}",stage="${stage}",kind="${kind}"} ${count}`,
+      );
+    }
+    lines.push("# TYPE gateway_channel_failure_overflow_total counter");
+    for (const {
+      labels: [stage, kind],
+      count,
+    } of this.channelFailureOverflow.values()) {
+      lines.push(
+        `gateway_channel_failure_overflow_total{stage="${stage}",kind="${kind}"} ${count}`,
+      );
+    }
     lines.push("# TYPE gateway_plugin_invocations_total counter");
     for (const entry of this.pluginInvocations.values()) {
       const [plugin, hook, outcomeKind, action] = entry.labels;
@@ -532,6 +645,33 @@ export class GatewayMetrics {
         "gateway_plugin_duration_ms",
         "Plugin hook execution duration in milliseconds",
       ),
+    );
+    lines.push(
+      "# HELP gateway_sse_phase_seconds Measured streaming phase duration in seconds",
+      "# TYPE gateway_sse_phase_seconds histogram",
+    );
+    for (const [key, histogram] of this.streamPhases) {
+      const [operation, stage] = key.split("\0");
+      lines.push(
+        ...histogram
+          .render("gateway_sse_phase_seconds", "", `operation="${operation}",stage="${stage}"`)
+          .slice(2),
+      );
+    }
+    lines.push("# TYPE gateway_sse_first_text_total counter");
+    for (const {
+      labels: [operation, outcome],
+      count,
+    } of this.firstTextOutcomes.values()) {
+      lines.push(
+        `gateway_sse_first_text_total{operation="${operation}",outcome="${outcome}"} ${count}`,
+      );
+    }
+    lines.push(
+      "# TYPE gateway_sse_waiting_first_text gauge",
+      `gateway_sse_waiting_first_text ${this.waitingFirstText}`,
+      `gateway_trace_capture_failures_total ${this.traceCaptureFailures}`,
+      `gateway_webhook_admission_rejections_total ${this.webhookAdmissionRejections}`,
     );
     return `${lines.join("\n")}\n`;
   }

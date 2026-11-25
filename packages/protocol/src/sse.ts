@@ -1,3 +1,7 @@
+import { optionalObject } from "@gateway/contracts";
+import type { Protocol } from "@gateway/kernel";
+import { stringifyExact } from "./json.ts";
+
 const encoder = new TextEncoder();
 
 export interface SSEEvent {
@@ -5,6 +9,53 @@ export interface SSEEvent {
   data: string;
   id: string;
   wire: string;
+}
+
+export function hasSseText(event: SSEEvent, protocol: Protocol): boolean {
+  if (!event.data || event.data === "[DONE]" || event.event === "error") return false;
+  let body: Record<string, unknown>;
+  try {
+    body = optionalObject(JSON.parse(event.data));
+  } catch {
+    return false;
+  }
+  if (body.error || body.type === "error" || body.type === "response.failed") return false;
+  const nonempty = (value: unknown) => typeof value === "string" && value.length > 0;
+  const type = body.type ?? event.event;
+  if (protocol === "chat")
+    return (
+      Array.isArray(body.choices) &&
+      body.choices.some((choice) => {
+        const delta = optionalObject(optionalObject(choice).delta);
+        return nonempty(delta.content) || nonempty(delta.refusal);
+      })
+    );
+  if (protocol === "messages") {
+    const delta = optionalObject(body.delta);
+    const block = optionalObject(body.content_block);
+    return (
+      (type === "content_block_delta" && delta.type === "text_delta" && nonempty(delta.text)) ||
+      (type === "content_block_start" && block.type === "text" && nonempty(block.text))
+    );
+  }
+  if (protocol === "responses")
+    return (
+      (type === "response.output_text.delta" || type === "response.refusal.delta") &&
+      nonempty(body.delta)
+    );
+  return (
+    Array.isArray(body.candidates) &&
+    body.candidates.some((candidate) => {
+      const parts = optionalObject(optionalObject(candidate).content).parts;
+      return (
+        Array.isArray(parts) &&
+        parts.some((item) => {
+          const part = optionalObject(item);
+          return part.thought !== true && nonempty(part.text);
+        })
+      );
+    })
+  );
 }
 
 export class SSEParser {
@@ -70,4 +121,3 @@ export const encodeSSE = (data: unknown, event?: string): Uint8Array =>
   encoder.encode(
     `${event ? `event: ${event}\n` : ""}data: ${typeof data === "string" ? data : stringifyExact(data)}\n\n`,
   );
-import { stringifyExact } from "./json.ts";

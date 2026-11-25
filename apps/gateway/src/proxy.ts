@@ -29,7 +29,9 @@ import type {
 } from "@gateway/ledger";
 import {
   applyResponseTransforms,
+  describeProviderError,
   evaluateErrorRules,
+  getAtPath,
   invokeWasmProviderResponse,
   invokeWasmProviderStreamEvent,
   WasmCapacityError,
@@ -93,6 +95,9 @@ import {
   peekStream,
 } from "./stream-relay.ts";
 import { parseOrCreateTrace, type GatewayMetrics, type TraceContext } from "./observability.ts";
+import { createRequestTrace, createTransportTiming } from "./first-text-trace.ts";
+import type { createTraceQueue } from "./trace-queue.ts";
+import type { ChannelFailureKind, ChannelFailureStage, TraceAttempt } from "./trace-types.ts";
 import type { SnapshotManager } from "./snapshot.ts";
 import { rejectUnmeteredTools } from "./tool-policy.ts";
 import {
@@ -133,6 +138,7 @@ export type ProxyDependencies = {
   wasmExecutor: WasmRuntimeExecutor | null;
   lifecycle: Lifecycle;
   metrics: GatewayMetrics;
+  traceQueue?: ReturnType<typeof createTraceQueue>;
   state?: ProxyRuntimeState;
   bodyBufferBudget?: { reserve(bytes: number): () => void };
 };
@@ -376,6 +382,7 @@ function mapHoldError(code: string, message: string): GatewayError {
     return new GatewayError(403, code, message);
   }
   if (code === "idempotency_conflict") return new GatewayError(409, code, message);
+  if (code === "ledger_busy") return new GatewayError(503, code, message);
   if (code === "supplier_unavailable" || code === "supplier_insufficient_balance") {
     return new GatewayError(503, code, message);
   }
@@ -391,15 +398,123 @@ function isRetryableStatus(status: number): "rate_limit" | "auth_error" | "retry
   return null;
 }
 
+function channelFailureKind(code: string): ChannelFailureKind {
+  switch (code) {
+    case "upstream_dns":
+      return "dns";
+    case "upstream_tls":
+      return "tls";
+    case "upstream_connect":
+    case "upstream_unreachable":
+      return "connect";
+    case "transport_interrupted":
+    case "stream_interrupted":
+      return "interrupted";
+    case "upstream_not_dispatched":
+    case "upstream_timeout":
+      return "timeout";
+    case "upstream_capacity":
+    case "channel_saturated":
+    case "provider_capacity_unavailable":
+      return "capacity";
+    case "upstream_rate_limited":
+      return "rate_limit";
+    case "upstream_auth_error":
+      return "auth_error";
+    case "upstream_client_error":
+      return "client_error";
+    case "invalid_upstream":
+    case "invalid_upstream_usage":
+    case "unexpected_trailing_event":
+    case "stream_truncated":
+    case "empty_stream":
+    case "usage_alias_conflict":
+    case "conversion_loss":
+    case "provider_stream_error":
+      return "protocol";
+    default:
+      return "other";
+  }
+}
+
+const mediaCompletionEvents: Partial<Record<Operation, string>> = {
+  images: "image_generation.completed",
+  image_edits: "image_edit.completed",
+  speech: "speech.audio.done",
+  transcription: "transcript.text.done",
+};
+
+function imageArtifact(value: unknown): string | undefined {
+  const { b64_json, url } = optionalObject(value);
+  if (
+    typeof b64_json === "string" &&
+    /^[A-Za-z0-9+/]+={0,2}$/.test(b64_json) &&
+    b64_json.length % 4 === 0
+  )
+    return b64_json;
+  if (typeof url !== "string" || !URL.canParse(url)) return;
+  const parsed = new URL(url);
+  if (parsed.protocol === "https:" || parsed.protocol === "http:") return parsed.href;
+}
+
+function recordImageArtifact(artifacts: Set<string>, value: unknown): void {
+  const artifact = imageArtifact(value);
+  if (!artifact) return;
+  const digest = new Bun.CryptoHasher("sha256").update(artifact).digest("hex");
+  if (artifacts.has(digest)) {
+    throw new GatewayError(502, "invalid_upstream_usage", "Provider repeated an image result");
+  }
+  artifacts.add(digest);
+}
+
+function countImageArtifacts(images: unknown[]): number {
+  const artifacts = new Set<string>();
+  for (const image of images) recordImageArtifact(artifacts, image);
+  return artifacts.size;
+}
+
 function buildUsageForOperation(
   operation: Operation,
-  customerBasis: PriceVersionRecord["basis"],
-  supplierBasis: PriceVersionRecord["basis"],
+  customerPrice: PriceVersionRecord,
+  supplierPrice: PriceVersionRecord,
   rawUsage: Usage | undefined,
+  deliveredImages?: number,
+  authorizedImages?: number,
 ): Usage | null {
+  if (operation === "images" || operation === "image_edits") {
+    const declared = rawUsage?.images;
+    const measured = deliveredImages === undefined ? undefined : String(deliveredImages);
+    if (declared !== undefined && measured !== undefined && declared !== measured) {
+      throw new GatewayError(
+        502,
+        "usage_alias_conflict",
+        "Provider image count disagrees with delivered images",
+      );
+    }
+    const quantity = measured ?? declared;
+    if (
+      quantity !== undefined &&
+      (authorizedImages === undefined ||
+        !Number.isSafeInteger(authorizedImages) ||
+        BigInt(quantity) > BigInt(authorizedImages))
+    ) {
+      throw new GatewayError(
+        502,
+        "invalid_upstream_usage",
+        "Provider returned more images than authorized",
+      );
+    }
+    if (
+      (!quantity || quantity === "0") &&
+      ((customerPrice.basis === "PROVIDER_USAGE" && customerPrice.rates.images) ||
+        (supplierPrice.basis === "PROVIDER_USAGE" && supplierPrice.rates.images))
+    )
+      return null;
+    if (quantity !== undefined) return { ...rawUsage, images: quantity };
+  }
   if (rawUsage) return rawUsage;
-  if (operation === "images" || operation === "image_edits") return { images: "1" };
-  if (customerBasis === "PROVIDER_USAGE" || supplierBasis === "PROVIDER_USAGE") return null;
+  if (customerPrice.basis === "PROVIDER_USAGE" || supplierPrice.basis === "PROVIDER_USAGE")
+    return null;
   return { requests: "1" };
 }
 
@@ -568,6 +683,7 @@ export async function handleInferenceRequest(
   let releaseProjectLimit: (() => void) | null = null;
   let releaseChannelLimit: (() => void) | null = null;
   let activeDispatch: PreparedDispatch | undefined;
+  let activeDispatchTiming: ReturnType<typeof createTransportTiming> | undefined;
   const releaseLimiters = () => {
     releaseChannelLimit?.();
     releaseChannelLimit = null;
@@ -583,6 +699,49 @@ export async function handleInferenceRequest(
   let logFailover = false;
   let logModBlocked = false;
   let logTtftMs: number | null = null;
+  let requestTrace: ReturnType<typeof createRequestTrace> | undefined;
+  let traceProtocol: Protocol | null = null;
+  let traceChannel: string | undefined;
+  let failureRecorded = false;
+  let channelStage: ChannelFailureStage = "request_prepare";
+  const recordAttemptFailure = (
+    code: string,
+    kind: ChannelFailureKind = channelFailureKind(code),
+    details?: TraceAttempt["providerError"],
+    stage = channelStage,
+  ) => {
+    if (!traceChannel || failureRecorded) return;
+    failureRecorded = true;
+    deps.metrics.recordChannelFailure(traceChannel, stage, kind);
+    requestTrace?.failAttempt(performance.now(), stage, kind, code, details);
+  };
+  const recordPreDispatchFailure = (
+    channel: string,
+    code: string,
+    kind: ChannelFailureKind,
+    timing?: ReturnType<typeof createTransportTiming>,
+    id?: string,
+    startedAt?: number,
+  ) => {
+    deps.metrics.recordChannelFailure(channel, "pre_dispatch", kind);
+    if (!deps.traceQueue || !requestTrace) return;
+    const at = performance.now();
+    requestTrace.recordPreDispatchFailure(
+      id ?? fastUuid(),
+      channel,
+      startedAt ?? at,
+      at,
+      code,
+      kind,
+      timing?.values ?? createTransportTiming().values,
+    );
+  };
+  let waitingForFirstText = false;
+  const stopWaitingForFirstText = () => {
+    if (!waitingForFirstText) return;
+    waitingForFirstText = false;
+    deps.metrics.waitingFirstText--;
+  };
   let logged = false;
   const acquiredProbes = new Map<string, symbol>();
   let holdAcquired = false;
@@ -590,7 +749,9 @@ export async function handleInferenceRequest(
   let holdFinalizeAttempted = false;
   let anyUnknownAttempt = false;
   let activePluginSignal: AbortSignal | undefined;
+  let releaseOutputAdmission: (() => void) | undefined;
   let currentAttemptDispatched = false;
+  let providerRequestIds: Map<string, string> | undefined;
 
   const commitMeasured = async (input: CommitTerminalInput) => {
     activePluginSignal?.throwIfAborted();
@@ -600,6 +761,7 @@ export async function handleInferenceRequest(
       throw new GatewayError(503, "ledger_commit_failed", "Ledger could not confirm settlement");
     }
     holdFinalized = true;
+    requestTrace?.recordSettlement(input.selected_attempt_id);
     return result;
   };
 
@@ -609,7 +771,7 @@ export async function handleInferenceRequest(
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         if (mode === "release") await deps.ledger.releaseHold(requestId);
-        else await deps.ledger.markUnknown(requestId);
+        else await deps.ledger.markUnknown(requestId, providerRequestIds);
         holdFinalized = true;
         return true;
       } catch {
@@ -639,7 +801,51 @@ export async function handleInferenceRequest(
   const emitAccessLog = (status: number, errorCode: string | null) => {
     if (logged) return;
     logged = true;
-    const durationMs = performance.now() - requestStart;
+    const ended = performance.now();
+    const durationMs = ended - requestStart;
+    stopWaitingForFirstText();
+    try {
+      if (
+        errorCode &&
+        /^(?:upstream_|invalid_upstream|provider_|unexpected_trailing_event$|missing_usage$)/.test(
+          errorCode,
+        )
+      ) {
+        recordAttemptFailure(errorCode);
+      }
+      if (requestTrace) {
+        requestTrace.endAttempt(ended);
+        const measurement = requestTrace.measurement;
+        if (traceProtocol && deps.config.traceMetrics)
+          deps.metrics.observeStreamPhases(operation, status, measurement);
+        if (deps.traceQueue && logProjectId)
+          deps.traceQueue.offer({
+            traceId: trace.traceId,
+            spanId: trace.spanId,
+            ...(trace.parentSpanId ? { parentSpanId: trace.parentSpanId } : {}),
+            requestId,
+            projectId: logProjectId,
+            model: logModel,
+            operation,
+            status,
+            firstTextTracked: traceProtocol !== null,
+            error:
+              errorCode && /^[A-Za-z0-9_.:-]{1,80}$/.test(errorCode)
+                ? errorCode
+                : errorCode
+                  ? "request_failed"
+                  : null,
+            origin: performance.timeOrigin,
+            start: requestStart,
+            end: ended,
+            ...(measurement.enqueued === undefined ? {} : { enqueued: measurement.enqueued }),
+            ...(measurement.admission ? { admission: measurement.admission } : {}),
+            ...requestTrace.completedAttempts,
+          });
+      }
+    } catch {
+      deps.metrics.traceCaptureFailures++;
+    }
     if (!deps.metrics.isAccessLogEnabled) {
       deps.metrics.observeRequestFast(operation, status, logChannel, durationMs, logTtftMs);
       return;
@@ -658,6 +864,9 @@ export async function handleInferenceRequest(
       moderation_blocked: logModBlocked,
       duration_ms: durationMs,
       ttft_ms: logTtftMs,
+      ...(requestTrace && traceProtocol
+        ? { first_text_trace: requestTrace.record(trace.spanId) }
+        : {}),
       error_code: errorCode,
     });
   };
@@ -809,6 +1018,22 @@ export async function handleInferenceRequest(
     const isStream =
       clientBody.stream === true || (operation === "speech" && clientBody.stream_format === "sse");
     logStream = isStream;
+    traceProtocol = isStream && isConversationalOperation(operation) ? operation : null;
+    if (
+      deps.traceQueue ||
+      (traceProtocol && (deps.config.traceMetrics || deps.metrics.isAccessLogEnabled))
+    ) {
+      requestTrace = createRequestTrace(
+        requestStart,
+        traceProtocol,
+        deps.config.traceExport?.maxAttempts,
+        stopWaitingForFirstText,
+      );
+      if (traceProtocol && deps.config.traceMetrics) {
+        waitingForFirstText = true;
+        deps.metrics.waitingFirstText++;
+      }
+    }
     const outputBound = resolveOutputBound(clientBody, model);
 
     const initialChars = isMultipartOp ? undefined : requestCharacters(operation, clientBody);
@@ -1179,6 +1404,54 @@ export async function handleInferenceRequest(
       deps.config.firstByteTimeoutMs !== undefined
         ? requestStart + deps.config.firstByteTimeoutMs
         : null;
+    const admitOutputPolicy = (candidate: HydratedCandidate) => {
+      releaseOutputAdmission?.();
+      releaseOutputAdmission = undefined;
+      if (!isConversationalOperation(operation) || !candidate.route.plugin_pipeline.length)
+        return undefined;
+      const admission = deps.pluginEngine.admitOutputWebhooks(
+        candidate.route.plugin_pipeline,
+        snap.plugins,
+        requestId,
+        isStream,
+      );
+      if (admission.ok) {
+        releaseOutputAdmission = admission.release;
+        return undefined;
+      }
+      return admission;
+    };
+    const replayedResponse = (priorId: string, priorState: string | undefined) => {
+      const inProgress = priorState === "HELD";
+      const code = inProgress ? "idempotency_in_progress" : "idempotency_replayed";
+      const message = inProgress
+        ? "Request with this Idempotency-Key is already in progress"
+        : `Request already finalized with state ${priorState ?? "UNKNOWN"}`;
+      emitAccessLog(409, code);
+      return c.json(
+        formatProtocolError(operation, 409, code, message, priorId),
+        409,
+        responseHeaders(priorId, trace),
+      );
+    };
+    const rejectOutputPolicy = async (failure: { code: string; message: string }) => {
+      deps.metrics.webhookAdmissionRejections++;
+      await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
+      const classified = classifyPluginBlock("host_capacity", undefined, failure.message);
+      emitAccessLog(classified.status, failure.code);
+      return c.json(
+        formatProtocolError(
+          operation,
+          classified.status,
+          classified.code,
+          classified.message,
+          requestId,
+          { rule_code: failure.code },
+        ),
+        classified.status as 400,
+        responseHeaders(requestId, trace, classified.extraHeaders),
+      );
+    };
     const reserveDispatch = async (
       candidate: HydratedCandidate,
       prepared: PreparedUpstreamRequest | null,
@@ -1186,6 +1459,9 @@ export async function handleInferenceRequest(
     ) => {
       if (!prepared) return;
       const linked = createLinkedController([c.req.raw.signal, pluginSignal]);
+      const timing = requestTrace ? createTransportTiming() : undefined;
+      const startedAt = timing ? performance.now() : 0;
+      if (timing) requestTrace?.observeAdmission(timing.values);
       try {
         activeDispatch = await deps.transport.prepareDispatch(
           prepared.url,
@@ -1194,6 +1470,7 @@ export async function handleInferenceRequest(
             : prepared.body.byteLength,
           {
             signal: linked.signal,
+            ...(timing ? { onTiming: timing.observe } : {}),
             dispatchDeadline: Math.min(
               firstByteDeadlineMs ?? Infinity,
               performance.now() +
@@ -1203,6 +1480,19 @@ export async function handleInferenceRequest(
           deps.config.allowPrivateUpstreams,
           deps.config.privateUpstreamCidrs,
         );
+        activeDispatchTiming = timing;
+      } catch (error) {
+        if (error instanceof UpstreamPreDispatchError && !linked.signal.aborted) {
+          recordPreDispatchFailure(
+            candidate.channel.name,
+            error.code,
+            channelFailureKind(error.code),
+            timing,
+            undefined,
+            startedAt,
+          );
+        }
+        throw error;
       } finally {
         linked.dispose();
       }
@@ -1224,6 +1514,7 @@ export async function handleInferenceRequest(
     const releaseDispatch = () => {
       activeDispatch?.release();
       activeDispatch = undefined;
+      activeDispatchTiming = undefined;
     };
     const preDispatchGatewayError = (error: UpstreamPreDispatchError) => {
       if (error.code === "upstream_capacity") return error;
@@ -1263,6 +1554,21 @@ export async function handleInferenceRequest(
       }
       const preparedInput = idx === 0 ? firstInput : await prepareRouteInput(cand);
       if (preparedInput instanceof Response) return preparedInput;
+      const unavailablePolicy = admitOutputPolicy(cand);
+      if (unavailablePolicy) {
+        if (idempotencyKey !== null) {
+          const prior = await deps.ledger.findIdempotentHold(project.id, operation, idempotencyKey);
+          if (prior) {
+            if (prior.fingerprint !== fingerprint)
+              throw mapHoldError(
+                "idempotency_conflict",
+                "Idempotency key reused with different request fingerprint",
+              );
+            return replayedResponse(prior.request_id, prior.state);
+          }
+        }
+        return await rejectOutputPolicy(unavailablePolicy);
+      }
       const effectiveBilling = resolveEffectiveCustomerPrice(
         snap,
         project.id,
@@ -1339,6 +1645,7 @@ export async function handleInferenceRequest(
         customer_atoms: customerAtoms,
         supplier_account_id: cand.account.id,
         supplier_cost_version_id: cand.costPrice.id,
+        customer_price_version_id: effectiveBilling.price.id,
         supplier_channel_id: cand.channel.id,
         supplier_currency: cand.costPrice.currency,
         supplier_atoms: supplierAtoms,
@@ -1349,17 +1656,7 @@ export async function handleInferenceRequest(
       if (holdRes.ok) {
         if (holdRes.replayed) {
           releaseUnusedProbes(idx);
-          const inProgress = holdRes.existing_state === "HELD";
-          const code = inProgress ? "idempotency_in_progress" : "idempotency_replayed";
-          const msg = inProgress
-            ? "Request with this Idempotency-Key is already in progress"
-            : `Request already finalized with state ${holdRes.existing_state ?? "UNKNOWN"}`;
-          emitAccessLog(409, code);
-          return c.json(
-            formatProtocolError(operation, 409, code, msg, holdRes.request_id),
-            409,
-            responseHeaders(holdRes.request_id, trace),
-          );
+          return replayedResponse(holdRes.request_id, holdRes.existing_state);
         }
         holdAcquired = true;
         activeIndex = idx;
@@ -1369,12 +1666,19 @@ export async function handleInferenceRequest(
         holdCustomerAtoms = holdRes.held_atoms;
         break;
       }
+      const lackedSupplierFunding =
+        holdRes.code === "supplier_unavailable" || holdRes.code === "supplier_insufficient_balance";
+      if (lackedSupplierFunding)
+        recordPreDispatchFailure(
+          cand.channel.name,
+          holdRes.code,
+          "supplier_funding",
+          activeDispatchTiming,
+          attemptId,
+        );
       releaseDispatch();
       releaseProbeFor(cand.channel_id);
-      if (
-        holdRes.code === "supplier_unavailable" ||
-        holdRes.code === "supplier_insufficient_balance"
-      ) {
+      if (lackedSupplierFunding) {
         lastHoldErr = mapHoldError(holdRes.code, holdRes.message);
         continue;
       }
@@ -1404,6 +1708,25 @@ export async function handleInferenceRequest(
       if (cursor !== activeIndex) releaseDispatch();
       const entry = selected[cursor]!;
       const cand = entry.route;
+      const providerIdHeader =
+        cand.route.adapter_overrides.reconciliation_response_id_header ??
+        cand.channel.adapter_config.reconciliation_response_id_header;
+      const requiresEvidence =
+        cand.route.adapter_overrides.reconciliation_evidence_required ??
+        cand.channel.adapter_config.reconciliation_evidence_required ??
+        Boolean(providerIdHeader);
+      const rejectedOutcome = (notExecuted = false): "FAILED" | "UNKNOWN" => {
+        if (!requiresEvidence || notExecuted) return "FAILED";
+        anyUnknownAttempt = true;
+        return "UNKNOWN";
+      };
+      const mayRetryAmbiguous = () => {
+        const limit = deps.config.maxAmbiguousRetriesPerMinute;
+        return (
+          Boolean(cand.route.retry_policy.retry_on_ambiguous) &&
+          (limit === undefined || deps.metrics.tryConsumeAmbiguousRetry(cand.channel.id, limit))
+        );
+      };
       if (!deps.router.peekAvailable(cand.channel.id, entry.probe)) {
         releaseProbeFor(cand.channel_id);
         if (cursor === activeIndex && !pendingSwitchFrom) {
@@ -1438,6 +1761,10 @@ export async function handleInferenceRequest(
       if (attemptInput instanceof Response) {
         await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
         return attemptInput;
+      }
+      if (cursor !== activeIndex) {
+        const unavailablePolicy = admitOutputPolicy(cand);
+        if (unavailablePolicy) return await rejectOutputPolicy(unavailablePolicy);
       }
       const {
         body: attemptBody,
@@ -1510,6 +1837,15 @@ export async function handleInferenceRequest(
           next_currency: cand.costPrice.currency,
           next_supplier_atoms: nextSupplierAtoms,
           next_supplier_cost_version_id: cand.costPrice.id,
+          next_customer_price_version_id: candBilling.price.id,
+          next_customer_price_adjustment: {
+            override_id: candBilling.overrideId,
+            discount_numerator: candBilling.discountNumerator,
+            discount_denominator: candBilling.discountDenominator,
+          },
+          ...(providerRequestIds?.get(pendingSwitchFrom.attemptId)
+            ? { failed_provider_request_id: providerRequestIds.get(pendingSwitchFrom.attemptId)! }
+            : {}),
           ...(BigInt(nextCustomerAtoms) > BigInt(holdCustomerAtoms)
             ? { required_customer_atoms: nextCustomerAtoms }
             : {}),
@@ -1517,6 +1853,13 @@ export async function handleInferenceRequest(
         if (!sw.ok) {
           releaseProbeFor(cand.channel_id);
           if (sw.code === "supplier_unavailable" || sw.code === "supplier_insufficient_balance") {
+            recordPreDispatchFailure(
+              cand.channel.name,
+              sw.code,
+              "supplier_funding",
+              activeDispatchTiming,
+              nextAttemptId,
+            );
             continue;
           }
           releaseUnusedProbes(cursor + 1);
@@ -1563,6 +1906,13 @@ export async function handleInferenceRequest(
             "Shared channel quota is unavailable",
           );
         }
+        recordPreDispatchFailure(
+          cand.channel.name,
+          "channel_saturated",
+          "capacity",
+          activeDispatchTiming,
+          activeAttemptId,
+        );
         releaseProbeFor(cand.channel_id);
         pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
         lastErrorStatus = 429;
@@ -1678,6 +2028,18 @@ export async function handleInferenceRequest(
       };
 
       const startedAt = performance.now();
+      traceChannel = cand.channel.name;
+      failureRecorded = false;
+      channelStage = "request_prepare";
+      requestTrace?.beginAttempt(
+        startedAt,
+        {
+          id: activeAttemptId,
+          number: attemptsMade,
+          channel: cand.channel.name,
+        },
+        activeDispatchTiming,
+      );
       let routingAttempt = deps.router.beginAttempt(cand.channel.id, entry.probe);
       let upstreamSuccessObserved = false;
       const observeAttemptFailure = (
@@ -1719,6 +2081,9 @@ export async function handleInferenceRequest(
             (await prepareUpstreamRequest({ ...options, signal: ensureAttemptSignal() }));
         }
       } catch (err) {
+        if (err instanceof GatewayError && /^(?:conversion_loss$|provider_)/.test(err.code)) {
+          recordAttemptFailure(err.code);
+        }
         cancelTimeout();
         attemptLinked.dispose();
         activeLinkedDispose = null;
@@ -1766,9 +2131,17 @@ export async function handleInferenceRequest(
       }
 
       try {
+        channelStage = "transport";
         pluginSignal.throwIfAborted();
         if (!deps.router.peekAvailable(cand.channel.id, entry.probe)) {
           throw new GatewayError(503, "no_route", "No healthy channel available for this model");
+        }
+        const unavailablePolicy = admitOutputPolicy(cand);
+        if (unavailablePolicy) {
+          cancelTimeout();
+          attemptLinked.dispose();
+          activeLinkedDispose = null;
+          return await rejectOutputPolicy(unavailablePolicy);
         }
         const request = {
           method: "POST",
@@ -1776,6 +2149,7 @@ export async function handleInferenceRequest(
           ...(prepared.headersValidated ? { headersValidated: true } : {}),
           body: prepared.body as BodyInit,
           onCancelRegister: onAttemptCancelRegister,
+          ...(requestTrace?.transportObserver ? { onTiming: requestTrace.transportObserver } : {}),
           dispatchDeadline: performance.now() + attemptTimeoutMs,
         };
         currentAttemptDispatched = true;
@@ -1816,6 +2190,20 @@ export async function handleInferenceRequest(
         }
         const classified =
           err instanceof UpstreamPreDispatchError ? preDispatchGatewayError(err) : null;
+        const diagnosticCode =
+          err instanceof GatewayError
+            ? err.code
+            : isPreDispatch
+              ? "upstream_connect"
+              : attemptAborted
+                ? "upstream_timeout"
+                : "transport_interrupted";
+        recordAttemptFailure(
+          diagnosticCode,
+          channelFailureKind(diagnosticCode),
+          undefined,
+          isPreDispatch ? "pre_dispatch" : channelStage,
+        );
         if (isPreDispatch) {
           const kind = err instanceof UpstreamPreDispatchError ? err.code : "upstream_connect";
           deps.metrics.recordUpstreamError(cand.channel.name, kind);
@@ -1830,13 +2218,7 @@ export async function handleInferenceRequest(
         }
         const failedOutcome: "FAILED" | "UNKNOWN" = isPreDispatch ? "FAILED" : "UNKNOWN";
         if (failedOutcome === "UNKNOWN") anyUnknownAttempt = true;
-        const policyAllowsAmbiguous = Boolean(cand.route.retry_policy.retry_on_ambiguous);
-        const maxAmbiguousPerMin = deps.config.maxAmbiguousRetriesPerMinute;
-        const allowAmbiguousRetry =
-          !isPreDispatch &&
-          policyAllowsAmbiguous &&
-          (maxAmbiguousPerMin === undefined ||
-            deps.metrics.tryConsumeAmbiguousRetry(cand.channel.id, maxAmbiguousPerMin));
+        const allowAmbiguousRetry = !isPreDispatch && mayRetryAmbiguous();
         lastErrorStatus = classified?.status ?? (isPreDispatch ? 503 : 504);
         lastErrorCode =
           classified?.code ?? (isPreDispatch ? "upstream_unreachable" : "upstream_timeout");
@@ -1853,7 +2235,62 @@ export async function handleInferenceRequest(
 
       const upstreamResp = fastResult.fast ? null : fastResult.response;
       const upstreamStatus = fastResult.fast ? fastResult.status : fastResult.response.status;
+      const upstreamHeaders = fastResult.fast ? fastResult.headers : fastResult.response.headers;
+      const diagnostics = deps.traceQueue ? prepared.mergedOverrides.error_diagnostics : undefined;
+      const describeFailure = diagnostics?.summaries
+        ? (body?: unknown) => {
+            try {
+              return describeProviderError(
+                diagnostics,
+                diagnostics.code_header
+                  ? getHeaderValue(upstreamHeaders, diagnostics.code_header.toLowerCase())
+                  : null,
+                body,
+              );
+            } catch {
+              deps.metrics.traceCaptureFailures++;
+              return undefined;
+            }
+          }
+        : undefined;
+      const diagnosticBodyLimit = deps.config.traceExport?.errorBodyMaxBytes ?? 8192;
+      const describeEventFailure =
+        describeFailure && diagnostics?.code_path
+          ? (data: string) => {
+              if (
+                data.length > diagnosticBodyLimit ||
+                Buffer.byteLength(data) > diagnosticBodyLimit
+              )
+                return describeFailure();
+              try {
+                return describeFailure(JSON.parse(data));
+              } catch {
+                return describeFailure();
+              }
+            }
+          : undefined;
+      requestTrace?.observeHeaders(upstreamStatus);
+      const diagnosticIdHeader = diagnostics?.request_id_header ?? providerIdHeader;
+      if (diagnosticIdHeader && deps.traceQueue) {
+        const providerId = getHeaderValue(upstreamHeaders, diagnosticIdHeader.toLowerCase());
+        if (
+          providerId &&
+          /^[A-Za-z0-9._:-]{1,128}$/.test(providerId) &&
+          !/^(?:sk[_-]|eyJ)/.test(providerId)
+        ) {
+          requestTrace?.bindProviderRequestId(providerId);
+        }
+      }
       const upstreamOk = upstreamStatus >= 200 && upstreamStatus < 300;
+      if (providerIdHeader) {
+        const providerId = getHeaderValue(upstreamHeaders, providerIdHeader.toLowerCase());
+        if (providerId && /^[A-Za-z0-9._:/-]{1,256}$/.test(providerId)) {
+          (providerRequestIds ??= new Map()).set(activeAttemptId, providerId);
+          await deps.ledger
+            .rememberProviderRequestId(requestId, activeAttemptId, providerId)
+            .catch(() => undefined);
+        }
+      }
 
       if (pluginSignal.aborted) {
         cancelTimeout();
@@ -1865,13 +2302,38 @@ export async function handleInferenceRequest(
       const latencyMs = performance.now() - startedAt;
       logTtftMs = latencyMs;
       if (!upstreamOk) {
+        channelStage = "http_response";
+        let detail = describeFailure?.();
+        if (!detail && describeFailure && diagnostics?.code_path && diagnosticBodyLimit > 0) {
+          const bytes = fastResult.fast
+            ? fastResult.body
+            : deps.transport.bufferedBody(fastResult.response);
+          const contentType = getHeaderValue(upstreamHeaders, "content-type") ?? "";
+          if (
+            bytes?.byteLength &&
+            bytes.byteLength <= diagnosticBodyLimit &&
+            /^application\/(?:json|[^;\s]+\+json)(?:\s*;|$)/i.test(contentType)
+          ) {
+            try {
+              detail = describeFailure(JSON.parse(utf8FatalDecoder.decode(bytes)));
+            } catch {
+              detail = undefined;
+            }
+          }
+        }
+        const retryKind = isRetryableStatus(upstreamStatus);
+        recordAttemptFailure(
+          "upstream_http_error",
+          retryKind ?? (upstreamStatus >= 400 && upstreamStatus < 500 ? "client_error" : "other"),
+          detail,
+        );
         cancelTimeout();
         attemptLinked.dispose();
         activeLinkedDispose = null;
         void upstreamResp?.body?.cancel().catch(() => undefined);
         releaseChannelLimit();
         releaseChannelLimit = null;
-        const retryKind = isRetryableStatus(upstreamStatus);
+        const outcome = rejectedOutcome();
         if (retryKind) {
           const retryAfterHdr = fastResult.fast
             ? getHeaderValue(fastResult.headers, "retry-after")
@@ -1880,7 +2342,7 @@ export async function handleInferenceRequest(
           deps.metrics.recordUpstreamError(cand.channel.name, `http_${upstreamStatus}`);
           observeAttemptFailure(retryKind, retryAfterMs, latencyMs);
           markProbeCompleted(cand.channel.id);
-          pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
+          pendingSwitchFrom = { attemptId: activeAttemptId, outcome };
           lastErrorStatus = upstreamStatus === 429 ? 429 : 502;
           lastErrorCode =
             retryKind === "rate_limit"
@@ -1889,6 +2351,7 @@ export async function handleInferenceRequest(
                 ? "upstream_auth_error"
                 : "upstream_error";
           lastErrorMessage = `Upstream returned HTTP ${upstreamStatus}`;
+          if (outcome === "UNKNOWN" && !mayRetryAmbiguous()) break;
           continue;
         }
         releaseProbeFor(cand.channel_id);
@@ -1918,6 +2381,7 @@ export async function handleInferenceRequest(
         isStream && !isUpstreamSse && isUpstreamJson && !prepared.isBedrockStream;
 
       if ((!isStream && !isUpstreamSse) || isFakeJsonOnStream) {
+        channelStage = "response_body";
         let retryFromLogicalError = false;
         const postResponse: { linked: ReturnType<typeof createLinkedController> | null } = {
           linked: null,
@@ -1963,8 +2427,8 @@ export async function handleInferenceRequest(
             releaseUnusedProbes(cursor + 1);
             const usage = buildUsageForOperation(
               operation,
-              candBilling.price.basis,
-              cand.costPrice.basis,
+              candBilling.price,
+              cand.costPrice,
               undefined,
             );
             if (!usage) {
@@ -2010,7 +2474,13 @@ export async function handleInferenceRequest(
             });
           }
 
-          const rawJson = object(parseProviderJson(utf8FatalDecoder.decode(respBytes)));
+          let rawJson: Record<string, unknown>;
+          try {
+            rawJson = object(parseProviderJson(utf8FatalDecoder.decode(respBytes)));
+          } catch (error) {
+            recordAttemptFailure("invalid_upstream");
+            throw error;
+          }
           let rawUsage: Usage | undefined;
           let clientJson: Record<string, unknown>;
 
@@ -2073,6 +2543,12 @@ export async function handleInferenceRequest(
             }
 
             if (wasmResp.retry_kind) {
+              recordAttemptFailure(
+                `logical_${wasmResp.retry_kind}`,
+                wasmResp.retry_kind,
+                describeFailure?.(rawJson),
+              );
+              const outcome = rejectedOutcome();
               if (wasmResp.retry_kind !== "client_error") {
                 deps.metrics.recordUpstreamError(
                   cand.channel.name,
@@ -2080,7 +2556,7 @@ export async function handleInferenceRequest(
                 );
                 observeAttemptFailure(wasmResp.retry_kind, wasmResp.retry_after_ms, latencyMs);
                 markProbeCompleted(cand.channel.id);
-                pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
+                pendingSwitchFrom = { attemptId: activeAttemptId, outcome };
                 lastErrorStatus =
                   wasmResp.status ?? (wasmResp.retry_kind === "rate_limit" ? 429 : 502);
                 lastErrorCode =
@@ -2158,6 +2634,12 @@ export async function handleInferenceRequest(
                 ? evaluateErrorRules(upstreamStatus, rawJson, prepared.mergedOverrides.error_rules)
                 : null;
             if (matchedErr) {
+              recordAttemptFailure(
+                `logical_${matchedErr.retry_kind}`,
+                matchedErr.retry_kind,
+                describeFailure?.(rawJson),
+              );
+              const outcome = rejectedOutcome(matchedErr.execution === "NOT_EXECUTED");
               if (matchedErr.retry_kind !== "client_error") {
                 deps.metrics.recordUpstreamError(
                   cand.channel.name,
@@ -2165,7 +2647,7 @@ export async function handleInferenceRequest(
                 );
                 observeAttemptFailure(matchedErr.retry_kind, matchedErr.retry_after_ms, latencyMs);
                 markProbeCompleted(cand.channel.id);
-                pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
+                pendingSwitchFrom = { attemptId: activeAttemptId, outcome };
                 lastErrorStatus =
                   matchedErr.http_status ?? (matchedErr.retry_kind === "rate_limit" ? 429 : 502);
                 lastErrorCode =
@@ -2249,9 +2731,14 @@ export async function handleInferenceRequest(
           if (!retryFromLogicalError) {
             const usage = buildUsageForOperation(
               operation,
-              candBilling.price.basis,
-              cand.costPrice.basis,
+              candBilling.price,
+              cand.costPrice,
               rawUsage,
+              (operation === "images" || operation === "image_edits") &&
+                Array.isArray(clientJson.data)
+                ? countImageArtifacts(clientJson.data)
+                : undefined,
+              inputMeasurement.images,
             );
             if (!usage) {
               await finalizeHold("unknown");
@@ -2410,6 +2897,7 @@ export async function handleInferenceRequest(
           activeLinkedDispose = null;
         }
         if (retryFromLogicalError) {
+          if (pendingSwitchFrom?.outcome === "UNKNOWN" && !mayRetryAmbiguous()) break;
           continue;
         }
       }
@@ -2418,6 +2906,13 @@ export async function handleInferenceRequest(
         prepared.resolvedProvider.kind === "WASM" &&
         prepared.resolvedProvider.config.hooks.includes("adapt_stream_event") &&
         isConversationalOperation(operation);
+      const tracedUpstreamProtocol =
+        prepared.upstreamProtocol ??
+        (!isWasmStreamProvider && isConversationalOperation(operation) ? operation : null);
+      const { error_rules: errorRules, media_stream_terminal: mediaTerminal } =
+        prepared.mergedOverrides;
+      const configuredTerminalEvent =
+        mediaTerminal && "event" in mediaTerminal ? mediaTerminal.event : undefined;
       let upstreamBody: ReadableStream<Uint8Array> | null = fastResult.fast
         ? new Response(fastResult.body as BodyInit).body
         : upstreamResp!.body;
@@ -2433,16 +2928,19 @@ export async function handleInferenceRequest(
         (isWasmStreamProvider || prepared.mergedOverrides.error_rules.length > 0) &&
         (isUpstreamSse || prepared.isBedrockStream)
       ) {
+        channelStage = "stream_prelude";
         const parser = new SSEParser();
         const bedrock = prepared.isBedrockStream ? new BedrockEventStreamDecoder() : null;
         let logicalError: MatchedProviderError | null = null;
+        let providerError: TraceAttempt["providerError"];
         try {
           const peeked = await peekStream(
             upstreamBody,
-            (chunk): SSEEvent | undefined =>
-              (bedrock ? bedrock.feed(chunk) : parser.feed(chunk)).find(
-                (frame) => frame.data !== "",
-              ),
+            (chunk): SSEEvent | undefined => {
+              const events = bedrock ? bedrock.feed(chunk) : parser.feed(chunk);
+              requestTrace?.observeUpstream(events, tracedUpstreamProtocol);
+              return events.find((frame) => frame.data !== "");
+            },
             ensureAttemptSignal(),
           );
           upstreamBody = peeked.body;
@@ -2468,6 +2966,7 @@ export async function handleInferenceRequest(
             });
             wasmPrelude = { event: first.event, data: first.data, result };
             if (result.retry_kind) {
+              providerError = describeEventFailure?.(first.data) ?? describeFailure?.();
               logicalError = {
                 retry_kind: result.retry_kind,
                 ...(result.retry_after_ms === undefined
@@ -2476,12 +2975,18 @@ export async function handleInferenceRequest(
                 ...(result.error_message === undefined ? {} : { message: result.error_message }),
               };
             }
-          } else if (first && first.data !== "[DONE]") {
+          } else if (
+            first &&
+            first.data !== "[DONE]" &&
+            !(first.event === configuredTerminalEvent && !first.data.trimStart().startsWith("{"))
+          ) {
+            const data = parseProviderJson(first.data);
             logicalError = evaluateErrorRules(
               upstreamStatus,
-              parseProviderJson(first.data),
+              data,
               prepared.mergedOverrides.error_rules,
             );
+            if (logicalError) providerError = describeFailure?.(data);
           }
         } catch (err) {
           cancelTimeout();
@@ -2507,16 +3012,12 @@ export async function handleInferenceRequest(
             throw new GatewayError(502, "provider_plugin_fault", err.message);
           }
           if (attemptAborted) {
+            recordAttemptFailure("upstream_timeout");
             deps.metrics.recordUpstreamError(cand.channel.name, "timeout");
             observeAttemptFailure("retryable", undefined, performance.now() - startedAt);
             markProbeCompleted(cand.channel.id);
             anyUnknownAttempt = true;
-            const policyAllowsAmbiguous = Boolean(cand.route.retry_policy.retry_on_ambiguous);
-            const maxAmbiguousPerMin = deps.config.maxAmbiguousRetriesPerMinute;
-            const allowAmbiguousRetry =
-              policyAllowsAmbiguous &&
-              (maxAmbiguousPerMin === undefined ||
-                deps.metrics.tryConsumeAmbiguousRetry(cand.channel.id, maxAmbiguousPerMin));
+            const allowAmbiguousRetry = mayRetryAmbiguous();
             lastErrorStatus = 504;
             lastErrorCode = "upstream_timeout";
             lastErrorMessage =
@@ -2538,6 +3039,12 @@ export async function handleInferenceRequest(
           );
         }
         if (logicalError) {
+          recordAttemptFailure(
+            `logical_${logicalError.retry_kind}`,
+            logicalError.retry_kind,
+            providerError,
+          );
+          const outcome = rejectedOutcome(logicalError.execution === "NOT_EXECUTED");
           cancelTimeout();
           attemptLinked.dispose();
           activeLinkedDispose = null;
@@ -2559,16 +3066,18 @@ export async function handleInferenceRequest(
             performance.now() - startedAt,
           );
           markProbeCompleted(cand.channel.id);
-          pendingSwitchFrom = { attemptId: activeAttemptId, outcome: "FAILED" };
+          pendingSwitchFrom = { attemptId: activeAttemptId, outcome };
           lastErrorStatus =
             logicalError.http_status ?? (logicalError.retry_kind === "rate_limit" ? 429 : 502);
           lastErrorCode =
             logicalError.retry_kind === "rate_limit" ? "upstream_rate_limited" : "upstream_error";
           lastErrorMessage = logicalError.message ?? "Upstream stream rejected the request";
+          if (outcome === "UNKNOWN" && !mayRetryAmbiguous()) break;
           continue;
         }
       }
 
+      channelStage = "stream";
       releaseUnusedProbes(cursor + 1);
       cancelTimeout();
       const streamProbe = acquiredProbes.get(cand.channel.id);
@@ -2610,7 +3119,11 @@ export async function handleInferenceRequest(
         createStreamChunkReader(
           reader,
           deps.config.streamIdleTimeoutMs ?? baseAttemptTimeoutMs,
-          () => attemptAbort.abort(new Error("Upstream stream exceeded its idle timeout")),
+          () => {
+            if (!streamSignal.aborted)
+              recordAttemptFailure("upstream_stream_idle_timeout", "timeout");
+            attemptAbort.abort(new Error("Upstream stream exceeded its idle timeout"));
+          },
           streamSignal,
         );
       const capturedProjectLimit = releaseProjectLimit;
@@ -2635,6 +3148,8 @@ export async function handleInferenceRequest(
       const cleanupStream = () => {
         if (streamCleanupDone) return;
         streamCleanupDone = true;
+        releaseOutputAdmission?.();
+        releaseOutputAdmission = undefined;
         if (streamCounted) deps.metrics.activeStreams--;
         clearTimeout(durationTimer);
         streamLinked.dispose();
@@ -2677,6 +3192,8 @@ export async function handleInferenceRequest(
         (!prepared.upstreamProtocol && !isWasmStreamProvider)
       ) {
         const usageDialect = prepared.usageDialect;
+        const terminalByType = (type: string) =>
+          type === "done" || type === "completed" || type === mediaCompletionEvents[operation];
         let clientCancelled = false;
         const mediaStream = createStreamRelay(
           async (controller) => {
@@ -2685,6 +3202,84 @@ export async function handleInferenceRequest(
             const parser = new SSEParser();
             let observedUsage: Usage | undefined;
             const heldChunks = createTerminalBuffer();
+            let terminal = false;
+            let sawDone = false;
+            const imageStream = operation === "images" || operation === "image_edits";
+            let deliveredImages: Set<string> | undefined;
+            const failure: { provider?: MatchedProviderError } = {};
+            const processEvent = (event: SSEEvent) => {
+              if (sawDone && event.data) {
+                throw new GatewayError(
+                  502,
+                  "unexpected_trailing_event",
+                  "Upstream sent media data after [DONE]",
+                );
+              }
+              if (event.event === "error" && !event.data.trimStart().startsWith("{")) {
+                throw new GatewayError(
+                  502,
+                  "upstream_stream_error",
+                  "Upstream reported a media stream error",
+                );
+              }
+              const namedTerminal = configuredTerminalEvent === event.event;
+              if (event.data === "[DONE]") {
+                terminal = true;
+                sawDone = true;
+              } else if (event.data && (!namedTerminal || event.data.trimStart().startsWith("{"))) {
+                const parsed = object(parseProviderJson(event.data));
+                const providerError = evaluateErrorRules(upstreamStatus, parsed, errorRules);
+                if (
+                  providerError ||
+                  event.event === "error" ||
+                  parsed.type === "error" ||
+                  parsed.error
+                ) {
+                  recordAttemptFailure(
+                    "upstream_stream_error",
+                    providerError?.retry_kind ?? "protocol",
+                    describeFailure?.(parsed),
+                  );
+                  if (providerError) failure.provider = providerError;
+                  throw new GatewayError(
+                    providerError?.http_status ??
+                      (providerError?.retry_kind === "client_error"
+                        ? 400
+                        : providerError?.retry_kind === "rate_limit"
+                          ? 429
+                          : 502),
+                    "upstream_stream_error",
+                    providerError?.message ?? "Upstream reported a media stream error",
+                  );
+                }
+                const baseUsage =
+                  usageDialect === "custom"
+                    ? observedUsage
+                    : (extractUsage(parsed, usageDialect, observedUsage) ?? observedUsage);
+                observedUsage =
+                  mergeUsageWithAliases(
+                    baseUsage,
+                    parsed,
+                    prepared.mergedOverrides.usage_aliases,
+                  ) ?? baseUsage;
+                if (
+                  imageStream &&
+                  (event.event === mediaCompletionEvents[operation] ||
+                    parsed.type === mediaCompletionEvents[operation])
+                ) {
+                  deliveredImages ??= new Set();
+                  recordImageArtifact(deliveredImages, parsed);
+                }
+                terminal ||= mediaTerminal
+                  ? "parts" in mediaTerminal &&
+                    getAtPath(parsed, mediaTerminal.parts) === mediaTerminal.equals
+                  : typeof parsed.type === "string" && terminalByType(parsed.type);
+              }
+              terminal ||= namedTerminal || (!mediaTerminal && terminalByType(event.event));
+              const bytes = utf8Encoder.encode(event.wire);
+              if (!terminal) return controller.enqueue(bytes);
+              heldChunks.push(bytes);
+            };
             try {
               if (!chunkReader) {
                 throw new GatewayError(502, "empty_stream", "Upstream returned empty body");
@@ -2692,27 +3287,11 @@ export async function handleInferenceRequest(
               while (true) {
                 const step = await chunkReader.read();
                 if (step.done) break;
-                const events = parser.feed(step.value, false);
-                for (const ev of events) {
-                  let isDoneEvent = false;
-                  if (ev.data && ev.data !== "[DONE]") {
-                    const parsed = object(parseProviderJson(ev.data));
-                    const baseU =
-                      usageDialect === "custom"
-                        ? observedUsage
-                        : (extractUsage(parsed, usageDialect, observedUsage) ?? observedUsage);
-                    observedUsage =
-                      mergeUsageWithAliases(
-                        baseU,
-                        parsed,
-                        prepared.mergedOverrides.usage_aliases,
-                      ) ?? baseU;
-                    const t = String(parsed.type ?? ev.event);
-                    if (t.endsWith(".done") || t.endsWith(".completed")) isDoneEvent = true;
-                  }
-                  const bytes = utf8Encoder.encode(ev.wire);
-                  if (isDoneEvent) heldChunks.push(bytes);
-                  else await controller.enqueue(bytes);
+                const events = parser.feed(step.value);
+                requestTrace?.observeUpstream(events, tracedUpstreamProtocol);
+                for (const event of events) {
+                  const enqueue = processEvent(event);
+                  if (enqueue) await enqueue;
                 }
               }
               if (clientCancelled || c.req.raw.signal.aborted) {
@@ -2720,14 +3299,26 @@ export async function handleInferenceRequest(
                 emitAccessLog(499, "client_aborted");
                 return;
               }
-              for (const ev of parser.feed(new Uint8Array(), true)) {
-                heldChunks.push(utf8Encoder.encode(ev.wire));
+              const events = parser.feed(new Uint8Array(), true);
+              requestTrace?.observeUpstream(events, tracedUpstreamProtocol);
+              for (const event of events) {
+                const enqueue = processEvent(event);
+                if (enqueue) await enqueue;
+              }
+              if (!terminal || parser.incomplete) {
+                throw new GatewayError(
+                  502,
+                  "stream_interrupted",
+                  "Media stream ended without a complete terminal event",
+                );
               }
               const usage = buildUsageForOperation(
                 operation,
-                candBilling.price.basis,
-                cand.costPrice.basis,
+                candBilling.price,
+                cand.costPrice,
                 observedUsage,
+                deliveredImages?.size,
+                inputMeasurement.images,
               );
               if (!usage) {
                 await finalizeHold("unknown");
@@ -2782,10 +3373,20 @@ export async function handleInferenceRequest(
                 return;
               }
               const code = err instanceof GatewayError ? err.code : "stream_interrupted";
-              if (code !== "ledger_commit_failed" && !streamSignal.aborted) {
+              const kind = failure.provider?.retry_kind ?? "retryable";
+              if (
+                code !== "ledger_commit_failed" &&
+                !streamSignal.aborted &&
+                kind !== "client_error"
+              ) {
+                recordAttemptFailure(code);
                 deps.metrics.recordUpstreamError(cand.channel.name, "media_stream_error");
                 streamProbeDone = true;
-                observeAttemptFailure("retryable", undefined, performance.now() - startedAt);
+                observeAttemptFailure(
+                  kind,
+                  failure.provider?.retry_after_ms,
+                  performance.now() - startedAt,
+                );
               }
               emitAccessLog(err instanceof GatewayError ? err.status : 502, code);
               try {
@@ -2822,6 +3423,7 @@ export async function handleInferenceRequest(
             fail: () => finalizeHold("unknown"),
             abortedFrame,
             finish: cleanupStream,
+            ...(requestTrace && traceProtocol ? { onEnqueued: requestTrace.observeEnqueued } : {}),
           },
         );
         return respondWithStream(mediaStream);
@@ -2895,6 +3497,11 @@ export async function handleInferenceRequest(
                 }));
               if (out.state !== undefined) wasmState = out.state;
               if (out.retry_kind) {
+                recordAttemptFailure(
+                  "upstream_stream_error",
+                  out.retry_kind,
+                  describeEventFailure?.(ev.data) ?? describeFailure?.(),
+                );
                 throw new GatewayError(
                   out.retry_kind === "rate_limit" ? 429 : 502,
                   "upstream_stream_error",
@@ -2979,6 +3586,7 @@ export async function handleInferenceRequest(
                 const events = bedrockDecoder
                   ? bedrockDecoder.feed(step.value)
                   : parser.feed(step.value, false);
+                requestTrace?.observeUpstream(events, prepared.upstreamProtocol);
                 for (const ev of events) {
                   await processWasmEvent(ev);
                   if (blockedEarly) break;
@@ -2996,7 +3604,9 @@ export async function handleInferenceRequest(
               }
 
               if (!blockedEarly && !bedrockDecoder) {
-                for (const ev of parser.feed(new Uint8Array(), true)) {
+                const events = parser.feed(new Uint8Array(), true);
+                requestTrace?.observeUpstream(events, prepared.upstreamProtocol);
+                for (const ev of events) {
                   await processWasmEvent(ev);
                   if (blockedEarly) break;
                 }
@@ -3087,8 +3697,8 @@ export async function handleInferenceRequest(
 
               const usage = buildUsageForOperation(
                 operation,
-                candBilling.price.basis,
-                cand.costPrice.basis,
+                candBilling.price,
+                cand.costPrice,
                 wasmUsage,
               );
               if (!usage) {
@@ -3177,6 +3787,8 @@ export async function handleInferenceRequest(
                     : err instanceof GatewayError
                       ? err.code
                       : "stream_interrupted";
+              if (!streamSignal.aborted && code !== "ledger_commit_failed")
+                recordAttemptFailure(code);
               emitAccessLog(errStatus, code);
               try {
                 const msg = err instanceof Error ? err.message : "Stream failed";
@@ -3204,6 +3816,7 @@ export async function handleInferenceRequest(
             fail: () => finalizeHold("unknown"),
             abortedFrame,
             finish: cleanupStream,
+            ...(requestTrace && traceProtocol ? { onEnqueued: requestTrace.observeEnqueued } : {}),
           },
         );
         return respondWithStream(wasmStream);
@@ -3227,6 +3840,7 @@ export async function handleInferenceRequest(
             prepared.mergedOverrides.error_rules.length > 0 ||
             prepared.mergedOverrides.usage_aliases.length > 0;
           let streamAliasUsage: Usage | undefined;
+          let translating: SSEEvent | undefined;
           const session =
             hasPlugins && clientProtocol !== "responses" ? openContentSession() : null;
 
@@ -3328,6 +3942,7 @@ export async function handleInferenceRequest(
               const events = bedrockDecoder
                 ? bedrockDecoder.feed(step.value)
                 : parser.feed(step.value, false);
+              requestTrace?.observeUpstream(events, upstreamProtocol);
               for (const ev of events) {
                 if (hasStreamRules && ev.data && ev.data !== "[DONE]") {
                   const parsedEv = object(parseProviderJson(ev.data));
@@ -3337,6 +3952,11 @@ export async function handleInferenceRequest(
                     prepared.mergedOverrides.error_rules,
                   );
                   if (matchedErr) {
+                    recordAttemptFailure(
+                      "upstream_stream_error",
+                      matchedErr.retry_kind,
+                      describeFailure?.(parsedEv),
+                    );
                     throw new GatewayError(
                       matchedErr.http_status ??
                         (matchedErr.retry_kind === "rate_limit" ? 429 : 502),
@@ -3353,7 +3973,9 @@ export async function handleInferenceRequest(
                     if (mergedU) streamAliasUsage = mergedU;
                   }
                 }
+                if (describeFailure) translating = ev;
                 const translated = translator.consume(ev);
+                translating = undefined;
                 if (translated.chunks.length && ev.event !== "error") confirmStreamProbe();
                 const isTerminalChunk = translated.terminal || translator.holdTerminal;
                 for (const chunk of translated.chunks) {
@@ -3376,8 +3998,11 @@ export async function handleInferenceRequest(
 
             if (!blockedEarly && !bedrockDecoder) {
               const tailEvents = parser.feed(new Uint8Array(), true);
+              requestTrace?.observeUpstream(tailEvents, upstreamProtocol);
               for (const ev of tailEvents) {
+                if (describeFailure) translating = ev;
                 const translated = translator.consume(ev);
+                translating = undefined;
                 for (const chunk of translated.chunks) {
                   await handleStreamChunk(chunk, true);
                   if (blockedEarly) break;
@@ -3471,8 +4096,8 @@ export async function handleInferenceRequest(
 
             const usage = buildUsageForOperation(
               operation,
-              candBilling.price.basis,
-              cand.costPrice.basis,
+              candBilling.price,
+              cand.costPrice,
               combinedStreamUsage,
             );
             if (!usage) {
@@ -3530,14 +4155,16 @@ export async function handleInferenceRequest(
             controller.close();
           } catch (err) {
             const abortedByClient = clientCancelled || c.req.raw.signal.aborted;
+            const code = err instanceof GatewayError ? err.code : "stream_interrupted";
             if (!streamFailed) {
               streamFailed = true;
               await finalizeHold("unknown");
-              if (
-                !abortedByClient &&
-                !streamSignal.aborted &&
-                !(err instanceof GatewayError && err.code === "ledger_commit_failed")
-              ) {
+              if (!abortedByClient && !streamSignal.aborted && code !== "ledger_commit_failed") {
+                const diagnosticsForFrame =
+                  code === "provider_stream_error" && translating
+                    ? (describeEventFailure?.(translating.data) ?? describeFailure?.())
+                    : undefined;
+                recordAttemptFailure(code, channelFailureKind(code), diagnosticsForFrame);
                 deps.metrics.recordUpstreamError(cand.channel.name, "stream_interrupted");
                 streamProbeDone = true;
                 observeAttemptFailure("retryable", undefined, performance.now() - startedAt);
@@ -3547,7 +4174,6 @@ export async function handleInferenceRequest(
               emitAccessLog(499, "client_aborted");
               return;
             }
-            const code = err instanceof GatewayError ? err.code : "stream_interrupted";
             const errStatus = err instanceof GatewayError ? err.status : 502;
             emitAccessLog(errStatus, code);
             try {
@@ -3576,6 +4202,7 @@ export async function handleInferenceRequest(
           fail: () => finalizeHold("unknown"),
           abortedFrame,
           finish: cleanupStream,
+          ...(requestTrace && traceProtocol ? { onEnqueued: requestTrace.observeEnqueued } : {}),
         },
       );
 
@@ -3601,6 +4228,8 @@ export async function handleInferenceRequest(
     releaseAllPendingProbes();
     releaseLimiters();
     if (!streamOwnsGuard) {
+      releaseOutputAdmission?.();
+      releaseOutputAdmission = undefined;
       activeLinkedDispose?.();
       activeLinkedDispose = null;
       releaseLocalProjectSlot?.();

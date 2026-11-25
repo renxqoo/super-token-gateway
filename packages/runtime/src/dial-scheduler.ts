@@ -7,6 +7,8 @@ export type DialLimits = {
   maxQueueBytes?: number;
 };
 
+export const DEFAULT_DIAL_QUEUE_WAIT_MS = 10_000;
+
 export type DialPermit = {
   start(): (() => void) | undefined;
   release(): void;
@@ -34,7 +36,7 @@ export function createDialScheduler(maxQueued: number, limits: DialLimits = {}) 
   const {
     concurrency = 16,
     startsPerSecond = 400,
-    maxQueueWaitMs = 10_000,
+    maxQueueWaitMs = DEFAULT_DIAL_QUEUE_WAIT_MS,
     maxQueueBytes = 64 * 1024 * 1024,
   } = limits;
   if (

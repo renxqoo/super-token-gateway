@@ -95,6 +95,9 @@ export function mergeOverridesForResolved(
     auth: resolved.config.auth,
     endpoints: {},
     ...(resolved.config.extra_headers ? { extra_headers: resolved.config.extra_headers } : {}),
+    ...(resolved.config.error_diagnostics
+      ? { error_diagnostics: resolved.config.error_diagnostics }
+      : {}),
   };
   return mergeAdapterOverrides(emptyBase, channelConfig, routeOverrides);
 }

@@ -1,8 +1,13 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import type { SQL } from "bun";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
+import { SQL } from "bun";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createDatabase, migrate } from "@gateway/ledger";
 import { createGatewayRuntime, type GatewayConfig } from "@gateway/gateway";
+import { encodeSSE } from "@gateway/protocol";
 import { createMockApp } from "../../apps/mock-providers/src/app.ts";
+import { createTraceStore } from "../../apps/gateway/src/trace-storage.ts";
 
 const baseDbUrl = process.env.DATABASE_URL;
 if (!baseDbUrl) throw new Error("DATABASE_URL is required");
@@ -172,6 +177,457 @@ function chatRequest(key: string, model: string, extra: Record<string, unknown> 
 function realServer(runtime: ReturnType<typeof createGatewayRuntime>) {
   return Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: runtime.publicApp.fetch });
 }
+
+test("symptom: a pre-dispatch wallet lock timeout returns HTTP 500 instead of retryable overload", async () => {
+  const shortDb = new SQL(targetUrl.toString(), { max: 8, connection: { lock_timeout: 30 } });
+  const runtime = createGatewayRuntime({ config: makeConfig(), db: shortDb });
+  const mock = createMockApp("lock-admission-fixture");
+  const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: mock.app.fetch });
+  const locked = Promise.withResolvers<void>();
+  const unlock = Promise.withResolvers<void>();
+  let transaction: Promise<unknown> | undefined;
+  try {
+    await runtime.start();
+    const fixture = await seed(runtime, upstream.url.origin);
+    const model = "ledger-lock-admission";
+    await fixture.call("PUT", "/internal/v1/models", { name: model, operations: ["chat"] });
+    await fixture.call("PUT", "/internal/v1/routes", {
+      model_name: model,
+      channel_id: fixture.channel.id,
+      upstream_model: model,
+      operations: ["chat"],
+      billing_price_id: fixture.customer.id,
+      cost_version_id: fixture.supplier.id,
+    });
+    transaction = db.begin(async (tx) => {
+      await tx`SELECT id FROM public.wallets WHERE project_id=${fixture.projectId}::uuid FOR UPDATE`;
+      locked.resolve();
+      await unlock.promise;
+    });
+    await Promise.race([locked.promise, transaction]);
+    const request = chatRequest(fixture.key, model, { stream: false });
+    request.headers.set("idempotency-key", "lock-timeout-retry");
+    const result = await runtime.publicApp.fetch(request);
+    expect(result.status).toBe(503);
+    expect(await result.json()).toMatchObject({ error: { code: "ledger_busy" } });
+    const requestId = result.headers.get("x-request-id");
+    const [held] =
+      await db`SELECT count(*)::int AS n FROM public.billing_holds WHERE request_id=${requestId}::uuid`;
+    expect(held?.n).toBe(0);
+    unlock.resolve();
+    await transaction;
+    const retry = chatRequest(fixture.key, model, { stream: false });
+    retry.headers.set("idempotency-key", "lock-timeout-retry");
+    const succeeded = await runtime.publicApp.fetch(retry);
+    expect(succeeded.status).toBe(200);
+    const [charged] =
+      await db`SELECT count(*)::int AS n FROM public.billing_charges WHERE project_id=${fixture.projectId}::uuid`;
+    expect(charged?.n).toBe(1);
+  } finally {
+    unlock.resolve();
+    await transaction;
+    await runtime.close();
+    upstream.stop(true);
+    await shortDb.close();
+  }
+});
+
+test("symptom: an open fail-closed output Webhook still dispatches paid upstream requests", async () => {
+  let calls = 0;
+  let webhookHealthy = false;
+  let recovering = false;
+  const upstreamReached = Promise.withResolvers<void>();
+  const upstreamProceed = Promise.withResolvers<void>();
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch() {
+      calls++;
+      if (recovering) {
+        upstreamReached.resolve();
+        await upstreamProceed.promise;
+      }
+      return Response.json({
+        id: "test",
+        object: "chat.completion",
+        model: "fixture",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "restricted" },
+            finish_reason: "stop",
+          },
+        ],
+        usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+      });
+    },
+  });
+  const webhook = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () =>
+      webhookHealthy ? Response.json({ action: "PASS" }) : new Response(null, { status: 503 }),
+  });
+  const runtime = createGatewayRuntime({ config: makeConfig(), db });
+  try {
+    await runtime.start();
+    const fixture = await seed(runtime, upstream.url.origin);
+    const plugin = await fixture.call("PUT", "/internal/v1/plugins", {
+      name: "webhook-admission-billing",
+      version: "1",
+      kind: "WEBHOOK",
+      webhook_config: {
+        url: webhook.url.href,
+        failure_policy: "FAIL_CLOSED",
+        circuit_failure_threshold: 1,
+        circuit_open_ms: 1000,
+      },
+      manifest: { hooks: ["on_response", "on_stream_end"] },
+    });
+    await fixture.call("POST", "/internal/v1/plugin-releases", {
+      id: crypto.randomUUID(),
+      expected_epoch: runtime.snapshot.get().epoch,
+      targets: [{ plugin_id: plugin.id }],
+      samples: { [String(plugin.id)]: { webhook_reply: { action: "PASS" } } },
+    });
+    const model = "webhook-open-admission";
+    await fixture.call("PUT", "/internal/v1/models", { name: model, operations: ["chat"] });
+    await fixture.call("PUT", "/internal/v1/routes", {
+      model_name: model,
+      channel_id: fixture.channel.id,
+      upstream_model: model,
+      operations: ["chat"],
+      billing_price_id: fixture.customer.id,
+      cost_version_id: fixture.supplier.id,
+      plugin_pipeline: [{ plugin_id: plugin.id, priority: 0 }],
+    });
+    const idempotent = () => {
+      const request = chatRequest(fixture.key, model, { stream: false });
+      request.headers.set("idempotency-key", "output-policy-replay");
+      return request;
+    };
+    const first = await runtime.publicApp.fetch(idempotent());
+    expect(first.status).toBe(503);
+    expect(calls).toBe(1);
+    const replay = await runtime.publicApp.fetch(idempotent());
+    expect(replay.status).toBe(409);
+    expect(replay.headers.get("x-request-id")).toBe(first.headers.get("x-request-id"));
+    await Promise.all(
+      [false, true].map(async (stream) => {
+        const blocked = await runtime.publicApp.fetch(chatRequest(fixture.key, model, { stream }));
+        expect(blocked.status).toBe(503);
+        expect(await blocked.json()).toMatchObject({
+          error: { rule_code: "webhook_circuit_open" },
+        });
+      }),
+    );
+    expect(calls).toBe(1);
+    const [charge] =
+      await db`SELECT count(*)::int AS entries, sum(customer_atoms)::text AS customer,
+      sum(supplier_cost_atoms)::text AS supplier FROM public.billing_charges WHERE project_id=${fixture.projectId}::uuid`;
+    expect(charge).toEqual({ entries: 1, customer: "0", supplier: "5" });
+    await Bun.sleep(1100);
+    webhookHealthy = true;
+    recovering = true;
+    const probe = runtime.publicApp.fetch(chatRequest(fixture.key, model, { stream: false }));
+    await Promise.race([
+      upstreamReached.promise,
+      Promise.resolve(probe).then(() => {
+        throw new Error("The half-open probe did not reach the upstream");
+      }),
+    ]);
+    try {
+      const rejected = await runtime.publicApp.fetch(
+        chatRequest(fixture.key, model, { stream: false }),
+      );
+      expect(rejected.status).toBe(503);
+      expect(await rejected.json()).toMatchObject({ error: { rule_code: "webhook_circuit_open" } });
+      expect(calls).toBe(2);
+    } finally {
+      upstreamProceed.resolve();
+    }
+    expect((await probe).status).toBe(200);
+    expect(
+      (await runtime.publicApp.fetch(chatRequest(fixture.key, model, { stream: false }))).status,
+    ).toBe(200);
+    expect(calls).toBe(3);
+    const [recovered] =
+      await db`SELECT count(*)::int AS entries, sum(customer_atoms)::text AS customer,
+      sum(supplier_cost_atoms)::text AS supplier FROM public.billing_charges WHERE project_id=${fixture.projectId}::uuid`;
+    expect(recovered).toEqual({ entries: 3, customer: "10", supplier: "15" });
+    expect((await runtime.ledger.auditConservation()).ok).toBe(true);
+  } finally {
+    upstreamProceed.resolve();
+    await runtime.close();
+    webhook.stop(true);
+    upstream.stop(true);
+  }
+});
+
+test("first text traces link the delayed SSE text to the client and skip reasoning and role frames", async () => {
+  const traceDbName = `trace_${testDbName}`;
+  const traceRole = `${traceDbName}_writer`;
+  const traceUrl = new URL(adminUrl);
+  traceUrl.pathname = `/${traceDbName}`;
+  await adminDb.unsafe(`CREATE DATABASE ${traceDbName}`);
+  const traceDb = createDatabase(traceUrl.toString(), 1);
+  await traceDb.unsafe(
+    await Bun.file(new URL("../../infra/postgres/trace-schema.sql", import.meta.url)).text(),
+  );
+  const writerUrl = new URL(traceUrl);
+  writerUrl.username = traceRole;
+  writerUrl.password = crypto.randomUUID();
+  await traceDb.unsafe(`CREATE ROLE ${traceRole} LOGIN PASSWORD '${writerUrl.password}'`);
+  await traceDb.unsafe(`GRANT USAGE ON SCHEMA telemetry TO ${traceRole}`);
+  await traceDb.unsafe(`GRANT SELECT, INSERT, DELETE ON telemetry.spans TO ${traceRole}`);
+  const traceStore = createTraceStore(writerUrl.toString(), 1000);
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () =>
+      new Response(
+        new ReadableStream({
+          async start(writer) {
+            writer.enqueue(encodeSSE({ choices: [{ index: 0, delta: { role: "assistant" } }] }));
+            writer.enqueue(
+              encodeSSE({ choices: [{ index: 0, delta: { reasoning_content: "hidden" } }] }),
+            );
+            await Bun.sleep(100);
+            writer.enqueue(encodeSSE({ choices: [{ index: 0, delta: { content: "visible" } }] }));
+            await Bun.sleep(80);
+            writer.enqueue(
+              encodeSSE({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+            );
+            writer.enqueue(
+              encodeSSE({
+                choices: [],
+                usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+              }),
+            );
+            writer.enqueue(encodeSSE("[DONE]"));
+            writer.close();
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  });
+  const runtime = createGatewayRuntime({
+    config: makeConfig({
+      accessLog: true,
+      traceMetrics: true,
+      traceExport: {
+        databaseUrl: writerUrl.toString(),
+        sampleBasisPoints: 10_000,
+        slowFirstTextMs: 3000,
+        maxAttempts: 3,
+        maxRecords: 4,
+        maxBytes: 32_768,
+        maxPerProject: 3,
+        priorityReserve: 1,
+        batchSize: 2,
+        batchDeadlineMs: 700,
+        flushMs: 25,
+        timeoutMs: 2000,
+        retryLimit: 0,
+        retentionSeconds: 120,
+        cleanupIntervalMs: 1000,
+        cleanupBatch: 2,
+      },
+    }),
+    db,
+  });
+  const logs = spyOn(console, "log").mockImplementation(() => undefined);
+  const dir = await mkdtemp(join(tmpdir(), "stg-first-text-"));
+  let server: ReturnType<typeof realServer> | undefined;
+  try {
+    await runtime.start();
+    const { key, channel, customer, supplier, call } = await seed(runtime, upstream.url.origin);
+    const model = "first-text-trace";
+    await call("PUT", "/internal/v1/models", {
+      name: model,
+      operations: ["chat"],
+      max_output_tokens: 32,
+    });
+    await call("PUT", "/internal/v1/routes", {
+      model_name: model,
+      channel_id: channel.id,
+      upstream_model: model,
+      operations: ["chat"],
+      billing_price_id: customer.id,
+      cost_version_id: supplier.id,
+    });
+    server = realServer(runtime);
+    const inputFile = join(dir, "request.json");
+    await Bun.write(
+      inputFile,
+      JSON.stringify({ model, messages: [{ role: "user", content: "test" }], max_tokens: 16 }),
+    );
+    const probe = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        new URL("../../scripts/trace-first-text.ts", import.meta.url).pathname,
+        "--url",
+        `${server.url.origin}/v1/chat/completions`,
+        "--request",
+        inputFile,
+        "--timeout-ms",
+        "4000",
+        "--persist",
+      ],
+      {
+        env: {
+          ...process.env,
+          GATEWAY_API_KEY: key,
+          TRACE_DATABASE_URL: writerUrl.toString(),
+          TRACE_RETENTION_SECONDS: "120",
+          TRACE_CLIENT_JOIN_WAIT_MS: "4000",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [exit, stdout, stderr] = await Promise.all([
+      probe.exited,
+      new Response(probe.stdout).text(),
+      new Response(probe.stderr).text(),
+    ]);
+    expect({ exit, stderr }, stdout).toEqual({ exit: 0, stderr: "" });
+    const client = JSON.parse(stdout);
+    const access = logs.mock.calls
+      .map(([line]) => JSON.parse(String(line)))
+      .find((row) => row.request_id === client.request_id);
+    expect(access).toMatchObject({ status: 200, trace_id: client.trace_id });
+    const trace = access.first_text_trace;
+    expect(trace.upstream_headers_ms).toBeGreaterThanOrEqual(trace.attempt_start_ms);
+    expect(trace.upstream_first_text_ms - trace.upstream_headers_ms).toBeGreaterThan(60);
+    expect(trace.gateway_first_text_enqueued_ms).toBeGreaterThanOrEqual(
+      trace.upstream_first_text_ms,
+    );
+    expect(access.duration_ms - trace.gateway_first_text_enqueued_ms).toBeGreaterThan(40);
+    expect(client.client_first_text_ms - client.client_headers_ms).toBeGreaterThan(60);
+    expect(client.client_duration_ms - client.client_first_text_ms).toBeGreaterThan(40);
+    expect(JSON.stringify(access)).not.toContain("hidden");
+    expect(JSON.stringify(access)).not.toContain("visible");
+    expect(client.trace_persisted).toBe(true);
+    const stored = await traceStore.read(client.request_id);
+    expect(stored.map(({ span }) => span.name).sort()).toEqual([
+      "client.inference",
+      "gateway.inference",
+      "gateway.upstream.attempt",
+    ]);
+    const gatewaySpan = stored.find(({ span }) => span.name === "gateway.inference")!.span;
+    const attemptSpan = stored.find(({ span }) => span.name === "gateway.upstream.attempt")!.span;
+    expect(gatewaySpan.parentSpanId).toBe(client.client_span_id);
+    expect(attemptSpan.parentSpanId).toBe(gatewaySpan.spanId);
+    expect(attemptSpan.events.map((event) => event.name)).toEqual(
+      expect.arrayContaining([
+        "http.request.written",
+        "http.response.headers",
+        "upstream.first_text",
+      ]),
+    );
+    expect(JSON.stringify(stored)).not.toContain("visible");
+    const metrics = async () => (await runtime.metricsResponse()).text();
+    expect(await metrics()).toContain(
+      'gateway_sse_phase_seconds_count{operation="chat",stage="upstream_first_text"} 1',
+    );
+    expect(await metrics()).toContain("gateway_sse_waiting_first_text 0");
+
+    await traceDb`UPDATE telemetry.spans SET expires_at = now() - interval '1 second'`;
+    await waitFor(async () => /gateway_trace_spans_expired_total 3\n/.test(await metrics()));
+    expect(await metrics()).toContain("gateway_trace_cleanup_failed_runs_total 0");
+
+    const locked = Promise.withResolvers<void>();
+    const unlock = Promise.withResolvers<void>();
+    const lock = traceDb.begin(async (tx) => {
+      await tx`LOCK TABLE telemetry.spans IN ACCESS EXCLUSIVE MODE`;
+      locked.resolve();
+      await unlock.promise;
+    });
+    await Promise.race([locked.promise, lock]);
+    try {
+      const replies = await Promise.all(
+        Array.from({ length: 8 }, () => runtime.publicApp.fetch(chatRequest(key, model))),
+      );
+      await Promise.all(
+        replies.map(async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("[DONE]");
+        }),
+      );
+      await waitFor(async () =>
+        /gateway_trace_export_failed_batches_total [1-9]/.test(await metrics()),
+      );
+      expect(await metrics()).toMatch(/gateway_trace_export_timed_out_batches_total [1-9]/);
+      expect(await metrics()).toMatch(/gateway_trace_dropped_total\{priority="ordinary"\} [1-9]/);
+    } finally {
+      unlock.resolve();
+      await lock;
+    }
+    await waitFor(async () => /gateway_trace_queue_records 0\n/.test(await metrics()));
+    const recovered = await runtime.publicApp.fetch(chatRequest(key, model));
+    expect(await recovered.text()).toContain("[DONE]");
+    await waitFor(
+      async () => (await traceStore.read(recovered.headers.get("x-request-id")!)).length === 2,
+    );
+    expect((await runtime.ledger.auditConservation()).ok).toBe(true);
+  } finally {
+    logs.mockRestore();
+    await server?.stop(true);
+    await runtime.close();
+    await upstream.stop(true);
+    await traceStore.close();
+    await traceDb.close();
+    await adminDb.unsafe(`DROP DATABASE ${traceDbName} WITH (FORCE)`);
+    await adminDb.unsafe(`DROP ROLE ${traceRole}`);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("symptom: a freshly issued Key is rejected as expired when Gateway runs outside UTC", async () => {
+  const originalTimeZone = process.env.TZ;
+  const runtime = createGatewayRuntime({ config: makeConfig(), db });
+  try {
+    process.env.TZ = "Asia/Singapore";
+    await runtime.start();
+    const project = await internalCall(runtime.internalApp, "PUT", "/internal/v1/projects", {
+      name: "key-expiration-timezone",
+    });
+    expect(project.status).toBe(200);
+    const now = Date.now();
+    const issue = (expiresAt: string) =>
+      internalCall(runtime.internalApp, "PUT", "/internal/v1/api-keys", {
+        project_id: project.data.id,
+        expires_at: expiresAt,
+      });
+    const listModels = (key: unknown) =>
+      runtime.publicApp.fetch(
+        new Request("http://gateway.local/v1/models", {
+          headers: { authorization: `Bearer ${String(key)}` },
+        }),
+      );
+
+    const currentExpiry = new Date(now + 15 * 60_000).toISOString();
+    const current = await issue(currentExpiry);
+    expect(current.status).toBe(200);
+    expect((await listModels(current.data.key)).status).toBe(200);
+    expect(current.data.expires_at).toBe(currentExpiry);
+
+    process.env.TZ = "America/Los_Angeles";
+    const pastExpiry = new Date(now - 15 * 60_000).toISOString();
+    const expired = await issue(pastExpiry);
+    expect(expired.status).toBe(200);
+    expect(expired.data.expires_at).toBe(pastExpiry);
+    const rejected = await listModels(expired.data.key);
+    expect(rejected.status).toBe(401);
+    expect(await rejected.json()).toMatchObject({ error: { code: "key_expired" } });
+  } finally {
+    if (originalTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTimeZone;
+    await runtime.close();
+  }
+});
 
 test("symptom: fixed input ceilings reject short text on a Key that can pay for the request", async () => {
   const mock = createMockApp("adv-ctrl");
@@ -441,7 +897,7 @@ test("symptom: a cancel storm of 100 concurrent SSE requests leaves funds exactl
       billing_price_id: customer.id,
       cost_version_id: supplier.id,
     });
-    mock.scenarios.set("adv-storm", { chunkDelayMs: 200, repeat: 30 });
+    mock.scenarios.set("adv-storm", { streamDurationMs: 6000, repeat: 30 });
     const before = await wallet(runtime, projectId);
     const publicServer = realServer(runtime);
     const N = 100;
@@ -460,18 +916,20 @@ test("symptom: a cancel storm of 100 concurrent SSE requests leaves funds exactl
           signal: ac.signal,
         }).catch(() => null);
         if (!res || res.status !== 200)
-          return { status: res?.status ?? 0, id: null as string | null };
+          return { status: res?.status ?? 0, id: null as string | null, firstChunkBytes: 0 };
         const id = res.headers.get("x-request-id");
         const reader = res.body!.getReader();
-        await reader.read();
+        const first = await reader.read();
         await Bun.sleep(5 + Math.random() * 30);
         ac.abort();
         await reader.cancel().catch(() => undefined);
-        return { status: 200, id };
+        return { status: 200, id, firstChunkBytes: first.value?.byteLength ?? 0 };
       }),
     );
     publicServer.stop(true);
-    expect(results.every((r) => r.status === 200)).toBe(true);
+    expect(results.every((r) => r.status === 200 && r.firstChunkBytes > 0)).toBe(true);
+    await waitFor(async () => mock.stats.active === 0);
+    expect(mock.stats.cancellations).toBe(N);
     const ids = results.map((r) => r.id!);
     expect(new Set(ids).size).toBe(N);
     await waitFor(
@@ -490,6 +948,21 @@ test("symptom: a cancel storm of 100 concurrent SSE requests leaves funds exactl
     }, 8000);
     expect(holds.length).toBe(N);
     expect(holds.every((h) => h.state === "UNKNOWN")).toBe(true);
+    const routeHealth = await internalCall(
+      runtime.internalApp,
+      "GET",
+      "/internal/v1/health/channels",
+    );
+    expect(routeHealth.status).toBe(200);
+    const channelHealth = (
+      routeHealth.data.channels as {
+        channel_id: string;
+        state: string;
+        consecutive_failures: number;
+      }[]
+    ).find((health) => health.channel_id === channel.id);
+    expect(channelHealth?.state ?? "CLOSED").toBe("CLOSED");
+    expect(channelHealth?.consecutive_failures ?? 0).toBe(0);
     const during = await wallet(runtime, projectId);
     expect(BigInt(during.reserved_atoms) - BigInt(before.reserved_atoms)).toBe(totalHeld);
     expect(BigInt(during.spent_atoms)).toBe(BigInt(before.spent_atoms));
@@ -854,5 +1327,119 @@ test("symptom: internal admin API rejects a forged or missing token and never ex
     expect([401, 404]).toContain(auditForged.status);
   } finally {
     await runtime.close();
+  }
+});
+
+test("symptom: an upstream business error prematurely releases an evidence-required hold", async () => {
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () =>
+      Response.json(
+        { vendor: { code: "BUSY" } },
+        {
+          headers: { "x-vendor-request-id": "vendor-throttle-reconciliation" },
+        },
+      ),
+  });
+  const runtime = createGatewayRuntime({ config: makeConfig(), db });
+  try {
+    await runtime.start();
+    const { projectId, key, channel, customer, supplier, call } = await seed(
+      runtime,
+      `http://127.0.0.1:${upstream.port}`,
+    );
+    const model = "reconciliation-provider-error";
+    const routeId = crypto.randomUUID();
+    await call("PUT", "/internal/v1/models", {
+      name: model,
+      operations: ["chat"],
+      max_output_tokens: 64,
+    });
+    const putRoute = (definitive: boolean) =>
+      call("PUT", "/internal/v1/routes", {
+        id: routeId,
+        model_name: model,
+        channel_id: channel.id,
+        upstream_model: model,
+        operations: ["chat"],
+        billing_price_id: customer.id,
+        cost_version_id: supplier.id,
+        adapter_overrides: {
+          reconciliation_response_id_header: "x-vendor-request-id",
+          error_rules: [
+            {
+              path: "vendor.code",
+              equals: "BUSY",
+              retry_kind: "client_error",
+              http_status: 429,
+              ...(definitive ? { execution: "NOT_EXECUTED" } : {}),
+            },
+          ],
+        },
+      });
+
+    await putRoute(false);
+    const unknown = await runtime.publicApp.fetch(chatRequest(key, model, { stream: false }));
+    expect(unknown.status).toBe(429);
+    await unknown.text();
+    const requestId = unknown.headers.get("x-request-id")!;
+    const [hold] =
+      await db`SELECT state, supplier_holds FROM public.billing_holds WHERE request_id=${requestId}`;
+    expect(hold.state).toBe("UNKNOWN");
+    expect(hold.supplier_holds).toMatchObject([
+      { state: "UNKNOWN", provider_request_id: "vendor-throttle-reconciliation" },
+    ]);
+
+    const wrongReceipt = {
+      request_id: requestId,
+      attempt_id: hold.supplier_holds[0].attempt_id,
+      provider_request_id: "other-provider-request",
+      account_id: hold.supplier_holds[0].account_id,
+      channel_id: channel.id,
+      currency: "USD",
+      evidence_ref: "supplier-proof",
+      verdict: "NOT_EXECUTED",
+    };
+    const rejected = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/reconciliation/receipts",
+      { actor: "fixture-finance", receipts: [wrongReceipt] },
+    );
+    expect(rejected.data).toEqual({
+      results: [{ attempt_id: wrongReceipt.attempt_id, status: "identity_conflict" }],
+    });
+    expect(BigInt((await wallet(runtime, projectId)).reserved_atoms)).toBeGreaterThan(0n);
+
+    await putRoute(true);
+    const certain = await runtime.publicApp.fetch(chatRequest(key, model, { stream: false }));
+    expect(certain.status).toBe(429);
+    await certain.text();
+    const [released] =
+      await db`SELECT state FROM public.billing_holds WHERE request_id=${certain.headers.get("x-request-id")}`;
+    expect(released.state).toBe("RELEASED");
+
+    const valid = await internalCall(
+      runtime.internalApp,
+      "POST",
+      "/internal/v1/reconciliation/receipts",
+      {
+        actor: "fixture-finance",
+        receipts: [{ ...wrongReceipt, provider_request_id: "vendor-throttle-reconciliation" }],
+      },
+    );
+    expect(valid.data).toEqual({
+      results: [{ attempt_id: wrongReceipt.attempt_id, status: "accepted" }],
+    });
+    expect(await runtime.ledger.processReconciliation(5)).toEqual({ receipts: 1, waivers: 0 });
+    expect(await wallet(runtime, projectId)).toMatchObject({
+      reserved_atoms: "0",
+      spent_atoms: "0",
+    });
+    expect((await runtime.ledger.auditConservation()).ok).toBe(true);
+  } finally {
+    await runtime.close();
+    await upstream.stop(true);
   }
 });

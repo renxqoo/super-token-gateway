@@ -617,3 +617,80 @@ sequenceDiagram
   - `bun run test:integration`：**17/17** 通过（451 断言，含 `G1.6` Drizzle/PG 1:1 零漂移、Redis 双节点 `PROVIDER` 插件同步、与完整 `G7.2–G7.7` 端到端链路）。
   - `bun run build` + `bun run test:artifact` + `bun run test:durability`：独立产物验收与 `SIGKILL` / `pg_dump` 恢复全通过，`conservation.ok=true`。
   - `BENCH_SECONDS=8 bun run bench:single`（560,043 笔实结，0 错误，`active_leases_after_idle=0`，`conservation.ok=true`）：短 JSON 1024c 达到 **13,205.3 RPS**（P99 107.14 ms），单热点钱包 512c **11,316.6 RPS**（P99 63.67 ms），流式 SSE 512c **9,038.3 RPS**（P99 93.01 ms）。
+
+## 12. 媒体 SSE 终态
+
+媒体和原样转发 SSE 在收到完成帧、确认用量并提交结算后，才向客户端发送完成帧。`[DONE]`、`done`、`completed` 和各操作的标准完整终态作为成功标记。图片生成使用 `image_generation.completed`，图片编辑使用 `image_edit.completed`，语音合成使用 `speech.audio.done`，转写使用 `transcript.text.done`。缺少完整终态、收到错误或缺少必需用量时，返回 SSE 错误并保留 `UNKNOWN` 预扣。
+
+非标准流可在声明式 `provider_config`、渠道 `adapter_config` 或模型路由 `adapter_overrides` 设置 `media_stream_terminal`。使用 `{"event":"vendor_finished"}` 匹配 SSE 事件名，或用 `{"path":"payload.status","equals":"ready"}` 匹配业务状态。优先级为路由、渠道、Provider，配置的匹配规则替代通用事件名判断。`[DONE]` 仍是协议完成标记。宿主复用缓存的路由计划解析字段路径，并通过 `usage_aliases` 读取非标准计量。
+
+标准图片接口按响应中实际交付的图片计量，最高为本次授权的张数。非流式计算 `data` 中有有效 Base64 或 HTTP(S) URL 的成品，流式只计算标准完成帧中的成品。非标准渠道可通过 `usage_aliases` 提供厂商计量。重复成品、成品数超出授权、别名与标准成品数冲突或按张计价缺少证据时，保留 `UNKNOWN` 待核账。
+
+## 13. 渠道执行证据与账本核账
+
+渠道或模型路由可在 `adapter_config` 或 `adapter_overrides` 配置 `reconciliation_response_id_header`。此字段默认同时启用 `reconciliation_evidence_required`，也可单独启用后者。开启后，已派发的 HTTP 错误、业务错误和首帧错误在缺少未执行证据时保留供应商预扣。需要按既有风险限额启用 `retry_on_ambiguous` 才能在首帧前切换。精确渠道错误规则可声明 `execution: "NOT_EXECUTED"`，仅用于供应商明确保证未执行且已通过样例验证的状态。错误类别继续决定路由降权和冷却。旧渠道按作用域逐步启用。
+
+Gateway 把可获得的供应商请求 ID 记到尝试记录，逐尝试保留实际使用的客户价目、折扣和供应商成本版本。历史记录没有客户价目与折扣快照时，Worker 不自动扣客户费用。向客户输出开始后继续遵守既有 SSE 切换限制。
+
+内网 `POST /internal/v1/reconciliation/receipts` 仅由财务角色提交逐条已核验证据。证据含 request、attempt、account、channel、currency、provider request ID、evidence ref 和结论。无已保存供应商 ID 的历史行必须包含有来源的关联说明。金额使用最小原子单位字符串。FINAL 回执中可选的 `customer_usage` 表示财务已确认该笔适用客户计费政策，并提交完整用量。仅有成本的回执自动入供应商账，后续可凭同一证据补充已批准客户用量。无法入账的记录和身份冲突进入 REVIEW，财务可按证据记录 RESUME 或 DISMISS。现有人工决议入口与待处理回执互斥，已驳回回执保留审核历史。
+
+Worker 可启用 `WORKER_RECONCILIATION_CONNECTORS`，其值是按供应商账户、渠道和币种配置的 JSON 数组。连接器只访问已配置的 HTTPS 查询地址，使用独立只读凭证，从返回内容提取明确的逐笔结论。可将厂商字段映射为标准回执，或由可信的供应商账单适配器返回该结构。404、查询超时、金额歧义、账户汇总和不匹配的请求 ID 保留待核账。尚无可信逐笔查询能力的渠道使用财务批量导入。
+
+```json
+[
+  {
+    "account_id": "00000000-0000-4000-8000-000000000001",
+    "channel_id": "00000000-0000-4000-8000-000000000002",
+    "currency": "USD",
+    "endpoint": "https://receipts.example.com/v1/lookup",
+    "token_env": "SUPPLIER_RECEIPTS_TOKEN",
+    "request_id_parameter": "request_id",
+    "status_path": "result.state",
+    "request_id_path": "result.request_id",
+    "evidence_path": "result.receipt_id",
+    "currency_path": "result.currency",
+    "cost_path": "result.supplier_cost_atoms",
+    "final_value": "settled",
+    "not_executed_value": "rejected_without_charge",
+    "timeout_ms": 2500,
+    "interval_ms": 60000,
+    "max_interval_ms": 900000
+  }
+]
+```
+
+平台兜底默认关闭。财务配置供应商币种的累计风险预算，再按项目、渠道和供应商币种启用策略，配置等待时间、单笔客户预扣上限和作用域累计预算。等待时间从进入待核账开始，旧记录缺时间戳时使用原预扣到期时间。自动豁免限于单一未结供应商尝试且缺少回执的记录，预算和客户解冻同事务；供应商预扣继续占用。迟到回执只闭合供应商侧，客户豁免持续有效。多次派发、金额超限和已存在争议证据的记录继续进入财务队列。只有显式启用 `include_historical` 的策略才考虑策略启用前的数据。
+
+旧 MiniMax 待核账由 `GET /internal/v1/reconciliation/cases` 列出。迁移仅新增元数据、索引和核账表。历史账务由实际回执驱动，或者由已经批准并指定适用历史范围的兜底策略处理。部署步骤沿用拆分角色配置和单版本数据库升级，迁移后重新应用 `infra/postgres/roles.sql`。
+
+## 14. 同一上游域名的连接回退
+
+推理和轮询传输在拨号前校验完整的 DNS 返回结果，并优先尝试 IPv4。存在多个地址时，首地址最多使用本阶段剩余连接时间的一半，余下时间分配给同一次解析中的后续地址。最后一个地址前，各地址分配的时间同时受 `UPSTREAM_DIAL_QUEUE_WAIT_MS` 限制，预备派发等待某个地址的拨号许可超时后可以继续尝试。每次连接都保留原始域名的 Host、TLS SNI 与证书校验，仍受连接池和拨号队列限制。证书校验失败、取消和本地容量拒绝立即结束。HTTP 请求可能已经发出时，同域名地址回退结束，由现有渠道路由和账务规则处理结果。
+
+## 15. SSE 首正文追踪
+
+开启 `ACCESS_LOG` 后，对话 SSE 完成或失败时的访问日志包含 `first_text_trace`。其中记录渠道尝试编号与 ID、当前尝试开始、收到上游响应头、识别到第一条含非空正文的上游帧，以及首条客户端正文进入 HTTP 响应流队列的时刻。字段以 Gateway 接受请求为共同起点，使用单调时钟计算。流失败、无正文、私有协议无法判定原始正文时，未观测字段为 `null`。现有 `ttft_ms` 指标继续按原口径供监控使用。
+
+模型 SSE 集合同一帧内的一段或多段文本，计时按最早完整正文帧观察。角色、心跳、推理增量、工具参数与用量帧排除。服务端发出时刻观察 HTTP 响应流入队，包含 Gateway 解析、转换、审核和背压相关开销。`scripts/trace-first-text.ts` 使用客户端单调时钟记录收到响应头及解析首正文的时间，并输出同一个 `x-request-id`、`x-trace-id`。服务器和客户端分别输出纯数字计时，无需上传正文或凭证。两端在同一主机时可用 Unix 时间锚点拆分 Gateway 入队到客户端解析的延迟。跨主机需要已知时钟误差，客户端可独立报告端到端首正文。第三方界面实际显示正文的时刻需该客户端自身采集。
+
+## 16. 自有 PostgreSQL Trace 存储
+
+`TRACE_METRICS` 控制 SSE 分段聚合，独立于访问日志和存储开关。`gateway_sse_phase_seconds` 按固定协议和阶段记录观测到的分段样本，缺失阶段没有样本。`gateway_sse_first_text_total` 记录送出、取消、失败和无正文结果。`gateway_sse_waiting_first_text` 观察在途等待。现有 `gateway_ttft_ms` 继续使用原响应头口径。连接池等待和 DNS 可能发生在渠道尝试开始前，分段值允许与 Gateway 准备阶段重叠。
+
+配置 `TRACE_DATABASE_URL` 后，Gateway 以 OpenTelemetry Span JSON 记录请求、渠道尝试和事件。请求完成时优先投递慢首正文、5xx、499 和跨渠道尝试，普通成功请求按 `TRACE_SAMPLE_BPS` 抽样。请求 ID、Trace ID 和尝试 ID 用于关联，正文、凭证和目标地址不进入存储。队列同时限制条数、估算字节和每项目占用，容量计入单个在途批次。独立 Bun Worker 序列化并批量写入独立数据库。写入按配置有限重试，`TRACE_BATCH_DEADLINE_MS` 限制 Gateway 等待批次确认的时间，超时后重建写入 Worker。后台定期分批清理过期记录，失败、超时、丢弃和清理结果通过 `/metrics` 查看。观测写入与资金数据库事务各自独立。
+
+为 Trace 单独建 PostgreSQL 数据库。在该数据库用所有者执行 `bun scripts/trace-db.ts migrate`。给 Gateway Trace 写入账户授予 `telemetry` schema 的 `USAGE`，以及 `telemetry.spans` 的 `SELECT, INSERT, DELETE` 权限。资金库权限无需授予该账户。设置 `infra/gateway.example.env` 中的 `TRACE_*` 参数。没有设置数据库地址时，仍可使用指标和现有访问日志。
+
+用 `bun scripts/trace-db.ts read <trace_id 或 request_id>` 从自有数据库读取 Span。受控客户端探针传入 `--persist` 可补存客户端 Span。探针使用服务端回传的关联 ID，核对已保留 Gateway Span 的父子关系，再使用运维凭证写入同一 Trace 数据库。普通第三方客户端仍可使用原推理接口。DB 凭证只放在受控运维环境。
+
+## 17. 渠道错误诊断
+
+所有推理协议的渠道失败使用同一个请求 ID 关联。尝试 Span 记录渠道、失败阶段、错误分类、上游状态和供应商请求 ID。预派发失败单独记录，后续切换成功时仍保留失败尝试。请求 Span 在结算已确认后记录账单选择的尝试 ID。渠道诊断只观察现有路由和账务决策。
+
+Provider、渠道和路由可配置 `error_diagnostics`，按路由、渠道、Provider 的优先级取整组配置。可以从指定响应头或 JSON 路径取供应商错误码，并通过 `summaries` 精确匹配预置的错误说明。`request_id_header` 可指定用于排障的供应商请求 ID 响应头。只保存允许的错误码、预置说明和经过格式校验的关联 ID。普通 HTTP 错误使用已缓冲的 JSON，最大解析字节数由 `TRACE_ERROR_BODY_BYTES` 控制。正文尚未缓冲时记录 HTTP 状态和可用的响应头，错误采集不增加上游等待。逻辑错误复用已解析的 JSON 或 SSE 事件。
+
+`gateway_channel_failures_total` 按渠道、阶段和有限的错误分类聚合。渠道标签预算用尽后，新组合计入按阶段和分类聚合的 `gateway_channel_failure_overflow_total`。Trace 优先保留渠道失败和切换，成功请求按配置抽样。保留期、队列和降级策略沿用自有 Trace 数据库配置。看板可通过失败、超时和丢弃指标观察存储拥堵。
+
+## 18. 输出审核准入
+
+Gateway 按请求的流式或非流式模式确定适用的输出钩子，并在资金预扣前检查 `FAIL_CLOSED` Webhook 在当前节点的熔断和调用容量。开路期间直接返回插件容量错误。冷却结束后单个请求可占用半开探测资格，由实际审核回调决定恢复。请求取消、派发失败或未到达审核钩子时释放资格。熔断状态按代次更新，早于当前熔断发起的回调只决定其自身请求。请求的审核、重试和账务继续遵循原策略。

@@ -553,16 +553,23 @@ synchronous_commit = on
     amount_atoms: "100000",
   });
   const key = await admin("security", "api-keys", "PUT", { name: "drill", project_id: project.id });
+  let upstreamReceiptId: string | null = null;
   upstream = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
-    fetch: () =>
-      Response.json({
+    fetch: () => {
+      if (upstreamReceiptId)
+        return Response.json(
+          { error: "dispatch outcome pending" },
+          { status: 408, headers: { "x-provider-request-id": upstreamReceiptId } },
+        );
+      return Response.json({
         choices: [
           { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
         ],
         usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
-      }),
+      });
+    },
   });
   const channel = await admin("catalog", "channels", "PUT", {
     name: "drill",
@@ -593,6 +600,7 @@ synchronous_commit = on
     channel_id: channel.id,
     billing_price_id: customerPrice.id,
     cost_version_id: supplierPrice.id,
+    adapter_overrides: { reconciliation_response_id_header: "x-provider-request-id" },
   });
   const infer = () =>
     gw.publicApp.request("/v1/chat/completions", {
@@ -634,6 +642,53 @@ synchronous_commit = on
     await worker.start();
   }
   verify(workers.filter((item) => item.isLeader()).length === 1, "Expected one Worker leader");
+  upstreamReceiptId = crypto.randomUUID();
+  const uncertainInference = await infer();
+  const uncertainRequestId = uncertainInference.headers.get("x-request-id");
+  await uncertainInference.text();
+  verify(uncertainInference.status >= 400 && uncertainRequestId, "Expected an uncertain inference");
+  const [uncertainHold] = await owner`SELECT state, supplier_holds FROM public.billing_holds
+    WHERE request_id=${uncertainRequestId}`;
+  verify(
+    uncertainHold?.state === "UNKNOWN" &&
+      uncertainHold.supplier_holds[0]?.provider_request_id === upstreamReceiptId,
+    "Data role did not persist the ambiguous attempt and receipt correlation ID",
+  );
+  const receipt = {
+    request_id: uncertainRequestId,
+    attempt_id: uncertainHold.supplier_holds[0].attempt_id,
+    provider_request_id: upstreamReceiptId,
+    account_id: account.id,
+    channel_id: channel.id,
+    currency: "USD",
+    evidence_ref: "drill-final-receipt",
+    verdict: "FINAL",
+    supplier_cost_atoms: "7",
+    customer_usage: { input_tokens: "2", output_tokens: "3" },
+  };
+  upstreamReceiptId = null;
+  verify(
+    (await api("catalog", "reconciliation/receipts", "POST", { receipts: [receipt] })).status ===
+      403,
+    "Catalog role submitted financial evidence",
+  );
+  const submission = await admin("finance", "reconciliation/receipts", "POST", {
+    receipts: [receipt],
+  });
+  verify(
+    (submission.results as { status: string }[])[0]?.status === "accepted",
+    "Control role could not record a verified receipt",
+  );
+  await workers.find((worker) => worker.isLeader())!.runOnce(false);
+  const [reconciledCharge] =
+    await auditDb`SELECT outcome, customer_atoms::text, supplier_cost_atoms::text
+    FROM public.billing_charges WHERE request_id=${uncertainRequestId}`;
+  verify(
+    reconciledCharge?.outcome === "UNKNOWN_RESOLVED" &&
+      reconciledCharge.customer_atoms === "13" &&
+      reconciledCharge.supplier_cost_atoms === "7",
+    "Worker role did not reconcile the exact customer and supplier amounts",
+  );
   await until(
     async () =>
       workers.some((worker) =>
@@ -914,6 +969,8 @@ recovery_target_action = 'promote'
           plugin_release_ack_and_revocation: true,
           console_role_and_inference_admission: true,
           data_role_atoms: "13",
+          reconciliation_worker_customer_atoms: "13",
+          reconciliation_worker_supplier_atoms: "7",
         },
         postgres_failover: {
           synchronous_commit: "remote_apply",

@@ -57,9 +57,17 @@ export type ErrorMatchRule = {
   in?: (string | number)[];
   regex?: string;
   retry_kind: "retryable" | "rate_limit" | "auth_error" | "client_error";
+  execution?: "NOT_EXECUTED";
   http_status?: number;
   message_path?: string;
   retry_after_path?: string;
+};
+
+export type ProviderErrorDiagnostics = {
+  code_path?: string;
+  code_header?: string;
+  request_id_header?: string;
+  summaries?: Record<string, string>;
 };
 
 export type UsageAliasTarget =
@@ -107,6 +115,9 @@ export type AsyncTaskProviderConfig = {
   billed_indicator_path?: string;
 };
 
+export type MediaStreamTerminalRule =
+  { event: string } | { path: string; equals: string | number | boolean };
+
 export type DeclarativeProviderConfig = {
   base_dialect: WireDialect;
   usage_dialect: UsageDialect;
@@ -120,7 +131,9 @@ export type DeclarativeProviderConfig = {
   request_transforms?: BodyTransformRule[];
   response_transforms?: ResponseTransformRule[];
   error_rules?: ErrorMatchRule[];
+  error_diagnostics?: ProviderErrorDiagnostics;
   usage_aliases?: UsageAliasRule[];
+  media_stream_terminal?: MediaStreamTerminalRule;
   reasoning_field?: string;
   async_task_config?: AsyncTaskProviderConfig;
 };
@@ -131,6 +144,7 @@ export type WasmProviderConfig = {
   stream_framing?: StreamFraming;
   auth: AuthSchemeConfig;
   extra_headers?: Record<string, string>;
+  error_diagnostics?: ProviderErrorDiagnostics;
   hooks: ("adapt_request" | "adapt_response" | "adapt_stream_event")[];
   grants?: "extract_usage"[];
   fuel_budget?: number;
@@ -141,13 +155,17 @@ export type WasmProviderConfig = {
 export type ProviderPluginConfig = DeclarativeProviderConfig | WasmProviderConfig;
 
 export type AdapterOverrides = {
+  reconciliation_evidence_required?: boolean;
+  reconciliation_response_id_header?: string;
   extra_headers?: Record<string, string>;
   query_params?: Record<string, string>;
   path_override?: string;
   request_transforms?: BodyTransformRule[];
   response_transforms?: ResponseTransformRule[];
   error_rules?: ErrorMatchRule[];
+  error_diagnostics?: ProviderErrorDiagnostics;
   usage_aliases?: UsageAliasRule[];
+  media_stream_terminal?: MediaStreamTerminalRule;
 };
 
 export type ProjectRecord = {
@@ -409,6 +427,13 @@ export type ChargeLotAllocation = {
 export type SupplierHoldEntry = {
   attempt_id: string;
   cost_version_id?: string;
+  customer_price_version_id?: string;
+  customer_price_adjustment?: {
+    override_id: string | null;
+    discount_numerator: string | null;
+    discount_denominator: string | null;
+  };
+  provider_request_id?: string;
   account_id: string;
   channel_id: string;
   currency: string;
@@ -468,6 +493,7 @@ export type AcquireHoldInput = {
   customer_atoms: string;
   supplier_account_id: string;
   supplier_cost_version_id?: string;
+  customer_price_version_id?: string;
   supplier_channel_id: string;
   supplier_currency: string;
   supplier_atoms: string;
@@ -495,6 +521,7 @@ export type AcquireHoldResult =
         | "idempotency_conflict"
         | "supplier_unavailable"
         | "supplier_insufficient_balance"
+        | "ledger_busy"
         | "invalid_amount";
       message: string;
     };
@@ -509,6 +536,9 @@ export type SwitchSupplierInput = {
   next_currency: string;
   next_supplier_atoms: string;
   next_supplier_cost_version_id?: string;
+  next_customer_price_version_id?: string;
+  next_customer_price_adjustment?: SupplierHoldEntry["customer_price_adjustment"];
+  failed_provider_request_id?: string;
   required_customer_atoms?: string;
 };
 
@@ -668,6 +698,32 @@ export type ResolveRequestInput = {
   supplier_cost_version_id?: string;
   reason: string;
   actor: string;
+};
+
+export type ReconciliationReceipt = {
+  request_id: string;
+  attempt_id: string;
+  account_id: string;
+  channel_id: string;
+  currency: string;
+  provider_request_id: string;
+  evidence_ref: string;
+  match_reason?: string | undefined;
+  actor: string;
+} & (
+  | { verdict: "NOT_EXECUTED" }
+  | { verdict: "FINAL"; supplier_cost_atoms: string; customer_usage?: Usage | undefined }
+);
+
+export type ReconciliationPolicy = {
+  project_id: string;
+  channel_id: string;
+  supplier_currency: string;
+  enabled: boolean;
+  include_historical: boolean;
+  age_seconds: number;
+  max_customer_atoms: string;
+  limit_atoms: string;
 };
 
 export type WalletSnapshot = {
