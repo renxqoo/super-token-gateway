@@ -20,6 +20,7 @@ import {
   toCellRow,
   expireLotsInMemory,
   withPgConcurrencyRetry,
+  classifyLedgerStatementCancellation,
   type WalletRow,
   type LotRow,
   type SupplierCellRow,
@@ -74,10 +75,13 @@ export async function commitDirectBatch(
   results: CommitTerminalResult[],
 ): Promise<void> {
   const staged: CommitTerminalResult[] = [];
-  const { detached, reconcileAccounts } = await db.begin((tx) => {
+  const apply = (tx: SQL) => {
     staged.length = 0;
     return applyDirectSettlements(tx, entries, staged);
-  });
+  };
+  const { detached, reconcileAccounts } = await db.begin(
+    classifyLedgerStatementCancellation(apply),
+  );
   for (const { index } of entries) {
     if (staged[index] !== undefined) results[index] = staged[index]!;
   }

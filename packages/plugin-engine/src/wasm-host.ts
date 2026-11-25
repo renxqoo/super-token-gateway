@@ -479,6 +479,12 @@ export function createWasmtimeExecutor(options: WasmtimeExecutorOptions = {}): W
   const api: WasmRuntimeExecutor = {
     runtimeKind: "wasmtime",
 
+    acceptsEgress() {
+      return (
+        !closed && (idleSlots.length > 0 || slots.size < poolSize || totalQueued() < maxPending)
+      );
+    },
+
     compile(pluginId: string, digest: string, wasmBytes: Uint8Array): void {
       if (closed) throw new WasmCapacityError("wasm_queue_full", "WASM executor is closed");
       const existing = modules.get(pluginId);

@@ -88,6 +88,24 @@ export function isTransientPgConcurrencyError(error: unknown): boolean {
   return code !== undefined && TRANSIENT_PG_STATES.has(code);
 }
 
+export class LedgerStatementCancelled extends Error {
+  constructor(cause: unknown) {
+    super("Ledger statement was cancelled", { cause });
+  }
+}
+
+export function classifyLedgerStatementCancellation<T>(run: (tx: SQL) => Promise<T>) {
+  return (tx: SQL) =>
+    run(tx).catch((error: unknown) => {
+      if (postgresState(error) === "57014") throw new LedgerStatementCancelled(error);
+      throw error;
+    });
+}
+
+export function isRetryableLedgerTransactionError(error: unknown): boolean {
+  return error instanceof LedgerStatementCancelled || isTransientPgConcurrencyError(error);
+}
+
 export function holdTemporarilyUnavailable() {
   return {
     ok: false,
@@ -99,6 +117,7 @@ export function holdTemporarilyUnavailable() {
 export async function withPgConcurrencyRetry<T>(
   run: () => Promise<T>,
   maxAttempts = 4,
+  shouldRetry = isTransientPgConcurrencyError,
 ): Promise<T> {
   let attempt = 0;
   for (;;) {
@@ -106,7 +125,7 @@ export async function withPgConcurrencyRetry<T>(
       return await run();
     } catch (error) {
       attempt++;
-      if (attempt >= maxAttempts || !isTransientPgConcurrencyError(error)) {
+      if (attempt >= maxAttempts || !shouldRetry(error)) {
         throw error;
       }
       await Bun.sleep(10 * attempt + Math.floor(Math.random() * 10));

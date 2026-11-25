@@ -11,46 +11,50 @@ export function createOutbox(orm: LedgerDrizzle) {
     ): Promise<{ lease_token: string; events: OutboxEventRecord[] }> {
       const leaseToken = crypto.randomUUID();
       return orm.transaction(async (tx) => {
-        await tx
-          .insert(outboxConsumers)
-          .values({ name: consumerName, ackedSeq: 0n })
-          .onConflictDoNothing({ target: outboxConsumers.name });
-        const [legacy] = await tx
-          .select({
-            ackedSeq: outboxConsumers.ackedSeq,
-            leaseToken: outboxConsumers.leaseToken,
-            leasedThroughSeq: outboxConsumers.leasedThroughSeq,
-            leasedUntil: outboxConsumers.leasedUntil,
-          })
-          .from(outboxConsumers)
-          .where(eq(outboxConsumers.name, consumerName))
-          .for("update");
-        const seedAck = legacy?.ackedSeq ?? 0n;
-        await tx
-          .insert(outboxConsumerShards)
-          .values(
-            Array.from({ length: OUTBOX_SHARDS }, (_, shard) => ({
-              name: consumerName,
-              shard,
-              ackedSeq: seedAck,
-              leaseToken: legacy?.leaseToken ?? null,
-              leasedThroughSeq: legacy?.leasedThroughSeq ?? null,
-              leasedUntil: legacy?.leasedUntil ?? null,
-            })),
-          )
-          .onConflictDoNothing();
-
-        const shardRows = await tx
-          .select({
-            shard: outboxConsumerShards.shard,
-            ackedSeq: outboxConsumerShards.ackedSeq,
-            leaseActive: sql<boolean>`${outboxConsumerShards.leaseToken} IS NOT NULL
-              AND ${outboxConsumerShards.leasedUntil} > clock_timestamp()`,
-          })
-          .from(outboxConsumerShards)
-          .where(eq(outboxConsumerShards.name, consumerName))
-          .orderBy(outboxConsumerShards.shard)
-          .for("update");
+        const lockConsumer = () =>
+          tx
+            .select({
+              ackedSeq: outboxConsumers.ackedSeq,
+              leaseToken: outboxConsumers.leaseToken,
+              leasedThroughSeq: outboxConsumers.leasedThroughSeq,
+              leasedUntil: outboxConsumers.leasedUntil,
+            })
+            .from(outboxConsumers)
+            .where(eq(outboxConsumers.name, consumerName))
+            .for("update");
+        let [legacy] = await lockConsumer();
+        if (!legacy) {
+          await tx
+            .insert(outboxConsumers)
+            .values({ name: consumerName, ackedSeq: 0n })
+            .onConflictDoNothing({ target: outboxConsumers.name });
+          [legacy] = await lockConsumer();
+        }
+        const readShards = () =>
+          tx
+            .select({
+              leaseActive: sql<boolean>`${outboxConsumerShards.leaseToken} IS NOT NULL
+                AND ${outboxConsumerShards.leasedUntil} > clock_timestamp()`,
+            })
+            .from(outboxConsumerShards)
+            .where(eq(outboxConsumerShards.name, consumerName));
+        let shardRows = await readShards();
+        if (shardRows.length < OUTBOX_SHARDS) {
+          await tx
+            .insert(outboxConsumerShards)
+            .values(
+              Array.from({ length: OUTBOX_SHARDS }, (_, shard) => ({
+                name: consumerName,
+                shard,
+                ackedSeq: legacy?.ackedSeq ?? 0n,
+                leaseToken: legacy?.leaseToken ?? null,
+                leasedThroughSeq: legacy?.leasedThroughSeq ?? null,
+                leasedUntil: legacy?.leasedUntil ?? null,
+              })),
+            )
+            .onConflictDoNothing();
+          shardRows = await readShards();
+        }
 
         if (shardRows.some((row) => row.leaseActive)) {
           return { lease_token: leaseToken, events: [] };
@@ -82,20 +86,12 @@ export function createOutbox(orm: LedgerDrizzle) {
 
         const last = evRows.at(-1);
         if (last) {
-          const maxByShard = new Map<number, bigint>();
-          for (const row of shardRows) {
-            maxByShard.set(row.shard, row.ackedSeq);
-          }
+          const maxByShard = new Map<number, string>();
           for (const ev of evRows) {
-            const seq = BigInt(String(ev.seq));
-            const cur = maxByShard.get(Number(ev.shard)) ?? 0n;
-            if (seq > cur) maxByShard.set(Number(ev.shard), seq);
+            maxByShard.set(Number(ev.shard), String(ev.seq));
           }
           const leaseUpdates = JSON.stringify(
-            shardRows.map((row) => ({
-              shard: row.shard,
-              leased_through_seq: (maxByShard.get(row.shard) ?? row.ackedSeq).toString(),
-            })),
+            [...maxByShard].map(([shard, leased_through_seq]) => ({ shard, leased_through_seq })),
           );
           await tx.execute(sql`
             UPDATE public.outbox_consumer_shards cs
@@ -160,8 +156,6 @@ export function createOutbox(orm: LedgerDrizzle) {
           WHERE name = ${consumerName}
             AND lease_token = ${leaseToken}::uuid
             AND leased_until > clock_timestamp()
-          ORDER BY shard
-          FOR UPDATE
         `)) as unknown as {
           shard: number;
           acked_seq: string;
@@ -187,8 +181,6 @@ export function createOutbox(orm: LedgerDrizzle) {
             WHERE name = ${consumerName}
               AND lease_token = ${leaseToken}::uuid
               AND leased_until > clock_timestamp()
-            ORDER BY shard
-            FOR UPDATE
           `)) as unknown as {
             shard: number;
             acked_seq: string;

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDatabase, migrate } from "@gateway/ledger";
 import { createGatewayRuntime, type GatewayConfig } from "@gateway/gateway";
+import { WasmCapacityError } from "@gateway/plugin-engine";
 import { encodeSSE } from "@gateway/protocol";
 import { createMockApp } from "../../apps/mock-providers/src/app.ts";
 import { createTraceStore } from "../../apps/gateway/src/trace-storage.ts";
@@ -178,59 +179,64 @@ function realServer(runtime: ReturnType<typeof createGatewayRuntime>) {
   return Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: runtime.publicApp.fetch });
 }
 
-test("symptom: a pre-dispatch wallet lock timeout returns HTTP 500 instead of retryable overload", async () => {
-  const shortDb = new SQL(targetUrl.toString(), { max: 8, connection: { lock_timeout: 30 } });
-  const runtime = createGatewayRuntime({ config: makeConfig(), db: shortDb });
-  const mock = createMockApp("lock-admission-fixture");
-  const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: mock.app.fetch });
-  const locked = Promise.withResolvers<void>();
-  const unlock = Promise.withResolvers<void>();
-  let transaction: Promise<unknown> | undefined;
-  try {
-    await runtime.start();
-    const fixture = await seed(runtime, upstream.url.origin);
-    const model = "ledger-lock-admission";
-    await fixture.call("PUT", "/internal/v1/models", { name: model, operations: ["chat"] });
-    await fixture.call("PUT", "/internal/v1/routes", {
-      model_name: model,
-      channel_id: fixture.channel.id,
-      upstream_model: model,
-      operations: ["chat"],
-      billing_price_id: fixture.customer.id,
-      cost_version_id: fixture.supplier.id,
-    });
-    transaction = db.begin(async (tx) => {
-      await tx`SELECT id FROM public.wallets WHERE project_id=${fixture.projectId}::uuid FOR UPDATE`;
-      locked.resolve();
-      await unlock.promise;
-    });
-    await Promise.race([locked.promise, transaction]);
-    const request = chatRequest(fixture.key, model, { stream: false });
-    request.headers.set("idempotency-key", "lock-timeout-retry");
-    const result = await runtime.publicApp.fetch(request);
-    expect(result.status).toBe(503);
-    expect(await result.json()).toMatchObject({ error: { code: "ledger_busy" } });
-    const requestId = result.headers.get("x-request-id");
-    const [held] =
-      await db`SELECT count(*)::int AS n FROM public.billing_holds WHERE request_id=${requestId}::uuid`;
-    expect(held?.n).toBe(0);
-    unlock.resolve();
-    await transaction;
-    const retry = chatRequest(fixture.key, model, { stream: false });
-    retry.headers.set("idempotency-key", "lock-timeout-retry");
-    const succeeded = await runtime.publicApp.fetch(retry);
-    expect(succeeded.status).toBe(200);
-    const [charged] =
-      await db`SELECT count(*)::int AS n FROM public.billing_charges WHERE project_id=${fixture.projectId}::uuid`;
-    expect(charged?.n).toBe(1);
-  } finally {
-    unlock.resolve();
-    await transaction;
-    await runtime.close();
-    upstream.stop(true);
-    await shortDb.close();
-  }
-});
+test.each(["lock", "statement"])(
+  "symptom: a pre-dispatch wallet %s timeout returns HTTP 500 instead of retryable overload",
+  async (timeout) => {
+    const connection =
+      timeout === "lock" ? { lock_timeout: 30 } : { lock_timeout: 5000, statement_timeout: 100 };
+    const shortDb = new SQL(targetUrl.toString(), { max: 8, connection });
+    const runtime = createGatewayRuntime({ config: makeConfig(), db: shortDb });
+    const mock = createMockApp("lock-admission-fixture");
+    const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: mock.app.fetch });
+    const locked = Promise.withResolvers<void>();
+    const unlock = Promise.withResolvers<void>();
+    let transaction: Promise<unknown> | undefined;
+    try {
+      await runtime.start();
+      const fixture = await seed(runtime, upstream.url.origin);
+      const model = "ledger-lock-admission";
+      await fixture.call("PUT", "/internal/v1/models", { name: model, operations: ["chat"] });
+      await fixture.call("PUT", "/internal/v1/routes", {
+        model_name: model,
+        channel_id: fixture.channel.id,
+        upstream_model: model,
+        operations: ["chat"],
+        billing_price_id: fixture.customer.id,
+        cost_version_id: fixture.supplier.id,
+      });
+      transaction = db.begin(async (tx) => {
+        await tx`SELECT id FROM public.wallets WHERE project_id=${fixture.projectId}::uuid FOR UPDATE`;
+        locked.resolve();
+        await unlock.promise;
+      });
+      await Promise.race([locked.promise, transaction]);
+      const request = chatRequest(fixture.key, model, { stream: false });
+      request.headers.set("idempotency-key", "lock-timeout-retry");
+      const result = await runtime.publicApp.fetch(request);
+      expect(result.status).toBe(503);
+      expect(await result.json()).toMatchObject({ error: { code: "ledger_busy" } });
+      const requestId = result.headers.get("x-request-id");
+      const [held] =
+        await db`SELECT count(*)::int AS n FROM public.billing_holds WHERE request_id=${requestId}::uuid`;
+      expect(held?.n).toBe(0);
+      unlock.resolve();
+      await transaction;
+      const retry = chatRequest(fixture.key, model, { stream: false });
+      retry.headers.set("idempotency-key", "lock-timeout-retry");
+      const succeeded = await runtime.publicApp.fetch(retry);
+      expect(succeeded.status).toBe(200);
+      const [charged] =
+        await db`SELECT count(*)::int AS n FROM public.billing_charges WHERE project_id=${fixture.projectId}::uuid`;
+      expect(charged?.n).toBe(1);
+    } finally {
+      unlock.resolve();
+      await transaction;
+      await runtime.close();
+      upstream.stop(true);
+      await shortDb.close();
+    }
+  },
+);
 
 test("symptom: an open fail-closed output Webhook still dispatches paid upstream requests", async () => {
   let calls = 0;
@@ -360,6 +366,100 @@ test("symptom: an open fail-closed output Webhook still dispatches paid upstream
     upstreamProceed.resolve();
     await runtime.close();
     webhook.stop(true);
+    upstream.stop(true);
+  }
+});
+
+test("symptom: a saturated fail-closed output WASM queue still dispatches paid upstream requests", async () => {
+  let full = false;
+  let upstreamCalls = 0;
+  const executor = {
+    runtimeKind: "mock" as const,
+    acceptsEgress: () => !full,
+    compile() {},
+    async invoke() {
+      if (full) throw new WasmCapacityError("wasm_queue_full", "Fixture queue is full");
+      return new TextEncoder().encode('{"action":"PASS"}');
+    },
+    close() {},
+  };
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      upstreamCalls++;
+      return Response.json({
+        id: "wasm-admission",
+        object: "chat.completion",
+        choices: [
+          { index: 0, message: { role: "assistant", content: "answer" }, finish_reason: "stop" },
+        ],
+        usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+      });
+    },
+  });
+  const runtime = createGatewayRuntime({ config: makeConfig(), db, contentWasmExecutor: executor });
+  try {
+    await runtime.start();
+    const fixture = await seed(runtime, upstream.url.origin);
+    const plugin = await fixture.call("POST", "/internal/v1/plugins/builtins/pii-guard/install", {
+      manifest: { hooks: ["on_response", "on_stream_end"] },
+    });
+    await fixture.call("POST", "/internal/v1/plugin-releases", {
+      id: crypto.randomUUID(),
+      expected_epoch: runtime.snapshot.get().epoch,
+      targets: [{ plugin_id: plugin.id }],
+      samples: { [String(plugin.id)]: { text: "sample@example.com" } },
+    });
+    const model = "wasm-output-admission";
+    await fixture.call("PUT", "/internal/v1/models", { name: model, operations: ["chat"] });
+    await fixture.call("PUT", "/internal/v1/routes", {
+      model_name: model,
+      channel_id: fixture.channel.id,
+      upstream_model: model,
+      operations: ["chat"],
+      billing_price_id: fixture.customer.id,
+      cost_version_id: fixture.supplier.id,
+      plugin_pipeline: [{ plugin_id: plugin.id, priority: 0 }],
+    });
+    const request = (stream: boolean) => {
+      const req = chatRequest(fixture.key, model, { stream });
+      req.headers.set("idempotency-key", `wasm-capacity-${stream}`);
+      return req;
+    };
+    full = true;
+    for (const stream of [false, true]) {
+      const rejected = await runtime.publicApp.fetch(request(stream));
+      expect(rejected.status).toBe(503);
+      expect(await rejected.json()).toMatchObject({ error: { rule_code: "wasm_queue_full" } });
+      expect(upstreamCalls).toBe(0);
+    }
+    const [before] = await db`
+      SELECT count(*)::int AS holds FROM public.billing_holds WHERE project_id=${fixture.projectId}::uuid`;
+    expect(before?.holds).toBe(0);
+    full = false;
+    const accepted = await runtime.publicApp.fetch(request(false));
+    expect(accepted.status).toBe(200);
+    await accepted.text();
+    full = true;
+    const replay = await runtime.publicApp.fetch(request(false));
+    expect(replay.status).toBe(409);
+    expect(replay.headers.get("x-request-id")).toBe(accepted.headers.get("x-request-id"));
+    expect(upstreamCalls).toBe(1);
+    const metrics = await runtime.publicApp.fetch(new Request("http://gateway.local/metrics"));
+    expect(await metrics.text()).toContain("gateway_wasm_admission_rejections_total 2\n");
+    const [after] = await db`
+      SELECT count(*)::int AS charges, sum(customer_atoms)::text AS customer,
+        sum(supplier_cost_atoms)::text AS supplier
+      FROM public.billing_charges WHERE project_id=${fixture.projectId}::uuid`;
+    expect(after).toEqual({ charges: 1, customer: "5", supplier: "5" });
+    expect(await runtime.ledger.auditConservation()).toMatchObject({
+      ok: true,
+      open_holds: 0,
+      unknown_holds: 0,
+    });
+  } finally {
+    await runtime.close();
     upstream.stop(true);
   }
 });

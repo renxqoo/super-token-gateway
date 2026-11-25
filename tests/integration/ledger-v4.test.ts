@@ -15,6 +15,7 @@ import {
   prepareLedgerMonth,
   SCHEMA_VERSION,
   verifyLedgerArchive,
+  type CommitTerminalInput,
 } from "@gateway/ledger";
 
 async function withLedgerDb(
@@ -508,60 +509,75 @@ test("symptom: concurrent requests with zero settled balance can all draw new cr
     }
   }));
 
-test("symptom: a transient wallet lock must not discard an active funded lease", () =>
-  withLedgerDb(async (db) => {
-    const { ledger, project, accountA, channelA } = await seedFixture(db);
-    try {
-      await ledger.creditWallet({
-        project_id: project.id,
-        currency: "PTS",
-        external_ref: "lease-competition-fund",
-        amount_atoms: "100000000",
-        kind: "CASH",
-      });
-      await ledger.rechargeSupplier({
-        account_id: accountA.id,
-        currency: "USD",
-        external_ref: "lease-competition-fund",
-        amount_atoms: "100000000",
-      });
-      const hold = (amount = "200", idempotencyKey: string | null = null) =>
-        ledger.acquireHold({
-          request_id: crypto.randomUUID(),
-          attempt_id: crypto.randomUUID(),
+test.each(["transient wallet lock", "wallet statement timeout"])(
+  "symptom: a %s must not discard an active funded lease",
+  (scenario) =>
+    withLedgerDb(async (db, dbUrl) => {
+      const fixture = await seedFixture(db);
+      const { project, accountA, channelA } = fixture;
+      const statementTimeout = scenario === "wallet statement timeout";
+      const limitedDb = statementTimeout
+        ? new SQL(dbUrl, { max: 8, connection: { lock_timeout: 5000, statement_timeout: 200 } })
+        : undefined;
+      const ledger = limitedDb ? createLedgerEngine(limitedDb) : fixture.ledger;
+      try {
+        await ledger.creditWallet({
           project_id: project.id,
           currency: "PTS",
-          operation: "chat",
-          model: "gpt-4o",
-          idempotency_key: idempotencyKey,
-          fingerprint: "leased-funds",
-          customer_atoms: amount,
-          supplier_account_id: accountA.id,
-          supplier_channel_id: channelA.id,
-          supplier_currency: "USD",
-          supplier_atoms: "100",
-          expires_at: new Date(Date.now() + 30000).toISOString(),
+          external_ref: "lease-competition-fund",
+          amount_atoms: "100000000",
+          kind: "CASH",
         });
-      const first = await Promise.all(Array.from({ length: 16 }, () => hold()));
-      expect(first.every((result) => result.ok)).toBe(true);
-      expect(await hold()).toMatchObject({ ok: true });
-      const wallet = (await ledger.getWallet(project.id, "PTS"))!;
-      expect(await hold(wallet.available_atoms, "earmark-free-funds")).toMatchObject({ ok: true });
-      expect(await ledger.getWallet(project.id, "PTS")).toMatchObject({ available_atoms: "0" });
-      const locked = Promise.withResolvers<void>();
-      const lock = db.begin(async (tx) => {
-        await tx`SELECT id FROM public.wallets WHERE project_id = ${project.id} FOR NO KEY UPDATE`;
-        locked.resolve();
-        await Bun.sleep(160);
-      });
-      await locked.promise;
-      const [admitted] = await Promise.all([hold(), lock]);
-      expect(admitted).toMatchObject({ ok: true, held_atoms: "200", credit_atoms: "0" });
-      expect((await ledger.auditConservation()).ok).toBe(true);
-    } finally {
-      await ledger.drain();
-    }
-  }));
+        await ledger.rechargeSupplier({
+          account_id: accountA.id,
+          currency: "USD",
+          external_ref: "lease-competition-fund",
+          amount_atoms: "100000000",
+        });
+        const hold = (amount = "200", idempotencyKey: string | null = null) =>
+          ledger.acquireHold({
+            request_id: crypto.randomUUID(),
+            attempt_id: crypto.randomUUID(),
+            project_id: project.id,
+            currency: "PTS",
+            operation: "chat",
+            model: "gpt-4o",
+            idempotency_key: idempotencyKey,
+            fingerprint: "leased-funds",
+            customer_atoms: amount,
+            supplier_account_id: accountA.id,
+            supplier_channel_id: channelA.id,
+            supplier_currency: "USD",
+            supplier_atoms: "100",
+            expires_at: new Date(Date.now() + 30000).toISOString(),
+          });
+        const first = await Promise.all(Array.from({ length: 16 }, () => hold()));
+        expect(first.every((result) => result.ok)).toBe(true);
+        expect(await hold()).toMatchObject({ ok: true });
+        const wallet = (await ledger.getWallet(project.id, "PTS"))!;
+        expect(await hold(wallet.available_atoms, "earmark-free-funds")).toMatchObject({
+          ok: true,
+        });
+        expect(await ledger.getWallet(project.id, "PTS")).toMatchObject({ available_atoms: "0" });
+        const locked = Promise.withResolvers<void>();
+        const lock = db.begin(async (tx) => {
+          await tx`SELECT id FROM public.wallets WHERE project_id = ${project.id} FOR NO KEY UPDATE`;
+          locked.resolve();
+          await Bun.sleep(statementTimeout ? 260 : 160);
+        });
+        await locked.promise;
+        const [admitted] = await Promise.all([hold(), lock]);
+        expect(admitted).toMatchObject({ ok: true, held_atoms: "200", credit_atoms: "0" });
+        expect((await ledger.auditConservation()).ok).toBe(true);
+      } finally {
+        await ledger.drain();
+        if (limitedDb) {
+          await limitedDb.close();
+          await fixture.ledger.drain();
+        }
+      }
+    }),
+);
 
 test("symptom: expired unused credit grants must not hide negative wallet balance on leased holds", () =>
   withLedgerDb(async (db) => {
@@ -1094,6 +1110,180 @@ test("G1.6 Drizzle schema declarations match migrated PostgreSQL tables and colu
     expect([...declaredByTable.keys()].sort()).toEqual([...actualByTable.keys()].sort());
     for (const [tableName, cols] of declaredByTable) {
       expect(actualByTable.get(tableName)).toEqual(cols);
+    }
+  }));
+
+test("symptom: a wallet lease is recreated between bursts inside the configured retention window", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const ledger = createLedgerEngine(db, { walletLeaseIdleReleaseMs: 1500 });
+    const wallet = await f.ledger.creditWallet({
+      project_id: f.project.id,
+      currency: "PTS",
+      external_ref: "retained-wallet-funding",
+      amount_atoms: "100000000",
+      kind: "CASH",
+    });
+    const hold = async () => {
+      const requestId = crypto.randomUUID();
+      const attemptId = crypto.randomUUID();
+      expect(
+        await ledger.acquireHold({
+          request_id: requestId,
+          attempt_id: attemptId,
+          project_id: f.project.id,
+          currency: "PTS",
+          operation: "chat",
+          model: "gpt-4o",
+          idempotency_key: null,
+          fingerprint: "",
+          customer_atoms: "200",
+          supplier_account_id: f.accountA.id,
+          supplier_channel_id: f.channelA.id,
+          supplier_currency: "USD",
+          supplier_atoms: "100",
+          expires_at: new Date(Date.now() + 30000).toISOString(),
+        }),
+      ).toMatchObject({ ok: true, held_atoms: "200" });
+      return {
+        request_id: requestId,
+        selected_attempt_id: attemptId,
+        project_id: f.project.id,
+        channel_id: f.channelA.id,
+        billing_price_id: f.flatBillingPrice.id,
+        cost_version_id: f.costPrice.id,
+        usage: { input_tokens: "60", output_tokens: "40" },
+        billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+        billing_basis: "PROVIDER_USAGE",
+        supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+        supplier_currency: "USD",
+      } satisfies CommitTerminalInput;
+    };
+    const settle = async (input: CommitTerminalInput) => {
+      expect(await ledger.commitTerminal(input)).toMatchObject({
+        ok: true,
+        customer_atoms: "100",
+        supplier_cost_atoms: "50",
+      });
+    };
+    const walletLeaseRows = () => db<{ id: string; state: string }[]>`
+      SELECT id, state FROM public.wallet_leases WHERE wallet_id = ${wallet.wallet_id}
+    `;
+    try {
+      await Promise.all((await Promise.all(Array.from({ length: 16 }, hold))).map(settle));
+      const original = await walletLeaseRows();
+      expect(original).toHaveLength(1);
+      expect(original[0]?.state).toBe("ACTIVE");
+      await Bun.sleep(800);
+      expect(await walletLeaseRows()).toEqual(original);
+      await Promise.all((await Promise.all(Array.from({ length: 16 }, hold))).map(settle));
+      expect(await walletLeaseRows()).toEqual(original);
+    } finally {
+      await ledger.drain();
+      await f.ledger.drain();
+    }
+    expect((await walletLeaseRows()).map((row) => row.state)).toEqual(["CLOSED"]);
+    expect(await f.ledger.getWallet(f.project.id, "PTS")).toMatchObject({
+      available_atoms: "99996800",
+      reserved_atoms: "0",
+      spent_atoms: "3200",
+    });
+    expect((await f.ledger.getSupplierBalance(f.accountA.id, "USD")).spent_atoms).toBe("1600");
+    expect((await ledger.auditConservation()).ok).toBe(true);
+  }));
+
+test("idle wallet lease batch returns unused funds and preserves a concurrent open hold", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const ledger = createLedgerEngine(db, { leaseIdleReleaseMs: 5000 });
+    const projects = await Promise.all(
+      [0, 1, 2].map((i) =>
+        f.catalog.upsertProject({
+          name: `batch-close-${i}`,
+          currency: "PTS",
+          rpm: 100,
+          tpm: 10000,
+          concurrency: 32,
+        }),
+      ),
+    );
+    const walletIds = [];
+    for (const project of projects) {
+      const wallet = await f.ledger.creditWallet({
+        project_id: project.id,
+        currency: "PTS",
+        external_ref: "batch-close-funding",
+        amount_atoms: "100000000",
+        kind: "CASH",
+      });
+      walletIds.push(wallet.wallet_id);
+    }
+
+    async function hold(projectId: string): Promise<string> {
+      const requestId = crypto.randomUUID();
+      expect(
+        await ledger.acquireHold({
+          request_id: requestId,
+          attempt_id: crypto.randomUUID(),
+          project_id: projectId,
+          currency: "PTS",
+          operation: "chat",
+          model: "gpt-4o",
+          idempotency_key: null,
+          fingerprint: "",
+          customer_atoms: "200",
+          supplier_account_id: f.accountA.id,
+          supplier_channel_id: f.channelA.id,
+          supplier_currency: "USD",
+          supplier_atoms: "100",
+          expires_at: new Date(Date.now() + 30000).toISOString(),
+        }),
+      ).toMatchObject({ ok: true, held_atoms: "200" });
+      return requestId;
+    }
+
+    try {
+      for (const project of projects) {
+        const requests = await Promise.all(Array.from({ length: 16 }, () => hold(project.id)));
+        for (const requestId of requests) await ledger.releaseHold(requestId);
+      }
+      const open = await hold(projects[2]!.id);
+      const [before] = await db`
+        SELECT wallet_lease_id FROM public.billing_holds WHERE request_id = ${open}
+      `;
+      expect(before.wallet_lease_id).toBeString();
+      expect(
+        (await db`SELECT count(*)::int AS n FROM public.wallet_leases WHERE state = 'ACTIVE'`)[0].n,
+      ).toBe(3);
+      await ledger.releaseIdleLeases();
+      const [after] = await db`
+        SELECT state, wallet_lease_id, held_atoms::text AS held_atoms
+        FROM public.billing_holds WHERE request_id = ${open}
+      `;
+      expect(after).toMatchObject({ state: "HELD", wallet_lease_id: null, held_atoms: "200" });
+      const [returnBatch] = await db`
+        SELECT count(*)::int AS closed, count(DISTINCT xmin::text)::int AS commits
+        FROM public.wallet_leases
+        WHERE wallet_id = ANY(${walletIds.slice(0, 2)}::uuid[]) AND state = 'CLOSED'
+      `;
+      expect(returnBatch).toMatchObject({ closed: 2, commits: 1 });
+      const balances = await db`
+        SELECT id, available_atoms::text AS available, reserved_atoms::text AS reserved
+        FROM public.wallets WHERE id = ANY(${walletIds}::uuid[])
+      `;
+      expect(balances).toHaveLength(3);
+      for (const balance of balances) {
+        const openWallet = balance.id === walletIds[2];
+        expect(balance).toMatchObject({
+          available: openWallet ? "99999800" : "100000000",
+          reserved: openWallet ? "200" : "0",
+        });
+      }
+      await ledger.releaseHold(open);
+      expect((await ledger.auditConservation()).ok).toBe(true);
+    } finally {
+      await ledger.drain();
+      await f.ledger.drain();
     }
   }));
 
@@ -1873,6 +2063,53 @@ test("concurrent claimOutboxEvents and ackOutboxEvents avoid deadlocks and prese
           competingClaim.events.at(-1)!.seq,
         );
       }
+    }
+  }));
+
+test("symptom: an unused Outbox consumer shard lock stalls claim and acknowledgement", () =>
+  withLedgerDb(async (db, dbUrl) => {
+    const ledger = createLedgerEngine(db, { enableLeases: false });
+    const shortDb = new SQL(dbUrl, { max: 2, connection: { lock_timeout: 100 } });
+    const consumer = createLedgerEngine(shortDb, { enableLeases: false });
+    const name = "unused-shard-lock";
+    const unlock = Promise.withResolvers<void>();
+    let blocker: Promise<unknown> | undefined;
+    try {
+      expect((await ledger.claimOutboxEvents(name)).events).toEqual([]);
+      const eventIds: [string, string] = [crypto.randomUUID(), crypto.randomUUID()];
+      const projectId = crypto.randomUUID();
+      const [event] = await db`
+        INSERT INTO public.outbox_events(event_id, kind, project_id, payload)
+        VALUES (${eventIds[0]}::uuid, 'billing.settled', ${projectId}::uuid, '{}'::jsonb),
+               (${eventIds[1]}::uuid, 'billing.settled', ${projectId}::uuid, '{}'::jsonb)
+        RETURNING shard`;
+      const locked = Promise.withResolvers<void>();
+      blocker = db.begin(async (tx) => {
+        const [row] = await tx`
+          SELECT shard FROM public.outbox_consumer_shards WHERE name=${name} AND shard <> ${event!.shard}
+          ORDER BY shard LIMIT 1 FOR UPDATE`;
+        expect(row).toBeDefined();
+        locked.resolve();
+        await unlock.promise;
+      });
+      await Promise.race([locked.promise, blocker]);
+      const batch = await consumer.claimOutboxEvents(name);
+      expect(batch.events.map((item) => item.event_id)).toEqual(eventIds);
+      expect(await consumer.ackOutboxEvents(name, batch.lease_token, batch.events[0]!.seq)).toBe(
+        true,
+      );
+      const remaining = await consumer.claimOutboxEvents(name);
+      expect(remaining.events.map((item) => item.event_id)).toEqual([eventIds[1]]);
+      expect(
+        await consumer.ackOutboxEvents(name, remaining.lease_token, remaining.events[0]!.seq),
+      ).toBe(true);
+      expect((await consumer.claimOutboxEvents(name)).events).toEqual([]);
+    } finally {
+      unlock.resolve();
+      await blocker;
+      await consumer.drain();
+      await shortDb.close();
+      await ledger.drain();
     }
   }));
 
@@ -2962,6 +3199,106 @@ test("worker periodic sweep drains a large expired-hold backlog in one tick inst
       expect(worker.metrics()).toContain(`stg_worker_swept_holds_total ${remaining}\n`);
     } finally {
       await worker.stop();
+      await f.ledger.drain();
+    }
+  }));
+
+test("symptom: a settlement statement timeout discards measured usage for other requests in its batch", () =>
+  withLedgerDb(async (db, dbUrl) => {
+    const f = await seedFixture(db);
+    const limitedDb = new SQL(dbUrl, {
+      max: 2,
+      connection: { statement_timeout: 80, lock_timeout: 5000 },
+    });
+    const limited = createLedgerEngine(limitedDb, { enableLeases: false, batchWindowMs: 20 });
+    let blocker: Promise<unknown> | undefined;
+    const unlock = Promise.withResolvers<void>();
+    try {
+      await limitedDb`SELECT 1`;
+      await f.ledger.creditWallet({
+        project_id: f.project.id,
+        currency: "PTS",
+        external_ref: "settlement-statement-timeout",
+        amount_atoms: "1000",
+        kind: "CASH",
+      });
+      const measured: CommitTerminalInput[] = [];
+      for (let index = 0; index < 2; index++) {
+        const requestId = crypto.randomUUID();
+        const attemptId = crypto.randomUUID();
+        expect(
+          await f.ledger.acquireHold({
+            request_id: requestId,
+            attempt_id: attemptId,
+            project_id: f.project.id,
+            currency: "PTS",
+            operation: "chat",
+            model: "gpt-4o",
+            idempotency_key: null,
+            fingerprint: requestId,
+            customer_atoms: "200",
+            supplier_account_id: f.accountA.id,
+            supplier_channel_id: f.channelA.id,
+            supplier_currency: "USD",
+            supplier_atoms: "100",
+            expires_at: new Date(Date.now() + 30_000).toISOString(),
+          }),
+        ).toMatchObject({ ok: true });
+        measured.push({
+          request_id: requestId,
+          project_id: f.project.id,
+          selected_attempt_id: attemptId,
+          channel_id: f.channelA.id,
+          billing_price_id: f.flatBillingPrice.id,
+          cost_version_id: f.costPrice.id,
+          usage: { input_tokens: "10", output_tokens: "10" },
+          billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+          billing_basis: "PROVIDER_USAGE",
+          supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+          supplier_currency: "USD",
+        });
+      }
+      const locked = Promise.withResolvers<void>();
+      blocker = db.begin(async (tx) => {
+        await tx`SELECT request_id FROM public.billing_holds
+          WHERE request_id = ${measured[0]!.request_id} FOR UPDATE`;
+        locked.resolve();
+        await unlock.promise;
+      });
+      await locked.promise;
+      const commits = measured.map((item) => limited.commitTerminal(item));
+      const outcomes = Promise.allSettled(commits);
+      expect(await commits[1]).toMatchObject({ ok: true, customer_atoms: "20" });
+      unlock.resolve();
+      await blocker;
+      const [original, unrelated] = await outcomes;
+      expect(unrelated).toMatchObject({
+        status: "fulfilled",
+        value: { ok: true, customer_atoms: "20", supplier_cost_atoms: "10" },
+      });
+      const recovered =
+        original?.status === "fulfilled"
+          ? original.value
+          : await limited.commitTerminal(measured[0]!);
+      expect(recovered).toMatchObject({
+        ok: true,
+        customer_atoms: "20",
+        supplier_cost_atoms: "10",
+      });
+      expect(await limited.commitTerminal(measured[0]!)).toMatchObject({
+        ok: true,
+        replayed: true,
+      });
+      expect(await f.ledger.auditConservation()).toMatchObject({
+        ok: true,
+        open_holds: 0,
+        unknown_holds: 0,
+      });
+    } finally {
+      unlock.resolve();
+      await blocker;
+      await limited.drain();
+      await limitedDb.close();
       await f.ledger.drain();
     }
   }));

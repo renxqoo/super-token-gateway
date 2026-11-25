@@ -42,6 +42,55 @@ test("adaptive MicroBatchQueue flushes immediately when idle and batches concurr
   await queue.drain();
 });
 
+test("symptom: separate arrivals in a sustained burst each open a durable batch", async () => {
+  const batches: number[][] = [];
+  const queue = new MicroBatchQueue<number, number>(
+    async (items) => {
+      batches.push(items);
+      return items;
+    },
+    64,
+    250,
+    1,
+    "collect-bursts",
+  );
+  expect(await queue.enqueue(1)).toBe(1);
+  await Promise.resolve();
+  const second = queue.enqueue(2);
+  await Bun.sleep(5);
+  const third = queue.enqueue(3);
+  expect(await Promise.all([second, third])).toEqual([2, 3]);
+  expect(batches).toEqual([[1], [2, 3]]);
+  await queue.drain();
+});
+
+test("symptom: an idle request waits behind the prior batch's timer", async () => {
+  const batches: number[][] = [];
+  const first = Promise.withResolvers<void>();
+  const queue = new MicroBatchQueue<number, number>(
+    async (items) => {
+      batches.push(items);
+      if (items.includes(1)) await first.promise;
+      return items;
+    },
+    64,
+    250,
+    2,
+  );
+  const a = queue.enqueue(1);
+  await Bun.sleep(0);
+  const b = queue.enqueue(2);
+  first.resolve();
+  await Promise.all([a, b]);
+  await Promise.resolve();
+  const c = queue.enqueue(3);
+  await Bun.sleep(5);
+  const flushed = batches.slice();
+  await queue.drain();
+  expect(await c).toBe(3);
+  expect(flushed).toEqual([[1], [2], [3]]);
+});
+
 test("compilePricing and calculateCompiledCostAtoms match calculateCost across safe, large, fractional, and duration usage", () => {
   const pricingInt: Pricing = {
     currency: "USD",

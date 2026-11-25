@@ -33,7 +33,8 @@ import {
   toCellRow,
   insertJournalLines,
   holdTemporarilyUnavailable,
-  isTransientPgConcurrencyError,
+  classifyLedgerStatementCancellation,
+  isRetryableLedgerTransactionError,
   expireLotsInMemory,
   type WalletRow,
   type LotRow,
@@ -115,7 +116,7 @@ export function createTransactionalHoldBatch(
     const createdWalletLeases: ActiveWalletLease[] = [];
     const createdSupplierLeases: ActiveSupplierLease[] = [];
 
-    await db.begin(async (tx) => {
+    const apply = async (tx: SQL) => {
       const batchStartedAt = Date.now();
       if (batchStartedAt >= pruneDemandAt) {
         for (const demand of [recentWalletHits, recentSupplierHits]) {
@@ -880,7 +881,8 @@ export function createTransactionalHoldBatch(
           ) AS u(id, account_id, currency, cell, remaining_atoms, expires_at)
         `;
       }
-    });
+    };
+    await db.begin(classifyLedgerStatementCancellation(apply));
 
     for (const lease of createdWalletLeases) leases.registerWallet(lease);
     for (const lease of createdSupplierLeases) leases.registerSupplier(lease);
@@ -898,7 +900,7 @@ export function createTransactionalHoldBatch(
         deferred.has(index) ? enqueueContended(items[index]!) : result,
       );
     } catch (error) {
-      if (!isTransientPgConcurrencyError(error)) throw error;
+      if (!isRetryableLedgerTransactionError(error)) throw error;
       return items.map((item) =>
         enqueueContended ? enqueueContended(item) : holdTemporarilyUnavailable(),
       );

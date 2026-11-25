@@ -70,6 +70,7 @@ export type WasmRuntimeExecutor = {
     input: Uint8Array,
     options: WasmInvokeOptions,
   ): Promise<Uint8Array>;
+  acceptsEgress?(): boolean;
   selfCheck?(): Promise<void>;
   stats?(): WasmExecutorStats;
   close(): void;

@@ -5,7 +5,9 @@ import { MicroBatchQueue } from "./micro-batch.ts";
 import { commitLeasedBatch, type FastCommitCandidate } from "./settlement-leased.ts";
 import { commitDirectBatch } from "./settlement-direct.ts";
 import {
+  isRetryableLedgerTransactionError,
   isTransientPgConcurrencyError,
+  LedgerStatementCancelled,
   postgresState,
   SETTLEMENT_LANES,
   walletLane,
@@ -73,8 +75,9 @@ export function createSettlementQueue(
         });
         for (const entry of fallback) directEntries.push(entry);
       } catch (error) {
+        const code = postgresState(error);
         const retryViaDirect =
-          postgresState(error)?.startsWith("23") || isTransientPgConcurrencyError(error);
+          code?.startsWith("23") || code === "57014" || isTransientPgConcurrencyError(error);
         for (const candidate of fastCandidates) {
           const wl = leases.walletById(candidate.meta.walletLeaseId);
           if (wl) leases.retireWalletLease(wl);
@@ -87,11 +90,20 @@ export function createSettlementQueue(
     }
 
     const bisectDeadline = performance.now() + 12_000;
-    async function commitDirect(entries: typeof directEntries): Promise<void> {
+    async function commitDirect(
+      entries: typeof directEntries,
+      parallelTimeoutSplit = true,
+    ): Promise<void> {
       try {
         const run = () => commitDirectBatch(db, leases.notifyDetachedLocal, entries, results);
         if (entries.length === 1) {
-          await withPgConcurrencyRetry(run, 3);
+          await withPgConcurrencyRetry(
+            run,
+            3,
+            (error) =>
+              isTransientPgConcurrencyError(error) ||
+              (error instanceof LedgerStatementCancelled && performance.now() < bisectDeadline),
+          );
         } else {
           await run().catch((error: unknown) => {
             const code = postgresState(error);
@@ -107,11 +119,17 @@ export function createSettlementQueue(
         const canBisect =
           entries.length > 1 &&
           (code?.startsWith("23") ||
-            (isTransientPgConcurrencyError(error) && performance.now() < bisectDeadline));
+            (isRetryableLedgerTransactionError(error) && performance.now() < bisectDeadline));
         if (canBisect) {
           const half = Math.floor(entries.length / 2);
-          await commitDirect(entries.slice(0, half));
-          await commitDirect(entries.slice(half));
+          const first = entries.slice(0, half);
+          const second = entries.slice(half);
+          if (parallelTimeoutSplit && error instanceof LedgerStatementCancelled) {
+            await Promise.all([commitDirect(first, false), commitDirect(second, false)]);
+          } else {
+            await commitDirect(first, parallelTimeoutSplit);
+            await commitDirect(second, parallelTimeoutSplit);
+          }
         } else {
           for (const { index } of entries) failures.set(index, error);
         }
@@ -127,13 +145,19 @@ export function createSettlementQueue(
   const batchCapacity = Math.max(maxBatchSize, 512);
   const queues = Array.from(
     { length: SETTLEMENT_LANES },
-    () => new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 1),
+    () => new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 1, "collect-bursts"),
   );
   const directQueues = Array.from(
     { length: SETTLEMENT_LANES },
-    () => new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 1),
+    () => new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 1, "collect-bursts"),
   );
-  const directFallback = new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 2);
+  const directFallback = new MicroBatchQueue(
+    runCommitBatch,
+    batchCapacity,
+    batchWindowMs,
+    2,
+    "collect-bursts",
+  );
   return {
     commitTerminal(input: CommitTerminalInput): Promise<CommitTerminalResult> {
       const hold = leases.holdById(input.request_id);

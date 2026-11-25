@@ -233,6 +233,66 @@ export async function detachHoldFromLeaseTx(
   };
 }
 
+export async function closeIdleWalletLeaseBatch(
+  db: SQL,
+  nodeId: string,
+  leaseIds: string[],
+): Promise<string[]> {
+  return db.begin(async (tx) => {
+    const locked = await tx<{ id: string }[]>`
+      SELECT id FROM public.wallet_leases
+      WHERE id = ANY(${leaseIds}::uuid[]) AND node_id = ${nodeId} AND state = 'ACTIVE'
+        AND remaining_atoms > 0 AND earliest_lot_expires_at IS NULL
+        AND jsonb_array_length(lot_allocations) = 1
+      ORDER BY id FOR UPDATE SKIP LOCKED
+    `;
+    if (locked.length === 0) return [];
+    const closed = await tx<{ id: string }[]>`
+      WITH idle AS MATERIALIZED (
+        SELECT DISTINCT ON (l.wallet_id) l.id, l.wallet_id, l.remaining_atoms,
+          (l.lot_allocations->0->>'lot_id')::uuid AS lot_id
+        FROM public.wallet_leases l
+        LEFT JOIN LATERAL (
+          SELECT true AS occupied FROM public.billing_holds h
+          WHERE h.wallet_lease_id = l.id AND h.state IN ('HELD', 'UNKNOWN')
+          LIMIT 1
+        ) h ON true
+        WHERE l.id = ANY(${locked.map(({ id }) => id)}::uuid[])
+          AND (l.lot_allocations->0->>'amount_atoms')::numeric = l.remaining_atoms
+          AND h.occupied IS NULL
+        ORDER BY l.wallet_id, l.id
+      ), wallets AS MATERIALIZED (
+        SELECT i.id, i.wallet_id, i.lot_id, i.remaining_atoms
+        FROM idle i JOIN public.wallets w ON w.id = i.wallet_id
+        WHERE w.reserved_atoms >= i.remaining_atoms
+          AND w.freeze_reason IS NULL AND NOT w.manual_frozen AND NOT w.evidence_disputed
+          AND w.debt_atoms + w.credit_reserved_atoms <= w.credit_limit_atoms
+        ORDER BY w.id FOR NO KEY UPDATE OF w SKIP LOCKED
+      ), releasable AS MATERIALIZED (
+        SELECT w.id, w.wallet_id, w.lot_id, w.remaining_atoms
+        FROM wallets w JOIN public.wallet_lots l ON l.id = w.lot_id AND l.wallet_id = w.wallet_id
+        WHERE l.expires_at IS NULL AND l.reserved_atoms >= w.remaining_atoms
+        ORDER BY l.id FOR NO KEY UPDATE OF l SKIP LOCKED
+      ), credit_lots AS (
+        UPDATE public.wallet_lots l
+        SET available_atoms = l.available_atoms + r.remaining_atoms,
+            reserved_atoms = l.reserved_atoms - r.remaining_atoms
+        FROM releasable r WHERE l.id = r.lot_id
+      ), credit_wallets AS (
+        UPDATE public.wallets w
+        SET available_atoms = w.available_atoms + r.remaining_atoms,
+            reserved_atoms = w.reserved_atoms - r.remaining_atoms
+        FROM releasable r WHERE w.id = r.wallet_id
+      )
+      UPDATE public.wallet_leases l
+      SET state = 'CLOSED', remaining_atoms = 0, lot_allocations = '[]'::jsonb, updated_at = now()
+      FROM releasable r WHERE l.id = r.id
+      RETURNING l.id
+    `;
+    return closed.map(({ id }) => id);
+  });
+}
+
 export async function closeWalletLease(
   db: SQL,
   leaseId: string,

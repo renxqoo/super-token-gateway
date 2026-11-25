@@ -192,6 +192,9 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     batchWindowMs: config.microBatchWindowMs,
     maxBatchSize: config.microBatchMaxSize,
     maxBatchConcurrency: 4,
+    ...(config.walletLeaseIdleReleaseMs === undefined
+      ? {}
+      : { walletLeaseIdleReleaseMs: config.walletLeaseIdleReleaseMs }),
     nodeId: cluster.nodeId,
     onLeaseRenewalFailure() {
       metrics.leaseRenewalFailures++;

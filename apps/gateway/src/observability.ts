@@ -174,6 +174,7 @@ export class GatewayMetrics {
   waitingFirstText = 0;
   traceCaptureFailures = 0;
   webhookAdmissionRejections = 0;
+  wasmAdmissionRejections = 0;
   pluginIntegrityFailures = 0;
   pluginPlatformAbsorbTotal = 0;
   pluginPlatformAbsorbAtoms = 0n;
@@ -672,6 +673,7 @@ export class GatewayMetrics {
       `gateway_sse_waiting_first_text ${this.waitingFirstText}`,
       `gateway_trace_capture_failures_total ${this.traceCaptureFailures}`,
       `gateway_webhook_admission_rejections_total ${this.webhookAdmissionRejections}`,
+      `gateway_wasm_admission_rejections_total ${this.wasmAdmissionRejections}`,
     );
     return `${lines.join("\n")}\n`;
   }

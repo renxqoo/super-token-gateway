@@ -21,7 +21,7 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
   const orm = createDrizzle(db);
   const batchWindowMs = options.batchWindowMs ?? 2;
   const maxBatchSize = options.maxBatchSize ?? 128;
-  const leases = createLeaseManager(db, options);
+  const leases = createLeaseManager(db, options, maxBatchSize);
   const acquisition = createHoldAcquirer(
     db,
     leases,

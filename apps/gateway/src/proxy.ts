@@ -1409,7 +1409,7 @@ export async function handleInferenceRequest(
       releaseOutputAdmission = undefined;
       if (!isConversationalOperation(operation) || !candidate.route.plugin_pipeline.length)
         return undefined;
-      const admission = deps.pluginEngine.admitOutputWebhooks(
+      const admission = deps.pluginEngine.admitOutputPolicies(
         candidate.route.plugin_pipeline,
         snap.plugins,
         requestId,
@@ -1434,8 +1434,13 @@ export async function handleInferenceRequest(
         responseHeaders(priorId, trace),
       );
     };
-    const rejectOutputPolicy = async (failure: { code: string; message: string }) => {
-      deps.metrics.webhookAdmissionRejections++;
+    const rejectOutputPolicy = async (failure: {
+      kind: "WASM" | "WEBHOOK";
+      code: string;
+      message: string;
+    }) => {
+      if (failure.kind === "WASM") deps.metrics.wasmAdmissionRejections++;
+      else deps.metrics.webhookAdmissionRejections++;
       await finalizeHold(anyUnknownAttempt ? "unknown" : "release");
       const classified = classifyPluginBlock("host_capacity", undefined, failure.message);
       emitAccessLog(classified.status, failure.code);

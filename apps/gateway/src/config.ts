@@ -64,6 +64,7 @@ export type GatewayConfig = {
   snapshotPollMs: number;
   microBatchWindowMs: number;
   microBatchMaxSize: number;
+  walletLeaseIdleReleaseMs?: number;
   wasmLibPath?: string;
   contentWasmPoolSize?: number;
   providerWasmPoolSize?: number;
@@ -363,6 +364,7 @@ export function loadConfigFromEnv(
     snapshotPollMs: intFromEnv(env, "SNAPSHOT_POLL_MS", 2000, production ? 1 : 0),
     microBatchWindowMs: intFromEnv(env, "MICRO_BATCH_WINDOW_MS", 3, 0),
     microBatchMaxSize: intFromEnv(env, "MICRO_BATCH_MAX_SIZE", 256),
+    walletLeaseIdleReleaseMs: intFromEnv(env, "WALLET_LEASE_IDLE_RELEASE_MS", 450, 0),
     ...(env.STG_WASMTIME_LIB ? { wasmLibPath: env.STG_WASMTIME_LIB } : {}),
     contentWasmPoolSize: intFromEnv(env, "CONTENT_WASM_POOL_SIZE", 4, 1, 16),
     providerWasmPoolSize: intFromEnv(env, "PROVIDER_WASM_POOL_SIZE", 4, 1, 16),

@@ -30,7 +30,7 @@
    - 23 张严格受控表（含 `wallet_leases` / `supplier_leases` PG 持久化分片租约），PostgreSQL 强约束（批次守恒 `CHECK`、不可变凭证触发器、`DEFERRABLE` 复式借贷平衡触发器）。
    - 多币种/积分（`PTS`/`USD`/`CNY`）`NUMERIC(38,0)` 原子计量，精确有理数 `BigInt` 计价与单次向上取整。
    - 多批次（`CASH`/`GRANT`）优先级与严格过期，过期预扣余量及租约内过期批次永不复活；退款按逆序归还批次；有界授信与自动收债冻结；16 分片供应商资金池与 `UNKNOWN` 预扣保守保留。
-   - **自适应 PG 持久化分片租约 + 9 表单 CTE 原子提交**：热点钱包与供应商分片在 PG 中按需预留租约，热路径 `acquireHold` 仅执行单条 `billing_holds` 持久化写入（先落盘再调用上游，`SIGKILL` 零丢账），`commitTerminal` 以全局升序 `FOR NO KEY UPDATE` 锁序在单条 9 表 Data-Modifying CTE 内原子完成结算、复式凭证（每笔 `billing_charges` 绑定 `customer_journal_id`/`supplier_journal_id` 可追溯）与 Outbox 写入；空闲 250 ms 自动退租，节点异常宕机由 Worker `sweepExpiredLeases` 全量回收归零。
+   - **自适应 PG 持久化分片租约 + 9 表单 CTE 原子提交**：热点钱包与供应商分片在 PG 中按需预留租约，热路径 `acquireHold` 仅执行单条 `billing_holds` 持久化写入（先落盘再调用上游，`SIGKILL` 零丢账），`commitTerminal` 以全局升序 `FOR NO KEY UPDATE` 锁序在单条 9 表 Data-Modifying CTE 内原子完成结算、复式凭证（每笔 `billing_charges` 绑定 `customer_journal_id`/`supplier_journal_id` 可追溯）与 Outbox 写入；空闲租约自动归还，Gateway 钱包退租窗口由 `WALLET_LEASE_IDLE_RELEASE_MS` 配置，节点异常宕机由 Worker `sweepExpiredLeases` 全量回收归零。
    - 并发 `Idempotency-Key` 在 `HELD` 在途期返回 `409 idempotency_in_progress`，杜绝重复派发上游与双扣。
    - **零明文落库**：Prompt、回复文本与工具内容永不写入数据库、日志或 Outbox 事件。
 2. **智能路由与动态故障切换（`SmartRouter`）**：

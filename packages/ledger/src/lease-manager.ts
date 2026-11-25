@@ -1,5 +1,6 @@
 import type { SQL } from "bun";
 import {
+  closeIdleWalletLeaseBatch,
   closeSupplierLease,
   closeWalletLease,
   type ActiveSupplierLease,
@@ -17,6 +18,7 @@ export type LeaseOptions = {
   nodeId?: string;
   enableLeases?: boolean;
   leaseIdleReleaseMs?: number;
+  walletLeaseIdleReleaseMs?: number;
   leaseTtlMs?: number;
   onLeaseRenewalFailure?: () => void;
 };
@@ -31,10 +33,11 @@ export type FastHoldRequest = {
 
 export type LeaseManager = ReturnType<typeof createLeaseManager>;
 
-export function createLeaseManager(db: SQL, options: LeaseOptions) {
+export function createLeaseManager(db: SQL, options: LeaseOptions, walletCloseBatchSize: number) {
   const nodeId = options.nodeId ?? crypto.randomUUID();
   const leaseEnabled = options.enableLeases ?? true;
   const leaseIdleReleaseMs = options.leaseIdleReleaseMs ?? LEASE_IDLE_RELEASE_MS;
+  const walletLeaseIdleReleaseMs = options.walletLeaseIdleReleaseMs ?? leaseIdleReleaseMs;
   const leaseTtlMs = options.leaseTtlMs ?? LEASE_TTL_MS;
   let draining = false;
   const activeWalletLeases = new Map<string, ActiveWalletLease>();
@@ -133,21 +136,55 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
     meta.channelId = nextChannelId;
   }
 
+  function forgetClosedWalletLease(leaseId: string): void {
+    const local = walletLeasesById.get(leaseId);
+    if (!local) return;
+    retireWalletLease(local);
+    closingWalletLeases.delete(local);
+    walletLeasesById.delete(leaseId);
+  }
+
   async function closeWalletLeaseInPg(leaseId: string, expiredOnly = false): Promise<boolean> {
     if (releasingLeaseIds.has(leaseId)) return false;
     releasingLeaseIds.add(leaseId);
     try {
       const closed = await closeWalletLease(db, leaseId, expiredOnly);
       if (closed === null || (expiredOnly && !closed)) return false;
-      const local = walletLeasesById.get(leaseId);
-      if (local) {
-        retireWalletLease(local);
-        closingWalletLeases.delete(local);
-        walletLeasesById.delete(leaseId);
-      }
+      forgetClosedWalletLease(leaseId);
       return closed;
     } finally {
       releasingLeaseIds.delete(leaseId);
+    }
+  }
+
+  async function closeIdleWalletLeases(items: ActiveWalletLease[]): Promise<void> {
+    if (items.length < 2 || walletCloseBatchSize < 2) return;
+    const byWallet = new Map<string, ActiveWalletLease>();
+    for (const lease of items) {
+      if (
+        lease.inFlightHolds === 0 &&
+        lease.earliestLotExpiresAtMs === null &&
+        !releasingLeaseIds.has(lease.leaseId)
+      ) {
+        byWallet.set(lease.walletId, lease);
+      }
+    }
+    const eligible = [...byWallet.values()];
+    for (let i = 0; i < eligible.length; i += walletCloseBatchSize) {
+      const ids = eligible
+        .slice(i, i + walletCloseBatchSize)
+        .map((lease) => lease.leaseId)
+        .filter((id) => !releasingLeaseIds.has(id));
+      if (ids.length < 2) continue;
+      for (const id of ids) releasingLeaseIds.add(id);
+      try {
+        const closed = await closeIdleWalletLeaseBatch(db, nodeId, ids);
+        for (const id of closed) forgetClosedWalletLease(id);
+      } catch {
+        void 0;
+      } finally {
+        for (const id of ids) releasingLeaseIds.delete(id);
+      }
     }
   }
 
@@ -182,7 +219,8 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
       if (
         forceReleaseAll ||
         lotNearExpiry ||
-        (wl.inFlightHolds === 0 && nowMs - wl.lastUsedAtMs >= leaseIdleReleaseMs)
+        (wl.inFlightHolds === 0 &&
+          (nowMs >= wl.expiresAtMs || nowMs - wl.lastUsedAtMs >= walletLeaseIdleReleaseMs))
       ) {
         retireWalletLease(wl);
       } else if (wl.inFlightHolds > 0 && wl.expiresAtMs - nowMs < LEASE_RENEW_MARGIN_MS) {
@@ -282,9 +320,13 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
       );
     }
 
-    await closeInParallel(wlToClose, async (wl) => {
-      await closeWalletLeaseInPg(wl.leaseId).catch(() => undefined);
-    });
+    await closeIdleWalletLeases(wlToClose);
+    await closeInParallel(
+      wlToClose.filter((wl) => closingWalletLeases.has(wl)),
+      async (wl) => {
+        await closeWalletLeaseInPg(wl.leaseId).catch(() => undefined);
+      },
+    );
     await closeInParallel(slToClose, async (sl) => {
       await closeSupplierLeaseInPg(sl.leaseId).catch(() => undefined);
     });
@@ -300,7 +342,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions) {
           maintenance = undefined;
         });
       },
-      Math.max(100, Math.min(leaseIdleReleaseMs, 150)),
+      Math.max(100, Math.min(walletLeaseIdleReleaseMs, leaseIdleReleaseMs, 150)),
     );
     maintenanceTimer.unref();
   }

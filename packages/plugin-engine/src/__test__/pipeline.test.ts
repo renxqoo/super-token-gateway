@@ -764,6 +764,7 @@ test("WASM invocations expire while waiting behind a busy worker and reject miss
   const executor = createWasmtimeExecutor({
     maxMemoryBytes,
     poolSize: 1,
+    maxPending: 1,
     minTimeoutMs: 25,
     maxTimeoutMs: 150,
   });
@@ -778,15 +779,26 @@ test("WASM invocations expire while waiting behind a busy worker and reject miss
     const busy = executor
       .invoke("loop", "on_response", input, { maxMemoryBytes, fuelBudget: 250_000_000 })
       .catch((error: unknown) => error);
-    await expect(
-      executor.invoke("fast", "on_response", input, { maxMemoryBytes, fuelBudget: 250_000 }),
-    ).rejects.toThrow("WASM queue timed out");
+    const queued = executor.invoke("fast", "on_response", input, {
+      maxMemoryBytes,
+      fuelBudget: 250_000,
+    });
+    expect(executor.acceptsEgress?.()).toBe(false);
+    const rejected = executor.invoke("fast", "on_response", input, {
+      maxMemoryBytes,
+      fuelBudget: 250_000,
+    });
+    await Promise.all([
+      expect(rejected).rejects.toMatchObject({ code: "wasm_queue_full" }),
+      expect(queued).rejects.toThrow("WASM queue timed out"),
+    ]);
     expect(await busy).toBeInstanceOf(Error);
     const fastOut = await executor.invoke("fast", "on_response", input, {
       maxMemoryBytes,
       fuelBudget: 1_500_000,
     });
     expect(fastOut).toBeInstanceOf(Uint8Array);
+    expect(executor.acceptsEgress?.()).toBe(true);
   } finally {
     executor.close?.();
   }

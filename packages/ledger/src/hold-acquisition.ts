@@ -5,7 +5,8 @@ import { MicroBatchQueue } from "./micro-batch.ts";
 import { createTransactionalHoldBatch } from "./transactional-holds.ts";
 import {
   holdTemporarilyUnavailable,
-  isTransientPgConcurrencyError,
+  classifyLedgerStatementCancellation,
+  isRetryableLedgerTransactionError,
   parseAtoms,
   SETTLEMENT_LANES,
   walletLane,
@@ -79,7 +80,7 @@ export function createHoldAcquirer(
     };
     let admitted: Set<string>;
     try {
-      const rows = await db.begin(async (tx) => {
+      const apply = async (tx: SQL) => {
         const [locked] = await tx<
           {
             wallet_lease_ids: string[];
@@ -135,10 +136,15 @@ export function createHoldAcquirer(
             )
           ), active_wallet_leases AS MATERIALIZED (
             SELECT l.id
-            FROM public.wallet_leases l
+            FROM unnest(${locked.wallet_lease_ids}::uuid[]) AS acquired(id)
+            CROSS JOIN LATERAL (
+              SELECT wl.id, wl.wallet_id, wl.state, wl.expires_at, wl.earliest_lot_expires_at
+              FROM public.wallet_leases wl
+              WHERE wl.id = acquired.id
+              LIMIT 1
+            ) l
             JOIN public.wallets w ON w.id = l.wallet_id
-            WHERE l.id = ANY(${locked.wallet_lease_ids}::uuid[])
-              AND l.state = 'ACTIVE' AND l.expires_at > statement_timestamp()
+            WHERE l.state = 'ACTIVE' AND l.expires_at > statement_timestamp()
               AND (l.earliest_lot_expires_at IS NULL OR l.earliest_lot_expires_at > statement_timestamp())
               AND w.freeze_reason IS NULL
               AND CASE WHEN w.reserved_atoms >= w.debt_atoms THEN true
@@ -172,10 +178,11 @@ export function createHoldAcquirer(
           JOIN active_supplier_leases s ON s.id = u.supplier_lease_id
           RETURNING request_id
         `;
-      });
+      };
+      const rows = await db.begin(classifyLedgerStatementCancellation(apply));
       admitted = new Set(rows.map((row) => String(row.request_id)));
     } catch (err) {
-      if (isTransientPgConcurrencyError(err)) {
+      if (isRetryableLedgerTransactionError(err)) {
         if (!retry) return items.map((item) => contendedFastQueue.enqueue(item));
         return items.map((item) => {
           restorePendingReservation(item);
@@ -247,6 +254,7 @@ export function createHoldAcquirer(
         maxBatchSize,
         batchWindowMs,
         1,
+        "collect-bursts",
       ),
   );
   const fastHoldQueues = Array.from(
@@ -257,6 +265,7 @@ export function createHoldAcquirer(
         Math.max(maxBatchSize, 512),
         batchWindowMs,
         1,
+        "collect-bursts",
       ),
   );
 

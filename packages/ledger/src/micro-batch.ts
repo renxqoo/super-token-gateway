@@ -6,6 +6,7 @@ export class MicroBatchQueue<I, O> {
   }[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
   private microtaskScheduled = false;
+  private lastArrivalAt = -Infinity;
   private inflight = 0;
   private drainWaiters: (() => void)[] = [];
 
@@ -14,9 +15,16 @@ export class MicroBatchQueue<I, O> {
     private readonly maxBatch: number,
     private readonly waitMs: number,
     private readonly maxConcurrency: number,
+    private readonly mode: "immediate" | "collect-bursts" = "immediate",
   ) {}
 
   enqueue(input: I): Promise<O> {
+    let burst = false;
+    if (this.mode === "collect-bursts" && this.waitMs > 0) {
+      const now = performance.now();
+      burst = now - this.lastArrivalAt <= this.waitMs;
+      this.lastArrivalAt = now;
+    }
     return new Promise<O>((resolve, reject) => {
       this.pending.push({ input, resolve, reject });
       if (this.pending.length >= this.maxBatch) {
@@ -25,7 +33,7 @@ export class MicroBatchQueue<I, O> {
           this.timer = undefined;
         }
         this.pump();
-      } else if (this.inflight === 0) {
+      } else if (this.inflight === 0 && !burst) {
         if (!this.microtaskScheduled) {
           this.microtaskScheduled = true;
           queueMicrotask(() => {
@@ -39,7 +47,7 @@ export class MicroBatchQueue<I, O> {
             }
           });
         }
-      } else if (this.inflight < this.maxConcurrency && !this.timer) {
+      } else if (!this.timer && (burst || this.inflight < this.maxConcurrency)) {
         if (this.waitMs <= 0) {
           this.pump();
         } else {
@@ -76,8 +84,8 @@ export class MicroBatchQueue<I, O> {
         )
         .finally(() => {
           this.inflight--;
-          if (this.pending.length > 0) this.pump();
-          else this.checkDrained();
+          if (this.pending.length === 0) this.checkDrained();
+          else if (this.mode === "immediate" || !this.timer) this.pump();
         });
     }
   }
