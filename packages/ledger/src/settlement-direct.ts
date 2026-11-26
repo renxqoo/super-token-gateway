@@ -1,5 +1,5 @@
 import type { SQL } from "bun";
-import type { Usage } from "@gateway/kernel";
+import { DomainError, type Usage } from "@gateway/kernel";
 import type { ChargeLotAllocation, CommitTerminalResult, SupplierHoldEntry } from "./types.ts";
 import type { LeaseManager } from "./lease-manager.ts";
 import {
@@ -190,7 +190,11 @@ export async function applyDirectSettlements(
     } catch (err) {
       results[i] = {
         ok: false,
-        code: "pricing_error",
+        code:
+          err instanceof DomainError &&
+          (err.code === "invalid_upstream_usage" || err.code === "usage_alias_conflict")
+            ? err.code
+            : "pricing_error",
         message: err instanceof Error ? err.message : "Pricing error",
       };
       continue;

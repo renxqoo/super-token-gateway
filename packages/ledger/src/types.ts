@@ -473,7 +473,13 @@ export type CommitTerminalResult =
     }
   | {
       ok: false;
-      code: "hold_not_found" | "invalid_state" | "pricing_error" | "currency_mismatch";
+      code:
+        | "hold_not_found"
+        | "invalid_state"
+        | "invalid_upstream_usage"
+        | "usage_alias_conflict"
+        | "pricing_error"
+        | "currency_mismatch";
       message: string;
     };
 

@@ -40,11 +40,12 @@ export function buildRealMatchWasm(
   hooks: readonly string[],
   needle: string,
   matchReply: Record<string, unknown>,
+  defaultReply: Record<string, unknown> = { action: "PASS" },
 ): Uint8Array {
   const enc = new TextEncoder();
   const needleBytes = [...enc.encode(needle)];
   const matchBytes = [...enc.encode(JSON.stringify(matchReply))];
-  const passBytes = [...enc.encode(JSON.stringify({ action: "PASS" }))];
+  const passBytes = [...enc.encode(JSON.stringify(defaultReply))];
   const needleOff = 64;
   const matchOff = 512;
   const passOff = 1536;

@@ -20,10 +20,12 @@ const OPERATOR_TOKEN = "foundation-admin-token-01234567890000000000000";
 let adminDb: SQL;
 let db: SQL;
 let gateway: ReturnType<typeof createGatewayRuntime>;
+let gatewayConfig: GatewayConfig;
 let mockServer: ReturnType<typeof Bun.serve>;
 let mockUrl = "";
 
 const videoTaskStatuses = new Map<string, Record<string, unknown>>();
+const videoPollBarriers = new Map<string, () => Promise<void>>();
 let receivedSecret = "";
 let videoSubmitCount = 0;
 
@@ -85,6 +87,7 @@ beforeAll(async () => {
         const tid = url.searchParams.get("task_id") ?? "";
         const state = videoTaskStatuses.get(tid);
         if (!state) return Response.json({ status: "Fail", error_code: 9999 }, { status: 404 });
+        await videoPollBarriers.get(tid)?.();
         return Response.json(state);
       }
       return new Response("Not Found", { status: 404 });
@@ -97,7 +100,7 @@ beforeAll(async () => {
   db = createDatabase(targetUrl.toString(), 16);
   await migrate(db);
 
-  const config: GatewayConfig = {
+  gatewayConfig = {
     mode: "gateway",
     host: "127.0.0.1",
     port: 0,
@@ -121,7 +124,7 @@ beforeAll(async () => {
     maxActiveAsyncTasksPerBillingAccount: 2,
     maxAutoRefundsPerBillingAccount24h: 2,
   };
-  gateway = createGatewayRuntime({ config, db, wasmExecutor: null });
+  gateway = createGatewayRuntime({ config: gatewayConfig, db, wasmExecutor: null });
   await gateway.start();
 });
 
@@ -464,8 +467,8 @@ test("Phase 1: channel secret preservation, api_key attribution & LIFETIME/DAILY
     );
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
   };
-  const pollVideo = async (rawKey: string, taskId: string) => {
-    const res = await gateway.fetchPublic(
+  const pollVideo = async (rawKey: string, taskId: string, node = gateway) => {
+    const res = await node.fetchPublic(
       new Request(`http://localhost/v1/videos/${taskId}`, {
         method: "GET",
         headers: { authorization: `Bearer ${rawKey}` },
@@ -510,12 +513,27 @@ test("Phase 1: channel secret preservation, api_key attribution & LIFETIME/DAILY
     `/internal/v1/wallets/${projA.id}?currency=USD`,
   );
   videoTaskStatuses.set(v2Up, { status: "Fail", error_code: 5001 });
-  const [v2Poll1, v2Poll2] = await Promise.all([
-    pollVideo(keyUnlimited.key!, v2Id),
-    pollVideo(keyUnlimited.key!, v2Id),
-  ]);
-  expect(v2Poll1.status).toBe(200);
-  expect(v2Poll2.status).toBe(200);
+  const peer = createGatewayRuntime({ config: gatewayConfig, wasmExecutor: null });
+  const bothPollsReachedUpstream = Promise.withResolvers<void>();
+  let upstreamPolls = 0;
+  videoPollBarriers.set(v2Up, () => {
+    if (++upstreamPolls === 2) bothPollsReachedUpstream.resolve();
+    return bothPollsReachedUpstream.promise;
+  });
+  try {
+    await peer.start();
+    const results = await Promise.all([
+      pollVideo(keyUnlimited.key!, v2Id),
+      pollVideo(keyUnlimited.key!, v2Id, peer),
+    ]);
+    expect(upstreamPolls).toBe(2);
+    expect(results.map((result) => result.status)).toEqual([200, 200]);
+    expect(results.map((result) => result.body.status)).toEqual(["FAILED", "FAILED"]);
+  } finally {
+    bothPollsReachedUpstream.resolve();
+    videoPollBarriers.delete(v2Up);
+    await peer.close(2000);
+  }
   const v2Final = await pollVideo(keyUnlimited.key!, v2Id);
   expect(v2Final.body.status).toBe("FAILED");
   expect(v2Final.body.failure_category).toBe("UPSTREAM_SYSTEM");

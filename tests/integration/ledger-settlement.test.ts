@@ -13,6 +13,103 @@ import {
 import migrationManifest from "../../packages/ledger/src/migrations/manifest.json";
 import { withLedgerDb, seedFixture } from "./ledger-fixture.ts";
 
+test.each([
+  ["without a total or the other TTL", { cache_write_5m_tokens: "3" }, "invalid_upstream_usage"],
+  [
+    "with a TTL detail greater than the total",
+    { cache_write_tokens: "0", cache_write_1h_tokens: "3" },
+    "usage_alias_conflict",
+  ],
+] as const)(
+  "symptom: aggregate cache settlement charges usage %s before correction",
+  (_, usage, code) =>
+    withLedgerDb(async (db) => {
+      const f = await seedFixture(db);
+      const customer = await f.catalog.createPriceVersion({
+        side: "CUSTOMER",
+        currency: "PTS",
+        basis: "PROVIDER_USAGE",
+        rates: { cache_write_tokens: { numerator: "3", denominator: "1" } },
+      });
+      const supplier = await f.catalog.createPriceVersion({
+        side: "SUPPLIER",
+        currency: "USD",
+        basis: "PROVIDER_USAGE",
+        rates: { cache_write_tokens: { numerator: "2", denominator: "1" } },
+      });
+      await f.ledger.creditWallet({
+        billing_account_id: f.billingAccount.id,
+        currency: "PTS",
+        external_ref: "aggregate-cache-write-test",
+        amount_atoms: "100",
+        kind: "CASH",
+      });
+      const requestId = crypto.randomUUID();
+      const attemptId = crypto.randomUUID();
+      expect(
+        await f.ledger.acquireHold({
+          request_id: requestId,
+          attempt_id: attemptId,
+          billing_account_id: f.billingAccount.id,
+          currency: "PTS",
+          operation: "chat",
+          model: "gpt-4o",
+          idempotency_key: null,
+          fingerprint: "aggregate-cache-write",
+          customer_atoms: "30",
+          supplier_account_id: f.accountA.id,
+          supplier_channel_id: f.channelA.id,
+          supplier_currency: "USD",
+          supplier_atoms: "20",
+          expires_at: new Date(Date.now() + 30_000).toISOString(),
+        }),
+      ).toMatchObject({ ok: true, replayed: false });
+      const terminal = {
+        request_id: requestId,
+        selected_attempt_id: attemptId,
+        channel_id: f.channelA.id,
+        billing_price_id: customer.id,
+        cost_version_id: supplier.id,
+        billing_pricing: { currency: "PTS", rates: customer.rates },
+        billing_basis: "PROVIDER_USAGE",
+        supplier_pricing: { currency: "USD", rates: supplier.rates },
+        supplier_currency: "USD",
+      } as const;
+
+      expect(await f.ledger.commitTerminal({ ...terminal, usage })).toMatchObject({
+        ok: false,
+        code,
+      });
+      expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
+        available_atoms: "70",
+        reserved_atoms: "30",
+        spent_atoms: "0",
+      });
+      const complete = {
+        ...terminal,
+        usage: { cache_write_5m_tokens: "3", cache_write_1h_tokens: "2" },
+      };
+      expect(await f.ledger.commitTerminal(complete)).toMatchObject({
+        ok: true,
+        replayed: false,
+        customer_atoms: "15",
+        supplier_cost_atoms: "10",
+      });
+      expect(await f.ledger.commitTerminal(complete)).toMatchObject({
+        ok: true,
+        replayed: true,
+        customer_atoms: "15",
+        supplier_cost_atoms: "10",
+      });
+      expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
+        available_atoms: "85",
+        reserved_atoms: "0",
+        spent_atoms: "15",
+      });
+      expect((await f.ledger.auditConservation()).ok).toBe(true);
+    }),
+);
+
 test("G1.3 100 concurrent micro-batched holds on one single hot wallet have zero 55P03 errors and exact conservation", () =>
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);

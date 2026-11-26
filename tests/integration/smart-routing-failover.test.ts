@@ -5,8 +5,77 @@ import { fakeUpstream, makeConfig, db, setup } from "./smart-routing-fixture.ts"
 import { registerRoutingFixture } from "./smart-routing-fixture.ts";
 import { registerDiagnosticsCases } from "./stream-diagnostics-cases.ts";
 import { registerFailoverCases } from "./channel-failover-cases.ts";
+import { registerAnthropicStreamCases } from "./anthropic-stream-cases.ts";
 
 registerRoutingFixture();
+registerAnthropicStreamCases();
+
+test("a failed SSE releases the only billing account slot while its hold awaits reconciliation", async () => {
+  const source = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
+  const encoder = new TextEncoder();
+  const upstream = fakeUpstream("single-stream-slot", {
+    streamFrames: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"id":"slot","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
+          ),
+        );
+        source.resolve(controller);
+      },
+    }),
+  });
+  const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    await runtime.start();
+    const fixture = await setup(runtime, [upstream], { billingConcurrency: 1 });
+    try {
+      const active = await fixture.chat(true);
+      expect(active.status).toBe(200);
+      reader = active.body!.getReader();
+      const decoder = new TextDecoder();
+      expect(decoder.decode((await reader.read()).value)).toContain('"content":"partial"');
+
+      const rejected = await fixture.chat();
+      expect(rejected.status).toBe(429);
+      expect(await rejected.json()).toMatchObject({ error: { code: "rate_limit_concurrency" } });
+      expect(upstream.calls()).toBe(1);
+      expect(await fixture.holdsByState()).toEqual({ HELD: 1 });
+
+      const controller = await source.promise;
+      controller.enqueue(
+        encoder.encode('event: error\ndata: {"error":{"message":"interrupted"}}\n\n'),
+      );
+      controller.close();
+      let terminal = "";
+      for (let result = await reader.read(); !result.done; result = await reader.read()) {
+        terminal += decoder.decode(result.value, { stream: true });
+      }
+      expect(terminal).toContain("provider_stream_error");
+      expect(terminal).not.toContain("data: [DONE]");
+      await fixture.settle();
+      expect(await fixture.holdsByState()).toEqual({ UNKNOWN: 1 });
+
+      upstream.set({});
+      const retry = await fixture.chat();
+      expect(retry.status).toBe(200);
+      expect(await retry.json()).toMatchObject({
+        choices: [{ message: { content: "single-stream-slot" } }],
+      });
+      expect(upstream.calls()).toBe(2);
+      expect(await fixture.charges()).toEqual({ n: 1, u: 1, atoms: "15" });
+      expect(await fixture.holdsByState()).toEqual({ SETTLED: 1, UNKNOWN: 1 });
+    } finally {
+      await reader?.cancel().catch(() => undefined);
+      reader?.releaseLock();
+      await fixture.resolveUnknownHolds();
+    }
+  } finally {
+    upstream.server.stop(true);
+    await runtime.close();
+  }
+});
 
 test("media SSE previously exposed success on incomplete or unmetered streams", async () => {
   const up = fakeUpstream("media-terminal");
@@ -223,6 +292,131 @@ test("chat finish and cache usage sharing the final frame survive through respon
     await up.server.stop(true);
   }
 });
+
+test("chat bills the usage-only trailer after the finish frame and preserves it on the wire", async () => {
+  const requestedUsage: unknown[] = [];
+  const upstream = fakeUpstream("usage-trailer", {
+    async respond(request) {
+      requestedUsage.push((await request.json()).stream_options);
+      return new Response(
+        [
+          'data: {"id":"x","model":"m","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}\n\n',
+          'data: {"id":"x","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+          'data: {"id":"x","model":"m","choices":[],"usage":{"prompt_tokens":13,"completion_tokens":7,"total_tokens":20,"prompt_tokens_details":{"cached_tokens":5}}}\n\n',
+          "data: [DONE]\n\n",
+        ].join(""),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+  const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+  try {
+    await runtime.start();
+    const { chat, charges } = await setup(runtime, [upstream], { cachedInputPrice: true });
+    const response = await chat(true);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toStartWith("text/event-stream");
+    const frames = (await response.text()).trimEnd().split("\n\n");
+    expect(requestedUsage).toEqual([{ include_usage: true }]);
+    expect(frames).toHaveLength(4);
+    expect(frames[0]).toContain('"content":"answer"');
+    expect(frames[1]).toContain('"finish_reason":"stop"');
+    expect(JSON.parse(frames[2]!.slice("data: ".length))).toMatchObject({
+      choices: [],
+      usage: {
+        prompt_tokens: 13,
+        completion_tokens: 7,
+        prompt_tokens_details: { cached_tokens: 5 },
+      },
+    });
+    expect(frames[3]).toBe("data: [DONE]");
+    const [charge] =
+      await db`SELECT usage FROM public.billing_charges WHERE request_id = ${response.headers.get("x-request-id")}`;
+    expect(charge?.usage).toEqual({
+      input_tokens: "8",
+      output_tokens: "7",
+      cached_input_tokens: "5",
+    });
+    expect(await charges()).toEqual({ n: 1, u: 1, atoms: "25" });
+  } finally {
+    upstream.server.stop(true);
+    await runtime.close();
+  }
+});
+
+test.each(["commits", "fails"] as const)(
+  "chat with settlement pending sends text before the ledger %s and sends the terminal outcome afterward",
+  async (settlement) => {
+    const upstream = fakeUpstream("settlement-gate", {
+      streamFrames: [
+        'data: {"id":"x","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}\n\n',
+        'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7}}\n\n',
+        "data: [DONE]\n\n",
+      ].join(""),
+    });
+    const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+    const commitStarted = Promise.withResolvers<void>();
+    const allowCommit = Promise.withResolvers<void>();
+    const commit = runtime.ledger.commitTerminal;
+    runtime.ledger.commitTerminal = async (input) => {
+      commitStarted.resolve();
+      await allowCommit.promise;
+      if (settlement === "fails")
+        throw new Error("Injected ledger failure before writing the charge");
+      return commit(input);
+    };
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      await runtime.start();
+      const fixture = await setup(runtime, [upstream]);
+      const response = await fixture.chat(true);
+      expect(response.status).toBe(200);
+      reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+      expect(decoder.decode(first.value, { stream: true })).toContain('"content":"answer"');
+      const next = reader.read();
+      await Promise.race([
+        commitStarted.promise,
+        next.then(() => {
+          throw new Error("The stream advanced before settlement was attempted");
+        }),
+      ]);
+      expect(await fixture.charges()).toEqual({ n: 0, u: 0, atoms: "0" });
+      const pending = Symbol("settlement pending");
+      expect(await Promise.race([next, pending])).toBe(pending);
+
+      allowCommit.resolve();
+      let terminal = "";
+      for (let result = await next; !result.done; result = await reader.read()) {
+        terminal += decoder.decode(result.value, { stream: true });
+      }
+      terminal += decoder.decode();
+      if (settlement === "commits") {
+        expect(terminal).toContain('"finish_reason":"stop"');
+        expect(terminal.match(/data: \[DONE\]/g)).toHaveLength(1);
+        expect(terminal.trimEnd()).toEndWith("data: [DONE]");
+        expect(await fixture.charges()).toEqual({ n: 1, u: 1, atoms: "18" });
+        expect(await fixture.holdsByState()).toEqual({ SETTLED: 1 });
+      } else {
+        expect(terminal).toContain("event: error");
+        expect(terminal).toContain('"code":"ledger_commit_failed"');
+        expect(terminal).not.toContain('"finish_reason":"stop"');
+        expect(terminal).not.toContain("data: [DONE]");
+        expect(await fixture.charges()).toEqual({ n: 0, u: 0, atoms: "0" });
+        expect(await fixture.holdsByState()).toEqual({ UNKNOWN: 1 });
+        await fixture.resolveUnknownHolds();
+      }
+    } finally {
+      allowCommit.resolve();
+      await reader?.cancel().catch(() => undefined);
+      reader?.releaseLock();
+      upstream.server.stop(true);
+      await runtime.close();
+    }
+  },
+);
 
 test("symptom: chat SSE bills and emits DONE when EOF leaves a partial trailing event", async () => {
   const up = fakeUpstream("partial-trailer");

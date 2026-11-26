@@ -1,6 +1,7 @@
 import { localInternalCredentials } from "../../scripts/local-internal-auth.ts";
 import { afterAll, beforeAll, expect } from "bun:test";
 import type { SQL } from "bun";
+import type { ReservationPrice } from "@gateway/kernel";
 import { createDatabase, migrate, type AdapterOverrides } from "@gateway/ledger";
 import { createGatewayRuntime, type GatewayConfig } from "@gateway/gateway";
 
@@ -67,6 +68,7 @@ export async function internalCall(
 }
 
 type UpstreamMode = {
+  respond?: (request: Request) => Response | Promise<Response>;
   status?: number;
   headerDelayMs?: number;
   refuse?: boolean;
@@ -105,6 +107,7 @@ export function fakeUpstream(label: string, initial: UpstreamMode = {}): FakeUps
     port: 0,
     async fetch(req) {
       calls++;
+      if (mode.respond) return mode.respond(req);
       if (mode.headerDelayMs) await Bun.sleep(mode.headerDelayMs);
       if (mode.status)
         return Response.json(
@@ -143,6 +146,7 @@ export function fakeUpstream(label: string, initial: UpstreamMode = {}): FakeUps
 }
 
 type Wallet = { available_atoms: string; reserved_atoms: string; spent_atoms: string };
+type TestPrice = Pick<ReservationPrice, "rates" | "ceilings">;
 
 export async function setup(
   runtime: ReturnType<typeof createGatewayRuntime>,
@@ -152,9 +156,14 @@ export async function setup(
     priority?: number[];
     weights?: number[];
     maxAttempts?: number;
-    operation?: "chat" | "speech" | "images";
-    adapterOverrides?: AdapterOverrides;
+    billingConcurrency?: number;
+    upstreamKeys?: readonly string[];
+    operation?: "chat" | "speech" | "images" | "image_edits";
+    providerKind?: "openai" | "anthropic";
+    providerPluginId?: string;
+    adapterOverrides?: AdapterOverrides | ((index: number) => AdapterOverrides | undefined);
     cachedInputPrice?: boolean;
+    prices?: { customer: TestPrice; supplier: TestPrice };
     contentPluginId?: string;
   } = {},
 ) {
@@ -169,7 +178,7 @@ export async function setup(
     currency: "USD",
     rpm: 10_000_000,
     tpm: 100_000_000,
-    concurrency: 5000,
+    concurrency: opts.billingConcurrency ?? 5000,
   });
   const billingAccountId = String(billingAccount.id);
   await call("POST", `/internal/v1/wallets/${billingAccountId}/credits`, {
@@ -189,29 +198,28 @@ export async function setup(
     amount_atoms: "1000000000",
   });
   const channels = [];
-  for (const [i, u] of ups.entries()) {
+  const providerKind = opts.providerKind ?? "openai";
+  for (const [index, u] of ups.entries()) {
     channels.push(
       await call("PUT", "/internal/v1/channels", {
         account_id: account.id,
-        kind: "openai",
+        kind: providerKind,
+        ...(opts.providerPluginId ? { provider_plugin_id: opts.providerPluginId } : {}),
         name: `${u.label}-${tag}`,
-        base_url: `${u.url}/openai`,
-        api_key: "k",
+        base_url: `${u.url}/${providerKind}`,
+        api_key: opts.upstreamKeys?.[index] ?? "k",
         rpm: 10_000_000,
         concurrency: 10_000,
       }),
     );
-    void i;
   }
   const price =
-    opts.operation === "images"
+    opts.operation === "images" || opts.operation === "image_edits"
       ? {
-          currency: "USD",
           rates: { images: { numerator: "5", denominator: "1" } },
           ceilings: { images: "10" },
         }
       : {
-          currency: "USD",
           rates: {
             input_tokens: { numerator: "1", denominator: "1" },
             output_tokens: { numerator: "1", denominator: "1" },
@@ -225,8 +233,16 @@ export async function setup(
             ...(opts.cachedInputPrice ? { cached_input_tokens: "100" } : {}),
           },
         };
-  const customer = await call("POST", "/internal/v1/prices", { side: "CUSTOMER", ...price });
-  const supplier = await call("POST", "/internal/v1/prices", { side: "SUPPLIER", ...price });
+  const customer = await call("POST", "/internal/v1/prices", {
+    side: "CUSTOMER",
+    currency: "USD",
+    ...(opts.prices?.customer ?? price),
+  });
+  const supplier = await call("POST", "/internal/v1/prices", {
+    side: "SUPPLIER",
+    currency: "USD",
+    ...(opts.prices?.supplier ?? price),
+  });
   const model = `sr-${tag}`;
   const operation = opts.operation ?? "chat";
   await call("PUT", "/internal/v1/models", {
@@ -236,6 +252,10 @@ export async function setup(
     routing_strategy: opts.strategy ?? "ROUND_ROBIN",
   });
   for (const [i, ch] of channels.entries()) {
+    const adapterOverrides =
+      typeof opts.adapterOverrides === "function"
+        ? opts.adapterOverrides(i)
+        : opts.adapterOverrides;
     await call("PUT", "/internal/v1/routes", {
       model_name: model,
       channel_id: ch.id,
@@ -246,7 +266,7 @@ export async function setup(
       priority: opts.priority?.[i] ?? 0,
       weight: opts.weights?.[i] ?? 1,
       retry_policy: { max_attempts: opts.maxAttempts ?? 3 },
-      ...(opts.adapterOverrides ? { adapter_overrides: opts.adapterOverrides } : {}),
+      ...(adapterOverrides ? { adapter_overrides: adapterOverrides } : {}),
       ...(opts.contentPluginId
         ? { plugin_pipeline: [{ plugin_id: opts.contentPluginId, priority: 1 }] }
         : {}),
@@ -296,6 +316,16 @@ export async function setup(
         body: JSON.stringify({ model, prompt: "Render a fixture", n, stream }),
       }),
     );
+  const editImage = (form: FormData) => {
+    form.set("model", model);
+    return runtime.fetchPublic(
+      new Request("http://gateway.local/v1/images/edits", {
+        method: "POST",
+        headers: { authorization: `Bearer ${key.key}` },
+        body: form,
+      }),
+    );
+  };
   const health = async () => {
     const r = await internalCall(runtime.internalApp, "GET", "/internal/v1/health/channels");
     const rows = r.data.channels as {
@@ -346,6 +376,7 @@ export async function setup(
     chat,
     speech,
     images,
+    editImage,
     health,
     charges,
     holdsByState,

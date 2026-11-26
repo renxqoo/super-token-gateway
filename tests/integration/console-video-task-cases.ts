@@ -10,6 +10,72 @@ import {
 } from "./console-billing-fixture.ts";
 
 export function registerVideoTaskCases() {
+  test("a failed video poll preserves the task and charge until a later successful poll confirms the refund", async () => {
+    const accountId = await createTeamBillingAccount("Video Poll Recovery", "video-poll-recovery");
+    const topup = await h.adminApi(
+      "POST",
+      `/admin/v1/finance/billing-accounts/${accountId}/topups`,
+      adminAccess,
+      { external_ref: "video-poll-recovery", amount_atoms: "10000" },
+    );
+    expect(topup.status).toBe(200);
+    const key = await h.clientApi<{ key: string }>(
+      "POST",
+      `/api/v1/billing-accounts/${accountId}/api-keys`,
+      customerAccess,
+      { name: "Video poll recovery", operations: ["videos"] },
+    );
+    expect(key.status).toBe(201);
+    const headers = { authorization: `Bearer ${key.data.key}`, "content-type": "application/json" };
+    const submitted = await fetch(`${h.gatewayPublicUrl}/v1/videos`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model: "bill-video", prompt: "clouds" }),
+    });
+    expect(submitted.status).toBe(200);
+    const { gateway_task_id: taskId, task_id: upstreamId } = (await submitted.json()) as {
+      gateway_task_id: string;
+      task_id: string;
+    };
+    const repository = createAsyncTasksRepository(h.gwDb);
+    const original = await repository.getTask(taskId);
+    expect(original).toMatchObject({ refund_eligibility: "PENDING", refund_id: null });
+    const wallet = () =>
+      h.clientApi<{ available_atoms: string }>(
+        "GET",
+        `/api/v1/billing-accounts/${accountId}/wallet`,
+        customerAccess,
+      );
+    expect((await wallet()).data.available_atoms).toBe("5000");
+
+    const poll = () => fetch(`${h.gatewayPublicUrl}/v1/videos/${taskId}`, { headers });
+    const providerBody = { status: "Fail", error_code: 5001 };
+    h.videoStates.set(upstreamId, { body: providerBody, httpStatus: 503 });
+    try {
+      const unavailable = await poll();
+      expect(unavailable.status).toBe(502);
+      expect(await unavailable.json()).toMatchObject({ error: { code: "upstream_poll_failed" } });
+      expect(await repository.getTask(taskId)).toMatchObject({
+        status: original!.status,
+        refund_eligibility: "PENDING",
+        refund_id: null,
+      });
+      expect((await wallet()).data.available_atoms).toBe("5000");
+
+      h.videoStates.set(upstreamId, { body: providerBody });
+      const recovered = await poll();
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toMatchObject({
+        status: "FAILED",
+        failure_category: "UPSTREAM_SYSTEM",
+        refund_eligibility: "AUTO_REFUNDED",
+      });
+      expect((await wallet()).data.available_atoms).toBe("10000");
+    } finally {
+      h.videoStates.delete(upstreamId);
+    }
+  });
+
   test("video tasks stay private to the issuing Key and accessible after rotation", async () => {
     const accountId = await createTeamBillingAccount("Video Task Access", "video-task-access");
     const keysPath = `/api/v1/billing-accounts/${accountId}/api-keys`;

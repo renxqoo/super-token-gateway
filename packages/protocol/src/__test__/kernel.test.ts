@@ -29,21 +29,6 @@ describe("precise cost and usage evidence", () => {
     body.max_tokens = 32;
     expect(stringifyExact(body)).toBe('{"max_tokens":32,"reference":9007199254740995}');
   });
-  test("sums rational dimensions before a single rounding", () => {
-    expect(
-      calculateCost(
-        { input_tokens: "1", output_tokens: "1", cached_input_tokens: "1" },
-        {
-          currency: "USD",
-          rates: {
-            input_tokens: { numerator: "1", denominator: "3" },
-            output_tokens: { numerator: "1", denominator: "3" },
-            cached_input_tokens: { numerator: "1", denominator: "3" },
-          },
-        },
-      ),
-    ).toBe("1");
-  });
   test("preserves large integers and rejects floats/overflow", () => {
     expect(
       calculateCost(

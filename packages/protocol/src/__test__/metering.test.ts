@@ -2,7 +2,13 @@ import { quoteReservation } from "@gateway/kernel";
 import { requestCharacters } from "../characters.ts";
 import { expect, test } from "bun:test";
 import { calculateCost } from "@gateway/kernel";
-import { extractUsage, parseClientJson, parseProviderJson, stringifyExact } from "../index.ts";
+import {
+  extractUsage,
+  parseClientJson,
+  parseProviderJson,
+  stringifyExact,
+  validateUsageObject,
+} from "../index.ts";
 import type { Operation, ReservationPrice } from "@gateway/kernel";
 
 test.each([
@@ -109,6 +115,27 @@ test("inconsistent cache partitions and duplicate aggregate pricing cannot produ
       },
     ),
   ).toThrow("cache write");
+});
+
+test("symptom: normalized usage accepts a single cache write TTL one token above the exact total", () => {
+  expect(() =>
+    validateUsageObject({
+      cache_write_tokens: "9007199254740992",
+      cache_write_1h_tokens: "9007199254740993",
+    }),
+  ).toThrow(expect.objectContaining({ status: 502, code: "usage_alias_conflict" }));
+});
+
+test("a single cache write TTL may equal the total beyond the JavaScript safe integer boundary", () => {
+  expect(
+    validateUsageObject({
+      cache_write_tokens: "9007199254740993",
+      cache_write_5m_tokens: "9007199254740993",
+    }),
+  ).toEqual({
+    cache_write_tokens: "9007199254740993",
+    cache_write_5m_tokens: "9007199254740993",
+  });
 });
 
 test("JSON usage retains exact integers at and above the safe integer boundary", () => {

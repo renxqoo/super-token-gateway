@@ -1,10 +1,12 @@
 import { writeLocalInternalAuth } from "./local-internal-auth.ts";
 import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDatabase, createLedgerEngine } from "@gateway/ledger";
+import { verifyCommittedReplay } from "./durability-idempotency.ts";
 
 const baseDbUrl = process.env.DATABASE_URL;
 if (!baseDbUrl) throw new Error("DATABASE_URL is required");
@@ -110,12 +112,17 @@ try {
     env,
     stdio: "ignore",
   });
-  let gwProc = spawn(process.execPath, ["dist/gateway/main.js", "--mode=gateway"], {
-    cwd: tempDir,
-    env,
-    stdio: "ignore",
-  });
-  procs.push(mockProc, workerProc, gwProc);
+  const startGateway = () => {
+    const processHandle = spawn(process.execPath, ["dist/gateway/main.js", "--mode=gateway"], {
+      cwd: tempDir,
+      env,
+      stdio: "ignore",
+    });
+    procs.push(processHandle);
+    return processHandle;
+  };
+  procs.push(mockProc, workerProc);
+  let gwProc = startGateway();
 
   await Promise.all([
     waitForJson(`http://127.0.0.1:${mockPort}/healthz`),
@@ -265,12 +272,7 @@ try {
       );
     }
 
-    gwProc = spawn(process.execPath, ["dist/gateway/main.js", "--mode=gateway"], {
-      cwd: tempDir,
-      env,
-      stdio: "ignore",
-    });
-    procs.push(gwProc);
+    gwProc = startGateway();
     await waitForJson(`http://127.0.0.1:${gwPort}/readyz`);
 
     const unknownHolds = await callInternal("GET", "/internal/v1/holds?state=UNKNOWN&limit=100");
@@ -297,6 +299,45 @@ try {
       }
     }
 
+    const committedModel = "dur-commit-replay";
+    await callInternal("PUT", "/internal/v1/models", {
+      name: committedModel,
+      operations: ["chat"],
+      max_output_tokens: 64,
+    });
+    await callInternal("PUT", "/internal/v1/routes", {
+      model_name: committedModel,
+      channel_id: ch.id,
+      upstream_model: committedModel,
+      operations: ["chat"],
+      billing_price_id: custPrice.id,
+      cost_version_id: supPrice.id,
+    });
+    await verifyCommittedReplay({
+      db: checkDb,
+      chatUrl: `http://127.0.0.1:${gwPort}/v1/chat/completions`,
+      billingAccountId: String(billingAccount.id),
+      key: String(key.key),
+      model: committedModel,
+      async restartGateway() {
+        const exited = once(gwProc, "exit", { signal: AbortSignal.timeout(5000) });
+        gwProc.kill("SIGKILL");
+        const [, signal] = await exited;
+        if (signal !== "SIGKILL") throw new Error("Gateway did not exit via SIGKILL");
+        gwProc = startGateway();
+        await waitForJson(`http://127.0.0.1:${gwPort}/readyz`);
+      },
+      async upstreamAttempts() {
+        const response = await fetch(`http://127.0.0.1:${mockPort}/__control/stats`, {
+          headers: { authorization: `Bearer ${env.MOCK_CONTROL_TOKEN}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!response.ok) throw new Error(`Mock stats returned HTTP ${response.status}`);
+        const { attempts } = (await response.json()) as { attempts: Record<string, number> };
+        return attempts[committedModel] ?? 0;
+      },
+    });
+
     const auditBeforeDump = await callInternal("GET", "/internal/v1/audit/conservation");
     if (
       !auditBeforeDump.ok ||
@@ -312,7 +353,7 @@ try {
     );
     if (
       walletOrig.reserved_atoms !== "0" ||
-      walletOrig.spent_atoms !== String(8 * (10 * 10 + 5 * 20))
+      walletOrig.spent_atoms !== String(8 * (10 * 10 + 5 * 20) + 185)
     ) {
       throw new Error(
         `Unexpected wallet state after SIGKILL recovery: ${JSON.stringify(walletOrig)}`,
@@ -362,6 +403,7 @@ try {
           sigkill_recovered_holds: IN_FLIGHT,
           resolved_released: 8,
           resolved_settled: 8,
+          post_commit_replay_verified: true,
           pg_dump_restore_verified: true,
           conservation: restoredAudit,
         }),

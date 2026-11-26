@@ -1,5 +1,12 @@
 import { exactInteger, hasExactLiterals, numberLiteral, normalizedProviderNumber } from "./json.ts";
-import { count, dimensions, type Dimension, type ProviderKind, type Usage } from "@gateway/kernel";
+import {
+  cacheWritePartitionMatches,
+  count,
+  dimensions,
+  type Dimension,
+  type ProviderKind,
+  type Usage,
+} from "@gateway/kernel";
 import { GatewayError } from "@gateway/contracts";
 
 const allowedUsageKeys = new Set<string>([...dimensions, "reasoning_tokens"]);
@@ -59,6 +66,15 @@ export function validateUsageObject(raw: unknown): Usage {
     BigInt(out.reasoning_tokens) > BigInt(out.output_tokens)
   ) {
     throw new GatewayError(502, "invalid_upstream_usage", "Reasoning usage exceeds total output");
+  }
+  if (
+    !cacheWritePartitionMatches(
+      out.cache_write_tokens,
+      out.cache_write_5m_tokens,
+      out.cache_write_1h_tokens,
+    )
+  ) {
+    throw new GatewayError(502, "usage_alias_conflict", "Provider cache write partitions disagree");
   }
   return out;
 }
@@ -255,20 +271,17 @@ export function extractUsage(
     creation && creation.ephemeral_1h_input_tokens !== undefined
       ? quantity(creation, "ephemeral_1h_input_tokens", creationExact)
       : undefined;
-  let write =
-    raw.cache_creation_input_tokens !== undefined
-      ? quantity(raw, "cache_creation_input_tokens", rawExact)
-      : undefined;
-  if (write5m !== undefined && write1h !== undefined) {
-    const total = (BigInt(write5m) + BigInt(write1h)).toString();
-    if ((write !== undefined && write !== total) || total.length > 38)
-      throw new GatewayError(
-        502,
-        "usage_alias_conflict",
-        "Provider cache write partitions disagree",
-      );
-    write = total;
-  }
+  const reportedWrite = quantity(raw, "cache_creation_input_tokens", rawExact);
+  const write =
+    reportedWrite ??
+    (write5m !== undefined && write1h !== undefined
+      ? (BigInt(write5m) + BigInt(write1h)).toString()
+      : undefined);
+  if (
+    (write !== undefined && write.length > 38) ||
+    !cacheWritePartitionMatches(reportedWrite, write5m, write1h)
+  )
+    throw new GatewayError(502, "usage_alias_conflict", "Provider cache write partitions disagree");
   const observedReasoning =
     (outputDetails && outputDetails.reasoning_tokens !== undefined
       ? quantity(outputDetails, "reasoning_tokens", hasExactLiterals(outputDetails))
