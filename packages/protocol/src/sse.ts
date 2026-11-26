@@ -12,6 +12,7 @@ export interface SSEEvent {
   data: string;
   id: string;
   wire: string;
+  wireBytes?: Uint8Array;
 }
 
 export function hasSseText(event: SSEEvent, protocol: Protocol): boolean {
@@ -71,6 +72,7 @@ export class SSEParser {
   constructor(private readonly maxBytes = 1_048_576) {}
 
   feed(chunk: Uint8Array, flush = false): SSEEvent[] {
+    const hadBuffered = this.buffer.length > 0;
     let decoded: string;
     if (this.streamDecoder) {
       decoded = this.streamDecoder.decode(chunk, { stream: !flush });
@@ -84,12 +86,16 @@ export class SSEParser {
       this.seenBytes = true;
       decoded = this.streamDecoder.decode(chunk, { stream: true });
     }
-    if (decoded.length > 0) this.buffer = this.buffer.length > 0 ? this.buffer + decoded : decoded;
+    const canSliceAscii =
+      !hadBuffered && !this.streamDecoder && decoded.length === chunk.byteLength;
+    if (decoded.length > 0) this.buffer = hadBuffered ? this.buffer + decoded : decoded;
     const buf = this.buffer;
     const len = buf.length;
     const events: SSEEvent[] = [];
     let start = 0;
     const hasCr = buf.indexOf("\r") !== -1;
+    const sliceAscii = canSliceAscii && !hasCr;
+    let singleLineStart = -1;
     while (start < len) {
       let i: number;
       if (!hasCr) {
@@ -102,11 +108,14 @@ export class SSEParser {
         i = nl === -1 ? cr : cr === -1 ? nl : nl < cr ? nl : cr;
         if (i === cr && i + 1 === len && !flush) break;
       }
+      const lineStart = start;
       const line = buf.slice(start, i);
       start = hasCr && buf.charCodeAt(i) === 13 && buf.charCodeAt(i + 1) === 10 ? i + 2 : i + 1;
-      this.eventSize += Buffer.byteLength(line) + 1;
+      this.eventSize += sliceAscii ? line.length + 1 : Buffer.byteLength(line) + 1;
       if (this.eventSize > this.maxBytes) throw new Error("SSE event exceeds limit");
       if (line !== "") {
+        if (sliceAscii && this.eventLines.length === 0) singleLineStart = lineStart;
+        else singleLineStart = -1;
         this.eventLines.push(line);
         continue;
       }
@@ -116,12 +125,14 @@ export class SSEParser {
         this.eventSize = 0;
         if (lines.length === 1 && lines[0]!.startsWith("data: ")) {
           const single = lines[0]!;
-          events.push({
+          const ev: SSEEvent = {
             event: "message",
             id: "",
             data: single.slice(6),
             wire: `${single}\n\n`,
-          });
+          };
+          if (singleLineStart >= 0) ev.wireBytes = chunk.subarray(singleLineStart, start);
+          events.push(ev);
         } else {
           const data: string[] = [];
           let event = "message";
@@ -138,7 +149,11 @@ export class SSEParser {
           }
           events.push({ event, id, data: data.join("\n"), wire: `${lines.join("\n")}\n\n` });
         }
-      } else this.eventSize = 0;
+        singleLineStart = -1;
+      } else {
+        this.eventSize = 0;
+        singleLineStart = -1;
+      }
     }
     this.buffer = start === 0 ? buf : start >= len ? "" : buf.slice(start);
     this.trailingBytes = this.buffer.length === 0 ? 0 : Buffer.byteLength(this.buffer);

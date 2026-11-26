@@ -26,7 +26,12 @@ import {
   mergeUsageWithAliases,
   replaceResponseText,
 } from "../upstream.ts";
-import { channelResponseHeaders, responseHeaders, sanitizeHttpErrorStatus } from "./http.ts";
+import {
+  channelJsonHeaders,
+  channelResponseHeaders,
+  responseHeaders,
+  sanitizeHttpErrorStatus,
+} from "./http.ts";
 import { readResponseBytesFast, utf8FatalDecoder } from "./body.ts";
 import { classifyPluginBlock } from "./policy.ts";
 import { buildUsageForOperation, countImageArtifacts } from "./usage.ts";
@@ -89,10 +94,6 @@ export async function handleUnaryResponse(
     }
     attempt.finishExchange();
     pluginSignal.throwIfAborted();
-    const droppedHeader: Record<string, string> =
-      prepared.droppedFields.length > 0
-        ? { "x-gateway-dropped-fields": prepared.droppedFields.join(",") }
-        : {};
 
     if (!isUpstreamJson) {
       releaseBackups();
@@ -318,13 +319,14 @@ export async function handleUnaryResponse(
       }
     }
 
-    const extraHeaders: Record<string, string> = block
-      ? { ...block.extraHeaders }
-      : { "content-type": "application/json" };
-    if (prepared.droppedFields.length > 0) {
-      extraHeaders["x-gateway-dropped-fields"] = droppedHeader["x-gateway-dropped-fields"]!;
-    }
-    const headers = channelResponseHeaders(requestId, trace, cand.channel, extraHeaders);
+    const headers = block
+      ? channelResponseHeaders(requestId, trace, cand.channel, {
+          ...block.extraHeaders,
+          ...(prepared.droppedFields.length > 0
+            ? { "x-gateway-dropped-fields": prepared.droppedFields.join(",") }
+            : {}),
+        })
+      : channelJsonHeaders(requestId, trace, cand.channel, prepared.droppedFields);
     const commitRes = await settle({
       usage,
       plugin_audit: allAudit,

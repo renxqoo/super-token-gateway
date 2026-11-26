@@ -25,7 +25,11 @@ export async function inspectStreamPrelude(
   isWasmStreamProvider: boolean,
   tracedUpstreamProtocol: Protocol | null,
 ): Promise<
-  | { upstreamBody: ReadableStream<Uint8Array> | null; wasmPrelude: WasmPrelude | undefined }
+  | {
+      upstreamBody: ReadableStream<Uint8Array> | null;
+      fastSseBody?: Uint8Array;
+      wasmPrelude: WasmPrelude | undefined;
+    }
   | RetryAttempt
 > {
   const {
@@ -53,15 +57,17 @@ export async function inspectStreamPrelude(
   const mediaTerminal = prepared.mergedOverrides.media_stream_terminal;
   const configuredTerminalEvent =
     mediaTerminal && "event" in mediaTerminal ? mediaTerminal.event : undefined;
+  const needsPrelude =
+    (isWasmStreamProvider || prepared.mergedOverrides.error_rules.length > 0) &&
+    (isUpstreamSse || prepared.isBedrockStream);
+  if (fastResult.fast && isUpstreamSse && !prepared.isBedrockStream && !needsPrelude) {
+    return { upstreamBody: null, fastSseBody: fastResult.body, wasmPrelude: undefined };
+  }
   let upstreamBody: ReadableStream<Uint8Array> | null = fastResult.fast
     ? new Response(fastResult.body as BodyInit).body
     : upstreamResp!.body;
   let wasmPrelude: WasmPrelude | undefined;
-  if (
-    upstreamBody &&
-    (isWasmStreamProvider || prepared.mergedOverrides.error_rules.length > 0) &&
-    (isUpstreamSse || prepared.isBedrockStream)
-  ) {
+  if (upstreamBody && needsPrelude) {
     telemetry.setStage("stream_prelude");
     const parser = new SSEParser();
     const bedrock = prepared.isBedrockStream ? new BedrockEventStreamDecoder() : null;

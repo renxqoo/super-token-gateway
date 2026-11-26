@@ -68,7 +68,7 @@ Caddy 公网模板按 HTTP 方法转发 Gateway 的公开路径，包括音乐�
 
 公网业务入口在读取请求体前检查节点压力和 IP 配额。配置可信代理时，Gateway 从连接对端和可信转发链解析地址。生产仅应信任实际连接 Gateway 的代理及由它验证的上游转发链。健康路径和私网监听不消耗业务 IP 配额。
 
-IP 限流由 `INGRESS_IP_MODE` 控制，支持 `off`、`observe` 和 `enforce`。启用时需要配置 `REDIS_URL`、`INGRESS_IP_WINDOW_MS`、`INGRESS_IP_MAX_REQUESTS`、`INGRESS_IP_NODE_MAX_REQUESTS`、`INGRESS_IP_MAX_PENDING` 和 `INGRESS_IP_TIMEOUT_MS`。节点有界准入后，Redis 原子计数并返回窗口剩余时间。超额返回 `429 ip_rate_limited`，Redis 不可用、等待超时或节点入口饱和返回 `503`。观测模式只记录这些决策。入口配额使用独立连接，在等待超时时关闭该连接并释放待处理额度，后续请求可在已确认的主节点上重连。主备切换可能丢失尚未复制的计数。
+IP 限流由 `INGRESS_IP_MODE` 控制，支持 `off`、`observe` 和 `enforce`。启用时需要配置 `REDIS_URL`、`INGRESS_IP_WINDOW_MS`、`INGRESS_IP_MAX_REQUESTS`、`INGRESS_IP_NODE_MAX_REQUESTS`、`INGRESS_IP_MAX_PENDING` 和 `INGRESS_IP_TIMEOUT_MS`。节点有界准入后，Redis 原子计数并返回窗口剩余时间。超额返回 `429 ip_rate_limited`，Redis 不可用、等待超时或节点入口饱和返回 `503`。观测模式只记录这些决策。入口配额使用独立连接，在等待超时时关闭该连接并释放待处理额度，后续请求可在已确认的主节点上重连。主备切换可能丢失尚未复制的计数。在 `enforce` 模式下，对于已同步鉴权通过且声明体积不超过 `65536` 字节的非 multipart 推理 POST 请求，Gateway 可将 IP 配额与账户共享配额合并到单次原子 Redis Lua 批量校验中（IP 校验严格先于账户配额扣除，触发前置错误时仍先执行独立 IP 配额校验并保留 `429`/`503` 语义）。
 
 资源保护由 `INGRESS_PRESSURE_MODE` 控制，沿用相同的三个模式。启用时显式配置 `INGRESS_PRESSURE_SAMPLE_MS`、`INGRESS_PRESSURE_STALE_MS`、`INGRESS_PRESSURE_HIGH_SAMPLES`、`INGRESS_PRESSURE_RECOVERY_SAMPLES`、`INGRESS_CPU_HIGH_PERCENT`、`INGRESS_CPU_RECOVERY_PERCENT`、`INGRESS_MEMORY_HIGH_PERCENT`、`INGRESS_MEMORY_RECOVERY_PERCENT` 和 `INGRESS_MEMORY_CRITICAL_PERCENT`。从 Linux cgroup v2 采样。超限时阻止新业务准入，放行既有请求收尾。缺少有效限额时保留固定并发基线，已经触发的保护需要有效恢复样本才能解除。采样状态与拒绝原因可通过私网指标观察。
 
@@ -100,7 +100,7 @@ IP 限流由 `INGRESS_IP_MODE` 控制，支持 `off`、`observe` 和 `enforce`�
 
 ## TCP 建连突发
 
-出口连接复用和新建连接分别管理。按已校验的物理目标 IP 与端口限制新建连接速率及并行握手，每节点默认 400 次/秒、16 个并行握手，分别由 `UPSTREAM_DIAL_RPS` 和 `UPSTREAM_DIAL_CONCURRENCY` 控制。TLS 连接复用仍按 SNI 隔离。等待同时受首字节预算、节点活跃交换容量、`UPSTREAM_DIAL_QUEUE_WAIT_MS` 和 `UPSTREAM_DIAL_QUEUE_BYTES` 限制。队列满或耗尽出口等待预算时返回 `503 upstream_capacity` 和 `Retry-After: 1`。多个节点指向同一端点时按端点合计拨号能力分配预算。
+出口连接复用和新建连接分别管理。按已校验的物理目标 IP 与端口限制新建连接速率及并行握手，每节点默认 2000 次/秒、64 个并行握手，分别由 `UPSTREAM_DIAL_RPS` 和 `UPSTREAM_DIAL_CONCURRENCY` 控制。TLS 连接复用仍按 SNI 隔离。等待同时受首字节预算、节点活跃交换容量、`UPSTREAM_DIAL_QUEUE_WAIT_MS` 和 `UPSTREAM_DIAL_QUEUE_BYTES` 限制。队列满或耗尽出口等待预算时返回 `503 upstream_capacity` 和 `Retry-After: 1`。多个节点指向同一端点时按端点合计拨号能力分配预算。
 
 交换槽队列与拨号队列分别应用等待时长和字节上限。推理出口准入还传入绝对截止时间，由首字节期限和本次尝试期限中较早的一项约束两个阶段。绝对请求期限先到时按未派发超时处理。
 

@@ -2,6 +2,7 @@ import { GatewayError } from "@gateway/contracts";
 import type { Operation } from "@gateway/kernel";
 import type { ChannelRecord } from "@gateway/ledger";
 import { formatProtocolError } from "@gateway/protocol";
+import { IngressDenialError } from "../public-ingress.ts";
 import type { TraceContext } from "../observability.ts";
 import type { InferenceContext } from "./types.ts";
 
@@ -39,6 +40,36 @@ export function responseHeaders(
 
 const safeChannelHeaderNames = new WeakMap<Pick<ChannelRecord, "id" | "name">, string>();
 
+export function channelJsonHeaders(
+  requestId: string,
+  trace: TraceContext,
+  channel: Pick<ChannelRecord, "id" | "name">,
+  droppedFields: readonly string[],
+): Record<string, string> {
+  let name = safeChannelHeaderNames.get(channel);
+  if (name === undefined) {
+    name = /[^\x20-\x7e\xa0-\xff]/.test(channel.name) ? channel.id : channel.name;
+    safeChannelHeaderNames.set(channel, name);
+  }
+  if (droppedFields.length === 0) {
+    return {
+      "x-request-id": requestId,
+      "x-trace-id": trace.traceId,
+      traceparent: trace.traceparent,
+      "x-gateway-channel": name,
+      "content-type": "application/json",
+    };
+  }
+  return {
+    "x-request-id": requestId,
+    "x-trace-id": trace.traceId,
+    traceparent: trace.traceparent,
+    "x-gateway-channel": name,
+    "content-type": "application/json",
+    "x-gateway-dropped-fields": droppedFields.join(","),
+  };
+}
+
 export function channelResponseHeaders(
   requestId: string,
   trace: TraceContext,
@@ -72,14 +103,16 @@ export function errorJson(
       ? err
       : new GatewayError(500, "internal_error", "Internal gateway error");
   const extraHeaders: Record<string, string> =
-    gw.code === "plugin_capacity_unavailable" ||
-    gw.code === "provider_capacity_unavailable" ||
-    gw.code === "request_body_capacity_unavailable" ||
-    gw.code === "upstream_capacity"
-      ? { "retry-after": "1" }
-      : gw.status === 408 || gw.status === 413 || gw.code === "overloaded"
-        ? { connection: "close" }
-        : {};
+    gw instanceof IngressDenialError
+      ? { "retry-after": gw.retryAfter }
+      : gw.code === "plugin_capacity_unavailable" ||
+          gw.code === "provider_capacity_unavailable" ||
+          gw.code === "request_body_capacity_unavailable" ||
+          gw.code === "upstream_capacity"
+        ? { "retry-after": "1" }
+        : gw.status === 408 || gw.status === 413 || gw.code === "overloaded"
+          ? { connection: "close" }
+          : {};
   return c.json(
     formatProtocolError(operation, gw.status, gw.code, gw.message, requestId),
     gw.status as 400,

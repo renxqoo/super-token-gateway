@@ -5,7 +5,7 @@ import type { InferenceRequest } from "./types.ts";
 
 export function selectInferenceRoutes(request: InferenceRequest) {
   const { deps, state, snap, model, operation, billingAccount } = request;
-  const acquiredProbes = new Map<string, symbol>();
+  let acquiredProbes: Map<string, symbol> | undefined;
   const baseHydrated = state.getHydratedCandidates(
     snap,
     model.name,
@@ -72,11 +72,13 @@ export function selectInferenceRoutes(request: InferenceRequest) {
     revokedRoute?.throwIfAborted();
     throw new GatewayError(503, "no_route", "No healthy channel available for this model");
   }
-  for (const entry of selected) {
-    if (entry.probe) acquiredProbes.set(entry.route.channel_id, entry.probe);
+  for (let i = 0; i < selected.length; i++) {
+    const entry = selected[i]!;
+    if (entry.probe) (acquiredProbes ??= new Map()).set(entry.route.channel_id, entry.probe);
   }
 
   const releaseAllPendingProbes = () => {
+    if (!acquiredProbes || acquiredProbes.size === 0) return;
     for (const [chId, probe] of acquiredProbes) {
       deps.router.releaseProbe(chId, probe);
     }
@@ -84,15 +86,17 @@ export function selectInferenceRoutes(request: InferenceRequest) {
   };
 
   const releaseProbeFor = (channelId: string) => {
+    if (!acquiredProbes) return;
     const probe = acquiredProbes.get(channelId);
     if (probe && acquiredProbes.delete(channelId)) deps.router.releaseProbe(channelId, probe);
   };
 
   const markProbeCompleted = (channelId: string) => {
-    acquiredProbes.delete(channelId);
+    acquiredProbes?.delete(channelId);
   };
 
   const releaseUnusedProbes = (fromIndex: number) => {
+    if (!acquiredProbes || acquiredProbes.size === 0) return;
     for (let i = fromIndex; i < selected.length; i++) {
       if (selected[i]!.probe) {
         releaseProbeFor(selected[i]!.route.channel_id);
@@ -106,6 +110,7 @@ export function selectInferenceRoutes(request: InferenceRequest) {
     markProbeCompleted,
     releaseUnusedProbes,
     takeProbe(channelId: string) {
+      if (!acquiredProbes) return undefined;
       const probe = acquiredProbes.get(channelId);
       acquiredProbes.delete(channelId);
       return probe;

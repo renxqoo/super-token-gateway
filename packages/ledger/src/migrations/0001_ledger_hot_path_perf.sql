@@ -883,3 +883,126 @@ ALTER TABLE public.ledger_entries
       AND ltrim(substring(account FROM 5 FOR 36), '0123456789abcdef-') = ''
     )
   );
+
+CREATE OR REPLACE FUNCTION public.acquire_leased_holds(
+  p_node_id text,
+  p_wallet_lease_ids uuid[],
+  p_supplier_lease_ids uuid[],
+  p_items jsonb,
+  p_check_debt_grants boolean
+) RETURNS uuid[]
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  v_locked_wl_ids uuid[];
+  v_locked_sl_ids uuid[];
+  v_now timestamp with time zone;
+  v_admitted uuid[];
+BEGIN
+  IF p_items IS NULL OR jsonb_array_length(p_items) = 0 THEN
+    RETURN '{}'::uuid[];
+  END IF;
+
+  WITH local_wallet_leases AS MATERIALIZED (
+    SELECT l.id, l.wallet_id
+    FROM public.wallet_leases l
+    WHERE l.id = ANY(p_wallet_lease_ids)
+      AND l.node_id = p_node_id
+      AND l.state = 'ACTIVE' AND l.expires_at > clock_timestamp()
+      AND (l.earliest_lot_expires_at IS NULL OR l.earliest_lot_expires_at > clock_timestamp())
+    ORDER BY l.id FOR KEY SHARE OF l
+  ), locked_supplier_leases AS MATERIALIZED (
+    SELECT l.id
+    FROM public.supplier_leases l
+    WHERE EXISTS (SELECT 1 FROM local_wallet_leases)
+      AND l.id = ANY(p_supplier_lease_ids)
+      AND l.node_id = p_node_id
+      AND l.state = 'ACTIVE' AND l.expires_at > clock_timestamp()
+    ORDER BY l.id FOR KEY SHARE OF l
+  ), locked_wallet_leases AS MATERIALIZED (
+    SELECT l.id
+    FROM local_wallet_leases l
+    JOIN public.wallets w ON w.id = l.wallet_id
+    WHERE EXISTS (SELECT 1 FROM locked_supplier_leases)
+    ORDER BY w.id, l.id FOR SHARE OF w
+  )
+  SELECT
+    COALESCE(ARRAY(SELECT id FROM locked_wallet_leases), '{}'::uuid[]),
+    COALESCE(ARRAY(SELECT id FROM locked_supplier_leases), '{}'::uuid[])
+  INTO v_locked_wl_ids, v_locked_sl_ids;
+
+  IF cardinality(v_locked_wl_ids) = 0 OR cardinality(v_locked_sl_ids) = 0 THEN
+    RETURN '{}'::uuid[];
+  END IF;
+
+  v_now := clock_timestamp();
+
+  WITH active_wallet_leases AS MATERIALIZED (
+    SELECT l.id
+    FROM unnest(v_locked_wl_ids) AS acquired(id)
+    CROSS JOIN LATERAL (
+      SELECT wl.id, wl.wallet_id, wl.state, wl.expires_at, wl.earliest_lot_expires_at
+      FROM public.wallet_leases wl
+      WHERE wl.id = acquired.id
+      LIMIT 1
+    ) l
+    JOIN public.wallets w ON w.id = l.wallet_id
+    WHERE l.state = 'ACTIVE' AND l.expires_at > v_now
+      AND (l.earliest_lot_expires_at IS NULL OR l.earliest_lot_expires_at > v_now)
+      AND w.freeze_reason IS NULL
+      AND CASE WHEN w.reserved_atoms >= w.debt_atoms THEN true
+        WHEN p_check_debt_grants THEN w.available_atoms + w.reserved_atoms - w.debt_atoms >= (
+          SELECT COALESCE(SUM(lot.available_atoms), 0)
+          FROM public.wallet_lots lot
+          WHERE lot.wallet_id = w.id AND lot.available_atoms > 0
+            AND lot.expires_at <= v_now
+        )
+        ELSE false
+      END
+  ), active_supplier_leases AS MATERIALIZED (
+    SELECT l.id
+    FROM public.supplier_leases l
+    JOIN public.upstream_accounts a ON a.id = l.account_id
+    WHERE l.id = ANY(v_locked_sl_ids)
+      AND l.state = 'ACTIVE' AND l.expires_at > v_now AND a.state = 'ACTIVE'
+  ), ins AS (
+    INSERT INTO public.billing_holds (
+      request_id, billing_account_id, wallet_id, api_key_id, key_reserved_atoms,
+      pricing_override_id, discount_numerator, discount_denominator,
+      operation, model, idempotency_key, fingerprint,
+      held_atoms, credit_atoms, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, state, expires_at
+    )
+    SELECT
+      u.request_id, u.billing_account_id, u.wallet_id, u.api_key_id, 0,
+      u.pricing_override_id, u.discount_numerator, u.discount_denominator,
+      u.operation, u.model, NULL, u.fingerprint,
+      u.held_atoms, 0, '[]'::jsonb, u.supplier_holds, u.wallet_lease_id, u.supplier_lease_id, 'HELD', u.expires_at
+    FROM jsonb_to_recordset(p_items) AS u(
+      request_id uuid,
+      billing_account_id uuid,
+      wallet_id uuid,
+      api_key_id uuid,
+      pricing_override_id uuid,
+      discount_numerator numeric,
+      discount_denominator numeric,
+      operation text,
+      model text,
+      fingerprint text,
+      held_atoms numeric,
+      supplier_holds jsonb,
+      wallet_lease_id uuid,
+      supplier_lease_id uuid,
+      expires_at timestamptz
+    )
+    JOIN active_wallet_leases awl ON awl.id = u.wallet_lease_id
+    JOIN active_supplier_leases asl ON asl.id = u.supplier_lease_id
+    RETURNING request_id
+  )
+  SELECT COALESCE(array_agg(request_id), '{}'::uuid[])
+  INTO v_admitted
+  FROM ins;
+
+  RETURN COALESCE(v_admitted, '{}'::uuid[]);
+END;
+$$;

@@ -45,49 +45,131 @@ export function channelFailureKind(code: string): ChannelFailureKind {
   }
 }
 
-export function createInferenceTelemetry(
-  deps: ProxyDependencies,
-  operation: Operation,
-  requestId: string,
-  trace: TraceContext,
-  requestStart: number,
-) {
-  let logBillingAccountId: string | null = null;
-  let logModel: string | null = null;
-  let logStream = false;
-  let logChannel: string | null = null;
-  let logAttempts = 0;
-  let logFailover = false;
-  let logModBlocked = false;
-  let logTtftMs: number | null = null;
-  let requestTrace: ReturnType<typeof createRequestTrace> | undefined;
-  let traceProtocol: Protocol | null = null;
-  let traceChannel: string | undefined;
-  let failureRecorded = false;
-  let channelStage: ChannelFailureStage = "request_prepare";
-  const recordAttemptFailure = (
+export class InferenceTelemetry {
+  private logBillingAccountId: string | null = null;
+  private logModel: string | null = null;
+  private logStream = false;
+  private logChannel: string | null = null;
+  private logAttempts = 0;
+  private logFailover = false;
+  private logModBlocked = false;
+  private logTtftMs: number | null = null;
+  requestTrace: ReturnType<typeof createRequestTrace> | undefined;
+  private traceProtocol: Protocol | null = null;
+  private traceChannel: string | undefined;
+  private failureRecorded = false;
+  private channelStage: ChannelFailureStage = "request_prepare";
+  private waitingForFirstText = false;
+  private logged = false;
+
+  constructor(
+    private readonly deps: ProxyDependencies,
+    private readonly operation: Operation,
+    private readonly requestId: string,
+    private readonly trace: TraceContext,
+    private readonly requestStart: number,
+  ) {}
+
+  get trackFirstText(): boolean {
+    return this.traceProtocol !== null;
+  }
+
+  setBillingAccount(id: string): void {
+    this.logBillingAccountId = id;
+  }
+
+  setModel(model: string): void {
+    this.logModel = model;
+  }
+
+  setChannel(channel: string): void {
+    this.logChannel = channel;
+  }
+
+  setStage(stage: ChannelFailureStage): void {
+    this.channelStage = stage;
+  }
+
+  setLatency(latency: number): void {
+    this.logTtftMs = latency;
+  }
+
+  private readonly stopWaitingForFirstText = (): void => {
+    if (!this.waitingForFirstText) return;
+    this.waitingForFirstText = false;
+    this.deps.metrics.waitingFirstText--;
+  };
+
+  beginResponseTracking(isStream: boolean): void {
+    this.logStream = isStream;
+    this.traceProtocol =
+      isStream && isConversationalOperation(this.operation) ? this.operation : null;
+    if (
+      this.deps.traceQueue ||
+      (this.traceProtocol &&
+        (this.deps.config.traceMetrics || this.deps.metrics.isAccessLogEnabled))
+    ) {
+      this.requestTrace = createRequestTrace(
+        this.requestStart,
+        this.traceProtocol,
+        this.deps.config.traceExport?.maxAttempts,
+        this.stopWaitingForFirstText,
+      );
+      if (this.traceProtocol && this.deps.config.traceMetrics) {
+        this.waitingForFirstText = true;
+        this.deps.metrics.waitingFirstText++;
+      }
+    }
+  }
+
+  beginAttempt(
+    channel: string,
+    id: string,
+    number: number,
+    startedAt: number,
+    timing: ReturnType<typeof createTransportTiming> | undefined,
+  ): void {
+    this.logAttempts = number;
+    this.traceChannel = channel;
+    this.failureRecorded = false;
+    this.channelStage = "request_prepare";
+    this.requestTrace?.beginAttempt(startedAt, { id, number, channel }, timing);
+  }
+
+  failover(): void {
+    this.logFailover = true;
+    this.deps.metrics.failoversTotal++;
+  }
+
+  moderationBlocked(): void {
+    this.logModBlocked = true;
+    this.deps.metrics.moderationBlocksTotal++;
+  }
+
+  recordAttemptFailure(
     code: string,
     kind: ChannelFailureKind = channelFailureKind(code),
     details?: TraceAttempt["providerError"],
-    stage = channelStage,
-  ) => {
-    if (!traceChannel || failureRecorded) return;
-    failureRecorded = true;
-    deps.metrics.recordChannelFailure(traceChannel, stage, kind);
-    requestTrace?.failAttempt(performance.now(), stage, kind, code, details);
-  };
-  const recordPreDispatchFailure = (
+    stage = this.channelStage,
+  ): void {
+    if (!this.traceChannel || this.failureRecorded) return;
+    this.failureRecorded = true;
+    this.deps.metrics.recordChannelFailure(this.traceChannel, stage, kind);
+    this.requestTrace?.failAttempt(performance.now(), stage, kind, code, details);
+  }
+
+  recordPreDispatchFailure(
     channel: string,
     code: string,
     kind: ChannelFailureKind,
     timing?: ReturnType<typeof createTransportTiming>,
     id?: string,
     startedAt?: number,
-  ) => {
-    deps.metrics.recordChannelFailure(channel, "pre_dispatch", kind);
-    if (!deps.traceQueue || !requestTrace) return;
+  ): void {
+    this.deps.metrics.recordChannelFailure(channel, "pre_dispatch", kind);
+    if (!this.deps.traceQueue || !this.requestTrace) return;
     const at = performance.now();
-    requestTrace.recordPreDispatchFailure(
+    this.requestTrace.recordPreDispatchFailure(
       id ?? fastUuid(),
       channel,
       startedAt ?? at,
@@ -96,25 +178,29 @@ export function createInferenceTelemetry(
       kind,
       timing?.values ?? createTransportTiming().values,
     );
-  };
-  let waitingForFirstText = false;
-  const stopWaitingForFirstText = () => {
-    if (!waitingForFirstText) return;
-    waitingForFirstText = false;
-    deps.metrics.waitingFirstText--;
-  };
-  let logged = false;
+  }
 
-  const emitAccessLog = (status: number, errorCode: string | null) => {
-    if (logged) return;
-    logged = true;
+  emitAccessLog(status: number, errorCode: string | null): void {
+    if (this.logged) return;
+    this.logged = true;
     const ended = performance.now();
-    const durationMs = ended - requestStart;
-    if (!errorCode && !requestTrace && !waitingForFirstText && !deps.metrics.isAccessLogEnabled) {
-      deps.metrics.observeRequestFast(operation, status, logChannel, durationMs, logTtftMs);
+    const durationMs = ended - this.requestStart;
+    if (
+      !errorCode &&
+      !this.requestTrace &&
+      !this.waitingForFirstText &&
+      !this.deps.metrics.isAccessLogEnabled
+    ) {
+      this.deps.metrics.observeRequestFast(
+        this.operation,
+        status,
+        this.logChannel,
+        durationMs,
+        this.logTtftMs,
+      );
       return;
     }
-    stopWaitingForFirstText();
+    this.stopWaitingForFirstText();
     try {
       if (
         errorCode &&
@@ -122,24 +208,24 @@ export function createInferenceTelemetry(
           errorCode,
         )
       ) {
-        recordAttemptFailure(errorCode);
+        this.recordAttemptFailure(errorCode);
       }
-      if (requestTrace) {
-        requestTrace.endAttempt(ended);
-        const measurement = requestTrace.measurement;
-        if (traceProtocol && deps.config.traceMetrics)
-          deps.metrics.observeStreamPhases(operation, status, measurement);
-        if (deps.traceQueue && logBillingAccountId)
-          deps.traceQueue.offer({
-            traceId: trace.traceId,
-            spanId: trace.spanId,
-            ...(trace.parentSpanId ? { parentSpanId: trace.parentSpanId } : {}),
-            requestId,
-            billingAccountId: logBillingAccountId,
-            model: logModel,
-            operation,
+      if (this.requestTrace) {
+        this.requestTrace.endAttempt(ended);
+        const measurement = this.requestTrace.measurement;
+        if (this.traceProtocol && this.deps.config.traceMetrics)
+          this.deps.metrics.observeStreamPhases(this.operation, status, measurement);
+        if (this.deps.traceQueue && this.logBillingAccountId)
+          this.deps.traceQueue.offer({
+            traceId: this.trace.traceId,
+            spanId: this.trace.spanId,
+            ...(this.trace.parentSpanId ? { parentSpanId: this.trace.parentSpanId } : {}),
+            requestId: this.requestId,
+            billingAccountId: this.logBillingAccountId,
+            model: this.logModel,
+            operation: this.operation,
             status,
-            firstTextTracked: traceProtocol !== null,
+            firstTextTracked: this.traceProtocol !== null,
             error:
               errorCode && /^[A-Za-z0-9_.:-]{1,80}$/.test(errorCode)
                 ? errorCode
@@ -147,107 +233,54 @@ export function createInferenceTelemetry(
                   ? "request_failed"
                   : null,
             origin: performance.timeOrigin,
-            start: requestStart,
+            start: this.requestStart,
             end: ended,
             ...(measurement.enqueued === undefined ? {} : { enqueued: measurement.enqueued }),
             ...(measurement.admission ? { admission: measurement.admission } : {}),
-            ...requestTrace.completedAttempts,
+            ...this.requestTrace.completedAttempts,
           });
       }
     } catch {
-      deps.metrics.traceCaptureFailures++;
+      this.deps.metrics.traceCaptureFailures++;
     }
-    if (!deps.metrics.isAccessLogEnabled) {
-      deps.metrics.observeRequestFast(operation, status, logChannel, durationMs, logTtftMs);
+    if (!this.deps.metrics.isAccessLogEnabled) {
+      this.deps.metrics.observeRequestFast(
+        this.operation,
+        status,
+        this.logChannel,
+        durationMs,
+        this.logTtftMs,
+      );
       return;
     }
-    deps.metrics.observeRequest({
-      trace_id: trace.traceId,
-      request_id: requestId,
-      billing_account_id: logBillingAccountId,
-      model: logModel,
-      operation,
-      stream: logStream,
-      channel: logChannel,
+    this.deps.metrics.observeRequest({
+      trace_id: this.trace.traceId,
+      request_id: this.requestId,
+      billing_account_id: this.logBillingAccountId,
+      model: this.logModel,
+      operation: this.operation,
+      stream: this.logStream,
+      channel: this.logChannel,
       status,
-      attempts: logAttempts,
-      failover: logFailover,
-      moderation_blocked: logModBlocked,
+      attempts: this.logAttempts,
+      failover: this.logFailover,
+      moderation_blocked: this.logModBlocked,
       duration_ms: durationMs,
-      ttft_ms: logTtftMs,
-      ...(requestTrace && traceProtocol
-        ? { first_text_trace: requestTrace.record(trace.spanId) }
+      ttft_ms: this.logTtftMs,
+      ...(this.requestTrace && this.traceProtocol
+        ? { first_text_trace: this.requestTrace.record(this.trace.spanId) }
         : {}),
       error_code: errorCode,
     });
-  };
-
-  return {
-    get requestTrace() {
-      return requestTrace;
-    },
-    get trackFirstText() {
-      return traceProtocol !== null;
-    },
-    setBillingAccount(id: string) {
-      logBillingAccountId = id;
-    },
-    setModel(model: string) {
-      logModel = model;
-    },
-    setChannel(channel: string) {
-      logChannel = channel;
-    },
-    setStage(stage: ChannelFailureStage) {
-      channelStage = stage;
-    },
-    setLatency(latency: number) {
-      logTtftMs = latency;
-    },
-    beginResponseTracking(isStream: boolean) {
-      logStream = isStream;
-      traceProtocol = isStream && isConversationalOperation(operation) ? operation : null;
-      if (
-        deps.traceQueue ||
-        (traceProtocol && (deps.config.traceMetrics || deps.metrics.isAccessLogEnabled))
-      ) {
-        requestTrace = createRequestTrace(
-          requestStart,
-          traceProtocol,
-          deps.config.traceExport?.maxAttempts,
-          stopWaitingForFirstText,
-        );
-        if (traceProtocol && deps.config.traceMetrics) {
-          waitingForFirstText = true;
-          deps.metrics.waitingFirstText++;
-        }
-      }
-    },
-    beginAttempt(
-      channel: string,
-      id: string,
-      number: number,
-      startedAt: number,
-      timing: ReturnType<typeof createTransportTiming> | undefined,
-    ) {
-      logAttempts = number;
-      traceChannel = channel;
-      failureRecorded = false;
-      channelStage = "request_prepare";
-      requestTrace?.beginAttempt(startedAt, { id, number, channel }, timing);
-    },
-    failover() {
-      logFailover = true;
-      deps.metrics.failoversTotal++;
-    },
-    moderationBlocked() {
-      logModBlocked = true;
-      deps.metrics.moderationBlocksTotal++;
-    },
-    recordAttemptFailure,
-    recordPreDispatchFailure,
-    emitAccessLog,
-  };
+  }
 }
 
-export type InferenceTelemetry = ReturnType<typeof createInferenceTelemetry>;
+export function createInferenceTelemetry(
+  deps: ProxyDependencies,
+  operation: Operation,
+  requestId: string,
+  trace: TraceContext,
+  requestStart: number,
+): InferenceTelemetry {
+  return new InferenceTelemetry(deps, operation, requestId, trace, requestStart);
+}

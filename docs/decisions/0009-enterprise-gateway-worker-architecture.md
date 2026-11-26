@@ -165,7 +165,7 @@ Redis 连接组件负责主节点发现、连接切换及健康探测。配额�
 5. **`wallet_leases` + `supplier_leases`**（PG 持久化节点分片租约，打破热点单行锁并保持 `SIGKILL` 零丢账）：
    - `wallet_leases (id PK, node_id, wallet_id FK, currency, lot_allocations jsonb, remaining_atoms NUMERIC(38,0), earliest_lot_expires_at, state CHECK('ACTIVE','CLOSED'), expires_at, created_at, updated_at)`
    - `supplier_leases (id PK, node_id, account_id FK, currency, cell SMALLINT, remaining_atoms NUMERIC(38,0), state CHECK('ACTIVE','CLOSED'), expires_at, created_at, updated_at)`
-   - 自适应激活：同批次达到热度阈值（`count >= 4` 或 2 秒内 `>= 16` 命中）且钱包无冻结/欠款/受限 lot 时，按需从 `wallets`/`wallet_lots` 与 `supplier_cells` 预留 `<= 50%` 可用余量作为 PG 持久化租约。Gateway 客户钱包空闲租约按 `WALLET_LEASE_IDLE_RELEASE_MS` 自动归还，默认 `450 ms`，供应商空闲租约使用 `450 ms`。提高钱包退租窗口会延长另一节点请求的可用余额可能不足的时间。租约到期、资金批次临近到期或优雅 `drain()` 时仍按原时间边界回收。节点被 `SIGKILL` 后由 Worker `sweepExpiredLeases` 原子分离未闭 `billing_holds`，将剩余资金退回 `available_atoms`，已过期 lot 严格计入 `expired_atoms`。续约以 PG 返回的有效期为准。回收持有排他租约锁后重新核验到期和开放预扣，遇到已被结算事务锁定的预扣则留到下一轮。
+   - 自适应激活：同批次达到热度阈值（`count >= 4` 或热度窗口内 `>= 16` 命中；客户钱包热度窗口随空闲退租窗口自适应收口至 `min(2000 ms, floor(WALLET_LEASE_IDLE_RELEASE_MS * 0.9))` 且正值不低于 `250 ms`，避免退租与晋升振荡）且钱包无冻结/欠款/受限 lot 时，按需从 `wallets`/`wallet_lots` 与 `supplier_cells` 预留 `<= 50%` 可用余量作为 PG 持久化租约。Gateway 客户钱包空闲租约按 `WALLET_LEASE_IDLE_RELEASE_MS` 自动归还，默认 `2500 ms`，供应商空闲租约默认 `2500 ms`。提高钱包退租窗口会延长另一节点请求的可用余额可能不足的时间。租约到期、资金批次临近到期或优雅 `drain()` 时仍按原时间边界回收。节点被 `SIGKILL` 后由 Worker `sweepExpiredLeases` 原子分离未闭 `billing_holds`，将剩余资金退回 `available_atoms`，已过期 lot 严格计入 `expired_atoms`。续约以 PG 返回的有效期为准。回收持有排他租约锁后重新核验到期和开放预扣，遇到已被结算事务锁定的预扣则留到下一轮。
    - 同一 Gateway 批量归还本节点多个钱包的闲置单笔永久资金批次。先锁租约，再确认没有开放预扣，按钱包和 lot 顺序取锁，校验并一次提交余额归还及退租。单个竞争钱包、到期资金批次和开放预扣沿用原逐笔事务。
    - 快速预扣获得租约及钱包锁后，用已锁定的租约主键逐项读取，再核对冻结、到期和可用资金。查询在复用 PostgreSQL 通用计划时按批内主键访问租约。
 6. **`billing_charges`** + **`ledger_entries`**（按月分区不可变终态凭证与统一双式分录）：
@@ -182,10 +182,10 @@ Redis 连接组件负责主节点发现、连接切换及健康探测。配额�
 
 1. **双轨自适应快慢路径（同一账本引擎内，无旧代码）**：
    - **冷钱包 / 授信 / 限模型 Lot / 幂等键请求**：走 2 ms 同钱包微批聚合器（`acquireQueue`），按全局升序 `FOR NO KEY UPDATE` 锁序批量完成 lot 预扣与 `billing_holds` 写入；达到热度条件后在同一事务内无缝签发 `wallet_leases` + `supplier_leases`。
-   - **热钱包租赁快路径（`fastHoldQueue`，单统一队列、单批上限 1024）**：先在内存中从活跃租约划拨预扣额度，再在同一 PostgreSQL 事务中按升序取得租约 `FOR KEY SHARE` 和钱包 `FOR SHARE`。等待行锁结束后，使用新的语句快照重新核验供应商、租约和钱包状态，再写入预扣。失效项回落到普通预扣，收到持久化确认后才派发。
+   - **热钱包租赁快路径（`fastHoldQueue`，单统一队列、单批上限 1024）**：先在内存中从活跃租约划拨预扣额度，再通过单次数据库往返的 PL/pgSQL 过程 `public.acquire_leased_holds`（`0001_ledger_hot_path_perf.sql`）按升序取得租约 `FOR KEY SHARE` 和钱包 `FOR SHARE`。等待行锁结束后，使用锁后 `clock_timestamp()` 重新核验供应商、租约和钱包状态，再批量写入预扣。失效项回落到普通预扣，收到持久化确认后才派发。
 2. **微批结算（`commitQueue`，2 条 `SETTLEMENT_LANES` 分片队列、单批上限 1024）**：
    - 严格遵循全局锁序：`1. billing_holds → 2. wallet_leases → 3. supplier_leases → 4. wallets → 5. wallet_lots → 6. upstream_accounts → 7. supplier_cells`，全线使用 **`FOR NO KEY UPDATE`** 避免与并发 `INSERT INTO billing_holds` 外键 `FOR KEY SHARE` 产生锁冲突或死锁。
-   - **单一 DB 往返 PL/pgSQL 快路径（`public.commit_leased_batch`，增量迁移 `0001_ledger_hot_path_perf.sql` / schema `2026112601`）**：当批量全部命中活跃单 Lot 租约时，通过单次 `SELECT public.commit_leased_batch(...)` 在 PG 服务端单事务内完成单次 `jsonb_to_recordset` 解析、行锁与 `ctid` 定位更新、多表 Data-Modifying CTE（更新 `wallet_leases`、`supplier_leases`、`billing_holds`，写入 `billing_charges` 与受不可变/复式平衡触发器保护的 `ledger_entries`，并在同一合并 CTE 内按严格锁序更新 `wallets`、`wallet_lots`、`supplier_cells`），随后按升序分片锁写入 `outbox_events`；请求/扣款/事件/分录采用 UUIDv7 保持 B-tree 右端顺序追加，遇到多 Lot、租约不足或失效等复杂项时自动回落至标准慢路径事务。
+   - **单一 DB 往返 PL/pgSQL 快路径（`public.commit_leased_batch`，增量迁移 `0001_ledger_hot_path_perf.sql` / schema `2026112601`）**：当批量全部命中活跃单 Lot 租约时，通过单次 `SELECT public.commit_leased_batch(...)` 在 PG 服务端单事务内完成单次 `jsonb_to_recordset` 解析、行锁与主键定位更新、多表 Data-Modifying CTE（更新 `wallet_leases`、`supplier_leases`、`billing_holds`，写入 `billing_charges` 与受不可变/复式平衡触发器保护的 `ledger_entries`，并在同一合并 CTE 内按严格锁序更新 `wallets`、`wallet_lots`、`supplier_cells`），随后按升序分片锁写入 `outbox_events`；请求/扣款/事件/分录采用 UUIDv7 保持 B-tree 右端顺序追加，遇到多 Lot、租约不足或失效等复杂项时自动回落至标准慢路径事务。
 3. **异常、故障切换与 `SIGKILL` 恢复**：
    - 故障切换（`switchSupplierAttempt`）、释放（`releaseHold`）、标未明（`markUnknown`）及跨租约/过期边界请求自动调用 `detachHoldFromLeaseTx` 从租约分离并安全落回标准事务路径；
    - 进程被 `SIGKILL` 强杀后，未闭合 `billing_holds` 与过期 `wallet_leases`/`supplier_leases` 由 `apps/worker` 的 `sweepTimedOutHolds` + `sweepExpiredLeases` + `expireAllLots` 全量回收，经人工或自动决议后 `auditConservation()` 100% 归零守恒。
@@ -199,8 +199,8 @@ Redis 连接组件负责主节点发现、连接切换及健康探测。配额�
   2. **配置目录与快照仓储（`packages/ledger/src/catalog.ts`）**：项目、Key、渠道、模型、价目、路由、插件的全部 CRUD Upsert、配置纪元递增与全量快照读取。
   3. **非热路径查询与状态流转**：钱包/供应商余额查询、版本校验（`assertSchemaVersion`）、`markUnknown`、超时预扣扫尾、Outbox `claim`/`ack` 与月度冷归档导出查询。
 - **保留原生 `Bun.SQL` 的场景**：
-  1. **微批集合热路径**：`fastHoldQueue` / `acquireQueue` / `commit_leased_batch` 与 9 表单 CTE `commitQueue` 批量 `UPDATE/INSERT ... FROM unnest(...)`、显式升序 `FOR NO KEY UPDATE` 行锁与资金事务。
-  2. **DDL 与 PG 专有控制**：基线及增量 SQL 迁移（含 `PARTITION BY RANGE`、`DEFERRABLE` 复式记账触发器、`immutable_record` 触发器、`outbox_shard`/`commit_leased_batch` 与 `pg_advisory_xact_lock`）。
+  1. **微批集合热路径**：`fastHoldQueue`（`acquire_leased_holds`）/ `acquireQueue` / `commit_leased_batch` 与 9 表单 CTE `commitQueue` 批量 `UPDATE/INSERT ... FROM unnest(...)`、显式升序 `FOR NO KEY UPDATE` 行锁与资金事务。
+  2. **DDL 与 PG 专有控制**：基线及增量 SQL 迁移（含 `PARTITION BY RANGE`、`DEFERRABLE` 复式记账触发器、`immutable_record` 触发器、`outbox_shard`/`acquire_leased_holds`/`commit_leased_batch` 与 `pg_advisory_xact_lock`）。
 
 ### 4.5 账本实现边界
 

@@ -444,6 +444,9 @@ test("symptom: commit_leased_batch succeeds under least-privilege stg_data outbo
       await db.unsafe(
         `GRANT EXECUTE ON FUNCTION public.commit_leased_batch(JSONB, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) TO ${roleName}`,
       );
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION public.acquire_leased_holds(TEXT, UUID[], UUID[], JSONB, BOOLEAN) TO ${roleName}`,
+      );
 
       const base = new URL(process.env.DATABASE_URL!);
       const [dbRow] = await db<{ dbname: string }[]>`SELECT current_database() AS dbname`;

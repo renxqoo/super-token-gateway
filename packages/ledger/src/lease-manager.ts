@@ -12,7 +12,7 @@ import { walletKey, supplierKey, walletLane } from "./funds.ts";
 
 const LEASE_TTL_MS = 15_000;
 const LEASE_RENEW_MARGIN_MS = 6_000;
-const LEASE_IDLE_RELEASE_MS = 450;
+const LEASE_IDLE_RELEASE_MS = 2500;
 
 export type LeaseOptions = {
   nodeId?: string;
@@ -469,6 +469,7 @@ export function createLeaseManager(db: SQL, options: LeaseOptions, walletCloseBa
   return {
     nodeId,
     ttlMs: leaseTtlMs,
+    walletIdleReleaseMs: walletLeaseIdleReleaseMs,
     canAcquire: () => leaseEnabled && !draining,
     reserveHold,
     hasWallet: (key: string) => activeWalletLeases.has(key),

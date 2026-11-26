@@ -411,7 +411,7 @@ export class StreamTranslator {
           event.event === "message" &&
           event.wire.startsWith("data: ") &&
           event.wire.indexOf("\n") === event.wire.length - 2
-          ? streamEncoder.encode(event.wire)
+          ? (event.wireBytes ?? streamEncoder.encode(event.wire))
           : encodeSSE(body, event.event === "message" ? undefined : event.event),
       );
     } else {

@@ -22,46 +22,18 @@ import {
   RENEW_LUA,
   BATCH_RENEW_LUA,
   buildBatchAcquireArgs,
+  decodeAcquireFailure,
+  failAcquire,
   renewSha,
   evalPermitPrepared,
   withRedisDeadline,
   createQuotaKeyCache,
-  type KeyTriple,
+  type ActivePermit,
+  type IngressIpCheck,
+  type PendingAcquire,
+  type RateLimitAcquireResult,
 } from "./cluster-redis.ts";
-
-type PendingAcquire = {
-  redis: RedisClient;
-  keys: KeyTriple;
-  rpm: string;
-  tpm: string;
-  concurrency: string;
-  estimatedTokens: string;
-  leaseTtlMs: number;
-  leaseTtlStr: string;
-  member: string;
-  onRevoke: (() => void) | undefined;
-  resolve: (result: RateLimitAcquireResult) => void;
-};
-
-type ActivePermit = {
-  concKey: string;
-  member: string;
-  leaseTtlMs: number;
-  leaseTtlStr: string;
-  renewEveryMs: number;
-  safetyMarginMs: number;
-  confirmedExpiresAtMs: number;
-  nextRenewAtMs: number;
-  renewing: boolean;
-  released: boolean;
-  onRevoke: (() => void) | undefined;
-  revoked: AbortController | null;
-  shortTimer?: ReturnType<typeof setTimeout> | undefined;
-};
-
-export type RateLimitAcquireResult =
-  | { ok: true; release: () => void; signal?: AbortSignal }
-  | { ok: false; reason: "rpm" | "tpm" | "concurrency" | "unavailable" };
+export type { IngressIpCheck, RateLimitAcquireResult } from "./cluster-redis.ts";
 
 const ACQUIRE_BATCH_MAX = 256;
 const MAX_ACQUIRE_IN_FLIGHT = 16;
@@ -136,7 +108,7 @@ export class ClusterCoordinator {
   private failPendingFor(client?: RedisClient): void {
     this.pendingAcquires = this.pendingAcquires.filter((item) => {
       if (client && item.redis !== client) return true;
-      item.resolve({ ok: false, reason: "unavailable" });
+      item.resolve(failAcquire(item.ingressIp));
       return false;
     });
     if (client && this.pendingReleases.length > 0) {
@@ -590,7 +562,7 @@ export class ClusterCoordinator {
         !this.connection.active ||
         !item.redis.connected
       ) {
-        item.resolve({ ok: false, reason: "unavailable" });
+        item.resolve(failAcquire(item.ingressIp));
         continue;
       }
       let list = groups.get(item.redis);
@@ -613,7 +585,13 @@ export class ClusterCoordinator {
     this.acquireInFlight++;
     const n = items.length;
     const relGroups = piggybackReleases ? groupPiggybackReleases(piggybackReleases) : undefined;
-    const shaArgs = buildBatchAcquireArgs(items, relGroups);
+    const { shaArgs, minIpTimeoutMs } = buildBatchAcquireArgs(items, relGroups, (ip) =>
+      this.connection.ingressKeyFor(ip),
+    );
+    const batchTimeoutMs =
+      minIpTimeoutMs === undefined
+        ? ACQUIRE_TIMEOUT_MS
+        : Math.min(ACQUIRE_TIMEOUT_MS, minIpTimeoutMs);
     const sentAtMs = Date.now();
     let expired = false;
     const work = evalPermitPrepared(redis, BATCH_ACQUIRE_LUA, shaArgs, () => !expired);
@@ -625,7 +603,7 @@ export class ClusterCoordinator {
       this.scheduleReleaseRecoveryFlush();
     };
     try {
-      const raw = await withRedisDeadline(work, ACQUIRE_TIMEOUT_MS, () => {
+      const raw = await withRedisDeadline(work, batchTimeoutMs, () => {
         expired = true;
       });
       if (!Array.isArray(raw) || raw.length !== n) {
@@ -638,15 +616,9 @@ export class ClusterCoordinator {
         !this.connection.active;
       for (let i = 0; i < n; i++) {
         const it = items[i]!;
-        const code = Number(raw[i]);
-        if (code === 1) {
-          it.resolve({ ok: false, reason: "rpm" });
-        } else if (code === 2) {
-          it.resolve({ ok: false, reason: "tpm" });
-        } else if (code === 3) {
-          it.resolve({ ok: false, reason: "concurrency" });
-        } else if (code !== 0) {
-          it.resolve({ ok: false, reason: "unavailable" });
+        const denied = decodeAcquireFailure(Number(raw[i]), it.ingressIp);
+        if (denied) {
+          it.resolve(denied);
         } else if (disconnected) {
           if (redis.connected) {
             void redis.send("ZREM", [it.keys.concKey, it.member]).catch(() => {
@@ -657,7 +629,7 @@ export class ClusterCoordinator {
           } else if (!this.connection.stopped) {
             this.recordOrphanedRelease(it.keys.concKey, it.member, sentAtMs + it.leaseTtlMs);
           }
-          it.resolve({ ok: false, reason: "unavailable" });
+          it.resolve(failAcquire(it.ingressIp));
         } else {
           it.resolve(
             this.registerPermit(
@@ -678,7 +650,7 @@ export class ClusterCoordinator {
         }
       }
       recoverAcquires(sentAtMs);
-      for (const it of items) it.resolve({ ok: false, reason: "unavailable" });
+      for (const it of items) it.resolve(failAcquire(it.ingressIp));
       this.connection.reportAcquireFailure(redis);
       if (expired) {
         this.lateAcquireBatches++;
@@ -706,15 +678,17 @@ export class ClusterCoordinator {
     estimatedTokens: number,
     leaseTtlMs = 120_000,
     onRevoke?: () => void,
+    ingressIp?: IngressIpCheck,
   ): Promise<RateLimitAcquireResult> {
     if (!this.connection.redisUrl) {
+      if (ingressIp) return Promise.resolve({ ok: false, reason: "ingress_quota_unavailable" });
       return Promise.resolve(this.localLimiter.acquire(key, limits, estimatedTokens));
     }
     const redis = this.connection.commandClient;
     if (this.lateAcquireBatches > 0 && this.acquireInFlight >= MAX_ACQUIRE_IN_FLIGHT)
-      return Promise.resolve({ ok: false, reason: "unavailable" });
+      return Promise.resolve(failAcquire(ingressIp));
     if (!redis?.connected || !this.connection.active || this.connection.stopped) {
-      return Promise.resolve({ ok: false, reason: "unavailable" });
+      return Promise.resolve(failAcquire(ingressIp));
     }
     const keys = this.getKeyTriple(key);
     const member = `${this.memberPrefix}${++this.permitSeq}`;
@@ -730,6 +704,7 @@ export class ClusterCoordinator {
         leaseTtlMs,
         leaseTtlStr: String(leaseTtlMs),
         member,
+        ingressIp,
         onRevoke,
         resolve,
       });

@@ -14,7 +14,7 @@ import {
 const jsonBody =
   '{"model":"test-chat","choices":[{"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}';
 
-async function invokeChat(body: string, { stream = false, cancel = false } = {}) {
+async function invokeChat(body: string, { stream = false, fast = false, cancel = false } = {}) {
   const billingAccount = makeBillingAccount(crypto.randomUUID(), 10);
   const key = createKey();
   const snap = makeSnapshot(1, [billingAccount], [makeApiKey(key, billingAccount.id)]);
@@ -123,7 +123,7 @@ async function invokeChat(body: string, { stream = false, cancel = false } = {})
   const contentType = stream ? "text/event-stream" : "application/json";
   const bytes = new TextEncoder().encode(body);
   const fetchFast: typeof deps.transport.fetchFast = async (_url, init) => {
-    if (stream) {
+    if (stream && !fast) {
       const response = new Response(bytes, { headers: { "content-type": contentType } });
       return { fast: false, response };
     }
@@ -205,6 +205,58 @@ test("symptom: a later SSE error in the same upstream read drops already validat
   expect(response.wire).toContain("provider_stream_error");
   expect(response.wire).toContain("valid answer prefix");
   expect(response.wire.indexOf("valid answer prefix")).toBeLessThan(
+    response.wire.indexOf("event: error"),
+  );
+});
+
+test("fast-buffered SSE settles exact usage and returns complete SSE frames", async () => {
+  const sseBody =
+    'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}\n\n' +
+    'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\n' +
+    "data: [DONE]\n\n";
+  const response = await invokeChat(sseBody, { stream: true, fast: true });
+  expect(response.status, response.wire).toBe(200);
+  expect(response.finalized).toEqual(["SETTLED"]);
+  expect(response.wire).toContain('"content":"hello"');
+  expect(response.wire).toContain("data: [DONE]\n\n");
+});
+
+test("fast-buffered SSE marks unknown and returns stream_interrupted on incomplete trailing frame", async () => {
+  const sseBody =
+    'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n' +
+    'data: {"truncated":true';
+  const response = await invokeChat(sseBody, { stream: true, fast: true });
+  expect(response.status, response.wire).toBe(200);
+  expect(response.finalized).toEqual(["UNKNOWN"]);
+  expect(response.wire).toContain('"content":"partial"');
+  expect(response.wire).toContain("stream_interrupted");
+  expect(response.wire).not.toContain("data: [DONE]");
+});
+
+test("fast-buffered SSE marks unknown and holds terminal frame when usage metadata is missing", async () => {
+  const sseBody =
+    'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{"content":"answer"}}]}\n\n' +
+    'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+    "data: [DONE]\n\n";
+  const response = await invokeChat(sseBody, { stream: true, fast: true });
+  expect(response.status, response.wire).toBe(200);
+  expect(response.finalized).toEqual(["UNKNOWN"]);
+  expect(response.wire).toContain('"content":"answer"');
+  expect(response.wire).toContain("invalid_upstream_usage");
+  expect(response.wire).not.toContain("data: [DONE]");
+});
+
+test("symptom: fast-buffered SSE drops already validated text when a later event errors", async () => {
+  const response = await invokeChat(
+    'data: {"choices":[{"index":0,"delta":{"content":"valid fast prefix"}}]}\n\n' +
+      'event: error\ndata: {"error":{"message":"Provider failed"}}\n\n',
+    { stream: true, fast: true },
+  );
+  expect(response.status, response.wire).toBe(200);
+  expect(response.finalized).toEqual(["UNKNOWN"]);
+  expect(response.wire).toContain("provider_stream_error");
+  expect(response.wire).toContain("valid fast prefix");
+  expect(response.wire.indexOf("valid fast prefix")).toBeLessThan(
     response.wire.indexOf("event: error"),
   );
 });

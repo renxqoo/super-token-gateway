@@ -31,51 +31,219 @@ function subscribeSharedAbort(signal: AbortSignal, fn: (reason: unknown) => void
   };
 }
 
-export function createInferenceResources(
-  deps: ProxyDependencies,
-  state: ProxyRuntimeState,
-  requestSignal: AbortSignal,
-) {
-  let drainAborted = false;
-  let billingAccountPermitRevoked = false;
-  let channelPermitRevoked = false;
-  let activeAbortNotify: ((reason: unknown) => void) | null = null;
-  let releaseGuard: (() => void) | undefined;
-  let releaseBodyBuffer: (() => void) | undefined;
-  let releaseLocalAccount: (() => void) | undefined;
-  let releaseAccountLimit: (() => void) | undefined;
-  let releaseChannelLimit: (() => void) | undefined;
-  let releaseOutputAdmission: (() => void) | undefined;
-  let disposeAttempt: (() => void) | undefined;
-  let handedToStream = false;
+export class AttemptLifetime {
+  private attemptAborted = false;
+  private attemptAbortReason: unknown;
+  private attemptCancelCb: ((reason: unknown) => void) | null = null;
+  private lazyAttemptController: AbortController | null = null;
+  private attemptDisposed = false;
+  private watchingReqSignal = false;
+  private unsubPlugin: (() => void) | undefined;
+  private readonly cancelTimeoutFn: () => void;
 
-  function dispose() {
-    disposeAttempt?.();
-    disposeAttempt = undefined;
-    activeAbortNotify = null;
-    clearChannelLimit();
-    clearOutputAdmission();
-    releaseAccountLimit?.();
-    releaseAccountLimit = undefined;
-    releaseLocalAccount?.();
-    releaseLocalAccount = undefined;
-    releaseBodyBuffer?.();
-    releaseBodyBuffer = undefined;
-    releaseGuard?.();
-    releaseGuard = undefined;
+  constructor(
+    private readonly owner: InferenceResources,
+    private readonly requestSignal: AbortSignal,
+    pluginSignal: AbortSignal,
+    attemptTimeoutMs: number,
+    watchPlugin: boolean,
+    state: ProxyRuntimeState,
+  ) {
+    if (owner.isDraining()) {
+      this.abort(new Error("Gateway shutting down"));
+    } else if (owner.quotaLost(true)) {
+      this.abort(new Error("Shared concurrency permit could not be renewed"));
+    } else if (requestSignal.aborted) {
+      this.abort(requestSignal.reason);
+    } else if (pluginSignal.aborted) {
+      this.abort(pluginSignal.reason);
+    }
+    if (!this.attemptAborted) {
+      this.watchingReqSignal = true;
+      requestSignal.addEventListener("abort", this.onReqAbort, { once: true });
+      if (watchPlugin) this.unsubPlugin = subscribeSharedAbort(pluginSignal, this.abort);
+      owner.setAbortNotify(this.abort);
+    }
+    this.cancelTimeoutFn = state.deadlines.schedule(attemptTimeoutMs, () =>
+      this.abort(new Error("attempt_timeout")),
+    );
   }
 
-  function clearChannelLimit() {
-    releaseChannelLimit?.();
-    releaseChannelLimit = undefined;
+  private readonly onReqAbort = (): void => {
+    this.abort(this.requestSignal.reason);
+  };
+
+  get aborted(): boolean {
+    return this.attemptAborted;
   }
 
-  function clearOutputAdmission() {
-    releaseOutputAdmission?.();
-    releaseOutputAdmission = undefined;
+  get reason(): unknown {
+    return this.attemptAbortReason;
   }
 
-  function link(
+  readonly abort = (reason: unknown): void => {
+    if (this.attemptAborted) return;
+    this.attemptAborted = true;
+    this.attemptAbortReason = reason;
+    const cb = this.attemptCancelCb;
+    this.attemptCancelCb = null;
+    if (cb) cb(reason);
+    this.lazyAttemptController?.abort(reason);
+  };
+
+  signal(): AbortSignal {
+    if (!this.lazyAttemptController) {
+      this.lazyAttemptController = new AbortController();
+      if (this.attemptAborted) this.lazyAttemptController.abort(this.attemptAbortReason);
+    }
+    return this.lazyAttemptController.signal;
+  }
+
+  cancelTimeout(): void {
+    this.cancelTimeoutFn();
+  }
+
+  readonly onCancelRegister: CancelRegistrar = (fn) => {
+    if (this.attemptAborted) {
+      fn(this.attemptAbortReason);
+      return () => {};
+    }
+    this.attemptCancelCb = fn;
+    return () => {
+      if (this.attemptCancelCb === fn) this.attemptCancelCb = null;
+    };
+  };
+
+  readonly dispose = (): void => {
+    this.cancelTimeoutFn();
+    if (!this.attemptDisposed) {
+      this.attemptDisposed = true;
+      this.attemptCancelCb = null;
+      if (this.watchingReqSignal) {
+        this.watchingReqSignal = false;
+        this.requestSignal.removeEventListener("abort", this.onReqAbort);
+      }
+      if (this.unsubPlugin) {
+        this.unsubPlugin();
+        this.unsubPlugin = undefined;
+      }
+      this.owner.clearAbortNotifyIf(this.abort);
+    }
+    this.owner.clearAttemptIf(this);
+  };
+
+  finishExchange(): void {
+    this.dispose();
+    this.owner.clearChannelLimit();
+  }
+}
+
+export class InferenceResources {
+  private drainAborted = false;
+  private billingAccountPermitRevoked = false;
+  private channelPermitRevoked = false;
+  private activeAbortNotify: ((reason: unknown) => void) | null = null;
+  private releaseGuard: (() => void) | undefined;
+  private releaseBodyBuffer: (() => void) | undefined;
+  private releaseLocalAccount: (() => void) | undefined;
+  private releaseAccountLimit: (() => void) | undefined;
+  private releaseChannelLimit: (() => void) | undefined;
+  private releaseOutputAdmission: (() => void) | undefined;
+  private activeAttempt: AttemptLifetime | undefined;
+  private handedToStream = false;
+
+  constructor(
+    private readonly deps: ProxyDependencies,
+    private readonly state: ProxyRuntimeState,
+    private readonly requestSignal: AbortSignal,
+  ) {}
+
+  enter(): void {
+    this.releaseGuard = this.deps.lifecycle.enterCallback(() => {
+      this.drainAborted = true;
+      this.activeAbortNotify?.(new Error("Gateway shutting down"));
+    }).release;
+  }
+
+  get streamOwnsRequest(): boolean {
+    return this.handedToStream;
+  }
+
+  readonly isDraining = (): boolean => this.drainAborted;
+
+  readonly setAbortNotify = (fn: ((reason: unknown) => void) | null): void => {
+    this.activeAbortNotify = fn;
+  };
+
+  clearAbortNotifyIf(fn: (reason: unknown) => void): void {
+    if (this.activeAbortNotify === fn) this.activeAbortNotify = null;
+  }
+
+  clearAttemptIf(attempt: AttemptLifetime): void {
+    if (this.activeAttempt === attempt) this.activeAttempt = undefined;
+  }
+
+  setBodyBuffer(release: () => void): void {
+    this.releaseBodyBuffer = release;
+  }
+
+  setLocalAccount(release: () => void): void {
+    this.releaseLocalAccount = release;
+  }
+
+  setAccountLimit(release: () => void): void {
+    this.releaseAccountLimit = release;
+  }
+
+  setChannelLimit(release: () => void): void {
+    this.releaseChannelLimit = release;
+  }
+
+  setOutputAdmission(release: (() => void) | undefined): void {
+    this.releaseOutputAdmission = release;
+  }
+
+  clearChannelLimit(): void {
+    this.releaseChannelLimit?.();
+    this.releaseChannelLimit = undefined;
+  }
+
+  clearOutputAdmission(): void {
+    this.releaseOutputAdmission?.();
+    this.releaseOutputAdmission = undefined;
+  }
+
+  resetChannelPermit(): void {
+    this.channelPermitRevoked = false;
+  }
+
+  readonly revokeAccountPermit = (): void => {
+    this.billingAccountPermitRevoked = true;
+    this.activeAbortNotify?.(new Error("Shared concurrency permit could not be renewed"));
+  };
+
+  readonly revokeChannelPermit = (): void => {
+    this.channelPermitRevoked = true;
+    this.activeAbortNotify?.(new Error("Shared concurrency permit could not be renewed"));
+  };
+
+  quotaLost(includeChannel = false): boolean {
+    return this.billingAccountPermitRevoked || (includeChannel && this.channelPermitRevoked);
+  }
+
+  interrupted(includeChannel = false): boolean {
+    return this.requestSignal.aborted || this.drainAborted || this.quotaLost(includeChannel);
+  }
+
+  admissionError(quotaLost: boolean): GatewayError {
+    return this.requestSignal.aborted
+      ? new GatewayError(499, "client_aborted", "Client disconnected")
+      : quotaLost
+        ? new GatewayError(503, "rate_limit_unavailable", "Shared concurrency permit was revoked")
+        : new GatewayError(503, "overloaded", "Gateway is draining");
+  }
+
+  link(
     sources: readonly (AbortSignal | undefined)[],
     includeChannelPermit = false,
     attachToRequest = true,
@@ -86,21 +254,24 @@ export function createInferenceResources(
     const trigger = (reason: unknown) => {
       if (!controller.signal.aborted) controller.abort(reason);
     };
-    if (drainAborted) {
+    if (this.drainAborted) {
       trigger(new Error("Gateway shutting down"));
-    } else if (billingAccountPermitRevoked || (includeChannelPermit && channelPermitRevoked)) {
+    } else if (
+      this.billingAccountPermitRevoked ||
+      (includeChannelPermit && this.channelPermitRevoked)
+    ) {
       trigger(new Error("Shared concurrency permit could not be renewed"));
     }
     if (!controller.signal.aborted) {
       for (let i = 0; i < sources.length; i++) {
         const src = sources[i];
-        if (!src || deps.snapshot.isNoopPluginSignal(src)) continue;
+        if (!src || this.deps.snapshot.isNoopPluginSignal(src)) continue;
         if (src.aborted) {
           trigger(src.reason);
           break;
         }
         const unsub =
-          src === requestSignal
+          src === this.requestSignal
             ? (() => {
                 const onAbort = () => trigger(src.reason);
                 src.addEventListener("abort", onAbort, { once: true });
@@ -112,7 +283,7 @@ export function createInferenceResources(
       }
     }
     if (!controller.signal.aborted && attachToRequest) {
-      activeAbortNotify = trigger;
+      this.activeAbortNotify = trigger;
     }
     const dispose = () => {
       if (disposed) return;
@@ -121,169 +292,54 @@ export function createInferenceResources(
         for (let i = 0; i < unsubscribes.length; i++) unsubscribes[i]!();
         unsubscribes = undefined;
       }
-      if (attachToRequest && activeAbortNotify === trigger) activeAbortNotify = null;
+      if (attachToRequest && this.activeAbortNotify === trigger) this.activeAbortNotify = null;
     };
     return { signal: controller.signal, trigger, dispose };
   }
 
-  function startAttempt(pluginSignal: AbortSignal, attemptTimeoutMs: number) {
-    let attemptAborted = false;
-    let attemptAbortReason: unknown;
-    let attemptCancelCb: ((reason: unknown) => void) | null = null;
-    let lazyAttemptController: AbortController | null = null;
-    let attemptDisposed = false;
-    const triggerAttemptAbort = (reason: unknown) => {
-      if (attemptAborted) return;
-      attemptAborted = true;
-      attemptAbortReason = reason;
-      const cb = attemptCancelCb;
-      attemptCancelCb = null;
-      if (cb) cb(reason);
-      lazyAttemptController?.abort(reason);
-    };
-    if (drainAborted) {
-      triggerAttemptAbort(new Error("Gateway shutting down"));
-    } else if (billingAccountPermitRevoked || channelPermitRevoked) {
-      triggerAttemptAbort(new Error("Shared concurrency permit could not be renewed"));
-    } else if (requestSignal.aborted) {
-      triggerAttemptAbort(requestSignal.reason);
-    } else if (pluginSignal.aborted) {
-      triggerAttemptAbort(pluginSignal.reason);
-    }
-    const onReqAbort = () => triggerAttemptAbort(requestSignal.reason);
-    const watchPlugin = !deps.snapshot.isNoopPluginSignal(pluginSignal);
-    let unsubPlugin: (() => void) | undefined;
-    if (!attemptAborted) {
-      requestSignal.addEventListener("abort", onReqAbort, { once: true });
-      if (watchPlugin) unsubPlugin = subscribeSharedAbort(pluginSignal, triggerAttemptAbort);
-      activeAbortNotify = triggerAttemptAbort;
-    }
-    const ensureAttemptSignal = (): AbortSignal => {
-      if (!lazyAttemptController) {
-        lazyAttemptController = new AbortController();
-        if (attemptAborted) lazyAttemptController.abort(attemptAbortReason);
-      }
-      return lazyAttemptController.signal;
-    };
-    const attemptLinked = {
-      trigger: triggerAttemptAbort,
-      dispose() {
-        if (attemptDisposed) return;
-        attemptDisposed = true;
-        attemptCancelCb = null;
-        requestSignal.removeEventListener("abort", onReqAbort);
-        if (unsubPlugin) {
-          unsubPlugin();
-          unsubPlugin = undefined;
-        }
-        if (activeAbortNotify === triggerAttemptAbort) activeAbortNotify = null;
-      },
-    };
-    const cancelTimeout = state.deadlines.schedule(attemptTimeoutMs, () =>
-      triggerAttemptAbort(new Error("attempt_timeout")),
+  startAttempt(pluginSignal: AbortSignal, attemptTimeoutMs: number): AttemptLifetime {
+    const attempt = new AttemptLifetime(
+      this,
+      this.requestSignal,
+      pluginSignal,
+      attemptTimeoutMs,
+      !this.deps.snapshot.isNoopPluginSignal(pluginSignal),
+      this.state,
     );
-    const onAttemptCancelRegister: CancelRegistrar = (fn) => {
-      if (attemptAborted) {
-        fn(attemptAbortReason);
-        return () => {};
-      }
-      attemptCancelCb = fn;
-      return () => {
-        if (attemptCancelCb === fn) attemptCancelCb = null;
-      };
-    };
-
-    function dispose() {
-      cancelTimeout();
-      attemptLinked.dispose();
-      if (disposeAttempt === dispose) disposeAttempt = undefined;
-    }
-    disposeAttempt = dispose;
-    return {
-      get aborted() {
-        return attemptAborted;
-      },
-      get reason() {
-        return attemptAbortReason;
-      },
-      abort: triggerAttemptAbort,
-      signal: ensureAttemptSignal,
-      cancelTimeout,
-      onCancelRegister: onAttemptCancelRegister,
-      dispose,
-      finishExchange() {
-        dispose();
-        clearChannelLimit();
-      },
-    };
+    this.activeAttempt = attempt;
+    return attempt;
   }
 
-  return {
-    enter() {
-      releaseGuard = deps.lifecycle.enterCallback(() => {
-        drainAborted = true;
-        activeAbortNotify?.(new Error("Gateway shutting down"));
-      }).release;
-    },
-    get streamOwnsRequest() {
-      return handedToStream;
-    },
-    isDraining: () => drainAborted,
-    setAbortNotify(fn: ((reason: unknown) => void) | null) {
-      activeAbortNotify = fn;
-    },
-    setBodyBuffer(release: () => void) {
-      releaseBodyBuffer = release;
-    },
-    setLocalAccount(release: () => void) {
-      releaseLocalAccount = release;
-    },
-    setAccountLimit(release: () => void) {
-      releaseAccountLimit = release;
-    },
-    setChannelLimit(release: () => void) {
-      releaseChannelLimit = release;
-    },
-    setOutputAdmission(release: (() => void) | undefined) {
-      releaseOutputAdmission = release;
-    },
-    clearChannelLimit,
-    clearOutputAdmission,
-    resetChannelPermit() {
-      channelPermitRevoked = false;
-    },
-    revokeAccountPermit() {
-      billingAccountPermitRevoked = true;
-      activeAbortNotify?.(new Error("Shared concurrency permit could not be renewed"));
-    },
-    revokeChannelPermit() {
-      channelPermitRevoked = true;
-      activeAbortNotify?.(new Error("Shared concurrency permit could not be renewed"));
-    },
-    quotaLost(includeChannel = false) {
-      return billingAccountPermitRevoked || (includeChannel && channelPermitRevoked);
-    },
-    interrupted(includeChannel = false) {
-      return requestSignal.aborted || drainAborted || this.quotaLost(includeChannel);
-    },
-    admissionError(quotaLost: boolean) {
-      return requestSignal.aborted
-        ? new GatewayError(499, "client_aborted", "Client disconnected")
-        : quotaLost
-          ? new GatewayError(503, "rate_limit_unavailable", "Shared concurrency permit was revoked")
-          : new GatewayError(503, "overloaded", "Gateway is draining");
-    },
-    link,
-    startAttempt,
-    handToStream() {
-      handedToStream = true;
-      return dispose;
-    },
-    finishRequest() {
-      if (!handedToStream) dispose();
-    },
+  private readonly dispose = (): void => {
+    this.activeAttempt?.dispose();
+    this.activeAttempt = undefined;
+    this.activeAbortNotify = null;
+    this.clearChannelLimit();
+    this.clearOutputAdmission();
+    this.releaseAccountLimit?.();
+    this.releaseAccountLimit = undefined;
+    this.releaseLocalAccount?.();
+    this.releaseLocalAccount = undefined;
+    this.releaseBodyBuffer?.();
+    this.releaseBodyBuffer = undefined;
+    this.releaseGuard?.();
+    this.releaseGuard = undefined;
   };
+
+  handToStream(): () => void {
+    this.handedToStream = true;
+    return this.dispose;
+  }
+
+  finishRequest(): void {
+    if (!this.handedToStream) this.dispose();
+  }
 }
 
-export type InferenceResources = ReturnType<typeof createInferenceResources>;
-export type AttemptLifetime = ReturnType<InferenceResources["startAttempt"]>;
+export function createInferenceResources(
+  deps: ProxyDependencies,
+  state: ProxyRuntimeState,
+  requestSignal: AbortSignal,
+): InferenceResources {
+  return new InferenceResources(deps, state, requestSignal);
+}

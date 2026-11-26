@@ -52,6 +52,12 @@ type CachedProviderPlan = {
   overrides: MergedProviderOverrides;
   extraHeaderEntries: readonly [string, string][];
   staticEndpoints: Map<string, URL>;
+  hasRequestPolicy: boolean;
+  authHeaderKey: string | null;
+  authPrefix: string;
+  lastSecret: string | undefined;
+  lastSecretValid: boolean;
+  lastAuthValue: string;
 };
 
 const textChatFields = new Set([
@@ -88,38 +94,48 @@ const textMessageFields = new Set([
 ]);
 
 function estimateTextChatInput(payload: Record<string, unknown>, body: string): number | undefined {
-  if (
-    !Array.isArray(payload.messages) ||
-    Object.keys(payload).some((key) => !textChatFields.has(key)) ||
-    (payload.n !== undefined && payload.n !== 1)
-  )
-    return undefined;
-  const tools = payload.tools ?? [];
-  if (!Array.isArray(tools) || tools.some((tool) => optionalObject(tool).type !== "function")) {
+  if (!Array.isArray(payload.messages) || (payload.n !== undefined && payload.n !== 1)) {
     return undefined;
   }
-  for (const value of payload.messages) {
-    const message = optionalObject(value);
-    if (
-      typeof message.role !== "string" ||
-      Object.keys(message).some((key) => !textMessageFields.has(key))
-    ) {
-      return undefined;
+  for (const key in payload) {
+    if (!textChatFields.has(key)) return undefined;
+  }
+  const tools = payload.tools;
+  let toolsLen = 0;
+  if (tools !== undefined) {
+    if (!Array.isArray(tools)) return undefined;
+    toolsLen = tools.length;
+    for (let i = 0; i < toolsLen; i++) {
+      if (optionalObject(tools[i]).type !== "function") return undefined;
+    }
+  }
+  const messages = payload.messages;
+  for (let i = 0; i < messages.length; i++) {
+    const rawMsg = messages[i];
+    if (typeof rawMsg !== "object" || rawMsg === null || Array.isArray(rawMsg)) return undefined;
+    const message = rawMsg as Record<string, unknown>;
+    if (typeof message.role !== "string") return undefined;
+    for (const key in message) {
+      if (!textMessageFields.has(key)) return undefined;
     }
     const content = message.content;
     if (content === undefined || content === null || typeof content === "string") continue;
-    if (
-      !Array.isArray(content) ||
-      content.some((value) => {
-        const part = optionalObject(value);
-        return (
-          part.type !== "text" || typeof part.text !== "string" || Object.keys(part).length !== 2
-        );
-      })
-    )
-      return undefined;
+    if (!Array.isArray(content)) return undefined;
+    for (let j = 0; j < content.length; j++) {
+      const rawPart = content[j];
+      if (typeof rawPart !== "object" || rawPart === null || Array.isArray(rawPart)) {
+        return undefined;
+      }
+      const part = rawPart as Record<string, unknown>;
+      if (part.type !== "text" || typeof part.text !== "string") return undefined;
+      let count = 0;
+      for (const _ in part) {
+        if (++count > 2) return undefined;
+      }
+      if (count !== 2) return undefined;
+    }
   }
-  return Buffer.byteLength(body) + 128 + 32 * (payload.messages.length + tools.length);
+  return Buffer.byteLength(body) + 128 + 32 * (messages.length + toolsLen);
 }
 
 const providerPlans = new WeakMap<RouteRecord, CachedProviderPlan>();
@@ -151,6 +167,15 @@ function getProviderPlan(
   for (const [k, v] of Object.entries(sanitized)) {
     extraHeaderEntries.push([k.toLowerCase(), v]);
   }
+  const auth = resolved.config.auth;
+  const authHeaderKey =
+    auth.scheme === "bearer"
+      ? "authorization"
+      : auth.scheme === "header"
+        ? auth.header_name.toLowerCase()
+        : null;
+  const authPrefix =
+    auth.scheme === "bearer" ? "Bearer " : auth.scheme === "header" ? (auth.prefix ?? "") : "";
   const plan: CachedProviderPlan = {
     snapshot,
     channel,
@@ -158,6 +183,12 @@ function getProviderPlan(
     overrides,
     extraHeaderEntries,
     staticEndpoints: new Map(),
+    hasRequestPolicy: Boolean(route.request_policy && Object.keys(route.request_policy).length > 0),
+    authHeaderKey,
+    authPrefix,
+    lastSecret: undefined,
+    lastSecretValid: true,
+    lastAuthValue: "",
   };
   providerPlans.set(route, plan);
   return plan;
@@ -213,7 +244,7 @@ export function tryPrepareUpstreamRequestSync(
     return null;
   }
 
-  if (route.request_policy && Object.keys(route.request_policy).length > 0) {
+  if (plan.hasRequestPolicy && route.request_policy) {
     validateRequestPolicy(clientBody, route.request_policy);
   }
 
@@ -272,12 +303,14 @@ export function tryPrepareUpstreamRequestSync(
   }
   headers["content-type"] = "application/json";
   let secretValid = true;
-  if (auth.scheme === "bearer" && secret) {
-    secretValid = isValidHttpHeaderValue(secret);
-    headers.authorization = `Bearer ${secret}`;
-  } else if (auth.scheme === "header" && secret) {
-    secretValid = isValidHttpHeaderValue(secret);
-    headers[auth.header_name.toLowerCase()] = `${auth.prefix ?? ""}${secret}`;
+  if (plan.authHeaderKey && secret) {
+    if (plan.lastSecret !== secret) {
+      plan.lastSecret = secret;
+      plan.lastSecretValid = isValidHttpHeaderValue(secret);
+      plan.lastAuthValue = `${plan.authPrefix}${secret}`;
+    }
+    secretValid = plan.lastSecretValid;
+    headers[plan.authHeaderKey] = plan.lastAuthValue;
   }
 
   const body = stringifyExact(payload);
@@ -319,11 +352,12 @@ export async function prepareUpstreamRequest(
     signal,
   } = options;
 
-  if (route.request_policy && Object.keys(route.request_policy).length > 0) {
+  const plan = getProviderPlan(snapshot, channel, route);
+  if (plan.hasRequestPolicy && route.request_policy) {
     validateRequestPolicy(clientBody, route.request_policy);
   }
 
-  const { resolved, overrides: mergedOverrides } = getProviderPlan(snapshot, channel, route);
+  const { resolved, overrides: mergedOverrides } = plan;
   const upstreamProtocol = upstreamProtocolFor(resolved, operation);
   const usageDialect = resolved.config.usage_dialect;
   const isBedrockStream = isStream && resolved.config.stream_framing === "bedrock_eventstream";

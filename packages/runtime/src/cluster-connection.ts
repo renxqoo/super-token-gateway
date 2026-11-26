@@ -358,7 +358,7 @@ export class RedisClusterConnection {
     }
   }
 
-  private ingressKeyFor(ip: string): string {
+  ingressKeyFor(ip: string): string {
     let key = this.ingressKeyCache.get(ip);
     if (key === undefined) {
       if (this.ingressKeyCache.size >= INGRESS_KEY_CACHE_MAX) this.ingressKeyCache.clear();

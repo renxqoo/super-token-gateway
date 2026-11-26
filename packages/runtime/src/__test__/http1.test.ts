@@ -137,3 +137,91 @@ test("bun HTTP/1.1 transport tears down socket and releases slot when cancelling
     server.close();
   }
 });
+
+test("bun HTTP/1.1 fetchFast buffers single-packet chunked and Content-Length SSE while streaming incremental chunks", async () => {
+  const sseChunk1 = 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n';
+  const sseChunk2 = "data: [DONE]\n\n";
+  const expectedSse = sseChunk1 + sseChunk2;
+  const encodeChunk = (text: string) => `${Buffer.byteLength(text).toString(16)}\r\n${text}\r\n`;
+  let reqNum = 0;
+  let connections = 0;
+  const server = createServer((socket) => {
+    connections++;
+    socket.on("data", () => {
+      reqNum++;
+      if (reqNum === 1) {
+        socket.write(
+          "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nTransfer-Encoding: chunked\r\n\r\n" +
+            encodeChunk(sseChunk1) +
+            encodeChunk(sseChunk2) +
+            "0\r\n\r\n",
+        );
+      } else if (reqNum === 2) {
+        socket.write(
+          `HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: ${Buffer.byteLength(expectedSse)}\r\n\r\n${expectedSse}`,
+        );
+      } else if (reqNum === 3) {
+        socket.write(
+          "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" +
+            encodeChunk(sseChunk1),
+        );
+        setTimeout(() => {
+          if (!socket.destroyed) socket.write(encodeChunk(sseChunk2) + "0\r\n\r\n");
+        }, 30);
+      } else if (reqNum === 4) {
+        socket.end(
+          "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nbad\r\n0\r\n\r\n",
+        );
+      } else {
+        socket.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  const transport = createTransport(1);
+  try {
+    const url = new URL(`http://127.0.0.1:${port}/`);
+    const decoder = new TextDecoder();
+
+    const r1 = await transport.fetchFast(url, { signal: AbortSignal.timeout(1500) }, true);
+    expect(r1.fast).toBe(true);
+    if (r1.fast) {
+      expect(r1.status).toBe(200);
+      expect(decoder.decode(r1.body)).toBe(expectedSse);
+    }
+
+    const r2 = await transport.fetchFast(url, { signal: AbortSignal.timeout(1500) }, true);
+    expect(r2.fast).toBe(true);
+    if (r2.fast) {
+      expect(r2.status).toBe(200);
+      expect(decoder.decode(r2.body)).toBe(expectedSse);
+    }
+
+    const r3 = await transport.fetchFast(url, { signal: AbortSignal.timeout(1500) }, true);
+    expect(r3.fast).toBe(false);
+    if (!r3.fast) {
+      expect(r3.response.status).toBe(200);
+      expect(await r3.response.text()).toBe(expectedSse);
+    }
+    expect(connections).toBe(1);
+
+    await expect(
+      transport
+        .fetchFast(url, { signal: AbortSignal.timeout(1500) }, true)
+        .then((res) => (res.fast ? decoder.decode(res.body) : res.response.text())),
+    ).rejects.toThrow();
+
+    const r5 = await transport.fetchFast(url, { signal: AbortSignal.timeout(1500) }, true);
+    expect(r5.fast).toBe(true);
+    if (r5.fast) {
+      expect(r5.status).toBe(200);
+      expect(decoder.decode(r5.body)).toBe("ok");
+    }
+    expect(connections).toBe(2);
+  } finally {
+    transport.close();
+    server.close();
+  }
+});

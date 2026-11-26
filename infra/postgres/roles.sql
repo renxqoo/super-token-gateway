@@ -89,6 +89,7 @@ GRANT EXECUTE ON FUNCTION public.prepare_ledger_month(DATE) TO stg_worker;
 GRANT EXECUTE ON FUNCTION public.operations_health(TEXT) TO stg_worker;
 GRANT EXECUTE ON FUNCTION public.outbox_shard(UUID) TO stg_data, stg_control, stg_worker;
 GRANT EXECUTE ON FUNCTION public.commit_leased_batch(JSONB, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) TO stg_data;
+GRANT EXECUTE ON FUNCTION public.acquire_leased_holds(TEXT, UUID[], UUID[], JSONB, BOOLEAN) TO stg_data;
 
 GRANT SELECT ON public.billing_reconciliation_receipts, public.billing_reconciliation_budgets,
   public.billing_reconciliation_policies, public.billing_reconciliation_waivers TO stg_control, stg_worker;

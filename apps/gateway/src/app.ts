@@ -47,6 +47,23 @@ import { createBodyBufferBudget, createPublicIngress } from "./public-ingress.ts
 import { createPressureMonitor } from "./resource-pressure.ts";
 import { SnapshotManager } from "./snapshot.ts";
 
+class FastInferenceContext implements InferenceContext {
+  readonly req = this;
+  constructor(readonly raw: Request) {}
+  query(name: string) {
+    return new URL(this.raw.url).searchParams.get(name) ?? undefined;
+  }
+  json(data: unknown, status?: ContentfulStatusCode, headers?: Record<string, string>) {
+    return new Response(JSON.stringify(data), {
+      status: status ?? 200,
+      headers: {
+        "content-type": "application/json; charset=UTF-8",
+        ...headers,
+      },
+    });
+  }
+}
+
 export type GatewayRuntimeOptions = {
   config: GatewayConfig;
   db?: SQL;
@@ -518,26 +535,6 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     ["/v1/videos", "videos"],
   ]);
 
-  function fastContext(req: Request): InferenceContext {
-    return {
-      req: {
-        raw: req,
-        query(name: string) {
-          return new URL(req.url).searchParams.get(name) ?? undefined;
-        },
-      },
-      json(data: unknown, status?: ContentfulStatusCode, headers?: Record<string, string>) {
-        return new Response(JSON.stringify(data), {
-          status: status ?? 200,
-          headers: {
-            "content-type": "application/json; charset=UTF-8",
-            ...headers,
-          },
-        });
-      },
-    };
-  }
-
   function fetchPublic(
     req: Request,
     env?: string | { peerAddress?: string; getPeerAddress?: () => string | undefined },
@@ -556,6 +553,46 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     const operation = req.method === "POST" ? staticInferenceRoutes.get(pathname) : undefined;
     const peer = typeof env === "string" ? env : (env?.peerAddress ?? env?.getPeerAddress);
     const requestPeer = config.ingressIp && typeof peer === "function" ? peer() : peer;
+    if (operation) {
+      const prep = ingress.tryPrepareDeferred(req, operation, requestPeer);
+      if (prep.kind === "deny") return prep.response;
+      if (prep.kind === "allow") {
+        return handleInferenceRequest(
+          new FastInferenceContext(req),
+          proxyDeps,
+          operation,
+          undefined,
+          requestPeer,
+          nativeHttp,
+          { declaredSize: prep.declaredSize },
+        );
+      }
+      if (prep.kind === "defer" && !snapshot.isDiverged() && snapshot.isFresh()) {
+        const ctx = new FastInferenceContext(req);
+        try {
+          const snap = snapshot.get();
+          const auth = authenticateRequest(ctx, snap, config, operation, requestPeer, proxyState);
+          const consoleCheck = checkConsoleAdmission(auth.billingAccount, auth.key);
+          if (!consoleCheck) {
+            return handleInferenceRequest(
+              ctx,
+              proxyDeps,
+              operation,
+              undefined,
+              requestPeer,
+              nativeHttp,
+              {
+                preAuth: { snap, key: auth.key, billingAccount: auth.billingAccount },
+                declaredSize: prep.declaredSize,
+                deferredIngress: ingress.activateDeferred(prep.ip),
+              },
+            );
+          }
+        } catch {
+          void 0;
+        }
+      }
+    }
     const denial = ingress.admit(
       req,
       operation ?? (pathname.startsWith("/v1beta/") ? "gemini" : "chat"),
@@ -564,7 +601,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     const dispatch = () =>
       operation
         ? handleInferenceRequest(
-            fastContext(req),
+            new FastInferenceContext(req),
             proxyDeps,
             operation,
             undefined,

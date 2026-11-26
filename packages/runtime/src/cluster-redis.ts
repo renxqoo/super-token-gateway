@@ -1,10 +1,54 @@
 import type { RedisClient } from "bun";
 
+export type IngressIpCheck = {
+  ip: string;
+  limit: number;
+  windowMs: number;
+  timeoutMs: number;
+  limitStr?: string;
+  windowMsStr?: string;
+};
+
+export type PendingAcquire = {
+  redis: RedisClient;
+  keys: KeyTriple;
+  rpm: string;
+  tpm: string;
+  concurrency: string;
+  estimatedTokens: string;
+  leaseTtlMs: number;
+  leaseTtlStr: string;
+  member: string;
+  ingressIp: IngressIpCheck | undefined;
+  onRevoke: (() => void) | undefined;
+  resolve: (result: RateLimitAcquireResult) => void;
+};
+
+export type ActivePermit = {
+  concKey: string;
+  member: string;
+  leaseTtlMs: number;
+  leaseTtlStr: string;
+  renewEveryMs: number;
+  safetyMarginMs: number;
+  confirmedExpiresAtMs: number;
+  nextRenewAtMs: number;
+  renewing: boolean;
+  released: boolean;
+  onRevoke: (() => void) | undefined;
+  revoked: AbortController | null;
+  shortTimer?: ReturnType<typeof setTimeout> | undefined;
+};
+
 export const BATCH_ACQUIRE_LUA = `
 local n = tonumber(ARGV[1])
-local rkStart = n * 3 + 1
+local ipCount = tonumber(ARGV[2])
+local argStride = ipCount > 0 and 7 or 6
+local ipKeyBase = n * 3
+local rkStart = ipKeyBase + ipCount + 1
+local ipMetaBase = 3 + n * argStride
 if rkStart <= #KEYS then
-  local ridx = 2 + n * 6
+  local ridx = ipMetaBase + ipCount * 2
   for ri = rkStart, #KEYS do
     local cnt = tonumber(ARGV[ridx])
     ridx = ridx + 1
@@ -28,62 +72,125 @@ local rpmDelta = {}
 local tpmCur = {}
 local tpmBase = {}
 local tpmDelta = {}
+local ipCur, ipBase, ipDelta, ipWin, ipTtl, ipBad, ipLimits
+if ipCount > 0 then
+  ipCur = {}
+  ipBase = {}
+  ipDelta = {}
+  ipWin = {}
+  ipTtl = {}
+  ipBad = {}
+  ipLimits = {}
+  for g = 1, ipCount do
+    local ipKey = KEYS[ipKeyBase + g]
+    local ipLimit = tonumber(ARGV[ipMetaBase + (g - 1) * 2])
+    local ipWindow = tonumber(ARGV[ipMetaBase + (g - 1) * 2 + 1])
+    ipLimits[g] = ipLimit
+    local count = tonumber(redis.call('GET', ipKey) or '0')
+    if not count or count < 0 or count ~= math.floor(count) then
+      ipBad[g] = true
+    elseif count == 0 then
+      ipCur[g] = 0
+      ipBase[g] = 0
+      ipWin[g] = ipWindow
+      ipTtl[g] = math.max(1, ipWindow)
+    else
+      local ttl = redis.call('PTTL', ipKey)
+      if ttl < 0 then
+        redis.call('PEXPIRE', ipKey, ipWindow)
+        ttl = ipWindow
+      end
+      ipCur[g] = count
+      ipBase[g] = count
+      ipWin[g] = ipWindow
+      ipTtl[g] = math.max(1, ttl)
+    end
+  end
+end
 for i = 1, n do
   local ki = (i - 1) * 3
-  local ai = 1 + (i - 1) * 6
-  local rpmKey = KEYS[ki + 1]
-  local tpmKey = KEYS[ki + 2]
-  local concKey = KEYS[ki + 3]
-  local rpmLimit = tonumber(ARGV[ai + 1])
-  local tpmLimit = tonumber(ARGV[ai + 2])
-  local concLimit = tonumber(ARGV[ai + 3])
-  local estTokens = tonumber(ARGV[ai + 4])
-  local leaseTtlMs = tonumber(ARGV[ai + 5])
-  local member = ARGV[ai + 6]
-
-  local active = concCount[concKey]
-  if active == nil then
-    redis.call('ZREMRANGEBYSCORE', concKey, '-inf', nowMs)
-    active = redis.call('ZCARD', concKey)
-    concCount[concKey] = active
-  end
-  if active >= concLimit then
-    out[i] = 3
-  else
-    local curRpm = rpmCur[rpmKey]
-    if curRpm == nil then
-      curRpm = tonumber(redis.call('GET', rpmKey) or '0')
-      rpmCur[rpmKey] = curRpm
-      rpmBase[rpmKey] = curRpm
-    end
-    if curRpm >= rpmLimit then
-      out[i] = 1
-    else
-      local curTpm = tpmCur[tpmKey]
-      if curTpm == nil then
-        curTpm = tonumber(redis.call('GET', tpmKey) or '0')
-        tpmCur[tpmKey] = curTpm
-        tpmBase[tpmKey] = curTpm
-      end
-      if curTpm + estTokens > tpmLimit then
-        out[i] = 2
+  local ai = 2 + (i - 1) * argStride
+  local ipDenied = false
+  if ipCount > 0 then
+    local g = tonumber(ARGV[ai + 7])
+    if g > 0 then
+      if ipBad[g] then
+        out[i] = 4
+        ipDenied = true
+      elseif ipCur[g] >= ipLimits[g] then
+        out[i] = -ipTtl[g]
+        ipDenied = true
       else
-        rpmCur[rpmKey] = curRpm + 1
-        rpmDelta[rpmKey] = (rpmDelta[rpmKey] or 0) + 1
-        tpmCur[tpmKey] = curTpm + estTokens
-        tpmDelta[tpmKey] = (tpmDelta[tpmKey] or 0) + estTokens
-        concCount[concKey] = active + 1
-        local exp = nowMs + leaseTtlMs
-        local adds = concAdds[concKey]
-        if adds == nil then
-          concAdds[concKey] = { exp, member }
-        else
-          local len = #adds
-          adds[len + 1] = exp
-          adds[len + 2] = member
-        end
-        out[i] = 0
+        ipCur[g] = ipCur[g] + 1
+        ipDelta[g] = (ipDelta[g] or 0) + 1
       end
+    end
+  end
+  if not ipDenied then
+    local rpmKey = KEYS[ki + 1]
+    local tpmKey = KEYS[ki + 2]
+    local concKey = KEYS[ki + 3]
+    local rpmLimit = tonumber(ARGV[ai + 1])
+    local tpmLimit = tonumber(ARGV[ai + 2])
+    local concLimit = tonumber(ARGV[ai + 3])
+    local estTokens = tonumber(ARGV[ai + 4])
+    local leaseTtlMs = tonumber(ARGV[ai + 5])
+    local member = ARGV[ai + 6]
+
+    local active = concCount[concKey]
+    if active == nil then
+      redis.call('ZREMRANGEBYSCORE', concKey, '-inf', nowMs)
+      active = redis.call('ZCARD', concKey)
+      concCount[concKey] = active
+    end
+    if active >= concLimit then
+      out[i] = 3
+    else
+      local curRpm = rpmCur[rpmKey]
+      if curRpm == nil then
+        curRpm = tonumber(redis.call('GET', rpmKey) or '0')
+        rpmCur[rpmKey] = curRpm
+        rpmBase[rpmKey] = curRpm
+      end
+      if curRpm >= rpmLimit then
+        out[i] = 1
+      else
+        local curTpm = tpmCur[tpmKey]
+        if curTpm == nil then
+          curTpm = tonumber(redis.call('GET', tpmKey) or '0')
+          tpmCur[tpmKey] = curTpm
+          tpmBase[tpmKey] = curTpm
+        end
+        if curTpm + estTokens > tpmLimit then
+          out[i] = 2
+        else
+          rpmCur[rpmKey] = curRpm + 1
+          rpmDelta[rpmKey] = (rpmDelta[rpmKey] or 0) + 1
+          tpmCur[tpmKey] = curTpm + estTokens
+          tpmDelta[tpmKey] = (tpmDelta[tpmKey] or 0) + estTokens
+          concCount[concKey] = active + 1
+          local exp = nowMs + leaseTtlMs
+          local adds = concAdds[concKey]
+          if adds == nil then
+            concAdds[concKey] = { exp, member }
+          else
+            local len = #adds
+            adds[len + 1] = exp
+            adds[len + 2] = member
+          end
+          out[i] = 0
+        end
+      end
+    end
+  end
+end
+if ipCount > 0 then
+  for g, delta in pairs(ipDelta) do
+    local k = KEYS[ipKeyBase + g]
+    if ipBase[g] == 0 then
+      redis.call('SET', k, delta, 'PX', ipWin[g])
+    else
+      redis.call('INCRBY', k, delta)
     end
   end
 end
@@ -230,22 +337,91 @@ export function buildBatchAcquireArgs(
     estimatedTokens: string;
     leaseTtlStr: string;
     member: string;
+    ingressIp?: IngressIpCheck | undefined;
   }[],
   relGroups: Map<string, string[]> | undefined,
-): string[] {
+  ingressKeyFor?: (ip: string) => string,
+): { shaArgs: string[]; minIpTimeoutMs: number | undefined } {
   const n = items.length;
-  const shaArgs: string[] = [batchAcquireSha, String(n * 3 + (relGroups ? relGroups.size : 0))];
+  let ipKeys: string[] | undefined;
+  let ipLimits: string[] | undefined;
+  let ipWindows: string[] | undefined;
+  let ipKeyIndex: Map<string, number> | undefined;
+  let itemIpIndices: Int32Array | undefined;
+  let minIpTimeoutMs: number | undefined;
+  let singleIpKey: string | undefined;
+  for (let i = 0; i < n; i++) {
+    const ipCheck = items[i]!.ingressIp;
+    if (!ipCheck) continue;
+    if (minIpTimeoutMs === undefined || ipCheck.timeoutMs < minIpTimeoutMs) {
+      minIpTimeoutMs = ipCheck.timeoutMs;
+    }
+    const key = ingressKeyFor!(ipCheck.ip);
+    if (!ipKeys) {
+      ipKeys = [key];
+      ipLimits = [ipCheck.limitStr ?? String(ipCheck.limit)];
+      ipWindows = [ipCheck.windowMsStr ?? String(ipCheck.windowMs)];
+      itemIpIndices = new Int32Array(n);
+      singleIpKey = key;
+      itemIpIndices[i] = 1;
+      continue;
+    }
+    if (singleIpKey !== undefined && key === singleIpKey) {
+      itemIpIndices![i] = 1;
+      continue;
+    }
+    if (!ipKeyIndex) {
+      ipKeyIndex = new Map([[singleIpKey!, 1]]);
+      singleIpKey = undefined;
+    }
+    let idx = ipKeyIndex.get(key);
+    if (idx === undefined) {
+      ipKeys.push(key);
+      ipLimits!.push(ipCheck.limitStr ?? String(ipCheck.limit));
+      ipWindows!.push(ipCheck.windowMsStr ?? String(ipCheck.windowMs));
+      idx = ipKeys.length;
+      ipKeyIndex.set(key, idx);
+    }
+    itemIpIndices![i] = idx;
+  }
+  const ipCount = ipKeys ? ipKeys.length : 0;
+  const shaArgs: string[] = [
+    batchAcquireSha,
+    String(n * 3 + ipCount + (relGroups ? relGroups.size : 0)),
+  ];
   for (let i = 0; i < n; i++) {
     const k = items[i]!.keys;
     shaArgs.push(k.rpmKey, k.tpmKey, k.concKey);
   }
+  if (ipKeys) {
+    for (let i = 0; i < ipKeys.length; i++) shaArgs.push(ipKeys[i]!);
+  }
   if (relGroups) {
     for (const key of relGroups.keys()) shaArgs.push(key);
   }
-  shaArgs.push(String(n));
-  for (let i = 0; i < n; i++) {
-    const it = items[i]!;
-    shaArgs.push(it.rpm, it.tpm, it.concurrency, it.estimatedTokens, it.leaseTtlStr, it.member);
+  shaArgs.push(String(n), String(ipCount));
+  if (ipCount === 0) {
+    for (let i = 0; i < n; i++) {
+      const it = items[i]!;
+      shaArgs.push(it.rpm, it.tpm, it.concurrency, it.estimatedTokens, it.leaseTtlStr, it.member);
+    }
+  } else {
+    for (let i = 0; i < n; i++) {
+      const it = items[i]!;
+      const idx = itemIpIndices![i]!;
+      shaArgs.push(
+        it.rpm,
+        it.tpm,
+        it.concurrency,
+        it.estimatedTokens,
+        it.leaseTtlStr,
+        it.member,
+        idx === 0 ? "0" : idx === 1 ? "1" : String(idx),
+      );
+    }
+    for (let g = 0; g < ipCount; g++) {
+      shaArgs.push(ipLimits![g]!, ipWindows![g]!);
+    }
   }
   if (relGroups) {
     for (const members of relGroups.values()) {
@@ -253,7 +429,7 @@ export function buildBatchAcquireArgs(
       for (let i = 0; i < members.length; i++) shaArgs.push(members[i]!);
     }
   }
-  return shaArgs;
+  return { shaArgs, minIpTimeoutMs };
 }
 
 export async function evalPermitPrepared(
@@ -291,6 +467,33 @@ export async function withRedisDeadline<T>(
   } finally {
     clearTimeout(timer);
   }
+}
+
+export type RateLimitAcquireResult =
+  | { ok: true; release: () => void; signal?: AbortSignal }
+  | {
+      ok: false;
+      reason: "rpm" | "tpm" | "concurrency" | "unavailable" | "ingress_quota_unavailable";
+    }
+  | { ok: false; reason: "ip_rate_limited"; retryAfterMs: number };
+
+export function failAcquire(ip?: IngressIpCheck): RateLimitAcquireResult {
+  return { ok: false, reason: ip ? "ingress_quota_unavailable" : "unavailable" };
+}
+
+export function decodeAcquireFailure(
+  code: number,
+  ip?: IngressIpCheck,
+): RateLimitAcquireResult | null {
+  if (code === 0) return null;
+  if (code < 0 && Number.isSafeInteger(code)) {
+    return { ok: false, reason: "ip_rate_limited", retryAfterMs: -code };
+  }
+  if (code === 4) return { ok: false, reason: "ingress_quota_unavailable" };
+  if (code === 1) return { ok: false, reason: "rpm" };
+  if (code === 2) return { ok: false, reason: "tpm" };
+  if (code === 3) return { ok: false, reason: "concurrency" };
+  return failAcquire(ip);
 }
 
 const KEY_CACHE_MAX = 8192;

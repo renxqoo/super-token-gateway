@@ -683,3 +683,109 @@ test("a live node cannot admit new holds against wallet and supplier leases reap
       await worker.drain();
     }
   }));
+
+test("symptom: default wallet lease retention survives 900ms inter-arrival gaps and short retention prevents demand thrashing", () =>
+  withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const defaultLedger = createLedgerEngine(db);
+    const shortLedger = createLedgerEngine(db, { walletLeaseIdleReleaseMs: 300 });
+    const shortAccount = await f.catalog.upsertBillingAccount({
+      name: "short-retention-acct",
+      currency: "PTS",
+      rpm: 1000,
+      tpm: 100000,
+      concurrency: 64,
+    });
+    const defaultWallet = await f.ledger.creditWallet({
+      billing_account_id: f.billingAccount.id,
+      currency: "PTS",
+      external_ref: "default-retention-seed",
+      amount_atoms: "100000000",
+      kind: "CASH",
+    });
+    const shortWallet = await f.ledger.creditWallet({
+      billing_account_id: shortAccount.id,
+      currency: "PTS",
+      external_ref: "short-retention-seed",
+      amount_atoms: "100000000",
+      kind: "CASH",
+    });
+    const acquireAndSettle = async (
+      engine: ReturnType<typeof createLedgerEngine>,
+      billingAccountId: string,
+      count: number,
+    ) => {
+      const items = await Promise.all(
+        Array.from({ length: count }, async () => {
+          const requestId = crypto.randomUUID();
+          const attemptId = crypto.randomUUID();
+          expect(
+            await engine.acquireHold({
+              request_id: requestId,
+              attempt_id: attemptId,
+              billing_account_id: billingAccountId,
+              currency: "PTS",
+              operation: "chat",
+              model: "gpt-4o",
+              idempotency_key: null,
+              fingerprint: "",
+              customer_atoms: "200",
+              supplier_account_id: f.accountA.id,
+              supplier_channel_id: f.channelA.id,
+              supplier_currency: "USD",
+              supplier_atoms: "100",
+              expires_at: new Date(Date.now() + 30000).toISOString(),
+            }),
+          ).toMatchObject({ ok: true, held_atoms: "200" });
+          return {
+            request_id: requestId,
+            selected_attempt_id: attemptId,
+            billing_account_id: billingAccountId,
+            channel_id: f.channelA.id,
+            billing_price_id: f.flatBillingPrice.id,
+            cost_version_id: f.costPrice.id,
+            usage: { input_tokens: "60", output_tokens: "40" },
+            billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+            billing_basis: "PROVIDER_USAGE" as const,
+            supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+            supplier_currency: "USD",
+          };
+        }),
+      );
+      expect(
+        (await Promise.all(items.map((item) => engine.commitTerminal(item)))).every((r) => r.ok),
+      ).toBe(true);
+    };
+    const walletRows = (walletId: string) =>
+      db<
+        { id: string; state: string }[]
+      >`SELECT id, state FROM public.wallet_leases WHERE wallet_id = ${walletId}`;
+    const supplierRows = () =>
+      db<
+        { id: string; state: string }[]
+      >`SELECT id, state FROM public.supplier_leases WHERE account_id = ${f.accountA.id}`;
+    try {
+      await acquireAndSettle(defaultLedger, f.billingAccount.id, 16);
+      const initialWalletLeases = await walletRows(defaultWallet.wallet_id);
+      const initialSupplierLeases = await supplierRows();
+      expect(initialWalletLeases).toHaveLength(1);
+      expect(initialWalletLeases[0]?.state).toBe("ACTIVE");
+      expect(initialSupplierLeases).toHaveLength(1);
+      expect(initialSupplierLeases[0]?.state).toBe("ACTIVE");
+      await Bun.sleep(900);
+      expect(await walletRows(defaultWallet.wallet_id)).toEqual(initialWalletLeases);
+      expect(await supplierRows()).toEqual(initialSupplierLeases);
+      await acquireAndSettle(defaultLedger, f.billingAccount.id, 4);
+      expect(await walletRows(defaultWallet.wallet_id)).toEqual(initialWalletLeases);
+      for (let wave = 0; wave < 6; wave++) {
+        if (wave > 0) await Bun.sleep(290);
+        await acquireAndSettle(shortLedger, shortAccount.id, 3);
+      }
+      expect(await walletRows(shortWallet.wallet_id)).toHaveLength(0);
+    } finally {
+      await defaultLedger.drain();
+      await shortLedger.drain();
+      await f.ledger.drain();
+    }
+    expect((await f.ledger.auditConservation()).ok).toBe(true);
+  }));

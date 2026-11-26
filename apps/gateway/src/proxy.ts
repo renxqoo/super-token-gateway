@@ -2,7 +2,11 @@ import { GatewayError } from "@gateway/contracts";
 import type { Operation } from "@gateway/kernel";
 import { fastUuid, ProxyRuntimeState } from "./proxy-state.ts";
 import { parseOrCreateTrace } from "./observability.ts";
-import type { InferenceContext, ProxyDependencies } from "./inference/types.ts";
+import type {
+  InferenceContext,
+  InferenceFastHandoff,
+  ProxyDependencies,
+} from "./inference/types.ts";
 import { errorJson } from "./inference/http.ts";
 import { createInferenceTelemetry } from "./inference/telemetry.ts";
 import { createInferenceResources } from "./inference/resources.ts";
@@ -29,6 +33,7 @@ export async function handleInferenceRequest(
   pathOverride?: { model: string; stream: boolean },
   peerAddress?: string | (() => string | undefined),
   nativeHttp = false,
+  handoff?: InferenceFastHandoff,
 ): Promise<Response> {
   const state = getProxyState(deps);
   const requestId = fastUuid();
@@ -51,6 +56,7 @@ export async function handleInferenceRequest(
       pathOverride,
       peerAddress,
       nativeHttp,
+      handoff,
     );
     const accounting = createInferenceAccounting(request, telemetry);
     return await routeInference(request, resources, telemetry, accounting);

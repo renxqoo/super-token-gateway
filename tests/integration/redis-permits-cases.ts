@@ -1,7 +1,11 @@
 import { expect, spyOn, test } from "bun:test";
 import { once } from "node:events";
+import { createGatewayRuntime } from "@gateway/gateway";
 import { ClusterCoordinator } from "@gateway/runtime";
 import {
+  db,
+  internalCall,
+  makeConfig,
   redisUrl,
   waitForRedisState,
   redisProc,
@@ -406,6 +410,208 @@ export function registerPermitCases() {
       for (const release of background) release();
       admin.close();
       await Promise.all([coordA.close(), coordB.close()]);
+    }
+  });
+
+  test("combined authenticated POST IP and account quota enforces IP first, flushes early errors, and fails closed on corruption or Redis pause", async () => {
+    const namespace = `stg_combined_ip_${crypto.randomUUID()}`;
+    let upstreamCalls = 0;
+    const upstream = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        upstreamCalls++;
+        return Response.json({
+          id: "cmpl_combined",
+          object: "chat.completion",
+          model: "combined-gpt",
+          choices: [
+            { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+          ],
+          usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+        });
+      },
+    });
+    const config = makeConfig({
+      redisNamespace: namespace,
+      trustedProxyCidrs: ["127.0.0.1/32"],
+      ingressIp: {
+        mode: "enforce",
+        windowMs: 10_000,
+        maxRequests: 2,
+        nodeMaxRequests: 64,
+        maxPending: 32,
+        timeoutMs: 200,
+      },
+    });
+    const runtime = createGatewayRuntime({ config, db, wasmExecutor: null });
+    const control = new Bun.RedisClient(redisUrl);
+    try {
+      await Promise.all([runtime.start(), control.connect()]);
+      await waitForRedisState(true, runtime.cluster);
+      const configure = async (method: string, path: string, body: Record<string, unknown>) => {
+        const res = await internalCall(runtime.internalApp, method, path, body);
+        expect([200, 201], JSON.stringify(res.data)).toContain(res.status);
+        return res.data;
+      };
+      const acct1 = await configure("PUT", "/internal/v1/billing-accounts", {
+        name: "combined-ip-1",
+        currency: "USD",
+        rpm: 3,
+        tpm: 100_000,
+        concurrency: 10,
+      });
+      const acct2 = await configure("PUT", "/internal/v1/billing-accounts", {
+        name: "combined-ip-2",
+        currency: "USD",
+        rpm: 1,
+        tpm: 100_000,
+        concurrency: 10,
+      });
+      const acct3 = await configure("PUT", "/internal/v1/billing-accounts", {
+        name: "combined-ip-3",
+        currency: "USD",
+        rpm: 2,
+        tpm: 100_000,
+        concurrency: 10,
+      });
+      const keys = await Promise.all(
+        [acct1, acct2, acct3].map(async (acct, idx) =>
+          String(
+            (
+              await configure("PUT", "/internal/v1/api-keys", {
+                billing_account_id: acct.id,
+                name: `combined-key-${idx}`,
+              })
+            ).key,
+          ),
+        ),
+      );
+      const [key1, key2, key3] = keys as [string, string, string];
+      for (const [idx, acct] of [acct1, acct2, acct3].entries()) {
+        await configure("POST", `/internal/v1/wallets/${acct.id}/credits`, {
+          currency: "USD",
+          external_ref: `combined-credit-${idx}-${namespace}`,
+          amount_atoms: "1000000",
+          kind: "CASH",
+        });
+      }
+      const supAcct = await configure("PUT", "/internal/v1/upstream-accounts", {
+        name: `combined-sup-${namespace}`,
+      });
+      await configure("POST", `/internal/v1/upstream-accounts/${supAcct.id}/recharges`, {
+        currency: "USD",
+        external_ref: `combined-sup-credit-${namespace}`,
+        amount_atoms: "1000000",
+      });
+      const channel = await configure("PUT", "/internal/v1/channels", {
+        account_id: supAcct.id,
+        name: `combined-ch-${namespace}`,
+        kind: "openai",
+        base_url: `http://127.0.0.1:${upstream.port}`,
+        api_key: "sk-combined",
+      });
+      await configure("PUT", "/internal/v1/models", {
+        name: "combined-gpt",
+        operations: ["chat"],
+        max_output_tokens: 64,
+      });
+      const makePrice = (side: "CUSTOMER" | "SUPPLIER") =>
+        configure("POST", "/internal/v1/prices", {
+          side,
+          currency: "USD",
+          rates: {
+            input_tokens: { numerator: "1", denominator: "1" },
+            output_tokens: { numerator: "1", denominator: "1" },
+          },
+          ceilings: { input_tokens: "1000", output_tokens: "64" },
+        });
+      const [custPrice, supPrice] = await Promise.all([
+        makePrice("CUSTOMER"),
+        makePrice("SUPPLIER"),
+      ]);
+      await configure("PUT", "/internal/v1/routes", {
+        model_name: "combined-gpt",
+        channel_id: channel.id,
+        upstream_model: "combined-gpt",
+        operations: ["chat"],
+        priority: 10,
+        billing_price_id: custPrice.id,
+        cost_version_id: supPrice.id,
+      });
+      await runtime.snapshot.load();
+
+      const validBody = JSON.stringify({
+        model: "combined-gpt",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 16,
+      });
+      const postChat = (apiKey: string, ip: string, body = validBody) =>
+        runtime.fetchPublic(
+          new Request("http://gateway.test/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${apiKey}`,
+              "content-type": "application/json",
+              "content-length": String(Buffer.byteLength(body)),
+              "x-forwarded-for": ip,
+            },
+            body,
+          }),
+          { peerAddress: "127.0.0.1" },
+        );
+
+      expect((await postChat(key1, "198.51.100.1")).status).toBe(200);
+      expect((await postChat(key1, "198.51.100.1")).status).toBe(200);
+
+      const ipDenied = await postChat(key1, "198.51.100.1");
+      expect(ipDenied.status).toBe(429);
+      expect(Number(ipDenied.headers.get("retry-after"))).toBeGreaterThan(0);
+      expect(await ipDenied.json()).toMatchObject({ error: { code: "ip_rate_limited" } });
+
+      const earlyBadModel = await postChat(
+        key1,
+        "198.51.100.1",
+        JSON.stringify({ model: "missing-model", messages: [{ role: "user", content: "hi" }] }),
+      );
+      expect(earlyBadModel.status).toBe(429);
+      expect(Number(earlyBadModel.headers.get("retry-after"))).toBeGreaterThan(0);
+      expect(await earlyBadModel.json()).toMatchObject({ error: { code: "ip_rate_limited" } });
+
+      const earlyBadJson = await postChat(key1, "198.51.100.1", "{broken");
+      expect(earlyBadJson.status).toBe(429);
+      expect(await earlyBadJson.json()).toMatchObject({ error: { code: "ip_rate_limited" } });
+
+      expect((await postChat(key1, "198.51.100.2")).status).toBe(200);
+      const rpmDenied = await postChat(key1, "198.51.100.2");
+      expect(rpmDenied.status).toBe(429);
+      expect(await rpmDenied.json()).toMatchObject({ error: { code: "rate_limit_rpm" } });
+
+      const corruptKey = `${namespace}:ingress:ip:198.51.100.3`;
+      await control.send("SET", [corruptKey, "corrupt"]);
+      const corruptResp = await postChat(key2, "198.51.100.3");
+      expect(corruptResp.status).toBe(503);
+      expect(await corruptResp.json()).toMatchObject({
+        error: { code: "ingress_quota_unavailable" },
+      });
+      expect(await control.send("GET", [corruptKey])).toBe("corrupt");
+
+      expect((await postChat(key2, "198.51.100.4")).status).toBe(200);
+
+      expect(await control.send("CLIENT", ["PAUSE", "600", "ALL"])).toBe("OK");
+      const pausedResp = await postChat(key3, "198.51.100.5");
+      expect(pausedResp.status).toBe(503);
+      expect(await pausedResp.json()).toMatchObject({
+        error: { code: "ingress_quota_unavailable" },
+      });
+      expect(runtime.cluster.isRedisConnected()).toBe(true);
+      expect(await control.send("PING", [])).toBe("PONG");
+      expect((await postChat(key3, "198.51.100.6")).status).toBe(200);
+      expect(upstreamCalls).toBe(5);
+    } finally {
+      control.close();
+      await runtime.close();
+      await upstream.stop(true);
     }
   });
 }

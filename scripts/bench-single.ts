@@ -449,7 +449,7 @@ try {
         if (waitSampleInFlight) return;
         waitSampleInFlight = db`
       SELECT COALESCE(wait_event_type || ':' || wait_event, 'running') AS wait,
-        CASE WHEN lower(query) LIKE '%active_wallet_leases as materialized%' THEN 'hold fence'
+        CASE WHEN lower(query) LIKE '%active_wallet_leases as materialized%' OR lower(query) LIKE '%acquire_leased_holds%' THEN 'hold fence'
              WHEN lower(query) LIKE '%for no key update%' THEN 'settlement locks'
              WHEN lower(query) LIKE '%with%' THEN 'batch statement'
              ELSE substr(query, 1, 36) END AS statement,

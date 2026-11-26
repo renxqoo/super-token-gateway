@@ -22,6 +22,17 @@ import type { ProxyRuntimeState } from "../proxy-state.ts";
 import type { GatewayMetrics, TraceContext } from "../observability.ts";
 import type { createTraceQueue } from "../trace-queue.ts";
 import type { SnapshotManager } from "../snapshot.ts";
+import type { DeferredIngressIp } from "../public-ingress.ts";
+
+export type InferenceFastHandoff = {
+  preAuth?: {
+    snap: ConfigSnapshot;
+    key: ApiKeyRecord;
+    billingAccount: BillingAccountRecord;
+  };
+  declaredSize?: number | undefined;
+  deferredIngress?: DeferredIngressIp;
+};
 
 export interface InferenceContext {
   req: {

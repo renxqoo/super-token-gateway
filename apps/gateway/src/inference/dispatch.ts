@@ -443,5 +443,6 @@ export async function dispatchInferenceAttempt(
     isWasmStreamProvider,
     () => routes.takeProbe(cand.channel.id),
     baseAttemptTimeoutMs,
+    prelude.fastSseBody,
   );
 }

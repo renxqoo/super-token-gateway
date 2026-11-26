@@ -14,7 +14,7 @@
       "files": [
         {
           "path": "./migrations/0001_ledger_hot_path_perf.sql",
-          "checksum": "d88a959186cfc3efe83e1221b2ed13b81f878880982fa3870df595785477de66"
+          "checksum": "35421eea7a1b4d50baacffdfe64582944a01711c2849afc4fce6b39ab20f43a9"
         }
       ]
     }

@@ -39,16 +39,18 @@ import { lockTransactionalHoldState, matchesHoldFingerprint } from "./transactio
 const DEMAND_WINDOW_MS = 2000;
 const LEASE_MIN_MULTIPLIER = 64n;
 const LEASE_TARGET_MULTIPLIER = 4096n;
+const LEASE_SUPPLIER_TARGET_MULTIPLIER = 32_768n;
 const LEASE_MIN_WALLET_CHUNK = 50_000_000n;
-const LEASE_MIN_SUPPLIER_CHUNK = 200_000_000n;
+const LEASE_MIN_SUPPLIER_CHUNK = 2_000_000_000n;
 
 function recordHit(
   map: Map<string, { count: number; windowStart: number }>,
   key: string,
   nowMs: number,
+  windowMs: number,
 ): number {
   const prev = map.get(key);
-  if (!prev || nowMs - prev.windowStart > DEMAND_WINDOW_MS) {
+  if (!prev || nowMs - prev.windowStart > windowMs) {
     map.set(key, { count: 1, windowStart: nowMs });
     return 1;
   }
@@ -65,6 +67,10 @@ export function createTransactionalHoldBatch(
   let batchCellCursor = 0;
   const recentWalletHits = new Map<string, { count: number; windowStart: number }>();
   const recentSupplierHits = new Map<string, { count: number; windowStart: number }>();
+  const demandWindowMs =
+    leases.walletIdleReleaseMs <= 0
+      ? 0
+      : Math.max(250, Math.min(DEMAND_WINDOW_MS, Math.floor(leases.walletIdleReleaseMs * 0.9)));
 
   let pruneDemandAt = 0;
 
@@ -94,12 +100,13 @@ export function createTransactionalHoldBatch(
     const apply = async (tx: SQL) => {
       const batchStartedAt = Date.now();
       if (batchStartedAt >= pruneDemandAt) {
-        for (const demand of [recentWalletHits, recentSupplierHits]) {
-          for (const [key, hit] of demand) {
-            if (batchStartedAt - hit.windowStart > DEMAND_WINDOW_MS) demand.delete(key);
-          }
+        for (const [key, hit] of recentWalletHits) {
+          if (batchStartedAt - hit.windowStart > demandWindowMs) recentWalletHits.delete(key);
         }
-        pruneDemandAt = batchStartedAt + DEMAND_WINDOW_MS;
+        for (const [key, hit] of recentSupplierHits) {
+          if (batchStartedAt - hit.windowStart > DEMAND_WINDOW_MS) recentSupplierHits.delete(key);
+        }
+        pruneDemandAt = batchStartedAt + Math.max(demandWindowMs, 1000);
       }
 
       const {
@@ -419,11 +426,11 @@ export function createTransactionalHoldBatch(
           creditPart === 0n &&
           customerAtoms > 0n
         ) {
-          const wHits = recordHit(recentWalletHits, wk, nowMs);
+          const wHits = recordHit(recentWalletHits, wk, nowMs, demandWindowMs);
           const demandKey = `${acctCurKey}:${lane}`;
           const sHits =
             supplierAtoms > 0n && sameLane(chosenCell)
-              ? recordHit(recentSupplierHits, demandKey, nowMs)
+              ? recordHit(recentSupplierHits, demandKey, nowMs, DEMAND_WINDOW_MS)
               : 0;
           const highLoadSupplier = sHits >= 32 || leases.hasSupplier(acctCurKey, lane);
           const walletHot = wHits >= 16 || (highLoadSupplier && wHits >= 2);
@@ -569,7 +576,7 @@ export function createTransactionalHoldBatch(
         const free = cell.balance_atoms - cell.reserved_atoms;
         if (free < demand.maxQuote * LEASE_MIN_MULTIPLIER) continue;
         const budget = BigInt(SETTLEMENT_LANES);
-        const target = (demand.maxQuote * LEASE_TARGET_MULTIPLIER) / budget;
+        const target = (demand.maxQuote * LEASE_SUPPLIER_TARGET_MULTIPLIER) / budget;
         const minimum = LEASE_MIN_SUPPLIER_CHUNK / budget;
         const desired = target > minimum ? target : minimum;
         const halfFree = free / 2n;

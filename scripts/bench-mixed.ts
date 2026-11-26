@@ -152,6 +152,8 @@ export async function runMixedSoak(options: {
   let lastCompleted = 0;
   let lastErrors = 0;
   const errorKinds: Record<string, number> = {};
+  const errorSamples: string[] = [];
+  const seenErrorSamples = new Set<string>();
   let previousErrorKinds: Record<string, number> = {};
   const pending = new Set<Promise<void>>();
   const samples: {
@@ -252,6 +254,13 @@ export async function runMixedSoak(options: {
                   ? "protocol_or_plugin_output"
                   : `http_${result.status}`;
             errorKinds[kind] = (errorKinds[kind] ?? 0) + 1;
+            if (errorSamples.length < 10) {
+              const sampleKey = `${fixture.name}:${kind}:${result.errText ?? ""}`;
+              if (!seenErrorSamples.has(sampleKey)) {
+                seenErrorSamples.add(sampleKey);
+                errorSamples.push(sampleKey);
+              }
+            }
           }
         })
         .finally(() => {
@@ -297,6 +306,7 @@ export async function runMixedSoak(options: {
     rps: Number((completed / elapsedSec).toFixed(2)),
     p99_ms: latency.p99(),
     error_kinds: errorKinds,
+    ...(errorSamples.length > 0 ? { sample_errors: errorSamples } : {}),
     lanes: byCase.map((fixture) => ({
       name: fixture.name,
       completed: fixture.completed,

@@ -20,6 +20,56 @@ import {
 } from "node:zlib";
 import { PassThrough, Readable, pipeline } from "node:stream";
 
+function tryDecodeCompleteChunked(
+  buf: Buffer,
+  maxBytes: number,
+): { body: Uint8Array; extra: boolean } | null {
+  const len = buf.byteLength;
+  let offset = 0;
+  let first: Buffer | null = null;
+  let parts: Buffer[] | null = null;
+  let total = 0;
+  while (offset < len) {
+    const idx = buf.indexOf(CRLF, offset);
+    if (idx === -1 || idx - offset > 4096) return null;
+    const line = buf.subarray(offset, idx).toString("latin1");
+    if (!isValidHttpHeaderValue(line)) return null;
+    const semi = line.indexOf(";");
+    const rawHex = semi === -1 ? line : line.slice(0, semi);
+    if (rawHex.length > 0 && (rawHex.charCodeAt(0) === 32 || rawHex.charCodeAt(0) === 9)) {
+      return null;
+    }
+    const hex = trimOws(rawHex);
+    if (hex.length === 0 || !/^[0-9a-fA-F]+$/.test(hex)) return null;
+    const size = Number.parseInt(hex, 16);
+    if (!Number.isSafeInteger(size) || size < 0) return null;
+    offset = idx + 2;
+    if (size === 0) {
+      if (len - offset < 2 || buf[offset] !== 13 || buf[offset + 1] !== 10) return null;
+      offset += 2;
+      const body =
+        first === null
+          ? new Uint8Array(0)
+          : parts === null
+            ? Buffer.from(first)
+            : Buffer.concat(parts, total);
+      return { body, extra: offset !== len };
+    }
+    if (total + size > maxBytes || offset + size + 2 > len) return null;
+    if (buf[offset + size] !== 13 || buf[offset + size + 1] !== 10) return null;
+    const slice = buf.subarray(offset, offset + size);
+    if (first === null) {
+      first = slice;
+    } else {
+      if (parts === null) parts = [first];
+      parts.push(slice);
+    }
+    total += size;
+    offset += size + 2;
+  }
+  return null;
+}
+
 export function createHttp1ResponseHandler({
   cancelActiveExchange,
   failExchange,
@@ -398,6 +448,26 @@ export function createHttp1ResponseHandler({
       : [];
 
     const isSse = /^text\/event-stream(?:\s*;|$)/i.test(parsed.contentType);
+    if (encodings.length === 0 && isSse && ex.fastMode && ex.resolveFast) {
+      if (
+        !isChunked &&
+        contentLen >= 0 &&
+        contentLen <= FAST_BUFFER_MAX &&
+        rest.byteLength >= contentLen
+      ) {
+        const body =
+          contentLen === 0 ? new Uint8Array(0) : Buffer.from(rest.subarray(0, contentLen));
+        resolveFastBuffered(conn, ex, body, rest.byteLength > contentLen);
+        return;
+      }
+      if (isChunked && rest.byteLength >= 5 && rest.byteLength <= FAST_BUFFER_MAX) {
+        const decoded = tryDecodeCompleteChunked(rest, FAST_BUFFER_MAX);
+        if (decoded) {
+          resolveFastBuffered(conn, ex, decoded.body, decoded.extra);
+          return;
+        }
+      }
+    }
     if (
       encodings.length === 0 &&
       !isSse &&
