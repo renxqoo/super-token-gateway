@@ -38,7 +38,7 @@ const cancelled = () =>
 
 export function createDialScheduler(maxQueued: number, limits: DialLimits = {}) {
   const {
-    concurrency = 64,
+    concurrency = 16,
     startsPerSecond = 2000,
     maxQueueWaitMs = DEFAULT_DIAL_QUEUE_WAIT_MS,
     maxQueueBytes = 64 * 1024 * 1024,

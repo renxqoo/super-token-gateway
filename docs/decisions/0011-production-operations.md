@@ -100,7 +100,7 @@ IP 限流由 `INGRESS_IP_MODE` 控制，支持 `off`、`observe` 和 `enforce`�
 
 ## TCP 建连突发
 
-出口连接复用和新建连接分别管理。按已校验的物理目标 IP 与端口限制新建连接速率及并行握手，每节点默认 2000 次/秒、64 个并行握手，分别由 `UPSTREAM_DIAL_RPS` 和 `UPSTREAM_DIAL_CONCURRENCY` 控制。TLS 连接复用仍按 SNI 隔离。等待同时受首字节预算、节点活跃交换容量、`UPSTREAM_DIAL_QUEUE_WAIT_MS` 和 `UPSTREAM_DIAL_QUEUE_BYTES` 限制。队列满或耗尽出口等待预算时返回 `503 upstream_capacity` 和 `Retry-After: 1`。多个节点指向同一端点时按端点合计拨号能力分配预算。
+出口连接复用和新建连接分别管理。按已校验的物理目标 IP 与端口限制新建连接速率及并行握手，每节点默认 2000 次/秒、16 个并行握手，分别由 `UPSTREAM_DIAL_RPS` 和 `UPSTREAM_DIAL_CONCURRENCY` 控制。TLS 连接复用仍按 SNI 隔离。等待同时受首字节预算、节点活跃交换容量、`UPSTREAM_DIAL_QUEUE_WAIT_MS` 和 `UPSTREAM_DIAL_QUEUE_BYTES` 限制。队列满或耗尽出口等待预算时返回 `503 upstream_capacity` 和 `Retry-After: 1`。多个节点指向同一端点时按端点合计拨号能力分配预算。
 
 交换槽队列与拨号队列分别应用等待时长和字节上限。推理出口准入还传入绝对截止时间，由首字节期限和本次尝试期限中较早的一项约束两个阶段。绝对请求期限先到时按未派发超时处理。
 

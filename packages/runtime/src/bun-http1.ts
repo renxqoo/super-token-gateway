@@ -19,7 +19,7 @@ import {
   type FastUpstreamResult,
 } from "./bun-http1-codec.ts";
 
-const IDLE_TTL_MS = 30_000;
+const IDLE_TTL_MS = 20_000;
 
 const IDLE_SWEEP_MS = 5_000;
 
@@ -135,10 +135,16 @@ export function createBunHttp1Pool(
   const popIdle = (origin: string): PooledConn | null => {
     const list = idleByOrigin.get(origin);
     if (!list) return null;
+    const cutoff = performance.now() - IDLE_TTL_MS;
     while (list.length > 0) {
       const conn = list.pop()!;
+      const since = idleOrder.get(conn);
       idleOrder.delete(conn);
       if (!conn.closed && conn.socket) {
+        if (since !== undefined && since <= cutoff) {
+          destroyConn(conn);
+          continue;
+        }
         if (list.length === 0) idleByOrigin.delete(origin);
         conn.inUse = true;
         return conn;

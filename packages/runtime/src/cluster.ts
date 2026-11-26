@@ -535,14 +535,32 @@ export class ClusterCoordinator {
       activeClient.connected
     ) {
       let allMatch = true;
+      let hasShortIp = false;
+      let hasStandard = false;
       for (let i = 0; i < batch.length; i++) {
-        if (batch[i]!.redis !== activeClient) {
+        const item = batch[i]!;
+        if (item.redis !== activeClient) {
           allMatch = false;
           break;
         }
+        if (item.ingressIp && item.ingressIp.timeoutMs < ACQUIRE_TIMEOUT_MS) hasShortIp = true;
+        else hasStandard = true;
       }
       if (allMatch) {
-        void this.runAcquireBatch(activeClient, batch, this.takePiggybackReleases(activeClient));
+        const piggyback = this.takePiggybackReleases(activeClient);
+        if (hasShortIp && hasStandard) {
+          const standard: PendingAcquire[] = [];
+          const shortIp: PendingAcquire[] = [];
+          for (let i = 0; i < batch.length; i++) {
+            const item = batch[i]!;
+            if (item.ingressIp && item.ingressIp.timeoutMs < ACQUIRE_TIMEOUT_MS) shortIp.push(item);
+            else standard.push(item);
+          }
+          void this.runAcquireBatch(activeClient, standard, piggyback);
+          void this.runAcquireBatch(activeClient, shortIp);
+        } else {
+          void this.runAcquireBatch(activeClient, batch, piggyback);
+        }
         return;
       }
     }
@@ -651,7 +669,9 @@ export class ClusterCoordinator {
       }
       recoverAcquires(sentAtMs);
       for (const it of items) it.resolve(failAcquire(it.ingressIp));
-      this.connection.reportAcquireFailure(redis);
+      if (!expired || batchTimeoutMs >= ACQUIRE_TIMEOUT_MS || !redis.connected) {
+        this.connection.reportAcquireFailure(redis);
+      }
       if (expired) {
         this.lateAcquireBatches++;
         if (this.acquireInFlight >= MAX_ACQUIRE_IN_FLIGHT) this.failPendingFor();

@@ -326,7 +326,7 @@ export function loadConfigFromEnv(
     trustedProxyCidrs: parseCsv(env.TRUSTED_PROXY_CIDRS),
     maxInFlight: intFromEnv(env, "MAX_IN_FLIGHT", 2000),
     upstreamDial: {
-      concurrency: intFromEnv(env, "UPSTREAM_DIAL_CONCURRENCY", 64, 1, 65_535),
+      concurrency: intFromEnv(env, "UPSTREAM_DIAL_CONCURRENCY", 16, 1, 65_535),
       startsPerSecond: intFromEnv(env, "UPSTREAM_DIAL_RPS", 2000, 1, 65_535),
       maxQueueWaitMs: intFromEnv(env, "UPSTREAM_DIAL_QUEUE_WAIT_MS", 10_000),
       maxQueueBytes: intFromEnv(env, "UPSTREAM_DIAL_QUEUE_BYTES", 64 * 1024 * 1024),
