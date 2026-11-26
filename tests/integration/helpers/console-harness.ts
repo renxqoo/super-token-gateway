@@ -80,7 +80,7 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
   const bootstrapAdminToken = "bootstrap-secret-token-1234";
 
   let lastUpstreamAuth = "";
-  const videoStates = new Map<string, Record<string, unknown>>();
+  const videoStates = new Map<string, { body: Record<string, unknown>; httpStatus?: number }>();
   const webhookDeliveries: RecordedWebhook[] = [];
   let webhookStatus = 200;
   let gatewayInterceptor: GatewayInterceptor | null = null;
@@ -110,12 +110,15 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
       }
       if (req.method === "POST" && url.pathname === "/v2/video_generation") {
         const tid = `up_con_${crypto.randomUUID().slice(0, 8)}`;
-        videoStates.set(tid, { status: "Processing", task_id: tid });
+        videoStates.set(tid, { body: { status: "Processing", task_id: tid } });
         return Response.json({ task_id: tid });
       }
       if (req.method === "GET" && url.pathname === "/v2/query/video_generation") {
         const tid = url.searchParams.get("task_id") ?? "";
-        return Response.json(videoStates.get(tid) ?? { status: "Fail", error_code: 9999 });
+        const result = videoStates.get(tid);
+        return Response.json(result?.body ?? { status: "Fail", error_code: 9999 }, {
+          status: result?.httpStatus ?? 200,
+        });
       }
       return new Response("Not Found", { status: 404 });
     },

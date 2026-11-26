@@ -3,6 +3,18 @@ import type { Pricing, Usage } from "./values.ts";
 
 const pricedDimensions = new Set<string>(dimensions);
 const integer = /^(0|[1-9][0-9]{0,37})$/;
+
+export function cacheWritePartitionMatches(
+  total: string | undefined,
+  write5m: string | undefined,
+  write1h: string | undefined,
+): boolean {
+  if (total === undefined) return true;
+  if (write5m === undefined) return write1h === undefined || BigInt(write1h) <= BigInt(total);
+  if (write1h === undefined) return BigInt(write5m) <= BigInt(total);
+  return BigInt(write5m) + BigInt(write1h) === BigInt(total);
+}
+
 export function validateUsage(usage: Usage): void {
   for (const [key, value] of Object.entries(usage)) {
     if (key !== "reasoning_tokens" && !pricedDimensions.has(key))

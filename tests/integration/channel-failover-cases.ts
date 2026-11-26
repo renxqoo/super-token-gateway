@@ -3,6 +3,224 @@ import { createGatewayRuntime } from "@gateway/gateway";
 import { fakeUpstream, makeConfig, db, setup, internalCall } from "./smart-routing-fixture.ts";
 
 export function registerFailoverCases() {
+  test("backup rebuilds the original chat request with its own adapter after the primary rejects a rewritten request", async () => {
+    const sent: { channel: string; authorization: string | null; body: Record<string, unknown> }[] =
+      [];
+    const primary = fakeUpstream("rewrite-primary", {
+      async respond(request) {
+        sent.push({
+          channel: "primary",
+          authorization: request.headers.get("authorization"),
+          body: await request.json(),
+        });
+        return Response.json({ error: { message: "Unavailable" } }, { status: 503 });
+      },
+    });
+    const backup = fakeUpstream("rewrite-backup", {
+      async respond(request) {
+        sent.push({
+          channel: "backup",
+          authorization: request.headers.get("authorization"),
+          body: await request.json(),
+        });
+        return Response.json({
+          id: "backup-chat",
+          model: "m",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "backup answer" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 9, completion_tokens: 4 },
+        });
+      },
+    });
+    const runtime = createGatewayRuntime({ config: makeConfig(), db });
+    try {
+      await runtime.start();
+      const ctx = await setup(runtime, [primary, backup], {
+        priority: [10, 0],
+        maxAttempts: 2,
+        upstreamKeys: ["primary-credential", "backup-credential"],
+        adapterOverrides: (index) =>
+          index === 0
+            ? { request_transforms: [{ op: "move_to", from: "messages", to: "vendor_messages" }] }
+            : { request_transforms: [{ op: "force_set", path: "temperature", value: 0.25 }] },
+      });
+      const response = await ctx.chat();
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        choices: [{ message: { content: "backup answer" } }],
+      });
+      expect(sent.map(({ channel, authorization }) => [channel, authorization])).toEqual([
+        ["primary", "Bearer primary-credential"],
+        ["backup", "Bearer backup-credential"],
+      ]);
+      expect(sent[0]?.body).toMatchObject({ vendor_messages: [{ role: "user", content: "hi" }] });
+      expect(sent[0]?.body).not.toHaveProperty("messages");
+      expect(sent[1]?.body).toMatchObject({
+        messages: [{ role: "user", content: "hi" }],
+        temperature: 0.25,
+      });
+      expect(sent[1]?.body).not.toHaveProperty("vendor_messages");
+      expect(await ctx.charges()).toEqual({ n: 1, u: 1, atoms: "13" });
+    } finally {
+      backup.server.stop(true);
+      primary.server.stop(true);
+      await runtime.close();
+    }
+  });
+
+  test("image edit failover preserves the uploaded file and repeated form fields after the primary consumes them", async () => {
+    const received: {
+      channel: string;
+      tags: FormDataEntryValue[];
+      filename: string;
+      mime: string;
+      bytes: number[];
+    }[] = [];
+    async function captureUpload(channel: string, request: Request): Promise<void> {
+      const form = await request.formData();
+      const image = form.get("image");
+      if (!(image instanceof File)) throw new Error("Upstream did not receive the image file");
+      received.push({
+        channel,
+        tags: form.getAll("tag"),
+        filename: image.name,
+        mime: image.type,
+        bytes: Array.from(new Uint8Array(await image.arrayBuffer())),
+      });
+    }
+    const primary = fakeUpstream("multipart-primary", {
+      async respond(request) {
+        await captureUpload("primary", request);
+        return new Response(null, { status: 503 });
+      },
+    });
+    const backup = fakeUpstream("multipart-backup", {
+      async respond(request) {
+        await captureUpload("backup", request);
+        return Response.json({ data: [{ b64_json: "YWJj" }] });
+      },
+    });
+    const runtime = createGatewayRuntime({ config: makeConfig(), db });
+    try {
+      await runtime.start();
+      const fixture = await setup(runtime, [primary, backup], {
+        operation: "image_edits",
+        priority: [10, 0],
+        maxAttempts: 2,
+      });
+      const form = new FormData();
+      form.append("prompt", "Adjust contrast");
+      form.append("tag", "first");
+      form.append("tag", "second");
+      form.append(
+        "image",
+        new File([new Uint8Array([137, 0, 255, 10])], "source.png", {
+          type: "image/png",
+        }),
+      );
+      const response = await fixture.editImage(form);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ data: [{ b64_json: "YWJj" }] });
+      expect(received.map(({ channel }) => channel)).toEqual(["primary", "backup"]);
+      for (const upload of received) {
+        expect(upload).toMatchObject({
+          tags: ["first", "second"],
+          filename: "source.png",
+          mime: "image/png",
+          bytes: [137, 0, 255, 10],
+        });
+      }
+      expect(await fixture.charges()).toEqual({ n: 1, u: 1, atoms: "5" });
+    } finally {
+      backup.server.stop(true);
+      primary.server.stop(true);
+      await runtime.close();
+    }
+  });
+
+  test.each([
+    ["the primary returns a client error", 400, 2, 400, "upstream_client_error"],
+    ["the route permits one attempt", 503, 1, 502, "upstream_error"],
+  ] as const)(
+    "gateway stops before dispatching to a healthy backup when %s",
+    async (_, upstreamStatus, maxAttempts, clientStatus, errorCode) => {
+      const primary = fakeUpstream("stop-primary", { status: upstreamStatus });
+      const backup = fakeUpstream("stop-backup");
+      const runtime = createGatewayRuntime({ config: makeConfig(), db });
+      try {
+        await runtime.start();
+        const ctx = await setup(runtime, [primary, backup], { priority: [10, 0], maxAttempts });
+        const initialWallet = await ctx.wallet();
+        const response = await ctx.chat();
+        expect(response.status).toBe(clientStatus);
+        expect(await response.json()).toMatchObject({ error: { code: errorCode } });
+        expect(primary.calls()).toBe(1);
+        expect(backup.calls()).toBe(0);
+        expect(await ctx.holdsByState()).toEqual({ RELEASED: 1 });
+        expect(await ctx.charges()).toEqual({ n: 0, u: 0, atoms: "0" });
+        expect(await ctx.wallet()).toEqual(initialWallet);
+      } finally {
+        backup.server.stop(true);
+        primary.server.stop(true);
+        await runtime.close();
+      }
+    },
+  );
+
+  test.each(["heartbeat", "visible text"] as const)(
+    "retryable SSE error after %s respects the client output boundary",
+    async (prefixKind) => {
+      const hasText = prefixKind === "visible text";
+      const textFrame =
+        'data: {"id":"primary-chat","model":"m","choices":[{"index":0,"delta":{"content":"primary output"},"finish_reason":null}]}\n\n';
+      const errorFrame = 'data: {"error":{"code":"vendor_unavailable"}}\n\n';
+      const primary = fakeUpstream("prelude-primary", {
+        streamFrames: (hasText ? textFrame : ": upstream heartbeat\n\n") + errorFrame,
+      });
+      const backup = fakeUpstream("prelude-backup");
+      const runtime = createGatewayRuntime({ config: makeConfig(), db });
+      try {
+        await runtime.start();
+        const ctx = await setup(runtime, [primary, backup], {
+          priority: [10, 0],
+          maxAttempts: 2,
+          adapterOverrides: {
+            error_rules: [
+              { path: "error.code", equals: "vendor_unavailable", retry_kind: "retryable" },
+            ],
+          },
+        });
+        const response = await ctx.chat(true);
+        expect(response.status).toBe(200);
+        const wire = await response.text();
+        expect(primary.calls()).toBe(1);
+        expect(backup.calls()).toBe(hasText ? 0 : 1);
+        if (hasText) {
+          expect(wire).toMatch(/primary output[\s\S]*upstream_stream_error/);
+          expect(wire).not.toContain("data: [DONE]");
+          expect(await ctx.charges()).toEqual({ n: 0, u: 0, atoms: "0" });
+          expect(await ctx.holdsByState()).toEqual({ UNKNOWN: 1 });
+          await ctx.resolveUnknownHolds();
+        } else {
+          expect(wire).toContain('"content":"prelude-backup"');
+          expect(wire).not.toContain("event: error");
+          expect(wire.trimEnd()).toEndWith("data: [DONE]");
+          expect(await ctx.charges()).toEqual({ n: 1, u: 1, atoms: "15" });
+          expect(await ctx.holdsByState()).toEqual({ SETTLED: 1 });
+        }
+      } finally {
+        backup.server.stop(true);
+        primary.server.stop(true);
+        await runtime.close();
+      }
+    },
+  );
+
   test("latency: a slow-failing primary near the attempt timeout adds at most one timeout of latency before switching; the client never waits for a second slow channel", async () => {
     const A = fakeUpstream("A", { status: 503, headerDelayMs: 2500 });
     const B = fakeUpstream("B");

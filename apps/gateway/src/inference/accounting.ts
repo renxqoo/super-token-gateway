@@ -287,6 +287,12 @@ export class InferenceAccounting {
       if (details.moderation_blocked !== undefined)
         input.moderation_blocked = details.moderation_blocked;
       const result = await deps.ledger.commitTerminal(input).catch(() => null);
+      if (
+        result?.ok === false &&
+        (result.code === "invalid_upstream_usage" || result.code === "usage_alias_conflict")
+      ) {
+        throw new GatewayError(502, result.code, result.message);
+      }
       if (!result?.ok) {
         deps.metrics.ledgerCommitFailures++;
         throw new GatewayError(503, "ledger_commit_failed", "Ledger could not confirm settlement");
