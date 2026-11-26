@@ -1,6 +1,10 @@
 {
   "categories": { "correctness": "error" },
   "plugins": ["typescript", "unicorn", "oxc"],
-  "rules": { "typescript/no-explicit-any": "error", "eqeqeq": "error" },
+  "rules": {
+    "typescript/no-explicit-any": "error",
+    "eqeqeq": "error",
+    "max-lines": ["error", { "max": 800, "skipBlankLines": false, "skipComments": false }]
+  },
   "ignorePatterns": [".local/**", "dist/**", "node_modules/**", "docs/design-2026-11-08/**"]
 }

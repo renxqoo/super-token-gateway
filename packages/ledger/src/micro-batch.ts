@@ -47,7 +47,7 @@ export class MicroBatchQueue<I, O> {
             }
           });
         }
-      } else if (!this.timer && (burst || this.inflight < this.maxConcurrency)) {
+      } else if (!this.timer && this.inflight < this.maxConcurrency) {
         if (this.waitMs <= 0) {
           this.pump();
         } else {
@@ -67,26 +67,35 @@ export class MicroBatchQueue<I, O> {
     }
   }
 
+  private finishBatch(): void {
+    this.inflight--;
+    if (this.pending.length === 0) this.checkDrained();
+    else if (this.mode === "immediate" || !this.timer) this.pump();
+  }
+
   private pump(): void {
     while (this.pending.length > 0 && this.inflight < this.maxConcurrency) {
-      const slice = this.pending.splice(0, this.maxBatch);
-      const inputs = Array.from<I>({ length: slice.length });
-      for (let i = 0; i < slice.length; i++) inputs[i] = slice[i]!.input;
+      let slice: typeof this.pending;
+      if (this.pending.length <= this.maxBatch) {
+        slice = this.pending;
+        this.pending = [];
+      } else {
+        slice = this.pending.splice(0, this.maxBatch);
+      }
+      const len = slice.length;
+      const inputs = Array.from<I>({ length: len });
+      for (let i = 0; i < len; i++) inputs[i] = slice[i]!.input;
       this.inflight++;
-      void this.executeBatch(inputs)
-        .then(
-          (results) => {
-            for (let i = 0; i < slice.length; i++) slice[i]!.resolve(results[i]!);
-          },
-          (error) => {
-            for (let i = 0; i < slice.length; i++) slice[i]!.reject(error);
-          },
-        )
-        .finally(() => {
-          this.inflight--;
-          if (this.pending.length === 0) this.checkDrained();
-          else if (this.mode === "immediate" || !this.timer) this.pump();
-        });
+      void this.executeBatch(inputs).then(
+        (results) => {
+          for (let i = 0; i < len; i++) slice[i]!.resolve(results[i]!);
+          this.finishBatch();
+        },
+        (error) => {
+          for (let i = 0; i < len; i++) slice[i]!.reject(error);
+          this.finishBatch();
+        },
+      );
     }
   }
 

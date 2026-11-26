@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
+import { posix } from "node:path";
 
 test("workspace dependencies remain strictly acyclic with zero legacy dual-track modules", async () => {
   const apps = (await readdir("apps")).filter((name) => !name.startsWith(".")).sort();
@@ -155,13 +156,54 @@ test("G7.1 provider plugin architecture eliminates hardcoded vendor enums and ch
   expect(baselineSql).toMatch(/adapter_config jsonb DEFAULT '{}'::jsonb NOT NULL/);
   expect(baselineSql).toMatch(/adapter_overrides jsonb DEFAULT '{}'::jsonb NOT NULL/);
 
-  const upstreamSrc = await Bun.file("apps/gateway/src/upstream.ts").text();
-  expect(upstreamSrc).not.toMatch(/switch\s*\(\s*channel\.kind\s*\)/);
-  expect(upstreamSrc).not.toMatch(
-    /channel\.kind\s*===\s*["'](?:deepseek|ollama|openai|anthropic|gemini|azure|bedrock|vertex)["']/,
-  );
+  const root = "apps/gateway/src";
+  const upstreamFiles = new Bun.Glob("{upstream,upstream-*,provider-request-preview}.ts");
+  for await (const file of upstreamFiles.scan(root)) {
+    const source = await Bun.file(`${root}/${file}`).text();
+    expect(source, file).not.toMatch(/switch\s*\(\s*channel\.kind\s*\)/);
+    expect(source, file).not.toMatch(
+      /channel\.kind\s*===\s*["'](?:deepseek|ollama|openai|anthropic|gemini|azure|bedrock|vertex)["']/,
+    );
+  }
 
-  const internalApiSrc = await Bun.file("apps/gateway/src/internal-api.ts").text();
-  expect(internalApiSrc).not.toMatch(/channelKindEnum/);
-  expect(internalApiSrc).not.toMatch(/kind\s*===\s*["'](?:azure|bedrock|vertex)["']/);
+  const internalFiles = new Bun.Glob("internal-*.ts");
+  for await (const file of internalFiles.scan(root)) {
+    const source = await Bun.file(`${root}/${file}`).text();
+    expect(source, file).not.toMatch(/channelKindEnum/);
+    expect(source, file).not.toMatch(/kind\s*===\s*["'](?:azure|bedrock|vertex)["']/);
+  }
+});
+
+test("inference stages are acyclic and ledger transitions have one owner", async () => {
+  const root = "apps/gateway/src";
+  const stages = await Array.fromAsync(new Bun.Glob("inference/*.ts").scan(root));
+  const files = ["proxy.ts", ...stages];
+  const graph = new Map<string, string[]>();
+  for (const file of files) {
+    const source = await Bun.file(`${root}/${file}`).text();
+    expect(source).not.toMatch(/from ["']\.\.\/(?:app|index|proxy)\.ts["']/);
+    if (file !== "inference/accounting.ts") {
+      expect(source, file).not.toMatch(
+        /\bledger\s*\.\s*(?:acquireHold|findIdempotentHold|switchSupplierAttempt|rememberProviderRequestId|commitTerminal|releaseHold|markUnknown)\s*\(/,
+      );
+    }
+    graph.set(
+      file,
+      [...source.matchAll(/from ["'](\.{1,2}\/[^"']+\.ts)["']/g)].map((match) =>
+        posix.normalize(posix.join(posix.dirname(file), match[1]!)),
+      ),
+    );
+  }
+
+  const checked = new Set<string>();
+  const visiting = new Set<string>();
+  function visit(file: string) {
+    if (checked.has(file)) return;
+    expect(visiting.has(file), `Cyclic inference dependency involving ${file}`).toBe(false);
+    visiting.add(file);
+    for (const dependency of graph.get(file) ?? []) visit(dependency);
+    visiting.delete(file);
+    checked.add(file);
+  }
+  for (const file of graph.keys()) visit(file);
 });

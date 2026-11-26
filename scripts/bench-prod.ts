@@ -2,16 +2,13 @@ import { writeLocalInternalAuth } from "./local-internal-auth.ts";
 import { spawn } from "node:child_process";
 import { appendFile, cp, mkdtemp, rm } from "node:fs/promises";
 import { Agent } from "node:http";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import type { SQL } from "bun";
 import { createDatabase } from "@gateway/ledger";
 import { auditConservation } from "../packages/ledger/src/conservation.ts";
 import {
   runMixedSoak,
-  seedMixedPlugins,
   verifyMixedCharges,
   verifyMixedBalances,
   type MixedChargeCheck,
@@ -19,37 +16,57 @@ import {
 import {
   benchmarkConcurrency,
   benchmarkIngressEnvironment,
-  buildPostRequest,
   collectProvenance,
   createFastHttp1BenchClient,
   diffCheckpointerStats,
-  postJsonKeepAlive,
   readCheckpointerStats,
   readProcessStats,
   warmHttpConnections,
 } from "./bench-http.ts";
 import { runSseBurst } from "./bench-sse-burst.ts";
+import { createProductionBenchmarkLoad } from "./bench-prod-load.ts";
+import { seedProductionBenchmarkCatalog } from "./bench-prod-catalog.ts";
+import {
+  findFreePort,
+  runPgBin,
+  pgBin,
+  runSync,
+  waitForJson,
+  percentile,
+  stopProcesses,
+} from "./bench-prod-runtime.ts";
 
 const syncStandby =
   process.env.BENCH_SYNC_STANDBY === "1" || process.env.BENCH_SYNC_STANDBY === "true";
+
 const syncCommitMode = process.env.BENCH_SYNC_COMMIT ?? "on";
+
 const baseDbUrl = process.env.DATABASE_URL;
+
 if (!baseDbUrl && !syncStandby) throw new Error("DATABASE_URL is required");
 
 const isStress = process.argv.includes("--stress");
+
 const isLimit = process.argv.includes("--limit");
+
 const isMixed = process.argv.includes("--mixed-soak");
+
 const gatewayNodes = Number(process.env.BENCH_GATEWAY_NODES ?? 2);
+
 if (!Number.isSafeInteger(gatewayNodes) || gatewayNodes < 1 || gatewayNodes > 8) {
   throw new Error("BENCH_GATEWAY_NODES must be an integer from 1 to 8");
 }
+
 const mockNodes = Number(
   process.env.BENCH_MOCK_NODES ?? (isLimit ? Math.min(4, Math.max(2, gatewayNodes)) : 1),
 );
+
 if (!Number.isSafeInteger(mockNodes) || mockNodes < 1 || mockNodes > 8) {
   throw new Error("BENCH_MOCK_NODES must be an integer from 1 to 8");
 }
+
 const billingAccountCount = Number(process.env.BENCH_BILLING_ACCOUNTS ?? 32);
+
 if (
   !Number.isSafeInteger(billingAccountCount) ||
   billingAccountCount < 1 ||
@@ -57,115 +74,74 @@ if (
 ) {
   throw new Error("BENCH_BILLING_ACCOUNTS must be an integer from 1 to 5000");
 }
+
 const soakSeconds = Number(process.env.BENCH_SOAK_SECONDS ?? 1800);
+
 const soakRps = Number(process.env.BENCH_SOAK_RPS ?? 500);
+
 const soakConcurrency = Number(process.env.BENCH_SOAK_CONCURRENCY ?? 1024);
+
 if (
   isMixed &&
   ![soakSeconds, soakRps, soakConcurrency].every((n) => Number.isSafeInteger(n) && n > 0)
 ) {
   throw new Error("Mixed soak requires positive integer duration, rate and concurrency");
 }
+
 const limitConcurrency = benchmarkConcurrency(process.env.BENCH_JSON_CONCURRENCY, [512, 1024]);
+
 const limitSeconds = Number(process.env.BENCH_LIMIT_SECONDS ?? 8);
+
 const isSseBurstFresh = process.argv.includes("--sse-burst-fresh");
+
 const isSseBurst = isSseBurstFresh || process.argv.includes("--sse-burst");
+
 const warmLimitSockets = isLimit && process.env.BENCH_LIMIT_COLD_CONNECT !== "1";
+
 const withRedis = !process.argv.includes("--no-redis");
+
 if (isSseBurst && !withRedis) throw new Error("--sse-burst requires Redis");
+
 const durationSec = isStress ? 15 : 5;
+
 const hotWalletSec = isStress ? 10 : 3;
+
 const longStreamCount = isStress ? 1000 : 500;
+
 const longStreamMs = isStress ? 5000 : 2500;
+
 const maxInFlight = Number(process.env.BENCH_MAX_IN_FLIGHT ?? Math.max(5000, ...limitConcurrency));
+
 const upstreamDelayMs = Number(process.env.BENCH_UPSTREAM_DELAY_MS ?? 0);
+
 const accessLog = process.env.BENCH_ACCESS_LOG === "1" || process.env.BENCH_ACCESS_LOG === "true";
+
 const verifyOutboxAck =
   process.env.BENCH_VERIFY_OUTBOX_ACK === "1" || process.env.BENCH_VERIFY_OUTBOX_ACK === "true";
+
 const tenantAffinity =
   process.env.BENCH_TENANT_AFFINITY === "1" || process.env.BENCH_TENANT_AFFINITY === "true";
+
 const useFastClient = process.env.BENCH_FAST_CLIENT !== "0";
+
 const ingressEnv = benchmarkIngressEnvironment();
 
-async function findFreePort(): Promise<number> {
-  return new Promise((resolvePort, rejectPort) => {
-    const srv = createServer();
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = typeof addr === "object" && addr ? addr.port : 0;
-      srv.close(() => resolvePort(port));
-    });
-    srv.on("error", rejectPort);
-  });
-}
-
-async function waitForJson(url: string): Promise<Record<string, unknown>> {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      if (res.ok) return (await res.json()) as Record<string, unknown>;
-    } catch {
-      void 0;
-    }
-    await Bun.sleep(100);
-  }
-  throw new Error(`Timed out waiting for ${url}`);
-}
-
-function runSync(cwd: string, args: string[], env: Record<string, string>): Promise<void> {
-  return new Promise((done, fail) => {
-    const proc = spawn(process.execPath, args, { cwd, env, stdio: "inherit" });
-    proc.on("exit", (code) => {
-      if (code === 0) done();
-      else fail(new Error(`Exited ${code}: ${args.join(" ")}`));
-    });
-  });
-}
-
-async function runPgBin(pgBin: string, name: string, args: string[]): Promise<void> {
-  const proc = Bun.spawn([join(pgBin, name), ...args], { stdout: "pipe", stderr: "pipe" });
-  const [code, stdout, stderr] = await Promise.all([
-    proc.exited,
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  if (code !== 0) throw new Error(`${name} failed (${code}): ${stdout} ${stderr}`);
-}
-
-async function stopProcesses(procs: ReturnType<typeof spawn>[]): Promise<void> {
-  const running = procs.filter(
-    (proc) => proc.pid && proc.exitCode === null && proc.signalCode === null,
-  );
-  const exits = Promise.all(
-    running.map(
-      (proc) => new Promise<void>((resolveExit) => proc.once("exit", () => resolveExit())),
-    ),
-  );
-  for (const proc of running) proc.kill("SIGTERM");
-  await Promise.race([exits, sleep(12_000, undefined, { ref: false })]);
-  for (const proc of running) {
-    if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
-  }
-  await exits;
-}
-
-function percentile(sorted: number[], p: number): number {
-  if (sorted.length === 0) return 0;
-  const idx = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p));
-  return Number(sorted[idx]!.toFixed(2));
-}
-
 const tempDir = await mkdtemp(join(tmpdir(), "stg-bench-prod-"));
+
 const distSrc = resolve(process.env.BENCH_DIST_DIR ?? "dist");
-const pgBin = process.env.PG_TOOLS_DIRECTORY ?? resolve(".local/toolchain/pg17/bin");
+
 const dbName = `gateway_v4_bprod_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+
 const pgClustersToStop: string[] = [];
 
 let adminDb: ReturnType<typeof createDatabase> | undefined;
+
 let targetDbUrl: string;
+
 let replicationState: Record<string, unknown> | null = null;
+
 const procs: ReturnType<typeof spawn>[] = [];
+
 const agentOptions = {
   keepAlive: true,
   maxSockets: Math.max(2048, ...limitConcurrency, isMixed ? soakConcurrency : 0),
@@ -175,7 +151,9 @@ const agentOptions = {
       ? Math.max(1024, Math.ceil(Math.max(...limitConcurrency) / gatewayNodes))
       : 1024,
 };
+
 const agent = new Agent(agentOptions);
+
 let fastClient: ReturnType<typeof createFastHttp1BenchClient> | undefined;
 
 try {
@@ -379,189 +357,18 @@ try {
     authorization: `Bearer ${operatorToken}`,
     "content-type": "application/json",
   };
-  const callInternal = async (method: string, path: string, body?: unknown) => {
-    const res = await fetch(`http://127.0.0.1:${internalPorts[0]}${path}`, {
-      method,
-      headers: adminHeaders,
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    });
-    if (!res.ok) throw new Error(`Internal ${path} failed: ${res.status} ${await res.text()}`);
-    return (await res.json()) as Record<string, unknown>;
-  };
-
-  const acc = await callInternal("PUT", "/internal/v1/upstream-accounts", { name: "bprod-acc" });
-  await callInternal("POST", `/internal/v1/upstream-accounts/${acc.id}/recharges`, {
-    currency: "USD",
-    external_ref: "bprod-sup-1",
-    amount_atoms: "100000000000000",
+  const { keys, callInternal, mixedPlugins } = await seedProductionBenchmarkCatalog({
+    internalPorts,
+    adminHeaders,
+    mockPorts,
+    baseEnv,
+    maxInFlight,
+    mockNodes,
+    upstreamDelayMs,
+    longStreamMs,
+    isMixed,
+    billingAccountCount,
   });
-  const primaryChannels = await Promise.all(
-    mockPorts.map((port, idx) =>
-      callInternal("PUT", "/internal/v1/channels", {
-        account_id: acc.id,
-        name: idx === 0 ? "bprod-primary" : `bprod-primary-${idx + 1}`,
-        kind: "openai",
-        base_url: `http://127.0.0.1:${port}/openai`,
-        api_key: `sk-bprod-p-${idx}`,
-        rpm: 10_000_000,
-        concurrency: Math.max(10_000, maxInFlight),
-      }),
-    ),
-  );
-  const chPrimary = primaryChannels[0]!;
-  const chBackup = await callInternal("PUT", "/internal/v1/channels", {
-    account_id: acc.id,
-    name: "bprod-backup",
-    kind: "openai",
-    base_url: `http://127.0.0.1:${mockPorts[0]}/openai`,
-    api_key: "sk-bprod-b",
-    rpm: 10_000_000,
-    concurrency: Math.max(10_000, maxInFlight),
-  });
-
-  await callInternal("PUT", "/internal/v1/models", {
-    name: "bprod-fast",
-    operations: ["chat"],
-    routing_strategy: mockNodes > 1 ? "ROUND_ROBIN" : "WEIGHTED",
-    max_output_tokens: 64,
-  });
-  for (const name of ["bprod-long", "bprod-failover"]) {
-    await callInternal("PUT", "/internal/v1/models", {
-      name,
-      operations: ["chat"],
-      max_output_tokens: 64,
-    });
-  }
-  const custPrice = await callInternal("POST", "/internal/v1/prices", {
-    side: "CUSTOMER",
-    currency: "USD",
-    rates: {
-      input_tokens: { numerator: "10", denominator: "1" },
-      cached_input_tokens: { numerator: "5", denominator: "1" },
-      output_tokens: { numerator: "20", denominator: "1" },
-    },
-    ceilings: { input_tokens: "1000", cached_input_tokens: "1000", output_tokens: "64" },
-  });
-  const supPrice = await callInternal("POST", "/internal/v1/prices", {
-    side: "SUPPLIER",
-    currency: "USD",
-    rates: {
-      input_tokens: { numerator: "2", denominator: "1" },
-      cached_input_tokens: { numerator: "1", denominator: "1" },
-      output_tokens: { numerator: "4", denominator: "1" },
-    },
-    ceilings: { input_tokens: "1000", cached_input_tokens: "1000", output_tokens: "64" },
-  });
-
-  for (const ch of primaryChannels) {
-    await callInternal("PUT", "/internal/v1/routes", {
-      model_name: "bprod-fast",
-      channel_id: ch.id,
-      upstream_model: "bprod-fast-up",
-      operations: ["chat"],
-      billing_price_id: custPrice.id,
-      cost_version_id: supPrice.id,
-    });
-  }
-  await callInternal("PUT", "/internal/v1/routes", {
-    model_name: "bprod-long",
-    channel_id: chPrimary.id,
-    upstream_model: "bprod-long-up",
-    operations: ["chat"],
-    billing_price_id: custPrice.id,
-    cost_version_id: supPrice.id,
-  });
-  await callInternal("PUT", "/internal/v1/routes", {
-    model_name: "bprod-failover",
-    channel_id: chPrimary.id,
-    upstream_model: "bprod-broken-up",
-    operations: ["chat"],
-    priority: 10,
-    billing_price_id: custPrice.id,
-    cost_version_id: supPrice.id,
-    retry_policy: { max_attempts: 2 },
-  });
-  await callInternal("PUT", "/internal/v1/routes", {
-    model_name: "bprod-failover",
-    channel_id: chBackup.id,
-    upstream_model: "bprod-fast-up",
-    operations: ["chat"],
-    priority: 5,
-    billing_price_id: custPrice.id,
-    cost_version_id: supPrice.id,
-    retry_policy: { max_attempts: 2 },
-  });
-
-  if (upstreamDelayMs > 0) {
-    for (const port of mockPorts) {
-      await fetch(`http://127.0.0.1:${port}/__control/scenarios`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${baseEnv.MOCK_CONTROL_TOKEN}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "bprod-fast-up",
-          scenario: { headerDelayMs: upstreamDelayMs },
-        }),
-      });
-    }
-  }
-  await fetch(`http://127.0.0.1:${mockPorts[0]}/__control/scenarios`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${baseEnv.MOCK_CONTROL_TOKEN}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "bprod-long-up",
-      scenario: { repeat: 8, streamDurationMs: longStreamMs },
-    }),
-  });
-  await fetch(`http://127.0.0.1:${mockPorts[0]}/__control/scenarios`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${baseEnv.MOCK_CONTROL_TOKEN}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "bprod-broken-up",
-      scenario: { status: 503 },
-    }),
-  });
-
-  const mixedPlugins = isMixed
-    ? await seedMixedPlugins({
-        callInternal,
-        mockPort: mockPorts[0]!,
-        mockToken: baseEnv.MOCK_CONTROL_TOKEN!,
-        channelId: chPrimary.id,
-        billingPriceId: custPrice.id,
-        costVersionId: supPrice.id,
-      })
-    : null;
-
-  const keys: string[] = [];
-  for (let i = 0; i < billingAccountCount; i++) {
-    const p = await callInternal("PUT", "/internal/v1/billing-accounts", {
-      name: `bprod-p-${i}`,
-      currency: "USD",
-      rpm: 10_000_000,
-      tpm: 1_000_000_000,
-      concurrency: Math.max(5000, maxInFlight),
-    });
-    const k = await callInternal("PUT", "/internal/v1/api-keys", {
-      billing_account_id: p.id,
-      name: `k-${i}`,
-    });
-    await callInternal("POST", `/internal/v1/wallets/${p.id}/credits`, {
-      currency: "USD",
-      external_ref: `bprod-c-${i}`,
-      amount_atoms: "1000000000000",
-      kind: "CASH",
-    });
-    keys.push(String(k.key));
-  }
 
   await Bun.sleep(withRedis ? 250 : 2200);
 
@@ -590,176 +397,22 @@ try {
     );
   }
 
-  async function runTimedLoad(
-    label: string,
-    model: string,
-    keyPool: string[],
-    concurrency: number,
-    seconds: number,
-    stream: boolean,
-  ) {
-    let completed = 0;
-    let errors = 0;
-    const sampleErrors: string[] = [];
-    const payload = Buffer.from(
-      JSON.stringify({
-        model,
-        stream,
-        messages: [{ role: "user", content: "hi" }],
-        max_tokens: 32,
-      }),
-    );
-    const rawByTargetKey = fastClient
-      ? targets.map((t) => keyPool.map((k) => buildPostRequest(t, k, payload)))
-      : null;
-    const latencies: number[] = [];
-    const walBefore = await walLsnBytes();
-    const rssBefore = await readCombinedGatewayRss();
-    const started = performance.now();
-    const stopAt = started + seconds * 1000;
-    let cursor = 0;
-
-    async function worker(workerIdx: number) {
-      const rampDelay = Math.floor(workerIdx / 64) * 10;
-      if (rampDelay > 0) await Bun.sleep(rampDelay);
-      const targetIdx = workerIdx % ports.length;
-      const affineStride = tenantAffinity && keyPool.length >= ports.length ? ports.length : 1;
-      const affineCount = Math.floor((keyPool.length - 1 - targetIdx) / affineStride) + 1;
-      while (performance.now() < stopAt) {
-        const idx = cursor++;
-        const keyIdx =
-          affineStride > 1 ? targetIdx + (idx % affineCount) * affineStride : idx % keyPool.length;
-        const t0 = performance.now();
-        const result = fastClient
-          ? await fastClient.sendRaw(targetIdx, rawByTargetKey![targetIdx]![keyIdx]!, stream)
-          : await postJsonKeepAlive(agent, ports[targetIdx]!, keyPool[keyIdx]!, payload, stream);
-        if (result.ok) completed++;
-        else {
-          errors++;
-          if (sampleErrors.length < 5)
-            sampleErrors.push(`${result.status} ${result.errText ?? ""}`);
-        }
-        latencies.push(performance.now() - t0);
-      }
-    }
-
-    await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)));
-    const elapsedSec = (performance.now() - started) / 1000;
-    const walAfter = await walLsnBytes();
-    const rssAfter = await readCombinedGatewayRss();
-    latencies.sort((a, b) => a - b);
-    return {
-      phase: label,
-      gateway_nodes: gatewayNodes,
-      redis_enabled: Boolean(redisUrl),
-      concurrency,
-      completed,
-      errors,
-      ...(sampleErrors.length ? { sample_errors: sampleErrors } : {}),
-      elapsed_sec: Number(elapsedSec.toFixed(3)),
-      rps: Number((completed / elapsedSec).toFixed(1)),
-      p50_ms: percentile(latencies, 0.5),
-      p95_ms: percentile(latencies, 0.95),
-      p99_ms: percentile(latencies, 0.99),
-      wal_bytes_per_req: completed > 0 ? Number((walAfter - walBefore) / BigInt(completed)) : 0,
-      combined_gw_rss_mb_before: rssBefore,
-      combined_gw_rss_mb_after: rssAfter,
-    };
-  }
-
-  async function runFixedCountLoad(
-    label: string,
-    model: string,
-    keyPool: string[],
-    concurrency: number,
-    totalRequests: number,
-    stream: boolean,
-  ) {
-    let completed = 0;
-    let errors = 0;
-    const sampleErrors: string[] = [];
-    const payload = Buffer.from(
-      JSON.stringify({
-        model,
-        stream,
-        messages: [{ role: "user", content: "hi" }],
-        max_tokens: 32,
-      }),
-    );
-    const rawByTargetKey = fastClient
-      ? targets.map((t) => keyPool.map((k) => buildPostRequest(t, k, payload)))
-      : null;
-    const latencies: number[] = [];
-    const walBefore = await walLsnBytes();
-    const rssBefore = await readCombinedGatewayRss();
-    const started = performance.now();
-    let cursor = 0;
-
-    async function worker(workerIdx: number) {
-      const targetIdx = workerIdx % ports.length;
-      while (true) {
-        const idx = cursor++;
-        if (idx >= totalRequests) break;
-        const keyIdx = idx % keyPool.length;
-        const t0 = performance.now();
-        const result = fastClient
-          ? await fastClient.sendRaw(targetIdx, rawByTargetKey![targetIdx]![keyIdx]!, stream)
-          : await postJsonKeepAlive(agent, ports[targetIdx]!, keyPool[keyIdx]!, payload, stream);
-        if (result.ok) completed++;
-        else {
-          errors++;
-          if (sampleErrors.length < 5)
-            sampleErrors.push(`${result.status} ${result.errText ?? ""}`);
-        }
-        latencies.push(performance.now() - t0);
-      }
-    }
-
-    await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)));
-    const elapsedSec = (performance.now() - started) / 1000;
-    const walAfter = await walLsnBytes();
-    const rssAfter = await readCombinedGatewayRss();
-    latencies.sort((a, b) => a - b);
-    return {
-      phase: label,
-      gateway_nodes: gatewayNodes,
-      redis_enabled: Boolean(redisUrl),
-      concurrency,
-      completed,
-      errors,
-      ...(sampleErrors.length ? { sample_errors: sampleErrors } : {}),
-      elapsed_sec: Number(elapsedSec.toFixed(3)),
-      rps: Number((completed / elapsedSec).toFixed(1)),
-      p50_ms: percentile(latencies, 0.5),
-      p95_ms: percentile(latencies, 0.95),
-      p99_ms: percentile(latencies, 0.99),
-      wal_bytes_per_req: completed > 0 ? Number((walAfter - walBefore) / BigInt(completed)) : 0,
-      combined_gw_rss_mb_before: rssBefore,
-      combined_gw_rss_mb_after: rssAfter,
-    };
-  }
-
-  async function runLimitPhases() {
-    if (warmLimitSockets) {
-      const target = Math.ceil(Math.max(...limitConcurrency) / ports.length);
-      if (fastClient) await fastClient.warm(target);
-      else await Promise.all(ports.map((port) => warmHttpConnections(agent, port, target)));
-    }
-    const results: Awaited<ReturnType<typeof runTimedLoad>>[] = [];
-    for (const concurrency of limitConcurrency) {
-      results.push(
-        await runTimedLoad(
-          `${gatewayNodes}node_limit_${limitSeconds}s_json_${concurrency}c`,
-          "bprod-fast",
-          keys,
-          concurrency,
-          limitSeconds,
-          false,
-        ),
-      );
-    }
-    return results;
-  }
+  const { runFixedCountLoad, runLimitPhases, runTimedLoad } = createProductionBenchmarkLoad({
+    targets,
+    walLsnBytes,
+    readCombinedGatewayRss,
+    ports,
+    redisUrl,
+    keys,
+    fastClient,
+    tenantAffinity,
+    agent,
+    gatewayNodes,
+    percentile,
+    warmLimitSockets,
+    limitConcurrency,
+    limitSeconds,
+  });
 
   let outboxStop = false;
   let outboxAcked = 0;

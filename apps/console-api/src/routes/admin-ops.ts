@@ -260,7 +260,7 @@ export function createAdminOpsRoutes(deps: ConsoleDeps) {
     const orgId = parseUuid(c.req.param("orgId"), "orgId");
     const body = await parseJsonBody(c, updateOrgStatusSchema);
     const { inferenceRevision, inferenceSyncedRevision, inferenceTargetStatus, ...organization } =
-      await deps.sync.changeOrganizationStatus(orgId, body.status);
+      await deps.sync.admission.changeOrganizationStatus(orgId, body.status);
     const pending = inferenceRevision !== inferenceSyncedRevision;
     await recordAuditLog(deps.orm, {
       actor,
@@ -343,7 +343,7 @@ export function createAdminOpsRoutes(deps: ConsoleDeps) {
       .returning();
     const synced =
       touchesGateway && updated!.gatewaySynced
-        ? await deps.sync.ensureBillingAccountSynced(billingAccountId)
+        ? await deps.sync.admission.ensureBillingAccountSynced(billingAccountId)
         : updated!;
     await recordAuditLog(deps.orm, {
       actor,

@@ -160,6 +160,9 @@ export class SmartRouter {
   peekAvailable(channelId: string, probe?: symbol): boolean {
     const st = this.channels.get(channelId);
     if (!st) return true;
+    if (st.state === "CLOSED" && st.cooldownUntilMs === 0 && st.dialUntilMs === 0) {
+      return !probe;
+    }
     const t = this.now();
     if (st.cooldownUntilMs > t || st.dialUntilMs > t) return false;
     if (probe) return st.state === "HALF_OPEN" && this.probeIsCurrent(st, probe);

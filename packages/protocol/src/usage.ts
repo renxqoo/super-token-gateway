@@ -4,13 +4,6 @@ import { GatewayError } from "@gateway/contracts";
 
 const allowedUsageKeys = new Set<string>([...dimensions, "reasoning_tokens"]);
 const decimalDurationKeys = new Set<string>(["audio_seconds", "video_seconds"]);
-const PROMPT_KEYS = ["prompt_tokens", "input_tokens", "promptTokenCount"] as const;
-const OUTPUT_KEYS = ["completion_tokens", "output_tokens", "candidatesTokenCount"] as const;
-const CACHED_RAW_KEYS = [
-  "cache_read_input_tokens",
-  "cachedContentTokenCount",
-  "prompt_cache_hit_tokens",
-] as const;
 
 export function readUsageQuantity(
   source: Record<string, unknown>,
@@ -111,18 +104,44 @@ function quantity(
   return value;
 }
 
-function aliases(
+function alias3(
   source: Record<string, unknown>,
-  keys: readonly string[],
+  k0: string,
+  k1: string,
+  k2: string,
   exact: boolean,
 ): string | undefined {
   let selected: string | undefined;
-  for (let i = 0; i < keys.length; i++) {
-    const value = quantity(source, keys[i]!, exact);
-    if (value === undefined) continue;
-    if (selected !== undefined && selected !== value)
-      throw new GatewayError(502, "usage_alias_conflict", "Provider usage aliases disagree");
-    selected = value;
+  const v0 = source[k0];
+  if (v0 !== undefined && v0 !== null) {
+    selected =
+      typeof v0 === "number" && !exact && Number.isSafeInteger(v0) && v0 >= 0
+        ? String(v0)
+        : quantity(source, k0, exact);
+  }
+  const v1 = source[k1];
+  if (v1 !== undefined && v1 !== null) {
+    const val =
+      typeof v1 === "number" && !exact && Number.isSafeInteger(v1) && v1 >= 0
+        ? String(v1)
+        : quantity(source, k1, exact);
+    if (val !== undefined) {
+      if (selected !== undefined && selected !== val)
+        throw new GatewayError(502, "usage_alias_conflict", "Provider usage aliases disagree");
+      selected = val;
+    }
+  }
+  const v2 = source[k2];
+  if (v2 !== undefined && v2 !== null) {
+    const val =
+      typeof v2 === "number" && !exact && Number.isSafeInteger(v2) && v2 >= 0
+        ? String(v2)
+        : quantity(source, k2, exact);
+    if (val !== undefined) {
+      if (selected !== undefined && selected !== val)
+        throw new GatewayError(502, "usage_alias_conflict", "Provider usage aliases disagree");
+      selected = val;
+    }
   }
   return selected;
 }
@@ -185,20 +204,36 @@ export function extractUsage(
     raw.prompt_tokens_details ?? raw.input_tokens_details ?? raw.input_token_details,
   );
   const outputDetails = asRecord(raw.completion_tokens_details ?? raw.output_tokens_details);
-  const prompt = aliases(raw, PROMPT_KEYS, rawExact);
+  const prompt = alias3(raw, "prompt_tokens", "input_tokens", "promptTokenCount", rawExact);
   const toolUse =
     kind === "gemini" ? quantity(raw, "toolUsePromptTokenCount", rawExact) : undefined;
   const input =
     toolUse === undefined ? prompt : (BigInt(prompt ?? "0") + BigInt(toolUse)).toString();
-  const output = aliases(raw, OUTPUT_KEYS, rawExact);
-  const cachedDetails = details
-    ? quantity(details, "cached_tokens", hasExactLiterals(details))
-    : undefined;
-  const cachedRaw = aliases(raw, CACHED_RAW_KEYS, rawExact);
+  const output = alias3(
+    raw,
+    "completion_tokens",
+    "output_tokens",
+    "candidatesTokenCount",
+    rawExact,
+  );
+  const cachedDetails =
+    details && details.cached_tokens !== undefined
+      ? quantity(details, "cached_tokens", hasExactLiterals(details))
+      : undefined;
+  const cachedRaw = alias3(
+    raw,
+    "cache_read_input_tokens",
+    "cachedContentTokenCount",
+    "prompt_cache_hit_tokens",
+    rawExact,
+  );
   if (cachedDetails !== undefined && cachedRaw !== undefined && cachedDetails !== cachedRaw)
     throw new GatewayError(502, "usage_alias_conflict", "Provider cache usage aliases disagree");
   const observedCached = cachedDetails ?? cachedRaw;
-  const cacheMiss = quantity(raw, "prompt_cache_miss_tokens", rawExact);
+  const cacheMiss =
+    raw.prompt_cache_miss_tokens !== undefined
+      ? quantity(raw, "prompt_cache_miss_tokens", rawExact)
+      : undefined;
   if (
     cacheMiss !== undefined &&
     input !== undefined &&
@@ -212,13 +247,18 @@ export function extractUsage(
     );
   const creation = asRecord(raw.cache_creation);
   const creationExact = creation ? hasExactLiterals(creation) : false;
-  const write5m = creation
-    ? quantity(creation, "ephemeral_5m_input_tokens", creationExact)
-    : undefined;
-  const write1h = creation
-    ? quantity(creation, "ephemeral_1h_input_tokens", creationExact)
-    : undefined;
-  let write = quantity(raw, "cache_creation_input_tokens", rawExact);
+  const write5m =
+    creation && creation.ephemeral_5m_input_tokens !== undefined
+      ? quantity(creation, "ephemeral_5m_input_tokens", creationExact)
+      : undefined;
+  const write1h =
+    creation && creation.ephemeral_1h_input_tokens !== undefined
+      ? quantity(creation, "ephemeral_1h_input_tokens", creationExact)
+      : undefined;
+  let write =
+    raw.cache_creation_input_tokens !== undefined
+      ? quantity(raw, "cache_creation_input_tokens", rawExact)
+      : undefined;
   if (write5m !== undefined && write1h !== undefined) {
     const total = (BigInt(write5m) + BigInt(write1h)).toString();
     if ((write !== undefined && write !== total) || total.length > 38)
@@ -230,9 +270,12 @@ export function extractUsage(
     write = total;
   }
   const observedReasoning =
-    (outputDetails
+    (outputDetails && outputDetails.reasoning_tokens !== undefined
       ? quantity(outputDetails, "reasoning_tokens", hasExactLiterals(outputDetails))
-      : undefined) ?? quantity(raw, "thoughtsTokenCount", rawExact);
+      : undefined) ??
+    (raw.thoughtsTokenCount !== undefined
+      ? quantity(raw, "thoughtsTokenCount", rawExact)
+      : undefined);
   const usage: Usage = previous ? { ...previous } : {};
   const audioDuration = measureDuration(usage, raw, "audio_seconds", "audio_ms", true, rawExact);
   const videoDuration = measureDuration(usage, raw, "video_seconds", "video_ms", false, rawExact);

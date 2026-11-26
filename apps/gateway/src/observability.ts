@@ -81,16 +81,22 @@ class Histogram {
     const v = Number.isFinite(value) && value >= 0 ? value : 0;
     this.sum += v;
     this.count++;
-    for (let i = 0; i < this.buckets.length; i++) {
-      if (v <= this.buckets[i]!) this.counts[i]!++;
+    const buckets = this.buckets;
+    for (let i = 0; i < buckets.length; i++) {
+      if (v <= buckets[i]!) {
+        this.counts[i]!++;
+        return;
+      }
     }
   }
 
   render(name: string, help: string, labels = ""): string[] {
     const lines = [`# HELP ${name} ${help}`, `# TYPE ${name} histogram`];
+    let cumulative = 0;
     for (let i = 0; i < this.buckets.length; i++) {
+      cumulative += this.counts[i]!;
       lines.push(
-        `${name}_bucket{${labels ? labels + "," : ""}le="${this.buckets[i]}"} ${this.counts[i]}`,
+        `${name}_bucket{${labels ? labels + "," : ""}le="${this.buckets[i]}"} ${cumulative}`,
       );
     }
     lines.push(`${name}_bucket{${labels ? labels + "," : ""}le="+Inf"} ${this.count}`);
@@ -162,6 +168,24 @@ type AmbiguousRetryWindow = {
   count: number;
 };
 
+const STREAM_PHASE_NAMES = [
+  "gateway_prepare",
+  "dns",
+  "connection_wait",
+  "tcp",
+  "tls",
+  "request_write",
+  "upstream_headers",
+  "upstream_first_text",
+  "gateway_first_text_relay",
+  "gateway_first_text",
+] as const;
+
+type StreamPhaseCache = {
+  stages: (Histogram | undefined)[];
+  outcomes: Map<string, LabeledCounter<readonly [string, string]>>;
+};
+
 export class GatewayMetrics {
   requestsTotal = 0;
   failoversTotal = 0;
@@ -183,6 +207,10 @@ export class GatewayMetrics {
     string,
     LabeledCounter<readonly [string, string, string]>
   >();
+  private lastHttpOp = "";
+  private lastHttpStatus = -1;
+  private lastHttpChannel: string | null = null;
+  private lastHttpCounter: LabeledCounter<readonly [string, string, string]> | undefined;
   private readonly upstreamErrorCounters = new Map<
     string,
     LabeledCounter<readonly [string, string]>
@@ -222,12 +250,34 @@ export class GatewayMetrics {
   private readonly ttftDuration = new Histogram();
   private readonly pluginDuration = new Histogram(PLUGIN_BUCKETS_MS);
   private readonly streamPhases = new Map<string, Histogram>();
+  private readonly streamPhaseSets = new Map<string, StreamPhaseCache>();
   private readonly firstTextOutcomes = new Map<string, LabeledCounter<readonly [string, string]>>();
 
   constructor(private readonly accessLogEnabled: boolean) {}
 
   get isAccessLogEnabled(): boolean {
     return this.accessLogEnabled;
+  }
+
+  private observeStage(
+    cache: StreamPhaseCache,
+    operation: string,
+    index: number,
+    from: number | undefined,
+    to: number | undefined,
+  ): void {
+    if (from === undefined || to === undefined || to < from) return;
+    let h = cache.stages[index];
+    if (!h) {
+      const key = `${operation}\0${STREAM_PHASE_NAMES[index]!}`;
+      h = this.streamPhases.get(key);
+      if (!h) {
+        h = new Histogram(STREAM_BUCKETS_SECONDS);
+        this.streamPhases.set(key, h);
+      }
+      cache.stages[index] = h;
+    }
+    h.observe((to - from) / 1000);
   }
 
   observeStreamPhases(
@@ -242,16 +292,14 @@ export class GatewayMetrics {
   ): void {
     const { requestStart, attempt, enqueued, admission } = point;
     const transport = attempt?.transport ?? admission;
-    const sample = (stage: string, from: number | undefined, to: number | undefined) => {
-      if (from === undefined || to === undefined || to < from) return;
-      const key = `${operation}\0${stage}`;
-      let histogram = this.streamPhases.get(key);
-      if (!histogram) {
-        histogram = new Histogram(STREAM_BUCKETS_SECONDS);
-        this.streamPhases.set(key, histogram);
-      }
-      histogram.observe((to - from) / 1000);
-    };
+    let cache = this.streamPhaseSets.get(operation);
+    if (!cache) {
+      cache = {
+        stages: Array.from({ length: STREAM_PHASE_NAMES.length }, () => undefined),
+        outcomes: new Map(),
+      };
+      this.streamPhaseSets.set(operation, cache);
+    }
     const outcome =
       enqueued !== undefined
         ? "sent"
@@ -260,21 +308,35 @@ export class GatewayMetrics {
           : status >= 400
             ? "failed"
             : "no_text";
-    bumpLabeled(
-      this.firstTextOutcomes,
-      `${operation}\0${outcome}`,
-      () => [operation, outcome] as const,
-    );
-    sample("gateway_prepare", requestStart, attempt?.start);
-    sample("dns", transport?.dns_start, transport?.dns_end);
-    if (transport?.first_wait !== undefined) sample("connection_wait", 0, transport.wait_ms);
-    sample("tcp", transport?.dial_start, transport?.tcp_ready);
-    sample("tls", transport?.tcp_ready, transport?.tls_ready);
-    sample("request_write", transport?.connection_ready, transport?.request_written);
-    sample("upstream_headers", transport?.request_written, transport?.response_headers);
-    sample("upstream_first_text", transport?.response_headers, attempt?.firstText);
-    sample("gateway_first_text_relay", attempt?.firstText, enqueued);
-    sample("gateway_first_text", requestStart, enqueued);
+    let outcomeCounter = cache.outcomes.get(outcome);
+    if (outcomeCounter) {
+      outcomeCounter.count++;
+    } else {
+      const key = `${operation}\0${outcome}`;
+      outcomeCounter = this.firstTextOutcomes.get(key);
+      if (outcomeCounter) {
+        outcomeCounter.count++;
+        cache.outcomes.set(outcome, outcomeCounter);
+      } else if (this.firstTextOutcomes.size < 2048) {
+        outcomeCounter = { labels: [operation, outcome] as const, count: 1 };
+        this.firstTextOutcomes.set(key, outcomeCounter);
+        cache.outcomes.set(outcome, outcomeCounter);
+      }
+    }
+    this.observeStage(cache, operation, 0, requestStart, attempt?.start);
+    if (transport) {
+      this.observeStage(cache, operation, 1, transport.dns_start, transport.dns_end);
+      if (transport.first_wait !== undefined) {
+        this.observeStage(cache, operation, 2, 0, transport.wait_ms);
+      }
+      this.observeStage(cache, operation, 3, transport.dial_start, transport.tcp_ready);
+      this.observeStage(cache, operation, 4, transport.tcp_ready, transport.tls_ready);
+      this.observeStage(cache, operation, 5, transport.connection_ready, transport.request_written);
+      this.observeStage(cache, operation, 6, transport.request_written, transport.response_headers);
+      this.observeStage(cache, operation, 7, transport.response_headers, attempt?.firstText);
+    }
+    this.observeStage(cache, operation, 8, attempt?.firstText, enqueued);
+    this.observeStage(cache, operation, 9, requestStart, enqueued);
   }
 
   observeRequestFast(
@@ -284,14 +346,30 @@ export class GatewayMetrics {
     durationMs: number,
     ttftMs: number | null,
   ): void {
-    const statusClass = statusClassOf(status);
-    const ch = channel ?? "none";
-    const key = `${operation}\0${statusClass}\0${ch}`;
-    const existing = this.httpCounters.get(key);
-    if (existing !== undefined) {
-      existing.count++;
-    } else if (this.httpCounters.size < 2048) {
-      this.httpCounters.set(key, { labels: [operation, statusClass, ch] as const, count: 1 });
+    if (
+      this.lastHttpCounter !== undefined &&
+      this.lastHttpOp === operation &&
+      this.lastHttpStatus === status &&
+      this.lastHttpChannel === channel
+    ) {
+      this.lastHttpCounter.count++;
+    } else {
+      const statusClass = statusClassOf(status);
+      const ch = channel ?? "none";
+      const key = `${operation}\0${statusClass}\0${ch}`;
+      let entry = this.httpCounters.get(key);
+      if (entry !== undefined) {
+        entry.count++;
+      } else if (this.httpCounters.size < 2048) {
+        entry = { labels: [operation, statusClass, ch] as const, count: 1 };
+        this.httpCounters.set(key, entry);
+      }
+      if (entry !== undefined) {
+        this.lastHttpOp = operation;
+        this.lastHttpStatus = status;
+        this.lastHttpChannel = channel;
+        this.lastHttpCounter = entry;
+      }
     }
     this.requestDuration.observe(durationMs);
     if (ttftMs !== null) {

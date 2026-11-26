@@ -1,33 +1,17 @@
 import type { Operation, Pricing } from "@gateway/kernel";
-import type {
-  ApiKeyRecord,
-  ChannelRecord,
-  ConfigSnapshot,
-  PriceVersionRecord,
-  RouteRecord,
-  UpstreamAccountRecord,
+import {
+  fastUuid,
+  type ApiKeyRecord,
+  type ChannelRecord,
+  type ConfigSnapshot,
+  type PriceVersionRecord,
+  type RouteRecord,
+  type UpstreamAccountRecord,
 } from "@gateway/ledger";
 import { quoteReservation, type ReservationMeasurement, type Usage } from "@gateway/kernel";
 import { verifier } from "@gateway/runtime";
 
-const UUID_POOL = Buffer.allocUnsafe(4096);
-let uuidHex = "";
-let uuidHexOffset = 8192;
-
-export function fastUuid(): string {
-  if (uuidHexOffset + 32 > 8192) {
-    crypto.getRandomValues(UUID_POOL);
-    for (let i = 0; i < 4096; i += 16) {
-      UUID_POOL[i + 6] = (UUID_POOL[i + 6]! & 0x0f) | 0x40;
-      UUID_POOL[i + 8] = (UUID_POOL[i + 8]! & 0x3f) | 0x80;
-    }
-    uuidHex = UUID_POOL.toString("hex");
-    uuidHexOffset = 0;
-  }
-  const o = uuidHexOffset;
-  uuidHexOffset += 32;
-  return `${uuidHex.slice(o, o + 8)}-${uuidHex.slice(o + 8, o + 12)}-${uuidHex.slice(o + 12, o + 16)}-${uuidHex.slice(o + 16, o + 20)}-${uuidHex.slice(o + 20, o + 32)}`;
-}
+export { fastUuid };
 
 export class LruMap<K, V> {
   private readonly map = new Map<K, V>();
@@ -41,8 +25,10 @@ export class LruMap<K, V> {
   get(key: K): V | undefined {
     const val = this.map.get(key);
     if (val === undefined) return undefined;
-    this.map.delete(key);
-    this.map.set(key, val);
+    if (this.map.size > this.maxEntries >>> 1) {
+      this.map.delete(key);
+      this.map.set(key, val);
+    }
     return val;
   }
 
@@ -113,6 +99,23 @@ export class DeadlineWheel {
         clearTimeout(handle);
       };
     }
+    const entry: CoarseDeadline = {
+      deadlineMs: performance.now() + timeoutMs,
+      fired: false,
+      cancelled: false,
+      onExpire,
+    };
+    this.coarse.add(entry);
+    this.ensureTimer();
+    return () => {
+      if (entry.cancelled) return;
+      entry.cancelled = true;
+      this.coarse.delete(entry);
+    };
+  }
+
+  scheduleCoarse(timeoutMs: number, onExpire: () => void): () => void {
+    if (this.closed) return () => {};
     const entry: CoarseDeadline = {
       deadlineMs: performance.now() + timeoutMs,
       fired: false,

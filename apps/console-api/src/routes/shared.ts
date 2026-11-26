@@ -18,14 +18,14 @@ import {
 import type { ConsoleConfig } from "../config.ts";
 import type { apiKeyRecords, ConsoleDrizzle, billingAccounts } from "../db/schema.ts";
 import type { GatewayClient } from "../gateway-client.ts";
-import type { ConsoleSyncEngine } from "../sync.ts";
+import type { ConsoleSync } from "../sync.ts";
 
 export type ConsoleDeps = {
   config: ConsoleConfig;
   db: SQL;
   orm: ConsoleDrizzle;
   gateway: GatewayClient;
-  sync: ConsoleSyncEngine;
+  sync: ConsoleSync;
   loginLimiter: LoginRateLimiter;
 };
 

@@ -5,28 +5,17 @@ import type {
   CommitTerminalInput,
   CommitTerminalResult,
   LeaseLotAllocation,
+  SupplierHoldEntry,
 } from "./types.ts";
 import type { LeaseManager } from "./lease-manager.ts";
-import { sha256Hex, cellKey, type JournalLine } from "./funds.ts";
-
-const UUID_POOL = Buffer.allocUnsafe(4096);
-let uuidHex = "";
-let uuidHexOffset = 8192;
-
-function fastUuid(): string {
-  if (uuidHexOffset + 32 > 8192) {
-    crypto.getRandomValues(UUID_POOL);
-    for (let i = 0; i < 4096; i += 16) {
-      UUID_POOL[i + 6] = (UUID_POOL[i + 6]! & 0x0f) | 0x40;
-      UUID_POOL[i + 8] = (UUID_POOL[i + 8]! & 0x3f) | 0x80;
-    }
-    uuidHex = UUID_POOL.toString("hex");
-    uuidHexOffset = 0;
-  }
-  const o = uuidHexOffset;
-  uuidHexOffset += 32;
-  return `${uuidHex.slice(o, o + 8)}-${uuidHex.slice(o + 8, o + 12)}-${uuidHex.slice(o + 12, o + 16)}-${uuidHex.slice(o + 16, o + 20)}-${uuidHex.slice(o + 20, o + 32)}`;
-}
+import {
+  cellKey,
+  fastUuid,
+  jsonNullable,
+  jsonQuote,
+  usageCanonicalAndDigest,
+  type JournalLine,
+} from "./funds.ts";
 
 export type FastCommitCandidate = {
   index: number;
@@ -52,44 +41,30 @@ export async function commitLeasedBatch(
   const nextExpIso = new Date(nextExpMs).toISOString();
   const renewThresholdIso = new Date(renewThresholdMs).toISOString();
 
-  const serialized = candidates.map((cand) => ({
-    cand,
-    chargeId: fastUuid(),
-    eventId: fastUuid(),
-    usageDigest: sha256Hex(cand.item.usage),
-    customerAtomsText: cand.customerAtoms.toString(),
-    supplierAtomsText: cand.supplierAtoms.toString(),
-  }));
+  const serialized = candidates.map((cand) => {
+    const usageInfo = usageCanonicalAndDigest(cand.item.usage);
+    return {
+      cand,
+      chargeId: fastUuid(),
+      eventId: fastUuid(),
+      usageJson: usageInfo.json,
+      usageDigest: usageInfo.digest,
+      customerAtomsText: cand.customerAtoms.toString(),
+      supplierAtomsText: cand.supplierAtoms.toString(),
+    };
+  });
 
-  const fastPayload = JSON.stringify(
-    serialized.map((s) => ({
-      charge_id: s.chargeId,
-      event_id: s.eventId,
-      request_id: s.cand.item.request_id,
-      billing_account_id: s.cand.meta.billingAccountId,
-      wallet_id: s.cand.meta.walletId,
-      api_key_id: s.cand.item.api_key_id ?? s.cand.meta.apiKeyId,
-      pricing_override_id: s.cand.item.pricing_override_id ?? s.cand.meta.pricingOverrideId,
-      discount_numerator: s.cand.item.discount_numerator ?? s.cand.meta.discountNumerator,
-      discount_denominator: s.cand.item.discount_denominator ?? s.cand.meta.discountDenominator,
-      wallet_lease_id: s.cand.meta.walletLeaseId,
-      supplier_lease_id: s.cand.meta.supplierLeaseId,
-      selected_attempt_id: s.cand.item.selected_attempt_id,
-      channel_id: s.cand.item.channel_id,
-      model: s.cand.meta.model,
-      operation: s.cand.meta.operation,
-      currency: s.cand.meta.currency,
-      billing_price_id: s.cand.item.billing_price_id,
-      cost_version_id: s.cand.item.cost_version_id,
-      usage: s.cand.item.usage,
-      usage_digest: s.usageDigest,
-      customer_atoms: s.customerAtomsText,
-      supplier_atoms: s.supplierAtomsText,
-      supplier_currency: s.cand.item.supplier_currency,
-      plugin_audit: s.cand.item.plugin_audit ?? [],
-      charge_policy: s.cand.item.charge_policy ?? "CHARGE_CUSTOMER",
-    })),
-  );
+  let fastPayload = "[";
+  for (let i = 0; i < serialized.length; i++) {
+    if (i > 0) fastPayload += ",";
+    const s = serialized[i]!;
+    const item = s.cand.item;
+    const meta = s.cand.meta;
+    const audit = item.plugin_audit;
+    const auditJson = !audit || audit.length === 0 ? "[]" : JSON.stringify(audit);
+    fastPayload += `{"charge_id":"${s.chargeId}","event_id":"${s.eventId}","request_id":"${item.request_id}","billing_account_id":"${meta.billingAccountId}","wallet_id":"${meta.walletId}","api_key_id":${jsonNullable(item.api_key_id ?? meta.apiKeyId)},"pricing_override_id":${jsonNullable(item.pricing_override_id ?? meta.pricingOverrideId)},"discount_numerator":${jsonNullable(item.discount_numerator ?? meta.discountNumerator)},"discount_denominator":${jsonNullable(item.discount_denominator ?? meta.discountDenominator)},"wallet_lease_id":"${meta.walletLeaseId}","supplier_lease_id":"${meta.supplierLeaseId}","selected_attempt_id":"${item.selected_attempt_id}","channel_id":"${item.channel_id}","model":${jsonQuote(meta.model)},"operation":${jsonQuote(meta.operation)},"currency":${jsonQuote(meta.currency)},"billing_price_id":${jsonNullable(item.billing_price_id)},"cost_version_id":${jsonNullable(item.cost_version_id)},"usage":${s.usageJson},"usage_digest":"${s.usageDigest}","customer_atoms":"${s.customerAtomsText}","supplier_atoms":"${s.supplierAtomsText}","supplier_currency":${jsonQuote(item.supplier_currency)},"plugin_audit":${auditJson},"charge_policy":${jsonQuote(item.charge_policy ?? "CHARGE_CUSTOMER")}}`;
+  }
+  fastPayload += "]";
 
   const [fastRow] = await db<
     {
@@ -153,7 +128,7 @@ export async function commitLeasedBatch(
 
   await db.begin(async (tx) => {
     const holdRows = await tx`
-        SELECT request_id, state, wallet_lease_id, supplier_lease_id, key_reserved_atoms::text
+        SELECT request_id, state, wallet_lease_id, supplier_lease_id, key_reserved_atoms::text, supplier_holds
         FROM public.billing_holds
         WHERE request_id = ANY(${reqIds}::uuid[])
         ORDER BY request_id
@@ -166,6 +141,7 @@ export async function commitLeasedBatch(
         wallet_lease_id: string | null;
         supplier_lease_id: string | null;
         key_reserved_atoms: bigint;
+        supplier_holds: SupplierHoldEntry[];
       }
     >();
     for (const r of holdRows) {
@@ -174,6 +150,7 @@ export async function commitLeasedBatch(
         wallet_lease_id: r.wallet_lease_id ? String(r.wallet_lease_id) : null,
         supplier_lease_id: r.supplier_lease_id ? String(r.supplier_lease_id) : null,
         key_reserved_atoms: BigInt(String(r.key_reserved_atoms ?? "0")),
+        supplier_holds: (r.supplier_holds ?? []) as SupplierHoldEntry[],
       });
     }
 
@@ -339,6 +316,13 @@ export async function commitLeasedBatch(
       if (
         !h ||
         h.state !== "HELD" ||
+        !h.supplier_holds.some(
+          (attempt) =>
+            attempt.attempt_id === cand.item.selected_attempt_id &&
+            attempt.channel_id === cand.item.channel_id &&
+            attempt.currency === cand.item.supplier_currency &&
+            attempt.state === "HELD",
+        ) ||
         h.key_reserved_atoms !== 0n ||
         h.wallet_lease_id !== cand.meta.walletLeaseId ||
         h.supplier_lease_id !== cand.meta.supplierLeaseId ||

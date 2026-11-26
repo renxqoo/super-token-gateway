@@ -36,24 +36,56 @@ export function createBodyBufferBudget(limit: number) {
   };
 }
 
+const DECLARED_SIZE_CACHE = new WeakMap<Request, number | null>();
+
 export function declaredRequestSize(req: Request, maxBytes: number): number | undefined {
-  const header = req.headers.get("content-length");
-  if (header === null || !/^\d+$/.test(header)) return undefined;
-  const length = Number(header);
-  if (length > maxBytes) {
+  let cached = DECLARED_SIZE_CACHE.get(req);
+  if (cached === undefined) {
+    const header = req.headers.get("content-length");
+    if (header === null || header.length === 0) {
+      cached = null;
+    } else {
+      let valid = true;
+      let n = 0;
+      for (let i = 0; i < header.length; i++) {
+        const d = header.charCodeAt(i) - 48;
+        if (d < 0 || d > 9) {
+          valid = false;
+          break;
+        }
+        n = n * 10 + d;
+      }
+      cached = valid ? n : null;
+    }
+    DECLARED_SIZE_CACHE.set(req, cached);
+  }
+  if (cached === null) return undefined;
+  if (cached > maxBytes) {
     throw new GatewayError(413, "body_too_large", "Payload exceeds the configured size limit");
   }
-  return length;
+  return cached;
 }
+
+const CANONICAL_IP_CACHE = new Map<string, string>();
+const CANONICAL_IP_CACHE_MAX = 1024;
 
 function canonicalIp(ip: string): string {
   if (!ip.includes(":")) return ip;
+  const cached = CANONICAL_IP_CACHE.get(ip);
+  if (cached !== undefined) return cached;
   const canonical = new URL(`http://[${ip}]`).hostname.slice(1, -1);
   const mapped = canonical.match(/^::ffff:([\da-f]+):([\da-f]+)$/);
-  if (!mapped) return canonical;
-  const high = Number.parseInt(mapped[1]!, 16);
-  const low = Number.parseInt(mapped[2]!, 16);
-  return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+  let out: string;
+  if (!mapped) {
+    out = canonical;
+  } else {
+    const high = Number.parseInt(mapped[1]!, 16);
+    const low = Number.parseInt(mapped[2]!, 16);
+    out = `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+  }
+  if (CANONICAL_IP_CACHE.size >= CANONICAL_IP_CACHE_MAX) CANONICAL_IP_CACHE.clear();
+  CANONICAL_IP_CACHE.set(ip, out);
+  return out;
 }
 
 function retryAfter(ms: number): string {
@@ -126,9 +158,17 @@ export function createPublicIngress(
     }
     windowCount++;
     pending++;
-    const wait = await cluster
-      .takeIngressWindow(ip, settings.maxRequests, settings.windowMs, settings.timeoutMs)
-      .finally(() => pending--);
+    let wait: number | null;
+    try {
+      wait = await cluster.takeIngressWindow(
+        ip,
+        settings.maxRequests,
+        settings.windowMs,
+        settings.timeoutMs,
+      );
+    } finally {
+      pending--;
+    }
     if (wait === 0) return;
     return wait === null
       ? {

@@ -4,7 +4,7 @@ import { inCidrs } from "./ip.ts";
 import { GatewayError } from "@gateway/contracts";
 import { DEFAULT_DIAL_QUEUE_WAIT_MS, type DialLimits } from "./dial-scheduler.ts";
 import { markUpstream } from "./transport-timing.ts";
-import { isValidHttpHeaderName, isValidHttpHeaderValue } from "./bun-http1.ts";
+import { isValidHttpHeaderName, isValidHttpHeaderValue } from "./bun-http1-codec.ts";
 import {
   createHttpPool,
   UpstreamPreDispatchError,
@@ -37,6 +37,7 @@ type FetchInit = RequestInit &
   >;
 type UpstreamOrigin = {
   url: URL;
+  host: string;
   addresses: DnsAddress[];
   tls: PinnedRequestInit["tls"];
   ipLiteral: boolean;
@@ -132,6 +133,14 @@ function createDnsResolver(options: TransportOptions = {}) {
   const inFlight = new Map<string, Promise<DnsAddress[]>>();
 
   return {
+    peekCached(hostname: string): DnsAddress[] | undefined {
+      if (ttlMs <= 0) return undefined;
+      const hit = cache.get(hostname);
+      if (!hit) return undefined;
+      if (hit.expiresAt > performance.now()) return hit.addresses;
+      cache.delete(hostname);
+      return undefined;
+    },
     resolve(
       hostname: string,
       signal?: AbortSignal | null,
@@ -176,11 +185,131 @@ function createDnsResolver(options: TransportOptions = {}) {
   };
 }
 
+type CachedUrlMeta = {
+  href: string;
+  url: URL;
+  protocol: string;
+  host: string;
+  hostname: string;
+  rawHostname: string;
+  port: number;
+  ipFamily: number;
+  unsafe: boolean;
+  tls: PinnedRequestInit["tls"];
+  literalAddresses: DnsAddress[] | null;
+  pinnedUrls: Map<string, URL>;
+};
+
+const URL_META_CACHE = new WeakMap<URL, CachedUrlMeta>();
+
+function readUrlMeta(input: URL): CachedUrlMeta {
+  const cached = URL_META_CACHE.get(input);
+  const href = input.href;
+  if (cached && cached.href === href) return cached;
+  const copy = new URL(href);
+  const protocol = copy.protocol;
+  const unsafe =
+    Boolean(copy.username || copy.password) || (protocol !== "https:" && protocol !== "http:");
+  const rawHost = copy.hostname;
+  const hostname = rawHost.charCodeAt(0) === 91 ? rawHost.slice(1, -1) : rawHost;
+  const ipFamily = cachedIpFamily(hostname);
+  const port = copy.port ? Number(copy.port) : protocol === "https:" ? 443 : 80;
+  const tls =
+    protocol === "https:"
+      ? { rejectUnauthorized: true as const, ...(!ipFamily && { serverName: hostname }) }
+      : undefined;
+  const meta: CachedUrlMeta = {
+    href,
+    url: copy,
+    protocol,
+    host: copy.host,
+    hostname,
+    rawHostname: rawHost,
+    port,
+    ipFamily,
+    unsafe,
+    tls,
+    literalAddresses: ipFamily ? [{ address: hostname, family: ipFamily }] : null,
+    pinnedUrls: new Map(),
+  };
+  URL_META_CACHE.set(input, meta);
+  return meta;
+}
+
 export function createTransport(maxConnections = 1024, options: TransportOptions = {}) {
   const pool = createHttpPool(maxConnections, options.dial);
   const dns = createDnsResolver(options);
   const fallbackBudget = options.dial?.maxQueueWaitMs ?? DEFAULT_DIAL_QUEUE_WAIT_MS;
   return {
+    tryPrepareDispatchSync(
+      url: URL,
+      allowPrivate: boolean,
+      privateCidrs: readonly string[] = [],
+    ): PreparedDispatch | null {
+      const meta = readUrlMeta(url);
+      if (meta.unsafe) return null;
+      const addresses = meta.literalAddresses ?? dns.peekCached(meta.hostname);
+      if (!addresses || addresses.length !== 1) return null;
+      const entry = addresses[0]!;
+      if (!entry.family || entry.address.includes("%")) return null;
+      if (
+        !allowPrivate &&
+        ((!isPublicAddress(entry.address) && !inCidrs(entry.address, privateCidrs)) ||
+          (meta.protocol !== "https:" && !inCidrs(entry.address, privateCidrs)))
+      ) {
+        return null;
+      }
+      const secure = meta.protocol === "https:";
+      const outbound = pool.tryReserveSync(entry.address, meta.port, meta.tls, secure);
+      if (!outbound) return null;
+      const origin: UpstreamOrigin = {
+        url: meta.url,
+        host: meta.host,
+        addresses,
+        tls: meta.tls,
+        ipLiteral: Boolean(meta.ipFamily),
+      };
+      let pinnedUrl: URL;
+      if (meta.ipFamily) {
+        pinnedUrl = meta.url;
+      } else {
+        const host = entry.family === 6 ? `[${entry.address}]` : entry.address;
+        if (host === meta.rawHostname) {
+          pinnedUrl = meta.url;
+        } else {
+          let cachedPinned = meta.pinnedUrls.get(host);
+          if (!cachedPinned) {
+            cachedPinned = new URL(meta.url);
+            cachedPinned.hostname = host;
+            if (meta.pinnedUrls.size >= 8) meta.pinnedUrls.clear();
+            meta.pinnedUrls.set(host, cachedPinned);
+          }
+          pinnedUrl = cachedPinned;
+        }
+      }
+      let available = true;
+      return {
+        async fetchFast(request: FetchInit) {
+          if (!available)
+            throw new UpstreamPreDispatchError("upstream_not_dispatched", "Dispatch unavailable");
+          available = false;
+          try {
+            if (request.body instanceof ReadableStream) {
+              throw new TypeError("Prepared dispatch requires a buffered request body");
+            }
+            const sendInit = pinnedRequest(origin, request);
+            sendInit.outbound = outbound;
+            return await pool.sendFast(pinnedUrl, sendInit);
+          } finally {
+            outbound.release();
+          }
+        },
+        release() {
+          available = false;
+          outbound.release();
+        },
+      };
+    },
     async prepareDispatch(
       url: URL,
       bytes: number,
@@ -470,7 +599,7 @@ async function resolveUpstreamOrigin(
               .map((entry) => [entry.address, entry]),
           ).values(),
         ];
-  return { url, addresses: ordered, tls, ipLiteral: Boolean(ipFamily) };
+  return { url, host: url.host, addresses: ordered, tls, ipLiteral: Boolean(ipFamily) };
 }
 
 function pinAddress(origin: UpstreamOrigin, address: DnsAddress): URL {
@@ -482,17 +611,17 @@ function pinAddress(origin: UpstreamOrigin, address: DnsAddress): URL {
 }
 
 function pinnedRequest(origin: UpstreamOrigin, init: FetchInit): PinnedRequestInit {
-  const { url, tls, ipLiteral } = origin;
+  const { host, tls, ipLiteral } = origin;
   let headers: HeadersInit;
   let headersValidated = false;
   if (init.headers instanceof Headers || Array.isArray(init.headers)) {
     const h = new Headers(init.headers);
-    if (!ipLiteral || !h.has("host")) h.set("host", url.host);
+    if (!ipLiteral || !h.has("host")) h.set("host", host);
     h.set("accept-encoding", "identity");
     headers = h;
   } else if (init.headersValidated && init.headers) {
     const plain = init.headers as Record<string, string>;
-    if (!ipLiteral || !("host" in plain)) plain.host = url.host;
+    if (!ipLiteral || !("host" in plain)) plain.host = host;
     plain["accept-encoding"] = "identity";
     headers = plain;
     headersValidated = true;
@@ -508,7 +637,7 @@ function pinnedRequest(origin: UpstreamOrigin, init: FetchInit): PinnedRequestIn
         plain[k.toLowerCase()] = v;
       }
     }
-    if (!ipLiteral || !("host" in plain)) plain.host = url.host;
+    if (!ipLiteral || !("host" in plain)) plain.host = host;
     plain["accept-encoding"] = "identity";
     headers = plain;
     headersValidated = true;

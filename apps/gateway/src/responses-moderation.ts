@@ -118,6 +118,9 @@ export function createResponsesModeration(openSession: () => Session) {
     isBlocked(): boolean {
       return [...lanes.values()].some((lane) => lane.session.isBlocked());
     },
+    async cancelPending(): Promise<void> {
+      await Promise.all([...lanes.values()].map((lane) => lane.session.cancelPending()));
+    },
     async finalize(): Promise<FinalResult & { frames: Uint8Array[] }> {
       if (!lanes.size) return { ...(await openSession().finalize()), frames: [] };
       const frames: Uint8Array[] = [];

@@ -161,6 +161,17 @@ export function createRequestTrace(
         ...(settledAttemptId ? { settledAttemptId } : {}),
       };
     },
+    markUpstreamFirstText() {
+      if (protocol && attempt && attempt.firstText === undefined) {
+        attempt.firstText = performance.now();
+      }
+    },
+    markFirstTextEnqueued() {
+      if (!protocol || enqueued !== undefined) return;
+      enqueued = performance.now();
+      outputParser = undefined;
+      onFirstText?.();
+    },
     observeUpstream(events: readonly SSEEvent[], source: Protocol | null) {
       if (
         protocol &&

@@ -159,7 +159,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     });
 
     try {
-      const synced = await deps.sync.syncApiKey(keyId);
+      const synced = await deps.sync.admission.syncApiKey(keyId);
       if (!synced.key)
         throw new GatewayError(
           502,
@@ -270,7 +270,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     if (!updated) throw new GatewayError(409, "key_changed", "API key changed during update");
 
     try {
-      const synced = await deps.sync.syncApiKey(keyId);
+      const synced = await deps.sync.admission.syncApiKey(keyId);
       await recordAuditLog(deps.orm, {
         actor: user,
         orgId: billingAccount.orgId,
@@ -407,9 +407,9 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
       return existing.desiredRevision;
     });
 
-    let syncedNew: Awaited<ReturnType<typeof deps.sync.syncApiKey>>;
+    let syncedNew: Awaited<ReturnType<typeof deps.sync.admission.syncApiKey>>;
     try {
-      syncedNew = await deps.sync.syncApiKey(newKeyId);
+      syncedNew = await deps.sync.admission.syncApiKey(newKeyId);
       if (!syncedNew.key)
         throw new GatewayError(
           502,
@@ -443,7 +443,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
 
     let oldKeyRevokePending = false;
     try {
-      await deps.sync.syncApiKey(keyId);
+      await deps.sync.admission.syncApiKey(keyId);
     } catch {
       oldKeyRevokePending = true;
     }
@@ -497,7 +497,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     }
 
     await abandonKey(deps.orm, keyId);
-    await deps.sync.syncApiKey(keyId);
+    await deps.sync.admission.syncApiKey(keyId);
 
     await recordAuditLog(deps.orm, {
       actor: user,

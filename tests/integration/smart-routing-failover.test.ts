@@ -1,365 +1,12 @@
-import { localInternalCredentials } from "../../scripts/local-internal-auth.ts";
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import type { SQL } from "bun";
-import { createDatabase, migrate, type AdapterOverrides } from "@gateway/ledger";
-import { createGatewayRuntime, type GatewayConfig } from "@gateway/gateway";
-import { createTraceStore } from "../../apps/gateway/src/trace-storage.ts";
+import { expect, test } from "bun:test";
+import { createGatewayRuntime } from "@gateway/gateway";
+import { WebhookPluginExecutor } from "@gateway/plugin-engine";
+import { fakeUpstream, makeConfig, db, setup } from "./smart-routing-fixture.ts";
+import { registerRoutingFixture } from "./smart-routing-fixture.ts";
+import { registerDiagnosticsCases } from "./stream-diagnostics-cases.ts";
+import { registerFailoverCases } from "./channel-failover-cases.ts";
 
-const baseDbUrl = process.env.DATABASE_URL;
-if (!baseDbUrl) throw new Error("DATABASE_URL is required");
-
-const testDbName = `gateway_sr_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
-const adminUrl = new URL(baseDbUrl);
-adminUrl.pathname = "/postgres";
-const targetUrl = new URL(baseDbUrl);
-targetUrl.pathname = `/${testDbName}`;
-const OPERATOR_TOKEN = "sr-admin-token-0123456789abcdef000000000000000";
-
-let adminDb: SQL;
-let db: SQL;
-beforeAll(async () => {
-  adminDb = createDatabase(adminUrl.toString(), 2);
-  await adminDb.unsafe(`CREATE DATABASE ${testDbName}`);
-  db = createDatabase(targetUrl.toString(), 16);
-  await migrate(db);
-});
-afterAll(async () => {
-  await db?.close();
-  if (adminDb) {
-    await adminDb.unsafe(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${testDbName}' AND pid <> pg_backend_pid()`,
-    );
-    await adminDb.unsafe(`DROP DATABASE IF EXISTS ${testDbName}`);
-    await adminDb.close();
-  }
-});
-
-function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
-  return {
-    mode: "gateway",
-    host: "127.0.0.1",
-    port: 0,
-    internalHost: "127.0.0.1",
-    internalPort: 0,
-    databaseUrl: targetUrl.toString(),
-    dbMaxConnections: 16,
-    keyPepper: "sr-pepper-secret-0123456789abcdef",
-    encryptionKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    internalCredentials: localInternalCredentials(OPERATOR_TOKEN),
-    allowPrivateUpstreams: true,
-    privateUpstreamCidrs: ["127.0.0.0/8"],
-    trustedProxyCidrs: [],
-    maxInFlight: 500,
-    maxBodyBytes: 2 * 1024 * 1024,
-    holdTtlMs: 30_000,
-    attemptTimeoutMs: 3000,
-    snapshotPollMs: 0,
-    microBatchWindowMs: 2,
-    microBatchMaxSize: 32,
-    ...overrides,
-  };
-}
-
-async function internalCall(
-  app: { fetch: (req: Request) => Response | Promise<Response> },
-  method: string,
-  path: string,
-  body?: unknown,
-) {
-  const res = await app.fetch(
-    new Request(`http://internal.local${path}`, {
-      method,
-      headers: { authorization: `Bearer ${OPERATOR_TOKEN}`, "content-type": "application/json" },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    }),
-  );
-  return { status: res.status, data: (await res.json()) as Record<string, unknown> };
-}
-
-type UpstreamMode = {
-  status?: number;
-  headerDelayMs?: number;
-  refuse?: boolean;
-  truncate?: boolean;
-  streamFrames?: string;
-  unaryBody?: object;
-  headers?: Record<string, string>;
-};
-type FakeUpstream = {
-  url: string;
-  calls: () => number;
-  set: (mode: UpstreamMode) => void;
-  label: string;
-  server: ReturnType<typeof Bun.serve>;
-};
-
-function fakeUpstream(label: string, initial: UpstreamMode = {}): FakeUpstream {
-  let mode = initial;
-  let calls = 0;
-  const sse = [
-    `data: {"id":"x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n`,
-    `data: {"id":"x","model":"m","choices":[{"index":0,"delta":{"content":"${label}"},"finish_reason":null}]}\n\n`,
-    `data: {"id":"x","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}\n\n`,
-    `data: [DONE]\n\n`,
-  ].join("");
-  const json = JSON.stringify({
-    id: "x",
-    object: "chat.completion",
-    model: "m",
-    choices: [{ index: 0, message: { role: "assistant", content: label }, finish_reason: "stop" }],
-    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-  });
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(req) {
-      calls++;
-      if (mode.headerDelayMs) await Bun.sleep(mode.headerDelayMs);
-      if (mode.status)
-        return Response.json(
-          mode.unaryBody ?? { error: { message: `${label} failure`, type: "mock" } },
-          {
-            status: mode.status,
-            headers: {
-              ...(mode.status === 429 ? { "retry-after": "1" } : {}),
-              ...mode.headers,
-            },
-          },
-        );
-      if (mode.streamFrames !== undefined) {
-        return new Response(mode.streamFrames, {
-          headers: { "content-type": "text/event-stream" },
-        });
-      }
-      if (mode.unaryBody) return Response.json(mode.unaryBody);
-      const body = (await req.json().catch(() => ({}))) as { stream?: boolean };
-      if (body.stream) {
-        const frames = mode.truncate ? sse.split("\n\n").slice(0, 2).join("\n\n") + "\n\n" : sse;
-        return new Response(frames, { headers: { "content-type": "text/event-stream" } });
-      }
-      return new Response(json, { headers: { "content-type": "application/json" } });
-    },
-  });
-  return {
-    label,
-    url: server.url.origin,
-    server,
-    calls: () => calls,
-    set: (m) => {
-      mode = m;
-    },
-  };
-}
-
-type Wallet = { available_atoms: string; reserved_atoms: string; spent_atoms: string };
-
-async function setup(
-  runtime: ReturnType<typeof createGatewayRuntime>,
-  ups: FakeUpstream[],
-  opts: {
-    strategy?: "WEIGHTED" | "ROUND_ROBIN" | "LEAST_LATENCY";
-    priority?: number[];
-    weights?: number[];
-    maxAttempts?: number;
-    operation?: "chat" | "speech" | "images";
-    adapterOverrides?: AdapterOverrides;
-    cachedInputPrice?: boolean;
-  } = {},
-) {
-  const call = async (method: string, path: string, body?: unknown) => {
-    const r = await internalCall(runtime.internalApp, method, path, body);
-    expect(r.status, JSON.stringify(r.data)).toBe(path === "/internal/v1/prices" ? 201 : 200);
-    return r.data as Record<string, unknown>;
-  };
-  const tag = crypto.randomUUID().slice(0, 6);
-  const billingAccount = await call("PUT", "/internal/v1/billing-accounts", {
-    name: `sr-${tag}`,
-    currency: "USD",
-    rpm: 10_000_000,
-    tpm: 100_000_000,
-    concurrency: 5000,
-  });
-  const billingAccountId = String(billingAccount.id);
-  await call("POST", `/internal/v1/wallets/${billingAccountId}/credits`, {
-    currency: "USD",
-    external_ref: `sr-${tag}`,
-    amount_atoms: "1000000000",
-    kind: "CASH",
-  });
-  const key = await call("PUT", "/internal/v1/api-keys", {
-    billing_account_id: billingAccountId,
-    name: "sr",
-  });
-  const account = await call("PUT", "/internal/v1/upstream-accounts", { name: `sr-${tag}` });
-  await call("POST", `/internal/v1/upstream-accounts/${account.id}/recharges`, {
-    currency: "USD",
-    external_ref: `sr-sup-${tag}`,
-    amount_atoms: "1000000000",
-  });
-  const channels = [];
-  for (const [i, u] of ups.entries()) {
-    channels.push(
-      await call("PUT", "/internal/v1/channels", {
-        account_id: account.id,
-        kind: "openai",
-        name: `${u.label}-${tag}`,
-        base_url: `${u.url}/openai`,
-        api_key: "k",
-        rpm: 10_000_000,
-        concurrency: 10_000,
-      }),
-    );
-    void i;
-  }
-  const price =
-    opts.operation === "images"
-      ? {
-          currency: "USD",
-          rates: { images: { numerator: "5", denominator: "1" } },
-          ceilings: { images: "10" },
-        }
-      : {
-          currency: "USD",
-          rates: {
-            input_tokens: { numerator: "1", denominator: "1" },
-            output_tokens: { numerator: "1", denominator: "1" },
-            ...(opts.cachedInputPrice
-              ? { cached_input_tokens: { numerator: "2", denominator: "1" } }
-              : {}),
-          },
-          ceilings: {
-            input_tokens: "100",
-            output_tokens: "100",
-            ...(opts.cachedInputPrice ? { cached_input_tokens: "100" } : {}),
-          },
-        };
-  const customer = await call("POST", "/internal/v1/prices", { side: "CUSTOMER", ...price });
-  const supplier = await call("POST", "/internal/v1/prices", { side: "SUPPLIER", ...price });
-  const model = `sr-${tag}`;
-  const operation = opts.operation ?? "chat";
-  await call("PUT", "/internal/v1/models", {
-    name: model,
-    operations: [operation],
-    max_output_tokens: 50,
-    routing_strategy: opts.strategy ?? "ROUND_ROBIN",
-  });
-  for (const [i, ch] of channels.entries()) {
-    await call("PUT", "/internal/v1/routes", {
-      model_name: model,
-      channel_id: ch.id,
-      upstream_model: "m",
-      operations: [operation],
-      billing_price_id: customer.id,
-      cost_version_id: supplier.id,
-      priority: opts.priority?.[i] ?? 0,
-      weight: opts.weights?.[i] ?? 1,
-      retry_policy: { max_attempts: opts.maxAttempts ?? 3 },
-      ...(opts.adapterOverrides ? { adapter_overrides: opts.adapterOverrides } : {}),
-    });
-  }
-  const wallet = async (): Promise<Wallet> => {
-    const r = await internalCall(
-      runtime.internalApp,
-      "GET",
-      `/internal/v1/wallets/${billingAccountId}`,
-    );
-    expect(r.status).toBe(200);
-    return r.data as unknown as Wallet;
-  };
-  const chat = (stream = false, signal?: AbortSignal) =>
-    runtime.publicApp.fetch(
-      new Request("http://gateway.local/v1/chat/completions", {
-        method: "POST",
-        ...(signal ? { signal } : {}),
-        headers: { authorization: `Bearer ${key.key}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          model,
-          stream,
-          messages: [{ role: "user", content: "hi" }],
-          max_tokens: 20,
-        }),
-      }),
-    );
-  const speech = () =>
-    runtime.fetchPublic(
-      new Request("http://gateway.local/v1/audio/speech", {
-        method: "POST",
-        headers: { authorization: `Bearer ${key.key}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          model,
-          input: "Read this text",
-          voice: "alloy",
-          stream_format: "sse",
-        }),
-      }),
-    );
-  const images = (n: number, stream: boolean) =>
-    runtime.fetchPublic(
-      new Request("http://gateway.local/v1/images/generations", {
-        method: "POST",
-        headers: { authorization: `Bearer ${key.key}`, "content-type": "application/json" },
-        body: JSON.stringify({ model, prompt: "Render a fixture", n, stream }),
-      }),
-    );
-  const health = async () => {
-    const r = await internalCall(runtime.internalApp, "GET", "/internal/v1/health/channels");
-    const rows = r.data.channels as {
-      channel_id: string;
-      state: string;
-      consecutive_failures: number;
-      ewma_latency_ms?: number;
-      cooldown_until_ms?: number;
-    }[];
-    return Object.fromEntries(rows.map((row) => [row.channel_id, row]));
-  };
-  const charges = async () => {
-    const rows =
-      await db`SELECT count(*)::int AS n, count(DISTINCT request_id)::int AS u, coalesce(sum(customer_atoms),0)::text AS atoms FROM public.billing_charges WHERE billing_account_id = ${billingAccountId}`;
-    return rows[0] as unknown as { n: number; u: number; atoms: string };
-  };
-  const holdsByState = async () => {
-    const rows = await db<
-      { state: string; n: number }[]
-    >`SELECT state, count(*)::int AS n FROM public.billing_holds WHERE billing_account_id = ${billingAccountId} GROUP BY state`;
-    return Object.fromEntries(rows.map((r: { state: string; n: number }) => [r.state, r.n]));
-  };
-  const resolveUnknownHolds = async () => {
-    const rows = await db<{ request_id: string }[]>`
-      SELECT request_id FROM public.billing_holds WHERE billing_account_id = ${billingAccountId} AND state = 'UNKNOWN'
-    `;
-    for (const { request_id } of rows) {
-      expect(
-        await runtime.ledger.resolveRequest({
-          request_id,
-          action: "RELEASE",
-          actor: "fixture",
-          reason: "Verified simulated upstream fault",
-        }),
-      ).toMatchObject({ state: "RELEASED" });
-    }
-  };
-  const audit = async () =>
-    (await internalCall(runtime.internalApp, "GET", "/internal/v1/audit/conservation")).data;
-  const settle = async () => {
-    for (let i = 0; i < 100 && runtime.lifecycle.size > 0; i++) await Bun.sleep(10);
-  };
-  return {
-    billingAccountId,
-    channels,
-    model,
-    wallet,
-    chat,
-    speech,
-    images,
-    health,
-    charges,
-    holdsByState,
-    resolveUnknownHolds,
-    audit,
-    settle,
-    customer,
-  };
-}
+registerRoutingFixture();
 
 test("media SSE previously exposed success on incomplete or unmetered streams", async () => {
   const up = fakeUpstream("media-terminal");
@@ -577,6 +224,203 @@ test("chat finish and cache usage sharing the final frame survive through respon
   }
 });
 
+test("symptom: chat SSE bills and emits DONE when EOF leaves a partial trailing event", async () => {
+  const up = fakeUpstream("partial-trailer");
+  const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+  try {
+    await runtime.start();
+    const { chat, charges, audit, holdsByState, resolveUnknownHolds } = await setup(runtime, [up]);
+    try {
+      const complete =
+        'data: {"id":"x","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\ndata: [DONE]\n\n';
+      up.set({ streamFrames: complete });
+      const control = await chat(true);
+      expect((await control.text()).trimEnd()).toEndWith("data: [DONE]");
+      expect(await charges()).toMatchObject({ n: 1, u: 1 });
+
+      up.set({ streamFrames: complete + 'event: error\ndata: {"error":' });
+      const response = await chat(true);
+      expect(response.status).toBe(200);
+      const wire = await response.text();
+      expect(wire).toContain("stream_interrupted");
+      expect(wire).not.toContain("data: [DONE]");
+      expect(await charges()).toMatchObject({ n: 1, u: 1 });
+      expect(await holdsByState()).toEqual({ SETTLED: 1, UNKNOWN: 1 });
+      expect(await audit()).toMatchObject({ ok: true, open_holds: 0 });
+    } finally {
+      await resolveUnknownHolds();
+    }
+  } finally {
+    await runtime.close();
+    await up.server.stop(true);
+  }
+});
+
+test("symptom: a tail heartbeat turns a completed chat SSE stream into UNKNOWN", async () => {
+  const up = fakeUpstream("terminal-comment", {
+    streamFrames:
+      'data: {"id":"x","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\ndata: [DONE]\n\n: keep-alive\n',
+  });
+  const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+  try {
+    await runtime.start();
+    const { chat, charges, holdsByState, resolveUnknownHolds } = await setup(runtime, [up]);
+    try {
+      const response = await chat(true);
+      expect(response.status).toBe(200);
+      const wire = await response.text();
+      expect(wire.trimEnd()).toEndWith("data: [DONE]");
+      expect(await charges()).toEqual({ n: 1, u: 1, atoms: "15" });
+      expect(await holdsByState()).toEqual({ SETTLED: 1 });
+    } finally {
+      await resolveUnknownHolds();
+    }
+  } finally {
+    await runtime.close();
+    await up.server.stop(true);
+  }
+});
+
+for (const termination of [
+  "partial frame",
+  "missing terminal event",
+  "client cancelled",
+] as const) {
+  test(`symptom: an ended chat SSE response leaves moderation running (${termination})`, async () => {
+    const clientCancels = termination === "client cancelled";
+    const encoder = new TextEncoder();
+    const source = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
+    const up = fakeUpstream("ended-with-cutoff", {
+      streamFrames: new ReadableStream<Uint8Array>({
+        start(controller) {
+          source.resolve(controller);
+          const content = clientCancels ? "answer" : "answer.";
+          controller.enqueue(
+            encoder.encode(
+              `data: {"id":"x","choices":[{"index":0,"delta":{"content":"${content}"}}]}\n\n`,
+            ),
+          );
+        },
+      }),
+    });
+    const finishWithUsage =
+      'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n';
+    const hooks: string[] = [];
+    const started = Promise.withResolvers<AbortSignal>();
+    const webhookReply = Promise.withResolvers<Response>();
+    const webhook = new WebhookPluginExecutor({
+      async fetchImpl(_url, init) {
+        const { hook } = JSON.parse(String(init.body)) as { hook: string };
+        hooks.push(hook);
+        const signal = init.signal!;
+        const aborted = Promise.withResolvers<never>();
+        const onAbort = () => aborted.reject(signal.reason);
+        signal.addEventListener("abort", onAbort, { once: true });
+        started.resolve(signal);
+        try {
+          return await Promise.race([webhookReply.promise, aborted.promise]);
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+        }
+      },
+    });
+    const runtime = createGatewayRuntime({
+      config: makeConfig(),
+      db,
+      wasmExecutor: null,
+      webhookExecutor: webhook,
+    });
+    try {
+      const plugin = await runtime.catalog.upsertPlugin({
+        name: `eof-cutoff-${termination.replaceAll(" ", "-")}`,
+        version: "1.0.0",
+        kind: "WEBHOOK",
+        webhook_config: {
+          url: "http://moderation.test/check",
+          stream_mode: "STREAM_AND_CUTOFF",
+          window_chars: 16,
+          timeout_ms: 2_000,
+        },
+        manifest: { hooks: ["on_stream_chunk", "on_stream_end"] },
+      });
+      await db`UPDATE public.plugins SET enabled = true WHERE id = ${plugin.id}`;
+      await runtime.start();
+      const { chat, charges, holdsByState, resolveUnknownHolds } = await setup(runtime, [up], {
+        contentPluginId: plugin.id,
+      });
+      try {
+        const response = await chat(true);
+        expect(response.status).toBe(200);
+        const upstream = await source.promise;
+        let signal: AbortSignal;
+        if (clientCancels) {
+          upstream.enqueue(encoder.encode(finishWithUsage + "data: [DONE]\n\n"));
+          upstream.close();
+          signal = await started.promise;
+          expect(webhook.stats()[plugin.id]?.inFlight).toBe(1);
+          const cancelled = response.body!.cancel();
+          webhookReply.resolve(Response.json({ action: "PASS" }));
+          await cancelled;
+        } else {
+          const reading = response.text();
+          signal = await started.promise;
+          expect(webhook.stats()[plugin.id]?.inFlight).toBe(1);
+          const end =
+            termination === "partial frame" ? "data: [DONE]\n\nevent: error\ndata: {" : "";
+          upstream.enqueue(encoder.encode(finishWithUsage + end));
+          upstream.close();
+          const wire = await reading;
+          expect(wire).toContain(
+            termination === "partial frame" ? "stream_interrupted" : "stream_truncated",
+          );
+          expect(wire).not.toContain("data: [DONE]");
+        }
+        expect(await charges()).toMatchObject({ n: 0 });
+        expect(await holdsByState()).toEqual({ UNKNOWN: 1 });
+        expect(signal.aborted).toBe(true);
+        expect(signal.reason).not.toHaveProperty("message", "webhook_timeout");
+        expect(webhook.stats()[plugin.id]?.inFlight).toBe(0);
+        expect(hooks).toEqual([clientCancels ? "on_stream_end" : "on_stream_chunk"]);
+      } finally {
+        webhookReply.resolve(Response.json({ action: "PASS" }));
+        await resolveUnknownHolds();
+      }
+    } finally {
+      await up.server.stop(true);
+      await runtime.close();
+    }
+  });
+}
+
+for (const stream of [false, true]) {
+  test(`symptom: an accepted Unicode channel name breaks chat response headers with stream=${stream}`, async () => {
+    const up = fakeUpstream("中文渠道");
+    const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+    try {
+      await runtime.start();
+      const { chat, channels, charges, holdsByState, resolveUnknownHolds } = await setup(runtime, [
+        up,
+      ]);
+      try {
+        const response = await chat(stream);
+        const body = await response.text();
+        expect(response.status, body).toBe(200);
+        expect(response.headers.get("x-gateway-channel")).toBe(String(channels[0]!.id));
+        expect(body).toContain("中文渠道");
+        if (stream) expect(body.trimEnd()).toEndWith("data: [DONE]");
+        expect(up.calls()).toBe(1);
+        expect(await charges()).toEqual({ n: 1, u: 1, atoms: "15" });
+        expect(await holdsByState()).toEqual({ SETTLED: 1 });
+      } finally {
+        await resolveUnknownHolds();
+      }
+    } finally {
+      await up.server.stop(true);
+      await runtime.close();
+    }
+  });
+}
+
 test("symptom: cancelled or saturated inference waits create reservations before the dial is admitted", async () => {
   const upstream = fakeUpstream("dial", { headerDelayMs: 250 });
   const runtime = createGatewayRuntime({
@@ -660,540 +504,5 @@ test("cascade: primary 503 -> secondary 429 -> tertiary healthy; one request suc
   }
 });
 
-test("channel diagnostics retain failures through JSON and SSE retries and classify broken streams", async () => {
-  const traceDbName = `trace_${testDbName}`;
-  const traceUrl = new URL(adminUrl);
-  traceUrl.pathname = `/${traceDbName}`;
-  await adminDb.unsafe(`CREATE DATABASE ${traceDbName}`);
-  const traceDb = createDatabase(traceUrl.toString(), 1);
-  const traces = createTraceStore(traceUrl.toString(), 1000);
-  const runtime = createGatewayRuntime({
-    config: makeConfig({
-      traceExport: {
-        databaseUrl: traceUrl.toString(),
-        sampleBasisPoints: 0,
-        slowFirstTextMs: 60_000,
-        maxAttempts: 4,
-        errorBodyMaxBytes: 1024,
-        maxRecords: 16,
-        maxBytes: 65_536,
-        maxPerBillingAccount: 8,
-        priorityReserve: 4,
-        batchSize: 4,
-        batchDeadlineMs: 2000,
-        flushMs: 20,
-        timeoutMs: 1000,
-        retryLimit: 0,
-        retentionSeconds: 120,
-        cleanupIntervalMs: 1000,
-        cleanupBatch: 20,
-      },
-    }),
-    db,
-  });
-  const readTrace = async (requestId: string) => {
-    const deadline = performance.now() + 2000;
-    let rows = await traces.read(requestId);
-    while (!rows.length && performance.now() < deadline) {
-      await Bun.sleep(20);
-      rows = await traces.read(requestId);
-    }
-    return rows;
-  };
-  const attrs = (span: Awaited<ReturnType<typeof readTrace>>[number]["span"]) =>
-    Object.fromEntries(span.attributes.map(({ key, value }) => [key, Object.values(value)[0]]));
-  const summaries = { quota_exhausted: "Provider account quota exhausted" };
-  try {
-    await traceDb.unsafe(
-      await Bun.file(new URL("../../infra/postgres/trace-schema.sql", import.meta.url)).text(),
-    );
-    await runtime.start();
-    for (const scenario of ["http_body", "http_header", "sse"] as const) {
-      const stream = scenario === "sse";
-      const fromHeader = scenario === "http_header";
-      const body = {
-        error: {
-          code: fromHeader ? "untrusted-provider-code" : "quota_exhausted",
-          message: "private-provider-content".repeat(fromHeader ? 100 : 1),
-        },
-      };
-      const unreachable = fakeUpstream("closed");
-      unreachable.server.stop(true);
-      const primary = fakeUpstream(
-        "primary",
-        stream
-          ? { streamFrames: `data: ${JSON.stringify(body)}\n\n` }
-          : {
-              status: 429,
-              unaryBody: body,
-              headers: {
-                "x-vendor-request-id": "vendor-429",
-                ...(fromHeader ? { "x-vendor-error-code": "quota_exhausted" } : {}),
-              },
-            },
-      );
-      const backup = fakeUpstream("backup");
-      try {
-        const fixture = await setup(runtime, [unreachable, primary, backup], {
-          priority: [20, 10, 0],
-          strategy: "WEIGHTED",
-          adapterOverrides: {
-            error_diagnostics: {
-              code_path: "error.code",
-              code_header: "X-Vendor-Error-Code",
-              request_id_header: "x-vendor-request-id",
-              summaries,
-            },
-            error_rules: [
-              { path: "error.code", equals: "quota_exhausted", retry_kind: "rate_limit" },
-            ],
-          },
-        });
-        const response = await fixture.chat(stream);
-        expect(response.status).toBe(200);
-        expect(await response.text()).toContain("backup");
-        expect(primary.calls()).toBe(1);
-        expect(backup.calls()).toBe(1);
-        const requestId = response.headers.get("x-request-id")!;
-        const rows = await readTrace(requestId);
-        expect(rows).toHaveLength(4);
-        const request = attrs(rows.find(({ span }) => span.name === "gateway.inference")!.span);
-        const attempts = rows
-          .filter(({ span }) => span.name === "gateway.upstream.attempt")
-          .map(({ span }) => attrs(span))
-          .sort(
-            (left, right) =>
-              Number(left["gateway.attempt.number"]) - Number(right["gateway.attempt.number"]),
-          );
-        expect(attempts[0]).toMatchObject({
-          "gateway.failure.stage": "pre_dispatch",
-          "error.type": "upstream_connect",
-        });
-        expect(attempts[1]).toMatchObject({
-          "gateway.failure.stage": stream ? "stream_prelude" : "http_response",
-          "http.response.status_code": stream ? "200" : "429",
-          "gateway.provider.error_code": "quota_exhausted",
-          "gateway.provider.error_summary": "Provider account quota exhausted",
-          ...(stream ? {} : { "gateway.provider.request_id": "vendor-429" }),
-        });
-        expect(JSON.stringify(rows)).not.toContain("private-provider-content");
-        expect(JSON.stringify(rows)).not.toContain("untrusted-provider-code");
-        expect(attempts[2]?.["gateway.channel"]).toBe(fixture.channels[2]!.name);
-        const [charge] =
-          await db`SELECT selected_attempt_id, customer_atoms::text, supplier_cost_atoms::text
-          FROM public.billing_charges WHERE request_id=${requestId}::uuid`;
-        expect(charge).toEqual({
-          selected_attempt_id: attempts[2]?.["gateway.attempt.id"],
-          customer_atoms: "15",
-          supplier_cost_atoms: "15",
-        });
-        expect(request["gateway.settlement.attempt_id"]).toBe(charge!.selected_attempt_id);
-        const metrics = await (await runtime.metricsResponse()).text();
-        expect(metrics).toContain(
-          `gateway_channel_failures_total{channel="${fixture.channels[1]!.name}",stage="${stream ? "stream_prelude" : "http_response"}",kind="rate_limit"} 1`,
-        );
-        expect(await fixture.audit()).toMatchObject({ ok: true, open_holds: 0, unknown_holds: 0 });
-      } finally {
-        primary.server.stop(true);
-        backup.server.stop(true);
-      }
-    }
-    for (const code of ["provider_stream_error", "stream_truncated"]) {
-      const textFrame = 'data: {"id":"x","choices":[{"index":0,"delta":{"content":"first"}}]}\n\n';
-      const errorFrame =
-        'event: error\ndata: {"error":{"code":"quota_exhausted","message":"private-provider-content"}}\n\n';
-      const upstream = fakeUpstream("broken", {
-        streamFrames: code === "provider_stream_error" ? textFrame + errorFrame : textFrame,
-      });
-      try {
-        const fixture = await setup(runtime, [upstream], {
-          adapterOverrides: {
-            error_diagnostics: { code_path: "error.code", summaries },
-          },
-        });
-        const before = await fixture.audit();
-        const response = await fixture.chat(true);
-        expect(response.status).toBe(200);
-        expect(await response.text()).toContain(code);
-        const requestId = response.headers.get("x-request-id")!;
-        const rows = await readTrace(requestId);
-        const attempt = rows.find(({ span }) => span.name === "gateway.upstream.attempt")!.span;
-        expect(attempt.status.code).toBe(2);
-        expect(attrs(attempt)).toMatchObject({
-          "gateway.failure.stage": "stream",
-          "gateway.failure.kind": "protocol",
-          "error.type": code,
-          ...(code === "provider_stream_error"
-            ? { "gateway.provider.error_code": "quota_exhausted" }
-            : {}),
-        });
-        expect(JSON.stringify(rows)).not.toContain("private-provider-content");
-        expect(await fixture.charges()).toMatchObject({ n: 0 });
-        expect(await fixture.holdsByState()).toEqual({ UNKNOWN: 1 });
-        expect(await fixture.audit()).toMatchObject({
-          ok: true,
-          open_holds: 0,
-          unknown_holds: Number(before.unknown_holds) + 1,
-        });
-        const cleanup = await internalCall(
-          runtime.internalApp,
-          "POST",
-          `/internal/v1/requests/${requestId}/resolve`,
-          {
-            action: "RELEASE",
-            reason: "Isolated test provider confirmed no billable usage",
-          },
-        );
-        expect(cleanup.status).toBe(200);
-        expect(await fixture.holdsByState()).toEqual({ RELEASED: 1 });
-      } finally {
-        upstream.server.stop(true);
-      }
-    }
-  } finally {
-    await runtime.close();
-    await traces.close();
-    await traceDb.close();
-    await adminDb.unsafe(`DROP DATABASE ${traceDbName} WITH (FORCE)`);
-  }
-});
-
-test("latency: a slow-failing primary near the attempt timeout adds at most one timeout of latency before switching; the client never waits for a second slow channel", async () => {
-  const A = fakeUpstream("A", { status: 503, headerDelayMs: 2500 });
-  const B = fakeUpstream("B");
-  const runtime = createGatewayRuntime({ config: makeConfig({ attemptTimeoutMs: 3000 }), db });
-  try {
-    await runtime.start();
-    const ctx = await setup(runtime, [A, B], { priority: [10, 0] });
-    const res = await ctx.chat();
-    const elapsedLabel = res.headers.get("x-gateway-channel");
-    expect(res.status).toBe(200);
-    expect(elapsedLabel?.startsWith("B-")).toBe(true);
-    await res.text();
-    await ctx.settle();
-    const slow = await ctx.health();
-    expect(slow[ctx.channels[0]!.id as string]!.consecutive_failures).toBeGreaterThanOrEqual(1);
-
-    A.set({ status: 503, headerDelayMs: 4000 });
-    B.set({ status: 503, headerDelayMs: 4000 });
-    const before2 = await ctx.wallet();
-    const t0 = performance.now();
-    const failing = await ctx.chat();
-    const waited = performance.now() - t0;
-    expect(failing.status).toBe(504);
-    expect(((await failing.json()) as { error: { code: string } }).error.code).toBe(
-      "upstream_timeout",
-    );
-    expect(waited).toBeGreaterThan(2800);
-    expect(waited).toBeLessThan(7000);
-    await ctx.settle();
-    const during = await ctx.wallet();
-    expect(BigInt(during.spent_atoms)).toBe(BigInt(before2.spent_atoms));
-    const unk =
-      await db`SELECT held_atoms::text AS h FROM public.billing_holds WHERE billing_account_id = ${ctx.billingAccountId} AND state = 'UNKNOWN'`;
-    expect(unk.length).toBe(1);
-    expect(BigInt(during.reserved_atoms) - BigInt(before2.reserved_atoms)).toBe(
-      BigInt(unk[0]!.h as string),
-    );
-    expect(await ctx.charges()).toMatchObject({ n: 1, u: 1 });
-    expect(await ctx.holdsByState()).toEqual({ SETTLED: 1, UNKNOWN: 1 });
-    const a = await ctx.audit();
-    expect(a.ok).toBe(true);
-    expect(a.open_holds).toBe(0);
-    expect(a.unknown_holds).toBe(1);
-  } finally {
-    await runtime.close();
-    A.server.stop(true);
-    B.server.stop(true);
-  }
-});
-
-test("exhaustion: every channel down returns the last upstream status with no stranded hold, no charge, and no retry storm (each channel hit once)", async () => {
-  const A = fakeUpstream("A", { status: 503 });
-  const B = fakeUpstream("B", { status: 429 });
-  const C = fakeUpstream("C", { status: 500 });
-  const runtime = createGatewayRuntime({ config: makeConfig(), db });
-  try {
-    await runtime.start();
-    const ctx = await setup(runtime, [A, B, C], { priority: [20, 10, 0] });
-    const before = await ctx.wallet();
-    const res = await ctx.chat();
-    expect(res.status).toBe(502);
-    const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("upstream_error");
-    expect(A.calls()).toBe(1);
-    expect(B.calls()).toBe(1);
-    expect(C.calls()).toBe(1);
-    await ctx.settle();
-    for (let i = 0; i < 100 && (await ctx.holdsByState()).RELEASED !== 1; i++) await Bun.sleep(10);
-    const after = await ctx.wallet();
-    expect(after).toEqual(before);
-    expect(await ctx.charges()).toMatchObject({ n: 0 });
-    expect(await ctx.holdsByState()).toEqual({ RELEASED: 1 });
-    const a = await ctx.audit();
-    expect(a.ok).toBe(true);
-    expect(await ctx.holdsByState()).toEqual({ RELEASED: 1 });
-  } finally {
-    await runtime.close();
-    for (const u of [A, B, C]) u.server.stop(true);
-  }
-});
-
-test("exhaustion with only 429s surfaces 429 upstream_rate_limited to the client", async () => {
-  const A = fakeUpstream("A", { status: 429 });
-  const B = fakeUpstream("B", { status: 429 });
-  const runtime = createGatewayRuntime({ config: makeConfig(), db });
-  try {
-    await runtime.start();
-    const ctx = await setup(runtime, [A, B]);
-    const res = await ctx.chat();
-    expect(res.status).toBe(429);
-    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
-      "upstream_rate_limited",
-    );
-    await ctx.settle();
-    for (let i = 0; i < 100 && (await ctx.holdsByState()).RELEASED !== 1; i++) await Bun.sleep(10);
-    expect(await ctx.charges()).toMatchObject({ n: 0 });
-    expect(await ctx.holdsByState()).toEqual({ RELEASED: 1 });
-    expect((await ctx.audit()).ok).toBe(true);
-  } finally {
-    await runtime.close();
-    A.server.stop(true);
-    B.server.stop(true);
-  }
-});
-
-test("dead channel: ECONNREFUSED on primary switches before dispatch, the customer is never charged for the dead attempt, and a later success closes the circuit via probe", async () => {
-  const dead = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("x") });
-  const deadPort = dead.port!;
-  dead.stop(true);
-  const B = fakeUpstream("B");
-  const runtime = createGatewayRuntime({ config: makeConfig(), db });
-  try {
-    await runtime.start();
-    const tag = crypto.randomUUID().slice(0, 6);
-    const call = async (method: string, path: string, body?: unknown) => {
-      const r = await internalCall(runtime.internalApp, method, path, body);
-      expect(r.status, JSON.stringify(r.data)).toBe(path === "/internal/v1/prices" ? 201 : 200);
-      return r.data as Record<string, unknown>;
-    };
-    const billingAccount = await call("PUT", "/internal/v1/billing-accounts", {
-      name: `sr-dead-${tag}`,
-      currency: "USD",
-      rpm: 10_000_000,
-      tpm: 100_000_000,
-      concurrency: 5000,
-    });
-    await call("POST", `/internal/v1/wallets/${billingAccount.id}/credits`, {
-      currency: "USD",
-      external_ref: `d-${tag}`,
-      amount_atoms: "1000000000",
-      kind: "CASH",
-    });
-    const key = await call("PUT", "/internal/v1/api-keys", {
-      billing_account_id: billingAccount.id,
-      name: "k",
-    });
-    const account = await call("PUT", "/internal/v1/upstream-accounts", { name: `d-${tag}` });
-    await call("POST", `/internal/v1/upstream-accounts/${account.id}/recharges`, {
-      currency: "USD",
-      external_ref: `ds-${tag}`,
-      amount_atoms: "1000000000",
-    });
-    const deadCh = await call("PUT", "/internal/v1/channels", {
-      account_id: account.id,
-      kind: "openai",
-      name: `dead-${tag}`,
-      base_url: `http://127.0.0.1:${deadPort}/openai`,
-      api_key: "k",
-      rpm: 10_000_000,
-      concurrency: 10_000,
-    });
-    const liveCh = await call("PUT", "/internal/v1/channels", {
-      account_id: account.id,
-      kind: "openai",
-      name: `live-${tag}`,
-      base_url: `${B.url}/openai`,
-      api_key: "k",
-      rpm: 10_000_000,
-      concurrency: 10_000,
-    });
-    const customer = await call("POST", "/internal/v1/prices", {
-      side: "CUSTOMER",
-      currency: "USD",
-      rates: {
-        input_tokens: { numerator: "1", denominator: "1" },
-        output_tokens: { numerator: "1", denominator: "1" },
-      },
-      ceilings: { input_tokens: "100", output_tokens: "100" },
-    });
-    const supplier = await call("POST", "/internal/v1/prices", {
-      side: "SUPPLIER",
-      currency: "USD",
-      rates: {
-        input_tokens: { numerator: "1", denominator: "1" },
-        output_tokens: { numerator: "1", denominator: "1" },
-      },
-      ceilings: { input_tokens: "100", output_tokens: "100" },
-    });
-    const model = `sr-dead-${tag}`;
-    await call("PUT", "/internal/v1/models", {
-      name: model,
-      operations: ["chat"],
-      max_output_tokens: 50,
-    });
-    await call("PUT", "/internal/v1/routes", {
-      model_name: model,
-      channel_id: deadCh.id,
-      upstream_model: "m",
-      operations: ["chat"],
-      billing_price_id: customer.id,
-      cost_version_id: supplier.id,
-      priority: 10,
-      retry_policy: { max_attempts: 2 },
-    });
-    await call("PUT", "/internal/v1/routes", {
-      model_name: model,
-      channel_id: liveCh.id,
-      upstream_model: "m",
-      operations: ["chat"],
-      billing_price_id: customer.id,
-      cost_version_id: supplier.id,
-      priority: 0,
-      retry_policy: { max_attempts: 2 },
-    });
-    const chat = () =>
-      runtime.publicApp.fetch(
-        new Request("http://gateway.local/v1/chat/completions", {
-          method: "POST",
-          headers: { authorization: `Bearer ${key.key}`, "content-type": "application/json" },
-          body: JSON.stringify({
-            model,
-            stream: false,
-            messages: [{ role: "user", content: "x" }],
-            max_tokens: 20,
-          }),
-        }),
-      );
-    const t0 = performance.now();
-    const res = await chat();
-    const sw = performance.now() - t0;
-    expect(res.status).toBe(200);
-    expect(res.headers.get("x-gateway-channel")).toBe(String(liveCh.name));
-    expect(sw).toBeLessThan(1500);
-    await res.text();
-    for (let i = 0; i < 100 && runtime.lifecycle.size > 0; i++) await Bun.sleep(10);
-    const charges =
-      await db`SELECT count(*)::int AS n FROM public.billing_charges WHERE billing_account_id = ${billingAccount.id}`;
-    expect(charges[0]!.n).toBe(1);
-    const hold =
-      await db`SELECT supplier_holds FROM public.billing_holds WHERE billing_account_id = ${billingAccount.id}`;
-    const sup = hold[0]!.supplier_holds as { channel_id: string; state: string }[];
-    expect(sup.some((x) => x.channel_id === String(deadCh.id) && x.state === "RELEASED")).toBe(
-      true,
-    );
-    expect(sup.some((x) => x.channel_id === String(liveCh.id) && x.state === "SETTLED")).toBe(true);
-    const w = (
-      await internalCall(runtime.internalApp, "GET", `/internal/v1/wallets/${billingAccount.id}`)
-    ).data as { spent_atoms: string; reserved_atoms: string };
-    expect(BigInt(w.spent_atoms)).toBe(15n);
-    expect(BigInt(w.reserved_atoms)).toBe(0n);
-  } finally {
-    await runtime.close();
-    B.server.stop(true);
-  }
-});
-
-test("post-dispatch: upstream dies after SSE first byte -> no failover, hold UNKNOWN, no charge, zero duplicate upstream calls", async () => {
-  const A = fakeUpstream("A", { truncate: true });
-  const B = fakeUpstream("B");
-  const runtime = createGatewayRuntime({ config: makeConfig(), db });
-  try {
-    await runtime.start();
-    const ctx = await setup(runtime, [A, B], { priority: [10, 0] });
-    const res = await ctx.chat(true);
-    expect(res.status).toBe(200);
-    const text = await res.text();
-    expect(text).not.toContain("[DONE]");
-    expect(text).toContain("event: error");
-    expect(A.calls()).toBe(1);
-    expect(B.calls()).toBe(0);
-    const requestId = res.headers.get("x-request-id")!;
-    for (let i = 0; i < 100; i++) {
-      const rows = await db`SELECT state FROM public.billing_holds WHERE request_id = ${requestId}`;
-      if (rows[0]?.state === "UNKNOWN") break;
-      await Bun.sleep(10);
-    }
-    expect(runtime.lifecycle.size).toBe(0);
-    expect(await ctx.charges()).toMatchObject({ n: 0 });
-    expect(await ctx.holdsByState()).toEqual({ UNKNOWN: 1 });
-    expect((await ctx.audit()).ok).toBe(true);
-  } finally {
-    await runtime.close();
-    A.server.stop(true);
-    B.server.stop(true);
-  }
-});
-
-test("LEAST_LATENCY: after at most two samples the slow channel is deprioritised and all remaining traffic goes to the fast peer", async () => {
-  const slow = fakeUpstream("slow", { headerDelayMs: 400 });
-  const fast = fakeUpstream("fast");
-  const runtime = createGatewayRuntime({ config: makeConfig({ attemptTimeoutMs: 3000 }), db });
-  try {
-    await runtime.start();
-    const ctx = await setup(runtime, [slow, fast], { strategy: "LEAST_LATENCY", priority: [0, 0] });
-    const picked = { slow: 0, fast: 0 };
-    for (let i = 0; i < 12; i++) {
-      const r = await ctx.chat();
-      expect(r.status).toBe(200);
-      picked[r.headers.get("x-gateway-channel")?.startsWith("fast-") ? "fast" : "slow"]++;
-      await r.text();
-    }
-    await ctx.settle();
-    expect(picked.slow).toBeLessThanOrEqual(2);
-    expect(picked.fast).toBeGreaterThanOrEqual(10);
-    const h = await ctx.health();
-    const fastRow = h[String(ctx.channels[1]!.id)]!;
-    const slowRow = h[String(ctx.channels[0]!.id)];
-    expect(fastRow.state).toBe("CLOSED");
-    expect(fastRow.ewma_latency_ms).toBeLessThan(slowRow?.ewma_latency_ms ?? Infinity);
-    expect(await ctx.charges()).toMatchObject({ n: 12, u: 12 });
-    expect((await ctx.audit()).ok).toBe(true);
-  } finally {
-    await runtime.close();
-    slow.server.stop(true);
-    fast.server.stop(true);
-  }
-});
-
-test("429 cooldown: a rate-limited channel is skipped for the retry-after window and receives no further calls until the cooldown passes", async () => {
-  const A = fakeUpstream("A", { status: 429 });
-  const B = fakeUpstream("B");
-  const runtime = createGatewayRuntime({ config: makeConfig(), db });
-  try {
-    await runtime.start();
-    const ctx = await setup(runtime, [A, B], { priority: [10, 0] });
-    const first = await ctx.chat();
-    expect(first.status).toBe(200);
-    expect(first.headers.get("x-gateway-channel")?.startsWith("B-")).toBe(true);
-    await first.text();
-    for (let i = 0; i < 10; i++) {
-      const r = await ctx.chat();
-      expect(r.status).toBe(200);
-      expect(r.headers.get("x-gateway-channel")?.startsWith("B-")).toBe(true);
-      await r.text();
-    }
-    await ctx.settle();
-    expect(A.calls()).toBe(1);
-    expect(B.calls()).toBe(11);
-    const h = await ctx.health();
-    const aRow = h[String(ctx.channels[0]!.id)]!;
-    expect(aRow.cooldown_until_ms!).toBeGreaterThan(performance.now());
-    expect(await ctx.charges()).toMatchObject({ n: 11, u: 11 });
-    expect((await ctx.audit()).ok).toBe(true);
-  } finally {
-    await runtime.close();
-    A.server.stop(true);
-    B.server.stop(true);
-  }
-});
+registerDiagnosticsCases();
+registerFailoverCases();

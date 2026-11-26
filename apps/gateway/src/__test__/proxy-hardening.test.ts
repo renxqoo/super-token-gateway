@@ -1,422 +1,17 @@
 import { expect, test } from "bun:test";
-import { createConnection } from "node:net";
-import type {
-  ConfigSnapshot,
-  ApiKeyRecord,
-  ChannelRecord,
-  PluginRecord,
-  BillingAccountRecord,
-  RouteRecord,
-} from "@gateway/ledger";
-import {
-  ClusterCoordinator,
-  createKey,
-  createTransport,
-  Lifecycle,
-  SmartRouter,
-  verifier,
-  VertexTokens,
-} from "@gateway/runtime";
-import { getBuiltinProvider, PluginPipelineEngine } from "@gateway/plugin-engine";
-import type { GatewayConfig } from "../config.ts";
-import { GatewayMetrics } from "../observability.ts";
-import { authenticateRequest, handleInferenceRequest, type ProxyDependencies } from "../proxy.ts";
-import { ProxyRuntimeState } from "../proxy-state.ts";
-import type { SnapshotManager } from "../snapshot.ts";
+import type { ChannelRecord, PluginRecord, RouteRecord } from "@gateway/ledger";
+import { createKey, SmartRouter, VertexTokens } from "@gateway/runtime";
+import { getBuiltinProvider } from "@gateway/plugin-engine";
+import type { ProxyDependencies } from "../inference/types.ts";
+import { handleInferenceRequest } from "../proxy.ts";
 import { tryPrepareUpstreamRequestSync } from "../upstream.ts";
-
-const TEST_PEPPER = "test-pepper-0123456789abcdef";
-
-function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
-  return {
-    mode: "gateway",
-    host: "127.0.0.1",
-    port: 0,
-    internalHost: "127.0.0.1",
-    internalPort: 0,
-    databaseUrl: "postgres://u:p@127.0.0.1:5432/db",
-    dbMaxConnections: 4,
-    keyPepper: TEST_PEPPER,
-    encryptionKey: "ab".repeat(32),
-    allowPrivateUpstreams: true,
-    privateUpstreamCidrs: [],
-    trustedProxyCidrs: [],
-    maxInFlight: 8,
-    maxBodyBytes: 1024 * 1024,
-    holdTtlMs: 60_000,
-    attemptTimeoutMs: 5_000,
-    snapshotPollMs: 0,
-    microBatchWindowMs: 2,
-    microBatchMaxSize: 64,
-    ...overrides,
-  };
-}
-
-function makeBillingAccount(id: string, concurrency: number): BillingAccountRecord {
-  return {
-    id,
-    name: id,
-    external_ref: null,
-    currency: "USD",
-    enabled: true,
-    rpm: 10_000,
-    tpm: 10_000_000,
-    concurrency,
-  };
-}
-
-function makeApiKey(rawKey: string, billingAccountId: string, pepper = TEST_PEPPER): ApiKeyRecord {
-  return {
-    id: `key-${rawKey}`,
-    billing_account_id: billingAccountId,
-    name: rawKey,
-    prefix: rawKey.slice(0, 8),
-    verifier: verifier(rawKey, pepper),
-    role: "INVOKER",
-    models: [],
-    operations: [],
-    allowed_cidrs: [],
-    enabled: true,
-    expires_at: null,
-    spend_limit_atoms: null,
-    spend_limit_window: "LIFETIME",
-  };
-}
-
-function makeSnapshot(
-  epoch: number,
-  billingAccounts: BillingAccountRecord[],
-  keys: ApiKeyRecord[],
-): ConfigSnapshot {
-  return {
-    epoch,
-    lineageToken: "11111111-1111-4111-8111-111111111111",
-    billingAccounts: new Map(billingAccounts.map((p) => [p.id, p])),
-    keysByVerifier: new Map(keys.map((k) => [k.verifier, k])),
-    accounts: new Map(),
-    channels: new Map(),
-    models: new Map(),
-    prices: new Map(),
-    pricingOverridesByBillingAccount: new Map(),
-    routesByModel: new Map(),
-    plugins: new Map(),
-    revokedPlugins: new Set(),
-    providerPluginsByName: new Map(),
-  };
-}
-
-function makeFakeDeps(snap: ConfigSnapshot, config: GatewayConfig): ProxyDependencies {
-  const noopSignal = new AbortController().signal;
-  const snapshot = {
-    isDiverged: () => false,
-    isFresh: () => true,
-    get: () => snap,
-    isNoopPluginSignal: (s: AbortSignal) => s === noopSignal,
-    pluginSignal: () => noopSignal,
-    decryptChannelSecret: () => "",
-  } as unknown as SnapshotManager;
-  const transport = createTransport(16);
-  const cluster = new ClusterCoordinator();
-  const router = new SmartRouter();
-  const lifecycle = new Lifecycle(config.maxInFlight);
-  const metrics = new GatewayMetrics(false);
-  const pluginEngine = new PluginPipelineEngine({ wasmExecutor: null });
-  const vertexTokens = new VertexTokens();
-  const ledger = {} as ProxyDependencies["ledger"];
-  const state = new ProxyRuntimeState();
-  return {
-    config,
-    checkConsoleAdmission: () => undefined,
-    snapshot,
-    ledger,
-    router,
-    cluster,
-    transport,
-    vertexTokens,
-    pluginEngine,
-    wasmExecutor: null,
-    lifecycle,
-    metrics,
-    state,
-  };
-}
-
-function sendSlowChunkedUpload(
-  port: number,
-  apiKey: string,
-  initialChunk: string,
-): { response: Promise<string>; close: () => void } {
-  const socket = createConnection({ host: "127.0.0.1", port });
-  const chunks: Buffer[] = [];
-  const response = new Promise<string>((resolve) => {
-    socket.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-    socket.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    socket.on("close", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    socket.on("error", () => resolve(Buffer.concat(chunks).toString("utf8")));
-  });
-  socket.on("connect", () => {
-    const hexLen = Buffer.byteLength(initialChunk, "utf8").toString(16);
-    socket.write(
-      `POST /v1/chat/completions HTTP/1.1\r\n` +
-        `Host: 127.0.0.1:${port}\r\n` +
-        `Authorization: Bearer ${apiKey}\r\n` +
-        `Content-Type: application/json\r\n` +
-        `Transfer-Encoding: chunked\r\n` +
-        `Connection: close\r\n\r\n` +
-        `${hexLen}\r\n${initialChunk}\r\n`,
-    );
-  });
-  return {
-    response,
-    close: () => socket.destroy(),
-  };
-}
-
-function sendSlowJsonUpload(
-  port: number,
-  apiKey: string,
-  contentLength: number,
-  initialBody: string,
-): { response: Promise<string>; close: () => void } {
-  const socket = createConnection({ host: "127.0.0.1", port });
-  const chunks: Buffer[] = [];
-  const response = new Promise<string>((resolve) => {
-    socket.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-    socket.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    socket.on("close", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    socket.on("error", () => resolve(Buffer.concat(chunks).toString("utf8")));
-  });
-  socket.on("connect", () => {
-    socket.write(
-      `POST /v1/chat/completions HTTP/1.1\r\n` +
-        `Host: 127.0.0.1:${port}\r\n` +
-        `Authorization: Bearer ${apiKey}\r\n` +
-        `Content-Type: application/json\r\n` +
-        `Content-Length: ${contentLength}\r\n` +
-        `Connection: close\r\n\r\n` +
-        initialBody,
-    );
-  });
-  return {
-    response,
-    close: () => socket.destroy(),
-  };
-}
-
-test("F1 symptom: slow JSON upload times out with 408 and frees admission slot instead of hanging indefinitely", async () => {
-  const proj = makeBillingAccount("11111111-1111-4111-8111-111111111111", 4);
-  const rawKey = createKey();
-  const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
-  const config = makeConfig({
-    maxInFlight: 4,
-    attemptTimeoutMs: 500,
-    ...({ bodyReadTimeoutMs: 120 } as Partial<GatewayConfig>),
-  });
-  const deps = makeFakeDeps(snap, config);
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(req) {
-      return handleInferenceRequest(
-        {
-          req: { raw: req, query: () => undefined },
-          json(data, status, headers) {
-            return new Response(JSON.stringify(data), {
-              status: status ?? 200,
-              headers: { "content-type": "application/json", ...headers },
-            });
-          },
-        },
-        deps,
-        "chat",
-      );
-    },
-  });
-  const conn = sendSlowJsonUpload(server.port!, rawKey, 200, '{"model":"gpt"');
-  try {
-    const raw = await Promise.race([
-      conn.response,
-      Bun.sleep(1000).then(() => "TIMED_OUT_WAITING_FOR_RESPONSE"),
-    ]);
-    expect(raw).toContain("408");
-    expect(raw).toContain("request_timeout");
-    await Bun.sleep(30);
-    expect(deps.lifecycle.size).toBe(0);
-  } finally {
-    conn.close();
-    deps.state?.close();
-    deps.transport.close();
-    await server.stop(true);
-  }
-});
-
-test("F1 symptom: slow chunked JSON upload times out with 408 and frees admission slot", async () => {
-  const proj = makeBillingAccount("11111111-1111-4111-8111-111111111111", 4);
-  const rawKey = createKey();
-  const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
-  const config = makeConfig({
-    maxInFlight: 4,
-    attemptTimeoutMs: 500,
-    bodyReadTimeoutMs: 120,
-  });
-  const deps = makeFakeDeps(snap, config);
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(req) {
-      return handleInferenceRequest(
-        {
-          req: { raw: req, query: () => undefined },
-          json(data, status, headers) {
-            return new Response(JSON.stringify(data), {
-              status: status ?? 200,
-              headers: { "content-type": "application/json", ...headers },
-            });
-          },
-        },
-        deps,
-        "chat",
-      );
-    },
-  });
-  const conn = sendSlowChunkedUpload(server.port!, rawKey, '{"model":"gpt"');
-  try {
-    const raw = await Promise.race([
-      conn.response,
-      Bun.sleep(1000).then(() => "TIMED_OUT_WAITING_FOR_RESPONSE"),
-    ]);
-    expect(raw).toContain("408");
-    expect(raw).toContain("request_timeout");
-    await Bun.sleep(30);
-    expect(deps.lifecycle.size).toBe(0);
-  } finally {
-    conn.close();
-    deps.state?.close();
-    deps.transport.close();
-    await server.stop(true);
-  }
-});
-
-test("F1 symptom: single tenant slow uploads are capped at billingAccount concurrency before body read and cannot starve other tenants", async () => {
-  const projA = makeBillingAccount("11111111-1111-4111-8111-111111111111", 2);
-  const projB = makeBillingAccount("22222222-2222-4222-8222-222222222222", 2);
-  const keyA = createKey();
-  const keyB = createKey();
-  const snap = makeSnapshot(
-    1,
-    [projA, projB],
-    [makeApiKey(keyA, projA.id), makeApiKey(keyB, projB.id)],
-  );
-  const config = makeConfig({
-    maxInFlight: 4,
-    attemptTimeoutMs: 2_000,
-    ...({ bodyReadTimeoutMs: 1_500 } as Partial<GatewayConfig>),
-  });
-  const deps = makeFakeDeps(snap, config);
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(req) {
-      return handleInferenceRequest(
-        {
-          req: { raw: req, query: () => undefined },
-          json(data, status, headers) {
-            return new Response(JSON.stringify(data), {
-              status: status ?? 200,
-              headers: { "content-type": "application/json", ...headers },
-            });
-          },
-        },
-        deps,
-        "chat",
-      );
-    },
-  });
-  const slow1 = sendSlowJsonUpload(server.port!, keyA, 200, "{");
-  const slow2 = sendSlowJsonUpload(server.port!, keyA, 200, "{");
-  try {
-    const deadline = Date.now() + 1000;
-    while (deps.lifecycle.size < 2 && Date.now() < deadline) await Bun.sleep(5);
-    expect(deps.lifecycle.size).toBe(2);
-
-    const thirdA = sendSlowJsonUpload(server.port!, keyA, 200, "{");
-    const thirdARaw = await Promise.race([
-      thirdA.response,
-      Bun.sleep(600).then(() => "THIRD_A_BLOCKED_ON_BODY_READ"),
-    ]);
-    thirdA.close();
-    expect(thirdARaw).toContain("429");
-    expect(thirdARaw).toContain("rate_limit_concurrency");
-
-    const resB = await fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${keyB}`, "content-type": "application/json" },
-      body: JSON.stringify({ model: "missing-model" }),
-    });
-    expect(resB.status).toBe(404);
-  } finally {
-    slow1.close();
-    slow2.close();
-    deps.state?.close();
-    deps.transport.close();
-    await server.stop(true);
-  }
-});
-
-test("F8 symptom: distinct runtime instances isolate auth caches instead of sharing module globals", () => {
-  const projA = makeBillingAccount("11111111-1111-4111-8111-111111111111", 10);
-  const projB = makeBillingAccount("22222222-2222-4222-8222-222222222222", 10);
-  const rawKey = createKey();
-  const snapA = makeSnapshot(1, [projA], [makeApiKey(rawKey, projA.id)]);
-  const snapB = makeSnapshot(1, [projB], [makeApiKey(rawKey, projB.id)]);
-  const config = makeConfig();
-  const makeCtx = () => ({
-    req: {
-      raw: new Request("http://127.0.0.1/v1/chat/completions", {
-        headers: { authorization: `Bearer ${rawKey}` },
-      }),
-      query: () => undefined,
-    },
-    json: (d: unknown, s?: number) => Response.json(d, { status: s ?? 200 }),
-  });
-  const stateA = new ProxyRuntimeState(2);
-  const stateB = new ProxyRuntimeState(2);
-  try {
-    const resA = authenticateRequest(makeCtx(), snapA, config, "chat", undefined, stateA);
-    expect(resA.billingAccount.id).toBe(projA.id);
-    const resB = authenticateRequest(makeCtx(), snapB, config, "chat", undefined, stateB);
-    expect(resB.billingAccount.id).toBe(projB.id);
-    const resNoState = authenticateRequest(makeCtx(), snapB, config, "chat");
-    expect(resNoState.billingAccount.id).toBe(projB.id);
-  } finally {
-    stateA.close();
-    stateB.close();
-  }
-});
-
-test("F8: ProxyRuntimeState LRU evicts least-recently-used key instead of wiping entire cache", () => {
-  const proj = makeBillingAccount("11111111-1111-4111-8111-111111111111", 10);
-  const key0 = createKey();
-  const key1 = createKey();
-  const key2 = createKey();
-  const k0 = makeApiKey(key0, proj.id);
-  const k1 = makeApiKey(key1, proj.id);
-  const k2 = makeApiKey(key2, proj.id);
-  const snap = makeSnapshot(1, [proj], [k0, k1, k2]);
-  const state = new ProxyRuntimeState(2);
-  try {
-    expect(state.lookupVerifiedKey(key0, snap, TEST_PEPPER)?.id).toBe(k0.id);
-    expect(state.lookupVerifiedKey(key1, snap, TEST_PEPPER)?.id).toBe(k1.id);
-    expect(state.lookupVerifiedKey(key0, snap, TEST_PEPPER)?.id).toBe(k0.id);
-    expect(state.lookupVerifiedKey(key2, snap, TEST_PEPPER)?.id).toBe(k2.id);
-    snap.keysByVerifier.clear();
-    expect(state.lookupVerifiedKey(key0, snap, TEST_PEPPER)?.id).toBe(k0.id);
-    expect(state.lookupVerifiedKey(key2, snap, TEST_PEPPER)?.id).toBe(k2.id);
-    expect(state.lookupVerifiedKey(key1, snap, TEST_PEPPER)).toBeUndefined();
-  } finally {
-    state.close();
-  }
-});
+import {
+  makeBillingAccount,
+  makeSnapshot,
+  makeApiKey,
+  makeConfig,
+  makeFakeDeps,
+} from "./proxy-fixture.ts";
 
 test("symptom: tryPrepareUpstreamRequestSync never marks unsafe bearer secrets headersValidated and preserves content-type", () => {
   const proj = makeBillingAccount("11111111-1111-4111-8111-111111111111", 10);
@@ -1003,6 +598,184 @@ test("proxy retries transient hold finalization failures and preserves upstream 
     expect(sseText).toContain("invalid_upstream_usage");
     expect(unknownAttempts).toBe(2);
     expect(releaseAttempts).toBe(0);
+  } finally {
+    deps.state?.close();
+    deps.transport.close();
+    await upstream.stop(true);
+  }
+});
+
+test("symptom: WASM adapt_response non-client logical errors expose unsanitized non-4xx/5xx HTTP status codes", async () => {
+  const proj = makeBillingAccount("11111111-1111-4111-8111-111111111188", 10);
+  const rawKey = createKey();
+  const snap = makeSnapshot(1, [proj], [makeApiKey(rawKey, proj.id)]);
+  const wasmBytes = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+  const wasmDigest = new Bun.CryptoHasher("sha256").update(wasmBytes).digest("hex");
+  const pluginId = "22222222-2222-4222-8222-222222222288";
+  const plugin = {
+    id: pluginId,
+    name: "custom-wasm-status",
+    version: "1.0.0",
+    kind: "WASM" as const,
+    capability: "PROVIDER" as const,
+    provider_config: {
+      base_dialect: "openai_chat" as const,
+      usage_dialect: "openai" as const,
+      auth: { scheme: "bearer" as const },
+      hooks: ["adapt_request" as const, "adapt_response" as const],
+      grants: [],
+    },
+    digest: wasmDigest,
+    wasm_bytes: wasmBytes,
+    webhook_config: null,
+    signature: null,
+    signing_key_id: null,
+    manifest: {},
+    enabled: true,
+  };
+  snap.plugins.set(pluginId, plugin);
+  snap.providerPluginsByName.set(plugin.name, plugin);
+  const billingPrice = {
+    id: "66666666-6666-4666-8666-666666666688",
+    side: "CUSTOMER" as const,
+    currency: "USD",
+    basis: "PROVIDER_USAGE" as const,
+    rates: {
+      input_tokens: { numerator: "1", denominator: "1" },
+      output_tokens: { numerator: "1", denominator: "1" },
+    },
+    ceilings: { input_tokens: "1000", output_tokens: "1000" },
+    source_digest: "d1",
+  };
+  const costPrice = {
+    id: "77777777-7777-4777-8777-777777777788",
+    side: "SUPPLIER" as const,
+    currency: "USD",
+    basis: "PROVIDER_USAGE" as const,
+    rates: {
+      input_tokens: { numerator: "1", denominator: "2" },
+      output_tokens: { numerator: "1", denominator: "2" },
+    },
+    ceilings: { input_tokens: "1000", output_tokens: "1000" },
+    source_digest: "d2",
+  };
+  snap.prices.set(billingPrice.id, billingPrice);
+  snap.prices.set(costPrice.id, costPrice);
+  snap.models.set("gpt-4o", {
+    name: "gpt-4o",
+    operations: ["chat"],
+    routing_strategy: "WEIGHTED",
+    max_output_tokens: 1000,
+    enabled: true,
+  });
+  const acctId = "44444444-4444-4444-8444-444444444488";
+  snap.accounts.set(acctId, { id: acctId, name: "acct-wasm", state: "ACTIVE", revision: "1" });
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => Response.json({ raw: "upstream-body" }, { status: 200 }),
+  });
+  const chId = "33333333-3333-4333-8333-333333333388";
+  snap.channels.set(chId, {
+    id: chId,
+    account_id: acctId,
+    name: "ch-wasm",
+    kind: plugin.name,
+    provider_plugin_id: pluginId,
+    base_url: `http://127.0.0.1:${upstream.port}`,
+    secret_ciphertext: "",
+    adapter_config: {},
+    rpm: 10_000,
+    concurrency: 100,
+    enabled: true,
+    routing_policy: {},
+    config_revision: 1,
+  });
+  snap.routesByModel.set("gpt-4o", [
+    {
+      id: "r-wasm",
+      model_name: "gpt-4o",
+      channel_id: chId,
+      upstream_model: "gpt-4o",
+      operations: ["chat"],
+      billing_price_id: billingPrice.id,
+      cost_version_id: costPrice.id,
+      priority: 1,
+      weight: 100,
+      enabled: true,
+      retry_policy: { max_attempts: 1 },
+      request_policy: {},
+      plugin_pipeline: [],
+      adapter_overrides: {},
+    },
+  ]);
+
+  let nextWasmReply: Record<string, unknown> = {
+    retry_kind: "retryable",
+    status: 200,
+    error_message: "logical failure",
+  };
+  const enc = new TextEncoder();
+  const deps = makeFakeDeps(snap, makeConfig());
+  deps.wasmExecutor = {
+    runtimeKind: "mock",
+    compile() {},
+    async invoke(_id, hook) {
+      if (hook === "adapt_request") {
+        return enc.encode(JSON.stringify({ path: "/v1/custom", headers: {}, body: { ok: true } }));
+      }
+      return enc.encode(JSON.stringify(nextWasmReply));
+    },
+    close() {},
+  };
+  deps.ledger = {
+    async acquireHold() {
+      return { ok: true, replayed: false, request_id: "req", held_atoms: "1000" };
+    },
+    async releaseHold() {
+      return true;
+    },
+    async markUnknown() {
+      return true;
+    },
+  } as unknown as ProxyDependencies["ledger"];
+
+  const invoke = () =>
+    handleInferenceRequest(
+      {
+        req: {
+          raw: new Request("http://127.0.0.1/v1/chat/completions", {
+            method: "POST",
+            headers: { authorization: `Bearer ${rawKey}`, "content-type": "application/json" },
+            body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] }),
+          }),
+          query: () => undefined,
+        },
+        json(data, status, headers) {
+          return new Response(JSON.stringify(data), {
+            status: status ?? 200,
+            headers: { "content-type": "application/json", ...headers },
+          });
+        },
+      },
+      deps,
+      "chat",
+    );
+
+  try {
+    nextWasmReply = { retry_kind: "retryable", status: 200, error_message: "logical failure" };
+    const r200 = await invoke();
+    expect(r200.status).toBe(502);
+    expect(await r200.json()).toMatchObject({ error: { code: "upstream_error" } });
+
+    nextWasmReply = { retry_kind: "rate_limit", status: 204, error_message: "throttled" };
+    const r204 = await invoke();
+    expect(r204.status).toBe(429);
+    expect(await r204.json()).toMatchObject({ error: { code: "upstream_rate_limited" } });
+
+    nextWasmReply = { retry_kind: "retryable", status: 503, error_message: "overloaded" };
+    const r503 = await invoke();
+    expect(r503.status).toBe(503);
   } finally {
     deps.state?.close();
     deps.transport.close();

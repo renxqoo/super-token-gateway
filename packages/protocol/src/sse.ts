@@ -3,6 +3,9 @@ import type { Protocol } from "@gateway/kernel";
 import { stringifyExact } from "./json.ts";
 
 const encoder = new TextEncoder();
+const SHARED_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+const SHARED_UTF8_DECODER_KEEP_BOM = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+const DONE_SSE_BYTES = encoder.encode("data: [DONE]\n\n");
 
 export interface SSEEvent {
   event: string;
@@ -59,7 +62,8 @@ export function hasSseText(event: SSEEvent, protocol: Protocol): boolean {
 }
 
 export class SSEParser {
-  private readonly decoder = new TextDecoder("utf-8", { fatal: true });
+  private streamDecoder: TextDecoder | undefined;
+  private seenBytes = false;
   private buffer = "";
   private eventLines: string[] = [];
   private eventSize = 0;
@@ -67,16 +71,39 @@ export class SSEParser {
   constructor(private readonly maxBytes = 1_048_576) {}
 
   feed(chunk: Uint8Array, flush = false): SSEEvent[] {
-    this.buffer += this.decoder.decode(chunk, { stream: !flush });
+    let decoded: string;
+    if (this.streamDecoder) {
+      decoded = this.streamDecoder.decode(chunk, { stream: !flush });
+    } else if (chunk.byteLength === 0) {
+      decoded = "";
+    } else if (flush || chunk[chunk.byteLength - 1]! < 0x80) {
+      decoded = (this.seenBytes ? SHARED_UTF8_DECODER_KEEP_BOM : SHARED_UTF8_DECODER).decode(chunk);
+      this.seenBytes = true;
+    } else {
+      this.streamDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: this.seenBytes });
+      this.seenBytes = true;
+      decoded = this.streamDecoder.decode(chunk, { stream: true });
+    }
+    if (decoded.length > 0) this.buffer = this.buffer.length > 0 ? this.buffer + decoded : decoded;
+    const buf = this.buffer;
+    const len = buf.length;
     const events: SSEEvent[] = [];
     let start = 0;
-    for (let i = 0; i < this.buffer.length; i++) {
-      const ch = this.buffer[i];
-      if (ch !== "\r" && ch !== "\n") continue;
-      if (ch === "\r" && i + 1 === this.buffer.length && !flush) break;
-      const line = this.buffer.slice(start, i);
-      if (ch === "\r" && this.buffer[i + 1] === "\n") i++;
-      start = i + 1;
+    const hasCr = buf.indexOf("\r") !== -1;
+    while (start < len) {
+      let i: number;
+      if (!hasCr) {
+        i = buf.indexOf("\n", start);
+        if (i === -1) break;
+      } else {
+        const nl = buf.indexOf("\n", start);
+        const cr = buf.indexOf("\r", start);
+        if (nl === -1 && cr === -1) break;
+        i = nl === -1 ? cr : cr === -1 ? nl : nl < cr ? nl : cr;
+        if (i === cr && i + 1 === len && !flush) break;
+      }
+      const line = buf.slice(start, i);
+      start = hasCr && buf.charCodeAt(i) === 13 && buf.charCodeAt(i + 1) === 10 ? i + 2 : i + 1;
       this.eventSize += Buffer.byteLength(line) + 1;
       if (this.eventSize > this.maxBytes) throw new Error("SSE event exceeds limit");
       if (line !== "") {
@@ -87,22 +114,33 @@ export class SSEParser {
         const lines = this.eventLines;
         this.eventLines = [];
         this.eventSize = 0;
-        const data: string[] = [];
-        let event = "message";
-        let id = "";
-        for (const current of lines) {
-          const colon = current.indexOf(":");
-          const name = colon < 0 ? current : current.slice(0, colon);
-          const raw = colon < 0 ? "" : current.slice(colon + 1);
-          const value = raw.startsWith(" ") ? raw.slice(1) : raw;
-          if (name === "data") data.push(value);
-          if (name === "event") event = value;
-          if (name === "id" && !value.includes("\0")) id = value;
+        if (lines.length === 1 && lines[0]!.startsWith("data: ")) {
+          const single = lines[0]!;
+          events.push({
+            event: "message",
+            id: "",
+            data: single.slice(6),
+            wire: `${single}\n\n`,
+          });
+        } else {
+          const data: string[] = [];
+          let event = "message";
+          let id = "";
+          for (let j = 0; j < lines.length; j++) {
+            const current = lines[j]!;
+            const colon = current.indexOf(":");
+            const name = colon < 0 ? current : current.slice(0, colon);
+            const raw = colon < 0 ? "" : current.slice(colon + 1);
+            const value = raw.startsWith(" ") ? raw.slice(1) : raw;
+            if (name === "data") data.push(value);
+            else if (name === "event") event = value;
+            else if (name === "id" && !value.includes("\0")) id = value;
+          }
+          events.push({ event, id, data: data.join("\n"), wire: `${lines.join("\n")}\n\n` });
         }
-        events.push({ event, id, data: data.join("\n"), wire: `${lines.join("\n")}\n\n` });
       } else this.eventSize = 0;
     }
-    this.buffer = this.buffer.slice(start);
+    this.buffer = start === 0 ? buf : start >= len ? "" : buf.slice(start);
     this.trailingBytes = this.buffer.length === 0 ? 0 : Buffer.byteLength(this.buffer);
     if (this.bufferedBytes > this.maxBytes) {
       throw new Error("SSE event exceeds limit");
@@ -113,11 +151,16 @@ export class SSEParser {
     return this.trailingBytes + this.eventSize;
   }
   get incomplete(): boolean {
-    return this.buffer.length > 0 || this.eventLines.length > 0;
+    return (
+      (this.buffer.length > 0 && !this.buffer.startsWith(":")) ||
+      this.eventLines.some((line) => !line.startsWith(":"))
+    );
   }
 }
 
 export const encodeSSE = (data: unknown, event?: string): Uint8Array =>
-  encoder.encode(
-    `${event ? `event: ${event}\n` : ""}data: ${typeof data === "string" ? data : stringifyExact(data)}\n\n`,
-  );
+  !event && data === "[DONE]"
+    ? DONE_SSE_BYTES.slice()
+    : encoder.encode(
+        `${event ? `event: ${event}\n` : ""}data: ${typeof data === "string" ? data : stringifyExact(data)}\n\n`,
+      );

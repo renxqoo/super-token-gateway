@@ -31,8 +31,8 @@ import {
   assertKeyNetworkAndOperation,
   authenticateRequest,
   billingAccountQuotaScope,
-  type InferenceContext,
-} from "./proxy.ts";
+} from "./inference/auth.ts";
+import type { InferenceContext } from "./inference/types.ts";
 import type { ProxyRuntimeState } from "./proxy-state.ts";
 import type { SnapshotManager } from "./snapshot.ts";
 

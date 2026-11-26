@@ -8,6 +8,15 @@
           "checksum": "f85393f485a4c98dd202b8322faf5e9d922aa97618476009711c76aafd405b96"
         }
       ]
+    },
+    {
+      "version": 2026112601,
+      "files": [
+        {
+          "path": "./migrations/0001_ledger_hot_path_perf.sql",
+          "checksum": "d88a959186cfc3efe83e1221b2ed13b81f878880982fa3870df595785477de66"
+        }
+      ]
     }
   ]
 }

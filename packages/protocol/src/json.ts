@@ -3,6 +3,7 @@ import { normalizedNumber, DomainError } from "@gateway/kernel";
 
 const numericLiterals = new WeakMap<object, Map<string, { literal: string; value: number }>>();
 const hasTrackedExact = new WeakSet<object>();
+let anyExactLiteralsTracked = false;
 
 export function normalizedProviderNumber(source: string): ReturnType<typeof normalizedNumber> {
   try {
@@ -14,15 +15,17 @@ export function normalizedProviderNumber(source: string): ReturnType<typeof norm
 }
 
 export function hasExactLiterals(parent: object): boolean {
-  return numericLiterals.has(parent);
+  return anyExactLiteralsTracked && numericLiterals.has(parent);
 }
 
 export function numberLiteral(parent: object, key: string): string | undefined {
+  if (!anyExactLiteralsTracked) return undefined;
   const entry = numericLiterals.get(parent)?.get(key);
   return entry && Object.is(entry.value, Reflect.get(parent, key)) ? entry.literal : undefined;
 }
 
 export function clearExactProperty(parent: object, key: string): void {
+  if (!anyExactLiteralsTracked) return;
   numericLiterals.get(parent)?.delete(key);
 }
 
@@ -33,10 +36,11 @@ export function setExactProperty(parent: object, key: string, literal: string): 
   if (!fields) numericLiterals.set(parent, (fields = new Map()));
   fields.set(key, { literal, value });
   hasTrackedExact.add(parent);
+  anyExactLiteralsTracked = true;
 }
 
 export function trackExactChild<T extends object>(parent: T, child: object): T {
-  if (hasTrackedExact.has(child)) hasTrackedExact.add(parent);
+  if (anyExactLiteralsTracked && hasTrackedExact.has(child)) hasTrackedExact.add(parent);
   return parent;
 }
 
@@ -44,24 +48,36 @@ const rawJson = (JSON as JSON & { rawJSON: (source: string) => unknown }).rawJSO
 
 function parseExactJson(source: string, preserveMeteringIntegers: boolean): unknown {
   let depth = 0;
-  let string = false;
-  let escaped = false;
   let fields = 0;
   let needsReviver = false;
   let numLen = 0;
   let inNumber = false;
-  for (let i = 0; i < source.length; i++) {
+  const len = source.length;
+  const checkFields = len >= 100000;
+  for (let i = 0; i < len; i++) {
     const code = source.charCodeAt(i);
-    if (string) {
-      if (escaped) escaped = false;
-      else if (code === 92) escaped = true;
-      else if (code === 34) string = false;
-      continue;
-    }
     if (code === 34) {
-      string = true;
       inNumber = false;
       numLen = 0;
+      let j = i + 1;
+      for (;;) {
+        const quote = source.indexOf('"', j);
+        if (quote === -1) {
+          i = len;
+          break;
+        }
+        let slashes = 0;
+        let k = quote - 1;
+        while (k > i && source.charCodeAt(k) === 92) {
+          slashes++;
+          k--;
+        }
+        if ((slashes & 1) === 0) {
+          i = quote;
+          break;
+        }
+        j = quote + 1;
+      }
     } else if (code === 123 || code === 91) {
       inNumber = false;
       numLen = 0;
@@ -75,7 +91,7 @@ function parseExactJson(source: string, preserveMeteringIntegers: boolean): unkn
     } else if (code === 58 || code === 44) {
       inNumber = false;
       numLen = 0;
-      if (++fields > 100000) {
+      if (checkFields && ++fields > 100000) {
         throw new GatewayError(502, "json_limit", "JSON field count exceeds protocol budget");
       }
     } else if (!needsReviver) {
@@ -86,11 +102,13 @@ function parseExactJson(source: string, preserveMeteringIntegers: boolean): unkn
         } else if (++numLen >= 15) {
           needsReviver = true;
         }
-      } else if (inNumber && (code === 46 || code === 101 || code === 69 || code === 43)) {
-        needsReviver = true;
-      } else {
-        inNumber = false;
-        numLen = 0;
+      } else if (inNumber) {
+        if (code === 46 || code === 101 || code === 69 || code === 43) {
+          needsReviver = true;
+        } else {
+          inNumber = false;
+          numLen = 0;
+        }
       }
     }
   }
@@ -139,10 +157,12 @@ function parseExactJson(source: string, preserveMeteringIntegers: boolean): unkn
       }
       map.set(key, { literal: context.source, value });
       hasTrackedExact.add(this);
+      anyExactLiteralsTracked = true;
       return value;
     });
     if (tracked > 0 && parsed !== null && typeof parsed === "object") {
       hasTrackedExact.add(parsed);
+      anyExactLiteralsTracked = true;
     }
     return parsed;
   } catch (error) {
@@ -157,7 +177,11 @@ export function parseProviderJson(source: string): unknown {
 }
 
 export function stringifyExact(value: unknown): string {
-  const needsExact = value !== null && typeof value === "object" && hasTrackedExact.has(value);
+  const needsExact =
+    anyExactLiteralsTracked &&
+    value !== null &&
+    typeof value === "object" &&
+    hasTrackedExact.has(value);
   const serialized = needsExact
     ? JSON.stringify(value, function (this: object, key, current: unknown) {
         const literal = typeof current === "number" ? numberLiteral(this, key) : undefined;
@@ -183,6 +207,7 @@ export function exactInteger(parent: Record<string, unknown>, key: string): stri
 }
 
 export function copyExact<T extends object>(source: object, target: T): T {
+  if (!anyExactLiteralsTracked) return target;
   if (hasTrackedExact.has(source)) hasTrackedExact.add(target);
   const fields = numericLiterals.get(source);
   if (fields) {

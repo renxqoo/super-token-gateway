@@ -1,26 +1,9 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { createGatewayRuntime } from "@gateway/gateway";
-import { verifier } from "@gateway/runtime";
-import { createConsoleTestHarness } from "./helpers/console-harness.ts";
+import { expect, test } from "bun:test";
+import { h, adminSession } from "./console-auth-fixture.ts";
+import { registerAuthFixture } from "./console-auth-fixture.ts";
+import { registerAdmissionCases } from "./console-auth-admission-cases.ts";
 
-let h: Awaited<ReturnType<typeof createConsoleTestHarness>>;
-let adminAccess = "";
-let adminRefresh = "";
-let adminUserId = "";
-
-beforeAll(async () => {
-  h = await createConsoleTestHarness({
-    consoleConfigOverrides: {
-      clientCorsOrigins: ["https://client.test"],
-      adminCorsOrigins: ["https://admin.internal"],
-    },
-    enableWorker: false,
-  });
-});
-
-afterAll(async () => {
-  await h?.close();
-});
+registerAuthFixture();
 
 test("dual listeners isolate routes, CORS origins, bootstrap reservation, and session scopes", async () => {
   const clientAdminProbe = await h.clientApi("GET", "/admin/v1/users");
@@ -95,9 +78,9 @@ test("dual listeners isolate routes, CORS origins, bootstrap reservation, and se
   ]);
   expect([b1.status, b2.status].sort()).toEqual([201, 409]);
   const bootWin = b1.status === 201 ? b1.data : b2.data;
-  adminAccess = bootWin.access_token;
-  adminRefresh = bootWin.refresh_token;
-  adminUserId = bootWin.user.id;
+  adminSession.access = bootWin.access_token;
+  adminSession.refresh = bootWin.refresh_token;
+  adminSession.userId = bootWin.user.id;
 
   const adminPublicLogin = await h.clientApi("POST", "/api/v1/auth/login", undefined, {
     email: h.bootstrapAdminEmail,
@@ -105,7 +88,7 @@ test("dual listeners isolate routes, CORS origins, bootstrap reservation, and se
   });
   expect(adminPublicLogin.status).toBe(403);
 
-  const adminOnClient = await h.clientApi("GET", "/api/v1/auth/me", adminAccess);
+  const adminOnClient = await h.clientApi("GET", "/api/v1/auth/me", adminSession.access);
   expect(adminOnClient.status).toBe(401);
 
   const user = await h.registerUser("scope-check@example.com");
@@ -153,15 +136,25 @@ test("session refresh concurrency, password change revocation, brute-force IP gu
   expect((await h.clientApi("POST", "/api/v1/auth/logout", activeToken)).status).toBe(200);
   expect((await h.clientApi("GET", "/api/v1/auth/me", activeToken)).status).toBe(401);
 
-  const demoteSelf = await h.adminApi("PATCH", `/admin/v1/users/${adminUserId}`, adminAccess, {
-    is_platform_admin: false,
-  });
+  const demoteSelf = await h.adminApi(
+    "PATCH",
+    `/admin/v1/users/${adminSession.userId}`,
+    adminSession.access,
+    {
+      is_platform_admin: false,
+    },
+  );
   expect(demoteSelf.status).toBe(400);
 
   const secondAdmin = await h.registerUser("second-admin@example.com");
-  const promote = await h.adminApi("PATCH", `/admin/v1/users/${secondAdmin.user.id}`, adminAccess, {
-    is_platform_admin: true,
-  });
+  const promote = await h.adminApi(
+    "PATCH",
+    `/admin/v1/users/${secondAdmin.user.id}`,
+    adminSession.access,
+    {
+      is_platform_admin: true,
+    },
+  );
   expect(promote.status).toBe(200);
   const secondAdminLogin = await h.adminApi<{ access_token: string }>(
     "POST",
@@ -173,7 +166,7 @@ test("session refresh concurrency, password change revocation, brute-force IP gu
   const demoteSecond = await h.adminApi(
     "PATCH",
     `/admin/v1/users/${secondAdmin.user.id}`,
-    adminAccess,
+    adminSession.access,
     { is_platform_admin: false },
   );
   expect(demoteSecond.status).toBe(200);
@@ -184,7 +177,7 @@ test("session refresh concurrency, password change revocation, brute-force IP gu
   const suspendUser = await h.adminApi(
     "PATCH",
     `/admin/v1/users/${secondAdmin.user.id}`,
-    adminAccess,
+    adminSession.access,
     { status: "SUSPENDED" },
   );
   expect(suspendUser.status).toBe(200);
@@ -194,17 +187,17 @@ test("session refresh concurrency, password change revocation, brute-force IP gu
     "POST",
     "/admin/v1/auth/refresh",
     undefined,
-    { refresh_token: adminRefresh },
+    { refresh_token: adminSession.refresh },
   );
   expect(adminRefreshed.status).toBe(200);
-  adminAccess = adminRefreshed.data.access_token;
-  adminRefresh = adminRefreshed.data.refresh_token;
+  adminSession.access = adminRefreshed.data.access_token;
+  adminSession.refresh = adminRefreshed.data.refresh_token;
 
   const orgOwner = await h.registerUser("org-suspend@example.com");
   const suspendOrg = await h.adminApi(
     "PATCH",
     `/admin/v1/orgs/${orgOwner.defaultOrgId}`,
-    adminAccess,
+    adminSession.access,
     { status: "SUSPENDED" },
   );
   expect(suspendOrg.status).toBe(200);
@@ -236,16 +229,26 @@ test("session refresh concurrency, password change revocation, brute-force IP gu
 });
 
 test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and allowed_cidrs IP enforcement work end-to-end", async () => {
-  const acc = await h.adminApi<{ id: string }>("POST", "/admin/v1/upstream-accounts", adminAccess, {
-    name: "rbac-acc",
-  });
+  const acc = await h.adminApi<{ id: string }>(
+    "POST",
+    "/admin/v1/upstream-accounts",
+    adminSession.access,
+    {
+      name: "rbac-acc",
+    },
+  );
   expect(acc.status).toBe(201);
-  await h.adminApi("POST", `/admin/v1/upstream-accounts/${acc.data.id}/recharges`, adminAccess, {
-    currency: "USD",
-    external_ref: "rbac-sup-1",
-    amount_atoms: "1000000",
-  });
-  const ch = await h.adminApi<{ id: string }>("POST", "/admin/v1/channels", adminAccess, {
+  await h.adminApi(
+    "POST",
+    `/admin/v1/upstream-accounts/${acc.data.id}/recharges`,
+    adminSession.access,
+    {
+      currency: "USD",
+      external_ref: "rbac-sup-1",
+      amount_atoms: "1000000",
+    },
+  );
+  const ch = await h.adminApi<{ id: string }>("POST", "/admin/v1/channels", adminSession.access, {
     account_id: acc.data.id,
     name: "rbac-ch",
     kind: "openai",
@@ -256,7 +259,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
   const cp = await h.adminApi<{ id: string; currentPriceVersionId: string }>(
     "POST",
     "/admin/v1/pricing-templates",
-    adminAccess,
+    adminSession.access,
     {
       name: "rbac-cust",
       side: "CUSTOMER",
@@ -272,7 +275,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
   const sp = await h.adminApi<{ id: string; currentPriceVersionId: string }>(
     "POST",
     "/admin/v1/pricing-templates",
-    adminAccess,
+    adminSession.access,
     {
       name: "rbac-sup",
       side: "SUPPLIER",
@@ -285,7 +288,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
     },
   );
   expect(sp.status).toBe(201);
-  const model = await h.adminApi("POST", "/admin/v1/models", adminAccess, {
+  const model = await h.adminApi("POST", "/admin/v1/models", adminSession.access, {
     name: "rbac-gpt",
     display_name: "RBAC GPT",
     operations: ["chat"],
@@ -293,7 +296,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
     list_price_template_id: cp.data.id,
   });
   expect(model.status).toBe(201);
-  const route = await h.adminApi("POST", "/admin/v1/routes", adminAccess, {
+  const route = await h.adminApi("POST", "/admin/v1/routes", adminSession.access, {
     model_name: "rbac-gpt",
     channel_id: ch.data.id,
     upstream_model: "rbac-gpt-up",
@@ -329,7 +332,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
   await h.adminApi(
     "POST",
     `/admin/v1/finance/billing-accounts/${billingAccountId}/topups`,
-    adminAccess,
+    adminSession.access,
     {
       external_ref: "rbac-topup-1",
       amount_atoms: "100000",
@@ -656,7 +659,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
       await h.adminApi(
         "PATCH",
         `/admin/v1/billing-accounts/${otherBillingAccountId}`,
-        adminAccess,
+        adminSession.access,
         {
           enabled: false,
         },
@@ -665,7 +668,7 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
   ).toBe(200);
 
   const setOrgStatus = (status: string) =>
-    h.adminApi("PATCH", `/admin/v1/orgs/${orgId}`, adminAccess, { status });
+    h.adminApi("PATCH", `/admin/v1/orgs/${orgId}`, adminSession.access, { status });
   expect((await setOrgStatus("SUSPENDED")).status).toBe(200);
   expect(await invoke(ownerKey.data.key)).toEqual({ status: 403, code: "org_suspended" });
   expect((await setOrgStatus("ACTIVE")).status).toBe(200);
@@ -677,266 +680,4 @@ test("5-role RBAC, invitations, cross-tenant IDOR, DEVELOPER key limits, and all
   });
 });
 
-test("an expired invitation no longer blocks the organization from issuing a replacement", async () => {
-  const owner = await h.registerUser("invite-resend-owner@example.com");
-  const org = await h.clientApi<{ id: string }>("POST", "/api/v1/orgs", owner.accessToken, {
-    name: "Invite Renewal",
-    slug: "invite-renewal",
-  });
-  expect(org.status).toBe(201);
-  const invite = () =>
-    h.clientApi<{ id: string; token: string }>(
-      "POST",
-      `/api/v1/orgs/${org.data.id}/invitations`,
-      owner.accessToken,
-      { email: "temp-resend@example.com", role: "VIEWER" },
-    );
-  const original = await invite();
-  expect(original.status).toBe(201);
-  await h.conDb`UPDATE public.org_invitations SET expires_at = now() - interval '1 minute' WHERE id = ${original.data.id}`;
-  const replacement = await invite();
-  expect(replacement.status).toBe(201);
-  const invited = await h.registerUser("temp-resend@example.com");
-  expect(
-    (
-      await h.clientApi(
-        "POST",
-        `/api/v1/invitations/${original.data.token}/accept`,
-        invited.accessToken,
-      )
-    ).status,
-  ).toBe(404);
-  expect(
-    (
-      await h.clientApi(
-        "POST",
-        `/api/v1/invitations/${replacement.data.token}/accept`,
-        invited.accessToken,
-      )
-    ).status,
-  ).toBe(200);
-});
-
-test("only sk_ billingAccount keys are accepted by authentication, import, and issuance", async () => {
-  const owner = await h.registerUser("key-format-owner@example.com");
-  const keyPath = `/api/v1/billing-accounts/${owner.defaultBillingAccountId}/api-keys`;
-  const modelsStatus = async (key: string) => {
-    const response = await fetch(`${h.gatewayPublicUrl}/v1/models`, {
-      headers: { authorization: `Bearer ${key}` },
-    });
-    await response.body?.cancel();
-    return response.status;
-  };
-  type IssuedKey = { id: string; key: string; keyPrefix: string };
-  const created = await h.clientApi<IssuedKey>("POST", keyPath, owner.accessToken, {
-    name: "Key to rotate",
-  });
-  expect(created.status).toBe(201);
-  const keyFormat = /^sk_[A-Za-z0-9_-]{43}$/;
-  expect(created.data.key).toMatch(keyFormat);
-  expect(created.data.keyPrefix).toBe(created.data.key.slice(0, 12));
-  expect(await modelsStatus(created.data.key)).toBe(200);
-
-  const legacyKey = `gw_${"A".repeat(43)}`;
-  const legacyId = crypto.randomUUID();
-  await h.gwDb`
-    INSERT INTO public.api_keys (id, billing_account_id, name, verifier, prefix)
-    VALUES (${legacyId}, ${owner.defaultBillingAccountId}, 'Retired key',
-      ${verifier(legacyKey, h.gatewayConfig.keyPepper)}, ${legacyKey.slice(0, 12)})
-  `;
-  const importedKey = `sk_${"B".repeat(42)}A`;
-  const importKey = (key: string) =>
-    h.gatewayInternalApi<{ key: string }>("PUT", "/internal/v1/api-keys", {
-      billing_account_id: owner.defaultBillingAccountId,
-      name: "Imported key",
-      raw_key: key,
-    });
-  const imported = await importKey(importedKey);
-  expect(imported.status).toBe(200);
-  expect(imported.data.key).toBe(importedKey);
-  expect(await modelsStatus(importedKey)).toBe(200);
-  expect(await modelsStatus(legacyKey)).toBe(401);
-  expect((await importKey(legacyKey)).status).toBe(400);
-  expect((await importKey("sk_short")).status).toBe(400);
-  expect((await importKey(`${importedKey}\n`)).status).toBe(400);
-
-  const rotated = await h.clientApi<IssuedKey & { old_key_revoke_pending: boolean }>(
-    "POST",
-    `${keyPath}/${created.data.id}/rotate`,
-    owner.accessToken,
-  );
-  expect(rotated.status).toBe(201);
-  expect(rotated.data.key).toMatch(keyFormat);
-  expect(rotated.data.keyPrefix).toBe(rotated.data.key.slice(0, 12));
-  expect(rotated.data.old_key_revoke_pending).toBe(false);
-  expect(await modelsStatus(rotated.data.key)).toBe(200);
-  expect(await modelsStatus(created.data.key)).toBe(401);
-});
-
-test("symptom: uppercase UUID spelling rejects valid Key updates and allows self-rotation", async () => {
-  const accountId = "abcedf00-0000-4000-8000-000000000001";
-  const rootId = "abcedf00-0000-4000-8000-000000000002";
-  const keyId = "abcedf00-0000-4000-8000-000000000003";
-  const account = await h.gatewayInternalApi("PUT", "/internal/v1/billing-accounts", {
-    id: accountId,
-    name: "Key scope normalization",
-  });
-  expect(account.status).toBe(200);
-  const create = await h.gatewayInternalApi("PUT", "/internal/v1/api-keys", {
-    id: rootId,
-    billing_account_id: accountId,
-  });
-  expect(create.status).toBe(200);
-  const update = await h.gatewayInternalApi("PUT", "/internal/v1/api-keys", {
-    id: rootId.toUpperCase(),
-    billing_account_id: accountId.toUpperCase(),
-    name: "Updated Key",
-  });
-  const selfRotation = await h.gatewayInternalApi("PUT", "/internal/v1/api-keys", {
-    id: rootId.toUpperCase(),
-    billing_account_id: accountId.toUpperCase(),
-    rotated_from_key_id: rootId,
-  });
-  expect([update, selfRotation]).toMatchObject([
-    { status: 200, data: { id: rootId, billing_account_id: accountId, name: "Updated Key" } },
-    { status: 409 },
-  ]);
-  const rotation = await h.gatewayInternalApi("PUT", "/internal/v1/api-keys", {
-    id: keyId.toUpperCase(),
-    billing_account_id: accountId.toUpperCase(),
-    rotated_from_key_id: rootId.toUpperCase(),
-  });
-  expect(rotation).toMatchObject({ status: 200, data: { id: keyId } });
-  const [stored] = await h.gwDb.unsafe(
-    "SELECT resource_scope_id FROM public.api_keys WHERE id = $1",
-    [keyId],
-  );
-  expect(stored?.resource_scope_id).toBe(rootId);
-});
-
-test("organization admission retries an unavailable Gateway and applies to a replica with a stale snapshot", async () => {
-  const user = await h.registerUser("admission-retry@example.com");
-  const { defaultOrgId: orgId, defaultBillingAccountId: billingAccountId } = user;
-  const key = await h.clientApi<{ key: string }>(
-    "POST",
-    `/api/v1/billing-accounts/${billingAccountId}/api-keys`,
-    user.accessToken,
-    { name: "Replica admission" },
-  );
-  expect(key.status).toBe(201);
-  const replica = createGatewayRuntime({
-    config: { ...h.gatewayConfig, snapshotPollMs: 0 },
-    db: h.gwDb,
-    wasmExecutor: null,
-  });
-  const listModels = () =>
-    replica.fetchPublic(
-      new Request("http://test/v1/models", {
-        headers: { authorization: `Bearer ${key.data.key}` },
-      }),
-    );
-  const setStatus = (status: "SUSPENDED" | "ACTIVE") =>
-    h.adminApi("PATCH", `/admin/v1/orgs/${orgId.toUpperCase()}`, adminAccess, { status });
-  const pending = () => h.adminApi("GET", "/admin/v1/sync/organizations", adminAccess);
-  const allowedAtConsole = () =>
-    h.clientApi("GET", `/api/v1/billing-accounts/${billingAccountId}`, user.accessToken);
-  try {
-    await replica.start();
-    const epoch = replica.snapshot.get().epoch;
-    expect((await listModels()).status).toBe(200);
-    const admissionPath = `/internal/v1/console/organizations/${orgId}/admission`;
-    h.setGatewayInterceptor(async (url, init, forward) =>
-      init?.method === "PUT" && new URL(url).pathname === admissionPath
-        ? new Response(null, { status: 503 })
-        : forward(),
-    );
-    expect(await setStatus("SUSPENDED")).toMatchObject({
-      status: 202,
-      data: {
-        status: "ACTIVE",
-        requested_status: "SUSPENDED",
-        inference_sync_pending: true,
-        inference_revision: 1,
-      },
-    });
-    expect((await listModels()).status).toBe(200);
-    expect((await allowedAtConsole()).status).toBe(403);
-    expect((await pending()).data).toEqual({ pending: 1 });
-    h.setGatewayInterceptor(null);
-    expect((await h.adminApi("POST", "/admin/v1/sync/reconcile", adminAccess)).data).toMatchObject({
-      failed: 0,
-    });
-    expect((await pending()).data).toEqual({ pending: 0 });
-    const denied = await listModels();
-    expect(denied.status).toBe(403);
-    expect(await denied.json()).toMatchObject({ error: { code: "org_suspended" } });
-    expect(
-      (
-        await h.gatewayInternalApi("PUT", "/internal/v1/billing-accounts", {
-          id: billingAccountId,
-          name: "Catalog update without organization reference",
-        })
-      ).status,
-    ).toBe(200);
-    expect(
-      (
-        await h.gatewayInternalApi("PUT", "/internal/v1/billing-accounts", {
-          id: billingAccountId,
-          name: "Catalog must preserve binding",
-          external_ref: null,
-        })
-      ).status,
-    ).toBe(409);
-    const primary = await fetch(`${h.gatewayPublicUrl}/v1/models`, {
-      headers: { authorization: `Bearer ${key.data.key}` },
-    });
-    expect(primary.status).toBe(403);
-    expect(await primary.json()).toMatchObject({ error: { code: "org_suspended" } });
-
-    h.setGatewayInterceptor(async (url, init, forward) => {
-      const response = await forward();
-      if (init?.method !== "PUT" || new URL(url).pathname !== admissionPath) return response;
-      expect(response.status).toBe(200);
-      await response.body?.cancel();
-      return new Response(null, { status: 503 });
-    });
-    expect(await setStatus("ACTIVE")).toMatchObject({
-      status: 202,
-      data: {
-        status: "SUSPENDED",
-        requested_status: "ACTIVE",
-        inference_sync_pending: true,
-        inference_revision: 2,
-      },
-    });
-    expect((await listModels()).status).toBe(200);
-    expect((await allowedAtConsole()).status).toBe(403);
-    h.setGatewayInterceptor(null);
-    expect((await h.adminApi("POST", "/admin/v1/sync/reconcile", adminAccess)).data).toMatchObject({
-      failed: 0,
-    });
-    expect((await allowedAtConsole()).status).toBe(200);
-    expect(
-      (await h.gatewayInternalApi("PUT", admissionPath, { suspended: true, source_revision: 1 }))
-        .status,
-    ).toBe(409);
-    expect((await listModels()).status).toBe(200);
-    expect(replica.snapshot.get().epoch).toBe(epoch);
-    expect((await pending()).data).toEqual({ pending: 0 });
-  } finally {
-    h.setGatewayInterceptor(null);
-    await replica.close();
-  }
-});
-
-test("concurrent password changes only accept the current password once", async () => {
-  const user = await h.registerUser("password-change-once@example.com", "CurrentPassword123!");
-  const change = (new_password: string) =>
-    h.clientApi("POST", "/api/v1/auth/change-password", user.accessToken, {
-      current_password: "CurrentPassword123!",
-      new_password,
-    });
-  const results = await Promise.all([change("DifferentPassword123!"), change("OtherPassword456!")]);
-  expect(results.map((result) => result.status).sort()).toEqual([200, 400]);
-  expect((await h.clientApi("GET", "/api/v1/auth/me", user.accessToken)).status).toBe(200);
-});
+registerAdmissionCases();

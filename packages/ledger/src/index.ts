@@ -7,3 +7,4 @@ export * from "./queries.ts";
 export * from "./engine.ts";
 export * from "./key-spend.ts";
 export * from "./async-tasks.ts";
+export { fastUuid } from "./funds.ts";

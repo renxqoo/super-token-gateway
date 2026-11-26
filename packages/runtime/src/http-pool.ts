@@ -1,3 +1,4 @@
+import { UpstreamPreDispatchError } from "./upstream-dispatch-error.ts";
 import { Agent, request as httpRequest } from "node:http";
 import type { ClientRequest } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
@@ -11,16 +12,17 @@ import {
   createZstdDecompress,
 } from "node:zlib";
 import { GatewayError } from "@gateway/contracts";
+import { connectionFailure, createBunHttp1Pool } from "./bun-http1.ts";
 import {
-  connectionFailure,
-  createBunHttp1Pool,
+  readUrlParts,
   type CancelRegistrar,
   type FastUpstreamResult,
   type OutboundReservation,
-} from "./bun-http1.ts";
+} from "./bun-http1-codec.ts";
 import {
   createDialScheduler,
   DEFAULT_DIAL_QUEUE_WAIT_MS,
+  dialTargetKey,
   type DialLimits,
   type DialPermit,
 } from "./dial-scheduler.ts";
@@ -44,22 +46,7 @@ type PreparedExchange = {
   release(): void;
 };
 
-export class UpstreamPreDispatchError extends GatewayError {
-  constructor(
-    code:
-      | "unsafe_upstream"
-      | "upstream_dns"
-      | "upstream_not_dispatched"
-      | "upstream_capacity"
-      | "upstream_tls"
-      | "upstream_connect",
-    message: string,
-    cause?: unknown,
-  ) {
-    super(code === "upstream_capacity" ? 503 : 502, code, message);
-    this.cause = cause;
-  }
-}
+export { UpstreamPreDispatchError };
 
 function toPlainHeaders(input: HeadersInit | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -112,7 +99,7 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
   if (!Number.isSafeInteger(maxConnections) || maxConnections < 1 || maxConnections > 65535) {
     throw new RangeError("Invalid upstream connection capacity");
   }
-  const maxIdle = Math.min(1024, Math.max(1, Math.floor(maxConnections / 2)));
+  const maxIdle = Math.min(4096, Math.max(1, Math.floor(maxConnections / 2)));
   const options = {
     keepAlive: true,
     maxSockets: maxConnections,
@@ -328,28 +315,32 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
     init: PinnedRequestInit,
     fastMode: boolean,
   ): Promise<FastUpstreamResult> {
-    if (closed) {
+    if (closed)
       throw new GatewayError(503, "upstream_transport_closed", "Upstream transport is closed");
-    }
     if (init.signal?.aborted || expired(init)) throw notDispatched();
-    const secureRequest = url.protocol === "https:";
-    const body = init.body;
-    const bytes =
-      typeof body === "string"
-        ? Buffer.byteLength(body)
-        : body instanceof Blob
-          ? body.size
-          : body instanceof ArrayBuffer || ArrayBuffer.isView(body)
-            ? body.byteLength
-            : 0;
-    const release = init.outbound
-      ? init.outbound.takeSlot()
-      : await acquireSlot(secureRequest, init, bytes);
+    const parts = readUrlParts(url);
+    const secureRequest = parts.secure;
+    let release: (() => void) | undefined;
+    if (init.outbound) {
+      release = init.outbound.takeSlot();
+    } else {
+      const body = init.body;
+      const bytes =
+        typeof body === "string"
+          ? Buffer.byteLength(body)
+          : body instanceof Blob
+            ? body.size
+            : body instanceof ArrayBuffer || ArrayBuffer.isView(body)
+              ? body.byteLength
+              : 0;
+      release = await acquireSlot(secureRequest, init, bytes);
+    }
     if (!release) throw notDispatched();
 
     let releaseOnClose = false;
     try {
-      if (closed || init.signal?.aborted || expired(init)) throw notDispatched();
+      if (!init.outbound && (closed || init.signal?.aborted || expired(init)))
+        throw notDispatched();
       const method = (init.method ?? "GET").toUpperCase();
       const headersValidated =
         Boolean(init.headersValidated) &&
@@ -366,26 +357,18 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
       if (typeof input === "string") bytes = input;
       else if (input instanceof URLSearchParams) bytes = input.toString();
       else if (input instanceof ArrayBuffer) bytes = new Uint8Array(input);
-      else if (ArrayBuffer.isView(input)) {
+      else if (ArrayBuffer.isView(input))
         bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-      } else if (input instanceof Blob) {
-        bytes = new Uint8Array(await input.arrayBuffer());
-      } else if (input instanceof ReadableStream) {
-        streamBody = input;
-      }
+      else if (input instanceof Blob) bytes = new Uint8Array(await input.arrayBuffer());
+      else if (input instanceof ReadableStream) streamBody = input;
       if (!streamBody) {
         if ("transfer-encoding" in plainHeaders) delete plainHeaders["transfer-encoding"];
-        if (bytes === undefined && "content-length" in plainHeaders) {
+        if (bytes === undefined && "content-length" in plainHeaders)
           delete plainHeaders["content-length"];
-        }
       }
-
       const tls = init.tls;
       const serverName = typeof tls === "object" && tls ? tls.serverName : undefined;
-      const rawHost = url.hostname;
-      const hostname = rawHost.charCodeAt(0) === 91 ? rawHost.slice(1, -1) : rawHost;
-      const port = url.port ? Number(url.port) : secureRequest ? 443 : 80;
-      const path = url.search ? `${url.pathname}${url.search}` : url.pathname;
+      const { hostname, port, path } = parts;
 
       if (!streamBody) {
         const tlsOpts = secureRequest
@@ -482,7 +465,7 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
           headers: plainHeaders,
           agent: secureRequest ? secure : plain,
           upstreamDial: {
-            target: JSON.stringify([hostname, port]),
+            target: dialTargetKey(hostname, port),
             bytes: Math.max(0, Number(plainHeaders["content-length"] ?? 0) || 0),
             signal: dialAbort.signal,
             deadline: init.dispatchDeadline,
@@ -688,7 +671,45 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
     }
   }
 
+  const wrapPrepared = (connection: OutboundReservation, release: () => void): PreparedExchange => {
+    let available = true;
+    return {
+      connection,
+      takeSlot() {
+        if (!available) return undefined;
+        available = false;
+        return release;
+      },
+      release() {
+        connection.release();
+        if (!available) return;
+        available = false;
+        release();
+      },
+    };
+  };
+
   return {
+    tryReserveSync(
+      host: string,
+      port: number,
+      tls: PinnedRequestInit["tls"],
+      secureRequest: boolean,
+    ): PreparedExchange | null {
+      if (closed) return null;
+      const slots = secureRequest ? httpsSlots : httpSlots;
+      if (slots.inUse >= maxConnections) return null;
+      const connection = bunPlain.tryReserveIdle(host, port, tls);
+      if (!connection) return null;
+      slots.inUse++;
+      const release = () => {
+        const next = slots.waiting.values().next().value;
+        if (!closed && next) next();
+        else slots.inUse--;
+      };
+      return wrapPrepared(connection, release);
+    },
+
     async reserve(
       url: URL,
       tls: PinnedRequestInit["tls"],
@@ -714,21 +735,7 @@ export function createHttpPool(maxConnections: number, dialLimits?: DialLimits) 
         } finally {
           markUpstream(init.onTiming, "wait_end");
         }
-        let available = true;
-        return {
-          connection,
-          takeSlot() {
-            if (!available) return undefined;
-            available = false;
-            return release;
-          },
-          release() {
-            connection.release();
-            if (!available) return;
-            available = false;
-            release();
-          },
-        };
+        return wrapPrepared(connection, release);
       } catch (error) {
         release();
         throw error;

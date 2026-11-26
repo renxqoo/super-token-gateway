@@ -99,6 +99,8 @@ Gateway 和 Console 从各自的空 PostgreSQL 数据库初始化。运行 `bun 
 
 ## 验证与基准
 
+Oxlint 将每个纳入检查的源文件限制为 800 行，空行和注释计入总数。
+
 ```sh
 bun run check            # Bun TypeScript 类型检查
 bun run lint             # oxlint（零告警零错误）

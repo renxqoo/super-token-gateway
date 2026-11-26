@@ -36,6 +36,7 @@ export function createSettlementQueue(
         !seenFastReqIds.has(item.request_id) &&
         !item.moderation_blocked &&
         item.selected_attempt_id === meta.attemptId &&
+        item.channel_id === meta.channelId &&
         item.billing_pricing.currency === meta.currency &&
         item.supplier_currency === meta.supplierCurrency
       ) {
@@ -142,7 +143,7 @@ export function createSettlementQueue(
     );
   }
 
-  const batchCapacity = Math.max(maxBatchSize, 512);
+  const batchCapacity = Math.max(maxBatchSize, 1024);
   const queues = Array.from(
     { length: SETTLEMENT_LANES },
     () => new MicroBatchQueue(runCommitBatch, batchCapacity, batchWindowMs, 1, "collect-bursts"),

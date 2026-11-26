@@ -11,9 +11,16 @@ const publicServer = Bun.serve({
   idleTimeout: 120,
   ...(config.reusePort ? { reusePort: true } : {}),
   fetch(req, server) {
-    return runtime.fetchPublic(req, {
-      getPeerAddress: () => server.requestIP(req)?.address,
-    });
+    if (config.ingressIp) {
+      return runtime.fetchPublic(req, server.requestIP(req)?.address, true);
+    }
+    return runtime.fetchPublic(
+      req,
+      {
+        getPeerAddress: () => server.requestIP(req)?.address,
+      },
+      true,
+    );
   },
 });
 

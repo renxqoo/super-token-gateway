@@ -1,17 +1,43 @@
 import { expect, test } from "bun:test";
 import {
   FIELD_CONVERSION_POLICY,
+  SSEParser,
   StreamTranslator,
   decodeRequest,
   decodeResponse,
   encodeRequest,
   encodeResponse,
+  encodeSSE,
   formatProtocolError,
 } from "../index.ts";
 import type { Protocol } from "@gateway/kernel";
 
 const convert = (body: Record<string, unknown>, source: Protocol, target: Protocol) =>
   encodeRequest(decodeRequest(body, source), target, "target");
+
+test("symptom: modifying a completed stream's bytes corrupts subsequent DONE frames", () => {
+  const translator = new StreamTranslator("chat", "chat", "openai", "test");
+  const parser = new SSEParser();
+  const [finish, done] = parser.feed(
+    new TextEncoder().encode(
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+    ),
+  );
+  translator.consume(finish!);
+  const terminal = translator.consume(done!);
+  const decoder = new TextDecoder();
+  expect(terminal.terminal).toBe(true);
+  expect(terminal.chunks).toHaveLength(1);
+  const frame = terminal.chunks[0]!;
+  expect(decoder.decode(frame)).toBe("data: [DONE]\n\n");
+  const original = frame[6]!;
+  try {
+    frame[6] = 65;
+    expect(decoder.decode(encodeSSE("[DONE]"))).toBe("data: [DONE]\n\n");
+  } finally {
+    frame[6] = original;
+  }
+});
 
 test("cross-protocol conversion rejects effort instead of silently dropping it", () => {
   const body = { messages: [{ role: "user", content: "solve" }], output_config: { effort: "low" } };
@@ -598,4 +624,31 @@ test("StreamTranslator falls back to top-level usage when message object is empt
     }),
   });
   expect(translator.usage).toMatchObject({ input_tokens: "12", output_tokens: "7" });
+});
+
+test("symptom: SSEParser strips mid-stream U+FEFF at chunk boundaries while preserving stream-start BOM stripping", () => {
+  const enc = new TextEncoder();
+  const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+
+  const leading = new SSEParser();
+  const leadingEvents = leading.feed(
+    new Uint8Array([...bom, ...enc.encode("data: hello\n\n")]),
+    true,
+  );
+  expect(leadingEvents).toHaveLength(1);
+  expect(leadingEvents[0]!.data).toBe("hello");
+
+  const asciiChunks = new SSEParser();
+  expect(asciiChunks.feed(enc.encode("data: a"), false)).toEqual([]);
+  const midAscii = asciiChunks.feed(new Uint8Array([...bom, ...enc.encode("b\n\n")]), false);
+  expect(midAscii).toHaveLength(1);
+  expect(midAscii[0]!.data).toBe("a\uFEFFb");
+
+  const splitUtf8 = new SSEParser();
+  expect(splitUtf8.feed(enc.encode("data: a"), false)).toEqual([]);
+  const zhong = enc.encode("中");
+  expect(splitUtf8.feed(new Uint8Array([...bom, zhong[0]!, zhong[1]!]), false)).toEqual([]);
+  const midSplit = splitUtf8.feed(new Uint8Array([zhong[2]!, ...enc.encode("b\n\n")]), false);
+  expect(midSplit).toHaveLength(1);
+  expect(midSplit[0]!.data).toBe("a\uFEFF中b");
 });

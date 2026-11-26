@@ -27,7 +27,7 @@ import {
   type ConsoleDeps,
   type ConsoleEnv,
 } from "./routes/shared.ts";
-import { ConsoleSyncEngine } from "./sync.ts";
+import { createConsoleSync } from "./sync.ts";
 
 export type ConsoleRuntimeOptions = {
   config: ConsoleConfig;
@@ -143,7 +143,7 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
     tokens: config.gatewayTokens,
     ...(options.gatewayFetch ? { fetchImpl: options.gatewayFetch } : {}),
   });
-  const sync = new ConsoleSyncEngine(db, orm, gateway);
+  const sync = createConsoleSync(db, orm, gateway);
   const loginLimiter = new LoginRateLimiter();
   const peerIpMap = new WeakMap<Request, string>();
 

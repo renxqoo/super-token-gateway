@@ -9,6 +9,10 @@ export type DialLimits = {
 
 export const DEFAULT_DIAL_QUEUE_WAIT_MS = 10_000;
 
+export function dialTargetKey(host: string, port: number): string {
+  return `${host}\0${port}`;
+}
+
 export type DialPermit = {
   start(): (() => void) | undefined;
   release(): void;
@@ -117,6 +121,67 @@ export function createDialScheduler(maxQueued: number, limits: DialLimits = {}) 
     };
   }
 
+  function acquireInternal(
+    target: string,
+    bytes: number,
+    signal?: AbortSignal | null,
+    deadline?: number,
+  ): { permit: DialPermit } | { promise: Promise<DialPermit>; cancel: () => void } {
+    const now = performance.now();
+    if (closed || signal?.aborted || (deadline !== undefined && deadline <= now)) {
+      throw cancelled();
+    }
+    let state = destinations.get(target);
+    if (!state) {
+      state = { tokens: concurrency, updatedAt: now, reserved: 0, active: 0, waiting: new Set() };
+      destinations.set(target, state);
+    }
+    refill(state);
+    if (!state.waiting.size && canGrant(state)) return { permit: reserve(target, state) };
+    if (queued >= maxQueued || bytes > maxQueueBytes - queuedBytes) throw capacity();
+    const destination = state;
+    let cancelWaiter: () => void = () => undefined;
+    const promise = new Promise<DialPermit>((resolve, reject) => {
+      const budget = now + maxQueueWaitMs;
+      const due = Math.min(budget, deadline ?? Infinity);
+      const timedOut = () =>
+        deadline !== undefined && deadline <= budget ? cancelled() : capacity();
+      const cleanup = () => {
+        if (!destination.waiting.delete(waiter)) return false;
+        queued--;
+        queuedBytes -= bytes;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        return true;
+      };
+      const waiter: Waiter = {
+        grant() {
+          if (!cleanup()) return;
+          if (performance.now() >= due) reject(timedOut());
+          else resolve(reserve(target, destination));
+        },
+        reject(error) {
+          if (!cleanup()) return;
+          reject(error);
+          pump(target, destination);
+        },
+      };
+      cancelWaiter = () => {
+        if (!cleanup()) return;
+        pump(target, destination);
+      };
+      const abort = () => waiter.reject(cancelled());
+      const timer = setTimeout(() => waiter.reject(timedOut()), Math.max(0, due - now));
+      timer.unref();
+      queued++;
+      queuedBytes += bytes;
+      destination.waiting.add(waiter);
+      signal?.addEventListener("abort", abort, { once: true });
+      pump(target, destination);
+    });
+    return { promise, cancel: cancelWaiter };
+  }
+
   return {
     acquire(
       target: string,
@@ -124,54 +189,10 @@ export function createDialScheduler(maxQueued: number, limits: DialLimits = {}) 
       signal?: AbortSignal | null,
       deadline?: number,
     ): DialPermit | Promise<DialPermit> {
-      const now = performance.now();
-      if (closed || signal?.aborted || (deadline !== undefined && deadline <= now)) {
-        throw cancelled();
-      }
-      let state = destinations.get(target);
-      if (!state) {
-        state = { tokens: concurrency, updatedAt: now, reserved: 0, active: 0, waiting: new Set() };
-        destinations.set(target, state);
-      }
-      refill(state);
-      if (!state.waiting.size && canGrant(state)) return reserve(target, state);
-      if (queued >= maxQueued || bytes > maxQueueBytes - queuedBytes) throw capacity();
-      const destination = state;
-      return new Promise<DialPermit>((resolve, reject) => {
-        const budget = now + maxQueueWaitMs;
-        const due = Math.min(budget, deadline ?? Infinity);
-        const timedOut = () =>
-          deadline !== undefined && deadline <= budget ? cancelled() : capacity();
-        const cleanup = () => {
-          if (!destination.waiting.delete(waiter)) return false;
-          queued--;
-          queuedBytes -= bytes;
-          clearTimeout(timer);
-          signal?.removeEventListener("abort", abort);
-          return true;
-        };
-        const waiter: Waiter = {
-          grant() {
-            if (!cleanup()) return;
-            if (performance.now() >= due) reject(timedOut());
-            else resolve(reserve(target, destination));
-          },
-          reject(error) {
-            if (!cleanup()) return;
-            reject(error);
-            pump(target, destination);
-          },
-        };
-        const abort = () => waiter.reject(cancelled());
-        const timer = setTimeout(() => waiter.reject(timedOut()), Math.max(0, due - now));
-        timer.unref();
-        queued++;
-        queuedBytes += bytes;
-        destination.waiting.add(waiter);
-        signal?.addEventListener("abort", abort, { once: true });
-        pump(target, destination);
-      });
+      const res = acquireInternal(target, bytes, signal, deadline);
+      return "permit" in res ? res.permit : res.promise;
     },
+    acquireCancellable: acquireInternal,
     close() {
       if (closed) return;
       closed = true;

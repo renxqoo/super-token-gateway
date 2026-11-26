@@ -4,6 +4,75 @@ import type { WalletPolicy } from "./types.ts";
 
 export const MAX_ATOMS = 10n ** 38n - 1n;
 export const CELL_COUNT = 16;
+
+const UUID_POOL = Buffer.allocUnsafe(4096);
+const HEX_BYTE = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, "0"));
+let uuidPoolOffset = 4096;
+let uuidLastMs = 0;
+let uuidSeq = 0;
+
+export function fastUuid(): string {
+  if (uuidPoolOffset + 10 > 4096) {
+    crypto.getRandomValues(UUID_POOL);
+    uuidPoolOffset = 0;
+  }
+  const o = uuidPoolOffset;
+  uuidPoolOffset += 10;
+  let ms = Date.now();
+  if (ms > uuidLastMs) {
+    uuidLastMs = ms;
+    uuidSeq = ((UUID_POOL[o]! & 0x03) << 8) | UUID_POOL[o + 1]!;
+  } else {
+    uuidSeq++;
+    if (uuidSeq > 0x0fff) {
+      uuidLastMs++;
+      uuidSeq = 0;
+    }
+    ms = uuidLastMs;
+  }
+  const hi = Math.floor(ms / 0x10000);
+  const lo = ms - hi * 0x10000;
+  const verSeq = 0x7000 | uuidSeq;
+  const b8 = (UUID_POOL[o + 2]! & 0x3f) | 0x80;
+  return (
+    HEX_BYTE[(hi >>> 24) & 0xff]! +
+    HEX_BYTE[(hi >>> 16) & 0xff]! +
+    HEX_BYTE[(hi >>> 8) & 0xff]! +
+    HEX_BYTE[hi & 0xff]! +
+    "-" +
+    HEX_BYTE[(lo >>> 8) & 0xff]! +
+    HEX_BYTE[lo & 0xff]! +
+    "-" +
+    HEX_BYTE[(verSeq >>> 8) & 0xff]! +
+    HEX_BYTE[verSeq & 0xff]! +
+    "-" +
+    HEX_BYTE[b8]! +
+    HEX_BYTE[UUID_POOL[o + 3]!]! +
+    "-" +
+    HEX_BYTE[UUID_POOL[o + 4]!]! +
+    HEX_BYTE[UUID_POOL[o + 5]!]! +
+    HEX_BYTE[UUID_POOL[o + 6]!]! +
+    HEX_BYTE[UUID_POOL[o + 7]!]! +
+    HEX_BYTE[UUID_POOL[o + 8]!]! +
+    HEX_BYTE[UUID_POOL[o + 9]!]!
+  );
+}
+
+const jsonStringCache = new Map<string, string>();
+
+export function jsonQuote(value: string): string {
+  if (value.length === 0) return '""';
+  const cached = jsonStringCache.get(value);
+  if (cached !== undefined) return cached;
+  const quoted = JSON.stringify(value);
+  if (jsonStringCache.size >= 2048) jsonStringCache.clear();
+  jsonStringCache.set(value, quoted);
+  return quoted;
+}
+
+export function jsonNullable(value: string | null | undefined): string {
+  return value === null || value === undefined ? "null" : `"${value}"`;
+}
 export type WalletRow = {
   id: string;
   billing_account_id: string;
@@ -227,6 +296,25 @@ function fastFlatCanonical(value: unknown): string | null {
   return `${out}}`;
 }
 
+export function usageCanonicalAndDigest(value: unknown): { json: string; digest: string } {
+  const fast = fastFlatCanonical(value);
+  if (fast !== null) {
+    const hit = usageDigestCache.get(fast);
+    if (hit !== undefined) return { json: fast, digest: hit };
+    const digest = new Bun.CryptoHasher("sha256").update(fast).digest("hex");
+    if (usageDigestCache.size >= 2048) {
+      const oldest = usageDigestCache.keys().next().value;
+      if (oldest !== undefined) usageDigestCache.delete(oldest);
+    }
+    usageDigestCache.set(fast, digest);
+    return { json: fast, digest };
+  }
+  return {
+    json: JSON.stringify(value),
+    digest: new Bun.CryptoHasher("sha256").update(canonical(value)).digest("hex"),
+  };
+}
+
 export function sha256Hex(value: unknown): string {
   const fast = fastFlatCanonical(value);
   if (fast !== null) {
@@ -312,7 +400,7 @@ export function preferredCell(seed: string): number {
   return (h >>> 0) % CELL_COUNT;
 }
 
-export const SETTLEMENT_LANES = 4;
+export const SETTLEMENT_LANES = 2;
 export const SUPPLIER_CELLS_PER_LANE = CELL_COUNT / SETTLEMENT_LANES;
 export const OUTBOX_SHARDS = 16;
 

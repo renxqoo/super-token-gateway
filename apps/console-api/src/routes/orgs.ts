@@ -576,7 +576,7 @@ export function createOrgAndBillingAccountRoutes(deps: ConsoleDeps) {
 
     const finalBillingAccount =
       touchesGateway && updated!.gatewaySynced
-        ? await deps.sync.ensureBillingAccountSynced(billingAccountId)
+        ? await deps.sync.admission.ensureBillingAccountSynced(billingAccountId)
         : updated!;
 
     await recordAuditLog(deps.orm, {

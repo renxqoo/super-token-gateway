@@ -96,6 +96,26 @@ flowchart LR
 | **不可重试客户端错误**：`400`、`404`、`413`、`422`、上游内容政策拒绝                                                      | **禁止切换**，直接返回                                          | 标记 `FAILED`，原子释放供应商预扣                                           | 原子释放客户 `billing_hold`（0 扣费）                                                                              |
 | **Post-First-Byte（已向客户端输出首字节 SSE）**                                                                           | **禁止切换**（防止半截拼接另一模型正文）                        | 按已观测 usage 结算或保留 `UNKNOWN` 风险，同时触发故障渠道降权/熔断         | 按已确认证据结算或挂 `UNKNOWN` 待对账，明确返回错误终止帧                                                          |
 
+### 3.4 网关推理请求的数据流
+
+公开 HTTP 入口先做节点级准入，再进入 `apps/gateway/src/proxy.ts`。请求准入使用一份目录快照验证 API Key、账单账户及模型权限，在读请求体前占用账户本地并发槽，解析后按输入估算申请共享配额。候选路由使用同一份快照，每次尝试各自应用内容策略、上游适配和价目。
+
+推理编排负责预算、尝试顺序和是否切换。无幂等键且支持预建连接时，先取得连接，再发起首次预扣。带幂等键的请求由账本识别重放。真实派发需要 PostgreSQL 预扣成功。切换复用同一笔客户预扣，由账本原子更新供应商尝试及可能的客户补足额。能证明未执行的失败可以释放，派发结果未明时保留对账所需的预扣和供应商请求 ID。
+
+核算组件以当前请求快照生成客户和供应商报价，记录账本确认的客户预扣额，并用同一尝试的价目组装预扣、切换和结算指令。上游准备组件负责序列化及预建连接。
+
+新预扣的幂等指纹使用渠道策略改写前的规范化请求，换渠道或调整脱敏策略仍可识别同一请求。账本比较已有指纹时识别带版本前缀的新格式，历史散列沿用原本的渠道策略后指纹比较。旧记录没有保存改写前的正文，因此保留其原有判定语义。
+
+收到上游响应后，按缓冲响应、媒体 SSE 或会话 SSE 处理。声明式与 WASM 流适配各自解析上游帧，会话输出共用内容策略和用量结算。响应处理只提交绑定到当前尝试的证据。直接结算及租约结算均在预扣行锁内核验供应商尝试、渠道和币种，再解绑租约或写入资金。同账号切换可保留租约，结算仍须匹配切换后的供应商尝试。已独立结算的供应商尝试仅能由带有已核实结算证据的客户对账路径完成客户结算。`x-gateway-channel` 优先携带可安全写入 HTTP 响应头的渠道展示名。展示名无法直接使用时，响应头携带稳定的渠道 ID。
+
+校验 SSE 响应头后，中继接手请求资源，结算确认后才发送成功终态。响应初始化失败时，请求层取消上游并完成核账状态和资源清理。正常结束、客户端取消、停机和插件撤销沿同一资源清理路径归还配额、探针及缓冲预算。完整终态后的 SSE 注释行不影响结算。上游 EOF 缺少成功终态或带有未闭合的业务帧时，按断流处理并保留 `UNKNOWN`，由 Worker 或人工核账继续处理。断流和客户端取消会在释放请求资源前取消并等待尚未完成的 Webhook 审核。客户端在提交结算前取消时，请求进入 `UNKNOWN`。
+
+账本是预扣、结算、分录和 Outbox 的持久化所有者。Worker 使用相同账本执行失效预扣与租约回收、核账轮询及事件投递。推理路径以原有 HTTP 和 PostgreSQL 集成用例验证预扣顺序、切换唯一结算、流终态、取消、撤销及守恒，部署和数据库升级沿用当前流程。
+
+Console 的准入同步拥有组织状态、账单账户与 API Key 的写入，目录同步拥有上游账户、渠道、模型、路由与价目写入。目录同步通过准入组件确认价格覆盖所需的账单账户。后台重试沿用相同的写入接口，并负责选主、待同步筛选和停止信号。
+
+Redis 连接组件负责主节点发现、连接切换及健康探测。配额组件负责令牌的申请、释放与恢复，并在连接重新开放前确认上一次连接的在途许可。申请超时后立即向请求返回不可用，并恢复同批待释放的许可。原申请仍在途时保留其批次名额，收到迟到的执行结果后再次清理可能已写入的许可。若名额耗尽时有在途申请超时，等待和新到的申请均返回不可用，直到有名额归还。迟到的脚本未命中响应终止本次申请。
+
 ---
 
 ## 4. 精简微批 PG 核心账本与数据结构设计
@@ -162,10 +182,10 @@ flowchart LR
 
 1. **双轨自适应快慢路径（同一账本引擎内，无旧代码）**：
    - **冷钱包 / 授信 / 限模型 Lot / 幂等键请求**：走 2 ms 同钱包微批聚合器（`acquireQueue`），按全局升序 `FOR NO KEY UPDATE` 锁序批量完成 lot 预扣与 `billing_holds` 写入；达到热度条件后在同一事务内无缝签发 `wallet_leases` + `supplier_leases`。
-   - **热钱包租赁快路径（`fastHoldQueue`，并发度 4、单批上限 512）**：先在内存中从活跃租约划拨预扣额度，随后在一条集合 SQL 内锁定并校验当前节点持有的活跃租约，再持久化预扣。快路径只锁租约行，失效项回落到普通预扣。收到持久化确认后才派发。
-2. **微批结算（`commitQueue`，并发度 4、单批上限 512）**：
+   - **热钱包租赁快路径（`fastHoldQueue`，单统一队列、单批上限 1024）**：先在内存中从活跃租约划拨预扣额度，再在同一 PostgreSQL 事务中按升序取得租约 `FOR KEY SHARE` 和钱包 `FOR SHARE`。等待行锁结束后，使用新的语句快照重新核验供应商、租约和钱包状态，再写入预扣。失效项回落到普通预扣，收到持久化确认后才派发。
+2. **微批结算（`commitQueue`，2 条 `SETTLEMENT_LANES` 分片队列、单批上限 1024）**：
    - 严格遵循全局锁序：`1. billing_holds → 2. wallet_leases → 3. supplier_leases → 4. wallets → 5. wallet_lots → 6. upstream_accounts → 7. supplier_cells`，全线使用 **`FOR NO KEY UPDATE`** 避免与并发 `INSERT INTO billing_holds` 外键 `FOR KEY SHARE` 产生锁冲突或死锁。
-   - **单一 DB 往返 PL/pgSQL 快路径（`public.commit_leased_batch`）**：当批量全部命中活跃单 Lot 租约时，通过单次 `SELECT public.commit_leased_batch(...)` 在 PG 服务端单事务内完成全部校验、行锁、9 表 Data-Modifying CTE（更新 `wallet_leases`、`supplier_leases`、`wallets`、`wallet_lots`、`supplier_cells`、`billing_holds`，写入 `billing_charges` 与受不可变/复式平衡触发器保护的 `ledger_entries`），随后按升序分片锁写入 `outbox_events`，消除多轮锁往返并将单笔 PG WAL 降至 **3.4–3.7 KB**；遇到多 Lot、租约不足或失效等复杂项时自动回落至标准慢路径事务。
+   - **单一 DB 往返 PL/pgSQL 快路径（`public.commit_leased_batch`，增量迁移 `0001_ledger_hot_path_perf.sql` / schema `2026112601`）**：当批量全部命中活跃单 Lot 租约时，通过单次 `SELECT public.commit_leased_batch(...)` 在 PG 服务端单事务内完成单次 `jsonb_to_recordset` 解析、行锁与 `ctid` 定位更新、多表 Data-Modifying CTE（更新 `wallet_leases`、`supplier_leases`、`billing_holds`，写入 `billing_charges` 与受不可变/复式平衡触发器保护的 `ledger_entries`，并在同一合并 CTE 内按严格锁序更新 `wallets`、`wallet_lots`、`supplier_cells`），随后按升序分片锁写入 `outbox_events`；请求/扣款/事件/分录采用 UUIDv7 保持 B-tree 右端顺序追加，遇到多 Lot、租约不足或失效等复杂项时自动回落至标准慢路径事务。
 3. **异常、故障切换与 `SIGKILL` 恢复**：
    - 故障切换（`switchSupplierAttempt`）、释放（`releaseHold`）、标未明（`markUnknown`）及跨租约/过期边界请求自动调用 `detachHoldFromLeaseTx` 从租约分离并安全落回标准事务路径；
    - 进程被 `SIGKILL` 强杀后，未闭合 `billing_holds` 与过期 `wallet_leases`/`supplier_leases` 由 `apps/worker` 的 `sweepTimedOutHolds` + `sweepExpiredLeases` + `expireAllLots` 全量回收，经人工或自动决议后 `auditConservation()` 100% 归零守恒。

@@ -24,12 +24,50 @@ export type WebhookExecutorStats = Record<string, WebhookPluginStats>;
 const DEFAULT_WEBHOOK_TIMEOUT_MS = 200;
 const DEFAULT_WEBHOOK_MAX_CONCURRENCY = 64;
 const DEFAULT_WEBHOOK_MAX_RESPONSE_BYTES = 1_048_576;
+const utf8Decoder = new TextDecoder();
+const sanitizedWebhookHeaders = new WeakMap<WebhookPluginConfig, Record<string, string>>();
+
+function webhookHeadersFor(cfg: WebhookPluginConfig): Record<string, string> {
+  const cached = sanitizedWebhookHeaders.get(cfg);
+  if (cached) return cached;
+  const headers: Record<string, string> = {};
+  if (cfg.headers) {
+    for (const [k, v] of Object.entries(cfg.headers)) {
+      const lower = k.toLowerCase();
+      if (
+        lower === "host" ||
+        lower === "content-length" ||
+        lower === "transfer-encoding" ||
+        lower === "connection" ||
+        lower === "keep-alive" ||
+        lower === "te" ||
+        lower === "upgrade" ||
+        lower === "proxy-connection" ||
+        lower === "content-type"
+      ) {
+        continue;
+      }
+      headers[k] = v;
+    }
+  }
+  headers["content-type"] = "application/json";
+  sanitizedWebhookHeaders.set(cfg, headers);
+  return headers;
+}
 
 async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {
   const clHeader = response.headers.get("content-length");
-  if (clHeader !== null && /^\d+$/.test(clHeader) && Number(clHeader) > maxBytes) {
-    void response.body?.cancel().catch(() => undefined);
-    throw new Error("webhook_response_too_large");
+  if (clHeader !== null && /^\d+$/.test(clHeader)) {
+    const cl = Number(clHeader);
+    if (cl > maxBytes) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error("webhook_response_too_large");
+    }
+    if (!response.headers.has("content-encoding") && cl <= 262_144) {
+      const bytes = await response.bytes();
+      if (bytes.byteLength > maxBytes) throw new Error("webhook_response_too_large");
+      return bytes.byteLength === 0 ? "" : utf8Decoder.decode(bytes);
+    }
   }
   const reader = response.body?.getReader();
   if (!reader) return "";
@@ -51,14 +89,14 @@ async function readBoundedResponseText(response: Response, maxBytes: number): Pr
     reader.releaseLock();
   }
   if (chunks.length === 0) return "";
-  if (chunks.length === 1) return new TextDecoder().decode(chunks[0]!);
+  if (chunks.length === 1) return utf8Decoder.decode(chunks[0]!);
   const merged = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
     merged.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(merged);
+  return utf8Decoder.decode(merged);
 }
 
 export class WebhookPluginExecutor {
@@ -214,30 +252,9 @@ export class WebhookPluginExecutor {
     signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
-      const headers: Record<string, string> = {};
-      if (cfg.headers) {
-        for (const [k, v] of Object.entries(cfg.headers)) {
-          const lower = k.toLowerCase();
-          if (
-            lower === "host" ||
-            lower === "content-length" ||
-            lower === "transfer-encoding" ||
-            lower === "connection" ||
-            lower === "keep-alive" ||
-            lower === "te" ||
-            lower === "upgrade" ||
-            lower === "proxy-connection" ||
-            lower === "content-type"
-          ) {
-            continue;
-          }
-          headers[k] = v;
-        }
-      }
-      headers["content-type"] = "application/json";
       const response = await this.fetchImpl(cfg.url, {
         method: "POST",
-        headers,
+        headers: webhookHeadersFor(cfg),
         body: JSON.stringify(input),
         signal: controller.signal,
       });

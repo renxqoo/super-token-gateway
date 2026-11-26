@@ -8,12 +8,7 @@ import type {
   SupplierHoldEntry,
 } from "./types.ts";
 import type { LeaseManager } from "./lease-manager.ts";
-import {
-  flushDirtyKeySpends,
-  rolloverKeySpendInMemory,
-  toKeySpendRow,
-  type KeySpendRow,
-} from "./key-spend.ts";
+import { flushDirtyKeySpends } from "./key-spend.ts";
 import {
   MAX_ATOMS,
   CELL_COUNT,
@@ -23,13 +18,10 @@ import {
   parseAtoms,
   walletAdmissionError,
   canReserveWalletCredit,
-  sortLots,
   lotEligible,
   preferredCell,
   walletKey,
   supplierKey,
-  toWalletRow,
-  toLotRow,
   toCellRow,
   insertJournalLines,
   holdTemporarilyUnavailable,
@@ -41,6 +33,8 @@ import {
   type SupplierCellRow,
   type JournalLine,
 } from "./funds.ts";
+
+import { lockTransactionalHoldState, matchesHoldFingerprint } from "./transactional-hold-state.ts";
 
 const DEMAND_WINDOW_MS = 2000;
 const LEASE_MIN_MULTIPLIER = 64n;
@@ -60,25 +54,6 @@ function recordHit(
   }
   prev.count++;
   return prev.count;
-}
-
-async function lockFundedSupplierCell(
-  tx: SQL,
-  item: AcquireHoldInput,
-  supplierAtoms: bigint | null,
-) {
-  if (supplierAtoms === null) return [];
-  const select = tx`
-    SELECT account_id, currency, cell, balance_atoms::text, reserved_atoms::text,
-      spent_atoms::text, revision::text
-    FROM public.supplier_cells
-    WHERE account_id = ${item.supplier_account_id} AND currency = ${item.supplier_currency}
-      AND balance_atoms - reserved_atoms >= ${supplierAtoms.toString()}::numeric
-    ORDER BY (cell - ${preferredCell(item.attempt_id)} + ${CELL_COUNT}) % ${CELL_COUNT}
-    LIMIT 1 FOR NO KEY UPDATE
-  `;
-  const available = await tx`${select} SKIP LOCKED`;
-  return available.length ? available : await select;
 }
 
 export function createTransactionalHoldBatch(
@@ -127,147 +102,34 @@ export function createTransactionalHoldBatch(
         pruneDemandAt = batchStartedAt + DEMAND_WINDOW_MS;
       }
 
-      const keySpendsById = new Map<string, KeySpendRow>();
-      if (limitedKeyIds.length > 0) {
-        const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
-        const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : batchStartedAt;
-        const lockedKeys = await tx`
-          SELECT id, billing_account_id, spend_limit_atoms::text, spend_limit_window,
-            spend_window_start, spent_atoms::text, reserved_atoms::text
-          FROM public.api_keys
-          WHERE id = ANY(${limitedKeyIds}::uuid[])
-          ORDER BY id
-          FOR NO KEY UPDATE
-        `;
-        for (const r of lockedKeys) {
-          const row = toKeySpendRow(r);
-          rolloverKeySpendInMemory(row, pgNowMs);
-          keySpendsById.set(row.id, row);
-        }
-      }
-
-      const lockedWallets = await tx`
-        SELECT id, billing_account_id, currency, policy,
-          available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
-          debt_atoms::text, credit_limit_atoms::text, credit_reserved_atoms::text,
-          credit_policy_version::text, manual_frozen, evidence_disputed, freeze_reason
-        FROM public.wallets
-        WHERE billing_account_id = ANY(${billingAccountIds}::uuid[])
-        ORDER BY id
-        FOR NO KEY UPDATE
-      `;
-      const walletsByKey = new Map<string, WalletRow>();
-      const walletsById = new Map<string, WalletRow>();
-      for (const r of lockedWallets) {
-        const w = toWalletRow(r);
-        walletsByKey.set(walletKey(w.billing_account_id, w.currency), w);
-        walletsById.set(w.id, w);
-      }
-
-      const walletIds = [...walletsById.keys()];
-      const lotRowsRaw = walletIds.length
-        ? await tx`
-            SELECT id, wallet_id, kind, priority, models, operations, expires_at, created_at,
-              issued_atoms::text, available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text
-            FROM public.wallet_lots
-            WHERE wallet_id = ANY(${walletIds}::uuid[]) AND available_atoms > 0
-            ORDER BY id
-            FOR NO KEY UPDATE
-          `
-        : [];
-      const lotsByWallet = new Map<string, LotRow[]>();
-      const allLots: LotRow[] = [];
-      for (const r of lotRowsRaw) {
-        const l = toLotRow(r);
-        allLots.push(l);
-        const arr = lotsByWallet.get(l.wallet_id);
-        if (arr) arr.push(l);
-        else lotsByWallet.set(l.wallet_id, [l]);
-      }
-      for (const [wid, arr] of lotsByWallet) {
-        const w = walletsById.get(wid)!;
-        lotsByWallet.set(wid, sortLots(arr, w.policy));
-      }
-
-      const accountRows = supplierAccounts.length
-        ? await tx`
-            SELECT id, state FROM public.upstream_accounts
-            WHERE id = ANY(${supplierAccounts}::uuid[])
-            ORDER BY id
-            FOR SHARE
-          `
-        : [];
-      const activeAccounts = new Set<string>();
-      for (const r of accountRows) {
-        if (r.state === "ACTIVE") activeAccounts.add(String(r.id));
-      }
-
-      const cursor = batchCellCursor++ % SUPPLIER_CELLS_PER_LANE;
-      const targetCellsByLane = Array.from(
-        { length: SETTLEMENT_LANES },
-        (_, lane) =>
-          lane * SUPPLIER_CELLS_PER_LANE +
-          ((cellOffsets[lane]! + cursor) % SUPPLIER_CELLS_PER_LANE),
-      );
-      const targetCells = [
-        ...new Set(items.map((item) => targetCellsByLane[walletLane(item.billing_account_id)]!)),
-      ];
-      const cellRowsRaw = retryContended
-        ? await lockFundedSupplierCell(tx, parsed[0]!.item, parsed[0]!.supplierAtoms)
-        : await tx`
-            SELECT account_id, currency, cell, balance_atoms::text, reserved_atoms::text, spent_atoms::text, revision::text
-            FROM public.supplier_cells
-            WHERE account_id = ANY(${supplierAccounts}::uuid[]) AND cell = ANY(${targetCells}::smallint[])
-            ORDER BY account_id, currency, cell
-            FOR NO KEY UPDATE
-          `;
-      const cellsByAcctCur = new Map<string, SupplierCellRow[]>();
-      const allCells: SupplierCellRow[] = [];
-      const smallestUnfundedQuote = new Map<string, bigint>();
-      for (const r of cellRowsRaw) {
-        const c = toCellRow(r);
-        allCells.push(c);
-        const k = supplierKey(c.account_id, c.currency);
-        const list = cellsByAcctCur.get(k);
-        if (list) list.push(c);
-        else cellsByAcctCur.set(k, [c]);
-      }
-
-      const existingIdem = new Map<
-        string,
-        {
-          request_id: string;
-          wallet_id: string;
-          fingerprint: string;
-          held_atoms: string;
-          credit_atoms: string;
-          state: string;
-          supplier_holds: SupplierHoldEntry[];
-        }
-      >();
-      if (idempotencyKeys.length > 0) {
-        const rows = await tx`
-          SELECT request_id, billing_account_id, operation, idempotency_key, wallet_id, fingerprint,
-            held_atoms::text, credit_atoms::text, state, supplier_holds
-          FROM public.billing_holds
-          WHERE billing_account_id = ANY(${billingAccountIds}::uuid[])
-            AND idempotency_key = ANY(${idempotencyKeys}::text[])
-        `;
-        for (const r of rows) {
-          existingIdem.set(`${r.billing_account_id}:${r.operation}:${r.idempotency_key}`, {
-            request_id: String(r.request_id),
-            wallet_id: String(r.wallet_id),
-            fingerprint: String(r.fingerprint),
-            held_atoms: String(r.held_atoms),
-            credit_atoms: String(r.credit_atoms),
-            state: String(r.state),
-            supplier_holds: (r.supplier_holds ?? []) as SupplierHoldEntry[],
-          });
-        }
-      }
+      const {
+        walletsById,
+        lotsByWallet,
+        walletsByKey,
+        activeAccounts,
+        keySpendsById,
+        cellsByAcctCur,
+        targetCells,
+        allCells,
+        allLots,
+        existingIdem,
+      } = await lockTransactionalHoldState({
+        limitedKeyIds,
+        tx,
+        batchStartedAt,
+        billingAccountIds,
+        supplierAccounts,
+        batchCellCursor: () => batchCellCursor++,
+        cellOffsets,
+        items,
+        retryContended,
+        parsed,
+        idempotencyKeys,
+      });
 
       const nowMs = Date.now();
       const journals: JournalLine[] = [];
+      const smallestUnfundedQuote = new Map<string, bigint>();
       for (const w of walletsById.values()) {
         const wLots = lotsByWallet.get(w.id);
         if (wLots) expireLotsInMemory(w, wLots, nowMs, journals);
@@ -318,7 +180,7 @@ export function createTransactionalHoldBatch(
           const ik = `${item.billing_account_id}:${item.operation}:${item.idempotency_key}`;
           const prev = existingIdem.get(ik);
           if (prev) {
-            if (prev.fingerprint !== item.fingerprint) {
+            if (!matchesHoldFingerprint(prev.fingerprint, item)) {
               results[i] = {
                 ok: false,
                 code: "idempotency_conflict",

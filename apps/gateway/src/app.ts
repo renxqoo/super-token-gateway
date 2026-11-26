@@ -39,12 +39,9 @@ import {
 import { createInternalApi } from "./internal-api.ts";
 import { GatewayMetrics } from "./observability.ts";
 import { createTraceQueue } from "./trace-queue.ts";
-import {
-  authenticateRequest,
-  handleInferenceRequest,
-  type InferenceContext,
-  type ProxyDependencies,
-} from "./proxy.ts";
+import { authenticateRequest } from "./inference/auth.ts";
+import type { InferenceContext, ProxyDependencies } from "./inference/types.ts";
+import { handleInferenceRequest } from "./proxy.ts";
 import { ProxyRuntimeState } from "./proxy-state.ts";
 import { createBodyBufferBudget, createPublicIngress } from "./public-ingress.ts";
 import { createPressureMonitor } from "./resource-pressure.ts";
@@ -543,19 +540,21 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
 
   function fetchPublic(
     req: Request,
-    env?: { peerAddress?: string; getPeerAddress?: () => string | undefined },
+    env?: string | { peerAddress?: string; getPeerAddress?: () => string | undefined },
+    nativeHttp = false,
   ): Response | Promise<Response> {
     const url = req.url;
     const scheme = url.indexOf("://");
     const pathStart = scheme === -1 ? 0 : url.indexOf("/", scheme + 3);
-    if (pathStart === -1) return publicApp.fetch(req, env);
+    if (pathStart === -1)
+      return publicApp.fetch(req, typeof env === "string" ? { peerAddress: env } : env);
     const queryStart = url.indexOf("?", pathStart);
     const pathname = queryStart === -1 ? url.slice(pathStart) : url.slice(pathStart, queryStart);
     if (pathname === "/livez" || pathname === "/readyz" || pathname === "/metrics") {
-      return publicApp.fetch(req, env);
+      return publicApp.fetch(req, typeof env === "string" ? { peerAddress: env } : env);
     }
     const operation = req.method === "POST" ? staticInferenceRoutes.get(pathname) : undefined;
-    const peer = env?.peerAddress ?? env?.getPeerAddress;
+    const peer = typeof env === "string" ? env : (env?.peerAddress ?? env?.getPeerAddress);
     const requestPeer = config.ingressIp && typeof peer === "function" ? peer() : peer;
     const denial = ingress.admit(
       req,
@@ -564,10 +563,21 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     );
     const dispatch = () =>
       operation
-        ? handleInferenceRequest(fastContext(req), proxyDeps, operation, undefined, requestPeer)
+        ? handleInferenceRequest(
+            fastContext(req),
+            proxyDeps,
+            operation,
+            undefined,
+            requestPeer,
+            nativeHttp,
+          )
         : publicApp.fetch(
             req,
-            typeof requestPeer === "string" ? { peerAddress: requestPeer } : env,
+            typeof requestPeer === "string"
+              ? { peerAddress: requestPeer }
+              : typeof env === "string"
+                ? { peerAddress: env }
+                : env,
           );
     return denial instanceof Promise
       ? denial.then((response) => response ?? dispatch())

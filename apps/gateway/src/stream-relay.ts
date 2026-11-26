@@ -1,7 +1,9 @@
 import { GatewayError } from "@gateway/contracts";
 
-type StreamWriter = {
-  enqueue(chunk: Uint8Array): Promise<void>;
+const STREAM_QUEUING_STRATEGY = new ByteLengthQueuingStrategy({ highWaterMark: 64 * 1024 });
+
+export type StreamWriter = {
+  enqueue(chunk: Uint8Array, knownHasText?: boolean): void | Promise<void>;
   close(): void;
 };
 
@@ -14,12 +16,43 @@ export function createStreamRelay(
     abortedFrame: () => Uint8Array | undefined;
     finish: () => void;
     onEnqueued?: (chunk: Uint8Array) => boolean;
+    onFirstTextEnqueued?: () => void;
   },
 ): ReadableStream<Uint8Array> {
   let resume: (() => void) | undefined;
   let cancelled = false;
   let onEnqueued = options.onEnqueued;
+  let onFirstTextEnqueued = options.onFirstTextEnqueued;
   let running: Promise<void>;
+  const notifyEnqueued = (chunk: Uint8Array, knownHasText?: boolean) => {
+    if (knownHasText === true) {
+      if (onFirstTextEnqueued) {
+        const fn = onFirstTextEnqueued;
+        onFirstTextEnqueued = undefined;
+        onEnqueued = undefined;
+        fn();
+      } else if (onEnqueued) {
+        try {
+          if (onEnqueued(chunk)) onEnqueued = undefined;
+        } catch {
+          onEnqueued = undefined;
+        }
+      }
+      return;
+    }
+    if (knownHasText === false) return;
+    if (onEnqueued) {
+      try {
+        if (onEnqueued(chunk)) {
+          onEnqueued = undefined;
+          onFirstTextEnqueued = undefined;
+        }
+      } catch {
+        onEnqueued = undefined;
+        onFirstTextEnqueued = undefined;
+      }
+    }
+  };
   const wake = () => {
     const unblock = resume;
     resume = undefined;
@@ -44,23 +77,23 @@ export function createStreamRelay(
           controller.close();
         };
         running = execute({
-          async enqueue(chunk) {
+          enqueue(chunk, knownHasText) {
             if (!cancelled && !options.signal.aborted && (controller.desiredSize ?? 0) <= 0) {
-              await new Promise<void>((resolve) => {
+              return new Promise<void>((resolve) => {
                 resume = resolve;
+              }).then(() => {
+                if (cancelled || options.signal.aborted) {
+                  throw options.signal.reason ?? new Error("Client cancelled the stream");
+                }
+                controller.enqueue(chunk);
+                notifyEnqueued(chunk, knownHasText);
               });
             }
             if (cancelled || options.signal.aborted) {
               throw options.signal.reason ?? new Error("Client cancelled the stream");
             }
             controller.enqueue(chunk);
-            if (onEnqueued) {
-              try {
-                if (onEnqueued(chunk)) onEnqueued = undefined;
-              } catch {
-                onEnqueued = undefined;
-              }
-            }
+            notifyEnqueued(chunk, knownHasText);
           },
           close,
         })
@@ -85,7 +118,7 @@ export function createStreamRelay(
         return running;
       },
     },
-    new ByteLengthQueuingStrategy({ highWaterMark: 64 * 1024 }),
+    STREAM_QUEUING_STRATEGY,
   );
 }
 

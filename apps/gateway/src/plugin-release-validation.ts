@@ -17,11 +17,8 @@ import {
 import { validateUsageObject } from "@gateway/protocol";
 import { validateAuthCredentials } from "@gateway/runtime";
 import type { Operation } from "@gateway/kernel";
-import {
-  isConversationalOperation,
-  previewProviderRequest,
-  upstreamProtocolFor,
-} from "./upstream.ts";
+import { isConversationalOperation, upstreamProtocolFor } from "./upstream-payload.ts";
+import { previewProviderRequest } from "./provider-request-preview.ts";
 
 type PluginReleaseSample = {
   request?: Record<string, unknown> | undefined;
