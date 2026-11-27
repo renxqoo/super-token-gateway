@@ -8,14 +8,7 @@ import type {
   SupplierHoldEntry,
 } from "./types.ts";
 import type { LeaseManager } from "./lease-manager.ts";
-import {
-  cellKey,
-  fastUuid,
-  jsonNullable,
-  jsonQuote,
-  usageCanonicalAndDigest,
-  type JournalLine,
-} from "./funds.ts";
+import { cellKey, fastUuid, usageCanonicalAndDigest, type JournalLine } from "./funds.ts";
 
 export type FastCommitCandidate = {
   index: number;
@@ -41,30 +34,90 @@ export async function commitLeasedBatch(
   const nextExpIso = new Date(nextExpMs).toISOString();
   const renewThresholdIso = new Date(renewThresholdMs).toISOString();
 
-  const serialized = candidates.map((cand) => {
-    const usageInfo = usageCanonicalAndDigest(cand.item.usage);
-    return {
-      cand,
-      chargeId: fastUuid(),
-      eventId: fastUuid(),
-      usageJson: usageInfo.json,
-      usageDigest: usageInfo.digest,
-      customerAtomsText: cand.customerAtoms.toString(),
-      supplierAtomsText: cand.supplierAtoms.toString(),
-    };
-  });
+  const serialized: {
+    cand: FastCommitCandidate;
+    chargeId: string;
+    eventId: string;
+    usageJson: string;
+    usageDigest: string;
+    pluginAuditJson: string;
+    customerAtomsText: string;
+    supplierAtomsText: string;
+  }[] = [];
+  const pChargeIds: string[] = [];
+  const pEventIds: string[] = [];
+  const pRequestIds: string[] = [];
+  const pBillingAccountIds: string[] = [];
+  const pWalletIds: string[] = [];
+  const pApiKeyIds: (string | null)[] = [];
+  const pPricingOverrideIds: (string | null)[] = [];
+  const pDiscountNumerators: (string | null)[] = [];
+  const pDiscountDenominators: (string | null)[] = [];
+  const pWalletLeaseIds: string[] = [];
+  const pSupplierLeaseIds: string[] = [];
+  const pSelectedAttemptIds: string[] = [];
+  const pChannelIds: string[] = [];
+  const pModels: string[] = [];
+  const pOperations: string[] = [];
+  const pCurrencies: string[] = [];
+  const pBillingPriceIds: (string | null)[] = [];
+  const pCostVersionIds: (string | null)[] = [];
+  const pUsages: string[] = [];
+  const pUsageDigests: string[] = [];
+  const pCustomerAtoms: string[] = [];
+  const pSupplierAtoms: string[] = [];
+  const pSupplierCurrencies: string[] = [];
+  const pPluginAudits: string[] = [];
+  const pChargePolicies: string[] = [];
 
-  let fastPayload = "[";
-  for (let i = 0; i < serialized.length; i++) {
-    if (i > 0) fastPayload += ",";
-    const s = serialized[i]!;
-    const item = s.cand.item;
-    const meta = s.cand.meta;
+  for (let i = 0; i < candidates.length; i++) {
+    const cand = candidates[i]!;
+    const { item, meta } = cand;
+    const usageInfo = usageCanonicalAndDigest(item.usage);
     const audit = item.plugin_audit;
-    const auditJson = !audit || audit.length === 0 ? "[]" : JSON.stringify(audit);
-    fastPayload += `{"charge_id":"${s.chargeId}","event_id":"${s.eventId}","request_id":"${item.request_id}","billing_account_id":"${meta.billingAccountId}","wallet_id":"${meta.walletId}","api_key_id":${jsonNullable(item.api_key_id ?? meta.apiKeyId)},"pricing_override_id":${jsonNullable(item.pricing_override_id ?? meta.pricingOverrideId)},"discount_numerator":${jsonNullable(item.discount_numerator ?? meta.discountNumerator)},"discount_denominator":${jsonNullable(item.discount_denominator ?? meta.discountDenominator)},"wallet_lease_id":"${meta.walletLeaseId}","supplier_lease_id":"${meta.supplierLeaseId}","selected_attempt_id":"${item.selected_attempt_id}","channel_id":"${item.channel_id}","model":${jsonQuote(meta.model)},"operation":${jsonQuote(meta.operation)},"currency":${jsonQuote(meta.currency)},"billing_price_id":${jsonNullable(item.billing_price_id)},"cost_version_id":${jsonNullable(item.cost_version_id)},"usage":${s.usageJson},"usage_digest":"${s.usageDigest}","customer_atoms":"${s.customerAtomsText}","supplier_atoms":"${s.supplierAtomsText}","supplier_currency":${jsonQuote(item.supplier_currency)},"plugin_audit":${auditJson},"charge_policy":${jsonQuote(item.charge_policy ?? "CHARGE_CUSTOMER")}}`;
+    const chargeId = fastUuid();
+    const eventId = fastUuid();
+    const usageJson = usageInfo.json;
+    const usageDigest = usageInfo.digest;
+    const pluginAuditJson = !audit || audit.length === 0 ? "[]" : JSON.stringify(audit);
+    const customerAtomsText = cand.customerAtoms.toString();
+    const supplierAtomsText = cand.supplierAtoms.toString();
+    serialized.push({
+      cand,
+      chargeId,
+      eventId,
+      usageJson,
+      usageDigest,
+      pluginAuditJson,
+      customerAtomsText,
+      supplierAtomsText,
+    });
+    pChargeIds.push(chargeId);
+    pEventIds.push(eventId);
+    pRequestIds.push(item.request_id);
+    pBillingAccountIds.push(meta.billingAccountId);
+    pWalletIds.push(meta.walletId);
+    pApiKeyIds.push(item.api_key_id ?? meta.apiKeyId ?? null);
+    pPricingOverrideIds.push(item.pricing_override_id ?? meta.pricingOverrideId ?? null);
+    pDiscountNumerators.push(item.discount_numerator ?? meta.discountNumerator ?? null);
+    pDiscountDenominators.push(item.discount_denominator ?? meta.discountDenominator ?? null);
+    pWalletLeaseIds.push(meta.walletLeaseId);
+    pSupplierLeaseIds.push(meta.supplierLeaseId);
+    pSelectedAttemptIds.push(item.selected_attempt_id);
+    pChannelIds.push(item.channel_id);
+    pModels.push(meta.model);
+    pOperations.push(meta.operation);
+    pCurrencies.push(meta.currency);
+    pBillingPriceIds.push(item.billing_price_id ?? null);
+    pCostVersionIds.push(item.cost_version_id ?? null);
+    pUsages.push(usageJson);
+    pUsageDigests.push(usageDigest);
+    pCustomerAtoms.push(customerAtomsText);
+    pSupplierAtoms.push(supplierAtomsText);
+    pSupplierCurrencies.push(item.supplier_currency);
+    pPluginAudits.push(pluginAuditJson);
+    pChargePolicies.push(item.charge_policy ?? "CHARGE_CUSTOMER");
   }
-  fastPayload += "]";
 
   const [fastRow] = await db<
     {
@@ -76,7 +129,31 @@ export async function commitLeasedBatch(
     }[]
   >`
     SELECT public.commit_leased_batch(
-      ${fastPayload}::text::jsonb,
+      ${pChargeIds}::uuid[],
+      ${pEventIds}::uuid[],
+      ${pRequestIds}::uuid[],
+      ${pBillingAccountIds}::uuid[],
+      ${pWalletIds}::uuid[],
+      ${pApiKeyIds}::uuid[],
+      ${pPricingOverrideIds}::uuid[],
+      ${pDiscountNumerators}::numeric[],
+      ${pDiscountDenominators}::numeric[],
+      ${pWalletLeaseIds}::uuid[],
+      ${pSupplierLeaseIds}::uuid[],
+      ${pSelectedAttemptIds}::uuid[],
+      ${pChannelIds}::uuid[],
+      ${pModels}::text[],
+      ${pOperations}::text[],
+      ${pCurrencies}::text[],
+      ${pBillingPriceIds}::uuid[],
+      ${pCostVersionIds}::uuid[],
+      ${pUsages}::text[],
+      ${pUsageDigests}::text[],
+      ${pCustomerAtoms}::numeric[],
+      ${pSupplierAtoms}::numeric[],
+      ${pSupplierCurrencies}::text[],
+      ${pPluginAudits}::text[],
+      ${pChargePolicies}::text[],
       ${nextExpIso}::timestamptz,
       ${renewThresholdIso}::timestamptz,
       ${nowIso}::timestamptz
@@ -659,39 +736,38 @@ export async function commitLeasedBatch(
       slowSlExp = slowExpRow.sl_expiries ?? {};
     }
 
-    const slowOutboxJson = JSON.stringify(
-      prepared.map((p) => ({
-        event_id: p.eventId,
-        request_id: p.cand.item.request_id,
-        billing_account_id: p.cand.meta.billingAccountId,
-        payload: {
-          charge_id: p.chargeId,
-          request_id: p.cand.item.request_id,
-          api_key_id: p.cand.item.api_key_id ?? p.cand.meta.apiKeyId,
-          attempt_id: p.cand.item.selected_attempt_id,
-          channel_id: p.cand.item.channel_id,
-          model: p.cand.meta.model,
-          operation: p.cand.meta.operation,
-          currency: p.cand.meta.currency,
-          pricing_override_id: p.cand.item.pricing_override_id ?? p.cand.meta.pricingOverrideId,
-          usage: p.cand.item.usage,
-          customer_atoms: p.customerAtomsText,
-          funded_atoms: p.customerAtomsText,
-          debt_atoms: "0",
-          supplier_cost_atoms: p.supplierAtomsText,
-          outcome: "SETTLED",
-          wallet_available_atoms: (wAvailAfter.get(p.cand.meta.walletId) ?? 0n).toString(),
-        },
-      })),
-    );
     await tx`
-            INSERT INTO public.outbox_events (event_id, kind, request_id, billing_account_id, payload)
-            SELECT u.event_id, 'billing.settled', u.request_id, u.billing_account_id, u.payload
-            FROM jsonb_to_recordset(${slowOutboxJson}::text::jsonb) AS u(
-              event_id uuid, request_id uuid, billing_account_id uuid, payload jsonb
-            )
-            ORDER BY public.outbox_shard(u.billing_account_id) ASC, u.request_id ASC
-      `;
+      SELECT public.publish_outbox_batch(
+        ${prepared.map((p) => p.eventId)}::uuid[],
+        ${prepared.map(() => "billing.settled")}::text[],
+        ${prepared.map((p) => p.cand.item.request_id)}::uuid[],
+        ${prepared.map((p) => p.cand.meta.billingAccountId)}::uuid[],
+        ARRAY(
+          SELECT x::jsonb
+          FROM unnest(${prepared.map((p) =>
+            JSON.stringify({
+              charge_id: p.chargeId,
+              request_id: p.cand.item.request_id,
+              api_key_id: p.cand.item.api_key_id ?? p.cand.meta.apiKeyId,
+              attempt_id: p.cand.item.selected_attempt_id,
+              channel_id: p.cand.item.channel_id,
+              model: p.cand.meta.model,
+              operation: p.cand.meta.operation,
+              currency: p.cand.meta.currency,
+              pricing_override_id: p.cand.item.pricing_override_id ?? p.cand.meta.pricingOverrideId,
+              usage: p.cand.item.usage,
+              customer_atoms: p.customerAtomsText,
+              funded_atoms: p.customerAtomsText,
+              debt_atoms: "0",
+              supplier_cost_atoms: p.supplierAtomsText,
+              outcome: "SETTLED",
+              wallet_available_atoms: (wAvailAfter.get(p.cand.meta.walletId) ?? 0n).toString(),
+            }),
+          )}::text[]) WITH ORDINALITY AS t(x, o)
+          ORDER BY o
+        )
+      )
+    `;
 
     for (const p of prepared) {
       results[p.cand.index] = {

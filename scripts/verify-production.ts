@@ -205,11 +205,12 @@ synchronous_commit = on
         'refresh_config_epoch_lineage',
         'outbox_shard',
         'commit_leased_batch',
-        'acquire_leased_holds'
+        'acquire_leased_holds',
+        'publish_outbox_batch'
       )
   `;
   verify(
-    fnOwners.length === 7 && fnOwners.every((row) => row.owner === "drill_migration"),
+    fnOwners.length === 8 && fnOwners.every((row) => row.owner === "drill_migration"),
     "All definer/trigger functions must belong to the dedicated migration login",
   );
   await runPg("psql", ["-X", "-d", pgUrl(primaryPort), "-f", resolve("infra/postgres/roles.sql")]);

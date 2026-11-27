@@ -340,3 +340,105 @@ test("funds recovery continues while the business webhook is waiting for a respo
       await webhook.stop(true);
     }
   }));
+
+test("publish_outbox_batch preserves strict monotonic seq under concurrent same-shard batches without skipping late commits", () =>
+  withLedgerDb(async (db) => {
+    const ledger = createLedgerEngine(db, { enableLeases: false });
+    const billingAccountId = "00000000-0000-4000-8000-000000000005";
+    const batch1Events = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+    const batch2Events = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+    const batch1Reqs = [
+      "00000000-0000-4000-8000-000000000010",
+      "00000000-0000-4000-8000-000000000020",
+      "00000000-0000-4000-8000-000000000030",
+    ];
+    const batch2Reqs = [
+      "00000000-0000-4000-8000-000000000040",
+      "00000000-0000-4000-8000-000000000050",
+      "00000000-0000-4000-8000-000000000060",
+    ];
+    const tx1Published = Promise.withResolvers<number>();
+    const tx1Commit = Promise.withResolvers<void>();
+
+    const tx1 = db.begin(async (tx) => {
+      const [pidRow] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      await tx`
+        SELECT public.publish_outbox_batch(
+          ${batch1Events}::uuid[],
+          ${batch1Events.map(() => "billing.settled")}::text[],
+          ${batch1Reqs}::uuid[],
+          ${batch1Events.map(() => billingAccountId)}::uuid[],
+          ARRAY(
+            SELECT x::jsonb
+            FROM unnest(${batch1Events.map((_, idx) => JSON.stringify({ batch: 1, idx }))}::text[]) WITH ORDINALITY AS t(x, o)
+            ORDER BY o
+          )
+        )
+      `;
+      tx1Published.resolve(pidRow!.pid);
+      await tx1Commit.promise;
+    });
+    const tx1Pid = await tx1Published.promise;
+
+    let tx2Done = false;
+    const tx2 = db.begin(async (tx) => {
+      await tx`
+        SELECT public.publish_outbox_batch(
+          ${batch2Events}::uuid[],
+          ${batch2Events.map(() => "billing.settled")}::text[],
+          ${batch2Reqs}::uuid[],
+          ${batch2Events.map(() => billingAccountId)}::uuid[],
+          ARRAY(
+            SELECT x::jsonb
+            FROM unnest(${batch2Events.map((_, idx) => JSON.stringify({ batch: 2, idx }))}::text[]) WITH ORDINALITY AS t(x, o)
+            ORDER BY o
+          )
+        )
+      `;
+      tx2Done = true;
+    });
+
+    const deadline = performance.now() + 2_000;
+    let waiting = false;
+    do {
+      const [row] = await db<{ waiting: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND ${tx1Pid} = ANY(pg_blocking_pids(pid))
+        ) AS waiting
+      `;
+      waiting = Boolean(row?.waiting);
+      if (!waiting) await Bun.sleep(10);
+    } while (!waiting && performance.now() < deadline);
+    expect(waiting).toBe(true);
+    expect(tx2Done).toBe(false);
+    tx1Commit.resolve();
+    await Promise.all([tx1, tx2]);
+    expect(tx2Done).toBe(true);
+
+    const rows = await db<{ event_id: string; seq: string; shard: number }[]>`
+      SELECT event_id::text AS event_id, seq::text AS seq, shard
+      FROM public.outbox_events
+      WHERE billing_account_id = ${billingAccountId}::uuid
+      ORDER BY seq ASC
+    `;
+    expect(rows).toHaveLength(6);
+    expect(rows.map((r) => r.event_id)).toEqual([...batch1Events, ...batch2Events]);
+    for (let i = 1; i < rows.length; i++) {
+      expect(BigInt(rows[i]!.seq) > BigInt(rows[i - 1]!.seq)).toBe(true);
+    }
+
+    const claimed = await ledger.claimOutboxEvents("batch-shard-order", 10);
+    expect(claimed.events.map((e) => e.event_id)).toEqual([...batch1Events, ...batch2Events]);
+    expect(claimed.events[0]!.payload).toEqual({ batch: 1, idx: 0 });
+    expect(claimed.events[3]!.payload).toEqual({ batch: 2, idx: 0 });
+    expect(
+      await ledger.ackOutboxEvents(
+        "batch-shard-order",
+        claimed.lease_token,
+        claimed.events.at(-1)!.seq,
+      ),
+    ).toBe(true);
+    expect((await ledger.claimOutboxEvents("batch-shard-order", 10)).events).toEqual([]);
+  }));

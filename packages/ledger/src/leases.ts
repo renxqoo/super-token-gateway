@@ -10,7 +10,87 @@ import {
   toWalletRow,
   type JournalLine,
   type LotRow,
+  type WalletRow,
 } from "./funds.ts";
+
+export type PendingLeaseSpend = {
+  id: string;
+  spent_lot_id: string;
+  spent_atoms: bigint;
+};
+
+export async function lockActiveWalletLeaseSpendTx(
+  tx: SQL,
+  walletId: string,
+): Promise<PendingLeaseSpend[]> {
+  const rows = await tx<{ id: string; spent_lot_id: string | null; spent_atoms: string }[]>`
+    SELECT id::text AS id, spent_lot_id::text AS spent_lot_id, spent_atoms::text AS spent_atoms
+    FROM public.wallet_leases
+    WHERE wallet_id = ${walletId}::uuid AND state = 'ACTIVE'
+    ORDER BY id
+    FOR NO KEY UPDATE
+  `;
+  const pending: PendingLeaseSpend[] = [];
+  for (const r of rows) {
+    const spent = BigInt(r.spent_atoms);
+    if (spent <= 0n) continue;
+    if (!r.spent_lot_id) {
+      throw new Error(`Wallet lease ${r.id} has spent_atoms without spent_lot_id`);
+    }
+    pending.push({
+      id: r.id,
+      spent_lot_id: r.spent_lot_id,
+      spent_atoms: spent,
+    });
+  }
+  return pending;
+}
+
+export async function flushActiveWalletLeaseSpendTx(
+  tx: SQL,
+  wallet: WalletRow,
+  leases: readonly PendingLeaseSpend[],
+): Promise<void> {
+  if (leases.length === 0) return;
+  const spentByLot = new Map<string, bigint>();
+  let totalSpent = 0n;
+  for (const l of leases) {
+    totalSpent += l.spent_atoms;
+    spentByLot.set(l.spent_lot_id, (spentByLot.get(l.spent_lot_id) ?? 0n) + l.spent_atoms);
+  }
+  const lotIds = [...spentByLot.keys()].sort();
+  const lotSpents = lotIds.map((id) => spentByLot.get(id)!.toString());
+  const leaseIds = leases.map((l) => l.id);
+
+  await tx`
+    SELECT id FROM public.wallet_lots
+    WHERE id = ANY(${lotIds}::uuid[])
+    ORDER BY id
+    FOR NO KEY UPDATE
+  `;
+  await tx`
+    UPDATE public.wallet_lots AS l
+    SET reserved_atoms = l.reserved_atoms - u.spent,
+        spent_atoms = l.spent_atoms + u.spent
+    FROM unnest(${lotIds}::uuid[], ${lotSpents}::numeric[]) AS u(id, spent)
+    WHERE l.id = u.id
+  `;
+  wallet.reserved_atoms -= totalSpent;
+  wallet.spent_atoms += totalSpent;
+  await tx`
+    UPDATE public.wallets
+    SET reserved_atoms = ${wallet.reserved_atoms.toString()}::numeric,
+        spent_atoms = ${wallet.spent_atoms.toString()}::numeric
+    WHERE id = ${wallet.id}::uuid
+  `;
+  await tx`
+    UPDATE public.wallet_leases
+    SET spent_atoms = 0,
+        spent_lot_id = NULL,
+        updated_at = now()
+    WHERE id = ANY(${leaseIds}::uuid[])
+  `;
+}
 
 export type ActiveWalletLease = {
   leaseId: string;
@@ -242,50 +322,73 @@ export async function closeIdleWalletLeaseBatch(
     const locked = await tx<{ id: string }[]>`
       SELECT id FROM public.wallet_leases
       WHERE id = ANY(${leaseIds}::uuid[]) AND node_id = ${nodeId} AND state = 'ACTIVE'
-        AND remaining_atoms > 0 AND earliest_lot_expires_at IS NULL
-        AND jsonb_array_length(lot_allocations) = 1
+        AND earliest_lot_expires_at IS NULL
+        AND remaining_atoms >= 0
+        AND (remaining_atoms > 0 OR spent_atoms > 0)
+        AND (
+          (remaining_atoms > 0 AND jsonb_array_length(lot_allocations) = 1
+            AND (spent_atoms = 0 OR spent_lot_id = (lot_allocations->0->>'lot_id')::uuid))
+          OR
+          (remaining_atoms = 0 AND jsonb_array_length(lot_allocations) = 0 AND spent_lot_id IS NOT NULL)
+        )
       ORDER BY id FOR UPDATE SKIP LOCKED
     `;
     if (locked.length === 0) return [];
     const closed = await tx<{ id: string }[]>`
-      WITH idle AS MATERIALIZED (
-        SELECT DISTINCT ON (l.wallet_id) l.id, l.wallet_id, l.remaining_atoms,
-          (l.lot_allocations->0->>'lot_id')::uuid AS lot_id
+      WITH open_wl AS MATERIALIZED (
+        SELECT DISTINCT wallet_lease_id
+        FROM public.billing_holds
+        WHERE state IN ('HELD', 'UNKNOWN') AND wallet_lease_id IS NOT NULL
+      ), idle AS MATERIALIZED (
+        SELECT DISTINCT ON (l.wallet_id)
+          l.id,
+          l.wallet_id,
+          l.remaining_atoms,
+          l.spent_atoms,
+          (l.remaining_atoms + l.spent_atoms) AS total_reserved,
+          CASE WHEN l.spent_atoms > 0 THEN l.spent_lot_id ELSE (l.lot_allocations->0->>'lot_id')::uuid END AS lot_id
         FROM public.wallet_leases l
-        LEFT JOIN LATERAL (
-          SELECT true AS occupied FROM public.billing_holds h
-          WHERE h.wallet_lease_id = l.id AND h.state IN ('HELD', 'UNKNOWN')
-          LIMIT 1
-        ) h ON true
+        LEFT JOIN open_wl o ON o.wallet_lease_id = l.id
         WHERE l.id = ANY(${locked.map(({ id }) => id)}::uuid[])
-          AND (l.lot_allocations->0->>'amount_atoms')::numeric = l.remaining_atoms
-          AND h.occupied IS NULL
+          AND (
+            (l.remaining_atoms = 0 AND jsonb_array_length(l.lot_allocations) = 0)
+            OR (l.remaining_atoms > 0 AND (l.lot_allocations->0->>'amount_atoms')::numeric = l.remaining_atoms)
+          )
+          AND o.wallet_lease_id IS NULL
         ORDER BY l.wallet_id, l.id
       ), wallets AS MATERIALIZED (
-        SELECT i.id, i.wallet_id, i.lot_id, i.remaining_atoms
+        SELECT i.id, i.wallet_id, i.lot_id, i.remaining_atoms, i.spent_atoms, i.total_reserved
         FROM idle i JOIN public.wallets w ON w.id = i.wallet_id
-        WHERE w.reserved_atoms >= i.remaining_atoms
+        WHERE w.reserved_atoms >= i.total_reserved
           AND w.freeze_reason IS NULL AND NOT w.manual_frozen AND NOT w.evidence_disputed
           AND w.debt_atoms + w.credit_reserved_atoms <= w.credit_limit_atoms
         ORDER BY w.id FOR NO KEY UPDATE OF w SKIP LOCKED
       ), releasable AS MATERIALIZED (
-        SELECT w.id, w.wallet_id, w.lot_id, w.remaining_atoms
+        SELECT w.id, w.wallet_id, w.lot_id, w.remaining_atoms, w.spent_atoms, w.total_reserved
         FROM wallets w JOIN public.wallet_lots l ON l.id = w.lot_id AND l.wallet_id = w.wallet_id
-        WHERE l.expires_at IS NULL AND l.reserved_atoms >= w.remaining_atoms
+        WHERE (w.remaining_atoms = 0 OR l.expires_at IS NULL)
+          AND l.reserved_atoms >= w.total_reserved
         ORDER BY l.id FOR NO KEY UPDATE OF l SKIP LOCKED
       ), credit_lots AS (
         UPDATE public.wallet_lots l
         SET available_atoms = l.available_atoms + r.remaining_atoms,
-            reserved_atoms = l.reserved_atoms - r.remaining_atoms
+            reserved_atoms = l.reserved_atoms - r.total_reserved,
+            spent_atoms = l.spent_atoms + r.spent_atoms
         FROM releasable r WHERE l.id = r.lot_id
       ), credit_wallets AS (
         UPDATE public.wallets w
         SET available_atoms = w.available_atoms + r.remaining_atoms,
-            reserved_atoms = w.reserved_atoms - r.remaining_atoms
+            reserved_atoms = w.reserved_atoms - r.total_reserved,
+            spent_atoms = w.spent_atoms + r.spent_atoms
         FROM releasable r WHERE w.id = r.wallet_id
       )
       UPDATE public.wallet_leases l
-      SET state = 'CLOSED', remaining_atoms = 0, lot_allocations = '[]'::jsonb, updated_at = now()
+      SET state = 'CLOSED',
+          remaining_atoms = 0,
+          spent_atoms = 0,
+          spent_lot_id = NULL,
+          lot_allocations = '[]'::jsonb,
+          updated_at = now()
       FROM releasable r WHERE l.id = r.id
       RETURNING l.id
     `;
@@ -301,7 +404,8 @@ export async function closeWalletLease(
   return db
     .begin(async (tx) => {
       const wlRows = await tx`
-          SELECT id, wallet_id, currency, lot_allocations, remaining_atoms::text, state
+          SELECT id, wallet_id, currency, lot_allocations, remaining_atoms::text,
+            spent_atoms::text, spent_lot_id, state
           FROM public.wallet_leases
           WHERE id = ${leaseId}
             AND state = 'ACTIVE'
@@ -310,15 +414,28 @@ export async function closeWalletLease(
         `;
       if (!wlRows.length) return false;
       const wl = wlRows[0]!;
-      const openHolds = await tx`
-          SELECT request_id, held_atoms::text
+      const candidateHoldRows = await tx<{ request_id: string }[]>`
+          SELECT request_id::text AS request_id
           FROM public.billing_holds
-          WHERE wallet_lease_id = ${leaseId} AND state IN ('HELD', 'UNKNOWN')
+          WHERE state IN ('HELD', 'UNKNOWN') AND wallet_lease_id = ${leaseId}::uuid
           ORDER BY request_id
-          FOR NO KEY UPDATE NOWAIT
         `;
+      const candidateIds = candidateHoldRows.map((r) => r.request_id);
+      const openHolds = candidateIds.length
+        ? await tx<{ request_id: string; held_atoms: string }[]>`
+            SELECT request_id, held_atoms::text
+            FROM public.billing_holds
+            WHERE request_id = ANY(${candidateIds}::uuid[])
+              AND wallet_lease_id = ${leaseId}::uuid
+              AND state IN ('HELD', 'UNKNOWN')
+            ORDER BY request_id
+            FOR NO KEY UPDATE NOWAIT
+          `
+        : [];
       let leaseLots = (wl.lot_allocations ?? []) as LeaseLotAllocation[];
       let remainingAtoms = BigInt(String(wl.remaining_atoms));
+      const spentAtoms = BigInt(String(wl.spent_atoms ?? "0"));
+      const spentLotId = wl.spent_lot_id ? String(wl.spent_lot_id) : null;
 
       for (const oh of openHolds) {
         const amt = BigInt(String(oh.held_atoms));
@@ -341,7 +458,9 @@ export async function closeWalletLease(
           FROM public.wallets WHERE id = ${wl.wallet_id} FOR NO KEY UPDATE
         `;
       const wallet = toWalletRow(wRows[0]!);
-      const lotIds = [...new Set(leaseLots.map((l) => l.lot_id))].sort();
+      const lotIdSet = new Set(leaseLots.map((l) => l.lot_id));
+      if (spentAtoms > 0n && spentLotId) lotIdSet.add(spentLotId);
+      const lotIds = [...lotIdSet].sort();
       const lotRowsRaw = lotIds.length
         ? await tx`
               SELECT id, wallet_id, kind, priority, models, operations, expires_at, created_at,
@@ -401,10 +520,20 @@ export async function closeWalletLease(
         lot.dirty = true;
       }
 
-      if (remainingAtoms > 0n) {
-        wallet.reserved_atoms -= remainingAtoms;
+      if (spentAtoms > 0n) {
+        if (!spentLotId) throw new Error(`Wallet lease ${leaseId} missing spent_lot_id`);
+        const spentLot = lotsById.get(spentLotId);
+        if (!spentLot) throw new Error(`Wallet lease ${leaseId} missing spent lot ${spentLotId}`);
+        spentLot.reserved_atoms -= spentAtoms;
+        spentLot.spent_atoms += spentAtoms;
+        spentLot.dirty = true;
+      }
+
+      if (remainingAtoms > 0n || spentAtoms > 0n) {
+        wallet.reserved_atoms -= remainingAtoms + spentAtoms;
         wallet.available_atoms += returnedAvail;
         wallet.expired_atoms += expiredAmt;
+        wallet.spent_atoms += spentAtoms;
         wallet.freeze_reason = computeFreezeReason(wallet);
         wallet.dirty = true;
       }
@@ -414,7 +543,12 @@ export async function closeWalletLease(
       await insertJournalLines(tx, journals);
       await tx`
           UPDATE public.wallet_leases
-          SET state = 'CLOSED', remaining_atoms = 0, lot_allocations = '[]'::jsonb, updated_at = now()
+          SET state = 'CLOSED',
+              remaining_atoms = 0,
+              spent_atoms = 0,
+              spent_lot_id = NULL,
+              lot_allocations = '[]'::jsonb,
+              updated_at = now()
           WHERE id = ${leaseId}
         `;
       return true;
@@ -433,7 +567,7 @@ export async function closeSupplierLease(
   return db
     .begin(async (tx) => {
       const slRows = await tx`
-          SELECT id, account_id, currency, cell, remaining_atoms::text, state
+          SELECT id, account_id, currency, cell, remaining_atoms::text, spent_atoms::text, state
           FROM public.supplier_leases
           WHERE id = ${leaseId}
             AND state = 'ACTIVE'
@@ -442,14 +576,26 @@ export async function closeSupplierLease(
         `;
       if (!slRows.length) return false;
       const sl = slRows[0]!;
-      const openHolds = await tx`
-          SELECT request_id, supplier_holds
+      const candidateHoldRows = await tx<{ request_id: string }[]>`
+          SELECT request_id::text AS request_id
           FROM public.billing_holds
-          WHERE supplier_lease_id = ${leaseId} AND state IN ('HELD', 'UNKNOWN')
+          WHERE state IN ('HELD', 'UNKNOWN') AND supplier_lease_id = ${leaseId}::uuid
           ORDER BY request_id
-          FOR NO KEY UPDATE NOWAIT
         `;
+      const candidateIds = candidateHoldRows.map((r) => r.request_id);
+      const openHolds = candidateIds.length
+        ? await tx<{ request_id: string; supplier_holds: SupplierHoldEntry[] }[]>`
+            SELECT request_id, supplier_holds
+            FROM public.billing_holds
+            WHERE request_id = ANY(${candidateIds}::uuid[])
+              AND supplier_lease_id = ${leaseId}::uuid
+              AND state IN ('HELD', 'UNKNOWN')
+            ORDER BY request_id
+            FOR NO KEY UPDATE NOWAIT
+          `
+        : [];
       let remainingAtoms = BigInt(String(sl.remaining_atoms));
+      const spentAtoms = BigInt(String(sl.spent_atoms ?? "0"));
       for (const oh of openHolds) {
         const holds = (oh.supplier_holds ?? []) as SupplierHoldEntry[];
         const heldSum = holds.reduce(
@@ -462,17 +608,20 @@ export async function closeSupplierLease(
             UPDATE public.billing_holds SET supplier_lease_id = NULL WHERE request_id = ${oh.request_id}
           `;
       }
-      if (remainingAtoms > 0n) {
+      const totalReserved = remainingAtoms + spentAtoms;
+      if (totalReserved > 0n) {
         await tx`
             UPDATE public.supplier_cells
-            SET reserved_atoms = reserved_atoms - ${remainingAtoms.toString()}::numeric,
+            SET reserved_atoms = reserved_atoms - ${totalReserved.toString()}::numeric,
+                balance_atoms = balance_atoms - ${spentAtoms.toString()}::numeric,
+                spent_atoms = spent_atoms + ${spentAtoms.toString()}::numeric,
                 revision = revision + 1
             WHERE account_id = ${sl.account_id} AND currency = ${sl.currency} AND cell = ${Number(sl.cell)}
           `;
       }
       await tx`
           UPDATE public.supplier_leases
-          SET state = 'CLOSED', remaining_atoms = 0, updated_at = now()
+          SET state = 'CLOSED', remaining_atoms = 0, spent_atoms = 0, updated_at = now()
           WHERE id = ${leaseId}
         `;
       return true;

@@ -16,26 +16,18 @@ import {
 } from "./funds.ts";
 import { matchesHoldFingerprint } from "./transactional-hold-state.ts";
 
-function serializeFastHoldBatch(items: FastHoldRequest[]): string {
-  let out = "[";
-  for (let i = 0; i < items.length; i++) {
-    if (i > 0) out += ",";
-    const x = items[i]!;
-    const inp = x.input;
-    const custAtoms = x.customerAtoms.toString();
-    const supAtoms = x.supplierAtoms.toString();
-    const overrideId = jsonNullable(inp.pricing_override_id);
-    const discNum = jsonNullable(inp.discount_numerator);
-    const discDen = jsonNullable(inp.discount_denominator);
-    let sh = `[{"attempt_id":"${inp.attempt_id}"`;
-    if (inp.supplier_cost_version_id) sh += `,"cost_version_id":"${inp.supplier_cost_version_id}"`;
-    if (inp.customer_price_version_id) {
-      sh += `,"customer_price_version_id":"${inp.customer_price_version_id}","customer_price_adjustment":{"override_id":${overrideId},"discount_numerator":${discNum},"discount_denominator":${discDen}}`;
-    }
-    sh += `,"account_id":"${inp.supplier_account_id}","channel_id":"${inp.supplier_channel_id}","currency":${jsonQuote(inp.supplier_currency)},"cell":${x.supplierLease.cell},"held_atoms":"${supAtoms}","state":"HELD"}]`;
-    out += `{"request_id":"${inp.request_id}","billing_account_id":"${inp.billing_account_id}","wallet_id":"${x.walletLease.walletId}","api_key_id":${jsonNullable(inp.api_key_id)},"pricing_override_id":${overrideId},"discount_numerator":${discNum},"discount_denominator":${discDen},"operation":${jsonQuote(inp.operation)},"model":${jsonQuote(inp.model)},"fingerprint":${inp.fingerprint.length === 0 ? '""' : JSON.stringify(inp.fingerprint)},"held_atoms":"${custAtoms}","supplier_holds":${sh},"wallet_lease_id":"${x.walletLease.leaseId}","supplier_lease_id":"${x.supplierLease.leaseId}","expires_at":${jsonQuote(inp.expires_at)}}`;
+function serializeSupplierHold(item: FastHoldRequest): string {
+  const inp = item.input;
+  const supAtoms = item.supplierAtoms.toString();
+  const overrideId = jsonNullable(inp.pricing_override_id);
+  const discNum = jsonNullable(inp.discount_numerator);
+  const discDen = jsonNullable(inp.discount_denominator);
+  let sh = `[{"attempt_id":"${inp.attempt_id}"`;
+  if (inp.supplier_cost_version_id) sh += `,"cost_version_id":"${inp.supplier_cost_version_id}"`;
+  if (inp.customer_price_version_id) {
+    sh += `,"customer_price_version_id":"${inp.customer_price_version_id}","customer_price_adjustment":{"override_id":${overrideId},"discount_numerator":${discNum},"discount_denominator":${discDen}}`;
   }
-  return `${out}]`;
+  return `${sh},"account_id":"${inp.supplier_account_id}","channel_id":"${inp.supplier_channel_id}","currency":${jsonQuote(inp.supplier_currency)},"cell":${item.supplierLease.cell},"held_atoms":"${supAtoms}","state":"HELD"}]`;
 }
 
 export function createHoldAcquirer(
@@ -50,8 +42,6 @@ export function createHoldAcquirer(
     retry = false,
     checkDebtGrants = false,
   ): Promise<(AcquireHoldResult | Promise<AcquireHoldResult>)[]> {
-    const batchPayload = serializeFastHoldBatch(items);
-
     const retireLeases = (item: FastHoldRequest) => {
       if (item.walletLease.inFlightHolds > 0) item.walletLease.inFlightHolds--;
       if (item.supplierLease.inFlightHolds > 0) item.supplierLease.inFlightHolds--;
@@ -66,15 +56,70 @@ export function createHoldAcquirer(
     };
     let admitted: Set<string>;
     try {
-      const uniqueWalletLeaseIds = [...new Set(items.map((item) => item.walletLease.leaseId))];
-      const uniqueSupplierLeaseIds = [...new Set(items.map((item) => item.supplierLease.leaseId))];
+      const n = items.length;
+      const wlSet = new Set<string>();
+      const slSet = new Set<string>();
+      const requestIds: string[] = [];
+      const billingAccountIds: string[] = [];
+      const walletIds: string[] = [];
+      const apiKeyIds: (string | null)[] = [];
+      const pricingOverrideIds: (string | null)[] = [];
+      const discountNumerators: (string | null)[] = [];
+      const discountDenominators: (string | null)[] = [];
+      const operations: string[] = [];
+      const models: string[] = [];
+      const fingerprints: string[] = [];
+      const heldAtoms: string[] = [];
+      const supplierHolds: string[] = [];
+      const itemWalletLeaseIds: string[] = [];
+      const itemSupplierLeaseIds: string[] = [];
+      const expiresAts: string[] = [];
+      for (let i = 0; i < n; i++) {
+        const x = items[i]!;
+        const inp = x.input;
+        const wlId = x.walletLease.leaseId;
+        const slId = x.supplierLease.leaseId;
+        wlSet.add(wlId);
+        slSet.add(slId);
+        requestIds.push(inp.request_id);
+        billingAccountIds.push(inp.billing_account_id);
+        walletIds.push(x.walletLease.walletId);
+        apiKeyIds.push(inp.api_key_id ?? null);
+        pricingOverrideIds.push(inp.pricing_override_id ?? null);
+        discountNumerators.push(inp.discount_numerator ?? null);
+        discountDenominators.push(inp.discount_denominator ?? null);
+        operations.push(inp.operation);
+        models.push(inp.model);
+        fingerprints.push(inp.fingerprint);
+        heldAtoms.push(x.customerAtoms.toString());
+        supplierHolds.push(serializeSupplierHold(x));
+        itemWalletLeaseIds.push(wlId);
+        itemSupplierLeaseIds.push(slId);
+        expiresAts.push(inp.expires_at);
+      }
+      const uniqueWalletLeaseIds = [...wlSet];
+      const uniqueSupplierLeaseIds = [...slSet];
       const [row] = await db<{ admitted: string[] | null }[]>`
         SELECT public.acquire_leased_holds(
           ${leases.nodeId},
           ${uniqueWalletLeaseIds}::uuid[],
           ${uniqueSupplierLeaseIds}::uuid[],
-          ${batchPayload}::text::jsonb,
-          ${checkDebtGrants}::boolean
+          ${checkDebtGrants}::boolean,
+          ${requestIds}::uuid[],
+          ${billingAccountIds}::uuid[],
+          ${walletIds}::uuid[],
+          ${apiKeyIds}::uuid[],
+          ${pricingOverrideIds}::uuid[],
+          ${discountNumerators}::numeric[],
+          ${discountDenominators}::numeric[],
+          ${operations}::text[],
+          ${models}::text[],
+          ${fingerprints}::text[],
+          ${heldAtoms}::numeric[],
+          ${supplierHolds}::text[],
+          ${itemWalletLeaseIds}::uuid[],
+          ${itemSupplierLeaseIds}::uuid[],
+          ${expiresAts}::timestamptz[]
         ) AS admitted
       `.catch((error: unknown) => {
         if (postgresState(error) === "57014") throw new LedgerStatementCancelled(error);
@@ -203,7 +248,6 @@ export function createHoldAcquirer(
         : null;
     },
     acquireHold(input: AcquireHoldInput): Promise<AcquireHoldResult> {
-      const lane = walletLane(input.billing_account_id);
       if (leases.canAcquire() && input.idempotency_key === null && !input.enforce_key_spend_limit) {
         const customerAtoms = parseAtoms(input.customer_atoms);
         const supplierAtoms = parseAtoms(input.supplier_atoms);
@@ -212,7 +256,7 @@ export function createHoldAcquirer(
           if (reserved) return fastHoldQueue.enqueue(reserved);
         }
       }
-      return acquireQueues[lane]!.enqueue(input);
+      return acquireQueues[walletLane(input.billing_account_id)]!.enqueue(input);
     },
     async drain(): Promise<void> {
       await fastHoldQueue.drain();

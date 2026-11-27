@@ -713,3 +713,80 @@ test("0001 ledger hot path migration upgrades a 0000 database with pre-existing 
     },
     async () => {},
   ));
+
+test("0002 migration upgrades a 0001 database with active and closed leases and monthly partitions", () =>
+  withLedgerDb(
+    async (db) => {
+      const m0 = migrationManifest.migrations[0]!;
+      const m1 = migrationManifest.migrations[1]!;
+      const sql0 = await Bun.file(
+        "packages/ledger/src/migrations/0000_billing_accounts.sql",
+      ).text();
+      const sql1 = await Bun.file(
+        "packages/ledger/src/migrations/0001_ledger_hot_path_perf.sql",
+      ).text();
+      const digest = (m: unknown) =>
+        new Bun.CryptoHasher("sha256").update(JSON.stringify(m)).digest("hex");
+      await db.begin(async (tx) => {
+        await tx.unsafe(sql0);
+        await tx`INSERT INTO public.schema_migrations(version, checksum, manifest) VALUES (${m0.version}, ${digest(m0)}, ${m0}::jsonb)`;
+        await tx.unsafe(sql1);
+        await tx`INSERT INTO public.schema_migrations(version, checksum, manifest) VALUES (${m1.version}, ${digest(m1)}, ${m1}::jsonb)`;
+      });
+      const now = new Date();
+      const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+      await prepareLedgerMonth(db, month);
+      const acctId = crypto.randomUUID();
+      const walletId = crypto.randomUUID();
+      const lotId = crypto.randomUUID();
+      const upId = crypto.randomUUID();
+      const activeWl = crypto.randomUUID();
+      const closedWl = crypto.randomUUID();
+      const activeSl = crypto.randomUUID();
+      const closedSl = crypto.randomUUID();
+      await db.begin(async (tx) => {
+        await tx`INSERT INTO public.billing_accounts (id, name, currency, rpm, tpm, concurrency) VALUES (${acctId}::uuid, 'upg-0002', 'PTS', 100, 10000, 10)`;
+        await tx`INSERT INTO public.wallets (id, billing_account_id, currency, reserved_atoms) VALUES (${walletId}::uuid, ${acctId}::uuid, 'PTS', 1000)`;
+        await tx`INSERT INTO public.wallet_lots (id, wallet_id, external_ref, kind, issued_atoms, available_atoms, reserved_atoms) VALUES (${lotId}::uuid, ${walletId}::uuid, 'upg-lot', 'CASH', 1000, 0, 1000)`;
+        await tx`INSERT INTO public.upstream_accounts (id, name) VALUES (${upId}::uuid, 'upg-up')`;
+        await tx`INSERT INTO public.wallet_leases (id, node_id, wallet_id, currency, lot_allocations, remaining_atoms, state, expires_at) VALUES (${activeWl}::uuid, 'n1', ${walletId}::uuid, 'PTS', ${JSON.stringify([{ lot_id: lotId, amount_atoms: "1000", expires_at_ms: null }])}::text::jsonb, 1000, 'ACTIVE', now() + interval '1 hour'), (${closedWl}::uuid, 'n1', ${walletId}::uuid, 'PTS', '[]'::jsonb, 0, 'CLOSED', now() - interval '1 hour')`;
+        await tx`INSERT INTO public.supplier_leases (id, node_id, account_id, currency, cell, remaining_atoms, state, expires_at) VALUES (${activeSl}::uuid, 'n1', ${upId}::uuid, 'USD', 0, 500, 'ACTIVE', now() + interval '1 hour'), (${closedSl}::uuid, 'n1', ${upId}::uuid, 'USD', 0, 0, 'CLOSED', now() - interval '1 hour')`;
+      });
+
+      await migrate(db);
+      expect(await assertSchemaVersion(db)).toBe(SCHEMA_VERSION);
+      expect(
+        await db`SELECT id::text, spent_atoms::text, spent_lot_id FROM public.wallet_leases WHERE id IN (${activeWl}::uuid, ${closedWl}::uuid) ORDER BY state`,
+      ).toEqual([
+        { id: activeWl, spent_atoms: "0", spent_lot_id: null },
+        { id: closedWl, spent_atoms: "0", spent_lot_id: null },
+      ]);
+      expect(
+        await db`SELECT id::text, spent_atoms::text FROM public.supplier_leases WHERE id IN (${activeSl}::uuid, ${closedSl}::uuid) ORDER BY state`,
+      ).toEqual([
+        { id: activeSl, spent_atoms: "0" },
+        { id: closedSl, spent_atoms: "0" },
+      ]);
+      await expect(
+        db`UPDATE public.wallet_leases SET spent_atoms = 10, spent_lot_id = NULL WHERE id = ${activeWl}::uuid`,
+      ).rejects.toThrow();
+      await expect(
+        db`UPDATE public.wallet_leases SET spent_atoms = 0, spent_lot_id = ${lotId}::uuid WHERE id = ${activeWl}::uuid`,
+      ).rejects.toThrow();
+      await expect(
+        db`UPDATE public.wallet_leases SET spent_atoms = 10, spent_lot_id = ${lotId}::uuid WHERE id = ${closedWl}::uuid`,
+      ).rejects.toThrow();
+      await expect(
+        db`UPDATE public.supplier_leases SET spent_atoms = 10 WHERE id = ${closedSl}::uuid`,
+      ).rejects.toThrow();
+      await expect(
+        db`INSERT INTO public.wallets (id, billing_account_id, currency) VALUES (${crypto.randomUUID()}::uuid, ${acctId}::uuid, 'usd')`,
+      ).rejects.toThrow();
+      const [procs] = await db<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public' AND p.proname IN ('commit_leased_batch', 'acquire_leased_holds', 'publish_outbox_batch')
+      `;
+      expect(procs?.n).toBe(3);
+    },
+    async () => {},
+  ));

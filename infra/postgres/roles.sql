@@ -57,9 +57,9 @@ GRANT UPDATE (available_atoms, reserved_atoms, spent_atoms, expired_atoms)
   ON public.wallet_lots TO stg_data, stg_worker;
 GRANT UPDATE (balance_atoms, reserved_atoms, spent_atoms, revision)
   ON public.supplier_cells TO stg_data, stg_worker;
-GRANT UPDATE (state, remaining_atoms, lot_allocations, earliest_lot_expires_at, expires_at, updated_at)
+GRANT UPDATE (state, remaining_atoms, spent_atoms, spent_lot_id, lot_allocations, earliest_lot_expires_at, expires_at, updated_at)
   ON public.wallet_leases TO stg_data, stg_control, stg_worker;
-GRANT UPDATE (state, remaining_atoms, expires_at, updated_at)
+GRANT UPDATE (state, remaining_atoms, spent_atoms, expires_at, updated_at)
   ON public.supplier_leases TO stg_data, stg_control, stg_worker;
 GRANT UPDATE (state, held_atoms, credit_atoms, key_reserved_atoms, lot_allocations, supplier_holds, wallet_lease_id,
   supplier_lease_id, closed_at) ON public.billing_holds TO stg_data, stg_control;
@@ -88,8 +88,19 @@ GRANT SELECT (request_id) ON public.admin_audit_pending TO stg_control;
 GRANT EXECUTE ON FUNCTION public.prepare_ledger_month(DATE) TO stg_worker;
 GRANT EXECUTE ON FUNCTION public.operations_health(TEXT) TO stg_worker;
 GRANT EXECUTE ON FUNCTION public.outbox_shard(UUID) TO stg_data, stg_control, stg_worker;
-GRANT EXECUTE ON FUNCTION public.commit_leased_batch(JSONB, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) TO stg_data;
-GRANT EXECUTE ON FUNCTION public.acquire_leased_holds(TEXT, UUID[], UUID[], JSONB, BOOLEAN) TO stg_data;
+REVOKE ALL ON FUNCTION public.publish_outbox_batch(UUID[], TEXT[], UUID[], UUID[], JSONB[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.publish_outbox_batch(UUID[], TEXT[], UUID[], UUID[], JSONB[]) TO stg_data;
+GRANT EXECUTE ON FUNCTION public.commit_leased_batch(
+  UUID[], UUID[], UUID[], UUID[], UUID[], UUID[], UUID[], NUMERIC[], NUMERIC[],
+  UUID[], UUID[], UUID[], UUID[], TEXT[], TEXT[], TEXT[], UUID[], UUID[],
+  TEXT[], TEXT[], NUMERIC[], NUMERIC[], TEXT[], TEXT[], TEXT[],
+  TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ
+) TO stg_data;
+GRANT EXECUTE ON FUNCTION public.acquire_leased_holds(
+  TEXT, UUID[], UUID[], BOOLEAN,
+  UUID[], UUID[], UUID[], UUID[], UUID[], NUMERIC[], NUMERIC[],
+  TEXT[], TEXT[], TEXT[], NUMERIC[], TEXT[], UUID[], UUID[], TIMESTAMPTZ[]
+) TO stg_data;
 
 GRANT SELECT ON public.billing_reconciliation_receipts, public.billing_reconciliation_budgets,
   public.billing_reconciliation_policies, public.billing_reconciliation_waivers TO stg_control, stg_worker;

@@ -624,7 +624,7 @@ export function createWasmtimeExecutor(options: WasmtimeExecutorOptions = {}): W
               timeoutTotal++;
               rejectInvoke(timeoutError);
             } else {
-              resolveInvoke(data.out ? new Uint8Array(data.out) : new Uint8Array(0));
+              resolveInvoke(data.out ?? new Uint8Array(0));
             }
           } else {
             releaseSlot(slot, true);
@@ -664,7 +664,7 @@ export function createWasmtimeExecutor(options: WasmtimeExecutorOptions = {}): W
         };
 
         try {
-          slot.worker.postMessage({
+          const message = {
             seq,
             id: pluginId,
             digest: entry.digest,
@@ -674,7 +674,18 @@ export function createWasmtimeExecutor(options: WasmtimeExecutorOptions = {}): W
             input,
             fuelBudget: invokeOptions.fuelBudget,
             maxMemoryBytes: effectiveMaxMem,
-          });
+          };
+          if (
+            invokeOptions.transferInput &&
+            input.byteLength > 0 &&
+            input.byteOffset === 0 &&
+            input.byteLength === input.buffer.byteLength &&
+            input.buffer instanceof ArrayBuffer
+          ) {
+            slot.worker.postMessage(message, [input.buffer]);
+          } else {
+            slot.worker.postMessage(message);
+          }
         } catch (error) {
           slot.onFault(error instanceof Error ? error.message : String(error));
         }

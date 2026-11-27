@@ -52,24 +52,98 @@ export class BedrockEventStreamDecoder {
   }
 }
 
-export function extractChunkTextFromEncodedSse(
-  chunkBytes: Uint8Array,
-  protocol: Protocol,
-): string | null {
+type ParsedSseChunk =
+  | { kind: "ok"; obj: Record<string, unknown>; event: string }
+  | { kind: "empty_or_invalid" }
+  | { kind: "multi_event" };
+
+function parseSseDataObject(chunkBytes: Uint8Array): ParsedSseChunk {
   const raw = decoder.decode(chunkBytes);
-  const dataLines = raw
-    .split("\n")
-    .filter((l) => l.startsWith("data: "))
-    .map((l) => l.slice(6));
-  if (dataLines.length === 0) return null;
-  const payload = dataLines.join("\n").trim();
-  if (!payload || payload === "[DONE]") return null;
-  let obj: Record<string, unknown>;
-  try {
-    obj = JSON.parse(payload) as Record<string, unknown>;
-  } catch {
-    return null;
+  const len = raw.length;
+  const hasCr = raw.indexOf("\r") !== -1;
+  let payload: string | undefined;
+  let parts: string[] | undefined;
+  let event = "message";
+  let inEvent = false;
+  let eventEnded = false;
+  let start = 0;
+  while (start < len) {
+    let end: number;
+    let nextStart: number;
+    if (!hasCr) {
+      const nl = raw.indexOf("\n", start);
+      if (nl === -1) {
+        end = len;
+        nextStart = len;
+      } else {
+        end = nl;
+        nextStart = nl + 1;
+      }
+    } else {
+      const nl = raw.indexOf("\n", start);
+      const cr = raw.indexOf("\r", start);
+      if (nl === -1 && cr === -1) {
+        end = len;
+        nextStart = len;
+      } else {
+        end = nl === -1 ? cr : cr === -1 ? nl : nl < cr ? nl : cr;
+        nextStart =
+          raw.charCodeAt(end) === 13 && raw.charCodeAt(end + 1) === 10 ? end + 2 : end + 1;
+      }
+    }
+    const lineLen = end - start;
+    if (lineLen === 0) {
+      if (inEvent) {
+        eventEnded = true;
+        inEvent = false;
+      }
+      start = nextStart;
+      continue;
+    }
+    if (eventEnded) {
+      if (raw.slice(start, end).trim().length > 0) return { kind: "multi_event" };
+      start = nextStart;
+      continue;
+    }
+    inEvent = true;
+    if (raw.startsWith("data:", start)) {
+      const valStart = start + 5 < end && raw.charCodeAt(start + 5) === 32 ? start + 6 : start + 5;
+      const line = raw.slice(valStart, end);
+      if (payload === undefined) {
+        payload = line;
+      } else {
+        if (!parts) parts = [payload];
+        parts.push(line);
+      }
+    } else if (lineLen === 4 && raw.startsWith("data", start)) {
+      if (payload === undefined) {
+        payload = "";
+      } else {
+        if (!parts) parts = [payload];
+        parts.push("");
+      }
+    } else if (raw.startsWith("event:", start)) {
+      const valStart = start + 6 < end && raw.charCodeAt(start + 6) === 32 ? start + 7 : start + 6;
+      event = raw.slice(valStart, end);
+    } else if (lineLen === 5 && raw.startsWith("event", start)) {
+      event = "";
+    }
+    start = nextStart;
   }
+  if (payload === undefined) return { kind: "empty_or_invalid" };
+  const text = (parts ? parts.join("\n") : payload).trim();
+  if (!text || text === "[DONE]") return { kind: "empty_or_invalid" };
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? { kind: "ok", obj: parsed as Record<string, unknown>, event }
+      : { kind: "empty_or_invalid" };
+  } catch {
+    return { kind: "empty_or_invalid" };
+  }
+}
+
+function extractTextFromObject(obj: Record<string, unknown>, protocol: Protocol): string | null {
   if (protocol === "chat") {
     const choices = Array.isArray(obj.choices) ? obj.choices : [];
     const delta = optionalObject(optionalObject(choices[0]).delta);
@@ -88,32 +162,17 @@ export function extractChunkTextFromEncodedSse(
   const parts = Array.isArray(optionalObject(optionalObject(cands[0]).content).parts)
     ? (optionalObject(optionalObject(cands[0]).content).parts as unknown[])
     : [];
-  const texts = parts
-    .map((p) => {
-      const part = optionalObject(p);
-      return typeof part.text === "string" && part.thought !== true ? part.text : "";
-    })
-    .join("");
+  let texts = "";
+  for (let i = 0; i < parts.length; i++) {
+    const part = optionalObject(parts[i]);
+    if (typeof part.text === "string" && part.thought !== true) texts += part.text;
+  }
   return texts.length > 0 ? texts : null;
 }
 
-export function inspectAnthropicBlockEvent(
-  chunkBytes: Uint8Array,
+function inspectAnthropicBlockFromObject(
+  obj: Record<string, unknown>,
 ): { kind: "text_start" | "block_stop"; index: number } | null {
-  const raw = decoder.decode(chunkBytes);
-  const dataLines = raw
-    .split("\n")
-    .filter((l) => l.startsWith("data: "))
-    .map((l) => l.slice(6));
-  if (dataLines.length === 0) return null;
-  const payload = dataLines.join("\n").trim();
-  if (!payload || payload === "[DONE]") return null;
-  let obj: Record<string, unknown>;
-  try {
-    obj = JSON.parse(payload) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
   const index = typeof obj.index === "number" && Number.isInteger(obj.index) ? obj.index : 0;
   if (obj.type === "content_block_start" && optionalObject(obj.content_block).type === "text") {
     return { kind: "text_start", index };
@@ -124,58 +183,149 @@ export function inspectAnthropicBlockEvent(
   return null;
 }
 
-export function stripTextFromSseChunk(
-  chunkBytes: Uint8Array,
-  protocol: Protocol,
-): Uint8Array | null {
+function stripTextFromObject(obj: Record<string, unknown>, protocol: Protocol): Uint8Array | null {
   if (protocol === "messages" || protocol === "responses") return null;
-  const raw = decoder.decode(chunkBytes);
-  const dataLines = raw
-    .split("\n")
-    .filter((l) => l.startsWith("data: "))
-    .map((l) => l.slice(6));
-  if (dataLines.length === 0) return null;
-  const payload = dataLines.join("\n").trim();
-  if (!payload || payload === "[DONE]") return null;
-  let obj: Record<string, unknown>;
-  try {
-    obj = JSON.parse(payload) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
   if (protocol === "chat") {
     const choices = Array.isArray(obj.choices) ? obj.choices : [];
     if (choices.length === 0) return null;
-    const first = { ...optionalObject(choices[0]) };
-    const delta = { ...optionalObject(first.delta) };
-    delete delta.content;
-    first.delta = delta;
+    const firstChoice = optionalObject(choices[0]);
+    const rawDelta = optionalObject(firstChoice.delta);
+    let hasOtherDeltaKey = false;
+    for (const k in rawDelta) {
+      if (k !== "content") {
+        hasOtherDeltaKey = true;
+        break;
+      }
+    }
     const hasMeta =
-      Object.keys(delta).length > 0 ||
-      (first.finish_reason !== null && first.finish_reason !== undefined) ||
+      hasOtherDeltaKey ||
+      choices.length > 1 ||
+      (firstChoice.finish_reason !== null && firstChoice.finish_reason !== undefined) ||
       obj.usage !== undefined;
     if (!hasMeta) return null;
+    const first = { ...firstChoice };
+    const delta = { ...rawDelta };
+    delete delta.content;
+    first.delta = delta;
     return encodeSSE({ ...obj, choices: [first, ...choices.slice(1)] });
   }
   const cands = Array.isArray(obj.candidates) ? obj.candidates : [];
   if (cands.length === 0) return null;
-  const first = { ...optionalObject(cands[0]) };
-  const content = optionalObject(first.content);
+  const firstCand = optionalObject(cands[0]);
+  const content = optionalObject(firstCand.content);
   const parts = Array.isArray(content.parts) ? (content.parts as unknown[]) : [];
   const remainingParts = parts.filter(
     (p) => typeof optionalObject(p).text !== "string" || optionalObject(p).thought === true,
   );
   const hasMeta =
     remainingParts.length > 0 ||
-    (first.finishReason !== null && first.finishReason !== undefined) ||
+    cands.length > 1 ||
+    (firstCand.finishReason !== null && firstCand.finishReason !== undefined) ||
     obj.usageMetadata !== undefined;
   if (!hasMeta) return null;
+  const first = { ...firstCand };
   if (remainingParts.length > 0) {
     first.content = { ...content, parts: remainingParts };
   } else {
     delete first.content;
   }
   return encodeSSE({ ...obj, candidates: [first, ...cands.slice(1)] });
+}
+
+function hasOtherTextInObject(
+  obj: Record<string, unknown>,
+  protocol: Protocol,
+  eventName: string,
+): boolean {
+  if (
+    eventName === "error" ||
+    obj.error ||
+    obj.type === "error" ||
+    obj.type === "response.failed"
+  ) {
+    return false;
+  }
+  if (protocol === "chat") {
+    const choices = Array.isArray(obj.choices) ? obj.choices : [];
+    for (let i = 0; i < choices.length; i++) {
+      const delta = optionalObject(optionalObject(choices[i]).delta);
+      if (typeof delta.refusal === "string" && delta.refusal.length > 0) return true;
+      if (i >= 1 && typeof delta.content === "string" && delta.content.length > 0) return true;
+    }
+    return false;
+  }
+  if (protocol === "messages") {
+    const type = obj.type ?? eventName;
+    if (type !== "content_block_start") return false;
+    const block = optionalObject(obj.content_block);
+    return block.type === "text" && typeof block.text === "string" && block.text.length > 0;
+  }
+  if (protocol === "responses") {
+    const type = obj.type ?? eventName;
+    return (
+      (type === "response.refusal.delta" ||
+        (obj.type === undefined && type === "response.output_text.delta")) &&
+      typeof obj.delta === "string" &&
+      obj.delta.length > 0
+    );
+  }
+  const cands = Array.isArray(obj.candidates) ? obj.candidates : [];
+  for (let i = 1; i < cands.length; i++) {
+    const parts = optionalObject(optionalObject(cands[i]).content).parts;
+    if (!Array.isArray(parts)) continue;
+    for (let j = 0; j < parts.length; j++) {
+      const part = optionalObject(parts[j]);
+      if (part.thought !== true && typeof part.text === "string" && part.text.length > 0) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+export type SplitSseChunkResult = {
+  text: string | null;
+  remainder: Uint8Array | null;
+  hasOtherText: boolean | undefined;
+  remainderHasText?: boolean;
+  anthropicBlock?: { kind: "text_start" | "block_stop"; index: number };
+};
+
+export function splitSseChunkText(
+  chunkBytes: Uint8Array,
+  protocol: Protocol,
+  includeRemainder = true,
+): SplitSseChunkResult {
+  const parsed = parseSseDataObject(chunkBytes);
+  if (parsed.kind === "multi_event") {
+    return { text: null, remainder: null, hasOtherText: undefined };
+  }
+  if (parsed.kind === "empty_or_invalid") {
+    return { text: null, remainder: null, hasOtherText: false };
+  }
+  const { obj, event } = parsed;
+  const anthropicBlock =
+    protocol === "messages" ? (inspectAnthropicBlockFromObject(obj) ?? undefined) : undefined;
+  const text = extractTextFromObject(obj, protocol);
+  if (text === null) {
+    const hasOtherText = hasOtherTextInObject(obj, protocol, event);
+    return anthropicBlock
+      ? { text: null, remainder: null, hasOtherText, anthropicBlock }
+      : { text: null, remainder: null, hasOtherText };
+  }
+  const remainder = includeRemainder ? stripTextFromObject(obj, protocol) : null;
+  const result: SplitSseChunkResult = {
+    text,
+    remainder,
+    hasOtherText: false,
+  };
+  if (remainder !== null) {
+    result.remainderHasText = hasOtherTextInObject(obj, protocol, event);
+  }
+  if (anthropicBlock) {
+    result.anthropicBlock = anthropicBlock;
+  }
+  return result;
 }
 
 export function buildTextDeltaSse(

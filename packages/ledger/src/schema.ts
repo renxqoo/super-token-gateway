@@ -180,6 +180,8 @@ export const walletLeases = pgTable(
       .notNull()
       .default(sql`'[]'::jsonb`),
     remainingAtoms: numeric("remaining_atoms", { precision: 38, scale: 0 }).notNull(),
+    spentAtoms: numeric("spent_atoms", { precision: 38, scale: 0 }).notNull().default("0"),
+    spentLotId: uuid("spent_lot_id"),
     earliestLotExpiresAt: timestamp("earliest_lot_expires_at", {
       withTimezone: true,
       mode: "string",
@@ -210,6 +212,7 @@ export const supplierLeases = pgTable(
     currency: text("currency").notNull(),
     cell: smallint("cell").notNull(),
     remainingAtoms: numeric("remaining_atoms", { precision: 38, scale: 0 }).notNull(),
+    spentAtoms: numeric("spent_atoms", { precision: 38, scale: 0 }).notNull().default("0"),
     state: text("state").$type<"ACTIVE" | "CLOSED">().notNull().default("ACTIVE"),
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -219,7 +222,10 @@ export const supplierLeases = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [index("supplier_leases_active_idx").on(t.expiresAt)],
+  (t) => [
+    index("supplier_leases_active_idx").on(t.expiresAt),
+    index("supplier_leases_account_active_idx").on(t.accountId, t.currency, t.cell),
+  ],
 );
 
 export const billingHolds = pgTable(
@@ -276,8 +282,6 @@ export const billingHolds = pgTable(
       .where(
         sql`${t.state} IN ('SETTLED', 'RELEASED') AND ${t.supplierHolds} @> '[{"state":"UNKNOWN"}]'`,
       ),
-    index("billing_holds_wallet_lease_idx").on(t.walletLeaseId),
-    index("billing_holds_supplier_lease_idx").on(t.supplierLeaseId),
   ],
 );
 
@@ -422,10 +426,7 @@ export const outboxEvents = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [
-    index("outbox_events_billing_account_idx").on(t.billingAccountId, t.seq),
-    index("outbox_events_shard_seq_idx").on(t.shard, t.seq),
-  ],
+  (t) => [index("outbox_events_shard_seq_idx").on(t.shard, t.seq)],
 );
 
 export const outboxConsumers = pgTable("outbox_consumers", {

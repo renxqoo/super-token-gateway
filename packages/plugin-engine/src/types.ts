@@ -45,6 +45,7 @@ export type WasmInvokeOptions = {
   priority?: WasmInvokePriority;
   tenantId?: string;
   compileTimeoutMs?: number;
+  transferInput?: boolean;
 };
 
 export type WasmExecutorStats = {

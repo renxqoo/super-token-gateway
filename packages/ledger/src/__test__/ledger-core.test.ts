@@ -8,7 +8,16 @@ import {
   type Usage,
 } from "@gateway/kernel";
 import { MicroBatchQueue } from "../micro-batch.ts";
-import { outboxShard, sha256Hex } from "../funds.ts";
+import {
+  CELL_COUNT,
+  outboxShard,
+  SETTLEMENT_LANES,
+  sha256Hex,
+  SUPPLIER_CELLS_PER_LANE,
+  walletAdmissionError,
+  walletLane,
+  type WalletRow,
+} from "../funds.ts";
 import { priceSettlement } from "../settlement-pricing.ts";
 import type { CommitTerminalInput } from "../types.ts";
 
@@ -192,5 +201,45 @@ test("symptom: settlement charges only the input when supplier-priced output evi
   expect(priceSettlement({ ...item, supplier_cost_atoms_override: "9" })).toEqual({
     customerAtoms: 6n,
     supplierAtoms: 9n,
+  });
+});
+
+test("2-lane sharding partitions 16 cells evenly and walletAdmissionError accounts for deferred lease spend", () => {
+  expect(SETTLEMENT_LANES).toBe(2);
+  expect(CELL_COUNT).toBe(16);
+  expect(SUPPLIER_CELLS_PER_LANE).toBe(8);
+  const seenLanes = new Set<number>();
+  for (let nibble = 0; nibble < 16; nibble++) {
+    const id = `00000000-0000-4000-8000-00000000000${nibble.toString(16)}`;
+    const lane = walletLane(id);
+    expect(lane).toBeGreaterThanOrEqual(0);
+    expect(lane).toBeLessThan(2);
+    seenLanes.add(lane);
+  }
+  expect(seenLanes.size).toBe(2);
+
+  const wallet: WalletRow = {
+    id: crypto.randomUUID(),
+    billing_account_id: crypto.randomUUID(),
+    currency: "PTS",
+    policy: "GIFT_FIRST",
+    available_atoms: 100n,
+    reserved_atoms: 400n,
+    spent_atoms: 0n,
+    expired_atoms: 0n,
+    debt_atoms: 350n,
+    credit_limit_atoms: 500n,
+    credit_reserved_atoms: 0n,
+    credit_policy_version: 0n,
+    manual_frozen: false,
+    evidence_disputed: false,
+    freeze_reason: null,
+    dirty: false,
+  };
+  expect(walletAdmissionError(wallet, 0n)).toBeNull();
+  expect(walletAdmissionError(wallet, 150n)).toBeNull();
+  expect(walletAdmissionError(wallet, 151n)).toEqual({
+    code: "insufficient_balance",
+    message: "Wallet has a negative settled balance",
   });
 });

@@ -20,6 +20,7 @@ import {
   toLotRow,
   expireLotsInMemory,
   walletAdmissionError,
+  loadDeferredWalletLeaseSpend,
   type LotRow,
   lotEligible,
   canReserveWalletCredit,
@@ -224,7 +225,11 @@ export function createSupplierSwitch({
             );
             const nowMs = Date.now();
             expireLotsInMemory(wallet, lots, nowMs, journals);
-            const admissionError = walletAdmissionError(wallet);
+            const deferredSpend =
+              wallet.debt_atoms > 0n
+                ? ((await loadDeferredWalletLeaseSpend(tx, [wallet.id])).get(wallet.id) ?? 0n)
+                : 0n;
+            const admissionError = walletAdmissionError(wallet, deferredSpend);
             if (admissionError) throw new SupplierSwitchRejected({ ok: false, ...admissionError });
             let rem = delta;
             const addPlan: { lot: LotRow; take: bigint }[] = [];

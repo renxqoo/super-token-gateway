@@ -44,6 +44,7 @@ export function createUpstreamPreparation(request: InferenceRequest) {
       outputBound,
       isStream,
       canMutateClientBody,
+      alreadyValidated: true,
       vertexTokens: deps.vertexTokens,
       wasmExecutor: deps.wasmExecutor,
       tenantId: billingAccount.id,
@@ -62,9 +63,10 @@ export function createUpstreamPreparation(request: InferenceRequest) {
     cand: HydratedCandidate,
     body: Record<string, unknown>,
     customerPrice: PriceVersionRecord,
+    canMutateClientBody = false,
   ): PreparedUpstreamRequest | null {
     try {
-      const opts = upstreamOptions(cand, body) as Parameters<
+      const opts = upstreamOptions(cand, body, canMutateClientBody) as Parameters<
         typeof tryPrepareUpstreamRequestSync
       >[0];
       opts.estimateInputTokens =

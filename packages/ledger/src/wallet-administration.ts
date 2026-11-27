@@ -21,8 +21,13 @@ import {
 } from "./funds.ts";
 import { DomainError } from "@gateway/kernel";
 import { collectDebtInTx } from "./wallet-debt.ts";
-import { wallets, walletLots, type LedgerDrizzle } from "./schema.ts";
-import { and, eq, desc } from "drizzle-orm";
+import {
+  flushActiveWalletLeaseSpendTx,
+  lockActiveWalletLeaseSpendTx,
+  type PendingLeaseSpend,
+} from "./leases.ts";
+import { createDrizzle, wallets, walletLots, type LedgerDrizzle } from "./schema.ts";
+import { and, eq, desc, sql } from "drizzle-orm";
 import type { SQL } from "bun";
 
 export function createWalletAdministration({
@@ -60,6 +65,17 @@ export function createWalletAdministration({
           VALUES (${crypto.randomUUID()}, ${input.billing_account_id}::uuid, ${input.currency})
           ON CONFLICT (billing_account_id, currency) DO NOTHING
         `;
+        let pendingLeaseSpend: PendingLeaseSpend[] = [];
+        if (delta < 0n) {
+          const wIdRows = await tx<{ id: string }[]>`
+            SELECT id::text AS id
+            FROM public.wallets
+            WHERE billing_account_id = ${input.billing_account_id}::uuid AND currency = ${input.currency}
+          `;
+          if (wIdRows.length > 0) {
+            pendingLeaseSpend = await lockActiveWalletLeaseSpendTx(tx, wIdRows[0]!.id);
+          }
+        }
         const wRows = await tx`
           SELECT id, billing_account_id, currency, policy,
             available_atoms::text, reserved_atoms::text, spent_atoms::text, expired_atoms::text,
@@ -199,6 +215,10 @@ export function createWalletAdministration({
             freeze_reason: receipt.freeze_reason,
             debt_collected_charges: collected,
           };
+        }
+
+        if (pendingLeaseSpend.length > 0) {
+          await flushActiveWalletLeaseSpendTx(tx, wallet, pendingLeaseSpend);
         }
 
         const amount = -delta;
@@ -346,14 +366,20 @@ export function createWalletAdministration({
               freeze_reason = ${w.freeze_reason}
           WHERE id = ${w.id}::uuid
         `;
+        const [leaseSpend] = await tx<{ spent: string }[]>`
+          SELECT coalesce(sum(spent_atoms), 0)::text AS spent
+          FROM public.wallet_leases
+          WHERE wallet_id = ${w.id}::uuid AND state = 'ACTIVE'
+        `;
+        const deferredSpent = BigInt(leaseSpend?.spent ?? "0");
         return {
           id: w.id,
           billing_account_id: w.billing_account_id,
           currency: w.currency,
           policy: w.policy,
           available_atoms: w.available_atoms.toString(),
-          reserved_atoms: w.reserved_atoms.toString(),
-          spent_atoms: w.spent_atoms.toString(),
+          reserved_atoms: (w.reserved_atoms - deferredSpent).toString(),
+          spent_atoms: (w.spent_atoms + deferredSpent).toString(),
           expired_atoms: w.expired_atoms.toString(),
           debt_atoms: w.debt_atoms.toString(),
           credit_limit_atoms: w.credit_limit_atoms.toString(),
@@ -368,19 +394,41 @@ export function createWalletAdministration({
 
     async getWallet(billingAccountId: string, currency: string): Promise<WalletSnapshot | null> {
       const rows = await orm
-        .select()
+        .select({
+          id: wallets.id,
+          billingAccountId: wallets.billingAccountId,
+          currency: wallets.currency,
+          policy: wallets.policy,
+          availableAtoms: wallets.availableAtoms,
+          reservedAtoms: wallets.reservedAtoms,
+          spentAtoms: wallets.spentAtoms,
+          expiredAtoms: wallets.expiredAtoms,
+          debtAtoms: wallets.debtAtoms,
+          creditLimitAtoms: wallets.creditLimitAtoms,
+          creditReservedAtoms: wallets.creditReservedAtoms,
+          creditPolicyVersion: wallets.creditPolicyVersion,
+          manualFrozen: wallets.manualFrozen,
+          evidenceDisputed: wallets.evidenceDisputed,
+          freezeReason: wallets.freezeReason,
+          deferredSpent: sql<string>`coalesce((
+            SELECT sum(wl.spent_atoms)
+            FROM public.wallet_leases wl
+            WHERE wl.wallet_id = "wallets"."id" AND wl.state = 'ACTIVE'
+          ), 0)::text`,
+        })
         .from(wallets)
         .where(and(eq(wallets.billingAccountId, billingAccountId), eq(wallets.currency, currency)));
       const w = rows[0];
       if (!w) return null;
+      const deferredSpent = BigInt(w.deferredSpent);
       return {
         id: w.id,
         billing_account_id: w.billingAccountId,
         currency: w.currency,
         policy: w.policy,
         available_atoms: w.availableAtoms,
-        reserved_atoms: w.reservedAtoms,
-        spent_atoms: w.spentAtoms,
+        reserved_atoms: (BigInt(w.reservedAtoms) - deferredSpent).toString(),
+        spent_atoms: (BigInt(w.spentAtoms) + deferredSpent).toString(),
         expired_atoms: w.expiredAtoms,
         debt_atoms: w.debtAtoms,
         credit_limit_atoms: w.creditLimitAtoms,
@@ -396,52 +444,75 @@ export function createWalletAdministration({
       billingAccountId: string,
       currency: string,
     ): Promise<WalletWithLotsSnapshot | null> {
-      const rows = await orm
-        .select()
-        .from(wallets)
-        .where(and(eq(wallets.billingAccountId, billingAccountId), eq(wallets.currency, currency)));
-      const w = rows[0];
-      if (!w) return null;
-      const lotRows = await orm
-        .select()
-        .from(walletLots)
-        .where(eq(walletLots.walletId, w.id))
-        .orderBy(desc(walletLots.createdAt), desc(walletLots.id))
-        .limit(200);
-      const lots: WalletLotSnapshot[] = lotRows.map((l) => ({
-        id: l.id,
-        wallet_id: l.walletId,
-        external_ref: l.externalRef,
-        kind: l.kind,
-        priority: l.priority,
-        models: l.models,
-        operations: l.operations,
-        expires_at: l.expiresAt,
-        issued_atoms: l.issuedAtoms,
-        available_atoms: l.availableAtoms,
-        reserved_atoms: l.reservedAtoms,
-        spent_atoms: l.spentAtoms,
-        expired_atoms: l.expiredAtoms,
-        created_at: l.createdAt,
-      }));
-      return {
-        id: w.id,
-        billing_account_id: w.billingAccountId,
-        currency: w.currency,
-        policy: w.policy,
-        available_atoms: w.availableAtoms,
-        reserved_atoms: w.reservedAtoms,
-        spent_atoms: w.spentAtoms,
-        expired_atoms: w.expiredAtoms,
-        debt_atoms: w.debtAtoms,
-        credit_limit_atoms: w.creditLimitAtoms,
-        credit_reserved_atoms: w.creditReservedAtoms,
-        credit_policy_version: w.creditPolicyVersion,
-        manual_frozen: w.manualFrozen,
-        evidence_disputed: w.evidenceDisputed,
-        freeze_reason: w.freezeReason,
-        lots,
-      };
+      return db.begin("isolation level repeatable read read only", async (tx) => {
+        const txOrm = createDrizzle(tx);
+        const rows = await txOrm
+          .select()
+          .from(wallets)
+          .where(
+            and(eq(wallets.billingAccountId, billingAccountId), eq(wallets.currency, currency)),
+          );
+        const w = rows[0];
+        if (!w) return null;
+        const lotRows = await txOrm
+          .select()
+          .from(walletLots)
+          .where(eq(walletLots.walletId, w.id))
+          .orderBy(desc(walletLots.createdAt), desc(walletLots.id))
+          .limit(200);
+        const leaseSpends = await tx<{ spent_lot_id: string | null; spent: string }[]>`
+          SELECT spent_lot_id::text AS spent_lot_id, coalesce(sum(spent_atoms), 0)::text AS spent
+          FROM public.wallet_leases
+          WHERE wallet_id = ${w.id}::uuid AND state = 'ACTIVE' AND spent_atoms > 0
+          GROUP BY spent_lot_id
+        `;
+        const spentByLot = new Map<string, bigint>();
+        let totalDeferredSpent = 0n;
+        for (const row of leaseSpends) {
+          const spent = BigInt(row.spent);
+          totalDeferredSpent += spent;
+          if (row.spent_lot_id) {
+            spentByLot.set(row.spent_lot_id, (spentByLot.get(row.spent_lot_id) ?? 0n) + spent);
+          }
+        }
+        const lots: WalletLotSnapshot[] = lotRows.map((l) => {
+          const lotSpent = spentByLot.get(l.id) ?? 0n;
+          return {
+            id: l.id,
+            wallet_id: l.walletId,
+            external_ref: l.externalRef,
+            kind: l.kind,
+            priority: l.priority,
+            models: l.models,
+            operations: l.operations,
+            expires_at: l.expiresAt,
+            issued_atoms: l.issuedAtoms,
+            available_atoms: l.availableAtoms,
+            reserved_atoms: (BigInt(l.reservedAtoms) - lotSpent).toString(),
+            spent_atoms: (BigInt(l.spentAtoms) + lotSpent).toString(),
+            expired_atoms: l.expiredAtoms,
+            created_at: l.createdAt,
+          };
+        });
+        return {
+          id: w.id,
+          billing_account_id: w.billingAccountId,
+          currency: w.currency,
+          policy: w.policy,
+          available_atoms: w.availableAtoms,
+          reserved_atoms: (BigInt(w.reservedAtoms) - totalDeferredSpent).toString(),
+          spent_atoms: (BigInt(w.spentAtoms) + totalDeferredSpent).toString(),
+          expired_atoms: w.expiredAtoms,
+          debt_atoms: w.debtAtoms,
+          credit_limit_atoms: w.creditLimitAtoms,
+          credit_reserved_atoms: w.creditReservedAtoms,
+          credit_policy_version: w.creditPolicyVersion,
+          manual_frozen: w.manualFrozen,
+          evidence_disputed: w.evidenceDisputed,
+          freeze_reason: w.freezeReason,
+          lots,
+        };
+      });
     },
   };
 }

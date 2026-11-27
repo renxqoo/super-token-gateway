@@ -1,5 +1,3 @@
-const encoder = new TextEncoder();
-
 export function sliceTailForMaxBytes(
   text: string,
   maxBytes: number,
@@ -10,11 +8,18 @@ export function sliceTailForMaxBytes(
   while (cut > 0) {
     let prev = cut - 1;
     const code = text.charCodeAt(prev);
+    let charBytes: number;
     if (code >= 0xdc00 && code <= 0xdfff && prev > 0) {
       const high = text.charCodeAt(prev - 1);
-      if (high >= 0xd800 && high <= 0xdbff) prev--;
+      if (high >= 0xd800 && high <= 0xdbff) {
+        prev--;
+        charBytes = 4;
+      } else {
+        charBytes = 3;
+      }
+    } else {
+      charBytes = code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
     }
-    const charBytes = encoder.encode(text.slice(prev, cut)).byteLength;
     if (bytes + charBytes > maxBytes) break;
     bytes += charBytes;
     cut = prev;
@@ -36,7 +41,7 @@ export function splitChunkForMaxBytes(text: string, start: number, maxBytes: num
   const approx = Math.min(text.length, start + maxBytes);
   let end = safeSliceBoundary(text, approx);
   if (end <= start) end = Math.min(text.length, start + 1);
-  while (end > start + 1 && encoder.encode(text.slice(start, end)).byteLength > maxBytes) {
+  while (end > start + 1 && Buffer.byteLength(text.slice(start, end), "utf8") > maxBytes) {
     const excess = Math.max(1, Math.floor((end - start) / 4));
     end = safeSliceBoundary(text, end - excess);
   }

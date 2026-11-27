@@ -5,12 +5,7 @@ import { expect, test } from "bun:test";
 import type { ConfigSnapshot, PluginRecord } from "@gateway/ledger";
 import { loadConfigFromEnv } from "../config.ts";
 import { SnapshotManager } from "../snapshot.ts";
-import {
-  extractChunkTextFromEncodedSse,
-  inspectAnthropicBlockEvent,
-  stripTextFromSseChunk,
-  transformRequestTexts,
-} from "../upstream.ts";
+import { splitSseChunkText, transformRequestTexts } from "../upstream.ts";
 
 function emptySnapshot(
   epoch: number,
@@ -220,15 +215,20 @@ test("Request and SSE helpers scan Anthropic array system, Gemini systemInstruct
   const gemThoughtSse = enc.encode(
     `data: ${JSON.stringify({ candidates: [{ index: 0, content: { role: "model", parts: [{ text: "internal", thought: true }] } }] })}\n\n`,
   );
-  expect(extractChunkTextFromEncodedSse(gemThoughtSse, "gemini")).toBeNull();
+  expect(splitSseChunkText(gemThoughtSse, "gemini")).toEqual({
+    text: null,
+    remainder: null,
+    hasOtherText: false,
+  });
 
   const gemTerminalSse = enc.encode(
     `data: ${JSON.stringify({ candidates: [{ index: 0, content: { role: "model", parts: [{ text: "thought", thought: true }, { text: "Call 13812345678" }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2, totalTokenCount: 3 } })}\n\n`,
   );
-  expect(extractChunkTextFromEncodedSse(gemTerminalSse, "gemini")).toBe("Call 13812345678");
-  const strippedGem = stripTextFromSseChunk(gemTerminalSse, "gemini");
-  expect(strippedGem).not.toBeNull();
-  const strippedGemText = new TextDecoder().decode(strippedGem!);
+  const splitGemTerminal = splitSseChunkText(gemTerminalSse, "gemini");
+  expect(splitGemTerminal.text).toBe("Call 13812345678");
+  expect(splitGemTerminal.remainderHasText).toBe(false);
+  expect(splitGemTerminal.remainder).not.toBeNull();
+  const strippedGemText = new TextDecoder().decode(splitGemTerminal.remainder!);
   expect(strippedGemText).not.toContain("13812345678");
   expect(strippedGemText).toContain('"thought":true');
   expect(strippedGemText).toContain('"finishReason":"STOP"');
@@ -239,6 +239,12 @@ test("Request and SSE helpers scan Anthropic array system, Gemini systemInstruct
   const antStop = enc.encode(
     'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
   );
-  expect(inspectAnthropicBlockEvent(antStart)).toEqual({ kind: "text_start", index: 1 });
-  expect(inspectAnthropicBlockEvent(antStop)).toEqual({ kind: "block_stop", index: 1 });
+  expect(splitSseChunkText(antStart, "messages").anthropicBlock).toEqual({
+    kind: "text_start",
+    index: 1,
+  });
+  expect(splitSseChunkText(antStop, "messages").anthropicBlock).toEqual({
+    kind: "block_stop",
+    index: 1,
+  });
 });

@@ -83,37 +83,25 @@ export function createRouteInput(
       .map((s) => `${s.plugin_id}:${s.priority}:${s.charge_policy ?? ""}`)
       .join("|");
   };
+  function buildRouteInput(
+    body: Record<string, unknown>,
+    chars: number | undefined,
+    audit: PluginAuditEntry[],
+    pluginSignal: AbortSignal,
+  ) {
+    const measurement = {
+      inputCharacters: chars === undefined ? undefined : String(chars),
+      images:
+        operation === "images" || operation === "image_edits" ? Number(body.n ?? 1) : undefined,
+    };
+    return { body, chars, measurement, audit, pluginSignal };
+  }
   function prepareRouteInput(candidate: HydratedCandidate, pluginSignal: AbortSignal) {
     pluginSignal.throwIfAborted();
     const steps = candidate.route.plugin_pipeline;
     if (steps.length === 0 && !isMultipartOp) {
-      const measurement = {
-        inputCharacters: initialChars === undefined ? undefined : String(initialChars),
-        images:
-          operation === "images" || operation === "image_edits"
-            ? Number(clientBody.n ?? 1)
-            : undefined,
-      };
-      return {
-        body: clientBody,
-        chars: initialChars,
-        measurement,
-        audit: emptyAudit,
-        pluginSignal,
-      };
+      return buildRouteInput(clientBody, initialChars, emptyAudit, pluginSignal);
     }
-    return prepareWithPolicy(candidate, pluginSignal);
-  }
-
-  async function prepareWithPolicy(candidate: HydratedCandidate, pluginSignal: AbortSignal) {
-    const steps = candidate.route.plugin_pipeline;
-    const pipeKey = isMultipartOp ? "__multipart__" : pipelineKeyOf(steps);
-    const cached = preRequestCache?.get(pipeKey);
-    if (cached) {
-      return { ...cached, pluginSignal };
-    }
-    let body = clientBody;
-    const localAudit: PluginAuditEntry[] = [];
     if (steps.length > 0 && !isMultipartOp) {
       if (
         deps.metrics.isTenantPlatformAbsorbExceeded(
@@ -135,6 +123,23 @@ export function createRouteInput(
           responseHeaders(requestId, trace, { "retry-after": "5" }),
         );
       }
+      if (!deps.pluginEngine.hasActiveHook("on_request", steps, snap.plugins)) {
+        return buildRouteInput(clientBody, initialChars, emptyAudit, pluginSignal);
+      }
+    }
+    return prepareWithPolicy(candidate, pluginSignal);
+  }
+
+  async function prepareWithPolicy(candidate: HydratedCandidate, pluginSignal: AbortSignal) {
+    const steps = candidate.route.plugin_pipeline;
+    const pipeKey = isMultipartOp ? "__multipart__" : pipelineKeyOf(steps);
+    const cached = preRequestCache?.get(pipeKey);
+    if (cached) {
+      return { ...cached, pluginSignal };
+    }
+    let body = clientBody;
+    const localAudit: PluginAuditEntry[] = [];
+    if (steps.length > 0 && !isMultipartOp) {
       let preBlocked: {
         outcome_kind?: PluginOutcomeKind;
         rule_code?: string;

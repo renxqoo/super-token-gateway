@@ -103,7 +103,12 @@ export async function routeInference(
       let prepared: PreparedUpstreamRequest | null;
       let quote: ReturnType<InferenceAccounting["quote"]>;
       try {
-        prepared = prepareForReservation(cand, preparedInput.body, customer.price);
+        prepared = prepareForReservation(
+          cand,
+          preparedInput.body,
+          customer.price,
+          selected.length === 1 && !request.isMultipartOp,
+        );
         quote = accounting.quote(cand, customer, {
           ...preparedInput.measurement,
           estimatedInputTokens: prepared?.estimatedInputTokens,

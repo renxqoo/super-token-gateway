@@ -185,9 +185,15 @@ test("a locked supplier lease cannot stall settlement for a wallet on another fu
       await blocking;
       await Promise.all([first, second]);
       expect(ahead).toMatchObject({ ok: true, customer_atoms: "100", supplier_cost_atoms: "50" });
-      const [balances] = await db`SELECT count(*)::int AS used, sum(spent_atoms)::text AS spent
-        FROM public.supplier_cells WHERE account_id = ${f.accountA.id} AND spent_atoms > 0`;
-      expect(balances).toMatchObject({ used: 2, spent: "100" });
+      expect(await ledger.getSupplierBalance(f.accountA.id, "USD")).toMatchObject({
+        spent_atoms: "100",
+      });
+      const [activeLeaseSpend] = await db`
+        SELECT count(DISTINCT cell)::int AS used, sum(spent_atoms)::text AS spent
+        FROM public.supplier_leases
+        WHERE account_id = ${f.accountA.id} AND state = 'ACTIVE' AND spent_atoms > 0
+      `;
+      expect(activeLeaseSpend).toMatchObject({ used: 2, spent: "100" });
     } finally {
       unlock.resolve();
       await blocking;
@@ -195,6 +201,9 @@ test("a locked supplier lease cannot stall settlement for a wallet on another fu
       await ledger.drain();
       await f.ledger.drain();
     }
+    const [balances] = await db`SELECT count(*)::int AS used, sum(spent_atoms)::text AS spent
+      FROM public.supplier_cells WHERE account_id = ${f.accountA.id} AND spent_atoms > 0`;
+    expect(balances).toMatchObject({ used: 2, spent: "100" });
     expect(await ledger.auditConservation()).toMatchObject({
       ok: true,
       open_holds: 0,
@@ -202,7 +211,7 @@ test("a locked supplier lease cannot stall settlement for a wallet on another fu
     });
   }));
 
-test("a wallet row lock timeout does not lose a measured settlement", () =>
+test("a wallet_leases row lock timeout does not lose a measured settlement and leased commit does not block on wallet row locks", () =>
   withLedgerDb(async (db) => {
     const f = await seedFixture(db);
     const ledger = createLedgerEngine(db, { leaseIdleReleaseMs: 60_000, batchWindowMs: 1 });
@@ -248,6 +257,7 @@ test("a wallet row lock timeout does not lose a measured settlement", () =>
         amount_atoms: "500000000",
       });
       await Promise.all(Array.from({ length: 16 }, () => acquire()));
+      const unblockedReq = await acquire();
       const { requestId, attemptId } = await acquire();
       const [hold] = await db`SELECT wallet_id, wallet_lease_id, supplier_lease_id
         FROM public.billing_holds WHERE request_id = ${requestId}`;
@@ -255,8 +265,32 @@ test("a wallet row lock timeout does not lose a measured settlement", () =>
       expect(hold?.supplier_lease_id).toBeTruthy();
 
       await db.begin(async (tx) => {
-        const [blocker] = await tx`SELECT pg_backend_pid() AS pid FROM public.wallets
-          WHERE id = ${hold!.wallet_id} FOR NO KEY UPDATE`;
+        await tx`SELECT id FROM public.wallets WHERE id = ${hold!.wallet_id} FOR NO KEY UPDATE`;
+        const fastWhileWalletLocked = await Promise.race([
+          ledger.commitTerminal({
+            request_id: unblockedReq.requestId,
+            selected_attempt_id: unblockedReq.attemptId,
+            channel_id: f.channelA.id,
+            billing_price_id: f.flatBillingPrice.id,
+            cost_version_id: f.costPrice.id,
+            usage: { input_tokens: "60", output_tokens: "40" },
+            billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+            billing_basis: "PROVIDER_USAGE",
+            supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+            supplier_currency: "USD",
+          }),
+          Bun.sleep(1_000).then(() => null),
+        ]);
+        expect(fastWhileWalletLocked).toMatchObject({
+          ok: true,
+          customer_atoms: "100",
+          supplier_cost_atoms: "50",
+        });
+      });
+
+      await db.begin(async (tx) => {
+        const [blocker] = await tx`SELECT pg_backend_pid() AS pid FROM public.wallet_leases
+          WHERE id = ${hold!.wallet_lease_id} FOR NO KEY UPDATE`;
         pending = ledger
           .commitTerminal({
             request_id: requestId,
@@ -275,11 +309,11 @@ test("a wallet row lock timeout does not lose a measured settlement", () =>
         for (;;) {
           const [row] = await db`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
             WHERE datname = current_database() AND wait_event_type = 'Lock'
-              AND (query LIKE '%FROM public.wallets%' OR query LIKE '%commit_leased_batch%')
+              AND (query LIKE '%FROM public.wallet_leases%' OR query LIKE '%commit_leased_batch%')
               AND ${blocker!.pid} = ANY(pg_blocking_pids(pid))) AS waiting`;
           if (row!.waiting) break;
           if (Date.now() >= deadline)
-            throw new Error("Settlement did not wait for the wallet lock");
+            throw new Error("Settlement did not wait for the wallet_leases lock");
           await Bun.sleep(20);
         }
         await Bun.sleep(5_150);
@@ -422,10 +456,10 @@ test("symptom: commit_leased_batch succeeds under least-privilege stg_data outbo
         `GRANT UPDATE (balance_atoms, reserved_atoms, spent_atoms, revision) ON public.supplier_cells TO ${roleName}`,
       );
       await db.unsafe(
-        `GRANT UPDATE (state, remaining_atoms, lot_allocations, earliest_lot_expires_at, expires_at, updated_at) ON public.wallet_leases TO ${roleName}`,
+        `GRANT UPDATE (state, remaining_atoms, spent_atoms, spent_lot_id, lot_allocations, earliest_lot_expires_at, expires_at, updated_at) ON public.wallet_leases TO ${roleName}`,
       );
       await db.unsafe(
-        `GRANT UPDATE (state, remaining_atoms, expires_at, updated_at) ON public.supplier_leases TO ${roleName}`,
+        `GRANT UPDATE (state, remaining_atoms, spent_atoms, expires_at, updated_at) ON public.supplier_leases TO ${roleName}`,
       );
       await db.unsafe(
         `GRANT UPDATE (state, held_atoms, credit_atoms, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, closed_at) ON public.billing_holds TO ${roleName}`,
@@ -442,10 +476,13 @@ test("symptom: commit_leased_batch succeeds under least-privilege stg_data outbo
       await db.unsafe(`GRANT USAGE ON SEQUENCE public.outbox_events_seq_seq TO ${roleName}`);
       await db.unsafe(`GRANT EXECUTE ON FUNCTION public.outbox_shard(UUID) TO ${roleName}`);
       await db.unsafe(
-        `GRANT EXECUTE ON FUNCTION public.commit_leased_batch(JSONB, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) TO ${roleName}`,
+        `GRANT EXECUTE ON FUNCTION public.publish_outbox_batch(UUID[], TEXT[], UUID[], UUID[], JSONB[]) TO ${roleName}`,
       );
       await db.unsafe(
-        `GRANT EXECUTE ON FUNCTION public.acquire_leased_holds(TEXT, UUID[], UUID[], JSONB, BOOLEAN) TO ${roleName}`,
+        `GRANT EXECUTE ON FUNCTION public.commit_leased_batch(UUID[], UUID[], UUID[], UUID[], UUID[], UUID[], UUID[], NUMERIC[], NUMERIC[], UUID[], UUID[], UUID[], UUID[], TEXT[], TEXT[], TEXT[], UUID[], UUID[], TEXT[], TEXT[], NUMERIC[], NUMERIC[], TEXT[], TEXT[], TEXT[], TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) TO ${roleName}`,
+      );
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION public.acquire_leased_holds(TEXT, UUID[], UUID[], BOOLEAN, UUID[], UUID[], UUID[], UUID[], UUID[], NUMERIC[], NUMERIC[], TEXT[], TEXT[], TEXT[], NUMERIC[], TEXT[], UUID[], UUID[], TIMESTAMPTZ[]) TO ${roleName}`,
       );
 
       const base = new URL(process.env.DATABASE_URL!);
@@ -518,6 +555,26 @@ test("symptom: commit_leased_batch succeeds under least-privilege stg_data outbo
         SELECT count(*)::int AS count FROM public.billing_holds WHERE wallet_lease_id IS NOT NULL
       `;
       expect(leasedCount?.count ?? 0).toBeGreaterThanOrEqual(secondWave.length);
+      expect(await f.ledger.auditConservation()).toMatchObject({
+        ok: true,
+        open_holds: 0,
+        unknown_holds: 0,
+      });
+      const directSeqDenied = await dataDb`
+        INSERT INTO public.outbox_events (seq, shard, event_id, kind, payload)
+        VALUES (999999, 0, ${crypto.randomUUID()}::uuid, 'billing.settled', '{}'::jsonb)
+      `
+        .then(() => null)
+        .catch((error: { errno?: string }) => error.errno ?? "unknown");
+      expect(directSeqDenied).toBe("42501");
+      const directShardDenied = await dataDb`
+        INSERT INTO public.outbox_events (shard, event_id, kind, payload)
+        VALUES (0, ${crypto.randomUUID()}::uuid, 'billing.settled', '{}'::jsonb)
+      `
+        .then(() => null)
+        .catch((error: { errno?: string }) => error.errno ?? "unknown");
+      expect(directShardDenied).toBe("42501");
+      await dataLedger.drain();
       expect(await f.ledger.auditConservation()).toMatchObject({
         ok: true,
         open_holds: 0,

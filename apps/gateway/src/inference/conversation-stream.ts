@@ -22,11 +22,9 @@ import type { StreamWriter } from "../stream-relay.ts";
 import {
   BedrockEventStreamDecoder,
   buildTextDeltaSse,
-  extractChunkTextFromEncodedSse,
-  inspectAnthropicBlockEvent,
   mergeUsageSources,
   mergeStreamUsageAliases,
-  stripTextFromSseChunk,
+  splitSseChunkText,
 } from "../upstream.ts";
 import { classifyPluginBlock } from "./policy.ts";
 import { buildUsageForOperation, buildModerationUsageFallback } from "./usage.ts";
@@ -132,7 +130,7 @@ export async function relayConversationStream(
       const result = await responsesModeration.push(chunk);
       if (!result) {
         if (isTerminal) heldTerminalChunks.push(chunk);
-        else await controller.enqueue(responsesModeration.rewrite(chunk));
+        else await controller.enqueue(responsesModeration.rewrite(chunk), false);
       } else {
         observedOutputChars += result.chars;
         if (result.blocked) {
@@ -141,7 +139,7 @@ export async function relayConversationStream(
         }
         if (result.rendered) {
           if (isTerminal) heldApprovedChunks!.push(result.rendered);
-          else await controller.enqueue(result.rendered);
+          else await controller.enqueue(result.rendered, true);
         }
       }
       return;
@@ -151,23 +149,25 @@ export async function relayConversationStream(
       else await controller.enqueue(chunk);
       return;
     }
-    if (!wasmProvider && clientProtocol === "messages") {
-      const blk = inspectAnthropicBlockEvent(chunk);
-      if (blk?.kind === "text_start") {
-        activeTextBlockIndex = blk.index;
-      } else if (blk?.kind === "block_stop" && blk.index === activeTextBlockIndex) {
+    const split = splitSseChunkText(chunk, clientProtocol, !wasmProvider);
+    if (!wasmProvider && clientProtocol === "messages" && split.anthropicBlock) {
+      if (split.anthropicBlock.kind === "text_start") {
+        activeTextBlockIndex = split.anthropicBlock.index;
+      } else if (
+        split.anthropicBlock.kind === "block_stop" &&
+        split.anthropicBlock.index === activeTextBlockIndex
+      ) {
         heldTerminalChunks.push(chunk);
         return;
       }
     }
-    const deltaText = extractChunkTextFromEncodedSse(chunk, clientProtocol);
-    if (deltaText === null) {
+    if (split.text === null) {
       if (isTerminal) heldTerminalChunks.push(chunk);
-      else await controller.enqueue(chunk);
+      else await controller.enqueue(chunk, split.hasOtherText);
       return;
     }
-    observedOutputChars += deltaText.length;
-    const mod = await session.push(deltaText);
+    observedOutputChars += split.text.length;
+    const mod = await session.push(split.text);
     if (mod.blocked) {
       blockedEarly = true;
       return;
@@ -181,12 +181,11 @@ export async function relayConversationStream(
         activeTextBlockIndex >= 0 ? activeTextBlockIndex : 0,
       );
       if (isTerminal) heldApprovedChunks!.push(rendered);
-      else await controller.enqueue(rendered);
+      else await controller.enqueue(rendered, true);
     }
-    const remainder = wasmProvider ? null : stripTextFromSseChunk(chunk, clientProtocol);
-    if (remainder) {
-      if (isTerminal) heldTerminalChunks.push(remainder);
-      else await controller.enqueue(remainder);
+    if (split.remainder) {
+      if (isTerminal) heldTerminalChunks.push(split.remainder);
+      else await controller.enqueue(split.remainder, split.remainderHasText ?? false);
     }
   }
 
@@ -441,7 +440,7 @@ export async function relayConversationStream(
         return;
       }
       for (const frame of finalMod.frames) {
-        if (wasmProvider) await controller.enqueue(frame);
+        if (wasmProvider) await controller.enqueue(frame, true);
         else heldApprovedChunks!.push(frame);
       }
       if (finalMod.emit.length > 0) {
@@ -452,7 +451,7 @@ export async function relayConversationStream(
           getStreamId(),
           activeTextBlockIndex >= 0 ? activeTextBlockIndex : 0,
         );
-        if (wasmProvider) await controller.enqueue(chunk);
+        if (wasmProvider) await controller.enqueue(chunk, true);
         else heldApprovedChunks!.push(chunk);
       }
     }
@@ -505,7 +504,7 @@ export async function relayConversationStream(
     observeAttemptSuccess(latencyMs);
     if (heldApprovedChunks) {
       for (const chunk of heldApprovedChunks) {
-        await controller.enqueue(chunk);
+        await controller.enqueue(chunk, true);
       }
     }
     if (!responsesModeration && heldTerminalChunks.length > 1) {
