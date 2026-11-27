@@ -39,7 +39,10 @@ export class AttemptLifetime {
   private attemptDisposed = false;
   private watchingReqSignal = false;
   private unsubPlugin: (() => void) | undefined;
+  private postDispatchGraceMs = 0;
+  private readonly attemptDeadlineMs: number;
   private readonly cancelTimeoutFn: () => void;
+  private cancelGraceTimeoutFn: (() => void) | undefined;
 
   constructor(
     private readonly owner: InferenceResources,
@@ -47,8 +50,9 @@ export class AttemptLifetime {
     pluginSignal: AbortSignal,
     attemptTimeoutMs: number,
     watchPlugin: boolean,
-    state: ProxyRuntimeState,
+    private readonly state: ProxyRuntimeState,
   ) {
+    this.attemptDeadlineMs = performance.now() + attemptTimeoutMs;
     if (owner.isDraining()) {
       this.abort(new Error("Gateway shutting down"));
     } else if (owner.quotaLost(true)) {
@@ -69,7 +73,25 @@ export class AttemptLifetime {
     );
   }
 
+  enablePostDispatchClientAbortGrace(graceMs: number): void {
+    if (graceMs <= 0 || this.attemptAborted || this.attemptDisposed) return;
+    this.postDispatchGraceMs = graceMs;
+  }
+
+  get hasPostDispatchGrace(): boolean {
+    return this.postDispatchGraceMs > 0;
+  }
+
   private readonly onReqAbort = (): void => {
+    if (this.postDispatchGraceMs > 0) {
+      const remainingMs = this.attemptDeadlineMs - performance.now();
+      if (this.postDispatchGraceMs < remainingMs && !this.cancelGraceTimeoutFn) {
+        this.cancelGraceTimeoutFn = this.state.deadlines.schedule(this.postDispatchGraceMs, () =>
+          this.abort(new GatewayError(499, "client_aborted", "Client disconnected")),
+        );
+      }
+      return;
+    }
     this.abort(this.requestSignal.reason);
   };
 
@@ -101,6 +123,8 @@ export class AttemptLifetime {
 
   cancelTimeout(): void {
     this.cancelTimeoutFn();
+    this.cancelGraceTimeoutFn?.();
+    this.cancelGraceTimeoutFn = undefined;
   }
 
   readonly onCancelRegister: CancelRegistrar = (fn) => {
@@ -116,6 +140,8 @@ export class AttemptLifetime {
 
   readonly dispose = (): void => {
     this.cancelTimeoutFn();
+    this.cancelGraceTimeoutFn?.();
+    this.cancelGraceTimeoutFn = undefined;
     if (!this.attemptDisposed) {
       this.attemptDisposed = true;
       this.attemptCancelCb = null;
@@ -235,12 +261,20 @@ export class InferenceResources {
     return this.requestSignal.aborted || this.drainAborted || this.quotaLost(includeChannel);
   }
 
+  serverInterrupted(includeChannel = false): boolean {
+    return this.drainAborted || this.quotaLost(includeChannel);
+  }
+
   admissionError(quotaLost: boolean): GatewayError {
     return this.requestSignal.aborted
       ? new GatewayError(499, "client_aborted", "Client disconnected")
-      : quotaLost
-        ? new GatewayError(503, "rate_limit_unavailable", "Shared concurrency permit was revoked")
-        : new GatewayError(503, "overloaded", "Gateway is draining");
+      : this.serverAdmissionError(quotaLost);
+  }
+
+  serverAdmissionError(quotaLost: boolean): GatewayError {
+    return quotaLost
+      ? new GatewayError(503, "rate_limit_unavailable", "Shared concurrency permit was revoked")
+      : new GatewayError(503, "overloaded", "Gateway is draining");
   }
 
   link(

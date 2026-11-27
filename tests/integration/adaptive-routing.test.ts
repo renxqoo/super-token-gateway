@@ -422,8 +422,7 @@ test("symptom: an upstream that waits forever to finish is excluded from failure
     expect(await (await runtime.metricsResponse()).text()).toMatch(
       /^gateway_routing_attempts_total\{[^\n]*mode="stream",dispatch="sent",outcome="failed"\} 1$/m,
     );
-    expect(await f.holdsByState()).toEqual({ UNKNOWN: 1 });
-    await f.resolveUnknownHolds();
+    expect(await f.holdsByState()).toEqual({ SETTLED: 1 });
   } finally {
     clearInterval(keepAlive);
     await runtime.close();

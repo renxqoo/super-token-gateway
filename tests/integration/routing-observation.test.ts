@@ -26,7 +26,9 @@ test("routing observation records first tool output and counts a 200 SSE interru
     }),
   });
   const runtime = createGatewayRuntime({
-    config: makeConfig({ routingObservationModels: models }),
+    config: makeConfig({
+      routingObservationModels: models,
+    }),
     db,
     wasmExecutor: null,
   });
@@ -72,7 +74,11 @@ test("routing observation records first tool output and counts a 200 SSE interru
 
 test("routing cost reports supplier expense in the original request window and unknown exposure separately", async () => {
   const upstream = fakeUpstream("cost-observation");
-  const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+  const runtime = createGatewayRuntime({
+    config: makeConfig({ streamEstimatedSettlement: false }),
+    db,
+    wasmExecutor: null,
+  });
   try {
     await runtime.start();
     const { model, chat, resolveUnknownHolds } = await setup(runtime, [upstream]);
@@ -134,7 +140,10 @@ test("routing observation counts a normal SSE terminator with missing usage as a
       'data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
   });
   const runtime = createGatewayRuntime({
-    config: makeConfig({ routingObservationModels: models }),
+    config: makeConfig({
+      routingObservationModels: models,
+      streamEstimatedSettlement: false,
+    }),
     db,
     wasmExecutor: null,
   });

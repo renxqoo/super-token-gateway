@@ -8,3 +8,4 @@ export * from "./json.ts";
 export * from "./sse.ts";
 export * from "./usage.ts";
 export * from "./characters.ts";
+export * from "./plaintext.ts";

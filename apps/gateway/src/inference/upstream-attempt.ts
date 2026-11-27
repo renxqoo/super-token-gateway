@@ -12,6 +12,15 @@ import { channelFailureKind } from "./telemetry.ts";
 import type { InferenceTelemetry } from "./telemetry.ts";
 import type { InferenceResources } from "./resources.ts";
 
+function hasNonZeroCacheWriteRate(price: PriceVersionRecord): boolean {
+  const { cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens } = price.rates;
+  return (
+    (cache_write_tokens !== undefined && cache_write_tokens.numerator !== "0") ||
+    (cache_write_5m_tokens !== undefined && cache_write_5m_tokens.numerator !== "0") ||
+    (cache_write_1h_tokens !== undefined && cache_write_1h_tokens.numerator !== "0")
+  );
+}
+
 export function createUpstreamPreparation(request: InferenceRequest) {
   const { deps, snap, operation, outputBound, isStream, billingAccount, trace, multipartEntries } =
     request;
@@ -70,10 +79,18 @@ export function createUpstreamPreparation(request: InferenceRequest) {
         typeof tryPrepareUpstreamRequestSync
       >[0];
       opts.estimateInputTokens =
-        operation === "chat" &&
-        cand.same_protocol &&
+        (operation === "chat" || operation === "responses" || operation === "messages") &&
         Boolean(customerPrice.rates.input_tokens || cand.costPrice.rates.input_tokens);
-      return tryPrepareUpstreamRequestSync(opts);
+      const prepared = tryPrepareUpstreamRequestSync(opts);
+      if (
+        prepared &&
+        prepared.estimatedInputTokens !== undefined &&
+        prepared.usageDialect !== "anthropic" &&
+        (hasNonZeroCacheWriteRate(customerPrice) || hasNonZeroCacheWriteRate(cand.costPrice))
+      ) {
+        delete prepared.estimatedInputTokens;
+      }
+      return prepared;
     } catch (error) {
       if (error instanceof MeteredRequestError) throw error;
       return null;

@@ -179,6 +179,17 @@ export async function dispatchInferenceAttempt(
       attempt.dispose();
       return await rejectOutputPolicy(unavailablePolicy);
     }
+    if (resources.interrupted(true)) {
+      attempt.finishExchange();
+      releaseProbe();
+      releaseBackups();
+      await accounting.finishFailedRequest();
+      throw resources.admissionError(resources.quotaLost(true));
+    }
+    const unaryGraceMs = !isStream ? (deps.config.unaryClientAbortGraceMs ?? 600_000) : 0;
+    if (unaryGraceMs > 0 && reservation.dispatch) {
+      attempt.enablePostDispatchClientAbortGrace(unaryGraceMs);
+    }
     const upstreamRequest: Parameters<typeof deps.transport.fetchFast>[1] = {
       method: "POST",
       headers: prepared.headers,
@@ -188,7 +199,20 @@ export async function dispatchInferenceAttempt(
     };
     if (prepared.headersValidated) upstreamRequest.headersValidated = true;
     const timingObserver = telemetry.transportObserver;
-    if (timingObserver) upstreamRequest.onTiming = timingObserver;
+    if (unaryGraceMs > 0 && !reservation.dispatch) {
+      upstreamRequest.onTiming = (phase, at) => {
+        if (
+          phase === "connection_ready" ||
+          phase === "request_written" ||
+          phase === "response_headers"
+        ) {
+          attempt.enablePostDispatchClientAbortGrace(unaryGraceMs);
+        }
+        timingObserver?.(phase, at);
+      };
+    } else if (timingObserver) {
+      upstreamRequest.onTiming = timingObserver;
+    }
     accounting.setDispatched(true);
     telemetry.noteRoutingDispatch("possible");
     fastResult = reservation.dispatch
@@ -199,6 +223,9 @@ export async function dispatchInferenceAttempt(
           deps.config.allowPrivateUpstreams,
           deps.config.privateUpstreamCidrs,
         );
+    if (unaryGraceMs > 0 && !attempt.hasPostDispatchGrace) {
+      attempt.enablePostDispatchClientAbortGrace(unaryGraceMs);
+    }
   } catch (err) {
     attempt.finishExchange();
     const isPreDispatch =
@@ -419,6 +446,10 @@ export async function dispatchInferenceAttempt(
     releaseProbe();
     releaseBackups();
     await accounting.finishFailedRequest();
+    if (c.req.raw.signal.aborted) {
+      telemetry.emitAccessLog(499, "client_aborted");
+      return new Response(null, { status: 499 });
+    }
     telemetry.emitAccessLog(upstreamStatus, "upstream_client_error");
     return c.json(
       formatProtocolError(

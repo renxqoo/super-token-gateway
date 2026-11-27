@@ -7,6 +7,7 @@ import type { SSEEvent } from "./sse.ts";
 import { finishReason, blockedPrompt } from "./finish.ts";
 import type { Completion } from "./response.ts";
 import { encodeStreamComplete, encodeStreamStart } from "./stream-encode.ts";
+import { observePlaintext, type PlaintextStats } from "./plaintext.ts";
 
 const streamEncoder = new TextEncoder();
 
@@ -20,6 +21,7 @@ export interface StreamDelta {
 
 export class StreamTranslator {
   usage: Usage | undefined;
+  readonly observedOutput: PlaintextStats = { asciiChars: 0, nonAsciiChars: 0, chunks: 0 };
   terminal = false;
   failed = false;
   private finish: Completion["finish"] = "stop";
@@ -220,11 +222,36 @@ export class StreamTranslator {
         if (rawDelta !== null && typeof rawDelta === "object" && !Array.isArray(rawDelta)) {
           const d = rawDelta as Record<string, unknown>;
           if (trackSourceContent && !hasChatTool) hasChatTool = hasChatToolDelta(d);
-          if (
-            (typeof d.content === "string" && d.content.length > 0) ||
-            (typeof d.refusal === "string" && d.refusal.length > 0)
-          ) {
+          if (typeof d.content === "string" && d.content.length > 0) {
             hasSourceText = true;
+            observePlaintext(this.observedOutput, d.content);
+          }
+          if (typeof d.refusal === "string" && d.refusal.length > 0) {
+            hasSourceText = true;
+            observePlaintext(this.observedOutput, d.refusal);
+          }
+          if (typeof d.reasoning_content === "string" && d.reasoning_content.length > 0) {
+            observePlaintext(this.observedOutput, d.reasoning_content);
+          } else if (typeof d.reasoning === "string" && d.reasoning.length > 0) {
+            observePlaintext(this.observedOutput, d.reasoning);
+          }
+          if (
+            d.function_call &&
+            typeof d.function_call === "object" &&
+            !Array.isArray(d.function_call)
+          ) {
+            const fc = d.function_call as Record<string, unknown>;
+            if (typeof fc.name === "string") observePlaintext(this.observedOutput, fc.name);
+            if (typeof fc.arguments === "string")
+              observePlaintext(this.observedOutput, fc.arguments);
+          }
+          if (Array.isArray(d.tool_calls)) {
+            for (const rawCall of d.tool_calls) {
+              const fn = optionalObject(optionalObject(rawCall).function);
+              if (typeof fn.name === "string") observePlaintext(this.observedOutput, fn.name);
+              if (typeof fn.arguments === "string")
+                observePlaintext(this.observedOutput, fn.arguments);
+            }
           }
           if (
             hasSourceText ||
@@ -269,7 +296,10 @@ export class StreamTranslator {
       const index = Number(body.output_index ?? 0);
       if (type === "response.output_text.delta") {
         const deltaStr = text(body.delta);
-        if (deltaStr.length > 0) hasSourceText = true;
+        if (deltaStr.length > 0) {
+          hasSourceText = true;
+          observePlaintext(this.observedOutput, deltaStr);
+        }
         pushDelta({ type: "text", index, text: deltaStr });
       } else if (
         type === "response.refusal.delta" &&
@@ -277,31 +307,40 @@ export class StreamTranslator {
         body.delta.length > 0
       ) {
         hasSourceText = true;
+        observePlaintext(this.observedOutput, body.delta);
       }
       if (
         type === "response.reasoning_summary_text.delta" ||
         type === "response.reasoning_text.delta"
-      )
-        pushDelta({ type: "reasoning", index, text: text(body.delta) });
+      ) {
+        const deltaStr = text(body.delta);
+        observePlaintext(this.observedOutput, deltaStr);
+        pushDelta({ type: "reasoning", index, text: deltaStr });
+      }
       if (type === "response.output_item.added") {
         const item = optionalObject(body.item);
-        if (item.type === "function_call")
+        if (item.type === "function_call") {
+          const callName = text(item.name);
+          observePlaintext(this.observedOutput, callName);
           pushDelta({
             type: "tool",
             index,
             text: "",
             id: text(item.call_id),
-            name: text(item.name),
+            name: callName,
           });
-        else if (
+        } else if (
           this.target !== this.source &&
           item.type !== "message" &&
           item.type !== "reasoning"
         )
           throw new GatewayError(502, "conversion_loss", "Unsupported response output item");
       }
-      if (type === "response.function_call_arguments.delta")
-        pushDelta({ type: "tool", index, text: text(body.delta) });
+      if (type === "response.function_call_arguments.delta") {
+        const deltaStr = text(body.delta);
+        observePlaintext(this.observedOutput, deltaStr);
+        pushDelta({ type: "tool", index, text: deltaStr });
+      }
       if (type === "response.completed" || type === "response.incomplete") {
         terminalNow = true;
         if (type === "response.incomplete") this.finish = "length";
@@ -312,39 +351,58 @@ export class StreamTranslator {
       if (type === "content_block_start") {
         const block = object(body.content_block);
         (this.blockTypes ??= new Map()).set(index, text(block.type));
-        if (block.type === "tool_use")
+        if (block.type === "tool_use") {
+          const toolName = text(block.name);
+          observePlaintext(this.observedOutput, toolName);
           pushDelta({
             type: "tool",
             index,
             text: "",
             id: text(block.id),
-            name: text(block.name),
+            name: toolName,
           });
-        else if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
+        } else if (
+          block.type === "text" &&
+          typeof block.text === "string" &&
+          block.text.length > 0
+        ) {
           hasSourceText = true;
+          observePlaintext(this.observedOutput, block.text);
           pushDelta({ type: "text", index, text: block.text });
         } else if (
           block.type === "thinking" &&
           typeof block.thinking === "string" &&
           block.thinking.length > 0
-        )
+        ) {
+          observePlaintext(this.observedOutput, block.thinking);
           pushDelta({ type: "reasoning", index, text: block.thinking });
-        else if (this.target !== this.source && block.type !== "text" && block.type !== "thinking")
+        } else if (
+          this.target !== this.source &&
+          block.type !== "text" &&
+          block.type !== "thinking"
+        )
           throw new GatewayError(502, "conversion_loss", "Unsupported Anthropic stream block");
       }
       if (type === "content_block_delta") {
         const delta = object(body.delta);
         if (delta.type === "text_delta") {
           const dt = text(delta.text);
-          if (dt.length > 0) hasSourceText = true;
+          if (dt.length > 0) {
+            hasSourceText = true;
+            observePlaintext(this.observedOutput, dt);
+          }
           pushDelta({ type: "text", index, text: dt });
-        } else if (delta.type === "thinking_delta")
-          pushDelta({ type: "reasoning", index, text: text(delta.thinking) });
-        else if (delta.type === "signature_delta") {
+        } else if (delta.type === "thinking_delta") {
+          const dt = text(delta.thinking);
+          observePlaintext(this.observedOutput, dt);
+          pushDelta({ type: "reasoning", index, text: dt });
+        } else if (delta.type === "signature_delta") {
           void 0;
-        } else if (delta.type === "input_json_delta")
-          pushDelta({ type: "tool", index, text: text(delta.partial_json) });
-        else if (this.target !== this.source)
+        } else if (delta.type === "input_json_delta") {
+          const dt = text(delta.partial_json);
+          observePlaintext(this.observedOutput, dt);
+          pushDelta({ type: "tool", index, text: dt });
+        } else if (this.target !== this.source)
           throw new GatewayError(502, "conversion_loss", "Unsupported Anthropic delta");
       }
       if (type === "message_delta") {
@@ -367,12 +425,18 @@ export class StreamTranslator {
             const part = object(content.parts[index]);
             if (typeof part.text !== "string" || part.text.length > 0) addsOutput = true;
             if (part.thought === true && typeof part.text === "string") {
-              if (part.text.length > 0) addsGeminiThought = true;
+              if (part.text.length > 0) {
+                addsGeminiThought = true;
+                observePlaintext(this.observedOutput, part.text);
+              }
               pushDelta({ type: "reasoning", index: 0, text: part.text });
               continue;
             }
             if (typeof part.text === "string") {
-              if (part.text.length > 0) hasSourceText = true;
+              if (part.text.length > 0) {
+                hasSourceText = true;
+                observePlaintext(this.observedOutput, part.text);
+              }
               pushDelta({ type: "text", index: 0, text: part.text });
             } else if (part.functionCall) {
               const call = object(part.functionCall);
@@ -391,13 +455,16 @@ export class StreamTranslator {
                 continue;
               }
               const callIndex = calls.size + 1;
-              calls.set(identity, { index: callIndex, args, name: text(call.name) });
+              const callName = text(call.name);
+              calls.set(identity, { index: callIndex, args, name: callName });
+              observePlaintext(this.observedOutput, callName);
+              observePlaintext(this.observedOutput, args);
               pushDelta({
                 type: "tool",
                 index: callIndex,
                 text: args,
                 id,
-                name: text(call.name),
+                name: callName,
               });
             } else if (this.target !== this.source)
               throw new GatewayError(502, "conversion_loss", "Unsupported Gemini stream part");

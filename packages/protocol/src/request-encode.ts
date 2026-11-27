@@ -204,6 +204,7 @@ export function encodeRequest(
     if (request.stream) body.stream_options = { include_usage: true };
     if (request.parallelToolCalls !== undefined)
       body.parallel_tool_calls = request.parallelToolCalls;
+    if (request.reasoningEffort !== undefined) body.reasoning_effort = request.reasoningEffort;
     if (request.topK !== undefined) {
       if (mode === "compat") recordDrop("top_k");
       else unsupported("top_k");
@@ -214,6 +215,11 @@ export function encodeRequest(
     if (request.maxTokens !== undefined) body.max_output_tokens = request.maxTokens;
     if (request.parallelToolCalls !== undefined)
       body.parallel_tool_calls = request.parallelToolCalls;
+    if (request.reasoningEffort !== undefined)
+      body.reasoning =
+        request.reasoningEffort === "none"
+          ? { effort: "none" }
+          : { effort: request.reasoningEffort, summary: "auto" };
     if (request.topK !== undefined) {
       if (mode === "compat") recordDrop("top_k");
       else unsupported("top_k");
@@ -223,6 +229,9 @@ export function encodeRequest(
     if (system.length) body.system = system.join("\n\n");
     body.max_tokens = request.maxTokens ?? 32768;
     if (request.topK !== undefined) body.top_k = request.topK;
+    if (request.reasoningEffort !== undefined) {
+      body.output_config = { effort: request.reasoningEffort };
+    }
   } else {
     delete body.stream;
     delete body.temperature;
@@ -233,6 +242,8 @@ export function encodeRequest(
       if (mode === "compat") recordDrop("parallel_tool_calls");
       else unsupported("parallel_tool_calls");
     }
+    if (request.reasoningEffort !== undefined)
+      unsupported(request.reasoningEffortField ?? "reasoning_effort");
     body.generationConfig = {
       ...(request.maxTokens !== undefined ? { maxOutputTokens: request.maxTokens } : {}),
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
@@ -255,7 +266,10 @@ export function encodeRequest(
       };
     if (target === "responses") body.text = { format };
     if (target === "messages")
-      body.output_config = { format: { type: "json_schema", schema: request.jsonSchema } };
+      body.output_config = {
+        ...(body.output_config as Record<string, unknown> | undefined),
+        format: { type: "json_schema", schema: request.jsonSchema },
+      };
   }
   if (request.tools.length) {
     body.tools =

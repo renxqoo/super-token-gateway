@@ -434,7 +434,11 @@ test.each(["commits", "fails"] as const)(
 
 test("symptom: chat SSE bills and emits DONE when EOF leaves a partial trailing event", async () => {
   const up = fakeUpstream("partial-trailer");
-  const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+  const runtime = createGatewayRuntime({
+    config: makeConfig({ streamEstimatedSettlement: false }),
+    db,
+    wasmExecutor: null,
+  });
   try {
     await runtime.start();
     const { chat, charges, audit, holdsByState, resolveUnknownHolds } = await setup(runtime, [up]);

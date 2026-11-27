@@ -1,6 +1,6 @@
 import { lookup } from "node:dns/promises";
-import { BlockList, isIP } from "node:net";
-import { inCidrs } from "./ip.ts";
+import { isIP } from "node:net";
+import { inCidrs, isPublicAddress } from "./ip.ts";
 import { GatewayError } from "@gateway/contracts";
 import { DEFAULT_DIAL_QUEUE_WAIT_MS, type DialLimits } from "./dial-scheduler.ts";
 import { markUpstream } from "./transport-timing.ts";
@@ -298,8 +298,22 @@ export function createTransport(maxConnections = 1024, options: TransportOptions
               throw new TypeError("Prepared dispatch requires a buffered request body");
             }
             const sendInit = pinnedRequest(origin, request);
-            sendInit.outbound = outbound;
-            return await pool.sendFast(pinnedUrl, sendInit);
+            if (!origin.tls) {
+              sendInit.outbound = outbound;
+              return await pool.sendFast(pinnedUrl, sendInit);
+            }
+            return await runWithTransientTlsRetry(
+              sendInit,
+              (attemptInit, retry) => {
+                if (retry) {
+                  delete attemptInit.outbound;
+                  return pool.sendFast(pinnedUrl, attemptInit);
+                }
+                attemptInit.outbound = outbound;
+                return pool.sendFast(pinnedUrl, attemptInit);
+              },
+              () => outbound.release(),
+            );
           } finally {
             outbound.release();
           }
@@ -372,8 +386,8 @@ export function createTransport(maxConnections = 1024, options: TransportOptions
               origin,
               pinnedRequest(origin, request),
               fallbackBudget,
-              async (pinned, init, index) => {
-                if (index !== selectedIndex) return pool.sendFast(pinned, init);
+              async (pinned, init, index, retry) => {
+                if (retry || index !== selectedIndex) return pool.sendFast(pinned, init);
                 try {
                   return await pool.sendFast(pinned, { ...init, outbound });
                 } finally {
@@ -429,76 +443,6 @@ export function createTransport(maxConnections = 1024, options: TransportOptions
       pool.close();
     },
   };
-}
-
-const blocked = new BlockList();
-for (const [address, prefix] of [
-  ["0.0.0.0", 8],
-  ["10.0.0.0", 8],
-  ["100.64.0.0", 10],
-  ["127.0.0.0", 8],
-  ["169.254.0.0", 16],
-  ["172.16.0.0", 12],
-  ["192.0.0.0", 24],
-  ["192.168.0.0", 16],
-  ["192.0.2.0", 24],
-  ["192.88.99.0", 24],
-  ["198.18.0.0", 15],
-  ["198.51.100.0", 24],
-  ["203.0.113.0", 24],
-  ["224.0.0.0", 4],
-  ["240.0.0.0", 4],
-] as const)
-  blocked.addSubnet(address, prefix, "ipv4");
-
-const blockedV6 = new BlockList();
-for (const [address, prefix] of [
-  ["2001::", 23],
-  ["2001:2::", 48],
-  ["2001:db8::", 32],
-  ["2001:10::", 28],
-  ["2001:20::", 28],
-  ["2002::", 16],
-  ["3fff::", 20],
-] as const)
-  blockedV6.addSubnet(address, prefix, "ipv6");
-const globalV6 = new BlockList();
-globalV6.addSubnet("2000::", 3, "ipv6");
-export function isPublicAddress(address: string): boolean {
-  if (isIP(address) === 4) return !blocked.check(address, "ipv4");
-  return (
-    isIP(address) === 6 && globalV6.check(address, "ipv6") && !blockedV6.check(address, "ipv6")
-  );
-}
-
-export function validateBaseUrl(
-  value: string,
-  allowPrivate: boolean,
-  privateCidrs: readonly string[] = [],
-): URL {
-  const url = new URL(value);
-  if (
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash ||
-    !["https:", "http:"].includes(url.protocol)
-  ) {
-    throw new GatewayError(400, "unsafe_upstream", "Invalid upstream URL");
-  }
-  const literal = url.hostname.replace(/^\[|\]$/g, "");
-  const permittedPrivate = isIP(literal) && inCidrs(literal, privateCidrs);
-  if (!allowPrivate && !permittedPrivate && url.protocol !== "https:")
-    throw new GatewayError(400, "unsafe_upstream", "Upstream requires HTTPS");
-  const host = url.hostname.replace(/^\[|\]$/g, "");
-  if (
-    !allowPrivate &&
-    !permittedPrivate &&
-    (host === "localhost" || (isIP(host) && !isPublicAddress(host)))
-  ) {
-    throw new GatewayError(400, "unsafe_upstream", "Private upstream addresses are forbidden");
-  }
-  return url;
 }
 
 function defaultDnsResolve(
@@ -671,16 +615,61 @@ function canTryAnotherAddress(error: unknown) {
   );
 }
 
+function canRetryTransientTlsHandshake(error: unknown, init: PinnedRequestInit): boolean {
+  if (!(error instanceof UpstreamPreDispatchError) || error.code !== "upstream_tls") return false;
+  if (init.body instanceof ReadableStream && init.dispatchDeadline === undefined) return false;
+  const cause = error.cause as { code?: string } | undefined;
+  return !cause || /^(ECONNRESET|ECONNABORTED|EPIPE)$/.test(cause.code ?? "");
+}
+
+async function runWithTransientTlsRetry<T>(
+  init: PinnedRequestInit,
+  run: (attemptInit: PinnedRequestInit, retry: boolean) => Promise<T>,
+  onBeforeRetry?: () => void,
+): Promise<T> {
+  let cancelled = false;
+  const register = init.onCancelRegister;
+  const attemptInit: PinnedRequestInit = register
+    ? {
+        ...init,
+        onCancelRegister: (cancel) =>
+          register((reason) => {
+            cancelled = true;
+            cancel(reason);
+          }),
+      }
+    : init;
+  try {
+    return await run(attemptInit, false);
+  } catch (error) {
+    onBeforeRetry?.();
+    if (
+      cancelled ||
+      init.signal?.aborted ||
+      (init.dispatchDeadline !== undefined && performance.now() >= init.dispatchDeadline) ||
+      !canRetryTransientTlsHandshake(error, init)
+    ) {
+      throw error;
+    }
+    return await run(attemptInit, true);
+  }
+}
+
 async function useAddresses<T>(
   origin: UpstreamOrigin,
   init: PinnedRequestInit,
   fallbackBudget: number,
-  tryAddress: (url: URL, init: PinnedRequestInit, index: number) => Promise<T>,
+  tryAddress: (url: URL, init: PinnedRequestInit, index: number, retry?: boolean) => Promise<T>,
   firstIndex = 0,
 ): Promise<T> {
   const { addresses } = origin;
-  if (addresses.length - firstIndex === 1)
-    return tryAddress(pinAddress(origin, addresses[firstIndex]!), init, firstIndex);
+  if (addresses.length - firstIndex === 1) {
+    const pinned = pinAddress(origin, addresses[firstIndex]!);
+    if (!origin.tls) return tryAddress(pinned, init, firstIndex, false);
+    return runWithTransientTlsRetry(init, (attemptInit, retry) =>
+      tryAddress(pinned, attemptInit, firstIndex, retry),
+    );
+  }
 
   const deadline = init.dispatchDeadline ?? performance.now() + fallbackBudget;
   const register = init.onCancelRegister;

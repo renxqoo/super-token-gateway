@@ -629,9 +629,8 @@ export const billingReconciliationBudgets = pgTable("billing_reconciliation_budg
 export const billingReconciliationPolicies = pgTable(
   "billing_reconciliation_policies",
   {
-    billingAccountId: uuid("billing_account_id")
-      .notNull()
-      .references(() => billingAccounts.id),
+    id: uuid("id").primaryKey().defaultRandom(),
+    billingAccountId: uuid("billing_account_id").references(() => billingAccounts.id),
     channelId: uuid("channel_id")
       .notNull()
       .references(() => channels.id),
@@ -648,37 +647,34 @@ export const billingReconciliationPolicies = pgTable(
     limitAtoms: numeric("limit_atoms", { precision: 38, scale: 0 }).notNull(),
     usedAtoms: numeric("used_atoms", { precision: 38, scale: 0 }).notNull().default("0"),
   },
-  (t) => [primaryKey({ columns: [t.billingAccountId, t.channelId, t.supplierCurrency] })],
-);
-
-export const billingReconciliationWaivers = pgTable(
-  "billing_reconciliation_waivers",
-  {
-    requestId: uuid("request_id")
-      .primaryKey()
-      .references(() => billingHolds.requestId),
-    attemptId: uuid("attempt_id").notNull(),
-    billingAccountId: uuid("billing_account_id").notNull(),
-    channelId: uuid("channel_id").notNull(),
-    supplierCurrency: text("supplier_currency").notNull(),
-    supplierRiskAtoms: numeric("supplier_risk_atoms", { precision: 38, scale: 0 }).notNull(),
-    customerReleasedAtoms: numeric("customer_released_atoms", {
-      precision: 38,
-      scale: 0,
-    }).notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
-  },
   (t) => [
-    foreignKey({
-      columns: [t.billingAccountId, t.channelId, t.supplierCurrency],
-      foreignColumns: [
-        billingReconciliationPolicies.billingAccountId,
-        billingReconciliationPolicies.channelId,
-        billingReconciliationPolicies.supplierCurrency,
-      ],
-    }),
+    uniqueIndex("billing_reconciliation_policies_account_scope_idx")
+      .on(t.billingAccountId, t.channelId, t.supplierCurrency)
+      .where(sql`${t.billingAccountId} IS NOT NULL`),
+    uniqueIndex("billing_reconciliation_policies_channel_default_idx")
+      .on(t.channelId, t.supplierCurrency)
+      .where(sql`${t.billingAccountId} IS NULL`),
   ],
 );
+
+export const billingReconciliationWaivers = pgTable("billing_reconciliation_waivers", {
+  requestId: uuid("request_id")
+    .primaryKey()
+    .references(() => billingHolds.requestId),
+  attemptId: uuid("attempt_id").notNull(),
+  policyId: uuid("policy_id")
+    .notNull()
+    .references(() => billingReconciliationPolicies.id),
+  billingAccountId: uuid("billing_account_id").notNull(),
+  channelId: uuid("channel_id").notNull(),
+  supplierCurrency: text("supplier_currency").notNull(),
+  supplierRiskAtoms: numeric("supplier_risk_atoms", { precision: 38, scale: 0 }).notNull(),
+  customerReleasedAtoms: numeric("customer_released_atoms", {
+    precision: 38,
+    scale: 0,
+  }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+});
 
 export const billingReconciliationPolls = pgTable("billing_reconciliation_polls", {
   attemptId: uuid("attempt_id").primaryKey(),

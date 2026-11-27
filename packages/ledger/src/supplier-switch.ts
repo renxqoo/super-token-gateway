@@ -136,7 +136,11 @@ export function createSupplierSwitch({
               });
               await tx`
                 UPDATE public.billing_holds
-                SET supplier_holds = ${supplierHolds}::jsonb
+                SET supplier_holds = ${supplierHolds}::jsonb,
+                    expires_at = GREATEST(
+                      expires_at,
+                      COALESCE(${input.expires_at ?? null}::timestamptz, expires_at)
+                    )
                 WHERE request_id = ${input.request_id}
               `;
               reboundAttempt = true;
@@ -421,7 +425,11 @@ export function createSupplierSwitch({
                   credit_atoms = ${creditAtoms.toString()}::numeric,
                   key_reserved_atoms = ${keyReservedAtoms.toString()}::numeric,
                   lot_allocations = ${lotAllocs}::jsonb,
-                  supplier_holds = ${supplierHolds}::jsonb
+                  supplier_holds = ${supplierHolds}::jsonb,
+                  expires_at = GREATEST(
+                    expires_at,
+                    COALESCE(${input.expires_at ?? null}::timestamptz, expires_at)
+                  )
               WHERE request_id = ${input.request_id}
             `;
 

@@ -17,7 +17,7 @@ export let extraBillingAccountId = "";
 
 export let accountId = "";
 
-let channelId = "";
+export let channelId = "";
 
 export let apiKeyRaw = "";
 

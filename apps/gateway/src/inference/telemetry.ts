@@ -57,6 +57,7 @@ export class InferenceTelemetry {
   private logAttempts = 0;
   private logFailover = false;
   private logModBlocked = false;
+  private logEstimatedUsage = false;
   private logTtftMs: number | null = null;
   requestTrace: ReturnType<typeof createRequestTrace> | undefined;
   private traceProtocol: Protocol | null = null;
@@ -283,6 +284,11 @@ export class InferenceTelemetry {
     this.deps.metrics.moderationBlocksTotal++;
   }
 
+  noteEstimatedUsage(): void {
+    this.logEstimatedUsage = true;
+    this.deps.metrics.estimatedStreamSettlements++;
+  }
+
   recordAttemptFailure(
     code: string,
     kind: ChannelFailureKind = channelFailureKind(code),
@@ -433,6 +439,7 @@ export class InferenceTelemetry {
       ...(this.requestTrace && this.traceProtocol
         ? { first_text_trace: this.requestTrace.record(this.trace.spanId) }
         : {}),
+      ...(this.logEstimatedUsage ? { usage_source: "estimated" as const } : {}),
       error_code: errorCode,
     });
   }

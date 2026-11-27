@@ -8,8 +8,9 @@
 2. 按请求币种获取不可变客户费率版本与预扣上界。币种默认计费账户的 billing_currency，可用 `x-gateway-currency` 指定；不换汇，不跨币种补足。
 3. PG 同事务复核授权、创建幂等请求、从合资格的现金/赠额及剩余信用分配预扣、登记首次物理 attempt。合资格资金与信用不足或冻结返回 402，上游尚未调用。
 4. 转发模型内容，同时旁路提取白名单数字；每个 attempt 独立保存 usage 和上游成本。正常 JSON/SSE 终态交付前，BullMQ 数字证据必须取得同连接 WAITAOF 落盘确认。
-5. 独立 BullMQ worker 结算最终交付 attempt，释放多余预扣；重试的其他成本由 Gateway 承担。取消但有可信最终 usage 时结算实际用量。
-6. 缺少最终证据时保留预扣并进入对账。不会因等待 15 分钟自动免收、释放或重发模型请求。明确未执行可释放；人工对账指令可显式结算或核销。等待证据的预扣按已存在时长退避重扫（30 秒至 1 小时），新证据、人工对账及异步资源轮询改变计费结果时立即推进；对账先处理待收债务，现金入账后的收债与解冻不排在等待证据的积压之后。
+5. 独立 BullMQ worker 结算最终交付 attempt，释放多余预扣；重试的其他成本由 Gateway 承担。取消但有可信最终 usage 时结算实际用量。非流式请求在发往上游后若客户端提前取消，在 `UNARY_CLIENT_ABORT_GRACE_MS`（默认 600000ms，设为 0 关闭）及单次尝试超时上界内继续等待上游收尾并按真实 usage 结算（不发起 failover 重试），超出宽限或仍缺 usage 再中止上游并转 `UNKNOWN`。
+6. 对话流式请求在 `STREAM_ESTIMATED_SETTLEMENT`（默认 `true`）启用时，若流正常完结仅缺 `usage`，或在无在途内容审核插件时中途断流/超时/客户端主动断开前已观测到输出增量（文本、思考或工具参数），则保留已收到的上游部分用量（如 Anthropic `message_start` 输入与缓存字段），对缺失的输入/输出 token 按明文字符分类（英文约 4 字符/token、非 ASCII 约 1 字符/token）估算并截断至不超过已预扣金额后即时结算，并在访问日志与指标标记 `estimated`；0 输出断流、在途审核插件未决中断、上游显式流错误帧或关闭估算开关时仍保留预扣并进入 `UNKNOWN` 对账。
+7. 缺少最终证据的 `UNKNOWN` 预扣默认进入对账等待。不会无上限自动免收或重发模型请求；明确未执行可释放；人工对账指令可显式结算或核销。配置 `billing_reconciliation_budgets` 与 `billing_reconciliation_policies`（支持按 `(billing_account_id, channel_id, supplier_currency)` 精确配置或 `billing_account_id = NULL` 的渠道默认策略，精确策略优先）后，满足等待时长与单笔/累计预算上限的 `UNKNOWN` 预扣可由 Worker 在预算封顶保护下自动释放客户冻结款，并在 `billing_reconciliation_waivers` 留存审计记录。等待证据的预扣按已存在时长退避重扫（30 秒至 1 小时），新证据、人工对账及异步资源轮询改变计费结果时立即推进；对账先处理待收债务，现金入账后的收债与解冻不排在等待证据的积压之后。
 
 解析失败、地址安全校验拒绝及解析阶段取消均发生在发送前，记为 `NOT_EXECUTED`。只有所有尝试都已确定无需结算时才释放失败请求的预扣。发送后状态未知的尝试仍须对账。
 
@@ -17,7 +18,7 @@
 
 费率是 `{numerator,denominator}`，金额为 **10^-18 币种单位**的原子整数字符串，最大 NUMERIC(38,0)。全部维度用精确有理数汇总，仅在最终原子金额上向上取整。供应商成本 `cost_versions` 与客户售价 `billing_prices` 独立，不能互相代替。模型/操作/币种默认费率可由供应商专属费率覆盖；请求保存原始报价与各候选供应商的价格版本。
 
-预扣上界由显式 ceilings、请求最大输出和收费依据决定。最大输出只读取入口协议的原生上界字段，多个或非本协议字段返回 400；没有计量维度的服务端托管工具在准入前返回 422/unmetered_tool，避免上游按未计量维度另行收费。`PROVIDER_USAGE` 要求全部已定价维度的 FINAL 证据；`INPUT_CHARACTERS` 用明确输入字符量并要求请求成功；`REQUEST_COMPLETION` 按成功请求收费。禁止把缺失维度当零。预扣上界不足造成超额时补扣可用资金；仍不足则完整登记债务；已有欠费与在途信用预扣合计超出授信时冻结新调用。现金入账可偿债，赠额不能偿还现金债务。可用余额扣减地板为0；欠费金额为实际客户应收中未被资金覆盖的部分，单独记录为 `debt_atoms`，默认授信为0时债务会冻结新调用并返回402；显式授信允许额度内继续使用。管理接口 `GET /internal/v1/wallets/:billingAccountId` 返回按币种区分的可用、预扣、已花费、欠费原子整数字符串和冻结原因，以及credit_limit_atoms、credit_reserved_atoms、available_credit_atoms、credit_excess_atoms、credit_policy_version。
+预扣上界由显式 ceilings、请求最大输出和收费依据决定。对纯文本 `chat`、`responses` 和 `messages` 对话请求（同协议与跨协议均适用，排除含多模态、服务端工具或服务端隐藏上下文的请求），网关可基于请求体 UTF-8 字节数与结构开销计算严格输入 token 上界 `estimatedInputTokens`，并在全部互斥输入计费维度（`input_tokens`、`cached_input_tokens`、`cache_write_tokens`、`cache_write_5m_tokens`、`cache_write_1h_tokens`）中按最高单价维度报价（超过对应 ceiling 时安全回退全上限），在保证绝不欠扣的前提下压低单笔冻结金额。最大输出只读取入口协议的原生上界字段，多个或非本协议字段返回 400；没有计量维度的服务端托管工具在准入前返回 422/unmetered_tool，避免上游按未计量维度另行收费。`PROVIDER_USAGE` 要求全部已定价维度的 FINAL 证据（流式估算启用时按上述明文估算边界兜底）；`INPUT_CHARACTERS` 用明确输入字符量并要求请求成功；`REQUEST_COMPLETION` 按成功请求收费。禁止把缺失维度当零。预扣上界不足造成超额时补扣可用资金；仍不足则完整登记债务；已有欠费与在途信用预扣合计超出授信时冻结新调用。现金入账可偿债，赠额不能偿还现金债务。可用余额扣减地板为0；欠费金额为实际客户应收中未被资金覆盖的部分，单独记录为 `debt_atoms`，默认授信为0时债务会冻结新调用并返回402；显式授信允许额度内继续使用。管理接口 `GET /internal/v1/wallets/:billingAccountId` 返回按币种区分的可用、预扣、已花费、欠费原子整数字符串和冻结原因，以及credit_limit_atoms、credit_reserved_atoms、available_credit_atoms、credit_excess_atoms、credit_policy_version。
 
 字符费率按入口协议中的直接文本计算 Unicode 码点。Completions、图片和视频读取 `prompt`，Speech、Embeddings 和 Moderations 读取 `input`，对话协议读取消息、系统提示和指令的文本内容。文本数组按项相加。媒体载荷、工具元数据和仅引用的历史内容不计入字符量。无法确定字符量时，该候选费率不能用于预扣，其他可用候选仍可参与路由。
 

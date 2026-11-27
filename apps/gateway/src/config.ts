@@ -58,6 +58,8 @@ export type GatewayConfig = {
   holdTtlMs: number;
   attemptTimeoutMs: number;
   firstByteTimeoutMs?: number;
+  unaryClientAbortGraceMs?: number;
+  streamEstimatedSettlement?: boolean;
   maxAmbiguousRetriesPerMinute?: number;
   streamIdleTimeoutMs?: number;
   streamMaxDurationMs?: number;
@@ -305,6 +307,12 @@ export function loadConfigFromEnv(
     env.TRACE_METRICS !== "false"
   )
     throw new Error("TRACE_METRICS must be true or false");
+  if (
+    env.STREAM_ESTIMATED_SETTLEMENT !== undefined &&
+    env.STREAM_ESTIMATED_SETTLEMENT !== "true" &&
+    env.STREAM_ESTIMATED_SETTLEMENT !== "false"
+  )
+    throw new Error("STREAM_ESTIMATED_SETTLEMENT must be true or false");
   return {
     mode,
     host: env.GATEWAY_HOST ?? "0.0.0.0",
@@ -355,6 +363,8 @@ export function loadConfigFromEnv(
     ...(env.FIRST_BYTE_TIMEOUT_MS !== undefined
       ? { firstByteTimeoutMs: intFromEnv(env, "FIRST_BYTE_TIMEOUT_MS", 15_000) }
       : {}),
+    unaryClientAbortGraceMs: intFromEnv(env, "UNARY_CLIENT_ABORT_GRACE_MS", 600_000, 0),
+    streamEstimatedSettlement: env.STREAM_ESTIMATED_SETTLEMENT !== "false",
     ...(env.MAX_AMBIGUOUS_RETRIES_PER_MINUTE !== undefined
       ? {
           maxAmbiguousRetriesPerMinute: intFromEnv(env, "MAX_AMBIGUOUS_RETRIES_PER_MINUTE", 60, 0),

@@ -101,6 +101,30 @@ test("GatewayClient sends least-privilege role tokens and maps timeout, auth, no
       if (pathname === "/internal/v1/audit/conservation") {
         return Response.json({ ok: false, open_holds: 2, imbalance_atoms: "50" }, { status: 500 });
       }
+      if (pathname === "/internal/v1/reconciliation/budgets/USD") {
+        return Response.json({
+          currency: "USD",
+          limit_atoms: JSON.parse(String(init?.body ?? "{}")).limit_atoms,
+          used_atoms: "0",
+        });
+      }
+      if (pathname === "/internal/v1/reconciliation/policies") {
+        return Response.json({
+          id: "pol-1",
+          ...JSON.parse(String(init?.body ?? "{}")),
+          used_atoms: "0",
+        });
+      }
+      if (pathname === "/internal/v1/reconciliation/cases") {
+        return Response.json({
+          data: [
+            {
+              request_id: "req-1",
+              query: new URL(url).search,
+            },
+          ],
+        });
+      }
       return Response.json({});
     },
   });
@@ -109,10 +133,35 @@ test("GatewayClient sends least-privilege role tokens and maps timeout, auth, no
   await client.listUpstreamAccounts();
   await client.listPlugins();
   await client.claimOutboxEvents("c1", 10);
+  const budget = await client.putReconciliationBudget("USD", "5000");
+  const policy = await client.putReconciliationPolicy({
+    billing_account_id: null,
+    channel_id: "ch-1",
+    supplier_currency: "USD",
+    enabled: true,
+    include_historical: true,
+    age_seconds: 300,
+    max_customer_atoms: "100",
+    limit_atoms: "500",
+  });
+  const cases = await client.listReconciliationCases({ limit: "25", min_age_days: "1" });
   expect(seenAuth.get("/internal/v1/health")).toBe("Bearer tok-ops");
   expect(seenAuth.get("/internal/v1/upstream-accounts")).toBe("Bearer tok-auditor");
   expect(seenAuth.get("/internal/v1/plugins")).toBe("Bearer tok-security");
   expect(seenAuth.get("/internal/v1/events/claim")).toBe("Bearer tok-events");
+  expect(seenAuth.get("/internal/v1/reconciliation/budgets/USD")).toBe("Bearer tok-finance");
+  expect(seenAuth.get("/internal/v1/reconciliation/policies")).toBe("Bearer tok-finance");
+  expect(seenAuth.get("/internal/v1/reconciliation/cases")).toBe("Bearer tok-auditor");
+  expect(budget).toEqual({ currency: "USD", limit_atoms: "5000", used_atoms: "0" });
+  expect(policy).toMatchObject({
+    id: "pol-1",
+    billing_account_id: null,
+    channel_id: "ch-1",
+    enabled: true,
+  });
+  expect(cases).toEqual({
+    data: [{ request_id: "req-1", query: "?limit=25&min_age_days=1" }],
+  });
 
   const conservation = await client.getConservationAudit();
   expect(conservation.status).toBe(500);

@@ -471,7 +471,7 @@ export function registerFailoverCases() {
     }
   });
 
-  test("post-dispatch: upstream dies after SSE first byte -> no failover, hold UNKNOWN, no charge, zero duplicate upstream calls", async () => {
+  test("post-dispatch: upstream dies after SSE first byte -> no failover, estimated settlement, zero duplicate upstream calls", async () => {
     const A = fakeUpstream("A", { truncate: true });
     const B = fakeUpstream("B");
     const runtime = createGatewayRuntime({ config: makeConfig(), db });
@@ -489,12 +489,12 @@ export function registerFailoverCases() {
       for (let i = 0; i < 100; i++) {
         const rows =
           await db`SELECT state FROM public.billing_holds WHERE request_id = ${requestId}`;
-        if (rows[0]?.state === "UNKNOWN") break;
+        if (rows[0]?.state === "SETTLED") break;
         await Bun.sleep(10);
       }
       expect(runtime.lifecycle.size).toBe(0);
-      expect(await ctx.charges()).toMatchObject({ n: 0 });
-      expect(await ctx.holdsByState()).toEqual({ UNKNOWN: 1 });
+      expect(await ctx.charges()).toMatchObject({ n: 1 });
+      expect(await ctx.holdsByState()).toEqual({ SETTLED: 1 });
       expect((await ctx.audit()).ok).toBe(true);
     } finally {
       await runtime.close();
@@ -566,6 +566,215 @@ export function registerFailoverCases() {
       await runtime.close();
       A.server.stop(true);
       B.server.stop(true);
+    }
+  });
+
+  test("symptom: unary client abort during retryable primary failure does not fail over to backup channel", async () => {
+    const primaryArrived = Promise.withResolvers<void>();
+    const releasePrimary = Promise.withResolvers<void>();
+    const A = fakeUpstream("abort-primary", {
+      async respond() {
+        primaryArrived.resolve();
+        await releasePrimary.promise;
+        return new Response(JSON.stringify({ error: { message: "Overloaded" } }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const B = fakeUpstream("abort-backup");
+    const runtime = createGatewayRuntime({
+      config: makeConfig({ unaryClientAbortGraceMs: 5000, attemptTimeoutMs: 5000 }),
+      db,
+    });
+    try {
+      await runtime.start();
+      const ctx = await setup(runtime, [A, B], { priority: [10, 0], maxAttempts: 2 });
+      const ac = new AbortController();
+      const pending = ctx.chat(false, ac.signal);
+      await primaryArrived.promise;
+      ac.abort();
+      await Bun.sleep(20);
+      releasePrimary.resolve();
+      const res = await pending;
+      expect(res.status).toBe(499);
+      expect(A.calls()).toBe(1);
+      expect(B.calls()).toBe(0);
+      expect((await ctx.audit()).ok).toBe(true);
+    } finally {
+      await runtime.close();
+      A.server.stop(true);
+      B.server.stop(true);
+    }
+  });
+
+  test("symptom: unary failover from short-timeout primary to long-timeout backup extends hold expires_at", async () => {
+    let observedExpiryMs = 0;
+    const A = fakeUpstream("short-primary", { status: 503 });
+    const B = fakeUpstream("long-backup", {
+      async respond() {
+        const rows = await db<{ exp_ms: string }[]>`
+          SELECT (extract(epoch FROM expires_at) * 1000)::bigint::text AS exp_ms
+          FROM public.billing_holds
+          WHERE state = 'HELD'
+          ORDER BY created_at DESC
+          LIMIT 1
+        `;
+        observedExpiryMs = Number(rows[0]?.exp_ms ?? "0");
+        return Response.json({
+          id: "backup-ok",
+          model: "m",
+          choices: [
+            { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 3 },
+        });
+      },
+    });
+    const runtime = createGatewayRuntime({
+      config: makeConfig({
+        holdTtlMs: 20_000,
+        attemptTimeoutMs: 1_500,
+        unaryClientAbortGraceMs: 60_000,
+      }),
+      db,
+    });
+    try {
+      await runtime.start();
+      const ctx = await setup(runtime, [A, B], { priority: [10, 0], maxAttempts: 2 });
+      await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+        id: ctx.routes[0]!.id,
+        model_name: ctx.model,
+        channel_id: ctx.channels[0]!.id,
+        upstream_model: "short-primary",
+        operations: ["chat"],
+        billing_price_id: ctx.customer.id,
+        cost_version_id: ctx.supplierPrices[0]!.id,
+        priority: 10,
+        retry_policy: { max_attempts: 2, attempt_timeout_ms: 1_500 },
+      });
+      await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+        id: ctx.routes[1]!.id,
+        model_name: ctx.model,
+        channel_id: ctx.channels[1]!.id,
+        upstream_model: "long-backup",
+        operations: ["chat"],
+        billing_price_id: ctx.customer.id,
+        cost_version_id: ctx.supplierPrices[0]!.id,
+        priority: 0,
+        retry_policy: { max_attempts: 2, attempt_timeout_ms: 180_000 },
+      });
+      const startedMs = Date.now();
+      const res = await ctx.chat();
+      expect(res.status).toBe(200);
+      await res.json();
+      expect(A.calls()).toBe(1);
+      expect(B.calls()).toBe(1);
+      expect(observedExpiryMs - startedMs).toBeGreaterThanOrEqual(200_000);
+      expect((await ctx.audit()).ok).toBe(true);
+    } finally {
+      await runtime.close();
+      A.server.stop(true);
+      B.server.stop(true);
+    }
+  });
+
+  test("cross-protocol and failover routes quote tightened per-candidate input reservations", async () => {
+    const primary = fakeUpstream("quote-primary", { status: 503 });
+    const backup = fakeUpstream("quote-backup", {
+      async respond() {
+        return Response.json({
+          id: "msg_backup",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 12, output_tokens: 4 },
+        });
+      },
+    });
+    const runtime = createGatewayRuntime({ config: makeConfig(), db });
+    try {
+      await runtime.start();
+      const ctx = await setup(runtime, [primary, backup], {
+        priority: [10, 0],
+        maxAttempts: 2,
+        prices: {
+          customer: {
+            rates: {
+              input_tokens: { numerator: "1", denominator: "1" },
+              output_tokens: { numerator: "1", denominator: "1" },
+              cache_write_tokens: { numerator: "2", denominator: "1" },
+            },
+            ceilings: {
+              input_tokens: "100000",
+              output_tokens: "100",
+              cache_write_tokens: "100000",
+            },
+          },
+          supplier: {
+            rates: {
+              input_tokens: { numerator: "1", denominator: "1" },
+              output_tokens: { numerator: "1", denominator: "1" },
+              cache_write_tokens: { numerator: "2", denominator: "1" },
+            },
+            ceilings: {
+              input_tokens: "100000",
+              output_tokens: "100",
+              cache_write_tokens: "100000",
+            },
+          },
+        },
+      });
+      const anthropicChannel = await internalCall(
+        runtime.internalApp,
+        "PUT",
+        "/internal/v1/channels",
+        {
+          account_id: ctx.channels[1]!.account_id,
+          kind: "anthropic",
+          name: `anthropic-backup-${crypto.randomUUID().slice(0, 6)}`,
+          base_url: `${backup.url}/anthropic`,
+          api_key: "k",
+          rpm: 10_000_000,
+          concurrency: 10_000,
+        },
+      );
+      expect(anthropicChannel.status).toBe(200);
+      const updatedRoute = await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+        id: ctx.routes[1]!.id,
+        model_name: ctx.model,
+        channel_id: anthropicChannel.data.id,
+        upstream_model: "claude-sonnet",
+        operations: ["chat"],
+        billing_price_id: ctx.customer.id,
+        cost_version_id: ctx.supplierPrices[0]!.id,
+        priority: 0,
+        retry_policy: { max_attempts: 2 },
+      });
+      expect(updatedRoute.status).toBe(200);
+      const res = await ctx.chat();
+      expect(res.status).toBe(200);
+      const requestId = res.headers.get("x-request-id")!;
+      await res.json();
+      const [hold] = await db<
+        {
+          held_atoms: string;
+          supplier_holds: { held_atoms: string; channel_id: string }[];
+        }[]
+      >`
+        SELECT held_atoms::text, supplier_holds
+        FROM public.billing_holds
+        WHERE request_id = ${requestId}::uuid
+      `;
+      expect(BigInt(hold!.supplier_holds[0]!.held_atoms)).toBe(300_020n);
+      expect(BigInt(hold!.supplier_holds[1]!.held_atoms)).toBeLessThan(10_000n);
+      expect((await ctx.audit()).ok).toBe(true);
+    } finally {
+      await runtime.close();
+      primary.server.stop(true);
+      backup.server.stop(true);
     }
   });
 }

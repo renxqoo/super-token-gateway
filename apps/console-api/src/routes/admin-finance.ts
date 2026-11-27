@@ -12,6 +12,7 @@ import {
   enrichFundingOperationDecimals,
   enrichLedgerEntryDecimals,
   enrichWalletDecimals,
+  nonNegativeAtomsSchema,
   operationEnum,
   parseBillingAccountFilter,
   parseJsonBody,
@@ -93,6 +94,28 @@ const adjustmentSchema = z
   .strict();
 
 const jsonObjectSchema = z.record(z.string(), z.unknown());
+
+const reconciliationBudgetSchema = z
+  .object({
+    limit_atoms: nonNegativeAtomsSchema.optional(),
+    limit_decimal: positiveDecimalSchema.optional(),
+  })
+  .strict();
+
+const reconciliationPolicySchema = z
+  .object({
+    billing_account_id: z.uuid().nullable().optional(),
+    channel_id: z.uuid(),
+    supplier_currency: currencySchema,
+    enabled: z.boolean().default(false),
+    include_historical: z.boolean().default(false),
+    age_seconds: z.number().int().positive().max(2_147_483_647),
+    max_customer_atoms: positiveAtomsSchema.optional(),
+    max_customer_decimal: positiveDecimalSchema.optional(),
+    limit_atoms: positiveAtomsSchema.optional(),
+    limit_decimal: positiveDecimalSchema.optional(),
+  })
+  .strict();
 
 function resolveBillingAccountCurrency(
   requested: string | undefined,
@@ -598,6 +621,131 @@ export function createAdminFinanceRoutes(deps: ConsoleDeps) {
       offset: c.req.query("offset"),
     })) as { items: Record<string, unknown>[] };
     return c.json({ ...raw, items: await mapBillingAccounts(raw.items) });
+  });
+
+  app.put("/finance/reconciliation/budgets/:currency", async (c) => {
+    const actor = c.get("user");
+    const parsedCurrency = currencySchema.safeParse(c.req.param("currency"));
+    if (!parsedCurrency.success) {
+      throw new GatewayError(400, "validation_error", "Invalid currency code");
+    }
+    const currency = parsedCurrency.data;
+    const body = await parseJsonBody(c, reconciliationBudgetSchema);
+    const limitAtoms = resolveAtomsAmount(body.limit_atoms, body.limit_decimal, {
+      field: "limit",
+      allowNegative: false,
+      allowZero: true,
+    });
+    const res = await deps.gateway.putReconciliationBudget(currency, limitAtoms);
+    await recordAuditLog(deps.orm, {
+      actor,
+      action: "admin.finance.put_reconciliation_budget",
+      targetType: "reconciliation_budget",
+      targetId: currency,
+      metadata: { limit_atoms: limitAtoms },
+    });
+    return c.json({
+      scale: AMOUNT_DECIMALS,
+      ...res,
+      limit_decimal: safeFormatAtoms(res.limit_atoms),
+      used_decimal: safeFormatAtoms(res.used_atoms),
+    });
+  });
+
+  app.put("/finance/reconciliation/policies", async (c) => {
+    const actor = c.get("user");
+    const body = await parseJsonBody(c, reconciliationPolicySchema);
+    const maxCustomerAtoms = resolveAtomsAmount(
+      body.max_customer_atoms,
+      body.max_customer_decimal,
+      {
+        field: "max_customer",
+        allowNegative: false,
+        allowZero: false,
+      },
+    );
+    const limitAtoms = resolveAtomsAmount(body.limit_atoms, body.limit_decimal, {
+      field: "limit",
+      allowNegative: false,
+      allowZero: false,
+    });
+    let gatewayBillingAccountId: string | null = null;
+    let auditOrgId: string | undefined;
+    let auditBillingAccountId: string | null = null;
+    if (body.billing_account_id) {
+      const [existing] = await deps.orm
+        .select({
+          id: billingAccounts.id,
+          orgId: billingAccounts.orgId,
+          gatewayBillingAccountId: billingAccounts.gatewayBillingAccountId,
+          gatewaySynced: billingAccounts.gatewaySynced,
+        })
+        .from(billingAccounts)
+        .where(eq(billingAccounts.id, body.billing_account_id))
+        .limit(1);
+      if (existing) {
+        const synced = existing.gatewaySynced
+          ? existing
+          : await deps.sync.admission.ensureBillingAccountSynced(existing.id);
+        gatewayBillingAccountId = synced.gatewayBillingAccountId;
+        auditOrgId = synced.orgId;
+        auditBillingAccountId = synced.id;
+      } else {
+        gatewayBillingAccountId = body.billing_account_id;
+        auditBillingAccountId = body.billing_account_id;
+      }
+    }
+    const res = await deps.gateway.putReconciliationPolicy({
+      billing_account_id: gatewayBillingAccountId,
+      channel_id: body.channel_id,
+      supplier_currency: body.supplier_currency,
+      enabled: body.enabled,
+      include_historical: body.include_historical,
+      age_seconds: body.age_seconds,
+      max_customer_atoms: maxCustomerAtoms,
+      limit_atoms: limitAtoms,
+    });
+    const [mapped] = await mapBillingAccounts([res]);
+    await recordAuditLog(deps.orm, {
+      actor,
+      ...(auditOrgId ? { orgId: auditOrgId } : {}),
+      action: "admin.finance.put_reconciliation_policy",
+      targetType: "reconciliation_policy",
+      targetId: `${auditBillingAccountId ?? "*"}:${body.channel_id}:${body.supplier_currency}`,
+      metadata: {
+        billing_account_id: auditBillingAccountId,
+        channel_id: body.channel_id,
+        supplier_currency: body.supplier_currency,
+        enabled: body.enabled,
+        include_historical: body.include_historical,
+        age_seconds: body.age_seconds,
+        max_customer_atoms: maxCustomerAtoms,
+        limit_atoms: limitAtoms,
+      },
+    });
+    return c.json({
+      scale: AMOUNT_DECIMALS,
+      ...mapped,
+      max_customer_decimal: safeFormatAtoms(res.max_customer_atoms),
+      limit_decimal: safeFormatAtoms(res.limit_atoms),
+      used_decimal: safeFormatAtoms(res.used_atoms),
+    });
+  });
+
+  app.get("/finance/reconciliation/cases", async (c) => {
+    assertKnownQueryParameters(c.req.query(), ["limit", "min_age_days"]);
+    const raw = await deps.gateway.listReconciliationCases({
+      limit: c.req.query("limit"),
+      min_age_days: c.req.query("min_age_days"),
+    });
+    const items = await mapBillingAccounts(raw.data ?? []);
+    return c.json({
+      scale: AMOUNT_DECIMALS,
+      data: items.map((item) => ({
+        ...item,
+        held_decimal: safeFormatAtoms(item.held_atoms),
+      })),
+    });
   });
 
   app.get("/finance/conservation", async (c) => {

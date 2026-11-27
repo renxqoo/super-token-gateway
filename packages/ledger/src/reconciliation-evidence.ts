@@ -269,11 +269,19 @@ export function createEvidenceReconciliation(
   async function applyWaiver() {
     const outcome = await db.begin(async (tx) => {
       const [hold] = await tx`
-        SELECT h.request_id, h.billing_account_id, h.held_atoms::text, h.supplier_holds->0 AS attempt
+        SELECT h.request_id, h.billing_account_id, h.held_atoms::text, h.supplier_holds->0 AS attempt,
+          p.id AS policy_id
         FROM public.billing_holds h
-        JOIN public.billing_reconciliation_policies p ON p.billing_account_id=h.billing_account_id
-          AND p.channel_id=(h.supplier_holds->0->>'channel_id')::uuid
-          AND p.supplier_currency=h.supplier_holds->0->>'currency'
+        JOIN LATERAL (
+          SELECT p.id, p.enabled, p.include_historical, p.eligible_since, p.age_seconds,
+            p.max_customer_atoms, p.limit_atoms, p.used_atoms, p.supplier_currency
+          FROM public.billing_reconciliation_policies p
+          WHERE p.channel_id=(h.supplier_holds->0->>'channel_id')::uuid
+            AND p.supplier_currency=h.supplier_holds->0->>'currency'
+            AND (p.billing_account_id=h.billing_account_id OR p.billing_account_id IS NULL)
+          ORDER BY (p.billing_account_id IS NULL) ASC
+          LIMIT 1
+        ) p ON true
         JOIN public.billing_reconciliation_budgets b ON b.currency=p.supplier_currency
         WHERE h.state='UNKNOWN' AND h.wallet_lease_id IS NULL AND h.supplier_lease_id IS NULL
           AND jsonb_array_length(h.supplier_holds)=1 AND h.supplier_holds->0->>'state' IN ('HELD','UNKNOWN')
@@ -295,19 +303,28 @@ export function createEvidenceReconciliation(
       const [policy] = await tx`UPDATE public.billing_reconciliation_policies p
         SET used_atoms=used_atoms+${attempt.held_atoms}::numeric
         FROM public.billing_holds h WHERE h.request_id=${hold.request_id}
-          AND p.billing_account_id=h.billing_account_id AND p.channel_id=${attempt.channel_id} AND p.supplier_currency=${attempt.currency}
+          AND p.id=${hold.policy_id}::uuid
+          AND p.channel_id=${attempt.channel_id} AND p.supplier_currency=${attempt.currency}
+          AND (p.billing_account_id=h.billing_account_id OR (
+            p.billing_account_id IS NULL AND NOT EXISTS (
+              SELECT 1 FROM public.billing_reconciliation_policies exact
+              WHERE exact.billing_account_id=h.billing_account_id
+                AND exact.channel_id=p.channel_id
+                AND exact.supplier_currency=p.supplier_currency
+            )
+          ))
           AND p.enabled AND (p.include_historical OR h.created_at>=p.eligible_since)
           AND COALESCE(h.reconciliation_started_at, h.expires_at) <= now() - p.age_seconds * interval '1 second'
           AND h.held_atoms <= p.max_customer_atoms AND p.limit_atoms-p.used_atoms >= ${attempt.held_atoms}::numeric
-        RETURNING p.billing_account_id`;
+        RETURNING p.id`;
       if (!policy) return null;
       await tx`UPDATE public.billing_reconciliation_budgets SET used_atoms=used_atoms+${attempt.held_atoms}::numeric
         WHERE currency=${attempt.currency}`;
       const release = await releaseHoldInTx(tx, hold.request_id, "CUSTOMER");
       if (!release.released) throw Error("Reconciliation waiver release failed");
       await tx`INSERT INTO public.billing_reconciliation_waivers
-        (request_id, attempt_id, billing_account_id, channel_id, supplier_currency, supplier_risk_atoms, customer_released_atoms)
-        VALUES (${hold.request_id}, ${attempt.attempt_id}, ${hold.billing_account_id}, ${attempt.channel_id}, ${attempt.currency},
+        (request_id, attempt_id, policy_id, billing_account_id, channel_id, supplier_currency, supplier_risk_atoms, customer_released_atoms)
+        VALUES (${hold.request_id}, ${attempt.attempt_id}, ${hold.policy_id}, ${hold.billing_account_id}, ${attempt.channel_id}, ${attempt.currency},
           ${attempt.held_atoms}::numeric, ${hold.held_atoms}::numeric)`;
       return { requestId: String(hold.request_id), release };
     });
@@ -456,19 +473,34 @@ export function createEvidenceReconciliation(
     },
 
     async putReconciliationPolicy(input: ReconciliationPolicy) {
-      const [result] = await db`INSERT INTO public.billing_reconciliation_policies
-        (billing_account_id, channel_id, supplier_currency, enabled, include_historical, age_seconds, max_customer_atoms, limit_atoms)
-        SELECT ${input.billing_account_id}::uuid, ${input.channel_id}::uuid, b.currency, ${input.enabled},
-          ${input.include_historical}, ${input.age_seconds}, ${input.max_customer_atoms}::numeric, ${input.limit_atoms}::numeric
-        FROM public.billing_reconciliation_budgets b WHERE b.currency=${input.supplier_currency}
-        ON CONFLICT (billing_account_id, channel_id, supplier_currency) DO UPDATE SET
-          eligible_since=CASE WHEN EXCLUDED.enabled AND NOT public.billing_reconciliation_policies.enabled
-            THEN now() ELSE public.billing_reconciliation_policies.eligible_since END,
-          enabled=EXCLUDED.enabled, include_historical=EXCLUDED.include_historical, age_seconds=EXCLUDED.age_seconds,
-          max_customer_atoms=EXCLUDED.max_customer_atoms, limit_atoms=EXCLUDED.limit_atoms
-        WHERE public.billing_reconciliation_policies.used_atoms<=EXCLUDED.limit_atoms
-        RETURNING billing_account_id, channel_id, supplier_currency, enabled, include_historical,
-          eligible_since, age_seconds, max_customer_atoms::text, limit_atoms::text, used_atoms::text`;
+      const billingAccountId = input.billing_account_id ?? null;
+      const [result] = billingAccountId
+        ? await db`INSERT INTO public.billing_reconciliation_policies
+            (billing_account_id, channel_id, supplier_currency, enabled, include_historical, age_seconds, max_customer_atoms, limit_atoms)
+            SELECT ${billingAccountId}::uuid, ${input.channel_id}::uuid, b.currency, ${input.enabled},
+              ${input.include_historical}, ${input.age_seconds}, ${input.max_customer_atoms}::numeric, ${input.limit_atoms}::numeric
+            FROM public.billing_reconciliation_budgets b WHERE b.currency=${input.supplier_currency}
+            ON CONFLICT (billing_account_id, channel_id, supplier_currency) WHERE billing_account_id IS NOT NULL DO UPDATE SET
+              eligible_since=CASE WHEN EXCLUDED.enabled AND NOT public.billing_reconciliation_policies.enabled
+                THEN now() ELSE public.billing_reconciliation_policies.eligible_since END,
+              enabled=EXCLUDED.enabled, include_historical=EXCLUDED.include_historical, age_seconds=EXCLUDED.age_seconds,
+              max_customer_atoms=EXCLUDED.max_customer_atoms, limit_atoms=EXCLUDED.limit_atoms
+            WHERE public.billing_reconciliation_policies.used_atoms<=EXCLUDED.limit_atoms
+            RETURNING id, billing_account_id, channel_id, supplier_currency, enabled, include_historical,
+              eligible_since, age_seconds, max_customer_atoms::text, limit_atoms::text, used_atoms::text`
+        : await db`INSERT INTO public.billing_reconciliation_policies
+            (billing_account_id, channel_id, supplier_currency, enabled, include_historical, age_seconds, max_customer_atoms, limit_atoms)
+            SELECT NULL, ${input.channel_id}::uuid, b.currency, ${input.enabled},
+              ${input.include_historical}, ${input.age_seconds}, ${input.max_customer_atoms}::numeric, ${input.limit_atoms}::numeric
+            FROM public.billing_reconciliation_budgets b WHERE b.currency=${input.supplier_currency}
+            ON CONFLICT (channel_id, supplier_currency) WHERE billing_account_id IS NULL DO UPDATE SET
+              eligible_since=CASE WHEN EXCLUDED.enabled AND NOT public.billing_reconciliation_policies.enabled
+                THEN now() ELSE public.billing_reconciliation_policies.eligible_since END,
+              enabled=EXCLUDED.enabled, include_historical=EXCLUDED.include_historical, age_seconds=EXCLUDED.age_seconds,
+              max_customer_atoms=EXCLUDED.max_customer_atoms, limit_atoms=EXCLUDED.limit_atoms
+            WHERE public.billing_reconciliation_policies.used_atoms<=EXCLUDED.limit_atoms
+            RETURNING id, billing_account_id, channel_id, supplier_currency, enabled, include_historical,
+              eligible_since, age_seconds, max_customer_atoms::text, limit_atoms::text, used_atoms::text`;
       return result ?? null;
     },
 

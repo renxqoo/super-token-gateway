@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Super Token Gateway",
-    "version": "2026112702",
+    "version": "2026112703",
     "description": "Public and internal routes use separate listeners. Inference payloads and success responses depend on the endpoint protocol and provider adapter."
   },
   "paths": {
@@ -9698,9 +9698,16 @@
                 "type": "object",
                 "properties": {
                   "billing_account_id": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "channel_id": {
                     "type": "string",
@@ -9734,7 +9741,6 @@
                   }
                 },
                 "required": [
-                  "billing_account_id",
                   "channel_id",
                   "supplier_currency",
                   "age_seconds",

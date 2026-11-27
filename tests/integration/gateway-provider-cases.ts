@@ -450,15 +450,12 @@ export function registerGatewayProviderCases() {
         "GET",
         `/internal/v1/requests/${truncatedStream.headers.get("x-request-id")}`,
       );
-      expect((truncatedDetails.hold as { state: string }).state).toBe("UNKNOWN");
-      expect(
-        await runtime.ledger.resolveRequest({
-          request_id: truncatedStream.headers.get("x-request-id")!,
-          action: "RELEASE",
-          actor: "fixture",
-          reason: "Verified incomplete test response",
-        }),
-      ).toMatchObject({ state: "RELEASED" });
+      const truncatedHold = truncatedDetails.hold as { state: string; heldAtoms: string };
+      const truncatedCharge = truncatedDetails.charge as { customerAtoms: string } | null;
+      expect(truncatedHold.state).toBe("SETTLED");
+      expect(truncatedCharge).not.toBeNull();
+      expect(BigInt(truncatedCharge!.customerAtoms) > 0n).toBe(true);
+      expect(BigInt(truncatedCharge!.customerAtoms) <= BigInt(truncatedHold.heldAtoms)).toBe(true);
 
       const capCountBeforeEscape = captures.length;
       const escapeResp = await runtime.publicApp.fetch(

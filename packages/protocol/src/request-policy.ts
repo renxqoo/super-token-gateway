@@ -55,6 +55,12 @@ export const FIELD_CONVERSION_POLICY: readonly FieldPolicyEntry[] = [
     note: "Preserved in responses and streams; unsigned history reasoning stripped across protocols",
   },
   {
+    field: "reasoning_effort",
+    protocols: ["chat", "responses", "messages"],
+    action: "map",
+    note: "Mapped bidirectionally across chat reasoning_effort, responses reasoning.effort, and messages output_config.effort; rejected on Gemini",
+  },
+  {
     field: "metadata",
     protocols: ["chat", "responses", "messages"],
     action: "drop_hint",
@@ -92,7 +98,7 @@ export const FIELD_CONVERSION_POLICY: readonly FieldPolicyEntry[] = [
   },
   {
     field: "store",
-    protocols: ["responses"],
+    protocols: ["chat", "responses"],
     action: "reject",
     note: "store: true requires stateful server continuation",
   },
@@ -107,12 +113,6 @@ export const FIELD_CONVERSION_POLICY: readonly FieldPolicyEntry[] = [
     protocols: ["chat", "responses"],
     action: "reject",
     note: "Strict grammar-constrained schema validation cannot be weakened silently",
-  },
-  {
-    field: "output_config.effort",
-    protocols: ["messages"],
-    action: "reject",
-    note: "Explicit effort contract cannot be silently dropped",
   },
   {
     field: "hosted_tools",
@@ -170,6 +170,8 @@ export interface NormalRequest {
   topK?: number;
   stop?: string[];
   parallelToolCalls?: boolean;
+  reasoningEffort?: string;
+  reasoningEffortField?: string;
   toolChoice?: "auto" | "none" | "required" | { name: string };
   jsonSchema?: Record<string, unknown>;
   droppedFields?: string[];

@@ -2,11 +2,14 @@ import { expect, test } from "bun:test";
 import { SQL } from "bun";
 import { createWorkerRunner } from "@gateway/worker";
 import {
+  assertSchemaVersion,
   createLedgerEngine,
   createLedgerQueries,
   fastUuid,
+  migrate,
   type CommitTerminalInput,
 } from "@gateway/ledger";
+import migrationManifest from "../../packages/ledger/src/migrations/manifest.json";
 import { withLedgerDb, seedFixture } from "./ledger-fixture.ts";
 
 test("symptom: a settlement statement timeout discards measured usage for other requests in its batch", () =>
@@ -544,4 +547,247 @@ test("symptom: a late supplier receipt after a bounded customer waiver never reo
       unknown_holds: 0,
     });
   });
+});
+
+test("channel default waiver policy covers new accounts while exact account policy takes precedence", async () => {
+  await withLedgerDb(async (db) => {
+    const f = await seedFixture(db);
+    const secondAccount = await f.catalog.upsertBillingAccount({
+      name: "second-account",
+      currency: "PTS",
+      rpm: 10000,
+      tpm: 10000000,
+      concurrency: 1000,
+    });
+    for (const [accId, ref] of [
+      [f.billingAccount.id, "waiver-default-first"],
+      [secondAccount.id, "waiver-default-second"],
+    ] as const) {
+      await f.ledger.creditWallet({
+        billing_account_id: accId,
+        currency: "PTS",
+        external_ref: ref,
+        amount_atoms: "500",
+        kind: "CASH",
+      });
+    }
+    const reqDefault = crypto.randomUUID();
+    const attDefault = crypto.randomUUID();
+    const reqOptOut = crypto.randomUUID();
+    const attOptOut = crypto.randomUUID();
+    for (const [reqId, attId, accId] of [
+      [reqDefault, attDefault, secondAccount.id],
+      [reqOptOut, attOptOut, f.billingAccount.id],
+    ] as const) {
+      const held = await f.ledger.acquireHold({
+        request_id: reqId,
+        attempt_id: attId,
+        billing_account_id: accId,
+        currency: "PTS",
+        operation: "chat",
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: reqId,
+        customer_atoms: "100",
+        supplier_account_id: f.accountA.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "40",
+        supplier_cost_version_id: f.costPrice.id,
+        customer_price_version_id: f.billingPrice.id,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      });
+      expect(held.ok).toBe(true);
+      await f.ledger.markUnknown(reqId);
+      await db`UPDATE public.billing_holds SET reconciliation_started_at=now()-interval '1 hour' WHERE request_id=${reqId}`;
+    }
+    await f.ledger.putReconciliationBudget("USD", "100");
+    const defaultPolicy = await f.ledger.putReconciliationPolicy({
+      billing_account_id: null,
+      channel_id: f.channelA.id,
+      supplier_currency: "USD",
+      enabled: true,
+      include_historical: true,
+      age_seconds: 300,
+      max_customer_atoms: "100",
+      limit_atoms: "100",
+    });
+    expect(defaultPolicy).toMatchObject({ billing_account_id: null, enabled: true });
+    await f.ledger.putReconciliationPolicy({
+      billing_account_id: f.billingAccount.id,
+      channel_id: f.channelA.id,
+      supplier_currency: "USD",
+      enabled: false,
+      include_historical: true,
+      age_seconds: 300,
+      max_customer_atoms: "100",
+      limit_atoms: "100",
+    });
+    expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 0, waivers: 1 });
+    expect(await f.ledger.getWallet(secondAccount.id, "PTS")).toMatchObject({
+      available_atoms: "500",
+      reserved_atoms: "0",
+    });
+    expect(await f.ledger.getWallet(f.billingAccount.id, "PTS")).toMatchObject({
+      available_atoms: "400",
+      reserved_atoms: "100",
+    });
+    const waivers = await db<
+      {
+        request_id: string;
+        policy_id: string;
+        supplier_risk_atoms: string;
+        customer_released_atoms: string;
+      }[]
+    >`
+      SELECT request_id::text, policy_id::text, supplier_risk_atoms::text, customer_released_atoms::text
+      FROM public.billing_reconciliation_waivers
+      WHERE request_id = ${reqDefault}::uuid
+    `;
+    expect([...waivers]).toEqual([
+      {
+        request_id: reqDefault,
+        policy_id: defaultPolicy.id,
+        supplier_risk_atoms: "40",
+        customer_released_atoms: "100",
+      },
+    ]);
+    const [budgetRow] = await db<{ used_atoms: string }[]>`
+      SELECT used_atoms::text FROM public.billing_reconciliation_budgets WHERE currency = 'USD'
+    `;
+    const [policyRow] = await db<{ used_atoms: string }[]>`
+      SELECT used_atoms::text FROM public.billing_reconciliation_policies WHERE id = ${defaultPolicy.id}::uuid
+    `;
+    expect(budgetRow?.used_atoms).toBe("40");
+    expect(policyRow?.used_atoms).toBe("40");
+    expect(await f.ledger.auditConservation()).toMatchObject({
+      ok: true,
+      open_holds: 0,
+      unknown_holds: 1,
+    });
+  });
+});
+
+test("0004_reconciliation_default_policies upgrades a non-empty 0003 database preserving existing policies and waivers", async () => {
+  await withLedgerDb(
+    async (db) => {
+      const f = await seedFixture(db);
+      await f.ledger.creditWallet({
+        billing_account_id: f.billingAccount.id,
+        currency: "PTS",
+        external_ref: "pre-0004-credit",
+        amount_atoms: "500",
+        kind: "CASH",
+      });
+      const legacyReq = crypto.randomUUID();
+      const legacyAtt = crypto.randomUUID();
+      const held = await f.ledger.acquireHold({
+        request_id: legacyReq,
+        attempt_id: legacyAtt,
+        billing_account_id: f.billingAccount.id,
+        currency: "PTS",
+        operation: "chat",
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: legacyReq,
+        customer_atoms: "100",
+        supplier_account_id: f.accountA.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "40",
+        supplier_cost_version_id: f.costPrice.id,
+        customer_price_version_id: f.billingPrice.id,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      });
+      expect(held.ok).toBe(true);
+      await f.ledger.markUnknown(legacyReq);
+      await db`
+        INSERT INTO public.billing_reconciliation_budgets(currency, limit_atoms, used_atoms)
+        VALUES ('USD', 100, 40)
+      `;
+      await db`
+        INSERT INTO public.billing_reconciliation_policies(
+          billing_account_id, channel_id, supplier_currency, enabled, include_historical,
+          age_seconds, max_customer_atoms, limit_atoms, used_atoms
+        ) VALUES (
+          ${f.billingAccount.id}::uuid, ${f.channelA.id}::uuid, 'USD', false, false,
+          300, 100, 100, 40
+        )
+      `;
+      await db`
+        INSERT INTO public.billing_reconciliation_waivers(
+          request_id, attempt_id, billing_account_id, channel_id, supplier_currency,
+          supplier_risk_atoms, customer_released_atoms
+        ) VALUES (
+          ${legacyReq}::uuid, ${legacyAtt}::uuid, ${f.billingAccount.id}::uuid,
+          ${f.channelA.id}::uuid, 'USD', 40, 100
+        )
+      `;
+
+      await migrate(db);
+      expect(await assertSchemaVersion(db)).toBe(2026112703);
+
+      const [preservedPolicy] = await db<{ id: string; billing_account_id: string | null }[]>`
+        SELECT id::text, billing_account_id::text
+        FROM public.billing_reconciliation_policies
+        WHERE billing_account_id = ${f.billingAccount.id}::uuid
+          AND channel_id = ${f.channelA.id}::uuid
+          AND supplier_currency = 'USD'
+      `;
+      expect(preservedPolicy?.id).toBeTruthy();
+      expect(preservedPolicy?.billing_account_id).toBe(f.billingAccount.id);
+      const [preservedWaiver] = await db<
+        {
+          request_id: string;
+          policy_id: string;
+          supplier_risk_atoms: string;
+          customer_released_atoms: string;
+        }[]
+      >`
+        SELECT request_id::text, policy_id::text, supplier_risk_atoms::text, customer_released_atoms::text
+        FROM public.billing_reconciliation_waivers
+        WHERE request_id = ${legacyReq}::uuid
+      `;
+      expect(preservedWaiver).toEqual({
+        request_id: legacyReq,
+        policy_id: preservedPolicy!.id,
+        supplier_risk_atoms: "40",
+        customer_released_atoms: "100",
+      });
+
+      const defaultPolicy = await f.ledger.putReconciliationPolicy({
+        billing_account_id: null,
+        channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        enabled: true,
+        include_historical: true,
+        age_seconds: 300,
+        max_customer_atoms: "100",
+        limit_atoms: "100",
+      });
+      expect(defaultPolicy.billing_account_id).toBeNull();
+      expect(defaultPolicy.id).not.toBe(preservedPolicy!.id);
+    },
+    async (db) => {
+      const pre0004 = migrationManifest.migrations.filter((m) => m.version <= 2026112702);
+      await db.begin(async (tx) => {
+        for (const migration of pre0004) {
+          const checksum = new Bun.CryptoHasher("sha256")
+            .update(JSON.stringify(migration))
+            .digest("hex");
+          for (const file of migration.files) {
+            const sqlPath = new URL(
+              file.path.replace("./migrations/", "../../packages/ledger/src/migrations/"),
+              import.meta.url,
+            );
+            await tx.unsafe(await Bun.file(sqlPath).text());
+          }
+          await tx`
+            INSERT INTO public.schema_migrations(version, checksum, manifest)
+            VALUES (${migration.version}, ${checksum}, ${migration}::jsonb)
+          `;
+        }
+      });
+    },
+  );
 });

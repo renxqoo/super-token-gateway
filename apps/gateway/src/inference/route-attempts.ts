@@ -447,6 +447,10 @@ export async function routeInference(
         },
       );
       if (result instanceof Response) return result;
+      if (c.req.raw.signal.aborted) {
+        lastError = new GatewayError(499, "client_aborted", "Client disconnected");
+        break;
+      }
       lastError = result.error;
       if (result.outcome === "UNKNOWN" && !mayRetryAmbiguous()) break;
       pendingSwitchFrom = { attemptId: activeAttemptId, outcome: result.outcome };

@@ -310,7 +310,9 @@ export function createBunHttp1Pool(
         return;
       }
       conn.socket = socket;
-      let tlsErr: unknown = authorized ? null : authorizationError;
+      let tlsErr: unknown = authorized
+        ? null
+        : (authorizationError ?? new Error("Upstream TLS authorization failed"));
       if (!tlsErr && conn.verifyHost) {
         const peerCert = socket.getPeerCertificate?.();
         if (!peerCert) {

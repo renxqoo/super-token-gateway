@@ -417,6 +417,7 @@ export type SwitchSupplierInput = {
   next_customer_price_adjustment?: SupplierHoldEntry["customer_price_adjustment"];
   failed_provider_request_id?: string;
   required_customer_atoms?: string;
+  expires_at?: string;
 };
 
 export type SwitchSupplierResult =
@@ -599,7 +600,7 @@ export type ReconciliationReceipt = {
 );
 
 export type ReconciliationPolicy = {
-  billing_account_id: string;
+  billing_account_id?: string | null | undefined;
   channel_id: string;
   supplier_currency: string;
   enabled: boolean;

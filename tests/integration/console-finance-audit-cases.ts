@@ -4,6 +4,7 @@ import {
   accountId,
   adminAccess,
   billingAccountId,
+  channelId,
   customerAccess,
 } from "./console-finance-fixture.ts";
 
@@ -366,5 +367,155 @@ export function registerFinanceAuditCases() {
     expect(transactions.data.items).toMatchObject([
       { billing_account_id: id, amount_atoms: "5000" },
     ]);
+  });
+
+  test("reconciliation budget, default/account policies with unsynced account auto-sync, and case listing work end-to-end", async () => {
+    const forbidden = await h.adminApi(
+      "GET",
+      "/admin/v1/finance/reconciliation/cases",
+      customerAccess,
+    );
+    expect(forbidden.status).toBe(401);
+
+    const badCurrency = await h.adminApi(
+      "PUT",
+      "/admin/v1/finance/reconciliation/budgets/invalid",
+      adminAccess,
+      { limit_decimal: "10" },
+    );
+    expect(badCurrency.status).toBe(400);
+
+    const budget = await h.adminApi<{
+      scale: number;
+      currency: string;
+      limit_atoms: string;
+      limit_decimal: string;
+      used_decimal: string;
+    }>("PUT", "/admin/v1/finance/reconciliation/budgets/USD", adminAccess, {
+      limit_decimal: "25",
+    });
+    expect(budget.status).toBe(200);
+    expect(budget.data).toMatchObject({
+      scale: 18,
+      currency: "USD",
+      limit_decimal: "25.000000000000000000",
+      used_decimal: "0.000000000000000000",
+    });
+
+    const defaultPolicy = await h.adminApi<{
+      scale: number;
+      billing_account_id: string | null;
+      channel_id: string;
+      enabled: boolean;
+      max_customer_decimal: string;
+      limit_decimal: string;
+    }>("PUT", "/admin/v1/finance/reconciliation/policies", adminAccess, {
+      billing_account_id: null,
+      channel_id: channelId,
+      supplier_currency: "USD",
+      enabled: true,
+      include_historical: true,
+      age_seconds: 300,
+      max_customer_decimal: "2",
+      limit_decimal: "10",
+    });
+    expect(defaultPolicy.status).toBe(200);
+    expect(defaultPolicy.data).toMatchObject({
+      scale: 18,
+      billing_account_id: null,
+      channel_id: channelId,
+      enabled: true,
+      max_customer_decimal: "2.000000000000000000",
+      limit_decimal: "10.000000000000000000",
+    });
+
+    const freshUser = await h.registerUser("reconciliation-unsynced@example.com");
+    const unsyncedAccountId = freshUser.defaultBillingAccountId;
+    const beforeSync = await h.conDb<{ gateway_synced: boolean }[]>`
+      SELECT gateway_synced FROM public.billing_accounts WHERE id = ${unsyncedAccountId}::uuid
+    `;
+    expect(beforeSync[0]?.gateway_synced).toBe(false);
+
+    const invalidScopedPolicy = await h.adminApi(
+      "PUT",
+      "/admin/v1/finance/reconciliation/policies",
+      adminAccess,
+      {
+        billing_account_id: unsyncedAccountId,
+        channel_id: channelId,
+        supplier_currency: "USD",
+        enabled: false,
+        include_historical: false,
+        age_seconds: 600,
+      },
+    );
+    expect(invalidScopedPolicy.status).toBe(400);
+    const stillUnsynced = await h.conDb<{ gateway_synced: boolean }[]>`
+      SELECT gateway_synced FROM public.billing_accounts WHERE id = ${unsyncedAccountId}::uuid
+    `;
+    expect(stillUnsynced[0]?.gateway_synced).toBe(false);
+
+    const scopedPolicy = await h.adminApi<{
+      billing_account_id: string;
+      enabled: boolean;
+      max_customer_decimal: string;
+      limit_decimal: string;
+    }>("PUT", "/admin/v1/finance/reconciliation/policies", adminAccess, {
+      billing_account_id: unsyncedAccountId,
+      channel_id: channelId,
+      supplier_currency: "USD",
+      enabled: false,
+      include_historical: false,
+      age_seconds: 600,
+      max_customer_decimal: "1",
+      limit_decimal: "5",
+    });
+    expect(scopedPolicy.status, JSON.stringify(scopedPolicy.data)).toBe(200);
+    expect(scopedPolicy.data).toMatchObject({
+      billing_account_id: unsyncedAccountId,
+      enabled: false,
+      max_customer_decimal: "1.000000000000000000",
+      limit_decimal: "5.000000000000000000",
+    });
+    const afterSync = await h.conDb<{ gateway_synced: boolean }[]>`
+      SELECT gateway_synced FROM public.billing_accounts WHERE id = ${unsyncedAccountId}::uuid
+    `;
+    expect(afterSync[0]?.gateway_synced).toBe(true);
+
+    const auditRows = await h.conDb<{ org_id: string | null; action: string; target_id: string }[]>`
+      SELECT org_id::text, action, target_id
+      FROM public.console_audit_logs
+      WHERE action IN ('admin.finance.put_reconciliation_budget', 'admin.finance.put_reconciliation_policy')
+      ORDER BY created_at ASC
+    `;
+    expect(auditRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "admin.finance.put_reconciliation_budget",
+          target_id: "USD",
+        }),
+        expect.objectContaining({
+          org_id: freshUser.defaultOrgId,
+          action: "admin.finance.put_reconciliation_policy",
+          target_id: `${unsyncedAccountId}:${channelId}:USD`,
+        }),
+      ]),
+    );
+
+    const badQuery = await h.adminApi(
+      "GET",
+      "/admin/v1/finance/reconciliation/cases?unknown=1",
+      adminAccess,
+    );
+    expect(badQuery.status).toBe(400);
+
+    const cases = await h.adminApi<{ scale: number; data: Record<string, unknown>[] }>(
+      "GET",
+      "/admin/v1/finance/reconciliation/cases?limit=10&min_age_days=0",
+      adminAccess,
+    );
+    expect(cases.status).toBe(200);
+    expect(cases.data.scale).toBe(18);
+    expect(Array.isArray(cases.data.data)).toBe(true);
   });
 }

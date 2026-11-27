@@ -62,7 +62,7 @@ test("music reservations enforce an explicit music ceiling and request rate", ()
   ).toMatchObject({ amount_atoms: "2", prices: { channel: "price" } });
 });
 
-test("text reservations price estimated input once and keep ceilings for unmeasured or premium cached input", () => {
+test("text reservations bound estimated input by the highest priced input dimension and fall back above ceilings", () => {
   const price = {
     provider_id: "channel",
     id: "price",
@@ -87,8 +87,44 @@ test("text reservations price estimated input once and keep ceilings for unmeasu
     rates: { ...price.rates, cached_input_tokens: { numerator: "5", denominator: "2" } },
   };
   expect(quoteReservation([premium], "USD", { estimatedInputTokens: 100 }, 10).amount_atoms).toBe(
-    "4530",
+    "280",
   );
+  const cacheWrite = {
+    ...price,
+    rates: {
+      ...price.rates,
+      cache_write_tokens: { numerator: "3", denominator: "1" },
+    },
+    ceilings: {
+      ...price.ceilings,
+      cache_write_tokens: "200",
+    },
+  };
+  expect(
+    quoteReservation([cacheWrite], "USD", { estimatedInputTokens: 100 }, 10).amount_atoms,
+  ).toBe("330");
+  expect(
+    quoteReservation([cacheWrite], "USD", { estimatedInputTokens: 201 }, 10).amount_atoms,
+  ).toBe("3630");
+  const ttlCacheWrite = {
+    ...price,
+    rates: {
+      ...price.rates,
+      cache_write_5m_tokens: { numerator: "5", denominator: "2" },
+      cache_write_1h_tokens: { numerator: "4", denominator: "1" },
+    },
+    ceilings: {
+      ...price.ceilings,
+      cache_write_5m_tokens: "500",
+      cache_write_1h_tokens: "500",
+    },
+  };
+  expect(
+    quoteReservation([ttlCacheWrite], "USD", { estimatedInputTokens: 100 }, 10).amount_atoms,
+  ).toBe("430");
+  expect(
+    quoteReservation([ttlCacheWrite], "USD", { estimatedInputTokens: 501 }, 10).amount_atoms,
+  ).toBe("6280");
 });
 
 test("integral tariff terms and fractional duration share one final rounding", () => {

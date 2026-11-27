@@ -140,7 +140,7 @@ export const reconciliationReceiptSchema = z.discriminatedUnion("verdict", [
 
 export const reconciliationPolicySchema = z
   .object({
-    billing_account_id: z.uuid(),
+    billing_account_id: z.uuid().nullable().optional(),
     channel_id: z.uuid(),
     supplier_currency: currencySchema,
     enabled: z.boolean().default(false),

@@ -1,226 +1,44 @@
 import { expect, test } from "bun:test";
-import { createKey } from "@gateway/runtime";
 import type { AdapterOverrides } from "@gateway/ledger";
-import { getBuiltinProvider } from "@gateway/plugin-engine";
-import { handleInferenceRequest } from "../proxy.ts";
-import type { ProxyDependencies } from "../inference/types.ts";
-import {
-  makeApiKey,
-  makeBillingAccount,
-  makeConfig,
-  makeFakeDeps,
-  makeSnapshot,
-} from "./proxy-fixture.ts";
+import { invokeInference, jsonBody } from "./proxy-response-harness.ts";
 
-const jsonBody =
-  '{"model":"test-chat","choices":[{"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}';
-
-async function invokeInference(
-  body: string,
-  {
-    stream = false,
-    fast = false,
-    cancel = false,
-    operation = "chat",
-    fields = {},
-    overrides = {},
-  }: {
-    stream?: boolean;
-    fast?: boolean;
-    cancel?: boolean;
-    operation?: "chat" | "completions" | "responses" | "gemini" | "messages";
-    fields?: Record<string, unknown>;
-    overrides?: AdapterOverrides;
-  } = {},
-) {
-  const billingAccount = makeBillingAccount(crypto.randomUUID(), 10);
-  const key = createKey();
-  const snap = makeSnapshot(1, [billingAccount], [makeApiKey(key, billingAccount.id)]);
-  const accountId = crypto.randomUUID();
-  const channelId = crypto.randomUUID();
-  const pluginId = crypto.randomUUID();
-  const model = "test-chat";
-  const kind =
-    operation === "gemini" ? "gemini" : operation === "messages" ? "anthropic" : "openai";
-  const provider = getBuiltinProvider(kind)!;
-  snap.plugins.set(pluginId, {
-    id: pluginId,
-    name: provider.name,
-    version: provider.version,
-    capability: "PROVIDER",
-    kind: "DECLARATIVE",
-    digest: provider.digest,
-    wasm_bytes: null,
-    webhook_config: null,
-    provider_config: provider.provider_config,
-    signature: null,
-    signing_key_id: null,
-    manifest: {},
-    enabled: true,
-    builtin: true,
-  });
-  snap.accounts.set(accountId, {
-    id: accountId,
-    name: "chat-upstream",
-    state: "ACTIVE",
-    revision: "1",
-  });
-  snap.channels.set(channelId, {
-    id: channelId,
-    account_id: accountId,
-    name: "chat-channel",
-    kind,
-    provider_plugin_id: pluginId,
-    base_url: "http://127.0.0.1",
-    secret_ciphertext: "",
-    adapter_config: {},
-    rpm: 1000,
-    concurrency: 100,
-    enabled: true,
-    routing_policy: {},
-    config_revision: 1,
-  });
-  const [customerPrice, supplierPrice] = (["CUSTOMER", "SUPPLIER"] as const).map((side) => {
-    const price = {
-      id: crypto.randomUUID(),
-      side,
-      currency: "USD",
-      basis: "PROVIDER_USAGE" as const,
-      rates: {
-        input_tokens: { numerator: "1", denominator: "1" },
-        output_tokens: { numerator: "1", denominator: "1" },
-      },
-      ceilings: { input_tokens: "1000", output_tokens: "1000" },
-      source_digest: "test",
-    };
-    snap.prices.set(price.id, price);
-    return price.id;
-  });
-  snap.models.set(model, {
-    name: model,
-    operations: [operation],
-    routing_strategy: "WEIGHTED",
-    max_output_tokens: 100,
-    enabled: true,
-  });
-  snap.routesByModel.set(model, [
-    {
-      id: crypto.randomUUID(),
-      model_name: model,
-      channel_id: channelId,
-      upstream_model: model,
-      operations: [operation],
-      billing_price_id: customerPrice!,
-      cost_version_id: supplierPrice!,
-      priority: 1,
-      weight: 100,
-      enabled: true,
-      retry_policy: { max_attempts: 1 },
-      request_policy: {},
-      plugin_pipeline: [],
-      adapter_overrides: overrides,
-    },
-  ]);
-  const deps = makeFakeDeps(snap, makeConfig());
-  const controller = new AbortController();
-  let transportCancelled = false;
-  const finalized: string[] = [];
-  let dispatches = 0;
-  let holds = 0;
-  deps.ledger = {
-    async acquireHold() {
-      holds++;
-      return { ok: true, replayed: false, request_id: "req", held_atoms: "1000" };
-    },
-    async commitTerminal() {
-      finalized.push("SETTLED");
-      return { ok: true, charge_id: "charge", supplier_cost_atoms: "5" };
-    },
-    async markUnknown() {
-      finalized.push("UNKNOWN");
-    },
-    async releaseHold() {
-      finalized.push("RELEASED");
-    },
-  } as unknown as ProxyDependencies["ledger"];
-  const contentType = stream ? "text/event-stream" : "application/json";
-  const bytes = new TextEncoder().encode(body);
-  const fetchFast: typeof deps.transport.fetchFast = async (_url, init) => {
-    dispatches++;
-    if (stream && !fast) {
-      const response = new Response(bytes, { headers: { "content-type": contentType } });
-      return { fast: false, response };
-    }
-    const result = {
-      fast: true as const,
-      status: 200,
-      contentType,
-      headers: { "content-type": contentType },
-      body: bytes,
-    };
-    if (!cancel) return result;
-    const cancelled = Promise.withResolvers<never>();
-    const detach = init.onCancelRegister?.((reason) => {
-      transportCancelled = true;
-      cancelled.reject(reason);
-    });
-    try {
-      controller.abort(new Error("Client disconnected during upstream work"));
-      return await Promise.race([cancelled.promise, Promise.resolve(result)]);
-    } finally {
-      detach?.();
-    }
-  };
-  deps.transport.prepareDispatch = async (url) => ({
-    fetchFast: (init) => fetchFast(url, init, true),
-    release() {},
-  });
-  deps.transport.fetchFast = fetchFast;
-  const path = {
-    chat: "/v1/chat/completions",
-    completions: "/v1/completions",
-    responses: "/v1/responses",
-    messages: "/v1/messages",
-    gemini: `/v1beta/models/${model}:generateContent`,
-  }[operation];
-  const raw = new Request(`http://gateway.test${path}`, {
-    method: "POST",
-    signal: controller.signal,
-    headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      model,
-      stream,
-      ...(operation === "chat" || operation === "messages"
-        ? { messages: [{ role: "user", content: "Hi" }] }
-        : {}),
-      ...fields,
-    }),
-  });
-  try {
-    const response = await handleInferenceRequest(
-      {
-        req: { raw, query: () => undefined },
-        json: (value, status = 200, headers = {}) => Response.json(value, { status, headers }),
-      },
-      deps,
-      operation,
-    );
-    const wire = new TextDecoder("utf-8", { ignoreBOM: true }).decode(await response.arrayBuffer());
-    return { status: response.status, wire, finalized, transportCancelled, dispatches, holds };
-  } finally {
-    deps.transport.close();
-    deps.state?.close();
-  }
-}
-
-test("symptom: a buffered response settles after the client disconnects", async () => {
-  const response = await invokeInference(jsonBody, { cancel: true });
+test("unary post-dispatch client disconnect settles within grace window and returns 499", async () => {
+  const response = await invokeInference(jsonBody, { cancel: true, delayMs: 25 });
   expect({ status: response.status, finalized: response.finalized }, response.wire).toEqual({
+    status: 499,
+    finalized: ["SETTLED"],
+  });
+  expect(response.settledUsages).toEqual([{ input_tokens: "3", output_tokens: "2" }]);
+  expect(response.transportCancelled).toBe(false);
+});
+
+test("symptom: a buffered response settles after the client disconnects when grace is disabled or exceeded", async () => {
+  const disabled = await invokeInference(jsonBody, {
+    cancel: true,
+    configOverrides: { unaryClientAbortGraceMs: 0 },
+  });
+  expect({ status: disabled.status, finalized: disabled.finalized }, disabled.wire).toEqual({
     status: 499,
     finalized: ["UNKNOWN"],
   });
-  expect(JSON.parse(response.wire)).toMatchObject({ error: { code: "client_aborted" } });
-  expect(response.transportCancelled).toBe(true);
+  expect(JSON.parse(disabled.wire)).toMatchObject({ error: { code: "client_aborted" } });
+  expect(disabled.transportCancelled).toBe(true);
+
+  const expired = await invokeInference(jsonBody, {
+    cancel: true,
+    delayMs: 80,
+    configOverrides: { unaryClientAbortGraceMs: 15 },
+  });
+  expect({ status: expired.status, finalized: expired.finalized }, expired.wire).toEqual({
+    status: 499,
+    finalized: ["UNKNOWN"],
+  });
+  expect(expired.transportCancelled).toBe(true);
+
+  const preDispatch = await invokeInference(jsonBody, { cancelBeforeDispatch: true });
+  expect(preDispatch.dispatches).toBe(0);
+  expect(preDispatch.status).toBe(499);
+  expect(preDispatch.finalized).toEqual(["RELEASED"]);
 });
 
 test("symptom: a charged JSON response passes an upstream BOM to strict clients", async () => {
@@ -259,29 +77,61 @@ test("fast-buffered SSE settles exact usage and returns complete SSE frames", as
   expect(response.wire).toContain("data: [DONE]\n\n");
 });
 
-test("fast-buffered SSE marks unknown and returns stream_interrupted on incomplete trailing frame", async () => {
+test("fast-buffered SSE settles via plaintext estimate on incomplete trailing frame with output and stays unknown when disabled or zero output", async () => {
   const sseBody =
-    'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n' +
+    'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{"content":"partial answer text"}}]}\n\n' +
     'data: {"truncated":true';
-  const response = await invokeInference(sseBody, { stream: true, fast: true });
-  expect(response.status, response.wire).toBe(200);
-  expect(response.finalized).toEqual(["UNKNOWN"]);
-  expect(response.wire).toContain('"content":"partial"');
-  expect(response.wire).toContain("stream_interrupted");
-  expect(response.wire).not.toContain("data: [DONE]");
+  const estimated = await invokeInference(sseBody, { stream: true, fast: true });
+  expect(estimated.status, estimated.wire).toBe(200);
+  expect(estimated.finalized).toEqual(["SETTLED"]);
+  expect(Number(estimated.settledUsages[0]?.output_tokens)).toBe(5);
+  expect(estimated.wire).toContain('"content":"partial answer text"');
+  expect(estimated.wire).toContain("stream_interrupted");
+  expect(estimated.wire).not.toContain("data: [DONE]");
+
+  const strict = await invokeInference(sseBody, {
+    stream: true,
+    fast: true,
+    configOverrides: { streamEstimatedSettlement: false },
+  });
+  expect(strict.status, strict.wire).toBe(200);
+  expect(strict.finalized).toEqual(["UNKNOWN"]);
+  expect(strict.wire).toContain("stream_interrupted");
+
+  const zeroOutput = await invokeInference(
+    'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n' +
+      'data: {"truncated":true',
+    { stream: true, fast: true },
+  );
+  expect(zeroOutput.status, zeroOutput.wire).toBe(200);
+  expect(zeroOutput.finalized).toEqual(["UNKNOWN"]);
+  expect(zeroOutput.wire).toContain("stream_interrupted");
 });
 
-test("fast-buffered SSE marks unknown and holds terminal frame when usage metadata is missing", async () => {
+test("fast-buffered SSE settles via plaintext estimate when usage metadata is missing and stays unknown when disabled", async () => {
   const sseBody =
     'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{"content":"answer"}}]}\n\n' +
     'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
     "data: [DONE]\n\n";
-  const response = await invokeInference(sseBody, { stream: true, fast: true });
-  expect(response.status, response.wire).toBe(200);
-  expect(response.finalized).toEqual(["UNKNOWN"]);
-  expect(response.wire).toContain('"content":"answer"');
-  expect(response.wire).toContain("invalid_upstream_usage");
-  expect(response.wire).not.toContain("data: [DONE]");
+  const estimated = await invokeInference(sseBody, { stream: true, fast: true });
+  expect(estimated.status, estimated.wire).toBe(200);
+  expect(estimated.finalized).toEqual(["SETTLED"]);
+  expect(Number(estimated.settledUsages[0]?.input_tokens)).toBeGreaterThan(0);
+  expect(Number(estimated.settledUsages[0]?.output_tokens)).toBe(2);
+  expect(estimated.estimatedStreamSettlements).toBe(1);
+  expect(estimated.wire).toContain('"content":"answer"');
+  expect(estimated.wire).toContain("data: [DONE]\n\n");
+
+  const strict = await invokeInference(sseBody, {
+    stream: true,
+    fast: true,
+    configOverrides: { streamEstimatedSettlement: false },
+  });
+  expect(strict.status, strict.wire).toBe(200);
+  expect(strict.finalized).toEqual(["UNKNOWN"]);
+  expect(strict.wire).toContain('"content":"answer"');
+  expect(strict.wire).toContain("invalid_upstream_usage");
+  expect(strict.wire).not.toContain("data: [DONE]");
 });
 
 test("symptom: fast-buffered SSE drops already validated text when a later event errors", async () => {
@@ -387,20 +237,31 @@ const chatStreamUsageCases: {
   },
 ];
 test.each(chatStreamUsageCases)(
-  "symptom: Chat SSE settles with $evidence output usage",
+  "symptom: Chat SSE strips $evidence output usage in strict mode and estimates plaintext instead of stale counts by default",
   async ({ fast, opening, overrides }) => {
-    const response = await invokeInference(
+    const streamPayload =
       (opening
         ? `data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"beginning"}}],${opening}}\n\n`
         : "") +
-        'data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3}}\n\n' +
-        "data: [DONE]\n\n",
-      { stream: true, fast, overrides },
-    );
-    expect(response.status, response.wire).toBe(200);
-    expect(response.finalized).toEqual(["UNKNOWN"]);
-    expect(response.wire).toContain("invalid_upstream_usage");
-    expect(response.wire).not.toContain("data: [DONE]");
+      'data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3}}\n\n' +
+      "data: [DONE]\n\n";
+    const strict = await invokeInference(streamPayload, {
+      stream: true,
+      fast,
+      overrides,
+      configOverrides: { streamEstimatedSettlement: false },
+    });
+    expect(strict.status, strict.wire).toBe(200);
+    expect(strict.finalized).toEqual(["UNKNOWN"]);
+    expect(strict.wire).toContain("invalid_upstream_usage");
+    expect(strict.wire).not.toContain("data: [DONE]");
+
+    const estimated = await invokeInference(streamPayload, { stream: true, fast, overrides });
+    expect(estimated.status, estimated.wire).toBe(200);
+    expect(estimated.finalized).toEqual(["SETTLED"]);
+    expect(estimated.settledUsages[0]?.input_tokens).toBe("3");
+    expect(Number(estimated.settledUsages[0]?.output_tokens)).toBe(opening ? 4 : 2);
+    expect(estimated.wire).toContain("data: [DONE]");
   },
 );
 
@@ -415,67 +276,114 @@ test("an explicit zero metered output settles normally", async () => {
   expect(response.finalized).toEqual(["SETTLED"]);
 });
 
-test("symptom: Anthropic SSE settles provisional output when final usage is missing", async () => {
-  const response = await invokeInference(
-    [
-      {
-        type: "message_start",
-        message: {
-          id: "msg_1",
-          model: "test-chat",
-          role: "assistant",
-          content: [],
-          usage: { input_tokens: 10, output_tokens: 1 },
-        },
+test("symptom: Anthropic SSE ignores provisional output_tokens in strict mode and estimates plaintext output while keeping input_tokens by default", async () => {
+  const anthropicPayload = [
+    {
+      type: "message_start",
+      message: {
+        id: "msg_1",
+        model: "test-chat",
+        role: "assistant",
+        content: [],
+        usage: { input_tokens: 10, output_tokens: 1 },
       },
-      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-      {
-        type: "content_block_delta",
-        index: 0,
-        delta: { type: "text_delta", text: "An actual answer" },
-      },
-      { type: "content_block_stop", index: 0 },
-      { type: "message_delta", delta: { stop_reason: "end_turn" } },
-      { type: "message_stop" },
-    ]
-      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
-      .join(""),
-    { operation: "messages", stream: true },
-  );
-  expect(response.status, response.wire).toBe(200);
-  expect(response.wire).toContain("An actual answer");
-  expect(response.wire).toContain("invalid_upstream_usage");
-  expect(response.wire).not.toContain("event: message_stop");
-  expect(response.finalized).toEqual(["UNKNOWN"]);
+    },
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: "An actual answer" },
+    },
+    { type: "content_block_stop", index: 0 },
+    { type: "message_delta", delta: { stop_reason: "end_turn" } },
+    { type: "message_stop" },
+  ]
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("");
+
+  const strict = await invokeInference(anthropicPayload, {
+    operation: "messages",
+    stream: true,
+    configOverrides: { streamEstimatedSettlement: false },
+  });
+  expect(strict.status, strict.wire).toBe(200);
+  expect(strict.wire).toContain("An actual answer");
+  expect(strict.wire).toContain("invalid_upstream_usage");
+  expect(strict.wire).not.toContain("event: message_stop");
+  expect(strict.finalized).toEqual(["UNKNOWN"]);
+
+  const estimated = await invokeInference(anthropicPayload, {
+    operation: "messages",
+    stream: true,
+  });
+  expect(estimated.status, estimated.wire).toBe(200);
+  expect(estimated.wire).toContain("event: message_stop");
+  expect(estimated.finalized).toEqual(["SETTLED"]);
+  expect(estimated.settledUsages).toEqual([{ input_tokens: "10", output_tokens: "4" }]);
 });
 
-test("symptom: Gemini SSE settles stale output usage after another content frame", async () => {
-  const response = await invokeInference(
-    [
-      {
-        candidates: [{ index: 0, content: { role: "model", parts: [{ text: "Beginning" }] } }],
-        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 1 },
-      },
-      {
-        candidates: [
-          {
-            index: 0,
-            content: { role: "model", parts: [{ text: "Rest of the answer" }] },
-            finishReason: "STOP",
-          },
-        ],
-        usageMetadata: { promptTokenCount: 10 },
-      },
-    ]
-      .map((event) => `data: ${JSON.stringify(event)}\n\n`)
-      .join(""),
-    { operation: "gemini", stream: true, fields: { contents: [{ parts: [{ text: "Hi" }] }] } },
-  );
+test("symptom: Gemini SSE strips stale output usage in strict mode and estimates full plaintext output by default", async () => {
+  const geminiPayload = [
+    {
+      candidates: [{ index: 0, content: { role: "model", parts: [{ text: "Beginning" }] } }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 1 },
+    },
+    {
+      candidates: [
+        {
+          index: 0,
+          content: { role: "model", parts: [{ text: "Rest of the answer" }] },
+          finishReason: "STOP",
+        },
+      ],
+      usageMetadata: { promptTokenCount: 10 },
+    },
+  ]
+    .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+    .join("");
+
+  const strict = await invokeInference(geminiPayload, {
+    operation: "gemini",
+    stream: true,
+    fields: { contents: [{ parts: [{ text: "Hi" }] }] },
+    configOverrides: { streamEstimatedSettlement: false },
+  });
+  expect(strict.status, strict.wire).toBe(200);
+  expect(strict.wire).toContain("Beginning");
+  expect(strict.wire).toContain("invalid_upstream_usage");
+  expect(strict.wire).not.toContain('"finishReason":"STOP"');
+  expect(strict.finalized).toEqual(["UNKNOWN"]);
+
+  const estimated = await invokeInference(geminiPayload, {
+    operation: "gemini",
+    stream: true,
+    fields: { contents: [{ parts: [{ text: "Hi" }] }] },
+  });
+  expect(estimated.status, estimated.wire).toBe(200);
+  expect(estimated.wire).toContain('"finishReason":"STOP"');
+  expect(estimated.finalized).toEqual(["SETTLED"]);
+  expect(estimated.settledUsages).toEqual([{ input_tokens: "10", output_tokens: "7" }]);
+});
+
+test("stream plaintext estimation clamps estimated tokens to held funds so estimation never fabricates debt", async () => {
+  const longChinese = "你好世界测试估算截断".repeat(20);
+  const sseBody =
+    `data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{"content":"${longChinese}"}}]}\n\n` +
+    'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+    "data: [DONE]\n\n";
+  const response = await invokeInference(sseBody, {
+    stream: true,
+    fast: true,
+    heldAtoms: "50",
+  });
   expect(response.status, response.wire).toBe(200);
-  expect(response.wire).toContain("Beginning");
-  expect(response.wire).toContain("invalid_upstream_usage");
-  expect(response.wire).not.toContain('"finishReason":"STOP"');
-  expect(response.finalized).toEqual(["UNKNOWN"]);
+  expect(response.finalized).toEqual(["SETTLED"]);
+  const usage = response.settledUsages[0]!;
+  const total = Number(usage.input_tokens) + Number(usage.output_tokens);
+  expect(total).toBeGreaterThanOrEqual(45);
+  expect(total).toBeLessThanOrEqual(50);
+  expect(Number(usage.output_tokens)).toBeGreaterThan(0);
+  expect(response.estimatedStreamSettlements).toBe(1);
 });
 
 test("Responses accepts an explicitly local shell", async () => {

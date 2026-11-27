@@ -70,13 +70,20 @@ export async function handleUnaryResponse(
     describeFailure,
   } = context;
   telemetry.setStage("response_body");
+  const allowClientAbortGrace = attempt.hasPostDispatchGrace;
   let postResponse: ReturnType<InferenceResources["link"]> | undefined;
   const getPostResponseSignal = () => {
-    postResponse ??= resources.link([c.req.raw.signal, pluginSignal]);
+    postResponse ??= resources.link(
+      allowClientAbortGrace ? [pluginSignal] : [c.req.raw.signal, pluginSignal],
+    );
     return postResponse.signal;
   };
   try {
-    if (resources.interrupted()) throw resources.admissionError(resources.quotaLost());
+    if (allowClientAbortGrace ? resources.serverInterrupted() : resources.interrupted()) {
+      throw allowClientAbortGrace
+        ? resources.serverAdmissionError(resources.quotaLost())
+        : resources.admissionError(resources.quotaLost());
+    }
     let respBytes: Uint8Array;
     if (fastResult.fast) {
       if (attempt.aborted) throw attempt.reason ?? new Error("Upstream request aborted");
@@ -100,6 +107,9 @@ export async function handleUnaryResponse(
           !(error instanceof GatewayError && error.code === "body_too_large")
         ) {
           telemetry.noteRoutingOutcome("failed");
+        }
+        if (c.req.raw.signal.aborted && attempt.aborted && !(error instanceof GatewayError)) {
+          throw new GatewayError(499, "client_aborted", "Client disconnected");
         }
         throw error;
       }
@@ -128,10 +138,15 @@ export async function handleUnaryResponse(
         plugin_audit: preRequestAudit,
         charge_policy: "CHARGE_CUSTOMER",
         moderation_blocked: false,
+        allowAfterClientAbort: allowClientAbortGrace,
       });
       pluginSignal.throwIfAborted();
       observeAttemptSuccess(latencyMs);
       completeProbe();
+      if (c.req.raw.signal.aborted) {
+        telemetry.emitAccessLog(499, "client_aborted");
+        return new Response(null, { status: 499 });
+      }
       telemetry.emitAccessLog(200, null);
       return new Response(respBytes as BodyInit, {
         status: 200,
@@ -176,9 +191,11 @@ export async function handleUnaryResponse(
         pluginSignal.throwIfAborted();
         releaseBackups();
         await accounting.finalizeHold("unknown");
-        if (resources.interrupted()) {
+        if (allowClientAbortGrace ? resources.serverInterrupted() : resources.interrupted()) {
           releaseProbe();
-          throw resources.admissionError(resources.quotaLost());
+          throw allowClientAbortGrace
+            ? resources.serverAdmissionError(resources.quotaLost())
+            : resources.admissionError(resources.quotaLost());
         }
         if (err instanceof WasmCapacityError) {
           releaseProbe();
@@ -354,6 +371,7 @@ export async function handleUnaryResponse(
       plugin_audit: allAudit,
       charge_policy: block?.chargePolicy ?? "CHARGE_CUSTOMER",
       moderation_blocked: block !== undefined,
+      allowAfterClientAbort: allowClientAbortGrace,
     });
     if (block && !block.isContentDecision) {
       deps.metrics.recordPlatformAbsorb(billingAccount.id, commitRes.supplier_cost_atoms);
@@ -393,6 +411,10 @@ export async function handleUnaryResponse(
     pluginSignal.throwIfAborted();
     observeAttemptSuccess(latencyMs);
     completeProbe();
+    if (c.req.raw.signal.aborted) {
+      telemetry.emitAccessLog(499, "client_aborted");
+      return new Response(null, { status: 499 });
+    }
     if (block) {
       telemetry.emitAccessLog(block.status, block.rule);
       return c.json(
@@ -434,6 +456,10 @@ export async function handleUnaryResponse(
       releaseProbe();
       releaseBackups();
       await accounting.finishFailedRequest();
+      if (c.req.raw.signal.aborted) {
+        telemetry.emitAccessLog(499, "client_aborted");
+        return new Response(null, { status: 499 });
+      }
       const status = fromWasm ? sanitizeHttpErrorStatus(http_status) : (http_status ?? 400);
       telemetry.emitAccessLog(status, "upstream_client_error");
       return c.json(

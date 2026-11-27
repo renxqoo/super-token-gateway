@@ -94,6 +94,7 @@ export type AccessLogRecord = {
   duration_ms: number;
   ttft_ms: number | null;
   first_text_trace?: FirstTextTraceRecord;
+  usage_source?: "provider" | "estimated";
   error_code: string | null;
 };
 
@@ -131,6 +132,7 @@ export class GatewayMetrics {
   failoversTotal = 0;
   ambiguousRetriesCappedTotal = 0;
   moderationBlocksTotal = 0;
+  estimatedStreamSettlements = 0;
   ledgerCommitFailures = 0;
   leaseRenewalFailures = 0;
   adminAuditFailures = 0;
@@ -691,6 +693,8 @@ export class GatewayMetrics {
     lines.push(
       "# TYPE gateway_sse_waiting_first_text gauge",
       `gateway_sse_waiting_first_text ${this.waitingFirstText}`,
+      "# TYPE gateway_estimated_stream_settlements_total counter",
+      `gateway_estimated_stream_settlements_total ${this.estimatedStreamSettlements}`,
       `gateway_trace_capture_failures_total ${this.traceCaptureFailures}`,
       `gateway_webhook_admission_rejections_total ${this.webhookAdmissionRejections}`,
       `gateway_wasm_admission_rejections_total ${this.wasmAdmissionRejections}`,

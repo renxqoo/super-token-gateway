@@ -26,7 +26,9 @@ export function mapHoldError(code: string, message: string): GatewayError {
 type ChargeDetails = Pick<
   CommitTerminalInput,
   "usage" | "plugin_audit" | "charge_policy" | "moderation_blocked"
->;
+> & {
+  allowAfterClientAbort?: boolean;
+};
 
 type AttemptQuote = {
   candidate: HydratedCandidate;
@@ -39,6 +41,7 @@ type Idempotency = { key: string; fingerprint: string; legacy_fingerprint: strin
 
 export class InferenceAccounting {
   private heldCustomerAtoms = 0n;
+  private heldSupplierAtoms = 0n;
   private hold: "none" | "held" | "settled" | "deferred" = "none";
   private finalizing: Promise<boolean> | undefined;
   private dispatched = false;
@@ -147,18 +150,19 @@ export class InferenceAccounting {
     };
   }
 
+  private holdExpiresAt(candidate: HydratedCandidate): string {
+    const { deps, state, isStream, maxStreamDurationMs } = this.request;
+    const unaryGraceMs = !isStream ? (deps.config.unaryClientAbortGraceMs ?? 600_000) : 0;
+    const effectiveAttemptMs =
+      candidate.route.retry_policy.attempt_timeout_ms ?? deps.config.attemptTimeoutMs;
+    const minUnaryHoldMs = unaryGraceMs > 0 ? effectiveAttemptMs + 30_000 : 0;
+    return state.cachedExpiresAt(
+      Math.max(deps.config.holdTtlMs, minUnaryHoldMs) + (isStream ? maxStreamDurationMs : 0),
+    );
+  }
+
   async acquire(attemptId: string, quote: AttemptQuote, idempotency: Idempotency | null) {
-    const {
-      deps,
-      state,
-      requestId,
-      operation,
-      billingAccount,
-      key,
-      model,
-      isStream,
-      maxStreamDurationMs,
-    } = this.request;
+    const { deps, requestId, operation, billingAccount, key, model } = this.request;
     const { candidate, customer, customerAtoms, supplierAtoms } = quote;
     const result = await deps.ledger.acquireHold({
       request_id: requestId,
@@ -182,15 +186,25 @@ export class InferenceAccounting {
       supplier_channel_id: candidate.channel.id,
       supplier_currency: candidate.costPrice.currency,
       supplier_atoms: supplierAtoms,
-      expires_at: state.cachedExpiresAt(
-        deps.config.holdTtlMs + (isStream ? maxStreamDurationMs : 0),
-      ),
+      expires_at: this.holdExpiresAt(candidate),
     });
     if (result.ok && !result.replayed) {
       this.hold = "held";
       this.heldCustomerAtoms = BigInt(result.held_atoms);
+      this.heldSupplierAtoms = BigInt(supplierAtoms);
     }
     return result;
+  }
+
+  get isSettled(): boolean {
+    return this.hold === "settled";
+  }
+
+  get heldLimits(): { customerAtoms: bigint; supplierAtoms: bigint } {
+    return {
+      customerAtoms: this.heldCustomerAtoms,
+      supplierAtoms: this.heldSupplierAtoms,
+    };
   }
 
   async switchSupplier(
@@ -217,12 +231,16 @@ export class InferenceAccounting {
         discount_numerator: customer.discountNumerator,
         discount_denominator: customer.discountDenominator,
       },
+      expires_at: this.holdExpiresAt(candidate),
       ...(providerRequestId ? { failed_provider_request_id: providerRequestId } : {}),
       ...(BigInt(customerAtoms) > this.heldCustomerAtoms
         ? { required_customer_atoms: customerAtoms }
         : {}),
     });
-    if (result.ok) this.heldCustomerAtoms = BigInt(result.held_atoms);
+    if (result.ok) {
+      this.heldCustomerAtoms = BigInt(result.held_atoms);
+      this.heldSupplierAtoms = BigInt(supplierAtoms);
+    }
     return result;
   }
 
@@ -265,7 +283,7 @@ export class InferenceAccounting {
     return async (details: ChargeDetails) => {
       const { c, deps, state, requestId, billingAccount, key } = this.request;
       pluginSignal.throwIfAborted();
-      if (c.req.raw.signal.aborted) {
+      if (!details.allowAfterClientAbort && c.req.raw.signal.aborted) {
         throw new GatewayError(499, "client_aborted", "Client disconnected");
       }
       const input: CommitTerminalInput = {

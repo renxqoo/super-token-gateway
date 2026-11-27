@@ -174,6 +174,8 @@ export function decodeRequest(
       "parallel_tool_calls",
       "response_format",
       "n",
+      "store",
+      "reasoning_effort",
     ]),
     responses: new Set([
       "model",
@@ -188,6 +190,7 @@ export function decodeRequest(
       "parallel_tool_calls",
       "text",
       "store",
+      "reasoning",
     ]),
     messages: new Set([
       "model",
@@ -221,17 +224,52 @@ export function decodeRequest(
     }
     unsupported(key);
   }
-  if (body.output_config) onlyKeys(object(body.output_config), ["format"], "output_config");
+  if (body.output_config)
+    onlyKeys(object(body.output_config), ["format", "effort"], "output_config");
   if (body.text) onlyKeys(object(body.text), ["format"], "text");
   if (body.stream_options)
     onlyKeys(object(body.stream_options), ["include_usage"], "stream_options");
   if (body.n !== undefined && body.n !== 1) unsupported("n > 1");
-  if (body.store === true) unsupported("stored response continuation");
+  if (body.store !== undefined && body.store !== null) {
+    if (body.store === true) unsupported("stored response continuation");
+    if (body.store !== false) unsupported("store");
+  }
 
   const result: NormalRequest = { messages: [], tools: [], stream: body.stream === true };
   if (body.parallel_tool_calls !== undefined) {
     if (typeof body.parallel_tool_calls !== "boolean") unsupported("parallel_tool_calls");
     result.parallelToolCalls = body.parallel_tool_calls as boolean;
+  }
+  if (source === "chat" && body.reasoning_effort !== undefined && body.reasoning_effort !== null) {
+    if (typeof body.reasoning_effort !== "string" || body.reasoning_effort.trim().length === 0) {
+      unsupported("reasoning_effort");
+    }
+    result.reasoningEffort = body.reasoning_effort as string;
+    result.reasoningEffortField = "reasoning_effort";
+  }
+  if (source === "responses" && body.reasoning !== undefined && body.reasoning !== null) {
+    if (typeof body.reasoning !== "object" || Array.isArray(body.reasoning)) {
+      unsupported("reasoning");
+    }
+    const reasoning = body.reasoning as Record<string, unknown>;
+    onlyKeys(reasoning, ["effort"], "reasoning");
+    if (reasoning.effort !== undefined && reasoning.effort !== null) {
+      if (typeof reasoning.effort !== "string" || reasoning.effort.trim().length === 0) {
+        unsupported("reasoning.effort");
+      }
+      result.reasoningEffort = reasoning.effort as string;
+      result.reasoningEffortField = "reasoning_effort";
+    }
+  }
+  if (source === "messages" && body.output_config !== undefined && body.output_config !== null) {
+    const outputConfig = object(body.output_config);
+    if (outputConfig.effort !== undefined && outputConfig.effort !== null) {
+      if (typeof outputConfig.effort !== "string" || outputConfig.effort.trim().length === 0) {
+        unsupported("output_config.effort");
+      }
+      result.reasoningEffort = outputConfig.effort as string;
+      result.reasoningEffortField = "output_config.effort";
+    }
   }
 
   const calls = new Map<string, string>();

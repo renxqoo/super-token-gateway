@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTransport } from "../network.ts";
@@ -305,6 +305,214 @@ try {
     await healthy.stop(true);
     for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolve) => stalled.close(() => resolve()));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("symptom: transient single-address TLS handshake reset fails without a safe pre-dispatch retry", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "stg-tls-retry-"));
+  const certPath = join(dir, "cert.pem");
+  const keyPath = join(dir, "key.pem");
+  const generated = spawnSync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "rsa:2048",
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    "/CN=retry.example",
+    "-addext",
+    "subjectAltName=DNS:retry.example",
+    "-keyout",
+    keyPath,
+    "-out",
+    certPath,
+  ]);
+  expect(generated.status).toBe(0);
+
+  const requests: string[] = [];
+  let dropAfterRead = false;
+  const openSockets = new Set<import("node:net").Socket>();
+  const backend = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    tls: { key: readFileSync(keyPath), cert: readFileSync(certPath) },
+    async fetch(request) {
+      requests.push(await request.text());
+      if (dropAfterRead) {
+        for (const socket of openSockets) socket.destroy();
+        await Bun.sleep(20);
+      }
+      return new Response("ok", { headers: { connection: "close" } });
+    },
+  });
+
+  let mode: "reset_first" | "pass" | "plaintext" | "always_reset" | "post_dispatch_drop" =
+    "reset_first";
+  let modeConnections = 0;
+  const proxy = createServer((client) => {
+    openSockets.add(client);
+    client.once("close", () => openSockets.delete(client));
+    modeConnections++;
+    if (mode === "always_reset" || (mode === "reset_first" && modeConnections === 1)) {
+      client.once("data", () => client.destroy());
+      return;
+    }
+    if (mode === "plaintext") {
+      client.once("data", () => client.end("HTTP/1.1 502 Bad Gateway\r\n\r\n"));
+      return;
+    }
+    const upstream = createConnection({ host: "127.0.0.1", port: backend.port! });
+    openSockets.add(upstream);
+    upstream.once("close", () => openSockets.delete(upstream));
+    client.pipe(upstream);
+    upstream.pipe(client);
+    client.on("error", () => upstream.destroy());
+    upstream.on("error", () => client.destroy());
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  const proxyAddr = proxy.address();
+  if (!proxyAddr || typeof proxyAddr === "string") throw new Error("Proxy fixture did not bind");
+
+  const control = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const next = new URL(request.url).searchParams.get("mode") as typeof mode | null;
+      const count = modeConnections;
+      if (next) {
+        mode = next;
+        dropAfterRead = next === "post_dispatch_drop";
+        modeConnections = 0;
+      }
+      return Response.json({ count });
+    },
+  });
+
+  try {
+    const run = join(dir, "probe.ts");
+    const networkMod = new URL("../network.ts", import.meta.url).pathname;
+    writeFileSync(
+      run,
+      `
+import { createTransport } from ${JSON.stringify(networkMod)};
+const controlUrl = ${JSON.stringify(control.url.toString())};
+const setMode = async (m: string) => {
+  const res = await fetch(controlUrl + "?mode=" + m);
+  return ((await res.json()) as { count: number }).count;
+};
+const getCount = async () => {
+  const res = await fetch(controlUrl);
+  return ((await res.json()) as { count: number }).count;
+};
+const t = createTransport(1, {
+  dnsLookup: async () => [{ address: "127.0.0.1", family: 4 }],
+});
+const okUrl = new URL("https://retry.example:${proxyAddr.port}/");
+const badHostUrl = new URL("https://wrong.example:${proxyAddr.port}/");
+const out: Record<string, unknown> = {};
+try {
+  await setMode("reset_first");
+  const prepared = await t.prepareDispatch(okUrl, 8, {}, true);
+  const r1 = await prepared.fetchFast({
+    method: "POST",
+    body: "prepared",
+    dispatchDeadline: performance.now() + 2000,
+  });
+  out.prepared = {
+    status: r1.fast ? r1.status : r1.response.status,
+    conns: await getCount(),
+  };
+
+  await setMode("reset_first");
+  const r2 = await t.fetchFast(
+    okUrl,
+    { method: "POST", body: "buffered", dispatchDeadline: performance.now() + 2000 },
+    true,
+  );
+  out.fetchFast = {
+    status: r2.fast ? r2.status : r2.response.status,
+    conns: await getCount(),
+  };
+
+  await setMode("reset_first");
+  const r3 = await t.fetch(
+    okUrl,
+    { method: "POST", body: "fetch", dispatchDeadline: performance.now() + 2000 },
+    true,
+  );
+  out.fetch = {
+    status: r3.status,
+    body: await r3.text(),
+    conns: await getCount(),
+  };
+
+  await setMode("pass");
+  try {
+    await t.fetchFast(badHostUrl, { method: "POST", body: "mismatch" }, true);
+    out.mismatch = { code: "ACCEPTED", conns: await getCount() };
+  } catch (e) {
+    out.mismatch = { code: (e as { code?: string }).code, conns: await getCount() };
+  }
+
+  await setMode("plaintext");
+  try {
+    await t.fetchFast(okUrl, { method: "POST", body: "plaintext" }, true);
+    out.plaintext = { code: "ACCEPTED", conns: await getCount() };
+  } catch (e) {
+    out.plaintext = { code: (e as { code?: string }).code, conns: await getCount() };
+  }
+
+  await setMode("always_reset");
+  try {
+    await t.fetchFast(okUrl, { method: "POST", body: "always" }, true);
+    out.alwaysReset = { code: "ACCEPTED", conns: await getCount() };
+  } catch (e) {
+    out.alwaysReset = { code: (e as { code?: string }).code, conns: await getCount() };
+  }
+
+  await setMode("post_dispatch_drop");
+  try {
+    const rDrop = await t.fetchFast(okUrl, { method: "POST", body: "dispatched" }, true);
+    if (!rDrop.fast) await rDrop.response.text();
+    out.postDispatch = { ok: true, conns: await getCount() };
+  } catch {
+    out.postDispatch = { ok: false, conns: await getCount() };
+  }
+} finally {
+  t.close();
+}
+console.log(JSON.stringify(out));
+`,
+    );
+    const child = Bun.spawn([process.execPath, run], {
+      env: { ...process.env, NODE_EXTRA_CA_CERTS: certPath },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+    expect(JSON.parse(stdout.trim())).toEqual({
+      prepared: { status: 200, conns: 2 },
+      fetchFast: { status: 200, conns: 2 },
+      fetch: { status: 200, body: "ok", conns: 2 },
+      mismatch: { code: "upstream_tls", conns: 1 },
+      plaintext: { code: "upstream_tls", conns: 1 },
+      alwaysReset: { code: "upstream_tls", conns: 2 },
+      postDispatch: { ok: false, conns: 1 },
+    });
+    expect(requests).toEqual(["prepared", "buffered", "fetch", "dispatched"]);
+  } finally {
+    await control.stop(true);
+    await backend.stop(true);
+    for (const socket of openSockets) socket.destroy();
+    await new Promise<void>((resolve) => proxy.close(() => resolve()));
     rmSync(dir, { recursive: true, force: true });
   }
 });

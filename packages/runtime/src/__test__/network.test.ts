@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { createServer } from "node:net";
 import { validateAuthCredentials } from "../cloud-auth.ts";
-import { createTransport, isPublicAddress, safeFetch, validateBaseUrl } from "../network.ts";
+import { isPublicAddress, validateBaseUrl } from "../ip.ts";
+import { createTransport, safeFetch } from "../network.ts";
 
 test("symptom: fast handshakes can start a new dial burst before the rate budget refills", async () => {
   const arrivals: number[] = [];

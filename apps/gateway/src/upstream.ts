@@ -1,4 +1,4 @@
-import { GatewayError, optionalObject } from "@gateway/contracts";
+import { GatewayError } from "@gateway/contracts";
 import { canonical, type Operation, type Protocol } from "@gateway/kernel";
 import type { ChannelRecord, ConfigSnapshot, RouteRecord } from "@gateway/ledger";
 import {
@@ -43,6 +43,15 @@ export {
   type SplitSseChunkResult,
 } from "./upstream-stream.ts";
 
+import {
+  estimateTextChatInput,
+  estimateTextInputForProtocol,
+  estimateTextMessagesInput,
+  estimateTextResponsesInput,
+} from "./upstream-input-estimate.ts";
+
+export { estimateTextChatInput, estimateTextResponsesInput, estimateTextMessagesInput };
+
 const encoder = new TextEncoder();
 
 type CachedProviderPlan = {
@@ -60,89 +69,6 @@ type CachedProviderPlan = {
   lastSecretValid: boolean;
   lastAuthValue: string;
 };
-
-const textChatFields = new Set([
-  "model",
-  "messages",
-  "stream",
-  "stream_options",
-  "max_tokens",
-  "max_completion_tokens",
-  "temperature",
-  "top_p",
-  "stop",
-  "n",
-  "frequency_penalty",
-  "presence_penalty",
-  "seed",
-  "tools",
-  "tool_choice",
-  "parallel_tool_calls",
-  "reasoning_effort",
-  "reasoning_split",
-  "response_format",
-  "user",
-]);
-
-const textMessageFields = new Set([
-  "role",
-  "content",
-  "name",
-  "tool_calls",
-  "tool_call_id",
-  "function_call",
-  "reasoning_content",
-]);
-
-export function estimateTextChatInput(
-  payload: Record<string, unknown>,
-  body?: string,
-): number | undefined {
-  if (!Array.isArray(payload.messages) || (payload.n !== undefined && payload.n !== 1)) {
-    return undefined;
-  }
-  for (const key in payload) {
-    if (!textChatFields.has(key)) return undefined;
-  }
-  const tools = payload.tools;
-  let toolsLen = 0;
-  if (tools !== undefined) {
-    if (!Array.isArray(tools)) return undefined;
-    toolsLen = tools.length;
-    for (let i = 0; i < toolsLen; i++) {
-      if (optionalObject(tools[i]).type !== "function") return undefined;
-    }
-  }
-  const messages = payload.messages;
-  for (let i = 0; i < messages.length; i++) {
-    const rawMsg = messages[i];
-    if (typeof rawMsg !== "object" || rawMsg === null || Array.isArray(rawMsg)) return undefined;
-    const message = rawMsg as Record<string, unknown>;
-    if (typeof message.role !== "string") return undefined;
-    for (const key in message) {
-      if (!textMessageFields.has(key)) return undefined;
-    }
-    const content = message.content;
-    if (content === undefined || content === null || typeof content === "string") continue;
-    if (!Array.isArray(content)) return undefined;
-    for (let j = 0; j < content.length; j++) {
-      const rawPart = content[j];
-      if (typeof rawPart !== "object" || rawPart === null || Array.isArray(rawPart)) {
-        return undefined;
-      }
-      const part = rawPart as Record<string, unknown>;
-      if (part.type !== "text" || typeof part.text !== "string") return undefined;
-      let count = 0;
-      for (const _ in part) {
-        if (++count > 2) return undefined;
-      }
-      if (count !== 2) return undefined;
-    }
-  }
-  return (
-    Buffer.byteLength(body ?? stringifyExact(payload)) + 128 + 32 * (messages.length + toolsLen)
-  );
-}
 
 const providerPlans = new WeakMap<RouteRecord, CachedProviderPlan>();
 
@@ -393,10 +319,9 @@ export function tryPrepareUpstreamRequestSync(
   }
 
   const body = stringifyExact(payload);
-  const estimatedInputTokens =
-    options.estimateInputTokens && upstreamProtocol === "chat" && usageDialect === "openai"
-      ? estimateTextChatInput(payload, body)
-      : undefined;
+  const estimatedInputTokens = options.estimateInputTokens
+    ? estimateTextInputForProtocol(upstreamProtocol, usageDialect, payload, body)
+    : undefined;
   return {
     url,
     headers,

@@ -16,7 +16,7 @@ import {
   StreamTranslator,
   validateUsageObject,
 } from "@gateway/protocol";
-import type { SSEEvent } from "@gateway/protocol";
+import type { PlaintextStats, SSEEvent } from "@gateway/protocol";
 import { createResponsesModeration } from "../responses-moderation.ts";
 import { createStreamChunkReader, createTerminalBuffer } from "../stream-relay.ts";
 import type { StreamWriter } from "../stream-relay.ts";
@@ -28,7 +28,13 @@ import {
   splitSseChunkText,
 } from "../upstream.ts";
 import { classifyPluginBlock } from "./policy.ts";
-import { buildUsageForOperation, buildModerationUsageFallback } from "./usage.ts";
+import {
+  buildEstimatedStreamUsage,
+  buildModerationUsageFallback,
+  buildUsageForOperation,
+  canEstimateStreamSettlementError,
+  observeClientChunkPlaintext,
+} from "./usage.ts";
 import { channelFailureKind } from "./telemetry.ts";
 import type { WasmPrelude } from "./stream-prelude.ts";
 import type { StreamResponse } from "./attempt-response.ts";
@@ -45,7 +51,7 @@ export async function relayConversationStream(
 ) {
   const {
     context: {
-      request: { deps, operation, requestId, snap, billingAccount, model },
+      request: { deps, state, operation, requestId, snap, billingAccount, model },
       accounting,
       telemetry,
       attempt,
@@ -91,6 +97,7 @@ export async function relayConversationStream(
   let wasmState = "";
   let wasmUsage: Usage | undefined;
   let wasmTerminal = false;
+  const wasmObservedOutput: PlaintextStats = { asciiChars: 0, nonAsciiChars: 0, chunks: 0 };
   let streamId: string | undefined;
   const getStreamId = () => (streamId ??= `gen_${requestId.replaceAll("-", "")}`);
   const hasPlugins = cand.route.plugin_pipeline.length > 0;
@@ -243,6 +250,7 @@ export async function relayConversationStream(
       wasmUsage = { ...wasmUsage, ...validated };
     }
     for (const chunkObj of out.chunks ?? []) {
+      observeClientChunkPlaintext(wasmObservedOutput, clientProtocol, chunkObj);
       if (
         telemetry.waitingForRoutingContent &&
         clientProtocol === "chat" &&
@@ -307,6 +315,59 @@ export async function relayConversationStream(
       );
     }
     return translated;
+  }
+
+  async function trySettleObservedStream(): Promise<boolean> {
+    if (
+      deps.config.streamEstimatedSettlement === false ||
+      hasPlugins ||
+      pluginSignal.aborted ||
+      resources.serverInterrupted(true)
+    ) {
+      return false;
+    }
+    let observedUsage: Usage | undefined;
+    try {
+      observedUsage = wasmProvider
+        ? wasmUsage
+        : mergeUsageSources(translator?.usage, streamAliasUsage);
+    } catch {
+      return false;
+    }
+    const limits = accounting.heldLimits;
+    const estimated = buildEstimatedStreamUsage({
+      operation,
+      customerPrice: candBilling.price,
+      supplierPrice: cand.costPrice,
+      customerPricing: state.pricingOf(candBilling.price),
+      supplierPricing: state.pricingOf(cand.costPrice),
+      observedUsage,
+      preparedBody: prepared.body,
+      inputChars: chars,
+      outputStats: translator ? translator.observedOutput : wasmObservedOutput,
+      streamCompleted: false,
+      heldCustomerAtoms: limits.customerAtoms,
+      heldSupplierAtoms: limits.supplierAtoms,
+    });
+    if (!estimated) return false;
+    try {
+      await settle({
+        usage: estimated.usage,
+        plugin_audit:
+          streamPluginAudit.length === 0
+            ? preRequestAudit
+            : preRequestAudit.length === 0
+              ? streamPluginAudit
+              : [...preRequestAudit, ...streamPluginAudit],
+        charge_policy: "CHARGE_CUSTOMER",
+        moderation_blocked: false,
+        allowAfterClientAbort: true,
+      });
+      if (estimated.estimated) telemetry.noteEstimatedUsage();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   try {
@@ -409,7 +470,9 @@ export async function relayConversationStream(
     }
     if (clientCancelled()) {
       await (session?.cancelPending() ?? responsesModeration?.cancelPending());
-      await accounting.finalizeHold("unknown");
+      if (!(await trySettleObservedStream())) {
+        await accounting.finalizeHold("unknown");
+      }
       telemetry.emitAccessLog(499, "client_aborted");
       return;
     }
@@ -504,12 +567,34 @@ export async function relayConversationStream(
       heldTerminalChunks.push(encodeSSE("[DONE]"));
     }
 
-    const usage = buildUsageForOperation(
+    let usage = buildUsageForOperation(
       operation,
       candBilling.price,
       cand.costPrice,
       combinedStreamUsage,
     );
+    let estimatedSettlement = false;
+    if (!usage && deps.config.streamEstimatedSettlement !== false) {
+      const limits = accounting.heldLimits;
+      const estimated = buildEstimatedStreamUsage({
+        operation,
+        customerPrice: candBilling.price,
+        supplierPrice: cand.costPrice,
+        customerPricing: state.pricingOf(candBilling.price),
+        supplierPricing: state.pricingOf(cand.costPrice),
+        observedUsage: combinedStreamUsage,
+        preparedBody: prepared.body,
+        inputChars: chars,
+        outputStats: translator ? translator.observedOutput : wasmObservedOutput,
+        streamCompleted: true,
+        heldCustomerAtoms: limits.customerAtoms,
+        heldSupplierAtoms: limits.supplierAtoms,
+      });
+      if (estimated) {
+        usage = estimated.usage;
+        estimatedSettlement = estimated.estimated;
+      }
+    }
     if (!usage) {
       streamFailed = true;
       deps.metrics.recordUpstreamError(cand.channel.name, "missing_usage");
@@ -542,6 +627,7 @@ export async function relayConversationStream(
       charge_policy: "CHARGE_CUSTOMER",
       moderation_blocked: false,
     });
+    if (estimatedSettlement) telemetry.noteEstimatedUsage();
 
     markProbeDone();
     observeAttemptSuccess(latencyMs);
@@ -573,8 +659,27 @@ export async function relayConversationStream(
           : err instanceof GatewayError
             ? err.code
             : "stream_interrupted";
+    if (accounting.isSettled) {
+      if (abortedByClient) {
+        telemetry.emitAccessLog(499, "client_aborted");
+        return;
+      }
+      telemetry.emitAccessLog(status, code);
+      try {
+        controller.close();
+      } catch {
+        void 0;
+      }
+      return;
+    }
     if (!streamFailed) {
-      await accounting.finalizeHold("unknown");
+      const settledByEstimate =
+        !localFault && canEstimateStreamSettlementError(code)
+          ? await trySettleObservedStream()
+          : false;
+      if (!settledByEstimate) {
+        await accounting.finalizeHold("unknown");
+      }
       if (
         !abortedByClient &&
         !streamSignal.aborted &&

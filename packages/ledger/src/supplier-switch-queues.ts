@@ -80,7 +80,11 @@ export function createSupplierSwitchQueues({
           const activeAccounts = new Set(
             (snap?.accounts ?? []).filter((a) => a.state === "ACTIVE").map((a) => String(a.id)),
           );
-          const updates: { request_id: string; supplier_holds: string }[] = [];
+          const updates: {
+            request_id: string;
+            supplier_holds: string;
+            expires_at: string | null;
+          }[] = [];
           for (const { index, job } of uniqueJobs) {
             const { input, nextSup } = job;
             const hold = holdByReq.get(input.request_id);
@@ -141,6 +145,7 @@ export function createSupplierSwitchQueues({
             updates.push({
               request_id: input.request_id,
               supplier_holds: JSON.stringify(supplierHolds),
+              expires_at: input.expires_at ?? null,
             });
             rebound.push({
               requestId: input.request_id,
@@ -156,11 +161,13 @@ export function createSupplierSwitchQueues({
           if (updates.length > 0) {
             await tx`
               UPDATE public.billing_holds AS h
-              SET supplier_holds = u.supplier_holds::jsonb
+              SET supplier_holds = u.supplier_holds::jsonb,
+                  expires_at = GREATEST(h.expires_at, COALESCE(u.expires_at, h.expires_at))
               FROM unnest(
                 ${updates.map((u) => u.request_id)}::uuid[],
-                ${updates.map((u) => u.supplier_holds)}::text[]
-              ) AS u(request_id, supplier_holds)
+                ${updates.map((u) => u.supplier_holds)}::text[],
+                ${updates.map((u) => u.expires_at)}::timestamptz[]
+              ) AS u(request_id, supplier_holds, expires_at)
               WHERE h.request_id = u.request_id
             `;
           }
@@ -287,8 +294,12 @@ export function createSupplierSwitchQueues({
             else cellsByAcctCur.set(k, [c]);
           }
 
-          const holdUpdates: { request_id: string; supplier_holds: string; clear_sl: boolean }[] =
-            [];
+          const holdUpdates: {
+            request_id: string;
+            supplier_holds: string;
+            clear_sl: boolean;
+            expires_at: string | null;
+          }[] = [];
           for (const { index, job } of uniqueJobs) {
             const { input, nextSup } = job;
             const hold = holdByReq.get(input.request_id);
@@ -400,6 +411,7 @@ export function createSupplierSwitchQueues({
               request_id: input.request_id,
               supplier_holds: JSON.stringify(supplierHolds),
               clear_sl: clearSl,
+              expires_at: input.expires_at ?? null,
             });
             out[index] = {
               ok: true,
@@ -439,12 +451,14 @@ export function createSupplierSwitchQueues({
                 upd_h AS (
                   UPDATE public.billing_holds AS h SET
                     supplier_holds = u.supplier_holds::jsonb,
-                    supplier_lease_id = CASE WHEN u.clear_sl THEN NULL ELSE h.supplier_lease_id END
+                    supplier_lease_id = CASE WHEN u.clear_sl THEN NULL ELSE h.supplier_lease_id END,
+                    expires_at = GREATEST(h.expires_at, COALESCE(u.expires_at, h.expires_at))
                   FROM unnest(
                     ${holdUpdates.map((h) => h.request_id)}::uuid[],
                     ${holdUpdates.map((h) => h.supplier_holds)}::text[],
-                    ${holdUpdates.map((h) => h.clear_sl)}::boolean[]
-                  ) AS u(request_id, supplier_holds, clear_sl)
+                    ${holdUpdates.map((h) => h.clear_sl)}::boolean[],
+                    ${holdUpdates.map((h) => h.expires_at)}::timestamptz[]
+                  ) AS u(request_id, supplier_holds, clear_sl, expires_at)
                   WHERE h.request_id = u.request_id
                 )
               SELECT 1

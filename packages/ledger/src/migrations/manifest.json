@@ -35,6 +35,15 @@
           "checksum": "1fb846533984c420763335eaac44b94cfeeea85d6ee9ff8c69f0f8cbe68c3a95"
         }
       ]
+    },
+    {
+      "version": 2026112703,
+      "files": [
+        {
+          "path": "./migrations/0004_reconciliation_default_policies.sql",
+          "checksum": "3fd9c11c095d4003b0d2b224b2d8309c7e07561d9389956c594b23c6ea9fc713"
+        }
+      ]
     }
   ]
 }

@@ -462,7 +462,7 @@ test("symptom: commit_leased_batch succeeds under least-privilege stg_data outbo
         `GRANT UPDATE (state, remaining_atoms, spent_atoms, expires_at, updated_at) ON public.supplier_leases TO ${roleName}`,
       );
       await db.unsafe(
-        `GRANT UPDATE (state, held_atoms, credit_atoms, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, closed_at) ON public.billing_holds TO ${roleName}`,
+        `GRANT UPDATE (state, held_atoms, credit_atoms, key_reserved_atoms, lot_allocations, supplier_holds, wallet_lease_id, supplier_lease_id, expires_at, closed_at) ON public.billing_holds TO ${roleName}`,
       );
       await db.unsafe(
         `GRANT UPDATE (state, revision, updated_at) ON public.upstream_accounts TO ${roleName}`,
@@ -555,6 +555,64 @@ test("symptom: commit_leased_batch succeeds under least-privilege stg_data outbo
         SELECT count(*)::int AS count FROM public.billing_holds WHERE wallet_lease_id IS NOT NULL
       `;
       expect(leasedCount?.count ?? 0).toBeGreaterThanOrEqual(secondWave.length);
+
+      const switchReqId = crypto.randomUUID();
+      const firstAttId = crypto.randomUUID();
+      const secondAttId = crypto.randomUUID();
+      const shortExpiry = new Date(Date.now() + 30_000).toISOString();
+      const extendedExpiry = new Date(Date.now() + 180_000).toISOString();
+      const heldForSwitch = await dataLedger!.acquireHold({
+        request_id: switchReqId,
+        attempt_id: firstAttId,
+        billing_account_id: f.billingAccount.id,
+        currency: "PTS",
+        operation: "chat",
+        model: "gpt-4o",
+        idempotency_key: null,
+        fingerprint: "",
+        customer_atoms: "200",
+        supplier_account_id: f.accountA.id,
+        supplier_cost_version_id: f.costPrice.id,
+        supplier_channel_id: f.channelA.id,
+        supplier_currency: "USD",
+        supplier_atoms: "100",
+        expires_at: shortExpiry,
+      });
+      expect(heldForSwitch.ok).toBe(true);
+      const switched = await dataLedger!.switchSupplierAttempt({
+        request_id: switchReqId,
+        failed_attempt_id: firstAttId,
+        failed_outcome: "FAILED",
+        next_attempt_id: secondAttId,
+        next_account_id: f.accountB.id,
+        next_channel_id: f.channelB.id,
+        next_currency: "USD",
+        next_supplier_atoms: "100",
+        next_supplier_cost_version_id: f.costPrice.id,
+        expires_at: extendedExpiry,
+      });
+      expect(switched.ok).toBe(true);
+      const [switchHoldRow] = await db<{ exp_ms: string }[]>`
+        SELECT (extract(epoch FROM expires_at) * 1000)::bigint::text AS exp_ms
+        FROM public.billing_holds WHERE request_id = ${switchReqId}::uuid
+      `;
+      expect(Number(switchHoldRow!.exp_ms)).toBeGreaterThanOrEqual(
+        new Date(extendedExpiry).getTime() - 1000,
+      );
+      const switchedCommit = await dataLedger!.commitTerminal({
+        request_id: switchReqId,
+        selected_attempt_id: secondAttId,
+        channel_id: f.channelB.id,
+        billing_price_id: f.flatBillingPrice.id,
+        cost_version_id: f.costPrice.id,
+        usage: { input_tokens: "60", output_tokens: "40" },
+        billing_pricing: { currency: "PTS", rates: f.flatBillingPrice.rates },
+        billing_basis: "PROVIDER_USAGE",
+        supplier_pricing: { currency: "USD", rates: f.costPrice.rates },
+        supplier_currency: "USD",
+      });
+      expect(switchedCommit.ok).toBe(true);
+
       expect(await f.ledger.auditConservation()).toMatchObject({
         ok: true,
         open_holds: 0,

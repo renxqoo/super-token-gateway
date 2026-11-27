@@ -513,7 +513,7 @@ export function registerGatewayHardeningCases() {
           const rows = await db`
           SELECT state FROM public.billing_holds WHERE request_id = ${sseReqId}
         `;
-          if (rows[0]?.state === "UNKNOWN") break;
+          if (rows[0]?.state === "SETTLED") break;
         }
         await Bun.sleep(20);
       }
@@ -521,7 +521,7 @@ export function registerGatewayHardeningCases() {
       const sseHoldRows = await db`
       SELECT state FROM public.billing_holds WHERE request_id = ${sseReqId}
     `;
-      expect(sseHoldRows[0]!.state).toBe("UNKNOWN");
+      expect(sseHoldRows[0]!.state).toBe("SETTLED");
       expect(runtime.lifecycle.size).toBe(0);
 
       const postAbortHealth = runtime.router
@@ -529,11 +529,6 @@ export function registerGatewayHardeningCases() {
         .find((s) => s.channel_id === String(chPrimary.id));
       expect(postAbortHealth?.state).toBe("CLOSED");
       expect(postAbortHealth?.consecutive_failures ?? 0).toBe(preAbortFailures);
-
-      await internalCall(runtime.internalApp, "POST", `/internal/v1/requests/${sseReqId}/resolve`, {
-        action: "RELEASE",
-        reason: "client_aborted_sse",
-      });
 
       const stalled = await runtime.publicApp.fetch(
         new Request("http://gateway.local/v1/chat/completions", {
@@ -558,15 +553,29 @@ export function registerGatewayHardeningCases() {
       } finally {
         await stalledReader.cancel();
       }
-      await internalCall(
-        runtime.internalApp,
-        "POST",
-        `/internal/v1/requests/${stalled.headers.get("x-request-id")}/resolve`,
-        {
-          action: "RELEASE",
-          reason: "stalled_upstream_sse",
-        },
-      );
+      const stalledId = stalled.headers.get("x-request-id")!;
+      let stalledDetails:
+        | { hold: { state: string; heldAtoms: string }; charge: { customerAtoms: string } | null }
+        | undefined;
+      for (let i = 0; i < 50; i++) {
+        const res = await internalCall(
+          runtime.internalApp,
+          "GET",
+          `/internal/v1/requests/${stalledId}`,
+        );
+        stalledDetails = res.data as {
+          hold: { state: string; heldAtoms: string };
+          charge: { customerAtoms: string } | null;
+        };
+        if (stalledDetails.hold?.state === "SETTLED") break;
+        await Bun.sleep(20);
+      }
+      expect(stalledDetails?.hold.state).toBe("SETTLED");
+      expect(BigInt(stalledDetails?.charge?.customerAtoms ?? "0") > 0n).toBe(true);
+      expect(
+        BigInt(stalledDetails?.charge?.customerAtoms ?? "0") <=
+          BigInt(stalledDetails?.hold.heldAtoms ?? "0"),
+      ).toBe(true);
 
       primaryMode = "slow_idem";
       const { data: flatPrice } = await internalCall(

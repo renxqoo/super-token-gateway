@@ -141,7 +141,7 @@ export function registerCancellationCases() {
     }
   });
 
-  test("symptom: client cancels SSE mid-stream after consuming output -> hold is UNKNOWN, nothing spent, nothing refunded, funds fully reserved", async () => {
+  test("symptom: client cancels SSE mid-stream after consuming output -> settles via plaintext estimate with exact conservation", async () => {
     const mock = createMockApp("adv-ctrl");
     const mockServer = Bun.serve({
       hostname: "127.0.0.1",
@@ -192,7 +192,7 @@ export function registerCancellationCases() {
       await waitFor(async () => {
         const rows =
           await db`SELECT state FROM public.billing_holds WHERE request_id = ${requestId}`;
-        return rows[0]?.state === "UNKNOWN";
+        return rows[0]?.state === "SETTLED";
       });
       expect(runtime.lifecycle.size).toBe(0);
 
@@ -200,10 +200,17 @@ export function registerCancellationCases() {
       const holdRow = (
         await db`SELECT held_atoms::text AS h FROM public.billing_holds WHERE request_id = ${requestId}`
       )[0]!;
+      const chargeRow = (
+        await db`SELECT customer_atoms::text AS c, usage FROM public.billing_charges WHERE request_id = ${requestId}`
+      )[0] as { c: string; usage: { input_tokens?: string; output_tokens?: string } };
       const held = BigInt(holdRow.h as string);
-      expect(BigInt(during.spent_atoms) - BigInt(before.spent_atoms)).toBe(0n);
-      expect(BigInt(during.available_atoms)).toBe(BigInt(before.available_atoms) - held);
-      expect(BigInt(during.reserved_atoms) - BigInt(before.reserved_atoms)).toBe(held);
+      const spent = BigInt(during.spent_atoms) - BigInt(before.spent_atoms);
+      expect(spent).toBe(BigInt(chargeRow.c));
+      expect(Number(chargeRow.usage.input_tokens)).toBeGreaterThan(0);
+      expect(Number(chargeRow.usage.output_tokens)).toBeGreaterThan(0);
+      expect(spent > 0n && spent <= held).toBe(true);
+      expect(BigInt(during.available_atoms)).toBe(BigInt(before.available_atoms) - spent);
+      expect(BigInt(during.reserved_atoms)).toBe(BigInt(before.reserved_atoms));
 
       const audit = await internalCall(
         runtime.internalApp,
@@ -212,8 +219,56 @@ export function registerCancellationCases() {
       );
       expect(audit.status).toBe(200);
       expect(audit.data.ok).toBe(true);
-      expect(audit.data.unknown_holds).toBe(1);
+      expect(audit.data.unknown_holds).toBe(0);
+      expect(audit.data.open_holds).toBe(0);
+    } finally {
+      await runtime.close();
+      await mockServer.stop(true);
+    }
+  });
 
+  test("symptom: strict-mode SSE cancel enters UNKNOWN and manual HTTP resolve SETTLE settles once with replay idempotency", async () => {
+    const mock = createMockApp("adv-ctrl");
+    const mockServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: mock.app.fetch });
+    const runtime = createGatewayRuntime({
+      config: makeConfig({ streamEstimatedSettlement: false }),
+      db,
+    });
+    try {
+      await runtime.start();
+      const { billingAccountId, key, channel, customer, supplier, call } = await seed(
+        runtime,
+        mockServer.url.origin,
+      );
+      const model = `adv-strict-${crypto.randomUUID().slice(0, 6)}`;
+      await call("PUT", "/internal/v1/models", {
+        name: model,
+        operations: ["chat"],
+        max_output_tokens: 50,
+      });
+      await call("PUT", "/internal/v1/routes", {
+        model_name: model,
+        channel_id: channel.id,
+        upstream_model: "adv-slow",
+        operations: ["chat"],
+        billing_price_id: customer.id,
+        cost_version_id: supplier.id,
+      });
+      mock.scenarios.set("adv-slow", { chunkDelayMs: 120, repeat: 20 });
+
+      const before = await wallet(runtime, billingAccountId);
+      const res = await runtime.publicApp.fetch(chatRequest(key, model));
+      expect(res.status).toBe(200);
+      const requestId = res.headers.get("x-request-id")!;
+      const reader = res.body!.getReader();
+      await reader.read();
+      await reader.cancel();
+
+      await waitFor(async () => {
+        const rows =
+          await db`SELECT state FROM public.billing_holds WHERE request_id = ${requestId}`;
+        return rows[0]?.state === "UNKNOWN";
+      });
       const resolve = await internalCall(
         runtime.internalApp,
         "POST",
@@ -223,22 +278,30 @@ export function registerCancellationCases() {
           billing_price_id: customer.id,
           usage: { input_tokens: "10", output_tokens: "5" },
           supplier_cost_atoms: "15",
-          reason: "ops-measured-actual-usage",
+          reason: "verified-upstream-receipt",
         },
       );
       expect(resolve.status, JSON.stringify(resolve.data)).toBe(200);
+      expect(resolve.data).toMatchObject({ replayed: false, state: "UNKNOWN_RESOLVED" });
+      const replay = await internalCall(
+        runtime.internalApp,
+        "POST",
+        `/internal/v1/requests/${requestId}/resolve`,
+        {
+          action: "RELEASE",
+          reason: "double-resolve-attempt",
+        },
+      );
+      expect(replay.data).toMatchObject({ replayed: true, state: "SETTLE" });
       const after = await wallet(runtime, billingAccountId);
-      expect(BigInt(after.available_atoms)).toBe(BigInt(before.available_atoms) - 10n);
       expect(BigInt(after.spent_atoms) - BigInt(before.spent_atoms)).toBe(10n);
       expect(BigInt(after.reserved_atoms)).toBe(BigInt(before.reserved_atoms));
-      const audit2 = await internalCall(
+      const audit = await internalCall(
         runtime.internalApp,
         "GET",
         "/internal/v1/audit/conservation",
       );
-      expect(audit2.data.ok).toBe(true);
-      expect(audit2.data.unknown_holds).toBe(0);
-      expect(audit2.data.open_holds).toBe(0);
+      expect(audit.data).toMatchObject({ ok: true, open_holds: 0, unknown_holds: 0 });
     } finally {
       await runtime.close();
       await mockServer.stop(true);
@@ -248,7 +311,10 @@ export function registerCancellationCases() {
   test("symptom: RELEASE on a cancelled request refunds exactly the hold and never more", async () => {
     const mock = createMockApp("adv-ctrl");
     const mockServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: mock.app.fetch });
-    const runtime = createGatewayRuntime({ config: makeConfig(), db });
+    const runtime = createGatewayRuntime({
+      config: makeConfig({ streamEstimatedSettlement: false }),
+      db,
+    });
     try {
       await runtime.start();
       const { billingAccountId, key, channel, customer, supplier, call } = await seed(
@@ -383,10 +449,10 @@ export function registerCancellationCases() {
       const totalHeld = holds.reduce((acc: bigint, h) => acc + BigInt(h.h), 0n);
       await waitFor(async () => {
         const w = await wallet(runtime, billingAccountId);
-        return BigInt(w.reserved_atoms) - BigInt(before.reserved_atoms) === totalHeld;
+        return BigInt(w.reserved_atoms) === BigInt(before.reserved_atoms);
       }, 8000);
       expect(holds.length).toBe(N);
-      expect(holds.every((h) => h.state === "UNKNOWN")).toBe(true);
+      expect(holds.every((h) => h.state === "SETTLED")).toBe(true);
       const routeHealth = await internalCall(
         runtime.internalApp,
         "GET",
@@ -403,8 +469,10 @@ export function registerCancellationCases() {
       expect(channelHealth?.state ?? "CLOSED").toBe("CLOSED");
       expect(channelHealth?.consecutive_failures ?? 0).toBe(0);
       const during = await wallet(runtime, billingAccountId);
-      expect(BigInt(during.reserved_atoms) - BigInt(before.reserved_atoms)).toBe(totalHeld);
-      expect(BigInt(during.spent_atoms)).toBe(BigInt(before.spent_atoms));
+      const spentDelta = BigInt(during.spent_atoms) - BigInt(before.spent_atoms);
+      expect(BigInt(during.reserved_atoms)).toBe(BigInt(before.reserved_atoms));
+      expect(spentDelta > 0n && spentDelta <= totalHeld).toBe(true);
+      expect(BigInt(during.available_atoms)).toBe(BigInt(before.available_atoms) - spentDelta);
       expect(BigInt(during.available_atoms) >= 0n).toBe(true);
       const audit = await internalCall(
         runtime.internalApp,
@@ -412,21 +480,8 @@ export function registerCancellationCases() {
         "/internal/v1/audit/conservation",
       );
       expect(audit.data.ok).toBe(true);
-      expect(audit.data.unknown_holds).toBe(N);
-      for (const id of ids)
-        await internalCall(runtime.internalApp, "POST", `/internal/v1/requests/${id}/resolve`, {
-          action: "RELEASE",
-          reason: "storm-cleanup",
-        });
-      const after = await wallet(runtime, billingAccountId);
-      expect(after).toEqual(before);
-      const audit2 = await internalCall(
-        runtime.internalApp,
-        "GET",
-        "/internal/v1/audit/conservation",
-      );
-      expect(audit2.data.ok).toBe(true);
-      expect(audit2.data.unknown_holds).toBe(0);
+      expect(audit.data.unknown_holds).toBe(0);
+      expect(audit.data.open_holds).toBe(0);
     } finally {
       await runtime.close();
       await mockServer.stop(true);

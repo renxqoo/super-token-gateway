@@ -187,24 +187,34 @@ export function registerDiagnosticsCases() {
               : {}),
           });
           expect(JSON.stringify(rows)).not.toContain("private-provider-content");
-          expect(await fixture.charges()).toMatchObject({ n: 0 });
-          expect(await fixture.holdsByState()).toEqual({ UNKNOWN: 1 });
-          expect(await fixture.audit()).toMatchObject({
-            ok: true,
-            open_holds: 0,
-            unknown_holds: Number(before.unknown_holds) + 1,
-          });
-          const cleanup = await internalCall(
-            runtime.internalApp,
-            "POST",
-            `/internal/v1/requests/${requestId}/resolve`,
-            {
-              action: "RELEASE",
-              reason: "Isolated test provider confirmed no billable usage",
-            },
-          );
-          expect(cleanup.status).toBe(200);
-          expect(await fixture.holdsByState()).toEqual({ RELEASED: 1 });
+          if (code === "provider_stream_error") {
+            expect(await fixture.charges()).toMatchObject({ n: 0 });
+            expect(await fixture.holdsByState()).toEqual({ UNKNOWN: 1 });
+            expect(await fixture.audit()).toMatchObject({
+              ok: true,
+              open_holds: 0,
+              unknown_holds: Number(before.unknown_holds) + 1,
+            });
+            const cleanup = await internalCall(
+              runtime.internalApp,
+              "POST",
+              `/internal/v1/requests/${requestId}/resolve`,
+              {
+                action: "RELEASE",
+                reason: "Isolated test provider confirmed no billable usage",
+              },
+            );
+            expect(cleanup.status).toBe(200);
+            expect(await fixture.holdsByState()).toEqual({ RELEASED: 1 });
+          } else {
+            expect(await fixture.charges()).toMatchObject({ n: 1 });
+            expect(await fixture.holdsByState()).toEqual({ SETTLED: 1 });
+            expect(await fixture.audit()).toMatchObject({
+              ok: true,
+              open_holds: 0,
+              unknown_holds: Number(before.unknown_holds),
+            });
+          }
         } finally {
           upstream.server.stop(true);
         }

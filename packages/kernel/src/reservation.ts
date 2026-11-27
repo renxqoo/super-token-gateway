@@ -17,6 +17,16 @@ export type ReservationMeasurement = {
   images?: unknown;
 };
 
+const textInputMetrics = [
+  "input_tokens",
+  "cached_input_tokens",
+  "cache_write_tokens",
+  "cache_write_5m_tokens",
+  "cache_write_1h_tokens",
+] as const;
+
+type TextInputMetric = (typeof textInputMetrics)[number];
+
 function quoteTextInput(
   row: ReservationPrice,
   estimatedInputTokens: number | undefined,
@@ -27,23 +37,30 @@ function quoteTextInput(
     estimatedInputTokens === undefined ||
     !Number.isSafeInteger(estimatedInputTokens) ||
     estimatedInputTokens <= 0 ||
-    BigInt(estimatedInputTokens) > BigInt(usage.input_tokens ?? "0") ||
-    row.rates.cache_write_tokens ||
-    row.rates.cache_write_5m_tokens ||
-    row.rates.cache_write_1h_tokens
+    !row.rates.input_tokens
   )
     return;
-  const uncached = row.rates.input_tokens;
-  const cached = row.rates.cached_input_tokens;
-  if (
-    !uncached ||
-    (cached &&
-      BigInt(cached.numerator) * BigInt(uncached.denominator) >
-        BigInt(uncached.numerator) * BigInt(cached.denominator))
-  )
-    return;
-  usage.input_tokens = String(estimatedInputTokens);
-  delete usage.cached_input_tokens;
+  const est = BigInt(estimatedInputTokens);
+  if (est > BigInt(usage.input_tokens ?? "0")) return;
+  let maxMetric: TextInputMetric = "input_tokens";
+  let maxRate = row.rates.input_tokens;
+  for (let i = 1; i < textInputMetrics.length; i++) {
+    const metric = textInputMetrics[i]!;
+    const rate = row.rates[metric];
+    if (!rate) continue;
+    if (
+      BigInt(rate.numerator) * BigInt(maxRate.denominator) >
+      BigInt(maxRate.numerator) * BigInt(rate.denominator)
+    ) {
+      maxMetric = metric;
+      maxRate = rate;
+    }
+  }
+  if (est > BigInt(usage[maxMetric] ?? "0")) return;
+  for (const metric of textInputMetrics) {
+    delete usage[metric];
+  }
+  usage[maxMetric] = String(estimatedInputTokens);
 }
 
 export function quoteReservation(

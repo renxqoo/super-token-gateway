@@ -510,7 +510,7 @@ test("proxy retries transient hold finalization failures and preserves upstream 
       adapter_overrides: {},
     },
   ]);
-  const deps = makeFakeDeps(snap, makeConfig());
+  const deps = makeFakeDeps(snap, { ...makeConfig(), streamEstimatedSettlement: false });
   let releaseAttempts = 0;
   let unknownAttempts = 0;
   let ledgerMode: "recover" | "always_fail" = "recover";

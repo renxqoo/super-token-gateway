@@ -62,7 +62,7 @@ GRANT UPDATE (state, remaining_atoms, spent_atoms, spent_lot_id, lot_allocations
 GRANT UPDATE (state, remaining_atoms, spent_atoms, expires_at, updated_at)
   ON public.supplier_leases TO stg_data, stg_control, stg_worker;
 GRANT UPDATE (state, held_atoms, credit_atoms, key_reserved_atoms, lot_allocations, supplier_holds, wallet_lease_id,
-  supplier_lease_id, closed_at) ON public.billing_holds TO stg_data, stg_control;
+  supplier_lease_id, expires_at, closed_at) ON public.billing_holds TO stg_data, stg_control;
 GRANT UPDATE (state, lot_allocations, wallet_lease_id, supplier_lease_id)
   ON public.billing_holds TO stg_worker;
 GRANT UPDATE (state, revision, updated_at) ON public.upstream_accounts TO stg_data;

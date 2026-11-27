@@ -549,38 +549,73 @@ export class GatewayClient {
     );
   }
 
-  listCharges(query: Record<string, string | undefined>) {
-    const sp = new URLSearchParams();
-    for (const [k, v] of Object.entries(query)) {
-      if (v !== undefined && v !== "") sp.set(k, v);
-    }
-    const qs = sp.toString() ? `?${sp.toString()}` : "";
-    return this.request<Record<string, unknown>>("auditor", "GET", `/internal/v1/charges${qs}`);
+  putReconciliationBudget(currency: string, limitAtoms: string) {
+    return this.request<Record<string, unknown>>(
+      "finance",
+      "PUT",
+      `/internal/v1/reconciliation/budgets/${encodeURIComponent(currency)}`,
+      { limit_atoms: limitAtoms },
+    );
   }
 
-  listFundingOperations(query: Record<string, string | undefined>) {
+  putReconciliationPolicy(input: {
+    billing_account_id?: string | null;
+    channel_id: string;
+    supplier_currency: string;
+    enabled: boolean;
+    include_historical: boolean;
+    age_seconds: number;
+    max_customer_atoms: string;
+    limit_atoms: string;
+  }) {
+    return this.request<Record<string, unknown>>(
+      "finance",
+      "PUT",
+      "/internal/v1/reconciliation/policies",
+      input,
+    );
+  }
+
+  private queryString(query: Record<string, string | undefined>): string {
     const sp = new URLSearchParams();
     for (const [k, v] of Object.entries(query)) {
       if (v !== undefined && v !== "") sp.set(k, v);
     }
-    const qs = sp.toString() ? `?${sp.toString()}` : "";
+    return sp.toString() ? `?${sp.toString()}` : "";
+  }
+
+  listReconciliationCases(query: {
+    limit?: string | undefined;
+    min_age_days?: string | undefined;
+  }) {
+    return this.request<{ data: Record<string, unknown>[] }>(
+      "auditor",
+      "GET",
+      `/internal/v1/reconciliation/cases${this.queryString(query)}`,
+    );
+  }
+
+  listCharges(query: Record<string, string | undefined>) {
     return this.request<Record<string, unknown>>(
       "auditor",
       "GET",
-      `/internal/v1/funding-operations${qs}`,
+      `/internal/v1/charges${this.queryString(query)}`,
+    );
+  }
+
+  listFundingOperations(query: Record<string, string | undefined>) {
+    return this.request<Record<string, unknown>>(
+      "auditor",
+      "GET",
+      `/internal/v1/funding-operations${this.queryString(query)}`,
     );
   }
 
   listLedgerEntries(query: Record<string, string | undefined>) {
-    const sp = new URLSearchParams();
-    for (const [k, v] of Object.entries(query)) {
-      if (v !== undefined && v !== "") sp.set(k, v);
-    }
-    const qs = sp.toString() ? `?${sp.toString()}` : "";
     return this.request<Record<string, unknown>>(
       "auditor",
       "GET",
-      `/internal/v1/ledger-entries${qs}`,
+      `/internal/v1/ledger-entries${this.queryString(query)}`,
     );
   }
 
@@ -593,25 +628,19 @@ export class GatewayClient {
   }
 
   getFinanceSummary(query: Record<string, string | undefined>) {
-    const sp = new URLSearchParams();
-    for (const [k, v] of Object.entries(query)) {
-      if (v !== undefined && v !== "") sp.set(k, v);
-    }
-    const qs = sp.toString() ? `?${sp.toString()}` : "";
     return this.request<Record<string, unknown>>(
       "auditor",
       "GET",
-      `/internal/v1/finance/summary${qs}`,
+      `/internal/v1/finance/summary${this.queryString(query)}`,
     );
   }
 
   listHolds(query: Record<string, string | undefined>) {
-    const sp = new URLSearchParams();
-    for (const [k, v] of Object.entries(query)) {
-      if (v !== undefined && v !== "") sp.set(k, v);
-    }
-    const qs = sp.toString() ? `?${sp.toString()}` : "";
-    return this.request<Record<string, unknown>>("auditor", "GET", `/internal/v1/holds${qs}`);
+    return this.request<Record<string, unknown>>(
+      "auditor",
+      "GET",
+      `/internal/v1/holds${this.queryString(query)}`,
+    );
   }
 
   listAsyncTasks(query: Record<string, string | undefined>) {

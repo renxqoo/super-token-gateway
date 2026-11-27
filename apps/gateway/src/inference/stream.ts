@@ -18,7 +18,11 @@ import { channelResponseHeaders } from "./http.ts";
 import type { AttemptResponse, StreamResponse } from "./attempt-response.ts";
 import type { WasmPrelude } from "./stream-prelude.ts";
 import { channelFailureKind } from "./telemetry.ts";
-import { buildUsageForOperation } from "./usage.ts";
+import {
+  buildEstimatedStreamUsage,
+  buildUsageForOperation,
+  canEstimateStreamSettlementError,
+} from "./usage.ts";
 import { relayMediaStream } from "./media-stream.ts";
 import { relayConversationStream } from "./conversation-stream.ts";
 
@@ -29,7 +33,7 @@ async function respondToFastBufferedSse(
   takeProbe: () => symbol | undefined,
 ): Promise<Response> {
   const {
-    request: { c, deps, requestId, operation, model },
+    request: { c, deps, state, requestId, operation, model },
     resources,
     telemetry,
     accounting,
@@ -38,6 +42,7 @@ async function respondToFastBufferedSse(
     customer: candBilling,
     prepared,
     pluginSignal,
+    chars,
     preRequestAudit,
     observeAttemptSuccess,
     observeAttemptFailure,
@@ -50,6 +55,8 @@ async function respondToFastBufferedSse(
   let streamProbeDone = false;
   let streamFailed = false;
   let translating: SSEEvent | undefined;
+  let translator: StreamTranslator | undefined;
+  let streamAliasUsage: Usage | undefined;
   const nonTerminalChunks: Uint8Array[] = [];
   let nonTerminalBytes = 0;
   let sawFirstText = false;
@@ -67,11 +74,6 @@ async function respondToFastBufferedSse(
   const releaseRequest = resources.handToStream();
   deps.metrics.activeStreams++;
   try {
-    if (c.req.raw.signal.aborted) {
-      await accounting.finalizeHold("unknown");
-      telemetry.emitAccessLog(499, "client_aborted");
-      return new Response(null, { status: 499 });
-    }
     if (pluginSignal.aborted) {
       await accounting.finalizeHold("unknown");
       telemetry.emitAccessLog(503, "plugin_revoked");
@@ -87,7 +89,7 @@ async function respondToFastBufferedSse(
       );
     }
     const parser = new SSEParser();
-    const translator = new StreamTranslator(
+    translator = new StreamTranslator(
       prepared.upstreamProtocol!,
       operation as Protocol,
       prepared.usageDialect,
@@ -95,7 +97,6 @@ async function respondToFastBufferedSse(
     );
     const { error_rules, usage_aliases } = prepared.mergedOverrides;
     const hasStreamRules = error_rules.length > 0 || usage_aliases.length > 0;
-    let streamAliasUsage: Usage | undefined;
     const events = parser.feed(fastSseBody, true);
     const terminalChunks: Uint8Array[] = [];
     let terminalBytes = 0;
@@ -163,12 +164,34 @@ async function respondToFastBufferedSse(
       terminalBytes += chunk.byteLength;
     }
     const combinedStreamUsage = mergeUsageSources(translator.usage, streamAliasUsage);
-    const usage = buildUsageForOperation(
+    let usage = buildUsageForOperation(
       operation,
       candBilling.price,
       cand.costPrice,
       combinedStreamUsage,
     );
+    let estimatedSettlement = false;
+    if (!usage && deps.config.streamEstimatedSettlement !== false) {
+      const limits = accounting.heldLimits;
+      const estimated = buildEstimatedStreamUsage({
+        operation,
+        customerPrice: candBilling.price,
+        supplierPrice: cand.costPrice,
+        customerPricing: state.pricingOf(candBilling.price),
+        supplierPricing: state.pricingOf(cand.costPrice),
+        observedUsage: combinedStreamUsage,
+        preparedBody: prepared.body,
+        inputChars: chars,
+        outputStats: translator.observedOutput,
+        streamCompleted: true,
+        heldCustomerAtoms: limits.customerAtoms,
+        heldSupplierAtoms: limits.supplierAtoms,
+      });
+      if (estimated) {
+        usage = estimated.usage;
+        estimatedSettlement = estimated.estimated;
+      }
+    }
     if (!usage) {
       streamFailed = true;
       deps.metrics.recordUpstreamError(cand.channel.name, "missing_usage");
@@ -189,11 +212,6 @@ async function respondToFastBufferedSse(
         { status: 200, headers },
       );
     }
-    if (c.req.raw.signal.aborted) {
-      await accounting.finalizeHold("unknown");
-      telemetry.emitAccessLog(499, "client_aborted");
-      return new Response(null, { status: 499 });
-    }
     if (pluginSignal.aborted) {
       await accounting.finalizeHold("unknown");
       telemetry.emitAccessLog(503, "plugin_revoked");
@@ -210,7 +228,7 @@ async function respondToFastBufferedSse(
         { status: 200, headers },
       );
     }
-    if (resources.interrupted(true)) {
+    if (resources.serverInterrupted(true)) {
       const quotaLost = resources.quotaLost(true);
       await accounting.finalizeHold("unknown");
       telemetry.emitAccessLog(503, quotaLost ? "rate_limit_unavailable" : "stream_interrupted");
@@ -227,6 +245,24 @@ async function respondToFastBufferedSse(
         { status: 200, headers },
       );
     }
+    if (c.req.raw.signal.aborted) {
+      if (deps.config.streamEstimatedSettlement !== false) {
+        await context.settle({
+          usage,
+          plugin_audit: preRequestAudit,
+          charge_policy: "CHARGE_CUSTOMER",
+          moderation_blocked: false,
+          allowAfterClientAbort: true,
+        });
+        if (estimatedSettlement) telemetry.noteEstimatedUsage();
+        streamProbeDone = true;
+        observeAttemptSuccess(latencyMs);
+      } else {
+        await accounting.finalizeHold("unknown");
+      }
+      telemetry.emitAccessLog(499, "client_aborted");
+      return new Response(null, { status: 499 });
+    }
     telemetry.noteRoutingOutcome("complete");
     await context.settle({
       usage,
@@ -234,6 +270,7 @@ async function respondToFastBufferedSse(
       charge_policy: "CHARGE_CUSTOMER",
       moderation_blocked: false,
     });
+    if (estimatedSettlement) telemetry.noteEstimatedUsage();
     streamProbeDone = true;
     observeAttemptSuccess(latencyMs);
     const totalBytes = nonTerminalBytes + terminalBytes;
@@ -260,8 +297,58 @@ async function respondToFastBufferedSse(
     const abortedByClient = c.req.raw.signal.aborted;
     const status = err instanceof GatewayError ? err.status : 502;
     const code = err instanceof GatewayError ? err.code : "stream_interrupted";
-    if (!streamFailed) {
-      await accounting.finalizeHold("unknown");
+    if (!streamFailed && !accounting.isSettled) {
+      let settledByEstimate = false;
+      if (
+        deps.config.streamEstimatedSettlement !== false &&
+        translator &&
+        !pluginSignal.aborted &&
+        !resources.serverInterrupted(true) &&
+        canEstimateStreamSettlementError(code)
+      ) {
+        let observedUsage: Usage | undefined;
+        let aliasConflict = false;
+        try {
+          observedUsage = mergeUsageSources(translator.usage, streamAliasUsage);
+        } catch {
+          aliasConflict = true;
+        }
+        if (!aliasConflict) {
+          const limits = accounting.heldLimits;
+          const estimated = buildEstimatedStreamUsage({
+            operation,
+            customerPrice: candBilling.price,
+            supplierPrice: cand.costPrice,
+            customerPricing: state.pricingOf(candBilling.price),
+            supplierPricing: state.pricingOf(cand.costPrice),
+            observedUsage,
+            preparedBody: prepared.body,
+            inputChars: chars,
+            outputStats: translator.observedOutput,
+            streamCompleted: false,
+            heldCustomerAtoms: limits.customerAtoms,
+            heldSupplierAtoms: limits.supplierAtoms,
+          });
+          if (estimated) {
+            try {
+              await context.settle({
+                usage: estimated.usage,
+                plugin_audit: preRequestAudit,
+                charge_policy: "CHARGE_CUSTOMER",
+                moderation_blocked: false,
+                allowAfterClientAbort: true,
+              });
+              if (estimated.estimated) telemetry.noteEstimatedUsage();
+              settledByEstimate = true;
+            } catch {
+              settledByEstimate = false;
+            }
+          }
+        }
+      }
+      if (!settledByEstimate) {
+        await accounting.finalizeHold("unknown");
+      }
       if (!abortedByClient && !pluginSignal.aborted && code !== "ledger_commit_failed") {
         const details =
           code === "provider_stream_error" && translating
@@ -372,7 +459,14 @@ export function respondToStream(
       return durationTimeout;
     },
     settle(details) {
-      streamSignal.throwIfAborted();
+      if (details.allowAfterClientAbort) {
+        pluginSignal.throwIfAborted();
+        if (resources.serverInterrupted(true)) {
+          throw resources.serverAdmissionError(resources.quotaLost(true));
+        }
+      } else {
+        streamSignal.throwIfAborted();
+      }
       return context.settle(details);
     },
     clientCancelled: () => clientCancelled || c.req.raw.signal.aborted,
