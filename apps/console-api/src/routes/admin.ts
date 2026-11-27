@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { createAdminCatalogRoutes } from "./admin-catalog.ts";
 import { createAdminFinanceRoutes } from "./admin-finance.ts";
 import { createAdminOpsRoutes } from "./admin-ops.ts";
+import { createAdminUsageMonitorRoutes } from "./admin-usage-monitor.ts";
 import { requirePlatformAdmin, type ConsoleDeps, type ConsoleEnv } from "./shared.ts";
 
 const PROTECTED_PREFIXES = [
@@ -19,6 +20,7 @@ const PROTECTED_PREFIXES = [
   "/pricing-overrides/*",
   "/sync/*",
   "/finance/*",
+  "/usage-monitor/*",
   "/plugins",
   "/plugins/*",
   "/plugin-releases",
@@ -41,5 +43,6 @@ export function createAdminRoutes(deps: ConsoleDeps) {
   app.route("/", createAdminCatalogRoutes(deps));
   app.route("/", createAdminFinanceRoutes(deps));
   app.route("/", createAdminOpsRoutes(deps));
+  app.route("/", createAdminUsageMonitorRoutes(deps));
   return app;
 }

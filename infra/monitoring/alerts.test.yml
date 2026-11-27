@@ -88,3 +88,90 @@ tests:
         exp_alerts:
           - exp_labels: { instance: active, severity: warning }
             exp_annotations: { summary: Business webhook outbox consumer has an overdue event }
+  - name: Anomaly notifications require a fresh enabled Console and deduplicate replicas
+    interval: 15s
+    input_series:
+      - series: 'stg_console_usage_monitor_open_findings{job="stg-console",instance="a",stg_cluster="notify",rule="MAX_OUTPUT"}'
+        values: "1+0x16"
+      - series: 'stg_console_usage_monitor_open_findings{job="stg-console",instance="b",stg_cluster="notify",rule="MAX_OUTPUT"}'
+        values: "2+0x16"
+      - series: 'stg_console_usage_monitor_open_findings{job="stg-console",instance="a",stg_cluster="observation",rule="MAX_OUTPUT"}'
+        values: "1+0x16"
+      - series: 'stg_console_usage_monitor_open_findings{job="stg-console",instance="a",stg_cluster="stale",rule="MAX_OUTPUT"}'
+        values: "1+0x16"
+      - series: 'stg_console_usage_monitor_notifications_enabled{job="stg-console",instance="a",stg_cluster="notify"}'
+        values: "1+0x16"
+      - series: 'stg_console_usage_monitor_notifications_enabled{job="stg-console",instance="b",stg_cluster="notify"}'
+        values: "1+0x16"
+      - series: 'stg_console_usage_monitor_notifications_enabled{job="stg-console",instance="a",stg_cluster="observation"}'
+        values: "0+0x16"
+      - series: 'stg_console_usage_monitor_notifications_enabled{job="stg-console",instance="a",stg_cluster="stale"}'
+        values: "1+0x16"
+      - series: 'stg_console_usage_monitor_last_tick_timestamp_seconds{job="stg-console",instance="a",stg_cluster="notify"}'
+        values: "1+15x16"
+      - series: 'stg_console_usage_monitor_last_tick_timestamp_seconds{job="stg-console",instance="b",stg_cluster="notify"}'
+        values: "1+15x16"
+      - series: 'stg_console_usage_monitor_last_tick_timestamp_seconds{job="stg-console",instance="a",stg_cluster="observation"}'
+        values: "1+15x16"
+      - series: 'stg_console_usage_monitor_last_tick_timestamp_seconds{job="stg-console",instance="a",stg_cluster="stale"}'
+        values: "1+0x16"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: STGUpstreamUsageAnomaly
+        exp_alerts:
+          - exp_labels: { stg_cluster: notify, rule: MAX_OUTPUT, severity: warning }
+            exp_annotations: { summary: Settled upstream usage requires platform review }
+  - name: Usage monitoring reports stalled processing and skipped coverage
+    interval: 15s
+    input_series:
+      - series: 'stg_console_usage_monitor_enabled{job="stg-console",instance="a",stg_cluster="idle"}'
+        values: "1+0x28"
+      - series: 'stg_console_usage_monitor_enabled{job="stg-console",instance="a",stg_cluster="backlog"}'
+        values: "1+0x28"
+      - series: 'stg_console_usage_monitor_last_tick_timestamp_seconds{job="stg-console",instance="a",stg_cluster="idle"}'
+        values: "0+0x28"
+      - series: 'stg_console_usage_monitor_last_tick_timestamp_seconds{job="stg-console",instance="a",stg_cluster="backlog"}'
+        values: "1+15x28"
+      - series: 'stg_console_usage_monitor_oldest_due_timestamp_seconds{job="stg-console",instance="a",stg_cluster="backlog"}'
+        values: "1+0x28"
+      - series: 'stg_console_usage_monitor_coverage_gaps{job="stg-console",instance="a",stg_cluster="gap"}'
+        values: "0+0x28"
+      - series: 'stg_console_usage_monitor_last_skip_timestamp_seconds{job="stg-console",instance="a",stg_cluster="gap"}'
+        values: "1+0x28"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: STGUsageMonitorCoverageGap
+        exp_alerts:
+          - exp_labels: { stg_cluster: gap, severity: warning }
+            exp_annotations: { summary: Upstream usage monitoring has incomplete window coverage }
+      - eval_time: 7m
+        alertname: STGUsageMonitorStale
+        exp_alerts:
+          - exp_labels: { job: stg-console, instance: a, stg_cluster: idle, severity: warning }
+            exp_annotations:
+              { summary: Upstream usage monitoring has stalled evaluation or backlog }
+          - exp_labels: { job: stg-console, instance: a, stg_cluster: backlog, severity: warning }
+            exp_annotations:
+              { summary: Upstream usage monitoring has stalled evaluation or backlog }
+
+  - name: failed Console scrape pages even without monitor metrics and clears on recovery
+    interval: 15s
+    input_series:
+      - series: 'up{job="stg-console",instance="console-a",stg_cluster="test"}'
+        values: "1 0+0x7 1+0x4"
+      - series: 'up{job="stg-console",instance="console-b",stg_cluster="test"}'
+        values: "1+0x12"
+    alert_rule_test:
+      - eval_time: 1m30s
+        alertname: STGInstanceScrapeFailed
+        exp_alerts:
+          - exp_labels:
+              job: stg-console
+              instance: console-a
+              stg_cluster: test
+              severity: warning
+            exp_annotations:
+              summary: Gateway, Worker or Console metrics endpoint is unreachable
+      - eval_time: 2m30s
+        alertname: STGInstanceScrapeFailed
+        exp_alerts: []

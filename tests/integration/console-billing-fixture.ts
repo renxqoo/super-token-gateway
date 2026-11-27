@@ -1,3 +1,4 @@
+import type { ConsoleConfig } from "@gateway/console-api";
 import { afterAll, beforeAll, expect } from "bun:test";
 import { createConsoleTestHarness } from "./helpers/console-harness.ts";
 
@@ -32,11 +33,12 @@ export async function createTeamBillingAccount(name: string, slug: string, curre
   return team.data.default_billing_account_id;
 }
 
-export function registerBillingFixture() {
+export function registerBillingFixture(usageMonitor?: ConsoleConfig["usageMonitor"]) {
   beforeAll(async () => {
     h = await createConsoleTestHarness({
       consoleConfigOverrides: {
         allowPrivateAlertWebhooks: true,
+        ...(usageMonitor ? { usageMonitor } : {}),
       },
       enableWorker: true,
     });

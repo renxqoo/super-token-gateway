@@ -1,16 +1,38 @@
 import { expect, test } from "bun:test";
+import { parseUsageMonitorPolicy } from "../../apps/console-api/src/usage-monitor/policy.ts";
+import { waitFor } from "./adversarial-billing-fixture.ts";
 import {
   h,
   eurBillingAccountId,
   adminAccess,
   customerAccess,
   usdBillingAccountId,
+  createTeamBillingAccount,
 } from "./console-billing-fixture.ts";
 import { registerBillingFixture } from "./console-billing-fixture.ts";
 import { registerAlertCases } from "./console-billing-alert-cases.ts";
 import { registerVideoTaskCases } from "./console-video-task-cases.ts";
 
-registerBillingFixture();
+const monitorWidth = 60_000;
+const monitorWindow = Math.floor(Date.now() / monitorWidth) * monitorWidth;
+const monitoredScope = {
+  channel_id: crypto.randomUUID(),
+  model: "monitor-isolation",
+  operation: "chat",
+  currency: "USD",
+  max_output_tokens: "5",
+};
+registerBillingFixture({
+  policy: parseUsageMonitorPolicy({
+    effective_from: new Date(monitorWindow).toISOString(),
+    window_ms: monitorWidth,
+    initial_grace_ms: 1000,
+    final_grace_ms: 5000,
+    scopes: [monitoredScope],
+  }),
+  intervalMs: 0,
+  notifications: false,
+});
 
 test("non-USD billingAccount finance defaults to billingAccount currency and rejects currency mismatch", async () => {
   const mismatch = await h.adminApi(
@@ -520,3 +542,113 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
 
 registerAlertCases();
 registerVideoTaskCases();
+
+test("real Gateway settlement and Console outbox ACK complete while the monitor is blocked on its write", async () => {
+  const billingAccount = await createTeamBillingAccount(
+    "Usage Monitor Isolation",
+    "usage-monitor-isolation",
+  );
+  expect(
+    await h.adminApi(
+      "POST",
+      `/admin/v1/finance/billing-accounts/${billingAccount}/topups`,
+      adminAccess,
+      {
+        external_ref: "usage-monitor-isolation-funds",
+        amount_atoms: "50000",
+      },
+    ),
+  ).toMatchObject({ status: 200 });
+  const keyRes = await h.clientApi<{ key: string }>(
+    "POST",
+    `/api/v1/billing-accounts/${billingAccount}/api-keys`,
+    customerAccess,
+    { name: "usage-monitor-isolation" },
+  );
+  expect(keyRes.status).toBe(201);
+  expect(
+    await h.adminApi("POST", "/internal/outbox/events", h.outboxToken, {
+      events: [
+        {
+          event_id: crypto.randomUUID(),
+          request_id: crypto.randomUUID(),
+          kind: "billing.settled",
+          created_at: new Date(monitorWindow + 1).toISOString(),
+          payload: {
+            ...monitoredScope,
+            charge_id: crypto.randomUUID(),
+            customer_atoms: "10",
+            outcome: "SETTLED",
+            usage: { output_tokens: "9" },
+          },
+        },
+      ],
+    }),
+  ).toMatchObject({ status: 200, data: { ingested: 1 } });
+
+  const locked = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const lock = h.conDb.begin(async (tx) => {
+    await tx`LOCK TABLE public.usage_monitor_findings IN SHARE MODE`;
+    locked.resolve();
+    await release.promise;
+  });
+  let monitoring: ReturnType<typeof h.consoleRuntime.flushUsageMonitorOnce> | undefined;
+  const isMonitorWaiting = async () =>
+    (
+      await h.conDb`
+    SELECT EXISTS (
+      SELECT 1 FROM pg_locks WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND relation = 'public.usage_monitor_findings'::regclass AND mode = 'RowExclusiveLock' AND NOT granted
+    ) AS waiting
+  `
+    )[0]?.waiting === true;
+  try {
+    await Promise.race([locked.promise, lock]);
+    monitoring = h.consoleRuntime.flushUsageMonitorOnce(monitorWindow + monitorWidth + 5000);
+    await Promise.race([
+      waitFor(isMonitorWaiting),
+      monitoring.then(() => {
+        throw new Error("Monitor finished before its write was blocked");
+      }),
+    ]);
+
+    const response = await fetch(`${h.gatewayPublicUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${keyRes.data.key}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "bill-gpt",
+        messages: [{ role: "user", content: "verify settlement during a monitor lock" }],
+        max_tokens: 50,
+      }),
+    });
+    expect(response.status).toBe(200);
+    await response.json();
+    const requestId = response.headers.get("x-request-id");
+    expect(requestId).toBeTruthy();
+    expect(await h.consoleRuntime.pullOutboxOnce()).toMatchObject({ acked: true });
+    const [event] = await h.gwDb`
+      SELECT e.event_id::text, cs.acked_seq >= e.seq AS acked
+      FROM public.outbox_events e
+      JOIN public.outbox_consumer_shards cs ON cs.shard = e.shard AND cs.name = ${h.consoleConfig.outboxConsumerName}
+      WHERE e.request_id = ${requestId} AND e.kind = 'billing.settled'
+    `;
+    expect(event?.acked).toBe(true);
+    expect(
+      await h.conDb`
+      SELECT outcome, billing_account_id::text FROM public.usage_events WHERE event_id = ${event?.event_id}
+    `,
+    ).toEqual([{ outcome: "SETTLED", billing_account_id: billingAccount }]);
+    expect(await isMonitorWaiting()).toBe(true);
+  } finally {
+    release.resolve();
+    await lock;
+    await monitoring;
+  }
+  expect(await monitoring).toBe("evaluated");
+  expect(
+    await h.conDb`
+    SELECT rule_key FROM public.usage_monitor_findings WHERE channel_id = ${monitoredScope.channel_id} AND matched
+  `,
+  ).toEqual([{ rule_key: "MAX_OUTPUT" }]);
+});

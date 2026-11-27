@@ -32,4 +32,6 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.sessions, public.org_members, pub
   public.upstream_accounts, public.channels, public.pricing_templates, public.model_catalog,
   public.routes, public.pricing_overrides, public.alert_rules, public.alert_eval_queue TO stg_console;
 GRANT SELECT, INSERT ON public.price_version_snapshots, public.usage_events, public.console_audit_logs TO stg_console;
+GRANT SELECT, INSERT, UPDATE ON public.usage_monitor_windows,
+  public.usage_monitor_window_stats, public.usage_monitor_findings TO stg_console;
 COMMIT;

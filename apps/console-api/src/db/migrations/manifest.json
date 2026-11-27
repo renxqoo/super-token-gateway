@@ -4,6 +4,11 @@
       "version": 2026112501,
       "path": "./migrations/0000_billing_accounts.sql",
       "checksum": "07934442bcf73d7ede06c760aea95ef5dc38d4baf9e6acd44e2e17482c06db87"
+    },
+    {
+      "version": 2026112701,
+      "path": "./migrations/0001_usage_monitor.sql",
+      "checksum": "be72df025d961fd2f667c3ed0cf895af5afd2e836af495e65f5111f4c443ee43"
     }
   ]
 }

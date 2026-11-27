@@ -106,6 +106,7 @@ export async function migrateConsoleDb(db: SQL): Promise<number> {
         )
       `;
     }
+    if (appliedCount < prepared.length) await tx`SET LOCAL statement_timeout = '15min'`;
     for (const mig of prepared.slice(appliedCount)) {
       await tx.unsafe(mig.sqlText);
       await tx`

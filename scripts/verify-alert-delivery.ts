@@ -12,8 +12,15 @@ async function localPort(): Promise<number> {
   return address.port;
 }
 
-type Delivery = { status?: string; commonLabels?: { alertname?: string; severity?: string } };
+type Delivery = {
+  status?: string;
+  commonLabels?: { alertname?: string; severity?: string; rule?: string };
+};
 const delivered = Promise.withResolvers<Delivery>();
+const usageDelivered = new Map([
+  ["MAX_OUTPUT", Promise.withResolvers<Delivery>()],
+  ["MAX_CHARGE", Promise.withResolvers<Delivery>()],
+]);
 const root = await mkdtemp("/tmp/stg-alerts-");
 const children: Bun.Subprocess[] = [];
 let samples = 0;
@@ -24,7 +31,15 @@ const endpoint = Bun.serve({
     if (new URL(req.url).pathname === "/metrics") {
       samples++;
       return new Response(
-        `# TYPE gateway_ledger_commit_failures_total counter\ngateway_ledger_commit_failures_total ${Number(samples > 3)}\n`,
+        [
+          "# TYPE gateway_ledger_commit_failures_total counter",
+          `gateway_ledger_commit_failures_total ${Number(samples > 3)}`,
+          "stg_console_usage_monitor_notifications_enabled 1",
+          `stg_console_usage_monitor_last_tick_timestamp_seconds ${Math.floor(Date.now() / 1000)}`,
+          `stg_console_usage_monitor_open_findings{rule="MAX_OUTPUT"} ${Number(samples > 3)}`,
+          `stg_console_usage_monitor_open_findings{rule="MAX_CHARGE"} ${Number(samples > 3)}`,
+          "",
+        ].join("\n"),
         { headers: { "content-type": "text/plain; version=0.0.4" } },
       );
     }
@@ -32,6 +47,8 @@ const endpoint = Bun.serve({
       const notification = (await req.json()) as Delivery;
       if (notification.commonLabels?.alertname === "STGLedgerCommitFailure")
         delivered.resolve(notification);
+      if (notification.commonLabels?.alertname === "STGUpstreamUsageAnomaly")
+        usageDelivered.get(notification.commonLabels.rule ?? "")?.resolve(notification);
       return new Response(null, { status: 204 });
     }
     return new Response(null, { status: 404 });
@@ -92,8 +109,11 @@ scrape_configs:
       { stdout: "ignore", stderr: "inherit" },
     ),
   );
-  const receipt = await Promise.race([
-    delivered.promise,
+  const [receipt, ...usageReceipts] = await Promise.race([
+    Promise.all([
+      delivered.promise,
+      ...Array.from(usageDelivered.values(), ({ promise }) => promise),
+    ]),
     ...children.map((child) =>
       child.exited.then((code) => {
         throw new Error(`Monitoring process exited with status ${code}`);
@@ -101,18 +121,30 @@ scrape_configs:
     ),
     new Promise<never>((_, reject) => {
       timeout = setTimeout(
-        () => reject(new Error("Did not receive firing alert in 30 seconds")),
-        30_000,
+        () =>
+          reject(
+            new Error(
+              "Did not receive the settlement alert and separate alerts for both usage rules",
+            ),
+          ),
+        50_000,
       );
     }),
   ]);
   if (receipt.status !== "firing" || receipt.commonLabels?.severity !== "critical") {
     throw new Error("Receiver did not receive a firing critical settlement alert");
   }
+  for (const usageReceipt of usageReceipts) {
+    if (usageReceipt.status !== "firing" || usageReceipt.commonLabels?.severity !== "warning") {
+      throw new Error("Receiver did not receive a firing usage anomaly warning");
+    }
+  }
   console.log(
     JSON.stringify({
       delivered: true,
       alert: receipt.commonLabels.alertname,
+      usage_alert: "STGUpstreamUsageAnomaly",
+      usage_rules: usageReceipts.map(({ commonLabels }) => commonLabels?.rule),
       samples,
       elapsed_ms: Number((performance.now() - started).toFixed(2)),
     }),

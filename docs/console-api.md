@@ -37,6 +37,8 @@ Console 创建和轮换计费账户的 API Key 时，Gateway 签发 `sk_` 加 43
 
 Outbox 推送成功时返回 `ok`、`received` 和 `ingested`，告警结果随后写入告警记录。`CONSOLE_ALERT_EVALUATION_INTERVAL_MS` 控制评估周期，`CONSOLE_ALERT_DELIVERY_INTERVAL_MS` 控制 Webhook 投递周期。关闭 Webhook 投递时，后台仍默认每 5 秒评估一次。
 
+平台可按渠道启用上游用量监控。策略配置、运维告警和人工处置接口见 [ADR 0014](decisions/0014-upstream-usage-monitoring.md#配置和发布)。
+
 构建产物包含 `dist/console-api/main.js` 和 `dist/tools/console-migrate.js`。为 Console 准备独立数据库，配置 `CONSOLE_DATABASE_URL`、Gateway 内部 URL 和服务凭证、`OUTBOX_WEBHOOK_TOKEN`。先执行迁移，再启动 Console。源码运行入口分别为 `bun run console:migrate` 和 `bun run console`。Gateway 对外 URL 通过 `GATEWAY_PUBLIC_URL` 提供给客户端示例。
 
 Gateway 私网目录使用 `PUT /internal/v1/billing-accounts`。账单、Outbox、内容 Webhook 和 WASM 的输入统一使用 `billing_account_id`。Gateway 的私网鉴权读取 `INTERNAL_AUTH_FILE`，Console 通过操作对应的 `GATEWAY_*_TOKEN` 访问。启用 Trace 时配置 `TRACE_QUEUE_PER_BILLING_ACCOUNT`，异步任务额度使用 `MAX_ACTIVE_ASYNC_TASKS_PER_BILLING_ACCOUNT` 和 `MAX_AUTO_REFUNDS_PER_BILLING_ACCOUNT_24H`。

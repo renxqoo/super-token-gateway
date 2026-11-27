@@ -28,6 +28,7 @@ import {
   type ConsoleEnv,
 } from "./routes/shared.ts";
 import { createConsoleSync } from "./sync.ts";
+import { createUsageMonitor } from "./usage-monitor/monitor.ts";
 
 export type ConsoleRuntimeOptions = {
   config: ConsoleConfig;
@@ -137,6 +138,11 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
   const { config } = options;
   const ownsDb = !options.db;
   const db = options.db ?? createConsoleDatabase(config.databaseUrl, config.dbMaxConnections);
+  const monitorDb = config.usageMonitor ? createConsoleDatabase(config.databaseUrl, 1) : undefined;
+  const usageMonitor =
+    monitorDb && config.usageMonitor
+      ? createUsageMonitor(monitorDb, config.usageMonitor)
+      : undefined;
   const orm = createConsoleDrizzle(db);
   const gateway = new GatewayClient({
     baseUrl: config.gatewayInternalUrl,
@@ -185,6 +191,13 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
     );
   }
   attachCommonHandlers(adminApp, db, peerIpMap);
+
+  adminApp.get("/metrics", (c) =>
+    c.text(usageMonitor?.metrics() ?? "stg_console_usage_monitor_enabled 0\n", 200, {
+      "content-type": "text/plain; version=0.0.4; charset=utf-8",
+      "cache-control": "no-store",
+    }),
+  );
 
   adminApp.post("/internal/outbox/events", async (c) => {
     const token = extractBearerToken(c.req.header("authorization"));
@@ -259,6 +272,10 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
       return processPendingWebhookDeliveries(db, webhookDeliveryOpts);
     },
 
+    async flushUsageMonitorOnce(now?: number) {
+      return usageMonitor?.runOnce(now);
+    },
+
     async start(): Promise<void> {
       if (running) return;
       await assertConsoleSchemaVersion(db);
@@ -281,6 +298,11 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
           signal: stopController.signal,
         }),
       );
+      if (usageMonitor && config.usageMonitor) {
+        schedule(config.usageMonitor.intervalMs, "usage_monitor_failed", () =>
+          usageMonitor.runOnce(),
+        );
+      }
     },
 
     async close(timeoutMs = 5_000): Promise<void> {
@@ -300,6 +322,7 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
         }
       }
       if (ownsDb) await db.close({ timeout: Math.max(0, (deadline - performance.now()) / 1_000) });
+      await monitorDb?.close({ timeout: Math.max(0, (deadline - performance.now()) / 1_000) });
     },
   };
 }

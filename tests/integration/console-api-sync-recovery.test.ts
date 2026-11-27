@@ -64,7 +64,8 @@ test("Console initializes an empty database and rejects an incompatible target",
     expect(await migrateConsoleDb(db)).toBe(CONSOLE_SCHEMA_VERSION);
     expect(await migrateConsoleDb(db)).toBe(CONSOLE_SCHEMA_VERSION);
     expect(await assertConsoleSchemaVersion(db)).toBe(CONSOLE_SCHEMA_VERSION);
-    await db.unsafe("UPDATE public.console_schema_migrations SET version = 1");
+    await db`UPDATE public.console_schema_migrations SET checksum = 'tampered'
+      WHERE version = ${CONSOLE_SCHEMA_VERSION}`;
     await expect(migrateConsoleDb(db)).rejects.toThrow(/checksum mismatch/);
   } finally {
     await db.close({ timeout: 0 });

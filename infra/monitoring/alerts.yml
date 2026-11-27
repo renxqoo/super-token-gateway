@@ -2,12 +2,12 @@ groups:
   - name: stg-production
     rules:
       - alert: STGInstanceScrapeFailed
-        expr: up{job=~"stg-gateway|stg-worker"} == 0
+        expr: up{job=~"stg-gateway|stg-worker|stg-console"} == 0
         for: 1m
         labels:
           severity: warning
         annotations:
-          summary: Gateway or Worker metrics endpoint is unreachable
+          summary: Gateway, Worker or Console metrics endpoint is unreachable
       - alert: STGGatewayUnavailable
         expr: max by (stg_cluster) (gateway_ready{job="stg-gateway"}) == 0 or (max by (stg_cluster) (up{job="stg-gateway"}) * 0 unless max by (stg_cluster) (gateway_ready{job="stg-gateway"}))
         for: 30s
@@ -121,3 +121,42 @@ groups:
           severity: warning
         annotations:
           summary: Business webhook delivery or acknowledgement failed
+  - name: stg-console-usage-monitor
+    rules:
+      - alert: STGUpstreamUsageAnomaly
+        expr: |
+          max by (stg_cluster, rule) (
+            (stg_console_usage_monitor_open_findings > 0)
+            and on (stg_cluster, job, instance) (stg_console_usage_monitor_notifications_enabled == 1)
+            and on (stg_cluster, job, instance)
+              (time() - stg_console_usage_monitor_last_tick_timestamp_seconds < 120)
+          ) > 0
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: Settled upstream usage requires platform review
+      - alert: STGUsageMonitorCoverageGap
+        expr: |
+          max by (stg_cluster) (stg_console_usage_monitor_coverage_gaps) > 0
+          or max by (stg_cluster) (
+            (stg_console_usage_monitor_last_skip_timestamp_seconds > 0)
+            and (time() - stg_console_usage_monitor_last_skip_timestamp_seconds < 3600)
+          ) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Upstream usage monitoring has incomplete window coverage
+      - alert: STGUsageMonitorStale
+        expr: |
+          (stg_console_usage_monitor_enabled == 1)
+          and on (stg_cluster, job, instance)
+            (time() - stg_console_usage_monitor_last_tick_timestamp_seconds > 120
+            or (stg_console_usage_monitor_oldest_due_timestamp_seconds > 0
+              and time() - stg_console_usage_monitor_oldest_due_timestamp_seconds > 300))
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Upstream usage monitoring has stalled evaluation or backlog

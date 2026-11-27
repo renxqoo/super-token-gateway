@@ -1,4 +1,9 @@
 import { normalizeAndValidateCidr } from "./auth.ts";
+import {
+  parseUsageMonitorPolicy,
+  usageMonitorIntervalMs,
+  type UsageMonitorConfig,
+} from "./usage-monitor/policy.ts";
 
 export type GatewayRoleTokens = {
   catalog?: string;
@@ -31,6 +36,7 @@ export type ConsoleConfig = {
   alertEvaluationIntervalMs?: number;
   alertDeliveryIntervalMs: number;
   allowPrivateAlertWebhooks?: boolean;
+  usageMonitor?: UsageMonitorConfig;
   clientCorsOrigins: string[];
   adminCorsOrigins: string[];
 };
@@ -55,6 +61,29 @@ function parseList(raw: string | undefined): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+function loadUsageMonitor(env: Record<string, string | undefined>): UsageMonitorConfig | undefined {
+  const raw = env.CONSOLE_USAGE_MONITOR_POLICY;
+  const notifications = env.CONSOLE_USAGE_MONITOR_NOTIFICATIONS || "false";
+  if (notifications !== "true" && notifications !== "false") {
+    throw new Error("CONSOLE_USAGE_MONITOR_NOTIFICATIONS must be true or false");
+  }
+  if (!raw) {
+    if (notifications === "true") {
+      throw new Error("CONSOLE_USAGE_MONITOR_NOTIFICATIONS requires CONSOLE_USAGE_MONITOR_POLICY");
+    }
+    return;
+  }
+  try {
+    return {
+      policy: parseUsageMonitorPolicy(JSON.parse(raw)),
+      notifications: notifications === "true",
+      intervalMs: usageMonitorIntervalMs,
+    };
+  } catch (error) {
+    throw new Error("Invalid CONSOLE_USAGE_MONITOR_POLICY", { cause: error });
+  }
 }
 
 export function loadConsoleConfigFromEnv(
@@ -111,6 +140,7 @@ export function loadConsoleConfigFromEnv(
     trustedProxyCidrs.push(normalized);
   }
 
+  const usageMonitor = loadUsageMonitor(env);
   return {
     host: env.CONSOLE_HOST ?? "0.0.0.0",
     port: intEnv(env, "CONSOLE_PORT", 8092, 0),
@@ -136,6 +166,7 @@ export function loadConsoleConfigFromEnv(
       alertDeliveryIntervalMs || 5_000,
     ),
     alertDeliveryIntervalMs,
+    ...(usageMonitor ? { usageMonitor } : {}),
     clientCorsOrigins: parseList(env.CONSOLE_CLIENT_CORS_ORIGINS),
     adminCorsOrigins: parseList(env.CONSOLE_ADMIN_CORS_ORIGINS),
   };
