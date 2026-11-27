@@ -11,6 +11,7 @@ import { GatewayError } from "@gateway/contracts";
 
 const allowedUsageKeys = new Set<string>([...dimensions, "reasoning_tokens"]);
 const decimalDurationKeys = new Set<string>(["audio_seconds", "video_seconds"]);
+const geminiInputs = new WeakMap<Usage, { prompt: string | undefined; tool: string | undefined }>();
 
 export function readUsageQuantity(
   source: Record<string, unknown>,
@@ -223,8 +224,14 @@ export function extractUsage(
   const prompt = alias3(raw, "prompt_tokens", "input_tokens", "promptTokenCount", rawExact);
   const toolUse =
     kind === "gemini" ? quantity(raw, "toolUsePromptTokenCount", rawExact) : undefined;
+  const previousGeminiInput =
+    kind === "gemini" && previous ? geminiInputs.get(previous) : undefined;
+  const geminiPrompt = prompt ?? previousGeminiInput?.prompt;
+  const geminiTool = toolUse ?? previousGeminiInput?.tool;
   const input =
-    toolUse === undefined ? prompt : (BigInt(prompt ?? "0") + BigInt(toolUse)).toString();
+    kind === "gemini" && geminiPrompt !== undefined && geminiTool !== undefined
+      ? (BigInt(geminiPrompt) + BigInt(geminiTool)).toString()
+      : geminiPrompt;
   const output = alias3(
     raw,
     "completion_tokens",
@@ -294,6 +301,7 @@ export function extractUsage(
   const videoDuration = measureDuration(usage, raw, "video_seconds", "video_ms", false, rawExact);
   if (
     input === undefined &&
+    toolUse === undefined &&
     output === undefined &&
     !audioDuration &&
     !videoDuration &&
@@ -358,5 +366,8 @@ export function extractUsage(
     if (write1h !== undefined) usage.cache_write_1h_tokens = write1h;
   }
   if (reasoning !== undefined) usage.reasoning_tokens = reasoning;
+  if (kind === "gemini" && (geminiPrompt !== undefined || geminiTool !== undefined)) {
+    geminiInputs.set(usage, { prompt: geminiPrompt, tool: geminiTool });
+  }
   return usage;
 }

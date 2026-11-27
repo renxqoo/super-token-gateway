@@ -85,6 +85,17 @@ function validateUsageFast(usage: Usage): void {
   }
 }
 
+export function hasPricedTokenUsage(usage: Usage, rates: Pricing["rates"]): boolean {
+  return (
+    (usage.input_tokens !== undefined ||
+      !rates.input_tokens ||
+      rates.input_tokens.numerator === "0") &&
+    (usage.output_tokens !== undefined ||
+      !rates.output_tokens ||
+      rates.output_tokens.numerator === "0")
+  );
+}
+
 export function compilePricing(pricing: Pricing): CompiledPricing {
   validatePricing(pricing);
   const entries: CompiledRateEntry[] = [];

@@ -77,6 +77,7 @@ export class StreamTranslator {
     terminal: boolean;
     hasSourceText?: boolean;
     hasTargetText?: boolean;
+    outputUsageBoundary?: "replace" | "ignore";
   } {
     if (this.terminal) {
       if (!event.data) return { chunks: [], terminal: true };
@@ -144,13 +145,13 @@ export class StreamTranslator {
       optionalObject(body.delta).stop_reason !== undefined
     )
       this.holdTerminal = true;
+    const rawType = text(body.type, event.event);
+    const responsesTerminal =
+      this.source === "responses" &&
+      (rawType === "response.completed" || rawType === "response.incomplete");
     const hasNestedMessage =
       body.message !== null && typeof body.message === "object" && !Array.isArray(body.message);
     const nested = hasNestedMessage ? (body.message as Record<string, unknown>) : undefined;
-    this.usage =
-      (nested ? extractUsage(nested, this.kind, this.usage) : undefined) ??
-      extractUsage(body, this.kind, this.usage) ??
-      this.usage;
     if (
       body.error ||
       event.event === "error" ||
@@ -160,7 +161,6 @@ export class StreamTranslator {
       this.failed = true;
       throw new GatewayError(502, "provider_stream_error", "Provider reported a stream error");
     }
-    const rawType = text(body.type, event.event);
     if (this.source === "gemini" && Array.isArray(body.candidates))
       for (const raw of body.candidates) {
         const candidate = optionalObject(raw);
@@ -175,7 +175,7 @@ export class StreamTranslator {
       }
     let terminalNow =
       this.source === "responses"
-        ? ["response.completed", "response.incomplete"].includes(rawType)
+        ? responsesTerminal
         : this.source === "messages"
           ? rawType === "message_stop"
           : this.source === "gemini" &&
@@ -187,6 +187,8 @@ export class StreamTranslator {
     this.terminal = terminalNow;
     const sameProtocol = this.source === this.target;
     let hasSourceText = false;
+    let addsOutput = false;
+    let addsGeminiThought = false;
     let deltas: StreamDelta[] | undefined;
     const pushDelta = (d: StreamDelta) => {
       (deltas ??= []).push(d);
@@ -217,6 +219,16 @@ export class StreamTranslator {
             (typeof d.refusal === "string" && d.refusal.length > 0)
           ) {
             hasSourceText = true;
+          }
+          if (
+            hasSourceText ||
+            d.reasoning_content ||
+            d.reasoning ||
+            d.audio ||
+            d.function_call ||
+            (Array.isArray(d.tool_calls) && d.tool_calls.length > 0)
+          ) {
+            addsOutput = true;
           }
         }
         if (!sameProtocol) {
@@ -347,7 +359,9 @@ export class StreamTranslator {
         if (Array.isArray(content.parts))
           for (let index = 0; index < content.parts.length; index++) {
             const part = object(content.parts[index]);
+            if (typeof part.text !== "string" || part.text.length > 0) addsOutput = true;
             if (part.thought === true && typeof part.text === "string") {
+              if (part.text.length > 0) addsGeminiThought = true;
               pushDelta({ type: "reasoning", index: 0, text: part.text });
               continue;
             }
@@ -389,6 +403,20 @@ export class StreamTranslator {
         }
       }
     }
+    const ignoreOutputUsage = this.source === "messages" && rawType === "message_start";
+    const replaceOutputUsage = addsOutput || responsesTerminal;
+    if (replaceOutputUsage && this.usage) {
+      delete this.usage.output_tokens;
+      if (this.source !== "gemini" || addsGeminiThought) delete this.usage.reasoning_tokens;
+    }
+    this.usage =
+      (nested ? extractUsage(nested, this.kind, this.usage) : undefined) ??
+      extractUsage(body, this.kind, this.usage) ??
+      this.usage;
+    if (ignoreOutputUsage && this.usage) {
+      delete this.usage.output_tokens;
+      delete this.usage.reasoning_tokens;
+    }
     if (sameProtocol) {
       let modified = Boolean(this.publicId && this.source === "responses");
       if (typeof body.model === "string" && body.model !== this.model) {
@@ -422,7 +450,14 @@ export class StreamTranslator {
     const hasTargetText = sameProtocol
       ? hasSourceText
       : Boolean(deltas?.some((d) => d.type === "text" && d.text.length > 0));
-    return { chunks, terminal: terminalNow, hasSourceText, hasTargetText };
+    return {
+      chunks,
+      terminal: terminalNow,
+      hasSourceText,
+      hasTargetText,
+      ...(replaceOutputUsage ? { outputUsageBoundary: "replace" } : {}),
+      ...(ignoreOutputUsage ? { outputUsageBoundary: "ignore" } : {}),
+    };
   }
 
   assertComplete(): void {

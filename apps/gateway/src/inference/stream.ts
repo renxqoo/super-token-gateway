@@ -12,7 +12,7 @@ import { createStreamChunkReader, createStreamRelay } from "../stream-relay.ts";
 import {
   isConversationalOperation,
   mergeUsageSources,
-  mergeUsageWithAliases,
+  mergeStreamUsageAliases,
 } from "../upstream.ts";
 import { channelResponseHeaders } from "./http.ts";
 import type { AttemptResponse, StreamResponse } from "./attempt-response.ts";
@@ -101,8 +101,9 @@ async function respondToFastBufferedSse(
     let terminalBytes = 0;
     for (let i = 0; i < events.length; i++) {
       const event = events[i]!;
+      let parsedEv: Record<string, unknown> | undefined;
       if (hasStreamRules && event.data && event.data !== "[DONE]") {
-        const parsedEv = object(parseProviderJson(event.data));
+        parsedEv = object(parseProviderJson(event.data));
         const matchedErr = evaluateErrorRules(200, parsedEv, error_rules);
         if (matchedErr) {
           telemetry.recordAttemptFailure(
@@ -116,14 +117,18 @@ async function respondToFastBufferedSse(
             matchedErr.message ?? "Upstream stream error",
           );
         }
-        if (usage_aliases.length > 0) {
-          streamAliasUsage =
-            mergeUsageWithAliases(streamAliasUsage, parsedEv, usage_aliases) ?? streamAliasUsage;
-        }
       }
       if (describeFailure) translating = event;
       const translated = translator.consume(event);
       translating = undefined;
+      if (parsedEv && usage_aliases.length > 0) {
+        streamAliasUsage = mergeStreamUsageAliases(
+          streamAliasUsage,
+          parsedEv,
+          usage_aliases,
+          translated.outputUsageBoundary,
+        );
+      }
       if (translated.hasSourceText) telemetry.requestTrace?.markUpstreamFirstText();
       if (translated.hasTargetText) sawFirstText = true;
       if (streamProbe && !streamProbeDone && translated.chunks.length && event.event !== "error") {

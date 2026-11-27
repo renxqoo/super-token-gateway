@@ -86,6 +86,24 @@ export function mergeUsageWithAliases(
   return mergeUsageSources(baseUsage, validateUsageObject(aliasRaw));
 }
 
+export function mergeStreamUsageAliases(
+  previous: Usage | undefined,
+  event: Record<string, unknown>,
+  rules: readonly UsageAliasRule[],
+  outputUsageBoundary: "replace" | "ignore" | undefined,
+): Usage | undefined {
+  if (outputUsageBoundary === "replace" && previous) {
+    delete previous.output_tokens;
+    delete previous.reasoning_tokens;
+  }
+  const usage = mergeUsageWithAliases(previous, event, rules) ?? previous;
+  if (outputUsageBoundary === "ignore" && usage) {
+    delete usage.output_tokens;
+    delete usage.reasoning_tokens;
+  }
+  return usage;
+}
+
 export function mergeUsageSources(baseUsage?: Usage, aliasUsage?: Usage): Usage | undefined {
   if (!aliasUsage) return baseUsage;
   if (!baseUsage) return aliasUsage;

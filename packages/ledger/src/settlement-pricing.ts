@@ -3,6 +3,7 @@ import {
   calculateCompiledCostAtoms,
   compilePricing,
   DomainError,
+  hasPricedTokenUsage,
   type CompiledPricing,
   type Pricing,
   type Usage,
@@ -24,10 +25,17 @@ function getCompiledPricing(pricing: Pricing): CompiledPricing {
 function usageForSettlement(
   item: CommitTerminalInput,
   basis: CommitTerminalInput["supplier_basis"],
+  pricing: Pricing,
 ): Usage {
   if (basis === "REQUEST_COMPLETION") return { requests: "1" };
   if (basis === "INPUT_CHARACTERS")
     return { characters: item.input_characters ?? "0", requests: "1" };
+  if (!hasPricedTokenUsage(item.usage, pricing.rates)) {
+    throw new DomainError(
+      "invalid_upstream_usage",
+      "Upstream omitted token usage required by pricing",
+    );
+  }
   return item.usage;
 }
 
@@ -71,14 +79,14 @@ export function priceSettlement(item: CommitTerminalInput): {
     throw new DomainError("usage_alias_conflict", "Provider cache write partitions disagree");
   }
   const customerAtoms = calculateSettlementCost(
-    usageForSettlement(item, item.billing_basis),
+    usageForSettlement(item, item.billing_basis, item.billing_pricing),
     item.billing_pricing,
   );
   if (item.supplier_cost_atoms_override === undefined) {
     return {
       customerAtoms,
       supplierAtoms: calculateSettlementCost(
-        usageForSettlement(item, item.supplier_basis),
+        usageForSettlement(item, item.supplier_basis, item.supplier_pricing),
         item.supplier_pricing,
       ),
     };

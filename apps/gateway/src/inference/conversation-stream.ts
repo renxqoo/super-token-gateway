@@ -25,7 +25,7 @@ import {
   extractChunkTextFromEncodedSse,
   inspectAnthropicBlockEvent,
   mergeUsageSources,
-  mergeUsageWithAliases,
+  mergeStreamUsageAliases,
   stripTextFromSseChunk,
 } from "../upstream.ts";
 import { classifyPluginBlock } from "./policy.ts";
@@ -255,8 +255,9 @@ export async function relayConversationStream(
   }
 
   function translateEvent(translator: StreamTranslator, ev: SSEEvent) {
+    let parsedEv: Record<string, unknown> | undefined;
     if (hasStreamRules && ev.data && ev.data !== "[DONE]") {
-      const parsedEv = object(parseProviderJson(ev.data));
+      parsedEv = object(parseProviderJson(ev.data));
       const matchedErr = evaluateErrorRules(200, parsedEv, error_rules);
       if (matchedErr) {
         telemetry.recordAttemptFailure(
@@ -270,14 +271,18 @@ export async function relayConversationStream(
           matchedErr.message ?? "Upstream stream error",
         );
       }
-      if (usage_aliases.length > 0) {
-        streamAliasUsage =
-          mergeUsageWithAliases(streamAliasUsage, parsedEv, usage_aliases) ?? streamAliasUsage;
-      }
     }
     if (describeFailure) translating = ev;
     const translated = translator.consume(ev);
     translating = undefined;
+    if (parsedEv && usage_aliases.length > 0) {
+      streamAliasUsage = mergeStreamUsageAliases(
+        streamAliasUsage,
+        parsedEv,
+        usage_aliases,
+        translated.outputUsageBoundary,
+      );
+    }
     return translated;
   }
 

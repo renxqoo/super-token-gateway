@@ -5,8 +5,8 @@
 ## 预扣输入
 
 - 输出上界只接受入口协议的原生字段：Chat 为 `max_completion_tokens` 或 `max_tokens`（二选一），Responses 为 `max_output_tokens`，Messages 与 Completions 为 `max_tokens`，Gemini 为 `generationConfig.maxOutputTokens`。显式 `null` 视为未提供，按模型上限预扣并写回原生字段。同时出现多个上界或出现其他协议的上界字段返回 400/invalid_request。原生透传不再允许客户用上游忽略的字段压低预扣，而让上游按另一字段生成。
-- 服务端执行、另行计费且没有计量维度的托管工具在准入前返回 422/unmetered_tool。按白名单放行由客户端执行、只按 token 计费的工具：Chat 为 `function`、`custom`，不接受非空 `web_search_options`；Responses 为 `function`、`custom`、`computer_use_preview`、`local_shell`、`shell`、`apply_patch`；Messages 为无类型、`custom` 及 `bash_*`、`text_editor_*`、`computer_*`、`memory_*`；Gemini 为 `functionDeclarations`/`function_declarations` 与 `computerUse`/`computer_use`。`tools: null` 视为未提供。未列入白名单的新工具类型默认拒绝，确认其由客户端执行后再加入。Batch 输入逐行执行相同规则。
-- Gemini `toolUsePromptTokenCount` 计入输入 token，与 `promptTokenCount` 合计后再扣除缓存读取。
+- 服务端执行、另行计费且没有计量维度的托管工具在准入前返回 422/unmetered_tool。按白名单放行由客户端执行、只按 token 计费的工具：Chat 为 `function`、`custom`，不接受非空 `web_search_options`；Responses 为 `function`、`custom`、`computer_use_preview`、`local_shell`、显式设置 `environment.type: local` 的 `shell`、`apply_patch`；Messages 为无类型、`custom` 及 `bash_*`、`text_editor_*`、`computer_*`、`memory_*`；Gemini 为 `functionDeclarations`/`function_declarations` 与 `computerUse`/`computer_use`。`tools: null` 视为未提供。未列入白名单的新工具类型默认拒绝，确认其由客户端执行后再加入。Batch 输入逐行执行相同规则。
+- Gemini `toolUsePromptTokenCount` 计入输入 token，与 `promptTokenCount` 合计后再扣除缓存读取。只报告工具输入用量时，常规输入仍缺少计量证据。
 
 ## 结算与准入
 

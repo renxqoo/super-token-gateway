@@ -9,6 +9,8 @@ import {
 } from "@gateway/kernel";
 import { MicroBatchQueue } from "../micro-batch.ts";
 import { outboxShard, sha256Hex } from "../funds.ts";
+import { priceSettlement } from "../settlement-pricing.ts";
+import type { CommitTerminalInput } from "../types.ts";
 
 test("adaptive MicroBatchQueue flushes immediately when idle and batches concurrent arrivals while busy", async () => {
   const batchSizes: number[] = [];
@@ -160,4 +162,35 @@ test("sha256Hex fast path matches canonical SHA-256 and outboxShard stays in 0..
     expect(shard).toBeLessThan(16);
   }
   expect(outboxShard(null)).toBe(0);
+});
+
+test("symptom: settlement charges only the input when supplier-priced output evidence is absent", () => {
+  const item = {
+    request_id: "request",
+    selected_attempt_id: "attempt",
+    channel_id: "channel",
+    billing_price_id: "customer-price",
+    cost_version_id: "supplier-price",
+    billing_pricing: {
+      currency: "USD",
+      rates: { input_tokens: { numerator: "2", denominator: "1" } },
+    },
+    supplier_pricing: {
+      currency: "USD",
+      rates: { output_tokens: { numerator: "4", denominator: "1" } },
+    },
+    billing_basis: "PROVIDER_USAGE",
+    supplier_basis: "PROVIDER_USAGE",
+    supplier_currency: "USD",
+    usage: { input_tokens: "3" },
+  } satisfies CommitTerminalInput;
+  expect(() => priceSettlement(item)).toThrow("Upstream omitted token usage required by pricing");
+  expect(priceSettlement({ ...item, usage: { input_tokens: "3", output_tokens: "0" } })).toEqual({
+    customerAtoms: 6n,
+    supplierAtoms: 0n,
+  });
+  expect(priceSettlement({ ...item, supplier_cost_atoms_override: "9" })).toEqual({
+    customerAtoms: 6n,
+    supplierAtoms: 9n,
+  });
 });

@@ -130,6 +130,9 @@ export async function handleUnaryResponse(
       rawJson = object(parseProviderJson(utf8FatalDecoder.decode(respBytes)));
     } catch (error) {
       telemetry.recordAttemptFailure("invalid_upstream");
+      if (error instanceof TypeError) {
+        throw new GatewayError(502, "invalid_upstream_json", "Provider returned invalid UTF-8");
+      }
       throw error;
     }
     const provider = prepared.resolvedProvider;

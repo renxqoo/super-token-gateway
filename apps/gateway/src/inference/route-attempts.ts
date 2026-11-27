@@ -1,4 +1,5 @@
 import { GatewayError } from "@gateway/contracts";
+import { MeteredRequestError } from "../request-metering.ts";
 import { formatProtocolError } from "@gateway/protocol";
 import { UpstreamPreDispatchError } from "@gateway/runtime";
 import type { EffectiveCustomerPrice } from "../pricing.ts";
@@ -99,10 +100,10 @@ export async function routeInference(
         return await rejectOutputPolicy(unavailablePolicy);
       }
       const customer = accounting.customerPrice(cand);
-      const prepared = prepareForReservation(cand, preparedInput.body, customer.price);
-
+      let prepared: PreparedUpstreamRequest | null;
       let quote: ReturnType<InferenceAccounting["quote"]>;
       try {
+        prepared = prepareForReservation(cand, preparedInput.body, customer.price);
         quote = accounting.quote(cand, customer, {
           ...preparedInput.measurement,
           estimatedInputTokens: prepared?.estimatedInputTokens,
@@ -244,9 +245,17 @@ export async function routeInference(
       }
       const { body: attemptBody, measurement: inputMeasurement, pluginSignal } = attemptInput;
       pluginSignal.throwIfAborted();
-      const preparedAttempt = firstAttempt
-        ? firstAttempt.prepared
-        : prepareForReservation(cand, attemptBody, candBilling.price);
+      let preparedAttempt: PreparedUpstreamRequest | null;
+      try {
+        preparedAttempt = firstAttempt
+          ? firstAttempt.prepared
+          : prepareForReservation(cand, attemptBody, candBilling.price);
+      } catch (error) {
+        if (!(error instanceof MeteredRequestError)) throw error;
+        lastError = error;
+        releaseProbeFor(cand.channel.id);
+        continue;
+      }
 
       if (pendingSwitchFrom) {
         try {

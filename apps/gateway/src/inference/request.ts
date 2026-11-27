@@ -5,7 +5,7 @@ import { copyExact, parseClientJson, requestCharacters } from "@gateway/protocol
 import { declaredRequestSize } from "../public-ingress.ts";
 import { ProxyRuntimeState } from "../proxy-state.ts";
 import type { TraceContext } from "../observability.ts";
-import { rejectUnmeteredTools } from "../tool-policy.ts";
+import { validateMeteredRequest } from "../request-metering.ts";
 import type {
   InferenceContext,
   InferenceFastHandoff,
@@ -190,7 +190,7 @@ export async function admitInferenceRequest(
       }
     }
 
-    rejectUnmeteredTools(clientBody, operation);
+    validateMeteredRequest(clientBody, operation);
 
     const isStream =
       clientBody.stream === true || (operation === "speech" && clientBody.stream_format === "sse");

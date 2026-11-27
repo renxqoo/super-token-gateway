@@ -3,6 +3,7 @@ import type { PriceVersionRecord } from "@gateway/ledger";
 import { UpstreamPreDispatchError } from "@gateway/runtime";
 import type { PreparedDispatch } from "@gateway/runtime";
 import type { HydratedCandidate } from "../proxy-state.ts";
+import { MeteredRequestError } from "../request-metering.ts";
 import { createTransportTiming } from "../first-text-trace.ts";
 import { tryPrepareUpstreamRequestSync } from "../upstream.ts";
 import type { PreparedUpstreamRequest, PrepareUpstreamOptions } from "../upstream.ts";
@@ -71,7 +72,8 @@ export function createUpstreamPreparation(request: InferenceRequest) {
         cand.same_protocol &&
         Boolean(customerPrice.rates.input_tokens || cand.costPrice.rates.input_tokens);
       return tryPrepareUpstreamRequestSync(opts);
-    } catch {
+    } catch (error) {
+      if (error instanceof MeteredRequestError) throw error;
       return null;
     }
   }

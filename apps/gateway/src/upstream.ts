@@ -12,6 +12,7 @@ import {
   type WasmRuntimeExecutor,
 } from "@gateway/plugin-engine";
 import { stringifyExact, validateRequestPolicy, type ConversionMode } from "@gateway/protocol";
+import { validateMeteredRequest } from "./request-metering.ts";
 import { applyAuthToRequest, isValidHttpHeaderValue, type VertexTokens } from "@gateway/runtime";
 import {
   type MergedProviderOverrides,
@@ -269,6 +270,7 @@ export function tryPrepareUpstreamRequestSync(
   if (options.onFieldRejected) payloadOpts.onFieldRejected = options.onFieldRejected;
   if (options.outputBound !== undefined) payloadOpts.outputBound = options.outputBound;
   const { payload, droppedFields } = buildPreparedPayload(payloadOpts);
+  validateMeteredRequest(payload, upstreamProtocol ?? operation);
 
   const endpointKey = `${operation}:${isStream ? 1 : 0}`;
   let url = staticEndpoints.get(endpointKey);
@@ -456,6 +458,7 @@ export async function prepareUpstreamRequest(
         err instanceof Error ? err.message : "Failed to render provider endpoint URL",
       );
     }
+    validateMeteredRequest(payload, upstreamProtocol ?? operation);
     bodyBytes = encoder.encode(stringifyExact(payload));
   } else {
     let wasmOut: Awaited<ReturnType<typeof invokeWasmProviderRequest>>;
@@ -507,6 +510,9 @@ export async function prepareUpstreamRequest(
     ) {
       capKnownOutput(wasmOut.body, upstreamProtocol, options.outputBound);
     }
+    if (resolved.config.base_dialect !== "passthrough") {
+      validateMeteredRequest(wasmOut.body, upstreamProtocol ?? operation);
+    }
     bodyBytes = encoder.encode(stringifyExact(wasmOut.body));
   }
 
@@ -551,6 +557,7 @@ export {
   upstreamProtocolFor,
   mergeOverridesForResolved,
   mergeUsageWithAliases,
+  mergeStreamUsageAliases,
   mergeUsageSources,
   type MergedProviderOverrides,
   type PreparedUpstreamRequest,

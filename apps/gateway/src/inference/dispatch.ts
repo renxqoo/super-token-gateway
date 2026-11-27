@@ -3,6 +3,7 @@ import { describeProviderError } from "@gateway/plugin-engine";
 import { formatProtocolError } from "@gateway/protocol";
 import { UpstreamPreDispatchError } from "@gateway/runtime";
 import type { FastUpstreamResult } from "@gateway/runtime";
+import { MeteredRequestError } from "../request-metering.ts";
 import type { EffectiveCustomerPrice } from "../pricing.ts";
 import {
   isConversationalOperation,
@@ -134,7 +135,11 @@ export async function dispatchInferenceAttempt(
     }
     attempt.finishExchange();
     pluginSignal.throwIfAborted();
-    if (err instanceof GatewayError && err.code === "conversion_loss" && hasBackup) {
+    if (
+      hasBackup &&
+      (err instanceof MeteredRequestError ||
+        (err instanceof GatewayError && err.code === "conversion_loss"))
+    ) {
       releaseProbe();
       return { outcome: "FAILED", error: err };
     }
@@ -387,6 +392,16 @@ export async function dispatchInferenceAttempt(
       : fastResult.response.headers.get("content-type")) ?? "application/json";
   const isUpstreamSse = upstreamContentType.toLowerCase().includes("text/event-stream");
   const isUpstreamJson = upstreamContentType.toLowerCase().includes("application/json");
+  if (!isStream && isUpstreamSse && isConversationalOperation(operation)) {
+    telemetry.setStage("http_response");
+    attempt.finishExchange();
+    await upstreamResp?.body?.cancel().catch(() => undefined);
+    throw new GatewayError(
+      502,
+      "invalid_upstream",
+      "Upstream returned SSE for a non-streaming request",
+    );
+  }
   const isFakeJsonOnStream =
     isStream && !isUpstreamSse && isUpstreamJson && !prepared.isBedrockStream;
 

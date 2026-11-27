@@ -345,7 +345,7 @@ test("symptom: concurrent requests with zero settled balance can all draw new cr
         request_id: winner.request_id,
         action: "SETTLE",
         billing_price_id: flatBillingPrice.id,
-        usage: { input_tokens: "20" },
+        usage: { input_tokens: "20", output_tokens: "0" },
         supplier_cost_atoms: "10",
         actor: "credit-operator",
         reason: "Confirmed upstream usage",

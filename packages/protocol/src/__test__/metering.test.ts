@@ -7,6 +7,7 @@ import {
   parseClientJson,
   parseProviderJson,
   stringifyExact,
+  StreamTranslator,
   validateUsageObject,
 } from "../index.ts";
 import type { Operation, ReservationPrice } from "@gateway/kernel";
@@ -289,8 +290,22 @@ test("Gemini tool-use prompt tokens are billed as input instead of being dropped
     ),
   ).toMatchObject({ input_tokens: "11", cached_input_tokens: "4", output_tokens: "3" });
   expect(
-    extractUsage({ usageMetadata: { toolUsePromptTokenCount: 6 } }, "vertex")?.input_tokens,
-  ).toBe("6");
+    extractUsage(
+      { usageMetadata: { toolUsePromptTokenCount: 6, candidatesTokenCount: 3 } },
+      "vertex",
+    ),
+  ).toEqual({ output_tokens: "3" });
+  const opening = extractUsage({ usageMetadata: { promptTokenCount: 10 } }, "gemini");
+  const later = extractUsage(
+    { usageMetadata: { toolUsePromptTokenCount: 5, candidatesTokenCount: 3 } },
+    "gemini",
+    opening,
+  );
+  expect(later).toEqual({ input_tokens: "15", output_tokens: "3" });
+  expect(extractUsage({ usageMetadata: { toolUsePromptTokenCount: 6 } }, "gemini", later)).toEqual({
+    input_tokens: "16",
+    output_tokens: "3",
+  });
 });
 
 function quoteForRequest(
@@ -310,3 +325,26 @@ function quoteForRequest(
     output,
   );
 }
+
+test("symptom: Gemini loses previously metered thoughts when the final text frame omits them", () => {
+  const translator = new StreamTranslator("gemini", "gemini", "gemini", "public-model");
+  for (const body of [
+    {
+      candidates: [{ content: { parts: [{ text: "thinking", thought: true }] } }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 0, thoughtsTokenCount: 8 },
+    },
+    {
+      candidates: [{ content: { parts: [{ text: "answer" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+    },
+  ]) {
+    const data = JSON.stringify(body);
+    translator.consume({ event: "message", id: "", data, wire: `data: ${data}\n\n` });
+  }
+  translator.assertComplete();
+  expect(translator.usage).toMatchObject({
+    input_tokens: "10",
+    output_tokens: "13",
+    reasoning_tokens: "8",
+  });
+});

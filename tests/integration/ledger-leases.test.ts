@@ -372,7 +372,7 @@ for (const action of ["RELEASE", "SETTLE"] as const) {
           request_id: requestId,
           action,
           billing_price_id: f.flatBillingPrice.id,
-          usage: { input_tokens: "30" },
+          usage: { input_tokens: "30", output_tokens: "0" },
           supplier_cost_atoms: "10",
           reason: "verified from supplier",
           actor: "reject-write",

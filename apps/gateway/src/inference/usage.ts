@@ -1,5 +1,5 @@
 import { GatewayError, optionalObject } from "@gateway/contracts";
-import type { Operation, Usage } from "@gateway/kernel";
+import { hasPricedTokenUsage, type Operation, type Usage } from "@gateway/kernel";
 import type { PriceVersionRecord } from "@gateway/ledger";
 
 export const mediaCompletionEvents: Partial<Record<Operation, string>> = {
@@ -46,6 +46,22 @@ export function buildUsageForOperation(
   deliveredImages?: number,
   authorizedImages?: number,
 ): Usage | null {
+  if (
+    rawUsage &&
+    rawUsage.output_tokens === undefined &&
+    (operation === "embeddings" || operation === "moderations")
+  ) {
+    rawUsage = { ...rawUsage, output_tokens: "0" };
+  }
+
+  const customerUsesProviderUsage = customerPrice.basis === "PROVIDER_USAGE";
+  const supplierUsesProviderUsage = supplierPrice.basis === "PROVIDER_USAGE";
+  if (
+    (customerUsesProviderUsage && !hasPricedTokenUsage(rawUsage ?? {}, customerPrice.rates)) ||
+    (supplierUsesProviderUsage && !hasPricedTokenUsage(rawUsage ?? {}, supplierPrice.rates))
+  )
+    return null;
+
   if (operation === "images" || operation === "image_edits") {
     const declared = rawUsage?.images;
     const measured = deliveredImages === undefined ? undefined : String(deliveredImages);
@@ -71,15 +87,14 @@ export function buildUsageForOperation(
     }
     if (
       (!quantity || quantity === "0") &&
-      ((customerPrice.basis === "PROVIDER_USAGE" && customerPrice.rates.images) ||
-        (supplierPrice.basis === "PROVIDER_USAGE" && supplierPrice.rates.images))
+      ((customerUsesProviderUsage && customerPrice.rates.images) ||
+        (supplierUsesProviderUsage && supplierPrice.rates.images))
     )
       return null;
     if (quantity !== undefined) return { ...rawUsage, images: quantity };
   }
   if (rawUsage) return rawUsage;
-  if (customerPrice.basis === "PROVIDER_USAGE" || supplierPrice.basis === "PROVIDER_USAGE")
-    return null;
+  if (customerUsesProviderUsage || supplierUsesProviderUsage) return null;
   return { requests: "1" };
 }
 
@@ -88,9 +103,9 @@ export function buildModerationUsageFallback(
   inputChars: number,
   outputChars: number,
 ): Usage {
-  if (observed) return observed;
   return {
-    input_tokens: String(Math.max(1, Math.ceil(inputChars / 4))),
-    output_tokens: String(Math.max(1, Math.ceil(outputChars / 4))),
+    ...observed,
+    input_tokens: observed?.input_tokens ?? String(Math.max(1, Math.ceil(inputChars / 4))),
+    output_tokens: observed?.output_tokens ?? String(Math.max(1, Math.ceil(outputChars / 4))),
   };
 }
