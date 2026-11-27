@@ -2,10 +2,31 @@
 
 ## 项目目录结构
 
-- `apps/gateway`：公开推理与内网管理 API，经账本包直连 PostgreSQL，支持独立网关和内置 Worker 模式。`apps/worker`：选主、资金清扫、维护和业务事件投递。`apps/mock-providers`：本地及测试上游。
-- `packages/kernel`：精确计量与金额计算。`packages/contracts`：输入校验和 HTTP 契约。`packages/protocol`：协议转换与流解析。`packages/plugin-engine`：内容策略和渠道适配。`packages/runtime`：网络、路由、限流与生命周期。`packages/ledger`：PostgreSQL 迁移、目录、账本及事件存储。
-- `scripts`：迁移、构建、基准与验收脚本；`tests/integration`：真实 PG/Redis/HTTP 集成测试；`tests/unit`：只放跨模块架构约束；`tests/fixtures`：历史 schema 升级夹具。
-- `infra`：部署与服务配置；`docs`：ADR、OpenAPI 与性能证据。
+- `apps/` 存放应用入口。
+  - `apps/gateway` 提供公开推理和内网管理 API，经账本包直连 PostgreSQL，支持独立网关和内置 Worker 模式。
+  - `apps/worker` 负责选主、资金清扫、维护和业务事件投递。
+  - `apps/console-api` 提供客户与平台管理 API，负责组织权限、模型市场、账务查询、用量投影和告警，使用独立 PostgreSQL 数据库。
+  - `apps/mock-providers` 提供本地开发和测试用的上游替身。
+- `packages/` 存放共享库。
+  - `packages/kernel` 负责精确计量与金额计算。
+  - `packages/contracts` 定义输入校验和 HTTP 契约。
+  - `packages/protocol` 负责协议转换与流解析。
+  - `packages/plugin-engine` 负责内容策略和渠道适配。
+  - `packages/runtime` 负责网络、路由、限流与生命周期管理。
+  - `packages/ledger` 负责 PostgreSQL 迁移、业务目录、账本和事件存储。
+- `native/` 存放 Rust 沙箱与 WASM 插件。
+  - `native/plugin-wasmtime` 提供 Wasmtime 插件沙箱。
+  - `native/builtin-pii-guard` 提供内置内容防护和脱敏插件。
+  - `native/example-provider-wasm` 提供上游协议适配的 WASM 插件示例。
+- `scripts/` 存放本地开发、迁移、构建、基准和验收脚本。
+- `tests/` 存放跨模块测试和测试夹具。
+  - `tests/integration` 存放使用真实 PostgreSQL、Redis 或 HTTP 服务的集成测试。
+  - `tests/unit` 只放跨模块架构约束测试。
+  - `tests/fixtures` 存放历史数据库 schema 升级夹具。
+- `infra/` 存放部署、数据库、监控和系统配置。
+- `docs/` 存放架构决策、OpenAPI、迁移文档、审查记录和性能证据。
+- `beyond-new-api/` 存放与 new-api 的性能对比、容量改造方案和验收记录。
+- `.github/workflows/` 存放 CI 验证流程。
 
 ## 重要的事
 
