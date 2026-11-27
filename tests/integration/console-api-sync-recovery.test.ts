@@ -14,6 +14,55 @@ import { registerCatalogRecoveryCases } from "./console-catalog-recovery-cases.t
 
 registerSyncFixture();
 
+test("adaptive model settings reconcile after failure and preserve an explicit disable until reset", async () => {
+  const name = "adaptive-sync-gpt";
+  const policy = {
+    operations: ["chat"],
+    mode: "observe",
+    first_content_target_ms: 1200,
+    supplier_reserve_limit: { currency: "USD", atoms: "300" },
+  };
+  const model = { name, display_name: "Adaptive sync", operations: ["chat"] };
+  const read = async () => {
+    const [result] = await h.gwDb`
+      SELECT adaptive_routing AS policy, source_revision AS revision FROM public.models WHERE name = ${name}
+    `;
+    return result;
+  };
+  const put = (adaptive?: object | false | null) =>
+    h.adminApi("POST", "/admin/v1/models", adminAccess, {
+      ...model,
+      ...(adaptive !== undefined ? { adaptive_routing: adaptive } : {}),
+    });
+  expect((await put(policy)).status).toBe(201);
+  expect(await read()).toEqual({ policy, revision: 1 });
+  expect((await put()).status).toBe(200);
+  expect(await read()).toEqual({ policy, revision: 2 });
+  const active = { ...policy, mode: "active" };
+  h.setGatewayInterceptor(async (url, init, forward) => {
+    if (init?.method === "PUT" && new URL(url).pathname === "/internal/v1/models")
+      return new Response("unavailable", { status: 503 });
+    return forward();
+  });
+  try {
+    expect((await put(active)).status).toBe(503);
+    expect(await read()).toEqual({ policy, revision: 2 });
+  } finally {
+    h.setGatewayInterceptor(null);
+  }
+  expect(await h.consoleRuntime.sync.reconcilePending()).toMatchObject({ failed: 0 });
+  expect(await read()).toEqual({ policy: active, revision: 3 });
+  expect((await put(false)).status).toBe(200);
+  expect(await read()).toEqual({ policy: false, revision: 4 });
+  expect(
+    await h.conDb`SELECT adaptive_routing AS policy FROM model_catalog WHERE name = ${name}`,
+  ).toEqual([{ policy: false }]);
+  expect((await put()).status).toBe(200);
+  expect(await read()).toEqual({ policy: false, revision: 5 });
+  expect((await put(null)).status).toBe(200);
+  expect(await read()).toEqual({ policy: null, revision: 6 });
+});
+
 test("reconcile completes with a two-connection pool instead of waiting for its own connection", async () => {
   const db = createConsoleDatabase(h.conDbUrl, 2);
   const runtime = createConsoleRuntime({ config: h.consoleConfig, db });

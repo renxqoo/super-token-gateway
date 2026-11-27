@@ -4,6 +4,7 @@ import {
   canonical,
   DomainError,
   validatePricing,
+  type AdaptiveRoutingSetting,
   type Operation,
   type Pricing,
 } from "@gateway/kernel";
@@ -329,6 +330,7 @@ export function createCatalogRepository(db: SQL) {
       name: string;
       operations: Operation[];
       routing_strategy?: RoutingStrategy;
+      adaptive_routing?: AdaptiveRoutingSetting;
       max_output_tokens: number;
       enabled?: boolean;
       source_revision?: number;
@@ -336,6 +338,8 @@ export function createCatalogRepository(db: SQL) {
       const routingStrategy = input.routing_strategy ?? "WEIGHTED";
       const enabled = input.enabled ?? true;
       const sourceRev = input.source_revision;
+      const adaptiveRouting =
+        input.adaptive_routing === false ? sql`'false'::jsonb` : input.adaptive_routing;
       return orm.transaction(async (tx) => {
         const rows = await tx
           .insert(models)
@@ -345,6 +349,7 @@ export function createCatalogRepository(db: SQL) {
             routingStrategy,
             maxOutputTokens: input.max_output_tokens,
             enabled,
+            adaptiveRouting: adaptiveRouting ?? null,
             ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
           })
           .onConflictDoUpdate({
@@ -357,6 +362,7 @@ export function createCatalogRepository(db: SQL) {
               routingStrategy,
               maxOutputTokens: input.max_output_tokens,
               enabled,
+              ...(adaptiveRouting !== undefined ? { adaptiveRouting } : {}),
               ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
             },
           })
@@ -373,6 +379,7 @@ export function createCatalogRepository(db: SQL) {
           name: r.name,
           operations: r.operations,
           routing_strategy: r.routingStrategy,
+          adaptive_routing: r.adaptiveRouting,
           max_output_tokens: r.maxOutputTokens,
           enabled: r.enabled,
           source_revision: r.sourceRevision,

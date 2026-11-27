@@ -1,6 +1,10 @@
 import type { Operation, Protocol } from "@gateway/kernel";
 import { fastUuid } from "../proxy-state.ts";
 import type { TraceContext } from "../observability.ts";
+import type { RoutingDispatch, RoutingOutcome } from "../routing-metrics.ts";
+import type { UpstreamTimingObserver } from "@gateway/runtime";
+import { routingLatencySample } from "../adaptive-routing-stats.ts";
+import type { adaptiveOrdering } from "./adaptive-routing.ts";
 import { createRequestTrace, createTransportTiming } from "../first-text-trace.ts";
 import type { ChannelFailureKind, ChannelFailureStage, TraceAttempt } from "../trace-types.ts";
 import { isConversationalOperation } from "../upstream.ts";
@@ -61,6 +65,22 @@ export class InferenceTelemetry {
   private channelStage: ChannelFailureStage = "request_prepare";
   private waitingForFirstText = false;
   private logged = false;
+  private routingModel: string | undefined;
+  private routingTargetMs: number | undefined;
+  adaptiveFeedback: NonNullable<ReturnType<typeof adaptiveOrdering>>["feedback"] | undefined;
+  private routingAttempt:
+    | {
+        routeId: string;
+        dispatch: RoutingDispatch;
+        outcome?: RoutingOutcome;
+        writtenAt?: number;
+        headersAt?: number;
+        firstContent?: boolean;
+        processingMs?: number;
+        onTime?: boolean;
+        outputTokens?: number;
+      }
+    | undefined;
 
   constructor(
     private readonly deps: ProxyDependencies,
@@ -100,8 +120,17 @@ export class InferenceTelemetry {
     this.deps.metrics.waitingFirstText--;
   };
 
-  beginResponseTracking(isStream: boolean): void {
+  beginResponseTracking(isStream: boolean, routingTargetMs?: number): void {
     this.logStream = isStream;
+    this.routingTargetMs = routingTargetMs;
+    if (
+      this.operation === "chat" &&
+      this.logModel &&
+      (routingTargetMs !== undefined ||
+        this.deps.config.routingObservationModels?.has(this.logModel))
+    ) {
+      this.routingModel = this.logModel;
+    }
     this.traceProtocol =
       isStream && isConversationalOperation(this.operation) ? this.operation : null;
     if (
@@ -124,16 +153,124 @@ export class InferenceTelemetry {
 
   beginAttempt(
     channel: string,
+    routeId: string,
     id: string,
     number: number,
     startedAt: number,
     timing: ReturnType<typeof createTransportTiming> | undefined,
   ): void {
+    if (this.routingModel) {
+      this.finishRoutingAttempt();
+      this.routingAttempt = { routeId, dispatch: "not_sent" };
+    }
     this.logAttempts = number;
     this.traceChannel = channel;
     this.failureRecorded = false;
     this.channelStage = "request_prepare";
     this.requestTrace?.beginAttempt(startedAt, { id, number, channel }, timing);
+  }
+
+  get transportObserver(): UpstreamTimingObserver | undefined {
+    const trace = this.requestTrace?.transportObserver;
+    const routing = this.routingAttempt;
+    if (!routing) return trace;
+    return (phase, at) => {
+      if (phase === "request_written") {
+        routing.dispatch = "sent";
+        routing.writtenAt ??= at;
+      } else if (phase === "response_headers") {
+        routing.headersAt ??= at;
+      }
+      trace?.(phase, at);
+    };
+  }
+
+  noteRoutingDispatch(dispatch: RoutingDispatch): void {
+    if (this.routingAttempt && this.routingAttempt.dispatch !== "sent") {
+      this.routingAttempt.dispatch = dispatch;
+    }
+  }
+
+  get waitingForRoutingContent(): boolean {
+    return this.routingAttempt?.writtenAt !== undefined && !this.routingAttempt.firstContent;
+  }
+
+  observeRoutingContent(): void {
+    const attempt = this.routingAttempt;
+    if (!this.routingModel || attempt?.writtenAt === undefined || attempt.firstContent) return;
+    attempt.firstContent = true;
+    const elapsedMs = performance.now() - attempt.writtenAt;
+    this.observeRoutingLatency(elapsedMs);
+    this.deps.metrics.routing.observeFirstContent(
+      this.routingModel,
+      attempt.routeId,
+      elapsedMs / 1000,
+    );
+  }
+
+  get routingProcessingStart(): number | undefined {
+    return this.adaptiveFeedback && this.waitingForRoutingContent ? performance.now() : undefined;
+  }
+
+  excludeRoutingProcessing(startedAt: number | undefined): void {
+    if (startedAt !== undefined && this.routingAttempt) {
+      this.routingAttempt.processingMs =
+        (this.routingAttempt.processingMs ?? 0) + (performance.now() - startedAt);
+    }
+  }
+
+  observeRoutingUnaryBody(): void {
+    const attempt = this.routingAttempt;
+    if (this.adaptiveFeedback && attempt?.writtenAt !== undefined) {
+      this.observeRoutingLatency(performance.now() - attempt.writtenAt);
+    }
+  }
+
+  private observeRoutingLatency(elapsedMs: number): void {
+    const attempt = this.routingAttempt;
+    const target = this.routingTargetMs;
+    if (!attempt || target === undefined || attempt.writtenAt === undefined) return;
+    const headersMs = (attempt.headersAt ?? attempt.writtenAt) - attempt.writtenAt;
+    const onTime = routingLatencySample(elapsedMs, attempt.processingMs ?? 0, headersMs, target);
+    if (onTime !== undefined) attempt.onTime = onTime;
+  }
+
+  observeRoutingSettledUsage(outputTokens: string | undefined): void {
+    if (!this.adaptiveFeedback || !this.routingAttempt || outputTokens === undefined) return;
+    const output = Number(outputTokens);
+    if (Number.isSafeInteger(output) && output >= 0) this.routingAttempt.outputTokens = output;
+  }
+
+  noteRoutingOutcome(outcome: RoutingOutcome): void {
+    if (this.routingAttempt) this.routingAttempt.outcome ??= outcome;
+  }
+
+  noteRoutingInvalidUsage(): void {
+    if (this.routingAttempt) this.routingAttempt.outcome = "failed";
+  }
+
+  private finishRoutingAttempt(): void {
+    const attempt = this.routingAttempt;
+    if (!this.routingModel || !attempt) return;
+    this.routingAttempt = undefined;
+    if (
+      attempt.dispatch !== "not_sent" &&
+      (attempt.outcome === "complete" || attempt.outcome === "failed")
+    ) {
+      this.adaptiveFeedback?.(
+        attempt.routeId,
+        attempt.outcome === "complete",
+        attempt.onTime,
+        attempt.outputTokens,
+      );
+    }
+    this.deps.metrics.routing.observeAttempt(
+      this.routingModel,
+      attempt.routeId,
+      this.logStream ? "stream" : "unary",
+      attempt.dispatch,
+      attempt.outcome ?? "local",
+    );
   }
 
   failover(): void {
@@ -154,6 +291,13 @@ export class InferenceTelemetry {
   ): void {
     if (!this.traceChannel || this.failureRecorded) return;
     this.failureRecorded = true;
+    if (this.routingAttempt && stage !== "request_prepare") {
+      if (kind === "rate_limit") this.noteRoutingOutcome("rate_limited");
+      else if (kind === "client_error") this.noteRoutingOutcome("rejected");
+      else if (kind !== "capacity" && !/^provider_(?:plugin|capacity|adapter)/.test(code)) {
+        this.noteRoutingOutcome("failed");
+      }
+    }
     this.deps.metrics.recordChannelFailure(this.traceChannel, stage, kind);
     this.requestTrace?.failAttempt(performance.now(), stage, kind, code, details);
   }
@@ -185,6 +329,23 @@ export class InferenceTelemetry {
     this.logged = true;
     const ended = performance.now();
     const durationMs = ended - this.requestStart;
+    if (this.routingModel) {
+      const outcome =
+        status === 499
+          ? "cancelled"
+          : status >= 200 && status < 300 && !errorCode
+            ? "complete"
+            : status < 500 && status !== 429
+              ? "rejected"
+              : "failed";
+      if (outcome === "cancelled" && this.routingAttempt) this.routingAttempt.outcome = outcome;
+      this.deps.metrics.routing.observeDelivery(
+        this.routingModel,
+        this.logStream ? "stream" : "unary",
+        outcome,
+        durationMs / 1000,
+      );
+    }
     if (
       !errorCode &&
       !this.requestTrace &&
@@ -198,6 +359,7 @@ export class InferenceTelemetry {
         durationMs,
         this.logTtftMs,
       );
+      this.finishRoutingAttempt();
       return;
     }
     this.stopWaitingForFirstText();
@@ -243,6 +405,7 @@ export class InferenceTelemetry {
     } catch {
       this.deps.metrics.traceCaptureFailures++;
     }
+    this.finishRoutingAttempt();
     if (!this.deps.metrics.isAccessLogEnabled) {
       this.deps.metrics.observeRequestFast(
         this.operation,

@@ -1,5 +1,5 @@
 import { GatewayError } from "@gateway/contracts";
-import type { Pricing } from "@gateway/kernel";
+import type { AdaptiveRoutingSetting, Pricing } from "@gateway/kernel";
 import type { GatewayRoleTokens } from "./config.ts";
 
 export type GatewayInternalRole = "catalog" | "security" | "finance" | "auditor" | "ops" | "events";
@@ -324,6 +324,7 @@ export class GatewayClient {
     name: string;
     operations: string[];
     routing_strategy: "WEIGHTED" | "ROUND_ROBIN" | "LEAST_LATENCY";
+    adaptive_routing?: AdaptiveRoutingSetting;
     max_output_tokens: number;
     enabled: boolean;
     source_revision?: number;

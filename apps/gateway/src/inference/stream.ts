@@ -119,7 +119,7 @@ async function respondToFastBufferedSse(
         }
       }
       if (describeFailure) translating = event;
-      const translated = translator.consume(event);
+      const translated = translator.consume(event, telemetry.waitingForRoutingContent);
       translating = undefined;
       if (parsedEv && usage_aliases.length > 0) {
         streamAliasUsage = mergeStreamUsageAliases(
@@ -130,6 +130,7 @@ async function respondToFastBufferedSse(
         );
       }
       if (translated.hasSourceText) telemetry.requestTrace?.markUpstreamFirstText();
+      if (translated.hasSourceContent) telemetry.observeRoutingContent();
       if (translated.hasTargetText) sawFirstText = true;
       if (streamProbe && !streamProbeDone && translated.chunks.length && event.event !== "error") {
         streamProbeDone = true;
@@ -226,6 +227,7 @@ async function respondToFastBufferedSse(
         { status: 200, headers },
       );
     }
+    telemetry.noteRoutingOutcome("complete");
     await context.settle({
       usage,
       plugin_audit: preRequestAudit,
@@ -349,18 +351,16 @@ export function respondToStream(
     attempt.abort(reason);
     streamLinked.trigger(reason);
   });
+  let durationTimeout: Error | undefined;
+  const expireDuration = () => {
+    durationTimeout = new Error("Upstream stream exceeded its maximum duration");
+    streamLinked.trigger(durationTimeout);
+    attempt.abort(durationTimeout);
+  };
   const cancelDuration =
     maxStreamDurationMs >= 5000
-      ? state.deadlines.scheduleCoarse(maxStreamDurationMs, () => {
-          const reason = new Error("Upstream stream exceeded its maximum duration");
-          streamLinked.trigger(reason);
-          attempt.abort(reason);
-        })
-      : state.deadlines.schedule(maxStreamDurationMs, () => {
-          const reason = new Error("Upstream stream exceeded its maximum duration");
-          streamLinked.trigger(reason);
-          attempt.abort(reason);
-        });
+      ? state.deadlines.scheduleCoarse(maxStreamDurationMs, expireDuration)
+      : state.deadlines.schedule(maxStreamDurationMs, expireDuration);
 
   let clientCancelled = false;
   let streamProbeDone = false;
@@ -368,6 +368,9 @@ export function respondToStream(
     context,
     tracedUpstreamProtocol,
     streamSignal,
+    get durationTimeout() {
+      return durationTimeout;
+    },
     settle(details) {
       streamSignal.throwIfAborted();
       return context.settle(details);

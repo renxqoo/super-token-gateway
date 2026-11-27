@@ -17,7 +17,7 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { Pricing } from "@gateway/kernel";
+import type { AdaptiveRoutingSetting, Pricing } from "@gateway/kernel";
 
 export type OrgKind = "PERSONAL" | "ENTERPRISE";
 export type OrgRole = "OWNER" | "ADMIN" | "FINANCE" | "DEVELOPER" | "VIEWER";
@@ -260,6 +260,7 @@ export const modelCatalog = pgTable("model_catalog", {
     .$type<"WEIGHTED" | "ROUND_ROBIN" | "LEAST_LATENCY">()
     .notNull()
     .default("WEIGHTED"),
+  adaptiveRouting: jsonb("adaptive_routing").$type<AdaptiveRoutingSetting>(),
   tags: text("tags").array().notNull().default([]),
   listPriceVersionId: uuid("list_price_version_id"),
   listRates: jsonb("list_rates").$type<Pricing["rates"]>().notNull().default({}),

@@ -93,6 +93,71 @@ test("SmartRouter trips OPEN after failure threshold, isolates 429 cooldown and 
   expect(router.isAvailable("ch1")).toEqual({ available: false });
 });
 
+test("shadow scoring preserves live draws and the half-open probe while active factors stay within priority and protocol", () => {
+  let clock = 1000;
+  let draws = 0;
+  const router = new SmartRouter({
+    now: () => clock,
+    failureThreshold: 1,
+    baseOpenMs: 5000,
+    random: () => {
+      draws++;
+      return 0.7;
+    },
+  });
+  const candidates = [
+    { ...makeCandidate("native-a", "half-open", 10), same_protocol: true },
+    { ...makeCandidate("native-b", "native-closed", 10), same_protocol: true },
+    makeCandidate("converted", "cross", 10, 1000),
+    { ...makeCandidate("backup", "low", 1, 1000), same_protocol: true },
+  ];
+  router.recordFailure("half-open", "retryable");
+  clock += 5001;
+  let comparisons = 0;
+  const adaptive = {
+    factors: (group: readonly RoutableCandidate[]) => {
+      expect(group.map(({ id }) => id)).toEqual(["native-a", "native-b"]);
+      return new Map([
+        ["native-a", 1],
+        ["native-b", 0.25],
+      ]);
+    },
+    compare: () => {
+      comparisons++;
+    },
+  };
+  const preview = router.selectCandidates("chat", candidates, "WEIGHTED", "chat", {
+    ...adaptive,
+    mode: "observe",
+  });
+  expect(draws).toBe(2);
+  expect(comparisons).toBe(1);
+  expect(preview.map(({ route }) => route.id)).toEqual([
+    "native-b",
+    "native-a",
+    "converted",
+    "backup",
+  ]);
+  const token = preview[1]?.probe;
+  expect(token).toBeDefined();
+  expect(router.peekAvailable("half-open", token)).toBeTrue();
+  expect(router.peekAvailable("half-open")).toBeFalse();
+  router.releaseProbe("half-open", token!);
+
+  const active = router.selectCandidates("chat", candidates, "WEIGHTED", "chat", {
+    ...adaptive,
+    mode: "active",
+  });
+  expect(active.map(({ route }) => route.id)).toEqual([
+    "native-a",
+    "native-b",
+    "converted",
+    "backup",
+  ]);
+  expect(draws).toBe(4);
+  expect(comparisons).toBe(1);
+});
+
 test("symptom: expired probe results can release a successor and close the newer circuit", () => {
   let clock = 1000;
   const events: CircuitTransition[] = [];

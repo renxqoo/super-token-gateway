@@ -77,8 +77,11 @@ export class InferenceAccounting {
   private async fingerprintRequest(
     key: string,
     policyBody: Record<string, unknown>,
+    identified?: Idempotency,
   ): Promise<Idempotency> {
-    const original = await fingerprintInference(this.request, this.request.clientBody);
+    const original =
+      identified?.legacy_fingerprint ??
+      (await fingerprintInference(this.request, this.request.clientBody));
     const legacy =
       this.request.multipartEntries || policyBody === this.request.clientBody
         ? original
@@ -89,18 +92,20 @@ export class InferenceAccounting {
   identifyIdempotency(
     header: string | null,
     policyBody: Record<string, unknown>,
+    identified?: Idempotency,
   ): Promise<Idempotency> | null {
     const key = header?.trim();
-    return key ? this.fingerprintRequest(key, policyBody) : null;
+    return key ? this.fingerprintRequest(key, policyBody, identified) : null;
   }
 
-  async findReplay(idempotency: Idempotency) {
+  async findReplay(idempotency: Idempotency, versionedOnly = false) {
     const { deps, billingAccount, operation } = this.request;
     const prior = await deps.ledger.findIdempotentHold(
       billingAccount.id,
       operation,
       idempotency.key,
       idempotency,
+      versionedOnly,
     );
     if (prior && !prior.matches) {
       throw mapHoldError(
@@ -291,6 +296,7 @@ export class InferenceAccounting {
         result?.ok === false &&
         (result.code === "invalid_upstream_usage" || result.code === "usage_alias_conflict")
       ) {
+        this.telemetry.noteRoutingInvalidUsage();
         throw new GatewayError(502, result.code, result.message);
       }
       if (!result?.ok) {
@@ -298,6 +304,7 @@ export class InferenceAccounting {
         throw new GatewayError(503, "ledger_commit_failed", "Ledger could not confirm settlement");
       }
       this.hold = "settled";
+      this.telemetry.observeRoutingSettledUsage(details.usage.output_tokens);
       this.telemetry.requestTrace?.recordSettlement(attemptId);
       return result;
     };

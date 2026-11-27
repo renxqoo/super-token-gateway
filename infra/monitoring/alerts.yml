@@ -35,6 +35,13 @@ groups:
           severity: critical
         annotations:
           summary: Gateway could not confirm one or more settlements
+      - alert: STGAdaptiveRoutingIncompatible
+        expr: sum by (stg_cluster, model, mode) (increase(gateway_adaptive_routing_decisions_total{job="stg-gateway",decision="incompatible"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Gateway suspended adaptive ranking for an incompatible model configuration
       - alert: STGLeaseRenewalFailure
         expr: increase(gateway_lease_renewal_failures_total[5m]) > 0
         labels:

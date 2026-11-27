@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import { SQL } from "bun";
 import { createWorkerRunner } from "@gateway/worker";
-import { createLedgerEngine, type CommitTerminalInput } from "@gateway/ledger";
+import {
+  createLedgerEngine,
+  createLedgerQueries,
+  fastUuid,
+  type CommitTerminalInput,
+} from "@gateway/ledger";
 import { withLedgerDb, seedFixture } from "./ledger-fixture.ts";
 
 test("symptom: a settlement statement timeout discards measured usage for other requests in its batch", () =>
@@ -230,6 +235,13 @@ test("direct settlement microbatch isolates lock-timeout holds and releaseHold/m
 test("symptom: unknown holds stay pending without evidence and duplicate receipts can settle or release only once", async () => {
   await withLedgerDb(async (db) => {
     const f = await seedFixture(db);
+    const from = new Date();
+    const routingCost = () =>
+      createLedgerQueries(db).getRoutingCostReport({
+        model: "gpt-4o",
+        from,
+        to: new Date(Date.now() + 1000),
+      });
     await f.ledger.creditWallet({
       billing_account_id: f.billingAccount.id,
       currency: "PTS",
@@ -238,7 +250,7 @@ test("symptom: unknown holds stay pending without evidence and duplicate receipt
       kind: "CASH",
     });
     const acquire = async (persistedPrice = true) => {
-      const requestId = crypto.randomUUID();
+      const requestId = fastUuid();
       const attemptId = crypto.randomUUID();
       const result = await f.ledger.acquireHold({
         request_id: requestId,
@@ -366,6 +378,9 @@ test("symptom: unknown holds stay pending without evidence and duplicate receipt
     }
     expect((await f.ledger.getSupplierBalance(f.accountA.id, "USD")).spent_atoms).toBe("38");
     expect((await f.ledger.getWallet(f.billingAccount.id, "PTS"))?.spent_atoms).toBe("13");
+    expect((await routingCost()).currencies).toMatchObject([
+      { currency: "USD", supplier_cost_atoms: "38" },
+    ]);
     expect(
       (
         await f.ledger.submitReconciliationReceipt({
@@ -377,6 +392,9 @@ test("symptom: unknown holds stay pending without evidence and duplicate receipt
     expect(await f.ledger.processReconciliation(5)).toEqual({ receipts: 1, waivers: 0 });
     expect((await f.ledger.getSupplierBalance(f.accountA.id, "USD")).spent_atoms).toBe("38");
     expect((await f.ledger.getWallet(f.billingAccount.id, "PTS"))?.spent_atoms).toBe("26");
+    expect((await routingCost()).currencies).toMatchObject([
+      { currency: "USD", supplier_cost_atoms: "38" },
+    ]);
     const [linked] = await db`SELECT c.supplier_journal_id IS NOT NULL AS linked,
       EXISTS (SELECT 1 FROM public.ledger_entries e WHERE e.journal_id=c.supplier_journal_id) AS present
       FROM public.billing_charges c WHERE c.request_id=${supplierFirst.requestId}`;

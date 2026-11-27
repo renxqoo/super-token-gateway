@@ -33,7 +33,7 @@ export async function inspectStreamPrelude(
   | RetryAttempt
 > {
   const {
-    request: { deps, operation, billingAccount },
+    request: { deps, operation, billingAccount, strictAdaptiveSwitch },
     resources,
     telemetry,
     accounting,
@@ -58,7 +58,11 @@ export async function inspectStreamPrelude(
   const configuredTerminalEvent =
     mediaTerminal && "event" in mediaTerminal ? mediaTerminal.event : undefined;
   const needsPrelude =
-    (isWasmStreamProvider || prepared.mergedOverrides.error_rules.length > 0) &&
+    (isWasmStreamProvider ||
+      prepared.mergedOverrides.error_rules.some(
+        (rule) =>
+          !strictAdaptiveSwitch || (rule.when_http_status ?? [200]).includes(upstreamStatus),
+      )) &&
     (isUpstreamSse || prepared.isBedrockStream);
   if (fastResult.fast && isUpstreamSse && !prepared.isBedrockStream && !needsPrelude) {
     return { upstreamBody: null, fastSseBody: fastResult.body, wasmPrelude: undefined };
@@ -86,6 +90,7 @@ export async function inspectStreamPrelude(
       upstreamBody = peeked.body;
       const first = peeked.found;
       if (first && isWasmStreamProvider && prepared.resolvedProvider.kind === "WASM") {
+        const adaptationStarted = telemetry.routingProcessingStart;
         const result = await invokeWasmProviderStreamEvent({
           executor: deps.wasmExecutor,
           plugin: prepared.resolvedProvider.plugin,
@@ -104,6 +109,7 @@ export async function inspectStreamPrelude(
             state: "",
           },
         });
+        telemetry.excludeRoutingProcessing(adaptationStarted);
         wasmPrelude = { event: first.event, data: first.data, result };
         if (result.retry_kind) {
           providerError = describeEventFailure?.(first.data) ?? describeFailure?.();

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
-import { GatewayError, pricingSchema } from "@gateway/contracts";
+import { adaptiveRoutingSchema, GatewayError, pricingSchema } from "@gateway/contracts";
 import type { Pricing } from "@gateway/kernel";
 import { recordAuditLog } from "../auth.ts";
 import {
@@ -74,6 +74,7 @@ const upsertModelSchema = z
     max_output_tokens: z.number().int().min(1).max(10_000_000).default(32_768),
     operations: z.array(operationEnum).min(1),
     routing_strategy: z.enum(["WEIGHTED", "ROUND_ROBIN", "LEAST_LATENCY"]).default("WEIGHTED"),
+    adaptive_routing: adaptiveRoutingSchema.optional(),
     tags: z.array(z.string().min(1).max(40)).max(32).default([]),
     list_price_template_id: z.uuid().nullable().optional(),
     list_rates: pricingSchema.shape.rates.optional(),
@@ -327,6 +328,10 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
   app.post("/models", async (c) => {
     const actor = c.get("user");
     const body = await parseJsonBody(c, upsertModelSchema);
+    const adaptiveRouting =
+      body.adaptive_routing === null || body.adaptive_routing === undefined
+        ? body.adaptive_routing
+        : sql`${JSON.stringify(body.adaptive_routing)}::text::jsonb`;
     let listPriceVersionId: string | null = null;
     let listRates: Pricing["rates"] = (body.list_rates as Pricing["rates"]) ?? {};
     let currency = body.currency;
@@ -353,6 +358,7 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
         maxOutputTokens: body.max_output_tokens,
         operations: body.operations,
         routingStrategy: body.routing_strategy,
+        adaptiveRouting: adaptiveRouting ?? null,
         tags: body.tags,
         listPriceVersionId,
         listRates,
@@ -372,6 +378,7 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
           maxOutputTokens: body.max_output_tokens,
           operations: body.operations,
           routingStrategy: body.routing_strategy,
+          ...(adaptiveRouting !== undefined ? { adaptiveRouting } : {}),
           tags: body.tags,
           listPriceVersionId,
           listRates,

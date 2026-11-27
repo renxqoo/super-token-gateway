@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import {
   createLedgerEngine,
+  createLedgerQueries,
+  fastUuid,
   type AcquireHoldInput,
   type CommitTerminalInput,
 } from "@gateway/ledger";
@@ -116,8 +118,11 @@ test("deferred lease spend is visible in live reads, conservation, and refunds b
 
       await warmLeases(ledger, f, f.billingAccount.id, expiry);
 
+      const from = new Date(Date.now() - 1000);
       const leasedReqs = await Promise.all(
-        Array.from({ length: 5 }, () => acquireChatHold(ledger, f, f.billingAccount.id, expiry)),
+        Array.from({ length: 5 }, () =>
+          acquireChatHold(ledger, f, f.billingAccount.id, expiry, { request_id: fastUuid() }),
+        ),
       );
       expect(leasedReqs.every((r) => r.res.ok)).toBe(true);
       const committed = await Promise.all(
@@ -130,6 +135,28 @@ test("deferred lease spend is visible in live reads, conservation, and refunds b
           (c) => c.ok && c.customer_atoms === "100" && c.supplier_cost_atoms === "50",
         ),
       ).toBe(true);
+      const [shared] = await db<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM public.ledger_entries
+        WHERE request_id IS NULL AND reference LIKE 'supplier_cost_batch:%' AND account = 'upstream:expense'
+      `;
+      expect(shared!.n).toBeGreaterThan(0);
+      expect(
+        await createLedgerQueries(db).getRoutingCostReport({
+          model: "gpt-4o",
+          from,
+          to: new Date(Date.now() + 1000),
+        }),
+      ).toEqual({
+        cohort_requests: 5,
+        currencies: [
+          {
+            currency: "USD",
+            supplier_cost_atoms: "250",
+            unknown_reserved_atoms: "0",
+            unknown_attempts: 0,
+          },
+        ],
+      });
 
       const [rawWallet] = await db<{ spent_atoms: string; reserved_atoms: string }[]>`
         SELECT spent_atoms::text, reserved_atoms::text FROM public.wallets WHERE id = ${credit.wallet_id}::uuid

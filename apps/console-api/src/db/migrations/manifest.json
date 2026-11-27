@@ -9,6 +9,11 @@
       "version": 2026112701,
       "path": "./migrations/0001_usage_monitor.sql",
       "checksum": "be72df025d961fd2f667c3ed0cf895af5afd2e836af495e65f5111f4c443ee43"
+    },
+    {
+      "version": 2026112702,
+      "path": "./migrations/0002_adaptive_routing.sql",
+      "checksum": "a96cf7d0771293a6adc8bd482f79bb0b11c4b91c370664ed6ae3e6288f0b762a"
     }
   ]
 }

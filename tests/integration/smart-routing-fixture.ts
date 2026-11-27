@@ -1,7 +1,7 @@
 import { localInternalCredentials } from "../../scripts/local-internal-auth.ts";
 import { afterAll, beforeAll, expect } from "bun:test";
 import type { SQL } from "bun";
-import type { ReservationPrice } from "@gateway/kernel";
+import type { AdaptiveRoutingSetting, ReservationPrice } from "@gateway/kernel";
 import { createDatabase, migrate, type AdapterOverrides } from "@gateway/ledger";
 import { createGatewayRuntime, type GatewayConfig } from "@gateway/gateway";
 
@@ -146,7 +146,9 @@ export function fakeUpstream(label: string, initial: UpstreamMode = {}): FakeUps
 }
 
 type Wallet = { available_atoms: string; reserved_atoms: string; spent_atoms: string };
-type TestPrice = Pick<ReservationPrice, "rates" | "ceilings">;
+type TestPrice = Pick<ReservationPrice, "rates" | "ceilings"> & {
+  basis?: ReservationPrice["basis"];
+};
 
 export async function setup(
   runtime: ReturnType<typeof createGatewayRuntime>,
@@ -164,6 +166,9 @@ export async function setup(
     adapterOverrides?: AdapterOverrides | ((index: number) => AdapterOverrides | undefined);
     cachedInputPrice?: boolean;
     prices?: { customer: TestPrice; supplier: TestPrice };
+    supplierPrices?: TestPrice[];
+    adaptiveRouting?: AdaptiveRoutingSetting;
+    retryOnAmbiguous?: boolean;
     contentPluginId?: string;
   } = {},
 ) {
@@ -238,39 +243,53 @@ export async function setup(
     currency: "USD",
     ...(opts.prices?.customer ?? price),
   });
-  const supplier = await call("POST", "/internal/v1/prices", {
-    side: "SUPPLIER",
-    currency: "USD",
-    ...(opts.prices?.supplier ?? price),
-  });
+  const supplierPrices = [];
+  for (const rates of opts.supplierPrices ?? [opts.prices?.supplier ?? price]) {
+    supplierPrices.push(
+      await call("POST", "/internal/v1/prices", {
+        side: "SUPPLIER",
+        currency: "USD",
+        ...rates,
+      }),
+    );
+  }
   const model = `sr-${tag}`;
   const operation = opts.operation ?? "chat";
-  await call("PUT", "/internal/v1/models", {
-    name: model,
-    operations: [operation],
-    max_output_tokens: 50,
-    routing_strategy: opts.strategy ?? "ROUND_ROBIN",
-  });
+  const putModel = (adaptiveRouting?: AdaptiveRoutingSetting) =>
+    call("PUT", "/internal/v1/models", {
+      name: model,
+      operations: [operation],
+      max_output_tokens: 50,
+      routing_strategy: opts.strategy ?? "ROUND_ROBIN",
+      ...(adaptiveRouting !== undefined ? { adaptive_routing: adaptiveRouting } : {}),
+    });
+  await putModel(opts.adaptiveRouting);
+  const routes = [];
   for (const [i, ch] of channels.entries()) {
     const adapterOverrides =
       typeof opts.adapterOverrides === "function"
         ? opts.adapterOverrides(i)
         : opts.adapterOverrides;
-    await call("PUT", "/internal/v1/routes", {
-      model_name: model,
-      channel_id: ch.id,
-      upstream_model: "m",
-      operations: [operation],
-      billing_price_id: customer.id,
-      cost_version_id: supplier.id,
-      priority: opts.priority?.[i] ?? 0,
-      weight: opts.weights?.[i] ?? 1,
-      retry_policy: { max_attempts: opts.maxAttempts ?? 3 },
-      ...(adapterOverrides ? { adapter_overrides: adapterOverrides } : {}),
-      ...(opts.contentPluginId
-        ? { plugin_pipeline: [{ plugin_id: opts.contentPluginId, priority: 1 }] }
-        : {}),
-    });
+    routes.push(
+      await call("PUT", "/internal/v1/routes", {
+        model_name: model,
+        channel_id: ch.id,
+        upstream_model: "m",
+        operations: [operation],
+        billing_price_id: customer.id,
+        cost_version_id: (supplierPrices[i] ?? supplierPrices[0])!.id,
+        priority: opts.priority?.[i] ?? 0,
+        weight: opts.weights?.[i] ?? 1,
+        retry_policy: {
+          max_attempts: opts.maxAttempts ?? 3,
+          ...(opts.retryOnAmbiguous ? { retry_on_ambiguous: true } : {}),
+        },
+        ...(adapterOverrides ? { adapter_overrides: adapterOverrides } : {}),
+        ...(opts.contentPluginId
+          ? { plugin_pipeline: [{ plugin_id: opts.contentPluginId, priority: 1 }] }
+          : {}),
+      }),
+    );
   }
   const wallet = async (): Promise<Wallet> => {
     const r = await internalCall(
@@ -281,16 +300,24 @@ export async function setup(
     expect(r.status).toBe(200);
     return r.data as unknown as Wallet;
   };
-  const chat = (stream = false, signal?: AbortSignal) =>
+  const chat = (
+    stream = false,
+    signal?: AbortSignal,
+    options?: { key?: string; message?: string },
+  ) =>
     runtime.publicApp.fetch(
       new Request("http://gateway.local/v1/chat/completions", {
         method: "POST",
         ...(signal ? { signal } : {}),
-        headers: { authorization: `Bearer ${key.key}`, "content-type": "application/json" },
+        headers: {
+          authorization: `Bearer ${key.key}`,
+          "content-type": "application/json",
+          ...(options?.key ? { "idempotency-key": options.key } : {}),
+        },
         body: JSON.stringify({
           model,
           stream,
-          messages: [{ role: "user", content: "hi" }],
+          messages: [{ role: "user", content: options?.message ?? "hi" }],
           max_tokens: 20,
         }),
       }),
@@ -384,6 +411,9 @@ export async function setup(
     audit,
     settle,
     customer,
+    putModel,
+    routes,
+    supplierPrices,
   };
 }
 

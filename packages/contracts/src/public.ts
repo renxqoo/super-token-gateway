@@ -1,8 +1,23 @@
 import { z } from "zod";
 import { providerKinds, operations, dimensions } from "@gateway/kernel";
-import type { Operation, Usage, Finality } from "@gateway/kernel";
+import type { AdaptiveRoutingSetting, Operation, Usage, Finality } from "@gateway/kernel";
 const positiveInteger = z.string().regex(/^[1-9][0-9]{0,37}$/);
 const integer = z.string().regex(/^(0|[1-9][0-9]{0,37})$/);
+export const adaptiveRoutingSchema = z.union([
+  z
+    .object({
+      operations: z.tuple([z.literal("chat")]),
+      mode: z.enum(["observe", "active"]),
+      first_content_target_ms: z.number().int().min(1).max(300_000),
+      supplier_reserve_limit: z
+        .object({ currency: z.string().regex(/^[A-Z]{3,8}$/), atoms: integer })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+  z.literal(false),
+  z.null(),
+]) satisfies z.ZodType<AdaptiveRoutingSetting>;
 export const rateSchema = z.object({ numerator: integer, denominator: positiveInteger }).strict();
 export const pricingSchema = z
   .object({

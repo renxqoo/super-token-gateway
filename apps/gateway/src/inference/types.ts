@@ -1,4 +1,4 @@
-import type { Operation } from "@gateway/kernel";
+import type { AdaptiveRoutingPolicy, Operation } from "@gateway/kernel";
 import type {
   ApiKeyRecord,
   ConfigSnapshot,
@@ -82,6 +82,8 @@ export type InferenceRequest = {
   isStream: boolean;
   outputBound: number;
   initialChars: number | undefined;
+  adaptivePolicy?: AdaptiveRoutingPolicy | undefined;
+  strictAdaptiveSwitch?: boolean;
   firstByteDeadlineMs: number | null;
   maxStreamDurationMs: number;
 };

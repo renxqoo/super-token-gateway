@@ -47,6 +47,25 @@ const EXPECTED_PRESETS = [
   "openrouter",
 ];
 
+test("symptom: a rounded JSON error number could falsely confirm that a paid request did not execute", () => {
+  const rules = [
+    {
+      path: "error.code",
+      equals: 1,
+      when_http_status: [503],
+      retry_kind: "retryable",
+      execution: "NOT_EXECUTED",
+    },
+  ] as const;
+  const [rule] = rules;
+  const match = (code: string) =>
+    evaluateErrorRules(503, parseProviderJson(`{"error":{"code":${code}}}`), [
+      { ...rule, when_http_status: [503] },
+    ]);
+  expect(match("1")).toEqual({ retry_kind: "retryable", execution: "NOT_EXECUTED" });
+  expect(match("1.00000000000000001")).toEqual({ retry_kind: "retryable" });
+});
+
 test("G7.2 all 15 built-in provider presets are exposed cleanly and match protocol/auth contracts", () => {
   const presets = listBuiltinProviders();
   expect(presets.map((p) => p.name)).toEqual(EXPECTED_PRESETS);

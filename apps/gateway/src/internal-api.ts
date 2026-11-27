@@ -410,6 +410,7 @@ export function createInternalApi(deps: InternalApiDeps) {
       name: body.name,
       operations: body.operations as Operation[],
       routing_strategy: body.routing_strategy as RoutingStrategy,
+      ...(body.adaptive_routing !== undefined ? { adaptive_routing: body.adaptive_routing } : {}),
       max_output_tokens: body.max_output_tokens,
       enabled: body.enabled,
       ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),

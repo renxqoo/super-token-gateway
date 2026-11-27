@@ -1,4 +1,4 @@
-import { GatewayError, object } from "@gateway/contracts";
+import { GatewayError, object, optionalObject } from "@gateway/contracts";
 import type { Protocol, Usage } from "@gateway/kernel";
 import type { PluginAuditEntry } from "@gateway/ledger";
 import {
@@ -10,6 +10,7 @@ import {
 import {
   encodeSSE,
   formatProtocolSseError,
+  hasChatToolDelta,
   parseProviderJson,
   SSEParser,
   StreamTranslator,
@@ -48,6 +49,8 @@ export async function relayConversationStream(
       accounting,
       telemetry,
       attempt,
+      resources,
+      pluginSignal,
       candidate: cand,
       customer: candBilling,
       prepared,
@@ -199,6 +202,7 @@ export async function relayConversationStream(
         ? wasmPrelude.result
         : undefined;
     wasmPrelude = undefined;
+    const adaptationStarted = cached ? undefined : telemetry.routingProcessingStart;
     const out =
       cached ??
       (await invokeWasmProviderStreamEvent({
@@ -219,6 +223,7 @@ export async function relayConversationStream(
           state: wasmState,
         },
       }));
+    telemetry.excludeRoutingProcessing(adaptationStarted);
     if (out.state !== undefined) wasmState = out.state;
     if (out.retry_kind) {
       telemetry.recordAttemptFailure(
@@ -238,6 +243,23 @@ export async function relayConversationStream(
       wasmUsage = { ...wasmUsage, ...validated };
     }
     for (const chunkObj of out.chunks ?? []) {
+      if (
+        telemetry.waitingForRoutingContent &&
+        clientProtocol === "chat" &&
+        Array.isArray(chunkObj.choices)
+      ) {
+        for (const choice of chunkObj.choices) {
+          const delta = optionalObject(optionalObject(choice).delta);
+          if (
+            (typeof delta.content === "string" && delta.content.length > 0) ||
+            (typeof delta.refusal === "string" && delta.refusal.length > 0) ||
+            hasChatToolDelta(delta)
+          ) {
+            telemetry.observeRoutingContent();
+            break;
+          }
+        }
+      }
       const evName =
         clientProtocol === "messages" && typeof chunkObj.type === "string"
           ? chunkObj.type
@@ -247,7 +269,9 @@ export async function relayConversationStream(
         (clientProtocol === "responses" &&
           ["response.completed", "response.incomplete"].includes(String(chunkObj.type))) ||
         (clientProtocol === "messages" && chunkObj.type === "message_stop");
+      const gatewayStarted = telemetry.routingProcessingStart;
       await handleStreamChunk(encoded, terminal);
+      telemetry.excludeRoutingProcessing(gatewayStarted);
       if (blockedEarly) break;
     }
     wasmTerminal ||= out.done === true;
@@ -272,7 +296,7 @@ export async function relayConversationStream(
       }
     }
     if (describeFailure) translating = ev;
-    const translated = translator.consume(ev);
+    const translated = translator.consume(ev, telemetry.waitingForRoutingContent);
     translating = undefined;
     if (parsedEv && usage_aliases.length > 0) {
       streamAliasUsage = mergeStreamUsageAliases(
@@ -291,12 +315,23 @@ export async function relayConversationStream(
     }
     while (true) {
       let step: Awaited<ReturnType<typeof chunkReader.read>>;
+      const awaitingUpstream = !streamSignal.aborted;
       try {
         step = await chunkReader.read();
       } catch (readErr) {
         if (session?.isBlocked() || responsesModeration?.isBlocked()) {
           blockedEarly = true;
           break;
+        }
+        if (
+          awaitingUpstream &&
+          streamSignal.aborted &&
+          streamSignal.reason === stream.durationTimeout &&
+          !clientCancelled() &&
+          !pluginSignal.aborted &&
+          !resources.interrupted(true)
+        ) {
+          telemetry.noteRoutingOutcome("failed");
         }
         throw readErr;
       }
@@ -320,7 +355,11 @@ export async function relayConversationStream(
         batchBytes = 0;
         batchHasText = false;
         const pending = controller.enqueue(out, hasText);
-        if (pending) await pending;
+        if (pending) {
+          const gatewayStarted = telemetry.routingProcessingStart;
+          await pending;
+          telemetry.excludeRoutingProcessing(gatewayStarted);
+        }
       };
       for (const event of events) {
         if (wasmProvider) {
@@ -334,6 +373,7 @@ export async function relayConversationStream(
             throw error;
           }
           if (translated.hasSourceText) telemetry.requestTrace?.markUpstreamFirstText();
+          if (translated.hasSourceContent) telemetry.observeRoutingContent();
           if (!step.done && translated.chunks.length && event.event !== "error")
             confirmStreamProbe();
           const isTerminal = step.done || translated.terminal || translator.holdTerminal;
@@ -351,7 +391,9 @@ export async function relayConversationStream(
                 }
               }
             } else {
+              const gatewayStarted = telemetry.routingProcessingStart;
               await handleStreamChunk(chunk, isTerminal);
+              telemetry.excludeRoutingProcessing(gatewayStarted);
               if (blockedEarly) break;
             }
           }
@@ -488,6 +530,7 @@ export async function relayConversationStream(
       return;
     }
 
+    telemetry.noteRoutingOutcome("complete");
     await settle({
       usage,
       plugin_audit:

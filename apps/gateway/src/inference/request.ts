@@ -1,5 +1,5 @@
 import { GatewayError, object, optionalObject } from "@gateway/contracts";
-import type { Operation } from "@gateway/kernel";
+import type { AdaptiveRoutingPolicy, Operation } from "@gateway/kernel";
 import type { ModelRecord } from "@gateway/ledger";
 import { copyExact, parseClientJson, requestCharacters } from "@gateway/protocol";
 import { declaredRequestSize } from "../public-ingress.ts";
@@ -16,6 +16,12 @@ import { authenticateRequest, billingAccountQuotaScope } from "./auth.ts";
 import { readRequestBytesBounded, utf8FatalDecoder } from "./body.ts";
 import type { InferenceTelemetry } from "./telemetry.ts";
 import type { InferenceResources } from "./resources.ts";
+
+const defaultAdaptiveRouting: AdaptiveRoutingPolicy = {
+  operations: ["chat"],
+  mode: "active",
+  first_content_target_ms: 1500,
+};
 
 function resolveOutputBound(body: Record<string, unknown>, model: ModelRecord): number {
   const gen = optionalObject(body.generationConfig);
@@ -194,7 +200,13 @@ export async function admitInferenceRequest(
 
     const isStream =
       clientBody.stream === true || (operation === "speech" && clientBody.stream_format === "sse");
-    telemetry.beginResponseTracking(isStream);
+    const configuredRouting = model.adaptive_routing;
+    const adaptivePolicy =
+      operation === "chat" && configuredRouting !== false
+        ? (configuredRouting ??
+          (model.routing_strategy === "WEIGHTED" ? defaultAdaptiveRouting : undefined))
+        : undefined;
+    telemetry.beginResponseTracking(isStream, adaptivePolicy?.first_content_target_ms);
     const outputBound = resolveOutputBound(clientBody, model);
 
     const initialChars = isMultipartOp ? undefined : requestCharacters(operation, clientBody);
@@ -283,6 +295,8 @@ export async function admitInferenceRequest(
       isStream,
       outputBound,
       initialChars,
+      adaptivePolicy,
+      strictAdaptiveSwitch: operation === "chat" && Boolean(configuredRouting),
       maxStreamDurationMs,
       firstByteDeadlineMs,
     };

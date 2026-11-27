@@ -453,7 +453,8 @@ export function evaluateErrorRules(
   for (const rule of rules) {
     const statuses = rule.when_http_status ?? [200];
     if (!statuses.includes(httpStatus)) continue;
-    const val = getAtPath(body, assertSafeFieldPath(rule.path));
+    const path = assertSafeFieldPath(rule.path);
+    const val = getAtPath(body, path);
     if (val === undefined) continue;
     let matched = false;
     if (rule.equals !== undefined && val === rule.equals) matched = true;
@@ -475,9 +476,17 @@ export function evaluateErrorRules(
         : typeof raVal === "string" && /^\d+(?:\.\d+)?$/.test(raVal.trim())
           ? Math.round(Number(raVal.trim()) * 1000)
           : undefined;
+    const evidenceParent = typeof val === "number" ? getAtPath(body, path.slice(0, -1)) : null;
+    const exactEvidence =
+      typeof val !== "number" ||
+      (Number.isSafeInteger(val) &&
+        typeof evidenceParent === "object" &&
+        evidenceParent !== null &&
+        numberLiteral(evidenceParent, path.at(-1)!) === undefined);
     return {
       retry_kind: rule.retry_kind,
       ...(rule.execution === "NOT_EXECUTED" &&
+      exactEvidence &&
       rule.regex === undefined &&
       rule.not_equals === undefined &&
       (rule.equals !== undefined || rule.in?.length)

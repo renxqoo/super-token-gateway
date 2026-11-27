@@ -234,12 +234,13 @@ export function createHoldAcquirer(
       operation: AcquireHoldInput["operation"],
       key: string,
       fingerprints: Pick<AcquireHoldInput, "fingerprint" | "legacy_fingerprint">,
+      versionedOnly = false,
     ) {
       const [hold] = await db<{ request_id: string; fingerprint: string; state: string }[]>`
         SELECT request_id, fingerprint, state FROM public.billing_holds
         WHERE billing_account_id=${billingAccountId}::uuid AND operation=${operation} AND idempotency_key=${key}
       `;
-      return hold
+      return hold && (!versionedOnly || hold.fingerprint.startsWith("v1:"))
         ? {
             requestId: hold.request_id,
             state: hold.state,

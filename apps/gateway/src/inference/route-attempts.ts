@@ -17,6 +17,7 @@ import type { InferenceAccounting } from "./accounting.ts";
 import { selectInferenceRoutes } from "./candidates.ts";
 import { createUpstreamPreparation, createDispatchReservation } from "./upstream-attempt.ts";
 import { dispatchInferenceAttempt } from "./dispatch.ts";
+import { enforceSupplierReserveLimit } from "./adaptive-routing.ts";
 
 export async function routeInference(
   request: InferenceRequest,
@@ -24,8 +25,31 @@ export async function routeInference(
   telemetry: InferenceTelemetry,
   accounting: InferenceAccounting,
 ): Promise<Response> {
-  const { c, deps, operation, trace, firstByteDeadlineMs } = request;
+  const { c, deps, operation, trace, firstByteDeadlineMs, adaptivePolicy, strictAdaptiveSwitch } =
+    request;
+  const idempotencyHeader = c.req.raw.headers.get("idempotency-key");
+  const replayedResponse = (priorId: string, priorState: string | undefined) => {
+    const inProgress = priorState === "HELD";
+    const code = inProgress ? "idempotency_in_progress" : "idempotency_replayed";
+    const message = inProgress
+      ? "Request with this Idempotency-Key is already in progress"
+      : `Request already finalized with state ${priorState ?? "UNKNOWN"}`;
+    telemetry.emitAccessLog(409, code);
+    return c.json(
+      formatProtocolError(operation, 409, code, message, priorId),
+      409,
+      responseHeaders(priorId, trace),
+    );
+  };
+  const identified = strictAdaptiveSwitch
+    ? ((await accounting.identifyIdempotency(idempotencyHeader, request.clientBody)) ?? undefined)
+    : undefined;
+  if (identified) {
+    const prior = await accounting.findReplay(identified, true);
+    if (prior) return replayedResponse(prior.requestId, prior.state);
+  }
   const routes = selectInferenceRoutes(request);
+  telemetry.adaptiveFeedback = routes.adaptive?.feedback;
   const { selected, releaseProbeFor, releaseUnusedProbes, releaseAllPendingProbes } = routes;
   const reservation = createDispatchReservation(request, resources, telemetry);
   const { reserveDispatch, releaseDispatch, preDispatchGatewayError } = reservation;
@@ -40,28 +64,11 @@ export async function routeInference(
     activePluginSignal = signal;
     return prepareInput(candidate, signal);
   };
-  const replayedResponse = (priorId: string, priorState: string | undefined) => {
-    const inProgress = priorState === "HELD";
-    const code = inProgress ? "idempotency_in_progress" : "idempotency_replayed";
-    const message = inProgress
-      ? "Request with this Idempotency-Key is already in progress"
-      : `Request already finalized with state ${priorState ?? "UNKNOWN"}`;
-    telemetry.emitAccessLog(409, code);
-    return c.json(
-      formatProtocolError(operation, 409, code, message, priorId),
-      409,
-      responseHeaders(priorId, trace),
-    );
-  };
-
   try {
     const input = prepareRouteInput(selected[0]!.route);
     const firstInput = input instanceof Promise ? await input : input;
     if (firstInput instanceof Response) return firstInput;
-    const identity = accounting.identifyIdempotency(
-      c.req.raw.headers.get("idempotency-key"),
-      firstInput.body,
-    );
+    const identity = accounting.identifyIdempotency(idempotencyHeader, firstInput.body, identified);
     const idempotency = identity ? await identity : null;
     let firstReservation:
       | {
@@ -113,6 +120,7 @@ export async function routeInference(
           ...preparedInput.measurement,
           estimatedInputTokens: prepared?.estimatedInputTokens,
         });
+        enforceSupplierReserveLimit(adaptivePolicy, cand.costPrice.currency, quote.supplierAtoms);
       } catch (err) {
         lastHoldErr =
           err instanceof GatewayError
@@ -181,6 +189,10 @@ export async function routeInference(
     }
 
     if (!firstReservation) {
+      if (strictAdaptiveSwitch && idempotency) {
+        const prior = await accounting.findReplay(idempotency);
+        if (prior) return replayedResponse(prior.requestId, prior.state);
+      }
       throw lastHoldErr ?? new GatewayError(503, "no_route", "No funded route available");
     }
 
@@ -188,6 +200,7 @@ export async function routeInference(
     let activeAttemptId = firstReservation.attemptId;
     const maxAttempts = Math.min(
       selected.length - activeIndex,
+      strictAdaptiveSwitch ? 2 : Number.POSITIVE_INFINITY,
       Math.max(1, selected[activeIndex]!.route.route.retry_policy.max_attempts ?? 3),
     );
     let attemptsMade = 0;
@@ -205,6 +218,7 @@ export async function routeInference(
       const mayRetryAmbiguous = () => {
         const limit = deps.config.maxAmbiguousRetriesPerMinute;
         return (
+          !strictAdaptiveSwitch &&
           Boolean(cand.route.retry_policy.retry_on_ambiguous) &&
           (limit === undefined || deps.metrics.tryConsumeAmbiguousRetry(cand.channel.id, limit))
         );
@@ -263,6 +277,25 @@ export async function routeInference(
       }
 
       if (pendingSwitchFrom) {
+        let quote: ReturnType<InferenceAccounting["quote"]>;
+        try {
+          quote = accounting.quote(cand, candBilling, {
+            ...inputMeasurement,
+            estimatedInputTokens: preparedAttempt?.estimatedInputTokens,
+          });
+          enforceSupplierReserveLimit(adaptivePolicy, cand.costPrice.currency, quote.supplierAtoms);
+        } catch (err) {
+          releaseProbeFor(cand.channel.id);
+          lastError =
+            err instanceof GatewayError
+              ? err
+              : new GatewayError(
+                  422,
+                  "billing_ceiling",
+                  err instanceof Error ? err.message : "Fallback quote error",
+                );
+          continue;
+        }
         try {
           await reserveDispatch(cand, preparedAttempt, pluginSignal);
         } catch (error) {
@@ -280,21 +313,6 @@ export async function routeInference(
           continue;
         }
 
-        let quote: ReturnType<InferenceAccounting["quote"]>;
-        try {
-          quote = accounting.quote(cand, candBilling, {
-            ...inputMeasurement,
-            estimatedInputTokens: preparedAttempt?.estimatedInputTokens,
-          });
-        } catch (err) {
-          releaseProbeFor(cand.channel.id);
-          lastError = new GatewayError(
-            422,
-            "billing_ceiling",
-            err instanceof Error ? err.message : "Fallback quote error",
-          );
-          continue;
-        }
         const nextAttemptId = fastUuid();
         const sw = await accounting.switchSupplier(pendingSwitchFrom, nextAttemptId, quote);
         if (!sw.ok) {

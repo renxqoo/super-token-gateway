@@ -388,6 +388,7 @@ export function createConsoleCatalogSync(
           name: m.name,
           operations: m.operations,
           routing_strategy: m.routingStrategy,
+          adaptive_routing: m.adaptiveRouting,
           max_output_tokens: m.maxOutputTokens,
           enabled: m.enabled,
           source_revision: targetRev,

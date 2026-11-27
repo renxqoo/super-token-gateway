@@ -470,6 +470,7 @@ export function registerAnthropicStreamCases() {
   }
 
   test("symptom: an Anthropic JSON response with missing priced cache TTL usage returns success", async () => {
+    const routingObservationModels = new Set<string>();
     const upstream = fakeUpstream("anthropic-cache-json", {
       unaryBody: {
         id: "msg_cache",
@@ -481,19 +482,29 @@ export function registerAnthropicStreamCases() {
         usage: { input_tokens: 8, output_tokens: 9, cache_creation_input_tokens: 6 },
       },
     });
-    const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+    const runtime = createGatewayRuntime({
+      config: makeConfig({ routingObservationModels }),
+      db,
+      wasmExecutor: null,
+    });
     try {
       await runtime.start();
       const fixture = await setup(runtime, [upstream], {
         providerKind: "anthropic",
         prices: ttlPrices,
       });
+      routingObservationModels.add(fixture.model);
       try {
         const response = await fixture.chat();
         expect(response.status).toBe(502);
         expect(await response.json()).toMatchObject({ error: { code: "invalid_upstream_usage" } });
         expect(await fixture.charges()).toEqual({ n: 0, u: 0, atoms: "0" });
         expect(await fixture.holdsByState()).toEqual({ UNKNOWN: 1 });
+        const metrics = await (await runtime.metricsResponse()).text();
+        expect(metrics).toMatch(
+          /^gateway_routing_attempts_total\{[^\n]*dispatch="sent",outcome="failed"\} 1$/m,
+        );
+        expect(metrics).not.toMatch(/^gateway_routing_attempts_total\{[^\n]*outcome="complete"\}/m);
       } finally {
         await fixture.resolveUnknownHolds();
       }

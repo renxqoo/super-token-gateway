@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Super Token Gateway",
-    "version": "2026112701",
+    "version": "2026112702",
     "description": "Public and internal routes use separate listeners. Inference payloads and success responses depend on the endpoint protocol and provider adapter."
   },
   "paths": {
@@ -3001,6 +3001,60 @@
                     "default": "WEIGHTED",
                     "type": "string",
                     "enum": ["WEIGHTED", "ROUND_ROBIN", "LEAST_LATENCY"]
+                  },
+                  "adaptive_routing": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "operations": {
+                            "type": "array",
+                            "prefixItems": [
+                              {
+                                "type": "string",
+                                "const": "chat"
+                              }
+                            ],
+                            "items": false,
+                            "minItems": 1,
+                            "maxItems": 1
+                          },
+                          "mode": {
+                            "type": "string",
+                            "enum": ["observe", "active"]
+                          },
+                          "first_content_target_ms": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 300000
+                          },
+                          "supplier_reserve_limit": {
+                            "type": "object",
+                            "properties": {
+                              "currency": {
+                                "type": "string",
+                                "pattern": "^[A-Z]{3,8}$"
+                              },
+                              "atoms": {
+                                "type": "string",
+                                "pattern": "^(0|[1-9][0-9]{0,37})$"
+                              }
+                            },
+                            "required": ["currency", "atoms"],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": ["operations", "mode", "first_content_target_ms"],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "max_output_tokens": {
                     "default": 32768,

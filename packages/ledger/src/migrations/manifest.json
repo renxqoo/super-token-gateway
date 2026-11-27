@@ -26,6 +26,15 @@
           "checksum": "4ae983d5aefde4bb2ec40dc7e0673fc2e077f0e2479919c9a812b8200211b360"
         }
       ]
+    },
+    {
+      "version": 2026112702,
+      "files": [
+        {
+          "path": "./migrations/0003_adaptive_routing.sql",
+          "checksum": "1fb846533984c420763335eaac44b94cfeeea85d6ee9ff8c69f0f8cbe68c3a95"
+        }
+      ]
     }
   ]
 }

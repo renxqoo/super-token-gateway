@@ -2,6 +2,27 @@ rule_files:
   - alerts.yml
 evaluation_interval: 15s
 tests:
+  - name: Adaptive routing incompatibility alerts per model and cluster across replicas
+    interval: 15s
+    input_series:
+      - series: 'gateway_adaptive_routing_decisions_total{job="stg-gateway",stg_cluster="ledger",instance="a",model="active-chat",mode="active",decision="incompatible"}'
+        values: "1+1x8"
+      - series: 'gateway_adaptive_routing_decisions_total{job="stg-gateway",stg_cluster="ledger",instance="b",model="active-chat",mode="active",decision="incompatible"}'
+        values: "1+2x8"
+      - series: 'gateway_adaptive_routing_decisions_total{job="stg-gateway",stg_cluster="ledger",instance="a",model="warmup-chat",mode="observe",decision="insufficient"}'
+        values: "1+1x8"
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: STGAdaptiveRoutingIncompatible
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: STGAdaptiveRoutingIncompatible
+        exp_alerts:
+          - exp_labels: { stg_cluster: ledger, model: active-chat, mode: active, severity: warning }
+            exp_annotations:
+              {
+                summary: Gateway suspended adaptive ranking for an incompatible model configuration,
+              }
   - name: Gateway outage follows cluster readiness, including missing samples
     interval: 15s
     input_series:

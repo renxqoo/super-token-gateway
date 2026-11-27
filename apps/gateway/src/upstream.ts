@@ -1,5 +1,5 @@
 import { GatewayError, optionalObject } from "@gateway/contracts";
-import type { Operation, Protocol } from "@gateway/kernel";
+import { canonical, type Operation, type Protocol } from "@gateway/kernel";
 import type { ChannelRecord, ConfigSnapshot, RouteRecord } from "@gateway/ledger";
 import {
   invokeWasmProviderRequest,
@@ -94,7 +94,10 @@ const textMessageFields = new Set([
   "reasoning_content",
 ]);
 
-function estimateTextChatInput(payload: Record<string, unknown>, body: string): number | undefined {
+export function estimateTextChatInput(
+  payload: Record<string, unknown>,
+  body?: string,
+): number | undefined {
   if (!Array.isArray(payload.messages) || (payload.n !== undefined && payload.n !== 1)) {
     return undefined;
   }
@@ -136,7 +139,9 @@ function estimateTextChatInput(payload: Record<string, unknown>, body: string): 
       if (count !== 2) return undefined;
     }
   }
-  return Buffer.byteLength(body) + 128 + 32 * (messages.length + toolsLen);
+  return (
+    Buffer.byteLength(body ?? stringifyExact(payload)) + 128 + 32 * (messages.length + toolsLen)
+  );
 }
 
 const providerPlans = new WeakMap<RouteRecord, CachedProviderPlan>();
@@ -213,6 +218,64 @@ export function resolveRouteUpstreamProtocol(
     return upstreamProtocolFor(resolved, operation);
   } catch {
     return null;
+  }
+}
+
+export function adaptiveRouteProfile(
+  snapshot: ConfigSnapshot,
+  channel: ChannelRecord,
+  route: RouteRecord,
+) {
+  try {
+    const { resolved, overrides, extraHeaderEntries } = getProviderPlan(snapshot, channel, route);
+    const declarative = resolved.kind === "DECLARATIVE" ? resolved.config : null;
+    const endpoint = declarative?.endpoints.chat ?? declarative?.endpoints.default;
+    const compatibility = new Bun.CryptoHasher("sha256")
+      .update(
+        canonical({
+          protocol: upstreamProtocolFor(resolved, "chat"),
+          usageDialect: resolved.config.usage_dialect,
+          streamFraming: resolved.config.stream_framing ?? "sse",
+          includeStreamUsage: declarative?.include_stream_usage_option ?? false,
+          wasmDigest: resolved.kind === "WASM" ? resolved.plugin.digest : null,
+          modelField: declarative?.model_field === undefined ? "model" : declarative.model_field,
+          streamField:
+            declarative?.stream_field === undefined ? "stream" : declarative.stream_field,
+          reasoningField: declarative?.reasoning_field ?? null,
+          query: { ...endpoint?.query, ...overrides.query_params },
+          streamQuery: { ...endpoint?.query, ...endpoint?.stream_query, ...overrides.query_params },
+          headers: Object.fromEntries(extraHeaderEntries),
+          requestTransforms: overrides.request_transforms,
+          responseTransforms: overrides.response_transforms,
+          usageAliases: overrides.usage_aliases,
+          requestPolicy: route.request_policy,
+          pipeline: route.plugin_pipeline
+            .filter((step) => step.enabled !== false)
+            .map((step) => ({
+              ...step,
+              digest: snapshot.plugins.get(step.plugin_id)?.digest ?? null,
+            })),
+        }),
+      )
+      .digest("hex");
+    const revision = new Bun.CryptoHasher("sha256")
+      .update(
+        canonical({
+          compatibility,
+          baseUrl: channel.base_url,
+          account: channel.account_id,
+          endpoint: endpoint ?? null,
+          providerVersion: resolved.version,
+          provider: resolved.source === "builtin" ? resolved.config : resolved.plugin.digest,
+          upstreamModel: route.upstream_model,
+          channelAdapter: channel.adapter_config,
+          routeAdapter: route.adapter_overrides,
+        }),
+      )
+      .digest("hex");
+    return { compatibility, revision };
+  } catch {
+    return undefined;
   }
 }
 

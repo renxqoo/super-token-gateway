@@ -85,13 +85,26 @@ export async function handleUnaryResponse(
       }
       respBytes = fastResult.body;
     } else {
-      respBytes = await readResponseBytesFast(
-        upstreamResp!,
-        deps.config.maxBodyBytes,
-        attempt.signal(),
-        deps.transport.bufferedBody(upstreamResp!),
-      );
+      try {
+        respBytes = await readResponseBytesFast(
+          upstreamResp!,
+          deps.config.maxBodyBytes,
+          attempt.signal(),
+          deps.transport.bufferedBody(upstreamResp!),
+        );
+      } catch (error) {
+        if (
+          !c.req.raw.signal.aborted &&
+          !pluginSignal.aborted &&
+          !resources.interrupted(true) &&
+          !(error instanceof GatewayError && error.code === "body_too_large")
+        ) {
+          telemetry.noteRoutingOutcome("failed");
+        }
+        throw error;
+      }
     }
+    telemetry.observeRoutingUnaryBody();
     attempt.finishExchange();
     pluginSignal.throwIfAborted();
 
@@ -109,6 +122,7 @@ export async function handleUnaryResponse(
       const headers = channelResponseHeaders(requestId, trace, cand.channel, {
         "content-type": upstreamContentType,
       });
+      telemetry.noteRoutingOutcome("complete");
       await settle({
         usage,
         plugin_audit: preRequestAudit,
@@ -279,6 +293,7 @@ export async function handleUnaryResponse(
       completeProbe();
       throw new GatewayError(502, "invalid_upstream_usage", "Upstream omitted usage metadata");
     }
+    telemetry.noteRoutingOutcome("complete");
 
     let block:
       | (ReturnType<typeof classifyPluginBlock> & {

@@ -1,5 +1,5 @@
 import { GatewayError, providerObject as object, optionalObject, text } from "@gateway/contracts";
-import { encodeSSE } from "./sse.ts";
+import { encodeSSE, hasChatToolDelta } from "./sse.ts";
 import { extractUsage } from "./usage.ts";
 import { parseProviderJson, copyExact, stringifyExact } from "./json.ts";
 import type { Protocol, ProviderKind, Usage } from "@gateway/kernel";
@@ -72,10 +72,14 @@ export class StreamTranslator {
     }
   }
 
-  consume(event: SSEEvent): {
+  consume(
+    event: SSEEvent,
+    trackSourceContent = false,
+  ): {
     chunks: Uint8Array[];
     terminal: boolean;
     hasSourceText?: boolean;
+    hasSourceContent?: boolean;
     hasTargetText?: boolean;
     outputUsageBoundary?: "replace" | "ignore";
   } {
@@ -187,6 +191,7 @@ export class StreamTranslator {
     this.terminal = terminalNow;
     const sameProtocol = this.source === this.target;
     let hasSourceText = false;
+    let hasChatTool = false;
     let addsOutput = false;
     let addsGeminiThought = false;
     let deltas: StreamDelta[] | undefined;
@@ -214,6 +219,7 @@ export class StreamTranslator {
         const rawDelta = choice.delta;
         if (rawDelta !== null && typeof rawDelta === "object" && !Array.isArray(rawDelta)) {
           const d = rawDelta as Record<string, unknown>;
+          if (trackSourceContent && !hasChatTool) hasChatTool = hasChatToolDelta(d);
           if (
             (typeof d.content === "string" && d.content.length > 0) ||
             (typeof d.refusal === "string" && d.refusal.length > 0)
@@ -455,6 +461,14 @@ export class StreamTranslator {
       terminal: terminalNow,
       hasSourceText,
       hasTargetText,
+      ...(trackSourceContent &&
+      (hasSourceText ||
+        hasChatTool ||
+        deltas?.some(
+          (delta) => delta.type === "tool" && Boolean(delta.text || delta.id || delta.name),
+        ))
+        ? { hasSourceContent: true }
+        : {}),
       ...(replaceOutputUsage ? { outputUsageBoundary: "replace" } : {}),
       ...(ignoreOutputUsage ? { outputUsageBoundary: "ignore" } : {}),
     };

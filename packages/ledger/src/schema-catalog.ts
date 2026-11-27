@@ -16,7 +16,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import type { Operation, Pricing } from "@gateway/kernel";
+import type { AdaptiveRoutingSetting, Operation, Pricing } from "@gateway/kernel";
 import type {
   AdapterOverrides,
   ChannelKind,
@@ -279,6 +279,7 @@ export const models = pgTable("models", {
   name: text("name").primaryKey(),
   operations: text("operations").array().$type<Operation[]>().notNull(),
   routingStrategy: text("routing_strategy").$type<RoutingStrategy>().notNull().default("WEIGHTED"),
+  adaptiveRouting: pgJsonb<AdaptiveRoutingSetting>("adaptive_routing"),
   maxOutputTokens: integer("max_output_tokens").notNull(),
   enabled: boolean("enabled").notNull().default(true),
   sourceRevision: integer("source_revision").notNull().default(0),

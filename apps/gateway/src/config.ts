@@ -18,6 +18,7 @@ export type GatewayConfig = {
   accessLog?: boolean;
   traceMetrics?: boolean;
   traceExport?: TraceExportConfig;
+  routingObservationModels?: ReadonlySet<string>;
   privateMetrics?: boolean;
   requireDbRoles?: boolean;
   keyPepper: string;
@@ -287,6 +288,17 @@ export function loadConfigFromEnv(
   }
   const maxBodyBytes = intFromEnv(env, "MAX_BODY_BYTES", 10 * 1024 * 1024);
   const traceExport = loadTraceExport(env, databaseUrl);
+  const routingObservationModels = new Set(
+    env.ROUTING_OBSERVATION_MODELS?.split(",")
+      .map((name) => name.trim())
+      .filter(Boolean),
+  );
+  if (
+    routingObservationModels.size > 16 ||
+    [...routingObservationModels].some((name) => !/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,149}$/.test(name))
+  ) {
+    throw new Error("ROUTING_OBSERVATION_MODELS must list at most 16 valid model names");
+  }
   if (
     env.TRACE_METRICS !== undefined &&
     env.TRACE_METRICS !== "true" &&
@@ -310,6 +322,7 @@ export function loadConfigFromEnv(
     accessLog: env.ACCESS_LOG !== "false",
     traceMetrics: env.TRACE_METRICS !== "false",
     ...(traceExport ? { traceExport } : {}),
+    ...(routingObservationModels.size ? { routingObservationModels } : {}),
     privateMetrics: production || env.PRIVATE_METRICS === "true",
     requireDbRoles: production,
     keyPepper,

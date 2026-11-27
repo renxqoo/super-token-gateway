@@ -10,6 +10,7 @@ import {
 } from "@gateway/ledger";
 import { quoteReservation, type ReservationMeasurement, type Usage } from "@gateway/kernel";
 import { verifier } from "@gateway/runtime";
+import { AdaptiveRoutingStats } from "./adaptive-routing-stats.ts";
 
 export { fastUuid };
 
@@ -163,6 +164,7 @@ export type HydratedCandidate = {
 
 export class ProxyRuntimeState {
   readonly deadlines = new DeadlineWheel();
+  readonly adaptiveRouting = new AdaptiveRoutingStats();
   private readonly verifiedKeyCache: LruMap<string, ApiKeyRecord>;
   private readonly quoteCache: LruMap<string, string>;
   private authCacheEpoch = -1;
@@ -318,6 +320,7 @@ export class ProxyRuntimeState {
 
   close(): void {
     this.deadlines.close();
+    this.adaptiveRouting.close();
     this.verifiedKeyCache.clear();
     this.quoteCache.clear();
     this.localBillingAccountInFlight.clear();

@@ -54,6 +54,7 @@ export type StreamResponse = {
   context: AttemptResponse;
   tracedUpstreamProtocol: Protocol | null;
   streamSignal: AbortSignal;
+  durationTimeout: Error | undefined;
   settle: AttemptSettlement;
   clientCancelled: () => boolean;
   markProbeDone: () => void;

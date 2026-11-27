@@ -365,6 +365,7 @@ export function createPluginCatalogOperations({ orm }: { orm: LedgerDrizzle }) {
           name: r.name,
           operations: r.operations,
           routing_strategy: r.routingStrategy,
+          adaptive_routing: r.adaptiveRouting,
           max_output_tokens: r.maxOutputTokens,
           enabled: r.enabled,
         });

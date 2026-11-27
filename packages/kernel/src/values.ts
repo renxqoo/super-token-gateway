@@ -27,6 +27,14 @@ export const operations = [
   "completions",
 ] as const;
 export type Operation = (typeof operations)[number];
+
+export type AdaptiveRoutingPolicy = {
+  operations: ["chat"];
+  mode: "observe" | "active";
+  first_content_target_ms: number;
+  supplier_reserve_limit?: { currency: string; atoms: string } | undefined;
+};
+export type AdaptiveRoutingSetting = AdaptiveRoutingPolicy | false | null;
 export const dimensions = [
   "input_tokens",
   "output_tokens",

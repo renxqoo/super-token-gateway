@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { pricingSchema } from "@gateway/contracts";
+import { adaptiveRoutingSchema, pricingSchema } from "@gateway/contracts";
 import { BILLING_ACCOUNT_API_KEY_LENGTH, BILLING_ACCOUNT_API_KEY_PATTERN } from "@gateway/runtime";
 import {
   currencySchema,
@@ -133,6 +133,7 @@ export const upsertModelSchema = z
     name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,149}$/),
     operations: z.array(operationEnum).min(1),
     routing_strategy: z.enum(["WEIGHTED", "ROUND_ROBIN", "LEAST_LATENCY"]).default("WEIGHTED"),
+    adaptive_routing: adaptiveRoutingSchema.optional(),
     max_output_tokens: z.number().int().min(1).max(10_000_000).default(32768),
     enabled: z.boolean().default(true),
     source_revision: sourceRevisionSchema,

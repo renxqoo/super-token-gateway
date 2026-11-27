@@ -4,7 +4,19 @@ import type { ChannelRecord } from "@gateway/ledger";
 import { formatProtocolError } from "@gateway/protocol";
 import { IngressDenialError } from "../public-ingress.ts";
 import type { TraceContext } from "../observability.ts";
+import type { HydratedCandidate } from "../proxy-state.ts";
 import type { InferenceContext } from "./types.ts";
+
+export function supplierReconciliation({ route, channel }: HydratedCandidate) {
+  const providerIdHeader =
+    route.adapter_overrides.reconciliation_response_id_header ??
+    channel.adapter_config.reconciliation_response_id_header;
+  const requiresEvidence =
+    route.adapter_overrides.reconciliation_evidence_required ??
+    channel.adapter_config.reconciliation_evidence_required ??
+    Boolean(providerIdHeader);
+  return { providerIdHeader, requiresEvidence };
+}
 
 export function getHeaderValue(
   headers: Headers | Record<string, string>,

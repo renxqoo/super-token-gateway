@@ -1,4 +1,4 @@
-import type { Operation, Pricing, Usage } from "@gateway/kernel";
+import type { AdaptiveRoutingSetting, Operation, Pricing, Usage } from "@gateway/kernel";
 import type { SpendLimitWindow, AdapterOverrides, ProviderPluginConfig } from "./provider-types.ts";
 export type {
   WireDialect,
@@ -161,6 +161,7 @@ export type ModelRecord = {
   name: string;
   operations: Operation[];
   routing_strategy: RoutingStrategy;
+  adaptive_routing?: AdaptiveRoutingSetting;
   max_output_tokens: number;
   enabled: boolean;
 };

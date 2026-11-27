@@ -15,6 +15,27 @@ export interface SSEEvent {
   wireBytes?: Uint8Array;
 }
 
+export function hasChatToolDelta(delta: Record<string, unknown>): boolean {
+  const legacy = optionalObject(delta.function_call);
+  if (
+    (typeof legacy.name === "string" && legacy.name.length > 0) ||
+    (typeof legacy.arguments === "string" && legacy.arguments.length > 0)
+  )
+    return true;
+  return (
+    Array.isArray(delta.tool_calls) &&
+    delta.tool_calls.some((raw: unknown) => {
+      const call = optionalObject(raw);
+      const fn = optionalObject(call.function);
+      return (
+        (typeof call.id === "string" && call.id.length > 0) ||
+        (typeof fn.name === "string" && fn.name.length > 0) ||
+        (typeof fn.arguments === "string" && fn.arguments.length > 0)
+      );
+    })
+  );
+}
+
 export function hasSseText(event: SSEEvent, protocol: Protocol): boolean {
   if (!event.data || event.data === "[DONE]" || event.event === "error") return false;
   let body: Record<string, unknown>;

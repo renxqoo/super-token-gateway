@@ -1,7 +1,7 @@
 import { GatewayError } from "@gateway/contracts";
-import { describeProviderError } from "@gateway/plugin-engine";
-import { formatProtocolError } from "@gateway/protocol";
-import { UpstreamPreDispatchError } from "@gateway/runtime";
+import { describeProviderError, evaluateErrorRules } from "@gateway/plugin-engine";
+import { formatProtocolError, parseProviderJson } from "@gateway/protocol";
+import { readBounded, UpstreamPreDispatchError } from "@gateway/runtime";
 import type { FastUpstreamResult } from "@gateway/runtime";
 import { MeteredRequestError } from "../request-metering.ts";
 import type { EffectiveCustomerPrice } from "../pricing.ts";
@@ -13,7 +13,12 @@ import {
 } from "../upstream.ts";
 import type { PreparedUpstreamRequest } from "../upstream.ts";
 import type { InferenceRequest } from "./types.ts";
-import { responseHeaders, isRetryableStatus, getHeaderValue } from "./http.ts";
+import {
+  responseHeaders,
+  isRetryableStatus,
+  getHeaderValue,
+  supplierReconciliation,
+} from "./http.ts";
 import { utf8FatalDecoder } from "./body.ts";
 import type { RouteInput, RouteOutputAdmission } from "./policy.ts";
 import { channelFailureKind } from "./telemetry.ts";
@@ -48,7 +53,8 @@ export async function dispatchInferenceAttempt(
     hasIdempotencyKey: boolean;
   },
 ): Promise<Response | RetryAttempt> {
-  const { c, deps, operation, requestId, trace, isStream, isMultipartOp } = request;
+  const { c, deps, operation, requestId, trace, isStream, isMultipartOp, strictAdaptiveSwitch } =
+    request;
   const {
     cursor,
     attemptId: activeAttemptId,
@@ -80,20 +86,15 @@ export async function dispatchInferenceAttempt(
   const startedAt = performance.now();
   telemetry.beginAttempt(
     cand.channel.name,
+    cand.route.id,
     activeAttemptId,
     attemptNumber,
     startedAt,
     reservation.timing,
   );
-  const providerIdHeader =
-    cand.route.adapter_overrides.reconciliation_response_id_header ??
-    cand.channel.adapter_config.reconciliation_response_id_header;
-  const requiresEvidence =
-    cand.route.adapter_overrides.reconciliation_evidence_required ??
-    cand.channel.adapter_config.reconciliation_evidence_required ??
-    Boolean(providerIdHeader);
+  const { providerIdHeader, requiresEvidence } = supplierReconciliation(cand);
   const rejectedOutcome = (notExecuted = false): "FAILED" | "UNKNOWN" => {
-    if (!requiresEvidence || notExecuted) return "FAILED";
+    if (notExecuted || (!strictAdaptiveSwitch && !requiresEvidence)) return "FAILED";
     accounting.noteUnknownAttempt();
     return "UNKNOWN";
   };
@@ -186,9 +187,10 @@ export async function dispatchInferenceAttempt(
       dispatchDeadline: performance.now() + attemptTimeoutMs,
     };
     if (prepared.headersValidated) upstreamRequest.headersValidated = true;
-    const timingObserver = telemetry.requestTrace?.transportObserver;
+    const timingObserver = telemetry.transportObserver;
     if (timingObserver) upstreamRequest.onTiming = timingObserver;
     accounting.setDispatched(true);
+    telemetry.noteRoutingDispatch("possible");
     fastResult = reservation.dispatch
       ? await reservation.dispatch.fetchFast(upstreamRequest)
       : await deps.transport.fetchFast(
@@ -201,9 +203,13 @@ export async function dispatchInferenceAttempt(
     attempt.finishExchange();
     const isPreDispatch =
       err instanceof UpstreamPreDispatchError ||
-      (err instanceof Error &&
+      (!strictAdaptiveSwitch &&
+        err instanceof Error &&
         /ECONNREFUSED|ENOTFOUND|Unable to connect|ConnectionRefused/i.test(err.message));
-    if (isPreDispatch) accounting.setDispatched(false);
+    if (isPreDispatch) {
+      accounting.setDispatched(false);
+      telemetry.noteRoutingDispatch("not_sent");
+    }
     if (pluginSignal.aborted) throw pluginSignal.reason;
     if (err instanceof GatewayError && err.code === "no_route") {
       releaseProbe();
@@ -259,6 +265,7 @@ export async function dispatchInferenceAttempt(
   }
 
   const upstreamResp = fastResult.fast ? null : fastResult.response;
+  telemetry.noteRoutingDispatch("sent");
   const upstreamStatus = fastResult.fast ? fastResult.status : fastResult.response.status;
   const upstreamHeaders = fastResult.fast ? fastResult.headers : fastResult.response.headers;
   const diagnostics = deps.traceQueue ? prepared.mergedOverrides.error_diagnostics : undefined;
@@ -307,7 +314,9 @@ export async function dispatchInferenceAttempt(
   if (providerIdHeader) {
     const providerId = getHeaderValue(upstreamHeaders, providerIdHeader.toLowerCase());
     if (providerId && /^[A-Za-z0-9._:/-]{1,256}$/.test(providerId)) {
+      const persistenceStarted = telemetry.routingProcessingStart;
       await accounting.rememberProviderRequestId(activeAttemptId, providerId);
+      telemetry.excludeRoutingProcessing(persistenceStarted);
     }
   }
 
@@ -321,22 +330,60 @@ export async function dispatchInferenceAttempt(
   if (!upstreamOk) {
     telemetry.setStage("http_response");
     let detail = describeFailure?.();
+    let confirmedNotExecuted = false;
+    const contentType = getHeaderValue(upstreamHeaders, "content-type") ?? "";
+    const jsonError = /^application\/(?:json|[^;\s]+\+json)(?:\s*;|$)/i.test(contentType);
+    const rules = prepared.mergedOverrides.error_rules;
+    if (
+      strictAdaptiveSwitch &&
+      jsonError &&
+      rules.some(
+        (rule) =>
+          rule.execution === "NOT_EXECUTED" && rule.when_http_status?.includes(upstreamStatus),
+      )
+    ) {
+      const maxEvidenceBytes = Math.min(deps.config.maxBodyBytes, 8192);
+      try {
+        const signal = attempt.signal();
+        const bytes = fastResult.fast
+          ? fastResult.body
+          : (deps.transport.bufferedBody(fastResult.response) ??
+            (await readBounded(fastResult.response.body, maxEvidenceBytes, signal)));
+        signal.throwIfAborted();
+        if (bytes?.byteLength && bytes.byteLength <= maxEvidenceBytes) {
+          const body = parseProviderJson(utf8FatalDecoder.decode(bytes));
+          confirmedNotExecuted =
+            evaluateErrorRules(upstreamStatus, body, rules)?.execution === "NOT_EXECUTED";
+          detail ??= describeFailure?.(body);
+        }
+      } catch {
+        confirmedNotExecuted = false;
+      }
+    }
     if (!detail && describeFailure && diagnostics?.code_path && diagnosticBodyLimit > 0) {
       const bytes = fastResult.fast
         ? fastResult.body
         : deps.transport.bufferedBody(fastResult.response);
-      const contentType = getHeaderValue(upstreamHeaders, "content-type") ?? "";
-      if (
-        bytes?.byteLength &&
-        bytes.byteLength <= diagnosticBodyLimit &&
-        /^application\/(?:json|[^;\s]+\+json)(?:\s*;|$)/i.test(contentType)
-      ) {
+      if (bytes?.byteLength && bytes.byteLength <= diagnosticBodyLimit && jsonError) {
         try {
           detail = describeFailure(JSON.parse(utf8FatalDecoder.decode(bytes)));
         } catch {
           detail = undefined;
         }
       }
+    }
+    if (pluginSignal.aborted) {
+      attempt.dispose();
+      void upstreamResp?.body?.cancel(pluginSignal.reason).catch(() => undefined);
+      throw pluginSignal.reason;
+    }
+    if (strictAdaptiveSwitch && resources.interrupted(true)) {
+      attempt.dispose();
+      void upstreamResp?.body?.cancel().catch(() => undefined);
+      releaseProbe();
+      releaseBackups();
+      await accounting.finalizeHold("unknown");
+      throw resources.admissionError(resources.quotaLost(true));
     }
     const retryKind = isRetryableStatus(upstreamStatus);
     telemetry.recordAttemptFailure(
@@ -347,7 +394,7 @@ export async function dispatchInferenceAttempt(
     attempt.dispose();
     void upstreamResp?.body?.cancel().catch(() => undefined);
     resources.clearChannelLimit();
-    const outcome = rejectedOutcome();
+    const outcome = rejectedOutcome(confirmedNotExecuted);
     if (retryKind) {
       const retryAfterHdr = fastResult.fast
         ? getHeaderValue(fastResult.headers, "retry-after")

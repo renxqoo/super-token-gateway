@@ -2,6 +2,7 @@ import { GatewayError } from "@gateway/contracts";
 import type { HydratedCandidate } from "../proxy-state.ts";
 import { resolveRouteUpstreamProtocol } from "../upstream.ts";
 import type { InferenceRequest } from "./types.ts";
+import { adaptiveOrdering } from "./adaptive-routing.ts";
 
 export function selectInferenceRoutes(request: InferenceRequest) {
   const { deps, state, snap, model, operation, billingAccount } = request;
@@ -62,11 +63,13 @@ export function selectInferenceRoutes(request: InferenceRequest) {
     hydrated = filtered;
   }
 
+  const adaptive = adaptiveOrdering(request, baseHydrated);
   const selected = deps.router.selectCandidates(
     model.name,
     hydrated,
     model.routing_strategy,
     operation,
+    adaptive?.ordering,
   );
   if (selected.length === 0) {
     revokedRoute?.throwIfAborted();
@@ -105,6 +108,7 @@ export function selectInferenceRoutes(request: InferenceRequest) {
   };
   return {
     selected,
+    adaptive,
     releaseAllPendingProbes,
     releaseProbeFor,
     markProbeCompleted,

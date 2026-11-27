@@ -8,10 +8,89 @@ import type {
   FundingOperationRecord,
 } from "./types.ts";
 
+function requestIdBoundary(time: Date): string {
+  const timestamp = time.getTime();
+  if (!Number.isFinite(timestamp) || timestamp < 0 || timestamp > 0xffffffffffff) {
+    throw new Error("The report timestamp is out of UUIDv7 range");
+  }
+  const hex = timestamp.toString(16).padStart(12, "0");
+  return `${hex.slice(0, 8)}-${hex.slice(8)}-7000-8000-000000000000`;
+}
+
 export function createLedgerQueries(db: SQL) {
   const orm = createDrizzle(db);
 
   return {
+    async getRoutingCostReport({ model, from, to }: { model: string; from: Date; to: Date }) {
+      const durationMs = to.getTime() - from.getTime();
+      if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 3_600_000) {
+        throw new Error(
+          "The routing cost report requires an increasing window of at most one hour",
+        );
+      }
+      const startId = requestIdBoundary(from);
+      const endId = requestIdBoundary(to);
+
+      return db.begin(async (tx) => {
+        await tx`SET TRANSACTION READ ONLY`;
+        await tx`SET LOCAL statement_timeout = '5s'`;
+        const [report] = await tx<
+          {
+            cohort_requests: number;
+            currencies: {
+              currency: string | null;
+              supplier_cost_atoms: string;
+              unknown_reserved_atoms: string;
+              unknown_attempts: number;
+            }[];
+          }[]
+        >`
+          WITH cohort AS MATERIALIZED (
+            SELECT request_id, supplier_holds
+            FROM public.billing_holds
+            WHERE model = ${model} AND operation = 'chat'
+              AND request_id >= ${startId}::uuid AND request_id < ${endId}::uuid
+              AND substring(request_id::text, 15, 1) = '7'
+          ), charges AS MATERIALIZED (
+            SELECT charge.request_id, charge.supplier_currency, charge.supplier_cost_atoms,
+                   charge.supplier_journal_id
+            FROM cohort JOIN public.billing_charges charge USING (request_id)
+          ), expenses AS (
+            SELECT supplier_currency AS currency, supplier_cost_atoms AS atoms
+            FROM charges WHERE supplier_currency IS NOT NULL OR supplier_cost_atoms <> 0
+            UNION ALL
+            SELECT entry.currency, entry.atoms
+            FROM cohort JOIN public.ledger_entries entry USING (request_id)
+            WHERE entry.side = 'SUPPLIER' AND entry.kind = 'SUPPLIER_COST'
+              AND entry.account = 'upstream:expense'
+              AND starts_with(entry.reference, 'supplier_attempt_resolution:')
+              AND NOT EXISTS (
+                SELECT 1 FROM charges
+                WHERE charges.request_id = entry.request_id AND charges.supplier_journal_id = entry.journal_id
+              )
+          ), cost AS (
+            SELECT currency, sum(atoms) AS atoms FROM expenses GROUP BY currency
+          ), unresolved AS (
+            SELECT attempt->>'currency' AS currency, sum((attempt->>'held_atoms')::numeric) AS atoms,
+                   count(*)::int AS attempts
+            FROM cohort CROSS JOIN LATERAL jsonb_array_elements(supplier_holds) attempt
+            WHERE attempt->>'state' = 'UNKNOWN'
+            GROUP BY attempt->>'currency'
+          )
+          SELECT (SELECT count(*)::int FROM cohort) AS cohort_requests, (
+            SELECT coalesce(jsonb_agg(jsonb_build_object(
+              'currency', currency,
+              'supplier_cost_atoms', coalesce(cost.atoms, 0)::text,
+              'unknown_reserved_atoms', coalesce(unresolved.atoms, 0)::text,
+              'unknown_attempts', coalesce(unresolved.attempts, 0)
+            ) ORDER BY currency), '[]'::jsonb)
+            FROM cost FULL JOIN unresolved USING (currency)
+          ) AS currencies
+        `;
+        return report!;
+      });
+    },
+
     async listCharges(input: {
       billing_account_id?: string;
       api_key_id?: string;
