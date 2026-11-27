@@ -38,10 +38,9 @@ export {
 
 export {
   BedrockEventStreamDecoder,
-  extractChunkTextFromEncodedSse,
-  inspectAnthropicBlockEvent,
-  stripTextFromSseChunk,
+  splitSseChunkText,
   buildTextDeltaSse,
+  type SplitSseChunkResult,
 } from "./upstream-stream.ts";
 
 const encoder = new TextEncoder();
@@ -54,6 +53,7 @@ type CachedProviderPlan = {
   extraHeaderEntries: readonly [string, string][];
   staticEndpoints: Map<string, URL>;
   hasRequestPolicy: boolean;
+  payloadPreservesMetering: boolean;
   authHeaderKey: string | null;
   authPrefix: string;
   lastSecret: string | undefined;
@@ -177,6 +177,12 @@ function getProviderPlan(
         : null;
   const authPrefix =
     auth.scheme === "bearer" ? "Bearer " : auth.scheme === "header" ? (auth.prefix ?? "") : "";
+  const cfg = resolved.kind === "DECLARATIVE" ? resolved.config : null;
+  const payloadPreservesMetering =
+    cfg !== null &&
+    overrides.request_transforms.length === 0 &&
+    (cfg.model_field === undefined || cfg.model_field === null || cfg.model_field === "model") &&
+    (cfg.stream_field === undefined || cfg.stream_field === null || cfg.stream_field === "stream");
   const plan: CachedProviderPlan = {
     snapshot,
     channel,
@@ -185,6 +191,7 @@ function getProviderPlan(
     extraHeaderEntries,
     staticEndpoints: new Map(),
     hasRequestPolicy: Boolean(route.request_policy && Object.keys(route.request_policy).length > 0),
+    payloadPreservesMetering,
     authHeaderKey,
     authPrefix,
     lastSecret: undefined,
@@ -220,6 +227,7 @@ export type PrepareUpstreamOptions = {
   multipartEntries?: readonly [string, string | File][];
   isStream: boolean;
   canMutateClientBody?: boolean;
+  alreadyValidated?: boolean;
   estimateInputTokens?: boolean;
   vertexTokens: VertexTokens;
   wasmExecutor: WasmRuntimeExecutor | null;
@@ -253,25 +261,6 @@ export function tryPrepareUpstreamRequestSync(
   const usageDialect = resolved.config.usage_dialect;
   const isBedrockStream = isStream && resolved.config.stream_framing === "bedrock_eventstream";
 
-  const conversionMode: ConversionMode =
-    route.request_policy?.conversion_mode === "compat" ? "compat" : "strict";
-  const payloadOpts: Parameters<typeof buildPreparedPayload>[0] = {
-    resolved,
-    merged: mergedOverrides,
-    operation,
-    upstreamProtocol,
-    upstreamModel: route.upstream_model,
-    clientBody,
-    isStream,
-    conversionMode,
-  };
-  if (options.canMutateClientBody) payloadOpts.canMutateClientBody = true;
-  if (options.onFieldDropped) payloadOpts.onFieldDropped = options.onFieldDropped;
-  if (options.onFieldRejected) payloadOpts.onFieldRejected = options.onFieldRejected;
-  if (options.outputBound !== undefined) payloadOpts.outputBound = options.outputBound;
-  const { payload, droppedFields } = buildPreparedPayload(payloadOpts);
-  validateMeteredRequest(payload, upstreamProtocol ?? operation);
-
   const endpointKey = `${operation}:${isStream ? 1 : 0}`;
   let url = staticEndpoints.get(endpointKey);
   if (!url) {
@@ -293,6 +282,31 @@ export function tryPrepareUpstreamRequestSync(
       );
     }
     staticEndpoints.set(endpointKey, url);
+  }
+
+  const conversionMode: ConversionMode =
+    route.request_policy?.conversion_mode === "compat" ? "compat" : "strict";
+  const payloadOpts: Parameters<typeof buildPreparedPayload>[0] = {
+    resolved,
+    merged: mergedOverrides,
+    operation,
+    upstreamProtocol,
+    upstreamModel: route.upstream_model,
+    clientBody,
+    isStream,
+    conversionMode,
+  };
+  if (options.canMutateClientBody) payloadOpts.canMutateClientBody = true;
+  if (options.onFieldDropped) payloadOpts.onFieldDropped = options.onFieldDropped;
+  if (options.onFieldRejected) payloadOpts.onFieldRejected = options.onFieldRejected;
+  if (options.outputBound !== undefined) payloadOpts.outputBound = options.outputBound;
+  const { payload, droppedFields } = buildPreparedPayload(payloadOpts);
+  if (!(
+    options.alreadyValidated &&
+    plan.payloadPreservesMetering &&
+    (upstreamProtocol === null || upstreamProtocol === operation)
+  )) {
+    validateMeteredRequest(payload, upstreamProtocol ?? operation);
   }
 
   const headers: Record<string, string> = {};
@@ -432,6 +446,7 @@ export async function prepareUpstreamRequest(
     clientBody,
     isStream,
     conversionMode,
+    ...(options.canMutateClientBody ? { canMutateClientBody: true } : {}),
     ...(options.onFieldDropped ? { onFieldDropped: options.onFieldDropped } : {}),
     ...(options.onFieldRejected ? { onFieldRejected: options.onFieldRejected } : {}),
     ...(options.outputBound === undefined ? {} : { outputBound: options.outputBound }),
@@ -458,7 +473,13 @@ export async function prepareUpstreamRequest(
         err instanceof Error ? err.message : "Failed to render provider endpoint URL",
       );
     }
-    validateMeteredRequest(payload, upstreamProtocol ?? operation);
+    if (!(
+      options.alreadyValidated &&
+      plan.payloadPreservesMetering &&
+      (upstreamProtocol === null || upstreamProtocol === operation)
+    )) {
+      validateMeteredRequest(payload, upstreamProtocol ?? operation);
+    }
     bodyBytes = encoder.encode(stringifyExact(payload));
   } else {
     let wasmOut: Awaited<ReturnType<typeof invokeWasmProviderRequest>>;

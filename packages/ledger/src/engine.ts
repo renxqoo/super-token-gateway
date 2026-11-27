@@ -42,7 +42,7 @@ export function createLedgerEngine(db: SQL, options: LedgerOptions = {}) {
     rememberProviderRequestId: holds.rememberProviderRequestId,
     sweepTimedOutHolds: holds.sweepTimedOutHolds,
     ...createWalletOperations(db, orm, leases.invalidateWallet),
-    ...createSupplierFunds(db, orm),
+    ...createSupplierFunds(db),
     ...createReconciliation(db, leases.notifyDetachedLocal),
     ...createEvidenceReconciliation(db, leases.notifyDetachedLocal),
     ...createOutbox(orm),

@@ -1,7 +1,5 @@
 import type { SQL } from "bun";
-import { and, eq, sql } from "drizzle-orm";
 import { DomainError } from "@gateway/kernel";
-import { supplierCells, supplierRootBalances, type LedgerDrizzle } from "./schema.ts";
 import type {
   AdjustSupplierBalanceInput,
   AdjustSupplierBalanceResult,
@@ -18,7 +16,7 @@ import {
   type SupplierCellRow,
 } from "./funds.ts";
 
-export function createSupplierFunds(db: SQL, orm: LedgerDrizzle) {
+export function createSupplierFunds(db: SQL) {
   return {
     async rechargeSupplier(input: RechargeSupplierInput): Promise<{
       operation_id: string;
@@ -90,7 +88,15 @@ export function createSupplierFunds(db: SQL, orm: LedgerDrizzle) {
           SET balance_atoms = 0, revision = revision + 1
           WHERE account_id = ${input.account_id} AND currency = ${input.currency}
         `;
-        const total = cells.reduce((acc, c) => acc + c.balance_atoms, 0n);
+        const [leaseSpend] = await tx<{ spent: string }[]>`
+          SELECT coalesce(sum(spent_atoms), 0)::text AS spent
+          FROM public.supplier_leases
+          WHERE account_id = ${input.account_id}::uuid
+            AND currency = ${input.currency}
+            AND state = 'ACTIVE'
+        `;
+        const deferredSpent = BigInt(leaseSpend?.spent ?? "0");
+        const total = cells.reduce((acc, c) => acc + c.balance_atoms, 0n) - deferredSpent;
         const opId = crypto.randomUUID();
         await insertJournalLines(tx, [
           {
@@ -283,11 +289,34 @@ export function createSupplierFunds(db: SQL, orm: LedgerDrizzle) {
           WHERE account_id = ${input.account_id}::uuid AND currency = ${input.currency}
         `;
 
-        const totalBalance = rootBal + cells.reduce((acc, c) => acc + c.balance_atoms, 0n);
-        const totalReserved = cells.reduce((acc, c) => acc + c.reserved_atoms, 0n);
+        const leaseSpendRows = await tx<{ cell: number; spent: string }[]>`
+          SELECT cell, coalesce(sum(spent_atoms), 0)::text AS spent
+          FROM public.supplier_leases
+          WHERE account_id = ${input.account_id}::uuid
+            AND currency = ${input.currency}
+            AND state = 'ACTIVE'
+            AND spent_atoms > 0
+          GROUP BY cell
+        `;
+        const deferredByCell = new Map<number, bigint>();
+        let totalDeferredSpent = 0n;
+        for (const r of leaseSpendRows) {
+          const spent = BigInt(r.spent);
+          deferredByCell.set(Number(r.cell), spent);
+          totalDeferredSpent += spent;
+        }
+        const totalBalance =
+          rootBal + cells.reduce((acc, c) => acc + c.balance_atoms, 0n) - totalDeferredSpent;
+        const totalReserved =
+          cells.reduce((acc, c) => acc + c.reserved_atoms, 0n) - totalDeferredSpent;
         const breached =
           totalBalance < 0n ||
-          cells.some((c) => c.balance_atoms < 0n || c.balance_atoms < c.reserved_atoms);
+          cells.some((c) => {
+            const deferred = deferredByCell.get(c.cell) ?? 0n;
+            const liveBalance = c.balance_atoms - deferred;
+            const liveReserved = c.reserved_atoms - deferred;
+            return liveBalance < 0n || liveBalance < liveReserved;
+          });
 
         if (breached && accountState === "ACTIVE") {
           await tx`
@@ -413,37 +442,56 @@ export function createSupplierFunds(db: SQL, orm: LedgerDrizzle) {
       accountId: string,
       currency: string,
     ): Promise<{ balance_atoms: string; reserved_atoms: string; spent_atoms: string }> {
-      const [rootRows, cellRows] = await Promise.all([
-        orm
-          .select({
-            balanceAtoms: supplierRootBalances.balanceAtoms,
-            spentAtoms: supplierRootBalances.spentAtoms,
-          })
-          .from(supplierRootBalances)
-          .where(
-            and(
-              eq(supplierRootBalances.accountId, accountId),
-              eq(supplierRootBalances.currency, currency),
-            ),
-          ),
-        orm
-          .select({
-            bal: sql<string>`coalesce(sum(${supplierCells.balanceAtoms}), 0)::text`,
-            res: sql<string>`coalesce(sum(${supplierCells.reservedAtoms}), 0)::text`,
-            spent: sql<string>`coalesce(sum(${supplierCells.spentAtoms}), 0)::text`,
-          })
-          .from(supplierCells)
-          .where(and(eq(supplierCells.accountId, accountId), eq(supplierCells.currency, currency))),
-      ]);
-      const rootBal = BigInt(rootRows[0]?.balanceAtoms ?? "0");
-      const rootSpent = BigInt(rootRows[0]?.spentAtoms ?? "0");
-      const cellBal = BigInt(cellRows[0]?.bal ?? "0");
-      const cellRes = BigInt(cellRows[0]?.res ?? "0");
-      const cellSpent = BigInt(cellRows[0]?.spent ?? "0");
+      const [row] = await db<
+        {
+          root_bal: string;
+          root_spent: string;
+          cell_bal: string;
+          cell_res: string;
+          cell_spent: string;
+          lease_spent: string;
+        }[]
+      >`
+        SELECT
+          coalesce((
+            SELECT r.balance_atoms
+            FROM public.supplier_root_balances r
+            WHERE r.account_id = ${accountId}::uuid AND r.currency = ${currency}
+          ), 0)::text AS root_bal,
+          coalesce((
+            SELECT r.spent_atoms
+            FROM public.supplier_root_balances r
+            WHERE r.account_id = ${accountId}::uuid AND r.currency = ${currency}
+          ), 0)::text AS root_spent,
+          coalesce(c.bal, 0)::text AS cell_bal,
+          coalesce(c.res, 0)::text AS cell_res,
+          coalesce(c.spent, 0)::text AS cell_spent,
+          coalesce((
+            SELECT sum(sl.spent_atoms)
+            FROM public.supplier_leases sl
+            WHERE sl.account_id = ${accountId}::uuid
+              AND sl.currency = ${currency}
+              AND sl.state = 'ACTIVE'
+          ), 0)::text AS lease_spent
+        FROM (
+          SELECT
+            coalesce(sum(balance_atoms), 0) AS bal,
+            coalesce(sum(reserved_atoms), 0) AS res,
+            coalesce(sum(spent_atoms), 0) AS spent
+          FROM public.supplier_cells
+          WHERE account_id = ${accountId}::uuid AND currency = ${currency}
+        ) c
+      `;
+      const rootBal = BigInt(row?.root_bal ?? "0");
+      const rootSpent = BigInt(row?.root_spent ?? "0");
+      const cellBal = BigInt(row?.cell_bal ?? "0");
+      const cellRes = BigInt(row?.cell_res ?? "0");
+      const cellSpent = BigInt(row?.cell_spent ?? "0");
+      const leaseSpent = BigInt(row?.lease_spent ?? "0");
       return {
-        balance_atoms: (rootBal + cellBal).toString(),
-        reserved_atoms: cellRes.toString(),
-        spent_atoms: (rootSpent + cellSpent).toString(),
+        balance_atoms: (rootBal + cellBal - leaseSpent).toString(),
+        reserved_atoms: (cellRes - leaseSpent).toString(),
+        spent_atoms: (rootSpent + cellSpent + leaseSpent).toString(),
       };
     },
   };

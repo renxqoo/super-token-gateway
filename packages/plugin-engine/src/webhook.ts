@@ -10,7 +10,17 @@ type WebhookCircuitState = {
   inFlight: number;
 };
 
-export type WebhookFetchFn = (url: string, init: RequestInit) => Promise<Response>;
+export type WebhookFastResponse = {
+  fast: true;
+  status: number;
+  headers: Headers | Record<string, string>;
+  body: Uint8Array;
+};
+
+export type WebhookFetchResult =
+  Response | WebhookFastResponse | { fast: false; response: Response };
+
+export type WebhookFetchFn = (url: string, init: RequestInit) => Promise<WebhookFetchResult>;
 
 export type WebhookPluginStats = {
   inFlight: number;
@@ -22,7 +32,7 @@ export type WebhookPluginStats = {
 export type WebhookExecutorStats = Record<string, WebhookPluginStats>;
 
 const DEFAULT_WEBHOOK_TIMEOUT_MS = 200;
-const DEFAULT_WEBHOOK_MAX_CONCURRENCY = 64;
+const DEFAULT_WEBHOOK_MAX_CONCURRENCY = 256;
 const DEFAULT_WEBHOOK_MAX_RESPONSE_BYTES = 1_048_576;
 const utf8Decoder = new TextDecoder();
 const sanitizedWebhookHeaders = new WeakMap<WebhookPluginConfig, Record<string, string>>();
@@ -252,20 +262,34 @@ export class WebhookPluginExecutor {
     signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
-      const response = await this.fetchImpl(cfg.url, {
+      const rawResult = await this.fetchImpl(cfg.url, {
         method: "POST",
         headers: webhookHeadersFor(cfg),
         body: JSON.stringify(input),
         signal: controller.signal,
       });
       signal?.throwIfAborted();
-      if (!response.ok) {
-        void response.body?.cancel().catch(() => undefined);
-        const kind: PluginOutcomeKind =
-          response.status >= 500 || response.status === 429 ? "host_capacity" : "plugin_fault";
-        return recordFailure(kind, `webhook_http_${response.status}`);
+      let rawText: string;
+      if (!(rawResult instanceof Response) && rawResult.fast) {
+        if (rawResult.status < 200 || rawResult.status >= 300) {
+          const kind: PluginOutcomeKind =
+            rawResult.status >= 500 || rawResult.status === 429 ? "host_capacity" : "plugin_fault";
+          return recordFailure(kind, `webhook_http_${rawResult.status}`);
+        }
+        if (rawResult.body.byteLength > maxResponseBytes) {
+          throw new Error("webhook_response_too_large");
+        }
+        rawText = rawResult.body.byteLength === 0 ? "" : utf8Decoder.decode(rawResult.body);
+      } else {
+        const response = rawResult instanceof Response ? rawResult : rawResult.response;
+        if (!response.ok) {
+          void response.body?.cancel().catch(() => undefined);
+          const kind: PluginOutcomeKind =
+            response.status >= 500 || response.status === 429 ? "host_capacity" : "plugin_fault";
+          return recordFailure(kind, `webhook_http_${response.status}`);
+        }
+        rawText = await readBoundedResponseText(response, maxResponseBytes);
       }
-      const rawText = await readBoundedResponseText(response, maxResponseBytes);
       signal?.throwIfAborted();
       const body = JSON.parse(rawText) as Record<string, unknown>;
       const action = body?.action;

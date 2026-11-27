@@ -72,6 +72,21 @@ export function createFfiWasmtimeExecutor(options: {
   const compiled = new Map<string, { digest: string; handle: NonNullable<typeof engine> }>();
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+  const outPtrHolder = new BigUint64Array(1);
+  const outLenHolder = new BigUint64Array(1);
+  const errBuf = new Uint8Array(512);
+  const errBufLen = BigInt(errBuf.byteLength);
+  const encodedHooks = new Map<WasmCallableHook, { bytes: Uint8Array; len: bigint }>();
+
+  function getHookBytes(hook: WasmCallableHook): { bytes: Uint8Array; len: bigint } {
+    let cached = encodedHooks.get(hook);
+    if (!cached) {
+      const bytes = encoder.encode(hook);
+      cached = { bytes, len: BigInt(bytes.byteLength) };
+      encodedHooks.set(hook, cached);
+    }
+    return cached;
+  }
 
   function readCString(buf: Uint8Array): string {
     const zero = buf.indexOf(0);
@@ -95,13 +110,13 @@ export function createFfiWasmtimeExecutor(options: {
         lib.symbols.stg_wasm_module_free(existing.handle);
         compiled.delete(pluginId);
       }
-      const errBuf = new Uint8Array(512);
+      errBuf[0] = 0;
       const handle = lib.symbols.stg_wasm_module_compile(
         engine,
         ptr(wasmBytes),
         BigInt(wasmBytes.byteLength),
         ptr(errBuf),
-        BigInt(errBuf.byteLength),
+        errBufLen,
       );
       if (!handle) {
         throw new WasmPluginFaultError(
@@ -125,15 +140,15 @@ export function createFfiWasmtimeExecutor(options: {
           `WASM plugin not compiled: ${pluginId}`,
         );
       }
-      const hookBytes = encoder.encode(hook);
-      const outPtrHolder = new BigUint64Array(1);
-      const outLenHolder = new BigUint64Array(1);
-      const errBuf = new Uint8Array(512);
+      const hookBuf = getHookBytes(hook);
+      outPtrHolder[0] = 0n;
+      outLenHolder[0] = 0n;
+      errBuf[0] = 0;
       const rc = lib.symbols.stg_wasm_invoke(
         engine,
         mod.handle,
-        ptr(hookBytes),
-        BigInt(hookBytes.byteLength),
+        ptr(hookBuf.bytes),
+        hookBuf.len,
         input.byteLength > 0 ? ptr(input) : null,
         BigInt(input.byteLength),
         BigInt(invokeOptions.fuelBudget),
@@ -141,7 +156,7 @@ export function createFfiWasmtimeExecutor(options: {
         ptr(outPtrHolder),
         ptr(outLenHolder),
         ptr(errBuf),
-        BigInt(errBuf.byteLength),
+        errBufLen,
       );
       if (rc !== 0) {
         const message = readCString(errBuf);

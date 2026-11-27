@@ -3,6 +3,12 @@ import { once } from "node:events";
 import { createGatewayRuntime } from "@gateway/gateway";
 import { ClusterCoordinator } from "@gateway/runtime";
 import {
+  BATCH_ACQUIRE_LUA,
+  buildBatchAcquireArgs,
+  createQuotaKeyCache,
+  evalPermitPrepared,
+} from "../../packages/runtime/src/cluster-redis.ts";
+import {
   db,
   internalCall,
   makeConfig,
@@ -612,6 +618,145 @@ export function registerPermitCases() {
       control.close();
       await runtime.close();
       await upstream.stop(true);
+    }
+  });
+
+  test("large single-scope Redis batches enforce IP limits before account quota and chunk >1000-arg ZADD and ZREM operations", async () => {
+    const admin = new Bun.RedisClient(redisUrl, { autoReconnect: false });
+    const namespace = `large-batch-${crypto.randomUUID()}`;
+    const coord = new ClusterCoordinator({ redisUrl, namespace });
+    const heldPermits: { release: () => void }[] = [];
+    const luaKeys = createQuotaKeyCache(namespace)("lua-chunked");
+    const luaIpKey = `${namespace}:ingress:ip:198.51.100.89`;
+    try {
+      await Promise.all([coord.start(), admin.connect()]);
+      const tight = { rpm: 520, tpm: 5_200, concurrency: 520 };
+      const blockedIp = { ip: "198.51.100.77", limit: 5, windowMs: 60_000, timeoutMs: 2_000 };
+      const allowedIp = { ip: "198.51.100.78", limit: 1_000, windowMs: 60_000, timeoutMs: 2_000 };
+
+      const firstWave = await Promise.all([
+        ...Array.from({ length: 20 }, () =>
+          coord.acquireRateLimit("hot-acct", tight, 10, 60_000, undefined, blockedIp),
+        ),
+        ...Array.from({ length: 260 }, () =>
+          coord.acquireRateLimit("hot-acct", tight, 10, 60_000, undefined, allowedIp),
+        ),
+        ...Array.from({ length: 265 }, () => coord.acquireRateLimit("hot-acct", tight, 10, 60_000)),
+      ]);
+
+      let okCount = 0;
+      let ipDeniedCount = 0;
+      let concDeniedCount = 0;
+      for (const res of firstWave) {
+        if (res.ok) {
+          okCount++;
+          heldPermits.push(res);
+        } else if (res.reason === "ip_rate_limited") {
+          expect(res.retryAfterMs).toBeGreaterThan(0);
+          ipDeniedCount++;
+        } else if (res.reason === "concurrency") {
+          concDeniedCount++;
+        } else {
+          throw new Error(`Unexpected acquire failure reason: ${res.reason}`);
+        }
+      }
+      expect(okCount).toBe(520);
+      expect(ipDeniedCount).toBe(15);
+      expect(concDeniedCount).toBe(10);
+      expect(Number(await admin.send("ZCARD", [`${namespace}:rl:conc:hot-acct`]))).toBe(520);
+      expect(await admin.send("GET", [`${namespace}:rl:rpm:hot-acct`])).toBe("520");
+      expect(await admin.send("GET", [`${namespace}:rl:tpm:hot-acct`])).toBe("5200");
+      expect(await admin.send("GET", [`${namespace}:ingress:ip:${blockedIp.ip}`])).toBe("5");
+
+      while (heldPermits.length > 0) heldPermits.pop()!.release();
+      const secondLimits = { rpm: 1_040, tpm: 10_400, concurrency: 520 };
+      const secondWave = await Promise.all(
+        Array.from({ length: 520 }, () =>
+          coord.acquireRateLimit("hot-acct", secondLimits, 10, 60_000),
+        ),
+      );
+      for (const res of secondWave) {
+        expect(res.ok).toBe(true);
+        if (res.ok) heldPermits.push(res);
+      }
+      expect(Number(await admin.send("ZCARD", [`${namespace}:rl:conc:hot-acct`]))).toBe(520);
+      expect(await admin.send("GET", [`${namespace}:rl:rpm:hot-acct`])).toBe("1040");
+      expect(await admin.send("GET", [`${namespace}:rl:tpm:hot-acct`])).toBe("10400");
+      while (heldPermits.length > 0) heldPermits.pop()!.release();
+      await expectPermitReleased(admin, `${namespace}:rl:conc:hot-acct`);
+
+      const makeLuaItem = (
+        member: string,
+        concurrency: string,
+        ingressIp?: { ip: string; limit: number; windowMs: number; timeoutMs: number },
+      ) => ({
+        keys: luaKeys,
+        rpm: "2000",
+        tpm: "20000",
+        concurrency,
+        estimatedTokens: "2",
+        leaseTtlStr: "60000",
+        member,
+        ...(ingressIp ? { ingressIp } : {}),
+      });
+      const luaBlockedIp = { ip: "198.51.100.89", limit: 2, windowMs: 60_000, timeoutMs: 2_000 };
+      const chunkedAddItems = [
+        ...Array.from({ length: 5 }, (_, i) => makeLuaItem(`la-${i}`, "550", luaBlockedIp)),
+        ...Array.from({ length: 548 }, (_, i) => makeLuaItem(`lb-${i}`, "550")),
+      ];
+      const addBuilt = buildBatchAcquireArgs(
+        chunkedAddItems,
+        undefined,
+        (ip) => `${namespace}:ingress:ip:${ip}`,
+      );
+      const addRes = (await evalPermitPrepared(
+        admin,
+        BATCH_ACQUIRE_LUA,
+        addBuilt.shaArgs,
+      )) as number[];
+      expect(addRes.length).toBe(553);
+      expect(addRes.filter((code) => code === 0).length).toBe(550);
+      expect(addRes.slice(2, 5).every((code) => code < 0)).toBe(true);
+      expect(Number(await admin.send("ZCARD", [luaKeys.concKey]))).toBe(550);
+      expect(await admin.send("GET", [luaKeys.rpmKey])).toBe("550");
+      expect(await admin.send("GET", [luaKeys.tpmKey])).toBe("1100");
+      expect(await admin.send("GET", [luaIpKey])).toBe("2");
+
+      const secondLuaItems = Array.from({ length: 550 }, (_, i) => makeLuaItem(`lc-${i}`, "1100"));
+      const secondLuaBuilt = buildBatchAcquireArgs(secondLuaItems, undefined);
+      const secondLuaRes = (await evalPermitPrepared(
+        admin,
+        BATCH_ACQUIRE_LUA,
+        secondLuaBuilt.shaArgs,
+      )) as number[];
+      expect(secondLuaRes.every((code) => code === 0)).toBe(true);
+      expect(Number(await admin.send("ZCARD", [luaKeys.concKey]))).toBe(1_100);
+
+      const allLuaMembers = [
+        "la-0",
+        "la-1",
+        ...Array.from({ length: 548 }, (_, i) => `lb-${i}`),
+        ...Array.from({ length: 550 }, (_, i) => `lc-${i}`),
+      ];
+      const relGroups = new Map<string, string[]>([[luaKeys.concKey, allLuaMembers]]);
+      const remBuilt = buildBatchAcquireArgs([makeLuaItem("final-slot", "1")], relGroups);
+      const remRes = (await evalPermitPrepared(
+        admin,
+        BATCH_ACQUIRE_LUA,
+        remBuilt.shaArgs,
+      )) as number[];
+      expect(remRes).toEqual([0]);
+      expect(Number(await admin.send("ZCARD", [luaKeys.concKey]))).toBe(1);
+      expect(await admin.send("ZSCORE", [luaKeys.concKey, "final-slot"])).not.toBeNull();
+      expect(await admin.send("ZSCORE", [luaKeys.concKey, "la-0"])).toBeNull();
+      expect(await admin.send("ZSCORE", [luaKeys.concKey, "lc-549"])).toBeNull();
+    } finally {
+      while (heldPermits.length > 0) heldPermits.pop()!.release();
+      await admin
+        .send("DEL", [luaKeys.rpmKey, luaKeys.tpmKey, luaKeys.concKey, luaIpKey])
+        .catch(() => undefined);
+      admin.close();
+      await coord.close();
     }
   });
 }

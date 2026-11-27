@@ -144,15 +144,21 @@ export class PluginPipelineEngine {
     input: PluginHookInput,
     priority: WasmInvokePriority,
     signal?: AbortSignal,
+    knownTextBytes?: number,
   ): Promise<PluginDecision> {
     this.wasm!.compile(plugin.id, plugin.digest, plugin.wasm_bytes!);
     const payloadBytes = encoder.encode(JSON.stringify(input));
-    const textBytes = encoder.encode(input.text).byteLength;
+    const perByte = manifest.fuel_per_byte ?? 0;
+    const fuelBudget =
+      perByte > 0
+        ? this.computeFuelBudget(manifest, knownTextBytes ?? Buffer.byteLength(input.text, "utf8"))
+        : (manifest.fuel_budget ?? 2_000_000);
     const rawOut = await this.wasm!.invoke(plugin.id, input.hook, payloadBytes, {
-      fuelBudget: this.computeFuelBudget(manifest, textBytes),
+      fuelBudget,
       maxMemoryBytes: manifest.max_memory_bytes ?? 32 * 1024 * 1024,
       priority,
       tenantId: input.billing_account_id,
+      transferInput: true,
       ...(signal ? { signal } : {}),
     });
     signal?.throwIfAborted();
@@ -176,6 +182,35 @@ export class PluginPipelineEngine {
       };
     }
     throw new WasmPluginFaultError("wasm_execution_failed", "Invalid WASM plugin reply");
+  }
+
+  hasActiveHook(
+    hook: PluginHook,
+    steps: readonly PluginPipelineStep[],
+    plugins: ReadonlyMap<string, PluginRecord>,
+  ): boolean {
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i]!;
+      if (step.enabled === false) continue;
+      const plugin = plugins.get(step.plugin_id);
+      if (!plugin || !plugin.enabled || plugin.capability !== "CONTENT") return true;
+      const manifest = plugin.manifest as Partial<WasmPluginManifest>;
+      if (plugin.kind === "WEBHOOK") {
+        if (!plugin.webhook_config) continue;
+        if (
+          Array.isArray(manifest.hooks) &&
+          manifest.hooks.length > 0 &&
+          !manifest.hooks.includes(hook)
+        ) {
+          continue;
+        }
+        return true;
+      }
+      if (!this.checkIntegrity(plugin).ok) return true;
+      if (Array.isArray(manifest.hooks) && !manifest.hooks.includes(hook)) continue;
+      return true;
+    }
+    return false;
   }
 
   admitOutputPolicies(
@@ -371,13 +406,16 @@ export class PluginPipelineEngine {
     const priority: WasmInvokePriority = input.hook === "on_request" ? "ingress" : "egress";
 
     try {
+      const needsSegmentCheck = input.hook === "on_request" || input.hook === "on_response";
       const maxInputBytes = manifest.max_input_bytes ?? DEFAULT_MAX_INPUT_BYTES;
-      const inputTextBytes = encoder.encode(input.text).byteLength;
+      const inputTextBytes =
+        needsSegmentCheck && input.text.length * 3 > maxInputBytes
+          ? Buffer.byteLength(input.text, "utf8")
+          : undefined;
       const decision =
-        inputTextBytes > maxInputBytes &&
-        (input.hook === "on_request" || input.hook === "on_response")
+        inputTextBytes !== undefined && inputTextBytes > maxInputBytes
           ? await this.invokeWasmSegmented(plugin, manifest, input, priority, maxInputBytes, signal)
-          : await this.invokeWasmOnce(plugin, manifest, input, priority, signal);
+          : await this.invokeWasmOnce(plugin, manifest, input, priority, signal, inputTextBytes);
       if (useCache && decision.outcome_kind === "content_decision") {
         this.setCachedDecision(cacheKey, decision);
       }

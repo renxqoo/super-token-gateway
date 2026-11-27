@@ -24,6 +24,8 @@ import { formatProtocolError } from "@gateway/protocol";
 import {
   ClusterCoordinator,
   createTransport,
+  isValidHttpHeaderName,
+  isValidHttpHeaderValue,
   Lifecycle,
   SmartRouter,
   VertexTokens,
@@ -215,16 +217,81 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
     },
   });
 
+  const webhookUrls = new Map<string, URL>();
+  const webhookHeaderCache = new WeakMap<
+    object,
+    { entries: readonly [string, string][]; valid: boolean }
+  >();
+  const getWebhookUrl = (rawUrl: string): URL => {
+    let parsed = webhookUrls.get(rawUrl);
+    if (!parsed) {
+      if (webhookUrls.size >= 256) webhookUrls.clear();
+      parsed = new URL(rawUrl);
+      webhookUrls.set(rawUrl, parsed);
+    }
+    return parsed;
+  };
+  const prepareWebhookHeaders = (
+    rawHeaders: RequestInit["headers"],
+  ): { headers: RequestInit["headers"]; headersValidated: boolean } => {
+    if (
+      !rawHeaders ||
+      rawHeaders instanceof Headers ||
+      Array.isArray(rawHeaders) ||
+      typeof rawHeaders !== "object"
+    ) {
+      return { headers: rawHeaders, headersValidated: false };
+    }
+    let cached = webhookHeaderCache.get(rawHeaders);
+    if (!cached) {
+      const entries: [string, string][] = [];
+      let valid = true;
+      for (const k in rawHeaders) {
+        const v = rawHeaders[k];
+        if (v === undefined) continue;
+        if (!isValidHttpHeaderName(k) || !isValidHttpHeaderValue(v)) {
+          valid = false;
+          break;
+        }
+        entries.push([k.toLowerCase(), v]);
+      }
+      cached = { entries, valid };
+      webhookHeaderCache.set(rawHeaders, cached);
+    }
+    if (!cached.valid) return { headers: rawHeaders, headersValidated: false };
+    const headers: Record<string, string> = {};
+    for (let i = 0; i < cached.entries.length; i++) {
+      const pair = cached.entries[i]!;
+      headers[pair[0]] = pair[1];
+    }
+    return { headers, headersValidated: true };
+  };
   const webhookExecutor =
     options.webhookExecutor ??
     new WebhookPluginExecutor({
-      fetchImpl: (rawUrl, init) =>
-        transport.fetch(
-          new URL(rawUrl),
-          init,
+      fetchImpl: (rawUrl, init) => {
+        const parsedUrl = getWebhookUrl(rawUrl);
+        const { headers, headersValidated } = prepareWebhookHeaders(init.headers);
+        const fastInit = {
+          ...init,
+          ...(headers !== undefined ? { headers } : {}),
+          headersValidated,
+        };
+        if (!init.signal?.aborted) {
+          const prepared = transport.tryPrepareDispatchSync(
+            parsedUrl,
+            config.allowPrivateUpstreams,
+            config.privateUpstreamCidrs,
+          );
+          if (prepared) return prepared.fetchFast(fastInit);
+        }
+        return transport.fetchFast(
+          parsedUrl,
+          fastInit,
           config.allowPrivateUpstreams,
           config.privateUpstreamCidrs,
-        ),
+        );
+      },
     });
 
   const pluginEngine = new PluginPipelineEngine({

@@ -341,15 +341,34 @@ export function computeFreezeReason(w: WalletRow): string | null {
 
 export function walletAdmissionError(
   w: WalletRow,
+  deferredLeaseSpent = 0n,
 ): { code: "wallet_frozen" | "insufficient_balance"; message: string } | null {
   const freeze = w.freeze_reason ?? computeFreezeReason(w);
   if (freeze !== null) {
     return { code: "wallet_frozen", message: `Wallet frozen: ${freeze}` };
   }
-  if (w.available_atoms + w.reserved_atoms < w.debt_atoms) {
+  if (w.available_atoms + w.reserved_atoms - deferredLeaseSpent < w.debt_atoms) {
     return { code: "insufficient_balance", message: "Wallet has a negative settled balance" };
   }
   return null;
+}
+
+export async function loadDeferredWalletLeaseSpend(
+  tx: SQL,
+  walletIds: readonly string[],
+): Promise<Map<string, bigint>> {
+  const spentByWallet = new Map<string, bigint>();
+  if (walletIds.length === 0) return spentByWallet;
+  const rows = await tx<{ wallet_id: string; spent: string }[]>`
+    SELECT wallet_id::text AS wallet_id, coalesce(sum(spent_atoms), 0)::text AS spent
+    FROM public.wallet_leases
+    WHERE wallet_id = ANY(${walletIds}::uuid[]) AND state = 'ACTIVE' AND spent_atoms > 0
+    GROUP BY wallet_id
+  `;
+  for (const row of rows) {
+    spentByWallet.set(row.wallet_id, BigInt(row.spent));
+  }
+  return spentByWallet;
 }
 
 export function canReserveWalletCredit(w: WalletRow, additional: bigint, existing = 0n): boolean {

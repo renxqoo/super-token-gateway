@@ -11,8 +11,15 @@ export async function auditConservation(db: SQL): Promise<ConservationAudit> {
             sum(credit_atoms) AS credit
           FROM open_holds GROUP BY wallet_id
         ), wallet_grants AS (
-          SELECT wallet_id, sum(remaining_atoms) AS reserved
+          SELECT wallet_id,
+            sum(remaining_atoms + spent_atoms) AS reserved,
+            sum(spent_atoms) AS spent
           FROM public.wallet_leases WHERE state = 'ACTIVE' GROUP BY wallet_id
+        ), wallet_lot_spent AS (
+          SELECT spent_lot_id AS lot_id, sum(spent_atoms) AS spent
+          FROM public.wallet_leases
+          WHERE state = 'ACTIVE' AND spent_atoms > 0
+          GROUP BY spent_lot_id
         ), supplier_claims AS (
           SELECT (entry->>'account_id')::uuid AS account_id,
             entry->>'currency' AS currency, (entry->>'cell')::int AS cell,
@@ -22,8 +29,14 @@ export async function auditConservation(db: SQL): Promise<ConservationAudit> {
           WHERE h.supplier_lease_id IS NULL AND entry->>'state' IN ('HELD', 'UNKNOWN')
           GROUP BY 1, 2, 3
         ), supplier_grants AS (
-          SELECT account_id, currency, cell, sum(remaining_atoms) AS reserved
+          SELECT account_id, currency, cell,
+            sum(remaining_atoms + spent_atoms) AS reserved,
+            sum(spent_atoms) AS spent
           FROM public.supplier_leases WHERE state = 'ACTIVE' GROUP BY account_id, currency, cell
+        ), supplier_lease_spent AS (
+          SELECT account_id, currency, sum(spent) AS spent
+          FROM supplier_grants
+          GROUP BY account_id, currency
         ), key_claims AS (
           SELECT api_key_id, sum(key_reserved_atoms) AS reserved
           FROM open_holds
@@ -39,12 +52,14 @@ export async function auditConservation(db: SQL): Promise<ConservationAudit> {
           GROUP BY entity_id
         ), supplier_totals AS (
           SELECT r.account_id, r.currency,
-            r.balance_atoms + coalesce(sum(c.balance_atoms), 0) AS balance_atoms,
-            r.spent_atoms + coalesce(sum(c.spent_atoms), 0) AS spent_atoms
+            r.balance_atoms + coalesce(sum(c.balance_atoms), 0) - coalesce(sls.spent, 0) AS balance_atoms,
+            r.spent_atoms + coalesce(sum(c.spent_atoms), 0) + coalesce(sls.spent, 0) AS spent_atoms
           FROM public.supplier_root_balances r
           LEFT JOIN public.supplier_cells c
             ON c.account_id = r.account_id AND c.currency = r.currency
-          GROUP BY r.account_id, r.currency, r.balance_atoms, r.spent_atoms
+          LEFT JOIN supplier_lease_spent sls
+            ON sls.account_id = r.account_id AND sls.currency = r.currency
+          GROUP BY r.account_id, r.currency, r.balance_atoms, r.spent_atoms, sls.spent
         ), supplier_ledger AS (
           SELECT entity_id AS account_id, currency,
             coalesce(sum(atoms) FILTER (WHERE account = 'upstream:available'), 0) AS balance_atoms,
@@ -61,10 +76,23 @@ export async function auditConservation(db: SQL): Promise<ConservationAudit> {
           (SELECT count(*) FROM public.wallet_lots
             WHERE issued_atoms <> available_atoms + reserved_atoms + spent_atoms + expired_atoms) +
           (SELECT count(*) FROM public.wallet_leases l
-            WHERE l.state = 'ACTIVE' AND l.remaining_atoms <> coalesce((
-              SELECT sum((entry->>'amount_atoms')::numeric)
-              FROM jsonb_array_elements(l.lot_allocations) entry
-            ), 0)) AS broken_lots,
+            WHERE (l.state = 'ACTIVE' AND (
+                l.remaining_atoms <> coalesce((
+                  SELECT sum((entry->>'amount_atoms')::numeric)
+                  FROM jsonb_array_elements(l.lot_allocations) entry
+                ), 0)
+                OR (l.spent_atoms > 0 AND (
+                  l.spent_lot_id IS NULL
+                  OR NOT EXISTS (
+                    SELECT 1 FROM public.wallet_lots lot
+                    WHERE lot.id = l.spent_lot_id AND lot.wallet_id = l.wallet_id
+                  )
+                ))
+              ))
+              OR (l.state <> 'ACTIVE' AND (l.remaining_atoms <> 0 OR l.spent_atoms <> 0))) +
+          (SELECT count(*) FROM wallet_lot_spent ls
+            LEFT JOIN public.wallet_lots lot ON lot.id = ls.lot_id
+            WHERE lot.id IS NULL OR lot.reserved_atoms < ls.spent) AS broken_lots,
           (SELECT count(*) FROM public.wallets w
             LEFT JOIN (
               SELECT wallet_id, sum(available_atoms) AS avail, sum(reserved_atoms) AS res,
@@ -95,8 +123,9 @@ export async function auditConservation(db: SQL): Promise<ConservationAudit> {
             WHERE k.reserved_atoms <> coalesce(kc.reserved, 0)
           ) AS reservation_mismatches,
           (SELECT count(*) FROM public.wallets w
+            LEFT JOIN wallet_grants g ON g.wallet_id = w.id
             FULL OUTER JOIN customer_ledger cl ON cl.wallet_id = w.id
-            WHERE coalesce(w.available_atoms + w.reserved_atoms, 0) <> coalesce(cl.lot_avail, 0)
+            WHERE coalesce(w.available_atoms + w.reserved_atoms - coalesce(g.spent, 0), 0) <> coalesce(cl.lot_avail, 0)
                OR coalesce(w.expired_atoms, 0) <> coalesce(cl.lot_expired, 0)
                OR coalesce(w.debt_atoms, 0) <> coalesce(cl.debt, 0)
           ) AS customer_ledger_mismatches,

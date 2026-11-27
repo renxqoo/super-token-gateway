@@ -32,18 +32,31 @@ import {
 } from "./key-spend.ts";
 import { createWalletAdministration } from "./wallet-administration.ts";
 import { collectDebtInTx } from "./wallet-debt.ts";
+import {
+  flushActiveWalletLeaseSpendTx,
+  lockActiveWalletLeaseSpendTx,
+  type PendingLeaseSpend,
+} from "./leases.ts";
 
 async function lockChargeContext(
   tx: SQL,
   chargeId: string,
   nowMs: number,
-): Promise<{ wallet: WalletRow; keySpend: KeySpendRow | null }> {
+  lockActiveLeaseSpend = false,
+): Promise<{
+  wallet: WalletRow;
+  keySpend: KeySpendRow | null;
+  pendingLeaseSpend: PendingLeaseSpend[];
+}> {
   const metaRows = await tx`
     SELECT wallet_id, api_key_id FROM public.billing_charges WHERE id = ${chargeId}
   `;
   if (!metaRows.length) throw new Error("Charge not found");
   const walletId = String(metaRows[0]!.wallet_id);
   const apiKeyId = metaRows[0]!.api_key_id ? String(metaRows[0]!.api_key_id) : null;
+  const pendingLeaseSpend = lockActiveLeaseSpend
+    ? await lockActiveWalletLeaseSpendTx(tx, walletId)
+    : [];
   let keySpend: KeySpendRow | null = null;
   if (apiKeyId) {
     const kRows = await tx`
@@ -68,7 +81,7 @@ async function lockChargeContext(
     FOR NO KEY UPDATE
   `;
   if (!wallet) throw new Error("Charge not found");
-  return { wallet: toWalletRow(wallet), keySpend };
+  return { wallet: toWalletRow(wallet), keySpend, pendingLeaseSpend };
 }
 
 export function createWalletOperations(
@@ -93,7 +106,12 @@ export function createWalletOperations(
     return db.begin(async (tx) => {
       const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
       const nowMs = pgNowRow ? Number(pgNowRow.ms) : Date.now();
-      const { wallet, keySpend } = await lockChargeContext(tx, input.charge_id, nowMs);
+      const { wallet, keySpend, pendingLeaseSpend } = await lockChargeContext(
+        tx,
+        input.charge_id,
+        nowMs,
+        true,
+      );
       const chRows = await tx`
           SELECT id, request_id, billing_account_id, wallet_id, api_key_id, model, operation, currency,
             customer_atoms::text, funded_atoms::text, debt_atoms::text, refunded_atoms::text,
@@ -129,6 +147,10 @@ export function createWalletOperations(
       const alreadyRefunded = BigInt(String(ch.refunded_atoms));
       if (atoms > customerAtoms - alreadyRefunded) {
         throw new Error("Refund exceeds remaining refundable charge amount");
+      }
+
+      if (pendingLeaseSpend.length > 0) {
+        await flushActiveWalletLeaseSpendTx(tx, wallet, pendingLeaseSpend);
       }
 
       const chargeDebt = BigInt(String(ch.debt_atoms));
@@ -421,7 +443,12 @@ export function createWalletOperations(
       return db.begin(async (tx) => {
         const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
         const nowMs = pgNowRow ? Number(pgNowRow.ms) : Date.now();
-        const { wallet, keySpend } = await lockChargeContext(tx, input.charge_id, nowMs);
+        const { wallet, keySpend, pendingLeaseSpend } = await lockChargeContext(
+          tx,
+          input.charge_id,
+          nowMs,
+          true,
+        );
         const chRows = await tx`
           SELECT id, request_id, billing_account_id, wallet_id, api_key_id, model, operation, currency,
             customer_atoms::text, debt_atoms::text, created_at
@@ -442,6 +469,9 @@ export function createWalletOperations(
             replayed: true,
             delta_atoms: delta.toString(),
           };
+        }
+        if (pendingLeaseSpend.length > 0) {
+          await flushActiveWalletLeaseSpendTx(tx, wallet, pendingLeaseSpend);
         }
         if (keySpend && Date.parse(String(ch.created_at)) >= keySpend.spend_window_start_ms) {
           keySpend.spent_atoms += delta;
@@ -548,14 +578,20 @@ export function createWalletOperations(
               freeze_reason = ${w.freeze_reason}
           WHERE id = ${w.id}
         `;
+        const [leaseSpend] = await tx<{ spent: string }[]>`
+          SELECT coalesce(sum(spent_atoms), 0)::text AS spent
+          FROM public.wallet_leases
+          WHERE wallet_id = ${w.id}::uuid AND state = 'ACTIVE'
+        `;
+        const deferredSpent = BigInt(leaseSpend?.spent ?? "0");
         return {
           id: w.id,
           billing_account_id: w.billing_account_id,
           currency: w.currency,
           policy: w.policy,
           available_atoms: w.available_atoms.toString(),
-          reserved_atoms: w.reserved_atoms.toString(),
-          spent_atoms: w.spent_atoms.toString(),
+          reserved_atoms: (w.reserved_atoms - deferredSpent).toString(),
+          spent_atoms: (w.spent_atoms + deferredSpent).toString(),
           expired_atoms: w.expired_atoms.toString(),
           debt_atoms: w.debt_atoms.toString(),
           credit_limit_atoms: w.credit_limit_atoms.toString(),

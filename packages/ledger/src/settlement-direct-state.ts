@@ -119,39 +119,43 @@ export async function loadDirectSettlementState({
   }
 
   const approvedHolds = [...holdsByReq.values()].filter((h) => approvedRequests.has(h.request_id));
+  const walletIds = [...new Set(approvedHolds.map((h) => h.wallet_id))].sort();
   const holdsNeedingDetach = approvedHolds.filter(
     (h) => h.wallet_lease_id !== null || h.supplier_lease_id !== null,
   );
-  if (holdsNeedingDetach.length > 0) {
-    const wlIds = [
-      ...new Set(
-        holdsNeedingDetach.map((h) => h.wallet_lease_id).filter((x): x is string => x !== null),
-      ),
-    ].sort();
-    const slIds = [
-      ...new Set(
-        holdsNeedingDetach.map((h) => h.supplier_lease_id).filter((x): x is string => x !== null),
-      ),
-    ].sort();
-    if (wlIds.length > 0) {
-      await tx`SELECT id FROM public.wallet_leases WHERE id = ANY(${wlIds}::uuid[]) ORDER BY id FOR NO KEY UPDATE`;
-    }
-    if (slIds.length > 0) {
-      await tx`SELECT id FROM public.supplier_leases WHERE id = ANY(${slIds}::uuid[]) ORDER BY id FOR NO KEY UPDATE`;
-    }
-    for (const h of holdsNeedingDetach) {
-      const det = await detachHoldFromLeaseTx(tx, h);
-      h.lot_allocations = det.lot_allocations;
-      h.wallet_lease_id = null;
-      h.supplier_lease_id = null;
-      detachedNotifications.push({
-        requestId: h.request_id,
-        wlId: det.detachedWalletLeaseId,
-        heldCust: h.held_atoms,
-        slId: det.detachedSupplierLeaseId,
-        supAtoms: det.detachedSupplierAtoms,
-      });
-    }
+  const wlIds = [
+    ...new Set(
+      holdsNeedingDetach.map((h) => h.wallet_lease_id).filter((x): x is string => x !== null),
+    ),
+  ].sort();
+  const slIds = [
+    ...new Set(
+      holdsNeedingDetach.map((h) => h.supplier_lease_id).filter((x): x is string => x !== null),
+    ),
+  ].sort();
+  if (wlIds.length > 0 || walletIds.length > 0) {
+    await tx`
+      SELECT id FROM public.wallet_leases
+      WHERE id = ANY(${wlIds}::uuid[]) OR (wallet_id = ANY(${walletIds}::uuid[]) AND state = 'ACTIVE')
+      ORDER BY id
+      FOR NO KEY UPDATE
+    `;
+  }
+  if (slIds.length > 0) {
+    await tx`SELECT id FROM public.supplier_leases WHERE id = ANY(${slIds}::uuid[]) ORDER BY id FOR NO KEY UPDATE`;
+  }
+  for (const h of holdsNeedingDetach) {
+    const det = await detachHoldFromLeaseTx(tx, h);
+    h.lot_allocations = det.lot_allocations;
+    h.wallet_lease_id = null;
+    h.supplier_lease_id = null;
+    detachedNotifications.push({
+      requestId: h.request_id,
+      wlId: det.detachedWalletLeaseId,
+      heldCust: h.held_atoms,
+      slId: det.detachedSupplierLeaseId,
+      supAtoms: det.detachedSupplierAtoms,
+    });
   }
 
   const mayHaveExistingCharge =
@@ -209,7 +213,6 @@ export async function loadDirectSettlementState({
     }
   }
 
-  const walletIds = [...new Set(approvedHolds.map((h) => h.wallet_id))].sort();
   const lockedWallets = walletIds.length
     ? await tx`
             SELECT id, billing_account_id, currency, policy,

@@ -233,6 +233,7 @@ async function invokeWasmProviderRaw(
     fuelBudget: config.fuel_budget ?? 5_000_000,
     maxMemoryBytes: config.max_memory_bytes ?? 16 * 1024 * 1024,
     priority: hook === "adapt_request" ? "ingress" : "egress",
+    transferInput: true,
     ...(tenantId ? { tenantId } : {}),
     ...(signal ? { signal } : {}),
   });

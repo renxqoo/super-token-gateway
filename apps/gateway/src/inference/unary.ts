@@ -288,7 +288,11 @@ export async function handleUnaryResponse(
       | undefined;
     let allAudit = preRequestAudit;
 
-    if (cand.route.plugin_pipeline.length > 0 && isConversationalOperation(operation)) {
+    if (
+      cand.route.plugin_pipeline.length > 0 &&
+      isConversationalOperation(operation) &&
+      deps.pluginEngine.hasActiveHook("on_response", cand.route.plugin_pipeline, snap.plugins)
+    ) {
       const respText = extractResponseText(clientJson, operation);
       const postRes = await deps.pluginEngine.runUnary(
         "on_response",

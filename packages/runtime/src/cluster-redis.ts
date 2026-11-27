@@ -42,11 +42,12 @@ export type ActivePermit = {
 
 export const BATCH_ACQUIRE_LUA = `
 local n = tonumber(ARGV[1])
-local ipCount = tonumber(ARGV[2])
-local argStride = ipCount > 0 and 7 or 6
-local ipKeyBase = n * 3
+local scopeCount = tonumber(ARGV[2])
+local ipCount = tonumber(ARGV[3])
+local argStride = ipCount > 0 and 8 or 7
+local ipKeyBase = scopeCount * 3
 local rkStart = ipKeyBase + ipCount + 1
-local ipMetaBase = 3 + n * argStride
+local ipMetaBase = 4 + n * argStride
 if rkStart <= #KEYS then
   local ridx = ipMetaBase + ipCount * 2
   for ri = rkStart, #KEYS do
@@ -56,8 +57,15 @@ if rkStart <= #KEYS then
       redis.call('ZREM', KEYS[ri], ARGV[ridx])
       ridx = ridx + 1
     elseif cnt > 1 then
-      redis.call('ZREM', KEYS[ri], unpack(ARGV, ridx, ridx + cnt - 1))
-      ridx = ridx + cnt
+      local rEnd = ridx + cnt - 1
+      local p = ridx
+      while p <= rEnd do
+        local chunkEnd = p + 999
+        if chunkEnd > rEnd then chunkEnd = rEnd end
+        redis.call('ZREM', KEYS[ri], unpack(ARGV, p, chunkEnd))
+        p = chunkEnd + 1
+      end
+      ridx = rEnd + 1
     end
   end
 end
@@ -65,7 +73,9 @@ local time = redis.call('TIME')
 local nowMs = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 local out = {}
 local concCount = {}
+local concInitial = {}
 local concAdds = {}
+local concMaxExp = {}
 local rpmCur = {}
 local rpmBase = {}
 local rpmDelta = {}
@@ -108,11 +118,10 @@ if ipCount > 0 then
   end
 end
 for i = 1, n do
-  local ki = (i - 1) * 3
-  local ai = 2 + (i - 1) * argStride
+  local ai = 3 + (i - 1) * argStride
   local ipDenied = false
   if ipCount > 0 then
-    local g = tonumber(ARGV[ai + 7])
+    local g = tonumber(ARGV[ai + 8])
     if g > 0 then
       if ipBad[g] then
         out[i] = 4
@@ -127,9 +136,8 @@ for i = 1, n do
     end
   end
   if not ipDenied then
-    local rpmKey = KEYS[ki + 1]
-    local tpmKey = KEYS[ki + 2]
-    local concKey = KEYS[ki + 3]
+    local s = tonumber(ARGV[ai + 7])
+    local ki = (s - 1) * 3
     local rpmLimit = tonumber(ARGV[ai + 1])
     local tpmLimit = tonumber(ARGV[ai + 2])
     local concLimit = tonumber(ARGV[ai + 3])
@@ -137,42 +145,48 @@ for i = 1, n do
     local leaseTtlMs = tonumber(ARGV[ai + 5])
     local member = ARGV[ai + 6]
 
-    local active = concCount[concKey]
+    local active = concCount[s]
     if active == nil then
+      local concKey = KEYS[ki + 3]
       redis.call('ZREMRANGEBYSCORE', concKey, '-inf', nowMs)
       active = redis.call('ZCARD', concKey)
-      concCount[concKey] = active
+      concCount[s] = active
+      concInitial[s] = active
     end
     if active >= concLimit then
       out[i] = 3
     else
-      local curRpm = rpmCur[rpmKey]
+      local curRpm = rpmCur[s]
       if curRpm == nil then
-        curRpm = tonumber(redis.call('GET', rpmKey) or '0')
-        rpmCur[rpmKey] = curRpm
-        rpmBase[rpmKey] = curRpm
+        curRpm = tonumber(redis.call('GET', KEYS[ki + 1]) or '0')
+        rpmCur[s] = curRpm
+        rpmBase[s] = curRpm
       end
       if curRpm >= rpmLimit then
         out[i] = 1
       else
-        local curTpm = tpmCur[tpmKey]
+        local curTpm = tpmCur[s]
         if curTpm == nil then
-          curTpm = tonumber(redis.call('GET', tpmKey) or '0')
-          tpmCur[tpmKey] = curTpm
-          tpmBase[tpmKey] = curTpm
+          curTpm = tonumber(redis.call('GET', KEYS[ki + 2]) or '0')
+          tpmCur[s] = curTpm
+          tpmBase[s] = curTpm
         end
         if curTpm + estTokens > tpmLimit then
           out[i] = 2
         else
-          rpmCur[rpmKey] = curRpm + 1
-          rpmDelta[rpmKey] = (rpmDelta[rpmKey] or 0) + 1
-          tpmCur[tpmKey] = curTpm + estTokens
-          tpmDelta[tpmKey] = (tpmDelta[tpmKey] or 0) + estTokens
-          concCount[concKey] = active + 1
+          rpmCur[s] = curRpm + 1
+          rpmDelta[s] = (rpmDelta[s] or 0) + 1
+          tpmCur[s] = curTpm + estTokens
+          tpmDelta[s] = (tpmDelta[s] or 0) + estTokens
+          concCount[s] = active + 1
           local exp = nowMs + leaseTtlMs
-          local adds = concAdds[concKey]
+          local prevMax = concMaxExp[s]
+          if not prevMax or exp > prevMax then
+            concMaxExp[s] = exp
+          end
+          local adds = concAdds[s]
           if adds == nil then
-            concAdds[concKey] = { exp, member }
+            concAdds[s] = { exp, member }
           else
             local len = #adds
             adds[len + 1] = exp
@@ -185,34 +199,62 @@ for i = 1, n do
   end
 end
 if ipCount > 0 then
-  for g, delta in pairs(ipDelta) do
-    local k = KEYS[ipKeyBase + g]
-    if ipBase[g] == 0 then
-      redis.call('SET', k, delta, 'PX', ipWin[g])
-    else
-      redis.call('INCRBY', k, delta)
+  for g = 1, ipCount do
+    local delta = ipDelta[g]
+    if delta then
+      local k = KEYS[ipKeyBase + g]
+      if ipBase[g] == 0 then
+        redis.call('SET', k, delta, 'PX', ipWin[g])
+      else
+        redis.call('INCRBY', k, delta)
+      end
     end
   end
 end
-for k, delta in pairs(rpmDelta) do
-  local nextVal = redis.call('INCRBY', k, delta)
-  if nextVal == delta or rpmBase[k] == 0 then
-    redis.call('PEXPIRE', k, 60000)
-  end
-end
-for k, delta in pairs(tpmDelta) do
-  if delta > 0 then
+for s = 1, scopeCount do
+  local delta = rpmDelta[s]
+  if delta then
+    local k = KEYS[(s - 1) * 3 + 1]
     local nextVal = redis.call('INCRBY', k, delta)
-    if nextVal == delta or tpmBase[k] == 0 then
+    if nextVal == delta or rpmBase[s] == 0 then
       redis.call('PEXPIRE', k, 60000)
     end
   end
 end
-for k, adds in pairs(concAdds) do
-  redis.call('ZADD', k, unpack(adds))
-  local latest = redis.call('ZREVRANGE', k, 0, 0, 'WITHSCORES')
-  if latest[2] then
-    redis.call('PEXPIREAT', k, math.ceil(tonumber(latest[2])))
+for s = 1, scopeCount do
+  local delta = tpmDelta[s]
+  if delta and delta > 0 then
+    local k = KEYS[(s - 1) * 3 + 2]
+    local nextVal = redis.call('INCRBY', k, delta)
+    if nextVal == delta or tpmBase[s] == 0 then
+      redis.call('PEXPIRE', k, 60000)
+    end
+  end
+end
+for s = 1, scopeCount do
+  local adds = concAdds[s]
+  if adds then
+    local k = KEYS[(s - 1) * 3 + 3]
+    local total = #adds
+    if total <= 1000 then
+      redis.call('ZADD', k, unpack(adds))
+    else
+      local p = 1
+      while p <= total do
+        local chunkEnd = p + 999
+        if chunkEnd > total then chunkEnd = total end
+        redis.call('ZADD', k, unpack(adds, p, chunkEnd))
+        p = chunkEnd + 1
+      end
+    end
+    if concInitial[s] > 0 then
+      local latest = redis.call('ZREVRANGE', k, 0, 0, 'WITHSCORES')
+      if latest[2] then
+        redis.call('PEXPIREAT', k, math.ceil(tonumber(latest[2])))
+      end
+    else
+      redis.call('PEXPIREAT', k, math.ceil(concMaxExp[s]))
+    end
   end
 end
 return out
@@ -328,6 +370,12 @@ return 1
 `;
 export const batchReleaseSha = new Bun.CryptoHasher("sha1").update(BATCH_RELEASE_LUA).digest("hex");
 
+const SMALL_INTS = Array.from({ length: 257 }, (_, i) => String(i));
+
+function smallIntStr(v: number): string {
+  return v >= 0 && v < SMALL_INTS.length ? SMALL_INTS[v]! : String(v);
+}
+
 export function buildBatchAcquireArgs(
   items: {
     keys: KeyTriple;
@@ -343,6 +391,76 @@ export function buildBatchAcquireArgs(
   ingressKeyFor?: (ip: string) => string,
 ): { shaArgs: string[]; minIpTimeoutMs: number | undefined } {
   const n = items.length;
+  const scopeKeys: KeyTriple[] = [];
+  let itemScopeIndices: Int32Array | undefined;
+  let scopeRefIndex: Map<KeyTriple, number> | undefined;
+  let scopeStrIndex: Map<string, number> | undefined;
+  let s0: KeyTriple | undefined;
+  let s1: KeyTriple | undefined;
+  if (n > 0) {
+    s0 = items[0]!.keys;
+    scopeKeys.push(s0);
+  }
+  for (let i = 1; i < n; i++) {
+    const k = items[i]!.keys;
+    if (k === s0) {
+      if (itemScopeIndices) itemScopeIndices[i] = 1;
+      continue;
+    }
+    if (s1 !== undefined && k === s1) {
+      itemScopeIndices![i] = 2;
+      continue;
+    }
+    if (scopeRefIndex) {
+      let idx = scopeRefIndex.get(k);
+      if (idx === undefined) {
+        const sk = `${k.rpmKey}\0${k.tpmKey}\0${k.concKey}`;
+        idx = scopeStrIndex!.get(sk);
+        if (idx === undefined) {
+          scopeKeys.push(k);
+          idx = scopeKeys.length;
+          scopeStrIndex!.set(sk, idx);
+        }
+        scopeRefIndex.set(k, idx);
+      }
+      itemScopeIndices![i] = idx;
+      continue;
+    }
+    if (k.rpmKey === s0!.rpmKey && k.tpmKey === s0!.tpmKey && k.concKey === s0!.concKey) {
+      if (itemScopeIndices) itemScopeIndices[i] = 1;
+      continue;
+    }
+    if (s1 === undefined) {
+      s1 = k;
+      scopeKeys.push(k);
+      itemScopeIndices = new Int32Array(n);
+      itemScopeIndices.fill(1, 0, i);
+      itemScopeIndices[i] = 2;
+      continue;
+    }
+    if (k.rpmKey === s1.rpmKey && k.tpmKey === s1.tpmKey && k.concKey === s1.concKey) {
+      itemScopeIndices![i] = 2;
+      continue;
+    }
+    scopeRefIndex = new Map([
+      [s0!, 1],
+      [s1, 2],
+    ]);
+    scopeStrIndex = new Map([
+      [`${s0!.rpmKey}\0${s0!.tpmKey}\0${s0!.concKey}`, 1],
+      [`${s1.rpmKey}\0${s1.tpmKey}\0${s1.concKey}`, 2],
+    ]);
+    const sk = `${k.rpmKey}\0${k.tpmKey}\0${k.concKey}`;
+    let idx = scopeStrIndex.get(sk);
+    if (idx === undefined) {
+      scopeKeys.push(k);
+      idx = scopeKeys.length;
+      scopeStrIndex.set(sk, idx);
+    }
+    scopeRefIndex.set(k, idx);
+    itemScopeIndices![i] = idx;
+  }
+
   let ipKeys: string[] | undefined;
   let ipLimits: string[] | undefined;
   let ipWindows: string[] | undefined;
@@ -384,13 +502,14 @@ export function buildBatchAcquireArgs(
     }
     itemIpIndices![i] = idx;
   }
+  const scopeCount = scopeKeys.length;
   const ipCount = ipKeys ? ipKeys.length : 0;
   const shaArgs: string[] = [
     batchAcquireSha,
-    String(n * 3 + ipCount + (relGroups ? relGroups.size : 0)),
+    smallIntStr(scopeCount * 3 + ipCount + (relGroups ? relGroups.size : 0)),
   ];
-  for (let i = 0; i < n; i++) {
-    const k = items[i]!.keys;
+  for (let s = 0; s < scopeCount; s++) {
+    const k = scopeKeys[s]!;
     shaArgs.push(k.rpmKey, k.tpmKey, k.concKey);
   }
   if (ipKeys) {
@@ -399,16 +518,11 @@ export function buildBatchAcquireArgs(
   if (relGroups) {
     for (const key of relGroups.keys()) shaArgs.push(key);
   }
-  shaArgs.push(String(n), String(ipCount));
+  shaArgs.push(smallIntStr(n), smallIntStr(scopeCount), smallIntStr(ipCount));
   if (ipCount === 0) {
     for (let i = 0; i < n; i++) {
       const it = items[i]!;
-      shaArgs.push(it.rpm, it.tpm, it.concurrency, it.estimatedTokens, it.leaseTtlStr, it.member);
-    }
-  } else {
-    for (let i = 0; i < n; i++) {
-      const it = items[i]!;
-      const idx = itemIpIndices![i]!;
+      const scopeStr = itemScopeIndices ? smallIntStr(itemScopeIndices[i]!) : "1";
       shaArgs.push(
         it.rpm,
         it.tpm,
@@ -416,7 +530,23 @@ export function buildBatchAcquireArgs(
         it.estimatedTokens,
         it.leaseTtlStr,
         it.member,
-        idx === 0 ? "0" : idx === 1 ? "1" : String(idx),
+        scopeStr,
+      );
+    }
+  } else {
+    for (let i = 0; i < n; i++) {
+      const it = items[i]!;
+      const scopeStr = itemScopeIndices ? smallIntStr(itemScopeIndices[i]!) : "1";
+      const ipIdx = itemIpIndices![i]!;
+      shaArgs.push(
+        it.rpm,
+        it.tpm,
+        it.concurrency,
+        it.estimatedTokens,
+        it.leaseTtlStr,
+        it.member,
+        scopeStr,
+        smallIntStr(ipIdx),
       );
     }
     for (let g = 0; g < ipCount; g++) {
@@ -425,7 +555,7 @@ export function buildBatchAcquireArgs(
   }
   if (relGroups) {
     for (const members of relGroups.values()) {
-      shaArgs.push(String(members.length));
+      shaArgs.push(smallIntStr(members.length));
       for (let i = 0; i < members.length; i++) shaArgs.push(members[i]!);
     }
   }

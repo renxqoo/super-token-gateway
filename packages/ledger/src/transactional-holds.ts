@@ -17,6 +17,7 @@ import {
   walletLane,
   parseAtoms,
   walletAdmissionError,
+  loadDeferredWalletLeaseSpend,
   canReserveWalletCredit,
   lotEligible,
   preferredCell,
@@ -141,6 +142,10 @@ export function createTransactionalHoldBatch(
         const wLots = lotsByWallet.get(w.id);
         if (wLots) expireLotsInMemory(w, wLots, nowMs, journals);
       }
+      const debtWalletIds = [...walletsById.values()]
+        .filter((w) => w.debt_atoms > 0n)
+        .map((w) => w.id);
+      const deferredSpendByWallet = await loadDeferredWalletLeaseSpend(tx, debtWalletIds);
 
       const newHolds: {
         request_id: string;
@@ -219,7 +224,10 @@ export function createTransactionalHoldBatch(
           };
           continue;
         }
-        const admissionError = walletAdmissionError(wallet);
+        const admissionError = walletAdmissionError(
+          wallet,
+          deferredSpendByWallet.get(wallet.id) ?? 0n,
+        );
         if (admissionError) {
           results[i] = { ok: false, ...admissionError };
           continue;
