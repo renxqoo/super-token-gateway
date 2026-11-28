@@ -2,7 +2,7 @@
 
 企业级高性能 LLM Gateway 与微批核心账本系统，基于 **Bun 1.4.5 / TypeScript + Hono + PostgreSQL 17 + 极薄 Rust `wasmtime` 插件沙箱**。控制台业务面使用独立 PostgreSQL 数据库，通过内部 HTTP API 与异步 Outbox 与网关协作。控制台能力、数据流和运行边界见 [Console API](docs/console-api.md)。
 
-架构与核心账本分片租约见 [ADR 0009](docs/decisions/0009-enterprise-gateway-worker-architecture.md)。插件定义、显式绑定、发布和迁移见 [ADR 0012](docs/decisions/0012-plugin-revisions-and-provider-verification.md)。
+模块、数据流和部署拓扑见 [系统架构](architecture.md) 与 [架构图](diagrams.md)。核心账本设计见 [ADR 0009](docs/decisions/0009-enterprise-gateway-worker-architecture.md)。插件定义、显式绑定、发布和迁移见 [ADR 0012](docs/decisions/0012-plugin-revisions-and-provider-verification.md)。
 
 [OpenAPI](docs/openapi.json) 从当前公开和内部监听路由以及内部请求校验生成。推理响应格式由协议和所选渠道决定。接口变更后运行 `bun run openapi` 更新文件。
 

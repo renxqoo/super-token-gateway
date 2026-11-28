@@ -1,6 +1,8 @@
-# 2026-11-11 资金边界与当前容量状态
+# 2026-11-11 资金边界与当期容量状态
 
-正常授信及严格容量验收装置已实施；最终门禁通过77单元、260真实集成、8项产物与8项原生耐久检查。当前原生环境多轮6000 RPS及较低负载两分钟复验均未通过，60分钟因磁盘预算不足未运行。完整结果、限制、旧版本对照与原始证据见[本轮报告](docs/performance/funds-capacity-2026-11-11.md)。后续历史记录不是当前版本达标证明。
+> 历史验证记录。本文记录各日期对应代码、schema 和测试装置的结果。当前运行拓扑和验证入口分别见 [系统架构](architecture.md) 与 [交付手册](delivery-and-validation.md)。
+
+正常授信及严格容量验收装置已实施；最终门禁通过77单元、260真实集成、8项产物与8项原生耐久检查。当期原生环境多轮6000 RPS及较低负载两分钟复验均未通过，60分钟因磁盘预算不足未运行。完整结果、限制、旧版本对照与原始证据见[本轮报告](docs/performance/funds-capacity-2026-11-11.md)。后续历史记录不是当前版本达标证明。
 
 ---
 
@@ -35,7 +37,7 @@
 
 本轮修复三项熔断边界。旧请求的迟到成功曾关闭正在进行的半开探测；旧闭合许可跨越开路和恢复后曾清除新一轮失败；700,000 ms 的探测租约曾只剩约 600,000 ms 的健康记录寿命。修复后观察绑定健康代次、探测 token 和 Redis 时间租约，长探测延长记录保留期，资金证据独立提交。失败证据分别保留在 `.local/routing-2026-11-11/stale-success-before.log` 和 `epoch-ttl-before.log`。独立只读审查指出的代次回归与取消同步缺口均已补齐。
 
-当前规则及具体重试状态码、预算、优先级、加权/轮询/最低延迟和熔断约束见 `reliability-and-operations.md` 的智能路由章节。schema 继续为 2026111010，本轮验证使用隔离数据。
+该轮沿用当时的智能路由状态码、预算、优先级和熔断约束。schema 继续为 2026111010，本轮验证使用隔离数据。
 
 最终 `bun run verify` 通过类型、零警告 lint、格式、72 项单元（1,449 个断言）、248 项真实 PG/Redis/HTTP 集成（6,526 个断言，包含本轮 50 项）、构建及 8 项独立产物检查。`bun run test --coverage` 的单元加载文件 functions 为 71.22%、lines 为 68.36%，Bun 未输出 statements/branches，当前未设置覆盖率阈值，集成测试未纳入该覆盖率统计。日志分别保留在 `.local/routing-2026-11-11/verify-batched-health.log`、`coverage-batched-health.log`。
 
@@ -290,7 +292,7 @@ Colima 的宿主 DNS 若被代理改写，容器验证可显式设置 `CONTAINER
 
 # schema06 历史验证与性能进度
 
-2026-11-10。当前唯一实现为 **PG 调用前预扣 → BullMQ 数字证据与同连接 WAITAOF → worker 同事务写 PG usage / charge / journal → ACK**。业务系统独立，Gateway 执行多币种钱包与客户结算。旧 usage/outbox 入口和旧 schema 已删除，不支持旧代码/旧库兼容。
+2026-11-10。该轮实现为 **PG 调用前预扣 → BullMQ 数字证据与同连接 WAITAOF → worker 同事务写 PG usage / charge / journal → ACK**。业务系统独立，Gateway 执行多币种钱包与客户结算。旧 usage/outbox 入口和旧 schema 已删除，不支持旧代码/旧库兼容。
 
 ## 已取得的证据
 

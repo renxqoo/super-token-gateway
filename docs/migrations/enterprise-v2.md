@@ -1,5 +1,7 @@
 # Enterprise v2 迁移规格与执行记录
 
+> 版本说明。本文及同系列记录归档 Enterprise v2 的执行、迁移和验收。现行运行与迁移流程见 [系统架构](../../architecture.md)、[数据库说明](../../database.md) 和 [运行手册](../../reliability-and-operations.md)。
+
 状态（2026-11-16）：T01–T07、T09–T12、T14、T15 已完成；T08、T16 部分完成；T17 进行中，实测约 50–80 RPS，未达 3000 RPS 门槛；T19、T18 未开始；T13 暂缓。逐项进度与遗留事项见 [enterprise-v2-progress.md](enterprise-v2-progress.md)，性能改进建议见 [capacity-improvement-plan.md](../performance/capacity-improvement-plan.md)。
 
 ## 1. 授权、事实与完成边界

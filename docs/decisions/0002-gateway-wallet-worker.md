@@ -1,5 +1,7 @@
 # ADR 0002：Gateway 资金预扣与 BullMQ 结算
 
+> 版本说明。技术钱包与外部支付的边界继续适用。本文的结算拓扑是 2026-11-10 的历史方案，当前数据流以 [ADR 0009](0009-enterprise-gateway-worker-architecture.md) 和 [资金与结算](../../funds-and-billing.md) 为准。
+
 2026-11-10 用户新增并确认，覆盖 ADR 0001 中“不在 Gateway 扣费/预扣”的约束；其余无正文持久化与逐尝试证据要求保留。
 
 ## 数据归属

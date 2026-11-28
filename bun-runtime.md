@@ -11,11 +11,11 @@ bun run build
 
 类型检查和格式脚本用 `--no-script` 调用 Bun 原生命令。编译选项以 [tsconfig.json](tsconfig.json) 为准。
 
-| 应用 | 配置入口 |
-| --- | --- |
+| 应用    | 配置入口                                                                                                                                                                                         |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Gateway | [config.ts](apps/gateway/src/config.ts) 从环境变量与 `--mode` 读取配置。生产数据、快照和管理连接池默认分别为 32、2、4。默认在途上限 2000、请求体 10 MiB、单次尝试 30000 ms、流总时长 300000 ms。 |
-| Worker | [main.ts](apps/worker/src/main.ts) 从环境变量读取连接池与维护间隔。`WORKER_DB_MAX` 默认 8，至少保留选主和工作连接。 |
-| Console | [config.ts](apps/console-api/src/config.ts) 读取独立数据库、客户与管理监听、Gateway 管理地址及逐角色凭证。 |
+| Worker  | [main.ts](apps/worker/src/main.ts) 从环境变量读取连接池与维护间隔。`WORKER_DB_MAX` 默认 8，至少保留选主和工作连接。                                                                              |
+| Console | [config.ts](apps/console-api/src/config.ts) 读取独立数据库、客户与管理监听、Gateway 管理地址及逐角色凭证。                                                                                       |
 
 账本连接的默认建立超时为 5 秒，`statement_timeout` 为 8000 ms，`lock_timeout` 为 5000 ms。设置连接数时计入所有应用副本和辅助连接池。HTTP 请求体、连接等待、流输出及插件执行都受各自预算约束。上游传输在 DNS 校验后连接已校验地址并保留 TLS 身份，等待可取消。见 [数据库连接](packages/ledger/src/database.ts) 和 [出站传输](packages/runtime/src/network.ts)。
 

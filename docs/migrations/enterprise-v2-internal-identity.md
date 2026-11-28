@@ -1,5 +1,7 @@
 # T04.b.identity-plan：生产内部身份、历史证据与宿主凭证接点
 
+> 历史身份设计。本文记录 Enterprise v2 的内部身份。现行 Gateway 私网身份和数据库授权见 [ADR 0011](../decisions/0011-production-operations.md#管理身份和数据库授权)。
+
 状态：2026-11-12 已接纳的内部身份实施依据。独立设计审查的 R1/R2/R3 已关闭；本文件不是产品实现或运行验收通过声明。生产身份前置单元须在 T04.b.1 接纳后串行实施，再由 T04.b.2/c 验证资金、真实网络和历史收证。所有拟新增字段、函数、端点和路径仍须对照实际代码实现，不能当作已有导出。
 
 隔离树 `/Users/wrr/work/super-token-gateway-internal-identity-design-fix2-20261112`，detached `ce5b4145a18959efcb7cc7cb927db2295cd8dd8f`，输入清单 `.local/T04b-identity-fix2-input.json` 的 227 项；初始工作区修改均为接纳输入。仅本树 `.local` 是本次写入范围。不读 env/真实 key，不读在写 b.1 树，不使用 PG/Redis/模型/Docker/Go/Cargo，不提交、不 push、不调用子代理。

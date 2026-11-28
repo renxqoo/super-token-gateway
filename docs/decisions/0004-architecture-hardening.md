@@ -1,5 +1,7 @@
 # ADR 0004：网关边界、热点隔离与受控数据演进
 
+> 版本说明。本文记录 2026-11-10 的架构加固。当前 PostgreSQL、Redis 和进程边界以 [ADR 0009](0009-enterprise-gateway-worker-architecture.md) 和 [运行手册](../../reliability-and-operations.md) 为准。
+
 状态：代码已实施并完成本地验证；生产容量与真实云验收未完成。2026-11-10 用户授权修复架构评估列出的全部问题，并补 Azure OpenAI、AWS Bedrock、Vertex AI 适配。
 
 保留 PG 预扣、耐久证据队列、worker 原子账务、未知结果待对账及无正文持久化规则。运行时只接受当前数据库契约；离线升级工具负责受支持旧版本的数据转换，不增加旧业务运行路径。

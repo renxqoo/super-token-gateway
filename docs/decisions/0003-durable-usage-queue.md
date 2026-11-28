@@ -1,5 +1,7 @@
 # ADR 0003：BullMQ 严格落盘用量入口
 
+> 状态。该结算路径已由 [ADR 0009](0009-enterprise-gateway-worker-architecture.md) 取代。本文记录当时的证据耐久性决策。现行 Gateway 直接提交 PostgreSQL 结算，部署参见 [系统架构](../../architecture.md)。
+
 状态：2026-11-10 用户确认，迁移实施中；覆盖 ADR 0002 的请求侧 PG usage/outbox 提交路径。原资金规则、无 LLM 正文持久化和独立业务边界保留。
 
 ## 基线与目标

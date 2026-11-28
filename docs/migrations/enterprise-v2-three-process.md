@@ -1,5 +1,7 @@
 # Enterprise v2 三进程与 Chat 产品路径（T04.c）实施方案
 
+> 历史拓扑。本文记录 Enterprise v2 三进程实现。现行拓扑和运行入口见 [系统架构](../../architecture.md) 与 [运行手册](../../reliability-and-operations.md)。
+
 状态：用户已确认方案 A；c1–c4 已实现，门禁与审查处置见第 7–10 节。日期：2026-11-14。起点：`main` `27a154a`（T04.b.2b ⑦ 已推送）。
 
 本记录对应 [enterprise-v2.md](enterprise-v2.md) 任务图 T04.c：三进程装配、Gateway Core client、宿主受控传输及 OpenAI Chat 产品路径，并完成 T04 表列出的独立进程、双 Gateway、耐久终态、双方账本/事件/ACK、取消与排空验收。资金、证据、身份 SQL 与 RPC 已由 T04.b 交付，本单元只消费，不改其语义；需要新增的内部契约在本文明确定义。

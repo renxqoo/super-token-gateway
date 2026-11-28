@@ -1,5 +1,7 @@
 # T14.a 原生耐久设施
 
+> 历史耐久记录。本文的执行流程属于 Enterprise v2。现行 PostgreSQL 恢复与验证入口见 [交付手册](../../delivery-and-validation.md)。
+
 本单元把 `scripts/verify-durability.ts` 迁为原生单轨，保留接受基线的八项有效断言。T14.a 交付时业务装配仍是旧单账本（`Store`、`FundsStore`、`persist_usage_batch` 与 usage queue）。T14 n2 起改为 v2：签名证据组经 `core-evidence-v1` 由 v2 结算 worker 落账；worker 提交前、提交后 ACK 前两个强杀窗口改由真实 core-worker 进程的集成回归 `tests/integration/core-worker-crash.test.ts` 承担，脚本保留其余六项（见[原生运维记录](enterprise-v2-native-operations.md) §5）。本文其余旧单账本描述是 T14.a 的历史记录，不代表 T18、容量或 HA 验收完成。
 
 ## 入口与配置

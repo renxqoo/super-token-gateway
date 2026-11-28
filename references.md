@@ -7,7 +7,7 @@
 | Tillgate `58df84769f4d25872b7786643db3468fc1001c57` | provider/adapter 分层、能力差异、silent-degradation、retry-guard、stream-deep、transport-deep、stream-timeout-scale、inference failover、generation polling |
 | new-api `bd6bb53019fb7e21804b31ab7365c9b2097f4b6c`  | relay 转换边界、golden 与 tool_loss_policy、usage_merge/billing_usage、stream_scanner 慢写取消、protected_fetch_client DNS 固定、task ownership/polling     |
 
-参考源码路径为 `/Users/wr/work/Tillgate/apps/gateway`、`/Users/wr/work/Tillgate/packages`、`/Users/wr/work/new-api`。此实现保持自己的商业边界、逐尝试不可变证据、耐久队列完成屏障和无正文持久化约束；按已确认边界独立实现技术钱包与客户结算，不复制商业支付系统。
+参考源码路径为 `/Users/wr/work/Tillgate/apps/gateway`、`/Users/wr/work/Tillgate/packages`、`/Users/wr/work/new-api`。此实现保持自己的商业边界、PostgreSQL 预扣与结算的持久化边界、逐尝试的核账信息和普通推理正文的存储约束；按已确认边界独立实现技术钱包与客户结算，不复制商业支付系统。
 
 同一机器的实测可以说明所选工作负载下的吞吐与延迟，不能证明“所有功能和所有负载全面优于两个成熟项目”。比较方法、差异和原始结果见 validation.md。
 
@@ -29,6 +29,6 @@
 - SigV4 canonical request：[AWS signing specification](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html)。签名测试另以 botocore 独立生成包含 session token 和编码模型名的 golden 值。
 - Vertex Gemini：[inference reference](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference)；[service account OAuth](https://developers.google.com/identity/protocols/oauth2/service-account)。
 
-## 当前持续对标
+## 历史对标
 
-本轮使用 /Users/wrr/work/Tillgate 与 /Users/wrr/work/new-api，版本及差距见[当前参考矩阵](docs/performance/reference-comparison.md)。通过 `bun run references:snapshot` 重新记录HEAD、工作区状态与关键源码哈希；当前性能与失败证据见[资金及容量复验](docs/performance/funds-capacity-2026-11-11.md)。历史参考版本与倍数不用于当前资金链路排名。
+本轮使用 /Users/wrr/work/Tillgate 与 /Users/wrr/work/new-api，版本及差距见[历史参考矩阵](docs/performance/reference-comparison.md)。当期性能与失败证据见[资金及容量复验](docs/performance/funds-capacity-2026-11-11.md)。历史参考版本与倍数不用于当前资金链路排名。

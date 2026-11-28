@@ -1,5 +1,7 @@
 # 3000 RPS 容量改进建议
 
+> 历史改造计划。本文使用 Enterprise v2 时期的容量装置与拓扑。当前基准按 [容量及对标契约](capacity-contract.md) 和 [系统架构](../../architecture.md) 执行。
+
 2026-11-16，基于提交 9a8db8d（T17 k5）的实测。门槛来自 [capacity-contract.md](capacity-contract.md)：本机均匀 1000 钱包短 JSON 完整链路稳定负载不低于 3000 RPS，强耐久、精确结算与逐请求交集不变。实测细节见 [capacity-2026-11-16.md](capacity-2026-11-16.md)。
 
 本文是建议，未实施。第 2、4 阶段会改变已确定的安全设计，需用户裁决后才能开工；第 1、3、5、6 阶段不改变安全模型，可直接排期。

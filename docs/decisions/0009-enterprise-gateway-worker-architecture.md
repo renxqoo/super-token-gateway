@@ -1,5 +1,7 @@
 # ADR 0009: 企业级 Bun 主力架构（Gateway + Worker、精简微批 PG 核心账本、智能路由与插件管道）
 
+> 当前实现索引。部署、数据库角色和故障恢复见 [ADR 0011](0011-production-operations.md)，Console 的独立数据库和 API 同步边界见 [ADR 0013](0013-personal-and-team-billing-accounts.md)。[系统架构](../../architecture.md) 汇总当前代码的模块、数据流和拓扑。下文保留决策时的目标与阶段数据。
+
 - **状态**：已实施并验收通过（单机实测 12,930 RPS / 0 错误 / 全量守恒；唯一 WASM 运行时为原生 Rust `wasmtime` FFI 池化沙箱）
 - **日期**：2026-11-21
 - **适用范围**：`apps/gateway`、`apps/worker`、`native/plugin-wasmtime`、`packages/{kernel,contracts,protocol,plugin-engine,ledger,runtime}`（后续同仓扩展 `apps/business` 业务系统）

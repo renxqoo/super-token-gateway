@@ -1,5 +1,7 @@
 # T14 三进程原生部署、产物、故障与可观测性
 
+> 历史运维记录。本文的命令、凭证和组件属于 Enterprise v2。现行部署与演练见 [运行手册](../../reliability-and-operations.md)。
+
 覆盖主规格 T14 行与 C23、C24。T14.a（原生耐久设施）已在先前交付，见[原生耐久记录](enterprise-v2-native-durability.md)。UI 资产随 T13 暂缓不执行。
 
 ## 1. 当前行为（代码核对，2026-11-15）

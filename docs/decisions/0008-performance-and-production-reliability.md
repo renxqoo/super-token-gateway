@@ -1,5 +1,7 @@
 # 0008 完整资金链路的性能与生产可靠性
 
+> 版本说明。本文记录 2026-11-17 的容量改造及当时的三进程边界。当前系统与验收入口见 [ADR 0009](0009-enterprise-gateway-worker-architecture.md) 和 [容量及对标契约](../performance/capacity-contract.md)。
+
 2026-11-17。状态：实施中，最终验收未完成。设计与阶段证据见 [beyond-new-api](../../beyond-new-api/README.md) 和 [实施记录](../../beyond-new-api/05-implementation.md)。
 
 ## 目标与边界

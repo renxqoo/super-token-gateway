@@ -1,5 +1,7 @@
 # New Gateway：全新架构设计
 
+> 版本说明。本目录归档 2026-11-08 的初始设计。当前实现见 [系统架构](../../architecture.md) 与 [ADR 0009](../decisions/0009-enterprise-gateway-worker-architecture.md)。
+
 日期：2026-11-08 · 版本：1.1 · 项目类型：从零建设 · 状态：待实施设计。
 
 [下载完整文档包](design-documents.zip)
