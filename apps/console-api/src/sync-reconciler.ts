@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, inArray, isNotNull, lt, or } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, isNull, lt, or } from "drizzle-orm";
 import {
   apiKeyRecords,
   channels,
@@ -133,9 +133,12 @@ export function createConsoleReconciler(
         .select({ name: modelCatalog.name })
         .from(modelCatalog)
         .where(
-          or(
-            inArray(modelCatalog.syncStatus, states),
-            lt(modelCatalog.syncedRevision, modelCatalog.desiredRevision),
+          and(
+            isNull(modelCatalog.pendingReleaseId),
+            or(
+              inArray(modelCatalog.syncStatus, states),
+              lt(modelCatalog.syncedRevision, modelCatalog.desiredRevision),
+            ),
           ),
         )
         .limit(batchLimit);
@@ -153,7 +156,13 @@ export function createConsoleReconciler(
         .select({ id: routes.id })
         .from(routes)
         .where(
-          or(inArray(routes.syncStatus, states), lt(routes.syncedRevision, routes.desiredRevision)),
+          and(
+            isNull(routes.pendingReleaseId),
+            or(
+              inArray(routes.syncStatus, states),
+              lt(routes.syncedRevision, routes.desiredRevision),
+            ),
+          ),
         )
         .limit(batchLimit);
       for (const r of rts) {

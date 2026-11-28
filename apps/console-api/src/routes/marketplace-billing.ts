@@ -7,6 +7,7 @@ import {
   gt,
   gte,
   inArray,
+  isNull,
   lte,
   sql,
   type SQL as DrizzleSQL,
@@ -250,6 +251,7 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
           eq(modelCatalog.enabled, true),
           eq(modelCatalog.isPublic, true),
           gt(modelCatalog.syncedRevision, 0),
+          isNull(modelCatalog.pendingReleaseId),
         ),
       )
       .orderBy(asc(modelCatalog.providerBrand), asc(modelCatalog.name));
@@ -311,6 +313,7 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
           eq(modelCatalog.name, modelName),
           eq(modelCatalog.enabled, true),
           gt(modelCatalog.syncedRevision, 0),
+          isNull(modelCatalog.pendingReleaseId),
         ),
       )
       .limit(1);

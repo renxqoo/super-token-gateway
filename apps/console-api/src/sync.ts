@@ -4,6 +4,7 @@ import type { GatewayClient } from "./gateway-client.ts";
 import { createConsoleCatalogSync } from "./sync-catalog.ts";
 import { createConsoleAdmissionSync } from "./sync-admission.ts";
 import { createConsoleReconciler } from "./sync-reconciler.ts";
+import { createConsoleRouteReleases } from "./route-releases.ts";
 import { createEntityLocker } from "./sync-state.ts";
 
 export function createConsoleSync(db: SQL, orm: ConsoleDrizzle, gateway: GatewayClient) {
@@ -15,8 +16,10 @@ export function createConsoleSync(db: SQL, orm: ConsoleDrizzle, gateway: Gateway
     withEntityLock,
     admission.ensureBillingAccountSynced,
   );
+  const routeReleases = createConsoleRouteReleases(orm, gateway);
   return {
     admission,
+    routeReleases,
     catalog,
     reconcilePending: createConsoleReconciler(db, orm, admission, catalog),
   };

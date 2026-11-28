@@ -42,11 +42,13 @@ export function createLedgerQueries(db: SQL) {
               supplier_cost_atoms: string;
               unknown_reserved_atoms: string;
               unknown_attempts: number;
+              unknown_attempts_without_reconciliation_start: number;
+              oldest_unknown_reconciliation_age_ms: number | null;
             }[];
           }[]
         >`
           WITH cohort AS MATERIALIZED (
-            SELECT request_id, supplier_holds
+            SELECT request_id, state, supplier_holds, reconciliation_started_at
             FROM public.billing_holds
             WHERE model = ${model} AND operation = 'chat'
               AND request_id >= ${startId}::uuid AND request_id < ${endId}::uuid
@@ -72,9 +74,12 @@ export function createLedgerQueries(db: SQL) {
             SELECT currency, sum(atoms) AS atoms FROM expenses GROUP BY currency
           ), unresolved AS (
             SELECT attempt->>'currency' AS currency, sum((attempt->>'held_atoms')::numeric) AS atoms,
-                   count(*)::int AS attempts
+                   count(*)::int AS attempts,
+                   count(*) FILTER (WHERE reconciliation_started_at IS NULL)::int AS missing_start,
+                   min(reconciliation_started_at) AS oldest_start
             FROM cohort CROSS JOIN LATERAL jsonb_array_elements(supplier_holds) attempt
             WHERE attempt->>'state' = 'UNKNOWN'
+               OR (cohort.state = 'UNKNOWN' AND attempt->>'state' = 'HELD')
             GROUP BY attempt->>'currency'
           )
           SELECT (SELECT count(*)::int FROM cohort) AS cohort_requests, (
@@ -82,7 +87,11 @@ export function createLedgerQueries(db: SQL) {
               'currency', currency,
               'supplier_cost_atoms', coalesce(cost.atoms, 0)::text,
               'unknown_reserved_atoms', coalesce(unresolved.atoms, 0)::text,
-              'unknown_attempts', coalesce(unresolved.attempts, 0)
+              'unknown_attempts', coalesce(unresolved.attempts, 0),
+              'unknown_attempts_without_reconciliation_start', coalesce(unresolved.missing_start, 0),
+              'oldest_unknown_reconciliation_age_ms', CASE WHEN unresolved.oldest_start IS NOT NULL THEN
+                greatest(0, floor(extract(epoch FROM (now() - unresolved.oldest_start)) * 1000))::float8
+              END
             ) ORDER BY currency), '[]'::jsonb)
             FROM cost FULL JOIN unresolved USING (currency)
           ) AS currencies

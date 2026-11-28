@@ -18,7 +18,7 @@ import {
   stringifyExact,
   validateUsageObject,
 } from "@gateway/protocol";
-import { extractUpstreamTaskId, getAsyncTaskConfig } from "../async-tasks.ts";
+import { extractUpstreamTaskId } from "../async-tasks.ts";
 import { fastUuid } from "../proxy-state.ts";
 import {
   extractResponseText,
@@ -381,7 +381,10 @@ export async function handleUnaryResponse(
       : channelJsonHeaders(requestId, trace, cand.channel, prepared.droppedFields);
     const upstreamTaskId =
       operation === "videos" && deps.asyncTasks && !block
-        ? extractUpstreamTaskId(clientJson, getAsyncTaskConfig(snap, cand.channel))
+        ? extractUpstreamTaskId(
+            clientJson,
+            provider.kind === "DECLARATIVE" ? (provider.config.async_task_config ?? null) : null,
+          )
         : null;
 
     const commitRes = await settle({

@@ -72,6 +72,7 @@ export class GatewayClient {
     method: "GET" | "POST" | "PUT",
     path: string,
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<{ status: number; ok: boolean; text: string }> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {
@@ -82,11 +83,12 @@ export class GatewayClient {
       headers["content-type"] = "application/json";
     }
     try {
+      const timeout = AbortSignal.timeout(this.timeoutMs);
       const resp = await this.fetchImpl(url, {
         method,
         headers,
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
         redirect: "manual",
       });
       const text = await resp.text();
@@ -104,8 +106,9 @@ export class GatewayClient {
     method: "GET" | "POST" | "PUT",
     path: string,
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<T> {
-    const { status, ok, text } = await this.sendRaw(role, method, path, body);
+    const { status, ok, text } = await this.sendRaw(role, method, path, body, signal);
     let parsed: unknown = null;
     if (text) {
       try {
@@ -328,6 +331,7 @@ export class GatewayClient {
     max_output_tokens: number;
     enabled: boolean;
     source_revision?: number;
+    expected_source_revision?: number;
   }) {
     return this.request<{ name: string; config_epoch: number; source_revision: number }>(
       "catalog",
@@ -337,11 +341,13 @@ export class GatewayClient {
     );
   }
 
-  getPriceVersion(priceId: string) {
+  getPriceVersion(priceId: string, signal?: AbortSignal) {
     return this.request<GatewayPriceVersionView>(
       "auditor",
       "GET",
       `/internal/v1/prices/${priceId}`,
+      undefined,
+      signal,
     );
   }
 
@@ -375,6 +381,7 @@ export class GatewayClient {
     adapter_overrides: Record<string, unknown>;
     retry_policy: Record<string, unknown>;
     enabled: boolean;
+    expected_source_revision?: number;
     source_revision?: number;
   }) {
     return this.request<{ id: string; config_epoch: number; source_revision: number }>(

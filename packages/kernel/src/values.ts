@@ -31,6 +31,7 @@ export type Operation = (typeof operations)[number];
 export type AdaptiveRoutingPolicy = {
   operations: ["chat"];
   mode: "observe" | "active";
+  execution_policy: "route" | "protected";
   first_content_target_ms: number;
   supplier_reserve_limit?: { currency: string; atoms: string } | undefined;
 };

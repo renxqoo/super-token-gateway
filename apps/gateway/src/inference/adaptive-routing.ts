@@ -1,16 +1,25 @@
-import { GatewayError } from "@gateway/contracts";
 import {
   calculateCompiledCostAtoms,
   compilePricing,
-  type AdaptiveRoutingPolicy,
+  type Operation,
   type CompiledPricing,
 } from "@gateway/kernel";
-import { hasPricingSpec, type PriceVersionRecord } from "@gateway/ledger";
+import {
+  hasPricingSpec,
+  type ConfigSnapshot,
+  type ModelRecord,
+  type PriceVersionRecord,
+} from "@gateway/ledger";
+import type { AdaptiveRoutingStats } from "../adaptive-routing-stats.ts";
 import type { HydratedCandidate } from "../proxy-state.ts";
 import type { AdaptiveDecision } from "../routing-metrics.ts";
 import { adaptiveRouteProfile, estimateTextChatInput } from "../upstream.ts";
-import { supplierReconciliation } from "./http.ts";
-import type { InferenceRequest } from "./types.ts";
+import {
+  defaultRouteAttempts,
+  routeAttemptTimeoutMs,
+  supplierReconciliation,
+} from "./failover-policy.ts";
+import type { InferenceRoutingPolicy } from "./routing-policy.ts";
 
 const profiles = new WeakMap<HydratedCandidate, ReturnType<typeof adaptiveRouteProfile>>();
 const prices = new WeakMap<PriceVersionRecord, CompiledPricing | null>();
@@ -19,17 +28,17 @@ const tokenDimensions = new Set(["input_tokens", "output_tokens", "cached_input_
 function hasUniformRetryPolicy(group: readonly HydratedCandidate[], defaultTimeoutMs: number) {
   const first = group[0]!;
   const {
-    max_attempts = 3,
-    attempt_timeout_ms = defaultTimeoutMs,
-    retry_on_ambiguous = false,
+    max_attempts: maxAttempts = defaultRouteAttempts,
+    attempt_timeout_ms: timeout = defaultTimeoutMs,
+    retry_on_ambiguous: retryOnAmbiguous = false,
   } = first.route.retry_policy;
   const { requiresEvidence } = supplierReconciliation(first);
   return group.every((candidate) => {
     const retry = candidate.route.retry_policy;
     return (
-      (retry.max_attempts ?? 3) === max_attempts &&
-      (retry.attempt_timeout_ms ?? defaultTimeoutMs) === attempt_timeout_ms &&
-      (retry.retry_on_ambiguous ?? false) === retry_on_ambiguous &&
+      (retry.max_attempts ?? defaultRouteAttempts) === maxAttempts &&
+      routeAttemptTimeoutMs(retry, defaultTimeoutMs) === timeout &&
+      (retry.retry_on_ambiguous ?? false) === retryOnAmbiguous &&
       supplierReconciliation(candidate).requiresEvidence === requiresEvidence
     );
   });
@@ -65,45 +74,37 @@ function comparablePrice(price: PriceVersionRecord) {
   return compiled;
 }
 
-export function enforceSupplierReserveLimit(
-  policy: AdaptiveRoutingPolicy | undefined,
-  currency: string,
-  atoms: string,
-): void {
-  const limit = policy?.supplier_reserve_limit;
-  if (limit && (limit.currency !== currency || BigInt(atoms) > BigInt(limit.atoms))) {
-    throw new GatewayError(
-      503,
-      "supplier_reserve_limit",
-      "No permitted supplier reservation at the configured currency and limit",
-    );
-  }
-}
-
 export function adaptiveOrdering(
-  request: InferenceRequest,
+  options: {
+    policy: NonNullable<InferenceRoutingPolicy["ordering"]>;
+    snapshot: ConfigSnapshot;
+    model: Pick<ModelRecord, "name" | "routing_strategy">;
+    operation: Operation;
+    isStream: boolean;
+    outputBound: number;
+    clientBody: Record<string, unknown>;
+    defaultAttemptTimeoutMs: number;
+    stats: AdaptiveRoutingStats;
+    observe: (decision: AdaptiveDecision) => void;
+  },
   hydrated: readonly HydratedCandidate[],
 ) {
   const {
-    adaptivePolicy: policy,
-    deps,
-    isStream,
+    policy,
+    snapshot,
     model,
     operation,
+    isStream,
     outputBound,
-    strictAdaptiveSwitch,
-    snap,
-    state,
-  } = request;
-  if (!policy) return;
-
-  const observe = (decision: AdaptiveDecision) =>
-    deps.metrics.routing.observeDecision(model.name, policy.mode, decision);
+    clientBody,
+    defaultAttemptTimeoutMs,
+    stats,
+    observe,
+  } = options;
   const modelKey = `${model.name}\0${operation}\0${isStream}`;
   const routeKeys = new Map<string, string>();
-  let compatibility: string | undefined;
-  let customerPriceId: string | undefined;
-  let compatible = model.routing_strategy === "WEIGHTED";
+  const weighted = model.routing_strategy === "WEIGHTED";
+  const active = policy.mode === "active";
   for (const candidate of hydrated) {
     if (
       !candidate.enabled ||
@@ -113,39 +114,55 @@ export function adaptiveOrdering(
     )
       continue;
     if (!profiles.has(candidate)) {
-      profiles.set(candidate, adaptiveRouteProfile(snap, candidate.channel, candidate.route));
+      profiles.set(candidate, adaptiveRouteProfile(snapshot, candidate.channel, candidate.route));
     }
     const profile = profiles.get(candidate);
-    if (
-      !profile ||
-      (compatibility !== undefined && profile.compatibility !== compatibility) ||
-      (customerPriceId !== undefined && candidate.billingPrice.id !== customerPriceId)
-    ) {
-      compatible = false;
-    }
     if (!profile) continue;
-    compatibility ??= profile.compatibility;
-    customerPriceId ??= candidate.billingPrice.id;
     routeKeys.set(
       candidate.id,
       `${candidate.id}\0${modelKey}\0${profile.revision}\0${policy.first_content_target_ms}`,
     );
   }
-  const hasRouteScopedModifier =
-    snap.pricingModifiers?.some(
-      (m) =>
-        m.enabled &&
-        (m.match.channel_id !== undefined || m.match.upstream_account_id !== undefined) &&
-        (!m.match.model || m.match.model === "*" || m.match.model === model.name),
-    ) ?? false;
-  if (hasRouteScopedModifier) compatible = false;
-  if (!compatible) observe("incompatible");
+  if (!weighted) observe("incompatible");
+
+  function hasRouteScopedModifier(group: readonly HydratedCandidate[]) {
+    return snapshot.pricingModifiers?.some(
+      ({ enabled, match }) =>
+        enabled &&
+        (match.channel_id !== undefined || match.upstream_account_id !== undefined) &&
+        (!match.model || match.model === "*" || match.model === model.name) &&
+        (!match.operation || match.operation === "*" || match.operation === operation) &&
+        (!match.execution_mode || match.execution_mode === "SYNC") &&
+        group.some(
+          ({ channel, account }) =>
+            (match.channel_id === undefined || match.channel_id === channel.id) &&
+            (match.upstream_account_id === undefined || match.upstream_account_id === account.id),
+        ),
+    );
+  }
+
+  function groupCompatible(group: readonly HydratedCandidate[]) {
+    const first = group[0]!;
+    const profile = profiles.get(first);
+    return (
+      profile !== null &&
+      profile !== undefined &&
+      group.every(
+        (candidate) =>
+          candidate.billingPrice.id === first.billingPrice.id &&
+          profiles.get(candidate)?.compatibility === profile.compatibility,
+      ) &&
+      !hasRouteScopedModifier(group)
+    );
+  }
 
   let inputTokens: string | null | undefined;
-  const stats = state.adaptiveRouting;
   const factors = (group: readonly HydratedCandidate[]) => {
-    if (!compatible) return undefined;
-    if (!strictAdaptiveSwitch && !hasUniformRetryPolicy(group, deps.config.attemptTimeoutMs)) {
+    if (!weighted) return undefined;
+    if (
+      !groupCompatible(group) ||
+      (policy.requireUniformRetryPolicy && !hasUniformRetryPolicy(group, defaultAttemptTimeoutMs))
+    ) {
       observe("incompatible");
       return undefined;
     }
@@ -174,7 +191,7 @@ export function adaptiveOrdering(
         if (inputTokens === undefined) {
           let estimate: number | undefined;
           try {
-            estimate = estimateTextChatInput(request.clientBody);
+            estimate = estimateTextChatInput(clientBody);
           } catch {
             estimate = undefined;
           }
@@ -201,7 +218,7 @@ export function adaptiveOrdering(
       if (minimum === undefined || atoms < minimum) minimum = atoms;
       costs.push({ id: candidate.id, quality, atoms });
     }
-    if (policy.mode === "active") observe("applied");
+    if (active) observe("applied");
     return new Map(
       costs.map(({ id, quality, atoms }) => [
         id,

@@ -7,6 +7,7 @@ import {
 } from "@gateway/plugin-engine";
 import { createKey, VertexTokens } from "@gateway/runtime";
 import { handleInferenceRequest } from "../proxy.ts";
+import { resolveInferenceRoutingPolicy } from "../inference/routing-policy.ts";
 import { createRouteInput } from "../inference/policy.ts";
 import { createInferenceResources } from "../inference/resources.ts";
 import { createInferenceTelemetry } from "../inference/telemetry.ts";
@@ -339,6 +340,7 @@ test("createRouteInput skips resources.link and transformRequestTexts synchronou
     isStream: false,
     outputBound: 100,
     initialChars: 11,
+    routing: resolveInferenceRoutingPolicy({ routing_strategy: "WEIGHTED" }, "chat"),
     firstByteDeadlineMs: null,
     maxStreamDurationMs: 60_000,
   };

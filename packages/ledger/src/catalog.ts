@@ -1,6 +1,11 @@
 import type { SQL } from "bun";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { DomainError, type AdaptiveRoutingSetting, type Operation } from "@gateway/kernel";
+import {
+  canonical,
+  DomainError,
+  type AdaptiveRoutingSetting,
+  type Operation,
+} from "@gateway/kernel";
 import {
   channels,
   configEpoch,
@@ -33,6 +38,30 @@ import { createCatalogAdmissionOperations } from "./catalog-admission.ts";
 import { createCatalogPricingOperations } from "./catalog-pricing.ts";
 
 import { bumpEpoch } from "./catalog-epoch.ts";
+
+function routeResult(
+  r: typeof routes.$inferSelect,
+  epoch: number,
+): RouteRecord & { config_epoch: number; source_revision: number } {
+  return {
+    id: r.id,
+    model_name: r.modelName,
+    channel_id: r.channelId,
+    upstream_model: r.upstreamModel,
+    operations: r.operations,
+    priority: r.priority,
+    weight: r.weight,
+    billing_price_id: r.billingPriceId,
+    cost_version_id: r.costVersionId,
+    request_policy: r.requestPolicy,
+    adapter_overrides: r.adapterOverrides,
+    plugin_pipeline: r.pluginPipeline,
+    retry_policy: r.retryPolicy,
+    enabled: r.enabled,
+    source_revision: r.sourceRevision,
+    config_epoch: epoch,
+  };
+}
 
 export function createCatalogRepository(db: SQL) {
   const orm = createDrizzle(db);
@@ -324,57 +353,102 @@ export function createCatalogRepository(db: SQL) {
       max_output_tokens: number;
       enabled?: boolean;
       source_revision?: number;
+      expected_source_revision?: number;
     }): Promise<ModelRecord & { config_epoch: number; source_revision: number }> {
-      const routingStrategy = input.routing_strategy ?? "WEIGHTED";
-      const enabled = input.enabled ?? true;
       const sourceRev = input.source_revision;
+      const configuration = {
+        operations: input.operations,
+        routingStrategy: input.routing_strategy ?? "WEIGHTED",
+        maxOutputTokens: input.max_output_tokens,
+        enabled: input.enabled ?? true,
+      };
       const adaptiveRouting =
         input.adaptive_routing === false ? sql`'false'::jsonb` : input.adaptive_routing;
+      const result = (r: typeof models.$inferSelect, epoch: number) => ({
+        name: r.name,
+        operations: r.operations,
+        routing_strategy: r.routingStrategy,
+        adaptive_routing: r.adaptiveRouting,
+        max_output_tokens: r.maxOutputTokens,
+        enabled: r.enabled,
+        source_revision: r.sourceRevision,
+        config_epoch: epoch,
+      });
+
       return orm.transaction(async (tx) => {
+        const [existing] = await tx
+          .select()
+          .from(models)
+          .where(eq(models.name, input.name))
+          .for("update");
+        if (existing?.managedByRelease) {
+          const unchanged =
+            canonical(configuration.operations) === canonical(existing.operations) &&
+            configuration.routingStrategy === existing.routingStrategy &&
+            configuration.maxOutputTokens === existing.maxOutputTokens &&
+            configuration.enabled === existing.enabled &&
+            canonical(
+              input.adaptive_routing === undefined
+                ? existing.adaptiveRouting
+                : input.adaptive_routing,
+            ) === canonical(existing.adaptiveRouting);
+          if (sourceRev === existing.sourceRevision && unchanged) {
+            const [epoch] = await tx
+              .select({ version: configEpoch.version })
+              .from(configEpoch)
+              .where(eq(configEpoch.id, 1));
+            return result(existing, epoch!.version);
+          }
+          if (
+            input.expected_source_revision !== existing.sourceRevision ||
+            sourceRev === undefined ||
+            sourceRev <= existing.sourceRevision
+          ) {
+            throw new DomainError(
+              "model_onboarding_conflict",
+              "Model requires its current accepted version",
+            );
+          }
+        }
         const rows = await tx
           .insert(models)
           .values({
             name: input.name,
-            operations: input.operations,
-            routingStrategy,
-            maxOutputTokens: input.max_output_tokens,
-            enabled,
+            ...configuration,
             adaptiveRouting: adaptiveRouting ?? null,
             ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
           })
           .onConflictDoUpdate({
             target: models.name,
-            ...(sourceRev !== undefined
-              ? { setWhere: sql`${models.sourceRevision} <= ${sourceRev}` }
-              : {}),
+            setWhere: existing?.managedByRelease
+              ? eq(models.sourceRevision, existing.sourceRevision)
+              : sourceRev === undefined
+                ? eq(models.managedByRelease, false)
+                : sql`NOT ${models.managedByRelease} AND ${models.sourceRevision} <= ${sourceRev}`,
             set: {
-              operations: input.operations,
-              routingStrategy,
-              maxOutputTokens: input.max_output_tokens,
-              enabled,
+              ...configuration,
               ...(adaptiveRouting !== undefined ? { adaptiveRouting } : {}),
               ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
             },
           })
           .returning();
         if (!rows[0]) {
+          const [current] = await tx
+            .select({ managed: models.managedByRelease })
+            .from(models)
+            .where(eq(models.name, input.name));
+          if (current?.managed) {
+            throw new DomainError(
+              "model_onboarding_conflict",
+              "Model requires its current accepted version",
+            );
+          }
           throw new DomainError(
             "stale_revision",
             "Incoming model revision is older than current Gateway revision",
           );
         }
-        const epoch = await bumpEpoch(tx);
-        const r = rows[0]!;
-        return {
-          name: r.name,
-          operations: r.operations,
-          routing_strategy: r.routingStrategy,
-          adaptive_routing: r.adaptiveRouting,
-          max_output_tokens: r.maxOutputTokens,
-          enabled: r.enabled,
-          source_revision: r.sourceRevision,
-          config_epoch: epoch,
-        };
+        return result(rows[0], await bumpEpoch(tx));
       });
     },
 
@@ -394,6 +468,7 @@ export function createCatalogRepository(db: SQL) {
       retry_policy?: RouteRetryPolicy;
       enabled?: boolean;
       source_revision?: number;
+      expected_source_revision?: number;
     }): Promise<RouteRecord & { config_epoch: number; source_revision: number }> {
       const id = input.id ?? crypto.randomUUID();
       const priority = input.priority ?? 0;
@@ -404,18 +479,59 @@ export function createCatalogRepository(db: SQL) {
       const enabled = input.enabled ?? true;
       const sourceRev = input.source_revision;
       return orm.transaction(async (tx) => {
-        const [existing] = await tx
-          .select({ pipeline: routes.pluginPipeline, sourceRevision: routes.sourceRevision })
-          .from(routes)
-          .where(eq(routes.id, id))
-          .for("update");
-        if (existing && sourceRev !== undefined && existing.sourceRevision > sourceRev) {
+        const [existing] = await tx.select().from(routes).where(eq(routes.id, id)).for("update");
+        if (
+          existing &&
+          !existing.managedByRelease &&
+          sourceRev !== undefined &&
+          existing.sourceRevision > sourceRev
+        ) {
           throw new DomainError(
             "stale_revision",
             "Incoming route revision is older than current Gateway revision",
           );
         }
-        const pluginPipeline = input.plugin_pipeline ?? existing?.pipeline ?? [];
+        const pluginPipeline = input.plugin_pipeline ?? existing?.pluginPipeline ?? [];
+        const configuration = {
+          channelId: input.channel_id,
+          upstreamModel: input.upstream_model,
+          operations: input.operations,
+          priority,
+          weight,
+          billingPriceId: input.billing_price_id,
+          costVersionId: input.cost_version_id,
+          requestPolicy,
+          adapterOverrides,
+          retryPolicy,
+          enabled,
+        };
+        if (existing?.managedByRelease) {
+          const proposed = { ...configuration, pluginPipeline, modelName: input.model_name };
+          const previous = Object.fromEntries(
+            Object.keys(proposed).map((key) => [key, existing[key as keyof typeof proposed]]),
+          );
+          if (
+            sourceRev === existing.sourceRevision &&
+            canonical(proposed) === canonical(previous)
+          ) {
+            const [epoch] = await tx
+              .select({ version: configEpoch.version })
+              .from(configEpoch)
+              .where(eq(configEpoch.id, 1));
+            return routeResult(existing, epoch!.version);
+          }
+          if (
+            input.expected_source_revision !== existing.sourceRevision ||
+            sourceRev === undefined ||
+            sourceRev <= existing.sourceRevision ||
+            existing.modelName !== input.model_name
+          ) {
+            throw new DomainError(
+              "route_release_conflict",
+              "Route requires its current accepted version",
+            );
+          }
+        }
         const requiredPlugins = new Set(
           pluginPipeline.filter((step) => step.enabled !== false).map((step) => step.plugin_id),
         );
@@ -446,40 +562,23 @@ export function createCatalogRepository(db: SQL) {
               : sourceRev !== undefined
                 ? sql`${routes.sourceRevision} <= ${sourceRev}`
                 : undefined;
+        const writeCondition = existing?.managedByRelease
+          ? setWhere
+          : and(eq(routes.managedByRelease, false), setWhere);
         const rows = await tx
           .insert(routes)
           .values({
             id,
             modelName: input.model_name,
-            channelId: input.channel_id,
-            upstreamModel: input.upstream_model,
-            operations: input.operations,
-            priority,
-            weight,
-            billingPriceId: input.billing_price_id,
-            costVersionId: input.cost_version_id,
-            requestPolicy,
-            adapterOverrides,
+            ...configuration,
             pluginPipeline,
-            retryPolicy,
-            enabled,
             ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
           })
           .onConflictDoUpdate({
             target: routes.id,
-            ...(setWhere ? { setWhere } : {}),
+            ...(writeCondition ? { setWhere: writeCondition } : {}),
             set: {
-              channelId: input.channel_id,
-              upstreamModel: input.upstream_model,
-              operations: input.operations,
-              priority,
-              weight,
-              billingPriceId: input.billing_price_id,
-              costVersionId: input.cost_version_id,
-              requestPolicy,
-              adapterOverrides,
-              retryPolicy,
-              enabled,
+              ...configuration,
               ...(sourceRev !== undefined ? { sourceRevision: sourceRev } : {}),
             },
           })
@@ -490,25 +589,7 @@ export function createCatalogRepository(db: SQL) {
             "Use a plugin release to change an existing route pipeline",
           );
         const epoch = await bumpEpoch(tx);
-        const r = rows[0]!;
-        return {
-          id: r.id,
-          model_name: r.modelName,
-          channel_id: r.channelId,
-          upstream_model: r.upstreamModel,
-          operations: r.operations,
-          priority: r.priority,
-          weight: r.weight,
-          billing_price_id: r.billingPriceId,
-          cost_version_id: r.costVersionId,
-          request_policy: r.requestPolicy,
-          adapter_overrides: r.adapterOverrides,
-          plugin_pipeline: r.pluginPipeline,
-          retry_policy: r.retryPolicy,
-          enabled: r.enabled,
-          source_revision: r.sourceRevision,
-          config_epoch: epoch,
-        };
+        return routeResult(rows[0]!, epoch);
       });
     },
 

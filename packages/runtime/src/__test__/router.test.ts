@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import {
   LocalRateLimiter,
   SmartRouter,
@@ -156,6 +156,28 @@ test("shadow scoring preserves live draws and the half-open probe while active f
   ]);
   expect(draws).toBe(4);
   expect(comparisons).toBe(1);
+});
+
+test("shadow first-choice metrics use the live draw instead of an unrelated random sample", () => {
+  const router = new SmartRouter({ random: () => 0.7 });
+  const candidates = [makeCandidate("a", "ch-a", 10), makeCandidate("b", "ch-b", 10)];
+  const compared: boolean[] = [];
+  const random = spyOn(crypto, "getRandomValues").mockReturnValue(new Uint32Array([0]));
+  try {
+    const selected = router.selectCandidates("pilot", candidates, "WEIGHTED", "chat", {
+      mode: "observe",
+      factors: () =>
+        new Map([
+          ["a", 1],
+          ["b", 0.25],
+        ]),
+      compare: (changed) => compared.push(changed),
+    });
+    expect(selected.map(({ route }) => route.id)).toEqual(["b", "a"]);
+    expect(compared).toEqual([true]);
+  } finally {
+    random.mockRestore();
+  }
 });
 
 test("symptom: expired probe results can release a successor and close the newer circuit", () => {

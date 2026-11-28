@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, isNull, eq, sql } from "drizzle-orm";
 import { GatewayError } from "@gateway/contracts";
 import { maskSecret } from "./auth.ts";
 import {
@@ -14,6 +14,17 @@ import {
 import type { GatewayClient } from "./gateway-client.ts";
 import { errMsg, isStaleRevisionError, LOCK_NS, type EntityLocker } from "./sync-state.ts";
 import type { ConsoleAdmissionSync } from "./sync-admission.ts";
+
+type ModelSettings = Omit<
+  typeof modelCatalog.$inferInsert,
+  | "pendingReleaseId"
+  | "desiredRevision"
+  | "syncedRevision"
+  | "syncStatus"
+  | "lastSyncError"
+  | "createdAt"
+  | "updatedAt"
+>;
 
 export function createConsoleCatalogSync(
   orm: ConsoleDrizzle,
@@ -374,64 +385,120 @@ export function createConsoleCatalogSync(
     });
   }
 
-  async function syncModel(modelName: string) {
-    return withEntityLock(LOCK_NS.model, modelName, async (orm) => {
-      const [m] = await orm
-        .select()
-        .from(modelCatalog)
-        .where(eq(modelCatalog.name, modelName))
-        .limit(1);
-      if (!m) throw new GatewayError(404, "not_found", "Model not found");
-      const targetRev = m.desiredRevision;
-      try {
-        const res = await gateway.upsertModel({
-          name: m.name,
-          operations: m.operations,
-          routing_strategy: m.routingStrategy,
-          adaptive_routing: m.adaptiveRouting,
-          max_output_tokens: m.maxOutputTokens,
-          enabled: m.enabled,
-          source_revision: targetRev,
-        });
-        const acceptedRev = Math.max(targetRev, res.source_revision ?? targetRev);
-        const [updated] = await orm
-          .update(modelCatalog)
-          .set({
-            syncedRevision: sql`GREATEST(${modelCatalog.syncedRevision}, ${acceptedRev})`,
-            syncStatus: sql`CASE WHEN ${modelCatalog.desiredRevision} <= ${acceptedRev} THEN 'SYNCED' ELSE 'PENDING' END`,
-            lastSyncError: sql`CASE WHEN ${modelCatalog.desiredRevision} <= ${acceptedRev} THEN NULL ELSE ${modelCatalog.lastSyncError} END`,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(modelCatalog.name, m.name))
-          .returning();
-        return updated ?? m;
-      } catch (err) {
-        if (isStaleRevisionError(err)) {
-          const [latest] = await orm
-            .select()
-            .from(modelCatalog)
-            .where(eq(modelCatalog.name, m.name))
-            .limit(1);
-          return latest ?? m;
+  async function upsertModel(input: ModelSettings) {
+    const { name, adaptiveRouting, ...settings } = input;
+    return withEntityLock(LOCK_NS.model, name, async (orm) => {
+      const where = eq(modelCatalog.name, name);
+      let [existing] = await orm.select().from(modelCatalog).where(where);
+      if (existing?.pendingReleaseId)
+        throw new GatewayError(409, "model_onboarding_conflict", "Model has a pending release");
+      if (existing && existing.syncedRevision < existing.desiredRevision) {
+        existing = await applyModel(orm, existing);
+        if (existing.syncedRevision < existing.desiredRevision) {
+          throw new GatewayError(409, "stale_revision", "Previous model edit is not synced");
         }
-        await orm
-          .update(modelCatalog)
-          .set({
-            syncStatus: sql`CASE WHEN ${modelCatalog.desiredRevision} <= ${targetRev} THEN 'FAILED' ELSE 'PENDING' END`,
-            lastSyncError: errMsg(err),
+      }
+
+      const changes = {
+        ...settings,
+        ...(adaptiveRouting !== undefined
+          ? {
+              adaptiveRouting:
+                adaptiveRouting === null
+                  ? null
+                  : sql`${JSON.stringify(adaptiveRouting)}::text::jsonb`,
+            }
+          : {}),
+        syncStatus: "PENDING" as const,
+      };
+      const [saved] = await orm
+        .insert(modelCatalog)
+        .values({ name, ...changes })
+        .onConflictDoUpdate({
+          target: modelCatalog.name,
+          set: {
+            ...changes,
+            desiredRevision: sql`${modelCatalog.desiredRevision} + 1`,
             updatedAt: sql`now()`,
-          })
-          .where(eq(modelCatalog.name, m.name));
+          },
+        })
+        .returning();
+      try {
+        return { created: !existing, model: await applyModel(orm, saved!) };
+      } catch (err) {
+        if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
+          if (existing) {
+            const { name: _name, createdAt: _createdAt, ...previous } = existing;
+            await orm
+              .update(modelCatalog)
+              .set({
+                ...previous,
+                adaptiveRouting:
+                  previous.adaptiveRouting === false
+                    ? sql`'false'::jsonb`
+                    : previous.adaptiveRouting,
+                updatedAt: sql`now()`,
+              })
+              .where(where);
+          } else {
+            await orm.delete(modelCatalog).where(where);
+          }
+        }
         throw err;
       }
     });
+  }
+
+  async function syncModel(modelName: string) {
+    return withEntityLock(LOCK_NS.model, modelName, async (orm) => {
+      const [model] = await orm.select().from(modelCatalog).where(eq(modelCatalog.name, modelName));
+      if (!model) throw new GatewayError(404, "not_found", "Model not found");
+      return model.pendingReleaseId ? model : applyModel(orm, model);
+    });
+  }
+
+  async function applyModel(orm: ConsoleDrizzle, model: typeof modelCatalog.$inferSelect) {
+    const where = eq(modelCatalog.name, model.name);
+    try {
+      const res = await gateway.upsertModel({
+        name: model.name,
+        operations: model.operations,
+        routing_strategy: model.routingStrategy,
+        adaptive_routing: model.adaptiveRouting,
+        max_output_tokens: model.maxOutputTokens,
+        enabled: model.enabled,
+        source_revision: model.desiredRevision,
+        expected_source_revision: model.syncedRevision,
+      });
+      const [updated] = await orm
+        .update(modelCatalog)
+        .set({
+          syncedRevision: Math.max(
+            model.desiredRevision,
+            res.source_revision ?? model.desiredRevision,
+          ),
+          syncStatus: "SYNCED",
+          lastSyncError: null,
+          updatedAt: sql`now()`,
+        })
+        .where(where)
+        .returning();
+      return updated!;
+    } catch (err) {
+      if (isStaleRevisionError(err)) return model;
+      await orm
+        .update(modelCatalog)
+        .set({ syncStatus: "FAILED", lastSyncError: errMsg(err), updatedAt: sql`now()` })
+        .where(where);
+      throw err;
+    }
   }
 
   async function syncRoute(routeId: string) {
     return withEntityLock(LOCK_NS.route, routeId, async (orm) => {
       const [route] = await orm.select().from(routes).where(eq(routes.id, routeId));
       if (!route) throw new GatewayError(404, "not_found", "Route not found");
-      return applyRoute(orm, route);
+      return route.pendingReleaseId ? route : applyRoute(orm, route);
     });
   }
 
@@ -455,8 +522,16 @@ export function createConsoleCatalogSync(
     >,
   ) {
     return withEntityLock(LOCK_NS.route, routeId, async (orm) => {
-      const [existing] = await orm.select().from(routes).where(eq(routes.id, routeId));
+      let [existing] = await orm.select().from(routes).where(eq(routes.id, routeId));
       if (!existing) throw new GatewayError(404, "not_found", "Route not found");
+      if (existing.pendingReleaseId)
+        throw new GatewayError(409, "route_release_conflict", "Route has a pending release");
+      if (existing.syncedRevision < existing.desiredRevision) {
+        existing = await applyRoute(orm, existing);
+        if (existing.syncedRevision < existing.desiredRevision) {
+          throw new GatewayError(409, "stale_revision", "Previous route edit is not synced");
+        }
+      }
       const [changed] = await orm
         .update(routes)
         .set({
@@ -465,10 +540,22 @@ export function createConsoleCatalogSync(
           syncStatus: "PENDING",
           updatedAt: sql`now()`,
         })
-        .where(eq(routes.id, routeId))
+        .where(
+          and(
+            eq(routes.id, routeId),
+            eq(routes.desiredRevision, existing.desiredRevision),
+            isNull(routes.pendingReleaseId),
+          ),
+        )
         .returning();
+      if (!changed)
+        throw new GatewayError(
+          409,
+          "route_release_conflict",
+          "Route changed or has a pending release",
+        );
       try {
-        return await applyRoute(orm, changed!);
+        return await applyRoute(orm, changed);
       } catch (err) {
         if (err instanceof GatewayError && err.status >= 400 && err.status < 500) {
           const {
@@ -480,7 +567,13 @@ export function createConsoleCatalogSync(
           await orm
             .update(routes)
             .set({ ...previous, updatedAt: sql`now()` })
-            .where(eq(routes.id, routeId));
+            .where(
+              and(
+                eq(routes.id, routeId),
+                eq(routes.desiredRevision, changed.desiredRevision),
+                isNull(routes.pendingReleaseId),
+              ),
+            );
         }
         throw err;
       }
@@ -505,6 +598,7 @@ export function createConsoleCatalogSync(
         retry_policy: r.retryPolicy,
         enabled: r.enabled,
         source_revision: targetRev,
+        expected_source_revision: r.syncedRevision,
       });
       const acceptedRev = Math.max(targetRev, res.source_revision ?? targetRev);
       const [updated] = await orm
@@ -684,6 +778,7 @@ export function createConsoleCatalogSync(
     syncChannel,
     updateChannel,
     syncPricingTemplate,
+    upsertModel,
     syncModel,
     syncRoute,
     updateRoute,

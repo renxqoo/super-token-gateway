@@ -62,6 +62,33 @@
           "checksum": "1bf8d39ee429fe74f66d8d63621e5b9c61fc6295f2bd19292117584696eb6bbf"
         }
       ]
+    },
+    {
+      "version": 2026112803,
+      "files": [
+        {
+          "path": "./migrations/0007_route_releases.sql",
+          "checksum": "02a312fdeebc98d0e5fdb041de2d0a9cbdccf8188bb587f42f3fc96292c47ed5"
+        }
+      ]
+    },
+    {
+      "version": 2026112804,
+      "files": [
+        {
+          "path": "./migrations/0008_model_onboarding.sql",
+          "checksum": "4f3c8510dc9d924b8ee1f8500bce5564acf8f82b1eb03fbab374910272a34a7f"
+        }
+      ]
+    },
+    {
+      "version": 2026112901,
+      "files": [
+        {
+          "path": "./migrations/0009_explicit_execution_policy.sql",
+          "checksum": "b53322d904c54d78ababac55bcbc35634723c1ef2ddb50d9e691e3411495da48"
+        }
+      ]
     }
   ]
 }

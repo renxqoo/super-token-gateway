@@ -6,7 +6,7 @@ Gateway 路由的完整规范由 `bun run openapi` 生成，见 [OpenAPI](docs/o
 
 推理使用 `Authorization: Bearer sk_...`；Messages 可用 `x-api-key`，Gemini 可用 `x-goog-api-key`。不把 URL 查询参数中的凭证写入访问日志；当前客户端应使用请求头。管理接口用独立的 Bearer 凭证按角色授权。
 
-推理响应通过 `x-request-id` 标识请求。已有预扣和账单可用该标识查询。响应还携带 `x-trace-id` 和 `traceparent`。相同 `Idempotency-Key` 的重放返回 409 及已有请求的 ID 和状态。不同请求复用幂等键返回 `idempotency_conflict`。响应体不作为幂等回放缓存。
+推理响应通过 `x-request-id` 标识请求。已有预扣和账单可用该标识查询。响应还携带 `x-trace-id` 和 `traceparent`。网关在选路前检查 `Idempotency-Key` 和当前版本的原始输入指纹。匹配时返回 409 及已有请求的 ID 和状态。不同输入或已保存的旧版摘要占用同一键时返回 `idempotency_conflict`，已有请求和账单继续按请求 ID 查询。响应体不作为幂等回放缓存。
 
 400 输入无效；401 未认证；402 合资格资金或授信不足、钱包冻结（insufficient_funds）；403 操作/模型越权；404 自有资源不存在；409 意图/配置冲突；413 字节超限；422 能力不可表达；429 准入超限；502 上游或转换失败；503 依赖、容量或提交不可用；504 超时。
 
@@ -28,13 +28,19 @@ Gateway 路由的完整规范由 `bun run openapi` 生成，见 [OpenAPI](docs/o
 | `POST /internal/v1/events/ack`                                     | 以 `consumer`、`lease_token`、`through_seq` 确认消费            |
 | `GET /internal/v1/health`                                          | 查询 Gateway 配置纪元、Redis 连接及渠道健康                     |
 
+模型路由视图和发布使用 `/internal/v1/models/:model/routing` 与 `/internal/v1/models/:model/route-releases`，使用 `catalog` 角色。发布支持预检、按 ID 查询和反向发布。发布过的路径执行来源版本保护，单项 `PUT /internal/v1/routes` 携带 `expected_source_revision` 和推进的 `source_revision`。相同版本和配置可重放。 [请求与状态契约](docs/console-api.md#模型主备路由发布)
+
 目录、财务、审计和事件使用各自的管理角色。变更渠道上游来源时提供新目标凭据，已有上游任务依其记录的渠道处理。客户通过 Console 的 `/api/v1/billing-accounts/:billingAccountId/api-keys` 管理账户 Key。
+
+新模型上架使用 `GET/POST /internal/v1/models/onboarding`、`POST /internal/v1/models/onboarding/validate` 和 `GET /internal/v1/models/:model/onboarding/:id`，使用 `catalog` 角色并返回价格版本引用。 `POST /internal/v1/models/onboarding/preview` 复用价格试算权限，使用 `auditor` 角色。单项 `PUT /internal/v1/models` 修改已上架模型时需要 `expected_source_revision` 和推进的 `source_revision`。同一版本及同一配置可重放。 [上架契约](docs/console-api.md#新模型上架与价格预览)
+
+模型的 `adaptive_routing` 可通过 `PUT /internal/v1/models` 或 Console 模型更新发布。`mode` 控制排序，显式策略必须设置 `execution_policy`，取值为 `route` 或 `protected`。旧显式配置由迁移补齐为 `protected`。 [观察、执行与回退配置](docs/adaptive-provider-routing.md#3-选路策略与配置)
 
 ## 数据面与资源
 
 个人注册和团队创建自动开通计费账户。登录用户通过 Console 的账户路径管理 Key。账户选择在签发时固定，推理请求继续使用 Key 作为调用凭证。账户停用返回 HTTP 403 和 `billing_account_disabled`。组织角色与签发权限见 [Console API](docs/console-api.md)。
 
-`GET /v1/models` 按 Key 的模型范围过滤。视频使用 `POST /v1/videos` 提交，`GET /v1/videos/:taskId` 查询，`POST /v1/videos/:taskId/cancel` 取消。同账户内，普通 Key 只可操作其轮换链签发的任务。账户 ADMIN 可查询或取消该账户内任意 Key 签发的任务。查询与取消均按数据库的最新限制复核调用方 Key 的模型、操作和客户端 IP 权限。跨账户或同账户其他调用方的任务返回 404。
+`GET /v1/models` 按 Key 的模型范围过滤，只列出当前目录快照中已启用且至少有一条启用路由能处理其声明操作的模型。视频使用 `POST /v1/videos` 提交，`GET /v1/videos/:taskId` 查询，`POST /v1/videos/:taskId/cancel` 取消。同账户内，普通 Key 只可操作其轮换链签发的任务。账户 ADMIN 可查询或取消该账户内任意 Key 签发的任务。查询与取消均按数据库的最新限制复核调用方 Key 的模型、操作和客户端 IP 权限。跨账户或同账户其他调用方的任务返回 404。
 
 `POST /v1/videos` 使用非流式响应。转写、翻译和图片编辑支持 multipart，具体允许字段由协议、路由与上游适配共同决定。
 

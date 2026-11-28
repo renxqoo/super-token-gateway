@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { adaptiveRoutingSchema, pricingSchema } from "@gateway/contracts";
+import { adaptiveRoutingSchema, pricingSchema, quantityStringSchema } from "@gateway/contracts";
 import { BILLING_ACCOUNT_API_KEY_LENGTH, BILLING_ACCOUNT_API_KEY_PATTERN } from "@gateway/runtime";
 import {
   currencySchema,
@@ -8,7 +8,7 @@ import {
   multiplierIntSchema,
 } from "./internal-request.ts";
 import { providerNameSchema, adapterOverridesSchema } from "./internal-provider-schemas.ts";
-import { pricingSpecSchema, quantityStringSchema } from "./internal-pricing-schemas.ts";
+import { pricingSpecSchema } from "./internal-pricing-schemas.ts";
 
 const sourceRevisionSchema = z.number().int().min(1).max(2_147_483_647).optional();
 
@@ -139,6 +139,7 @@ export const upsertModelSchema = z
     max_output_tokens: z.number().int().min(1).max(10_000_000).default(32768),
     enabled: z.boolean().default(true),
     source_revision: sourceRevisionSchema,
+    expected_source_revision: z.number().int().min(0).max(2_147_483_647).optional(),
   })
   .strict();
 
@@ -189,6 +190,7 @@ export const upsertRouteSchema = z
     plugin_pipeline: z.array(pluginStepSchema).max(20).optional(),
     retry_policy: retryPolicySchema.default({}),
     enabled: z.boolean().default(true),
+    expected_source_revision: z.number().int().min(0).max(2_147_483_647).optional(),
     source_revision: sourceRevisionSchema,
   })
   .strict();

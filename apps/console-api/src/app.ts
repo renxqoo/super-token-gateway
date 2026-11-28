@@ -287,6 +287,9 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
       schedule(config.reconcileIntervalMs, "reconcile_failed", () =>
         sync.reconcilePending(stopController.signal),
       );
+      schedule(config.reconcileIntervalMs, "route_release_reconcile_failed", () =>
+        sync.routeReleases.reconcilePending(stopController.signal),
+      );
       schedule(config.outboxPullIntervalMs, "outbox_pull_failed", () =>
         pullOutboxBatch(db, orm, gateway, config.outboxConsumerName),
       );

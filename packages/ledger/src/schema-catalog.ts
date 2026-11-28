@@ -33,7 +33,6 @@ import type {
   PluginCapability,
   PluginKind,
   PluginPipelineStep,
-  PluginReleaseChange,
   PriceBasis,
   PriceSide,
   ProviderPluginConfig,
@@ -202,7 +201,7 @@ export const plugins = pgTable(
   (t) => [unique("plugins_name_version_key").on(t.name, t.version)],
 );
 
-export const pluginReleases = pgTable("plugin_releases", {
+export const configReleases = pgTable("config_releases", {
   id: uuid("id").primaryKey(),
   requestDigest: text("request_digest").notNull(),
   actor: text("actor").notNull(),
@@ -213,8 +212,10 @@ export const pluginReleases = pgTable("plugin_releases", {
     .array()
     .notNull()
     .default(sql`'{}'`),
-  changes: pgJsonb<PluginReleaseChange[]>("changes").notNull(),
-  rollbackOf: uuid("rollback_of").references((): AnyPgColumn => pluginReleases.id),
+  kind: text("kind").$type<"PLUGIN" | "ROUTE" | "MODEL">().notNull().default("PLUGIN"),
+  modelName: text("model_name"),
+  changes: pgJsonb<unknown[]>("changes").notNull(),
+  rollbackOf: uuid("rollback_of").references((): AnyPgColumn => configReleases.id),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
 
@@ -237,12 +238,12 @@ export const gatewayConfigNodes = pgTable("gateway_config_nodes", {
   stoppedAt: timestamp("stopped_at", { withTimezone: true, mode: "string" }),
 });
 
-export const pluginReleaseAcks = pgTable(
-  "plugin_release_acks",
+export const configReleaseAcks = pgTable(
+  "config_release_acks",
   {
     configEpoch: bigint("config_epoch", { mode: "number" })
       .notNull()
-      .references(() => pluginReleases.configEpoch),
+      .references(() => configReleases.configEpoch),
     nodeId: uuid("node_id")
       .notNull()
       .references(() => gatewayConfigNodes.id),
@@ -293,6 +294,7 @@ export const models = pgTable("models", {
   adaptiveRouting: pgJsonb<AdaptiveRoutingSetting>("adaptive_routing"),
   maxOutputTokens: integer("max_output_tokens").notNull(),
   enabled: boolean("enabled").notNull().default(true),
+  managedByRelease: boolean("managed_by_release").notNull().default(false),
   sourceRevision: integer("source_revision").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
@@ -402,6 +404,7 @@ export const routes = pgTable(
       .notNull()
       .default(sql`'{}'::jsonb`),
     enabled: boolean("enabled").notNull().default(true),
+    managedByRelease: boolean("managed_by_release").notNull().default(false),
     sourceRevision: integer("source_revision").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .notNull()

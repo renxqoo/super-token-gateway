@@ -15,6 +15,7 @@ import type { InferenceRequest } from "./types.ts";
 import { channelFailureKind } from "./telemetry.ts";
 import type { InferenceTelemetry } from "./telemetry.ts";
 import type { InferenceResources } from "./resources.ts";
+import { routeAttemptTimeoutMs } from "./failover-policy.ts";
 
 export function createUpstreamPreparation(request: InferenceRequest) {
   const { deps, snap, operation, outputBound, isStream, billingAccount, trace, multipartEntries } =
@@ -170,7 +171,7 @@ export function createDispatchReservation(
           dispatchDeadline: Math.min(
             firstByteDeadlineMs ?? Infinity,
             performance.now() +
-              (candidate.route.retry_policy.attempt_timeout_ms ?? deps.config.attemptTimeoutMs),
+              routeAttemptTimeoutMs(candidate.route.retry_policy, deps.config.attemptTimeoutMs),
           ),
         },
         deps.config.allowPrivateUpstreams,

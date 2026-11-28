@@ -44,14 +44,14 @@ GRANT SELECT ON public.wallets, public.wallet_lots, public.supplier_cells, publi
 GRANT SELECT ON public.supplier_root_balances TO stg_control, stg_worker;
 GRANT SELECT ON public.outbox_events, public.outbox_consumers, public.outbox_consumer_shards TO stg_control, stg_worker;
 GRANT SELECT ON public.plugin_revocations TO stg_data, stg_control;
-GRANT SELECT ON public.gateway_config_nodes, public.plugin_release_acks TO stg_data, stg_control, stg_worker;
-GRANT SELECT (config_epoch) ON public.plugin_releases TO stg_data;
-GRANT SELECT (expected_nodes) ON public.plugin_releases TO stg_worker;
+GRANT SELECT ON public.gateway_config_nodes, public.config_release_acks TO stg_data, stg_control, stg_worker;
+GRANT SELECT (config_epoch) ON public.config_releases TO stg_data;
+GRANT SELECT (expected_nodes) ON public.config_releases TO stg_worker;
 GRANT INSERT, UPDATE ON public.gateway_config_nodes TO stg_data;
 GRANT DELETE ON public.gateway_config_nodes TO stg_worker;
-GRANT INSERT ON public.plugin_release_acks TO stg_data;
+GRANT INSERT ON public.config_release_acks TO stg_data;
 GRANT INSERT ON public.plugin_revocations TO stg_control;
-GRANT SELECT ON public.funding_operations, public.billing_resolutions, public.plugin_releases TO stg_control;
+GRANT SELECT ON public.funding_operations, public.billing_resolutions, public.config_releases TO stg_control;
 GRANT SELECT ON public.billing_charges, public.ledger_entries, public.admin_audit_events,
   public.price_versions, public.pricing_modifiers, public.fx_rate_versions TO stg_audit;
 
@@ -88,7 +88,7 @@ GRANT INSERT, UPDATE ON public.billing_accounts, public.api_keys, public.upstrea
   public.supplier_root_balances, public.supplier_cells TO stg_control;
 GRANT UPDATE ON public.config_epoch TO stg_control;
 GRANT INSERT ON public.price_versions, public.fx_rate_versions, public.funding_operations, public.billing_resolutions,
-  public.plugin_releases, public.admin_audit_events TO stg_control;
+  public.config_releases, public.admin_audit_events TO stg_control;
 GRANT INSERT, DELETE ON public.admin_audit_pending TO stg_control;
 GRANT SELECT (request_id) ON public.admin_audit_pending TO stg_control;
 GRANT EXECUTE ON FUNCTION public.prepare_ledger_month(DATE) TO stg_worker;

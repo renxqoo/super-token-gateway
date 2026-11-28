@@ -1,5 +1,5 @@
 import { GatewayError, object, optionalObject } from "@gateway/contracts";
-import type { AdaptiveRoutingPolicy, Operation } from "@gateway/kernel";
+import type { Operation } from "@gateway/kernel";
 import type { ModelRecord } from "@gateway/ledger";
 import { copyExact, numberLiteral, parseClientJson, requestCharacters } from "@gateway/protocol";
 import { declaredRequestSize } from "../public-ingress.ts";
@@ -7,6 +7,7 @@ import { ProxyRuntimeState } from "../proxy-state.ts";
 import type { TraceContext } from "../observability.ts";
 import { inspectMeteredRequestSignals, validateMeteredRequest } from "../request-metering.ts";
 import { snapshotSupportsHostedTools, snapshotSupportsServiceTier } from "../pricing.ts";
+import { isMultipartOperation } from "../upstream-payload.ts";
 import type {
   InferenceContext,
   InferenceFastHandoff,
@@ -18,12 +19,7 @@ import { readRequestBytesBounded, utf8FatalDecoder } from "./body.ts";
 import { parseMultipartFormData } from "./multipart.ts";
 import type { InferenceTelemetry } from "./telemetry.ts";
 import type { InferenceResources } from "./resources.ts";
-
-const defaultAdaptiveRouting: AdaptiveRoutingPolicy = {
-  operations: ["chat"],
-  mode: "active",
-  first_content_target_ms: 1500,
-};
+import { resolveInferenceRoutingPolicy } from "./routing-policy.ts";
 
 function validatePositiveOutputBound(
   parent: Record<string, unknown>,
@@ -229,10 +225,7 @@ export async function admitInferenceRequest(
 
     const contentType = reqHeaders.get("content-type") ?? "";
     const isMultipartOp =
-      (operation === "transcription" ||
-        operation === "translation" ||
-        operation === "image_edits") &&
-      contentType.toLowerCase().includes("multipart/form-data");
+      isMultipartOperation(operation) && contentType.toLowerCase().includes("multipart/form-data");
 
     const bodyReadTimeoutMs =
       deps.config.bodyReadTimeoutMs ?? Math.min(deps.config.attemptTimeoutMs, 15_000);
@@ -341,13 +334,8 @@ export async function admitInferenceRequest(
         "Video task creation does not support streaming",
       );
     }
-    const configuredRouting = model.adaptive_routing;
-    const adaptivePolicy =
-      operation === "chat" && configuredRouting !== false
-        ? (configuredRouting ??
-          (model.routing_strategy === "WEIGHTED" ? defaultAdaptiveRouting : undefined))
-        : undefined;
-    telemetry.beginResponseTracking(isStream, adaptivePolicy?.first_content_target_ms);
+    const routing = resolveInferenceRoutingPolicy(model, operation);
+    telemetry.beginResponseTracking(isStream, routing.ordering?.first_content_target_ms);
     const outputBound = resolveOutputBound(clientBody, operation, model);
 
     const initialChars = isMultipartOp ? undefined : requestCharacters(operation, clientBody);
@@ -462,8 +450,7 @@ export async function admitInferenceRequest(
       isStream,
       outputBound,
       initialChars,
-      adaptivePolicy,
-      strictAdaptiveSwitch: operation === "chat" && Boolean(configuredRouting),
+      routing,
       maxStreamDurationMs,
       firstByteDeadlineMs,
     };

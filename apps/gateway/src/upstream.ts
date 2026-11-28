@@ -1,11 +1,17 @@
 import { GatewayError } from "@gateway/contracts";
 import { canonical, type Operation, type Protocol } from "@gateway/kernel";
-import type { ChannelRecord, ConfigSnapshot, RouteRecord } from "@gateway/ledger";
+import type {
+  ChannelRecord,
+  ConfigSnapshot,
+  DeclarativeProviderConfig,
+  RouteRecord,
+} from "@gateway/ledger";
 import {
   invokeWasmProviderRequest,
   renderEndpointUrl,
   resolvePinnedProviderPlugin,
   sanitizeProviderHeaders,
+  verifyPluginIntegrity,
   WasmCapacityError,
   WasmPluginFaultError,
   type ResolvedProvider,
@@ -13,7 +19,12 @@ import {
 } from "@gateway/plugin-engine";
 import { stringifyExact, validateRequestPolicy, type ConversionMode } from "@gateway/protocol";
 import { validateMeteredRequest, type MeteredValidationOptions } from "./request-metering.ts";
-import { applyAuthToRequest, isValidHttpHeaderValue, type VertexTokens } from "@gateway/runtime";
+import {
+  applyAuthToRequest,
+  isValidHttpHeaderValue,
+  validateAuthCredentials,
+  type VertexTokens,
+} from "@gateway/runtime";
 import {
   type MergedProviderOverrides,
   mergeOverridesForResolved,
@@ -23,6 +34,9 @@ import {
   joinBase,
   encodeMultipartWithModel,
   isConversationalOperation,
+  isMultipartOperation,
+  multipartPaths,
+  declaresProviderOperation,
   capKnownOutput,
 } from "./upstream-payload.ts";
 
@@ -245,6 +259,107 @@ function assertProviderDestination(baseUrl: string, url: URL): void {
   }
 }
 
+function renderDeclarativeEndpoint(
+  channel: ChannelRecord,
+  route: RouteRecord,
+  config: DeclarativeProviderConfig,
+  overrides: MergedProviderOverrides,
+  operation: Operation,
+  isStream: boolean,
+): URL {
+  try {
+    return renderEndpointUrl({
+      baseUrl: channel.base_url,
+      config,
+      operation,
+      upstreamModel: route.upstream_model,
+      isStream,
+      ...(overrides.path_override ? { pathOverride: overrides.path_override } : {}),
+      extraQuery: overrides.query_params,
+    });
+  } catch (err) {
+    throw new GatewayError(
+      502,
+      "provider_adapter_failed",
+      err instanceof Error ? err.message : "Failed to render provider endpoint URL",
+    );
+  }
+}
+
+function renderMultipartEndpoint(
+  channel: ChannelRecord,
+  route: RouteRecord,
+  resolved: ResolvedProvider,
+  overrides: MergedProviderOverrides,
+  operation: keyof typeof multipartPaths,
+): URL {
+  if (
+    resolved.kind === "DECLARATIVE" &&
+    (resolved.config.endpoints[operation] ||
+      resolved.config.endpoints.default ||
+      overrides.path_override)
+  ) {
+    return renderDeclarativeEndpoint(channel, route, resolved.config, overrides, operation, false);
+  }
+  return joinBase(channel.base_url, overrides.path_override ?? multipartPaths[operation]);
+}
+
+export function validateRouteAdapter(
+  snapshot: ConfigSnapshot,
+  channel: ChannelRecord,
+  route: RouteRecord,
+  options: {
+    secret: string;
+    wasmExecutor: WasmRuntimeExecutor | null;
+    signingPublicKeyPem: string | undefined;
+  },
+): void {
+  const { resolved, overrides } = getProviderPlan(snapshot, channel, route);
+  if (channel.provider_plugin_id && snapshot.revokedPlugins.has(channel.provider_plugin_id)) {
+    throw new Error("Provider revision is revoked");
+  }
+  validateAuthCredentials(resolved.config.auth, options.secret);
+  if (route.operations.includes("videos")) {
+    const query = resolved.kind === "DECLARATIVE" ? resolved.config.async_task_config : undefined;
+    if (!query || (!query.query_param && !query.query_path.includes("${task_id}"))) {
+      throw new Error("Video adapter does not query by task ID");
+    }
+  }
+  if (resolved.kind === "WASM") {
+    if (
+      !options.wasmExecutor ||
+      !verifyPluginIntegrity(resolved.plugin, options.signingPublicKeyPem).ok
+    ) {
+      throw new Error("WASM provider is unavailable");
+    }
+  }
+  for (const operation of route.operations) {
+    if (isMultipartOperation(operation)) {
+      assertProviderDestination(
+        channel.base_url,
+        renderMultipartEndpoint(channel, route, resolved, overrides, operation),
+      );
+      continue;
+    }
+    if (resolved.kind === "WASM") continue;
+    if (!declaresProviderOperation(resolved.config, operation, overrides.path_override)) {
+      throw new Error("Provider endpoint is not declared");
+    }
+    const endpoint = resolved.config.endpoints[operation] ?? resolved.config.endpoints.default;
+    for (const isStream of endpoint?.stream_path ? [false, true] : [false]) {
+      const url = renderDeclarativeEndpoint(
+        channel,
+        route,
+        resolved.config,
+        overrides,
+        operation,
+        isStream,
+      );
+      assertProviderDestination(channel.base_url, url);
+    }
+  }
+}
+
 export function tryPrepareUpstreamRequestSync(
   options: Omit<PrepareUpstreamOptions, "signal">,
 ): PreparedUpstreamRequest | null {
@@ -270,23 +385,14 @@ export function tryPrepareUpstreamRequestSync(
   const endpointKey = `${operation}:${isStream ? 1 : 0}`;
   let url = staticEndpoints.get(endpointKey);
   if (!url) {
-    try {
-      url = renderEndpointUrl({
-        baseUrl: channel.base_url,
-        config: resolved.config,
-        operation,
-        upstreamModel: route.upstream_model,
-        isStream,
-        ...(mergedOverrides.path_override ? { pathOverride: mergedOverrides.path_override } : {}),
-        extraQuery: mergedOverrides.query_params,
-      });
-    } catch (err) {
-      throw new GatewayError(
-        502,
-        "provider_adapter_failed",
-        err instanceof Error ? err.message : "Failed to render provider endpoint URL",
-      );
-    }
+    url = renderDeclarativeEndpoint(
+      channel,
+      route,
+      resolved.config,
+      mergedOverrides,
+      operation,
+      isStream,
+    );
     assertProviderDestination(channel.base_url, url);
     staticEndpoints.set(endpointKey, url);
   }
@@ -392,30 +498,8 @@ export async function prepareUpstreamRequest(
     headers.set(k, v);
   }
 
-  if (multipartEntries) {
-    const defaultMultipartPath =
-      operation === "transcription"
-        ? "/v1/audio/transcriptions"
-        : operation === "translation"
-          ? "/v1/audio/translations"
-          : "/v1/images/edits";
-    const url =
-      resolved.kind === "DECLARATIVE" &&
-      (resolved.config.endpoints[operation] ||
-        resolved.config.endpoints.default ||
-        mergedOverrides.path_override)
-        ? renderEndpointUrl({
-            baseUrl: channel.base_url,
-            config: resolved.config,
-            operation,
-            upstreamModel: route.upstream_model,
-            isStream: false,
-            ...(mergedOverrides.path_override
-              ? { pathOverride: mergedOverrides.path_override }
-              : {}),
-            extraQuery: mergedOverrides.query_params,
-          })
-        : joinBase(channel.base_url, mergedOverrides.path_override ?? defaultMultipartPath);
+  if (multipartEntries && isMultipartOperation(operation)) {
+    const url = renderMultipartEndpoint(channel, route, resolved, mergedOverrides, operation);
     assertProviderDestination(channel.base_url, url);
     const encoded = await encodeMultipartWithModel(multipartEntries, route.upstream_model);
     headers.set("content-type", encoded.contentType);
@@ -463,23 +547,14 @@ export async function prepareUpstreamRequest(
   let bodyBytes: Uint8Array;
 
   if (resolved.kind === "DECLARATIVE") {
-    try {
-      url = renderEndpointUrl({
-        baseUrl: channel.base_url,
-        config: resolved.config,
-        operation,
-        upstreamModel: route.upstream_model,
-        isStream,
-        ...(mergedOverrides.path_override ? { pathOverride: mergedOverrides.path_override } : {}),
-        extraQuery: mergedOverrides.query_params,
-      });
-    } catch (err) {
-      throw new GatewayError(
-        502,
-        "provider_adapter_failed",
-        err instanceof Error ? err.message : "Failed to render provider endpoint URL",
-      );
-    }
+    url = renderDeclarativeEndpoint(
+      channel,
+      route,
+      resolved.config,
+      mergedOverrides,
+      operation,
+      isStream,
+    );
     if (!(
       options.alreadyValidated &&
       plan.payloadPreservesMetering &&

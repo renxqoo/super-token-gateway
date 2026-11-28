@@ -17,16 +17,6 @@ import {
 import type { SupplierHoldEntry, AcquireHoldInput } from "./types.ts";
 import type { SQL } from "bun";
 
-export function matchesHoldFingerprint(
-  stored: string,
-  incoming: Pick<AcquireHoldInput, "fingerprint" | "legacy_fingerprint">,
-): boolean {
-  return (
-    stored === incoming.fingerprint ||
-    (stored === incoming.legacy_fingerprint && /^[0-9a-f]{64}$/.test(stored))
-  );
-}
-
 async function lockFundedSupplierCell(
   tx: SQL,
   item: AcquireHoldInput,

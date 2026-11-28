@@ -78,13 +78,13 @@ const upsertModelSchema = z
     tags: z.array(z.string().min(1).max(40)).max(32).default([]),
     list_price_template_id: z.uuid().nullable().optional(),
     list_rates: pricingSchema.shape.rates.optional(),
-    currency: currencySchema.default("USD"),
+    currency: currencySchema.optional(),
     is_public: z.boolean().default(true),
     enabled: z.boolean().default(true),
   })
   .strict()
   .superRefine((v, ctx) => {
-    if (v.list_rates !== undefined) validatePricingRates(v.currency, v.list_rates, ctx);
+    if (v.list_rates !== undefined) validatePricingRates(v.currency ?? "USD", v.list_rates, ctx);
   });
 
 const createRouteSchema = z
@@ -328,83 +328,47 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
   app.post("/models", async (c) => {
     const actor = c.get("user");
     const body = await parseJsonBody(c, upsertModelSchema);
-    const adaptiveRouting =
-      body.adaptive_routing === null || body.adaptive_routing === undefined
-        ? body.adaptive_routing
-        : sql`${JSON.stringify(body.adaptive_routing)}::text::jsonb`;
-    let listPriceVersionId: string | null = null;
-    let listRates: Pricing["rates"] = (body.list_rates as Pricing["rates"]) ?? {};
-    let currency = body.currency;
-    if (body.list_price_template_id) {
-      const tpl = await resolveTemplatePriceId(body.list_price_template_id, "CUSTOMER");
-      listPriceVersionId = tpl.currentPriceVersionId;
-      listRates = tpl.rates;
-      currency = tpl.currency;
-    }
-    const [existing] = await deps.orm
-      .select()
-      .from(modelCatalog)
-      .where(eq(modelCatalog.name, body.name))
-      .limit(1);
-    await deps.orm
-      .insert(modelCatalog)
-      .values({
-        name: body.name,
-        displayName: body.display_name,
-        providerBrand: body.provider_brand,
-        description: body.description,
-        category: body.category,
-        contextLength: body.context_length,
-        maxOutputTokens: body.max_output_tokens,
-        operations: body.operations,
-        routingStrategy: body.routing_strategy,
-        adaptiveRouting: adaptiveRouting ?? null,
-        tags: body.tags,
-        listPriceVersionId,
-        listRates,
-        currency,
-        isPublic: body.is_public,
-        enabled: body.enabled,
-        syncStatus: "PENDING",
-      })
-      .onConflictDoUpdate({
-        target: modelCatalog.name,
-        set: {
-          displayName: body.display_name,
-          providerBrand: body.provider_brand,
-          description: body.description,
-          category: body.category,
-          contextLength: body.context_length,
-          maxOutputTokens: body.max_output_tokens,
-          operations: body.operations,
-          routingStrategy: body.routing_strategy,
-          ...(adaptiveRouting !== undefined ? { adaptiveRouting } : {}),
-          tags: body.tags,
-          listPriceVersionId,
-          listRates,
-          currency,
-          isPublic: body.is_public,
-          enabled: body.enabled,
-          desiredRevision: sql`${modelCatalog.desiredRevision} + 1`,
-          syncStatus: "PENDING",
-          updatedAt: sql`now()`,
-        },
-      });
-    try {
-      const synced = await deps.sync.catalog.syncModel(body.name);
-      await recordAuditLog(deps.orm, {
-        actor,
-        action: "admin.model.upsert",
-        targetType: "model",
-        targetId: body.name,
-      });
-      return c.json(synced, existing ? 200 : 201);
-    } catch (err) {
-      if (err instanceof GatewayError && err.status >= 400 && err.status < 500 && !existing) {
-        await deps.orm.delete(modelCatalog).where(eq(modelCatalog.name, body.name));
-      }
-      throw err;
-    }
+    const template = body.list_price_template_id
+      ? await resolveTemplatePriceId(body.list_price_template_id, "CUSTOMER")
+      : null;
+    const listingPrice = template
+      ? {
+          listPriceVersionId: template.currentPriceVersionId,
+          listRates: template.rates,
+          currency: template.currency,
+        }
+      : body.list_price_template_id === null ||
+          body.list_rates !== undefined ||
+          body.currency !== undefined
+        ? {
+            listPriceVersionId: null,
+            listRates: (body.list_rates as Pricing["rates"]) ?? {},
+            currency: body.currency ?? "USD",
+          }
+        : {};
+    const { created, model } = await deps.sync.catalog.upsertModel({
+      name: body.name,
+      displayName: body.display_name,
+      providerBrand: body.provider_brand,
+      description: body.description,
+      category: body.category,
+      contextLength: body.context_length,
+      maxOutputTokens: body.max_output_tokens,
+      operations: body.operations,
+      routingStrategy: body.routing_strategy,
+      adaptiveRouting: body.adaptive_routing,
+      tags: body.tags,
+      ...listingPrice,
+      isPublic: body.is_public,
+      enabled: body.enabled,
+    });
+    await recordAuditLog(deps.orm, {
+      actor,
+      action: "admin.model.upsert",
+      targetType: "model",
+      targetId: body.name,
+    });
+    return c.json(model, created ? 201 : 200);
   });
 
   app.get("/routes", async (c) => {
@@ -439,21 +403,32 @@ export function createAdminCatalogRoutes(deps: ConsoleDeps) {
       );
     }
     const id = crypto.randomUUID();
-    await deps.orm.insert(routes).values({
-      id,
-      modelName: body.model_name,
-      channelId: body.channel_id,
-      upstreamModel: body.upstream_model,
-      operations: body.operations,
-      priority: body.priority,
-      weight: body.weight,
-      billingPriceId,
-      costVersionId,
-      requestPolicy: body.request_policy,
-      adapterOverrides: body.adapter_overrides,
-      retryPolicy: body.retry_policy,
-      enabled: body.enabled,
-      syncStatus: "PENDING",
+    await deps.orm.transaction(async (tx) => {
+      const [model] = await tx
+        .select({ pendingReleaseId: modelCatalog.pendingReleaseId })
+        .from(modelCatalog)
+        .where(eq(modelCatalog.name, body.model_name))
+        .for("update");
+      if (!model) throw new GatewayError(404, "not_found", "Model not found");
+      if (model.pendingReleaseId) {
+        throw new GatewayError(409, "model_onboarding_conflict", "Model has a pending release");
+      }
+      await tx.insert(routes).values({
+        id,
+        modelName: body.model_name,
+        channelId: body.channel_id,
+        upstreamModel: body.upstream_model,
+        operations: body.operations,
+        priority: body.priority,
+        weight: body.weight,
+        billingPriceId,
+        costVersionId,
+        requestPolicy: body.request_policy,
+        adapterOverrides: body.adapter_overrides,
+        retryPolicy: body.retry_policy,
+        enabled: body.enabled,
+        syncStatus: "PENDING",
+      });
     });
     try {
       const synced = await deps.sync.catalog.syncRoute(id);

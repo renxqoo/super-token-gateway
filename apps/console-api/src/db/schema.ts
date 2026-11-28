@@ -1,4 +1,5 @@
 import type { SQL } from "bun";
+import type { ModelOnboardingInput, RouteReleaseIntent } from "@gateway/contracts";
 import { drizzle } from "drizzle-orm/bun-sql";
 import {
   type AnyPgColumn,
@@ -247,6 +248,20 @@ export const priceVersionSnapshots = pgTable("price_version_snapshots", {
   createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 
+export const routeReleaseRequests = pgTable("route_release_requests", {
+  id: uuid("id").primaryKey(),
+  modelName: text("model_name").notNull(),
+  actorUserId: uuid("actor_user_id").notNull(),
+  actorEmail: text("actor_email").notNull(),
+  digest: text("digest").notNull(),
+  intent: jsonb("intent").$type<RouteReleaseIntent | ModelOnboardingInput>().notNull(),
+  state: text("state").$type<"PENDING" | "COMMITTED" | "REJECTED">().notNull().default("PENDING"),
+  rejection: jsonb("rejection").$type<{ status: number; code: string; message: string }>(),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true, mode: "date" })
+    .notNull()
+    .defaultNow(),
+});
+
 export const modelCatalog = pgTable("model_catalog", {
   name: text("name").primaryKey(),
   displayName: text("display_name").notNull(),
@@ -267,6 +282,7 @@ export const modelCatalog = pgTable("model_catalog", {
   currency: text("currency").notNull().default("USD"),
   isPublic: boolean("is_public").notNull().default(true),
   enabled: boolean("enabled").notNull().default(true),
+  pendingReleaseId: uuid("pending_release_id").references(() => routeReleaseRequests.id),
   desiredRevision: integer("desired_revision").notNull().default(1),
   syncedRevision: integer("synced_revision").notNull().default(0),
   syncStatus: text("sync_status").$type<SyncStatus>().notNull().default("PENDING"),
@@ -296,6 +312,7 @@ export const routes = pgTable("routes", {
     .default({}),
   retryPolicy: jsonb("retry_policy").$type<Record<string, unknown>>().notNull().default({}),
   enabled: boolean("enabled").notNull().default(true),
+  pendingReleaseId: uuid("pending_release_id").references(() => routeReleaseRequests.id),
   desiredRevision: integer("desired_revision").notNull().default(1),
   syncedRevision: integer("synced_revision").notNull().default(0),
   syncStatus: text("sync_status").$type<SyncStatus>().notNull().default("PENDING"),
@@ -499,6 +516,7 @@ export const consoleSchema = {
   priceVersionSnapshots,
   modelCatalog,
   routes,
+  routeReleaseRequests,
   pricingOverrides,
   usageEvents,
   usageHourlyRollups,

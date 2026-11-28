@@ -17,6 +17,8 @@ Gateway 和 Worker 通过 `@gateway/ledger` 连接同一账本 PostgreSQL。Cons
 | `async_task_admissions`、`async_tasks`                           | 视频创建名额、已登记任务、上游任务标识和查询结果                          |
 | `outbox_events`、`outbox_consumers`、`outbox_consumer_shards`    | 已提交业务事件、消费方和带租约的分片游标                                  |
 
+配置发布使用 `config_releases`、`config_release_acks` 与 `gateway_config_nodes`。插件、路由调整和新模型上架分别保存发布类型和配置，按同一纪元机制确认。新模型与全部部署共享一个客户价卡引用，每项部署记录各自的供应商价卡。Console 的 `route_release_requests` 保存两类目录发布意图和拒绝原因，通过模型及路由上的待发布 ID 协调单项编辑和提交投影。 [上架与投影契约](docs/console-api.md#新模型上架与价格预览)
+
 类型定义见 [账本 schema](packages/ledger/src/schema.ts)，运行时以 [SQL 迁移清单](packages/ledger/src/migrations/manifest.json) 为准。
 
 ## 事务与恢复

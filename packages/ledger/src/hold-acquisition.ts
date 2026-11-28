@@ -14,7 +14,6 @@ import {
   SETTLEMENT_LANES,
   walletLane,
 } from "./funds.ts";
-import { matchesHoldFingerprint } from "./transactional-hold-state.ts";
 
 function serializeSupplierHold(item: FastHoldRequest): string {
   const inp = item.input;
@@ -277,18 +276,17 @@ export function createHoldAcquirer(
       billingAccountId: string,
       operation: AcquireHoldInput["operation"],
       key: string,
-      fingerprints: Pick<AcquireHoldInput, "fingerprint" | "legacy_fingerprint">,
-      versionedOnly = false,
+      fingerprint: string,
     ) {
       const [hold] = await db<{ request_id: string; fingerprint: string; state: string }[]>`
         SELECT request_id, fingerprint, state FROM public.billing_holds
         WHERE billing_account_id=${billingAccountId}::uuid AND operation=${operation} AND idempotency_key=${key}
       `;
-      return hold && (!versionedOnly || hold.fingerprint.startsWith("v1:"))
+      return hold
         ? {
             requestId: hold.request_id,
             state: hold.state,
-            matches: matchesHoldFingerprint(hold.fingerprint, fingerprints),
+            matches: hold.fingerprint === fingerprint,
           }
         : null;
     },

@@ -174,7 +174,7 @@ test("G7.1 provider plugin architecture eliminates hardcoded vendor enums and ch
   }
 });
 
-test("inference stages are acyclic and ledger transitions have one owner", async () => {
+test("inference stages are acyclic and ledger writes and identity reads have designated owners", async () => {
   const root = "apps/gateway/src";
   const stages = await Array.fromAsync(new Bun.Glob("inference/*.ts").scan(root));
   const files = ["proxy.ts", ...stages];
@@ -184,8 +184,11 @@ test("inference stages are acyclic and ledger transitions have one owner", async
     expect(source).not.toMatch(/from ["']\.\.\/(?:app|index|proxy)\.ts["']/);
     if (file !== "inference/accounting.ts") {
       expect(source, file).not.toMatch(
-        /\bledger\s*\.\s*(?:acquireHold|findIdempotentHold|switchSupplierAttempt|rememberProviderRequestId|commitTerminal|releaseHold|markUnknown)\s*\(/,
+        /\bledger\s*\.\s*(?:acquireHold|switchSupplierAttempt|rememberProviderRequestId|commitTerminal|releaseHold|markUnknown)\s*\(/,
       );
+    }
+    if (file !== "inference/request-identity.ts") {
+      expect(source, file).not.toMatch(/\bledger\s*\.\s*findIdempotentHold\s*\(/);
     }
     graph.set(
       file,

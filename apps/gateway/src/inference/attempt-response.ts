@@ -11,8 +11,9 @@ import type { InferenceRequest } from "./types.ts";
 import type { InferenceTelemetry } from "./telemetry.ts";
 import type { InferenceResources, AttemptLifetime } from "./resources.ts";
 import type { InferenceAccounting, AttemptSettlement } from "./accounting.ts";
+import type { AttemptOutcome } from "./failover-policy.ts";
 
-export type RetryAttempt = { outcome: "FAILED" | "UNKNOWN"; error: GatewayError };
+export type RetryAttempt = { outcome: AttemptOutcome; error: GatewayError };
 export type AttemptResponse = {
   request: InferenceRequest;
   resources: InferenceResources;

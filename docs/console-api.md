@@ -51,6 +51,44 @@ Outbox 推送成功时返回 `ok`、`received` 和 `ingested`，告警结果随�
 
 Gateway 私网目录使用 `PUT /internal/v1/billing-accounts`。账单、Outbox、内容 Webhook 和 WASM 的输入统一使用 `billing_account_id`。Gateway 的私网鉴权读取 `INTERNAL_AUTH_FILE`，Console 通过操作对应的 `GATEWAY_*_TOKEN` 访问。启用 Trace 时配置 `TRACE_QUEUE_PER_BILLING_ACCOUNT`，异步任务额度使用 `MAX_ACTIVE_ASYNC_TASKS_PER_BILLING_ACCOUNT` 和 `MAX_AUTO_REFUNDS_PER_BILLING_ACCOUNT_24H`。
 
+## 模型主备路由发布
+
+平台管理员通过管理监听编辑已有模型的两条路由。路径中的模型名采用 URL 编码。
+
+| 方法和路径                                                 | 行为                                                                         |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `GET /admin/v1/models/:model/routing`                      | 返回 Gateway 当前目录纪元，以及模型路由的标识、价卡、权重、优先级和来源版本  |
+| `POST /admin/v1/models/:model/route-releases/validate`     | 按当前纪元和目标版本检查整组改动，返回前后值。预检不修改路由                 |
+| `POST /admin/v1/models/:model/route-releases`              | 原子发布两条路由的权重和优先级，同一请求 ID 及同一意图可以重放               |
+| `GET /admin/v1/models/:model/route-releases/:id`           | 查询提交和节点应用，回读后同步可匹配的 Console 路由投影。待提交时返回 202    |
+| `POST /admin/v1/models/:model/route-releases/:id/rollback` | 用新的 ID 和当前 `expected_epoch` 发布原前值。目标版本或绑定已变化时返回 409 |
+
+预检和发布请求包含调用方生成的 UUID `id`、来自模型路由视图的 `expected_epoch`，以及两条 `targets`。目标各包含 `route_id`、`expected_revision`、`priority`、`weight`。路由版本来自视图的 `source_revision`。两条路由须支持相同操作，并与受影响操作的其他启用路由共用客户价卡和相同的启用内容插件配置，包括绑定顺序和优先级。内容插件可以改变按字符计费的输入或拦截后的收费结果。若客户定价依赖所涉及的渠道或上游账户，发布会被拒绝。配置资格检查涵盖启用状态、插件绑定和上游账户，实际请求仍受实时健康、限额和资金检查约束。
+
+Gateway 在一个事务写入两条路由、发布记录和一个新纪元。返回的 `config_epoch` 为提交证明，`nodes[].status` 分别报告 `APPLIED`、`PENDING`、`SUPERSEDED`、`OFFLINE`。Console 会持久化请求意图并在单独的后台任务重放待处理请求。响应不明时，可用同一 ID 查询或原样重试。在 Console 等待确认时，对目标路由的单项编辑返回 409。已发布的路由仍可做单项编辑，Gateway 要求这些写入带上当前已确认版本。
+
+Console 管理的路由通过 Console 发布。若已从 Gateway 私网提交，平台管理员可按发布顺序在 Console 查询对应发布 ID。两条本地路由都仍是发布前的已同步版本时，查询会一起更新投影视图。Gateway 私网使用对应的 `/internal/v1/models/:model/...` 路径和 `catalog` 角色。 [私网契约](../api-contracts.md#管理面)
+
+## 新模型上架与价格预览
+
+| 方法和路径                                   | 行为                                                             |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| `GET /admin/v1/models/onboarding`            | 读取当前目录纪元                                                 |
+| `POST /admin/v1/models/onboarding/validate`  | 预检整组模型、渠道和价格版本引用                                 |
+| `POST /admin/v1/models/onboarding/preview`   | 试算草稿中指定部署的收费、供应商成本、预扣和毛利                 |
+| `POST /admin/v1/models/onboarding`           | 保存发布意图并提交模型和所有部署                                 |
+| `GET /admin/v1/models/:model/onboarding/:id` | 查询提交、节点确认、当前配置和 Console 投影。模型名使用 URL 编码 |
+
+发布请求包含 UUID `id`、`expected_epoch`、`model`、`billing_price_id` 和 `deployments`。模型包含名称、展示名、操作集和可选的展示及路由设置。每项部署包含 UUID `id`、`channel_id`、`upstream_model`、`cost_version_id`，以及可选的 `priority` 和 `weight`。部署使用同一客户价卡和模型的全部操作，供应商价卡可以不同。渠道须已同步，预检检查启用的账号和适配器。视频部署须使用可以按任务 ID 查询状态的声明式适配器。Multipart 部署按实际出站规则解析端点。已有模型依旧通过普通编辑或主备发布管理。
+
+价格预览的请求体包含 `release` 和 `quote`。报价指定待发布的 `route_id`、`operation` 和 `currency`，并可输入 `billing_account_id`、`usage`、`rated_at`、`estimated_input_tokens` 和 `output_bound`。账户报价使用账户币种。Gateway 按样例上下文应用费率、账户覆盖、定价规则和 FX，金额以 atoms 返回。市场详情展示所绑定客户价卡的基础费率。正式结算使用实际计量与当时有效的价格规则，预检和试算没有供应商出站调用。
+
+Gateway 在一个事务写入模型、全部部署、发布记录和目录纪元。节点从同一快照读取模型与部署。Console 读取不可变客户价卡后再次核对 Gateway 当前配置和节点状态。只有配置仍可用，且发布时在线的节点已应用、已推进或离线时，才一起确认草稿并公开市场信息。首次可见前，单项模型和路由写入返回 409。
+
+发布或回读返回 200 时，Console 投影已提交。202 表示发布意图尚待 Gateway 提交或确认。Gateway 已提交时，响应带 `config_epoch`、`customer_price_id`、`nodes` 和 `current_configuration`。若最新快照已偏离发布配置，显示 `CHANGED` 及 `observed_revisions`，市场草稿继续隐藏。目录操作人员可按观测版本在 Gateway 修复绑定，补偿将在原发布已提交且配置恢复后继续投影。若 Gateway 明确拒绝且没有提交，Console 清理草稿，原 ID 仍可查询拒绝原因。
+
+连接中断可按原 ID 查询或提交相同请求。需要改动意图时使用新的 ID 和最新纪元。上线后的停用走现有模型接口。已发布的模型及部署要求 Gateway 单项写入携带已接受的来源版本，Console 自动提供此值。前一次单项编辑的提交结果不明时，Console 先确认该版本，再保存和同步后续编辑。编辑模型时省略市场价格字段会沿用已发布的展示费率和币种。
+
 ## 部署与验收
 
 | 组件       | 运行方式                                                                                                                                                                                                                                                                                                             |

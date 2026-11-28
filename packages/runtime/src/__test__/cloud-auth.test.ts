@@ -93,3 +93,24 @@ test("Bedrock signing binds payload, session, region and encoded model path", ()
     "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
   );
 });
+
+test("AWS signing binds the GET method of an empty-body task status query", () => {
+  const headers = new Headers();
+  const amzDate = "20260101T000000Z";
+  signAwsRequest(
+    new URL("https://provider.example.test/jobs/fixture?task_id=upstream"),
+    new Uint8Array(),
+    headers,
+    {
+      accessKeyId: "AKIDEXAMPLE",
+      region: "us-east-1",
+      service: "bedrock",
+      amzDate,
+      signingKey: awsSigningKey("SECRET", "20260101", "us-east-1", "bedrock"),
+    },
+    "GET",
+  );
+  expect(headers.get("authorization")).toContain(
+    "Signature=e86f126a1fe92c17b3a1353954be4d6ffdacc8b8cdcc5e7f6fab9516bffe3ca0",
+  );
+});

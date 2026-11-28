@@ -52,7 +52,7 @@ flowchart TD
 
 1. **入口。** `handleInferenceRequest` 创建 `request_id`、追踪与资源作用域。准入读取目录，鉴权、限制请求体，验证模型和操作，计算输出上限与客户账号 RPM、TPM、并发。`FIRST_BYTE_TIMEOUT_MS` 配好时从请求开始计算，尝试超时另由路由策略或 Gateway 默认值提供。 [推理入口](../apps/gateway/src/proxy.ts#L29) · [模型准入、客户配额与期限](../apps/gateway/src/inference/request.ts#L164)
 2. **候选。** 从 `(目录快照, 模型, 操作, 客户币种)` 缓存装配路由、渠道、供应商账户和两侧价格版本。`SmartRouter` 过滤禁用、不支持操作和不可用的渠道，先按 `priority` 降序，再在同层优先原协议。未启用自适应时，`WEIGHTED` 组内用 `weight × 渠道近期成功率因子` 无放回排序。`LEAST_LATENCY` 用渠道 EWMA，另有 `ROUND_ROBIN`。供应商价格在此时已取得，启用的自适应排序用它估算进货成本。 [候选装配](../apps/gateway/src/inference/candidates.ts#L6) · [排序](../packages/runtime/src/router.ts#L374)
-3. **首次预留与发送。** 首个候选先走输入插件和输出插件可用性检查，获取客户有效价和供应商保留报价。部分同协议请求可同步完成上游准备并估算输入 token。可提前取连接的无幂等键路径先预备连接，之后 `acquireHold`。有幂等键的重放通过已有指纹和账本约束识别。当前候选取得资金预留后才申请 **`channel:<id>` 的 RPM 和并发**，这一调用传入的是无实际约束的 TPM。客户账户的 TPM 是入口另一道准入。传输前仍会检查渠道与插件状态。 [输入及初次预留](../apps/gateway/src/inference/route-attempts.ts#L57) · [同步报价准备](../apps/gateway/src/inference/upstream-attempt.ts#L62) · [渠道准入](../apps/gateway/src/inference/route-attempts.ts#L332) · [发送入口](../apps/gateway/src/inference/dispatch.ts#L170)
+3. **首次预留与发送。** 首个候选先走输入插件和输出插件可用性检查，获取客户有效价和供应商保留报价。部分同协议请求可同步完成上游准备并估算输入 token。可提前取连接的无幂等键路径先预备连接，之后 `acquireHold`。有幂等键的请求在选路前按原始输入的当前版本指纹检查，账本在预留时对同一指纹做并发校验。旧摘要继续占用原键，查到时返回冲突。当前候选取得资金预留后才申请 **`channel:<id>` 的 RPM 和并发**，这一调用传入的是无实际约束的 TPM。客户账户的 TPM 是入口另一道准入。传输前仍会检查渠道与插件状态。 [输入及初次预留](../apps/gateway/src/inference/route-attempts.ts#L57) · [同步报价准备](../apps/gateway/src/inference/upstream-attempt.ts#L62) · [渠道准入](../apps/gateway/src/inference/route-attempts.ts#L332) · [发送入口](../apps/gateway/src/inference/dispatch.ts#L170)
 4. **现有切换。** 自动切换沿本次已经排序的候选向后走。上游不可用或账户资金不足等可能在发送前淘汰候选。出站失败后，备选重新走输入处理、报价和出站准备，`switchSupplierAttempt` 在同一个请求下更新供应商尝试与预留。账本可按替代路由调整客户价格并补足预留。原策略以第一条完成预留的路由作为尝试上限，默认 3，且 `UNKNOWN` 受 `retry_on_ambiguous` 及可选限额控制。试点配置额外限制最多两次，遇 `UNKNOWN` 立即停止切换。当前循环计数在进入 dispatch 前增加，因此它可约束编排次数，不能直接当作供应商收到的物理请求数。 [尝试上限](../apps/gateway/src/inference/route-attempts.ts#L187) · [已有切换](../apps/gateway/src/inference/route-attempts.ts#L265) · [切换报价](../apps/gateway/src/inference/accounting.ts#L191) · [计数与收口](../apps/gateway/src/inference/route-attempts.ts#L410)
 5. **响应与计量。** 普通响应由对应适配器解析和转换。SSE 只有部分路径会检查前导逻辑错误，返回流后由流处理器持有资源，已有自动切换循环就此结束。对话 SSE 可以先发正文，验证正常终态与用量并等待 `commitTerminal` 后才发正常结束。缺用量、断流和账本确认失败走既有错误及对账路径。账本按请求存一份 `billing_holds`，供应商尝试在 `supplier_holds` 中记录，`billing_charges.request_id` 唯一。预留和结算已有租约批处理与直接事务路径。 [SSE 交接](../apps/gateway/src/inference/dispatch.ts#L440) · [对话流终态](../apps/gateway/src/inference/conversation-stream.ts#L459) · [账本记录](../packages/ledger/src/schema.ts#L245) · [预留路径](../packages/ledger/src/hold-acquisition.ts#L250) · [结算队列](../packages/ledger/src/settlement-dispatch.ts#L163)
 
@@ -113,17 +113,30 @@ flowchart LR
 
 **反馈。** 按路由、上游有效版本、流式模式和目标聚合，本地最多保留 256 个路由序列和 32 个模型输出序列。普通目录更新保留有效版本的样本。流式从上游请求写完量到解析首段正文或工具调用，非流式量到读完响应体。可能被落库、适配或流转发等待影响，且无法确定落在目标哪一侧的时延样本退出评分，保留原始观测指标。流可以先有首内容、后无正常终态。客户端取消、内容拦截、渠道许可失效和账本失败各自处理。 [本地采样](../apps/gateway/src/adaptive-routing-stats.ts) · [反馈入口](../apps/gateway/src/inference/telemetry.ts)
 
-**影子与开关。** 通过 Console `POST /admin/v1/models` 发布，Gateway 内网接口 `PUT /internal/v1/models` 接受同一字段，经 `source_revision` 和目录 epoch 生效。观察模式使用同一批已准入候选，并用独立随机抽样对比同组首选。半开令牌和实际发送仍由一次真实选择管理。部署需把 Console 和 Gateway 账本迁至 `2026112702`，按现有 schema 门禁协调升级 Console、Gateway 与 Worker。切回 `observe` 恢复现有排序，继续执行已配置的预留上限和切换保护。 [模型配置入口](../apps/gateway/src/internal-api.ts#L408) · [候选排序](../packages/runtime/src/router.ts) · [Schema 版本检查](../packages/ledger/src/database.ts#L67)
+**影子与开关。** 通过 Console `POST /admin/v1/models` 发布，Gateway 内网接口 `PUT /internal/v1/models` 接受同一字段，经 `source_revision` 和目录 epoch 生效。观察模式以实际可用的同优先级、同协议候选为比较组，并复用该组实际首选的抽样。半开令牌和实际发送由同一次真实选择管理。切回 `observe` 使用基础权重，执行约束继续按 `execution_policy` 和预留上限配置计算。 [模型配置入口](../apps/gateway/src/internal-api.ts#L408) · [候选排序](../packages/runtime/src/router.ts) · [Schema 版本检查](../packages/ledger/src/database.ts#L67)
 
 未设置策略的存量和新建 `WEIGHTED` 模型默认对 `chat` 使用 `active`，延迟目标为 1500 ms。继承默认时使用路由已有的重试和执行证据规则。同组的尝试次数、超时、结果不明重试或证据要求有差异时沿用原权重。模型更新支持 `adaptive_routing: false` 关闭自适应排序，`null` 恢复默认，省略字段保留当前设置。
 
-显式策略示例为 `adaptive_routing: { "operations": ["chat"], "mode": "observe", "first_content_target_ms": 1500, "supplier_reserve_limit": { "currency": "USD", "atoms": "100000" } }`。将 `mode` 设为 `active` 才应用自定义权重。显式策略同时应用试点切换保护。供应商预留上限可省略，配置时仅能授权指定币种，首次授权和切换共用该规则。
+当原模型使用基础权重和路由级执行规则时，可用以下配置只增加影子比较。
+
+```json
+{
+  "adaptive_routing": {
+    "operations": ["chat"],
+    "mode": "observe",
+    "execution_policy": "route",
+    "first_content_target_ms": 1500
+  }
+}
+```
+
+`mode: active` 才会应用自适应权重。显式策略须包含 `execution_policy`。`route` 继承路由尝试次数、执行证据和歧义重试规则。`protected` 应用更严格的切换保护。旧显式配置由两库迁移补齐为 `protected`。启用路由级执行时，尝试数、超时、歧义重试和对账证据要求在竞争组内一致，组才参与比较。各执行策略都执行明确配置的 `supplier_reserve_limit`，首次授权和切换共用该规则。原模型若已启用主动自适应，切到 `observe` 会将实际排序切回基础权重。回退时恢复试点前存下的完整 `adaptive_routing` 值。若备份的显式对象来自升级前且缺少 `execution_policy`，填写 `protected` 后再提交。备份值为 `false` 或 `null` 时原样提交。升级管理与推理节点后再写入新字段。
 
 ### 费用上限和切换边界
 
-- **客户报价。** 同币种候选含备用需共享 `billing_price_id`，并通过协议、用量解析、关键请求配置和内容策略的兼容性检查。候选不兼容时暂停自适应。监控规则 `STGAdaptiveRoutingIncompatible` 按集群、模型和模式报告持续出现的不兼容决策。同一客户的折扣或指定价格继续由现有规则计算。显式模型策略先按原请求指纹检查幂等重放，再判断当次候选和上限。 [客户有效价格](../apps/gateway/src/pricing.ts#L73) · [幂等入口](../apps/gateway/src/inference/route-attempts.ts) · [告警规则](../infra/monitoring/alerts.yml)
+- **客户报价。** 观察和主动模式使用同一套组内检查。参与实际竞争的候选需共享 `billing_price_id`，并通过协议、用量解析、关键请求配置和内容策略的兼容性检查。匹配到范围内渠道或账户的定价修饰器会暂停对应比较。监控规则 `STGAdaptiveRoutingIncompatible` 按集群、模型和模式报告持续出现的不兼容决策。同一客户的折扣或指定价格继续由现有规则计算。有幂等键的请求先按当前版本指纹检查重放，再判断当次候选和上限。 [客户有效价格](../apps/gateway/src/pricing.ts#L73) · [幂等入口](../apps/gateway/src/inference/route-attempts.ts) · [告警规则](../infra/monitoring/alerts.yml)
 - **每次供应商预留。** 带金额门槛的灰度，在现有 `quote` 后、`acquireHold` 或 `switchSupplierAttempt` 前对试点同币种精确金额做门槛检查。超限候选按候选不可用处理。这个门槛限制可授权预留金额。真实上游发生超预留费用时，账本仍记录实际证据，超额按现有账户隔离及对账规则处理。高价兜底先用现有独立供应商账户的资金及信用上限、渠道 RPM 和并发控制量级。共享同一账户的渠道不能据此声称拥有独立支出上限。 [报价入口](../apps/gateway/src/inference/accounting.ts#L125) · [供应商超额处理](../packages/ledger/src/reconciliation.ts#L120)
-- **试点切换。** 显式配置 `observe` 或 `active` 时限制最多两次出站编排，原路由可配置更低上限。只在传输确认未发送，或既有可切换响应明确匹配 `NOT_EXECUTED` 时，才释放旧尝试并切换。HTTP 错误按实际状态和适配器规则最多读取 8 KiB 的 JSON 证据，超时、缺失或无法证明的结果进入 `UNKNOWN`。SSE 交付开始后由现有流终态收口。配置证据前先核对供应商实际执行语义。 [HTTP 证据与切换](../apps/gateway/src/inference/dispatch.ts) · [账本失败收口](../apps/gateway/src/inference/accounting.ts)
+- **试点切换。** `protected` 限制最多两次出站编排，原路由可配置更低上限。只在传输确认未发送，或既有可切换响应明确匹配 `NOT_EXECUTED` 时，才释放旧尝试并切换。HTTP 错误按实际状态和适配器规则最多读取 8 KiB 的 JSON 证据，超时、缺失或无法证明的结果进入 `UNKNOWN`。SSE 交付开始后由现有流终态收口。配置证据前先核对供应商实际执行语义。 [HTTP 证据与切换](../apps/gateway/src/inference/dispatch.ts) · [账本失败收口](../apps/gateway/src/inference/accounting.ts)
 - **故障窗口硬预算。** 把它留到运营需要按模型、操作或时间段精确封顶时实施。归属 Ledger，在现有预留事务里同时分配窗口额度和尝试金额，按 `(预算范围, 供应商币种, 窗口)` 计数、用 `attempt_id` 做幂等。终态实际消耗、明确未执行释放、`UNKNOWN` 继续占用原窗口。届时同时覆盖租约和直接资金路径，先验证高并发预留、跨窗长 SSE、重复回执与数据库锁竞争。现有账户资金上限主要约束账户的可用资金，窗口告警只能观察趋势。
 
 ### 多实例与故障降级
@@ -138,6 +151,6 @@ flowchart LR
 | 影子评分与安全边界 | 对照同候选时的顺序差异。证明影子运行没有额外发送、预留或影响半开状态。验证同模型不同 route 的样本隔离、价格更新和低样本回退。用真实 PG 及受控上游复测级联切换、未知成本、终态或重放。                                                                                   |
 | 单模型启用         | 一个模型和操作按时间段轮换原策略与试点策略，分别看普通和流式、相近请求规模及流量。以完整交付率、P95 首内容、每千次完整交付的供应商实际成本为上线条件。若资金守恒、重复扣费或未授权发送检查失败，立即停止灰度。若成本、尾延迟、CPU 或 RSS 超出试点前约定阈值，切回观察。 |
 
-**费用统计口径。** 比较各 Gateway 已生效同一模式的稳定时段，排除切换和预热。以原请求 UUIDv7 的时间归组，用逐请求结算金额覆盖共用供应商分录的批量结算，再补计尚未关联到同一结算记录的独立供应商对账费用。窗口关闭后确认的费用仍归原请求，待处理预留单列。不同窗口使用相同对账成熟期。正式灰度用 `ACCESS_LOG` 的结构化记录，按 `request_id` 的进入时间与账务窗口对齐。每个模型以全部 `chat` 请求中返回 `2xx` 且 `error_code` 为空的唯一请求数作完整交付分母，流式和非流式的稳定性用指标分别分析。`cohort_requests` 是留下预留记录的请求数。Prometheus 的请求终态按结束时间计入。分析额外发送与备用命中时，按现有逐请求尝试追踪读取发送证据。 [结构化访问日志](../apps/gateway/src/inference/telemetry.ts) · [成本查询](../packages/ledger/src/queries.ts) · [独立供应商对账](../packages/ledger/src/reconciliation.ts#L57)
+**费用统计口径。** 比较各 Gateway 已生效同一模式的稳定时段，排除切换和预热。以原请求 UUIDv7 的时间归组，用逐请求结算金额覆盖共用供应商分录的批量结算，再补计尚未关联到同一结算记录的独立供应商对账费用。窗口关闭后确认的费用仍归原请求，待处理预留单列。超时后待核账的整笔预留也计入敞口，即使供应商尝试仍显示 `HELD`。按币种返回的 `oldest_unknown_reconciliation_age_ms` 使用请求级已记录的核账开始时间，缺少该时间的尝试计入 `unknown_attempts_without_reconciliation_start`。没有可用起点时账龄为 `null`。不同窗口使用相同对账成熟期。正式灰度用 `ACCESS_LOG` 的结构化记录，按 `request_id` 的进入时间与账务窗口对齐。每个模型以全部 `chat` 请求中返回 `2xx` 且 `error_code` 为空的唯一请求数作完整交付分母，流式和非流式的稳定性用指标分别分析。`cohort_requests` 是留下预留记录的请求数。Prometheus 的请求终态按结束时间计入。分析额外发送与备用命中时，按现有逐请求尝试追踪读取发送证据。 [结构化访问日志](../apps/gateway/src/inference/telemetry.ts) · [成本查询](../packages/ledger/src/queries.ts) · [独立供应商对账](../packages/ledger/src/reconciliation.ts#L57)
 
 本地验证覆盖影子和启用模式、同组加权、低样本与端点更新回退、费用上限、幂等、同状态码有无执行证据、流式终态与取消处理，以及 Console 目录发布和恢复。生产渠道故障分布、供应商未执行证据、目标阈值与灰度收益用单模型实测确认。 [自适应集成验证](../tests/integration/adaptive-routing.test.ts) · [混合及长流验收](performance/gateway-capacity-2026-11-25.md#固定到达率混合负载)

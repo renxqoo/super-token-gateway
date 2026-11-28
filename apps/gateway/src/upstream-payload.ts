@@ -25,6 +25,30 @@ export function isConversationalOperation(op: Operation): op is Protocol {
   return op === "chat" || op === "responses" || op === "messages" || op === "gemini";
 }
 
+export const multipartPaths = {
+  transcription: "/v1/audio/transcriptions",
+  translation: "/v1/audio/translations",
+  image_edits: "/v1/images/edits",
+} as const;
+
+export function isMultipartOperation(
+  operation: Operation,
+): operation is keyof typeof multipartPaths {
+  return Object.hasOwn(multipartPaths, operation);
+}
+
+export function declaresProviderOperation(
+  config: DeclarativeProviderConfig,
+  operation: Operation,
+  pathOverride?: string | null,
+): boolean {
+  return Boolean(
+    config.endpoints[operation] ||
+    pathOverride ||
+    (isConversationalOperation(operation) && config.endpoints.default),
+  );
+}
+
 export function upstreamProtocolFor(
   resolved: ResolvedProvider,
   clientOp: Operation,

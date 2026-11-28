@@ -19,6 +19,7 @@ test("adaptive model settings reconcile after failure and preserve an explicit d
   const policy = {
     operations: ["chat"],
     mode: "observe",
+    execution_policy: "protected",
     first_content_target_ms: 1200,
     supplier_reserve_limit: { currency: "USD", atoms: "300" },
   };
@@ -34,11 +35,16 @@ test("adaptive model settings reconcile after failure and preserve an explicit d
       ...model,
       ...(adaptive !== undefined ? { adaptive_routing: adaptive } : {}),
     });
+  const { execution_policy: _, ...incomplete } = policy;
+  const rejected = await put(incomplete);
+  expect(rejected.status).toBe(400);
+  expect(rejected.data.error).toMatchObject({ code: "validation_error" });
+  expect(await read()).toBeUndefined();
   expect((await put(policy)).status).toBe(201);
   expect(await read()).toEqual({ policy, revision: 1 });
   expect((await put()).status).toBe(200);
   expect(await read()).toEqual({ policy, revision: 2 });
-  const active = { ...policy, mode: "active" };
+  const active = { ...policy, mode: "active", execution_policy: "route" };
   h.setGatewayInterceptor(async (url, init, forward) => {
     if (init?.method === "PUT" && new URL(url).pathname === "/internal/v1/models")
       return new Response("unavailable", { status: 503 });

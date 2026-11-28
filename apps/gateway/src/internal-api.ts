@@ -27,6 +27,8 @@ import {
 import { authenticateInternal, type InternalRole } from "./internal-auth.ts";
 import { registerInternalFinanceRoutes } from "./internal-finance-routes.ts";
 import { registerInternalPluginRoutes } from "./internal-plugin-routes.ts";
+import { registerInternalModelOnboarding } from "./internal-model-onboarding.ts";
+import { registerInternalRouteReleases } from "./internal-route-releases.ts";
 import { registerInternalPricingRoutes } from "./internal-pricing-routes.ts";
 import { type AdminEnv, type AdminContext, parseBody, parseUuid } from "./internal-request.ts";
 import {
@@ -202,6 +204,8 @@ export function createInternalApi(deps: InternalApiDeps) {
       [
         "plugin_revision_conflict",
         "plugin_release_conflict",
+        "route_release_conflict",
+        "model_onboarding_conflict",
         "stale_revision",
         "console_billing_account_binding_conflict",
         "api_key_scope_conflict",
@@ -230,6 +234,8 @@ export function createInternalApi(deps: InternalApiDeps) {
       (err instanceof DomainError &&
         [
           "invalid_plugin_binding",
+          "invalid_route_release",
+          "invalid_model_onboarding",
           "invalid_channel_secret",
           "invalid_price",
           "invalid_price_override",
@@ -435,6 +441,9 @@ export function createInternalApi(deps: InternalApiDeps) {
       max_output_tokens: body.max_output_tokens,
       enabled: body.enabled,
       ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),
+      ...(body.expected_source_revision !== undefined
+        ? { expected_source_revision: body.expected_source_revision }
+        : {}),
     });
     await onConfigUpdated(rec.config_epoch);
     return c.json(rec);
@@ -512,6 +521,9 @@ export function createInternalApi(deps: InternalApiDeps) {
         : {}),
       retry_policy: body.retry_policy as RouteRetryPolicy,
       enabled: body.enabled,
+      ...(body.expected_source_revision !== undefined
+        ? { expected_source_revision: body.expected_source_revision }
+        : {}),
       ...(body.source_revision !== undefined ? { source_revision: body.source_revision } : {}),
     });
     await onConfigUpdated(rec.config_epoch);
@@ -530,6 +542,8 @@ export function createInternalApi(deps: InternalApiDeps) {
     checkBodySize,
   });
 
+  registerInternalRouteReleases(deps, route, jsonRoute, onConfigUpdated);
+  registerInternalModelOnboarding(deps, route, jsonRoute, onConfigUpdated);
   registerInternalPricingRoutes({ jsonRoute, route, deps, onConfigUpdated });
 
   registerInternalFinanceRoutes({ jsonRoute, deps, route, onConfigUpdated });

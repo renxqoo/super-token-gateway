@@ -13,12 +13,7 @@ import {
 } from "../upstream.ts";
 import type { PreparedUpstreamRequest } from "../upstream.ts";
 import type { InferenceRequest } from "./types.ts";
-import {
-  responseHeaders,
-  isRetryableStatus,
-  getHeaderValue,
-  supplierReconciliation,
-} from "./http.ts";
+import { responseHeaders, isRetryableStatus, getHeaderValue } from "./http.ts";
 import { utf8FatalDecoder } from "./body.ts";
 import type { RouteInput, RouteOutputAdmission } from "./policy.ts";
 import { channelFailureKind } from "./telemetry.ts";
@@ -28,6 +23,7 @@ import type { InferenceAccounting } from "./accounting.ts";
 import type { InferenceRoutes } from "./candidates.ts";
 import type { UpstreamPreparation, DispatchReservation } from "./upstream-attempt.ts";
 import type { AttemptResponse, RetryAttempt } from "./attempt-response.ts";
+import { rejectedAttemptOutcome, supplierReconciliation } from "./failover-policy.ts";
 import { handleUnaryResponse } from "./unary.ts";
 import { inspectStreamPrelude } from "./stream-prelude.ts";
 import { respondToStream } from "./stream.ts";
@@ -53,8 +49,8 @@ export async function dispatchInferenceAttempt(
     hasIdempotencyKey: boolean;
   },
 ): Promise<Response | RetryAttempt> {
-  const { c, deps, operation, requestId, trace, isStream, isMultipartOp, strictAdaptiveSwitch } =
-    request;
+  const { c, deps, operation, requestId, trace, isStream, isMultipartOp, routing } = request;
+  const { requireExecutionEvidence } = routing.failover;
   const {
     cursor,
     attemptId: activeAttemptId,
@@ -93,15 +89,13 @@ export async function dispatchInferenceAttempt(
     reservation.timing,
   );
   const { providerIdHeader, requiresEvidence } = supplierReconciliation(cand);
-  const rejectedOutcome = (notExecuted = false): "FAILED" | "UNKNOWN" => {
-    if (
-      notExecuted ||
-      (!strictAdaptiveSwitch && !requiresEvidence && !resources.videoAdmissionRetained)
-    ) {
-      return "FAILED";
-    }
-    accounting.noteUnknownAttempt();
-    return "UNKNOWN";
+  const rejectedOutcome = (notExecuted = false) => {
+    const outcome = rejectedAttemptOutcome(
+      notExecuted,
+      requireExecutionEvidence || requiresEvidence || resources.videoAdmissionRetained,
+    );
+    if (outcome === "UNKNOWN") accounting.noteUnknownAttempt();
+    return outcome;
   };
   let routingAttempt = deps.router.beginAttempt(cand.channel.id, entry.probe);
   let upstreamSuccessObserved = false;
@@ -247,16 +241,11 @@ export async function dispatchInferenceAttempt(
       attempt.enablePostDispatchClientAbortGrace(unaryGraceMs);
     }
   } catch (err) {
-    if (operation === "videos" && transportStarted && !(err instanceof UpstreamPreDispatchError)) {
+    const isPreDispatch = err instanceof UpstreamPreDispatchError;
+    if (operation === "videos" && transportStarted && !isPreDispatch) {
       resources.setVideoAdmissionRetained(true);
     }
     attempt.finishExchange();
-    const isPreDispatch =
-      err instanceof UpstreamPreDispatchError ||
-      (operation !== "videos" &&
-        !strictAdaptiveSwitch &&
-        err instanceof Error &&
-        /ECONNREFUSED|ENOTFOUND|Unable to connect|ConnectionRefused/i.test(err.message));
     if (isPreDispatch) {
       accounting.setDispatched(false);
       telemetry.noteRoutingDispatch("not_sent");
@@ -275,16 +264,13 @@ export async function dispatchInferenceAttempt(
       );
       throw resources.admissionError(quotaLost);
     }
-    const classified =
-      err instanceof UpstreamPreDispatchError ? reservation.preDispatchGatewayError(err) : null;
+    const classified = isPreDispatch ? reservation.preDispatchGatewayError(err) : null;
     const diagnosticCode =
       err instanceof GatewayError
         ? err.code
-        : isPreDispatch
-          ? "upstream_connect"
-          : attempt.aborted
-            ? "upstream_timeout"
-            : "transport_interrupted";
+        : attempt.aborted
+          ? "upstream_timeout"
+          : "transport_interrupted";
     telemetry.recordAttemptFailure(
       diagnosticCode,
       channelFailureKind(diagnosticCode),
@@ -292,7 +278,7 @@ export async function dispatchInferenceAttempt(
       isPreDispatch ? "pre_dispatch" : "transport",
     );
     if (isPreDispatch) {
-      const kind = err instanceof UpstreamPreDispatchError ? err.code : "upstream_connect";
+      const kind = err.code;
       deps.metrics.recordUpstreamError(cand.channel.name, kind);
       if (kind === "upstream_connect" || kind === "upstream_tls" || kind === "upstream_dns") {
         deps.router.recordDialFailure(cand.channel.id, routingAttempt);
@@ -308,8 +294,8 @@ export async function dispatchInferenceAttempt(
     return {
       outcome,
       error: new GatewayError(
-        classified?.status ?? (isPreDispatch ? 503 : 504),
-        classified?.code ?? (isPreDispatch ? "upstream_unreachable" : "upstream_timeout"),
+        classified?.status ?? 504,
+        classified?.code ?? "upstream_timeout",
         classified?.message ?? (err instanceof Error ? err.message : "Upstream request failed"),
       ),
     };
@@ -390,7 +376,7 @@ export async function dispatchInferenceAttempt(
     const jsonError = /^application\/(?:json|[^;\s]+\+json)(?:\s*;|$)/i.test(contentType);
     const rules = prepared.mergedOverrides.error_rules;
     if (
-      (strictAdaptiveSwitch || videoMayHaveStarted) &&
+      (requireExecutionEvidence || videoMayHaveStarted) &&
       jsonError &&
       rules.some(
         (rule) =>
@@ -433,7 +419,7 @@ export async function dispatchInferenceAttempt(
       void upstreamResp?.body?.cancel(pluginSignal.reason).catch(() => undefined);
       throw pluginSignal.reason;
     }
-    if (strictAdaptiveSwitch && resources.interrupted(true)) {
+    if (requireExecutionEvidence && resources.interrupted(true)) {
       attempt.dispose();
       void upstreamResp?.body?.cancel().catch(() => undefined);
       releaseProbe();

@@ -14,6 +14,21 @@
       "version": 2026112702,
       "path": "./migrations/0002_adaptive_routing.sql",
       "checksum": "a96cf7d0771293a6adc8bd482f79bb0b11c4b91c370664ed6ae3e6288f0b762a"
+    },
+    {
+      "version": 2026112801,
+      "path": "./migrations/0003_route_releases.sql",
+      "checksum": "324bd62a95b067d27bcf00440c6e119dc28399426ba23209dc8cb7eefa48e743"
+    },
+    {
+      "version": 2026112802,
+      "path": "./migrations/0004_model_onboarding.sql",
+      "checksum": "02e4eecca19e6f10a35fe25959332f84d5d83ef88d9327992b3d3a801b5e0356"
+    },
+    {
+      "version": 2026112901,
+      "path": "./migrations/0005_explicit_execution_policy.sql",
+      "checksum": "db388b520fac08920e8233b97acac735e6bb9f8a87a61d2c9146b8f8dfc0e512"
     }
   ]
 }

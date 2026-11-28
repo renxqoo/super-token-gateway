@@ -1,14 +1,12 @@
 import { GatewayError } from "@gateway/contracts";
 import { DomainError } from "@gateway/kernel";
 import { MeteredRequestError, type MeteredValidationOptions } from "../request-metering.ts";
-import { formatProtocolError } from "@gateway/protocol";
 import { UpstreamPreDispatchError } from "@gateway/runtime";
 import type { EffectiveCustomerPrice } from "../pricing.ts";
 import { fastUuid } from "../proxy-state.ts";
 import type { HydratedCandidate } from "../proxy-state.ts";
 import type { PreparedUpstreamRequest } from "../upstream.ts";
 import type { InferenceRequest } from "./types.ts";
-import { responseHeaders } from "./http.ts";
 import { createRouteInput, createRouteOutputAdmission } from "./policy.ts";
 import type { RouteInput } from "./policy.ts";
 import type { InferenceTelemetry } from "./telemetry.ts";
@@ -18,7 +16,15 @@ import type { InferenceAccounting } from "./accounting.ts";
 import { selectInferenceRoutes } from "./candidates.ts";
 import { createUpstreamPreparation, createDispatchReservation } from "./upstream-attempt.ts";
 import { dispatchInferenceAttempt } from "./dispatch.ts";
-import { enforceSupplierReserveLimit } from "./adaptive-routing.ts";
+import {
+  allowsFallback,
+  attemptLimit,
+  attemptTimeoutWithinBudget,
+  enforceSupplierReserveLimit,
+  routeAttemptTimeoutMs,
+  type AttemptOutcome,
+} from "./failover-policy.ts";
+import { findReplayResponse, identifyRequest, replayResponse } from "./request-identity.ts";
 
 export async function routeInference(
   request: InferenceRequest,
@@ -26,28 +32,13 @@ export async function routeInference(
   telemetry: InferenceTelemetry,
   accounting: InferenceAccounting,
 ): Promise<Response> {
-  const { c, deps, operation, trace, firstByteDeadlineMs, adaptivePolicy, strictAdaptiveSwitch } =
-    request;
-  const idempotencyHeader = c.req.raw.headers.get("idempotency-key");
-  const replayedResponse = (priorId: string, priorState: string | undefined) => {
-    const inProgress = priorState === "HELD";
-    const code = inProgress ? "idempotency_in_progress" : "idempotency_replayed";
-    const message = inProgress
-      ? "Request with this Idempotency-Key is already in progress"
-      : `Request already finalized with state ${priorState ?? "UNKNOWN"}`;
-    telemetry.emitAccessLog(409, code);
-    return c.json(
-      formatProtocolError(operation, 409, code, message, priorId),
-      409,
-      responseHeaders(priorId, trace),
-    );
-  };
-  const identified = strictAdaptiveSwitch
-    ? ((await accounting.identifyIdempotency(idempotencyHeader, request.clientBody)) ?? undefined)
-    : undefined;
-  if (identified) {
-    const prior = await accounting.findReplay(identified, true);
-    if (prior) return replayedResponse(prior.requestId, prior.state);
+  const { c, deps, operation, firstByteDeadlineMs, routing } = request;
+  const { failover } = routing;
+  const key = c.req.raw.headers.get("idempotency-key")?.trim();
+  const idempotency = key ? await identifyRequest(request, key) : null;
+  if (idempotency) {
+    const prior = await findReplayResponse(request, telemetry, idempotency);
+    if (prior) return prior;
   }
   const routes = selectInferenceRoutes(request);
   telemetry.adaptiveFeedback = routes.adaptive?.feedback;
@@ -69,8 +60,6 @@ export async function routeInference(
     const input = prepareRouteInput(selected[0]!.route);
     const firstInput = input instanceof Promise ? await input : input;
     if (firstInput instanceof Response) return firstInput;
-    const identity = accounting.identifyIdempotency(idempotencyHeader, firstInput.body, identified);
-    const idempotency = identity ? await identity : null;
     let firstReservation:
       | {
           index: number;
@@ -102,8 +91,8 @@ export async function routeInference(
       const unavailablePolicy = admitOutputPolicy(cand);
       if (unavailablePolicy) {
         if (idempotency) {
-          const prior = await accounting.findReplay(idempotency);
-          if (prior) return replayedResponse(prior.requestId, prior.state);
+          const prior = await findReplayResponse(request, telemetry, idempotency);
+          if (prior) return prior;
         }
         return await rejectOutputPolicy(unavailablePolicy);
       }
@@ -142,7 +131,7 @@ export async function routeInference(
           estimatedInputTokens: prepared?.estimatedInputTokens,
         });
         enforceSupplierReserveLimit(
-          adaptivePolicy,
+          failover,
           customer.supplierSnapshot?.currency ?? cand.costPrice.currency,
           quote.supplierAtoms,
         );
@@ -190,7 +179,7 @@ export async function routeInference(
       if (holdRes.ok) {
         if (holdRes.replayed) {
           releaseUnusedProbes(idx);
-          return replayedResponse(holdRes.request_id, holdRes.existing_state);
+          return replayResponse(request, telemetry, holdRes.request_id, holdRes.existing_state);
         }
         firstReservation = { index: idx, attemptId, input: preparedInput, prepared, customer };
         break;
@@ -216,23 +205,23 @@ export async function routeInference(
     }
 
     if (!firstReservation) {
-      if (strictAdaptiveSwitch && idempotency) {
-        const prior = await accounting.findReplay(idempotency);
-        if (prior) return replayedResponse(prior.requestId, prior.state);
+      if (idempotency) {
+        const prior = await findReplayResponse(request, telemetry, idempotency);
+        if (prior) return prior;
       }
       throw lastHoldErr ?? new GatewayError(503, "no_route", "No funded route available");
     }
 
     const activeIndex = firstReservation.index;
     let activeAttemptId = firstReservation.attemptId;
-    const maxAttempts = Math.min(
+    const maxAttempts = attemptLimit(
+      failover,
+      selected[activeIndex]!.route.route.retry_policy,
       selected.length - activeIndex,
-      strictAdaptiveSwitch ? 2 : Number.POSITIVE_INFINITY,
-      Math.max(1, selected[activeIndex]!.route.route.retry_policy.max_attempts ?? 3),
     );
     let attemptsMade = 0;
     let lastError: GatewayError | undefined;
-    let pendingSwitchFrom: { attemptId: string; outcome: "FAILED" | "UNKNOWN" } | null = null;
+    let pendingSwitchFrom: { attemptId: string; outcome: AttemptOutcome } | null = null;
 
     for (
       let cursor = activeIndex;
@@ -242,15 +231,6 @@ export async function routeInference(
       if (cursor !== activeIndex) releaseDispatch();
       const entry = selected[cursor]!;
       const cand = entry.route;
-      const mayRetryAmbiguous = () => {
-        const limit = deps.config.maxAmbiguousRetriesPerMinute;
-        return (
-          operation !== "videos" &&
-          !strictAdaptiveSwitch &&
-          Boolean(cand.route.retry_policy.retry_on_ambiguous) &&
-          (limit === undefined || deps.metrics.tryConsumeAmbiguousRetry(cand.channel.id, limit))
-        );
-      };
       if (!deps.router.peekAvailable(cand.channel.id, entry.probe)) {
         releaseProbeFor(cand.channel.id);
         if (cursor === activeIndex && !pendingSwitchFrom) {
@@ -354,7 +334,7 @@ export async function routeInference(
             estimatedInputTokens: preparedAttempt?.estimatedInputTokens,
           });
           enforceSupplierReserveLimit(
-            adaptivePolicy,
+            failover,
             candBilling.supplierSnapshot?.currency ?? cand.costPrice.currency,
             quote.supplierAtoms,
           );
@@ -461,8 +441,10 @@ export async function routeInference(
         continue;
       }
       if (chLimit.release) resources.setChannelLimit(chLimit.release);
-      const baseAttemptTimeoutMs =
-        cand.route.retry_policy.attempt_timeout_ms ?? deps.config.attemptTimeoutMs;
+      const baseAttemptTimeoutMs = routeAttemptTimeoutMs(
+        cand.route.retry_policy,
+        deps.config.attemptTimeoutMs,
+      );
       let attemptTimeoutMs = baseAttemptTimeoutMs;
       if (firstByteDeadlineMs !== null) {
         const remainingTotalMs = Math.floor(firstByteDeadlineMs - performance.now());
@@ -490,16 +472,11 @@ export async function routeInference(
             healthyBackupsLeft++;
           }
         }
-        attemptTimeoutMs =
-          healthyBackupsLeft > 0
-            ? Math.min(
-                baseAttemptTimeoutMs,
-                Math.max(
-                  Math.min(100, remainingTotalMs),
-                  Math.floor(remainingTotalMs / (healthyBackupsLeft + 1)),
-                ),
-              )
-            : Math.min(baseAttemptTimeoutMs, remainingTotalMs);
+        attemptTimeoutMs = attemptTimeoutWithinBudget(
+          baseAttemptTimeoutMs,
+          remainingTotalMs,
+          healthyBackupsLeft,
+        );
       }
       const result = await dispatchInferenceAttempt(
         request,
@@ -529,8 +506,21 @@ export async function routeInference(
       }
       lastError = result.error;
       if (
-        resources.videoAdmissionRetained ||
-        (result.outcome === "UNKNOWN" && !mayRetryAmbiguous())
+        !allowsFallback(
+          {
+            requireExecutionEvidence: failover.requireExecutionEvidence,
+            operation,
+            outcome: result.outcome,
+            videoAdmissionRetained: resources.videoAdmissionRetained,
+            retryOnAmbiguous: cand.route.retry_policy.retry_on_ambiguous,
+          },
+          () => {
+            const limit = deps.config.maxAmbiguousRetriesPerMinute;
+            return (
+              limit === undefined || deps.metrics.tryConsumeAmbiguousRetry(cand.channel.id, limit)
+            );
+          },
+        )
       )
         break;
       pendingSwitchFrom = { attemptId: activeAttemptId, outcome: result.outcome };

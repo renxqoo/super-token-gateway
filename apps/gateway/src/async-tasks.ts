@@ -5,18 +5,13 @@ import type {
   AsyncTaskProviderConfig,
   AsyncTaskRecord,
   AsyncTaskRefundEligibility,
-  ChannelRecord,
   ConfigSnapshot,
   BillingAccountRecord,
   createAsyncTasksRepository,
   createLedgerEngine,
   createLedgerQueries,
 } from "@gateway/ledger";
-import {
-  resolvePinnedProviderPlugin,
-  resolveProviderPlugin,
-  sanitizeProviderHeaders,
-} from "@gateway/plugin-engine";
+import { resolvePinnedProviderPlugin, sanitizeProviderHeaders } from "@gateway/plugin-engine";
 import { formatProtocolError, parseProviderJson } from "@gateway/protocol";
 import {
   applyAuthToRequest,
@@ -71,19 +66,6 @@ export function extractByDotPath(obj: Record<string, unknown>, path: string): un
     cur = (cur as Record<string, unknown>)[part];
   }
   return cur;
-}
-
-export function getAsyncTaskConfig(
-  snap: ConfigSnapshot,
-  channel: ChannelRecord,
-): AsyncTaskProviderConfig | null {
-  const resolved = channel.provider_plugin_id
-    ? resolvePinnedProviderPlugin(channel.provider_plugin_id, snap)
-    : resolveProviderPlugin(channel.kind, null, snap);
-  if (resolved?.kind === "DECLARATIVE" && resolved.config.async_task_config) {
-    return resolved.config.async_task_config;
-  }
-  return null;
 }
 
 export function extractUpstreamTaskId(
@@ -173,11 +155,9 @@ async function pollUpstreamTaskOnce(
   task: AsyncTaskRecord,
 ): Promise<AsyncTaskRecord> {
   const channel = snap.channels.get(task.channel_id);
-  if (!channel || !channel.enabled) return task;
+  if (!channel?.enabled || !channel.provider_plugin_id) return task;
 
-  const resolved = channel.provider_plugin_id
-    ? resolvePinnedProviderPlugin(channel.provider_plugin_id, snap)
-    : resolveProviderPlugin(channel.kind, null, snap);
+  const resolved = resolvePinnedProviderPlugin(channel.provider_plugin_id, snap);
   if (!resolved) return task;
   if (resolved.source !== "builtin" && snap.revokedPlugins.has(resolved.plugin_id)) {
     throw new GatewayError(503, "plugin_revoked", "Provider plugin has been revoked");
@@ -204,9 +184,11 @@ async function pollUpstreamTaskOnce(
   const secret = deps.snapshot.decryptChannelSecret(channel);
   const dispatchDeadline = performance.now() + deps.config.attemptTimeoutMs;
   const signal = AbortSignal.timeout(deps.config.attemptTimeoutMs);
+  const method = "GET";
   await applyAuthToRequest({
     auth: resolved.config.auth,
     secret,
+    method,
     url,
     headers,
     body: new Uint8Array(0),
@@ -216,7 +198,7 @@ async function pollUpstreamTaskOnce(
 
   const resp = await deps.transport.fetch(
     url,
-    { method: "GET", headers, signal, dispatchDeadline },
+    { method, headers, signal, dispatchDeadline },
     deps.config.allowPrivateUpstreams,
     deps.config.privateUpstreamCidrs,
   );

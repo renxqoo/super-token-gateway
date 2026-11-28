@@ -33,7 +33,7 @@ export async function inspectStreamPrelude(
   | RetryAttempt
 > {
   const {
-    request: { deps, operation, billingAccount, strictAdaptiveSwitch },
+    request: { deps, operation, billingAccount, routing },
     resources,
     telemetry,
     accounting,
@@ -61,7 +61,8 @@ export async function inspectStreamPrelude(
     (isWasmStreamProvider ||
       prepared.mergedOverrides.error_rules.some(
         (rule) =>
-          !strictAdaptiveSwitch || (rule.when_http_status ?? [200]).includes(upstreamStatus),
+          !routing.failover.requireExecutionEvidence ||
+          (rule.when_http_status ?? [200]).includes(upstreamStatus),
       )) &&
     (isUpstreamSse || prepared.isBedrockStream);
   if (fastResult.fast && isUpstreamSse && !prepared.isBedrockStream && !needsPrelude) {

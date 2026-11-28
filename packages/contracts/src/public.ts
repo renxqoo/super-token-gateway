@@ -8,6 +8,7 @@ export const adaptiveRoutingSchema = z.union([
     .object({
       operations: z.tuple([z.literal("chat")]),
       mode: z.enum(["observe", "active"]),
+      execution_policy: z.enum(["route", "protected"]),
       first_content_target_ms: z.number().int().min(1).max(300_000),
       supplier_reserve_limit: z
         .object({ currency: z.string().regex(/^[A-Z]{3,8}$/), atoms: integer })

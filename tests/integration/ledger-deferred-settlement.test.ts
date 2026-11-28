@@ -154,6 +154,8 @@ test("deferred lease spend is visible in live reads, conservation, and refunds b
             supplier_cost_atoms: "250",
             unknown_reserved_atoms: "0",
             unknown_attempts: 0,
+            unknown_attempts_without_reconciliation_start: 0,
+            oldest_unknown_reconciliation_age_ms: null,
           },
         ],
       });

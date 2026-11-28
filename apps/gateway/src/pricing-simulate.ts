@@ -17,7 +17,7 @@ import {
   type SnapshotReservationQuote,
   type Usage,
 } from "@gateway/kernel";
-import { rateCardFromPriceVersion, type ConfigSnapshot } from "@gateway/ledger";
+import { rateCardFromPriceVersion, type RouteRecord, type ConfigSnapshot } from "@gateway/ledger";
 import {
   applyLegacyOverrideMultiplierToSnapshot,
   canRouteMatchCurrency,
@@ -119,8 +119,9 @@ export function simulatePricing(
         }
       | undefined;
   },
+  draftRoutes?: readonly RouteRecord[],
 ) {
-  const modelRoutes = (snap.routesByModel.get(input.model) ?? []).filter(
+  const modelRoutes = (draftRoutes ?? snap.routesByModel.get(input.model) ?? []).filter(
     (r) =>
       r.enabled &&
       r.operations.includes(input.operation) &&

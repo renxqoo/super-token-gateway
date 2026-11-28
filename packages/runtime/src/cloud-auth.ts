@@ -138,14 +138,20 @@ export async function applyAuthToRequest(options: {
         creds.region,
         auth.service,
       );
-      signAwsRequest(url, body, headers, {
-        accessKeyId: creds.accessKeyId,
-        sessionToken: creds.sessionToken,
-        region: creds.region,
-        service: auth.service,
-        amzDate,
-        signingKey,
-      });
+      signAwsRequest(
+        url,
+        body,
+        headers,
+        {
+          accessKeyId: creds.accessKeyId,
+          sessionToken: creds.sessionToken,
+          region: creds.region,
+          service: auth.service,
+          amzDate,
+          signingKey,
+        },
+        options.method,
+      );
       return;
     }
     case "gcp_vertex_oauth": {
@@ -226,6 +232,7 @@ export function signAwsRequest(
   body: string | Uint8Array,
   headers: Headers,
   scope: AwsSigningScope,
+  method = "POST",
 ): void {
   const day = scope.amzDate.slice(0, 8);
   headers.set("host", url.host);
@@ -249,9 +256,14 @@ export function signAwsRequest(
     .split("/")
     .map((part) => uriEncode(part))
     .join("/");
-  const canonical = ["POST", path, query, canonicalHeaders, names.join(";"), sha256(body)].join(
-    "\n",
-  );
+  const canonical = [
+    method.toUpperCase(),
+    path,
+    query,
+    canonicalHeaders,
+    names.join(";"),
+    sha256(body),
+  ].join("\n");
   const credentialScope = `${day}/${scope.region}/${scope.service}/aws4_request`;
   const toSign = `AWS4-HMAC-SHA256\n${scope.amzDate}\n${credentialScope}\n${sha256(canonical)}`;
   headers.set(

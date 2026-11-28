@@ -415,7 +415,6 @@ export type AcquireHoldInput = {
   model: string;
   idempotency_key: string | null;
   fingerprint: string;
-  legacy_fingerprint?: string;
   customer_atoms: string;
   supplier_account_id: string;
   supplier_cost_version_id?: string;

@@ -94,7 +94,8 @@ export function registerRecoveryCases() {
   test.each([
     ["changing routes", "idempotency_replayed"],
     ["changing the address hidden by redaction", "idempotency_conflict"],
-    ["replaying a pre-upgrade redacted fingerprint", "idempotency_replayed"],
+    ["reusing a key held by an obsolete redacted fingerprint", "idempotency_conflict"],
+    ["reusing a key held by an obsolete original fingerprint", "idempotency_conflict"],
   ] as const)(
     "symptom: %s returns the wrong idempotency decision",
     async (scenario, expectedCode) => {
@@ -194,7 +195,7 @@ export function registerRecoveryCases() {
             enabled: false,
           });
         }
-        if (scenario === "replaying a pre-upgrade redacted fingerprint") {
+        if (scenario === "reusing a key held by an obsolete redacted fingerprint") {
           const historicalFingerprint = createHash("sha256")
             .update(
               JSON.stringify({
@@ -211,6 +212,10 @@ export function registerRecoveryCases() {
             )
             .digest("hex");
           await db`UPDATE public.billing_holds SET fingerprint = ${historicalFingerprint}
+          WHERE billing_account_id = ${fixture.billingAccountId}::uuid AND idempotency_key = ${idem}`;
+        }
+        if (scenario === "reusing a key held by an obsolete original fingerprint") {
+          await db`UPDATE public.billing_holds SET fingerprint = substring(fingerprint FROM 4)
           WHERE billing_account_id = ${fixture.billingAccountId}::uuid AND idempotency_key = ${idem}`;
         }
         const second = await send(

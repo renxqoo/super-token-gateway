@@ -35,7 +35,7 @@ import {
   type JournalLine,
 } from "./funds.ts";
 
-import { lockTransactionalHoldState, matchesHoldFingerprint } from "./transactional-hold-state.ts";
+import { lockTransactionalHoldState } from "./transactional-hold-state.ts";
 
 const DEMAND_WINDOW_MS = 2000;
 const LEASE_MIN_MULTIPLIER = 64n;
@@ -190,7 +190,7 @@ export function createTransactionalHoldBatch(
           const ik = `${item.billing_account_id}:${item.operation}:${item.idempotency_key}`;
           const prev = existingIdem.get(ik);
           if (prev) {
-            if (!matchesHoldFingerprint(prev.fingerprint, item)) {
+            if (prev.fingerprint !== item.fingerprint) {
               results[i] = {
                 ok: false,
                 code: "idempotency_conflict",

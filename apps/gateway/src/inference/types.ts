@@ -1,4 +1,4 @@
-import type { AdaptiveRoutingPolicy, Operation } from "@gateway/kernel";
+import type { Operation } from "@gateway/kernel";
 import type {
   ApiKeyRecord,
   ConfigSnapshot,
@@ -23,6 +23,7 @@ import type { GatewayMetrics, TraceContext } from "../observability.ts";
 import type { createTraceQueue } from "../trace-queue.ts";
 import type { SnapshotManager } from "../snapshot.ts";
 import type { DeferredIngressIp } from "../public-ingress.ts";
+import type { InferenceRoutingPolicy } from "./routing-policy.ts";
 
 export type InferenceFastHandoff = {
   preAuth?: {
@@ -82,8 +83,7 @@ export type InferenceRequest = {
   isStream: boolean;
   outputBound: number;
   initialChars: number | undefined;
-  adaptivePolicy?: AdaptiveRoutingPolicy | undefined;
-  strictAdaptiveSwitch?: boolean;
+  routing: InferenceRoutingPolicy;
   firstByteDeadlineMs: number | null;
   maxStreamDurationMs: number;
 };

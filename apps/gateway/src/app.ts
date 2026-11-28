@@ -466,7 +466,16 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
       const check = checkConsoleAdmission(billingAccount, key);
       if (check) await check;
       const data = [...snap.models.values()]
-        .filter((m) => m.enabled && (key.models.length === 0 || key.models.includes(m.name)))
+        .filter(
+          (m) =>
+            m.enabled &&
+            (key.models.length === 0 || key.models.includes(m.name)) &&
+            snap.routesByModel
+              .get(m.name)
+              ?.some((route) =>
+                route.operations.some((operation) => m.operations.includes(operation)),
+              ),
+        )
         .map((m) => ({ id: m.name, object: "model", owned_by: "gateway" }));
       return c.json({ object: "list", data });
     } catch (err) {

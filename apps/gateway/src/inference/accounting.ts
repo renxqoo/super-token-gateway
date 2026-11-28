@@ -1,18 +1,13 @@
 import { GatewayError } from "@gateway/contracts";
 import type { CommitTerminalInput } from "@gateway/ledger";
-import {
-  canonical,
-  normalizedNumber,
-  quoteSnapshotReservation,
-  type ReservationMeasurement,
-} from "@gateway/kernel";
-import { numberLiteral } from "@gateway/protocol";
-import { sha256 } from "@gateway/runtime";
+import { quoteSnapshotReservation, type ReservationMeasurement } from "@gateway/kernel";
 import { resolveAttemptPricing, type EffectiveCustomerPrice } from "../pricing.ts";
 import { inspectMeteredRequestSignals } from "../request-metering.ts";
 import type { HydratedCandidate } from "../proxy-state.ts";
 import type { InferenceRequest } from "./types.ts";
 import type { InferenceTelemetry } from "./telemetry.ts";
+import type { RequestIdentity } from "./request-identity.ts";
+import { routeAttemptTimeoutMs, type AttemptOutcome } from "./failover-policy.ts";
 
 export function mapHoldError(code: string, message: string): GatewayError {
   if (code === "insufficient_balance" || code === "key_spend_limit_exceeded") {
@@ -42,8 +37,6 @@ type AttemptQuote = {
   customerAtoms: string;
   supplierAtoms: string;
 };
-
-type Idempotency = { key: string; fingerprint: string; legacy_fingerprint: string };
 
 export class InferenceAccounting {
   private heldCustomerAtoms = 0n;
@@ -86,48 +79,6 @@ export class InferenceAccounting {
     return (this.finalizing ??= this.finalize(mode).finally(() => {
       this.finalizing = undefined;
     }));
-  }
-
-  private async fingerprintRequest(
-    key: string,
-    policyBody: Record<string, unknown>,
-    identified?: Idempotency,
-  ): Promise<Idempotency> {
-    const original =
-      identified?.legacy_fingerprint ??
-      (await fingerprintInference(this.request, this.request.clientBody));
-    const legacy =
-      this.request.multipartEntries || policyBody === this.request.clientBody
-        ? original
-        : await fingerprintInference(this.request, policyBody);
-    return { key, fingerprint: `v1:${original}`, legacy_fingerprint: legacy };
-  }
-
-  identifyIdempotency(
-    header: string | null,
-    policyBody: Record<string, unknown>,
-    identified?: Idempotency,
-  ): Promise<Idempotency> | null {
-    const key = header?.trim();
-    return key ? this.fingerprintRequest(key, policyBody, identified) : null;
-  }
-
-  async findReplay(idempotency: Idempotency, versionedOnly = false) {
-    const { deps, billingAccount, operation } = this.request;
-    const prior = await deps.ledger.findIdempotentHold(
-      billingAccount.id,
-      operation,
-      idempotency.key,
-      idempotency,
-      versionedOnly,
-    );
-    if (prior && !prior.matches) {
-      throw mapHoldError(
-        "idempotency_conflict",
-        "Idempotency key reused with different request fingerprint",
-      );
-    }
-    return prior;
   }
 
   customerPrice(candidate: HydratedCandidate, body?: Record<string, unknown>) {
@@ -188,15 +139,17 @@ export class InferenceAccounting {
   private holdExpiresAt(candidate: HydratedCandidate): string {
     const { deps, state, isStream, maxStreamDurationMs } = this.request;
     const unaryGraceMs = !isStream ? (deps.config.unaryClientAbortGraceMs ?? 600_000) : 0;
-    const effectiveAttemptMs =
-      candidate.route.retry_policy.attempt_timeout_ms ?? deps.config.attemptTimeoutMs;
+    const effectiveAttemptMs = routeAttemptTimeoutMs(
+      candidate.route.retry_policy,
+      deps.config.attemptTimeoutMs,
+    );
     const minUnaryHoldMs = unaryGraceMs > 0 ? effectiveAttemptMs + 30_000 : 0;
     return state.cachedExpiresAt(
       Math.max(deps.config.holdTtlMs, minUnaryHoldMs) + (isStream ? maxStreamDurationMs : 0),
     );
   }
 
-  async acquire(attemptId: string, quote: AttemptQuote, idempotency: Idempotency | null) {
+  async acquire(attemptId: string, quote: AttemptQuote, idempotency: RequestIdentity | null) {
     const { deps, requestId, operation, billingAccount, key, model } = this.request;
     const { candidate, customer, customerAtoms, supplierAtoms } = quote;
     const result = await deps.ledger.acquireHold({
@@ -212,7 +165,6 @@ export class InferenceAccounting {
       model: model.name,
       idempotency_key: idempotency?.key ?? null,
       fingerprint: idempotency?.fingerprint ?? "",
-      ...(idempotency ? { legacy_fingerprint: idempotency.legacy_fingerprint } : {}),
       customer_atoms: customerAtoms,
       supplier_account_id: candidate.account.id,
       supplier_cost_version_id: customer.supplierSnapshot?.rate_card_id ?? candidate.costPrice.id,
@@ -248,7 +200,7 @@ export class InferenceAccounting {
   }
 
   async switchSupplier(
-    previous: { attemptId: string; outcome: "FAILED" | "UNKNOWN" },
+    previous: { attemptId: string; outcome: AttemptOutcome },
     nextAttemptId: string,
     quote: AttemptQuote,
   ) {
@@ -398,48 +350,6 @@ export function createInferenceAccounting(
   telemetry: InferenceTelemetry,
 ): InferenceAccounting {
   return new InferenceAccounting(request, telemetry);
-}
-
-async function fingerprintInference(
-  request: InferenceRequest,
-  firstBody: Record<string, unknown>,
-): Promise<string> {
-  const { multipartEntries, operation, billingAccount, model } = request;
-  const body = multipartEntries
-    ? await Promise.all(
-        multipartEntries.map(async ([field, value]) => [
-          field,
-          typeof value === "string"
-            ? value
-            : {
-                filename: value.name,
-                type: value.type,
-                sha256: new Bun.CryptoHasher("sha256")
-                  .update(await value.arrayBuffer())
-                  .digest("hex"),
-              },
-        ]),
-      )
-    : firstBody;
-  return sha256(
-    canonical(
-      { billing_account_id: billingAccount.id, operation, model: model.name, body },
-      (parent, key) => {
-        const literal = numberLiteral(parent, key);
-        if (!literal) return undefined;
-        const rounded = String(Number(literal));
-        if (literal === rounded) return undefined;
-        if (!Number.isFinite(Number(literal))) return literal;
-        const exact = normalizedNumber(literal);
-        const value = normalizedNumber(rounded);
-        return exact.digits === value.digits &&
-          exact.exponent === value.exponent &&
-          exact.negative === value.negative
-          ? undefined
-          : literal;
-      },
-    ),
-  );
 }
 
 export type AttemptSettlement = ReturnType<InferenceAccounting["bindSettlement"]>;

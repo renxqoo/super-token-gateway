@@ -14,6 +14,7 @@ registerRoutingFixture();
 
 const observe: AdaptiveRoutingPolicy = {
   mode: "observe",
+  execution_policy: "protected",
   operations: ["chat"],
   first_content_target_ms: 300_000,
 };
@@ -167,7 +168,6 @@ test("default weighted chat retains the three-attempt route policy and charges o
     const f = await setup(runtime, [first, second, third], {
       strategy: "WEIGHTED",
       priority: [20, 10, 0],
-      maxAttempts: 3,
     });
     const response = await f.chat();
     expect(response.status).toBe(200);
@@ -360,33 +360,40 @@ test("the exact reservation cap skips an expensive first choice and preserves a 
   }
 });
 
-test("a known failed first send cannot authorize an over-cap fallback reservation", async () => {
-  const primary = fakeUpstream("adaptive-cap-failure", refusalFixture(503, true));
-  const backup = fakeUpstream("adaptive-cap-skipped");
-  const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
-  try {
-    await runtime.start();
-    const f = await setup(runtime, [primary, backup], {
-      strategy: "WEIGHTED",
-      priority: [10, 0],
-      adaptiveRouting: { ...observe, supplier_reserve_limit: { currency: "USD", atoms: "5" } },
-      supplierPrices: [fee("5"), fee("20")],
-      adapterOverrides: { error_rules: [{ ...notExecuted, when_http_status: [503] }] },
-    });
-    const result = await f.chat();
-    expect(result.status).toBe(503);
-    expect(await result.text()).toContain("supplier_reserve_limit");
-    expect([primary.calls(), backup.calls()]).toEqual([1, 0]);
-    const [row] = await db<{ attempts: number; state: string }[]>`
+test.each(["protected", "route"] as const)(
+  "an over-cap fallback stays unapproved under the %s execution policy",
+  async (execution_policy) => {
+    const primary = fakeUpstream("adaptive-cap-failure", refusalFixture(503, true));
+    const backup = fakeUpstream("adaptive-cap-skipped");
+    const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+    try {
+      await runtime.start();
+      const f = await setup(runtime, [primary, backup], {
+        strategy: "WEIGHTED",
+        priority: [10, 0],
+        adaptiveRouting: {
+          ...observe,
+          execution_policy,
+          supplier_reserve_limit: { currency: "USD", atoms: "5" },
+        },
+        supplierPrices: [fee("5"), fee("20")],
+        adapterOverrides: { error_rules: [{ ...notExecuted, when_http_status: [503] }] },
+      });
+      const result = await f.chat();
+      expect(result.status).toBe(503);
+      expect(await result.text()).toContain("supplier_reserve_limit");
+      expect([primary.calls(), backup.calls()]).toEqual([1, 0]);
+      const [row] = await db<{ attempts: number; state: string }[]>`
       SELECT jsonb_array_length(supplier_holds) AS attempts, state
       FROM public.billing_holds WHERE billing_account_id = ${f.billingAccountId}
     `;
-    expect(row).toEqual({ attempts: 1, state: "RELEASED" });
-  } finally {
-    await runtime.close();
-    await Promise.all([primary.server.stop(true), backup.server.stop(true)]);
-  }
-});
+      expect(row).toEqual({ attempts: 1, state: "RELEASED" });
+    } finally {
+      await runtime.close();
+      await Promise.all([primary.server.stop(true), backup.server.stop(true)]);
+    }
+  },
+);
 
 test("confirmed failures never send a third request under the adaptive attempt ceiling", async () => {
   const first = fakeUpstream("adaptive-attempt-1", refusalFixture(503, true));
@@ -413,6 +420,121 @@ test("confirmed failures never send a third request under the adaptive attempt c
     await Promise.all([first, second, third].map((upstream) => upstream.server.stop(true)));
   }
 });
+
+test.each([
+  {
+    mode: "inherited",
+    expectedStatus: 200,
+    backupCalls: 1,
+    holdState: "SETTLED",
+    chargeAtoms: "15",
+  },
+  {
+    mode: "explicit observe",
+    expectedStatus: 502,
+    backupCalls: 0,
+    holdState: "UNKNOWN",
+    chargeAtoms: "0",
+  },
+] as const)(
+  "$mode preserves ambiguous attempt funding and idempotent replay",
+  async ({ mode, expectedStatus, backupCalls, holdState, chargeAtoms }) => {
+    const first = fakeUpstream("ambiguous-primary", refusalFixture(503, false));
+    const backup = fakeUpstream("ambiguous-backup");
+    const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+    try {
+      await runtime.start();
+      const fixture = await setup(runtime, [first, backup], {
+        strategy: "WEIGHTED",
+        priority: [10, 0],
+        ...(mode === "explicit observe" ? { adaptiveRouting: observe } : {}),
+        retryOnAmbiguous: true,
+        adapterOverrides: (index) =>
+          index === 0 ? { reconciliation_evidence_required: true } : {},
+      });
+      const options = { key: "ambiguous-replay" };
+      const firstResponse = await fixture.chat(false, undefined, options);
+      expect(firstResponse.status).toBe(expectedStatus);
+      await firstResponse.json();
+
+      const repeated = await fixture.chat(false, undefined, options);
+      expect(repeated.status).toBe(409);
+      expect(repeated.headers.get("x-request-id")).toBe(firstResponse.headers.get("x-request-id"));
+      expect(await repeated.json()).toMatchObject({ error: { code: "idempotency_replayed" } });
+      const conflict = await fixture.chat(false, undefined, {
+        ...options,
+        message: "different body",
+      });
+      expect(conflict.status).toBe(409);
+      expect(await conflict.json()).toMatchObject({ error: { code: "idempotency_conflict" } });
+
+      expect([first.calls(), backup.calls()]).toEqual([1, backupCalls]);
+      const [row] = await db<
+        { state: string; supplier_holds: { channel_id: string; state: string }[] }[]
+      >`
+        SELECT state, supplier_holds FROM public.billing_holds
+        WHERE billing_account_id = ${fixture.billingAccountId}
+      `;
+      expect(row?.state).toBe(holdState);
+      expect(row?.supplier_holds.map(({ channel_id, state }) => ({ channel_id, state }))).toEqual([
+        { channel_id: String(fixture.channels[0]!.id), state: "UNKNOWN" },
+        ...(backupCalls ? [{ channel_id: String(fixture.channels[1]!.id), state: "SETTLED" }] : []),
+      ]);
+      expect(await fixture.charges()).toEqual({
+        n: backupCalls,
+        u: backupCalls,
+        atoms: chargeAtoms,
+      });
+      if (holdState === "UNKNOWN") await fixture.resolveUnknownHolds();
+    } finally {
+      await runtime.close();
+      await Promise.all([first.server.stop(true), backup.server.stop(true)]);
+    }
+  },
+);
+
+test.each([false, true])(
+  "Chat replays the current request identity before attempting to route (%p)",
+  async (configured) => {
+    const upstream = fakeUpstream("versioned-replay");
+    const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+    try {
+      await runtime.start();
+      const fixture = await setup(runtime, [upstream], {
+        strategy: "WEIGHTED",
+        ...(configured ? { adaptiveRouting: observe } : {}),
+      });
+      const options = { key: "versioned-lookup" };
+      const original = await fixture.chat(false, undefined, options);
+      expect(original.status).toBe(200);
+      await original.json();
+
+      const disabled = await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+        id: fixture.routes[0]!.id,
+        model_name: fixture.model,
+        channel_id: fixture.channels[0]!.id,
+        upstream_model: "m",
+        operations: ["chat"],
+        billing_price_id: fixture.customer.id,
+        cost_version_id: fixture.supplierPrices[0]!.id,
+        enabled: false,
+      });
+      expect(disabled.status).toBe(200);
+
+      const repeated = await fixture.chat(false, undefined, options);
+      expect(repeated.status).toBe(409);
+      expect(await repeated.json()).toMatchObject({
+        error: { code: "idempotency_replayed" },
+      });
+      expect(repeated.headers.get("x-request-id")).toBe(original.headers.get("x-request-id"));
+      expect(upstream.calls()).toBe(1);
+      expect(await fixture.charges()).toEqual({ n: 1, u: 1, atoms: "15" });
+    } finally {
+      await runtime.close();
+      upstream.server.stop(true);
+    }
+  },
+);
 
 test.each([true, false])(
   "streamed execution proof before public output=%p only switches before delivery",

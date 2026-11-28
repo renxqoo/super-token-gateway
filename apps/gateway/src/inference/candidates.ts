@@ -73,7 +73,25 @@ export function selectInferenceRoutes(request: InferenceRequest) {
     hydrated = filtered;
   }
 
-  const adaptive = adaptiveOrdering(request, baseHydrated);
+  const ordering = request.routing.ordering;
+  const adaptive = ordering
+    ? adaptiveOrdering(
+        {
+          policy: ordering,
+          snapshot: snap,
+          model,
+          operation,
+          isStream: request.isStream,
+          outputBound: request.outputBound,
+          clientBody: request.clientBody,
+          defaultAttemptTimeoutMs: deps.config.attemptTimeoutMs,
+          stats: state.adaptiveRouting,
+          observe: (decision) =>
+            deps.metrics.routing.observeDecision(model.name, ordering.mode, decision),
+        },
+        hydrated,
+      )
+    : undefined;
   const selected = deps.router.selectCandidates(
     model.name,
     hydrated,

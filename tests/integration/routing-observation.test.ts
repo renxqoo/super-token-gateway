@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createGatewayRuntime } from "@gateway/gateway";
-import { createLedgerQueries } from "@gateway/ledger";
+import { createLedgerQueries, fastUuid } from "@gateway/ledger";
 import {
   db,
   fakeUpstream,
@@ -96,6 +96,10 @@ test("routing cost reports supplier expense in the original request window and u
       FROM public.billing_holds WHERE request_id = ${requestId}
     `;
     const to = attempt!.cutoff;
+    await db`
+      UPDATE public.billing_holds SET reconciliation_started_at = clock_timestamp() - interval '2 minutes'
+      WHERE request_id = ${requestId} AND state = 'UNKNOWN' AND reconciliation_started_at IS NOT NULL
+    `;
     const getCost = () => createLedgerQueries(db).getRoutingCostReport({ model, from, to });
     const before = await getCost();
     expect(before.cohort_requests).toBe(2);
@@ -105,8 +109,13 @@ test("routing cost reports supplier expense in the original request window and u
         supplier_cost_atoms: "15",
         unknown_reserved_atoms: attempt!.held_atoms,
         unknown_attempts: 1,
+        unknown_attempts_without_reconciliation_start: 0,
+        oldest_unknown_reconciliation_age_ms: expect.any(Number),
       },
     ]);
+    expect(before.currencies[0]!.oldest_unknown_reconciliation_age_ms).toBeGreaterThanOrEqual(
+      120_000,
+    );
     expect(
       await runtime.ledger.resolveSupplierAttempt({
         request_id: requestId!,
@@ -124,12 +133,73 @@ test("routing cost reports supplier expense in the original request window and u
         supplier_cost_atoms: "22",
         unknown_reserved_atoms: "0",
         unknown_attempts: 0,
+        unknown_attempts_without_reconciliation_start: 0,
+        oldest_unknown_reconciliation_age_ms: null,
       },
     ]);
     await resolveUnknownHolds();
   } finally {
     await runtime.close();
     await upstream.server.stop(true);
+  }
+});
+
+test("the routing cost report includes supplier exposure when timeout marks the hold unknown", async () => {
+  const upstream = fakeUpstream("expired-hold-cost");
+  const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+  try {
+    await runtime.start();
+    const fixture = await setup(runtime, [upstream]);
+    const from = new Date(Date.now() - 1000);
+    const requestId = fastUuid();
+    const channel = fixture.channels[0]!;
+    const held = await runtime.ledger.acquireHold({
+      request_id: requestId,
+      attempt_id: fastUuid(),
+      billing_account_id: fixture.billingAccountId,
+      model: fixture.model,
+      operation: "chat",
+      currency: "USD",
+      idempotency_key: null,
+      fingerprint: "",
+      customer_atoms: "20",
+      supplier_account_id: String(channel.account_id),
+      supplier_channel_id: String(channel.id),
+      supplier_currency: "USD",
+      supplier_atoms: "7",
+      expires_at: new Date(Date.now() - 1).toISOString(),
+    });
+    expect(held).toMatchObject({ ok: true, request_id: requestId });
+    const range = { model: fixture.model, from, to: new Date(Date.now() + 1000) };
+    const queries = createLedgerQueries(db);
+    expect(await queries.getRoutingCostReport(range)).toEqual({
+      cohort_requests: 1,
+      currencies: [],
+    });
+    expect(await runtime.ledger.sweepTimedOutHolds()).toBe(1);
+    const [hold] = await db`
+      SELECT state, supplier_holds->0->>'state' AS attempt_state
+      FROM public.billing_holds WHERE request_id = ${requestId}
+    `;
+    expect(hold).toEqual({ state: "UNKNOWN", attempt_state: "HELD" });
+    const report = await queries.getRoutingCostReport(range);
+    expect(report).toMatchObject({
+      cohort_requests: 1,
+      currencies: [
+        {
+          currency: "USD",
+          supplier_cost_atoms: "0",
+          unknown_reserved_atoms: "7",
+          unknown_attempts: 1,
+          unknown_attempts_without_reconciliation_start: 0,
+          oldest_unknown_reconciliation_age_ms: expect.any(Number),
+        },
+      ],
+    });
+    await fixture.resolveUnknownHolds();
+  } finally {
+    await runtime.close();
+    upstream.server.stop(true);
   }
 });
 

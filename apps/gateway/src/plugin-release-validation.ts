@@ -17,7 +17,11 @@ import {
 import { validateUsageObject } from "@gateway/protocol";
 import { validateAuthCredentials } from "@gateway/runtime";
 import type { Operation } from "@gateway/kernel";
-import { isConversationalOperation, upstreamProtocolFor } from "./upstream-payload.ts";
+import {
+  declaresProviderOperation,
+  isConversationalOperation,
+  upstreamProtocolFor,
+} from "./upstream-payload.ts";
 import { previewProviderRequest } from "./provider-request-preview.ts";
 
 type PluginReleaseSample = {
@@ -96,12 +100,12 @@ export async function validatePluginRelease(options: {
           : ["chat"]);
       for (const operation of operations) {
         if (resolved.kind === "DECLARATIVE") {
-          const endpoints = resolved.config.endpoints;
           if (
-            !endpoints[operation] &&
-            !route?.adapter_overrides.path_override &&
-            !channel?.adapter_config.path_override &&
-            !(isConversationalOperation(operation) && endpoints.default)
+            !declaresProviderOperation(
+              resolved.config,
+              operation,
+              route?.adapter_overrides.path_override || channel?.adapter_config.path_override,
+            )
           ) {
             throw invalid(`Provider does not declare an endpoint for ${operation}`);
           }

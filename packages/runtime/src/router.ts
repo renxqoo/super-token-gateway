@@ -421,24 +421,6 @@ export class SmartRouter {
         )
           ? scoredWeights
           : undefined;
-        if (adaptive && adaptiveWeights && adaptive.mode === "observe") {
-          const baseline = group.map(
-            (item) => item.route.weight * (item.st ? this.healthFactor(item.st) : 1),
-          );
-          const draw = crypto.getRandomValues(new Uint32Array(1))[0]! / 0x1_0000_0000;
-          adaptive.compare(
-            pickWeighted(
-              baseline,
-              baseline.reduce((sum, weight) => sum + weight, 0),
-              draw,
-            ) !==
-              pickWeighted(
-                adaptiveWeights,
-                adaptiveWeights.reduce((sum, weight) => sum + weight, 0),
-                draw,
-              ),
-          );
-        }
         const activeWeights = adaptive?.mode === "active" ? adaptiveWeights : undefined;
         while (remaining.length > 0) {
           let totalWeight = 0;
@@ -450,7 +432,16 @@ export class SmartRouter {
               return w;
             });
           if (activeWeights) totalWeight = activeWeights.reduce((sum, weight) => sum + weight, 0);
-          const chosenIdx = pickWeighted(weights, totalWeight, this.random());
+          const draw = this.random();
+          const chosenIdx = pickWeighted(weights, totalWeight, draw);
+          if (
+            adaptive?.mode === "observe" &&
+            adaptiveWeights &&
+            remaining.length === group.length
+          ) {
+            const adaptiveTotal = adaptiveWeights.reduce((sum, weight) => sum + weight, 0);
+            adaptive.compare(chosenIdx !== pickWeighted(adaptiveWeights, adaptiveTotal, draw));
+          }
           activeWeights?.splice(chosenIdx, 1);
           const [chosen] = remaining.splice(chosenIdx, 1);
           ordered.push({ route: chosen!.route, probe: chosen!.probe });

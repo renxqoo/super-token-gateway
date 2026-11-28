@@ -281,7 +281,7 @@ export async function setup(
         priority: opts.priority?.[i] ?? 0,
         weight: opts.weights?.[i] ?? 1,
         retry_policy: {
-          max_attempts: opts.maxAttempts ?? 3,
+          ...(opts.maxAttempts !== undefined ? { max_attempts: opts.maxAttempts } : {}),
           ...(opts.retryOnAmbiguous ? { retry_on_ambiguous: true } : {}),
         },
         ...(adapterOverrides ? { adapter_overrides: adapterOverrides } : {}),

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { createAdminCatalogRoutes } from "./admin-catalog.ts";
 import { createAdminFinanceRoutes } from "./admin-finance.ts";
+import { createAdminRouteReleaseRoutes } from "./admin-route-releases.ts";
 import { createAdminOpsRoutes } from "./admin-ops.ts";
 import { createAdminUsageMonitorRoutes } from "./admin-usage-monitor.ts";
 import { requirePlatformAdmin, type ConsoleDeps, type ConsoleEnv } from "./shared.ts";
@@ -41,6 +42,7 @@ export function createAdminRoutes(deps: ConsoleDeps) {
     app.use(pattern, adminOnly);
   }
   app.route("/", createAdminCatalogRoutes(deps));
+  app.route("/", createAdminRouteReleaseRoutes(deps));
   app.route("/", createAdminFinanceRoutes(deps));
   app.route("/", createAdminOpsRoutes(deps));
   app.route("/", createAdminUsageMonitorRoutes(deps));
