@@ -1,5 +1,7 @@
 # T04.b.1 受控插件发行目录
 
+> 历史迁移记录。本文的 Core 发布目录属于 Enterprise v2。现行插件修订与发布见 [ADR 0012](../decisions/0012-plugin-revisions-and-provider-verification.md)。
+
 本切片交付真实 catalog 前置链。Core application 位于 `apps/core-api/src/plugins`，平台凭证验证位于相邻 `platform`；Gateway 暂时装配同一个 HTTP application，T04.c 迁走装配时不复制发布或绑定实现。这里没有实现 T04.b.2 的资金准入、三进程执行、HA、任意包上传或真实供应商验收。旧 Gateway connector 路径仍是迁移中的旧执行口，不能用其测试冒称插件执行新链。
 
 ## 发行与信任

@@ -21,4 +21,4 @@
 
 协议转换覆盖 Chat、Responses、Messages 和 Gemini 已支持的文本、图像、工具、采样和结构化输出字段。严格模式拒绝不可表达的语义，兼容模式按字段策略标记省略。原生请求继续服从上游字段和计量规则。Messages 格式可用于 Bedrock 适配，Vertex 使用 Gemini 适配。当前可用协议和公开路径见 [API 契约](api-contracts.md)。
 
-每条路由可配置 `request_policy`。内容策略处理后的请求体在协议转换和供应商请求改写前接受检查。`allowed_parameters` 检查顶层字段，`blocked_parameters` 禁止指定点分路径，`parameter_ranges` 校验数值范围。路径中的 `*` 展开一层。白名单以传入此阶段的请求字段为准。路由更新替换整个策略，`{}` 清空。权限与插件修订变化按 [配置快照和撤销规则](docs/decisions/0012-plugin-revisions-and-provider-verification.md) 生效。
+每条路由可配置 `request_policy`。内容策略处理后的请求体在协议转换和供应商请求改写前接受检查。其中 `allowed_parameters` 检查顶层字段，`blocked_parameters` 禁止指定点分路径，`parameter_ranges` 校验数值范围。路径中的 `*` 展开一层。白名单以传入此阶段的请求字段为准。路由更新替换整个策略，`{}` 清空。权限与插件修订变化按 [配置快照和撤销规则](docs/decisions/0012-plugin-revisions-and-provider-verification.md) 生效。

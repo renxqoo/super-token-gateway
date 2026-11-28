@@ -1,5 +1,7 @@
 # enterprise-v2 T08 动态插件发布全生命周期
 
+> 历史迁移记录。本文的 Core 插件生命周期属于 Enterprise v2。现行插件修订与发布见 [ADR 0012](../decisions/0012-plugin-revisions-and-provider-verification.md)。
+
 ## 1. 当前行为（代码核对）
 
 - Core 目录只接受受控 builtin：`releaseDescriptorSchema` 与部署 policy 的 `release_id` 固定为 `gateway.openai-chat-1.0.0`，`verifyRelease` 还要求包内容等于仓库内置文件；新增任何插件都要改代码并重新部署。

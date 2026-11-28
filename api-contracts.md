@@ -6,7 +6,7 @@ Gateway 路由的完整规范由 `bun run openapi` 生成，见 [OpenAPI](docs/o
 
 推理使用 `Authorization: Bearer sk_...`；Messages 可用 `x-api-key`，Gemini 可用 `x-goog-api-key`。不把 URL 查询参数中的凭证写入访问日志；当前客户端应使用请求头。管理接口用独立的 Bearer 凭证按角色授权。
 
-推理响应通过 `x-request-id` 标识请求账务记录，并携带 `x-trace-id` 和 `traceparent`。相同 `Idempotency-Key` 的重放返回 409 及已有请求的 ID 和状态。不同请求复用幂等键返回 `idempotency_conflict`。响应体不作为幂等回放缓存。
+推理响应通过 `x-request-id` 标识请求。已有预扣和账单可用该标识查询。响应还携带 `x-trace-id` 和 `traceparent`。相同 `Idempotency-Key` 的重放返回 409 及已有请求的 ID 和状态。不同请求复用幂等键返回 `idempotency_conflict`。响应体不作为幂等回放缓存。
 
 400 输入无效；401 未认证；402 合资格资金或授信不足、钱包冻结（insufficient_funds）；403 操作/模型越权；404 自有资源不存在；409 意图/配置冲突；413 字节超限；422 能力不可表达；429 准入超限；502 上游或转换失败；503 依赖、容量或提交不可用；504 超时。
 

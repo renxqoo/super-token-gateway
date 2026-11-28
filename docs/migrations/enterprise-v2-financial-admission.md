@@ -1,5 +1,7 @@
 # Core 金融准入实现单元
 
+> 历史迁移记录。本文的 Core 准入和发送许可属于 Enterprise v2。现行准入、预扣与派发顺序见[路由与执行](../../routing-and-execution.md)。
+
 本记录对应 T04.b.2a、追加版本 `2026111206`。目标是准入、单次 begin、双方预留及共享 quota；RAW/CANONICAL/DISPUTED、实际供应结算和数字证据 producer 验证由 T04.b.2b 继续，Gateway 本地发送 registry、真实网络发送、三业务进程及 WAITAOF 由 T04.c 继续。金融设计、内部身份设计及协调者 quota ownership revision2 为本单元依据；此文件不是整个企业迁移的完成声明。
 
 ## 公开入口与真实边界

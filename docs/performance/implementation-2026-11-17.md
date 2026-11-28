@@ -1,6 +1,8 @@
 # 实施中的容量与生产可靠性证据
 
-日期：2026-11-17。状态：实施中，未达到稳定RPS严格超过3000、CPU≤2ms或生产HA验收。设计依据及改动记录见[beyond-new-api/05](../../beyond-new-api/05-implementation.md)、[Worker与发送许可](../../beyond-new-api/07-builtin-worker.md)。本报告持续记录失败与成功，不能把局部执行器验证或较低档容量写成最终完成。
+> 本文记录 2026-11-17 容量改造的历史结果。下文引用的 `beyond-new-api/` 文件可在提交 `12c32a8` 中查阅，例如 `git show 12c32a8:beyond-new-api/05-implementation.md`。现行验证要求见[容量及对标契约](capacity-contract.md)。
+
+日期：2026-11-17。状态：实施中，未达到稳定RPS严格超过3000、CPU≤2ms或生产HA验收。设计依据及改动记录见beyond-new-api/05（`beyond-new-api/05-implementation.md`）、Worker与发送许可（`beyond-new-api/07-builtin-worker.md`）。本报告持续记录失败与成功，不能把局部执行器验证或较低档容量写成最终完成。
 
 ## 1. 当前可证明的性能
 
@@ -142,9 +144,9 @@ CLI未捕获Worker线程，不能把这些比例乘Gateway进程CPU或旧7.1ms�
 
 S4b完整门禁：check337、unit439例7925断言69文件、lint/fmt/build/native/plugin-artifact/artifact/durability/backup退出0；integration532通过1失败、78文件12745断言1124.27秒，退出1。唯一失败为native工具/bin/sh --version等待超时，根因未定位；原样重放4通过1失败保留，后续诊断通过不视为根因修复。未调大门槛，按用户不过度测试规则停止大量重放。
 
-S5第一片定向17例80断言、check339、lint/build退出0，完整故障矩阵未全部完成。S6按[09](../../beyond-new-api/09-success-quota-close.md)实现成功证据事务关闭、单恢复loop合并唤醒、失败冷却及仅配额技术过期，资金UNKNOWN不退款。独审两项推进问题已修正，最终17例186断言通过，另提交前崩溃单例10断言通过。原26通过2失败以及导入/截止装置错误保留；前缀最初2秒BEGIN没有通过原双重安全余量，未冒称其已复现目标前缀问题。
+S5第一片定向17例80断言、check339、lint/build退出0，完整故障矩阵未全部完成。S6按09（`beyond-new-api/09-success-quota-close.md`）实现成功证据事务关闭、单恢复loop合并唤醒、失败冷却及仅配额技术过期，资金UNKNOWN不退款。独审两项推进问题已修正，最终17例186断言通过，另提交前崩溃单例10断言通过。原26通过2失败以及导入/截止装置错误保留；前缀最初2秒BEGIN没有通过原双重安全余量，未冒称其已复现目标前缀问题。
 
-用户要求先解决PG最大瓶颈后，不再为S6单独压测。进入[10 计价与资金主链重构](../../beyond-new-api/10-funding-engine.md)时，1803先安装私有空cells、不可变划拨结构、fund fence/精度guard、价格程序和融合exposure。价格由旧不可变版本精确编译，未信调用者权重；该基础阶段未切换旧root，后续1804接入情况见§10。
+用户要求先解决PG最大瓶颈后，不再为S6单独压测。进入10 计价与资金主链重构（`beyond-new-api/10-funding-engine.md`）时，1803先安装私有空cells、不可变划拨结构、fund fence/精度guard、价格程序和融合exposure。价格由旧不可变版本精确编译，未信调用者权重；该基础阶段未切换旧root，后续1804接入情况见§10。
 
 S7基础阶段独立金额/全局精度/真实预算划拨4例36断言、check345退出0；先前lint、架构与恢复单测11例666断言退出0。冻结账户跨cell预留上界缺口、融合exposure的NULL finals接纳及新审计对未迁移root误报可用额均已0通过1失败→通过修正。该阶段私有划拨尚未切入请求；源价格编译及历史回填、整体舍入和未知预留差额均有独立期望。原始日志按阶段保存于s4/s5/s6/s7-validation目录。
 
@@ -158,7 +160,7 @@ S7基础阶段独立金额/全局精度/真实预算划拨4例36断言、check34
 
 实际root和cell0同时被锁住的用例中，两个BEGIN仍成功，cell1结算成功，cell0结算返回55P03且无部分receipt；释放后原事实完成并重放无重复收费。预算100、两次预留各30的碎片场景不假402，最终供应B=70/R=0/S=30、客户两次各100。它证明被覆盖操作的锁隔离及资金语义，不能推算吞吐倍数。
 
-两项独审发现均红绿修复：有限列角色不得扩大资金权限；冻结root局部下界不得误拒合法全局调账。后一回归从HTTP409变201，最终总B=−99999999999999999999999999999999999989、未知R=11、S=0，内部REBASE不改公共revision。具体推导及权限收口见[10](../../beyond-new-api/10-funding-engine.md)。
+两项独审发现均红绿修复：有限列角色不得扩大资金权限；冻结root局部下界不得误拒合法全局调账。后一回归从HTTP409变201，最终总B=−99999999999999999999999999999999999989、未知R=11、S=0，内部REBASE不改公共revision。具体推导及权限收口见10（`beyond-new-api/10-funding-engine.md`）。
 
 | 本次定向命令所含范围                                    | 通过/失败 | 断言 | 退出码 |
 | ------------------------------------------------------- | --------: | ---: | -----: |
@@ -189,7 +191,7 @@ S7基础阶段独立金额/全局精度/真实预算划拨4例36断言、check34
 | 证据副本              |   0.205 |
 | 服务合计              |  25.020 |
 
-PG统计有效、驱逐数不变；顶层40.036调用、23.443执行ms、60639.51 WAL字节/请求。证据组持久化和execution batch顶层分别10.463与7.605执行ms/请求，含嵌套子语句，不能再加子语句求总成本。相对S5两轮P99下降约44%–46%，服务CPU基本不变；因此分区解除等待不是总体CPU达标的证据。下一重点是真正集合式准入和结算，计划见[10§10](../../beyond-new-api/10-funding-engine.md)。
+PG统计有效、驱逐数不变；顶层40.036调用、23.443执行ms、60639.51 WAL字节/请求。证据组持久化和execution batch顶层分别10.463与7.605执行ms/请求，含嵌套子语句，不能再加子语句求总成本。相对S5两轮P99下降约44%–46%，服务CPU基本不变；因此分区解除等待不是总体CPU达标的证据。下一重点是真正集合式准入和结算，计划见10§10（`beyond-new-api/10-funding-engine.md`）。
 
 独立生产DDL冷计划探针复现revision-claim查找选delivery索引、过滤10001行、2.540ms，ANALYZE后选attempt/source/revision索引、过滤0行、0.003ms；不是顺序扫描。探针的10000条克隆receipt仅为合成计划数据，不能充当签名资金历史或压测请求；也不能据此断言正式轮全部慢查的根因。原始计划与源码保留，无共享PG配置或统计修改。
 
@@ -197,7 +199,7 @@ PG统计有效、驱逐数不变；顶层40.036调用、23.443执行ms、60639.5
 
 ## 12. 1805结算批量写入进展
 
-追加1805，把同批供应cell更新归并为每cell一次，供应经济journal及entries各一次集合INSERT；每请求仍有独立金额、journal ID、reference、分录和平衡约束。hold当前R随状态更新一次写入。组失败丢弃自身待写资金及流水；批末SQL失败先整批回滚，再在同一外层期限内按组即时应用，保留故障隔离和原事实幂等。原public批入口owner/ACL保持，旧public group/leaf删除，细节见[10§11](../../beyond-new-api/10-funding-engine.md)。
+追加1805，把同批供应cell更新归并为每cell一次，供应经济journal及entries各一次集合INSERT；每请求仍有独立金额、journal ID、reference、分录和平衡约束。hold当前R随状态更新一次写入。组失败丢弃自身待写资金及流水；批末SQL失败先整批回滚，再在同一外层期限内按组即时应用，保留故障隔离和原事实幂等。原public批入口owner/ACL保持，旧public group/leaf删除，细节见10§11（`beyond-new-api/10-funding-engine.md`）。
 
 同cell两个独立请求各1/3仍合计2，产生一次cell更新和一次含两个独立journal的INSERT；同attempt partial/final两个1/3合计1。批末坏cell和供应投影后客户账单失败均验证有效组继续提交、失败组无部分资金或receipt、重投不重复收费。真实队列worker仍在PG全部提交后ACK，重投不增资金。
 
@@ -219,7 +221,7 @@ PG统计有效、驱逐数不变；顶层40.036调用、23.443执行ms、60639.5
 
 ## 13. 1806客户权威与BEGIN集合执行
 
-追加1806，把客户授权的org/principal/project/key权威行按批读取、固定顺序加锁并重核关系，原逐项路径与批路径共用政策纯判定。成功scope可在同事务复用候选/runtime，限8MiB，持有原catalog/epoch栅栏并核runtime自然到期；失败scope的新cache不向外提升。BEGIN仍保留原全部授权、资金、proof和一次发送校验，再按连续段集合写permit/command/audit。遇依赖或其他命令先flush，单项使用同一业务体即时写。具体事务、权限及自然时间协议见[10§12](../../beyond-new-api/10-funding-engine.md)。
+追加1806，把客户授权的org/principal/project/key权威行按批读取、固定顺序加锁并重核关系，原逐项路径与批路径共用政策纯判定。成功scope可在同事务复用候选/runtime，限8MiB，持有原catalog/epoch栅栏并核runtime自然到期；失败scope的新cache不向外提升。BEGIN仍保留原全部授权、资金、proof和一次发送校验，再按连续段集合写permit/command/audit。遇依赖或其他命令先flush，单项使用同一业务体即时写。具体事务、权限及自然时间协议见10§12（`beyond-new-api/10-funding-engine.md`）。
 
 两项新BEGIN的三表各一次集合写已由实际transition-table记录验证，独立预扣和回执仍保留。批末失败回滚包含早先prefix，按原期限重建授权cache并即时处理；失败项不产生发送材料。key、proof、明确批准的Wasm在批内到期均不会新授发送，未释放原资金预留。UUID大小写变体曾在暂存中产生两次fresh，真实0通过1失败3断言后按PG UUID值识别依赖修复；签名及原请求数据不改。
 
@@ -241,7 +243,7 @@ PG统计有效、驱逐数不变；顶层40.036调用、23.443执行ms、60639.5
 
 ## 14. 1807连续准入集合写
 
-准入原来给allocate_customer_batch_v1每次只传一条，再逐请求更新余额及写执行材料。1807保留唯一item业务校验，连续admit在真实cell锁下累积供应R/revision；段末一次客户额度分配、每cell一次余额更新，并集合写请求预算、attempt binding、独立command/permit/供应hold/journal/entries、额度租约及audit。单项、next和EX慢路沿原即时逻辑。详细事务与授权边界见[10§13](../../beyond-new-api/10-funding-engine.md)。
+准入原来给allocate_customer_batch_v1每次只传一条，再逐请求更新余额及写执行材料。1807保留唯一item业务校验，连续admit在真实cell锁下累积供应R/revision；段末一次客户额度分配、每cell一次余额更新，并集合写请求预算、attempt binding、独立command/permit/供应hold/journal/entries、额度租约及audit。单项、next和EX慢路沿原即时逻辑。详细事务与授权边界见10§13（`beyond-new-api/10-funding-engine.md`）。
 
 客户分配或批末写入失败时，包含此前prefix和资金的整个试批先回滚，再按原期限即时逐项处理一次。原有未知COMMIT不进入该回退。改变命令类型或遇重复command/request/attempt/intent先将前缀写入当前事务；不提前COMMIT，不合并每请求金额、舍入、流水或回执。最终写重新检查实际客户、context及session/certificate/command/runtime自然期限。
 
@@ -268,7 +270,7 @@ check351文件、lint零错误/警告、fmt732文件、架构7项681断言、bui
 
 原group每份事实分别读取attempt价格和canonical、查询快照版本，再单独写index/payload。1808保留同一决策体，在真实锁下捕获各attempt必要列、价格、版本及source/final状态，事务内逐份推进快照和回执，最后集合写事实、delivery及attempt/request状态。供应cost/head/hold也改为组末集合写，原1805跨成功组的供应cell及流水pending不变。后续组仍读取前组已落库的canonical、cost和hold；不把partial/final跨组先相加再舍入。
 
-不同原子组总事实不超过64，实际钱包互不相交、无到期lot且仍为未争议未隔离NEW时，可试合并一次客户结算；原组receipt/billing在返回前拆回。共享钱包、到期lot、重复、重放、争议或试批异常保留原组顺序与失败隔离。实际关系在取锁后再次核对，不能只信取锁前的分组。细节见[10§14](../../beyond-new-api/10-funding-engine.md)。
+不同原子组总事实不超过64，实际钱包互不相交、无到期lot且仍为未争议未隔离NEW时，可试合并一次客户结算；原组receipt/billing在返回前拆回。共享钱包、到期lot、重复、重放、争议或试批异常保留原组顺序与失败隔离。实际关系在取锁后再次核对，不能只信取锁前的分组。细节见10§14（`beyond-new-api/10-funding-engine.md`）。
 
 | 定向验证批次                                                   | 通过/失败 | 断言 | 退出码 |
 | -------------------------------------------------------------- | --------: | ---: | -----: |
@@ -364,7 +366,7 @@ CPU分母为含预热的实际已准入请求，采样工作还包含503拒绝�
 
 ## 18. 实际查询计划与规划方式实验
 
-本轮不改产品代码或41项迁移。两次运行与1809 default轮的产物SHA全部一致，使用原生PG及同一耐久/资金契约；只在各自新建夹具库改变诊断设置。方案先更新于[10§16](../../beyond-new-api/10-funding-engine.md#16-实际查询计划与下一步数据访问改造)，最后正式稳定档仍为旧构建60，以下不作为新稳定档。
+本轮不改产品代码或41项迁移。两次运行与1809 default轮的产物SHA全部一致，使用原生PG及同一耐久/资金契约；只在各自新建夹具库改变诊断设置。方案先更新于10§16（`beyond-new-api/10-funding-engine.md#16-实际查询计划与下一步数据访问改造`），最后正式稳定档仍为旧构建60，以下不作为新稳定档。
 
 第一轮是30秒、200到达的计划剖析，未启用online-capacity，因此没有逐ID交集文件或capacityPassed字段。只在该库新连接加载auto_explain，sample_rate=0.1、analyze=on、timing=off，收集真实业务SQL的实际行数和缓冲块。按audit中本库PG PID筛选到7831份目标计划，解析错误0，保存每类首3、末3及最慢8份代表计划。4866请求最终全部结算，9732份receipt及ACK、双方R=0；HTTP错误使脚本退出1。剖析开销显著，不比较该轮RPS/CPU。原始失败审计见[采样轮](evidence-implementation-2026-11-17/s7-pg-plans-profile/round.json)，代表性计划与提取脚本见[计划归档](evidence-implementation-2026-11-17/s7-validation/query-plans-1809/pg-plan-profile-plans.json.raw)。
 
@@ -404,7 +406,7 @@ CPU分母为含预热的实际已准入请求，采样工作还包含503拒绝�
 
 ## 19. 1810预检定向读取
 
-新增迁移core-preflight-reads.sql只替换公开预检函数的读取方式：完整caller/permit owner/context owner及core_auth仍在原位置，空attempt不再查询租约连接并保留原NULL输出；实际permit、context、request和closure使用常量SQL及USING参数，租约按实际request筛选，再逐租约读取其所属attempt的epoch，仍覆盖同request其他attempt及原排序。未改变资金写入、租约数量、返回投影或角色权限，未设置全局custom-plan。独立只读审查未见新增权限/授权/租约缺陷。方案与局限见[10§17](../../beyond-new-api/10-funding-engine.md#17-预检的参数化定向读取)。
+新增迁移core-preflight-reads.sql只替换公开预检函数的读取方式：完整caller/permit owner/context owner及core_auth仍在原位置，空attempt不再查询租约连接并保留原NULL输出；实际permit、context、request和closure使用常量SQL及USING参数，租约按实际request筛选，再逐租约读取其所属attempt的epoch，仍覆盖同request其他attempt及原排序。未改变资金写入、租约数量、返回投影或角色权限，未设置全局custom-plan。独立只读审查未见新增权限/授权/租约缺陷。方案与局限见10§17（`beyond-new-api/10-funding-engine.md#17-预检的参数化定向读取`）。
 
 新回归以真实身份及一次准入捕获context/三条租约；停止仅自有Core后，在固定generic连接、冷统计下加入4096份合成attempt/permit元数据，作为访问计划数据而非有效资金历史。通过公开preflight及内建表计数观察两次调用，而非比较不稳定的绝对耗时。预热后的DDL会改变准备条件，最初几种夹具虽通过但不能复现，不称红证据；将所有DDL提前、随后只增长数据后，旧实现两次读取4098条许可，0通过1失败9断言、退出1。1810同例seq读取0、index增量4，1通过9断言、退出0；NULL/permit/closure、三scope与实际attempt/epoch结果不变。
 
@@ -447,7 +449,7 @@ CPU分母为含预热的实际已准入请求，采样工作还包含503拒绝�
 
 ## 20. 1811回执唯一索引重排
 
-1810后receipt revision查询仍89114次/70.621执行秒。1811把同名core_receipt_delivery唯一约束由(origin_identity,event_id,body_digest)重排为(event_id,origin_identity,body_digest)，去掉低基数origin单独成为查找前缀的条件。三列均NOT NULL，唯一三元组集合、约束名和23505语义不变；产品delivery读取仍带完整三列，FK只引用receipt id。未改资金、签名、ACK、部分revision索引或角色权限。增量迁移、Drizzle schema及快照同步，旧42项manifest完全相同，新43项checksum及源码/产物资产绑定通过。设计见[10§18](../../beyond-new-api/10-funding-engine.md#18-receipt唯一索引的访问方向)。
+1810后receipt revision查询仍89114次/70.621执行秒。1811把同名core_receipt_delivery唯一约束由(origin_identity,event_id,body_digest)重排为(event_id,origin_identity,body_digest)，去掉低基数origin单独成为查找前缀的条件。三列均NOT NULL，唯一三元组集合、约束名和23505语义不变；产品delivery读取仍带完整三列，FK只引用receipt id。未改资金、签名、ACK、部分revision索引或角色权限。增量迁移、Drizzle schema及快照同步，旧42项manifest完全相同，新43项checksum及源码/产物资产绑定通过。设计见10§18（`beyond-new-api/10-funding-engine.md#18-receipt唯一索引的访问方向`）。
 
 冷计划回归以一次真实签名receipt为种子，全部DDL在预热前完成，再增长10000条同origin合成索引元数据；这些克隆不作为有效签名资金历史或容量证明。缺失revision的原SQL在旧布局读取10001行，0通过1失败5断言、退出1；新布局读取0行、index scan增量1，1通过9断言、退出0。已知revision仍返回原receipt，重复三元组仍拒绝，同event跨origin、同origin/event不同body仍允许。最终版本在10003行当前schema上重放DDL，核对原签名receipt未变、客户支出100和供应B999/R0/S1。该重放证明含数据重建，不等同真实1810前缀升级或在线无停写迁移；表行访问计数也不是全部索引项、缓冲或CPU。独立只读审查未发现新增资金、FK、权限或唯一性问题；迁移仍须遵守停写边界及表锁/重建成本。
 
@@ -490,7 +492,7 @@ CPU分母为含预热的实际已准入请求，采样工作还包含503拒绝�
 
 ## 21. Worker跨任务合并的反例
 
-1811后的Worker只逐job调用存储，Gateway侧的producer批不能自动合并不同job。新processor复用有界加权Batcher，完整group跨job合并至多128组，2个存储调用并行，忙时收集1ms；结果等长校验后按原job切回，每job仅重投自己的55P03/40P01失败组。共享存储异常或结果数不符使参与job全部失败，不制造成功或补偿退款。运行角色、schema及43项迁移不变；产物对照仅worker main及总manifest变化。设计见[10§19](../../beyond-new-api/10-funding-engine.md#19-worker跨队列任务的有界合并)。
+1811后的Worker只逐job调用存储，Gateway侧的producer批不能自动合并不同job。新processor复用有界加权Batcher，完整group跨job合并至多128组，2个存储调用并行，忙时收集1ms；结果等长校验后按原job切回，每job仅重投自己的55P03/40P01失败组。共享存储异常或结果数不符使参与job全部失败，不制造成功或补偿退款。运行角色、schema及43项迁移不变；产物对照仅worker main及总manifest变化。设计见10§19（`beyond-new-api/10-funding-engine.md#19-worker跨队列任务的有界合并`）。
 
 真实队列回归先积压8个独立单组job，测试专用入口保留原SQL并增加50ms阻塞，形成确定的忙碌收集条件。旧Worker从未跨job合并，0通过1失败11断言、退出1；新实现通过合并断言。首绿批3通过1失败32断言，因为独立算例误把供应初始100000当成1000，实际99992=100000−8；修正期望及两处SQL回调类型后，新用例1通过19断言、退出0。8份真实签名receipt及8笔客户扣款，客户S800/R0、供应S8/R0，重投后仍8份receipt/8笔扣款，队列自有namespace删除并核空。原Worker的提交后ACK、锁冲突局部重试及拒绝/隔离告警三项均在首绿批通过。
 
@@ -549,7 +551,7 @@ v1各进程CPU为Gateway1.981、Core API1.614、worker0.587、PG23.968、准入R
 
 定向读取修复了历史规模缺陷，其单轮窗口吞吐没有提高。四路候选在同 schema 的窗口完成数提高 41.8%，排空缩短 52.3%，同时准入 HTTP 503 增多、服务 CPU 上升。末次周期样本中平均组数从 8.14 降到 4.33，锁冲突输出从 11112/26410 组增到 14838/28193 组，含重投。较高并行度提高了结算完成速度，尚未解决资金锁重叠和工作量，无法单独推断任务上限和并行度各自的贡献。三个轮次均在 300 档退出 1，已准入子集最终帐实相符、资金预留清零，完整压测失败项保留。
 
-下一阶段的容量差距、成本预算和事务主链设计见 [11 短 JSON 主链](../../beyond-new-api/11-hot-path.md)。当前机器以原 5000 B/request 的最低估算需要 62.77 GB 才能启动 3010 到达的 60 分钟长测，实际可用约 33.14 GB。最新账务库的平均大小高于估算，长测前还需以实际候选的空间斜率重算。
+下一阶段的容量差距、成本预算和事务主链设计见 11 短 JSON 主链（`beyond-new-api/11-hot-path.md`）。当前机器以原 5000 B/request 的最低估算需要 62.77 GB 才能启动 3010 到达的 60 分钟长测，实际可用约 33.14 GB。最新账务库的平均大小高于估算，长测前还需以实际候选的空间斜率重算。
 
 ### 100 RPS 连续验收
 
@@ -575,7 +577,7 @@ v1各进程CPU为Gateway1.981、Core API1.614、worker0.587、PG23.968、准入R
 
 ## 23. 1813 准入读取和结算组隔离
 
-准入合并已有回执与上下文的两次读取，优先返回可重放的已有回执。批准入按输入键读取并去重客户权威，保持取锁后的归属复核。BEGIN 和配额同步只从 PG 取得需要的状态与租约字段。首次路由依旧写入完整上下文。结算批按实际生产者、attempt 和回执键读取，共享分类输入。需要资金单元的普通结算组在依赖复核之后拿锁。如果任一所需单元忙碌，整个原组等待重试，独立组仍合批提交。扣账、持久证据及提交后 ACK 沿用现有契约。渠道健康观测仍在证据耐久确认后发送。迁移 2026111813 只替换函数，保留旧迁移和已有权限。[实现边界](../../beyond-new-api/11-hot-path.md#5-1813-准入读取与结算事务首片)
+准入合并已有回执与上下文的两次读取，优先返回可重放的已有回执。批准入按输入键读取并去重客户权威，保持取锁后的归属复核。BEGIN 和配额同步只从 PG 取得需要的状态与租约字段。首次路由依旧写入完整上下文。结算批按实际生产者、attempt 和回执键读取，共享分类输入。需要资金单元的普通结算组在依赖复核之后拿锁。如果任一所需单元忙碌，整个原组等待重试，独立组仍合批提交。扣账、持久证据及提交后 ACK 沿用现有契约。渠道健康观测仍在证据耐久确认后发送。迁移 2026111813 只替换函数，保留旧迁移和已有权限。实现边界（`beyond-new-api/11-hot-path.md#5-1813-准入读取与结算事务首片`）
 
 ### 300 RPS 同档诊断
 
@@ -676,7 +678,7 @@ v1各进程CPU为Gateway1.981、Core API1.614、worker0.587、PG23.968、准入R
 
 ## 25. 1814 结算批的有类型暂存
 
-迁移 2026111814 把结算批中反复重建的整批 JSONB 改为逐 attempt 和 request 更新的有类型记录，证据快照、payload 和回执以记录数组攒齐后集合写入。临时类型和函数由原结算入口的 owner 使用。旧迁移可继续重放，当前迁移删除本次替换的私有辅助函数。证据摘要、修订顺序、资金计价、锁顺序、原子结算组、PG 提交前的回执写入和提交后的 ACK 沿用现有契约。渠道健康观测仍在证据耐久确认后发送。[设计](../../beyond-new-api/11-hot-path.md#6-结算批的有类型暂存)
+迁移 2026111814 把结算批中反复重建的整批 JSONB 改为逐 attempt 和 request 更新的有类型记录，证据快照、payload 和回执以记录数组攒齐后集合写入。临时类型和函数由原结算入口的 owner 使用。旧迁移可继续重放，当前迁移删除本次替换的私有辅助函数。证据摘要、修订顺序、资金计价、锁顺序、原子结算组、PG 提交前的回执写入和提交后的 ACK 沿用现有契约。渠道健康观测仍在证据耐久确认后发送。设计（`beyond-new-api/11-hot-path.md#6-结算批的有类型暂存`）
 
 ### 200 与 300 RPS 同口径对照
 

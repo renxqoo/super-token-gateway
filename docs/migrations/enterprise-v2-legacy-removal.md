@@ -1,5 +1,7 @@
 # enterprise-v2 T16 legacy 删除
 
+> 历史迁移记录。本文记录 Enterprise v2 的旧单体移除。现行模块边界见[系统架构](../../architecture.md)。
+
 本记录承接[审查记录](enterprise-v2-review.md) §4 的 legacy 残留清单，规划并记录 T16 删除 legacy 单体网关的过程。删除前逐例核对 legacy 测试承载的行为在 v2 中的去向，避免随文件删除丢失有效断言。
 
 ## 1. 当前状态（代码核对，2026-11-15）

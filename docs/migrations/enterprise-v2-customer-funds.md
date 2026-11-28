@@ -1,5 +1,7 @@
 # Enterprise v2 客户资金迁移（T05）实施方案
 
+> 历史迁移记录。本文的资金接口属于 Enterprise v2。现行预扣、结算与退款见[资金与定价](../../funds-and-billing.md)。
+
 状态：用户已确认 D1–D3 按推荐执行。日期：2026-11-14。起点：`main` `cdf19a1`（T04.c 完成，未推送）。
 
 本记录对应 [enterprise-v2.md](enterprise-v2.md) 任务图 T05：客户钱包、授信、价格、退款完整迁移到 Core，覆盖能力 C13、C18–C20 及 §5.1 客户资金不变量。客户账本的 SQL 规则（`credit_wallet`、`configure_wallet_credit`、`refund_billing_charge`、`adjust_billing_charge`、`settle_requests`、`expire_wallet`、`collect_wallet_debt`）由 legacy 与 v2 结算共用，本单元不改其语义，只迁移调用方、权限与驱动进程，并以 v2 三进程真实用例验证。

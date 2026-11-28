@@ -1,5 +1,7 @@
 # Core 准入、单次发送许可与双方资金事务
 
+> 历史执行记录。本文的 Core 执行接口属于 Enterprise v2。当前 Gateway 推理流程见 [路由与执行](../../routing-and-execution.md)。
+
 状态：金融实施设计已接纳；T04.b.2a已完成双路独立复查、精确main集成与主树单次完整verify（unit284、integration463、全部产物），v2026111206冻结。T04.b.2b签名数字事实/双方结算与T04.c三业务进程仍待验收。以下保留2026-11-12设计修订1技术正文；“当前行为”、行号及早期未接纳状态是当时事实，使用前核对已接纳源码。原稿SHA256为 `dfa76dd607387731163be1a0aed405abf54894eb32643e1b30ec27be116e22e9`。
 
 实施优先级：本次已确认业务规则及 [迁移主规格](enterprise-v2.md) → [内部身份设计](enterprise-v2-internal-identity.md) → 本文金融事务设计。身份设计的 Core 私有认证投影、历史收证撤销屏障及严格 `DispatchProjectionV1` 替代本文早期可信 session 与完整 dispatch 传入 Core 的形状。完整上游 target、headers 与 body 仅留 Gateway 宿主内存；Core 只接收白名单技术摘要，不能因本文早期字段建议恢复原文传输或持久化。

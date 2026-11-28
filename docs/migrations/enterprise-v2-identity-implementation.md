@@ -1,5 +1,7 @@
 # T04.b.identity implementation record
 
+> Historical implementation record for Enterprise v2. See [ADR 0011](../decisions/0011-production-operations.md#管理身份和数据库授权) for current internal API authentication and database roles.
+
 Accepted design: enterprise-v2-internal-identity.md §§2–7/9. The accepted migration versions through 2026111204 remain immutable. This unit appends 2026111205, implements registration and signed current-session status, and rejects every unsupported business operation. Financial admission, execution, historical evidence disposition and reverse resource authorization remain downstream work.
 
 The deployment directory is provisioned through a separate database deployment role, never through ADMIN_KEY or workload RPC. Four identity tables contain only public certificates, keys, nonces, revisions and safe registration receipts. Core API uses only bounded SECURITY DEFINER functions, owned by a NOLOGIN role, with a fixed search path. Registration checks instance/certificate state under SHARE NOWAIT, obtains sorted transaction advisory locks before row locks, and commits session plus receipt together. Current-session status takes instance/certificate/session SHARE NOWAIT and rechecks every observed binding/revision inside the same transaction. Historical public material remains readable after natural expiry, retirement or security revocation; no historical financial writer is delivered by this unit.

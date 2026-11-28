@@ -1,5 +1,7 @@
 # enterprise-v2 T09 文本与云适配迁移
 
+> 历史迁移记录。本文记录 Enterprise v2 的文本和云适配。现行供应商插件与协议转换边界见 [ADR 0010](../decisions/0010-provider-plugin-architecture.md)及[路由与执行](../../routing-and-execution.md)。
+
 ## 1. 当前行为（代码核对）
 
 - v2 Gateway 只公开 `POST /v1/chat/completions`，唯一插件 `gateway.openai-chat` 直连 OpenAI 兼容上游；其余 provider kind（anthropic/gemini/deepseek/ollama/azure/bedrock/vertex）与入站协议 responses/messages/gemini 仍由 legacy gateway 经 `packages/connectors` 的 TS 转换执行。
