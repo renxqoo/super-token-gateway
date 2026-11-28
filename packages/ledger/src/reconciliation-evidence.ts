@@ -1,5 +1,5 @@
 import type { SQL } from "bun";
-import { canonical, type Pricing, type Usage } from "@gateway/kernel";
+import { canonical, hasCompleteSnapshotUsage, type Pricing, type Usage } from "@gateway/kernel";
 import type {
   CommitTerminalInput,
   CommitTerminalResult,
@@ -101,15 +101,22 @@ async function settleAuthorizedCustomer(
     (price) =>
       price.id === attempt.cost_version_id &&
       price.side === "SUPPLIER" &&
-      price.currency === attempt.currency,
+      (price.currency === attempt.currency ||
+        (attempt.supplier_pricing_snapshot !== undefined &&
+          price.currency === attempt.supplier_pricing_snapshot.base_currency)),
   );
   if (!customer || !supplier) return "historical_price_unavailable";
   const usage = evidence.customer_usage;
   const adjustment = attempt.customer_price_adjustment;
+  const customerSnapshot = attempt.customer_pricing_snapshot;
+  const supplierSnapshot = attempt.supplier_pricing_snapshot;
+  const effectiveBasis = customerSnapshot ? customerSnapshot.basis : customer.basis;
   if (
-    (customer.basis === "PROVIDER_USAGE" &&
-      Object.keys(customer.rates).some((metric) => usage[metric as keyof Usage] === undefined)) ||
-    (customer.basis === "INPUT_CHARACTERS" && usage.characters === undefined)
+    (customerSnapshot
+      ? !hasCompleteSnapshotUsage(customerSnapshot, usage)
+      : customer.basis === "PROVIDER_USAGE" &&
+        Object.keys(customer.rates).some((metric) => usage[metric as keyof Usage] === undefined)) ||
+    (effectiveBasis === "INPUT_CHARACTERS" && usage.characters === undefined)
   )
     return "incomplete_customer_usage";
   const item: CommitTerminalInput = {
@@ -123,18 +130,20 @@ async function settleAuthorizedCustomer(
     cost_version_id: supplier.id,
     usage,
     billing_pricing: {
-      currency: customer.currency,
+      currency: customerSnapshot ? customerSnapshot.currency : customer.currency,
       rates: scalePricingRates(
         customer.rates,
         adjustment.discount_numerator,
         adjustment.discount_denominator,
       ),
     },
-    billing_basis: customer.basis,
+    billing_basis: effectiveBasis,
     ...(usage.characters === undefined ? {} : { input_characters: usage.characters }),
-    supplier_pricing: { currency: supplier.currency, rates: supplier.rates },
-    supplier_currency: supplier.currency,
+    supplier_pricing: { currency: attempt.currency, rates: supplier.rates },
+    supplier_currency: attempt.currency,
     supplier_cost_atoms_override: evidence.supplier_cost_atoms!,
+    ...(customerSnapshot ? { customer_pricing_snapshot: customerSnapshot } : {}),
+    ...(supplierSnapshot ? { supplier_pricing_snapshot: supplierSnapshot } : {}),
   };
   try {
     if (priceSettlement(item).customerAtoms > BigInt(hold.held_atoms))

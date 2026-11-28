@@ -49,6 +49,12 @@ export const FIELD_CONVERSION_POLICY: readonly FieldPolicyEntry[] = [
     note: "Preserved between Messages and Gemini; dropped with hint on OpenAI in compat mode",
   },
   {
+    field: "stop",
+    protocols: ["chat", "messages", "gemini"],
+    action: "map",
+    note: "Mapped across stop, stop_sequences, and stopSequences; dropped with hint on Responses in compat mode",
+  },
+  {
     field: "reasoning",
     protocols: ["chat", "responses", "messages", "gemini"],
     action: "map",
@@ -123,10 +129,26 @@ export const FIELD_CONVERSION_POLICY: readonly FieldPolicyEntry[] = [
 ];
 
 export const COMPAT_DROP_TOP_LEVEL: Record<Protocol, ReadonlySet<string>> = {
-  chat: new Set(["metadata", "user", "seed", "service_tier"]),
-  responses: new Set(["metadata", "user", "service_tier"]),
+  chat: new Set([
+    "metadata",
+    "user",
+    "seed",
+    "service_tier",
+    "frequency_penalty",
+    "presence_penalty",
+    "prompt_cache_key",
+    "reasoning_split",
+  ]),
+  responses: new Set([
+    "metadata",
+    "user",
+    "service_tier",
+    "truncation",
+    "include",
+    "prompt_cache_key",
+  ]),
   messages: new Set(["metadata", "service_tier", "cache_control"]),
-  gemini: new Set(["seed"]),
+  gemini: new Set(["seed", "safetySettings", "safety_settings", "serviceTier", "service_tier"]),
 };
 
 export type DecodeRequestOptions = {
@@ -140,6 +162,7 @@ export type EncodeRequestOptions = {
   onFieldDropped?: (field: string) => void;
   onFieldRejected?: (field: string) => void;
   droppedFields?: string[];
+  defaultMaxTokens?: number;
 };
 
 export type Part =

@@ -44,6 +44,16 @@ const updateApiKeySchema = z
   })
   .strict();
 
+function requireDeveloperKeyRole(role: typeof apiKeyRecords.$inferSelect.role): void {
+  if (role !== "INVOKER" && role !== "VIEWER") {
+    throw new GatewayError(
+      403,
+      "forbidden",
+      "DEVELOPER role can only manage INVOKER or VIEWER API keys",
+    );
+  }
+}
+
 function revokeKeyFields() {
   return {
     enabled: false,
@@ -83,41 +93,36 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
   app.post("/billing-accounts/:billingAccountId/api-keys", async (c) => {
     const user = c.get("user");
     const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
-    const { billingAccount, role } = await requireBillingAccountAccess(
-      deps.orm,
-      user.id,
-      billingAccountId,
-      ["OWNER", "ADMIN", "DEVELOPER"],
-    );
     const body = await parseJsonBody(c, createApiKeySchema);
 
-    let effectiveSpendLimit = body.spend_limit_atoms ?? null;
-    if (role === "DEVELOPER") {
-      if (body.role !== "INVOKER" && body.role !== "VIEWER") {
-        throw new GatewayError(
-          403,
-          "forbidden",
-          "DEVELOPER role can only create INVOKER or VIEWER API keys",
-        );
-      }
-      if (billingAccount.developerKeySpendLimitAtoms !== null) {
-        if (body.spend_limit_atoms === undefined) {
-          effectiveSpendLimit = billingAccount.developerKeySpendLimitAtoms;
-        } else if (
-          body.spend_limit_atoms === null ||
-          BigInt(body.spend_limit_atoms) > BigInt(billingAccount.developerKeySpendLimitAtoms)
-        ) {
-          throw new GatewayError(
-            403,
-            "forbidden",
-            "API key spend limit exceeds the billing account policy for DEVELOPER role",
-          );
+    const keyId = crypto.randomUUID();
+    const { billingAccount, effectiveSpendLimit } = await deps.orm.transaction(async (tx) => {
+      const { billingAccount, role } = await requireBillingAccountAccess(
+        tx,
+        user.id,
+        billingAccountId,
+        ["OWNER", "ADMIN", "DEVELOPER"],
+        true,
+      );
+      let effectiveSpendLimit = body.spend_limit_atoms ?? null;
+      if (role === "DEVELOPER") {
+        requireDeveloperKeyRole(body.role);
+        if (billingAccount.developerKeySpendLimitAtoms !== null) {
+          if (body.spend_limit_atoms === undefined) {
+            effectiveSpendLimit = billingAccount.developerKeySpendLimitAtoms;
+          } else if (
+            body.spend_limit_atoms === null ||
+            BigInt(body.spend_limit_atoms) > BigInt(billingAccount.developerKeySpendLimitAtoms)
+          ) {
+            throw new GatewayError(
+              403,
+              "forbidden",
+              "API key spend limit exceeds the billing account policy for DEVELOPER role",
+            );
+          }
         }
       }
-    }
 
-    const keyId = crypto.randomUUID();
-    await deps.orm.transaction(async (tx) => {
       if (role === "DEVELOPER" && billingAccount.developerMaxActiveKeys !== null) {
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(88421201, hashtext(${`${billingAccountId}:${user.id}`}))`,
@@ -156,6 +161,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
         expiresAt: body.expires_at ? new Date(body.expires_at) : null,
         syncStatus: "PENDING",
       });
+      return { billingAccount, effectiveSpendLimit };
     });
 
     try {
@@ -195,22 +201,6 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     const user = c.get("user");
     const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const keyId = parseUuid(c.req.param("keyId"), "keyId");
-    const { billingAccount, role } = await requireBillingAccountAccess(
-      deps.orm,
-      user.id,
-      billingAccountId,
-      ["OWNER", "ADMIN", "FINANCE", "DEVELOPER"],
-    );
-    const [existing] = await deps.orm
-      .select()
-      .from(apiKeyRecords)
-      .where(and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.billingAccountId, billingAccountId)))
-      .limit(1);
-    if (!existing) throw new GatewayError(404, "not_found", "API key not found");
-    if (existing.revokedAt) {
-      throw new GatewayError(409, "key_revoked", "Revoked API keys cannot be modified");
-    }
-
     const body = await parseJsonBody(c, updateApiKeySchema);
     const touchesSpend =
       body.spend_limit_atoms !== undefined || body.spend_limit_window !== undefined;
@@ -222,52 +212,80 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
       body.enabled !== undefined ||
       body.expires_at !== undefined;
 
-    if (role === "FINANCE" && touchesNonSpend) {
-      throw new GatewayError(403, "forbidden", "FINANCE role can only manage API key spend limits");
-    }
-    if (role === "DEVELOPER") {
-      if (existing.createdBy !== user.id) {
-        throw new GatewayError(403, "forbidden", "DEVELOPER role can only modify own API keys");
+    const { billingAccount, existing, updated } = await deps.orm.transaction(async (tx) => {
+      const { billingAccount, role } = await requireBillingAccountAccess(
+        tx,
+        user.id,
+        billingAccountId,
+        ["OWNER", "ADMIN", "FINANCE", "DEVELOPER"],
+        true,
+      );
+      const [existing] = await tx
+        .select()
+        .from(apiKeyRecords)
+        .where(
+          and(eq(apiKeyRecords.id, keyId), eq(apiKeyRecords.billingAccountId, billingAccountId)),
+        )
+        .for("update")
+        .limit(1);
+      if (!existing) throw new GatewayError(404, "not_found", "API key not found");
+      if (existing.revokedAt) {
+        throw new GatewayError(409, "key_revoked", "Revoked API keys cannot be modified");
       }
-      if (touchesSpend) {
+
+      if (role === "FINANCE" && touchesNonSpend) {
         throw new GatewayError(
           403,
           "forbidden",
-          "Only OWNER, ADMIN, or FINANCE can modify API key spend limits",
+          "FINANCE role can only manage API key spend limits",
         );
       }
-    }
+      if (role === "DEVELOPER") {
+        requireDeveloperKeyRole(existing.role);
+        if (existing.createdBy !== user.id) {
+          throw new GatewayError(403, "forbidden", "DEVELOPER role can only modify own API keys");
+        }
+        if (touchesSpend) {
+          throw new GatewayError(
+            403,
+            "forbidden",
+            "Only OWNER, ADMIN, or FINANCE can modify API key spend limits",
+          );
+        }
+      }
 
-    const [updated] = await deps.orm
-      .update(apiKeyRecords)
-      .set({
-        ...(body.name !== undefined ? { name: body.name } : {}),
-        ...(body.allowed_cidrs !== undefined ? { allowedCidrs: body.allowed_cidrs } : {}),
-        ...(body.models !== undefined ? { models: body.models } : {}),
-        ...(body.operations !== undefined ? { operations: body.operations } : {}),
-        ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
-        ...(body.expires_at !== undefined
-          ? { expiresAt: body.expires_at ? new Date(body.expires_at) : null }
-          : {}),
-        ...(body.spend_limit_atoms !== undefined
-          ? { spendLimitAtoms: body.spend_limit_atoms }
-          : {}),
-        ...(body.spend_limit_window !== undefined
-          ? { spendLimitWindow: body.spend_limit_window as SpendLimitWindow }
-          : {}),
-        desiredRevision: sql`${apiKeyRecords.desiredRevision} + 1`,
-        syncStatus: "PENDING",
-        updatedAt: sql`now()`,
-      })
-      .where(
-        and(
-          eq(apiKeyRecords.id, keyId),
-          eq(apiKeyRecords.desiredRevision, existing.desiredRevision),
-          isNull(apiKeyRecords.revokedAt),
-        ),
-      )
-      .returning({ revision: apiKeyRecords.desiredRevision });
-    if (!updated) throw new GatewayError(409, "key_changed", "API key changed during update");
+      const [updated] = await tx
+        .update(apiKeyRecords)
+        .set({
+          ...(body.name !== undefined ? { name: body.name } : {}),
+          ...(body.allowed_cidrs !== undefined ? { allowedCidrs: body.allowed_cidrs } : {}),
+          ...(body.models !== undefined ? { models: body.models } : {}),
+          ...(body.operations !== undefined ? { operations: body.operations } : {}),
+          ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+          ...(body.expires_at !== undefined
+            ? { expiresAt: body.expires_at ? new Date(body.expires_at) : null }
+            : {}),
+          ...(body.spend_limit_atoms !== undefined
+            ? { spendLimitAtoms: body.spend_limit_atoms }
+            : {}),
+          ...(body.spend_limit_window !== undefined
+            ? { spendLimitWindow: body.spend_limit_window as SpendLimitWindow }
+            : {}),
+          desiredRevision: sql`${apiKeyRecords.desiredRevision} + 1`,
+          syncStatus: "PENDING",
+          updatedAt: sql`now()`,
+        })
+        .where(
+          and(
+            eq(apiKeyRecords.id, keyId),
+            eq(apiKeyRecords.desiredRevision, existing.desiredRevision),
+            isNull(apiKeyRecords.revokedAt),
+          ),
+        )
+        .returning({ revision: apiKeyRecords.desiredRevision });
+      if (!updated) throw new GatewayError(409, "key_changed", "API key changed during update");
+      return { billingAccount, existing, updated };
+    });
 
     try {
       const synced = await deps.sync.admission.syncApiKey(keyId);
@@ -355,15 +373,16 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
     const user = c.get("user");
     const billingAccountId = parseUuid(c.req.param("billingAccountId"), "billingAccountId");
     const keyId = parseUuid(c.req.param("keyId"), "keyId");
-    const { billingAccount, role } = await requireBillingAccountAccess(
-      deps.orm,
-      user.id,
-      billingAccountId,
-      ["OWNER", "ADMIN", "DEVELOPER"],
-    );
-
     const newKeyId = crypto.randomUUID();
-    const previousRevision = await deps.orm.transaction(async (tx) => {
+    const { billingAccount, previousRevision } = await deps.orm.transaction(async (tx) => {
+      const { billingAccount, role } = await requireBillingAccountAccess(
+        tx,
+        user.id,
+        billingAccountId,
+        ["OWNER", "ADMIN", "DEVELOPER"],
+        true,
+      );
+
       const [existing] = await tx
         .select()
         .from(apiKeyRecords)
@@ -376,10 +395,14 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
         throw new GatewayError(409, "key_revoked", "Revoked API key cannot be rotated");
       }
       if (role === "DEVELOPER") {
+        requireDeveloperKeyRole(existing.role);
         if (existing.createdBy !== user.id) {
           throw new GatewayError(403, "forbidden", "DEVELOPER role can only rotate own API keys");
         }
-        if (existing.spendLimitAtoms !== null) {
+        if (
+          existing.spendLimitAtoms !== null ||
+          billingAccount.developerKeySpendLimitAtoms !== null
+        ) {
           throw new GatewayError(
             403,
             "forbidden",
@@ -404,7 +427,7 @@ export function createApiKeyRoutes(deps: ConsoleDeps) {
         expiresAt: existing.expiresAt,
         syncStatus: "PENDING",
       });
-      return existing.desiredRevision;
+      return { billingAccount, previousRevision: existing.desiredRevision };
     });
 
     let syncedNew: Awaited<ReturnType<typeof deps.sync.admission.syncApiKey>>;

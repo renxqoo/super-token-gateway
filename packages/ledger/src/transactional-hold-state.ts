@@ -47,7 +47,7 @@ async function lockFundedSupplierCell(
 }
 
 export async function lockTransactionalHoldState({
-  limitedKeyIds,
+  keyIds,
   tx,
   batchStartedAt,
   billingAccountIds,
@@ -59,7 +59,7 @@ export async function lockTransactionalHoldState({
   parsed,
   idempotencyKeys,
 }: {
-  limitedKeyIds: string[];
+  keyIds: string[];
   tx: SQL;
   batchStartedAt: number;
   billingAccountIds: string[];
@@ -72,14 +72,14 @@ export async function lockTransactionalHoldState({
   idempotencyKeys: string[];
 }) {
   const keySpendsById = new Map<string, KeySpendRow>();
-  if (limitedKeyIds.length > 0) {
+  if (keyIds.length > 0) {
     const [pgNowRow] = await tx`SELECT floor(extract(epoch from now()) * 1000)::bigint AS ms`;
     const pgNowMs = pgNowRow ? Number(pgNowRow.ms) : batchStartedAt;
     const lockedKeys = await tx`
           SELECT id, billing_account_id, spend_limit_atoms::text, spend_limit_window,
             spend_window_start, spent_atoms::text, reserved_atoms::text
           FROM public.api_keys
-          WHERE id = ANY(${limitedKeyIds}::uuid[])
+          WHERE id = ANY(${keyIds}::uuid[])
           ORDER BY id
           FOR NO KEY UPDATE
         `;

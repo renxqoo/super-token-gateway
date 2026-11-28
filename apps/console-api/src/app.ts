@@ -150,7 +150,7 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
     ...(options.gatewayFetch ? { fetchImpl: options.gatewayFetch } : {}),
   });
   const sync = createConsoleSync(db, orm, gateway);
-  const loginLimiter = new LoginRateLimiter();
+  const loginLimiter = new LoginRateLimiter({ maxPasswordWork: 2 });
   const peerIpMap = new WeakMap<Request, string>();
 
   const deps: ConsoleDeps = {
@@ -209,7 +209,10 @@ export function createConsoleRuntime(options: ConsoleRuntimeOptions) {
     return c.json({ ok: true, ...result });
   });
 
-  adminApp.route("/admin/v1/auth", createAdminAuthRoutes(deps));
+  adminApp.route(
+    "/admin/v1/auth",
+    createAdminAuthRoutes({ ...deps, loginLimiter: new LoginRateLimiter({ maxPasswordWork: 2 }) }),
+  );
   adminApp.route("/admin/v1", createAdminRoutes(deps));
 
   const timers: ReturnType<typeof setInterval>[] = [];

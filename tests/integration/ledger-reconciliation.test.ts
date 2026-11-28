@@ -7,10 +7,11 @@ import {
   createLedgerQueries,
   fastUuid,
   migrate,
+  SCHEMA_VERSION,
   type CommitTerminalInput,
 } from "@gateway/ledger";
 import migrationManifest from "../../packages/ledger/src/migrations/manifest.json";
-import { withLedgerDb, seedFixture } from "./ledger-fixture.ts";
+import { withLedgerDb, seedFixture, seedPre0004Fixture } from "./ledger-fixture.ts";
 
 test("symptom: a settlement statement timeout discards measured usage for other requests in its batch", () =>
   withLedgerDb(async (db, dbUrl) => {
@@ -671,7 +672,7 @@ test("channel default waiver policy covers new accounts while exact account poli
 test("0004_reconciliation_default_policies upgrades a non-empty 0003 database preserving existing policies and waivers", async () => {
   await withLedgerDb(
     async (db) => {
-      const f = await seedFixture(db);
+      const f = await seedPre0004Fixture(db);
       await f.ledger.creditWallet({
         billing_account_id: f.billingAccount.id,
         currency: "PTS",
@@ -725,7 +726,7 @@ test("0004_reconciliation_default_policies upgrades a non-empty 0003 database pr
       `;
 
       await migrate(db);
-      expect(await assertSchemaVersion(db)).toBe(2026112703);
+      expect(await assertSchemaVersion(db)).toBe(SCHEMA_VERSION);
 
       const [preservedPolicy] = await db<{ id: string; billing_account_id: string | null }[]>`
         SELECT id::text, billing_account_id::text

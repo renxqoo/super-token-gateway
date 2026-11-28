@@ -42,6 +42,11 @@ export const dimensions = [
   "cache_write_tokens",
   "cache_write_5m_tokens",
   "cache_write_1h_tokens",
+  "image_input_tokens",
+  "image_output_tokens",
+  "audio_input_tokens",
+  "audio_output_tokens",
+  "video_input_tokens",
   "requests",
   "images",
   "audio_ms",
@@ -50,6 +55,11 @@ export const dimensions = [
   "audio_seconds",
   "video_seconds",
   "characters",
+  "web_search_calls",
+  "code_interpreter_sessions",
+  "file_search_calls",
+  "search_units",
+  "pages",
 ] as const;
 export type Dimension = (typeof dimensions)[number];
 export type Usage = Partial<Record<Dimension | "reasoning_tokens", string>>;

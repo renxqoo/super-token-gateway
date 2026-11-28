@@ -1,23 +1,22 @@
-# Bun 1.4.4 运行时
+# Bun 运行时与产物
 
-运行和构建固定 Bun 1.4.4；`.bun-version` 与 packageManager/engines 一致。Hono 使用 Bun 原生 HTTP，不引入 Node HTTP 转接层。PostgreSQL 用 Bun.SQL，Redis 用 Bun.RedisClient，依赖由 bun.lock 锁定。
+仓库版本由 [.bun-version](.bun-version) 和 [package.json](package.json) 固定为 Bun 1.4.5，依赖由 `bun.lock` 锁定。Hono 处理应用路由，入口使用 `Bun.serve`。PostgreSQL 使用 `Bun.SQL` 与 Drizzle，Redis 使用 `Bun.RedisClient`。
 
 ```sh
-bun check --no-script
-bun fmt --no-script
-bun fmt --no-script --check
+bun run check
 bun run lint
+bun run fmt:check
 bun run build
 ```
 
-`--no-script` 明确调用 Bun 原生命令，避免 package.json 的同名脚本转发。所有 TypeScript 启用 strict、noUncheckedIndexedAccess 和 exactOptionalPropertyTypes。
+类型检查和格式脚本用 `--no-script` 调用 Bun 原生命令。编译选项以 [tsconfig.json](tsconfig.json) 为准。
 
-v2 Gateway 的 JSON 配置在 `apps/gateway/src/config.ts` 中验证，Core API 的 JSON 配置在 `apps/core-api/src/config.ts`，core-worker 的环境变量在 `apps/core-worker/src/config.ts`。Gateway 关键默认值：总时限 180s、上游响应头/流空闲与下游停滞各 30s、请求 16MiB、JSON 响应 32MiB、在途请求 1024、停机宽限 20s；插件宿主的 SSE 单事件上限 1MiB；Core 默认最多物理尝试 3，Core API 内部与管理连接池各 8，core-worker 连接池 8。
+| 应用 | 配置入口 |
+| --- | --- |
+| Gateway | [config.ts](apps/gateway/src/config.ts) 从环境变量与 `--mode` 读取配置。生产数据、快照和管理连接池默认分别为 32、2、4。默认在途上限 2000、请求体 10 MiB、单次尝试 30000 ms、流总时长 300000 ms。 |
+| Worker | [main.ts](apps/worker/src/main.ts) 从环境变量读取连接池与维护间隔。`WORKER_DB_MAX` 默认 8，至少保留选主和工作连接。 |
+| Console | [config.ts](apps/console-api/src/config.ts) 读取独立数据库、客户与管理监听、Gateway 管理地址及逐角色凭证。 |
 
-这些上限是受控缓冲与并发预算，不是操作系统 RSS 上限。JSON/字符串/转换对象和运行时也占内存；生产需配合 systemd 内存上限与压测调整。流队列按字节背压，输出不写临时文件。
+账本连接的默认建立超时为 5 秒，`statement_timeout` 为 8000 ms，`lock_timeout` 为 5000 ms。设置连接数时计入所有应用副本和辅助连接池。HTTP 请求体、连接等待、流输出及插件执行都受各自预算约束。上游传输在 DNS 校验后连接已校验地址并保留 TLS 身份，等待可取消。见 [数据库连接](packages/ledger/src/database.ts) 和 [出站传输](packages/runtime/src/network.ts)。
 
-Redis 命令 1 秒 deadline，连接失败不离线排队；不确定的分布式准入返回 503，租约自行回收。PG 服务端 statement_timeout=8s、lock_timeout=2s、连接建立 5s；不要把连接池总量扩到超过 PG 预算。
-
-Gateway 配置 `production: true` 时禁止 `allow_private_upstream: true`；上游必须 HTTPS。DNS 全地址校验后将请求固定到已检查 IP，保留 Host/SNI/证书验证，禁用环境代理和自动重定向。供应商密钥不发送到跨源视频下载地址。
-
-构建产物包括 gateway/main.js、core-api/main.js、core-worker/main.js、tools/ 下的迁移与运维工具、SQL 迁移、mock-providers/main.js、原生插件 helper 和源码 SHA-256 manifest。生产只需 Bun 和 dist，不需要工作区 node_modules。
+[构建脚本](scripts/build.ts) 输出 `dist/gateway/main.js`、`dist/worker/main.js`、`dist/console-api/main.js`、`dist/mock-providers/main.js`，以及 Trace/WASM 辅助入口、`dist/tools` 中的迁移与运维工具、`dist/native` 的 Wasmtime 库和 `dist/manifest.json`。清单列出 Bun 与数据库 schema 版本，并记录构建文件的大小和 SHA-256。独立产物使用 Bun 运行。部署模式及私网边界见 [运行手册](reliability-and-operations.md)。

@@ -1,9 +1,15 @@
 import { GatewayError } from "@gateway/contracts";
 import type { CommitTerminalInput } from "@gateway/ledger";
-import { canonical, normalizedNumber, type ReservationMeasurement } from "@gateway/kernel";
+import {
+  canonical,
+  normalizedNumber,
+  quoteSnapshotReservation,
+  type ReservationMeasurement,
+} from "@gateway/kernel";
 import { numberLiteral } from "@gateway/protocol";
 import { sha256 } from "@gateway/runtime";
-import { resolveEffectiveCustomerPrice, type EffectiveCustomerPrice } from "../pricing.ts";
+import { resolveAttemptPricing, type EffectiveCustomerPrice } from "../pricing.ts";
+import { inspectMeteredRequestSignals } from "../request-metering.ts";
 import type { HydratedCandidate } from "../proxy-state.ts";
 import type { InferenceRequest } from "./types.ts";
 import type { InferenceTelemetry } from "./telemetry.ts";
@@ -25,7 +31,7 @@ export function mapHoldError(code: string, message: string): GatewayError {
 
 type ChargeDetails = Pick<
   CommitTerminalInput,
-  "usage" | "plugin_audit" | "charge_policy" | "moderation_blocked"
+  "usage" | "plugin_audit" | "charge_policy" | "moderation_blocked" | "async_task"
 > & {
   allowAfterClientAbort?: boolean;
 };
@@ -47,11 +53,16 @@ export class InferenceAccounting {
   private dispatched = false;
   private _unknownAttempt = false;
   private providerRequestIds: Map<string, string> | undefined;
+  private _ratedAt: string | undefined;
 
   constructor(
     private readonly request: InferenceRequest,
     private readonly telemetry: InferenceTelemetry,
   ) {}
+
+  private ratedAt(): string {
+    return (this._ratedAt ??= new Date().toISOString());
+  }
 
   private async finalize(mode: "release" | "unknown"): Promise<boolean> {
     const { ledger } = this.request.deps;
@@ -119,15 +130,19 @@ export class InferenceAccounting {
     return prior;
   }
 
-  customerPrice(candidate: HydratedCandidate) {
-    const { snap, billingAccount, model, operation } = this.request;
-    return resolveEffectiveCustomerPrice(
+  customerPrice(candidate: HydratedCandidate, body?: Record<string, unknown>) {
+    const { snap, billingAccount, model, operation, clientBody, isStream } = this.request;
+    const signals = inspectMeteredRequestSignals(body ?? clientBody, operation);
+    return resolveAttemptPricing({
       snap,
-      billingAccount.id,
-      model.name,
+      billingAccount,
+      modelName: model.name,
       operation,
-      candidate.billingPrice,
-    );
+      candidate,
+      ratedAt: () => this.ratedAt(),
+      signals,
+      isStream,
+    });
   }
 
   quote(
@@ -136,6 +151,26 @@ export class InferenceAccounting {
     measurement: ReservationMeasurement,
   ): AttemptQuote {
     const { state, snap, outputBound } = this.request;
+    if (customer.customerSnapshot || customer.supplierSnapshot) {
+      return {
+        candidate,
+        customer,
+        customerAtoms: customer.customerSnapshot
+          ? quoteSnapshotReservation(customer.customerSnapshot, measurement, outputBound)
+              .amount_atoms
+          : state.quoteForPrice(
+              snap.epoch,
+              customer.price,
+              measurement,
+              outputBound,
+              customer.cacheKey,
+            ),
+        supplierAtoms: customer.supplierSnapshot
+          ? quoteSnapshotReservation(customer.supplierSnapshot, measurement, outputBound)
+              .amount_atoms
+          : state.quoteForPrice(snap.epoch, candidate.costPrice, measurement, outputBound),
+      };
+    }
     return {
       candidate,
       customer,
@@ -169,7 +204,6 @@ export class InferenceAccounting {
       attempt_id: attemptId,
       billing_account_id: billingAccount.id,
       api_key_id: key.id,
-      enforce_key_spend_limit: key.spend_limit_atoms !== null,
       pricing_override_id: customer.overrideId,
       discount_numerator: customer.discountNumerator,
       discount_denominator: customer.discountDenominator,
@@ -181,10 +215,16 @@ export class InferenceAccounting {
       ...(idempotency ? { legacy_fingerprint: idempotency.legacy_fingerprint } : {}),
       customer_atoms: customerAtoms,
       supplier_account_id: candidate.account.id,
-      supplier_cost_version_id: candidate.costPrice.id,
-      customer_price_version_id: customer.price.id,
+      supplier_cost_version_id: customer.supplierSnapshot?.rate_card_id ?? candidate.costPrice.id,
+      customer_price_version_id: customer.customerSnapshot?.rate_card_id ?? customer.price.id,
+      ...(customer.customerSnapshot
+        ? { customer_pricing_snapshot: customer.customerSnapshot }
+        : {}),
+      ...(customer.supplierSnapshot
+        ? { supplier_pricing_snapshot: customer.supplierSnapshot }
+        : {}),
       supplier_channel_id: candidate.channel.id,
-      supplier_currency: candidate.costPrice.currency,
+      supplier_currency: customer.supplierSnapshot?.currency ?? candidate.costPrice.currency,
       supplier_atoms: supplierAtoms,
       expires_at: this.holdExpiresAt(candidate),
     });
@@ -222,15 +262,22 @@ export class InferenceAccounting {
       next_attempt_id: nextAttemptId,
       next_account_id: candidate.account.id,
       next_channel_id: candidate.channel.id,
-      next_currency: candidate.costPrice.currency,
+      next_currency: customer.supplierSnapshot?.currency ?? candidate.costPrice.currency,
       next_supplier_atoms: supplierAtoms,
-      next_supplier_cost_version_id: candidate.costPrice.id,
-      next_customer_price_version_id: customer.price.id,
+      next_supplier_cost_version_id:
+        customer.supplierSnapshot?.rate_card_id ?? candidate.costPrice.id,
+      next_customer_price_version_id: customer.customerSnapshot?.rate_card_id ?? customer.price.id,
       next_customer_price_adjustment: {
         override_id: customer.overrideId,
         discount_numerator: customer.discountNumerator,
         discount_denominator: customer.discountDenominator,
       },
+      ...(customer.customerSnapshot
+        ? { next_customer_pricing_snapshot: customer.customerSnapshot }
+        : {}),
+      ...(customer.supplierSnapshot
+        ? { next_supplier_pricing_snapshot: customer.supplierSnapshot }
+        : {}),
       expires_at: this.holdExpiresAt(candidate),
       ...(providerRequestId ? { failed_provider_request_id: providerRequestId } : {}),
       ...(BigInt(customerAtoms) > this.heldCustomerAtoms
@@ -291,17 +338,33 @@ export class InferenceAccounting {
         billing_account_id: billingAccount.id,
         selected_attempt_id: attemptId,
         channel_id: candidate.channel.id,
-        billing_price_id: customer.price.id,
-        cost_version_id: candidate.costPrice.id,
+        billing_price_id: customer.customerSnapshot?.rate_card_id ?? customer.price.id,
+        cost_version_id: customer.supplierSnapshot?.rate_card_id ?? candidate.costPrice.id,
         api_key_id: key.id,
         pricing_override_id: customer.overrideId,
         discount_numerator: customer.discountNumerator,
         discount_denominator: customer.discountDenominator,
-        billing_pricing: state.pricingOf(customer.price),
-        billing_basis: customer.price.basis,
-        supplier_basis: candidate.costPrice.basis,
-        supplier_pricing: state.pricingOf(candidate.costPrice),
-        supplier_currency: candidate.costPrice.currency,
+        billing_pricing: customer.customerSnapshot
+          ? {
+              currency: customer.customerSnapshot.currency,
+              rates: customer.customerSnapshot.effective_card.rates,
+            }
+          : state.pricingOf(customer.price),
+        billing_basis: customer.customerSnapshot?.basis ?? customer.price.basis,
+        supplier_basis: customer.supplierSnapshot?.basis ?? candidate.costPrice.basis,
+        supplier_pricing: customer.supplierSnapshot
+          ? {
+              currency: customer.supplierSnapshot.currency,
+              rates: customer.supplierSnapshot.effective_card.rates,
+            }
+          : state.pricingOf(candidate.costPrice),
+        supplier_currency: customer.supplierSnapshot?.currency ?? candidate.costPrice.currency,
+        ...(customer.customerSnapshot
+          ? { customer_pricing_snapshot: customer.customerSnapshot }
+          : {}),
+        ...(customer.supplierSnapshot
+          ? { supplier_pricing_snapshot: customer.supplierSnapshot }
+          : {}),
         usage: details.usage,
       };
       if (chars !== undefined) input.input_characters = String(chars);
@@ -309,6 +372,7 @@ export class InferenceAccounting {
       if (details.charge_policy !== undefined) input.charge_policy = details.charge_policy;
       if (details.moderation_blocked !== undefined)
         input.moderation_blocked = details.moderation_blocked;
+      if (details.async_task !== undefined) input.async_task = details.async_task;
       const result = await deps.ledger.commitTerminal(input).catch(() => null);
       if (
         result?.ok === false &&

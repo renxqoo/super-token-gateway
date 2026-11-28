@@ -127,6 +127,12 @@ export function createSupplierSwitch({
                         : {}),
                     }
                   : {}),
+                ...(input.next_customer_pricing_snapshot
+                  ? { customer_pricing_snapshot: input.next_customer_pricing_snapshot }
+                  : {}),
+                ...(input.next_supplier_pricing_snapshot
+                  ? { supplier_pricing_snapshot: input.next_supplier_pricing_snapshot }
+                  : {}),
                 account_id: input.next_account_id,
                 channel_id: input.next_channel_id,
                 currency: input.next_currency,
@@ -409,6 +415,12 @@ export function createSupplierSwitch({
                     ? { customer_price_adjustment: input.next_customer_price_adjustment }
                     : {}),
                 }
+              : {}),
+            ...(input.next_customer_pricing_snapshot
+              ? { customer_pricing_snapshot: input.next_customer_pricing_snapshot }
+              : {}),
+            ...(input.next_supplier_pricing_snapshot
+              ? { supplier_pricing_snapshot: input.next_supplier_pricing_snapshot }
               : {}),
             account_id: input.next_account_id,
             channel_id: input.next_channel_id,

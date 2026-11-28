@@ -35,6 +35,14 @@ flowchart LR
 
 Console 创建和轮换计费账户的 API Key 时，Gateway 签发 `sk_` 加 43 位 Base64URL 字符。明文只在签发响应的 `key` 字段返回，后续列表返回 `keyPrefix`。
 
+客户注册需要绑定邮箱的短期令牌。所有 Console 副本通过 `CONSOLE_REGISTRATION_SIGNING_SECRET` 配置同一个 32 字节十六进制随机密钥。平台管理员核实邮箱归属后，在管理监听调用 `POST /admin/v1/auth/registration-token`，传入 `email`，并通过已核实的渠道交付响应中的 `registration_token`。客户在 `POST /api/v1/auth/register` 中提交该令牌和同一邮箱。令牌有效期为 15 分钟。缺少配置或有效令牌时注册拒绝，已有账号登录和刷新无需注册令牌。
+
+每个 Console 实例为客户侧和管理侧各保留两个密码计算名额，合计最多四个。未获授权的注册在数据库查询与密码计算前接受独立来源限流。
+
+组织开发者可创建、修改和轮换本人持有的 INVOKER 或 VIEWER 密钥，其他限制仍按账单账户策略执行。管理员应在成员降级时按组织策略审查此前签发的凭据。告警规则和投递历史的客户响应仅返回投递状态及 `webhookConfigured`，回调地址作为写入字段提供。
+
+变更已有渠道的上游来源时，请在同一次管理请求中提供用于新目标的 `api_key`。目录配置变更保留同来源的现有凭据。供应商修订绑定继续通过独立的安全发布流程管理。
+
 Outbox 推送成功时返回 `ok`、`received` 和 `ingested`，告警结果随后写入告警记录。`CONSOLE_ALERT_EVALUATION_INTERVAL_MS` 控制评估周期，`CONSOLE_ALERT_DELIVERY_INTERVAL_MS` 控制 Webhook 投递周期。关闭 Webhook 投递时，后台仍默认每 5 秒评估一次。
 
 平台可按渠道启用上游用量监控。策略配置、运维告警和人工处置接口见 [ADR 0014](decisions/0014-upstream-usage-monitoring.md#配置和发布)。

@@ -74,7 +74,17 @@ export type UsageAliasTarget =
   | "video_ms"
   | "video_seconds"
   | "music_ms"
-  | "characters";
+  | "characters"
+  | "web_search_calls"
+  | "code_interpreter_sessions"
+  | "file_search_calls"
+  | "search_units"
+  | "pages"
+  | "image_input_tokens"
+  | "image_output_tokens"
+  | "audio_input_tokens"
+  | "audio_output_tokens"
+  | "video_input_tokens";
 
 export type UsageAliasRule = {
   target: UsageAliasTarget;

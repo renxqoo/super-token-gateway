@@ -1,4 +1,9 @@
-import { verify, until } from "./verify-production-checks.ts";
+import {
+  verify,
+  until,
+  consoleRequest,
+  bootstrapConsoleEnrollment,
+} from "./verify-production-checks.ts";
 import { generateKeyPairSync } from "node:crypto";
 import { createServer, connect, type Socket } from "node:net";
 import { once } from "node:events";
@@ -327,6 +332,9 @@ synchronous_commit = on
     OUTBOX_WEBHOOK_TOKEN: crypto.randomUUID(),
     BOOTSTRAP_ADMIN_EMAIL: "console-operator@example.test",
     BOOTSTRAP_ADMIN_TOKEN: crypto.randomUUID(),
+    CONSOLE_REGISTRATION_SIGNING_SECRET: Buffer.from(
+      crypto.getRandomValues(new Uint8Array(32)),
+    ).toString("hex"),
   });
   consoleRuntime = createConsoleRuntime({
     config: consoleConfig,
@@ -334,33 +342,15 @@ synchronous_commit = on
     gatewayFetch: async (input, init) => gw.internalApp.fetch(new Request(input, init)),
   });
   await consoleRuntime.start();
-  const consoleRequest = (path: string, method: string, body: unknown, token?: string) =>
-    new Request(`http://console.test${path}`, {
-      method,
-      headers: {
-        "content-type": "application/json",
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify(body),
-    });
-  const consoleBootstrap = await consoleRuntime.fetchAdmin(
-    consoleRequest("/admin/v1/auth/bootstrap", "POST", {
-      email: consoleConfig.bootstrapAdminEmail,
-      bootstrap_token: consoleConfig.bootstrapAdminToken,
-      password: crypto.randomUUID(),
-      display_name: "Release operator",
-    }),
+  const { adminToken: consoleAdminToken, registrationToken } = await bootstrapConsoleEnrollment(
+    consoleRuntime.fetchAdmin,
+    consoleConfig,
+    "console-admission-drill@example.test",
   );
-  verify(
-    consoleBootstrap.status === 201,
-    `Console runtime role bootstrap returned ${consoleBootstrap.status}`,
-  );
-  const { access_token: consoleAdminToken } = (await consoleBootstrap.json()) as {
-    access_token: string;
-  };
   const consoleRegistration = await consoleRuntime.fetchClient(
     consoleRequest("/api/v1/auth/register", "POST", {
       email: "console-admission-drill@example.test",
+      registration_token: registrationToken,
       password: crypto.randomUUID(),
       display_name: "Release tenant",
     }),

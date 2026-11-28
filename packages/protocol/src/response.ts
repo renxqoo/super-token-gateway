@@ -1,7 +1,7 @@
 import { GatewayError, providerObject as object, optionalObject, text } from "@gateway/contracts";
 import { extractUsage } from "./usage.ts";
-import { stringifyExact, parseProviderJson } from "./json.ts";
-import { finishReason, blockedPrompt } from "./finish.ts";
+import { stringifyExact, parseProviderJson, trackExactChild } from "./json.ts";
+import { finishReason, blockedPrompt, responsesIncompleteFinish } from "./finish.ts";
 import type { Protocol, ProviderKind, Usage } from "@gateway/kernel";
 import type { Part } from "./request.ts";
 
@@ -112,7 +112,7 @@ export function decodeResponse(
           }
         else throw new GatewayError(502, "conversion_loss", "Unsupported Responses output item");
       }
-    if (body.status === "incomplete") result.finish = "length";
+    if (body.status === "incomplete") result.finish = responsesIncompleteFinish(body, true);
   } else if (source === "messages") {
     if (!Array.isArray(body.content))
       throw new GatewayError(502, "invalid_upstream", "Missing message content");
@@ -290,28 +290,32 @@ export function encodeResponse(
       ),
       ...(result.usage ? { usage } : {}),
     };
-  if (target === "messages")
-    return {
+  if (target === "messages") {
+    const exactInputs: object[] = [];
+    const encoded = {
       id: result.id,
       type: "message",
       role: "assistant",
       model,
-      content: parts.map((part) =>
-        part.type === "call"
+      content: parts.map((part) => {
+        if (part.type === "call") {
+          const input = object(parseProviderJson(part.arguments.trim() ? part.arguments : "{}"));
+          exactInputs.push(input);
+          return {
+            type: "tool_use",
+            id: part.id,
+            name: part.name,
+            input,
+          };
+        }
+        return part.type === "reasoning"
           ? {
-              type: "tool_use",
-              id: part.id,
-              name: part.name,
-              input: parseProviderJson(part.arguments),
+              type: "thinking",
+              thinking: part.text,
+              ...(part.signature ? { signature: part.signature } : {}),
             }
-          : part.type === "reasoning"
-            ? {
-                type: "thinking",
-                thinking: part.text,
-                ...(part.signature ? { signature: part.signature } : {}),
-              }
-            : { type: "text", text: part.type === "text" ? part.text : "" },
-      ),
+          : { type: "text", text: part.type === "text" ? part.text : "" };
+      }),
       stop_reason:
         result.finish === "content_filter"
           ? "refusal"
@@ -323,25 +327,32 @@ export function encodeResponse(
       stop_sequence: null,
       ...(result.usage ? { usage } : {}),
     };
-  return {
+    for (const input of exactInputs) trackExactChild(encoded, input);
+    return encoded;
+  }
+  const exactArgs: object[] = [];
+  const encoded = {
     candidates: [
       {
         index: 0,
         content: {
           role: "model",
-          parts: parts.map((part) =>
-            part.type === "call"
-              ? {
-                  functionCall: {
-                    id: part.id,
-                    name: part.name,
-                    args: parseProviderJson(part.arguments),
-                  },
-                }
-              : part.type === "reasoning"
-                ? { text: part.text, thought: true }
-                : { text: part.type === "text" ? part.text : "" },
-          ),
+          parts: parts.map((part) => {
+            if (part.type === "call") {
+              const args = object(parseProviderJson(part.arguments.trim() ? part.arguments : "{}"));
+              exactArgs.push(args);
+              return {
+                functionCall: {
+                  id: part.id,
+                  name: part.name,
+                  args,
+                },
+              };
+            }
+            return part.type === "reasoning"
+              ? { text: part.text, thought: true }
+              : { text: part.type === "text" ? part.text : "" };
+          }),
         },
         finishReason:
           result.finish === "length"
@@ -353,4 +364,6 @@ export function encodeResponse(
     ],
     ...(result.usage ? { usageMetadata: usage } : {}),
   };
+  for (const args of exactArgs) trackExactChild(encoded, args);
+  return encoded;
 }

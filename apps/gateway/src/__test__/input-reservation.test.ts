@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   estimateTextChatInput,
+  estimateTextGeminiInput,
   estimateTextInputForProtocol,
   estimateTextMessagesInput,
   estimateTextResponsesInput,
@@ -220,6 +221,106 @@ test("estimateTextMessagesInput accounts for Anthropic tool/thinking/output_conf
   ).toBeUndefined();
 });
 
+test("estimateTextGeminiInput bounds camelCase and snake_case text payloads and rejects media, hosted tools, and multi-candidate configs", () => {
+  const plainCamel = {
+    contents: [{ role: "user", parts: [{ text: "你好世界🚀" }] }],
+    systemInstruction: { parts: [{ text: "Be concise" }] },
+    generationConfig: { maxOutputTokens: 128, temperature: 0.2 },
+  };
+  const serialized = JSON.stringify(plainCamel);
+  expect(estimateTextGeminiInput(plainCamel)).toBe(Buffer.byteLength(serialized) + 128 + 32);
+  expect(estimateTextGeminiInput(plainCamel, `${serialized}  `)).toBe(
+    Buffer.byteLength(serialized) + 2 + 128 + 32,
+  );
+
+  const snakeWithToolsAndSchema = {
+    system_instruction: { parts: [{ text: "Use tools" }] },
+    contents: [
+      { role: "user", parts: [{ text: "lookup" }] },
+      {
+        role: "model",
+        parts: [
+          { thought: true, text: "thinking", thought_signature: "sig" },
+          { function_call: { name: "lookup", args: { q: "x" } } },
+        ],
+      },
+      {
+        role: "user",
+        parts: [{ function_response: { name: "lookup", response: { ok: true } } }],
+      },
+    ],
+    tools: [{ function_declarations: [{ name: "lookup", parameters: { type: "object" } }] }],
+    generation_config: {
+      max_output_tokens: 128,
+      response_json_schema: { type: "object" },
+    },
+  };
+  const snakeSerialized = JSON.stringify(snakeWithToolsAndSchema);
+  expect(estimateTextGeminiInput(snakeWithToolsAndSchema)).toBe(
+    Buffer.byteLength(snakeSerialized) + 128 + 32 * 4 + 512 + 256,
+  );
+
+  expect(
+    estimateTextGeminiInput({
+      contents: [
+        { role: "user", parts: [{ inlineData: { mimeType: "image/png", data: "AAAA" } }] },
+      ],
+    }),
+  ).toBeUndefined();
+  expect(
+    estimateTextGeminiInput({
+      contents: [
+        {
+          role: "user",
+          parts: [{ file_data: { mime_type: "image/png", file_uri: "gs://bucket/a.png" } }],
+        },
+      ],
+    }),
+  ).toBeUndefined();
+  expect(
+    estimateTextGeminiInput({
+      cachedContent: "cachedContents/123",
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+    }),
+  ).toBeUndefined();
+  expect(
+    estimateTextGeminiInput({
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      tools: [{ googleSearch: {} }],
+    }),
+  ).toBeUndefined();
+  expect(
+    estimateTextGeminiInput({
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      generation_config: { candidate_count: 2 },
+    }),
+  ).toBeUndefined();
+  expect(
+    estimateTextGeminiInput({
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                name: "screenshot",
+                response: { ok: true },
+                parts: [{ inlineData: { mimeType: "image/png", data: "AAAA" } }],
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  ).toBeUndefined();
+  expect(
+    estimateTextGeminiInput({
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      tools: [{ functionDeclarations: [], function_declarations: [{ name: "f" }] }],
+    }),
+  ).toBeUndefined();
+});
+
 test("estimateTextInputForProtocol dispatches only matching protocol and usage dialect pairs", () => {
   const chatPayload = { model: "m", messages: [{ role: "user", content: "hi" }] };
   const chatBody = JSON.stringify(chatPayload);
@@ -242,4 +343,13 @@ test("estimateTextInputForProtocol dispatches only matching protocol and usage d
     estimateTextMessagesInput(msgPayload, msgBody),
   );
   expect(estimateTextInputForProtocol("messages", "openai", msgPayload, msgBody)).toBeUndefined();
+
+  const geminiPayload = { contents: [{ role: "user", parts: [{ text: "hi" }] }] };
+  const geminiBody = JSON.stringify(geminiPayload);
+  expect(estimateTextInputForProtocol("gemini", "gemini", geminiPayload, geminiBody)).toBe(
+    estimateTextGeminiInput(geminiPayload, geminiBody),
+  );
+  expect(
+    estimateTextInputForProtocol("gemini", "openai", geminiPayload, geminiBody),
+  ).toBeUndefined();
 });

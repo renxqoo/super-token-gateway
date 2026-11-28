@@ -4,7 +4,7 @@ import { extractUsage } from "./usage.ts";
 import { parseProviderJson, copyExact, stringifyExact } from "./json.ts";
 import type { Protocol, ProviderKind, Usage } from "@gateway/kernel";
 import type { SSEEvent } from "./sse.ts";
-import { finishReason, blockedPrompt } from "./finish.ts";
+import { finishReason, blockedPrompt, responsesIncompleteFinish } from "./finish.ts";
 import type { Completion } from "./response.ts";
 import { encodeStreamComplete, encodeStreamStart } from "./stream-encode.ts";
 import { observePlaintext, type PlaintextStats } from "./plaintext.ts";
@@ -38,6 +38,7 @@ export class StreamTranslator {
   publicId: string | undefined;
   private targetIndices: Map<string, number> | undefined;
   private nextTargetIndex = 0;
+  private deferredResponseToolCount = 0;
   private messageOpen: number | undefined;
   private messageClosed: Set<number> | undefined;
   private geminiCompleted: Set<number> | undefined;
@@ -343,7 +344,8 @@ export class StreamTranslator {
       }
       if (type === "response.completed" || type === "response.incomplete") {
         terminalNow = true;
-        if (type === "response.incomplete") this.finish = "length";
+        if (type === "response.incomplete")
+          this.finish = responsesIncompleteFinish(body, this.target !== this.source);
       }
     } else if (this.source === "messages") {
       const type = text(body.type, event.event);
@@ -568,6 +570,8 @@ export class StreamTranslator {
   }
 
   private delta(delta: StreamDelta): Uint8Array[] {
+    const deferTool =
+      this.source === "chat" && this.target === "responses" && delta.type === "tool";
     const sourceIndex = `${delta.type}:${delta.index}`;
     const targetIndices = (this.targetIndices ??= new Map());
     let targetIndex = targetIndices.get(sourceIndex);
@@ -575,51 +579,48 @@ export class StreamTranslator {
       targetIndex === undefined ||
       (this.target === "messages" && this.messageClosed?.has(targetIndex))
     ) {
-      targetIndex = this.nextTargetIndex++;
+      targetIndex = deferTool ? -++this.deferredResponseToolCount : this.nextTargetIndex++;
       targetIndices.set(sourceIndex, targetIndex);
     }
     delta = { ...delta, index: targetIndex };
     const chunks: Uint8Array[] = [];
-    if (!Number.isSafeInteger(delta.index) || delta.index < 0 || delta.index > 127)
+    if (this.nextTargetIndex + this.deferredResponseToolCount > 128)
       throw new GatewayError(502, "invalid_upstream", "Stream block index is out of range");
     const openBlocks = (this.openBlocks ??= new Set());
     const first = !openBlocks.has(delta.index);
-    if ((delta.type === "text" || delta.type === "reasoning") && this.tools?.has(delta.index))
-      throw new GatewayError(502, "invalid_upstream", "Stream block type changed");
-    if (delta.type === "tool") {
-      const tools = (this.tools ??= new Map());
-      const previous = tools.get(delta.index);
-      const tool = {
-        id: delta.id ?? previous?.id ?? `call_${delta.index}`,
-        name: delta.name ?? previous?.name ?? "",
-        args: (previous?.args ?? "") + delta.text,
-      };
-      tools.set(delta.index, tool);
-      this.finish = "tool_calls";
-    }
     if (this.target === "responses" || delta.type === "tool") {
       this.accumulatedBytes += streamEncoder.encode(delta.text).byteLength;
+      if (delta.type === "tool") {
+        if (delta.name) this.accumulatedBytes += streamEncoder.encode(delta.name).byteLength;
+        if (delta.id) this.accumulatedBytes += streamEncoder.encode(delta.id).byteLength;
+      }
       if (this.accumulatedBytes > this.maxAggregate)
         throw new GatewayError(
           502,
           "conversion_limit",
           "Converted response aggregate exceeds limit",
         );
-      if (delta.type === "text") {
-        const textBlocks = (this.textBlocks ??= new Map());
-        textBlocks.set(delta.index, (textBlocks.get(delta.index) ?? "") + delta.text);
-      }
-      if (delta.type === "reasoning") {
-        const reasoningBlocks = (this.reasoningBlocks ??= new Map());
-        reasoningBlocks.set(delta.index, (reasoningBlocks.get(delta.index) ?? "") + delta.text);
-      }
     }
-    if (this.target === "messages" && delta.type === "tool") return [];
-    if (
-      this.target === "messages" &&
-      (delta.type === "text" || delta.type === "reasoning") &&
-      this.tools?.size
-    )
+    if (delta.type === "tool") {
+      const tools = (this.tools ??= new Map());
+      const previous = tools.get(delta.index);
+      const tool = {
+        id: delta.id ?? previous?.id ?? (deferTool ? "" : `call_${delta.index}`),
+        name: (previous?.name ?? "") + (delta.name ?? ""),
+        args: (previous?.args ?? "") + delta.text,
+      };
+      tools.set(delta.index, tool);
+      this.finish = "tool_calls";
+    }
+    if (this.target === "responses" && delta.type !== "tool") {
+      const blocks =
+        delta.type === "text"
+          ? (this.textBlocks ??= new Map())
+          : (this.reasoningBlocks ??= new Map());
+      blocks.set(delta.index, (blocks.get(delta.index) ?? "") + delta.text);
+    }
+    if (deferTool || (this.target === "messages" && delta.type === "tool")) return [];
+    if (this.target === "messages" && this.tools?.size)
       throw new GatewayError(
         502,
         "conversion_loss",
@@ -668,14 +669,7 @@ export class StreamTranslator {
               content_block:
                 delta.type === "text"
                   ? { type: "text", text: "" }
-                  : delta.type === "reasoning"
-                    ? { type: "thinking", thinking: "" }
-                    : {
-                        type: "tool_use",
-                        id: this.tools?.get(delta.index)?.id,
-                        name: this.tools?.get(delta.index)?.name,
-                        input: {},
-                      },
+                  : { type: "thinking", thinking: "" },
             },
             "content_block_start",
           ),
@@ -688,9 +682,7 @@ export class StreamTranslator {
             delta:
               delta.type === "text"
                 ? { type: "text_delta", text: delta.text }
-                : delta.type === "reasoning"
-                  ? { type: "thinking_delta", thinking: delta.text }
-                  : { type: "input_json_delta", partial_json: delta.text },
+                : { type: "thinking_delta", thinking: delta.text },
           },
           "content_block_delta",
         ),
@@ -776,6 +768,16 @@ export class StreamTranslator {
   private complete(): Uint8Array[] {
     const chunks: Uint8Array[] = [];
     if (!this.started) chunks.push(...this.start());
+    if (this.deferredResponseToolCount > 0 && this.tools) {
+      const deferred = this.tools;
+      this.tools = new Map();
+      for (const tool of deferred.values()) {
+        const index = this.nextTargetIndex++;
+        this.tools.set(index, { ...tool, id: tool.id || `call_${index}` });
+        this.openBlocks!.add(index);
+      }
+      this.deferredResponseToolCount = 0;
+    }
     chunks.push(
       ...encodeStreamComplete({
         id: this.id,
@@ -784,6 +786,7 @@ export class StreamTranslator {
         finish: this.finish,
         usage: this.usage,
         nextEvent: (type, body) => this.event(type, body),
+        bufferResponseTools: this.source === "chat",
         openBlocks: this.openBlocks,
         messageClosed: this.messageClosed,
         tools: this.tools,

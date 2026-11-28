@@ -12,6 +12,8 @@ import type {
   ChannelRecord,
   ModelRecord,
   PriceVersionRecord,
+  PricingModifierRecord,
+  FxRateVersionRecord,
   RouteRecord,
   BillingAccountPricingOverrideRecord,
 } from "./types.ts";
@@ -26,6 +28,8 @@ import {
   channels,
   models,
   priceVersions,
+  pricingModifiers,
+  fxRateVersions,
   billingAccountPricingOverrides,
   routes,
   pluginRevocations,
@@ -201,6 +205,8 @@ export function createPluginCatalogOperations({ orm }: { orm: LedgerDrizzle }) {
         modelRows,
         priceRows,
         overrideRows,
+        modifierRows,
+        fxRateRows,
         routeRows,
         pluginMetaRows,
         wasmBytesById,
@@ -216,6 +222,8 @@ export function createPluginCatalogOperations({ orm }: { orm: LedgerDrizzle }) {
             modelRows,
             priceRows,
             overrideRows,
+            modifierRows,
+            fxRateRows,
             routeRows,
             pluginMetaRows,
             revokedRows,
@@ -234,6 +242,19 @@ export function createPluginCatalogOperations({ orm }: { orm: LedgerDrizzle }) {
               .select()
               .from(billingAccountPricingOverrides)
               .where(eq(billingAccountPricingOverrides.enabled, true)),
+            tx
+              .select()
+              .from(pricingModifiers)
+              .where(eq(pricingModifiers.enabled, true))
+              .orderBy(
+                asc(pricingModifiers.layer),
+                asc(pricingModifiers.priority),
+                asc(pricingModifiers.id),
+              ),
+            tx
+              .select()
+              .from(fxRateVersions)
+              .orderBy(desc(fxRateVersions.effectiveFrom), desc(fxRateVersions.id)),
             tx
               .select()
               .from(routes)
@@ -288,6 +309,8 @@ export function createPluginCatalogOperations({ orm }: { orm: LedgerDrizzle }) {
             modelRows,
             priceRows,
             overrideRows,
+            modifierRows,
+            fxRateRows,
             routeRows,
             pluginMetaRows,
             wasmBytesById,
@@ -302,6 +325,7 @@ export function createPluginCatalogOperations({ orm }: { orm: LedgerDrizzle }) {
         billingAccountMap.set(r.id, {
           id: r.id,
           external_ref: r.externalRef,
+          ...(r.customerGroupId !== null ? { customer_group_id: r.customerGroupId } : {}),
           name: r.name,
           currency: r.currency,
           rpm: r.rpm,
@@ -380,6 +404,7 @@ export function createPluginCatalogOperations({ orm }: { orm: LedgerDrizzle }) {
           basis: r.basis,
           rates: r.rates,
           ceilings: r.ceilings,
+          ...(r.pricingSpec ? { pricing_spec: r.pricingSpec } : {}),
           source_digest: r.sourceDigest,
         });
       }
@@ -458,6 +483,33 @@ export function createPluginCatalogOperations({ orm }: { orm: LedgerDrizzle }) {
         else pricingOverridesByBillingAccount.set(rec.billing_account_id, [rec]);
       }
 
+      const snapshotModifiers: PricingModifierRecord[] = modifierRows.map((r) => ({
+        id: r.id,
+        layer: r.layer,
+        kind: r.kind,
+        stacking: r.stacking,
+        priority: r.priority,
+        enabled: r.enabled,
+        effective_from: r.effectiveFrom ? r.effectiveFrom.toISOString() : null,
+        effective_to: r.effectiveTo ? r.effectiveTo.toISOString() : null,
+        time_windows: r.timeWindows ?? null,
+        match: r.match,
+        multiplier_numerator: r.multiplierNumerator,
+        multiplier_denominator: r.multiplierDenominator,
+        rate_card_price_version_id: r.rateCardPriceVersionId,
+      }));
+
+      const snapshotFxRates: FxRateVersionRecord[] = fxRateRows.map((r) => ({
+        id: r.id,
+        base_currency: r.baseCurrency,
+        quote_currency: r.quoteCurrency,
+        rate_numerator: r.rateNumerator,
+        rate_denominator: r.rateDenominator,
+        effective_from: r.effectiveFrom.toISOString(),
+        effective_to: r.effectiveTo ? r.effectiveTo.toISOString() : null,
+        source_digest: r.sourceDigest,
+      }));
+
       return {
         epoch: epochRows[0]?.version ?? 0,
         lineageToken: epochRows[0]?.lineageToken ?? "",
@@ -468,6 +520,8 @@ export function createPluginCatalogOperations({ orm }: { orm: LedgerDrizzle }) {
         models: modelMap,
         prices: priceMap,
         pricingOverridesByBillingAccount,
+        pricingModifiers: snapshotModifiers,
+        fxRateVersions: snapshotFxRates,
         routesByModel,
         plugins: pluginMap,
         revokedPlugins: new Set(revokedRows.map(({ id }) => id)),

@@ -88,6 +88,9 @@ try {
     OUTBOX_WEBHOOK_TOKEN: "artifact-outbox-webhook-token-1234",
     BOOTSTRAP_ADMIN_EMAIL: "root@artifact.test",
     BOOTSTRAP_ADMIN_TOKEN: "artifact-bootstrap-token-1234",
+    CONSOLE_REGISTRATION_SIGNING_SECRET: Buffer.from(
+      crypto.getRandomValues(new Uint8Array(32)),
+    ).toString("hex"),
   };
 
   await runSync(tempDir, ["dist/tools/migrate.js"], env);
@@ -147,11 +150,24 @@ try {
     );
   }
 
+  const enrollment = await fetch("http://127.0.0.1:18093/admin/v1/auth/registration-token", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${bootstrapJson.access_token}`,
+    },
+    body: JSON.stringify({ email: "artifact-tenant@example.test" }),
+  });
+  if (enrollment.status !== 201)
+    throw new Error(`Console artifact enrollment returned ${enrollment.status}`);
+  const { registration_token } = (await enrollment.json()) as { registration_token: string };
+
   const consoleRegistration = await fetch("http://127.0.0.1:18092/api/v1/auth/register", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       email: "artifact-tenant@example.test",
+      registration_token,
       password: crypto.randomUUID(),
       display_name: "Artifact Tenant",
     }),

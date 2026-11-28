@@ -27,6 +27,12 @@ function serializeSupplierHold(item: FastHoldRequest): string {
   if (inp.customer_price_version_id) {
     sh += `,"customer_price_version_id":"${inp.customer_price_version_id}","customer_price_adjustment":{"override_id":${overrideId},"discount_numerator":${discNum},"discount_denominator":${discDen}}`;
   }
+  if (inp.customer_pricing_snapshot) {
+    sh += `,"customer_pricing_snapshot":${JSON.stringify(inp.customer_pricing_snapshot)}`;
+  }
+  if (inp.supplier_pricing_snapshot) {
+    sh += `,"supplier_pricing_snapshot":${JSON.stringify(inp.supplier_pricing_snapshot)}`;
+  }
   return `${sh},"account_id":"${inp.supplier_account_id}","channel_id":"${inp.supplier_channel_id}","currency":${jsonQuote(inp.supplier_currency)},"cell":${item.supplierLease.cell},"held_atoms":"${supAtoms}","state":"HELD"}]`;
 }
 
@@ -55,8 +61,10 @@ export function createHoldAcquirer(
       item.supplierLease.freeInMemory += item.supplierAtoms;
     };
     let admitted: Set<string>;
-    try {
-      const n = items.length;
+    const requiresTransactional = new Set<string>();
+    const acquire = async (connection: SQL, eligible: FastHoldRequest[]) => {
+      if (eligible.length === 0) return new Set<string>();
+      const n = eligible.length;
       const wlSet = new Set<string>();
       const slSet = new Set<string>();
       const requestIds: string[] = [];
@@ -75,7 +83,7 @@ export function createHoldAcquirer(
       const itemSupplierLeaseIds: string[] = [];
       const expiresAts: string[] = [];
       for (let i = 0; i < n; i++) {
-        const x = items[i]!;
+        const x = eligible[i]!;
         const inp = x.input;
         const wlId = x.walletLease.leaseId;
         const slId = x.supplierLease.leaseId;
@@ -99,7 +107,7 @@ export function createHoldAcquirer(
       }
       const uniqueWalletLeaseIds = [...wlSet];
       const uniqueSupplierLeaseIds = [...slSet];
-      const [row] = await db<{ admitted: string[] | null }[]>`
+      const [row] = await connection<{ admitted: string[] | null }[]>`
         SELECT public.acquire_leased_holds(
           ${leases.nodeId},
           ${uniqueWalletLeaseIds}::uuid[],
@@ -121,13 +129,46 @@ export function createHoldAcquirer(
           ${itemSupplierLeaseIds}::uuid[],
           ${expiresAts}::timestamptz[]
         ) AS admitted
-      `.catch((error: unknown) => {
-        if (postgresState(error) === "57014") throw new LedgerStatementCancelled(error);
-        throw error;
-      });
-      admitted = new Set((row?.admitted ?? []).map((id) => String(id)));
+      `;
+      return new Set((row?.admitted ?? []).map((id) => String(id)));
+    };
+    try {
+      const keyIds = [
+        ...new Set(items.flatMap(({ input }) => (input.api_key_id ? [input.api_key_id] : []))),
+      ];
+      admitted =
+        keyIds.length === 0
+          ? await acquire(db, items)
+          : await db.begin(async (tx) => {
+              const keys = await tx<
+                { id: string; billing_account_id: string; spend_limit_atoms: string | null }[]
+              >`
+              SELECT id, billing_account_id, spend_limit_atoms::text
+              FROM public.api_keys
+              WHERE id = ANY(${keyIds}::uuid[])
+              ORDER BY id
+              FOR SHARE
+            `;
+              const unlimited = new Map(
+                keys
+                  .filter((key) => key.spend_limit_atoms === null)
+                  .map((key) => [key.id, key.billing_account_id]),
+              );
+              const eligible = items.filter(({ input }) => {
+                if (
+                  !input.api_key_id ||
+                  unlimited.get(input.api_key_id) === input.billing_account_id
+                ) {
+                  return true;
+                }
+                requiresTransactional.add(input.request_id);
+                return false;
+              });
+              return acquire(tx, eligible);
+            });
     } catch (err) {
-      if (isRetryableLedgerTransactionError(err)) {
+      const error = postgresState(err) === "57014" ? new LedgerStatementCancelled(err) : err;
+      if (isRetryableLedgerTransactionError(error)) {
         if (!retry) return items.map((item) => contendedFastQueue.enqueue(item));
         return items.map((item) => {
           restorePendingReservation(item);
@@ -135,7 +176,7 @@ export function createHoldAcquirer(
         });
       }
       for (const item of items) retireLeases(item);
-      throw err;
+      throw error;
     }
 
     const out: (AcquireHoldResult | Promise<AcquireHoldResult>)[] = Array.from({
@@ -146,7 +187,10 @@ export function createHoldAcquirer(
     for (let i = 0; i < items.length; i++) {
       const x = items[i]!;
       if (!admitted.has(x.input.request_id)) {
-        if (!checkDebtGrants) {
+        if (requiresTransactional.has(x.input.request_id)) {
+          restorePendingReservation(x);
+          out[i] = acquireQueues[walletLane(x.input.billing_account_id)]!.enqueue(x.input);
+        } else if (!checkDebtGrants) {
           rejectedIndices.push(i);
           rejectedItems.push(x);
         } else {
@@ -249,7 +293,12 @@ export function createHoldAcquirer(
         : null;
     },
     acquireHold(input: AcquireHoldInput): Promise<AcquireHoldResult> {
-      if (leases.canAcquire() && input.idempotency_key === null && !input.enforce_key_spend_limit) {
+      if (
+        leases.canAcquire() &&
+        input.idempotency_key === null &&
+        input.customer_pricing_snapshot === undefined &&
+        input.supplier_pricing_snapshot === undefined
+      ) {
         const customerAtoms = parseAtoms(input.customer_atoms);
         const supplierAtoms = parseAtoms(input.supplier_atoms);
         if (customerAtoms !== null && supplierAtoms !== null) {

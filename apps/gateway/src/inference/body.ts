@@ -12,7 +12,6 @@ export async function readRequestBytesBounded(
   deadlines: DeadlineWheel,
   isDraining: () => boolean,
   setAbortNotify: (fn: ((reason: unknown) => void) | null) => void,
-  forceStream: boolean,
   declaredSize?: number | null,
 ): Promise<Uint8Array> {
   if (req.signal.aborted) {
@@ -21,74 +20,8 @@ export async function readRequestBytesBounded(
   if (isDraining()) {
     throw new GatewayError(503, "overloaded", "Gateway is draining");
   }
-  const parsedCl =
-    declaredSize === undefined ? (declaredRequestSize(req, maxBytes) ?? -1) : (declaredSize ?? -1);
+  if (declaredSize === undefined) declaredRequestSize(req, maxBytes);
   const timeoutErr = () => new GatewayError(408, "request_timeout", "Request body read timed out");
-
-  if (!forceStream && parsedCl >= 0 && parsedCl <= 262_144) {
-    return new Promise<Uint8Array>((resolve, reject) => {
-      let settled = false;
-      let watchingSignal = false;
-      let cancelSignalWatch: (() => void) | null = null;
-      const onReqAbort = () => fail(new GatewayError(499, "client_aborted", "Client disconnected"));
-      const cleanup = () => {
-        cancelTimer();
-        if (cancelSignalWatch) {
-          cancelSignalWatch();
-          cancelSignalWatch = null;
-        }
-        if (watchingSignal) {
-          watchingSignal = false;
-          req.signal.removeEventListener("abort", onReqAbort);
-        }
-        setAbortNotify(null);
-      };
-      const fail = (err: unknown) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(err);
-      };
-      setAbortNotify(() => fail(new GatewayError(503, "overloaded", "Gateway is draining")));
-      const cancelTimer = deadlines.schedule(timeoutMs, () => fail(timeoutErr()));
-      const attachSignalWatch = () => {
-        cancelSignalWatch = null;
-        if (settled) return;
-        if (req.signal.aborted) {
-          onReqAbort();
-          return;
-        }
-        watchingSignal = true;
-        req.signal.addEventListener("abort", onReqAbort, { once: true });
-      };
-      cancelSignalWatch =
-        timeoutMs >= 1000
-          ? deadlines.scheduleCoarse(50, attachSignalWatch)
-          : deadlines.schedule(Math.min(50, timeoutMs), attachSignalWatch);
-      req.bytes().then(
-        (bytes) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          if (bytes.byteLength > maxBytes) {
-            reject(
-              new GatewayError(413, "body_too_large", "Payload exceeds the configured size limit"),
-            );
-            return;
-          }
-          resolve(bytes);
-        },
-        (err) => {
-          if (settled) return;
-          if ((err instanceof Error && err.name === "AbortError") || req.signal.aborted) {
-            fail(new GatewayError(499, "client_aborted", "Client disconnected"));
-            return;
-          }
-          fail(err);
-        },
-      );
-    });
-  }
 
   const body = req.body;
   if (!body) return new Uint8Array(0);

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { h, adminSession } from "./console-auth-fixture.ts";
 import { registerAuthFixture } from "./console-auth-fixture.ts";
 import { registerAdmissionCases } from "./console-auth-admission-cases.ts";
+import { createConsoleTestHarness } from "./helpers/console-harness.ts";
 
 registerAuthFixture();
 
@@ -96,6 +97,114 @@ test("dual listeners isolate routes, CORS origins, bootstrap reservation, and se
   expect(clientOnAdmin.status).toBe(401);
   const clientOnAdminUsers = await h.adminApi("GET", "/admin/v1/users", user.accessToken);
   expect(clientOnAdminUsers.status).toBe(401);
+});
+
+test("unauthorized registration has one result and an approved address can enroll", async () => {
+  const runtime = await createConsoleTestHarness({ enableWorker: false });
+  try {
+    const operator = await runtime.bootstrapAdmin();
+    const email = "approved-enrollment@example.com";
+    const submit = (target: string, registration_token?: string) =>
+      runtime.clientApi("POST", "/api/v1/auth/register", undefined, {
+        email: target,
+        registration_token,
+        password: "EnrollmentPassword123!",
+        display_name: "Approved",
+      });
+    const enrollment = await runtime.adminApi<{ registration_token: string }>(
+      "POST",
+      "/admin/v1/auth/registration-token",
+      operator.accessToken,
+      { email },
+    );
+    expect(enrollment.status).toBe(201);
+    expect(enrollment.headers.get("cache-control")).toBe("no-store");
+    const unmatched = await submit(
+      "unapproved-enrollment@example.com",
+      enrollment.data.registration_token,
+    );
+    const reserved = await submit(runtime.bootstrapAdminEmail);
+    expect(unmatched.status).toBe(403);
+    expect(reserved.status).toBe(403);
+    expect(unmatched.data).toEqual(reserved.data);
+    const registered = await submit(email, enrollment.data.registration_token);
+    expect(registered.status).toBe(201);
+    expect(registered.data).toMatchObject({ user: { email } });
+    const existing = await submit(email);
+    expect(existing.status).toBe(403);
+    expect(existing.data).toEqual(reserved.data);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("a demoted organization administrator cannot manage their previously issued admin key", async () => {
+  const owner = await h.registerUser("key-scope-owner@example.com");
+  const member = await h.registerUser("key-scope-member@example.com");
+  const org = await h.clientApi<{ id: string; default_billing_account_id: string }>(
+    "POST",
+    "/api/v1/orgs",
+    owner.accessToken,
+    { name: "Key Scope Team", slug: "key-scope-team" },
+  );
+  expect(org.status).toBe(201);
+  const invite = await h.clientApi<{ token: string }>(
+    "POST",
+    `/api/v1/orgs/${org.data.id}/invitations`,
+    owner.accessToken,
+    { email: member.user.email, role: "ADMIN" },
+  );
+  expect(invite.status).toBe(201);
+  const joined = await h.clientApi(
+    "POST",
+    `/api/v1/invitations/${invite.data.token}/accept`,
+    member.accessToken,
+  );
+  expect(joined.status).toBe(200);
+  const scoped = `/api/v1/billing-accounts/${org.data.default_billing_account_id}/api-keys`;
+  const adminKey = await h.clientApi<{ id: string }>("POST", scoped, member.accessToken, {
+    name: "admin key",
+    role: "ADMIN",
+  });
+  const regularKey = await h.clientApi<{ id: string }>("POST", scoped, member.accessToken, {
+    name: "regular key",
+    role: "INVOKER",
+  });
+  expect(adminKey.status).toBe(201);
+  expect(regularKey.status).toBe(201);
+  const changed = await h.clientApi(
+    "PATCH",
+    `/api/v1/orgs/${org.data.id}/members/${member.user.id}`,
+    owner.accessToken,
+    { role: "DEVELOPER" },
+  );
+  expect(changed.status).toBe(200);
+  expect(
+    (await h.clientApi("POST", `${scoped}/${adminKey.data.id}/rotate`, member.accessToken)).status,
+  ).toBe(403);
+  expect(
+    (
+      await h.clientApi("PATCH", `${scoped}/${adminKey.data.id}`, member.accessToken, {
+        enabled: true,
+      })
+    ).status,
+  ).toBe(403);
+  const rotation = await h.clientApi<{ id: string }>(
+    "POST",
+    `${scoped}/${regularKey.data.id}/rotate`,
+    member.accessToken,
+  );
+  expect(rotation.status).toBe(201);
+  const policy = await h.clientApi(
+    "PATCH",
+    `/api/v1/billing-accounts/${org.data.default_billing_account_id}`,
+    owner.accessToken,
+    { developer_key_spend_limit_atoms: "100" },
+  );
+  expect(policy.status).toBe(200);
+  expect(
+    (await h.clientApi("POST", `${scoped}/${rotation.data.id}/rotate`, member.accessToken)).status,
+  ).toBe(403);
 });
 
 test("session refresh concurrency, password change revocation, brute-force IP guard, and user/org suspension work end-to-end", async () => {

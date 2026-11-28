@@ -1,5 +1,6 @@
+import { providerObject } from "@gateway/contracts";
 import { encodeSSE } from "./sse.ts";
-import { parseProviderJson } from "./json.ts";
+import { parseProviderJson, trackExactChild } from "./json.ts";
 import { encodeResponse, publicUsage, type Completion } from "./response.ts";
 import type { Protocol, Usage } from "@gateway/kernel";
 import type { Part } from "./request.ts";
@@ -11,6 +12,7 @@ export interface StreamEncodeState {
   finish: Completion["finish"];
   usage: Usage | undefined;
   nextEvent: (type: string, body: Record<string, unknown>) => Uint8Array;
+  bufferResponseTools?: boolean;
   openBlocks?: Set<number> | undefined;
   messageClosed?: Set<number> | undefined;
   tools?: Map<number, { id: string; name: string; args: string }> | undefined;
@@ -90,7 +92,8 @@ export function encodeStreamComplete(state: StreamEncodeState): Uint8Array[] {
           chunks.push(encodeSSE({ type: "content_block_stop", index }, "content_block_stop"));
     if (state.tools)
       for (const [index, tool] of state.tools) {
-        parseProviderJson(tool.args || "{}");
+        const rawArgs = tool.args.trim() ? tool.args : "{}";
+        providerObject(parseProviderJson(rawArgs));
         chunks.push(
           encodeSSE(
             {
@@ -106,7 +109,7 @@ export function encodeStreamComplete(state: StreamEncodeState): Uint8Array[] {
             {
               type: "content_block_delta",
               index,
-              delta: { type: "input_json_delta", partial_json: tool.args || "{}" },
+              delta: { type: "input_json_delta", partial_json: rawArgs },
             },
             "content_block_delta",
           ),
@@ -141,6 +144,30 @@ export function encodeStreamComplete(state: StreamEncodeState): Uint8Array[] {
       const tool = state.tools?.get(index);
       if (tool) {
         parts.push({ type: "call", id: tool.id, name: tool.name, arguments: tool.args });
+        if (state.bufferResponseTools) {
+          chunks.push(
+            state.nextEvent("response.output_item.added", {
+              output_index: index,
+              item: {
+                id: `fc_${index}`,
+                type: "function_call",
+                call_id: tool.id,
+                name: tool.name,
+                arguments: "",
+                status: "in_progress",
+              },
+            }),
+          );
+          if (tool.args) {
+            chunks.push(
+              state.nextEvent("response.function_call_arguments.delta", {
+                output_index: index,
+                item_id: `fc_${index}`,
+                delta: tool.args,
+              }),
+            );
+          }
+        }
         chunks.push(
           state.nextEvent("response.function_call_arguments.done", {
             output_index: index,
@@ -203,28 +230,35 @@ export function encodeStreamComplete(state: StreamEncodeState): Uint8Array[] {
     );
   } else {
     if (state.tools)
-      for (const tool of state.tools.values())
+      for (const tool of state.tools.values()) {
+        const args = providerObject(parseProviderJson(tool.args.trim() ? tool.args : "{}"));
         chunks.push(
-          encodeSSE({
-            candidates: [
+          encodeSSE(
+            trackExactChild(
               {
-                index: 0,
-                content: {
-                  role: "model",
-                  parts: [
-                    {
-                      functionCall: {
-                        id: tool.id,
-                        name: tool.name,
-                        args: parseProviderJson(tool.args || "{}"),
-                      },
+                candidates: [
+                  {
+                    index: 0,
+                    content: {
+                      role: "model",
+                      parts: [
+                        {
+                          functionCall: {
+                            id: tool.id,
+                            name: tool.name,
+                            args,
+                          },
+                        },
+                      ],
                     },
-                  ],
-                },
+                  },
+                ],
               },
-            ],
-          }),
+              args,
+            ),
+          ),
         );
+      }
     chunks.push(
       encodeSSE({
         candidates: [

@@ -1,5 +1,5 @@
-import { GatewayError } from "@gateway/contracts";
-import { stringifyExact, parseProviderJson } from "./json.ts";
+import { GatewayError, object } from "@gateway/contracts";
+import { stringifyExact, parseClientJson, trackExactChild } from "./json.ts";
 import type { Protocol } from "@gateway/kernel";
 import type {
   NormalRequest,
@@ -153,19 +153,21 @@ export function encodeRequest(
         } else if (part.type === "image") {
           parts.push(imageSource(part));
         } else if (part.type === "call") {
+          const parsedArgs = object(parseClientJson(part.arguments.trim() ? part.arguments : "{}"));
+          trackExactChild(body, parsedArgs);
           parts.push(
             target === "messages"
               ? {
                   type: "tool_use",
                   id: part.id,
                   name: part.name,
-                  input: parseProviderJson(part.arguments),
+                  input: parsedArgs,
                 }
               : {
                   functionCall: {
                     id: part.id,
                     name: part.name,
-                    args: parseProviderJson(part.arguments),
+                    args: parsedArgs,
                   },
                 },
           );
@@ -190,11 +192,17 @@ export function encodeRequest(
         }
       }
       if (parts.length > 0) {
-        messages.push(
-          target === "messages"
-            ? { role: message.role, content: parts }
-            : { role: message.role === "assistant" ? "model" : "user", parts },
-        );
+        const nextRole =
+          target === "messages" ? message.role : message.role === "assistant" ? "model" : "user";
+        const prev = messages.at(-1) as Record<string, unknown> | undefined;
+        if (prev && prev.role === nextRole) {
+          const targetList = (target === "messages" ? prev.content : prev.parts) as unknown[];
+          targetList.push(...parts);
+        } else {
+          messages.push(
+            target === "messages" ? { role: nextRole, content: parts } : { role: nextRole, parts },
+          );
+        }
       }
     }
   }
@@ -227,7 +235,7 @@ export function encodeRequest(
   } else if (target === "messages") {
     body.messages = messages;
     if (system.length) body.system = system.join("\n\n");
-    body.max_tokens = request.maxTokens ?? 32768;
+    body.max_tokens = request.maxTokens ?? options.defaultMaxTokens ?? 32768;
     if (request.topK !== undefined) body.top_k = request.topK;
     if (request.reasoningEffort !== undefined) {
       body.output_config = { effort: request.reasoningEffort };
@@ -255,8 +263,16 @@ export function encodeRequest(
         : {}),
     };
   }
-  if (request.stop && target !== "gemini")
-    body[target === "messages" ? "stop_sequences" : "stop"] = request.stop;
+  if (request.stop && target !== "gemini") {
+    if (target === "responses") {
+      if (request.stop.length > 0) {
+        if (mode === "compat") recordDrop("stop");
+        else unsupported("stop");
+      }
+    } else {
+      body[target === "messages" ? "stop_sequences" : "stop"] = request.stop;
+    }
+  }
   if (request.jsonSchema && target !== "gemini") {
     const format = { type: "json_schema", name: "response", schema: request.jsonSchema };
     if (target === "chat")

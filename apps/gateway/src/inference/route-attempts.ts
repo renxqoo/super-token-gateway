@@ -1,5 +1,6 @@
 import { GatewayError } from "@gateway/contracts";
-import { MeteredRequestError } from "../request-metering.ts";
+import { DomainError } from "@gateway/kernel";
+import { MeteredRequestError, type MeteredValidationOptions } from "../request-metering.ts";
 import { formatProtocolError } from "@gateway/protocol";
 import { UpstreamPreDispatchError } from "@gateway/runtime";
 import type { EffectiveCustomerPrice } from "../pricing.ts";
@@ -106,30 +107,56 @@ export async function routeInference(
         }
         return await rejectOutputPolicy(unavailablePolicy);
       }
-      const customer = accounting.customerPrice(cand);
+      let customer: EffectiveCustomerPrice;
       let prepared: PreparedUpstreamRequest | null;
       let quote: ReturnType<InferenceAccounting["quote"]>;
       try {
+        customer = accounting.customerPrice(cand, preparedInput.body);
+        const effectiveCustomerPrice = customer.customerSnapshot
+          ? (request.snap.prices.get(customer.customerSnapshot.rate_card_id) ?? customer.price)
+          : customer.price;
+        const effectiveSupplierPrice = customer.supplierSnapshot
+          ? (request.snap.prices.get(customer.supplierSnapshot.rate_card_id) ?? cand.costPrice)
+          : cand.costPrice;
+        const meteredValidation: MeteredValidationOptions | undefined =
+          customer.meteredAllowedServiceTier || customer.meteredAllowedHostedTools
+            ? {
+                ...(customer.meteredAllowedServiceTier
+                  ? { allowedServiceTiers: new Set([customer.meteredAllowedServiceTier]) }
+                  : {}),
+                ...(customer.meteredAllowedHostedTools
+                  ? { allowedHostedTools: customer.meteredAllowedHostedTools }
+                  : {}),
+              }
+            : undefined;
         prepared = prepareForReservation(
           cand,
           preparedInput.body,
-          customer.price,
+          effectiveCustomerPrice,
+          effectiveSupplierPrice,
           selected.length === 1 && !request.isMultipartOp,
+          meteredValidation,
         );
         quote = accounting.quote(cand, customer, {
           ...preparedInput.measurement,
           estimatedInputTokens: prepared?.estimatedInputTokens,
         });
-        enforceSupplierReserveLimit(adaptivePolicy, cand.costPrice.currency, quote.supplierAtoms);
+        enforceSupplierReserveLimit(
+          adaptivePolicy,
+          customer.supplierSnapshot?.currency ?? cand.costPrice.currency,
+          quote.supplierAtoms,
+        );
       } catch (err) {
         lastHoldErr =
           err instanceof GatewayError
             ? err
-            : new GatewayError(
-                422,
-                "billing_ceiling",
-                err instanceof Error ? err.message : "Quote error",
-              );
+            : err instanceof DomainError
+              ? new GatewayError(422, err.code, err.message)
+              : new GatewayError(
+                  422,
+                  "billing_ceiling",
+                  err instanceof Error ? err.message : "Quote error",
+                );
         releaseProbeFor(cand.channel.id);
         continue;
       }
@@ -218,6 +245,7 @@ export async function routeInference(
       const mayRetryAmbiguous = () => {
         const limit = deps.config.maxAmbiguousRetriesPerMinute;
         return (
+          operation !== "videos" &&
           !strictAdaptiveSwitch &&
           Boolean(cand.route.retry_policy.retry_on_ambiguous) &&
           (limit === undefined || deps.metrics.tryConsumeAmbiguousRetry(cand.channel.id, limit))
@@ -249,7 +277,6 @@ export async function routeInference(
         break;
       }
       const firstAttempt = cursor === activeIndex ? firstReservation : undefined;
-      const candBilling = firstAttempt?.customer ?? accounting.customerPrice(cand);
       telemetry.setChannel(cand.channel.name);
       accounting.setDispatched(false);
       const attemptInput = firstAttempt?.input ?? (await prepareRouteInput(cand));
@@ -264,16 +291,59 @@ export async function routeInference(
       }
       const { body: attemptBody, measurement: inputMeasurement, pluginSignal } = attemptInput;
       pluginSignal.throwIfAborted();
+      let candBilling: EffectiveCustomerPrice;
       let preparedAttempt: PreparedUpstreamRequest | null;
       try {
+        candBilling = firstAttempt?.customer ?? accounting.customerPrice(cand, attemptBody);
+        const effectiveCustomerPrice = candBilling.customerSnapshot
+          ? (request.snap.prices.get(candBilling.customerSnapshot.rate_card_id) ??
+            candBilling.price)
+          : candBilling.price;
+        const effectiveSupplierPrice = candBilling.supplierSnapshot
+          ? (request.snap.prices.get(candBilling.supplierSnapshot.rate_card_id) ?? cand.costPrice)
+          : cand.costPrice;
+        const meteredValidation: MeteredValidationOptions | undefined =
+          candBilling.meteredAllowedServiceTier || candBilling.meteredAllowedHostedTools
+            ? {
+                ...(candBilling.meteredAllowedServiceTier
+                  ? { allowedServiceTiers: new Set([candBilling.meteredAllowedServiceTier]) }
+                  : {}),
+                ...(candBilling.meteredAllowedHostedTools
+                  ? { allowedHostedTools: candBilling.meteredAllowedHostedTools }
+                  : {}),
+              }
+            : undefined;
         preparedAttempt = firstAttempt
           ? firstAttempt.prepared
-          : prepareForReservation(cand, attemptBody, candBilling.price);
+          : prepareForReservation(
+              cand,
+              attemptBody,
+              effectiveCustomerPrice,
+              effectiveSupplierPrice,
+              false,
+              meteredValidation,
+            );
       } catch (error) {
-        if (!(error instanceof MeteredRequestError)) throw error;
-        lastError = error;
-        releaseProbeFor(cand.channel.id);
-        continue;
+        if (error instanceof MeteredRequestError) {
+          lastError = error;
+          releaseProbeFor(cand.channel.id);
+          continue;
+        }
+        if (!firstAttempt) {
+          lastError =
+            error instanceof GatewayError
+              ? error
+              : error instanceof DomainError
+                ? new GatewayError(422, error.code, error.message)
+                : new GatewayError(
+                    422,
+                    "billing_ceiling",
+                    error instanceof Error ? error.message : "Fallback pricing error",
+                  );
+          releaseProbeFor(cand.channel.id);
+          continue;
+        }
+        throw error;
       }
 
       if (pendingSwitchFrom) {
@@ -283,17 +353,23 @@ export async function routeInference(
             ...inputMeasurement,
             estimatedInputTokens: preparedAttempt?.estimatedInputTokens,
           });
-          enforceSupplierReserveLimit(adaptivePolicy, cand.costPrice.currency, quote.supplierAtoms);
+          enforceSupplierReserveLimit(
+            adaptivePolicy,
+            candBilling.supplierSnapshot?.currency ?? cand.costPrice.currency,
+            quote.supplierAtoms,
+          );
         } catch (err) {
           releaseProbeFor(cand.channel.id);
           lastError =
             err instanceof GatewayError
               ? err
-              : new GatewayError(
-                  422,
-                  "billing_ceiling",
-                  err instanceof Error ? err.message : "Fallback quote error",
-                );
+              : err instanceof DomainError
+                ? new GatewayError(422, err.code, err.message)
+                : new GatewayError(
+                    422,
+                    "billing_ceiling",
+                    err instanceof Error ? err.message : "Fallback quote error",
+                  );
           continue;
         }
         try {
@@ -452,7 +528,11 @@ export async function routeInference(
         break;
       }
       lastError = result.error;
-      if (result.outcome === "UNKNOWN" && !mayRetryAmbiguous()) break;
+      if (
+        resources.videoAdmissionRetained ||
+        (result.outcome === "UNKNOWN" && !mayRetryAmbiguous())
+      )
+        break;
       pendingSwitchFrom = { attemptId: activeAttemptId, outcome: result.outcome };
     }
     releaseAllPendingProbes();

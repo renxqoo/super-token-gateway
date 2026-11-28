@@ -43,7 +43,10 @@ export class Histogram {
 }
 
 export function escapeLabel(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\n", " ");
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replace(/\r\n|[\r\n\u2028\u2029]/g, " ");
 }
 
 export type LabeledCounter<T extends readonly string[]> = {

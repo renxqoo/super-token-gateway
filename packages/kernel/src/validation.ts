@@ -27,13 +27,19 @@ export function validateUsage(usage: Usage): void {
       throw new TypeError("Usage counters must be exact nonnegative integers or decimal durations");
   }
   if (
-    usage.cache_write_tokens !== undefined &&
-    usage.cache_write_5m_tokens !== undefined &&
-    usage.cache_write_1h_tokens !== undefined &&
-    BigInt(usage.cache_write_tokens) !==
-      BigInt(usage.cache_write_5m_tokens) + BigInt(usage.cache_write_1h_tokens)
+    !cacheWritePartitionMatches(
+      usage.cache_write_tokens,
+      usage.cache_write_5m_tokens,
+      usage.cache_write_1h_tokens,
+    )
   )
     throw new TypeError("Provider cache write partitions disagree");
+  if (
+    usage.reasoning_tokens !== undefined &&
+    usage.output_tokens !== undefined &&
+    BigInt(usage.reasoning_tokens) > BigInt(usage.output_tokens)
+  )
+    throw new TypeError("Reasoning usage exceeds total output");
 }
 export function validatePricing(pricing: Pricing): void {
   if (!/^[A-Z]{3,8}$/.test(pricing.currency)) throw new TypeError("Invalid currency");

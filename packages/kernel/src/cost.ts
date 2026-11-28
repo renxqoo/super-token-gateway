@@ -1,9 +1,11 @@
 import { dimensions } from "./values.ts";
-import { validatePricing, validateUsage } from "./validation.ts";
+import { cacheWritePartitionMatches, validatePricing, validateUsage } from "./validation.ts";
 import type { Dimension, Pricing, Usage } from "./values.ts";
 
 const maxAtoms = 10n ** 38n - 1n;
 const maxSafeRate = 500_000_000n;
+const maxSafeIntegerBigInt = BigInt(Number.MAX_SAFE_INTEGER);
+const maxFastQuantity = 999_999n;
 const pricedDimensions = new Set<string>(dimensions);
 
 export type CompiledRateEntry = {
@@ -75,13 +77,20 @@ function validateUsageFast(usage: Usage): void {
     }
   }
   if (
-    usage.cache_write_tokens !== undefined &&
-    usage.cache_write_5m_tokens !== undefined &&
-    usage.cache_write_1h_tokens !== undefined &&
-    BigInt(usage.cache_write_tokens) !==
-      BigInt(usage.cache_write_5m_tokens) + BigInt(usage.cache_write_1h_tokens)
+    !cacheWritePartitionMatches(
+      usage.cache_write_tokens,
+      usage.cache_write_5m_tokens,
+      usage.cache_write_1h_tokens,
+    )
   ) {
     throw new TypeError("Provider cache write partitions disagree");
+  }
+  if (
+    usage.reasoning_tokens !== undefined &&
+    usage.output_tokens !== undefined &&
+    BigInt(usage.reasoning_tokens) > BigInt(usage.output_tokens)
+  ) {
+    throw new TypeError("Reasoning usage exceeds total output");
   }
 }
 
@@ -100,6 +109,7 @@ export function compilePricing(pricing: Pricing): CompiledPricing {
   validatePricing(pricing);
   const entries: CompiledRateEntry[] = [];
   let allUnitSafe = true;
+  let maxUnitSafeTotal = 0n;
   for (const dimension of dimensions) {
     const rate = pricing.rates[dimension];
     if (!rate || rate.numerator === "0") continue;
@@ -107,7 +117,12 @@ export function compilePricing(pricing: Pricing): CompiledPricing {
     const denominator = BigInt(rate.denominator);
     const unitDen = denominator === 1n;
     const isDecimalDim = dimension === "audio_seconds" || dimension === "video_seconds";
-    if (!unitDen || isDecimalDim || numerator > maxSafeRate) allUnitSafe = false;
+    if (!unitDen || isDecimalDim || numerator > maxSafeRate) {
+      allUnitSafe = false;
+    } else {
+      maxUnitSafeTotal += numerator * maxFastQuantity;
+      if (maxUnitSafeTotal > maxSafeIntegerBigInt) allUnitSafe = false;
+    }
     entries.push({
       dimension,
       numerator,

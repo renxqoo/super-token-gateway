@@ -1,9 +1,19 @@
-import { assertSchemaVersion, assertServiceRole, createDatabase } from "@gateway/ledger";
+import {
+  assertProductionPostgresTransport,
+  assertSchemaVersion,
+  assertServiceRole,
+  createDatabase,
+} from "@gateway/ledger";
 import { createWorkerRunner } from "./runner.ts";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
   throw new Error("DATABASE_URL is required");
+}
+
+const production = process.env.NODE_ENV === "production";
+if (production) {
+  assertProductionPostgresTransport(databaseUrl, process.env.NODE_TLS_REJECT_UNAUTHORIZED);
 }
 
 const dbPoolSize = Number(process.env.WORKER_DB_MAX ?? 8);
@@ -12,7 +22,7 @@ if (!Number.isSafeInteger(dbPoolSize) || dbPoolSize < 2) {
 }
 const db = createDatabase(databaseUrl, dbPoolSize);
 const currentVersion = await assertSchemaVersion(db);
-if (process.env.NODE_ENV === "production") await assertServiceRole(db, "stg_worker");
+if (production) await assertServiceRole(db, "stg_worker");
 
 const worker = createWorkerRunner({
   db,

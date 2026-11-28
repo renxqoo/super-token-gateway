@@ -44,6 +44,24 @@
           "checksum": "3fd9c11c095d4003b0d2b224b2d8309c7e07561d9389956c594b23c6ea9fc713"
         }
       ]
+    },
+    {
+      "version": 2026112801,
+      "files": [
+        {
+          "path": "./migrations/0005_async_task_admissions.sql",
+          "checksum": "b7466824cd7d98e86ed4bb8f2082585e8f2e01c91f0f67c74b459d4631225b59"
+        }
+      ]
+    },
+    {
+      "version": 2026112802,
+      "files": [
+        {
+          "path": "./migrations/0006_standardized_pricing.sql",
+          "checksum": "1bf8d39ee429fe74f66d8d63621e5b9c61fc6295f2bd19292117584696eb6bbf"
+        }
+      ]
     }
   ]
 }

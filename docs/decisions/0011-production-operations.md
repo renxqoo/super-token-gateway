@@ -27,6 +27,8 @@ Gateway 使用稳定的 PostgreSQL 写入口，切换前应隔离旧主连接。
 
 每个身份持有独立的至少 32 字节随机令牌，编码为无填充 Base64URL 或十六进制。使用私网 HTTPS 管理入口。将令牌保存在调用方密钥存储，Gateway 的 `INTERNAL_AUTH_FILE` 只包含令牌的 SHA-256 十六进制散列。多个角色可以赋予同一身份。替换或撤销凭证后滚动重启 Gateway。所有环境使用 `INTERNAL_AUTH_FILE`。生产环境还需配置两个 PostgreSQL 登录、共享 Redis 和插件验签公钥 `PLUGIN_SIGNING_PUBLIC_KEY_PEM`（启动期校验公钥合法性及原生 `wasmtime` 沙箱自检）。
 
+Gateway 数据面、控制面和独立 Worker 的生产 PostgreSQL 连接使用 `sslmode=verify-full`，由 Bun 校验服务器证书和主机名。与受控本地数据库或本地 TLS 代理通信时可使用字面回环地址。远端连接拒绝禁用证书校验，连接地址由 URL 主体指定。账本归档应写入由运行用户持有的私有目录，数据与清单仅向运行用户开放。现有归档和分发副本的权限由运维核对。
+
 ```json
 [
   {
@@ -66,6 +68,10 @@ Caddy 公网模板按 HTTP 方法转发 Gateway 的公开路径，包括音乐�
 
 视频任务查询和取消验证项目凭证与组织状态后，在读取任务之前先取得项目配额。正常查询、未找到的查询、已完成任务的查询以及取消操作使用同一个项目的 RPM、TPM 和并发额度，与推理共享配额。超限返回 `429`，共享配额不可用返回 `503`。跨项目请求在取得配额后仍返回 `404`。
 
+视频创建使用非流式响应，在派发前由 PostgreSQL 按账单账户串行预留一个名额，同时计入在途创建、已持久化的活跃任务和取消冷却中的任务。创建成功时，同一事务写入任务、账单和 Outbox 并消费预留。任务登记失败会撤回该事务，网关保留名额和待核账预扣。确定上游未执行时可以重试或归还名额。结果不明确时保留名额至到期，由 Worker 定期清理。部署新版前先执行账本迁移并应用角色授权，避免旧节点和新版节点同时处理视频创建。
+
+Console 管理的密钥在推理准入时复核当前数据库中的凭据和权限。快照与当前策略不一致时返回 503，等待节点同步。资金预占依据数据库中的当前密钥额度，租约快路径只使用无密钥额度的请求。
+
 公网业务入口在读取请求体前检查节点压力和 IP 配额。配置可信代理时，Gateway 从连接对端和可信转发链解析地址。生产仅应信任实际连接 Gateway 的代理及由它验证的上游转发链。健康路径和私网监听不消耗业务 IP 配额。
 
 IP 限流由 `INGRESS_IP_MODE` 控制，支持 `off`、`observe` 和 `enforce`。启用时需要配置 `REDIS_URL`、`INGRESS_IP_WINDOW_MS`、`INGRESS_IP_MAX_REQUESTS`、`INGRESS_IP_NODE_MAX_REQUESTS`、`INGRESS_IP_MAX_PENDING` 和 `INGRESS_IP_TIMEOUT_MS`。节点有界准入后，Redis 原子计数并返回窗口剩余时间。超额返回 `429 ip_rate_limited`，Redis 不可用、等待超时或节点入口饱和返回 `503`。观测模式只记录这些决策。入口配额使用独立连接，在等待超时时关闭该连接并释放待处理额度，后续请求可在已确认的主节点上重连。主备切换可能丢失尚未复制的计数。在 `enforce` 模式下，对于已同步鉴权通过且声明体积不超过 `65536` 字节的非 multipart 推理 POST 请求，Gateway 可将 IP 配额与账户共享配额合并到单次原子 Redis Lua 批量校验中（IP 校验严格先于账户配额扣除，触发前置错误时仍先执行独立 IP 配额校验并保留 `429`/`503` 语义）。
@@ -73,6 +79,8 @@ IP 限流由 `INGRESS_IP_MODE` 控制，支持 `off`、`observe` 和 `enforce`�
 资源保护由 `INGRESS_PRESSURE_MODE` 控制，沿用相同的三个模式。启用时显式配置 `INGRESS_PRESSURE_SAMPLE_MS`、`INGRESS_PRESSURE_STALE_MS`、`INGRESS_PRESSURE_HIGH_SAMPLES`、`INGRESS_PRESSURE_RECOVERY_SAMPLES`、`INGRESS_CPU_HIGH_PERCENT`、`INGRESS_CPU_RECOVERY_PERCENT`、`INGRESS_MEMORY_HIGH_PERCENT`、`INGRESS_MEMORY_RECOVERY_PERCENT` 和 `INGRESS_MEMORY_CRITICAL_PERCENT`。从 Linux cgroup v2 采样。超限时阻止新业务准入，放行既有请求收尾。缺少有效限额时保留固定并发基线，已经触发的保护需要有效恢复样本才能解除。采样状态与拒绝原因可通过私网指标观察。
 
 公开业务仅接受未编码或单独标记为 `identity` 的请求体，其他 `Content-Encoding` 返回 `415 unsupported_content_encoding` 及 `Accept-Encoding: identity`。`MAX_BODY_BYTES` 和 `BODY_READ_TIMEOUT_MS` 继续负责单请求上限。设置 `INGRESS_BODY_BUFFER_BYTES` 后，推理请求在读取前按请求体字节数预留节点总缓冲额度，未知长度按单请求上限预留。超时或断连时取消读取，处理结束时归还额度。流式请求在流终态时释放。预算用尽返回 `503 request_body_capacity_unavailable`。预算衡量原始请求体字节，解析和派生对象的内存由资源压力监控覆盖。
+
+访问日志只记录已通过权限和目录检查的模型名称。超过 16 KiB 的记录仅输出时间、请求 ID、Trace ID、操作、状态和截断标记。
 
 ## 容量配比与 PostgreSQL 存储调优
 

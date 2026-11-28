@@ -1,4 +1,5 @@
 import { GatewayError } from "@gateway/contracts";
+import { canRouteMatchCurrency } from "../pricing.ts";
 import type { HydratedCandidate } from "../proxy-state.ts";
 import { resolveRouteUpstreamProtocol } from "../upstream.ts";
 import type { InferenceRequest } from "./types.ts";
@@ -23,7 +24,16 @@ export function selectInferenceRoutes(request: InferenceRequest) {
         const billingPrice = snap.prices.get(r.billing_price_id);
         const costPrice = snap.prices.get(r.cost_version_id);
         if (!billingPrice || !costPrice) continue;
-        if (billingPrice.currency !== billingAccount.currency) continue;
+        if (
+          !canRouteMatchCurrency(
+            snap,
+            billingPrice.currency,
+            billingAccount.currency,
+            model.name,
+            operation,
+          )
+        )
+          continue;
         const candidateUpstreamProto = resolveRouteUpstreamProtocol(snap, channel, r, operation);
         list.push({
           id: r.id,

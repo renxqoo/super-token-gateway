@@ -88,6 +88,7 @@ try {
     ALLOW_PRIVATE_UPSTREAMS: "true",
     ACCESS_LOG: "false",
     HOLD_TTL_MS: "1500",
+    UNARY_CLIENT_ABORT_GRACE_MS: "0",
     WORKER_SWEEP_MS: "300",
     GATEWAY_HOST: "127.0.0.1",
     GATEWAY_PORT: String(gwPort),

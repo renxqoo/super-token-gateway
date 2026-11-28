@@ -3,6 +3,7 @@ import {
   calculateCompiledCostAtoms,
   compilePricing,
   DomainError,
+  evaluateSnapshotAtoms,
   hasPricedTokenUsage,
   type CompiledPricing,
   type Pricing,
@@ -78,18 +79,49 @@ export function priceSettlement(item: CommitTerminalInput): {
   ) {
     throw new DomainError("usage_alias_conflict", "Provider cache write partitions disagree");
   }
-  const customerAtoms = calculateSettlementCost(
-    usageForSettlement(item, item.billing_basis, item.billing_pricing),
-    item.billing_pricing,
-  );
+  let customerAtoms: bigint;
+  if (item.customer_pricing_snapshot) {
+    if (
+      item.customer_pricing_snapshot.side !== "CUSTOMER" ||
+      item.customer_pricing_snapshot.currency !== item.billing_pricing.currency
+    ) {
+      throw new DomainError("pricing_error", "Customer pricing snapshot side or currency mismatch");
+    }
+    customerAtoms = evaluateSnapshotAtoms(
+      item.customer_pricing_snapshot,
+      item.usage,
+      item.input_characters,
+    );
+  } else {
+    customerAtoms = calculateSettlementCost(
+      usageForSettlement(item, item.billing_basis, item.billing_pricing),
+      item.billing_pricing,
+    );
+  }
   if (item.supplier_cost_atoms_override === undefined) {
-    return {
-      customerAtoms,
-      supplierAtoms: calculateSettlementCost(
+    let supplierAtoms: bigint;
+    if (item.supplier_pricing_snapshot) {
+      if (
+        item.supplier_pricing_snapshot.side !== "SUPPLIER" ||
+        item.supplier_pricing_snapshot.currency !== item.supplier_currency
+      ) {
+        throw new DomainError(
+          "pricing_error",
+          "Supplier pricing snapshot side or currency mismatch",
+        );
+      }
+      supplierAtoms = evaluateSnapshotAtoms(
+        item.supplier_pricing_snapshot,
+        item.usage,
+        item.input_characters,
+      );
+    } else {
+      supplierAtoms = calculateSettlementCost(
         usageForSettlement(item, item.supplier_basis, item.supplier_pricing),
         item.supplier_pricing,
-      ),
-    };
+      );
+    }
+    return { customerAtoms, supplierAtoms };
   }
 
   const supplierAtoms = parseAtoms(item.supplier_cost_atoms_override);

@@ -331,6 +331,8 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
     },
   );
   expect(lowBalanceRule.status).toBe(201);
+  expect(lowBalanceRule.data).toMatchObject({ webhookConfigured: true });
+  expect(lowBalanceRule.data).not.toHaveProperty("webhookUrl");
 
   const dailySpendRule = await h.clientApi<{ id: string }>(
     "POST",
@@ -530,6 +532,19 @@ test("outbox push/pull, concurrent replay idempotency, refunds/adjustments, usag
     true,
   );
   expect(h.webhookDeliveries.length).toBe(4);
+
+  const alerts = await h.clientApi<{
+    rules: Record<string, unknown>[];
+    recent_deliveries: Record<string, unknown>[];
+  }>("GET", `/api/v1/billing-accounts/${usdBillingAccountId}/alerts`, customerAccess);
+  expect(alerts.status).toBe(200);
+  expect(alerts.data.rules).toHaveLength(2);
+  expect(alerts.data.recent_deliveries).toHaveLength(2);
+  for (const item of [...alerts.data.rules, ...alerts.data.recent_deliveries]) {
+    expect(item.webhookConfigured).toBe(true);
+    expect(item).not.toHaveProperty("webhookUrl");
+    expect(item).not.toHaveProperty("lastError");
+  }
 
   await h.conDb`
     INSERT INTO public.alert_eval_queue (billing_account_id)

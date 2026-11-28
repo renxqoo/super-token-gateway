@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createGatewayRuntime } from "@gateway/gateway";
-import type { AdaptiveRoutingPolicy } from "@gateway/kernel";
+import { canonical, type AdaptiveRoutingPolicy } from "@gateway/kernel";
 import {
   db,
   fakeUpstream,
@@ -35,6 +35,66 @@ const fee = (atoms: string) => ({
 const refusalFixture = (status: number, evidence: boolean) => ({
   status,
   unaryBody: { error: { code: evidence ? "rejected_before_generation" : "unknown_execution" } },
+});
+
+test("symptom: a historical flat price blocks unrelated pricing simulation after upgrade", async () => {
+  const upstream = fakeUpstream("legacy-price-simulation");
+  const runtime = createGatewayRuntime({ config: makeConfig(), db, wasmExecutor: null });
+  try {
+    const legacy = {
+      side: "CUSTOMER",
+      currency: "USD",
+      basis: "REQUEST_COMPLETION",
+      rates: {
+        requests: { numerator: "4", denominator: "1" },
+        input_tokens: { numerator: "999", denominator: "1" },
+      },
+      ceilings: { requests: "1", input_tokens: "100", metadata_units: "8" },
+    };
+    const id = crypto.randomUUID();
+    const digest = new Bun.CryptoHasher("sha256").update(canonical(legacy)).digest("hex");
+    await db`INSERT INTO public.price_versions (id, side, currency, basis, rates, ceilings, source_digest)
+      VALUES (${id}, ${legacy.side}, ${legacy.currency}, ${legacy.basis},
+        ${JSON.stringify(legacy.rates)}::text::jsonb, ${JSON.stringify(legacy.ceilings)}::text::jsonb, ${digest})`;
+    await runtime.start();
+    const f = await setup(runtime, [upstream]);
+    const simulate = () =>
+      internalCall(runtime.internalApp, "POST", "/internal/v1/pricing/simulate", {
+        model: f.model,
+        operation: "chat",
+        currency: "USD",
+        usage: { input_tokens: "9", output_tokens: "5" },
+        output_bound: 20,
+      });
+
+    const unrelated = await simulate();
+    expect(unrelated.status, JSON.stringify(unrelated.data)).toBe(200);
+    expect(unrelated.data.customer_breakdown).toMatchObject({ total_atoms: "14" });
+
+    const replay = await internalCall(runtime.internalApp, "POST", "/internal/v1/prices", {
+      id,
+      ...legacy,
+    });
+    expect(replay.status, JSON.stringify(replay.data)).toBe(200);
+    expect(replay.data).toMatchObject({ id, replayed: true, ceilings: legacy.ceilings });
+
+    const route = await internalCall(runtime.internalApp, "PUT", "/internal/v1/routes", {
+      id: f.routes[0]!.id,
+      model_name: f.model,
+      channel_id: f.channels[0]!.id,
+      upstream_model: "m",
+      operations: ["chat"],
+      billing_price_id: id,
+      cost_version_id: f.supplierPrices[0]!.id,
+    });
+    expect(route.status).toBe(200);
+    const selected = await simulate();
+    expect(selected.status, JSON.stringify(selected.data)).toBe(200);
+    expect(selected.data.customer_breakdown).toMatchObject({ total_atoms: "4" });
+  } finally {
+    await runtime.close();
+    await upstream.server.stop(true);
+  }
 });
 
 test("weighted chat applies adaptive ranking by default and supports durable opt-out and reset", async () => {

@@ -175,6 +175,8 @@ export class InferenceResources {
   private releaseAccountLimit: (() => void) | undefined;
   private releaseChannelLimit: (() => void) | undefined;
   private releaseOutputAdmission: (() => void) | undefined;
+  private releaseVideoAdmission: (() => Promise<void>) | undefined;
+  private retainVideoAdmission = false;
   private activeAttempt: AttemptLifetime | undefined;
   private handedToStream = false;
 
@@ -223,6 +225,18 @@ export class InferenceResources {
 
   setChannelLimit(release: () => void): void {
     this.releaseChannelLimit = release;
+  }
+
+  setVideoAdmission(release: () => Promise<void>): void {
+    this.releaseVideoAdmission = release;
+  }
+
+  get videoAdmissionRetained(): boolean {
+    return this.retainVideoAdmission;
+  }
+
+  setVideoAdmissionRetained(retain: boolean): void {
+    this.retainVideoAdmission = retain;
   }
 
   setOutputAdmission(release: (() => void) | undefined): void {
@@ -344,7 +358,7 @@ export class InferenceResources {
     return attempt;
   }
 
-  private readonly dispose = (): void => {
+  private readonly dispose = (): Promise<void> | undefined => {
     this.activeAttempt?.dispose();
     this.activeAttempt = undefined;
     this.activeAbortNotify = null;
@@ -356,17 +370,27 @@ export class InferenceResources {
     this.releaseLocalAccount = undefined;
     this.releaseBodyBuffer?.();
     this.releaseBodyBuffer = undefined;
-    this.releaseGuard?.();
+    const releaseGuard = this.releaseGuard;
     this.releaseGuard = undefined;
+    const releaseVideoAdmission = this.releaseVideoAdmission;
+    this.releaseVideoAdmission = undefined;
+    if (releaseVideoAdmission && !this.retainVideoAdmission) {
+      return releaseVideoAdmission()
+        .catch(() => undefined)
+        .finally(releaseGuard);
+    }
+    releaseGuard?.();
   };
 
   handToStream(): () => void {
     this.handedToStream = true;
-    return this.dispose;
+    return () => {
+      void this.dispose();
+    };
   }
 
-  finishRequest(): void {
-    if (!this.handedToStream) this.dispose();
+  finishRequest(): Promise<void> | undefined {
+    if (!this.handedToStream) return this.dispose();
   }
 }
 

@@ -438,7 +438,7 @@ export async function handleGetAsyncTask(
       peerAddress,
       deps.state,
     );
-    const check = deps.checkConsoleAdmission(billingAccount, key);
+    const check = deps.checkConsoleAdmission(billingAccount, key, "status");
     if (check) await check;
     releaseLimit = await acquireVideoTaskQuota(deps, billingAccount);
     const task = await deps.asyncTasks.getTaskForKey(
@@ -499,7 +499,7 @@ export async function handleCancelAsyncTask(
       peerAddress,
       deps.state,
     );
-    const check = deps.checkConsoleAdmission(billingAccount, key);
+    const check = deps.checkConsoleAdmission(billingAccount, key, "status");
     if (check) await check;
     releaseLimit = await acquireVideoTaskQuota(deps, billingAccount);
     const updated = await deps.asyncTasks.markUserCancelled(

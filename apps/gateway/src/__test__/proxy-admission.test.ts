@@ -321,9 +321,6 @@ test("symptom: native HTTP mid-body drain leaves stalled keep-alive upload open 
         },
         deps,
         "chat",
-        undefined,
-        undefined,
-        true,
       );
     },
   });
@@ -370,6 +367,99 @@ test("symptom: native HTTP mid-body drain leaves stalled keep-alive upload open 
     expect(bodyBudget.metrics()).toContain("gateway_ingress_body_buffer_reserved_bytes 0");
   } finally {
     socket.destroy();
+    deps.state?.close();
+    deps.transport.close();
+    await server.stop(true);
+  }
+});
+
+test("unauthorized and rate-limited POST requests with partial large bodies reject immediately before body completion", async () => {
+  const proj = makeBillingAccount("11111111-1111-4111-8111-111111111177", 1);
+  const validKey = createKey();
+  const disabledKey = createKey();
+  const unknownKey = createKey();
+  const disabledRec = { ...makeApiKey(disabledKey, proj.id), enabled: false };
+  const snap = makeSnapshot(1, [proj], [makeApiKey(validKey, proj.id), disabledRec]);
+  const config = makeConfig({
+    maxInFlight: 8,
+    maxBodyBytes: 1024 * 1024,
+    attemptTimeoutMs: 5_000,
+    bodyReadTimeoutMs: 5_000,
+  });
+  const deps = makeFakeDeps(snap, config);
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(req) {
+      return handleInferenceRequest(
+        {
+          req: { raw: req, query: () => undefined },
+          json(data, status, headers) {
+            return new Response(JSON.stringify(data), {
+              status: status ?? 200,
+              headers: { "content-type": "application/json", ...headers },
+            });
+          },
+        },
+        deps,
+        "chat",
+      );
+    },
+  });
+  const partialPrefix = `{"model":"gpt-4o","messages":[{"role":"user","content":"${"a".repeat(960)}`;
+  const declaredLen = 512 * 1024;
+  const openConns: Array<{ close: () => void }> = [];
+  try {
+    for (const badKey of [unknownKey, disabledKey]) {
+      const conn = sendSlowJsonUpload(server.port!, badKey, declaredLen, partialPrefix);
+      openConns.push(conn);
+      const t0 = performance.now();
+      const raw = await Promise.race([
+        conn.response,
+        Bun.sleep(800).then(() => "TIMED_OUT_WAITING_FOR_401"),
+      ]);
+      const elapsed = performance.now() - t0;
+      conn.close();
+      expect(raw).toContain("401");
+      expect(raw).toContain("unauthorized");
+      expect(elapsed).toBeLessThan(800);
+    }
+
+    const blocker = sendSlowJsonUpload(server.port!, validKey, declaredLen, partialPrefix);
+    openConns.push(blocker);
+    const deadline = Date.now() + 1000;
+    while (deps.lifecycle.size < 1 && Date.now() < deadline) await Bun.sleep(5);
+    expect(deps.lifecycle.size).toBe(1);
+
+    const limited = sendSlowJsonUpload(server.port!, validKey, declaredLen, partialPrefix);
+    openConns.push(limited);
+    const t0 = performance.now();
+    const limitedRaw = await Promise.race([
+      limited.response,
+      Bun.sleep(800).then(() => "TIMED_OUT_WAITING_FOR_429"),
+    ]);
+    const elapsed = performance.now() - t0;
+    limited.close();
+    expect(limitedRaw).toContain("429");
+    expect(limitedRaw).toContain("rate_limit_concurrency");
+    expect(elapsed).toBeLessThan(800);
+
+    blocker.close();
+    const drainDeadline = Date.now() + 1000;
+    while (deps.lifecycle.size > 0 && Date.now() < drainDeadline) await Bun.sleep(5);
+    expect(deps.lifecycle.size).toBe(0);
+
+    const control = await fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${validKey}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "not-configured",
+        messages: [{ role: "user", content: "ok" }],
+      }),
+    });
+    expect(control.status).toBe(404);
+  } finally {
+    for (const conn of openConns) conn.close();
     deps.state?.close();
     deps.transport.close();
     await server.stop(true);

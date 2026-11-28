@@ -2,6 +2,8 @@ import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
 import { createGatewayRuntime } from "../app.ts";
 import { loadConfigFromEnv } from "../config.ts";
+import { readRequestBytesBounded } from "../inference/body.ts";
+import { DeadlineWheel } from "../proxy-state.ts";
 import { createBodyBufferBudget, createPublicIngress } from "../public-ingress.ts";
 import { createCgroupPressureSampler, createPressureMonitor } from "../resource-pressure.ts";
 
@@ -37,6 +39,35 @@ const pressureEnv = {
   INGRESS_MEMORY_RECOVERY_PERCENT: "70",
   INGRESS_MEMORY_CRITICAL_PERCENT: "94",
 };
+
+test("a declared-length request body is cancelled when its read times out", async () => {
+  const deadlines = new DeadlineWheel();
+  let cancelled = false;
+  const req = new Request("http://fixture.test/", {
+    method: "POST",
+    headers: { "content-length": "8" },
+    body: new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    }),
+  });
+  try {
+    await expect(
+      readRequestBytesBounded(
+        req,
+        128,
+        10,
+        deadlines,
+        () => false,
+        () => {},
+      ),
+    ).rejects.toMatchObject({ code: "request_timeout" });
+    expect(cancelled).toBe(true);
+  } finally {
+    deadlines.close();
+  }
+});
 
 test("Gateway startup requires a role credentials file", () => {
   expect(() => loadConfigFromEnv({ ...baseEnv, INTERNAL_AUTH_FILE: undefined }, [])).toThrow(

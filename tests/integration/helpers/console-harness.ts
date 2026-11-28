@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from "node:crypto";
 import {
   localConsoleTokens,
   localInternalCredentials,
@@ -78,9 +79,11 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
   const outboxToken = `console-e2e-outbox-${suffix}-012345`;
   const bootstrapAdminEmail = "admin@platform.test";
   const bootstrapAdminToken = "bootstrap-secret-token-1234";
+  const registrationSigningSecret = randomBytes(32).toString("hex");
 
   let lastUpstreamAuth = "";
   const videoStates = new Map<string, { body: Record<string, unknown>; httpStatus?: number }>();
+  let videoCreateStatus = 200;
   const webhookDeliveries: RecordedWebhook[] = [];
   let webhookStatus = 200;
   let gatewayInterceptor: GatewayInterceptor | null = null;
@@ -109,6 +112,9 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
         });
       }
       if (req.method === "POST" && url.pathname === "/v2/video_generation") {
+        if (videoCreateStatus !== 200) {
+          return Response.json({ error: "fixture response" }, { status: videoCreateStatus });
+        }
         const tid = `up_con_${crypto.randomUUID().slice(0, 8)}`;
         videoStates.set(tid, { body: { status: "Processing", task_id: tid } });
         return Response.json({ task_id: tid });
@@ -225,6 +231,7 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
       outboxConsumerName: `console_e2e_${suffix}`,
       bootstrapAdminEmail,
       bootstrapAdminToken,
+      registrationSigningSecret,
       trustedProxyCidrs: [],
       sessionTtlMs: 3_600_000,
       refreshTtlMs: 86_400_000,
@@ -321,6 +328,10 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
       password = "UserPassword123!",
       displayName = "User",
     ) => {
+      const expiresAt = Date.now() + 60_000;
+      const proof = createHmac("sha256", Buffer.from(registrationSigningSecret, "hex"))
+        .update(`${expiresAt}\n${email.trim().toLowerCase()}`)
+        .digest("hex");
       const res = await clientApi<{
         access_token: string;
         refresh_token: string;
@@ -331,6 +342,7 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
         email,
         password,
         display_name: displayName,
+        registration_token: `${expiresAt}.${proof}`,
       });
       if (res.status !== 201) {
         throw new Error(`Register failed: ${res.status} ${JSON.stringify(res.data)}`);
@@ -377,6 +389,9 @@ export async function createConsoleTestHarness(options: ConsoleTestHarnessOption
       gatewayPublicUrl,
       gatewayInternalUrl,
       videoStates,
+      setVideoCreateStatus: (status: number) => {
+        videoCreateStatus = status;
+      },
       webhookDeliveries,
       getLastUpstreamAuth: () => lastUpstreamAuth,
       setWebhookStatus: (status: number) => {

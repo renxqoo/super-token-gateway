@@ -32,7 +32,6 @@ export async function handleInferenceRequest(
   operation: Operation,
   pathOverride?: { model: string; stream: boolean },
   peerAddress?: string | (() => string | undefined),
-  nativeHttp = false,
   handoff?: InferenceFastHandoff,
 ): Promise<Response> {
   const state = getProxyState(deps);
@@ -55,7 +54,6 @@ export async function handleInferenceRequest(
       telemetry,
       pathOverride,
       peerAddress,
-      nativeHttp,
       handoff,
     );
     const accounting = createInferenceAccounting(request, telemetry);
@@ -66,6 +64,7 @@ export async function handleInferenceRequest(
     telemetry.emitAccessLog(status, code);
     return errorJson(c, operation, error, requestId, trace);
   } finally {
-    resources.finishRequest();
+    const released = resources.finishRequest();
+    if (released) await released;
   }
 }

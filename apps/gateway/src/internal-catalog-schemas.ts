@@ -8,6 +8,7 @@ import {
   multiplierIntSchema,
 } from "./internal-request.ts";
 import { providerNameSchema, adapterOverridesSchema } from "./internal-provider-schemas.ts";
+import { pricingSpecSchema, quantityStringSchema } from "./internal-pricing-schemas.ts";
 
 const sourceRevisionSchema = z.number().int().min(1).max(2_147_483_647).optional();
 
@@ -22,6 +23,7 @@ export const upsertBillingAccountSchema = z
   .object({
     id: z.uuid().optional(),
     external_ref: z.string().max(200).nullable().optional(),
+    customer_group_id: z.string().min(1).max(120).nullable().optional(),
     name: z.string().min(1).max(120),
     currency: currencySchema.default("USD"),
     rpm: z.number().int().min(1).max(10_000_000).default(6000),
@@ -149,7 +151,8 @@ export const createPriceSchema = z
       .enum(["PROVIDER_USAGE", "REQUEST_COMPLETION", "INPUT_CHARACTERS"])
       .default("PROVIDER_USAGE"),
     rates: pricingSchema.shape.rates,
-    ceilings: z.record(z.string(), nonNegativeAtomsSchema).default({}),
+    ceilings: z.record(z.string(), quantityStringSchema).default({}),
+    pricing_spec: pricingSpecSchema.optional(),
   })
   .strict();
 

@@ -280,7 +280,18 @@ export function createLedgerQueries(db: SQL) {
             coalesce(sum(funded_atoms), 0)::text AS customer_funded_atoms,
             coalesce(sum(debt_atoms), 0)::text AS customer_debt_atoms,
             coalesce(sum(refunded_atoms), 0)::text AS customer_refunded_atoms,
-            coalesce(sum(supplier_cost_atoms) FILTER (WHERE supplier_currency IS NULL OR supplier_currency = currency), 0)::text AS supplier_cost_atoms
+            coalesce(sum(CASE
+              WHEN supplier_currency IS NULL OR supplier_currency = currency THEN supplier_cost_atoms
+              WHEN pricing_snapshot->'customer'->>'base_currency' = supplier_currency
+                AND (pricing_snapshot->'customer'->'fx_rate'->>'numerator') ~ '^[1-9][0-9]*$'
+                AND (pricing_snapshot->'customer'->'fx_rate'->>'denominator') ~ '^[1-9][0-9]*$'
+              THEN div(
+                supplier_cost_atoms * (pricing_snapshot->'customer'->'fx_rate'->>'numerator')::numeric
+                  + (pricing_snapshot->'customer'->'fx_rate'->>'denominator')::numeric - 1,
+                (pricing_snapshot->'customer'->'fx_rate'->>'denominator')::numeric
+              )
+              ELSE 0
+            END), 0)::text AS supplier_cost_atoms
           FROM public.billing_charges
           WHERE (${billingAccountId}::uuid IS NULL OR billing_account_id = ${billingAccountId}::uuid)
             AND (${currency}::text IS NULL OR currency = ${currency}::text)
@@ -351,7 +362,18 @@ export function createLedgerQueries(db: SQL) {
             count(*)::int AS charge_count,
             coalesce(sum(customer_atoms), 0)::text AS customer_billed_atoms,
             coalesce(sum(refunded_atoms), 0)::text AS customer_refunded_atoms,
-            coalesce(sum(supplier_cost_atoms) FILTER (WHERE supplier_currency IS NULL OR supplier_currency = currency), 0)::text AS supplier_cost_atoms
+            coalesce(sum(CASE
+              WHEN supplier_currency IS NULL OR supplier_currency = currency THEN supplier_cost_atoms
+              WHEN pricing_snapshot->'customer'->>'base_currency' = supplier_currency
+                AND (pricing_snapshot->'customer'->'fx_rate'->>'numerator') ~ '^[1-9][0-9]*$'
+                AND (pricing_snapshot->'customer'->'fx_rate'->>'denominator') ~ '^[1-9][0-9]*$'
+              THEN div(
+                supplier_cost_atoms * (pricing_snapshot->'customer'->'fx_rate'->>'numerator')::numeric
+                  + (pricing_snapshot->'customer'->'fx_rate'->>'denominator')::numeric - 1,
+                (pricing_snapshot->'customer'->'fx_rate'->>'denominator')::numeric
+              )
+              ELSE 0
+            END), 0)::text AS supplier_cost_atoms
           FROM public.billing_charges
           WHERE (${billingAccountId}::uuid IS NULL OR billing_account_id = ${billingAccountId}::uuid)
             AND (${currency}::text IS NULL OR currency = ${currency}::text)
@@ -377,7 +399,18 @@ export function createLedgerQueries(db: SQL) {
             count(*)::int AS charge_count,
             coalesce(sum(customer_atoms), 0)::text AS customer_billed_atoms,
             coalesce(sum(refunded_atoms), 0)::text AS customer_refunded_atoms,
-            coalesce(sum(supplier_cost_atoms) FILTER (WHERE supplier_currency IS NULL OR supplier_currency = currency), 0)::text AS supplier_cost_atoms
+            coalesce(sum(CASE
+              WHEN supplier_currency IS NULL OR supplier_currency = currency THEN supplier_cost_atoms
+              WHEN pricing_snapshot->'customer'->>'base_currency' = supplier_currency
+                AND (pricing_snapshot->'customer'->'fx_rate'->>'numerator') ~ '^[1-9][0-9]*$'
+                AND (pricing_snapshot->'customer'->'fx_rate'->>'denominator') ~ '^[1-9][0-9]*$'
+              THEN div(
+                supplier_cost_atoms * (pricing_snapshot->'customer'->'fx_rate'->>'numerator')::numeric
+                  + (pricing_snapshot->'customer'->'fx_rate'->>'denominator')::numeric - 1,
+                (pricing_snapshot->'customer'->'fx_rate'->>'denominator')::numeric
+              )
+              ELSE 0
+            END), 0)::text AS supplier_cost_atoms
           FROM public.billing_charges
           WHERE (${billingAccountId}::uuid IS NULL OR billing_account_id = ${billingAccountId}::uuid)
             AND (${currency}::text IS NULL OR currency = ${currency}::text)
@@ -403,14 +436,36 @@ export function createLedgerQueries(db: SQL) {
             count(*)::int AS charge_count,
             coalesce(sum(customer_atoms), 0)::text AS customer_billed_atoms,
             coalesce(sum(refunded_atoms), 0)::text AS customer_refunded_atoms,
-            coalesce(sum(supplier_cost_atoms) FILTER (WHERE supplier_currency IS NULL OR supplier_currency = currency), 0)::text AS supplier_cost_atoms
+            coalesce(sum(CASE
+              WHEN supplier_currency IS NULL OR supplier_currency = currency THEN supplier_cost_atoms
+              WHEN pricing_snapshot->'customer'->>'base_currency' = supplier_currency
+                AND (pricing_snapshot->'customer'->'fx_rate'->>'numerator') ~ '^[1-9][0-9]*$'
+                AND (pricing_snapshot->'customer'->'fx_rate'->>'denominator') ~ '^[1-9][0-9]*$'
+              THEN div(
+                supplier_cost_atoms * (pricing_snapshot->'customer'->'fx_rate'->>'numerator')::numeric
+                  + (pricing_snapshot->'customer'->'fx_rate'->>'denominator')::numeric - 1,
+                (pricing_snapshot->'customer'->'fx_rate'->>'denominator')::numeric
+              )
+              ELSE 0
+            END), 0)::text AS supplier_cost_atoms
           FROM public.billing_charges
           WHERE (${billingAccountId}::uuid IS NULL OR billing_account_id = ${billingAccountId}::uuid)
             AND (${currency}::text IS NULL OR currency = ${currency}::text)
             AND (${from}::timestamptz IS NULL OR created_at >= ${from}::timestamptz)
             AND (${to}::timestamptz IS NULL OR created_at < ${to}::timestamptz)
           GROUP BY channel_id, currency
-          ORDER BY sum(supplier_cost_atoms) DESC, key ASC
+          ORDER BY coalesce(sum(CASE
+              WHEN supplier_currency IS NULL OR supplier_currency = currency THEN supplier_cost_atoms
+              WHEN pricing_snapshot->'customer'->>'base_currency' = supplier_currency
+                AND (pricing_snapshot->'customer'->'fx_rate'->>'numerator') ~ '^[1-9][0-9]*$'
+                AND (pricing_snapshot->'customer'->'fx_rate'->>'denominator') ~ '^[1-9][0-9]*$'
+              THEN div(
+                supplier_cost_atoms * (pricing_snapshot->'customer'->'fx_rate'->>'numerator')::numeric
+                  + (pricing_snapshot->'customer'->'fx_rate'->>'denominator')::numeric - 1,
+                (pricing_snapshot->'customer'->'fx_rate'->>'denominator')::numeric
+              )
+              ELSE 0
+            END), 0) DESC, key ASC
           LIMIT 50
         `,
         ]);

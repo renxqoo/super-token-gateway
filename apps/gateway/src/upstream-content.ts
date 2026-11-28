@@ -41,9 +41,10 @@ export function extractRequestText(body: Record<string, unknown>, operation: Ope
     else if (Array.isArray(body.input)) {
       for (const item of body.input) {
         const obj = optionalObject(item);
-        if (typeof obj.content === "string") parts.push(obj.content);
-        else if (Array.isArray(obj.content)) {
-          for (const p of obj.content) {
+        const content = obj.type === "function_call_output" ? obj.output : obj.content;
+        if (typeof content === "string") parts.push(content);
+        else if (Array.isArray(content)) {
+          for (const p of content) {
             const part = optionalObject(p);
             if (typeof part.text === "string") parts.push(part.text);
           }
@@ -109,7 +110,10 @@ export function replaceRequestText(
       return copyExact(body, { ...body, input: nextText });
     }
     if (Array.isArray(body.input) && body.input.length > 0) {
-      const items = body.input.map((it) => ({ ...optionalObject(it) }));
+      const items = body.input.map((it) => {
+        const item = optionalObject(it);
+        return copyExact(item, { ...item });
+      });
       for (let i = items.length - 1; i >= 0; i--) {
         if (typeof items[i]!.content === "string") {
           items[i]!.content = nextText;
@@ -263,18 +267,23 @@ export async function transformRequestTexts(
         changed = true;
       }
     } else if (Array.isArray(body.input)) {
-      const items = body.input.map((it) => ({ ...optionalObject(it) }));
+      const items = body.input.map((it) => {
+        const item = optionalObject(it);
+        return copyExact(item, { ...item });
+      });
       let inputChanged = false;
       for (const item of items) {
-        if (typeof item.content === "string" && item.content.length > 0) {
-          const res = await transform(item.content);
+        const field = item.type === "function_call_output" ? "output" : "content";
+        const content = item[field];
+        if (typeof content === "string" && content.length > 0) {
+          const res = await transform(content);
           if (res.blocked) return { blocked: true, body };
-          if (res.text !== item.content) {
-            item.content = res.text;
+          if (res.text !== content) {
+            item[field] = res.text;
             inputChanged = true;
           }
-        } else if (Array.isArray(item.content)) {
-          const parts = item.content.map((p) => ({ ...optionalObject(p) }));
+        } else if (Array.isArray(content)) {
+          const parts = content.map((p) => ({ ...optionalObject(p) }));
           let partChanged = false;
           for (const part of parts) {
             if (typeof part.text === "string" && part.text.length > 0) {
@@ -287,7 +296,7 @@ export async function transformRequestTexts(
             }
           }
           if (partChanged) {
-            item.content = parts;
+            item[field] = parts;
             inputChanged = true;
           }
         }

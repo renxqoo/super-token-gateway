@@ -5,7 +5,7 @@ import {
   type AdaptiveRoutingPolicy,
   type CompiledPricing,
 } from "@gateway/kernel";
-import type { PriceVersionRecord } from "@gateway/ledger";
+import { hasPricingSpec, type PriceVersionRecord } from "@gateway/ledger";
 import type { HydratedCandidate } from "../proxy-state.ts";
 import type { AdaptiveDecision } from "../routing-metrics.ts";
 import { adaptiveRouteProfile, estimateTextChatInput } from "../upstream.ts";
@@ -38,6 +38,10 @@ function hasUniformRetryPolicy(group: readonly HydratedCandidate[], defaultTimeo
 function comparablePrice(price: PriceVersionRecord) {
   const cached = prices.get(price);
   if (cached !== undefined) return cached;
+  if (hasPricingSpec(price.pricing_spec)) {
+    prices.set(price, null);
+    return null;
+  }
   let compiled: CompiledPricing | null = null;
   const rates =
     price.basis === "REQUEST_COMPLETION"
@@ -127,6 +131,14 @@ export function adaptiveOrdering(
       `${candidate.id}\0${modelKey}\0${profile.revision}\0${policy.first_content_target_ms}`,
     );
   }
+  const hasRouteScopedModifier =
+    snap.pricingModifiers?.some(
+      (m) =>
+        m.enabled &&
+        (m.match.channel_id !== undefined || m.match.upstream_account_id !== undefined) &&
+        (!m.match.model || m.match.model === "*" || m.match.model === model.name),
+    ) ?? false;
+  if (hasRouteScopedModifier) compatible = false;
   if (!compatible) observe("incompatible");
 
   let inputTokens: string | null | undefined;

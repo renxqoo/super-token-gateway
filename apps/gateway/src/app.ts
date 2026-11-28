@@ -32,7 +32,7 @@ import {
 } from "@gateway/runtime";
 import { createWorkerRunner } from "@gateway/worker";
 import type { GatewayConfig } from "./config.ts";
-import { createConsoleAdmissionCheck } from "./console-admission.ts";
+import { createConsoleAdmissionCheck, requiresConsoleAdmission } from "./console-admission.ts";
 import {
   handleCancelAsyncTask,
   handleGetAsyncTask,
@@ -605,7 +605,6 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
   function fetchPublic(
     req: Request,
     env?: string | { peerAddress?: string; getPeerAddress?: () => string | undefined },
-    nativeHttp = false,
   ): Response | Promise<Response> {
     const url = req.url;
     const scheme = url.indexOf("://");
@@ -630,7 +629,6 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
           operation,
           undefined,
           requestPeer,
-          nativeHttp,
           { declaredSize: prep.declaredSize },
         );
       }
@@ -639,21 +637,12 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
         try {
           const snap = snapshot.get();
           const auth = authenticateRequest(ctx, snap, config, operation, requestPeer, proxyState);
-          const consoleCheck = checkConsoleAdmission(auth.billingAccount, auth.key);
-          if (!consoleCheck) {
-            return handleInferenceRequest(
-              ctx,
-              proxyDeps,
-              operation,
-              undefined,
-              requestPeer,
-              nativeHttp,
-              {
-                preAuth: { snap, key: auth.key, billingAccount: auth.billingAccount },
-                declaredSize: prep.declaredSize,
-                deferredIngress: ingress.activateDeferred(prep.ip),
-              },
-            );
+          if (!requiresConsoleAdmission(auth.billingAccount)) {
+            return handleInferenceRequest(ctx, proxyDeps, operation, undefined, requestPeer, {
+              preAuth: { snap, key: auth.key, billingAccount: auth.billingAccount },
+              declaredSize: prep.declaredSize,
+              deferredIngress: ingress.activateDeferred(prep.ip),
+            });
           }
         } catch {
           void 0;
@@ -673,7 +662,6 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions) {
             operation,
             undefined,
             requestPeer,
-            nativeHttp,
           )
         : publicApp.fetch(
             req,

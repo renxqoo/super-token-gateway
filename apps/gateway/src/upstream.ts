@@ -12,7 +12,7 @@ import {
   type WasmRuntimeExecutor,
 } from "@gateway/plugin-engine";
 import { stringifyExact, validateRequestPolicy, type ConversionMode } from "@gateway/protocol";
-import { validateMeteredRequest } from "./request-metering.ts";
+import { validateMeteredRequest, type MeteredValidationOptions } from "./request-metering.ts";
 import { applyAuthToRequest, isValidHttpHeaderValue, type VertexTokens } from "@gateway/runtime";
 import {
   type MergedProviderOverrides,
@@ -45,12 +45,18 @@ export {
 
 import {
   estimateTextChatInput,
+  estimateTextGeminiInput,
   estimateTextInputForProtocol,
   estimateTextMessagesInput,
   estimateTextResponsesInput,
 } from "./upstream-input-estimate.ts";
 
-export { estimateTextChatInput, estimateTextResponsesInput, estimateTextMessagesInput };
+export {
+  estimateTextChatInput,
+  estimateTextGeminiInput,
+  estimateTextResponsesInput,
+  estimateTextMessagesInput,
+};
 
 const encoder = new TextEncoder();
 
@@ -217,6 +223,7 @@ export type PrepareUpstreamOptions = {
   isStream: boolean;
   canMutateClientBody?: boolean;
   alreadyValidated?: boolean;
+  meteredValidation?: MeteredValidationOptions;
   estimateInputTokens?: boolean;
   vertexTokens: VertexTokens;
   wasmExecutor: WasmRuntimeExecutor | null;
@@ -227,6 +234,16 @@ export type PrepareUpstreamOptions = {
   onFieldRejected?: (source: Protocol, target: Protocol, field: string) => void;
   signal: AbortSignal;
 };
+
+function assertProviderDestination(baseUrl: string, url: URL): void {
+  if (url.origin !== new URL(baseUrl).origin) {
+    throw new GatewayError(
+      502,
+      "invalid_provider_config",
+      "Upstream request escaped its configured origin",
+    );
+  }
+}
 
 export function tryPrepareUpstreamRequestSync(
   options: Omit<PrepareUpstreamOptions, "signal">,
@@ -270,6 +287,7 @@ export function tryPrepareUpstreamRequestSync(
         err instanceof Error ? err.message : "Failed to render provider endpoint URL",
       );
     }
+    assertProviderDestination(channel.base_url, url);
     staticEndpoints.set(endpointKey, url);
   }
 
@@ -295,7 +313,7 @@ export function tryPrepareUpstreamRequestSync(
     plan.payloadPreservesMetering &&
     (upstreamProtocol === null || upstreamProtocol === operation)
   )) {
-    validateMeteredRequest(payload, upstreamProtocol ?? operation);
+    validateMeteredRequest(payload, upstreamProtocol ?? operation, options.meteredValidation);
   }
 
   const headers: Record<string, string> = {};
@@ -398,6 +416,7 @@ export async function prepareUpstreamRequest(
             extraQuery: mergedOverrides.query_params,
           })
         : joinBase(channel.base_url, mergedOverrides.path_override ?? defaultMultipartPath);
+    assertProviderDestination(channel.base_url, url);
     const encoded = await encodeMultipartWithModel(multipartEntries, route.upstream_model);
     headers.set("content-type", encoded.contentType);
     await applyAuthToRequest({
@@ -466,7 +485,7 @@ export async function prepareUpstreamRequest(
       plan.payloadPreservesMetering &&
       (upstreamProtocol === null || upstreamProtocol === operation)
     )) {
-      validateMeteredRequest(payload, upstreamProtocol ?? operation);
+      validateMeteredRequest(payload, upstreamProtocol ?? operation, options.meteredValidation);
     }
     bodyBytes = encoder.encode(stringifyExact(payload));
   } else {
@@ -520,11 +539,16 @@ export async function prepareUpstreamRequest(
       capKnownOutput(wasmOut.body, upstreamProtocol, options.outputBound);
     }
     if (resolved.config.base_dialect !== "passthrough") {
-      validateMeteredRequest(wasmOut.body, upstreamProtocol ?? operation);
+      validateMeteredRequest(
+        wasmOut.body,
+        upstreamProtocol ?? operation,
+        options.meteredValidation,
+      );
     }
     bodyBytes = encoder.encode(stringifyExact(wasmOut.body));
   }
 
+  assertProviderDestination(channel.base_url, url);
   await applyAuthToRequest({
     auth: resolved.config.auth,
     secret,
@@ -548,12 +572,18 @@ export async function prepareUpstreamRequest(
   };
 }
 
+const RETRY_AFTER_HTTP_DATE =
+  /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s\d{2}\s(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s\d{4}\s\d{2}:\d{2}:\d{2}\sGMT|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s\d{2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2}\s\d{2}:\d{2}:\d{2}\sGMT|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s(?:\d{2}|\s\d)\s\d{2}:\d{2}:\d{2}\s\d{4})$/i;
+
 export function parseRetryAfterMs(header: string | null): number | undefined {
   if (!header) return undefined;
   const trimmed = header.trim();
   if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
-    return Math.max(0, Math.round(Number(trimmed) * 1000));
+    const seconds = Number(trimmed);
+    if (!Number.isFinite(seconds)) return undefined;
+    return Math.max(0, Math.round(seconds * 1000));
   }
+  if (!RETRY_AFTER_HTTP_DATE.test(trimmed)) return undefined;
   const ts = Date.parse(trimmed);
   if (Number.isFinite(ts)) {
     return Math.max(0, ts - Date.now());

@@ -159,6 +159,8 @@ export async function relayMediaStream(
       observedUsage,
       deliveredImages?.size,
       authorizedImages,
+      candBilling.customerSnapshot,
+      candBilling.supplierSnapshot,
     );
     if (!usage) {
       await accounting.finalizeHold("unknown");

@@ -1,6 +1,7 @@
 import { GatewayError } from "@gateway/contracts";
 import {
   clearExactProperty,
+  compareExactNumber,
   copyExact,
   numberLiteral,
   readUsageQuantity,
@@ -332,10 +333,23 @@ export function applyBodyTransforms(
         const parts = assertSafeFieldPath(rule.path);
         const cur = getAtPath(out, parts);
         if (typeof cur === "number" && Number.isFinite(cur)) {
-          let next = cur;
-          if (rule.min !== undefined && next < rule.min) next = rule.min;
-          if (rule.max !== undefined && next > rule.max) next = rule.max;
-          if (next !== cur) setAtPath(out, parts, next);
+          const parent = parts.length === 1 ? out : getAtPath(out, parts.slice(0, -1));
+          const literal =
+            parent !== null && typeof parent === "object"
+              ? numberLiteral(parent, parts.at(-1)!)
+              : undefined;
+          if (literal !== undefined) {
+            if (rule.min !== undefined && compareExactNumber(literal, rule.min) < 0) {
+              setAtPath(out, parts, rule.min);
+            } else if (rule.max !== undefined && compareExactNumber(literal, rule.max) > 0) {
+              setAtPath(out, parts, rule.max);
+            }
+          } else {
+            let next = cur;
+            if (rule.min !== undefined && next < rule.min) next = rule.min;
+            if (rule.max !== undefined && next > rule.max) next = rule.max;
+            if (next !== cur) setAtPath(out, parts, next);
+          }
         }
         break;
       }

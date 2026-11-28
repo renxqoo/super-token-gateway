@@ -2,7 +2,7 @@ import { Hono, type Handler, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { GatewayError } from "@gateway/contracts";
-import { DomainError, type Operation, type Pricing } from "@gateway/kernel";
+import { DomainError, type Operation, type Pricing, type PricingSpec } from "@gateway/kernel";
 import { createPluginReleaseRepository, getApiKeySpend, resetApiKeySpend } from "@gateway/ledger";
 import type {
   AdapterOverrides,
@@ -27,6 +27,7 @@ import {
 import { authenticateInternal, type InternalRole } from "./internal-auth.ts";
 import { registerInternalFinanceRoutes } from "./internal-finance-routes.ts";
 import { registerInternalPluginRoutes } from "./internal-plugin-routes.ts";
+import { registerInternalPricingRoutes } from "./internal-pricing-routes.ts";
 import { type AdminEnv, type AdminContext, parseBody, parseUuid } from "./internal-request.ts";
 import {
   upsertBillingAccountSchema,
@@ -205,6 +206,7 @@ export function createInternalApi(deps: InternalApiDeps) {
         "console_billing_account_binding_conflict",
         "api_key_scope_conflict",
         "price_version_conflict",
+        "fx_rate_version_conflict",
         "reconcile_required_conflict",
         "insufficient_balance",
         "credit_limit_exceeded",
@@ -214,13 +216,26 @@ export function createInternalApi(deps: InternalApiDeps) {
     ) {
       return c.json({ error: { code: err.code, message: err.message } }, 409);
     }
+    if (
+      err instanceof DomainError &&
+      ["tariff_unavailable", "ambiguous_pricing", "invalid_tariff", "billing_ceiling"].includes(
+        err.code,
+      )
+    ) {
+      return c.json({ error: { code: err.code, message: err.message } }, 422);
+    }
     const status = err instanceof GatewayError ? err.status : 400;
     const code =
       err instanceof GatewayError ||
       (err instanceof DomainError &&
-        ["invalid_plugin_binding", "invalid_channel_secret", "invalid_price_override"].includes(
-          err.code,
-        ))
+        [
+          "invalid_plugin_binding",
+          "invalid_channel_secret",
+          "invalid_price",
+          "invalid_price_override",
+          "invalid_pricing_modifier",
+          "invalid_fx_rate",
+        ].includes(err.code))
         ? err.code
         : "internal_api_error";
     return c.json({ error: { code, message: err.message } }, status as 400);
@@ -245,9 +260,15 @@ export function createInternalApi(deps: InternalApiDeps) {
     "catalog",
     upsertBillingAccountSchema,
     async (c, body) => {
+      if (body.customer_group_id !== undefined && !c.get("principal").roles.includes("finance")) {
+        throw new GatewayError(403, "forbidden", "Setting customer_group_id requires finance role");
+      }
       const rec = await deps.catalog.upsertBillingAccount({
         ...(body.id ? { id: body.id } : {}),
         ...(body.external_ref !== undefined ? { external_ref: body.external_ref } : {}),
+        ...(body.customer_group_id !== undefined
+          ? { customer_group_id: body.customer_group_id }
+          : {}),
         name: body.name,
         currency: body.currency,
         rpm: body.rpm,
@@ -436,6 +457,9 @@ export function createInternalApi(deps: InternalApiDeps) {
       basis: body.basis as PriceBasis,
       rates: body.rates as Pricing["rates"],
       ceilings: body.ceilings,
+      ...(body.pricing_spec !== undefined
+        ? { pricing_spec: body.pricing_spec as PricingSpec }
+        : {}),
     });
     if (!rec.replayed) await onConfigUpdated(rec.config_epoch);
     return c.json(rec, rec.replayed ? 200 : 201);
@@ -505,6 +529,8 @@ export function createInternalApi(deps: InternalApiDeps) {
     authorize,
     checkBodySize,
   });
+
+  registerInternalPricingRoutes({ jsonRoute, route, deps, onConfigUpdated });
 
   registerInternalFinanceRoutes({ jsonRoute, deps, route, onConfigUpdated });
 

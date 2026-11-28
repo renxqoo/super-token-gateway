@@ -42,7 +42,7 @@ export async function handleUnaryResponse(
   context: AttemptResponse,
 ): Promise<Response | RetryAttempt> {
   const {
-    request: { c, deps, snap, operation, requestId, trace, billingAccount, key, model },
+    request: { c, deps, snap, operation, requestId, trace, billingAccount, model },
     resources,
     telemetry,
     accounting,
@@ -120,7 +120,17 @@ export async function handleUnaryResponse(
 
     if (!isUpstreamJson) {
       releaseBackups();
-      const usage = buildUsageForOperation(operation, candBilling.price, cand.costPrice, undefined);
+      const usage = buildUsageForOperation(
+        operation,
+        candBilling.price,
+        cand.costPrice,
+        undefined,
+        undefined,
+        undefined,
+        candBilling.customerSnapshot,
+        candBilling.supplierSnapshot,
+        candBilling.meteredAllowedHostedTools,
+      );
       if (!usage) {
         await accounting.finalizeHold("unknown");
         throw new GatewayError(
@@ -303,6 +313,9 @@ export async function handleUnaryResponse(
         ? countImageArtifacts(clientJson.data)
         : undefined,
       authorizedImages,
+      candBilling.customerSnapshot,
+      candBilling.supplierSnapshot,
+      candBilling.meteredAllowedHostedTools,
     );
     if (!usage) {
       await accounting.finalizeHold("unknown");
@@ -366,46 +379,42 @@ export async function handleUnaryResponse(
             : {}),
         })
       : channelJsonHeaders(requestId, trace, cand.channel, prepared.droppedFields);
+    const upstreamTaskId =
+      operation === "videos" && deps.asyncTasks && !block
+        ? extractUpstreamTaskId(clientJson, getAsyncTaskConfig(snap, cand.channel))
+        : null;
+
     const commitRes = await settle({
       usage,
       plugin_audit: allAudit,
       charge_policy: block?.chargePolicy ?? "CHARGE_CUSTOMER",
       moderation_blocked: block !== undefined,
       allowAfterClientAbort: allowClientAbortGrace,
+      ...(upstreamTaskId
+        ? {
+            async_task: {
+              id: `vid_${fastUuid().replaceAll("-", "")}`,
+              upstream_task_id: upstreamTaskId,
+              result_json: clientJson,
+            },
+          }
+        : {}),
     });
     if (block && !block.isContentDecision) {
       deps.metrics.recordPlatformAbsorb(billingAccount.id, commitRes.supplier_cost_atoms);
     }
 
-    if (operation === "videos" && deps.asyncTasks && !block) {
-      const asyncCfg = getAsyncTaskConfig(snap, cand.channel);
-      const upstreamTaskId = extractUpstreamTaskId(clientJson, asyncCfg);
-      if (upstreamTaskId) {
-        const taskId = `vid_${fastUuid().replaceAll("-", "")}`;
-        const taskRec = await deps.asyncTasks
-          .createTask({
-            id: taskId,
-            request_id: requestId,
-            charge_id: commitRes.charge_id,
-            billing_account_id: billingAccount.id,
-            api_key_id: key.id,
-            channel_id: cand.channel.id,
-            model: model.name,
-            operation,
-            upstream_task_id: upstreamTaskId,
-            status: "QUEUED",
-            result_json: clientJson,
-          })
-          .catch(() => null);
-        if (taskRec) {
-          clientJson = {
-            ...clientJson,
-            gateway_task_id: taskRec.id,
-            ...(typeof clientJson.id !== "string" ? { id: taskRec.id } : {}),
-          };
-          responseModified = true;
-        }
+    if (upstreamTaskId) {
+      const taskId = commitRes.async_task_id;
+      if (!taskId) {
+        throw new GatewayError(503, "ledger_commit_failed", "Ledger could not confirm video task");
       }
+      clientJson = {
+        ...clientJson,
+        gateway_task_id: taskId,
+        ...(typeof clientJson.id !== "string" ? { id: taskId } : {}),
+      };
+      responseModified = true;
     }
 
     pluginSignal.throwIfAborted();
@@ -449,6 +458,9 @@ export async function handleUnaryResponse(
     fromWasm: boolean,
   ): Promise<Response | RetryAttempt> {
     const { retry_kind, http_status, message, retry_after_ms, execution } = logical;
+    if (operation === "videos" && execution === "NOT_EXECUTED") {
+      resources.setVideoAdmissionRetained(false);
+    }
     const failure = `logical_${retry_kind}`;
     telemetry.recordAttemptFailure(failure, retry_kind, describeFailure?.(body));
     const outcome = rejectedOutcome(execution === "NOT_EXECUTED");

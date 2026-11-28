@@ -340,6 +340,162 @@ export function estimateTextMessagesInput(
   );
 }
 
+const textGeminiTopFields = new Set([
+  "model",
+  "contents",
+  "systemInstruction",
+  "system_instruction",
+  "generationConfig",
+  "generation_config",
+  "tools",
+  "toolConfig",
+  "tool_config",
+  "safetySettings",
+  "safety_settings",
+  "stream",
+]);
+const textGeminiContentFields = new Set(["role", "parts"]);
+const textGeminiPartFields = new Set([
+  "text",
+  "thought",
+  "thoughtSignature",
+  "thought_signature",
+  "functionCall",
+  "function_call",
+  "functionResponse",
+  "function_response",
+]);
+
+const textGeminiFunctionCallFields = new Set(["id", "name", "args"]);
+const textGeminiFunctionResponseFields = new Set(["id", "name", "response"]);
+
+function isGeminiTextOnlyPart(rawPart: unknown): boolean {
+  if (!isPlainRecord(rawPart) || !hasOnlyFields(rawPart, textGeminiPartFields)) return false;
+  if (rawPart.text !== undefined && typeof rawPart.text !== "string") return false;
+  if (rawPart.thought !== undefined && typeof rawPart.thought !== "boolean") return false;
+  if (rawPart.thoughtSignature !== undefined && typeof rawPart.thoughtSignature !== "string") {
+    return false;
+  }
+  if (rawPart.thought_signature !== undefined && typeof rawPart.thought_signature !== "string") {
+    return false;
+  }
+  if (rawPart.functionCall !== undefined && rawPart.function_call !== undefined) return false;
+  if (rawPart.functionResponse !== undefined && rawPart.function_response !== undefined) {
+    return false;
+  }
+  for (const fc of [rawPart.functionCall, rawPart.function_call]) {
+    if (
+      fc !== undefined &&
+      (!isPlainRecord(fc) || !hasOnlyFields(fc, textGeminiFunctionCallFields))
+    ) {
+      return false;
+    }
+  }
+  for (const fr of [rawPart.functionResponse, rawPart.function_response]) {
+    if (
+      fr !== undefined &&
+      (!isPlainRecord(fr) || !hasOnlyFields(fr, textGeminiFunctionResponseFields))
+    ) {
+      return false;
+    }
+  }
+  return (
+    rawPart.text !== undefined ||
+    rawPart.functionCall !== undefined ||
+    rawPart.function_call !== undefined ||
+    rawPart.functionResponse !== undefined ||
+    rawPart.function_response !== undefined
+  );
+}
+
+export function estimateTextGeminiInput(
+  payload: Record<string, unknown>,
+  body?: string,
+): number | undefined {
+  if (!Array.isArray(payload.contents) || !hasOnlyFields(payload, textGeminiTopFields)) {
+    return undefined;
+  }
+  if (
+    payload.generationConfig !== undefined &&
+    payload.generationConfig !== null &&
+    payload.generation_config !== undefined &&
+    payload.generation_config !== null
+  ) {
+    return undefined;
+  }
+  if (
+    payload.systemInstruction !== undefined &&
+    payload.systemInstruction !== null &&
+    payload.system_instruction !== undefined &&
+    payload.system_instruction !== null
+  ) {
+    return undefined;
+  }
+  let hasStructuredSchema = false;
+  for (const cfgRaw of [payload.generationConfig, payload.generation_config]) {
+    if (cfgRaw === undefined || cfgRaw === null) continue;
+    if (!isPlainRecord(cfgRaw)) return undefined;
+    if (cfgRaw.candidateCount !== undefined && cfgRaw.candidateCount !== 1) return undefined;
+    if (cfgRaw.candidate_count !== undefined && cfgRaw.candidate_count !== 1) return undefined;
+    if (
+      cfgRaw.responseSchema !== undefined ||
+      cfgRaw.response_schema !== undefined ||
+      cfgRaw.responseJsonSchema !== undefined ||
+      cfgRaw.response_json_schema !== undefined
+    ) {
+      hasStructuredSchema = true;
+    }
+  }
+  for (const sysRaw of [payload.systemInstruction, payload.system_instruction]) {
+    if (sysRaw === undefined || sysRaw === null) continue;
+    if (!isPlainRecord(sysRaw) || !hasOnlyFields(sysRaw, textGeminiContentFields)) return undefined;
+    if (!Array.isArray(sysRaw.parts)) return undefined;
+    for (let i = 0; i < sysRaw.parts.length; i++) {
+      const part = sysRaw.parts[i];
+      if (!isPlainRecord(part) || typeof part.text !== "string") return undefined;
+      for (const key in part) {
+        if (key !== "text") return undefined;
+      }
+    }
+  }
+  const tools = payload.tools;
+  let toolsLen = 0;
+  if (tools !== undefined) {
+    if (!Array.isArray(tools)) return undefined;
+    for (let i = 0; i < tools.length; i++) {
+      const tool = tools[i];
+      if (!isPlainRecord(tool)) return undefined;
+      for (const key in tool) {
+        if (key !== "functionDeclarations" && key !== "function_declarations") return undefined;
+      }
+      if (tool.functionDeclarations !== undefined && tool.function_declarations !== undefined) {
+        return undefined;
+      }
+      const decls = tool.functionDeclarations ?? tool.function_declarations;
+      if (!Array.isArray(decls)) return undefined;
+      toolsLen += decls.length;
+    }
+  }
+  const contents = payload.contents;
+  for (let i = 0; i < contents.length; i++) {
+    const content = contents[i];
+    if (!isPlainRecord(content) || !hasOnlyFields(content, textGeminiContentFields)) {
+      return undefined;
+    }
+    if (!Array.isArray(content.parts)) return undefined;
+    for (let j = 0; j < content.parts.length; j++) {
+      if (!isGeminiTextOnlyPart(content.parts[j])) return undefined;
+    }
+  }
+  return (
+    Buffer.byteLength(body ?? stringifyExact(payload)) +
+    128 +
+    32 * (contents.length + toolsLen) +
+    (toolsLen > 0 ? 512 : 0) +
+    (hasStructuredSchema ? 256 : 0)
+  );
+}
+
 export function estimateTextInputForProtocol(
   upstreamProtocol: Protocol | null,
   usageDialect: string,
@@ -354,6 +510,9 @@ export function estimateTextInputForProtocol(
   }
   if (upstreamProtocol === "messages" && usageDialect === "anthropic") {
     return estimateTextMessagesInput(payload, body);
+  }
+  if (upstreamProtocol === "gemini" && usageDialect === "gemini") {
+    return estimateTextGeminiInput(payload, body);
   }
   return undefined;
 }

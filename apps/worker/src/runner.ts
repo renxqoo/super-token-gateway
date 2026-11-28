@@ -274,6 +274,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
     const expired_wallets = await ledger.expireAllLots(100);
     const collected_debts = await ledger.collectAllDebts(100);
     const rebalanced_accounts = await rebalanceImbalancedSuppliers();
+    await asyncTasks.expireTaskAdmissions();
     await asyncTasks.expireStaleTasks(2 * 3_600_000, 100);
     const delivered_outbox_events = await deliverOutboxBatch();
     const prepared_months = includePartitions ? await ensurePartitions() : [];
@@ -407,6 +408,7 @@ export function createWorkerRunner(options: WorkerRunnerOptions) {
           await ledger.expireAllLots(100);
           await ledger.collectAllDebts(100);
           await rebalanceImbalancedSuppliers();
+          await asyncTasks.expireTaskAdmissions();
           await asyncTasks.expireStaleTasks(2 * 3_600_000, 100);
         }
       }, options.maintenanceIntervalMs ?? 15_000);

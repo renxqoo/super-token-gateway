@@ -56,11 +56,7 @@ async function chatWithUpstream(
       hostname: "127.0.0.1",
       port: 0,
       fetch(req, server) {
-        return runtime.fetchPublic(
-          req,
-          { getPeerAddress: () => server.requestIP(req)?.address },
-          true,
-        );
+        return runtime.fetchPublic(req, { getPeerAddress: () => server.requestIP(req)?.address });
       },
     });
     const path = new URL("/v1/chat/completions", gateway.url);

@@ -348,3 +348,329 @@ test("symptom: Gemini loses previously metered thoughts when the final text fram
     reasoning_tokens: "8",
   });
 });
+
+test("Gemini explicit zero thoughtsTokenCount overwrites prior thoughts without inflating output_tokens", () => {
+  const first = extractUsage(
+    { usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 0, thoughtsTokenCount: 100 } },
+    "gemini",
+  );
+  expect(first).toEqual({ input_tokens: "20", output_tokens: "100", reasoning_tokens: "100" });
+
+  const merged = extractUsage(
+    { usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 150, thoughtsTokenCount: 0 } },
+    "gemini",
+    first,
+  );
+  expect(merged).toEqual({ input_tokens: "20", output_tokens: "150", reasoning_tokens: "0" });
+
+  const translator = new StreamTranslator("gemini", "gemini", "gemini", "public-model");
+  for (const body of [
+    {
+      candidates: [{ content: { parts: [{ text: "plan", thought: true }] } }],
+      usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 0, thoughtsTokenCount: 100 },
+    },
+    {
+      candidates: [{ content: { parts: [{ text: "final" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 150, thoughtsTokenCount: 0 },
+    },
+  ]) {
+    const data = JSON.stringify(body);
+    translator.consume({ event: "message", id: "", data, wire: `data: ${data}\n\n` });
+  }
+  translator.assertComplete();
+  expect(translator.usage).toEqual({
+    input_tokens: "20",
+    output_tokens: "150",
+    reasoning_tokens: "0",
+  });
+});
+
+test("Anthropic cache_creation snapshot replaces prior 1h bucket cleanly instead of leaking stale TTL tokens", () => {
+  const first = extractUsage(
+    {
+      usage: {
+        input_tokens: 10,
+        output_tokens: 1,
+        cache_creation_input_tokens: 1000,
+        cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1000 },
+      },
+    },
+    "anthropic",
+  );
+  expect(first).toEqual({
+    input_tokens: "10",
+    output_tokens: "1",
+    cache_write_tokens: "1000",
+    cache_write_5m_tokens: "0",
+    cache_write_1h_tokens: "1000",
+  });
+
+  const replaced = extractUsage(
+    {
+      usage: {
+        output_tokens: 40,
+        cache_creation_input_tokens: 1000,
+        cache_creation: { ephemeral_5m_input_tokens: 1000, ephemeral_1h_input_tokens: 0 },
+      },
+    },
+    "anthropic",
+    first,
+  );
+  expect(replaced).toEqual({
+    input_tokens: "10",
+    output_tokens: "40",
+    cache_write_tokens: "1000",
+    cache_write_5m_tokens: "1000",
+    cache_write_1h_tokens: "0",
+  });
+
+  const partialReplace = extractUsage(
+    {
+      usage: {
+        output_tokens: 45,
+        cache_creation: { ephemeral_5m_input_tokens: 1000 },
+      },
+    },
+    "anthropic",
+    first,
+  );
+  expect(partialReplace).toEqual({
+    input_tokens: "10",
+    output_tokens: "45",
+    cache_write_5m_tokens: "1000",
+  });
+  expect(partialReplace?.cache_write_1h_tokens).toBeUndefined();
+});
+
+test("Anthropic message_start zero/placeholder output and message_delta usage merge cleanly while Responses cache and reasoning overflows reject", () => {
+  const translator = new StreamTranslator("messages", "messages", "anthropic", "claude-1");
+  const startBody = JSON.stringify({
+    type: "message_start",
+    message: {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      model: "claude-1",
+      content: [],
+      usage: {
+        input_tokens: 120,
+        output_tokens: 1,
+        cache_read_input_tokens: 500,
+        cache_creation_input_tokens: 40,
+      },
+    },
+  });
+  const startStep = translator.consume({
+    event: "message_start",
+    id: "",
+    data: startBody,
+    wire: `event: message_start\ndata: ${startBody}\n\n`,
+  });
+  expect(startStep.outputUsageBoundary).toBe("ignore");
+  expect(translator.usage).toEqual({
+    input_tokens: "120",
+    cached_input_tokens: "500",
+    cache_write_tokens: "40",
+  });
+
+  const deltaText = JSON.stringify({
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "text_delta", text: "Hello world" },
+  });
+  translator.consume({
+    event: "content_block_delta",
+    id: "",
+    data: deltaText,
+    wire: `event: content_block_delta\ndata: ${deltaText}\n\n`,
+  });
+  expect(translator.observedOutput.chunks).toBe(1);
+  expect(translator.observedOutput.asciiChars).toBe(11);
+
+  const msgDelta = JSON.stringify({
+    type: "message_delta",
+    delta: { stop_reason: "end_turn" },
+    usage: { output_tokens: 45 },
+  });
+  translator.consume({
+    event: "message_delta",
+    id: "",
+    data: msgDelta,
+    wire: `event: message_delta\ndata: ${msgDelta}\n\n`,
+  });
+  expect(translator.usage).toEqual({
+    input_tokens: "120",
+    cached_input_tokens: "500",
+    cache_write_tokens: "40",
+    output_tokens: "45",
+  });
+
+  expect(
+    extractUsage(
+      {
+        response: {
+          usage: {
+            input_tokens: 100,
+            input_tokens_details: { cached_tokens: 40 },
+            output_tokens: 30,
+            output_tokens_details: { reasoning_tokens: 12 },
+          },
+        },
+      },
+      "openai",
+    ),
+  ).toEqual({
+    input_tokens: "60",
+    cached_input_tokens: "40",
+    output_tokens: "30",
+    reasoning_tokens: "12",
+  });
+
+  expect(() =>
+    extractUsage(
+      {
+        response: {
+          usage: {
+            input_tokens: 100,
+            input_tokens_details: { cached_tokens: 101 },
+            output_tokens: 10,
+          },
+        },
+      },
+      "openai",
+    ),
+  ).toThrow("Provider cached usage exceeds total input");
+
+  expect(() =>
+    extractUsage(
+      {
+        response: {
+          usage: {
+            input_tokens: 100,
+            output_tokens: 10,
+            output_tokens_details: { reasoning_tokens: 11 },
+          },
+        },
+      },
+      "openai",
+    ),
+  ).toThrow("Reasoning usage exceeds total output");
+
+  expect(() =>
+    extractUsage(
+      {
+        usage: {
+          prompt_tokens: 100,
+          prompt_cache_hit_tokens: 40,
+          prompt_cache_miss_tokens: 50,
+          completion_tokens: 5,
+        },
+      },
+      "openai",
+    ),
+  ).toThrow("Provider cache partition does not equal prompt usage");
+});
+
+test("symptom: hosted tool counts are extracted from OpenAI Responses output[] and Anthropic server_tool_use with alias conflict checks", () => {
+  expect(
+    extractUsage(
+      {
+        id: "resp_1",
+        output: [
+          { type: "web_search_call", status: "completed" },
+          { type: "web_search_call", status: "completed" },
+          { type: "code_interpreter_call", status: "completed" },
+          { type: "file_search_call", status: "completed" },
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
+        ],
+        usage: { input_tokens: 50, output_tokens: 20 },
+      },
+      "openai",
+    ),
+  ).toEqual({
+    input_tokens: "50",
+    output_tokens: "20",
+    web_search_calls: "2",
+    code_interpreter_sessions: "1",
+    file_search_calls: "1",
+  });
+
+  expect(
+    extractUsage(
+      {
+        id: "resp_no_tools",
+        output: [{ type: "message", role: "assistant", content: [] }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      },
+      "openai",
+    ),
+  ).toEqual({
+    input_tokens: "10",
+    output_tokens: "5",
+  });
+
+  const translator = new StreamTranslator("responses", "responses", "openai", "gpt-5");
+  const doneBody = {
+    type: "response.completed",
+    response: {
+      id: "resp_stream",
+      output: [{ type: "web_search_call" }, { type: "file_search_call" }],
+      usage: { input_tokens: 30, output_tokens: 12 },
+    },
+  };
+  translator.consume({
+    event: "response.completed",
+    id: "",
+    data: JSON.stringify(doneBody),
+    wire: `event: response.completed\ndata: ${JSON.stringify(doneBody)}\n\n`,
+  });
+  translator.assertComplete();
+  expect(translator.usage).toEqual({
+    input_tokens: "30",
+    output_tokens: "12",
+    web_search_calls: "1",
+    file_search_calls: "1",
+  });
+
+  expect(() =>
+    extractUsage(
+      {
+        output: [{ type: "web_search_call" }, { type: "web_search_call" }],
+        usage: { input_tokens: 10, output_tokens: 5, web_search_calls: 1 },
+      },
+      "openai",
+    ),
+  ).toThrow("Provider web search usage aliases disagree");
+
+  expect(
+    extractUsage(
+      {
+        usage: {
+          input_tokens: 100,
+          output_tokens: 40,
+          server_tool_use: { web_search_requests: 2, code_execution_requests: 3 },
+        },
+      },
+      "anthropic",
+    ),
+  ).toEqual({
+    input_tokens: "100",
+    output_tokens: "40",
+    web_search_calls: "2",
+    code_interpreter_sessions: "3",
+  });
+
+  expect(() =>
+    extractUsage(
+      {
+        usage: {
+          input_tokens: 100,
+          output_tokens: 40,
+          code_interpreter_sessions: 1,
+          server_tool_use: { code_execution_requests: 2 },
+        },
+      },
+      "anthropic",
+    ),
+  ).toThrow("Provider code execution usage aliases disagree");
+});

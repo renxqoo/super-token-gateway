@@ -85,10 +85,8 @@ export function createTransactionalHoldBatch(
     }));
 
     const billingAccountIds = [...new Set(items.map((i) => i.billing_account_id))];
-    const limitedKeyIds = [
-      ...new Set(
-        items.filter((i) => i.enforce_key_spend_limit && i.api_key_id).map((i) => i.api_key_id!),
-      ),
+    const keyIds = [
+      ...new Set(items.flatMap((item) => (item.api_key_id ? [item.api_key_id] : []))),
     ].sort();
     const supplierAccounts = [...new Set(items.map((i) => i.supplier_account_id))];
     const idempotencyKeys = items
@@ -122,7 +120,7 @@ export function createTransactionalHoldBatch(
         allLots,
         existingIdem,
       } = await lockTransactionalHoldState({
-        limitedKeyIds,
+        keyIds,
         tx,
         batchStartedAt,
         billingAccountIds,
@@ -241,11 +239,8 @@ export function createTransactionalHoldBatch(
           };
           continue;
         }
-        if (
-          item.enforce_key_spend_limit &&
-          item.api_key_id &&
-          !keySpendsById.has(item.api_key_id)
-        ) {
+        const keySpendRow = item.api_key_id ? keySpendsById.get(item.api_key_id) : undefined;
+        if (item.api_key_id && keySpendRow?.billing_account_id !== item.billing_account_id) {
           results[i] = holdTemporarilyUnavailable();
           continue;
         }
@@ -334,10 +329,6 @@ export function createTransactionalHoldBatch(
           continue;
         }
 
-        const keySpendRow =
-          item.enforce_key_spend_limit && item.api_key_id
-            ? keySpendsById.get(item.api_key_id)
-            : undefined;
         if (
           keySpendRow &&
           keySpendRow.spend_limit_atoms !== null &&
@@ -390,6 +381,12 @@ export function createTransactionalHoldBatch(
                 },
               }
             : {}),
+          ...(item.customer_pricing_snapshot
+            ? { customer_pricing_snapshot: item.customer_pricing_snapshot }
+            : {}),
+          ...(item.supplier_pricing_snapshot
+            ? { supplier_pricing_snapshot: item.supplier_pricing_snapshot }
+            : {}),
           account_id: item.supplier_account_id,
           channel_id: item.supplier_channel_id,
           currency: item.supplier_currency,
@@ -430,7 +427,9 @@ export function createTransactionalHoldBatch(
           });
         } else if (
           leases.canAcquire() &&
-          !item.enforce_key_spend_limit &&
+          item.customer_pricing_snapshot === undefined &&
+          item.supplier_pricing_snapshot === undefined &&
+          (keySpendRow === undefined || keySpendRow.spend_limit_atoms === null) &&
           creditPart === 0n &&
           customerAtoms > 0n
         ) {

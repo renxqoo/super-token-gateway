@@ -35,19 +35,36 @@ export function createCatalogAdmissionOperations({ db, orm }: { db: SQL; orm: Le
       organizationId: string,
       externalRef: string,
       billingAccountId: string,
-      keyId: string,
+      key: Pick<
+        ApiKeyRecord,
+        | "id"
+        | "verifier"
+        | "role"
+        | "allowed_cidrs"
+        | "models"
+        | "operations"
+        | "spend_limit_atoms"
+        | "spend_limit_window"
+      >,
     ) {
       const [row] = await db<
         {
           billing_account_enabled: boolean;
           key_enabled: boolean;
+          key_policy_matches: boolean;
           suspended: boolean;
         }[]
       >`SELECT p.enabled AS billing_account_enabled,
           k.enabled AND (k.expires_at IS NULL OR k.expires_at > now()) AS key_enabled,
+          (k.verifier = ${key.verifier} AND k.role = ${key.role}
+            AND k.allowed_cidrs = ${key.allowed_cidrs}::text[]
+            AND k.models = ${key.models}::text[]
+            AND k.operations = ${key.operations}::text[]
+            AND k.spend_limit_atoms IS NOT DISTINCT FROM ${key.spend_limit_atoms}::numeric
+            AND k.spend_limit_window = ${key.spend_limit_window}) AS key_policy_matches,
           coalesce(o.suspended, false) AS suspended
         FROM public.billing_accounts p
-        JOIN public.api_keys k ON k.billing_account_id = p.id AND k.id = ${keyId}
+        JOIN public.api_keys k ON k.billing_account_id = p.id AND k.id = ${key.id}
         LEFT JOIN public.console_organization_admission o ON o.organization_id = ${organizationId}
         WHERE p.id = ${billingAccountId} AND p.external_ref = ${externalRef}`;
       return row;
@@ -56,6 +73,7 @@ export function createCatalogAdmissionOperations({ db, orm }: { db: SQL; orm: Le
     async upsertBillingAccount(input: {
       id?: string;
       external_ref?: string | null;
+      customer_group_id?: string | null;
       name: string;
       currency?: string;
       rpm: number;
@@ -67,6 +85,7 @@ export function createCatalogAdmissionOperations({ db, orm }: { db: SQL; orm: Le
       const id = input.id ?? crypto.randomUUID();
       const currency = input.currency ?? "USD";
       const externalRef = input.external_ref ?? null;
+      const customerGroupId = input.customer_group_id ?? null;
       const enabled = input.enabled ?? true;
       const sourceRev = input.source_revision;
       const bindingChangeAllowed = sql`(${billingAccounts.externalRef} IS NULL
@@ -84,6 +103,7 @@ export function createCatalogAdmissionOperations({ db, orm }: { db: SQL; orm: Le
           .values({
             id,
             externalRef,
+            customerGroupId,
             name: input.name,
             currency,
             rpm: input.rpm,
@@ -100,6 +120,7 @@ export function createCatalogAdmissionOperations({ db, orm }: { db: SQL; orm: Le
                 input.external_ref !== undefined
                   ? externalRef
                   : sql`CASE WHEN ${billingAccounts.externalRef} LIKE 'console:org:%' THEN ${billingAccounts.externalRef} ELSE NULL END`,
+              ...(input.customer_group_id !== undefined ? { customerGroupId } : {}),
               name: input.name,
               currency,
               rpm: input.rpm,
@@ -144,6 +165,7 @@ export function createCatalogAdmissionOperations({ db, orm }: { db: SQL; orm: Le
         return {
           id: r.id,
           external_ref: r.externalRef,
+          ...(r.customerGroupId !== null ? { customer_group_id: r.customerGroupId } : {}),
           name: r.name,
           currency: r.currency,
           rpm: r.rpm,

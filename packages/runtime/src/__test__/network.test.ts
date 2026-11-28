@@ -676,3 +676,65 @@ test("a write followed by an upstream disconnect does not replay the request to 
     await new Promise<void>((resolve) => primary.close(() => resolve()));
   }
 });
+
+test.each([301, 302, 303, 307, 308])(
+  "transport never follows HTTP %i redirect or replays POST bodies to the Location target",
+  async (status) => {
+    let targetHits = 0;
+    const target = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        targetHits++;
+        return new Response("redirected-secret", { status: 200 });
+      },
+    });
+    const originBodies: string[] = [];
+    const location = `http://127.0.0.1:${target.port}/redirected`;
+    const origin = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        originBodies.push(await request.text());
+        return new Response(null, { status, headers: { location } });
+      },
+    });
+    const transport = createTransport(8);
+    const url = new URL(`http://127.0.0.1:${origin.port}/v1/chat/completions`);
+    try {
+      const fetchResp = await transport.fetch(
+        url,
+        { method: "POST", body: `payload-fetch-${status}` },
+        true,
+      );
+      expect(fetchResp.status).toBe(status);
+      expect(fetchResp.headers.get("location")).toBe(location);
+      await fetchResp.body?.cancel();
+
+      const fastResp = await transport.fetchFast(
+        url,
+        { method: "POST", body: `payload-fast-${status}` },
+        true,
+      );
+      if (fastResp.fast) {
+        expect(fastResp.status).toBe(status);
+        const fastLocation =
+          fastResp.headers instanceof Headers
+            ? fastResp.headers.get("location")
+            : fastResp.headers.location;
+        expect(fastLocation).toBe(location);
+      } else {
+        expect(fastResp.response.status).toBe(status);
+        expect(fastResp.response.headers.get("location")).toBe(location);
+        await fastResp.response.body?.cancel();
+      }
+
+      expect(originBodies).toEqual([`payload-fetch-${status}`, `payload-fast-${status}`]);
+      expect(targetHits).toBe(0);
+    } finally {
+      transport.close();
+      await origin.stop(true);
+      await target.stop(true);
+    }
+  },
+);

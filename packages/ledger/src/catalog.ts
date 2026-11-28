@@ -1,13 +1,6 @@
 import type { SQL } from "bun";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import {
-  canonical,
-  DomainError,
-  validatePricing,
-  type AdaptiveRoutingSetting,
-  type Operation,
-  type Pricing,
-} from "@gateway/kernel";
+import { DomainError, type AdaptiveRoutingSetting, type Operation } from "@gateway/kernel";
 import {
   channels,
   configEpoch,
@@ -26,9 +19,6 @@ import type {
   EpochStamp,
   ModelRecord,
   PluginPipelineStep,
-  PriceBasis,
-  PriceSide,
-  PriceVersionRecord,
   BillingAccountPricingOverrideRecord,
   RouteRecord,
   RouteRetryPolicy,
@@ -40,7 +30,9 @@ import { createPluginCatalogOperations } from "./catalog-snapshot.ts";
 
 import { createCatalogAdmissionOperations } from "./catalog-admission.ts";
 
-import { bumpEpoch, catalogDigest } from "./catalog-epoch.ts";
+import { createCatalogPricingOperations } from "./catalog-pricing.ts";
+
+import { bumpEpoch } from "./catalog-epoch.ts";
 
 export function createCatalogRepository(db: SQL) {
   const orm = createDrizzle(db);
@@ -66,6 +58,7 @@ export function createCatalogRepository(db: SQL) {
     },
 
     ...createCatalogAdmissionOperations({ db, orm }),
+    ...createCatalogPricingOperations({ orm }),
 
     async upsertUpstreamAccount(input: {
       id?: string;
@@ -180,20 +173,6 @@ export function createCatalogRepository(db: SQL) {
       }));
     },
 
-    async getPriceVersion(id: string): Promise<PriceVersionRecord | null> {
-      const [r] = await orm.select().from(priceVersions).where(eq(priceVersions.id, id)).limit(1);
-      if (!r) return null;
-      return {
-        id: r.id,
-        side: r.side,
-        currency: r.currency,
-        basis: r.basis,
-        rates: r.rates,
-        ceilings: r.ceilings,
-        source_digest: r.sourceDigest,
-      };
-    },
-
     async upsertChannel(input: {
       id?: string;
       account_id: string;
@@ -218,6 +197,7 @@ export function createCatalogRepository(db: SQL) {
         const [existing] = await tx
           .select({
             providerId: channels.providerPluginId,
+            baseUrl: channels.baseUrl,
             secretCiphertext: channels.secretCiphertext,
             sourceRevision: channels.sourceRevision,
           })
@@ -228,6 +208,16 @@ export function createCatalogRepository(db: SQL) {
           throw new DomainError(
             "stale_revision",
             "Incoming channel revision is older than current Gateway revision",
+          );
+        }
+        if (
+          existing &&
+          new URL(existing.baseUrl).origin !== new URL(input.base_url).origin &&
+          (!input.secret_ciphertext || input.secret_ciphertext === existing.secretCiphertext)
+        ) {
+          throw new DomainError(
+            "invalid_channel_secret",
+            "Changing a channel origin requires credentials for the new destination",
           );
         }
         const effectiveSecret = input.secret_ciphertext ?? existing?.secretCiphertext;
@@ -384,85 +374,6 @@ export function createCatalogRepository(db: SQL) {
           enabled: r.enabled,
           source_revision: r.sourceRevision,
           config_epoch: epoch,
-        };
-      });
-    },
-
-    async createPriceVersion(input: {
-      id?: string;
-      side: PriceSide;
-      currency: string;
-      basis?: PriceBasis;
-      rates: Pricing["rates"];
-      ceilings?: Record<string, string>;
-    }): Promise<PriceVersionRecord & { config_epoch: number; replayed?: boolean }> {
-      validatePricing({ currency: input.currency, rates: input.rates });
-      const id = input.id ?? crypto.randomUUID();
-      const basis = input.basis ?? "PROVIDER_USAGE";
-      const ceilings = input.ceilings ?? {};
-      const sourceDigest = catalogDigest(
-        canonical({
-          side: input.side,
-          currency: input.currency,
-          basis,
-          rates: input.rates,
-          ceilings,
-        }),
-      );
-      return orm.transaction(async (tx) => {
-        const rows = await tx
-          .insert(priceVersions)
-          .values({
-            id,
-            side: input.side,
-            currency: input.currency,
-            basis,
-            rates: input.rates,
-            ceilings,
-            sourceDigest,
-          })
-          .onConflictDoNothing({ target: priceVersions.id })
-          .returning();
-        if (rows[0]) {
-          const epoch = await bumpEpoch(tx);
-          const r = rows[0]!;
-          return {
-            id: r.id,
-            side: r.side,
-            currency: r.currency,
-            basis: r.basis,
-            rates: r.rates,
-            ceilings: r.ceilings,
-            source_digest: r.sourceDigest,
-            config_epoch: epoch,
-            replayed: false,
-          };
-        }
-        const [existing] = await tx
-          .select()
-          .from(priceVersions)
-          .where(eq(priceVersions.id, id))
-          .limit(1);
-        if (!existing || existing.sourceDigest !== sourceDigest) {
-          throw new DomainError(
-            "price_version_conflict",
-            "Price version identifier already exists with different rates",
-          );
-        }
-        const [epochRow] = await tx
-          .select({ version: configEpoch.version })
-          .from(configEpoch)
-          .where(eq(configEpoch.id, 1));
-        return {
-          id: existing.id,
-          side: existing.side,
-          currency: existing.currency,
-          basis: existing.basis,
-          rates: existing.rates,
-          ceilings: existing.ceilings,
-          source_digest: existing.sourceDigest,
-          config_epoch: epochRow?.version ?? 0,
-          replayed: true,
         };
       });
     },

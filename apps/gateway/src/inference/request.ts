@@ -1,11 +1,12 @@
 import { GatewayError, object, optionalObject } from "@gateway/contracts";
 import type { AdaptiveRoutingPolicy, Operation } from "@gateway/kernel";
 import type { ModelRecord } from "@gateway/ledger";
-import { copyExact, parseClientJson, requestCharacters } from "@gateway/protocol";
+import { copyExact, numberLiteral, parseClientJson, requestCharacters } from "@gateway/protocol";
 import { declaredRequestSize } from "../public-ingress.ts";
 import { ProxyRuntimeState } from "../proxy-state.ts";
 import type { TraceContext } from "../observability.ts";
-import { validateMeteredRequest } from "../request-metering.ts";
+import { inspectMeteredRequestSignals, validateMeteredRequest } from "../request-metering.ts";
+import { snapshotSupportsHostedTools, snapshotSupportsServiceTier } from "../pricing.ts";
 import type {
   InferenceContext,
   InferenceFastHandoff,
@@ -14,6 +15,7 @@ import type {
 } from "./types.ts";
 import { authenticateRequest, billingAccountQuotaScope } from "./auth.ts";
 import { readRequestBytesBounded, utf8FatalDecoder } from "./body.ts";
+import { parseMultipartFormData } from "./multipart.ts";
 import type { InferenceTelemetry } from "./telemetry.ts";
 import type { InferenceResources } from "./resources.ts";
 
@@ -23,14 +25,150 @@ const defaultAdaptiveRouting: AdaptiveRoutingPolicy = {
   first_content_target_ms: 1500,
 };
 
-function resolveOutputBound(body: Record<string, unknown>, model: ModelRecord): number {
-  const gen = optionalObject(body.generationConfig);
-  const raw =
-    body.max_completion_tokens ?? body.max_tokens ?? body.max_output_tokens ?? gen.maxOutputTokens;
-  if (typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0) {
-    return Math.min(raw, model.max_output_tokens);
+function validatePositiveOutputBound(
+  parent: Record<string, unknown>,
+  key: string,
+  field: string,
+): number {
+  const raw = parent[key];
+  if (
+    typeof raw !== "number" ||
+    !Number.isSafeInteger(raw) ||
+    raw <= 0 ||
+    numberLiteral(parent, key) !== undefined
+  ) {
+    throw new GatewayError(400, "invalid_request", `${field} must be a positive integer`);
+  }
+  return raw;
+}
+
+function resolveOutputBound(
+  body: Record<string, unknown>,
+  operation: Operation,
+  model: ModelRecord,
+): number {
+  const genCamel = optionalObject(body.generationConfig);
+  const genSnake = optionalObject(body.generation_config);
+  const candidates: [string, Record<string, unknown>, string, unknown][] = [
+    ["max_completion_tokens", body, "max_completion_tokens", body.max_completion_tokens],
+    ["max_tokens", body, "max_tokens", body.max_tokens],
+    ["max_output_tokens", body, "max_output_tokens", body.max_output_tokens],
+    ["generationConfig.maxOutputTokens", genCamel, "maxOutputTokens", genCamel.maxOutputTokens],
+    [
+      "generationConfig.max_output_tokens",
+      genCamel,
+      "max_output_tokens",
+      genCamel.max_output_tokens,
+    ],
+    ["generation_config.maxOutputTokens", genSnake, "maxOutputTokens", genSnake.maxOutputTokens],
+    [
+      "generation_config.max_output_tokens",
+      genSnake,
+      "max_output_tokens",
+      genSnake.max_output_tokens,
+    ],
+  ].filter(([, , , value]) => value !== undefined && value !== null) as [
+    string,
+    Record<string, unknown>,
+    string,
+    unknown,
+  ][];
+
+  if (
+    operation !== "chat" &&
+    operation !== "completions" &&
+    operation !== "responses" &&
+    operation !== "messages" &&
+    operation !== "gemini"
+  ) {
+    return model.max_output_tokens;
+  }
+
+  const allowedByOp: Record<
+    "chat" | "completions" | "responses" | "messages" | "gemini",
+    ReadonlySet<string>
+  > = {
+    chat: new Set(["max_completion_tokens", "max_tokens"]),
+    completions: new Set(["max_tokens"]),
+    responses: new Set(["max_output_tokens"]),
+    messages: new Set(["max_tokens"]),
+    gemini: new Set([
+      "generationConfig.maxOutputTokens",
+      "generationConfig.max_output_tokens",
+      "generation_config.maxOutputTokens",
+      "generation_config.max_output_tokens",
+    ]),
+  };
+  if (
+    operation === "gemini" &&
+    body.generationConfig !== undefined &&
+    body.generationConfig !== null &&
+    body.generation_config !== undefined &&
+    body.generation_config !== null
+  ) {
+    throw new GatewayError(
+      400,
+      "invalid_request",
+      "Cannot specify both generationConfig and generation_config",
+    );
+  }
+  const allowed = allowedByOp[operation];
+  for (const [field] of candidates) {
+    if (!allowed.has(field)) {
+      throw new GatewayError(
+        400,
+        "invalid_request",
+        `Output token bound field ${field} is not valid for ${operation}`,
+      );
+    }
+  }
+  if (candidates.length > 1) {
+    throw new GatewayError(
+      400,
+      "invalid_request",
+      `Multiple output token bound fields specified: ${candidates.map(([f]) => f).join(", ")}`,
+    );
+  }
+  if (candidates.length === 1) {
+    const [field, parent, key] = candidates[0]!;
+    return Math.min(validatePositiveOutputBound(parent, key, field), model.max_output_tokens);
   }
   return model.max_output_tokens;
+}
+
+function validateImageRequestCount(
+  body: Record<string, unknown>,
+  operation: Operation,
+  isMultipartOp: boolean,
+  multipartEntries?: readonly [string, string | File][],
+): void {
+  if (operation !== "images" && operation !== "image_edits") return;
+  if (isMultipartOp && multipartEntries) {
+    let nCount = 0;
+    for (const [key] of multipartEntries) {
+      if (key === "n") nCount++;
+    }
+    if (nCount > 1) {
+      throw new GatewayError(400, "invalid_request", "Multiple n fields specified");
+    }
+  }
+  if (body.n === undefined || (!isMultipartOp && body.n === null)) return;
+  if (isMultipartOp && typeof body.n === "string") {
+    const trimmed = body.n.trim();
+    if (/^[1-9]\d*$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (Number.isSafeInteger(parsed) && parsed > 0) return;
+    }
+    throw new GatewayError(400, "invalid_request", "n must be a positive integer");
+  }
+  if (
+    typeof body.n !== "number" ||
+    !Number.isSafeInteger(body.n) ||
+    body.n <= 0 ||
+    numberLiteral(body, "n") !== undefined
+  ) {
+    throw new GatewayError(400, "invalid_request", "n must be a positive integer");
+  }
 }
 
 export async function admitInferenceRequest(
@@ -45,7 +183,6 @@ export async function admitInferenceRequest(
   telemetry: InferenceTelemetry,
   pathOverride?: { model: string; stream: boolean },
   peerAddress?: string | (() => string | undefined),
-  nativeHttp = false,
   handoff?: InferenceFastHandoff,
 ): Promise<InferenceRequest> {
   const deferredIngress = handoff?.deferredIngress;
@@ -122,26 +259,26 @@ export async function admitInferenceRequest(
         state.deadlines,
         resources.isDraining,
         resources.setAbortNotify,
-        true,
         declaredSize,
       );
-      const form = await new Response(received as BodyInit, {
-        headers: { "content-type": contentType },
-      })
-        .formData()
-        .catch(() => {
-          throw new GatewayError(400, "invalid_request", "Invalid multipart body");
-        });
-      const entries: [string, string | File][] = [];
+      const entries = parseMultipartFormData(received, contentType);
       const meta: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-      for (const [key, value] of form.entries() as Iterable<[string, string | File]>) {
-        entries.push([key, value]);
+      for (const [key, value] of entries) {
         meta[key] =
           typeof value === "string"
             ? value
             : { filename: value.name, size: value.size, type: value.type };
       }
       multipartEntries = entries;
+      if (
+        meta.stream !== undefined &&
+        meta.stream !== "true" &&
+        meta.stream !== "false" &&
+        meta.stream !== true &&
+        meta.stream !== false
+      ) {
+        throw new GatewayError(400, "invalid_request", "stream must be a boolean");
+      }
       clientBody = {
         ...meta,
         stream: meta.stream === "true" || meta.stream === true,
@@ -154,7 +291,6 @@ export async function admitInferenceRequest(
         state.deadlines,
         resources.isDraining,
         resources.setAbortNotify,
-        !nativeHttp && deps.bodyBufferBudget !== undefined,
         declaredSize,
       );
       const parsedRaw = object(parseClientJson(utf8FatalDecoder.decode(rawBytes)));
@@ -169,7 +305,6 @@ export async function admitInferenceRequest(
 
     const modelName = typeof clientBody.model === "string" ? clientBody.model.trim() : "";
     if (!modelName) throw new GatewayError(400, "invalid_request", "Missing model");
-    telemetry.setModel(modelName);
     if (key.models.length > 0 && !key.models.includes(modelName)) {
       throw new GatewayError(403, "model_not_allowed", "API key cannot access this model");
     }
@@ -177,29 +312,35 @@ export async function admitInferenceRequest(
     if (!model || !model.enabled || !model.operations.includes(operation)) {
       throw new GatewayError(404, "model_not_found", "Model or operation is unavailable");
     }
-
-    if (operation === "videos" && deps.asyncTasks) {
-      const activeTasks = await deps.asyncTasks.countActiveTasks(
-        billingAccount.id,
-        deps.config.asyncTaskCancelCooldownMs ?? 0,
-      );
-      const maxActive = Math.min(
-        billingAccount.concurrency,
-        deps.config.maxActiveAsyncTasksPerBillingAccount ?? 10,
-      );
-      if (activeTasks >= maxActive) {
-        throw new GatewayError(
-          429,
-          "rate_limit_async_tasks",
-          "Too many concurrent active async video tasks for this billingAccount",
-        );
-      }
-    }
-
-    validateMeteredRequest(clientBody, operation);
+    telemetry.setModel(model.name);
 
     const isStream =
       clientBody.stream === true || (operation === "speech" && clientBody.stream_format === "sse");
+    const meteredSignals = inspectMeteredRequestSignals(clientBody, operation);
+    validateMeteredRequest(clientBody, operation, {
+      allowPricedServiceTier: meteredSignals.serviceTier
+        ? snapshotSupportsServiceTier(snap, meteredSignals.serviceTier)
+        : false,
+      allowPricedHostedTools:
+        meteredSignals.hostedTools.size > 0
+          ? snapshotSupportsHostedTools(
+              snap,
+              model.name,
+              operation,
+              meteredSignals.hostedTools,
+              isStream,
+            )
+          : false,
+    });
+    validateImageRequestCount(clientBody, operation, isMultipartOp, multipartEntries);
+
+    if (operation === "videos" && isStream) {
+      throw new GatewayError(
+        400,
+        "invalid_request",
+        "Video task creation does not support streaming",
+      );
+    }
     const configuredRouting = model.adaptive_routing;
     const adaptivePolicy =
       operation === "chat" && configuredRouting !== false
@@ -207,7 +348,7 @@ export async function admitInferenceRequest(
           (model.routing_strategy === "WEIGHTED" ? defaultAdaptiveRouting : undefined))
         : undefined;
     telemetry.beginResponseTracking(isStream, adaptivePolicy?.first_content_target_ms);
-    const outputBound = resolveOutputBound(clientBody, model);
+    const outputBound = resolveOutputBound(clientBody, operation, model);
 
     const initialChars = isMultipartOp ? undefined : requestCharacters(operation, clientBody);
     const estimatedTokens = Math.max(
@@ -272,6 +413,32 @@ export async function admitInferenceRequest(
       );
     }
     if (projAcq.release) resources.setAccountLimit(projAcq.release);
+    const asyncTasks = deps.asyncTasks;
+    if (operation === "videos" && asyncTasks) {
+      const limit = Math.min(
+        billingAccount.concurrency,
+        deps.config.maxActiveAsyncTasksPerBillingAccount ?? 10,
+      );
+      const leaseMs = Math.max(
+        2 * 3_600_000,
+        Math.max(deps.config.holdTtlMs, deps.config.attemptTimeoutMs, 300_000) * 10 + 120_000,
+      );
+      const admitted = await asyncTasks.reserveTaskSlot({
+        requestId,
+        billingAccountId: billingAccount.id,
+        limit,
+        cancelCooldownMs: deps.config.asyncTaskCancelCooldownMs ?? 0,
+        leaseMs,
+      });
+      if (!admitted) {
+        throw new GatewayError(
+          429,
+          "rate_limit_async_tasks",
+          "Too many concurrent active async video tasks for this billingAccount",
+        );
+      }
+      resources.setVideoAdmission(() => asyncTasks.releaseTaskSlot(requestId, billingAccount.id));
+    }
     const maxStreamDurationMs = deps.config.streamMaxDurationMs ?? 300_000;
     const firstByteDeadlineMs =
       deps.config.firstByteTimeoutMs !== undefined

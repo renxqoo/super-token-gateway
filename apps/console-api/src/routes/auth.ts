@@ -8,9 +8,11 @@ import {
   constantTimeEquals,
   generateOpaqueToken,
   hashPassword,
+  issueRegistrationToken,
   recordAuditLog,
   sha256Hex,
   verifyPassword,
+  verifyRegistrationToken,
   defaultBillingAccountId,
 } from "../auth.ts";
 import {
@@ -37,8 +39,11 @@ const registerSchema = z
     password: z.string().min(8).max(128),
     display_name: z.string().trim().min(1).max(120),
     billing_currency: currencySchema.default("USD"),
+    registration_token: z.string().max(128).optional(),
   })
   .strict();
+
+const registrationTokenSchema = z.object({ email: z.email().max(200) }).strict();
 
 const bootstrapAdminSchema = z
   .object({
@@ -268,8 +273,17 @@ export function createClientAuthRoutes(deps: ConsoleDeps) {
   app.post("/register", async (c) => {
     const body = await parseJsonBody(c, registerSchema);
     const email = body.email.trim().toLowerCase();
-    if (deps.config.bootstrapAdminEmail && email === deps.config.bootstrapAdminEmail) {
-      throw new GatewayError(403, "reserved_email", "This email address is reserved");
+    const secret = deps.config.registrationSigningSecret;
+    if (
+      !secret ||
+      !body.registration_token ||
+      !verifyRegistrationToken(email, body.registration_token, secret) ||
+      email === deps.config.bootstrapAdminEmail
+    ) {
+      const rateKey = `registration:${getClientIp(deps, c) ?? "unknown"}`;
+      deps.loginLimiter.check(rateKey);
+      deps.loginLimiter.recordFailure(rateKey);
+      throw new GatewayError(403, "registration_not_authorized", "Registration requires approval");
     }
     const existing = await deps.orm
       .select({ id: users.id })
@@ -446,6 +460,23 @@ export function createClientAuthRoutes(deps: ConsoleDeps) {
 export function createAdminAuthRoutes(deps: ConsoleDeps) {
   const app = new Hono<ConsoleEnv>();
   const adminOnly = requirePlatformAdmin(deps);
+
+  app.post("/registration-token", adminOnly, async (c) => {
+    const body = await parseJsonBody(c, registrationTokenSchema);
+    const email = body.email.trim().toLowerCase();
+    const secret = deps.config.registrationSigningSecret;
+    if (!secret || email === deps.config.bootstrapAdminEmail) {
+      throw new GatewayError(403, "registration_not_authorized", "Registration is unavailable");
+    }
+    await recordAuditLog(deps.orm, {
+      actor: c.get("user"),
+      action: "admin.auth.registration_token",
+      targetType: "registration_email",
+      targetId: sha256Hex(email),
+      metadata: { email },
+    });
+    return c.json(issueRegistrationToken(email, secret), 201, { "cache-control": "no-store" });
+  });
 
   app.post("/bootstrap", async (c) => {
     const body = await parseJsonBody(c, bootstrapAdminSchema);

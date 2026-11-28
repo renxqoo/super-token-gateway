@@ -1,130 +1,44 @@
 # 发布、容量与故障恢复
 
+[系统架构](architecture.md) · [ADR 0011 生产运行与恢复](docs/decisions/0011-production-operations.md) · [Console 部署与验收](docs/console-api.md#部署与验收)
+
 ## 本地环境
 
-`bun run setup:local` 生成并保护配置；`bun run infra:up` 用 `PG_TOOLS_DIRECTORY` 与 `DURABILITY_REDIS_SERVER` 指定的本机工具，在 `.local/native-services/` 启动此计费账户专用 PG/Redis，或直接使用配置好的本机实例。它不安装软件、不使用 Docker、不清空共享服务，端口被其他进程占用时拒绝启动。开发库与测试库隔离；生产（`NODE_ENV=production`）禁止运行开发栈 `bun run dev`。
+`bun run setup:local` 生成受保护的 `.env.local` 和内部凭证文件。首次生成的示例使用 PostgreSQL 55442、Redis 56382、Gateway 8088 和独立 mock 9088。实际端口以本机配置为准。`bun run infra:up` 使用 `PG_TOOLS_DIRECTORY` 和 `DURABILITY_REDIS_SERVER` 指定的工具，启动仓库拥有的本地 PostgreSQL 与 Redis。服务由 `bun run infra:status` 和 `bun run infra:down` 管理。端口已被其他进程占用时脚本拒绝接管。
 
-开发端口：PG 55442、准入 Redis 56382、耐久队列 Redis 56383、独立 mock 9088、worker health 8099；`bun run dev` 的 Gateway、Core 与上游替身使用随机端口，Gateway 地址写入 `.local/client.env`。`.local/native-services/` 是本地依赖数据，不是跨主机 HA 集群。不要删除仍有用途的 usage 证据目录。
+`bun run db:migrate` 初始化或升级账本，`bun run dev` 启动 mock 与内置 Worker 的 Gateway。Console 单独使用 `bun run console:migrate` 和 `bun run console`，并配置自己的数据库和 Gateway 私网 API 凭证。[本地配置脚本](scripts/setup-local.ts) · [开发启动脚本](scripts/dev.ts)
 
 ## 生产发布
 
-1. 使用 Bun 1.4.4 和锁文件执行 `bun install --frozen-lockfile`、`bun run verify`，生成 dist 与 manifest；保留上一个可回滚版本。
-2. 准备专用 PG、准入 Redis、耐久队列 Redis 和数据库迁移 owner。用迁移账号运行 `bun dist/tools/migrate.js --database <确切新库名>`。`MIGRATION_DATABASE_URL` 可独立于 `DATABASE_URL`。每个进程使用独立登录账号，只授予对应角色：
-   - Core API 内部连接（`database_url`）：`infra/core-identity-role.sql` 的 `core_identity_api` 与 `infra/core-execution-role.sql` 的 `core_execution_api`。
-   - Core API 管理连接（`admin.database_url`）：`infra/core-management-role.sql` 的 `core_management_api` 与 `infra/core-catalog-role.sql` 的 `core_catalog`。
-   - Core API 公开连接（`public.database_url`）：`infra/core-public-role.sql` 的 `core_public_api`。
-   - Core 结算 worker：`infra/core-settlement-role.sql` 的 `core_settlement_worker`，只能读 schema 版本与启动 session 公钥、执行证据持久化函数。
-   - v2 Gateway：没有数据库账号。
-   - legacy 网关的 `gateway_runtime`、`gateway_worker` 不再使用：迁移 2026111225 撤销它们在本库的全部权限；集群内全部库迁移后由 DBA 执行 `DROP ROLE gateway_runtime, gateway_worker`（角色是集群级对象，迁移不删除）。
-3. 发布 dist 到 `/opt/llm-gateway/releases/<版本>/`，将 current 指向该目录。进程必须只读。密钥与配置放在 `/etc/llm-gateway/` 或由外部 secret manager 注入，文件权限 0600 且只属于对应进程用户，禁止打入镜像：Core API 读取 `core-api.json`（含 pepper、加密主密钥、管理 key，参考 `infra/core-api.example.json`：这三项在样例中留空，不填写时拒绝启动），worker 读取 `core-worker.env`（参考 `infra/core-worker.example.env`），v2 Gateway 实例读取 `gateway-<实例>.json`（只有 mTLS 客户端证书、Core 证书指纹与证据队列地址，参考 `infra/gateway.example.json`）。三个样例的 audience、Core 内部地址与证书 SAN、队列 namespace 及 Caddy 指向的 Core 公开端口互相一致，替换时成组修改。
-4. 安装 `infra/core-api.service`（内部 RPC、管理监听 127.0.0.1:8096 与公开监听 127.0.0.1:8095 同一进程）、`infra/core-worker.service`、`infra/gateway@.service`（v2，实例 1/2 监听 127.0.0.1:8090/8091）。Core API、Core worker、v2 Gateway 分别使用 `llm-core`、`llm-core-worker`、`llm-gateway` 三个低权限用户，互相读不到对方的配置与密钥（v2 Gateway 尤其不能读到数据库地址、Core 的 pepper 与加密主密钥）。v2 Gateway 的内部 mTLS 身份先用 `dist/tools/identity-provision.js` 登记。v2 Gateway 启动时向 Core 建立 session，须在 Core API 就绪后启动（同机部署时单元已声明 `After=core-api.service`，Core 不可达时启动失败并由 systemd 重试）；worker 只依赖 PG 与耐久队列。
-5. v2 Gateway 配置 `production: true`、`allow_private_upstream: false`，证据队列 `required_replicas` 等于所有可晋升 AOF 副本数且至少 1，`queue.namespace` 必须与 Core worker 的 `REDIS_NAMESPACE`（默认 `stg`）相同，`core.audience` 形如 `<部署名>/core-api` 且与 Core API 的 `audience` 一致。PG/Redis 使用已验证的 TLS 连接，供应商为公网 HTTPS 地址。配置业务系统与 Gateway 的独立访问凭证。
-6. 修改 `infra/Caddyfile` 的真实域名和实例地址，运行 `caddy validate`，切入已通过 `/readyz` 的新实例，再逐个 SIGTERM 旧实例。`@chat`、`@resources` 列出的推理与资源路径只代理到 v2 Gateway；`@account`、`@request` 列出的钱包、模型列表、用量、计费账户 Key、请求证据与 `/openapi.json` 代理到 Core 公开监听；未列出的路径由 Caddy 直接返回 404。Core 管理监听与内部 RPC 不暴露公网。
+1. 按 [.bun-version](.bun-version) 使用锁定的 Bun，执行 `bun install --frozen-lockfile`。在目标平台准备原生 Wasmtime 库，再执行 `bun run verify` 生成和验证构建产物。验证依赖见 [交付手册](delivery-and-validation.md)。
+2. 准备 PostgreSQL 稳定写入口和专用库。使用对象所有者连接运行 `bun dist/tools/migrate.js`，按 [账本迁移与角色](database.md#迁移与角色) 配置授权。Console 使用独立库及 [Console 角色脚本](infra/postgres/console-roles.sql)。升级前核对迁移清单和备份。
+3. 生产 Gateway 采用 `--mode=gateway`。用 `DATABASE_URL` 和 `INTERNAL_DATABASE_URL` 配置同一写入口和数据库的两个独立登录，准备共享 Redis、`INTERNAL_AUTH_FILE` 和 `PLUGIN_SIGNING_PUBLIC_KEY_PEM`。远端 PostgreSQL 连接要求 `sslmode=verify-full`，回环环境例外见 [ADR 0011](docs/decisions/0011-production-operations.md#管理身份和数据库授权)。独立 Worker 用自己的数据库登录。样例见 [Gateway](infra/gateway.example.env)、[Worker](infra/worker.example.env) 和 [Console](infra/console.example.env)。
+4. Linux 单元从 `/opt/super-token-gateway` 运行 `dist`，环境文件放在 `/etc/super-token-gateway/`。按实机配置校验 [Gateway](infra/gateway@.service)、[Worker](infra/worker.service) 和 [Console](infra/console-api@.service) 单元，给每个 Gateway 副本分配独立监听地址或端口。
+5. [Gateway Caddy 模板](infra/Caddyfile) 代理公开推理及健康路由，示例用 8080 和 8082 作为两路公开端口。用 [Console Caddy 模板](infra/console.Caddyfile) 转发客户 API。管理监听、Outbox 推送入口和生产指标仅在私网开放。以 `/readyz` 验收实例后接入流量，摘除旧节点后再发送 SIGTERM 排空。
+6. 验证一笔实际结算、Worker 选主和 Outbox 消费。启用 Console 时再验证组织和 Key 策略同步、账务查询和用量投影。涉及不兼容数据库升级时按对应迁移说明协调旧进程退出和新进程启动。
 
-发布成品是 `dist/` 下的独立 bundle、`dist/tools` 运维工具与 `dist/native/plugin-host`，生产不安装 node_modules；`bun run test:artifact` 在独立空目录启动编译产物，检查真实依赖、三进程 JSON/SSE、双方精确记账、SIGTERM 与输出不含正文。只读根、非 root 与能力收紧由 systemd 单元提供，单元需在 Linux 部署机用 `systemd-analyze verify` 检查。
+`infra/docker-compose.yml` 使用单库、单 Gateway 与内置 Worker，适合单机验证。生产拓扑使用独立 Worker、数据库及最小权限角色，并由部署平台提供 PostgreSQL 和 Redis 故障转移。
 
-运行进程只接受 checksummed manifest 的最新版本（当前 2026111224）。迁移工具要求 `--database <确切名称>` 匹配连接 URL，首次只接受空库；已知 v2 版本按 checksummed manifest 顺序应用。旧开发 schema06–2026111201 不升级、不修改，必须为 v2 建独立新库。应用回退须使用相同数据库契约并保留已确认队列、账本及费率证据。详见 [数据库契约](database.md)。
+## 可用性与故障行为
 
-## 内部证书与 pin 轮换
+| 故障                                    | 当前行为与核对点                                                                                                                                           |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PostgreSQL 准入失败或写入口只读         | 新请求得不到预扣，不派发。Gateway 的 `/readyz` 检查写入口。                                                                                                |
+| PostgreSQL 结算失败或无法确认提交       | 响应以失败收口，SSE 不发成功终态。按原请求 ID 核对已提交账单和待核账预扣，重放沿用原幂等约束。                                                             |
+| 共享 Redis 不可用                       | 已配置共享配额的请求失败关闭，Gateway 就绪返回失败。Redis 切换可丢失尚未复制的配额计数，资金继续由 PostgreSQL 决定。                                       |
+| 上游超时、错误或输出后断流              | 由发送状态、执行证据和路由预算决定是否切换。已输出的流不拼接替代响应。缺证据的请求保留预扣，对话流的有界估算见 [资金规则](funds-and-billing.md#请求链路)。 |
+| Gateway SIGTERM 或 SIGKILL              | SIGTERM 停止接纳新请求并有界排空。SIGKILL 后由 Worker 清扫过期预扣及租约，已派发且无法确认的请求进入核账。                                                 |
+| Worker 主节点不可用或 Outbox 接收方中断 | 由其他 Worker 获取 PostgreSQL 选主锁。已提交事件保留在 Outbox，消费方在提交本地事务后确认，失败按租约和游标重试。                                          |
 
-内部 RPC 只用 TLS 1.3 双向认证且不发会话票据，每次重连都完整验证证书。Core 按 `ca_file` 校验对端证书链，并要求叶证书已登记、未 RETIRE、未安全撤销；Gateway 与 worker 除 CA 与主机名外还固定 Core 服务端叶证书 DER 的 SHA-256（`core.peer_sha256` / `CORE_PEER_SHA256`）与完整 SAN（`core.subject_altname` / `CORE_SUBJECT_ALTNAME`）。登记与变更使用 `dist/tools/identity-provision.js`、`dist/tools/identity-revoke.js`，连接 `INTERNAL_IDENTITY_DEPLOY_DATABASE_URL`（授予 `core_identity_deployer` 的登录账号）。
-
-1. Gateway、worker 或 Core 自身客户端证书（`client_cert_file`）到期轮换：用同一 CA、同一 URI SAN 签发新叶证书；`identity-provision.js --service <服务> --instance <实例> --certificate <新证书> --uri-san <URI> --hostname <主机名>` 登记（同一实例可同时持有多张证书）；替换该实例配置中的证书与私钥并重启；旧进程退出后 `identity-revoke.js --service <服务> --instance <实例> --certificate-sha256 <旧证书指纹> --action RETIRE`。旧 session 已签名、仍在队列中的证据照常按捕获公钥验证并只入账一次，新实例不能接管旧尝试的发送权。
-2. Core 服务端证书轮换：计算新叶证书指纹（`openssl x509 -in core.pem -outform DER | sha256sum`），替换 Core 的 `key_file`/`cert_file` 并重启 Core API，然后逐个更新 Gateway 的 `core.peer_sha256`（SAN 变化时同时改 `core.subject_altname`）与 worker 的 `CORE_PEER_SHA256` 并重启。pin 只有一个值：Core 换证后到对应进程重启前，Gateway 的 `/readyz` 因无法与 Core 建立新连接返回 503 并被 Caddy 摘除，worker 的执行恢复调用失败、计入 `/readyz` 的 `maintenance_failures` 并按 `RECOVERY_INTERVAL_MS` 重试（证据结算不经 Core，不受影响），因此安排在低峰窗口逐台完成。
-3. CA 轮换：先把新旧 CA 合并为一个 PEM 信任包，作为 Core 与全部 Gateway、worker 的 `ca_file`/`core.ca_file`/`CORE_CA_FILE` 并逐个重启；再按第 1、2 步换成新 CA 签发的证书；全部旧叶证书 RETIRE 后从信任包删除旧 CA 并再次逐个重启。只信任单个 CA 的一端会拒绝另一 CA 签发的对端。
-4. 私钥泄露：对泄露证书执行 `--action SECURITY_REVOKE`（可加 `--session <session_id>`），已连接 session 的下一个请求即被拒；该 session 尚未锚定的证据只隔离不入账，原 UNKNOWN 与资金责任保留，按第 1 步换证后重启。
-
-## 高可用依赖
-
-应用层可多实例运行，支持共享幂等、分布式并发和恢复租约；本次双实例 HTTP 测试已验证只分派一次。实际 PG 主从/仲裁、Redis 故障转移和跨机房可用性由部署平台提供，不能用本地单容器证明。
-
-PG 使用高可用主端点、同步耐久提交、备份与 PITR。准入 Redis 的丢失会重置部分速率窗口；它不保存权威资金。
-
-耐久队列 Redis 保存尚未入 PG 的证据，必须独立部署：Redis ≥7.2、appendonly=yes、appendfsync=always、no-appendfsync-on-rewrite=no、aof-load-truncated=no、maxmemory-policy=noeviction。生产 QUEUE_REQUIRED_REPLICAS 至少 1，且等于所有可晋升副本数；客户端启动及准入探针检查 Redis 主角色、online/connected 副本数与配置完全一致，并重查持久化配置。所有连接副本都按可晋升候选管理，所有候选均须 AOF 落盘确认。成员变动需先停止准入、排空/核对、重新配置确认数，禁止自动降为 0。生产推荐独立主节点与两个 AOF 副本、三个故障域及外部仲裁/隔离。
-
-同连接 WAITAOF 证明此前写入达到指定落盘副本数量，不提供任意故障下的强一致性。晋升必须隔离旧主，并只选择未丢失已确认偏移的落盘副本；无法证明则停止准入，不能以可用性为由晋升落后的节点。不要从空白主库启动复制覆盖存量副本。当前客户端通过稳定故障转移端点或代理连接，不直接发现 Sentinel。参见 [Redis 官方 WAITAOF 保证](https://redis.io/docs/latest/commands/waitaof/)。
-
-本地 `bun run test:durability` 仅使用本轮新建的原生 PostgreSQL 17 cluster 与 Redis 7.4 AOF 主副本；必须显式设置 `PG_TOOLS_DIRECTORY`（PG 工具绝对目录）和 `DURABILITY_REDIS_SERVER`（Redis server 绝对路径），不接受参数。脚本不会使用 `DATABASE_URL` 或现有 Redis 端点作为源，也不会安装工具或操作已有服务。八项断言保留旧单账本路径的提交前/提交后未 ACK 强杀、完整 AOF 重启、副本独立晋升、缺副本/配置漂移拒绝准入、非法正文拒收与 UNKNOWN 预扣保留；三笔结算各 12 atoms。临时目录 0700、配置和数据 0600，子进程使用最小环境和 `--no-env-file`；正常、失败、超时、SIGINT/SIGTERM 均执行有界独立清理，输出实际 owned resources。该单元不代表未来 Core 双账本/真实三服务耐久验收，也不模拟驱动进程 SIGKILL 后自动恢复、机房掉电或仲裁失效。工具配置、预算与边界见 [原生耐久实施记录](docs/migrations/enterprise-v2-native-durability.md)。
-
-Gateway 配置 `upstream_pool_size` 默认1024，限制同时持有上游连接的请求数；共享空闲连接另有 min(512, floor(upstream_pool_size/2)) 的上限，30秒无使用则回收。等待连接的请求可被取消，取消发生在获得连接前时记录明确未执行。停机时拒绝等待请求并销毁连接。连接耗尽指标采用固定错误类别；本机端口或文件描述符不足且尚未取得响应时，记录明确未执行、释放预扣并返回503，不触发供应商熔断。
-
-Core API 内部与管理连接池各 8 个连接，core-worker 的 `DB_POOL_SIZE` 默认 8；所有 Core 进程的连接总数必须低于 PG 预算并留出迁移/运维余量。容量测试单独记录各进程连接总量。增加实例前先确认 PG WAL/磁盘、Redis CPU、上游限制与负载发生器都没有成为瓶颈。
-
-准入与熔断脚本优先使用 EVALSHA，减少每个请求重复发送 Lua 正文。只有 Redis 明确返回 NOSCRIPT 时才在同一命令期限内发送脚本；超时、断连和执行结果未知继续关闭本次准入。脚本缓存被清理后按同一规则恢复。
-
-TPM 桶在首次创建时设置固定窗口到期时间，已有桶的零 token 预留只读取现有计数。后续预留仍累加精确计数，最终调整仍作用于原桶，减少重复的零值写入及相同到期时间写入。
-
-RPM 和 active 集合按剩余 TTL 合并过期时间写入，保留至少完整滚动窗口及租约预算，空闲键最多额外保留 30 秒。短租约准入保留已有长租约的集合寿命。实际准入仍按 Redis TIME 和成员 score 清理过期项。成功健康观察在一次 HSET 中更新失败数、延迟和熔断时间。
-
-容量测试记录实际窗口、作业大小、worker 并发和数据库合批上限。
-
-TPM 是按输入字节/输出上限保守估算的准入，完成后用最终 token 事实修正；多模态、远端文件与异步任务不能依靠它获得精确财务上限，应配合供应商配额和计费账户并发。财务硬约束由 PG 预扣与钱包承担，不能由技术窗口代替。
+Redis 可通过托管主节点写入口或 `REDIS_SENTINEL_URLS` + `REDIS_SENTINEL_MASTER` 发现主节点。PG 主备切换先隔离旧主，再校验 WAL 位置和新写入口。PostgreSQL 恢复后核对资金、新写入、Worker 选主及 Outbox 游标。更多细节见 [ADR 0011 的故障切换与 PITR](docs/decisions/0011-production-operations.md#故障切换与-pitr-操作)。
 
 ## 智能路由与尝试预算
 
-模型缺省使用 WEIGHTED。候选需匹配模型与操作，模型、路由、供应商均启用，并通过共享供应商熔断检查。先按 priority 从高到低排序，同层的 WEIGHTED 按权重随机排序，ROUND_ROBIN 通过共享 Redis 计数轮换，LEAST_LATENCY 按供应商共享延迟升序选择，延迟相同时优先较大权重。延迟样本以旧值 80%、新值 20% 平滑。路由和模型偏好缓存 1 秒；派发前仍在 PG 校验权限、凭证有效期及渠道硬配置。
+候选按优先级、模型策略和渠道健康排序。切换复用同一逻辑请求，最终只向客户结算选中尝试。供应商未明成本独立待核账。客户端已经收到内容后继续沿当前流收口。尝试数、首包时限、结果不明重试及自适应排序见 [路由与执行](routing-and-execution.md) 和 [自适应路由方案](docs/adaptive-provider-routing.md)。
 
-Core 配置 `execution.maxAttempts` 缺省 3，允许 1 至 5，整次逻辑请求共享物理尝试预算。候选未通过供应商限流或探测准入时可以继续找其他候选；实际尝试预算及总循环次数都有界。Gateway 配置 `total_timeout_ms` 缺省 180,000 ms，`upstream_header_timeout_ms`、`upstream_idle_timeout_ms` 与 `downstream_stall_timeout_ms` 缺省 30,000 ms。
+## 监控、备份与容量
 
-HTTP 408、409、429、500、502、503、504、529 允许重试或切换，401、403、404 也允许尝试其他渠道。已识别的 400、422 终止本次调用。连接拒绝、头部超时、坏 JSON 及首个有效流事件前失败，可以在尚未交付结果时切换。已交付流内容、完整结果的本地终结失败，以及本机连接资源耗尽，按各自证据结束本次请求。发生重试时保留每个物理 attempt 的独立事实。
-
-同供应商再尝试时同时遵守 Retry-After 的数字秒或 HTTP 日期，以及 30 ms 起的指数退避与最多 30 ms 随机抖动。单次等待上限一小时，整次请求仍受总期限及客户端取消约束，等待不增加尝试预算。连续三次有效健康失败开路 10 秒；冷却后共享状态只允许一个半开探测，成功恢复闭合，失败重新开路。
-
-客户账单采用最终选中 attempt 的原始客户费率版本，所有其他物理调用的上游成本独立保留。全部尝试明确未执行时释放预扣；结果未知或缺少收费维度时继续保留预扣，等待可信补证或显式人工对账。多渠道边界与金额回归见 `tests/integration/gateway-chat.test.ts` 与 `core-routing-health.test.ts`。
-
-## 故障行为
-
-推理请求取得熔断准入时绑定本次观察身份与健康代次。首次准入及熔断重开使用唯一身份设置代次，健康记录过期后重新初始化也获得新代次。正常闭合状态下开始的调用只更新同代次且仍处于闭合状态的健康记录；半开探测还要求当前 token 且租约有效。获取半开租约时延长健康记录寿命，覆盖完整租约及健康保留窗口。租约过期、被替换或健康代次改变后，迟到观察保留该物理调用的数字证据与资金结果。有效探测提交健康结果后释放探测身份，其他实例共享相同准入状态。
-
-| 故障                             | 行为与处置                                                                                         |
-| -------------------------------- | -------------------------------------------------------------------------------------------------- |
-| PG 无法准入/worker 提交          | 准入失败不发上游；worker 失败保留队列作业与预扣，重试并告警；恢复后幂等结算                        |
-| 准入 Redis 断连/黑洞             | 准入失败关闭，命令1秒内返回503；连接重建后新请求恢复，不自动重放可能已执行的 Lua                   |
-| 上游超时/5xx/输出前失败          | 有限切换/重试；保留每个物理尝试及未知成本                                                          |
-| 输出后断流/取消                  | 不透明切换；提交 PARTIAL/UNKNOWN；终止上游并回收租约                                               |
-| 供应商已有最终证据、原流随后断开 | 保留 FINAL 优先，不允许后来部分证据降级计量                                                        |
-| SIGTERM                          | readiness关闭，等待宽限期，再取消在途；最多30秒清理，等待计量后关闭DB/Redis                        |
-| SIGKILL                          | 已发送的 attempt 结果记为未知并保留供应商暴露；重启不重发输入                                      |
-| 异步状态完成但缺usage            | PENDING_USAGE，指数退避最多1小时继续补证，不能当作零成本                                           |
-| Batch 缺根聚合usage              | 纯内存逐行扫描上游结果文件，只提取数字；每文件256MiB、50,000行、每行受JSON预算限制；超界保留待补证 |
-| 客户端下载停滞                   | 有背压队列及停滞/总时限；取消上游，正文不落盘                                                      |
-
-Gateway 按 `resource_poll_ms`（默认 5 秒）轮询未完成的异步资源，由租约持有者签名最终证据；core-worker 按 `RECOVERY_INTERVAL_MS`（默认 5 秒）执行恢复。若供应商没有查询/补证能力，UNKNOWN 长期保留并进入运营对账，不自动免收、不自行生成最终证据。
-
-## 监控与告警
-
-Core 管理监听的 `GET /admin/metrics` 返回未结请求、未结预扣、过期许可、待最终证据的资源、用量冲突、各事件消费者积压与结算队列计数；`GET /admin/queue` 返回证据队列 waiting/active/delayed/failed 数量。至少告警：各进程 readiness 失败、core-worker `/readyz` 的 `maintenance_failures`、证据队列 failed/waiting 积压、持续 UNKNOWN 与未结预扣、事件消费者积压、429/503、进程 RSS、PG连接/锁/WAL/磁盘、Redis内存与延迟。
-
-`scripts/bench-system.ts` 在 `bun run build` 后用编译产物启动 Core API、1–8 个 Gateway（`--instances`）与 core-worker，上游为本次运行自签证书的 TLS 标准 mock 或预序列化 fixture（`--upstream precomputed`）；审计客户资金、供应账本（每请求成本 59）、签名证据收据与 Core 事件 ACK，并按进程树记录 RSS 与 CPU。严格在线形式为 `--online-capacity --seconds 60 --upstream precomputed --rate <每秒> --target-rps <每秒>`。需提供测试 owner 的 DATABASE_URL、准入 Redis、独立的 AOF always 证据主节点及落盘副本，设置 QUEUE_REQUIRED_REPLICAS=1。该入口创建并清理独立测试数据库、准入与证据队列命名空间。参数与审计项见 [T14 n5](docs/migrations/enterprise-v2-native-operations.md)。历史 legacy 单体测量的命令、本机配置与结果见 validation.md。
-
-严格窗口验收按 request ID 求有效 HTTP 完成与已确认收据 ACK 的交集。每页 ACK 前逐对核对 request_id、evidence_id、数字用量及金额，最后再核对全量预扣、扣款、流水与队列。`--record-request-ids` 将技术身份和完成时刻写入有背压的TSV文件；外部ACK单独记录，运行后用64MiB排序预算逐行合并核对。严格在线验收支持60秒的整数倍、最长3600秒，每分钟完成交集和对应发出窗口的全部响应延迟均须达标，尾批包含在延迟预算内；普通吞吐测试使用固定大小直方图。
-
-不得在网关、代理、APM 或错误采集中记录请求/响应正文或认证头；不要启用响应缓存、body dump、磁盘请求缓冲或 swap/core dump 内容采集。技术ID和数字计量可保留。S3并非本 Gateway 的输出存储依赖。
-
-## 备份与恢复
-
-PG 与耐久队列共同构成恢复集。PG 单独备份不包含已经落盘确认但未入 PG 的证据。计划备份应停止所有 HTTP 准入、等待所有生产者退出、队列 waiting/active/delayed/failed 为零，核对 PG 预扣与证据后，再使用一致性快照进行 pg_dump/WAL 备份。未知执行结果的预扣可以保留；不要自动释放。若无法排空，必须保全对应队列 AOF 及复制状态，与 PG 协调恢复并通过幂等消费重放。
-
-恢复到全新数据库和同一当前队列契约，核对 schema、usage、钱包/资金批次/预扣/账单、平衡 journal 和不可变触发器，并重新执行 `infra/` 下的角色脚本；备份不保存 ACL。Core 的加密主密钥与 pepper 独立备份。确认无证据缺口后再恢复准入。不要删除 failed 作业来让备份门禁通过。
-
-本地 `bun run test:backup -- --quiesced` 只针对专用 PG，要求先停准入并排空当前 namespace，生成 0600 PG 备份、恢复到随机临时库并校验。备份在 `.local/backups/`，不进入 Git。
-
-供应商 API Key 通过管理 PATCH 轮换；Core 的加密主密钥不可直接覆盖，需先受控迁移全部密文并保留恢复窗口。pepper 改变后旧 Key verifier 无法使用，需要先发放新凭证并完成迁移。
-
-当前没有提供目标服务器，因此未执行公网发布、跨主机故障转移或10,000 RPS持续60分钟集群验收。当前版本的6000 RPS及持续验收状态见 validation.md；不得将单机短测称为完整生产验收。
-
-## 本地容量配置
-
-本地原生 PG 使用 256MiB shared_buffers 与 200 连接上限，保留fsync、full_page_writes、synchronous_commit=on。这些是本地开发配置；其他主机应按实际内存、磁盘、连接与WAL保留预算调整，不能直接照搬为通用最优值。参见[PG17内存说明](https://www.postgresql.org/docs/17/runtime-config-resource.html)与[WAL说明](https://www.postgresql.org/docs/17/wal-configuration.html)。
-
-## 本地多副本演练与热点验收
-
-同机 AOF 副本、副本晋升与缺副本拒绝由 `bun run test:durability` 在自有原生 PG/Redis 集群中演练；生产仍需独立故障域、稳定端点、旧主隔离和明确的晋升控制，不能由本地演练推导99.99% SLO。
-
-完整账务压测支持 `--wallets 1/10/1000` 与 `--hot-share 0.9`，报告每钱包负载、PG 锁等待、活动查询和停压排空。使用 `QUEUE_REQUIRED_REPLICAS=1` 或目标生产副本数实测，不以零副本成绩代替生产容量。本机原生服务设置 `QUEUE_REPLICA_URL=redis://127.0.0.1:<端口>` 时，`bun run infra:up` 另起一个与证据队列同为 appendonly/appendfsync always/aof-load-truncated no/noeviction 的 AOF 副本（`.local/native-services/queue-replica`），并以 `replicaof` 指向 `QUEUE_REDIS_URL`；未设置时不启动副本。副本挂在门禁共用的队列 Redis 上，运行 `verify` 前须停止副本（`redis-cli -p <副本端口> SHUTDOWN`）：`gateway-lifecycle` 断言队列无副本时 `required_replicas: 1` 的 Gateway 拒绝启动，副本在线会使该断言失败。修改 schema/队列后重新执行 `verify`、`test:durability`，备份恢复需在停止准入并排空队列后执行。
-
-使用冷 tablespace 的生产恢复需先准备对应 tablespace 或显式用 pg_restore 的 --no-tablespaces 恢复到目标默认存储，再核对数据与权限。原生 PG 工具的本地备份复验可通过 PG_TOOLS_DIRECTORY 指定同主版本工具目录；密码经子进程环境传递，不放入命令行或输出。
-
-## 当前容量验收入口
-
-完整口径见 [容量契约](docs/performance/capacity-contract.md)。`scripts/bench-system.ts --online-capacity` 支持60秒整数倍窗口，`--max-p99-ms`默认1500，只能收紧，超过1500的参数直接拒绝且验收判定不通过；全量和每个发出分钟的尾批P99均进入门槛。默认按5000字节/计划请求另加4GiB实验空间、4GiB系统保留量做磁盘预检，长测空间不足时在创建数据库前拒绝。该估计来自历史数量级，不是磁盘占用上限；测试期间继续检查剩余空间，不足时中止并判失败。不要通过关闭耐久性或删除权威身份降低空间预算。
+- 生产 Gateway 从私网管理监听采集 `/metrics`。独立 Worker 配置健康端口后提供 `/livez`、`/readyz` 和 `/metrics`。Console 管理监听提供用量监控指标。观察就绪、结算失败、未明账龄、过期租约、选主、Outbox 积压、配置分叉和共享配额错误。通过独立探针验证公网入口。[Prometheus 配置](infra/monitoring/prometheus.yml) · [告警规则](infra/monitoring/alerts.yml)
+- Gateway 账本和 Console 各自保留备份与恢复记录。按业务切点协调两库的 PITR，核对 Console 组织准入、事件 ID 去重、Gateway 消费游标和账本守恒。恢复到更旧的目录世代后按 ADR 0011 的分叉程序处理。按月导出账单与分录见 [数据库归档](database.md#分区归档与留存)。
+- `bun run test:artifact` 核验独立产物、账户与推理链路、Console 及账本归档。`bun run test:durability` 检查进程强杀、幂等重放和逻辑备份恢复。`bun run test:production` 使用隔离进程演练 PostgreSQL 主备、PITR 和 Redis Sentinel，目标环境仍需独立完成部署验收。
+- 测量前记录每个 Gateway 的数据、快照和管理池预算，并加上 Worker、Console 及滚动扩容实例占用。当前基准以 [README 的验证与基准](README.md#验证与基准) 为入口。比较时同时核对尾延迟、账本守恒、未明预扣和 Outbox 投递进度。

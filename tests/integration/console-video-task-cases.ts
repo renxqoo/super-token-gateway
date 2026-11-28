@@ -10,6 +10,112 @@ import {
 } from "./console-billing-fixture.ts";
 
 export function registerVideoTaskCases() {
+  test("symptom: failed video task registration leaves a committed charge without a task", async () => {
+    const accountId = await createTeamBillingAccount("Video Task Write", "video-task-write");
+    const topup = await h.adminApi(
+      "POST",
+      `/admin/v1/finance/billing-accounts/${accountId}/topups`,
+      adminAccess,
+      { external_ref: "video-task-write", amount_atoms: "20000" },
+    );
+    expect(topup.status).toBe(200);
+    const key = await h.clientApi<{ key: string }>(
+      "POST",
+      `/api/v1/billing-accounts/${accountId}/api-keys`,
+      customerAccess,
+      { name: "Video task write fixture", operations: ["videos"] },
+    );
+    expect(key.status).toBe(201);
+    const submit = () =>
+      fetch(`${h.gatewayPublicUrl}/v1/videos`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${key.data.key}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "bill-video", prompt: "clouds" }),
+      });
+
+    const control = await submit();
+    expect(control.status).toBe(200);
+    const { gateway_task_id: taskId } = (await control.json()) as { gateway_task_id: string };
+    const [stored] = await h.gwDb`SELECT t.id, c.request_id::text, c.customer_atoms::text
+      FROM public.async_tasks AS t JOIN public.billing_charges AS c ON c.id = t.charge_id
+      WHERE t.id = ${taskId}`;
+    expect(stored).toMatchObject({ id: taskId, customer_atoms: "5000" });
+
+    await h.gwDb`ALTER TABLE public.async_tasks ADD CONSTRAINT fixture_task_write_failure
+      CHECK (false) NOT VALID`;
+    try {
+      const failed = await submit();
+      const body = (await failed.json()) as { error: { code: string; request_id: string } };
+      const id = body.error.request_id;
+      const [state] = await h.gwDb`SELECT state,
+        EXISTS (SELECT 1 FROM public.billing_charges WHERE request_id = ${id}) AS charged,
+        EXISTS (SELECT 1 FROM public.async_tasks WHERE request_id = ${id}) AS registered,
+        EXISTS (SELECT 1 FROM public.outbox_events WHERE request_id = ${id} AND kind = 'billing.settled') AS published,
+        EXISTS (SELECT 1 FROM public.async_task_admissions WHERE request_id = ${id}) AS admitted
+        FROM public.billing_holds WHERE request_id = ${id}`;
+      expect(state).toEqual({
+        state: "UNKNOWN",
+        charged: false,
+        registered: false,
+        published: false,
+        admitted: true,
+      });
+      expect(failed.status).toBe(503);
+      expect(body.error.code).toBe("ledger_commit_failed");
+    } finally {
+      await h.gwDb`ALTER TABLE public.async_tasks DROP CONSTRAINT fixture_task_write_failure`;
+    }
+  });
+
+  test("video admission stays occupied when the upstream creation result is uncertain", async () => {
+    const accountId = await createTeamBillingAccount("Uncertain Video", "uncertain-video");
+    const topup = await h.adminApi(
+      "POST",
+      `/admin/v1/finance/billing-accounts/${accountId}/topups`,
+      adminAccess,
+      { external_ref: "uncertain-video", amount_atoms: "20000" },
+    );
+    expect(topup.status).toBe(200);
+    const key = await h.clientApi<{ key: string }>(
+      "POST",
+      `/api/v1/billing-accounts/${accountId}/api-keys`,
+      customerAccess,
+      { name: "Video slot fixture", operations: ["videos"] },
+    );
+    expect(key.status).toBe(201);
+    const gateway = createGatewayRuntime({
+      config: { ...h.gatewayConfig, maxActiveAsyncTasksPerBillingAccount: 1 },
+      db: h.gwDb,
+      wasmExecutor: null,
+    });
+    const submit = () =>
+      gateway.fetchPublic(
+        new Request("http://fixture.test/v1/videos", {
+          method: "POST",
+          headers: { authorization: `Bearer ${key.data.key}`, "content-type": "application/json" },
+          body: JSON.stringify({ model: "bill-video", prompt: "clouds" }),
+        }),
+      );
+    try {
+      await gateway.start();
+      h.setVideoCreateStatus(503);
+      const ambiguous = await submit();
+      expect(ambiguous.status).toBe(502);
+      const receipt = (await ambiguous.json()) as { error: { request_id: string } };
+      const [hold] =
+        await h.gwDb`SELECT state FROM public.billing_holds WHERE request_id = ${receipt.error.request_id}`;
+      expect(hold?.state).toBe("UNKNOWN");
+
+      h.setVideoCreateStatus(200);
+      const denied = await submit();
+      expect(denied.status).toBe(429);
+      expect(await denied.json()).toMatchObject({ error: { code: "rate_limit_async_tasks" } });
+    } finally {
+      h.setVideoCreateStatus(200);
+      await gateway.close();
+    }
+  });
+
   test("a failed video poll preserves the task and charge until a later successful poll confirms the refund", async () => {
     const accountId = await createTeamBillingAccount("Video Poll Recovery", "video-poll-recovery");
     const topup = await h.adminApi(

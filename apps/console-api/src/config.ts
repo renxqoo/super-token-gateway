@@ -28,6 +28,7 @@ export type ConsoleConfig = {
   outboxConsumerName: string;
   bootstrapAdminEmail?: string;
   bootstrapAdminToken?: string;
+  registrationSigningSecret?: string;
   trustedProxyCidrs: string[];
   sessionTtlMs: number;
   refreshTtlMs: number;
@@ -131,6 +132,11 @@ export function loadConsoleConfigFromEnv(
     );
   }
 
+  const registrationSigningSecret = env.CONSOLE_REGISTRATION_SIGNING_SECRET?.trim() || undefined;
+  if (registrationSigningSecret && !/^[a-f0-9]{64}$/i.test(registrationSigningSecret)) {
+    throw new Error("CONSOLE_REGISTRATION_SIGNING_SECRET must contain 32 hexadecimal bytes");
+  }
+
   const trustedProxyCidrs: string[] = [];
   for (const rawCidr of parseList(env.CONSOLE_TRUSTED_PROXY_CIDRS)) {
     const normalized = normalizeAndValidateCidr(rawCidr);
@@ -155,6 +161,7 @@ export function loadConsoleConfigFromEnv(
     outboxConsumerName: env.OUTBOX_CONSUMER_NAME ?? "console_api",
     ...(bootstrapAdminEmail ? { bootstrapAdminEmail } : {}),
     ...(bootstrapAdminToken ? { bootstrapAdminToken } : {}),
+    ...(registrationSigningSecret ? { registrationSigningSecret } : {}),
     trustedProxyCidrs,
     sessionTtlMs: intEnv(env, "CONSOLE_SESSION_TTL_MS", 24 * 3_600_000, 60_000),
     refreshTtlMs: intEnv(env, "CONSOLE_REFRESH_TTL_MS", 30 * 24 * 3_600_000, 300_000),

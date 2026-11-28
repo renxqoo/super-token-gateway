@@ -75,3 +75,70 @@ test("native extended precision numbers cannot cross a model range through binar
     }),
   ).not.toThrow();
 });
+
+test("route policy enforces nested extra_body blocks, multi-level array wildcards, non-finite range rejections, single-point bounds, and empty allowlists", () => {
+  expect(() =>
+    validateRequestPolicy(
+      { model: "m", messages: [], extra_body: { internal_flag: true } },
+      { blocked_parameters: ["extra_body.internal_flag"] },
+    ),
+  ).toThrow("extra_body.internal_flag");
+
+  expect(() =>
+    validateRequestPolicy(
+      {
+        contents: [],
+        generationConfig: { thinkingConfig: { thinkingBudget: 1024 } },
+      },
+      { blocked_parameters: ["generationConfig.thinkingConfig"] },
+    ),
+  ).toThrow("generationConfig.thinkingConfig");
+
+  expect(() =>
+    validateRequestPolicy(
+      {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "ok" }] },
+          {
+            role: "user",
+            content: [{ type: "image_url", image_url: { url: "https://example.com/a.png" } }],
+          },
+        ],
+      },
+      { blocked_parameters: ["messages.*.content.*.image_url"] },
+    ),
+  ).toThrow("messages.*.content.*.image_url");
+
+  const rangePolicy = { parameter_ranges: { temperature: { minimum: 0, maximum: 1 } } };
+  for (const invalidTemp of [
+    true,
+    false,
+    "0.5",
+    null,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    -0.01,
+  ]) {
+    expect(() =>
+      validateRequestPolicy({ messages: [], temperature: invalidTemp }, rangePolicy),
+    ).toThrow("temperature");
+  }
+  const negTiny = object(parseClientJson('{"messages":[],"temperature":-0.0000000000000000001}'));
+  expect(() => validateRequestPolicy(negTiny, rangePolicy)).toThrow("temperature");
+
+  const pointPolicy = { parameter_ranges: { temperature: { minimum: 0.5, maximum: 0.5 } } };
+  expect(() =>
+    validateRequestPolicy({ messages: [], temperature: 0.5 }, pointPolicy),
+  ).not.toThrow();
+  expect(() => validateRequestPolicy({ messages: [], temperature: 0.51 }, pointPolicy)).toThrow(
+    "temperature",
+  );
+
+  expect(() => validateRequestPolicy({ model: "m" }, { allowed_parameters: [] })).toThrow("model");
+  expect(() =>
+    validateRequestPolicy(
+      { model: "m", secret_param: 1 },
+      { allowed_parameters: ["model", "extra_body.safe"] },
+    ),
+  ).toThrow("secret_param");
+});

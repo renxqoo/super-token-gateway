@@ -169,6 +169,11 @@ async function respondToFastBufferedSse(
       candBilling.price,
       cand.costPrice,
       combinedStreamUsage,
+      undefined,
+      undefined,
+      candBilling.customerSnapshot,
+      candBilling.supplierSnapshot,
+      candBilling.meteredAllowedHostedTools,
     );
     let estimatedSettlement = false;
     if (!usage && deps.config.streamEstimatedSettlement !== false) {
@@ -179,6 +184,9 @@ async function respondToFastBufferedSse(
         supplierPrice: cand.costPrice,
         customerPricing: state.pricingOf(candBilling.price),
         supplierPricing: state.pricingOf(cand.costPrice),
+        ...(candBilling.customerSnapshot ? { customerSnapshot: candBilling.customerSnapshot } : {}),
+        ...(candBilling.supplierSnapshot ? { supplierSnapshot: candBilling.supplierSnapshot } : {}),
+        authorizedHostedTools: candBilling.meteredAllowedHostedTools ?? null,
         observedUsage: combinedStreamUsage,
         preparedBody: prepared.body,
         inputChars: chars,
@@ -321,6 +329,13 @@ async function respondToFastBufferedSse(
             supplierPrice: cand.costPrice,
             customerPricing: state.pricingOf(candBilling.price),
             supplierPricing: state.pricingOf(cand.costPrice),
+            ...(candBilling.customerSnapshot
+              ? { customerSnapshot: candBilling.customerSnapshot }
+              : {}),
+            ...(candBilling.supplierSnapshot
+              ? { supplierSnapshot: candBilling.supplierSnapshot }
+              : {}),
+            authorizedHostedTools: candBilling.meteredAllowedHostedTools ?? null,
             observedUsage,
             preparedBody: prepared.body,
             inputChars: chars,

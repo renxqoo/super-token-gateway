@@ -1,30 +1,30 @@
 # Gateway 钱包、预扣与结算
 
-资金边界见 [ADR 0002](docs/decisions/0002-gateway-wallet-worker.md)，正常授信与资金承诺边界见 [ADR 0005](docs/decisions/0005-credit-boundaries-and-capacity.md)，当前唯一计量入口见 [ADR 0003](docs/decisions/0003-durable-usage-queue.md)。Gateway 执行技术钱包记账；业务系统处理支付、商业账号、商品订阅、营销和真实退款渠道。业务系统通过幂等内部管理 API 入账与冲正，不写 Gateway 的数据库。
+Gateway 在进程内调用账本库进行技术钱包预扣、结算和退款。Console 通过私网管理 API 同步业务配置与发起资金操作，实际支付及原路现金退款由外部业务系统处理。当前数据流以 [ADR 0009](docs/decisions/0009-enterprise-gateway-worker-architecture.md) 和 [系统架构](architecture.md) 为准。授信规则见 [ADR 0005](docs/decisions/0005-credit-boundaries-and-capacity.md)。
 
 ## 请求链路
 
-1. 验证计费账户、Key、技术组织/主体、角色、模型/操作、来源 IP 和 RPM/TPM/并发。
-2. 按请求币种获取不可变客户费率版本与预扣上界。币种默认计费账户的 billing_currency，可用 `x-gateway-currency` 指定；不换汇，不跨币种补足。
-3. PG 同事务复核授权、创建幂等请求、从合资格的现金/赠额及剩余信用分配预扣、登记首次物理 attempt。合资格资金与信用不足或冻结返回 402，上游尚未调用。
-4. 转发模型内容，同时旁路提取白名单数字；每个 attempt 独立保存 usage 和上游成本。正常 JSON/SSE 终态交付前，BullMQ 数字证据必须取得同连接 WAITAOF 落盘确认。
-5. 独立 BullMQ worker 结算最终交付 attempt，释放多余预扣；重试的其他成本由 Gateway 承担。取消但有可信最终 usage 时结算实际用量。非流式请求在发往上游后若客户端提前取消，在 `UNARY_CLIENT_ABORT_GRACE_MS`（默认 600000ms，设为 0 关闭）及单次尝试超时上界内继续等待上游收尾并按真实 usage 结算（不发起 failover 重试），超出宽限或仍缺 usage 再中止上游并转 `UNKNOWN`。
-6. 对话流式请求在 `STREAM_ESTIMATED_SETTLEMENT`（默认 `true`）启用时，若流正常完结仅缺 `usage`，或在无在途内容审核插件时中途断流/超时/客户端主动断开前已观测到输出增量（文本、思考或工具参数），则保留已收到的上游部分用量（如 Anthropic `message_start` 输入与缓存字段），对缺失的输入/输出 token 按明文字符分类（英文约 4 字符/token、非 ASCII 约 1 字符/token）估算并截断至不超过已预扣金额后即时结算，并在访问日志与指标标记 `estimated`；0 输出断流、在途审核插件未决中断、上游显式流错误帧或关闭估算开关时仍保留预扣并进入 `UNKNOWN` 对账。
-7. 缺少最终证据的 `UNKNOWN` 预扣默认进入对账等待。不会无上限自动免收或重发模型请求；明确未执行可释放；人工对账指令可显式结算或核销。配置 `billing_reconciliation_budgets` 与 `billing_reconciliation_policies`（支持按 `(billing_account_id, channel_id, supplier_currency)` 精确配置或 `billing_account_id = NULL` 的渠道默认策略，精确策略优先）后，满足等待时长与单笔/累计预算上限的 `UNKNOWN` 预扣可由 Worker 在预算封顶保护下自动释放客户冻结款，并在 `billing_reconciliation_waivers` 留存审计记录。等待证据的预扣按已存在时长退避重扫（30 秒至 1 小时），新证据、人工对账及异步资源轮询改变计费结果时立即推进；对账先处理待收债务，现金入账后的收债与解冻不排在等待证据的积压之后。
+1. 验证 Key、计费账户、组织、模型与操作范围、来源 IP 及运行配额。Console 管理的账户复核 Gateway 数据库的组织和 Key 状态。
+2. 按账户币种确定客户报价和预扣上界，分别计算上游成本并检查供应商资金。定价可使用已配置的版本化汇率。钱包资金保留原币种。
+3. PostgreSQL 同事务登记幂等请求、预扣及首次供应商尝试。合资格现金、赠额和剩余信用不足时返回 402，上游尚未调用。
+4. Gateway 转发模型内容并提取数字用量。正常 JSON 或 SSE 成功终态等待 `commitTerminal` 的 PostgreSQL 提交。账单、两侧分录和 Outbox 同事务写入，允许先转发可交付的 SSE 内容增量。
+5. 客户只按最终选中的尝试结算。备选渠道更贵时可在切换事务中补足预扣，其他尝试的已知或未明供应商成本独立处理。非流式请求派发后若客户端提前断开，在 `UNARY_CLIENT_ABORT_GRACE_MS`（默认 600000 ms，设 0 关闭）及单次尝试超时约束内，可继续等待可信用量并结算。此路径不继续切换供应商。
+6. `STREAM_ESTIMATED_SETTLEMENT` 启用时，正常结束但缺部分计量的对话流，或已有输出且无未决内容审核的断流，可以用已观测的文本估算缺失的输入或输出 token，并在两侧预扣上界内结算。已有数字用量保留，估算在访问日志与指标中标记。无输出的中断、上游显式流错误、未决审核中断或无法满足计价证据要求时保留 `UNKNOWN`。
+7. `UNKNOWN` 保留预扣供 Worker 查询已配置的核账来源或处理人工收据。确认未执行可释放，可信最终用量可结算。可配置渠道级或账户级核账豁免策略，由 Worker 在等待期和逐笔、累计预算内释放客户冻结款，并留存审计。派发结果不明时，恢复依赖账本状态和供应商证据。
 
-解析失败、地址安全校验拒绝及解析阶段取消均发生在发送前，记为 `NOT_EXECUTED`。只有所有尝试都已确定无需结算时才释放失败请求的预扣。发送后状态未知的尝试仍须对账。
+派发前明确失败可归还预扣。派发后只有得到足以结算、释放或豁免的证据，才推进相应资金状态。
 
 ## 金额、价格与资金来源
 
-费率是 `{numerator,denominator}`，金额为 **10^-18 币种单位**的原子整数字符串，最大 NUMERIC(38,0)。全部维度用精确有理数汇总，仅在最终原子金额上向上取整。供应商成本 `cost_versions` 与客户售价 `billing_prices` 独立，不能互相代替。模型/操作/币种默认费率可由供应商专属费率覆盖；请求保存原始报价与各候选供应商的价格版本。
+费率是 `{numerator,denominator}`，金额为 **10^-18 币种单位**的原子整数字符串，最大 NUMERIC(38,0)。全部维度用精确有理数汇总，仅在最终原子金额上向上取整。客户和供应商费率统一存于不可变 `price_versions`，通过 `side` 区分。路由独立引用客户价和供应商成本。已预扣的尝试记录对应版本，并可冻结生效价卡。
 
-预扣上界由显式 ceilings、请求最大输出和收费依据决定。对纯文本 `chat`、`responses` 和 `messages` 对话请求（同协议与跨协议均适用，排除含多模态、服务端工具或服务端隐藏上下文的请求），网关可基于请求体 UTF-8 字节数与结构开销计算严格输入 token 上界 `estimatedInputTokens`，并在全部互斥输入计费维度（`input_tokens`、`cached_input_tokens`、`cache_write_tokens`、`cache_write_5m_tokens`、`cache_write_1h_tokens`）中按最高单价维度报价（超过对应 ceiling 时安全回退全上限），在保证绝不欠扣的前提下压低单笔冻结金额。最大输出只读取入口协议的原生上界字段，多个或非本协议字段返回 400；没有计量维度的服务端托管工具在准入前返回 422/unmetered_tool，避免上游按未计量维度另行收费。`PROVIDER_USAGE` 要求全部已定价维度的 FINAL 证据（流式估算启用时按上述明文估算边界兜底）；`INPUT_CHARACTERS` 用明确输入字符量并要求请求成功；`REQUEST_COMPLETION` 按成功请求收费。禁止把缺失维度当零。预扣上界不足造成超额时补扣可用资金；仍不足则完整登记债务；已有欠费与在途信用预扣合计超出授信时冻结新调用。现金入账可偿债，赠额不能偿还现金债务。可用余额扣减地板为0；欠费金额为实际客户应收中未被资金覆盖的部分，单独记录为 `debt_atoms`，默认授信为0时债务会冻结新调用并返回402；显式授信允许额度内继续使用。管理接口 `GET /internal/v1/wallets/:billingAccountId` 返回按币种区分的可用、预扣、已花费、欠费原子整数字符串和冻结原因，以及credit_limit_atoms、credit_reserved_atoms、available_credit_atoms、credit_excess_atoms、credit_policy_version。
+预扣上界由显式 ceilings、请求最大输出和收费依据决定。对纯文本 `chat`、`responses`、`messages` 和 `gemini` 对话请求（同协议与跨协议均适用，排除含多模态、服务端工具或服务端隐藏上下文的请求），网关可基于请求体 UTF-8 字节数与结构开销计算严格输入 token 上界 `estimatedInputTokens`，并在全部互斥输入计费维度（`input_tokens`、`cached_input_tokens`、`cache_write_tokens`、`cache_write_5m_tokens`、`cache_write_1h_tokens`）中按最高单价维度报价（超过对应 ceiling 时安全回退全上限），可用于收紧该路由的预扣上界。最大输出只读取入口协议的原生上界字段，多个、非正整数或非本协议字段返回 400；无对应计价维度的非默认 `service_tier` / `serviceTier` 返回 422/billing_ceiling；没有计量维度的服务端托管工具在准入前返回 422/unmetered_tool，避免上游按未计量维度另行收费。`PROVIDER_USAGE` 要求全部已定价维度的 FINAL 证据（流式估算启用时按上述明文估算边界兜底）；`INPUT_CHARACTERS` 用明确输入字符量并要求请求成功；`REQUEST_COMPLETION` 按成功请求收费。禁止把缺失维度当零。预扣上界不足造成超额时补扣可用资金；仍不足则完整登记债务；已有欠费与在途信用预扣合计超出授信时冻结新调用。现金入账可偿债，赠额不能偿还现金债务。可用余额扣减地板为0；欠费金额为实际客户应收中未被资金覆盖的部分，单独记录为 `debt_atoms`，默认授信为0时债务会冻结新调用并返回402；显式授信允许额度内继续使用。管理接口 `GET /internal/v1/wallets/:billingAccountId` 返回按币种区分的可用、预扣、已花费、欠费原子整数字符串和冻结原因，以及credit_limit_atoms、credit_reserved_atoms、available_credit_atoms、credit_excess_atoms、credit_policy_version。
 
 字符费率按入口协议中的直接文本计算 Unicode 码点。Completions、图片和视频读取 `prompt`，Speech、Embeddings 和 Moderations 读取 `input`，对话协议读取消息、系统提示和指令的文本内容。文本数组按项相加。媒体载荷、工具元数据和仅引用的历史内容不计入字符量。无法确定字符量时，该候选费率不能用于预扣，其他可用候选仍可参与路由。
 
 每个计费账户、每个币种有独立钱包。现金和赠额按相同条款聚合资金批次，赠额可设置模型/操作范围、到期时间和优先级。策略支持 `GIFT_FIRST`、`CASH_FIRST`、`EARLIEST_EXPIRY`；同类按 priority、到期、创建顺序消费。预扣、扣费、释放、退款均保存来源分配，退回原币种和原资金批次；过期赠额退入 expired，不能复活为可用余额。
 
-外部充值、退款、调价和对账命令均有 external_ref 和载荷指纹；同一身份重复执行返回原结果，载荷变化返回 409。钱包与资金批次物化余额、账单和不可变平衡流水在同一 PG 事务变更。运行角色不能直接修改余额、分配或 journal；金融入口使用固定安全 search_path，临时表不能遮蔽权威表。
+外部充值、退款、调价和对账命令均有 external_ref 和载荷指纹；同一身份重复执行返回原结果，载荷变化返回 409。资金变动由账本实现按服务角色的数据库授权执行。租约结算先提交账单、分录和租约用量记录，余额归并可在租约关闭时完成。生产角色与授权见 [数据库说明](database.md#迁移与角色)。
 
 ## Usage 证据
 
@@ -39,36 +39,41 @@ token、请求、图片、字符和毫秒以十进制整数字符串保存；明
 
 明确的毫秒时长可换算为秒。秒值可精确表示为合法整数毫秒时，同时记录毫秒维度。无法精确换算的值保留秒精度，毫秒费率等待可用证据。单一费率只能选择同类媒体的一种时长单位。正常结束的 SSE 即使未报告 token，仍有一次请求的最终证据，token 费率仍须等待所需维度。
 
-成功读取到媒体响应末尾时记录一次请求的最终证据，并记录可直接确定的合成输入字符数。未报告的时长、token 等维度继续等待可信证据。Batch 按提交时已校验的端点逐行计量；顶层汇总用量不取代结果文件中的行证据。新上传只保存行数、排序后的行标识摘要和已知图片请求总量。按张计价使用该总量预扣，超过候选费率上界时拒绝派发。旧图片批次文件可在创建新任务时从供应商重新读取并核对上界。
+媒体按响应实际用量、可确定的图片数量、输入字符或请求完成依据计价。缺少当前费率需要的数字用量时进入核账。对视频任务，创建时的结算和登记同事务提交，后续由公开查询按任务绑定的上游读取状态，符合配置的系统故障可触发退款。余额和用量投影通过业务事件更新。
 
-Batch 结果按文件和行标识检查重复。只有每行都有某项维度时，才会将该维度的总值写入 FINAL；捕获的费率需要该维度而证据不足时，保留预扣待对账。完整 Batch 用量证据记录 `batch_completed`、`batch_cancelled` 或 `batch_failed`，结算以该持久化终态为准。状态查询可在结果暂时不可用时返回上游状态，轮询与 worker 继续处理账务证据。
+## 结算恢复与 Outbox
 
-同一 attempt 的累计快照不能相加。`attempts.evidence_id` 指向选定证据，兼容补证可补全字段；互斥的 FINAL 数字保留到 `usage_conflicts`，不静默覆盖。追加式 `wallet_disputes` 立即阻止该钱包的新预扣，worker 再推进对账；解决争议必须显式提交对账记录。旧异步资源完成不能替代另一已交付 attempt。
+普通租约结算及直接结算都通过 PostgreSQL 写入数字用量、客户账单、资金分配、平衡分录和 Outbox。提交结果不明时使用原请求 ID 查询或重放，避免产生第二张客户账单。Worker 清扫过期预扣和租约，跟进未明供应商成本、收据及欠款。
 
-## 队列与恢复
+Outbox 至少一次投递。`POST /internal/v1/events/claim` 按已授权的消费者认领事件并返回 30 秒租约。消费者在自己的事务中按 `event_id` 去重，事务提交后通过 `POST /internal/v1/events/ack` 提交 `lease_token` 和 `through_seq`。Gateway 按消费方维护分片游标。配置了业务 Webhook 时，Worker 可用同一领批与确认机制推送事件。
 
-BullMQ 6.7.2 使用 Bun 原生 Redis 适配器。作业只保存严格白名单的数字 usage、attempt UUID、状态、来源与受限错误码，不含 LLM 正文。生产要求独立 AOF always/noeviction Redis、本机与配置的 AOF 副本确认；同连接入队/WAITAOF 期间断线即丢弃该连接代次，不透明重连后伪造确认。确认未知最多以同一 jobId 重试，无法确认则不交付正常成功终态。
-
-core-worker 的唯一入口 `persist_core_evidence_groups_v1 → settle_requests` 在 PG 中原子写证据、客户账单、资金来源分配和平衡流水，PG commit 后 ACK。完成作业可以移除，失败作业保留并告警；单条失败不撤销同批其他已提交事实，重投时逐条幂等。无最终证据的预扣留在 PG 对账；已丢失的队列不能由 PG 还原其数字，不得把丢证解释为零。
-
-外部 usage 消费同样是至少一次：创建 consumer，claim 获取 30 秒租约，在自己的事务中按 event_id 去重后 ack。历史回放按短注册屏障确定水位，分块补投，避免注册期间长时间阻塞实时计量。seq 是诊断浏览序号，不能当提交顺序游标。
-
-Gateway 不保存提示词、模型输出、工具参数、向量、媒体、完整响应或 Batch 结果；内容恢复依赖上游，资金恢复只使用数字证据和资源标识。
-
-每钱包最多256组仍可成为可用余额的资金条款；已消费但仍可退款的未过期来源继续占用名额。同条款入账复用原批次，退款不受新增条款名额影响。现金入账、现金退款与预扣释放在钱包存在可用现金时唤醒既有债务回收；赠额不能偿还现金债务，赠额释放不唤醒债务，争议未解决的债务不会自动回收。
+账务和 Outbox 保存数字用量及必要标识。视频任务的查询结果单独保存于任务表，普通推理响应正文不用于账务恢复。赠额不抵偿现金债务，现金入账、退款或预扣释放后可推进欠款回收。
 
 ## 正常授信与扣除地板
 
-`available_atoms` 和 `reserved_atoms` 只统计真实现金/赠额，最低为0；`credit_reserved_atoms` 是独立的信用承诺。`billing_holds.amount_atoms` 仍为总预扣，其中 `credit_atoms` 是信用部分；资金来源分配合计为两者之差。正常准入在钱包锁内保证欠费加在途信用加新信用不超过授信，不用赠额偿还旧债。信用不产生资金批次或充值流水。
+`available_atoms` 和 `reserved_atoms` 只统计真实现金/赠额，最低为0；`credit_reserved_atoms` 是独立的信用承诺。`billing_holds.held_atoms` 仍为总预扣，其中 `credit_atoms` 是信用部分；资金来源分配合计为两者之差。正常准入在钱包锁内保证欠费加在途信用加新信用不超过授信，不用赠额偿还旧债。信用不产生资金批次或充值流水。
 
-私网 `POST /internal/v1/wallets/:billingAccountId/credit-policy` 接受 `currency`、`expected_version`、`credit_limit_atoms` 和可选的 `policy`。版本和额度均为非负整数字符串，额度以原子为单位。新钱包的额度和版本均为 0。更新要求版本匹配，成功后版本加一，旧版本重试返回 HTTP 400。降低额度后，重新计算钱包冻结状态并保留已有欠费和在途信用。人工冻结继续由原 PATCH 执行。信用不足返回 HTTP 402 和 `insufficient_funds`。
+私网 `POST /internal/v1/wallets/:billingAccountId/credit-policy` 接受 `currency`、`expected_version`、`credit_limit_atoms` 和可选的 `policy`。版本和额度均为非负整数字符串，额度以原子为单位。新钱包的额度和版本均为 0。更新要求版本匹配，成功后版本加一，旧版本重试返回 HTTP 400。降低额度后，重新计算钱包冻结状态并保留已有欠费和在途信用。人工冻结使用 `POST /internal/v1/wallets/:billingAccountId/freeze`。信用不足返回 HTTP 402 和 `insufficient_funds`。
 
 UNKNOWN保留信用承诺；明确释放或终态结算恰好释放一次，未被真实资金覆盖的实际费用记债务。授信约束正常承诺，异常实际应收可能突破额度，完整记录并冻结，不提供客户费用硬封顶或额外结算宽限。退款、收债、调账、人工对账和冻结统一复核债务加信用承诺；现金清偿或信用释放后重新计算可用额度。
 
-最终补证与资源完成、创建证据可能交错；选中尝试的可信async_final成功证据重新推进账务，不能将已有最终数字和信用承诺永久留在PENDING。其他尝试的迟到事实仍不能替换选中尝试。
+核账可在客户请求已结束后处理未明供应商尝试。其他尝试的迟到成本不能替换已选中的客户结算。
 
 ## 精度与供应商差异计量
 
 金额仍固定为 18 位小数的整数 atoms，计算与舍入契约见 [ADR 0007](docs/decisions/0007-money-and-model-compatibility.md)。不引入第三方十进制计算库，不以展示位数或支付渠道精度替换内部记账精度。对外支付、币种白名单与支付尾差由业务系统按渠道规则处理；已配置对应币种费率是 Gateway 的报价准入条件，不代表该币种已获支付渠道支持。
 
 缓存写入可按 `cache_write_tokens` 合计计价，或分别使用 `cache_write_5m_tokens`、`cache_write_1h_tokens`，同一费率禁止两者混用以免重复收费。明细与合计是包含关系，总 token 统计只加合计一次。完整明细验证相加等于合计，未报告明细不补零；新合计没有明细时清除旧快照明细。已有费率保持历史行为，新建差异费率时同步配置对应 ceilings。新费率缺失所需 TTL 最终证据时保留预扣等待补证。
+
+## 标准化商业定价与快照冻结
+
+旧版平面费率卡保留原始配置和幂等标识。进入标准化引擎时，仅使用计费依据适用的费率、以及可识别且适用的上限。
+
+标准化费率按生效阶梯核对计费用量。缺少独立思考、已授权托管工具或其他计费维度的证据时保留预扣供对账。有明确请求授权记录时，未授权且上游未报告用量的托管工具计为零。TTL 单独参与跳档时，账本需要对应 TTL 明细或能精确推导该值的缓存计数。
+
+- **不可变基础费率卡扩展 (`price_versions.pricing_spec`)**：`POST /internal/v1/prices` 支持可选 `pricing_spec`，统一表达长上下文全量跳档阶梯（`cliff`）、边际累进分段（`progressive`）、媒体属性矩阵（`matrix`，如图片 `size × quality`、视频 `resolution × has_audio`）、独立思考输出单价（`reasoning_rate`）、最小起算量/计费步长量化器（`quantizers`）及单次最低/封顶收费（`min_charge_atoms` / `max_charge_atoms`）；未配置 `pricing_spec` 且无修饰器/汇率转换的路由保持零额外开销的既有租约快路径。
+- **分层修饰器 (`pricing_modifiers`) 与不可变汇率版本 (`fx_rate_versions`)**：通过 `PUT /internal/v1/pricing-modifiers`、`GET /internal/v1/pricing-modifiers`、`POST /internal/v1/fx-rates`、`GET /internal/v1/fx-rates` 管理产品级修饰器（`PRODUCT`，如时区峰谷时段 `time_windows`、`service_tier`、`execution_mode`）与商业级修饰器（`COMMERCIAL`，如 `customer_group_id`、`billing_account_id`，支持 `MULTIPLY`、`BEST_FOR_CUSTOMER`、`EXCLUSIVE` 及 `EXACT_RATE_CARD`）以及版本化精确有理数汇率；每次配置变更递增 `config_epoch`，Gateway 节点在内存中零 I/O 编译为只读 `CompiledRatingPlan`。
+- **预扣冻结与对账一致性 (`billing_holds.supplier_holds` / `billing_charges.pricing_snapshot`)**：使用标准化定价的请求在预扣瞬间冻结不可变 `PricingSnapshot`（含 `rated_at`、生效费率卡、命中修饰器、汇率版本和合并倍率），随 `supplier_holds` 持久化并在结算时写入 `billing_charges.pricing_snapshot` 与 `billing.settled` 事件；后续修饰器变更、峰谷跨时段或汇率切换不影响在途与 `UNKNOWN` 对账请求的结算金额。
+- **零副作用试算 (`POST /internal/v1/pricing/simulate`)**：基于当前内存配置快照返回完整客户/供应商 `PricingSnapshot`、逐维度明细 `CostBreakdown`、预扣上界试算以及毛利与防倒挂评估结果。
+
+实时推理使用 `SYNC` 定价上下文。`BATCH` 执行模式和 `region` 选择器目前只在试算请求中提供。

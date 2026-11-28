@@ -22,6 +22,7 @@ import type { Usage } from "@gateway/kernel";
 import type {
   ChargeLotAllocation,
   ChargePolicy,
+  ChargePricingSnapshot,
   HoldLotAllocation,
   LeaseLotAllocation,
   LotKind,
@@ -34,6 +35,8 @@ import {
   upstreamAccounts,
   pgJsonb,
   priceVersions,
+  pricingModifiers,
+  fxRateVersions,
   channels,
   schemaMigrations,
   configEpoch,
@@ -62,6 +65,8 @@ export {
   channels,
   models,
   priceVersions,
+  pricingModifiers,
+  fxRateVersions,
   routes,
 } from "./schema-catalog.ts";
 
@@ -303,6 +308,7 @@ export const billingCharges = pgTable(
     pricingOverrideId: uuid("pricing_override_id"),
     discountNumerator: numeric("discount_numerator", { precision: 38, scale: 0 }),
     discountDenominator: numeric("discount_denominator", { precision: 38, scale: 0 }),
+    pricingSnapshot: pgJsonb<ChargePricingSnapshot | null>("pricing_snapshot"),
     usage: pgJsonb<Usage>("usage")
       .notNull()
       .default(sql`'{}'::jsonb`),
@@ -510,6 +516,21 @@ export const billingAccountPricingOverrides = pgTable(
   ],
 );
 
+export const asyncTaskAdmissions = pgTable(
+  "async_task_admissions",
+  {
+    requestId: uuid("request_id").primaryKey(),
+    billingAccountId: uuid("billing_account_id")
+      .notNull()
+      .references(() => billingAccounts.id),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+  },
+  (t) => [
+    index("async_task_admissions_account_expiry_idx").on(t.billingAccountId, t.expiresAt),
+    index("async_task_admissions_expiry_idx").on(t.expiresAt, t.requestId),
+  ],
+);
+
 export const asyncTasks = pgTable(
   "async_tasks",
   {
@@ -697,8 +718,11 @@ export const ledgerSchema = {
   channels,
   models,
   priceVersions,
+  pricingModifiers,
+  fxRateVersions,
   billingAccountPricingOverrides,
   asyncTasks,
+  asyncTaskAdmissions,
   plugins,
   pluginReleases,
   pluginRevocations,

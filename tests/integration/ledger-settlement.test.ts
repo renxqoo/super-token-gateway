@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { appendFile, rm } from "node:fs/promises";
+import { appendFile, rm, stat } from "node:fs/promises";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import {
   assertSchemaVersion,
@@ -436,6 +436,11 @@ test("G1.5 moderation PLATFORM_ABSORB, DB immutability/balance triggers, and mon
     try {
       const manifestPath = await exportLedgerArchive(db, month, archiveDir);
       const verified = await verifyLedgerArchive(manifestPath);
+      expect((await stat(archiveDir)).mode & 0o777).toBe(0o700);
+      expect((await stat(manifestPath)).mode & 0o777).toBe(0o600);
+      for (const file of verified.files) {
+        expect((await stat(`${archiveDir}/${file.file}`)).mode & 0o777).toBe(0o600);
+      }
       expect(verified.files.find((x) => x.kind === "charges")?.rows).toBe(1);
       expect(verified.files.find((x) => x.kind === "entries")?.rows).toBeGreaterThanOrEqual(4);
       const entriesFile = verified.files.find((file) => file.kind === "entries")!.file;

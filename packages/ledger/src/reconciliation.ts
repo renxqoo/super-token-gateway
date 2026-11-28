@@ -1,13 +1,15 @@
 import type { SQL } from "bun";
-import type { Pricing } from "@gateway/kernel";
+import { formatRational, parseRational, type Pricing, type PricingSpec } from "@gateway/kernel";
 import type {
   CommitTerminalInput,
   CommitTerminalResult,
+  PriceBasis,
   ResolveRequestInput,
   ResolveSupplierAttemptInput,
   ResolveSupplierAttemptResult,
   SupplierHoldEntry,
 } from "./types.ts";
+import { hasPricingSpec, rateCardFromPriceVersion } from "./catalog-pricing.ts";
 import { parseAtoms, insertJournalLines } from "./funds.ts";
 import { notifyHoldRelease, releaseHoldInTx } from "./hold-transitions.ts";
 import { applyDirectSettlements, markAccountsReconcileRequired } from "./settlement-direct.ts";
@@ -165,7 +167,7 @@ export function createReconciliation(
     ): Promise<{ replayed: boolean; state: string }> {
       const settled = await db.begin(async (tx) => {
         const [hold] = await tx`
-          SELECT state, supplier_holds, discount_numerator::text, discount_denominator::text
+          SELECT state, supplier_holds, pricing_override_id, discount_numerator::text, discount_denominator::text, created_at
           FROM public.billing_holds
           WHERE request_id = ${input.request_id} FOR NO KEY UPDATE
         `;
@@ -194,16 +196,29 @@ export function createReconciliation(
         if (input.supplier_cost_atoms === undefined)
           throw new Error("supplier_cost_atoms required for SETTLE");
         const [pr] = await tx`
-        SELECT id, currency, basis, rates FROM public.price_versions
+        SELECT id, currency, basis, rates, ceilings, pricing_spec, source_digest FROM public.price_versions
         WHERE id = ${input.billing_price_id} AND side = 'CUSTOMER'
       `;
         if (!pr) throw new Error("Customer price version not found");
-        if (pr.basis === "PROVIDER_USAGE" && !input.usage) {
-          throw new Error("Verified usage required for provider-usage settlement");
-        }
         const allSup = (hold.supplier_holds ?? []) as SupplierHoldEntry[];
         const sh = [...allSup].reverse().find((s) => s.state === "HELD" || s.state === "UNKNOWN");
         if (!sh) throw new Error("No unresolved supplier attempt");
+        if (
+          sh.customer_pricing_snapshot &&
+          String(pr.id) !== sh.customer_pricing_snapshot.rate_card_id &&
+          sh.customer_price_version_id !== String(pr.id)
+        ) {
+          throw new Error("Customer price version conflicts with the recorded attempt snapshot");
+        }
+        const effectiveBasis = sh.customer_pricing_snapshot
+          ? sh.customer_pricing_snapshot.basis
+          : (pr.basis as CommitTerminalInput["billing_basis"]);
+        if (effectiveBasis === "PROVIDER_USAGE" && !input.usage) {
+          throw new Error("Verified usage required for provider-usage settlement");
+        }
+        if (effectiveBasis === "INPUT_CHARACTERS" && input.usage?.characters === undefined) {
+          throw new Error("Verified character usage required for input-character settlement");
+        }
         if (
           input.supplier_cost_version_id &&
           sh.cost_version_id &&
@@ -214,26 +229,105 @@ export function createReconciliation(
         const costVersionId = sh.cost_version_id ?? input.supplier_cost_version_id;
         if (!costVersionId)
           throw new Error("supplier_cost_version_id required for a historical hold");
+        const allowedSupplierCurrencies = sh.supplier_pricing_snapshot
+          ? [...new Set([sh.currency, sh.supplier_pricing_snapshot.base_currency])]
+          : [sh.currency];
         const [supplierPrice] = await tx`
         SELECT currency, basis, rates FROM public.price_versions
-        WHERE id = ${costVersionId} AND side = 'SUPPLIER' AND currency = ${sh.currency}
+        WHERE id = ${costVersionId} AND side = 'SUPPLIER' AND currency = ANY(${allowedSupplierCurrencies}::text[])
       `;
         if (!supplierPrice)
           throw new Error("Supplier price version not found for attempt currency");
+        const adjustment = sh.customer_price_adjustment;
+        const effectiveOverrideId =
+          adjustment !== undefined
+            ? adjustment.override_id
+            : hold.pricing_override_id
+              ? String(hold.pricing_override_id)
+              : null;
+        const effectiveDiscNum =
+          adjustment !== undefined
+            ? adjustment.discount_numerator
+            : hold.discount_numerator
+              ? String(hold.discount_numerator)
+              : null;
+        const effectiveDiscDen =
+          adjustment !== undefined
+            ? adjustment.discount_denominator
+            : hold.discount_denominator
+              ? String(hold.discount_denominator)
+              : null;
         const effectiveRates = scalePricingRates(
           pr.rates as Pricing["rates"],
-          hold.discount_numerator ? String(hold.discount_numerator) : null,
-          hold.discount_denominator ? String(hold.discount_denominator) : null,
+          effectiveDiscNum,
+          effectiveDiscDen,
         );
+        let customerSnapshot = sh.customer_pricing_snapshot;
+        const supplierSnapshot = sh.supplier_pricing_snapshot;
+        const prSpec = (pr.pricing_spec ?? null) as PricingSpec | null;
+        if (!customerSnapshot && prSpec?.matrix && prSpec.matrix.length > 0) {
+          throw new Error(
+            "Historical customer_pricing_snapshot is required to settle a matrix price version",
+          );
+        }
+        if (!customerSnapshot && hasPricingSpec(prSpec)) {
+          const card = rateCardFromPriceVersion({
+            id: String(pr.id),
+            side: "CUSTOMER",
+            currency: String(pr.currency),
+            basis: pr.basis as PriceBasis,
+            rates: pr.rates as Pricing["rates"],
+            ceilings: (pr.ceilings ?? {}) as Record<string, string>,
+            pricing_spec: prSpec,
+            source_digest: String(pr.source_digest),
+          });
+          const hasDisc =
+            effectiveDiscNum !== null &&
+            effectiveDiscDen !== null &&
+            BigInt(effectiveDiscNum) > 0n &&
+            BigInt(effectiveDiscDen) > 0n;
+          const combined = hasDisc
+            ? formatRational(
+                parseRational({ numerator: effectiveDiscNum!, denominator: effectiveDiscDen! }),
+              )
+            : { numerator: "1", denominator: "1" };
+          const ratedAt =
+            hold.created_at instanceof Date
+              ? hold.created_at.toISOString()
+              : new Date(String(hold.created_at)).toISOString();
+          customerSnapshot = {
+            version: 1,
+            rated_at: ratedAt,
+            side: "CUSTOMER",
+            currency: card.currency,
+            base_currency: card.currency,
+            rate_card_id: card.id,
+            basis: card.basis,
+            effective_card: card,
+            matched_matrix_index: null,
+            applied_modifiers: [],
+            fx_version_id: null,
+            fx_rate: null,
+            combined_multiplier: combined,
+          };
+        }
         const item: CommitTerminalInput = {
           request_id: input.request_id,
           selected_attempt_id: sh.attempt_id,
           channel_id: sh.channel_id,
-          billing_price_id: String(pr.id),
+          billing_price_id: customerSnapshot ? customerSnapshot.rate_card_id : String(pr.id),
           cost_version_id: costVersionId,
+          pricing_override_id: effectiveOverrideId,
+          discount_numerator: effectiveDiscNum,
+          discount_denominator: effectiveDiscDen,
           usage: input.usage ?? { requests: "1" },
-          billing_pricing: { currency: String(pr.currency), rates: effectiveRates },
-          billing_basis: pr.basis as CommitTerminalInput["billing_basis"],
+          billing_pricing: {
+            currency: customerSnapshot ? customerSnapshot.currency : String(pr.currency),
+            rates: effectiveRates,
+          },
+          billing_basis: customerSnapshot
+            ? customerSnapshot.basis
+            : (pr.basis as CommitTerminalInput["billing_basis"]),
           ...(input.usage?.characters === undefined
             ? {}
             : { input_characters: input.usage.characters }),
@@ -243,6 +337,8 @@ export function createReconciliation(
           },
           supplier_currency: sh.currency,
           supplier_cost_atoms_override: input.supplier_cost_atoms,
+          ...(customerSnapshot ? { customer_pricing_snapshot: customerSnapshot } : {}),
+          ...(supplierSnapshot ? { supplier_pricing_snapshot: supplierSnapshot } : {}),
         };
         const results: CommitTerminalResult[] = [];
         const { detached, reconcileAccounts } = await applyDirectSettlements(

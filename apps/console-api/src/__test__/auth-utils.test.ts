@@ -135,7 +135,7 @@ test("constantTimeEquals checks exact UTF-8 equality across equal and differing 
 });
 
 test("LoginRateLimiter enforces thresholds, fails closed under flood capacity, resets blocked keys, and expires windows", () => {
-  const limiter = new LoginRateLimiter(3, 60_000, 3);
+  const limiter = new LoginRateLimiter({ maxAttempts: 3, windowMs: 60_000, maxKeys: 3 });
   const t0 = 1_000_000;
 
   limiter.recordFailure("email:a@test.com", t0);
@@ -158,4 +158,19 @@ test("LoginRateLimiter enforces thresholds, fails closed under flood capacity, r
   expect(() => limiter.check("email:a@test.com", t0 + 100)).not.toThrow();
 
   expect(() => limiter.check("email:b@test.com", t0 + 61_000)).not.toThrow();
+});
+
+test("password work honors its caller's capacity and frees it after completion", async () => {
+  const limiter = new LoginRateLimiter({ maxPasswordWork: 1 });
+  const pending = Promise.withResolvers<string>();
+  const active = limiter.runPasswordWork(() => pending.promise);
+  try {
+    await expect(limiter.runPasswordWork(async () => "second")).rejects.toMatchObject({
+      status: 429,
+    });
+  } finally {
+    pending.resolve("first");
+    await active;
+  }
+  expect(await limiter.runPasswordWork(async () => "available")).toBe("available");
 });

@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 import { and, eq, gt, isNull, sql } from "drizzle-orm";
@@ -41,6 +41,33 @@ export function constantTimeEquals(a: string, b: string): boolean {
   const bb = Buffer.from(b);
   if (ab.length !== bb.length) return false;
   return timingSafeEqual(ab, bb);
+}
+
+const registrationTokenTtlMs = 15 * 60_000;
+
+function registrationSignature(email: string, expiresAt: number, secret: string): string {
+  return createHmac("sha256", Buffer.from(secret, "hex"))
+    .update(`${expiresAt}\n${email}`)
+    .digest("hex");
+}
+
+export function issueRegistrationToken(email: string, secret: string) {
+  const expiresAt = Date.now() + registrationTokenTtlMs;
+  return {
+    registration_token: `${expiresAt}.${registrationSignature(email, expiresAt, secret)}`,
+    expires_at: new Date(expiresAt).toISOString(),
+  };
+}
+
+export function verifyRegistrationToken(email: string, token: string, secret: string): boolean {
+  const match = /^(\d{13})\.([a-f0-9]{64})$/.exec(token);
+  if (!match) return false;
+  const expiresAt = Number(match[1]);
+  const now = Date.now();
+  return (
+    expiresAt > now &&
+    constantTimeEquals(match[2]!, registrationSignature(email, expiresAt, secret))
+  );
 }
 
 export async function hashPassword(password: string): Promise<string> {
@@ -311,13 +338,25 @@ export async function fetchPublicWebhook(
 export class LoginRateLimiter {
   private readonly buckets = new Map<string, number[]>();
   private readonly activeAttempts = new Map<string, number>();
+  private readonly maxAttempts: number;
+  private readonly windowMs: number;
+  private readonly maxKeys: number;
+  private readonly maxPasswordWork: number;
   private activePasswordWork = 0;
 
   constructor(
-    private readonly maxAttempts = 10,
-    private readonly windowMs = 15 * 60_000,
-    private readonly maxKeys = 10_000,
-  ) {}
+    options: {
+      maxAttempts?: number;
+      windowMs?: number;
+      maxKeys?: number;
+      maxPasswordWork?: number;
+    } = {},
+  ) {
+    this.maxAttempts = options.maxAttempts ?? 10;
+    this.windowMs = options.windowMs ?? 15 * 60_000;
+    this.maxKeys = options.maxKeys ?? 10_000;
+    this.maxPasswordWork = options.maxPasswordWork ?? 4;
+  }
 
   private prune(key: string, now: number): number[] {
     const existing = this.buckets.get(key);
@@ -377,7 +416,7 @@ export class LoginRateLimiter {
   }
 
   async runPasswordWork<T>(work: () => Promise<T>): Promise<T> {
-    if (this.activePasswordWork >= 4) {
+    if (this.activePasswordWork >= this.maxPasswordWork) {
       throw new GatewayError(429, "too_many_attempts", "Authentication is busy");
     }
     this.activePasswordWork++;
@@ -517,12 +556,13 @@ export const defaultBillingAccountId = sql<string | null>`(
 )`;
 
 export async function requireBillingAccountAccess(
-  orm: ConsoleDrizzle,
+  orm: Pick<ConsoleDrizzle, "select">,
   userId: string,
   billingAccountId: string,
   allowedRoles?: readonly OrgRole[],
+  lockMembership = false,
 ) {
-  const rows = await orm
+  const query = orm
     .select({
       billingAccount: billingAccounts,
       role: orgMembers.role,
@@ -538,7 +578,7 @@ export async function requireBillingAccountAccess(
     )
     .where(eq(billingAccounts.id, billingAccountId))
     .limit(1);
-  const row = rows[0];
+  const [row] = await (lockMembership ? query.for("share", { of: orgMembers }) : query);
   if (!row) throw new GatewayError(404, "not_found", "Billing account not found");
   if (row.orgStatus !== "ACTIVE" || !row.inferenceReady) {
     throw new GatewayError(403, "org_suspended", "Organization is suspended");

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { resolve } from "node:path";
 import type { PluginRecord, WasmProviderConfig } from "@gateway/ledger";
-import { parseProviderJson } from "@gateway/protocol";
+import { parseClientJson, parseProviderJson, stringifyExact } from "@gateway/protocol";
 import {
   applyBodyTransforms,
   applyResponseTransforms,
@@ -648,4 +648,112 @@ test("malformed JSON returned by WASM provider adapt_response throws WasmPluginF
   }
   expect(caught).toBeInstanceOf(WasmPluginFaultError);
   expect((caught as WasmPluginFaultError).code).toBe("wasm_execution_failed");
+});
+
+test("applyBodyTransforms preserves explicit zero/false/empty values, deep immutability, non-overwrite rename, strict delete_if_equals, and merges usage_aliases in base < channel < route order", () => {
+  const defaultValue = { nested: ["a"] };
+  const original: Record<string, unknown> = {
+    temperature: 0,
+    top_p: 0,
+    stream: false,
+    parallel_tool_calls: false,
+    seed: 0,
+    user: "",
+    max_completion_tokens: 200,
+    max_tokens: 100,
+    zero_num: 0,
+    zero_str: "0",
+    false_bool: false,
+    null_val: null,
+    non_num_temp: "0.5",
+    nan_temp: Number.NaN,
+    inf_temp: Number.POSITIVE_INFINITY,
+    nested: { keep: 1, child: { untouched: true } },
+    arr: [1, 2],
+  };
+  const out = applyBodyTransforms(original, [
+    { op: "set_default", path: "temperature", value: 0.7 },
+    { op: "set_default", path: "top_p", value: 0.9 },
+    { op: "set_default", path: "stream", value: true },
+    { op: "set_default", path: "parallel_tool_calls", value: true },
+    { op: "set_default", path: "seed", value: 42 },
+    { op: "set_default", path: "user", value: "fallback" },
+    { op: "set_default", path: "injected", value: defaultValue },
+    { op: "drop", path: "does.not.exist.here" },
+    { op: "drop", path: "arr.not_a_key" },
+    { op: "rename", from: "max_completion_tokens", to: "max_tokens", overwrite: false },
+    { op: "delete_if_equals", path: "zero_num", value: "0" },
+    { op: "delete_if_equals", path: "zero_str", value: 0 },
+    { op: "delete_if_equals", path: "false_bool", value: 0 },
+    { op: "delete_if_equals", path: "null_val", value: false },
+    { op: "delete_if_equals", path: "zero_num", value: 0 },
+    { op: "clamp", path: "non_num_temp", min: 0, max: 1 },
+    { op: "clamp", path: "nan_temp", min: 0, max: 1 },
+    { op: "clamp", path: "inf_temp", min: 0, max: 1 },
+    { op: "force_set", path: "nested.child.added", value: 2 },
+  ]);
+
+  expect(out.temperature).toBe(0);
+  expect(out.top_p).toBe(0);
+  expect(out.stream).toBe(false);
+  expect(out.parallel_tool_calls).toBe(false);
+  expect(out.seed).toBe(0);
+  expect(out.user).toBe("");
+  expect(out.max_tokens).toBe(100);
+  expect(out.max_completion_tokens).toBeUndefined();
+  expect(out.zero_num).toBeUndefined();
+  expect(out.zero_str).toBe("0");
+  expect(out.false_bool).toBe(false);
+  expect(out.null_val).toBeNull();
+  expect(out.non_num_temp).toBe("0.5");
+  expect(Number.isNaN(out.nan_temp)).toBe(true);
+  expect(out.inf_temp).toBe(Number.POSITIVE_INFINITY);
+
+  expect((original.nested as { child: Record<string, unknown> }).child.added).toBeUndefined();
+  (out.injected as { nested: string[] }).nested.push("mutated");
+  expect(defaultValue.nested).toEqual(["a"]);
+
+  const mergedAliases = mergeAdapterOverrides(
+    getBuiltinProvider("deepseek")!.provider_config,
+    { usage_aliases: [{ target: "cached_input_tokens", source_path: "usage.ch_cached" }] },
+    { usage_aliases: [{ target: "output_tokens", source_path: "usage.route_out" }] },
+  );
+  const paths = mergedAliases.usage_aliases.map((r) => r.source_path);
+  expect(paths.indexOf("usage.ch_cached")).toBeLessThan(paths.indexOf("usage.route_out"));
+  expect(mergedAliases.usage_aliases.length).toBeGreaterThanOrEqual(2);
+});
+
+test("symptom: applyBodyTransforms clamp skips extended-precision JSON literal that rounds to the bound", () => {
+  const overMax = parseClientJson('{"temperature":1.0000000000000000001}') as Record<
+    string,
+    unknown
+  >;
+  const clampedMax = applyBodyTransforms(overMax, [
+    { op: "clamp", path: "temperature", min: 0, max: 1 },
+  ]);
+  expect(stringifyExact(clampedMax)).toBe('{"temperature":1}');
+
+  const underMin = parseClientJson('{"temperature":-0.0000000000000000001}') as Record<
+    string,
+    unknown
+  >;
+  const clampedMin = applyBodyTransforms(underMin, [
+    { op: "clamp", path: "temperature", min: 0, max: 1 },
+  ]);
+  expect(stringifyExact(clampedMin)).toBe('{"temperature":0}');
+
+  const withinBounds = parseClientJson('{"temperature":0.9999999999999999999}') as Record<
+    string,
+    unknown
+  >;
+  const kept = applyBodyTransforms(withinBounds, [
+    { op: "clamp", path: "temperature", min: 0, max: 1 },
+  ]);
+  expect(stringifyExact(kept)).toBe('{"temperature":0.9999999999999999999}');
+
+  const overSafeInt = parseClientJson('{"max_tokens":9007199254740993}') as Record<string, unknown>;
+  const clampedInt = applyBodyTransforms(overSafeInt, [
+    { op: "clamp", path: "max_tokens", max: 9007199254740992 },
+  ]);
+  expect(stringifyExact(clampedInt)).toBe('{"max_tokens":9007199254740992}');
 });

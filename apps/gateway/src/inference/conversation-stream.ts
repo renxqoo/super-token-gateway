@@ -341,6 +341,9 @@ export async function relayConversationStream(
       supplierPrice: cand.costPrice,
       customerPricing: state.pricingOf(candBilling.price),
       supplierPricing: state.pricingOf(cand.costPrice),
+      ...(candBilling.customerSnapshot ? { customerSnapshot: candBilling.customerSnapshot } : {}),
+      ...(candBilling.supplierSnapshot ? { supplierSnapshot: candBilling.supplierSnapshot } : {}),
+      authorizedHostedTools: candBilling.meteredAllowedHostedTools ?? null,
       observedUsage,
       preparedBody: prepared.body,
       inputChars: chars,
@@ -514,19 +517,41 @@ export async function relayConversationStream(
         if (classified.isContentDecision) {
           telemetry.moderationBlocked();
         }
+        const limits = accounting.heldLimits;
         const modUsage = buildModerationUsageFallback(
           combinedStreamUsage,
           chars ?? 0,
           observedOutputChars,
+          {
+            preparedBody: prepared.body,
+            outputStats: translator ? translator.observedOutput : wasmObservedOutput,
+            customerPrice: candBilling.price,
+            supplierPrice: cand.costPrice,
+            customerPricing: state.pricingOf(candBilling.price),
+            supplierPricing: state.pricingOf(cand.costPrice),
+            ...(candBilling.customerSnapshot
+              ? { customerSnapshot: candBilling.customerSnapshot }
+              : {}),
+            ...(candBilling.supplierSnapshot
+              ? { supplierSnapshot: candBilling.supplierSnapshot }
+              : {}),
+            authorizedHostedTools: candBilling.meteredAllowedHostedTools ?? null,
+            heldCustomerAtoms: limits.customerAtoms,
+            heldSupplierAtoms: limits.supplierAtoms,
+          },
         );
-        const commitRes = await settle({
-          usage: modUsage,
-          plugin_audit: [...preRequestAudit, ...streamPluginAudit],
-          charge_policy: effectiveChargePolicy,
-          moderation_blocked: true,
-        });
-        if (!classified.isContentDecision) {
-          deps.metrics.recordPlatformAbsorb(billingAccount.id, commitRes.supplier_cost_atoms);
+        if (modUsage) {
+          const commitRes = await settle({
+            usage: modUsage,
+            plugin_audit: [...preRequestAudit, ...streamPluginAudit],
+            charge_policy: effectiveChargePolicy,
+            moderation_blocked: true,
+          });
+          if (!classified.isContentDecision) {
+            deps.metrics.recordPlatformAbsorb(billingAccount.id, commitRes.supplier_cost_atoms);
+          }
+        } else {
+          await accounting.finalizeHold("unknown");
         }
         markProbeDone();
         observeAttemptSuccess(latencyMs);
@@ -572,6 +597,11 @@ export async function relayConversationStream(
       candBilling.price,
       cand.costPrice,
       combinedStreamUsage,
+      undefined,
+      undefined,
+      candBilling.customerSnapshot,
+      candBilling.supplierSnapshot,
+      candBilling.meteredAllowedHostedTools,
     );
     let estimatedSettlement = false;
     if (!usage && deps.config.streamEstimatedSettlement !== false) {
@@ -582,6 +612,9 @@ export async function relayConversationStream(
         supplierPrice: cand.costPrice,
         customerPricing: state.pricingOf(candBilling.price),
         supplierPricing: state.pricingOf(cand.costPrice),
+        ...(candBilling.customerSnapshot ? { customerSnapshot: candBilling.customerSnapshot } : {}),
+        ...(candBilling.supplierSnapshot ? { supplierSnapshot: candBilling.supplierSnapshot } : {}),
+        authorizedHostedTools: candBilling.meteredAllowedHostedTools ?? null,
         observedUsage: combinedStreamUsage,
         preparedBody: prepared.body,
         inputChars: chars,

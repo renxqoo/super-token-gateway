@@ -177,12 +177,31 @@ export function capKnownOutput(
     body.max_tokens = cap(body.max_tokens);
     clearExactProperty(body, "max_tokens");
   } else {
-    const config = optionalObject(body.generationConfig);
-    body.generationConfig = copyExact(config, {
+    const hasCamel =
+      typeof body.generationConfig === "object" &&
+      body.generationConfig !== null &&
+      !Array.isArray(body.generationConfig);
+    const hasSnake =
+      typeof body.generation_config === "object" &&
+      body.generation_config !== null &&
+      !Array.isArray(body.generation_config);
+    const usesSnake = !hasCamel && hasSnake;
+    const configKey = usesSnake ? "generation_config" : "generationConfig";
+    const config = optionalObject(body[configKey]);
+    const fieldKey =
+      usesSnake || ("max_output_tokens" in config && !("maxOutputTokens" in config))
+        ? "max_output_tokens"
+        : "maxOutputTokens";
+    const otherFieldKey =
+      fieldKey === "max_output_tokens" ? "maxOutputTokens" : "max_output_tokens";
+    const nextConfig: Record<string, unknown> = {
       ...config,
-      maxOutputTokens: cap(config.maxOutputTokens),
-    });
-    clearExactProperty(body.generationConfig as object, "maxOutputTokens");
+      [fieldKey]: cap(config[fieldKey] ?? config[otherFieldKey]),
+    };
+    delete nextConfig[otherFieldKey];
+    body[configKey] = copyExact(config, nextConfig);
+    delete body[usesSnake ? "generationConfig" : "generation_config"];
+    clearExactProperty(body[configKey] as object, fieldKey);
   }
 }
 
@@ -227,6 +246,7 @@ export function buildPreparedPayload(options: {
       payload = encodeRequest(normalized, upstreamProtocol, upstreamModel, {
         mode,
         droppedFields,
+        ...(options.outputBound !== undefined ? { defaultMaxTokens: options.outputBound } : {}),
         ...(options.onFieldDropped
           ? {
               onFieldDropped: (field) =>
@@ -266,7 +286,10 @@ export function buildPreparedPayload(options: {
       delete payload.stream;
     }
     if (cfg.include_stream_usage_option && isStream && upstreamProtocol === "chat") {
-      payload.stream_options = { include_usage: true };
+      payload.stream_options = {
+        ...optionalObject(payload.stream_options),
+        include_usage: true,
+      };
     }
     if (hasTransforms) {
       payload = applyBodyTransforms(payload, merged.request_transforms);

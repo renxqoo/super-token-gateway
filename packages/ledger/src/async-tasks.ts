@@ -97,46 +97,140 @@ async function findTaskForKey(
   return row.task;
 }
 
+type CreateTaskInput = {
+  id: string;
+  request_id: string;
+  charge_id: string | null;
+  billing_account_id: string;
+  api_key_id: string | null;
+  channel_id: string;
+  model: string;
+  operation: string;
+  upstream_task_id: string;
+  status?: AsyncTaskStatus;
+  result_json?: Record<string, unknown>;
+};
+
+async function lockTaskAdmissionAccount(tx: SQL, billingAccountId: string): Promise<void> {
+  await tx`SELECT pg_advisory_xact_lock(88421207, hashtext(${billingAccountId}::text))`;
+}
+
+async function insertAsyncTask(
+  orm: Pick<LedgerDrizzle, "insert" | "select">,
+  input: CreateTaskInput,
+): Promise<AsyncTaskRecord> {
+  const [row] = await orm
+    .insert(asyncTasks)
+    .values({
+      id: input.id,
+      requestId: input.request_id,
+      chargeId: input.charge_id,
+      billingAccountId: input.billing_account_id,
+      apiKeyId: input.api_key_id,
+      channelId: input.channel_id,
+      model: input.model,
+      operation: input.operation,
+      upstreamTaskId: input.upstream_task_id,
+      status: input.status ?? "QUEUED",
+      resultJson: input.result_json ?? {},
+    })
+    .onConflictDoNothing({ target: asyncTasks.requestId })
+    .returning();
+  if (row) return mapTaskRow(row);
+  const [existing] = await orm
+    .select()
+    .from(asyncTasks)
+    .where(eq(asyncTasks.requestId, input.request_id));
+  return mapTaskRow(existing!);
+}
+
+export async function registerAdmittedTask(
+  tx: SQL,
+  input: CreateTaskInput,
+): Promise<AsyncTaskRecord> {
+  await lockTaskAdmissionAccount(tx, input.billing_account_id);
+  const [admission] = await tx`SELECT request_id FROM public.async_task_admissions
+    WHERE request_id = ${input.request_id} AND billing_account_id = ${input.billing_account_id}
+      AND expires_at > statement_timestamp() FOR UPDATE`;
+  const taskOrm = createDrizzle(tx);
+  if (!admission) {
+    const [existing] = await taskOrm
+      .select()
+      .from(asyncTasks)
+      .where(
+        and(
+          eq(asyncTasks.requestId, input.request_id),
+          eq(asyncTasks.billingAccountId, input.billing_account_id),
+        ),
+      );
+    if (existing) return mapTaskRow(existing);
+    throw new Error("Video task admission is unavailable");
+  }
+  const task = await insertAsyncTask(taskOrm, input);
+  await tx`DELETE FROM public.async_task_admissions WHERE request_id = ${input.request_id}`;
+  return task;
+}
+
 export function createAsyncTasksRepository(db: SQL) {
   const orm = createDrizzle(db);
 
   return {
-    async createTask(input: {
-      id: string;
-      request_id: string;
-      charge_id: string | null;
-      billing_account_id: string;
-      api_key_id: string | null;
-      channel_id: string;
-      model: string;
-      operation: string;
-      upstream_task_id: string;
-      status?: AsyncTaskStatus;
-      result_json?: Record<string, unknown>;
-    }): Promise<AsyncTaskRecord> {
-      const [row] = await orm
-        .insert(asyncTasks)
-        .values({
-          id: input.id,
-          requestId: input.request_id,
-          chargeId: input.charge_id,
-          billingAccountId: input.billing_account_id,
-          apiKeyId: input.api_key_id,
-          channelId: input.channel_id,
-          model: input.model,
-          operation: input.operation,
-          upstreamTaskId: input.upstream_task_id,
-          status: input.status ?? "QUEUED",
-          resultJson: input.result_json ?? {},
-        })
-        .onConflictDoNothing({ target: asyncTasks.requestId })
-        .returning();
-      if (row) return mapTaskRow(row);
-      const [existing] = await orm
-        .select()
-        .from(asyncTasks)
-        .where(eq(asyncTasks.requestId, input.request_id));
-      return mapTaskRow(existing!);
+    createTask(input: CreateTaskInput): Promise<AsyncTaskRecord> {
+      return insertAsyncTask(orm, input);
+    },
+
+    async reserveTaskSlot(input: {
+      requestId: string;
+      billingAccountId: string;
+      limit: number;
+      cancelCooldownMs: number;
+      leaseMs: number;
+    }): Promise<boolean> {
+      return db.begin("isolation level read committed", async (tx) => {
+        await lockTaskAdmissionAccount(tx, input.billingAccountId);
+        const [result] = await tx<{ admitted: boolean }[]>`
+          WITH reserved AS (
+            INSERT INTO public.async_task_admissions (request_id, billing_account_id, expires_at)
+            SELECT ${input.requestId}::uuid, ${input.billingAccountId}::uuid,
+              statement_timestamp() + ${input.leaseMs}::bigint * interval '1 millisecond'
+            WHERE (
+              SELECT count(*) FROM public.async_tasks
+              WHERE billing_account_id = ${input.billingAccountId}
+                AND (status IN ('QUEUED', 'PROCESSING') OR (
+                  ${input.cancelCooldownMs}::bigint > 0 AND status = 'CANCELLED' AND user_cancelled
+                  AND completed_at >= statement_timestamp() - ${input.cancelCooldownMs}::bigint * interval '1 millisecond'
+                ))
+            ) + (
+              SELECT count(*) FROM public.async_task_admissions
+              WHERE billing_account_id = ${input.billingAccountId} AND expires_at > statement_timestamp()
+            ) < ${input.limit}::int
+            ON CONFLICT (request_id) DO NOTHING
+            RETURNING request_id
+          )
+          SELECT EXISTS (SELECT 1 FROM reserved) OR EXISTS (
+            SELECT 1 FROM public.async_task_admissions
+            WHERE request_id = ${input.requestId} AND billing_account_id = ${input.billingAccountId}
+              AND expires_at > statement_timestamp()
+          ) AS admitted
+        `;
+        return result?.admitted === true;
+      });
+    },
+
+    async releaseTaskSlot(requestId: string, billingAccountId: string): Promise<void> {
+      await db`DELETE FROM public.async_task_admissions
+        WHERE request_id = ${requestId} AND billing_account_id = ${billingAccountId}`;
+    },
+
+    async registerAdmittedTask(input: CreateTaskInput): Promise<AsyncTaskRecord> {
+      return db.begin("isolation level read committed", (tx) => registerAdmittedTask(tx, input));
+    },
+
+    async expireTaskAdmissions(limit = 100): Promise<void> {
+      await db`WITH expired AS (
+        SELECT request_id FROM public.async_task_admissions WHERE expires_at <= statement_timestamp()
+        ORDER BY expires_at, request_id LIMIT ${limit} FOR UPDATE SKIP LOCKED
+      ) DELETE FROM public.async_task_admissions AS a USING expired WHERE a.request_id = expired.request_id`;
     },
 
     async getTask(id: string): Promise<AsyncTaskRecord | null> {
@@ -153,31 +247,6 @@ export function createAsyncTasksRepository(db: SQL) {
       const scope = and(eq(asyncTasks.id, id), eq(asyncTasks.billingAccountId, billingAccountId))!;
       const row = await findTaskForKey(orm, scope, keyId, checkPolicy);
       return row ? mapTaskRow(row) : null;
-    },
-
-    async countActiveTasks(billingAccountId: string, cancelCooldownMs = 0): Promise<number> {
-      const where =
-        cancelCooldownMs > 0
-          ? and(
-              eq(asyncTasks.billingAccountId, billingAccountId),
-              or(
-                inArray(asyncTasks.status, ["QUEUED", "PROCESSING"]),
-                and(
-                  eq(asyncTasks.status, "CANCELLED"),
-                  eq(asyncTasks.userCancelled, true),
-                  sql`${asyncTasks.completedAt} >= ${new Date(Date.now() - cancelCooldownMs).toISOString()}::timestamptz`,
-                ),
-              ),
-            )
-          : and(
-              eq(asyncTasks.billingAccountId, billingAccountId),
-              inArray(asyncTasks.status, ["QUEUED", "PROCESSING"]),
-            );
-      const [row] = await orm
-        .select({ count: sql<number>`count(*)::int` })
-        .from(asyncTasks)
-        .where(where);
-      return Number(row?.count ?? 0);
     },
 
     async countRecentAutoRefunds(billingAccountId: string, windowHours = 24): Promise<number> {

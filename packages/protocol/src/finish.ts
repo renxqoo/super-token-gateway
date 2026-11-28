@@ -6,6 +6,10 @@ export function finishReason(protocol: Protocol, reason: unknown): Finish | unde
   const value = String(reason);
   if (protocol === "chat" && ["stop", "length", "tool_calls", "content_filter"].includes(value))
     return value as Finish;
+  if (protocol === "responses") {
+    if (value === "max_output_tokens") return "length";
+    if (value === "content_filter") return "content_filter";
+  }
   if (protocol === "messages") {
     if (["end_turn", "stop_sequence"].includes(value)) return "stop";
     if (["max_tokens", "model_context_window_exceeded"].includes(value)) return "length";
@@ -38,4 +42,15 @@ export function finishReason(protocol: Protocol, reason: unknown): Finish | unde
 export function blockedPrompt(body: Record<string, unknown>): boolean {
   const reason = optionalObject(body.promptFeedback).blockReason;
   return typeof reason === "string" && reason.length > 0 && reason !== "BLOCK_REASON_UNSPECIFIED";
+}
+
+export function responsesIncompleteFinish(body: Record<string, unknown>, strict: boolean): Finish {
+  const reason =
+    optionalObject(optionalObject(body.response).incomplete_details).reason ??
+    optionalObject(body.incomplete_details).reason;
+  return strict
+    ? (finishReason("responses", reason) ?? "length")
+    : reason === "content_filter"
+      ? "content_filter"
+      : "length";
 }

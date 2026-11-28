@@ -299,12 +299,117 @@ export function extractUsage(
   const usage: Usage = previous ? { ...previous } : {};
   const audioDuration = measureDuration(usage, raw, "audio_seconds", "audio_ms", true, rawExact);
   const videoDuration = measureDuration(usage, raw, "video_seconds", "video_ms", false, rawExact);
+  const serverToolUse = asRecord(raw.server_tool_use);
+  const serverToolUseExact = serverToolUse ? hasExactLiterals(serverToolUse) : false;
+  const outputArray =
+    kind === "openai"
+      ? Array.isArray(value.output)
+        ? value.output
+        : Array.isArray(asRecord(value.response)?.output)
+          ? (asRecord(value.response)!.output as unknown[])
+          : undefined
+      : undefined;
+  let outputWebSearchCount = 0;
+  let outputCodeInterpreterCount = 0;
+  let outputFileSearchCount = 0;
+  if (outputArray) {
+    for (let i = 0; i < outputArray.length; i++) {
+      const item = asRecord(outputArray[i]);
+      const type = item?.type;
+      if (type === "web_search_call") outputWebSearchCount++;
+      else if (type === "code_interpreter_call") outputCodeInterpreterCount++;
+      else if (type === "file_search_call") outputFileSearchCount++;
+    }
+  }
+  const outputWebSearch = outputWebSearchCount > 0 ? String(outputWebSearchCount) : undefined;
+  const outputCodeInterpreter =
+    outputCodeInterpreterCount > 0 ? String(outputCodeInterpreterCount) : undefined;
+  const outputFileSearch = outputFileSearchCount > 0 ? String(outputFileSearchCount) : undefined;
+  const webSearchRaw = quantity(raw, "web_search_calls", rawExact);
+  const webSearchAnthropic =
+    serverToolUse && serverToolUse.web_search_requests !== undefined
+      ? quantity(serverToolUse, "web_search_requests", serverToolUseExact)
+      : undefined;
+  if (
+    (webSearchRaw !== undefined &&
+      webSearchAnthropic !== undefined &&
+      webSearchRaw !== webSearchAnthropic) ||
+    (webSearchRaw !== undefined &&
+      outputWebSearch !== undefined &&
+      webSearchRaw !== outputWebSearch) ||
+    (webSearchAnthropic !== undefined &&
+      outputWebSearch !== undefined &&
+      webSearchAnthropic !== outputWebSearch)
+  ) {
+    throw new GatewayError(
+      502,
+      "usage_alias_conflict",
+      "Provider web search usage aliases disagree",
+    );
+  }
+  const webSearchCalls = webSearchRaw ?? webSearchAnthropic ?? outputWebSearch;
+  const codeInterpreterRaw = quantity(raw, "code_interpreter_sessions", rawExact);
+  const codeExecutionAnthropic =
+    serverToolUse && serverToolUse.code_execution_requests !== undefined
+      ? quantity(serverToolUse, "code_execution_requests", serverToolUseExact)
+      : undefined;
+  if (
+    (codeInterpreterRaw !== undefined &&
+      codeExecutionAnthropic !== undefined &&
+      codeInterpreterRaw !== codeExecutionAnthropic) ||
+    (codeInterpreterRaw !== undefined &&
+      outputCodeInterpreter !== undefined &&
+      codeInterpreterRaw !== outputCodeInterpreter) ||
+    (codeExecutionAnthropic !== undefined &&
+      outputCodeInterpreter !== undefined &&
+      codeExecutionAnthropic !== outputCodeInterpreter)
+  ) {
+    throw new GatewayError(
+      502,
+      "usage_alias_conflict",
+      "Provider code execution usage aliases disagree",
+    );
+  }
+  const codeInterpreterSessions =
+    codeInterpreterRaw ?? codeExecutionAnthropic ?? outputCodeInterpreter;
+  const fileSearchRaw = quantity(raw, "file_search_calls", rawExact);
+  if (
+    fileSearchRaw !== undefined &&
+    outputFileSearch !== undefined &&
+    fileSearchRaw !== outputFileSearch
+  ) {
+    throw new GatewayError(
+      502,
+      "usage_alias_conflict",
+      "Provider file search usage aliases disagree",
+    );
+  }
+  const fileSearchCalls = fileSearchRaw ?? outputFileSearch;
+  const searchUnits = quantity(raw, "search_units", rawExact);
+  const pages = quantity(raw, "pages", rawExact);
+  const imageInputTokens = quantity(raw, "image_input_tokens", rawExact);
+  const imageOutputTokens = quantity(raw, "image_output_tokens", rawExact);
+  const audioInputTokens = quantity(raw, "audio_input_tokens", rawExact);
+  const audioOutputTokens = quantity(raw, "audio_output_tokens", rawExact);
+  const videoInputTokens = quantity(raw, "video_input_tokens", rawExact);
+  const hasExtendedUsage =
+    webSearchCalls !== undefined ||
+    codeInterpreterSessions !== undefined ||
+    fileSearchCalls !== undefined ||
+    searchUnits !== undefined ||
+    pages !== undefined ||
+    imageInputTokens !== undefined ||
+    imageOutputTokens !== undefined ||
+    audioInputTokens !== undefined ||
+    audioOutputTokens !== undefined ||
+    videoInputTokens !== undefined;
   if (
     input === undefined &&
     toolUse === undefined &&
     output === undefined &&
     !audioDuration &&
     !videoDuration &&
+    !hasExtendedUsage &&
     observedCached === undefined &&
     write === undefined &&
     write5m === undefined &&
@@ -366,6 +471,18 @@ export function extractUsage(
     if (write1h !== undefined) usage.cache_write_1h_tokens = write1h;
   }
   if (reasoning !== undefined) usage.reasoning_tokens = reasoning;
+  if (webSearchCalls !== undefined) usage.web_search_calls = webSearchCalls;
+  if (codeInterpreterSessions !== undefined) {
+    usage.code_interpreter_sessions = codeInterpreterSessions;
+  }
+  if (fileSearchCalls !== undefined) usage.file_search_calls = fileSearchCalls;
+  if (searchUnits !== undefined) usage.search_units = searchUnits;
+  if (pages !== undefined) usage.pages = pages;
+  if (imageInputTokens !== undefined) usage.image_input_tokens = imageInputTokens;
+  if (imageOutputTokens !== undefined) usage.image_output_tokens = imageOutputTokens;
+  if (audioInputTokens !== undefined) usage.audio_input_tokens = audioInputTokens;
+  if (audioOutputTokens !== undefined) usage.audio_output_tokens = audioOutputTokens;
+  if (videoInputTokens !== undefined) usage.video_input_tokens = videoInputTokens;
   if (kind === "gemini" && (geminiPrompt !== undefined || geminiTool !== undefined)) {
     geminiInputs.set(usage, { prompt: geminiPrompt, tool: geminiTool });
   }

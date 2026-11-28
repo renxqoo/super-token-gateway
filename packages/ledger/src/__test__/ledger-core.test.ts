@@ -204,6 +204,116 @@ test("symptom: settlement charges only the input when supplier-priced output evi
   });
 });
 
+test("priceSettlement synthesizes aggregate cache write totals, rejects partial or conflicting TTLs, and allows explicit zero cache writes", () => {
+  const baseItem = {
+    request_id: "req-cache",
+    selected_attempt_id: "att-cache",
+    channel_id: "ch-cache",
+    billing_price_id: "cp-cache",
+    cost_version_id: "sp-cache",
+    billing_pricing: {
+      currency: "USD",
+      rates: {
+        input_tokens: { numerator: "1", denominator: "1" },
+        output_tokens: { numerator: "1", denominator: "1" },
+        cache_write_tokens: { numerator: "2", denominator: "1" },
+      },
+    },
+    supplier_pricing: {
+      currency: "USD",
+      rates: {
+        input_tokens: { numerator: "1", denominator: "1" },
+        output_tokens: { numerator: "1", denominator: "1" },
+      },
+    },
+    billing_basis: "PROVIDER_USAGE" as const,
+    supplier_basis: "PROVIDER_USAGE" as const,
+    supplier_currency: "USD",
+    usage: {
+      input_tokens: "10",
+      output_tokens: "5",
+      cache_write_5m_tokens: "100",
+      cache_write_1h_tokens: "200",
+    },
+  } satisfies CommitTerminalInput;
+
+  expect(priceSettlement(baseItem)).toEqual({ customerAtoms: 615n, supplierAtoms: 15n });
+
+  expect(() =>
+    priceSettlement({
+      ...baseItem,
+      usage: { input_tokens: "10", output_tokens: "5", cache_write_5m_tokens: "100" },
+    }),
+  ).toThrow("Upstream omitted cache write usage required by pricing");
+
+  const ttlPricing = {
+    currency: "USD",
+    rates: {
+      input_tokens: { numerator: "1", denominator: "1" },
+      output_tokens: { numerator: "1", denominator: "1" },
+      cache_write_5m_tokens: { numerator: "2", denominator: "1" },
+      cache_write_1h_tokens: { numerator: "3", denominator: "1" },
+    },
+  };
+  expect(() =>
+    priceSettlement({
+      ...baseItem,
+      billing_pricing: ttlPricing,
+      usage: { input_tokens: "10", output_tokens: "5", cache_write_tokens: "100" },
+    }),
+  ).toThrow("Upstream omitted cache write usage required by pricing");
+
+  expect(
+    priceSettlement({
+      ...baseItem,
+      billing_pricing: ttlPricing,
+      usage: { input_tokens: "10", output_tokens: "5", cache_write_tokens: "0" },
+    }),
+  ).toEqual({ customerAtoms: 15n, supplierAtoms: 15n });
+
+  for (const conflicting of [
+    {
+      input_tokens: "10",
+      output_tokens: "5",
+      cache_write_tokens: "100",
+      cache_write_5m_tokens: "150",
+    },
+    {
+      input_tokens: "10",
+      output_tokens: "5",
+      cache_write_tokens: "100",
+      cache_write_5m_tokens: "60",
+      cache_write_1h_tokens: "60",
+    },
+  ]) {
+    expect(() => priceSettlement({ ...baseItem, usage: conflicting })).toThrow(
+      "Provider cache write partitions disagree",
+    );
+  }
+
+  expect(
+    priceSettlement({
+      ...baseItem,
+      billing_basis: "INPUT_CHARACTERS",
+      billing_pricing: {
+        currency: "USD",
+        rates: { characters: { numerator: "3", denominator: "1" } },
+      },
+      supplier_basis: "REQUEST_COMPLETION",
+      supplier_pricing: {
+        currency: "USD",
+        rates: { requests: { numerator: "7", denominator: "1" } },
+      },
+      input_characters: "12",
+      usage: { requests: "1" },
+    }),
+  ).toEqual({ customerAtoms: 36n, supplierAtoms: 7n });
+
+  expect(() => priceSettlement({ ...baseItem, supplier_cost_atoms_override: "-1" })).toThrow(
+    "Invalid supplier_cost_atoms_override",
+  );
+});
+
 test("2-lane sharding partitions 16 cells evenly and walletAdmissionError accounts for deferred lease spend", () => {
   expect(SETTLEMENT_LANES).toBe(2);
   expect(CELL_COUNT).toBe(16);

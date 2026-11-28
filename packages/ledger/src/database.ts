@@ -3,8 +3,8 @@ import { and, asc, getTableColumns, gte, lt, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { createGzip, createGunzip } from "node:zlib";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, rename, rm } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { lstat, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createInterface } from "node:readline";
@@ -14,6 +14,29 @@ import { billingCharges, createDrizzle, ledgerEntries } from "./schema.ts";
 const databases = new WeakMap<SQL, string>();
 
 export const SCHEMA_VERSION = manifest.migrations.at(-1)!.version;
+
+export function assertProductionPostgresTransport(
+  url: string,
+  tlsVerification: string | undefined,
+): void {
+  const parsed = new URL(url);
+  const params = parsed.searchParams;
+  if (
+    !["postgres:", "postgresql:"].includes(parsed.protocol) ||
+    !parsed.hostname ||
+    ["host", "port", "path", "socket", "ssl", "tls", "ssl-mode"].some((name) => params.has(name))
+  ) {
+    throw new Error("Production PostgreSQL requires an explicit server in the connection URL");
+  }
+  const modes = params.getAll("sslmode");
+  const isLoopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+  const verified = modes.length === 1 && modes[0] === "verify-full" && tlsVerification !== "0";
+  if (!verified && !(isLoopback && modes.length === 0)) {
+    throw new Error(
+      "Production PostgreSQL requires sslmode=verify-full and certificate verification",
+    );
+  }
+}
 
 export function createDatabase(url: string, max = 32): SQL {
   const name = decodeURIComponent(new URL(url).pathname.slice(1));
@@ -181,6 +204,43 @@ async function fileDigest(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
+async function privateArchiveDirectory(directory: string): Promise<string> {
+  const requestedPath = resolve(directory);
+  await mkdir(requestedPath, { recursive: true, mode: 0o700 });
+  const owner = process.geteuid?.();
+  const info = await lstat(requestedPath);
+  if (
+    !info.isDirectory() ||
+    owner === undefined ||
+    info.uid !== owner ||
+    (info.mode & 0o077) !== 0
+  ) {
+    throw new Error("Archive directory must be private and owned by the running user");
+  }
+
+  const target = await realpath(requestedPath);
+  const chain: string[] = [];
+  for (let path = target; ; path = dirname(path)) {
+    chain.push(path);
+    if (path === dirname(path)) break;
+  }
+  for (const path of chain.reverse()) {
+    const entry = await lstat(path);
+    if (path === target) {
+      if (!entry.isDirectory() || entry.uid !== owner || (entry.mode & 0o077) !== 0) {
+        throw new Error("Archive directory must be private and owned by the running user");
+      }
+      continue;
+    }
+    const writable = (entry.mode & 0o022) !== 0;
+    const sticky = (entry.mode & 0o1000) !== 0;
+    if (!entry.isDirectory() || (entry.uid !== 0 && entry.uid !== owner) || (writable && !sticky)) {
+      throw new Error("Archive directory has an untrusted parent directory");
+    }
+  }
+  return target;
+}
+
 export async function exportLedgerArchive(
   db: SQL,
   month: string,
@@ -191,7 +251,7 @@ export async function exportLedgerArchive(
   const next = new Date(startIso);
   next.setUTCMonth(next.getUTCMonth() + 1);
   const endIso = next.toISOString();
-  await mkdir(directory, { recursive: true });
+  const outputDirectory = await privateArchiveDirectory(directory);
   const generation = crypto.randomUUID();
   const generated: string[] = [];
   const writeGzip = async (
@@ -199,7 +259,7 @@ export async function exportLedgerArchive(
     rows: AsyncIterable<Record<string, unknown>>,
   ): Promise<ArchiveManifest["files"][number]> => {
     const file = `${kind}-${generation}.ndjson.gz`;
-    const path = join(directory, file);
+    const path = join(outputDirectory, file);
     generated.push(path);
     let count = 0;
     async function* ndjson() {
@@ -208,12 +268,16 @@ export async function exportLedgerArchive(
         yield `${JSON.stringify(row)}\n`;
       }
     }
-    await pipeline(Readable.from(ndjson()), createGzip(), createWriteStream(path, { flags: "wx" }));
+    await pipeline(
+      Readable.from(ndjson()),
+      createGzip(),
+      createWriteStream(path, { flags: "wx", mode: 0o600 }),
+    );
     return { kind, file, rows: count, sha256: await fileDigest(path) };
   };
 
-  const manifestPath = join(directory, "manifest.json");
-  const temporaryManifest = join(directory, `.manifest-${generation}.json`);
+  const manifestPath = join(outputDirectory, "manifest.json");
+  const temporaryManifest = join(outputDirectory, `.manifest-${generation}.json`);
   generated.push(temporaryManifest);
   try {
     const doc = await db.begin("isolation level repeatable read read only", async (tx) => {
@@ -272,7 +336,10 @@ export async function exportLedgerArchive(
         files: [await writeGzip("charges", charges), await writeGzip("entries", entries)],
       } satisfies ArchiveManifest;
     });
-    await Bun.write(temporaryManifest, `${JSON.stringify(doc, null, 2)}\n`);
+    await writeFile(temporaryManifest, `${JSON.stringify(doc, null, 2)}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    });
     await rename(temporaryManifest, manifestPath);
     return manifestPath;
   } catch (error) {

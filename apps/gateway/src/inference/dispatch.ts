@@ -94,7 +94,12 @@ export async function dispatchInferenceAttempt(
   );
   const { providerIdHeader, requiresEvidence } = supplierReconciliation(cand);
   const rejectedOutcome = (notExecuted = false): "FAILED" | "UNKNOWN" => {
-    if (notExecuted || (!strictAdaptiveSwitch && !requiresEvidence)) return "FAILED";
+    if (
+      notExecuted ||
+      (!strictAdaptiveSwitch && !requiresEvidence && !resources.videoAdmissionRetained)
+    ) {
+      return "FAILED";
+    }
     accounting.noteUnknownAttempt();
     return "UNKNOWN";
   };
@@ -114,6 +119,7 @@ export async function dispatchInferenceAttempt(
   };
   let fastResult: FastUpstreamResult;
   let prepared: Awaited<ReturnType<typeof prepareUpstreamRequest>>;
+  let transportStarted = false;
   try {
     pluginSignal.throwIfAborted();
     if (resources.interrupted(true)) throw resources.admissionError(resources.quotaLost(true));
@@ -125,11 +131,24 @@ export async function dispatchInferenceAttempt(
         cand.route.plugin_pipeline.length === 0 &&
         !hasIdempotencyKey &&
         !isMultipartOp;
-      const options = upstreamOptions(cand, attemptBody, canMutateClientBody);
+      const meteredValidation =
+        candBilling.meteredAllowedServiceTier || candBilling.meteredAllowedHostedTools
+          ? {
+              ...(candBilling.meteredAllowedServiceTier
+                ? { allowedServiceTiers: new Set([candBilling.meteredAllowedServiceTier]) }
+                : {}),
+              ...(candBilling.meteredAllowedHostedTools
+                ? { allowedHostedTools: candBilling.meteredAllowedHostedTools }
+                : {}),
+            }
+          : undefined;
+      const options = upstreamOptions(cand, attemptBody, canMutateClientBody, meteredValidation);
       prepared =
         tryPrepareUpstreamRequestSync(options) ??
         (await prepareUpstreamRequest({ ...options, signal: attempt.signal() }));
     }
+    const admission = deps.checkConsoleAdmission(request.billingAccount, request.key);
+    if (admission) await admission;
   } catch (err) {
     if (err instanceof GatewayError && /^(?:conversion_loss$|provider_)/.test(err.code)) {
       telemetry.recordAttemptFailure(err.code);
@@ -213,6 +232,7 @@ export async function dispatchInferenceAttempt(
     } else if (timingObserver) {
       upstreamRequest.onTiming = timingObserver;
     }
+    transportStarted = true;
     accounting.setDispatched(true);
     telemetry.noteRoutingDispatch("possible");
     fastResult = reservation.dispatch
@@ -227,10 +247,14 @@ export async function dispatchInferenceAttempt(
       attempt.enablePostDispatchClientAbortGrace(unaryGraceMs);
     }
   } catch (err) {
+    if (operation === "videos" && transportStarted && !(err instanceof UpstreamPreDispatchError)) {
+      resources.setVideoAdmissionRetained(true);
+    }
     attempt.finishExchange();
     const isPreDispatch =
       err instanceof UpstreamPreDispatchError ||
-      (!strictAdaptiveSwitch &&
+      (operation !== "videos" &&
+        !strictAdaptiveSwitch &&
         err instanceof Error &&
         /ECONNREFUSED|ENOTFOUND|Unable to connect|ConnectionRefused/i.test(err.message));
     if (isPreDispatch) {
@@ -238,7 +262,7 @@ export async function dispatchInferenceAttempt(
       telemetry.noteRoutingDispatch("not_sent");
     }
     if (pluginSignal.aborted) throw pluginSignal.reason;
-    if (err instanceof GatewayError && err.code === "no_route") {
+    if (!transportStarted && err instanceof GatewayError && err.code === "no_route") {
       releaseProbe();
       return { outcome: "FAILED", error: err };
     }
@@ -294,6 +318,10 @@ export async function dispatchInferenceAttempt(
   const upstreamResp = fastResult.fast ? null : fastResult.response;
   telemetry.noteRoutingDispatch("sent");
   const upstreamStatus = fastResult.fast ? fastResult.status : fastResult.response.status;
+  const videoMayHaveStarted =
+    operation === "videos" &&
+    (upstreamStatus < 400 || upstreamStatus === 408 || upstreamStatus >= 500);
+  if (videoMayHaveStarted) resources.setVideoAdmissionRetained(true);
   const upstreamHeaders = fastResult.fast ? fastResult.headers : fastResult.response.headers;
   const diagnostics = deps.traceQueue ? prepared.mergedOverrides.error_diagnostics : undefined;
   const describeFailure = diagnostics?.summaries
@@ -362,7 +390,7 @@ export async function dispatchInferenceAttempt(
     const jsonError = /^application\/(?:json|[^;\s]+\+json)(?:\s*;|$)/i.test(contentType);
     const rules = prepared.mergedOverrides.error_rules;
     if (
-      strictAdaptiveSwitch &&
+      (strictAdaptiveSwitch || videoMayHaveStarted) &&
       jsonError &&
       rules.some(
         (rule) =>
@@ -387,6 +415,7 @@ export async function dispatchInferenceAttempt(
         confirmedNotExecuted = false;
       }
     }
+    if (videoMayHaveStarted && confirmedNotExecuted) resources.setVideoAdmissionRetained(false);
     if (!detail && describeFailure && diagnostics?.code_path && diagnosticBodyLimit > 0) {
       const bytes = fastResult.fast
         ? fastResult.body
@@ -515,7 +544,9 @@ export async function dispatchInferenceAttempt(
     describeFailure,
     describeEventFailure,
   };
-  if ((!isStream && !isUpstreamSse) || isFakeJsonOnStream) return handleUnaryResponse(context);
+  if (operation === "videos" || (!isStream && !isUpstreamSse) || isFakeJsonOnStream) {
+    return handleUnaryResponse(context);
+  }
 
   const isWasmStreamProvider =
     prepared.resolvedProvider.kind === "WASM" &&

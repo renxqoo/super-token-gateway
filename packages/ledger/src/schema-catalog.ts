@@ -16,7 +16,17 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import type { AdaptiveRoutingSetting, Operation, Pricing } from "@gateway/kernel";
+import type {
+  AdaptiveRoutingSetting,
+  ModifierKind,
+  ModifierLayer,
+  ModifierMatch,
+  Operation,
+  Pricing,
+  PricingSpec,
+  StackingPolicy,
+  TimeWindow,
+} from "@gateway/kernel";
 import type {
   AdapterOverrides,
   ChannelKind,
@@ -88,6 +98,7 @@ export const configEpoch = pgTable("config_epoch", {
 export const billingAccounts = pgTable("billing_accounts", {
   id: uuid("id").primaryKey(),
   externalRef: text("external_ref").unique(),
+  customerGroupId: text("customer_group_id"),
   name: text("name").notNull(),
   currency: text("currency").notNull().default("USD"),
   rpm: integer("rpm").notNull(),
@@ -295,9 +306,68 @@ export const priceVersions = pgTable("price_versions", {
   ceilings: pgJsonb<Record<string, string>>("ceilings")
     .notNull()
     .default(sql`'{}'::jsonb`),
+  pricingSpec: pgJsonb<PricingSpec | null>("pricing_spec"),
   sourceDigest: text("source_digest").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
 });
+
+export const pricingModifiers = pgTable(
+  "pricing_modifiers",
+  {
+    id: uuid("id").primaryKey(),
+    layer: text("layer").$type<ModifierLayer>().notNull(),
+    kind: text("kind").$type<ModifierKind>().notNull(),
+    stacking: text("stacking").$type<StackingPolicy>().notNull(),
+    priority: integer("priority").notNull().default(0),
+    enabled: boolean("enabled").notNull().default(true),
+    effectiveFrom: timestamp("effective_from", { withTimezone: true, mode: "date" }),
+    effectiveTo: timestamp("effective_to", { withTimezone: true, mode: "date" }),
+    timeWindows: pgJsonb<TimeWindow[] | null>("time_windows"),
+    match: pgJsonb<ModifierMatch>("match")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    multiplierNumerator: numeric("multiplier_numerator", { precision: 38, scale: 0 }),
+    multiplierDenominator: numeric("multiplier_denominator", { precision: 38, scale: 0 }),
+    rateCardPriceVersionId: uuid("rate_card_price_version_id").references(() => priceVersions.id),
+    sourceRevision: integer("source_revision").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("pricing_modifiers_enabled_idx")
+      .on(t.layer, t.priority, t.id)
+      .where(sql`${t.enabled}`),
+  ],
+);
+
+export const fxRateVersions = pgTable(
+  "fx_rate_versions",
+  {
+    id: uuid("id").primaryKey(),
+    baseCurrency: text("base_currency").notNull(),
+    quoteCurrency: text("quote_currency").notNull(),
+    rateNumerator: numeric("rate_numerator", { precision: 38, scale: 0 }).notNull(),
+    rateDenominator: numeric("rate_denominator", { precision: 38, scale: 0 }).notNull(),
+    effectiveFrom: timestamp("effective_from", { withTimezone: true, mode: "date" }).notNull(),
+    effectiveTo: timestamp("effective_to", { withTimezone: true, mode: "date" }),
+    sourceDigest: text("source_digest").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("fx_rate_versions_pair_effective_idx").on(
+      t.baseCurrency,
+      t.quoteCurrency,
+      t.effectiveFrom,
+      t.id,
+    ),
+  ],
+);
 
 export const routes = pgTable(
   "routes",

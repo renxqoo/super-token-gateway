@@ -1,4 +1,5 @@
 import { createPublicKey } from "node:crypto";
+import { assertProductionPostgresTransport } from "@gateway/ledger";
 import { validateCidr, type TransportOptions } from "@gateway/runtime";
 import { loadInternalCredentials, type InternalCredentials } from "./internal-auth.ts";
 import type { TraceExportConfig } from "./trace-queue.ts";
@@ -255,6 +256,15 @@ export function loadConfigFromEnv(
     throw new Error(
       "Production requires standalone Gateway, INTERNAL_AUTH_FILE, INTERNAL_DATABASE_URL and REDIS_URL",
     );
+  }
+  if (production) {
+    assertProductionPostgresTransport(databaseUrl, env.NODE_TLS_REJECT_UNAUTHORIZED);
+    if (env.INTERNAL_DATABASE_URL) {
+      assertProductionPostgresTransport(
+        env.INTERNAL_DATABASE_URL,
+        env.NODE_TLS_REJECT_UNAUTHORIZED,
+      );
+    }
   }
   const signingKeyPem = env.PLUGIN_SIGNING_PUBLIC_KEY_PEM?.trim();
   if (production && !signingKeyPem) {

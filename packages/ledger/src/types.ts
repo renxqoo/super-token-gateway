@@ -1,4 +1,16 @@
-import type { AdaptiveRoutingSetting, Operation, Pricing, Usage } from "@gateway/kernel";
+import type {
+  AdaptiveRoutingSetting,
+  ModifierKind,
+  ModifierLayer,
+  ModifierMatch,
+  Operation,
+  Pricing,
+  PricingSnapshot,
+  PricingSpec,
+  StackingPolicy,
+  TimeWindow,
+  Usage,
+} from "@gateway/kernel";
 import type { SpendLimitWindow, AdapterOverrides, ProviderPluginConfig } from "./provider-types.ts";
 export type {
   WireDialect,
@@ -44,6 +56,7 @@ export type PluginAction = "PASS" | "TRANSFORM" | "BLOCK";
 export type BillingAccountRecord = {
   id: string;
   external_ref: string | null;
+  customer_group_id?: string | null;
   name: string;
   currency: string;
   rpm: number;
@@ -173,7 +186,40 @@ export type PriceVersionRecord = {
   basis: PriceBasis;
   rates: Pricing["rates"];
   ceilings: Record<string, string>;
+  pricing_spec?: PricingSpec | null;
   source_digest: string;
+};
+
+export type PricingModifierRecord = {
+  id: string;
+  layer: ModifierLayer;
+  kind: ModifierKind;
+  stacking: StackingPolicy;
+  priority: number;
+  enabled: boolean;
+  effective_from: string | null;
+  effective_to: string | null;
+  time_windows: TimeWindow[] | null;
+  match: ModifierMatch;
+  multiplier_numerator: string | null;
+  multiplier_denominator: string | null;
+  rate_card_price_version_id: string | null;
+};
+
+export type FxRateVersionRecord = {
+  id: string;
+  base_currency: string;
+  quote_currency: string;
+  rate_numerator: string;
+  rate_denominator: string;
+  effective_from: string;
+  effective_to: string | null;
+  source_digest: string;
+};
+
+export type ChargePricingSnapshot = {
+  customer?: PricingSnapshot;
+  supplier?: PricingSnapshot;
 };
 
 export type PluginPipelineStep = {
@@ -277,6 +323,8 @@ export type ConfigSnapshot = {
   models: Map<string, ModelRecord>;
   prices: Map<string, PriceVersionRecord>;
   pricingOverridesByBillingAccount: Map<string, BillingAccountPricingOverrideRecord[]>;
+  pricingModifiers?: PricingModifierRecord[];
+  fxRateVersions?: FxRateVersionRecord[];
   routesByModel: Map<string, RouteRecord[]>;
   plugins: Map<string, PluginRecord>;
   revokedPlugins: ReadonlySet<string>;
@@ -309,6 +357,8 @@ export type SupplierHoldEntry = {
     discount_numerator: string | null;
     discount_denominator: string | null;
   };
+  customer_pricing_snapshot?: PricingSnapshot;
+  supplier_pricing_snapshot?: PricingSnapshot;
   provider_request_id?: string;
   account_id: string;
   channel_id: string;
@@ -357,7 +407,6 @@ export type AcquireHoldInput = {
   attempt_id: string;
   billing_account_id: string;
   api_key_id?: string | null;
-  enforce_key_spend_limit?: boolean;
   pricing_override_id?: string | null;
   discount_numerator?: string | null;
   discount_denominator?: string | null;
@@ -371,6 +420,8 @@ export type AcquireHoldInput = {
   supplier_account_id: string;
   supplier_cost_version_id?: string;
   customer_price_version_id?: string;
+  customer_pricing_snapshot?: PricingSnapshot;
+  supplier_pricing_snapshot?: PricingSnapshot;
   supplier_channel_id: string;
   supplier_currency: string;
   supplier_atoms: string;
@@ -415,6 +466,8 @@ export type SwitchSupplierInput = {
   next_supplier_cost_version_id?: string;
   next_customer_price_version_id?: string;
   next_customer_price_adjustment?: SupplierHoldEntry["customer_price_adjustment"];
+  next_customer_pricing_snapshot?: PricingSnapshot;
+  next_supplier_pricing_snapshot?: PricingSnapshot;
   failed_provider_request_id?: string;
   required_customer_atoms?: string;
   expires_at?: string;
@@ -457,9 +510,12 @@ export type CommitTerminalInput = {
   supplier_basis?: PriceBasis;
   supplier_currency: string;
   supplier_cost_atoms_override?: string;
+  customer_pricing_snapshot?: PricingSnapshot;
+  supplier_pricing_snapshot?: PricingSnapshot;
   plugin_audit?: PluginAuditEntry[];
   charge_policy?: ChargePolicy;
   moderation_blocked?: boolean;
+  async_task?: { id: string; upstream_task_id: string; result_json: Record<string, unknown> };
 };
 
 export type CommitTerminalResult =
@@ -467,6 +523,7 @@ export type CommitTerminalResult =
       ok: true;
       replayed: boolean;
       charge_id: string;
+      async_task_id?: string;
       outcome: "SETTLED" | "RELEASED" | "DEBT" | "MODERATION_BLOCKED" | "UNKNOWN_RESOLVED";
       customer_atoms: string;
       funded_atoms: string;

@@ -28,11 +28,15 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, stg_data, stg_control,
 
 GRANT SELECT ON public.schema_migrations TO stg_data, stg_control, stg_worker, stg_audit;
 GRANT SELECT ON public.config_epoch, public.billing_accounts, public.api_keys, public.upstream_accounts,
-  public.plugins, public.channels, public.models, public.price_versions, public.billing_account_pricing_overrides, public.routes TO stg_data, stg_control;
+  public.plugins, public.channels, public.models, public.price_versions, public.billing_account_pricing_overrides,
+  public.pricing_modifiers, public.fx_rate_versions, public.routes TO stg_data, stg_control;
 GRANT SELECT ON public.console_organization_admission TO stg_data, stg_control;
 GRANT INSERT, UPDATE ON public.console_organization_admission TO stg_control;
 GRANT SELECT, INSERT, UPDATE ON public.async_tasks TO stg_data, stg_worker;
 GRANT SELECT, UPDATE ON public.async_tasks TO stg_control;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.async_task_admissions TO stg_data;
+GRANT SELECT, DELETE ON public.async_task_admissions TO stg_worker;
+GRANT UPDATE (expires_at) ON public.async_task_admissions TO stg_worker;
 GRANT SELECT ON public.async_tasks TO stg_audit;
 GRANT SELECT ON public.wallets, public.wallet_lots, public.supplier_cells, public.wallet_leases,
   public.supplier_leases, public.billing_holds, public.billing_charges, public.ledger_entries
@@ -48,7 +52,8 @@ GRANT DELETE ON public.gateway_config_nodes TO stg_worker;
 GRANT INSERT ON public.plugin_release_acks TO stg_data;
 GRANT INSERT ON public.plugin_revocations TO stg_control;
 GRANT SELECT ON public.funding_operations, public.billing_resolutions, public.plugin_releases TO stg_control;
-GRANT SELECT ON public.billing_charges, public.ledger_entries, public.admin_audit_events TO stg_audit;
+GRANT SELECT ON public.billing_charges, public.ledger_entries, public.admin_audit_events,
+  public.price_versions, public.pricing_modifiers, public.fx_rate_versions TO stg_audit;
 
 GRANT INSERT ON public.wallet_leases, public.supplier_leases, public.billing_holds TO stg_data;
 GRANT UPDATE (available_atoms, reserved_atoms, spent_atoms, expired_atoms, debt_atoms,
@@ -78,11 +83,12 @@ GRANT INSERT, UPDATE ON public.outbox_consumers, public.outbox_consumer_shards T
 
 GRANT UPDATE (spend_window_start, spent_atoms, reserved_atoms) ON public.api_keys TO stg_data;
 GRANT INSERT, UPDATE ON public.billing_accounts, public.api_keys, public.upstream_accounts, public.plugins,
-  public.channels, public.models, public.routes, public.billing_account_pricing_overrides, public.wallets, public.wallet_lots,
+  public.channels, public.models, public.routes, public.billing_account_pricing_overrides, public.pricing_modifiers,
+  public.wallets, public.wallet_lots,
   public.supplier_root_balances, public.supplier_cells TO stg_control;
 GRANT UPDATE ON public.config_epoch TO stg_control;
-GRANT INSERT ON public.price_versions, public.funding_operations, public.billing_resolutions, public.plugin_releases,
-  public.admin_audit_events TO stg_control;
+GRANT INSERT ON public.price_versions, public.fx_rate_versions, public.funding_operations, public.billing_resolutions,
+  public.plugin_releases, public.admin_audit_events TO stg_control;
 GRANT INSERT, DELETE ON public.admin_audit_pending TO stg_control;
 GRANT SELECT (request_id) ON public.admin_audit_pending TO stg_control;
 GRANT EXECUTE ON FUNCTION public.prepare_ledger_month(DATE) TO stg_worker;
@@ -116,7 +122,8 @@ GRANT UPDATE (enabled, include_historical, eligible_since, age_seconds, max_cust
   ON public.billing_reconciliation_policies TO stg_control;
 GRANT INSERT ON public.billing_reconciliation_waivers TO stg_worker;
 GRANT UPDATE (used_atoms) ON public.billing_reconciliation_budgets, public.billing_reconciliation_policies TO stg_worker;
-GRANT SELECT ON public.price_versions, public.api_keys, public.upstream_accounts, public.config_epoch TO stg_worker;
+GRANT SELECT ON public.price_versions, public.pricing_modifiers, public.fx_rate_versions,
+  public.api_keys, public.upstream_accounts, public.config_epoch TO stg_worker;
 GRANT UPDATE (state, revision, updated_at) ON public.upstream_accounts TO stg_worker;
 GRANT UPDATE (version) ON public.config_epoch TO stg_worker;
 GRANT UPDATE (supplier_holds, closed_at) ON public.billing_holds TO stg_worker;

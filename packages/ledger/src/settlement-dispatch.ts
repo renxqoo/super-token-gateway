@@ -25,16 +25,23 @@ export function createSettlementQueue(
     const results = Array.from<CommitTerminalResult>({ length: items.length });
     const fastCandidates: FastCommitCandidate[] = [];
     const directEntries: { index: number; item: CommitTerminalInput }[] = [];
+    const taskEntries: typeof directEntries = [];
     const seenFastReqIds = new Set<string>();
     const nowMs = Date.now();
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i]!;
+      if (item.async_task) {
+        taskEntries.push({ index: i, item });
+        continue;
+      }
       const meta = leases.holdById(item.request_id);
       if (
         meta &&
         !seenFastReqIds.has(item.request_id) &&
         !item.moderation_blocked &&
+        !item.customer_pricing_snapshot &&
+        !item.supplier_pricing_snapshot &&
         item.selected_attempt_id === meta.attemptId &&
         item.channel_id === meta.channelId &&
         item.billing_pricing.currency === meta.currency &&
@@ -138,6 +145,7 @@ export function createSettlementQueue(
     }
 
     if (directEntries.length > 0) await commitDirect(directEntries);
+    for (const entry of taskEntries) await commitDirect([entry]);
     return results.map((result, index) =>
       failures.has(index) ? Promise.reject(failures.get(index)) : result,
     );

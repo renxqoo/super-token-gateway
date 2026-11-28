@@ -397,3 +397,92 @@ test("Responses accepts an explicitly local shell", async () => {
   expect(response.status, response.wire).toBe(200);
   expect(response.finalized).toEqual(["SETTLED"]);
 });
+
+test.each([
+  {
+    name: "chat clean EOF without finish_reason or DONE",
+    operation: "chat" as const,
+    fields: {},
+    body: 'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n',
+    forbidden: "data: [DONE]",
+  },
+  {
+    name: "chat DONE without prior finish_reason",
+    operation: "chat" as const,
+    fields: {},
+    body:
+      'data: {"id":"c1","object":"chat.completion.chunk","model":"test-chat","choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n' +
+      "data: [DONE]\n\n",
+    forbidden: "data: [DONE]",
+  },
+  {
+    name: "chat DONE only",
+    operation: "chat" as const,
+    fields: {},
+    body: "data: [DONE]\n\n",
+    forbidden: "data: [DONE]",
+  },
+  {
+    name: "responses clean EOF without response.completed",
+    operation: "responses" as const,
+    fields: { input: "Hi" },
+    body: 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","output_index":0,"delta":"partial"}\n\n',
+    forbidden: "response.completed",
+  },
+])(
+  "truncated stream ($name) emits stream_truncated without synthetic completion and stays UNKNOWN in strict mode",
+  async ({ operation, fields, body, forbidden }) => {
+    for (const fast of [false, true]) {
+      const response = await invokeInference(body, {
+        operation,
+        fields,
+        stream: true,
+        fast,
+        configOverrides: { streamEstimatedSettlement: false },
+      });
+      expect(response.status, response.wire).toBe(200);
+      expect(response.dispatches).toBe(1);
+      expect(response.finalized).toEqual(["UNKNOWN"]);
+      expect(response.wire).toContain("stream_truncated");
+      expect(response.wire).not.toContain(forbidden);
+    }
+  },
+);
+
+test("Responses top-level error and response.failed streams fail cleanly before or after text without poisoning healthy requests", async () => {
+  const errorStreams = [
+    'event: error\ndata: {"type":"error","error":null,"code":429,"message":"quota exceeded"}\n\n',
+    'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","output_index":0,"delta":"valid prefix"}\n\n' +
+      'event: error\ndata: {"type":"error","error":null,"code":500,"message":"upstream failed"}\n\n',
+    'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","output_index":0,"delta":"before failed"}\n\n' +
+      'event: response.failed\ndata: {"type":"response.failed","response":{"id":"r1","status":"failed","error":{"message":"failed"}}}\n\n',
+  ];
+  for (const fast of [false, true]) {
+    for (const sse of errorStreams) {
+      const failed = await invokeInference(sse, {
+        operation: "responses",
+        fields: { input: "Hi" },
+        stream: true,
+        fast,
+        configOverrides: { streamEstimatedSettlement: false },
+      });
+      expect(failed.status, failed.wire).toBe(200);
+      expect(failed.finalized).toEqual(["UNKNOWN"]);
+      expect(failed.wire).toContain("provider_stream_error");
+      expect(failed.wire).not.toContain("response.completed");
+    }
+    const healthy = await invokeInference(
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","output_index":0,"delta":"ok"}\n\n' +
+        'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r_ok","object":"response","model":"test-chat","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":2}}}\n\n',
+      {
+        operation: "responses",
+        fields: { input: "Hi" },
+        stream: true,
+        fast,
+      },
+    );
+    expect(healthy.status, healthy.wire).toBe(200);
+    expect(healthy.finalized).toEqual(["SETTLED"]);
+    expect(healthy.wire).toContain("response.completed");
+  }
+});

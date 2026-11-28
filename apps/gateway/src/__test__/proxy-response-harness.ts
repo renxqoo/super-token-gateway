@@ -1,5 +1,5 @@
 import { createKey, UpstreamPreDispatchError } from "@gateway/runtime";
-import type { AdapterOverrides } from "@gateway/ledger";
+import type { AdapterOverrides, CommitTerminalInput } from "@gateway/ledger";
 import { getBuiltinProvider } from "@gateway/plugin-engine";
 import type { GatewayConfig } from "../config.ts";
 import type { Usage } from "@gateway/kernel";
@@ -31,25 +31,51 @@ export async function invokeInference(
     heldAtoms = "1000",
     headers = {},
     customerRates,
+    supplierRates,
+    customerBasis = "PROVIDER_USAGE",
+    supplierBasis = "PROVIDER_USAGE",
     skipPrepareDispatch = false,
     emitTiming = "none",
     streamBody = false,
+    upstreamKind,
+    modelMaxOutputTokens = 100,
+    multipartBody,
+    rawJsonBody,
+    responseContentType,
+    checkConsoleAdmission,
   }: {
     stream?: boolean;
     fast?: boolean;
     cancel?: boolean;
     cancelBeforeDispatch?: boolean;
     delayMs?: number;
-    operation?: "chat" | "completions" | "responses" | "gemini" | "messages";
+    operation?:
+      | "chat"
+      | "completions"
+      | "responses"
+      | "gemini"
+      | "messages"
+      | "images"
+      | "image_edits"
+      | "speech";
     fields?: Record<string, unknown>;
     overrides?: AdapterOverrides;
     configOverrides?: Partial<GatewayConfig>;
     heldAtoms?: string;
     headers?: Record<string, string>;
     customerRates?: Record<string, { numerator: string; denominator: string }>;
+    supplierRates?: Record<string, { numerator: string; denominator: string }>;
+    customerBasis?: "PROVIDER_USAGE" | "INPUT_CHARACTERS" | "REQUEST_COMPLETION";
+    supplierBasis?: "PROVIDER_USAGE" | "INPUT_CHARACTERS" | "REQUEST_COMPLETION";
     skipPrepareDispatch?: boolean;
     emitTiming?: "none" | "pre_dispatch" | "connection_ready";
     streamBody?: boolean;
+    upstreamKind?: "openai" | "anthropic" | "gemini";
+    modelMaxOutputTokens?: number;
+    multipartBody?: FormData;
+    rawJsonBody?: string;
+    responseContentType?: string;
+    checkConsoleAdmission?: ProxyDependencies["checkConsoleAdmission"];
   } = {},
 ) {
   const billingAccount = makeBillingAccount(crypto.randomUUID(), 10);
@@ -60,7 +86,8 @@ export async function invokeInference(
   const pluginId = crypto.randomUUID();
   const model = "test-chat";
   const kind =
-    operation === "gemini" ? "gemini" : operation === "messages" ? "anthropic" : "openai";
+    upstreamKind ??
+    (operation === "gemini" ? "gemini" : operation === "messages" ? "anthropic" : "openai");
   const provider = getBuiltinProvider(kind)!;
   snap.plugins.set(pluginId, {
     id: pluginId,
@@ -100,20 +127,37 @@ export async function invokeInference(
     config_revision: 1,
   });
   const [customerPrice, supplierPrice] = (["CUSTOMER", "SUPPLIER"] as const).map((side) => {
+    const basis = side === "CUSTOMER" ? customerBasis : supplierBasis;
+    const explicitRates = side === "CUSTOMER" ? customerRates : supplierRates;
     const rates =
-      side === "CUSTOMER" && customerRates
-        ? customerRates
-        : {
-            input_tokens: { numerator: "1", denominator: "1" },
-            output_tokens: { numerator: "1", denominator: "1" },
-          };
-    const ceilings: Record<string, string> = { input_tokens: "1000", output_tokens: "1000" };
+      explicitRates ??
+      (basis === "INPUT_CHARACTERS"
+        ? { characters: { numerator: "1", denominator: "1" } }
+        : basis === "REQUEST_COMPLETION"
+          ? { requests: { numerator: "10", denominator: "1" } }
+          : operation === "images" || operation === "image_edits"
+            ? { images: { numerator: "10", denominator: "1" } }
+            : {
+                input_tokens: { numerator: "1", denominator: "1" },
+                output_tokens: { numerator: "1", denominator: "1" },
+              });
+    const ceilings: Record<string, string> =
+      basis === "INPUT_CHARACTERS"
+        ? { characters: "10000" }
+        : basis === "REQUEST_COMPLETION"
+          ? { requests: "1" }
+          : operation === "images" || operation === "image_edits"
+            ? { images: "10" }
+            : { input_tokens: "1000", output_tokens: String(Math.max(1000, modelMaxOutputTokens)) };
     if (rates.cache_write_tokens) ceilings.cache_write_tokens = "1000";
+    if (rates.cache_write_5m_tokens) ceilings.cache_write_5m_tokens = "1000";
+    if (rates.cache_write_1h_tokens) ceilings.cache_write_1h_tokens = "1000";
+    if (rates.cached_input_tokens) ceilings.cached_input_tokens = "1000";
     const price = {
       id: crypto.randomUUID(),
       side,
       currency: "USD",
-      basis: "PROVIDER_USAGE" as const,
+      basis,
       rates,
       ceilings,
       source_digest: "test",
@@ -125,7 +169,7 @@ export async function invokeInference(
     name: model,
     operations: [operation],
     routing_strategy: "WEIGHTED",
-    max_output_tokens: 100,
+    max_output_tokens: modelMaxOutputTokens,
     enabled: true,
   });
   snap.routesByModel.set(model, [
@@ -147,14 +191,17 @@ export async function invokeInference(
     },
   ]);
   const deps = makeFakeDeps(snap, { ...makeConfig(), ...configOverrides });
+  if (checkConsoleAdmission) deps.checkConsoleAdmission = checkConsoleAdmission;
   const controller = new AbortController();
   let transportCancelled = false;
   const finalized: string[] = [];
   const settledUsages: Usage[] = [];
+  const settledInputs: CommitTerminalInput[] = [];
   let dispatches = 0;
   let holds = 0;
   let requestedCustomerAtoms: string | undefined;
   let holdExpiresAt: string | undefined;
+  const dispatchedBodies: string[] = [];
   deps.ledger = {
     async acquireHold(input: { customer_atoms: string; expires_at: string }) {
       holds++;
@@ -168,9 +215,10 @@ export async function invokeInference(
     async findIdempotentHold() {
       return null;
     },
-    async commitTerminal(input: { usage: Usage }) {
+    async commitTerminal(input: CommitTerminalInput) {
       finalized.push("SETTLED");
       settledUsages.push(input.usage);
+      settledInputs.push(input);
       return { ok: true, charge_id: "charge", supplier_cost_atoms: "5" };
     },
     async markUnknown() {
@@ -180,10 +228,15 @@ export async function invokeInference(
       finalized.push("RELEASED");
     },
   } as unknown as ProxyDependencies["ledger"];
-  const contentType = stream ? "text/event-stream" : "application/json";
+  const contentType = responseContentType ?? (stream ? "text/event-stream" : "application/json");
   const bytes = new TextEncoder().encode(body);
   const fetchFast: typeof deps.transport.fetchFast = async (_url, init) => {
     dispatches++;
+    if (typeof init.body === "string") {
+      dispatchedBodies.push(init.body);
+    } else if (init.body instanceof Uint8Array) {
+      dispatchedBodies.push(new TextDecoder().decode(init.body));
+    }
     if (stream && !fast) {
       const response = new Response(bytes, { headers: { "content-type": contentType } });
       return { fast: false, response };
@@ -250,20 +303,34 @@ export async function invokeInference(
     responses: "/v1/responses",
     messages: "/v1/messages",
     gemini: `/v1beta/models/${model}:generateContent`,
+    images: "/v1/images/generations",
+    image_edits: "/v1/images/edits",
+    speech: "/v1/audio/speech",
   }[operation];
-  const raw = new Request(`http://gateway.test${path}`, {
-    method: "POST",
-    signal: controller.signal,
-    headers: { authorization: `Bearer ${key}`, "content-type": "application/json", ...headers },
-    body: JSON.stringify({
-      model,
-      stream,
-      ...(operation === "chat" || operation === "messages"
-        ? { messages: [{ role: "user", content: "Hi" }] }
-        : {}),
-      ...fields,
-    }),
-  });
+  const raw = multipartBody
+    ? new Request(`http://gateway.test${path}`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { authorization: `Bearer ${key}`, ...headers },
+        body: multipartBody,
+      })
+    : new Request(`http://gateway.test${path}`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json", ...headers },
+        body:
+          rawJsonBody ??
+          JSON.stringify({
+            model,
+            ...(operation === "images" || operation === "image_edits" || operation === "speech"
+              ? {}
+              : { stream }),
+            ...(operation === "chat" || operation === "messages"
+              ? { messages: [{ role: "user", content: "Hi" }] }
+              : {}),
+            ...fields,
+          }),
+      });
   try {
     const response = await handleInferenceRequest(
       {
@@ -279,11 +346,13 @@ export async function invokeInference(
       wire,
       finalized,
       settledUsages,
+      settledInputs,
       transportCancelled,
       dispatches,
       holds,
       requestedCustomerAtoms,
       holdExpiresAt,
+      dispatchedBodies,
       estimatedStreamSettlements: deps.metrics.estimatedStreamSettlements,
     };
   } finally {

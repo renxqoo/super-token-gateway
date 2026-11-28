@@ -24,7 +24,7 @@ function* valuesAt(
   }
 }
 
-function compareNumber(literal: string, bound: number): number {
+export function compareExactNumber(literal: string, bound: number): number {
   const left = normalizedNumber(literal);
   const right = normalizedNumber(String(bound));
   if (left.negative !== right.negative) return left.negative ? -1 : 1;
@@ -63,8 +63,8 @@ export function validateRequestPolicy(
       if (
         typeof value !== "number" ||
         !Number.isFinite(value) ||
-        (range.minimum !== undefined && compareNumber(literal!, range.minimum) < 0) ||
-        (range.maximum !== undefined && compareNumber(literal!, range.maximum) > 0)
+        (range.minimum !== undefined && compareExactNumber(literal!, range.minimum) < 0) ||
+        (range.maximum !== undefined && compareExactNumber(literal!, range.maximum) > 0)
       )
         fail(path);
 }

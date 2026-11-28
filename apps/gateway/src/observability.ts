@@ -98,6 +98,8 @@ export type AccessLogRecord = {
   error_code: string | null;
 };
 
+const maxAccessLogBytes = 16 * 1024;
+
 type TenantAbsorbWindow = {
   windowStartMs: number;
   count: number;
@@ -329,16 +331,32 @@ export class GatewayMetrics {
       record.ttft_ms,
     );
     if (this.accessLogEnabled) {
-      console.log(
-        JSON.stringify({
-          ts: new Date().toISOString(),
-          level: record.status >= 500 ? "error" : "info",
-          service: "gateway",
-          ...record,
-          duration_ms: Number(record.duration_ms.toFixed(2)),
-          ttft_ms: record.ttft_ms === null ? null : Number(record.ttft_ms.toFixed(2)),
-        }),
-      );
+      const ts = new Date().toISOString();
+      const level = record.status >= 500 ? "error" : "info";
+      const line = JSON.stringify({
+        ts,
+        level,
+        service: "gateway",
+        ...record,
+        duration_ms: Number(record.duration_ms.toFixed(2)),
+        ttft_ms: record.ttft_ms === null ? null : Number(record.ttft_ms.toFixed(2)),
+      });
+      if (Buffer.byteLength(line) <= maxAccessLogBytes) {
+        console.log(line);
+      } else {
+        console.log(
+          JSON.stringify({
+            ts,
+            level,
+            service: "gateway",
+            request_id: record.request_id,
+            trace_id: record.trace_id,
+            operation: record.operation,
+            status: record.status,
+            log_truncated: true,
+          }),
+        );
+      }
     }
   }
 

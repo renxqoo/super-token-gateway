@@ -51,6 +51,32 @@ import {
   type ConsoleEnv,
 } from "./shared.ts";
 
+const visibleAlertRule = {
+  id: alertRules.id,
+  billingAccountId: alertRules.billingAccountId,
+  kind: alertRules.kind,
+  thresholdAtoms: alertRules.thresholdAtoms,
+  enabled: alertRules.enabled,
+  lastTriggeredAt: alertRules.lastTriggeredAt,
+  createdAt: alertRules.createdAt,
+  updatedAt: alertRules.updatedAt,
+  webhookConfigured: sql<boolean>`${alertRules.webhookUrl} IS NOT NULL`,
+};
+
+const visibleAlertDelivery = {
+  id: alertDeliveries.id,
+  ruleId: alertDeliveries.ruleId,
+  billingAccountId: alertDeliveries.billingAccountId,
+  status: alertDeliveries.status,
+  attempts: alertDeliveries.attempts,
+  nextAttemptAt: alertDeliveries.nextAttemptAt,
+  lastHttpStatus: alertDeliveries.lastHttpStatus,
+  deliveredAt: alertDeliveries.deliveredAt,
+  payload: alertDeliveries.payload,
+  createdAt: alertDeliveries.createdAt,
+  webhookConfigured: sql<boolean>`${alertDeliveries.webhookUrl} IS NOT NULL`,
+};
+
 function sanitizeCustomerCharge(raw: Record<string, unknown>, billingAccountId: string) {
   const customerAtoms = String(raw.customerAtoms ?? raw.customer_atoms ?? "0");
   const fundedAtoms = String(raw.fundedAtoms ?? raw.funded_atoms ?? "0");
@@ -689,12 +715,12 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
     await requireBillingAccountAccess(deps.orm, user.id, billingAccountId);
     const [rules, deliveries] = await Promise.all([
       deps.orm
-        .select()
+        .select(visibleAlertRule)
         .from(alertRules)
         .where(eq(alertRules.billingAccountId, billingAccountId))
         .orderBy(desc(alertRules.createdAt)),
       deps.orm
-        .select()
+        .select(visibleAlertDelivery)
         .from(alertDeliveries)
         .where(eq(alertDeliveries.billingAccountId, billingAccountId))
         .orderBy(desc(alertDeliveries.createdAt))
@@ -730,7 +756,7 @@ export function createMarketplaceAndBillingRoutes(deps: ConsoleDeps) {
         webhookUrl: body.webhook_url ?? null,
         enabled: body.enabled,
       })
-      .returning();
+      .returning(visibleAlertRule);
     await recordAuditLog(deps.orm, {
       actor: user,
       orgId: billingAccount.orgId,

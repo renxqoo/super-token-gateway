@@ -2,8 +2,12 @@ import { GatewayError } from "@gateway/contracts";
 import type { PriceVersionRecord } from "@gateway/ledger";
 import { UpstreamPreDispatchError } from "@gateway/runtime";
 import type { PreparedDispatch } from "@gateway/runtime";
+import {
+  hasNonZeroCacheWriteInPriceVersion,
+  hasPricedDimensionInPriceVersion,
+} from "../pricing.ts";
 import type { HydratedCandidate } from "../proxy-state.ts";
-import { MeteredRequestError } from "../request-metering.ts";
+import { MeteredRequestError, type MeteredValidationOptions } from "../request-metering.ts";
 import { createTransportTiming } from "../first-text-trace.ts";
 import { tryPrepareUpstreamRequestSync } from "../upstream.ts";
 import type { PreparedUpstreamRequest, PrepareUpstreamOptions } from "../upstream.ts";
@@ -11,15 +15,6 @@ import type { InferenceRequest } from "./types.ts";
 import { channelFailureKind } from "./telemetry.ts";
 import type { InferenceTelemetry } from "./telemetry.ts";
 import type { InferenceResources } from "./resources.ts";
-
-function hasNonZeroCacheWriteRate(price: PriceVersionRecord): boolean {
-  const { cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens } = price.rates;
-  return (
-    (cache_write_tokens !== undefined && cache_write_tokens.numerator !== "0") ||
-    (cache_write_5m_tokens !== undefined && cache_write_5m_tokens.numerator !== "0") ||
-    (cache_write_1h_tokens !== undefined && cache_write_1h_tokens.numerator !== "0")
-  );
-}
 
 export function createUpstreamPreparation(request: InferenceRequest) {
   const { deps, snap, operation, outputBound, isStream, billingAccount, trace, multipartEntries } =
@@ -42,6 +37,7 @@ export function createUpstreamPreparation(request: InferenceRequest) {
     cand: HydratedCandidate,
     body: Record<string, unknown>,
     canMutateClientBody = false,
+    meteredValidation?: MeteredValidationOptions,
   ): Omit<PrepareUpstreamOptions, "signal"> {
     const opts: Omit<PrepareUpstreamOptions, "signal"> = {
       channel: cand.channel,
@@ -54,6 +50,7 @@ export function createUpstreamPreparation(request: InferenceRequest) {
       isStream,
       canMutateClientBody,
       alreadyValidated: true,
+      ...(meteredValidation ? { meteredValidation } : {}),
       vertexTokens: deps.vertexTokens,
       wasmExecutor: deps.wasmExecutor,
       tenantId: billingAccount.id,
@@ -72,21 +69,31 @@ export function createUpstreamPreparation(request: InferenceRequest) {
     cand: HydratedCandidate,
     body: Record<string, unknown>,
     customerPrice: PriceVersionRecord,
+    supplierPrice: PriceVersionRecord = cand.costPrice,
     canMutateClientBody = false,
+    meteredValidation?: MeteredValidationOptions,
   ): PreparedUpstreamRequest | null {
     try {
-      const opts = upstreamOptions(cand, body, canMutateClientBody) as Parameters<
-        typeof tryPrepareUpstreamRequestSync
-      >[0];
+      const opts = upstreamOptions(
+        cand,
+        body,
+        canMutateClientBody,
+        meteredValidation,
+      ) as Parameters<typeof tryPrepareUpstreamRequestSync>[0];
       opts.estimateInputTokens =
-        (operation === "chat" || operation === "responses" || operation === "messages") &&
-        Boolean(customerPrice.rates.input_tokens || cand.costPrice.rates.input_tokens);
+        (operation === "chat" ||
+          operation === "responses" ||
+          operation === "messages" ||
+          operation === "gemini") &&
+        (hasPricedDimensionInPriceVersion(customerPrice, "input_tokens") ||
+          hasPricedDimensionInPriceVersion(supplierPrice, "input_tokens"));
       const prepared = tryPrepareUpstreamRequestSync(opts);
       if (
         prepared &&
         prepared.estimatedInputTokens !== undefined &&
         prepared.usageDialect !== "anthropic" &&
-        (hasNonZeroCacheWriteRate(customerPrice) || hasNonZeroCacheWriteRate(cand.costPrice))
+        (hasNonZeroCacheWriteInPriceVersion(customerPrice) ||
+          hasNonZeroCacheWriteInPriceVersion(supplierPrice))
       ) {
         delete prepared.estimatedInputTokens;
       }
@@ -106,7 +113,7 @@ export function createDispatchReservation(
   resources: InferenceResources,
   telemetry: InferenceTelemetry,
 ) {
-  const { c, deps, firstByteDeadlineMs, snap, billingAccount, key } = request;
+  const { c, deps, firstByteDeadlineMs, snap } = request;
   let activeDispatch: PreparedDispatch | undefined;
   let activeDispatchTiming: ReturnType<typeof createTransportTiming> | undefined;
   const reserveDispatch = (
@@ -137,11 +144,7 @@ export function createDispatchReservation(
         } else {
           activeDispatchTiming = undefined;
         }
-        const currentAdmission = deps.checkConsoleAdmission(billingAccount, key);
-        if (!currentAdmission) return;
-        return currentAdmission.then(() => {
-          pluginSignal.throwIfAborted();
-        });
+        return;
       }
     }
     return reserveDispatchAsync(candidate, prepared, pluginSignal);
@@ -200,9 +203,6 @@ export function createDispatchReservation(
         "Gateway configuration changed before dispatch",
       );
     }
-    const currentAdmission = deps.checkConsoleAdmission(billingAccount, key);
-    if (currentAdmission) await currentAdmission;
-    pluginSignal.throwIfAborted();
   };
   const releaseDispatch = () => {
     activeDispatch?.release();

@@ -1,6 +1,11 @@
 import type { SQL } from "bun";
 import { DomainError, type Usage } from "@gateway/kernel";
-import type { ChargeLotAllocation, CommitTerminalResult, SupplierHoldEntry } from "./types.ts";
+import type {
+  ChargeLotAllocation,
+  ChargePricingSnapshot,
+  CommitTerminalResult,
+  SupplierHoldEntry,
+} from "./types.ts";
 import type { LeaseManager } from "./lease-manager.ts";
 import {
   sha256Hex,
@@ -14,6 +19,7 @@ import {
 } from "./funds.ts";
 import { priceSettlement } from "./settlement-pricing.ts";
 import { flushDirtyKeySpends } from "./key-spend.ts";
+import { registerAdmittedTask } from "./async-tasks.ts";
 
 import {
   loadDirectSettlementState,
@@ -87,6 +93,8 @@ export async function applyDirectSettlements(
 
   const journals: JournalLine[] = [];
   const reconcileAccounts = new Set<string>();
+  const taskRegistrations: { index: number; input: Parameters<typeof registerAdmittedTask>[1] }[] =
+    [];
   const holdUpdates: {
     request_id: string;
     state: string;
@@ -108,6 +116,7 @@ export async function applyDirectSettlements(
     pricing_override_id: string | null;
     discount_numerator: string | null;
     discount_denominator: string | null;
+    pricing_snapshot: ChargePricingSnapshot | null;
     usage: Usage;
     usage_digest: string;
     customer_atoms: string;
@@ -134,10 +143,15 @@ export async function applyDirectSettlements(
     const { index: i, item, previouslySettledSupplierJournal } = entry;
     const existing = existingCharges.get(item.request_id);
     if (existing) {
+      const [task] = item.async_task
+        ? await tx<{ id: string }[]>`SELECT id FROM public.async_tasks
+            WHERE request_id = ${item.request_id} AND charge_id = ${existing.id}`
+        : [];
       results[i] = {
         ok: true,
         replayed: true,
         charge_id: existing.id,
+        ...(task ? { async_task_id: task.id } : {}),
         outcome: existing.outcome,
         customer_atoms: existing.customer_atoms,
         funded_atoms: existing.funded_atoms,
@@ -163,6 +177,10 @@ export async function applyDirectSettlements(
       };
       continue;
     }
+    if (item.async_task && hold.operation !== "videos") {
+      results[i] = { ok: false, code: "invalid_state", message: "Hold is not for a video task" };
+      continue;
+    }
     const selectedAttempt = selectedAttempts.get(entry);
     if (!selectedAttempt) {
       results[i] = {
@@ -173,7 +191,11 @@ export async function applyDirectSettlements(
       continue;
     }
     const wallet = walletsById.get(hold.wallet_id)!;
-    if (item.billing_pricing.currency !== wallet.currency) {
+    if (
+      item.billing_pricing.currency !== wallet.currency ||
+      (item.customer_pricing_snapshot &&
+        item.customer_pricing_snapshot.currency !== wallet.currency)
+    ) {
       results[i] = {
         ok: false,
         code: "currency_mismatch",
@@ -442,6 +464,14 @@ export async function applyDirectSettlements(
         ? hold.discount_denominator
         : item.discount_denominator;
 
+    const pricingSnapshot: ChargePricingSnapshot | null =
+      item.customer_pricing_snapshot || item.supplier_pricing_snapshot
+        ? {
+            ...(item.customer_pricing_snapshot ? { customer: item.customer_pricing_snapshot } : {}),
+            ...(item.supplier_pricing_snapshot ? { supplier: item.supplier_pricing_snapshot } : {}),
+          }
+        : null;
+
     holdUpdates.push({
       request_id: item.request_id,
       state: "SETTLED",
@@ -463,6 +493,7 @@ export async function applyDirectSettlements(
       pricing_override_id: effectiveOverrideId,
       discount_numerator: effectiveDiscNum,
       discount_denominator: effectiveDiscDen,
+      pricing_snapshot: pricingSnapshot,
       usage: item.usage,
       usage_digest: usageDigest,
       customer_atoms: billableCustomerAtoms.toString(),
@@ -477,6 +508,21 @@ export async function applyDirectSettlements(
       customer_journal_id: customerJournalId,
       supplier_journal_id: supplierJournalId,
     });
+    if (item.async_task) {
+      taskRegistrations.push({
+        index: i,
+        input: {
+          ...item.async_task,
+          request_id: item.request_id,
+          charge_id: chargeId,
+          billing_account_id: hold.billing_account_id,
+          api_key_id: hold.api_key_id,
+          channel_id: item.channel_id,
+          model: hold.model,
+          operation: hold.operation,
+        },
+      });
+    }
     outboxBatch.push({
       event_id: crypto.randomUUID(),
       kind: "billing.settled",
@@ -492,6 +538,7 @@ export async function applyDirectSettlements(
         operation: hold.operation,
         currency: wallet.currency,
         pricing_override_id: effectiveOverrideId,
+        ...(pricingSnapshot ? { pricing_snapshot: pricingSnapshot } : {}),
         usage: item.usage,
         customer_atoms: billableCustomerAtoms.toString(),
         funded_atoms: funded.toString(),
@@ -639,7 +686,7 @@ export async function applyDirectSettlements(
           INSERT INTO public.billing_charges (
             id, request_id, billing_account_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
             model, operation, currency, billing_price_id, cost_version_id,
-            pricing_override_id, discount_numerator, discount_denominator,
+            pricing_override_id, discount_numerator, discount_denominator, pricing_snapshot,
             usage, usage_digest,
             customer_atoms, funded_atoms, debt_atoms, supplier_cost_atoms, supplier_currency,
             lot_allocations, plugin_audit, charge_policy, outcome, customer_journal_id, supplier_journal_id
@@ -647,7 +694,7 @@ export async function applyDirectSettlements(
           SELECT
             u.id, u.request_id, u.billing_account_id, u.wallet_id, u.api_key_id, u.selected_attempt_id, u.channel_id,
             u.model, u.operation, u.currency, u.billing_price_id, u.cost_version_id,
-            u.pricing_override_id, u.discount_numerator, u.discount_denominator,
+            u.pricing_override_id, u.discount_numerator, u.discount_denominator, u.pricing_snapshot::jsonb,
             u.usage::jsonb, u.usage_digest,
             u.customer_atoms, u.funded_atoms, u.debt_atoms, u.supplier_cost_atoms, u.supplier_currency,
             u.lot_allocations::jsonb, u.plugin_audit::jsonb, u.charge_policy, u.outcome,
@@ -668,6 +715,7 @@ export async function applyDirectSettlements(
             ${newCharges.map((c) => c.pricing_override_id)}::uuid[],
             ${newCharges.map((c) => c.discount_numerator)}::numeric[],
             ${newCharges.map((c) => c.discount_denominator)}::numeric[],
+            ${newCharges.map((c) => (c.pricing_snapshot === null ? null : JSON.stringify(c.pricing_snapshot)))}::text[],
             ${newCharges.map((c) => JSON.stringify(c.usage))}::text[],
             ${newCharges.map((c) => c.usage_digest)}::text[],
             ${newCharges.map((c) => c.customer_atoms)}::numeric[],
@@ -684,7 +732,7 @@ export async function applyDirectSettlements(
           ) AS u(
             id, request_id, billing_account_id, wallet_id, api_key_id, selected_attempt_id, channel_id,
             model, operation, currency, billing_price_id, cost_version_id,
-            pricing_override_id, discount_numerator, discount_denominator,
+            pricing_override_id, discount_numerator, discount_denominator, pricing_snapshot,
             usage, usage_digest,
             customer_atoms, funded_atoms, debt_atoms, supplier_cost_atoms, supplier_currency,
             lot_allocations, plugin_audit, charge_policy, outcome, customer_journal_id, supplier_journal_id
@@ -700,6 +748,11 @@ export async function applyDirectSettlements(
         )
       SELECT 1
     `;
+  }
+  for (const { index, input } of taskRegistrations) {
+    const task = await registerAdmittedTask(tx, input);
+    const result = results[index];
+    if (result?.ok) result.async_task_id = task.id;
   }
   return {
     detached: detachedNotifications,
