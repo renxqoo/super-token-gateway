@@ -5,6 +5,7 @@ import type { CompiledFxRate, CompiledModifier, CompiledRatingPlan } from "./com
 import type {
   AppliedModifier,
   ExactRational,
+  MatrixEntry,
   PricingContext,
   PricingSnapshot,
   RateCard,
@@ -152,7 +153,7 @@ function applyMatrix(
   let bestIndex = -1;
   let tie = false;
   for (let i = 0; i < matrix.length; i++) {
-    const row = matrix[i]!;
+    const row: MatrixEntry = matrix[i]!;
     const keys = Object.keys(row.match);
     let matched = true;
     for (let j = 0; j < keys.length; j++) {
